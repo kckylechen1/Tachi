@@ -19,7 +19,6 @@ pub use llm::embedding_config::{
     EmbeddingConfig, EmbeddingModelSource, DEFAULT_EMBEDDING_DIMENSION, DEFAULT_EMBEDDING_MODEL,
     EMBEDDING_DIMENSION_ENV, EMBEDDING_MODEL_ENV, STORED_INDEX_DIMENSION,
 };
-pub use llm::ingress_gate::UnresolvedReferenceReport;
 pub use llm::voyage_embeddings_endpoint;
 pub use llm::{
     auth_probe_descriptor_for_host, auth_probe_descriptor_for_provider_kind, CompletionStatusV1,

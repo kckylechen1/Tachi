@@ -42,6 +42,10 @@ fn test_dispatch_params(agent: Option<&str>, task: &str) -> TachiDispatchParams 
     }
 }
 
+mod prompt_lifecycle;
+mod prompt_lifecycle_golden;
+mod resolution_grants;
+
 fn spawn_auth_gated_opencode_doc_server() -> (String, std::thread::JoinHandle<()>) {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind probe server");
     let port = listener.local_addr().expect("local addr").port();
@@ -90,6 +94,28 @@ async fn wait_for_result(run_dir: &std::path::Path) -> String {
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
     }
     panic!("dispatch result was not written: {}", result_path.display());
+}
+
+async fn wait_for_terminal_status(run_dir: &std::path::Path) -> Value {
+    for _ in 0..120 {
+        let status: Value = serde_json::from_str(
+            &tokio::fs::read_to_string(run_dir.join("status.json"))
+                .await
+                .expect("terminal status remains readable"),
+        )
+        .expect("terminal status JSON");
+        if matches!(
+            status["state"].as_str(),
+            Some("TASK_STATE_COMPLETED" | "TASK_STATE_FAILED" | "TASK_STATE_CANCELED")
+        ) {
+            return status;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    panic!(
+        "dispatch did not reach a terminal receipt: {}",
+        run_dir.display()
+    );
 }
 
 #[tokio::test]
@@ -461,7 +487,7 @@ async fn opencode_serve_preflight_uses_dispatch_credential_env() {
         .vault_set(rmcp::handler::server::wrapper::Parameters(
             crate::vault_ops::VaultSetParams {
                 name: "OPENCODE_SERVER_PASSWORD_TEST".to_string(),
-                value: "test123".to_string(),
+                value: "launchspec-post-spec-sentinel".to_string(),
                 agent_id: None,
                 secret_type: "api_key".to_string(),
                 description: "dispatch opencode serve password".to_string(),
@@ -483,7 +509,7 @@ async fn opencode_serve_preflight_uses_dispatch_credential_env() {
     params.command = vec![
         "python3".to_string(),
         "-c".to_string(),
-        "print('credential-ok')".to_string(),
+        "import os; assert os.environ['OPENCODE_SERVER_PASSWORD'] == 'launchspec-post-spec-sentinel'; print('credential-ok')".to_string(),
     ];
 
     let raw = handle_tachi_dispatch(&server, params)
@@ -491,13 +517,29 @@ async fn opencode_serve_preflight_uses_dispatch_credential_env() {
         .expect("dispatch should start with per-dispatch opencode serve auth");
     probe_server.join().expect("probe server thread");
     assert!(
-        !raw.contains("test123"),
+        !raw.contains("launchspec-post-spec-sentinel"),
         "dispatch response must not leak credential values: {raw}"
     );
     let response: Value = serde_json::from_str(&raw).expect("dispatch JSON");
     let run_dir = std::path::PathBuf::from(response["run_dir"].as_str().expect("run_dir"));
     let result = wait_for_result(&run_dir).await;
     assert!(result.contains("credential-ok"), "result={result}");
+    let terminal_status = wait_for_terminal_status(&run_dir).await;
+    let trajectory = tokio::fs::read_to_string(run_dir.join("trajectory.jsonl"))
+        .await
+        .expect("trajectory exists");
+    let terminal_status_text = terminal_status.to_string();
+    for (surface, content) in [
+        ("response", raw.as_str()),
+        ("status", terminal_status_text.as_str()),
+        ("trajectory", trajectory.as_str()),
+        ("result", result.as_str()),
+    ] {
+        assert!(
+            !content.contains("launchspec-post-spec-sentinel"),
+            "post-spec credential must not leak through {surface}: {content}"
+        );
+    }
 }
 
 /// #1174 (codex review round): `build_opencode_command`'s unit tests
@@ -982,154 +1024,6 @@ async fn dispatch_receipt_carries_the_effective_authority_contract() {
     );
 }
 
-/// #1690 C1 discriminator (oracle K4 widening): the retired capability-bundle
-/// key must be ABSENT from every status.json construction/write site in the
-/// crate. The receipt-first seed in `dispatch.rs` is only observable on disk
-/// between the two synchronous `write_status_json` calls in
-/// `handle_tachi_dispatch` (prompt assembly sits between them); every
-/// post-return read sees the enrich write, which already drops the key — so a
-/// runtime read alone can never go RED for the INITIAL write.
-///
-/// The pin is two layers:
-/// 1. WIDENED sweep (this test): every .rs file that references the
-///    `status.json` filename literal — the `write_status_json` funnel's
-///    definition and callers, plus DIRECT writers that never call the funnel
-///    (`task_lifecycle/utils.rs` and `research_ops.rs` write the path
-///    themselves) — must not contain the retired key literal. The old pin
-///    keyed on `write_status_json(` and let a direct path writer smuggle the
-///    key in (oracle K4); a file that touches status.json any way is now in
-///    scope.
-/// 2. FUNNEL sweep: `write_status_json(` call sites (kept as a second layer so
-///    a caller that forwards into the funnel without naming the path itself is
-///    still caught).
-///
-/// Exclusions: this test's own host file (it asserts on the key and never
-/// writes status.json) and test files that assert the key's ABSENCE
-/// (`bundle_artifact.rs` reads status.json and pins the key gone) — they
-/// legitimately contain the token without emitting it. The exclusion list is
-/// named because "asserts absence" is a semantic property no path heuristic
-/// can prove. RED pre-repair: the seed emits `"capability_bundle":
-/// Value::Null`; GREEN: absent from every writer.
-#[test]
-fn c1_retired_capability_bundle_key_is_absent_from_status_writers() {
-    let src_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let own_path =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/dispatch_ops/dispatch/tests.rs");
-    let mut rs_files = Vec::new();
-    collect_rs_files(&src_root, &mut rs_files);
-
-    let widened_offenders =
-        status_writer_files(&rs_files, &own_path, status_writer_references_path)
-            .into_iter()
-            .map(|path| path.display().to_string())
-            .collect::<Vec<_>>();
-    assert!(
-        widened_offenders.is_empty(),
-        "no status.json writer (funnel or direct path writer) may emit the retired capability_bundle key (#1690 C1 / oracle K4), found in: {widened_offenders:?}"
-    );
-
-    let funnel_offenders = status_writer_files(&rs_files, &own_path, status_writer_uses_funnel)
-        .into_iter()
-        .map(|path| path.display().to_string())
-        .collect::<Vec<_>>();
-    assert!(
-        funnel_offenders.is_empty(),
-        "no write_status_json(...) funnel caller may emit the retired capability_bundle key (#1690 C1), found in: {funnel_offenders:?}"
-    );
-}
-
-/// A .rs file under src/ that references the `status.json` filename literal —
-/// the funnel's definition and callers plus DIRECT writers that construct the
-/// path themselves (`task_lifecycle/utils.rs`, `research_ops.rs`).
-fn status_writer_references_path(source: &str) -> bool {
-    source.contains("status.json")
-}
-
-/// A .rs file that calls (or defines) the `write_status_json` funnel. Kept as
-/// a second layer: a caller forwarding into the funnel without naming the
-/// path itself must still be swept.
-fn status_writer_uses_funnel(source: &str) -> bool {
-    source.contains("write_status_json(")
-}
-
-/// Test files that legitimately contain the retired token while asserting its
-/// ABSENCE (runtime receipts, prompt-scan discriminators, absence seeds).
-/// They never emit the key into a status.json payload, so the pin excludes
-/// them exactly as it excludes its own host. The list is named and justified
-/// because "asserts absence" is a semantic property no path heuristic can
-/// prove; a new file may join only when it provably asserts absence.
-fn is_status_absence_asserting_test(path: &std::path::Path) -> bool {
-    let name = path.to_string_lossy().to_string();
-    name.ends_with(
-        "tests/dispatch_tests/prompt_credentials_board/capability_dispatch/bundle_artifact.rs",
-    )
-}
-
-fn status_writer_files<'a>(
-    rs_files: &'a [std::path::PathBuf],
-    own_path: &std::path::Path,
-    is_writer: fn(&str) -> bool,
-) -> Vec<&'a std::path::PathBuf> {
-    rs_files
-        .iter()
-        .filter(|path| **path != own_path && !is_status_absence_asserting_test(path))
-        .filter(|path| {
-            let source = std::fs::read_to_string(path).expect("read status writer source");
-            is_writer(&source) && source.contains("capability_bundle")
-        })
-        .collect()
-}
-
-/// #1690 C1 / oracle K4 discriminator: the WIDENED predicate catches a direct
-/// status.json path writer that the old funnel-only predicate misses. RED
-/// pre-repair: a direct writer (`task_lifecycle/utils.rs`,
-/// `research_ops.rs` shape — path constructed in-file, no
-/// `write_status_json(` call) could smuggle the retired key past the pin;
-/// GREEN: the widened sweep flags it. The temp file is a synthetic stand-in
-/// for exactly those writers, so the discriminator does not depend on their
-/// current content.
-#[test]
-fn c1_widened_status_writer_sweep_catches_direct_path_writers() {
-    let tmp = tempfile::tempdir().expect("temp dir for synthetic status writer");
-    let synthetic = tmp.path().join("direct_status_writer.rs");
-    std::fs::write(
-        &synthetic,
-        "fn write() {\n    let path = run_dir.join(\"status.json\");\n    let obj = serde_json::json!({\"capability_bundle\": \"seed\"});\n    std::fs::write(&path, obj.to_string()).unwrap();\n}\n",
-    )
-    .expect("write synthetic direct status writer");
-    let files = vec![synthetic.clone()];
-    // The synthetic file is a stand-in for a REAL writer, so the "own host"
-    // exclusion must not swallow it — pass a path that is not in the sweep.
-    let own = std::path::PathBuf::from("no-such-host-file.rs");
-
-    let widened = status_writer_files(&files, &own, status_writer_references_path);
-    assert!(
-        !widened.is_empty(),
-        "the widened sweep must flag a direct status.json path writer that carries the retired key"
-    );
-
-    let funnel = status_writer_files(&files, &own, status_writer_uses_funnel);
-    assert!(
-        funnel.is_empty(),
-        "the funnel-only sweep misses direct path writers — which is exactly the gap the oracle K4 widening closes"
-    );
-}
-
-/// Recursive .rs walk used by the C1 writer sweep so the pin follows the
-/// crate layout instead of hard-coding a file list that refactors would
-/// hollow out.
-fn collect_rs_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
-    for entry in std::fs::read_dir(dir).expect("read src dir") {
-        let entry = entry.expect("src dir entry");
-        let path = entry.path();
-        if path.is_dir() {
-            collect_rs_files(&path, out);
-        } else if path.extension().is_some_and(|ext| ext == "rs") {
-            out.push(path);
-        }
-    }
-}
-
 /// #1324: a successful external-staffing start is receipt-first, and the
 /// accepted response and terminal worker evidence stay in one canonical run
 /// directory. This test exercises the canonical kernel directly; legacy
@@ -1182,19 +1076,6 @@ async fn canonical_external_staffing_start_and_terminal_receipt_share_one_run_di
     assert_eq!(accepted_status["dispatch_id"], json!(dispatch_id));
     assert_eq!(accepted_status["state"], response["state"]);
     assert_eq!(accepted_status["run_dir"], response["run_dir"]);
-    // #1690 C1 discriminator: the retired `capability_bundle` key must be
-    // ABSENT from the receipt-first status.json write — not merely null.
-    // RED pre-repair: the seed emits `"capability_bundle": null`.
-    assert!(
-        accepted_status.get("capability_bundle").is_none(),
-        "status.json initial write must not carry the retired capability_bundle key: {accepted_status}"
-    );
-    assert!(
-        !std::fs::read_to_string(run_dir.join("status.json"))
-            .expect("status text")
-            .contains("capability_bundle"),
-        "retired capability_bundle must not appear anywhere in the initial status.json"
-    );
 
     std::fs::write(&release_worker, b"release").expect("release custom worker");
     let result = wait_for_result(&run_dir).await;
@@ -1243,15 +1124,12 @@ async fn canonical_external_staffing_start_and_terminal_receipt_share_one_run_di
 
 /// tachi#1173 item 1 discriminator: on origin/main (pre-#1173) the dispatch
 /// response always embeds the full routing card (`profile` — the whole
-/// `ResolvedDispatchProfile` including its own nested `mbit_card` and
-/// `identity_receipt` — plus top-level `identity_receipt` and
-/// `dispatch_profile` duplicating the same mbit_card again), so this
+/// `ResolvedDispatchProfile` including its own identity receipt — plus a
+/// top-level `identity_receipt` and `dispatch_profile` projection), so this
 /// assertion is RED before the fix (those keys are always present) and GREEN
 /// after (they're absent by default). The default receipt must still carry
 /// the four fields the issue names: dispatch_id, state, run_dir,
-/// suggested_complete_command. #1690 slice B retires the mbit_card surface
-/// end-to-end, so `dispatch_profile` (its dispatch-response projection) is
-/// gone from every response, verbose or not.
+/// suggested_complete_command.
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn dispatch_response_default_omits_fat_routing_card() {
@@ -1294,7 +1172,7 @@ async fn dispatch_response_default_omits_fat_routing_card() {
     );
     assert!(
         response.get("dispatch_profile").is_none(),
-        "default dispatch response must not carry dispatch_profile: {response}"
+        "default dispatch response must not carry the retired dispatch_profile projection: {response}"
     );
     assert!(
         !dispatch_response.contains("mbit_card"),
@@ -1316,11 +1194,8 @@ async fn dispatch_response_default_omits_fat_routing_card() {
     );
 }
 
-/// tachi#1173 item 1 discriminator (verbose escape hatch): verbose=true must
-/// restore the pre-#1173 full routing card so no information is lost, only
-/// deferred behind an explicit opt-in. #1690 slice B additionally retires the
-/// mbit_card surface, so the verbose card carries `profile` +
-/// `identity_receipt` and never `dispatch_profile`/`mbit_card`.
+/// tachi#1173 item 1 discriminator: verbose=true restores the profile and
+/// identity receipt, but the retired profile-card projection stays absent.
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn dispatch_response_verbose_true_restores_full_routing_card() {
@@ -1350,16 +1225,12 @@ async fn dispatch_response_verbose_true_restores_full_routing_card() {
         "verbose=true must carry the full routing card: {response}"
     );
     assert!(
-        response["profile"].get("mbit_card").is_none(),
-        "verbose=true's `profile` must not nest the retired mbit_card: {response}"
-    );
-    assert!(
         response["identity_receipt"].is_object(),
         "verbose=true must carry identity_receipt: {response}"
     );
     assert!(
         response.get("dispatch_profile").is_none(),
-        "the dispatch_profile mbit_card projection is retired (#1690): {response}"
+        "verbose=true must not resurrect the retired dispatch_profile projection: {response}"
     );
     assert!(
         !dispatch_response.contains("mbit_card"),

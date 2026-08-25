@@ -6,15 +6,15 @@ async fn safe_merge_persists_status_and_event_when_flow_id_supplied() {
     let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let tmp = tempfile::tempdir().unwrap();
-    let original = std::env::var_os("TACHI_RUN_ROOT");
-    // Force flow_runs_root() to the tempdir via env override.
-    std::env::set_var("TACHI_RUN_ROOT", tmp.path());
+    let (home, tmp, original_home, original_runs) = with_verify_env();
     let client = MockGhClient::new()
         .with_pr("o/r", ready_pr())
         .with_checks("o/r", 42, vec![]);
     let flow = "flow_test-safe-merge";
+    // #1454 F1: the gate needs the full canonical receipt set, not the
+    // ledger JSON alone, before safe_merge may reach ready.
     write_verification(tmp.path(), flow, "passed", "deadbeef");
+    seed_full_passed_set(home.path(), flow, "deadbeef", None);
     let out = handle_github_safe_merge(
         &client,
         "o/r",
@@ -49,11 +49,7 @@ async fn safe_merge_persists_status_and_event_when_flow_id_supplied() {
     assert_eq!(status["github"]["pr_number"], 42);
     let events = std::fs::read_to_string(run_dir.join("events.jsonl")).unwrap();
     assert!(events.contains("\"github_review_gate_passed\""));
-    if let Some(v) = original {
-        std::env::set_var("TACHI_RUN_ROOT", v);
-    } else {
-        std::env::remove_var("TACHI_RUN_ROOT");
-    }
+    restore_env(original_home, original_runs);
 }
 
 #[allow(clippy::await_holding_lock)]
@@ -62,9 +58,7 @@ async fn safe_merge_persists_pending_blocked_and_merged_flow_events() {
     let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let tmp = tempfile::tempdir().unwrap();
-    let original = std::env::var_os("TACHI_RUN_ROOT");
-    std::env::set_var("TACHI_RUN_ROOT", tmp.path());
+    let (home, tmp, original_home, original_runs) = with_verify_env();
 
     let pending_client = MockGhClient::new()
         .with_pr("o/r", pending_pr())
@@ -130,6 +124,7 @@ async fn safe_merge_persists_pending_blocked_and_merged_flow_events() {
             .with_pr("o/r", ready_pr())
             .with_checks("o/r", 42, vec![]);
     write_verification(tmp.path(), "flow_merged-safe-merge", "passed", "deadbeef");
+    seed_full_passed_set(home.path(), "flow_merged-safe-merge", "deadbeef", None);
     handle_github_safe_merge(
         &merged_client,
         "o/r",
@@ -158,11 +153,7 @@ async fn safe_merge_persists_pending_blocked_and_merged_flow_events() {
         .contains("\"github_pr_merged\""));
     assert_eq!(merged_client.merge_calls().len(), 1);
 
-    if let Some(v) = original {
-        std::env::set_var("TACHI_RUN_ROOT", v);
-    } else {
-        std::env::remove_var("TACHI_RUN_ROOT");
-    }
+    restore_env(original_home, original_runs);
 }
 
 #[allow(clippy::await_holding_lock)]

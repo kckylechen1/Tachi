@@ -195,10 +195,23 @@ fn packaged_doctor_joins_blocked_provider_writer_and_emits_one_terminal_json_doc
         .execute_batch("BEGIN IMMEDIATE")
         .expect("hold provider-health writer lock");
 
+    // The lock lives on an owned thread so the parent can release it only after
+    // probe traffic has settled and the public 10-second join deadline has had
+    // time to fire. This avoids waiting for every serialized provider writer
+    // to pay its own two-second SQLite busy deadline after that fact is proven.
+    let (release_lock, release_lock_rx) = std::sync::mpsc::sync_channel(0);
+    let lock_owner_thread = std::thread::spawn(move || {
+        release_lock_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("parent releases external lock owner");
+        lock_owner
+            .execute_batch("ROLLBACK")
+            .expect("release test lock");
+    });
+
     let provider = MockProvider::unauthorized();
     let chat_endpoint = format!("{}/v1/chat/completions", provider.endpoint);
     let rerank_endpoint = format!("{}/v1/rerank", provider.endpoint);
-    let started = Instant::now();
     let child = Command::new(env!("CARGO_BIN_EXE_tachi-server"))
         .args([
             "--global-db",
@@ -225,6 +238,20 @@ fn packaged_doctor_joins_blocked_provider_writer_and_emits_one_terminal_json_doc
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn packaged doctor");
+
+    let request_deadline = Instant::now() + Duration::from_secs(10);
+    while provider.request_count() == 0 {
+        assert!(
+            Instant::now() < request_deadline,
+            "packaged doctor must reach provider probes before lock release"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    provider.wait_until_requests_settle(Duration::from_millis(500), Duration::from_secs(5));
+    std::thread::sleep(Duration::from_millis(10_250));
+    release_lock
+        .send(())
+        .expect("signal external lock owner release");
     let output = wait_with_deadline(child, Duration::from_secs(35));
 
     assert!(
@@ -242,19 +269,24 @@ fn packaged_doctor_joins_blocked_provider_writer_and_emits_one_terminal_json_doc
     let remediation = document["daily_remediation"]
         .as_str()
         .expect("doctor JSON carries daily remediation receipt");
-    assert!(remediation.contains("provider_health_persist status=timeout"));
-    assert!(remediation.contains("second writer forbidden"));
+    assert!(
+        remediation.contains("provider_health_persist status=timeout"),
+        "remediation={remediation}"
+    );
+    assert!(
+        remediation.contains("cause=provider_health_persist_join_timeout"),
+        "remediation={remediation}"
+    );
+    assert!(
+        remediation.contains("writer_joined=true"),
+        "remediation={remediation}"
+    );
+    assert!(
+        remediation.contains("second writer forbidden"),
+        "remediation={remediation}"
+    );
 
-    // Keep the independent lock owner alive beyond the public 10-second join
-    // deadline even when the writer's own two-second SQLite deadline lets the
-    // packaged process exit earlier.
-    let minimum_lock_hold = Duration::from_secs(11);
-    if started.elapsed() < minimum_lock_hold {
-        std::thread::sleep(minimum_lock_hold - started.elapsed());
-    }
-    lock_owner
-        .execute_batch("ROLLBACK")
-        .expect("release test lock");
+    lock_owner_thread.join().expect("join external lock owner");
 
     let release_probe = rusqlite::Connection::open(&global_db).expect("open release probe");
     release_probe

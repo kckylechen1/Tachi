@@ -169,14 +169,9 @@ pub struct RequestRequirements {
 // ─── Reference classification ───────────────────────────────────────────────
 
 /// How the resolver reads a [`crate::model_broker_seam::ModelRef`]'s reference
-/// string.
-///
-/// Exposed because the same classification is what an ingress reporting gate
-/// needs (#1681 PR-D debt (a)): "did a caller hand us a string that only the
-/// resolver could have turned into a deployment" is answerable with exactly
-/// this function, and answering it the same way in both places is the point.
+/// string while selecting an alias or concrete deployment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ReferenceClass {
+enum ReferenceClass {
     /// Exactly one active alias binds this name.
     Alias,
     /// The name is a known deployment id and no alias claims it.
@@ -257,7 +252,7 @@ impl CatalogResolver {
     /// `known_deployment_ids` is the union of the catalog placements this
     /// resolver holds and whatever ids the caller can see; a resolution passes
     /// its admitted candidates.
-    pub fn classify_reference<'a>(
+    fn classify_reference<'a>(
         &self,
         reference: &str,
         known_deployment_ids: impl IntoIterator<Item = &'a str>,

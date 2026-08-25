@@ -232,12 +232,29 @@ pub struct PilotProgressLedgerV1 {
     contract_digest: String,
     blindings: Vec<PilotBlindingRecordV1>,
     records: Vec<PilotCallRecordV1>,
+    sync_on_persist: bool,
 }
 
 impl PilotProgressLedgerV1 {
     pub fn open(
         path: impl AsRef<Path>,
         contract_digest: &str,
+    ) -> Result<Self, PilotProgressErrorV1> {
+        Self::open_with_sync(path, contract_digest, true)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn open_relaxed_sync_for_test(
+        path: impl AsRef<Path>,
+        contract_digest: &str,
+    ) -> Result<Self, PilotProgressErrorV1> {
+        Self::open_with_sync(path, contract_digest, false)
+    }
+
+    fn open_with_sync(
+        path: impl AsRef<Path>,
+        contract_digest: &str,
+        sync_on_persist: bool,
     ) -> Result<Self, PilotProgressErrorV1> {
         let path = path.as_ref().to_path_buf();
         if is_source_database_path(&path) {
@@ -287,6 +304,7 @@ impl PilotProgressLedgerV1 {
                 contract_digest: contract_digest.to_string(),
                 blindings: persisted.blindings,
                 records: persisted.records,
+                sync_on_persist,
             })
         } else {
             let ledger = Self {
@@ -294,6 +312,7 @@ impl PilotProgressLedgerV1 {
                 contract_digest: contract_digest.to_string(),
                 blindings: Vec::new(),
                 records: Vec::new(),
+                sync_on_persist,
             };
             ledger.persist()?;
             Ok(ledger)
@@ -387,7 +406,14 @@ impl PilotProgressLedgerV1 {
         let mut file = options
             .open(&temporary)
             .map_err(PilotProgressErrorV1::Write)?;
-        if let Err(error) = file.write_all(&bytes).and_then(|()| file.sync_all()) {
+        let write_result = file.write_all(&bytes).and_then(|()| {
+            if self.sync_on_persist {
+                file.sync_all()
+            } else {
+                Ok(())
+            }
+        });
+        if let Err(error) = write_result {
             let _ = std::fs::remove_file(&temporary);
             return Err(PilotProgressErrorV1::Write(error));
         }
@@ -395,9 +421,13 @@ impl PilotProgressLedgerV1 {
             let _ = std::fs::remove_file(&temporary);
             return Err(PilotProgressErrorV1::Write(error));
         }
-        std::fs::File::open(parent)
-            .and_then(|directory| directory.sync_all())
-            .map_err(PilotProgressErrorV1::Write)
+        if self.sync_on_persist {
+            std::fs::File::open(parent)
+                .and_then(|directory| directory.sync_all())
+                .map_err(PilotProgressErrorV1::Write)
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -588,5 +618,44 @@ mod tests {
             PilotProgressLedgerV1::open(&path, &"0".repeat(64)),
             Err(PilotProgressErrorV1::InsecurePermissions)
         ));
+    }
+
+    #[test]
+    fn relaxed_test_sync_still_persists_atomic_state_for_durable_reopen() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("pilot-progress.json");
+        let digest = "0".repeat(64);
+        let key = PilotCallKeyV1 {
+            contract_digest: digest.clone(),
+            source_route: PilotSourceRouteV1::Antigravity,
+            source_id: "row-1".to_string(),
+            source_revision: 1,
+            role: PilotCallRoleV1::Producer,
+            arm: PilotCallArmV1::None,
+            ordinal: 0,
+        };
+
+        let mut relaxed = PilotProgressLedgerV1::open_relaxed_sync_for_test(&path, &digest)
+            .expect("relaxed test ledger");
+        assert!(!relaxed.sync_on_persist);
+        relaxed
+            .record(key.clone(), PilotCallStateV1::Started)
+            .expect("persist relaxed test state");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let mode = std::fs::metadata(&path)
+                .expect("relaxed progress metadata")
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+        drop(relaxed);
+
+        let durable = PilotProgressLedgerV1::open(&path, &digest).expect("durable reopen");
+        assert!(durable.sync_on_persist);
+        assert!(matches!(durable.get(&key), Some(PilotCallStateV1::Started)));
     }
 }

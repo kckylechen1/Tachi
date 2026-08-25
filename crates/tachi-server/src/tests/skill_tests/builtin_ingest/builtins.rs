@@ -5,13 +5,13 @@ use super::*;
 async fn server_seeds_builtin_capabilities_and_mcp_policies() {
     let server = make_server();
 
-    let trajectory = server
+    let retired_trajectory = server
         .with_global_store_read(|store| {
             store
                 .hub_get("skill:trajectory-distiller")
                 .map_err(|e| e.to_string())
         })
-        .expect("lookup trajectory builtin");
+        .expect("lookup retired trajectory builtin");
     let coding = server
         .with_global_store_read(|store| {
             store
@@ -62,7 +62,10 @@ async fn server_seeds_builtin_capabilities_and_mcp_policies() {
         })
         .expect("lookup waza check builtin");
 
-    let trajectory = trajectory.expect("trajectory-distiller builtin should exist");
+    assert!(
+        retired_trajectory.is_none(),
+        "trajectory-distiller must not be seeded on a fresh store"
+    );
     let coding = coding.expect("coding builtin should exist");
     let trading = trading.expect("trading builtin should exist");
     let mcp = mcp.expect("mcp builtin should exist");
@@ -74,8 +77,6 @@ async fn server_seeds_builtin_capabilities_and_mcp_policies() {
     let verification = verification.expect("verification builtin should exist");
     let waza_check = waza_check.expect("waza check builtin should exist");
 
-    let trajectory_def: Value =
-        serde_json::from_str(&trajectory.definition).expect("trajectory definition json");
     let coding_def: Value =
         serde_json::from_str(&coding.definition).expect("coding definition json");
     let trading_def: Value =
@@ -93,7 +94,6 @@ async fn server_seeds_builtin_capabilities_and_mcp_policies() {
     let waza_check_def: Value =
         serde_json::from_str(&waza_check.definition).expect("waza check definition json");
 
-    assert_eq!(trajectory_def["retention_policy"], "permanent");
     assert_eq!(coding_def["retention_policy"], "permanent");
     assert_eq!(trading_def["retention_policy"], "ephemeral");
     assert_eq!(superpowers_execute_def["execution"], "document");
@@ -141,6 +141,35 @@ async fn server_seeds_builtin_capabilities_and_mcp_policies() {
         "${vault:ZAI_API_KEY|BIGMODEL_API_KEY|REASONING_API_KEY}"
     );
     assert_eq!(vision_def["env"]["Z_AI_MODE"], "ZAI");
+
+    // An upgrade can encounter the formerly seeded row in an existing Global
+    // Store. Re-seeding must make that persisted capability non-callable rather
+    // than merely omitting it from the new seed corpus.
+    let mut legacy_trajectory = coding.clone();
+    legacy_trajectory.id = "skill:trajectory-distiller".to_string();
+    legacy_trajectory.name = "trajectory-distiller".to_string();
+    legacy_trajectory.enabled = true;
+    legacy_trajectory.review_status = "approved".to_string();
+    server
+        .with_global_store(|store| {
+            store
+                .hub_register(&legacy_trajectory)
+                .map_err(|e| e.to_string())
+        })
+        .expect("install legacy trajectory builtin row");
+
+    crate::builtins::seed_builtin_capabilities(&server)
+        .expect("reseed after trajectory builtin retirement");
+    let retired_trajectory = server
+        .with_global_store_read(|store| {
+            store
+                .hub_get("skill:trajectory-distiller")
+                .map_err(|e| e.to_string())
+        })
+        .expect("reload retired trajectory builtin")
+        .expect("legacy row remains as an audit tombstone");
+    assert!(!retired_trajectory.enabled);
+    assert_eq!(retired_trajectory.review_status, "rejected");
 
     let policy = server
         .with_global_store_read(|store| {

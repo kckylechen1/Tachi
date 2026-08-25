@@ -4,15 +4,39 @@ use reqwest::{
     Url,
 };
 use serde_json::{self, Value};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use super::super::catalog_import::DeploymentAttribution;
-use super::super::ingress_gate::bounded_reference;
 use super::super::provider_health::{
     ChatLane, ChatLaneConfig, CompletionStatusV1, Generated, ModelInvocationLaneV1,
     ProviderInvocationFailure, ProviderInvocationFailureClass, ProviderInvocationOutcome,
     ProviderInvocationReceipt, SelectedProviderSecret,
 };
+
+/// Maximum retained characters from a caller-supplied model override.
+const MAX_REFERENCE_CHARS: usize = 64;
+const LLM_USAGE_PERSIST_SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Bound and scrub a caller-supplied model override before it reaches a
+/// durable usage row or retry log. Routing still uses the original string.
+fn bounded_reference(raw: &str) -> String {
+    let mut bounded: String = raw
+        .chars()
+        .take(MAX_REFERENCE_CHARS)
+        .map(|character| {
+            if character.is_control() {
+                '\u{fffd}'
+            } else {
+                character
+            }
+        })
+        .collect();
+    if raw.chars().nth(MAX_REFERENCE_CHARS).is_some() {
+        bounded.push('…');
+    }
+    bounded
+}
 
 #[derive(Clone, Copy)]
 struct ChatUsageTokens {
@@ -185,18 +209,6 @@ impl super::super::LlmClient {
         let lane = ChatLane::Reasoning;
         let cfg = self.lane(lane).clone();
 
-        // Same report-only observation as `call_lane_llm` (#1681 PR-D debt
-        // (a)): this entry is a second public door onto `call_provider_tier`
-        // and was skipping the gate entirely, so a caller routed through it
-        // was invisible to the unresolved-reference count. Zero behavior
-        // change — see `llm::ingress_gate` for why measuring is correct here.
-        self.ingress_gate.observe(
-            lane.as_str(),
-            model,
-            &cfg.model,
-            &chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-        );
-
         let breaker_key = format!("chat:{}", lane.as_str());
         if !self.circuit_breakers.allow(&breaker_key) {
             return Err(ProviderInvocationFailure {
@@ -299,19 +311,6 @@ impl super::super::LlmClient {
     ) -> Result<ProviderInvocationOutcome, String> {
         let primary_cfg = self.lane(lane).clone();
         let primary_breaker_key = format!("chat:{}", lane.as_str());
-
-        // #1681 PR-D debt (a): this is the seam that accepts an arbitrary
-        // model string, and after #1685's cutover a string arriving here must
-        // have come from a resolution. Nothing here can resolve one yet, so
-        // the gate counts and warns and changes nothing — see
-        // `llm::ingress_gate` for why measuring is the correct move at this
-        // point in the migration and refusing is not.
-        self.ingress_gate.observe(
-            lane.as_str(),
-            model_override,
-            &primary_cfg.model,
-            &chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-        );
 
         let mut tiers: Vec<(ChatLaneConfig, String)> =
             vec![(primary_cfg.clone(), primary_breaker_key)];
@@ -729,12 +728,9 @@ impl super::super::LlmClient {
                 self.mark_secret_success(&selected, attribution);
                 self.circuit_breakers.record_success(breaker_key);
                 let usage = parse_usage_tokens(json.get("usage"));
-                // #1681 PR-D review (CP5): `model` here is `model_override`
-                // unwrapped, i.e. caller-controlled, and this is a durable
-                // write into `llm_usage.model` — bound it the same way the
-                // ingress gate bounds the identical string before it counts
-                // or logs it. Routing already happened above with the raw
-                // `model`; this is the write-sink bound only.
+                // `model` may be a caller-controlled override. Bound it before
+                // the durable `llm_usage.model` write; routing already happened
+                // above with the raw value, so this is a write-sink bound only.
                 self.record_successful_llm_usage(
                     lane,
                     &bounded_reference(model),
@@ -787,9 +783,8 @@ impl super::super::LlmClient {
                 .unwrap_or_else(|| "unknown".to_string());
 
             // Same bound as the successful-write sink above: `model` is
-            // caller-controlled and this string reaches `eprintln!` below
-            // (via `last_err`), so an un-bounded value here is the same
-            // newline-forging seam the ingress gate already closed once.
+            // caller-controlled and this string reaches `eprintln!` below via
+            // `last_err`, so it must not be able to forge a second log line.
             let bounded_model = bounded_reference(model);
             last_err = format!(
                 "Empty assistant content (finish_reason={finish_reason_label}, usage={usage}, model={bounded_model})"
@@ -855,20 +850,37 @@ impl super::super::LlmClient {
             response_chars: response_chars.min(i64::MAX as usize) as i64,
             duration_ms: duration.as_millis().min(i64::MAX as u128) as i64,
         };
+        let migration = self.vault_db_migration.clone();
+        let tracker = self
+            .llm_usage_persist
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .tracker();
+        let background_persist_lock = Arc::clone(&self.background_persist_lock);
+        let completion = tracker.track();
 
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(async move {
-                if let Err(err) =
-                    tokio::task::spawn_blocking(move || persist_llm_usage_blocking(db_path, record))
-                        .await
-                        .map_err(|err| format!("persist llm usage join failed: {err}"))
-                        .and_then(|inner| inner)
-                {
+                let _completion = completion;
+                let result = {
+                    let _persist_guard = background_persist_lock.lock().await;
+                    tokio::task::spawn_blocking(move || {
+                        persist_llm_usage_blocking(db_path, migration, record)
+                    })
+                    .await
+                    .map_err(|err| format!("persist llm usage join failed: {err}"))
+                    .and_then(|inner| inner)
+                };
+                if let Err(err) = result {
+                    tracker.record_error(err.clone());
                     tracing::warn!("[llm] {err}");
                 }
             });
-        } else if let Err(err) = persist_llm_usage_blocking(db_path, record) {
-            tracing::warn!("[llm] {err}");
+        } else {
+            if let Err(err) = persist_llm_usage_blocking(db_path, migration, record) {
+                tracker.record_error(err.clone());
+                tracing::warn!("[llm] {err}");
+            }
         }
     }
 }
@@ -972,13 +984,23 @@ fn redact_provider_response(resp_text: &str) -> String {
 
 fn persist_llm_usage_blocking(
     db_path: std::path::PathBuf,
+    migration: memcore::MigrationAuthority,
     record: LlmUsageEvent,
 ) -> Result<(), String> {
     let db_path = db_path
         .to_str()
         .ok_or_else(|| "persist llm usage: invalid db path".to_string())?;
-    let store = memcore::MemoryStore::open(db_path)
-        .map_err(|err| format!("persist llm usage open db: {err}"))?;
+    let open_context = memcore::DbOpenContext {
+        intent: memcore::OpenIntent::OpenExisting,
+        migration,
+        required_profile: memcore::StoreProfile::TachiFull,
+    };
+    let store = memcore::MemoryStore::open_with_context_and_busy_timeout(
+        db_path,
+        &open_context,
+        LLM_USAGE_PERSIST_SQLITE_BUSY_TIMEOUT,
+    )
+    .map_err(|err| format!("persist llm usage open db: {err}"))?;
     store
         .record_llm_usage(&record)
         .map_err(|err| format!("persist llm usage insert: {err}"))

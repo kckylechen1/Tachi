@@ -1,7 +1,5 @@
 //! Narrow operator-only preview/apply seams for irreversible maintenance.
 
-use rusqlite::Connection;
-
 use crate::{db, GcConfig, MemoryError, MemoryStore};
 
 impl MemoryStore {
@@ -26,8 +24,9 @@ impl MemoryStore {
     }
 
     /// Re-freeze, mutate, and expose the precommit boundary inside one
-    /// `BEGIN IMMEDIATE` transaction. The callback is where the server makes
-    /// its prepared receipt durable; an error rolls the whole mutation back.
+    /// `BEGIN IMMEDIATE` transaction. The callback receives only immutable
+    /// source/post facts and is where the server makes its prepared receipt
+    /// durable; an error rolls the whole mutation back.
     pub fn apply_operator_gc_with_precommit_receipt<F>(
         &mut self,
         plan: &db::OperatorMaintenancePlanBinding,
@@ -35,7 +34,6 @@ impl MemoryStore {
     ) -> Result<db::GcMaintenanceOutcome, MemoryError>
     where
         F: FnOnce(
-            &Connection,
             &[db::MaintenanceClassFact],
             &[db::MaintenanceClassFact],
         ) -> Result<db::OperatorMaintenanceCommittedReceiptBinding, MemoryError>,
@@ -68,6 +66,8 @@ impl MemoryStore {
     }
 
     /// Re-freeze and canonically delete one exact ID inside one transaction.
+    /// The callback receives immutable source/post facts, never the live
+    /// database handle protected by the maintenance authorization.
     pub fn apply_operator_delete_with_precommit_receipt<F>(
         &mut self,
         plan: &db::OperatorMaintenancePlanBinding,
@@ -75,7 +75,6 @@ impl MemoryStore {
     ) -> Result<db::DeleteMaintenanceOutcome, MemoryError>
     where
         F: FnOnce(
-            &Connection,
             &[db::MaintenanceClassFact],
             &[db::MaintenanceClassFact],
         ) -> Result<db::OperatorMaintenanceCommittedReceiptBinding, MemoryError>,

@@ -2,7 +2,9 @@ use super::super::acp_native::{
     is_native_acp_transport, run_native_acp_dispatch, NativeAcpRunSpec,
 };
 use super::super::acpx::{is_acpx_transport, persist_acpx_events_and_map};
-use super::super::dispatch_v2::{append_trajectory_event, write_status_json};
+#[cfg(test)]
+use super::super::dispatch_v2::stamp_route_decision_id;
+use super::super::dispatch_v2::{append_trajectory_event, status_json_lock_for, write_status_json};
 use super::super::kanban_helpers::{get_kanban_state, should_cleanup_run, update_kanban_state};
 use super::super::subprocess::{run_agent_subprocess, run_opencode_sop_subprocess, tail_chars};
 use super::dedupe::release_flow_dispatch_slot;
@@ -12,6 +14,11 @@ use chrono::Utc;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+#[cfg(test)]
+use std::{
+    collections::HashSet,
+    sync::{Arc, Barrier, Mutex, OnceLock},
+};
 use tachi_credential_profile::cleanup_ephemeral_credential_materializations;
 use tachi_dispatch::{
     model_lineage_id, provider_model_parts, DispatchAcknowledgement, DispatchIdentityEffective,
@@ -654,7 +661,91 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
             );
         }
         release_flow_dispatch_slot(flow_dispatch_slot_for_spawn);
+        #[cfg(test)]
+        mark_background_dispatch_cleanup_complete(&d_id);
     });
+}
+
+#[cfg(test)]
+fn background_dispatch_cleanup_completions() -> &'static Mutex<HashSet<String>> {
+    static COMPLETIONS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    COMPLETIONS.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+#[cfg(test)]
+fn mark_background_dispatch_cleanup_complete(dispatch_id: &str) {
+    background_dispatch_cleanup_completions()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(dispatch_id.to_string());
+}
+
+#[cfg(test)]
+pub(crate) fn background_dispatch_cleanup_complete(dispatch_id: &str) -> bool {
+    background_dispatch_cleanup_completions()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .contains(dispatch_id)
+}
+
+#[cfg(test)]
+#[derive(Clone)]
+struct AcpStatusReadBarrier {
+    run_dir: std::path::PathBuf,
+    read: Arc<Barrier>,
+    resume: Arc<Barrier>,
+}
+
+#[cfg(test)]
+fn acp_status_read_barrier() -> &'static Mutex<Option<AcpStatusReadBarrier>> {
+    static BARRIER: OnceLock<Mutex<Option<AcpStatusReadBarrier>>> = OnceLock::new();
+    BARRIER.get_or_init(|| Mutex::new(None))
+}
+
+#[cfg(test)]
+struct AcpStatusReadBarrierGuard;
+
+#[cfg(test)]
+impl Drop for AcpStatusReadBarrierGuard {
+    fn drop(&mut self) {
+        *acp_status_read_barrier()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    }
+}
+
+#[cfg(test)]
+fn install_acp_status_read_barrier(
+    run_dir: std::path::PathBuf,
+    read: Arc<Barrier>,
+    resume: Arc<Barrier>,
+) -> AcpStatusReadBarrierGuard {
+    *acp_status_read_barrier()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(AcpStatusReadBarrier {
+        run_dir,
+        read,
+        resume,
+    });
+    AcpStatusReadBarrierGuard
+}
+
+#[cfg(test)]
+fn pause_acp_after_status_read(run_dir: &Path) {
+    let barrier = {
+        let mut barrier = acp_status_read_barrier()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        barrier
+            .as_ref()
+            .is_some_and(|configured| configured.run_dir == run_dir)
+            .then(|| barrier.take())
+            .flatten()
+    };
+    if let Some(barrier) = barrier {
+        barrier.read.wait();
+        barrier.resume.wait();
+    }
 }
 
 /// Persist a model value reported by the native ACP session into the existing
@@ -670,9 +761,15 @@ fn persist_acp_model_acknowledgement(
     else {
         return Ok(false);
     };
+    let status_lock = status_json_lock_for(run_dir);
+    let _status_guard = status_lock
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let status_path = run_dir.join("status.json");
     let mut status = crate::task_lifecycle::read_json_file(&status_path)?
         .ok_or_else(|| format!("ACP acknowledgement requires {}", status_path.display()))?;
+    #[cfg(test)]
+    pause_acp_after_status_read(run_dir);
     let receipt_value = status.get("identity_receipt").cloned().ok_or_else(|| {
         format!(
             "ACP acknowledgement requires identity_receipt in {}",
@@ -966,6 +1063,136 @@ mod tests {
         )
         .expect("parse status");
         serde_json::from_value(status["identity_receipt"].clone()).expect("parse receipt")
+    }
+
+    /// Native ACP acknowledgement is a receipt merge, not a second lifecycle:
+    /// terminal state and post-acceptance route evidence must survive its
+    /// identity update even when the child finishes before acknowledgement.
+    #[test]
+    fn native_acp_acknowledgement_preserves_terminal_route_evidence() {
+        let temp = tempfile::tempdir().expect("temporary run directory");
+        write_planned_receipt(temp.path(), "gpt-5.5");
+        write_status_json(
+            temp.path(),
+            "20260822T000001Z-acp-terminal",
+            false,
+            None,
+            None,
+            "n/a",
+            Some(0),
+            None,
+            Some(1),
+            Some(1),
+            Some(json!({
+                "state": "TASK_STATE_COMPLETED",
+                "result_written": true,
+            })),
+        );
+        stamp_route_decision_id(temp.path(), "route-fast-terminal").expect("stamp route evidence");
+
+        assert!(
+            persist_acp_model_acknowledgement(temp.path(), Some("gpt-5.5"))
+                .expect("merge ACP acknowledgement")
+        );
+        let status: Value = serde_json::from_slice(
+            &std::fs::read(temp.path().join("status.json")).expect("read merged receipt"),
+        )
+        .expect("parse merged receipt");
+        assert_eq!(status["state"], "TASK_STATE_COMPLETED");
+        assert_eq!(status["result_written"], true);
+        assert_eq!(status["route_decision_id"], "route-fast-terminal");
+        assert_eq!(
+            read_receipt(temp.path())
+                .observed
+                .effective
+                .model
+                .as_deref(),
+            Some("gpt-5.5"),
+            "ACP update must merge only identity receipt"
+        );
+    }
+
+    /// The ACP path intentionally pauses after a stale receipt read while
+    /// holding the same per-run lock as terminal lifecycle and route evidence.
+    /// If any of those lock acquisitions is removed, terminal+route writes can
+    /// finish before ACP resumes and its stale snapshot erases them.
+    #[test]
+    fn acp_stale_read_cannot_lose_terminal_or_route_evidence() {
+        let temp = tempfile::tempdir().expect("temporary run directory");
+        write_planned_receipt(temp.path(), "gpt-5.5");
+        let read = Arc::new(Barrier::new(2));
+        let resume = Arc::new(Barrier::new(2));
+        let run_dir = temp.path().to_path_buf();
+        let _barrier = install_acp_status_read_barrier(
+            run_dir.clone(),
+            Arc::clone(&read),
+            Arc::clone(&resume),
+        );
+        let acp = std::thread::spawn(move || {
+            persist_acp_model_acknowledgement(&run_dir, Some("gpt-5.5"))
+        });
+
+        read.wait();
+        let terminal_dir = temp.path().to_path_buf();
+        let (terminal_done, terminal_result) = std::sync::mpsc::sync_channel(1);
+        let terminal = std::thread::spawn(move || {
+            write_status_json(
+                &terminal_dir,
+                "20260822T000002Z-acp-overlap",
+                false,
+                None,
+                None,
+                "n/a",
+                Some(0),
+                None,
+                Some(1),
+                Some(1),
+                Some(json!({ "state": "TASK_STATE_COMPLETED", "result_written": true })),
+            );
+            let result = stamp_route_decision_id(&terminal_dir, "route-overlap");
+            terminal_done.send(result).expect("report terminal result");
+        });
+        assert!(
+            terminal_result
+                .recv_timeout(Duration::from_millis(100))
+                .is_err(),
+            "terminal lifecycle must wait behind the ACP stale-read lock"
+        );
+
+        resume.wait();
+        assert!(acp.join().expect("join ACP").expect("ACP merge"));
+        terminal.join().expect("join terminal lifecycle");
+        terminal_result
+            .recv_timeout(Duration::from_secs(1))
+            .expect("terminal result after ACP release")
+            .expect("route stamp after terminal lifecycle");
+
+        let status: Value = serde_json::from_slice(
+            &std::fs::read(temp.path().join("status.json")).expect("read merged receipt"),
+        )
+        .expect("parse merged receipt");
+        assert_eq!(status["state"], "TASK_STATE_COMPLETED");
+        assert_eq!(status["result_written"], true);
+        assert_eq!(status["route_decision_id"], "route-overlap");
+        assert_eq!(
+            read_receipt(temp.path())
+                .observed
+                .effective
+                .model
+                .as_deref(),
+            Some("gpt-5.5")
+        );
+
+        let execution_source = include_str!("execution.rs");
+        let lifecycle_source = include_str!("../dispatch_v2.rs");
+        assert!(execution_source.contains("status_json_lock_for(run_dir)"));
+        assert_eq!(
+            lifecycle_source
+                .matches("status_json_lock_for(run_dir)")
+                .count(),
+            2,
+            "route stamp and lifecycle rewrite must each acquire the shared per-run lock"
+        );
     }
 
     #[test]

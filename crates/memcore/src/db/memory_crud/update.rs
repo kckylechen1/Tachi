@@ -149,6 +149,7 @@ fn expected_state_matches_within_tx(
 
 /// Atomically bind a complete expected source state to its final migration
 /// receipt and supersession lifecycle transition.
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn supersede_with_metadata_if_expected_state(
     conn: &mut Connection,
     id: &str,

@@ -95,11 +95,7 @@ impl ActionEffectMetadata {
 /// verbatim from the pre-#1098 `server_state::cache::CACHEABLE_TOOLS`.
 pub(crate) const CACHEABLE_TOOLS: &[&str] = &[
     "section_build",
-    "tachi_task_brief",
     "tachi_wiki_search",
-    "search_memory",
-    "find_similar_memory",
-    "get_memory",
     "list_memories",
     "memory_stats",
     "hub_discover",
@@ -108,7 +104,6 @@ pub(crate) const CACHEABLE_TOOLS: &[&str] = &[
     "vc_list",
     "vc_resolve",
     "get_pipeline_status",
-    "wiki_search",
     // Facade tools (read-only)
     "tachi_search",
     "tachi_web_search",
@@ -122,8 +117,6 @@ pub(crate) const CACHEABLE_TOOLS: &[&str] = &[
 /// either never invalidates the cache today) — preserved as-is; fixing that
 /// gap is a separate, unadjudicated change, not part of #1098's scope.
 pub(crate) const CACHE_INVALIDATING_TOOLS: &[&str] = &[
-    "save_memory",
-    "remember",
     "extract_facts",
     "ingest_event",
     "hub_register",
@@ -145,19 +138,15 @@ pub(crate) const CACHE_INVALIDATING_TOOLS: &[&str] = &[
     // #1099: "handoff_leave"/"handoff_check" retired — the routes no longer
     // exist. "tachi_handoff" (below) stays, still mixed read/write via its
     // one surviving action (promote_issue).
-    "post_card",
-    "update_card",
+    // Batch B: "post_card"/"update_card" retired from MCP.
     "tachi_unstick",
     "wiki_lint",
     "tachi_wiki_write",
     "tachi_wiki_ingest",
     // Facade tools (write / mixed)
-    "tachi_save",
     "tachi_memory",
     "tachi_domain_adapter",
     "tachi_handoff",
-    "tachi_complete",
-    "tachi_orchestrator",
     "tachi_task",
     "tachi_wiki",
     "tachi_skill",
@@ -203,10 +192,7 @@ const STANDALONE_UNSAFE_ROUTES: &[&str] = &[
 /// telemetry (`search_memory`), and therefore may not be replay-safe.
 const STANDALONE_REPLAY_SAFE_ROUTES: &[&str] = &[
     "section_build",
-    "tachi_task_brief",
     "tachi_wiki_search",
-    "find_similar_memory",
-    "get_memory",
     "list_memories",
     "memory_stats",
     "hub_discover",
@@ -215,7 +201,6 @@ const STANDALONE_REPLAY_SAFE_ROUTES: &[&str] = &[
     "vc_list",
     "vc_resolve",
     "get_pipeline_status",
-    "wiki_search",
     "tachi_web_search",
     "tachi_browse",
 ];
@@ -303,23 +288,15 @@ pub(crate) fn facade_action_effect(
         "tachi_component" => (&["list", "show", "check", "plan"], &[], &[]),
         // Preserve the existing conservative treatment of these facades while
         // making the set exhaustive. Unknown actions receive no metadata.
-        "tachi_skill" => (
-            &[],
-            &[],
-            // #1690 C3/C4: bundle/loadout/from_pattern are retired — only the
-            // surviving actions discover/run keep typed metadata.
-            &["discover", "run"],
-        ),
-        "tachi_verify" => (&[], &[], &["start", "record", "status", "board"]),
-        "tachi_orchestrator" => (
+        "tachi_skill" => (&["discover"], &[], &["run"]),
+        "tachi_verify" => (
             &[],
             &[],
             &[
-                "todo_list",
-                "todo_update",
-                "handoff_write",
-                "handoff_read",
-                "recovery_briefing",
+                "start", "record", "status", "board",
+                // #1454 slice 2: server-executed checks are side-effecting
+                // (process spawn + ledger write) and never replay-safe.
+                "run",
             ],
         ),
         _ => return None,
@@ -480,7 +457,6 @@ mod tests {
             "tachi_handoff",
             "tachi_orchestrator",
             "tachi_sandbox",
-            "tachi_complete",
         ] {
             assert!(
                 dlq_unsafe(tool, Some("anything")),
@@ -540,6 +516,30 @@ mod tests {
         }
     }
 
+    /// #1454 slice 2: `tachi_verify(action='run')` is a server-executed,
+    /// side-effecting check — a replayed DLQ retry would spawn a second
+    /// process run and double-write the ledger. It must never be classified
+    /// replay-safe, and the whole-facade cache-invalidating membership must
+    /// stay (the cache is invalidated regardless of which action runs).
+    #[test]
+    fn f1454_verify_run_action_is_never_replay_safe() {
+        assert!(dlq_unsafe("tachi_verify", Some("run")));
+        assert_eq!(
+            dlq_replay_metadata(
+                "tachi_verify",
+                Some(&serde_json::Map::from_iter([(
+                    "action".to_string(),
+                    Value::String("run".to_string())
+                )]))
+            ),
+            Some(ActionEffectMetadata::MUTATING_UNSAFE)
+        );
+        assert!(
+            CACHE_INVALIDATING_TOOLS.contains(&"tachi_verify"),
+            "tachi_verify must stay cache-invalidating (run/record/start all mutate the ledger)"
+        );
+    }
+
     #[test]
     fn retired_task_actions_are_unclassified() {
         for action in tachi_params::TACHI_TASK_RETIRED_ACTIONS {
@@ -571,26 +571,6 @@ mod tests {
         }
     }
 
-    /// #1690 C4 re-anchor: the retired `tachi_skill` actions keep NO typed
-    /// replay metadata (they are dead inventory, fail-closed but stale). The
-    /// completeness ratchet (`f1098_every_typed_facade_action_has_effect_metadata`)
-    /// walks `TACHI_SKILL_ACTIONS` == {discover, run}, so this pins the other
-    /// side: a retired action must not be re-registered with metadata.
-    #[test]
-    fn retired_skill_actions_are_unclassified() {
-        for action in ["bundle", "loadout", "from_pattern"] {
-            assert_eq!(
-                facade_action_effect("tachi_skill", Some(action)),
-                None,
-                "retired skill action {action} must not have effect metadata"
-            );
-            assert!(
-                dlq_unsafe("tachi_skill", Some(action)),
-                "retired skill action {action} must fail closed for replay"
-            );
-        }
-    }
-
     #[test]
     fn f1098_standalone_unsafe_routes_unchanged() {
         for name in STANDALONE_UNSAFE_ROUTES {
@@ -617,8 +597,7 @@ mod tests {
     /// `tachi_params::facade::{tachi_event_action_schema, tachi_wiki_action_schema}`
     /// / `orchestration::tachi_staff_action_schema` string literals, with no
     /// shared source to catch drift between the schema and this test. Those
-    /// three schema functions — plus `tachi_skill_action_schema`,
-    /// `tachi_orchestrator_action_schema` — now
+    /// schema functions — plus `tachi_skill_action_schema` — now
     /// read from `tachi_params::facade::action_inventory` pub consts that this
     /// test also imports (`tachi_params::TACHI_EVENT_ACTIONS` etc.): one
     /// source, not a fourth independently-authored list.
@@ -640,10 +619,6 @@ mod tests {
         // it proves the enumeration walks the REAL typed action universe for
         // them too, instead of never touching real inventories that exist.
         assert_all_classified("tachi_skill", tachi_params::TACHI_SKILL_ACTIONS);
-        assert_all_classified(
-            "tachi_orchestrator",
-            tachi_params::TACHI_ORCHESTRATOR_ACTIONS,
-        );
         let verify_actions = tachi_params::TachiVerifyAction::all_wire_strings();
         assert_all_classified("tachi_verify", &verify_actions);
     }

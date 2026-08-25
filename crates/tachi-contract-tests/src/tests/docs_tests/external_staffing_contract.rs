@@ -219,17 +219,27 @@ fn staffing_ledger_root_variables(source: &str) -> Vec<&str> {
 fn observe_functions(functions: &[RustFunction]) -> Value {
     let mut definitions = functions
         .iter()
-        .filter(|function| function.name == "handle_tachi_dispatch")
+        .filter(|function| function.name == "launch_canonical_dispatch")
         .map(|function| function.symbol.clone())
         .collect::<Vec<_>>();
     let mut production_adopters = functions
         .iter()
         .filter(|function| {
             function.name != "handle_tachi_dispatch"
-                && occurrence_count(&function.source, "handle_tachi_dispatch(") > 0
+                && function.name != "launch_staff_assignment"
+                && (occurrence_count(&function.source, "handle_tachi_dispatch(") > 0
+                    || occurrence_count(&function.source, "launch_staff_assignment(") > 0)
         })
         .flat_map(|function| {
-            numbered_sites(function, "handle_tachi_dispatch(", "dispatch-kernel-call")
+            if occurrence_count(&function.source, "handle_tachi_dispatch(") > 0 {
+                numbered_sites(function, "handle_tachi_dispatch(", "dispatch-kernel-call")
+            } else {
+                numbered_sites(
+                    function,
+                    "launch_staff_assignment(",
+                    "typed-staff-launch-call",
+                )
+            }
         })
         .collect::<Vec<_>>();
     let mut request_builders = functions
@@ -250,6 +260,7 @@ fn observe_functions(functions: &[RustFunction]) -> Value {
     let mut ledger_roots = Vec::new();
     let mut ledger_writers = Vec::new();
     let mut linked_result_copies = Vec::new();
+    let mut independent_staff_lifecycles = Vec::new();
     for function in functions {
         // Legacy secondary-ledger ownership is bounded to the retired Shell and
         // Arena run-time modules (both deleted: Shell in [1319-B7], Arena in
@@ -309,6 +320,12 @@ fn observe_functions(functions: &[RustFunction]) -> Value {
                 linked_result_copies.extend(numbered_sites(function, call, "linked-result-copy"));
             }
         }
+        if function.symbol.contains("/staffing_ops/")
+            && (function.source.contains("tokio::spawn(")
+                || function.source.contains("write_status_json("))
+        {
+            independent_staff_lifecycles.push(function.symbol.clone());
+        }
     }
     definitions.sort();
     production_adopters.sort();
@@ -317,6 +334,7 @@ fn observe_functions(functions: &[RustFunction]) -> Value {
     ledger_roots.sort();
     ledger_writers.sort();
     linked_result_copies.sort();
+    independent_staff_lifecycles.sort();
 
     json!({
         "adoption_entrypoint_definitions": definitions,
@@ -326,6 +344,7 @@ fn observe_functions(functions: &[RustFunction]) -> Value {
         "legacy_secondary_ledger_roots": ledger_roots,
         "legacy_staffing_projection_writer_sites": ledger_writers,
         "linked_result_copies": linked_result_copies,
+        "independent_staff_lifecycles": independent_staff_lifecycles,
     })
 }
 
@@ -374,6 +393,10 @@ fn budget_violations(observed: &Value, budgets: &Value) -> Vec<String> {
             "legacy_staffing_projection_writer_sites",
         ),
         ("linked_result_copies", "linked_result_copies"),
+        (
+            "independent_staff_lifecycles",
+            "independent_staff_lifecycles",
+        ),
     ] {
         let actual = observed[key].as_array().expect("observed inventory").len() as u64;
         let frozen = budgets[budget_key].as_u64().expect("contraction budget");
@@ -386,9 +409,46 @@ fn budget_violations(observed: &Value, budgets: &Value) -> Vec<String> {
     violations
 }
 
+fn fixture_metadata_violations(fixture: &Value) -> Vec<String> {
+    let mut violations = Vec::new();
+    let canonical = &fixture["canonical_request"];
+    if canonical["rust_type"] != json!("tachi_params::StaffAssignmentRequest") {
+        violations.push("canonical_request.rust_type must name StaffAssignmentRequest".to_string());
+    }
+    if canonical["adoption_entrypoint"] != json!("crate::dispatch_ops::launch_staff_assignment") {
+        violations.push(
+            "canonical_request.adoption_entrypoint must name the typed Staff launch".to_string(),
+        );
+    }
+    let bootstrap = &fixture["bootstrap_diagnostic_flat_route"];
+    if bootstrap["rust_type"] != json!("tachi_params::TachiDispatchParams") {
+        violations.push(
+            "bootstrap_diagnostic_flat_route.rust_type must retain the flat diagnostic type"
+                .to_string(),
+        );
+    }
+    if bootstrap["adoption_entrypoint"] != json!("crate::dispatch_ops::handle_tachi_dispatch") {
+        violations.push(
+            "bootstrap_diagnostic_flat_route.adoption_entrypoint must retain bootstrap dispatch"
+                .to_string(),
+        );
+    }
+    if bootstrap["scope"] != json!("sole diagnostic bootstrap route; never a Staff adoption path") {
+        violations
+            .push("bootstrap_diagnostic_flat_route.scope must exclude Staff adoption".to_string());
+    }
+    violations
+}
+
 #[test]
 fn external_staffing_topology_matches_the_single_kernel_contract() {
     let fixture: Value = serde_json::from_str(FIXTURE).expect("staffing fixture parses");
+    let metadata_violations = fixture_metadata_violations(&fixture);
+    assert!(
+        metadata_violations.is_empty(),
+        "{}",
+        metadata_violations.join("\n")
+    );
     let observed = observed_topology();
     assert_eq!(
         observed, fixture["observed_topology"],
@@ -396,6 +456,86 @@ fn external_staffing_topology_matches_the_single_kernel_contract() {
     );
     let violations = budget_violations(&observed, &fixture["contraction_budgets"]);
     assert!(violations.is_empty(), "{}", violations.join("\n"));
+}
+
+#[test]
+fn external_staffing_fixture_rejects_stale_flat_canonical_metadata() {
+    let fixture: Value = serde_json::from_str(FIXTURE).expect("staffing fixture parses");
+    assert!(fixture_metadata_violations(&fixture).is_empty());
+
+    let mut stale = fixture.clone();
+    stale["canonical_request"]["rust_type"] = json!("tachi_params::TachiDispatchParams");
+    stale["canonical_request"]["adoption_entrypoint"] =
+        json!("crate::dispatch_ops::handle_tachi_dispatch");
+    let violations = fixture_metadata_violations(&stale);
+    assert!(
+        violations
+            .iter()
+            .any(|violation| violation.contains("canonical_request.rust_type")),
+        "stale flat canonical request metadata must fail the contract"
+    );
+    assert!(
+        violations
+            .iter()
+            .any(|violation| violation.contains("canonical_request.adoption_entrypoint")),
+        "stale flat canonical entrypoint metadata must fail the contract"
+    );
+}
+
+#[test]
+fn external_staffing_typed_adopter_rejects_flat_facade_mutants() {
+    let root = repo_root();
+    let staff = std::fs::read_to_string(root.join("crates/tachi-server/src/staffing_ops/mod.rs"))
+        .expect("read Staff source");
+    let flat = ["TachiDispatch", "Params"].concat();
+    assert!(
+        !staff.contains(&flat),
+        "the actual Staff adopter must not mention the flat bootstrap facade"
+    );
+    assert!(
+        format!("{staff}\n{flat} deliberate_mutant").contains(&flat),
+        "the Staff flat-facade detector must reject a deliberate mutant"
+    );
+}
+
+#[test]
+fn external_staffing_observer_rejects_independent_staff_lifecycle_mutant() {
+    let root = repo_root();
+    let relative = "crates/tachi-server/src/staffing_ops/mod.rs";
+    let staff = std::fs::read_to_string(root.join(relative)).expect("read production Staff source");
+    let staff_start = functions_in_source(relative, &staff)
+        .into_iter()
+        .find(|function| function.name == "staff_start")
+        .expect("attribute the real production staff_start body");
+    let mutated_start =
+        staff_start
+            .source
+            .replacen('{', "{ tokio::spawn(async {}); write_status_json();", 1);
+    let mutant = staff.replacen(&staff_start.source, &mutated_start, 1);
+    let observed = observe_sources([(relative, mutant.as_str())]);
+    assert_eq!(
+        observed["independent_staff_lifecycles"],
+        json!(["crates/tachi-server/src/staffing_ops/mod.rs::staff_start"]),
+        "a spawn inserted into real staff_start is a second lifecycle and must exceed the zero budget"
+    );
+    assert!(
+        budget_violations(
+            &observed,
+            &json!({
+                "launch_kernels": 1,
+                "production_adopters": 1,
+                "request_builders": 0,
+                "launch_advertising_facades": 0,
+                "legacy_secondary_ledger_roots": 0,
+                "legacy_staffing_projection_writer_sites": 0,
+                "linked_result_copies": 0,
+                "independent_staff_lifecycles": 0,
+            }),
+        )
+        .iter()
+        .any(|violation| violation.contains("independent_staff_lifecycles")),
+        "the lifecycle mutant must be rejected by the ratcheted budget"
+    );
 }
 
 #[test]
@@ -420,6 +560,10 @@ fn external_staffing_budgets_discriminate_every_growth_axis() {
             "legacy_staffing_projection_writer_sites",
         ),
         ("linked_result_copies", "linked_result_copies"),
+        (
+            "independent_staff_lifecycles",
+            "independent_staff_lifecycles",
+        ),
     ] {
         let mut grown = fixture["observed_topology"].clone();
         grown[key]

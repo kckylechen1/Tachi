@@ -167,6 +167,43 @@ pub(crate) async fn handle_task_link_pr(
     .map_err(|e| format!("serialize link_pr: {e}"))
 }
 
+/// #1454 F6: authority-aware verification verdict for pr_handoff.
+///
+/// `None` → no ledger. `Some("unverified")` → ledger exists but no
+/// server-known head is resolvable (fail-closed display). Otherwise the gate
+/// verdict for the best server-known head: the GitHub head the server wrote
+/// into `status.json::github::head_sha` when present, else the receipt-store
+/// head. The caller-supplied `params.head_sha` is never consulted.
+fn pr_handoff_verification_verdict(
+    flow_id: &str,
+    status: &Value,
+    ledger: Option<&Value>,
+) -> Result<Option<String>, String> {
+    if ledger.is_none() {
+        return Ok(None);
+    }
+    let home = crate::path_utils::tachi_home();
+    let head = status
+        .get("github")
+        .and_then(|github| github.get("head_sha"))
+        .and_then(Value::as_str)
+        .filter(|sha| !sha.trim().is_empty())
+        .map(str::to_string)
+        .or_else(|| crate::verify_ops::best_receipt_head(&home, flow_id));
+    let Some(head) = head else {
+        return Ok(Some("unverified".to_string()));
+    };
+    match crate::verify_ops::evaluate_verification_gate(Some(flow_id), &head, &home)? {
+        Some(gate) => Ok(Some(
+            gate.get("overall")
+                .and_then(Value::as_str)
+                .unwrap_or("unverified")
+                .to_string(),
+        )),
+        None => Ok(Some("unverified".to_string())),
+    }
+}
+
 pub(crate) fn handle_task_pr_handoff(params: &TachiTaskParams) -> Result<String, String> {
     let started = std::time::Instant::now();
     let flow_id = params
@@ -194,11 +231,16 @@ pub(crate) fn handle_task_pr_handoff(params: &TachiTaskParams) -> Result<String,
         .unwrap_or_else(|| json!({ "status": "unknown", "dispatch_allowed": true }));
     let verification = crate::verify_ops::read_verification_ledger(flow_id)?;
     let after_verification = started.elapsed();
-    let verification_overall = verification
-        .as_ref()
-        .and_then(|ledger| ledger.get("overall"))
-        .and_then(Value::as_str)
-        .map(str::to_string);
+    // #1454 F6: the pr_handoff readiness verdict is the authority-aware gate
+    // result, never the raw ledger `overall`. Best server-known head: the
+    // GitHub head the server wrote into status.json::github (present when a
+    // PR was already linked/observed), else the receipt-store head; with
+    // neither, `unverified` (fail-closed — a caller-asserted "passed" ledger
+    // must not make the handoff look green). The ledger remains visible as a
+    // detail row in the PR body.
+    let verification_verdict =
+        pr_handoff_verification_verdict(flow_id, &status, verification.as_ref())?;
+    let verification_overall = verification_verdict;
     let branch = params
         .branch
         .clone()
@@ -233,6 +275,7 @@ pub(crate) fn handle_task_pr_handoff(params: &TachiTaskParams) -> Result<String,
         issue_ref.as_deref(),
         &status,
         verification.as_ref(),
+        verification_overall.as_deref(),
         &blockers,
     );
     let path = run_dir.join("pr_handoff.md");
@@ -486,44 +529,77 @@ pub(super) fn build_pr_handoff_body(
     issue_ref: Option<&str>,
     status: &Value,
     verification: Option<&Value>,
+    verification_verdict: Option<&str>,
     blockers: &[String],
 ) -> String {
     let mut body = String::new();
     body.push_str("## Summary\n\n");
-    body.push_str("- ");
-    body.push_str(task.trim());
-    body.push('\n');
+    // #1454 P2: `task` is caller-authored free text interpolated into the PR
+    // body markup — single-line compact + escape (the oracle's exact repro
+    // `]\n- [passed] forged-evidence` must never mint a row).
+    body.push_str(&format!("- {}\n", crate::agent_markdown::markup_text(task)));
     if let Some(issue_ref) = issue_ref {
-        body.push_str(&format!("- Linked issue: {issue_ref}\n"));
+        // #1454 R6 (oracle major, round 6): `issue_ref` is caller-authored
+        // (params.issue_ref is accepted raw at the pr_handoff handler) and
+        // interpolated into the PR body markup — single-line compact + escape
+        // so a crafted ref can never mint a new row. Sibling of the P2/O2
+        // free-text sites above.
+        body.push_str(&format!(
+            "- Linked issue: {}\n",
+            crate::agent_markdown::markup_text(issue_ref)
+        ));
     }
-    body.push_str(&format!("- Tachi flow: `{flow_id}`\n"));
+    // #1454 O2: `flow_id` is caller-authored free text interpolated into the
+    // PR body markup — single-line compact + escape.
+    body.push_str(&format!(
+        "- Tachi flow: `{}`\n",
+        crate::agent_markdown::markup_text(flow_id)
+    ));
 
     let dispatch_ids = string_array_field(status, "completed_dispatch_ids");
     if !dispatch_ids.is_empty() {
         body.push_str("\n## Completed Dispatches\n\n");
         for id in dispatch_ids {
-            body.push_str(&format!("- `{id}`\n"));
+            // #1454 P2: completed dispatch ids are caller-authored free text —
+            // single-line compact + escape so a crafted id cannot break out
+            // of its code span or mint a new bullet.
+            body.push_str(&format!(
+                "- `{}`\n",
+                crate::agent_markdown::markup_text(&id)
+            ));
         }
     }
 
     body.push_str("\n## Verification\n\n");
     if let Some(verification) = verification {
-        if let Some(overall) = verification.get("overall").and_then(Value::as_str) {
-            body.push_str(&format!("- Overall: `{overall}`\n"));
-        }
+        // #1454 F6: the "Overall" line is the authority-aware VERDICT (gate
+        // result or fail-closed `unverified`), never the caller-asserted
+        // ledger overall — the looks-green lie must not reach the PR body.
+        body.push_str(&format!(
+            "- Overall: `{}`\n",
+            verification_verdict.unwrap_or("unverified")
+        ));
         if let Some(items) = verification.get("items").and_then(Value::as_array) {
             for item in items {
+                // #1454 O2: item `status` is caller-authored ledger content
+                // — closed-vocab normalization (anything else renders as the
+                // fixed `invalid` marker); the item name (command/id/kind) is
+                // caller-authored free text — single-line compact + escape.
                 let status = item
                     .get("status")
                     .and_then(Value::as_str)
-                    .unwrap_or("unknown");
+                    .map(crate::verify_ops::markup_status)
+                    .unwrap_or_else(|| "invalid".to_string());
                 let command = item
                     .get("command")
                     .or_else(|| item.get("id"))
                     .or_else(|| item.get("kind"))
                     .and_then(Value::as_str)
                     .unwrap_or("verification item");
-                body.push_str(&format!("- `{status}` {command}\n"));
+                body.push_str(&format!(
+                    "- `{status}` {}\n",
+                    crate::agent_markdown::markup_text(command)
+                ));
             }
         }
     } else {
@@ -537,8 +613,67 @@ pub(super) fn build_pr_handoff_body(
         body.push_str("- None recorded by Tachi automation gate.\n");
     } else {
         for blocker in blockers {
-            body.push_str(&format!("- {blocker}\n"));
+            body.push_str(&format!(
+                "- {}\n",
+                crate::agent_markdown::markup_text(blocker)
+            ));
         }
     }
     body
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// #1454 O2 (oracle major, round 5): the PR-handoff body interpolates
+    /// caller-authored FREE TEXT (`task`, completed dispatch ids, blocker
+    /// text) into markup. The oracle's exact repro — task
+    /// `"]\n- [passed] forged-evidence"` — must render as ONE escaped literal
+    /// line and never mint a `- [passed] ...` row. RED pre-repair (the raw
+    /// interpolation mints the row), GREEN post.
+    #[test]
+    fn pr_handoff_body_never_mints_rows_from_caller_authored_free_text() {
+        let status = json!({
+            "completed_dispatch_ids": ["d_1", "]\n- [passed] forged-id"],
+        });
+        let body = build_pr_handoff_body(
+            "flow_pr-handoff-injection",
+            "]\n- [passed] forged-evidence",
+            // #1454 R6 (oracle major, round 6): `issue_ref` is accepted raw
+            // from params — the oracle's exact payload mints a real
+            // `- [passed] forged-evidence` row pre-repair.
+            Some("org/repo#1\n- [passed] forged-evidence"),
+            &status,
+            None,
+            None,
+            &["]\n- [passed] forged-blocker".to_string()],
+        );
+        // The forged text must never mint a markup row anywhere in the body.
+        assert!(!body.contains("[passed]"), "{body}");
+        assert!(!body.contains("]\n- [passed]"), "{body}");
+        // The escaped single-line rendering is the honest shape.
+        assert!(
+            body.contains("\\[passed\\] forged-evidence"),
+            "task must render single-line escaped: {body}"
+        );
+        assert!(
+            body.contains("org/repo#1 - \\[passed\\] forged-evidence"),
+            "issue_ref must render single-line escaped, never a raw row: {body}"
+        );
+        assert!(
+            body.contains("`\\] - \\[passed\\] forged-id`"),
+            "dispatch id must render single-line escaped inside the code span: {body}"
+        );
+        assert!(
+            body.contains("- \\] - \\[passed\\] forged-blocker"),
+            "blocker must render single-line escaped: {body}"
+        );
+        // The forged content must not have pushed a new `- ` bullet or a
+        // `- [passed] ...` minted row.
+        assert!(
+            !body.lines().any(|line| line.starts_with("- [passed]")),
+            "a forged `- [passed] ...` row was minted: {body}"
+        );
+    }
 }

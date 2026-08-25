@@ -14,6 +14,7 @@ use shared::{format_section_rows, md_escape, wiki_store_badge};
 pub(crate) use alerts::format_alerts;
 pub(crate) use briefing::{format_briefing, render_issue_freshness_section};
 pub(crate) use search::{format_search_memory_markdown, format_search_sections};
+pub(crate) use shared::markup_text;
 pub(crate) use wiki::{
     format_wiki_browse_category, format_wiki_browse_stats, format_wiki_read,
     format_wiki_read_ambiguity, format_wiki_search,
@@ -297,9 +298,14 @@ mod tests {
             &serde_json::json!({}),
             true,
         );
+        // #1454 O2 re-anchor: verification `flow_id` now renders through the
+        // shared `markup_text` helper, so an underscored id appears escaped
+        // (`flow\_0`) — the row-count discriminator matches both spellings.
         let gate_rows = compact
             .lines()
-            .filter(|line| line.starts_with("- [") && line.contains("`flow_"))
+            .filter(|line| {
+                line.starts_with("- [") && (line.contains("`flow_") || line.contains("`flow\\_"))
+            })
             .count();
         assert_eq!(gate_rows, 3);
         assert!(compact.contains("### Verification gates"));

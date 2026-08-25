@@ -191,16 +191,17 @@ fn delegate_facade_action_allowed(tool_name: &str, action: &str) -> bool {
                 | "alerts"
                 | "ask"
         ),
+        "tachi_wiki" => matches!(action, "search" | "browse" | "read"),
         "tachi_skill" => matches!(action, "discover" | "run"),
-        "tachi_event" => matches!(action, "emit" | "query" | "metrics" | "context" | "a2a"),
         "tachi_a2a" => matches!(action, "respond" | "status"),
         // Non-facade tools on the delegate list (no action concept): tool
         // visibility is enough, regardless of what's in the `action` arg.
         // `peer_query` (#1016 S1) is action-less (its selector is `noun`, gated
         // internally by an exhaustive whitelist) and read-only, so it belongs
         // here rather than in an action-bundle map.
-        "tachi_tools" | "runtime_info" | "tachi_web_search" | "tachi_browse" | "tachi_unstick"
-        | "tachi_complete" | "peer_query" => true,
+        "tachi_tools" | "runtime_info" | "tachi_web_search" | "tachi_unstick" | "peer_query" => {
+            true
+        }
         // Anything else — a tool not on the delegate allow-list at all, or a
         // gated facade we forgot to enumerate above — is denied by default.
         _ => false,
@@ -244,7 +245,7 @@ pub fn facade_action_required_bundle(tool_name: &str, action: &str) -> Option<To
             // Tool is listed under Coordinate patterns; treat status reads as
             // Observe so pure observe profiles that gain the tool later stay safe.
             "status" | "board" => Some(ToolBundle::Observe),
-            "start" | "record" => Some(ToolBundle::Coordinate),
+            "start" | "record" | "run" => Some(ToolBundle::Coordinate),
             _ => None,
         },
         "tachi_gh" => match action.as_str() {
@@ -344,14 +345,21 @@ mod tests {
             profile
         ));
         assert!(facade_action_allowed("tachi_skill", Some("run"), profile));
-        // #1690 C3: bundle/loadout/from_pattern are retired — the delegate
-        // gate must not admit any retired tachi_skill action.
-        for retired in ["bundle", "loadout", "from_pattern"] {
-            assert!(
-                !facade_action_allowed("tachi_skill", Some(retired), profile),
-                "delegate gate must reject retired tachi_skill action '{retired}'"
-            );
-        }
+        assert!(!facade_action_allowed(
+            "tachi_skill",
+            Some("bundle"),
+            profile
+        ));
+        assert!(!facade_action_allowed(
+            "tachi_skill",
+            Some("loadout"),
+            profile
+        ));
+        assert!(!facade_action_allowed(
+            "tachi_skill",
+            Some("from_pattern"),
+            profile
+        ));
 
         assert!(facade_action_allowed(
             "tachi_memory",
@@ -364,6 +372,12 @@ mod tests {
             Some("consolidate"),
             profile
         ));
+
+        assert!(!facade_action_allowed("tachi_browse", None, profile));
+        assert!(facade_action_allowed("tachi_wiki", Some("search"), profile));
+        assert!(facade_action_allowed("tachi_wiki", Some("browse"), profile));
+        assert!(facade_action_allowed("tachi_wiki", Some("read"), profile));
+        assert!(!facade_action_allowed("tachi_wiki", Some("write"), profile));
     }
 
     #[test]
@@ -583,14 +597,14 @@ mod tests {
 
     #[test]
     fn f3_missing_action_on_non_gated_tool_is_not_profile_gated() {
-        // tachi_complete has no action concept; tool-level visibility is enough.
+        // tachi_unstick has no action concept; tool-level visibility is enough.
         assert!(facade_action_allowed(
-            "tachi_complete",
+            "tachi_unstick",
             None,
             Some(ToolProfile::delegate())
         ));
         assert!(facade_action_allowed(
-            "tachi_complete",
+            "tachi_unstick",
             None,
             Some(ToolProfile::observe())
         ));
@@ -689,8 +703,7 @@ mod tests {
     /// Unrestricted tools on the delegate allow-list keep working regardless
     /// of what's in the (irrelevant) action arg — this is the "no action
     /// concept" carve-out, distinct from a real gated facade with an
-    /// unrecognized action. `run_skill` is gone: its route was retired
-    /// (#1690 C3 slice A), so the allow-arm died with it.
+    /// unrecognized action.
     #[test]
     fn f919_delegate_no_action_concept_tools_stay_allowed() {
         let profile = Some(ToolProfile::delegate());
@@ -698,27 +711,11 @@ mod tests {
             "tachi_tools",
             "runtime_info",
             "tachi_web_search",
-            "tachi_browse",
             "tachi_unstick",
-            "tachi_complete",
         ] {
             assert!(facade_action_allowed(tool, None, profile));
             assert!(facade_action_allowed(tool, Some("whatever"), profile));
         }
-    }
-
-    /// #1690 C3 slice A discrimination: the retired `run_skill` route must not
-    /// be re-admitted through the delegate no-action-concept carve-out. RED
-    /// pre-fix (the arm matched), GREEN post-fix (the arm is gone).
-    #[test]
-    fn f1690_retired_run_skill_is_not_delegate_allowed() {
-        let profile = Some(ToolProfile::delegate());
-        assert!(!facade_action_allowed("run_skill", None, profile));
-        assert!(!facade_action_allowed(
-            "run_skill",
-            Some("whatever"),
-            profile
-        ));
     }
 
     #[test]

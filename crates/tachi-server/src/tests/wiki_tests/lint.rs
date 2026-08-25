@@ -844,15 +844,46 @@ async fn wiki_lint_migration_audit_never_applies_edges_across_store_identity() {
                 .upsert(&global_source)
                 .map_err(|error| error.to_string())?;
             store
-                .add_edge(&memcore::MemoryEdge {
-                    source_id: global_source.id.clone(),
-                    target_id: global_target.id.clone(),
-                    relation: "supersedes".to_string(),
-                    weight: 0.9,
-                    metadata: json!({"source": "test"}),
-                    created_at: Utc::now().to_rfc3339(),
-                    valid_from: String::new(),
-                    valid_to: None,
+                .with_immutable_supersession_transaction(|replacement| {
+                    let source = replacement
+                        .get_memory(&global_target.id)?
+                        .ok_or_else(|| memcore::MemoryError::NotFound(global_target.id.clone()))?;
+                    let target = replacement
+                        .get_memory(&global_source.id)?
+                        .ok_or_else(|| memcore::MemoryError::NotFound(global_source.id.clone()))?;
+                    let expected = memcore::SupersessionExpectedState::active_unsuperseded(
+                        &source,
+                        Some(&target),
+                    );
+                    let result = replacement.claim_checked_immutable_supersession(
+                        &source.id,
+                        &target.id,
+                        &expected,
+                        "wiki_lint_fixture_v1",
+                        "wiki-lint-fixture-v1",
+                        false,
+                    )?;
+                    if result != memcore::SupersessionCommitResult::Applied {
+                        return Err(memcore::MemoryError::InvalidArg(
+                            "wiki lint fixture supersession was not applied".to_string(),
+                        ));
+                    }
+                    replacement.add_canonical_supersession_edge(
+                        &memcore::MemoryEdge {
+                            source_id: global_source.id.clone(),
+                            target_id: global_target.id.clone(),
+                            relation: "supersedes".to_string(),
+                            weight: 0.9,
+                            metadata: json!({"source": "test"}),
+                            created_at: Utc::now().to_rfc3339(),
+                            valid_from: String::new(),
+                            valid_to: None,
+                        },
+                        &memcore::db::EdgeProvenance {
+                            authority: Some(memcore::db::EdgeAuthority::StructuralBookkeeping),
+                            ..Default::default()
+                        },
+                    )
                 })
                 .map_err(|error| error.to_string())
         })
@@ -1011,5 +1042,53 @@ async fn wiki_lint_still_sees_pending_review_drafts() {
         "non-regression: wiki_lint's MigrationAudit path must still see pending_review \
          drafts (SQL user_facing_wiki_sql_where is deliberately not lifecycle-gated \
          by this leaf): {orphan_ids:?}"
+    );
+}
+
+#[test]
+fn skill_quality_refresh_does_not_mutate_retired_tombstone() {
+    let server = make_server();
+    let mut retired = crate::tests::make_skill_capability(
+        crate::builtins::RETIRED_TRAJECTORY_DISTILLER_ID,
+        "trajectory-distiller",
+        "Historical trajectory writer excluded from quality evolution",
+        "listed",
+    );
+    retired.definition = json!({
+        "content": "A substantial historical trajectory distillation workflow that quality guards would otherwise annotate.",
+        "skill_path": "/skills/general/trajectory-distiller",
+        "policy": {"visibility": "listed"}
+    })
+    .to_string();
+    server
+        .with_global_store(|store| {
+            store
+                .hub_register(&retired)
+                .map_err(|error| error.to_string())
+        })
+        .expect("inject retired quality tombstone");
+    let before = server
+        .with_global_store_read(|store| {
+            store
+                .hub_get(crate::builtins::RETIRED_TRAJECTORY_DISTILLER_ID)
+                .map_err(|error| error.to_string())
+        })
+        .expect("load retired row before quality refresh");
+    let before = serde_json::to_string(&before).expect("serialize pre-refresh state");
+
+    crate::wiki_ops::refresh_skill_quality_guards(&server)
+        .expect("quality refresh should skip retired rows");
+
+    let after = server
+        .with_global_store_read(|store| {
+            store
+                .hub_get(crate::builtins::RETIRED_TRAJECTORY_DISTILLER_ID)
+                .map_err(|error| error.to_string())
+        })
+        .expect("load retired row after quality refresh");
+    let after = serde_json::to_string(&after).expect("serialize post-refresh state");
+    assert_eq!(
+        after, before,
+        "quality refresh must not mutate the tombstone"
     );
 }

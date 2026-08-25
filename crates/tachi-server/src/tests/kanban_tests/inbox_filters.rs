@@ -4,8 +4,9 @@ use super::*;
 async fn check_inbox_respects_broadcast_toggle() {
     let server = make_server();
 
-    server
-        .post_card(Parameters(PostCardParams {
+    handle_post_card(
+        &server,
+        PostCardParams {
             from_agent: "aegis".to_string(),
             to_agent: "*".to_string(),
             title: "Fleet alert".to_string(),
@@ -17,12 +18,14 @@ async fn check_inbox_respects_broadcast_toggle() {
             project_id: None,
             conversation_id: None,
             agent_session_id: None,
-        }))
-        .await
-        .expect("post_card broadcast should succeed");
+        },
+    )
+    .await
+    .expect("post_card broadcast should succeed");
 
-    let no_broadcast = server
-        .check_inbox(Parameters(CheckInboxParams {
+    let no_broadcast = handle_check_inbox(
+        &server,
+        CheckInboxParams {
             agent_id: "iris".to_string(),
             status_filter: None,
             since: None,
@@ -30,15 +33,17 @@ async fn check_inbox_respects_broadcast_toggle() {
             limit: 10,
             workspace_id: None,
             conversation_id: None,
-        }))
-        .await
-        .expect("check_inbox without broadcast should succeed");
+        },
+    )
+    .await
+    .expect("check_inbox without broadcast should succeed");
     let no_broadcast_json: serde_json::Value =
         serde_json::from_str(&no_broadcast).expect("check_inbox response should be JSON");
     assert_eq!(no_broadcast_json["count"], json!(0));
 
-    let with_broadcast = server
-        .check_inbox(Parameters(CheckInboxParams {
+    let with_broadcast = handle_check_inbox(
+        &server,
+        CheckInboxParams {
             agent_id: "iris".to_string(),
             status_filter: None,
             since: None,
@@ -46,9 +51,10 @@ async fn check_inbox_respects_broadcast_toggle() {
             limit: 10,
             workspace_id: None,
             conversation_id: None,
-        }))
-        .await
-        .expect("check_inbox with broadcast should succeed");
+        },
+    )
+    .await
+    .expect("check_inbox with broadcast should succeed");
     let with_broadcast_json: serde_json::Value =
         serde_json::from_str(&with_broadcast).expect("check_inbox response should be JSON");
     assert_eq!(with_broadcast_json["count"], json!(1));
@@ -58,8 +64,9 @@ async fn check_inbox_respects_broadcast_toggle() {
 async fn check_inbox_workspace_and_conversation_filters_require_exact_match() {
     let server = make_server();
 
-    server
-        .post_card(Parameters(PostCardParams {
+    handle_post_card(
+        &server,
+        PostCardParams {
             from_agent: "hapi".to_string(),
             to_agent: "iris".to_string(),
             title: "Scoped card".to_string(),
@@ -71,12 +78,14 @@ async fn check_inbox_workspace_and_conversation_filters_require_exact_match() {
             project_id: None,
             conversation_id: Some("conv-1".to_string()),
             agent_session_id: Some("sess-1".to_string()),
-        }))
-        .await
-        .expect("scoped post_card should succeed");
+        },
+    )
+    .await
+    .expect("scoped post_card should succeed");
 
-    server
-        .post_card(Parameters(PostCardParams {
+    handle_post_card(
+        &server,
+        PostCardParams {
             from_agent: "hapi".to_string(),
             to_agent: "iris".to_string(),
             title: "Unscoped card".to_string(),
@@ -88,12 +97,14 @@ async fn check_inbox_workspace_and_conversation_filters_require_exact_match() {
             project_id: None,
             conversation_id: None,
             agent_session_id: None,
-        }))
-        .await
-        .expect("unscoped post_card should succeed");
+        },
+    )
+    .await
+    .expect("unscoped post_card should succeed");
 
-    let filtered = server
-        .check_inbox(Parameters(CheckInboxParams {
+    let filtered = handle_check_inbox(
+        &server,
+        CheckInboxParams {
             agent_id: "iris".to_string(),
             status_filter: None,
             since: None,
@@ -101,9 +112,10 @@ async fn check_inbox_workspace_and_conversation_filters_require_exact_match() {
             limit: 10,
             workspace_id: Some("alpha".to_string()),
             conversation_id: Some("conv-1".to_string()),
-        }))
-        .await
-        .expect("filtered check_inbox should succeed");
+        },
+    )
+    .await
+    .expect("filtered check_inbox should succeed");
     let filtered_json: serde_json::Value =
         serde_json::from_str(&filtered).expect("filtered check_inbox response should be JSON");
     let cards = filtered_json["cards"]

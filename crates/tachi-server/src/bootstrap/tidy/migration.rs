@@ -415,7 +415,7 @@ fn migrate_single_db(
     // reserved-namespace guard still applies.
     let rows_after = match target_store.upsert_batch_with_precommit_preserving_anchor_rows(
         &source_entries,
-        |tx| {
+        |view| {
             // This is the last authority check before the non-atomic
             // main/WAL/SHM archive move, while target writes remain uncommitted.
             authority
@@ -431,11 +431,7 @@ fn migrate_single_db(
                 }
                 Ok::<(), memcore::MemoryError>(())
             })?;
-            tx.query_row("SELECT COUNT(*) FROM memories", [], |row| {
-                row.get::<_, i64>(0)
-            })
-            .map(|count| count as usize)
-            .map_err(memcore::MemoryError::from)
+            view.memory_row_count()
         },
     ) {
         Ok(rows_after) => rows_after,

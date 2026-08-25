@@ -28,6 +28,54 @@ fn portable_build_disables_admin_surface() {
     );
 }
 
+/// #1119 remediation text, portable branch: memcore built without `admin`
+/// must not prescribe a product-specific command. The feature bit cannot
+/// know which shell embeds it or which migration operations that shell
+/// supports, so the hint must remain product-neutral.
+/// The admin branch is pinned by memcore's own Display test; workspace
+/// feature unification prevents asserting both branches in one build, which
+/// is why this lives in the isolated contract test.
+#[test]
+fn schema_migration_refusal_keeps_portable_remediation_product_neutral() {
+    // Tripwire on the compile-time constant, deliberately (same shape as the
+    // post-#1062 tripwire in exec_env_reaper): every assertion below is only
+    // meaningful while this facade resolves memcore without `admin`.
+    #[allow(clippy::assertions_on_constants)]
+    {
+        assert!(
+            !ADMIN_SURFACE_ENABLED,
+            "the portable-branch pin is only meaningful in a no-admin build"
+        );
+    }
+    let err = MemoryError::SchemaMigrationOptInRequired {
+        stored: 21,
+        expected: 27,
+        db_path: "/data/legacy.db".into(),
+        backup_hint: "/data/legacy.db.migration-bak.<ts>".into(),
+        marker_hint: "/data/legacy.db.migration-marker".into(),
+    };
+    let text = err.to_string();
+    assert!(
+        !text.contains("--allow-schema-migration to tachi-server"),
+        "portable builds must not chase a flag their shell does not have: {text}"
+    );
+    assert!(
+        text.contains("portable build")
+            && text.contains("embedding product")
+            && text.contains("documented schema-migration opt-in")
+            && text.contains("documented migration procedure"),
+        "portable builds must delegate remediation to the embedding product's docs: {text}"
+    );
+    assert!(
+        !text.contains("portable-server") && !text.contains("hypermem migrate"),
+        "portable memcore must not guess which product command can remediate the refusal: {text}"
+    );
+    assert!(
+        text.contains("/data/legacy.db.migration-marker"),
+        "the migration-trail hints must survive the remediation split: {text}"
+    );
+}
+
 fn smoke_entry(id: &str) -> MemoryEntry {
     MemoryEntry {
         id: id.into(),

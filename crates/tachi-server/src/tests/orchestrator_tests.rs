@@ -1,8 +1,15 @@
 use super::make_server;
 use crate::orchestrator_ops::set_todo_update_snapshot_hook;
 use crate::tool_params::TachiOrchestratorParams;
-use rmcp::handler::server::wrapper::Parameters;
+use crate::MemoryServer;
 use serde_json::{json, Value};
+
+async fn call_orchestrator(
+    server: &MemoryServer,
+    params: TachiOrchestratorParams,
+) -> Result<String, String> {
+    crate::orchestrator_ops::handle_orchestrator(server, params).await
+}
 
 fn orchestrator_params(action: &str, task_id: &str) -> TachiOrchestratorParams {
     TachiOrchestratorParams {
@@ -37,15 +44,13 @@ async fn orchestrator_recovery_briefing_infers_active_task() {
     update.todo_id = Some("t1".to_string());
     update.todo_content = Some("Continue the active task".to_string());
     update.todo_status = Some("in_progress".to_string());
-    server
-        .tachi_orchestrator(Parameters(update))
+    call_orchestrator(&server, update)
         .await
         .expect("todo_update");
 
     let mut recovery = orchestrator_params("recovery_briefing", "unused");
     recovery.task_id = None;
-    let raw = server
-        .tachi_orchestrator(Parameters(recovery))
+    let raw = call_orchestrator(&server, recovery)
         .await
         .expect("recovery without task_id");
     let json: Value = serde_json::from_str(&raw).expect("json");
@@ -60,15 +65,13 @@ async fn orchestrator_recovery_briefing_ignores_completed_todo_without_handoff()
     update.todo_id = Some("t1".to_string());
     update.todo_content = Some("Already done".to_string());
     update.todo_status = Some("done".to_string());
-    server
-        .tachi_orchestrator(Parameters(update))
+    call_orchestrator(&server, update)
         .await
         .expect("todo_update");
 
     let mut recovery = orchestrator_params("recovery_briefing", "unused");
     recovery.task_id = None;
-    let err = server
-        .tachi_orchestrator(Parameters(recovery))
+    let err = call_orchestrator(&server, recovery)
         .await
         .expect("completed-only task should return empty recovery, not an MCP error");
     let json: Value = serde_json::from_str(&err).expect("json");
@@ -81,8 +84,9 @@ async fn orchestrator_todos_and_handoff_persist() {
     let server = make_server();
     let task_id = "dispatch-test-001";
 
-    let update = server
-        .tachi_orchestrator(Parameters(TachiOrchestratorParams {
+    let update = call_orchestrator(
+        &server,
+        TachiOrchestratorParams {
             action: "todo_update".to_string(),
             task_id: Some(task_id.to_string()),
             todo_id: Some("t1".to_string()),
@@ -104,14 +108,16 @@ async fn orchestrator_todos_and_handoff_persist() {
             known_blockers: vec![],
             next_action: None,
             newest_user_instruction: None,
-        }))
-        .await
-        .expect("todo_update");
+        },
+    )
+    .await
+    .expect("todo_update");
     let update_json: Value = serde_json::from_str(&update).expect("json");
     assert_eq!(update_json["ok"], json!(true));
 
-    let list = server
-        .tachi_orchestrator(Parameters(TachiOrchestratorParams {
+    let list = call_orchestrator(
+        &server,
+        TachiOrchestratorParams {
             action: "todo_list".to_string(),
             task_id: Some(task_id.to_string()),
             todo_id: None,
@@ -133,14 +139,16 @@ async fn orchestrator_todos_and_handoff_persist() {
             known_blockers: vec![],
             next_action: None,
             newest_user_instruction: None,
-        }))
-        .await
-        .expect("todo_list");
+        },
+    )
+    .await
+    .expect("todo_list");
     let list_json: Value = serde_json::from_str(&list).expect("json");
     assert_eq!(list_json["todos"].as_array().map(|a| a.len()), Some(1));
 
-    let handoff = server
-        .tachi_orchestrator(Parameters(TachiOrchestratorParams {
+    let handoff = call_orchestrator(
+        &server,
+        TachiOrchestratorParams {
             action: "handoff_write".to_string(),
             task_id: Some(task_id.to_string()),
             todo_id: None,
@@ -162,12 +170,14 @@ async fn orchestrator_todos_and_handoff_persist() {
             known_blockers: vec![],
             next_action: Some("Run CI".to_string()),
             newest_user_instruction: Some("Don't stop".to_string()),
-        }))
-        .await
-        .expect("handoff_write");
+        },
+    )
+    .await
+    .expect("handoff_write");
 
-    let recovery = server
-        .tachi_orchestrator(Parameters(TachiOrchestratorParams {
+    let recovery = call_orchestrator(
+        &server,
+        TachiOrchestratorParams {
             action: "recovery_briefing".to_string(),
             task_id: Some(task_id.to_string()),
             todo_id: None,
@@ -189,9 +199,10 @@ async fn orchestrator_todos_and_handoff_persist() {
             known_blockers: vec![],
             next_action: None,
             newest_user_instruction: None,
-        }))
-        .await
-        .expect("recovery");
+        },
+    )
+    .await
+    .expect("recovery");
     let recovery_json: Value = serde_json::from_str(&recovery).expect("json");
     assert!(recovery_json["handoff"].is_object());
     assert_eq!(
@@ -212,21 +223,18 @@ async fn todo_update_preserves_status_and_clears_stale_state() {
     create.todo_id = Some("t1".to_string());
     create.todo_content = Some("Finish merge".to_string());
     create.todo_status = Some("done".to_string());
-    server
-        .tachi_orchestrator(Parameters(create))
+    call_orchestrator(&server, create)
         .await
         .expect("create done todo");
 
     let mut content_only = orchestrator_params("todo_update", task_id);
     content_only.todo_id = Some("t1".to_string());
     content_only.todo_content = Some("Finish merge after CI".to_string());
-    server
-        .tachi_orchestrator(Parameters(content_only))
+    call_orchestrator(&server, content_only)
         .await
         .expect("content-only update");
 
-    let list = server
-        .tachi_orchestrator(Parameters(orchestrator_params("todo_list", task_id)))
+    let list = call_orchestrator(&server, orchestrator_params("todo_list", task_id))
         .await
         .expect("todo_list");
     let list_json: Value = serde_json::from_str(&list).expect("json");
@@ -238,21 +246,18 @@ async fn todo_update_preserves_status_and_clears_stale_state() {
     blocked.todo_id = Some("t1".to_string());
     blocked.todo_status = Some("blocked".to_string());
     blocked.blocked_reason = Some("waiting for CI".to_string());
-    server
-        .tachi_orchestrator(Parameters(blocked))
+    call_orchestrator(&server, blocked)
         .await
         .expect("block todo");
 
     let mut reopen = orchestrator_params("todo_update", task_id);
     reopen.todo_id = Some("t1".to_string());
     reopen.todo_status = Some("in_progress".to_string());
-    server
-        .tachi_orchestrator(Parameters(reopen))
+    call_orchestrator(&server, reopen)
         .await
         .expect("reopen todo");
 
-    let list = server
-        .tachi_orchestrator(Parameters(orchestrator_params("todo_list", task_id)))
+    let list = call_orchestrator(&server, orchestrator_params("todo_list", task_id))
         .await
         .expect("todo_list");
     let list_json: Value = serde_json::from_str(&list).expect("json");
@@ -300,15 +305,13 @@ async fn todo_update_retries_after_a_competing_first_insert() {
     update.todo_id = Some("ours".to_string());
     update.todo_content = Some("Keep this update too".to_string());
     update.todo_status = Some("in_progress".to_string());
-    let raw = server
-        .tachi_orchestrator(Parameters(update))
+    let raw = call_orchestrator(&server, update)
         .await
         .expect("todo update retries after competing insert");
     let receipt: Value = serde_json::from_str(&raw).expect("receipt JSON");
     assert_eq!(receipt["todo_count"], json!(2));
 
-    let raw = server
-        .tachi_orchestrator(Parameters(orchestrator_params("todo_list", task_id)))
+    let raw = call_orchestrator(&server, orchestrator_params("todo_list", task_id))
         .await
         .expect("todo list");
     let list: Value = serde_json::from_str(&raw).expect("todo list JSON");

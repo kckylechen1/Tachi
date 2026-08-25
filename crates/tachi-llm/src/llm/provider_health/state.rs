@@ -134,6 +134,16 @@ pub(in crate::llm) struct ProviderHealthPersistTracker {
     first_terminal_error: std::sync::Mutex<Option<String>>,
 }
 
+pub(in crate::llm) struct ProviderHealthPersistCompletion {
+    tracker: Arc<ProviderHealthPersistTracker>,
+}
+
+impl Drop for ProviderHealthPersistCompletion {
+    fn drop(&mut self) {
+        self.tracker.complete();
+    }
+}
+
 impl ProviderHealthReloadState {
     pub(in crate::llm) fn memory_only() -> Self {
         Self {
@@ -191,7 +201,14 @@ impl ProviderHealthPersistState {
 }
 
 impl ProviderHealthPersistTracker {
-    pub(in crate::llm) fn begin(&self) {
+    pub(in crate::llm) fn track(self: &Arc<Self>) -> ProviderHealthPersistCompletion {
+        self.begin();
+        ProviderHealthPersistCompletion {
+            tracker: Arc::clone(self),
+        }
+    }
+
+    fn begin(&self) {
         self.pending
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
     }
@@ -206,7 +223,7 @@ impl ProviderHealthPersistTracker {
         }
     }
 
-    pub(in crate::llm) fn complete(&self) {
+    fn complete(&self) {
         let previous = self
             .pending
             .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
@@ -233,6 +250,29 @@ impl ProviderHealthPersistTracker {
             }
             notified.await;
         }
+    }
+}
+
+#[cfg(test)]
+mod persist_tracker_tests {
+    use super::*;
+
+    #[test]
+    fn completion_drop_returns_the_pending_slot() {
+        let tracker = Arc::new(ProviderHealthPersistTracker::default());
+        let completion = tracker.track();
+        assert_eq!(
+            tracker.pending.load(std::sync::atomic::Ordering::Acquire),
+            1
+        );
+
+        drop(completion);
+
+        assert_eq!(
+            tracker.pending.load(std::sync::atomic::Ordering::Acquire),
+            0,
+            "task cancellation must not strand a persistence waiter"
+        );
     }
 }
 

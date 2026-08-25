@@ -51,6 +51,7 @@ pub(crate) async fn handle_export_skills(
             all_skills.push(cap);
         }
     }
+    all_skills.retain(|cap| !crate::builtins::is_retired_builtin_capability_id(&cap.id));
 
     // ── 2. Filter by requested skill IDs ─────────────────────────────────────
     if let Some(ref ids) = params.skill_ids {

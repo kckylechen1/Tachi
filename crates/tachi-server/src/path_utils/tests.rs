@@ -805,3 +805,93 @@ fn plan_c_split_brain_defers_to_routing_gate_on_ambiguous_identity() {
         ));
     });
 }
+
+#[test]
+fn plan_c_project_root_does_not_treat_global_tachi_home_as_project_root() {
+    with_env_lock(|| {
+        let tmp = crate::test_support::non_skipped_fixture_tempdir("global-home-");
+        let tachi_home = tmp.path().join(".tachi");
+        std::fs::create_dir_all(&tachi_home).expect("tachi home");
+        let _tachi_home = EnvRestore::set_path("TACHI_HOME", &tachi_home);
+
+        // 1. Global DB directly inside ~/.tachi must NOT be recognized as a project root
+        let global_db = tachi_home.join("memory.db");
+        std::fs::write(&global_db, b"global").expect("global db");
+        assert_eq!(
+            plan_c_project_root_from_local_db(&global_db),
+            None,
+            "global database in TACHI_HOME must not be treated as a Plan C project DB"
+        );
+
+        // 2. Global DB inside ~/.tachi/global/ must NOT be recognized as a project root
+        let global_dir_db = tachi_home.join("global").join("tachi-memory.db");
+        std::fs::create_dir_all(global_dir_db.parent().unwrap()).expect("global dir");
+        std::fs::write(&global_dir_db, b"global-dir").expect("global dir db");
+        assert_eq!(
+            plan_c_project_root_from_local_db(&global_dir_db),
+            None,
+            "global database in ~/.tachi/global must not be treated as a Plan C project DB"
+        );
+
+        // 3. Real repo-local DB in /path/to/my-repo/.tachi/tachi-memory.db MUST return /path/to/my-repo
+        let repo = tmp.path().join("my-repo");
+        let repo_tachi = repo.join(".tachi");
+        std::fs::create_dir_all(&repo_tachi).expect("repo tachi dir");
+        let repo_db = repo_tachi.join("tachi-memory.db");
+        std::fs::write(&repo_db, b"repo").expect("repo db");
+        assert_eq!(
+            plan_c_project_root_from_local_db(&repo_db),
+            Some(repo),
+            "repo-local database must correctly return its project root"
+        );
+    });
+}
+
+#[test]
+fn scope_hint_for_in_home_correctly_classifies_global_store_and_projects() {
+    with_env_lock(|| {
+        let tmp = crate::test_support::non_skipped_fixture_tempdir("scope-hint-");
+        let tachi_home = tmp.path().join("custom-tachi-home");
+        std::fs::create_dir_all(&tachi_home).expect("tachi home");
+
+        // 1. ~/.tachi/global/tachi-memory.db
+        let global_dir_db = tachi_home.join("global").join(memcore::MEMORY_DB_FILENAME);
+        assert_eq!(
+            crate::doctor::scope_hint_for_in_home(&global_dir_db, &tachi_home),
+            "global"
+        );
+
+        // 2. ~/.tachi/global/memory.db (legacy name)
+        let global_dir_legacy_db = tachi_home
+            .join("global")
+            .join(memcore::LEGACY_MEMORY_DB_FILENAME);
+        assert_eq!(
+            crate::doctor::scope_hint_for_in_home(&global_dir_legacy_db, &tachi_home),
+            "global"
+        );
+
+        // 3. ~/.tachi/tachi-memory.db (root level)
+        let global_root_db = tachi_home.join(memcore::MEMORY_DB_FILENAME);
+        assert_eq!(
+            crate::doctor::scope_hint_for_in_home(&global_root_db, &tachi_home),
+            "global"
+        );
+
+        // 4. ~/.tachi/memory.db (root level legacy)
+        let global_root_legacy_db = tachi_home.join(memcore::LEGACY_MEMORY_DB_FILENAME);
+        assert_eq!(
+            crate::doctor::scope_hint_for_in_home(&global_root_legacy_db, &tachi_home),
+            "global"
+        );
+
+        // 5. ~/.tachi/projects/my-proj/tachi-memory.db
+        let project_alias = tachi_home
+            .join("projects")
+            .join("my-proj")
+            .join(memcore::MEMORY_DB_FILENAME);
+        assert_eq!(
+            crate::doctor::scope_hint_for_in_home(&project_alias, &tachi_home),
+            "project:my-proj"
+        );
+    });
+}

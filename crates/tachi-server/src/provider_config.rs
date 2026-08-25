@@ -535,8 +535,8 @@ pub(crate) struct EnvCatalogImport {
 /// `catalog_source='env'` deployment rows (#1681 D7 PR-B).
 ///
 /// This is the production caller the projection was written for. Without it,
-/// `catalog_import` is a function only tests call, and #1685's cutover would
-/// be reading a table nothing populates.
+/// `catalog_import` would be a function only tests call and the status catalog
+/// would describe nothing the running process configured.
 ///
 /// # Which config
 ///
@@ -747,9 +747,8 @@ mod catalog_import_tests {
         server
     }
 
-    /// The production caller exists and reaches every lane. Before this, the
-    /// projection was a function only tests called — five deployment rows the
-    /// #1685 cutover would have found empty.
+    /// The production caller exists and reaches every lane rather than leaving
+    /// the projection as a function only tests call.
     #[test]
     fn the_serve_path_import_records_every_lane_including_embedding() {
         let _guard = crate::utils::global_test_lock()
@@ -864,38 +863,26 @@ mod catalog_import_tests {
         );
     }
 
-    /// A refusable config never reaches the store, even through the server
-    /// seam that wraps the import in a transaction.
+    /// A refusable chat config cannot become the server's running client.
+    /// Refusal at client construction is stronger than the catalog import's
+    /// later defense-in-depth check: no poisoned client exists to install.
     #[test]
-    fn a_client_running_a_userinfo_base_url_imports_nothing() {
+    fn a_userinfo_chat_endpoint_is_refused_before_client_construction() {
         let _guard = crate::utils::global_test_lock()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let mut config = injected_config();
         config.extract.base_url =
             "https://svc-account:sk-live-SECRET@proxy.internal:8443/v1/chat".to_string();
-        let mut server = crate::tests::make_server();
-        server.replace_llm(tachi_llm::LlmClient::new_with_config(config, None).expect("client"));
-
-        let err = import_env_catalog_deployments(&server)
-            .expect_err("a userinfo base URL must refuse the whole import");
+        let err = match tachi_llm::LlmClient::new_with_config(config, None) {
+            Ok(_) => panic!("a userinfo base URL must be refused before client construction"),
+            Err(err) => err,
+        };
         assert!(!err.contains("sk-live-SECRET"), "{err}");
         assert!(!err.contains("proxy.internal"), "{err}");
         assert!(
             err.contains("extract"),
             "the refusal must name the lane: {err}"
-        );
-
-        let stored = server
-            .with_global_store_read(|store| {
-                list_model_deployments_by_source(store.connection(), CatalogSource::Env)
-                    .map_err(|e| e.to_string())
-            })
-            .expect("rows read");
-        assert!(
-            stored.is_empty(),
-            "not even the clean lanes may land: {} row(s)",
-            stored.len()
         );
     }
 

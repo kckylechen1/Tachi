@@ -169,3 +169,29 @@ fn check_writable_enforces_allow_write() {
         other => panic!("expected NotInManifest, got {other:?}"),
     }
 }
+
+#[test]
+fn manifest_populates_global_store_with_global_role_and_owner() {
+    let mut m = Manifest::empty();
+    let report = mk_report(vec![
+        mk_finding(
+            "/u/.tachi/global/tachi-memory.db",
+            DbClassification::Healthy,
+            "global",
+        ),
+        mk_finding("/u/.tachi/memory.db", DbClassification::Healthy, "global"),
+    ]);
+    m.populate_from_doctor(&report);
+    assert_eq!(m.dbs.len(), 2);
+    for entry in &m.dbs {
+        assert_eq!(
+            entry.role,
+            DbRole::Global,
+            "must be classified as DbRole::Global"
+        );
+        assert_eq!(entry.owner, "tachi", "global store owner must be tachi");
+        assert_eq!(entry.scope_hint, "global");
+        assert!(entry.allow_write);
+    }
+    assert!(m.global().is_some());
+}

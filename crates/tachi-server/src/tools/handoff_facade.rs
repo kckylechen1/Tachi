@@ -5,8 +5,7 @@ use crate::dlq_ops::{handle_dlq_list, handle_dlq_retry};
 use crate::handoff_ops::handle_handoff_promote_issue;
 use crate::skill_chain_ops::handle_chain_skills;
 use crate::tool_params::{
-    ChainSkillsParams, DlqListParams, DlqRetryParams, HandoffPromoteIssueParams,
-    TachiHandoffParams, TachiOrchestratorParams,
+    ChainSkillsParams, DlqListParams, DlqRetryParams, HandoffPromoteIssueParams, TachiHandoffParams,
 };
 use crate::MemoryServer;
 
@@ -43,7 +42,7 @@ impl MemoryServer {
     }
 
     #[tool(
-        description = "Create/link a GitHub issue from an existing handoff memo (action='promote_issue' only). #1099: 'leave'/'check' were retired — use tachi_a2a(action='respond') for same-host advisory messaging, or tachi_orchestrator(action='handoff_write'/'handoff_read') for a structured task baton."
+        description = "Create/link a GitHub issue from an existing handoff memo (action='promote_issue' only). #1099: 'leave'/'check' were retired — use tachi_a2a(action='respond') for same-host advisory messaging, or tachi_task(action='handoff') for task handoff."
     )]
     pub(crate) async fn tachi_handoff(
         &self,
@@ -72,23 +71,13 @@ impl MemoryServer {
             }
             "leave" | "check" => Err(format!(
                 "action='{action}' was retired in #1099. Use tachi_a2a(action='respond') \
-                 for same-host advisory messaging, or tachi_orchestrator(action='handoff_write'|'handoff_read') \
-                 for a structured task baton. 'promote_issue' is the only action tachi_handoff still supports."
+                 for same-host advisory messaging, or tachi_task(action='handoff') \
+                 for structured task handoff. 'promote_issue' is the only action tachi_handoff still supports."
             )),
             _ => Err(format!(
                 "Invalid action '{}'. tachi_handoff only supports 'promote_issue'.",
                 params.action
             )),
         }
-    }
-
-    #[tool(
-        description = "Persistent orchestrator state outside LLM context: todo_list, todo_update, handoff_write, handoff_read, recovery_briefing. Stored in hard_state (survives compaction). Use task_id = dispatch_id or issue id."
-    )]
-    pub(crate) async fn tachi_orchestrator(
-        &self,
-        Parameters(params): Parameters<TachiOrchestratorParams>,
-    ) -> Result<String, String> {
-        crate::orchestrator_ops::handle_orchestrator(self, params).await
     }
 }

@@ -252,8 +252,8 @@ fn few_shot_for_intent(intent: &str) -> Vec<&str> {
 **数据价值：** 这些已经是 **v2 → v4 多层过滤的高质量蒸馏产物**，可以直接作为 gold standard。
 
 **实现方式：**
-1. 作为 `handle_distill_trajectory()` 的质量 benchmark
-2. 从样本中提取高频 pattern → 自动生成 SKILL.md（frontmatter + body）
+1. 作为 reviewed skill candidate 的质量 benchmark
+2. 从样本中提取高频 pattern → 形成可静态发现/运行的 skill 文档与待审查证据草稿（不自动注册或生成可执行 SKILL.md）
 3. 作为 `synthesize_agent_evolution()` 的 training data
 
 ---
@@ -338,8 +338,8 @@ huggingface-cli download Qwen/Qwen2.5-32B-Instruct
 
 ### Phase 4: Foundry Integration（本月）
 
-- [ ] 将 SFT 数据作为 `distill_trajectory` 的 gold standard
-- [ ] 从样本中聚类提取高频 pattern → 自动生成 SKILL.md
+- [ ] 将 SFT 数据作为 reviewed skill candidate 的 gold standard
+- [ ] 从样本中聚类提取高频 pattern → 形成可静态发现/运行的 skill 文档与待审查证据工件
 - [ ] 评估 distill 质量是否提升
 
 ---

@@ -398,12 +398,28 @@ impl MemoryServer {
                                 migrated.display()
                             ));
                         }
+                        crate::path_utils::require_plan_c_alias_success(
+                            crate::path_utils::ensure_plan_c_canonical_alias_in_home(
+                                &canonical_db,
+                                &root,
+                                tachi_home,
+                            ),
+                        )?;
                     }
-                    None => crate::project_db_ops::register_repo_local_manifest_entry_in_home(
-                        &canonical_db,
-                        &canonical_name,
-                        tachi_home,
-                    )?,
+                    None => {
+                        crate::project_db_ops::register_repo_local_manifest_entry_in_home(
+                            &canonical_db,
+                            &canonical_name,
+                            tachi_home,
+                        )?;
+                        crate::path_utils::require_plan_c_alias_success(
+                            crate::path_utils::ensure_plan_c_canonical_alias_in_home(
+                                &canonical_db,
+                                &root,
+                                tachi_home,
+                            ),
+                        )?;
+                    }
                 }
                 canonical_name
             }
@@ -1211,6 +1227,87 @@ mod resolve_named_project_tests {
             let error = MemoryServer::resolve_named_project_db_path(&identity)
                 .expect_err("a missing authoritative DB must not fall back");
             assert!(error.contains("missing or unreadable"), "{error}");
+        });
+    }
+
+    #[test]
+    fn alias_migration_creates_canonical_alias_and_converges_from_disk() {
+        with_env_lock(|| {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let tachi_home = tmp.path().join("home");
+            std::fs::create_dir_all(&tachi_home).expect("home");
+            let _tachi_home = EnvRestore::set_path("TACHI_HOME", &tachi_home);
+
+            let repo = tmp.path().join("Sigil");
+            let local_db = repo.join(".tachi/tachi-memory.db");
+            std::fs::create_dir_all(local_db.parent().unwrap()).expect("repo local parent");
+            let repo = std::fs::canonicalize(&repo).expect("canon repo");
+            let local_db = repo.join(".tachi/tachi-memory.db");
+            std::fs::write(&local_db, b"sqlite-header-test-data").expect("write local db");
+            let local_db = std::fs::canonicalize(&local_db).expect("canon local db");
+
+            let gen3_name =
+                crate::path_utils::plan_c_previous_dir_name_from_root(&repo).expect("gen3 name");
+            let gen4_name = crate::path_utils::plan_c_dir_name_from_root(&repo).expect("gen4 name");
+            assert_ne!(gen3_name, gen4_name, "gen3 and gen4 must differ");
+
+            // Setup: ONLY gen-3 alias exists on disk
+            let gen3_dir = tachi_home.join("projects").join(&gen3_name);
+            std::fs::create_dir_all(&gen3_dir).expect("create gen3 dir");
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(&local_db, gen3_dir.join(memcore::MEMORY_DB_FILENAME))
+                .expect("gen3 symlink");
+
+            let gen4_dir = tachi_home.join("projects").join(&gen4_name);
+            assert!(
+                !gen4_dir.exists(),
+                "precondition: gen4 dir does not exist yet"
+            );
+
+            // 1. A caller arrives addressing the store through gen-3 alias
+            let (settled_label, resolved_db) =
+                MemoryServer::resolve_named_project_binding_in_home(&gen3_name, &tachi_home)
+                    .expect("resolve binding");
+            assert_eq!(
+                settled_label, gen4_name,
+                "binding settled on canonical gen-4 name"
+            );
+            assert_eq!(
+                std::fs::canonicalize(&resolved_db).expect("canonicalize resolved_db"),
+                local_db,
+                "resolved db matches local db"
+            );
+
+            // 2. Convergence: on-disk canonical gen-4 alias directory must now exist!
+            assert!(
+                gen4_dir.exists(),
+                "canonical gen4 directory must now exist on disk"
+            );
+            let canonical_from_disk =
+                crate::path_utils::named_project_for_db_path_in_home(&local_db, &tachi_home)
+                    .expect("named project lookup from disk");
+            assert_eq!(
+                canonical_from_disk, gen4_name,
+                "disk resolution must immediately converge on gen-4 canonical identity"
+            );
+
+            // 3. Robustness: delete the legacy gen-3 directory entirely from disk
+            std::fs::remove_dir_all(&gen3_dir).expect("remove legacy gen3 dir");
+            assert!(!gen3_dir.exists());
+
+            // 4. Disk resolution continues to resolve cleanly via canonical gen-4 alias
+            let canonical_after_gen3_removal =
+                crate::path_utils::named_project_for_db_path_in_home(&local_db, &tachi_home)
+                    .expect("named project lookup after gen3 removal");
+            assert_eq!(
+                canonical_after_gen3_removal, gen4_name,
+                "disk resolution must still succeed through canonical name after legacy removal"
+            );
+
+            let (settled_again, _) =
+                MemoryServer::resolve_named_project_binding_in_home(&gen4_name, &tachi_home)
+                    .expect("resolve binding after gen3 removal");
+            assert_eq!(settled_again, gen4_name);
         });
     }
 }

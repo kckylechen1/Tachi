@@ -3,8 +3,7 @@
 //!
 //! This is NOT a public MCP tool, NOT a new facade, and NOT a parallel
 //! lifecycle. It maps a small model-decidable request into
-//! [`TachiDispatchParams`](crate::tool_params::TachiDispatchParams) and delegates
-//! to the single canonical choke-point [`crate::dispatch_ops::handle_tachi_dispatch`];
+//! a resolved typed assignment and enters the single canonical launch kernel;
 //! it creates no second result/status store.
 //!
 //! # Boundary contract
@@ -32,26 +31,20 @@
 //! # Why an explicit allowlist struct
 //!
 //! [`StaffStartRequest`] deliberately has NO field named `cwd`, `command`,
-//! `transport`, `credentials`, `sandbox`, or `allowed_tools`. A request JSON
-//! that attempts to set any of those is silently ignored (no matching field
-//! exists to deserialize into), so the resulting [`TachiDispatchParams`] maps
-//! every execution field to its kernel-side default.
+//! `transport`, `credentials`, `sandbox`, or `allowed_tools`. Both
+//! [`StaffStartRequest`] and [`tachi_params::TachiStaffParams`] enforce
+//! `#[serde(deny_unknown_fields)]`: a request JSON that attempts to set any
+//! hostile execution field fails deserialization loudly before reaching any
+//! handler or creating any artifacts.
 
 use crate::dispatch_ops::{
-    canonical_dir_is_within, dispatch_runs_root, handle_tachi_dispatch, is_valid_dispatch_id,
+    canonical_dir_is_within, dispatch_runs_root, is_valid_dispatch_id, launch_staff_assignment,
 };
-use crate::tool_params::{TachiDispatchParams, TachiDispatchReason};
 use crate::MemoryServer;
 use rmcp::schemars::JsonSchema;
 // The `#[derive(JsonSchema)]` macro expands to reference `schemars::...`, so
 // the crate must be in scope under that name.
 use rmcp::schemars;
-use serde_json::Value;
-
-/// Default per-dispatch timeout (seconds) when the Staff request does not
-/// declare one. Mirrors `default_dispatch_timeout` in `tachi-params` (600s);
-/// duplicated locally because the params crate keeps that fn private.
-const DEFAULT_STAFF_DISPATCH_TIMEOUT_SECS: u64 = 600;
 
 /// Minimal semantic request for externally staffing a worker. The model may
 /// only set intent fields here; execution fields (cwd, command, transport,
@@ -63,111 +56,10 @@ const DEFAULT_STAFF_DISPATCH_TIMEOUT_SECS: u64 = 600;
 /// field; an unknown variant fails schema deserialization). The reason is
 /// stamped into the canonical receipt so staffing is auditable.
 ///
-/// `#[serde(default)]` on the optional fields plus the absence of any
-/// execution-shaped field means an inbound JSON carrying `"cwd": "/evil"` or
-/// `"command": ["rm", "-rf"]` is silently ignored — those names have no field
-/// to bind to, so they cannot leak into the mapped params.
-#[derive(Debug, Clone, serde::Deserialize, JsonSchema)]
-pub(crate) struct StaffStartRequest {
-    /// Task description / prompt for the worker. Required — a Staff request
-    /// with no task is meaningless.
-    pub task: String,
-    /// REQUIRED typed reason execution is leaving the host harness. Admission
-    /// fails closed without it (see the module-level admission-gate docs).
-    /// Reuses [`TachiDispatchReason`] so the vocabulary cannot drift from the
-    /// retired `tachi_task(dispatch)` gate.
-    pub staffing_reason: TachiDispatchReason,
-    /// Semantic dispatch profile hint — resolved through the existing profile
-    /// pipeline, not a raw agent/transport override.
-    #[serde(default)]
-    pub profile: Option<String>,
-    /// Worker/agent backend hint (e.g. "claude", "codex", "custom"). Resolved
-    /// to the canonical `agent` field; never a transport override.
-    #[serde(default)]
-    pub worker: Option<String>,
-    /// Optional named project DB for context search.
-    #[serde(default)]
-    pub project: Option<String>,
-    /// Dispatch stage: "plan" | "execute" | "auto".
-    #[serde(default)]
-    pub stage: Option<String>,
-    /// GitHub issue reference bound to this dispatch.
-    #[serde(default)]
-    pub issue_ref: Option<String>,
-    /// GitHub PR reference bound to this dispatch.
-    #[serde(default)]
-    pub pr_ref: Option<String>,
-    /// Tachi flow id for feature-scoped briefing/dispatch/eval linkage.
-    #[serde(default)]
-    pub flow_id: Option<String>,
-    /// tachi#1675 PR1 Seam B: the `recommendation_id` a prior
-    /// `tachi_dispatch(action='recommend')` call returned, when this start
-    /// was placed on that advice. Optional — absence is itself evidence
-    /// (`route_decisions.assignment_mode` records `unadvised`, never a
-    /// fabricated advisory).
-    #[serde(default)]
-    pub recommendation_ref: Option<String>,
-}
-
-impl StaffStartRequest {
-    /// Map a semantic Staff request onto the canonical dispatch params.
-    ///
-    /// Every execution-shaped field (`cwd`, `command`, `transport`,
-    /// `credentials`, `sandbox`, `allowed_tools`, MCP plumbing, watchdog
-    /// internals) is left at its kernel-side default: `None` / empty / the
-    /// default timeout. Those are resolved by the canonical admission / policy
-    /// / profile pipeline inside `handle_tachi_dispatch`, NEVER set here.
-    ///
-    /// `staffing_reason` IS mapped through (not dropped) — it carries the
-    /// admission contract into `TachiDispatchParams` so the kernel's
-    /// defense-in-depth check and the receipt stamp both see it.
-    ///
-    /// NOTE: `TachiDispatchParams` does NOT derive `Default` (it has 30+ fields
-    /// with non-trivial serde attributes), so this method enumerates every
-    /// field explicitly — same pattern the dispatch tests use for their
-    /// `test_dispatch_params` helper. Any new field added to
-    /// `TachiDispatchParams` will surface as a compile error here, forcing an
-    /// explicit decision about whether Staff should expose it (default: no).
-    fn into_params(self) -> TachiDispatchParams {
-        TachiDispatchParams {
-            task: self.task,
-            // #1319 admission contract: carry the typed reason into the kernel.
-            staffing_reason: self.staffing_reason,
-            agent: self.worker,
-            profile: self.profile,
-            project: self.project,
-            stage: self.stage,
-            issue_ref: self.issue_ref,
-            pr_ref: self.pr_ref,
-            flow_id: self.flow_id,
-            // ── Execution fields: intentionally left at kernel defaults ──────
-            cwd: None,
-            env_id: None,
-            unmanaged_cwd: None,
-            execution_level: None,
-            command: Vec::new(),
-            harness_transport: None,
-            harness_server_url: None,
-            sandbox: None,
-            allowed_tools: Vec::new(),
-            permission_profile: None,
-            inject_tachi_mcp: None,
-            inject_hub_mcps: None,
-            allowed_mcp_servers: Vec::new(),
-            tool_profile: None,
-            mcp_access: None,
-            credential_profiles: Vec::new(),
-            skills: Vec::new(),
-            context_query: None,
-            model: None,
-            completion_predicate: None,
-            max_turns: None,
-            timeout_secs: DEFAULT_STAFF_DISPATCH_TIMEOUT_SECS,
-            verbose: None,
-            inject_card: None,
-        }
-    }
-}
+/// `#[serde(deny_unknown_fields)]` ensures that an inbound JSON carrying
+/// `"cwd": "/evil"` or `"command": ["rm", "-rf"]` is rejected loudly at
+/// deserialization — those names cannot leak into the mapped params.
+pub(crate) type StaffStartRequest = tachi_params::StaffAssignmentRequest;
 
 /// Read-only status probe. Only the canonical `dispatch_id` is accepted —
 /// there is no Staff-local id namespace.
@@ -178,9 +70,8 @@ pub(crate) struct StaffStatusRequest {
 
 /// Start a worker via the canonical dispatch kernel.
 ///
-/// Maps the semantic [`StaffStartRequest`] into [`TachiDispatchParams`] and
-/// delegates to the single canonical choke-point
-/// [`handle_tachi_dispatch`]. The `staffing_reason` field is required on the
+/// Resolves the semantic [`StaffAssignmentRequest`] and enters the single
+/// canonical launch kernel. The `staffing_reason` field is required on the
 /// request struct, so a caller that omits it is rejected at deserialization
 /// (the field has no `#[serde(default)]`). This is the facade-level admission
 /// gate; the kernel additionally fail-closes inside `handle_tachi_dispatch`
@@ -210,11 +101,9 @@ pub(crate) async fn staff_start(
     // runtime check is needed here — the struct's type IS the gate. The
     // kernel-side defense-in-depth check inside handle_tachi_dispatch catches
     // any future caller that reaches it without going through this struct.
-    let recommendation_ref = request.recommendation_ref.clone();
-    let params = request.into_params();
-    let raw = handle_tachi_dispatch(server, params).await?;
+    let (raw, _assignment, recommendation) = launch_staff_assignment(server, request).await?;
 
-    record_route_decision_best_effort(server, &raw, recommendation_ref.as_deref());
+    record_route_decision_best_effort(server, &raw, recommendation.as_ref());
 
     Ok(raw)
 }
@@ -230,7 +119,7 @@ pub(crate) async fn staff_start(
 fn record_route_decision_best_effort(
     server: &MemoryServer,
     raw_response: &str,
-    recommendation_ref: Option<&str>,
+    resolved_recommendation: Option<&memcore::RouteRecommendationRow>,
 ) {
     let response: serde_json::Value = match serde_json::from_str(raw_response) {
         Ok(v) => v,
@@ -279,43 +168,10 @@ fn record_route_decision_best_effort(
         .get("authority")
         .map(crate::tune_ops::route_policy::content_digest_hex);
 
-    // tachi#1675 BUG-10: `assignment_mode` and `recommendation_id` must
-    // reflect a recommendation the DB actually resolved, never the mere
-    // presence of a caller-supplied ref. A caller can pass any string
-    // (stale, typo'd, forged) as `recommendation_ref`; recording 'advised'
-    // for a ref that doesn't resolve would be the ledger fabricating advice
-    // that was never given. `resolved_recommendation` is the ONE lookup
-    // whose outcome both `assignment_mode` and `override_flag` are derived
-    // from — a miss (not found OR a query error) degrades to the honest
-    // 'unadvised' floor with `recommendation_id` stored NULL, exactly the
-    // same shape as no ref ever being supplied.
-    let resolved_recommendation = recommendation_ref.and_then(|rec_id| {
-        match server.with_global_store_read(|store| {
-            memcore::get_route_recommendation(store.connection(), rec_id)
-                .map_err(|e| e.to_string())
-        }) {
-            Ok(Some(row)) => Some(row),
-            Ok(None) => {
-                tracing::warn!(
-                    dispatch_id,
-                    recommendation_ref = rec_id,
-                    "tachi#1675 Seam B: recommendation_ref does not resolve to a route_recommendations \
-                     row; recording assignment_mode='unadvised' rather than fabricating advice"
-                );
-                None
-            }
-            Err(err) => {
-                tracing::warn!(
-                    dispatch_id,
-                    recommendation_ref = rec_id,
-                    error = %err,
-                    "tachi#1675 Seam B: recommendation lookup failed; recording assignment_mode='unadvised' \
-                     rather than fabricating advice"
-                );
-                None
-            }
-        }
-    });
+    // Typed resolution validates this fact before acceptance and carries the
+    // exact row here. Do not re-query a caller spelling after acceptance: a
+    // delete or read failure in that interval cannot turn accepted advice into
+    // an unadvised ledger row.
     let assignment_mode = if resolved_recommendation.is_some() {
         "advised"
     } else {
@@ -325,7 +181,7 @@ fn record_route_decision_best_effort(
         .as_ref()
         .map(|row| row.recommended_profile != selected_profile)
         .unwrap_or(false);
-    let recommendation_id = resolved_recommendation.map(|row| row.recommendation_id);
+    let recommendation_id = resolved_recommendation.map(|row| row.recommendation_id.clone());
 
     let route_decision_id = uuid::Uuid::new_v4().to_string();
     let new_decision = memcore::NewRouteDecision {
@@ -356,31 +212,13 @@ fn record_route_decision_best_effort(
         }
     };
 
-    // Stamp the (possibly pre-existing, on an idempotent replay)
-    // `route_decision_id` back into status.json — convenience only, the DB
-    // row above is the queryable authority. This is a ONE-TIME explicit
-    // patch, not a `write_status_json` call: no later writer may emit this
-    // key at all (see the `write_status_json` preserve-list in
-    // `dispatch_ops::dispatch_v2`, which carries it forward automatically
-    // once present — emitting `route_decision_id: null` there would erase
-    // it).
-    if let Ok(Value::Object(mut obj)) =
-        crate::task_lifecycle::read_json_file(&run_dir.join("status.json"))
-            .map(|v| v.unwrap_or(Value::Null))
+    // The shared status lock serializes this read/merge/write with terminal
+    // status writers, so a fast child cannot be replaced by an older working
+    // snapshot while evidence is stamped.
+    if let Err(err) =
+        crate::dispatch_ops::stamp_route_decision_id(&run_dir, &inserted.route_decision_id)
     {
-        obj.insert(
-            "route_decision_id".to_string(),
-            Value::String(inserted.route_decision_id),
-        );
-        let body = serde_json::to_string_pretty(&Value::Object(obj)).unwrap_or_default();
-        if !body.is_empty() {
-            if let Err(err) = crate::utils::write_owner_only_file_atomic(
-                &run_dir.join("status.json"),
-                body.as_bytes(),
-            ) {
-                tracing::warn!(dispatch_id, error = %err, "tachi#1675 Seam B: failed to stamp route_decision_id into status.json");
-            }
-        }
+        tracing::warn!(dispatch_id, error = %err, "tachi#1675 Seam B: failed to stamp route_decision_id into status.json");
     }
 }
 
@@ -439,8 +277,345 @@ async fn staff_status_impl(request: &StaffStatusRequest) -> Result<String, Strin
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+    use crate::tool_params::TachiDispatchReason;
+    use serde_json::Value;
+
+    fn write_fake_worker(bin_dir: &std::path::Path, exit_code: i32) {
+        let worker = bin_dir.join("codex");
+        std::fs::write(
+            &worker,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  printf 'codex-cli 0.144.1\\n'\n  exit 0\nfi\nprintf 'staff fake worker\\n'\nexit {exit_code}\n"
+            ),
+        )
+        .expect("write fake codex worker");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = std::fs::metadata(&worker)
+                .expect("fake worker metadata")
+                .permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&worker, permissions).expect("make fake worker executable");
+        }
+    }
+
+    async fn wait_for_staff_terminal(run_dir: &std::path::Path) -> (Value, String) {
+        for _ in 0..360 {
+            let status = std::fs::read_to_string(run_dir.join("status.json"))
+                .ok()
+                .and_then(|raw| serde_json::from_str::<Value>(&raw).ok());
+            let result = std::fs::read_to_string(run_dir.join("result.md")).ok();
+            if let (Some(status), Some(result)) = (status, result) {
+                if status
+                    .get("status")
+                    .or_else(|| status.get("state"))
+                    .or_else(|| status.get("task_state"))
+                    .and_then(Value::as_str)
+                    .is_some_and(|state| {
+                        matches!(
+                            state,
+                            "completed"
+                                | "failed"
+                                | "timed_out"
+                                | "cancelled"
+                                | "TASK_STATE_COMPLETED"
+                                | "TASK_STATE_FAILED"
+                                | "TASK_STATE_CANCELED"
+                        )
+                    })
+                {
+                    return (status, result);
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        panic!(
+            "staff launch did not reach a terminal canonical receipt: {}",
+            run_dir.display()
+        );
+    }
+
+    async fn wait_for_staff_cleanup(dispatch_id: &str) {
+        for _ in 0..360 {
+            if crate::dispatch_ops::background_dispatch_cleanup_complete(dispatch_id) {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        panic!("Staff background cleanup did not finish for {dispatch_id}");
+    }
+
+    /// Keep the process-global fake-worker environment alive if assertions
+    /// panic after acceptance. The E2Es use a two-thread runtime, so this
+    /// bounded blocking Drop wait cannot starve the background dispatch.
+    struct StaffCleanupGuard {
+        accepted_response: String,
+        armed: bool,
+    }
+
+    impl StaffCleanupGuard {
+        fn arm(accepted_response: &str) -> Self {
+            Self {
+                accepted_response: accepted_response.to_string(),
+                armed: true,
+            }
+        }
+
+        fn disarm(&mut self) {
+            self.armed = false;
+        }
+    }
+
+    impl Drop for StaffCleanupGuard {
+        fn drop(&mut self) {
+            if !self.armed {
+                return;
+            }
+            let dispatch_id = serde_json::from_str::<Value>(&self.accepted_response)
+                .ok()
+                .and_then(|response| response["dispatch_id"].as_str().map(str::to_string));
+            let Some(dispatch_id) = dispatch_id else {
+                return;
+            };
+            for _ in 0..360 {
+                if crate::dispatch_ops::background_dispatch_cleanup_complete(&dispatch_id) {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            eprintln!("Staff cleanup guard timed out for {dispatch_id}");
+        }
+    }
+
+    fn terminal_staff_state(status: &Value) -> &str {
+        status
+            .get("status")
+            .or_else(|| status.get("state"))
+            .or_else(|| status.get("task_state"))
+            .and_then(Value::as_str)
+            .expect("terminal canonical receipt state")
+    }
+
+    fn staff_request(project: &str) -> StaffStartRequest {
+        StaffStartRequest {
+            task: "prove the canonical Staff launch lifecycle".to_string(),
+            staffing_reason: TachiDispatchReason::DurableCrossSession,
+            profile: Some("codex_55_review".to_string()),
+            worker: Some("codex".to_string()),
+            project: Some(project.to_string()),
+            stage: None,
+            execution_level: None,
+            issue_ref: Some("kckylechen1/tachi#1814".to_string()),
+            pr_ref: None,
+            flow_id: Some("flow_1814_staff_e2e".to_string()),
+            completion_predicate: None,
+            recommendation_ref: None,
+        }
+    }
+
+    /// End-to-end discriminator for #1814: Staff must reach the one canonical
+    /// background launcher, rather than returning a pending-only receipt.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[allow(clippy::await_holding_lock)] // serializes process-global fake-worker environment through terminal cleanup
+    async fn staff_start_launches_fake_worker_through_canonical_receipt_lifecycle() {
+        let _environment = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let temp_home = tempfile::tempdir().expect("temp tachi home");
+        let temp_runs = tempfile::tempdir().expect("temp canonical run root");
+        let temp_bin = tempfile::tempdir().expect("temp fake worker bin");
+        write_fake_worker(temp_bin.path(), 0);
+        let old_path = std::env::var_os("PATH").unwrap_or_default();
+        let joined_path = std::env::join_paths(
+            std::iter::once(temp_bin.path().to_path_buf()).chain(std::env::split_paths(&old_path)),
+        )
+        .expect("join fake-worker PATH");
+        let _home = crate::test_support::EnvRestore::set_path("TACHI_HOME", temp_home.path());
+        let _runs = crate::test_support::EnvRestore::set_path("TACHI_RUN_ROOT", temp_runs.path());
+        let _path = crate::test_support::EnvRestore::set_os("PATH", &joined_path);
+        let server = test_server();
+        let recommendation = server
+            .with_global_store(|store| {
+                memcore::insert_route_recommendation(
+                    store.connection(),
+                    &memcore::NewRouteRecommendation {
+                        recommendation_id: "rec-staff-e2e".to_string(),
+                        task_type: Some("implementation".to_string()),
+                        risk: "low".to_string(),
+                        candidates: serde_json::json!([{"profile": "codex_55_review"}]),
+                        recommended_profile: Some("codex_55_review".to_string()),
+                        policy_source_revision: Some("staff-e2e".to_string()),
+                        rows_considered: 1,
+                        occurred_at: memcore::now_utc_iso(),
+                    },
+                )
+                .map_err(|error| error.to_string())
+            })
+            .expect("seed recommendation fact");
+        let mut request = staff_request("tachi");
+        request.recommendation_ref = Some(recommendation.recommendation_id.clone());
+
+        let raw = staff_start(&server, request)
+            .await
+            .expect("Staff start should be accepted before background execution");
+        let mut cleanup_guard = StaffCleanupGuard::arm(&raw);
+        let response: Value = serde_json::from_str(&raw).expect("canonical response JSON");
+        let dispatch_id = response["dispatch_id"].as_str().expect("dispatch id");
+        let run_dir = dispatch_runs_root().join(dispatch_id);
+        let (status, result) = wait_for_staff_terminal(&run_dir).await;
+        wait_for_staff_cleanup(dispatch_id).await;
+        cleanup_guard.disarm();
+
+        assert_eq!(
+            terminal_staff_state(&status),
+            "TASK_STATE_COMPLETED",
+            "fake worker terminal receipt"
+        );
+        assert_eq!(
+            status["project"], "tachi",
+            "Staff project linkage survives launch"
+        );
+        assert_eq!(
+            status["result_written"], true,
+            "terminal outcome retains result receipt"
+        );
+        assert_eq!(
+            status["run_dir"],
+            run_dir.to_string_lossy().as_ref(),
+            "recovery retains the canonical run directory"
+        );
+        assert!(
+            result.contains("staff fake worker"),
+            "canonical result.md: {result}"
+        );
+
+        let trajectory = std::fs::read_to_string(run_dir.join("trajectory.jsonl"))
+            .expect("canonical trajectory");
+        let events = trajectory
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).expect("trajectory JSON"))
+            .map(|event| event["event"].as_str().unwrap_or_default().to_string())
+            .collect::<Vec<_>>();
+        let received = events
+            .iter()
+            .position(|event| event == "dispatch_received")
+            .expect("receipt-first event");
+        let started = events
+            .iter()
+            .position(|event| event == "execute_started")
+            .expect("real execution event");
+        let finished = events
+            .iter()
+            .position(|event| event == "subprocess_finished")
+            .expect("subprocess terminal event");
+        assert!(
+            received < started && started < finished,
+            "canonical trajectory ordering: {events:?}"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| *event == "dispatch_received")
+                .count(),
+            1,
+            "no second lifecycle"
+        );
+        let decision = server
+            .with_global_store_read(|store| {
+                memcore::get_route_decision_by_dispatch_id(store.connection(), dispatch_id)
+                    .map_err(|error| error.to_string())
+            })
+            .expect("read route decision")
+            .expect("exactly one route decision for accepted Staff start");
+        assert_eq!(
+            route_decisions_count(&server),
+            1,
+            "one acceptance creates one decision"
+        );
+        assert_eq!(decision.assignment_mode, "advised");
+        assert_eq!(
+            decision.recommendation_id.as_deref(),
+            Some(recommendation.recommendation_id.as_str())
+        );
+        assert_eq!(
+            status["route_decision_id"].as_str(),
+            Some(decision.route_decision_id.as_str()),
+            "the evidence stamp must retain the fast child's terminal receipt"
+        );
+    }
+
+    /// A child spawn failure is asynchronous: Staff receives the canonical
+    /// acceptance first, then the sole run transitions to failed with its
+    /// canonical result and cleanup-owned terminal receipt.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[allow(clippy::await_holding_lock)] // serializes process-global fake-worker environment through terminal cleanup
+    async fn staff_start_child_failure_is_asynchronous_and_uses_one_lifecycle() {
+        let _environment = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let temp_home = tempfile::tempdir().expect("temp tachi home");
+        let temp_runs = tempfile::tempdir().expect("temp canonical run root");
+        let temp_bin = tempfile::tempdir().expect("temp fake worker bin");
+        write_fake_worker(temp_bin.path(), 17);
+        let old_path = std::env::var_os("PATH").unwrap_or_default();
+        let joined_path = std::env::join_paths(
+            std::iter::once(temp_bin.path().to_path_buf()).chain(std::env::split_paths(&old_path)),
+        )
+        .expect("join fake-worker PATH");
+        let _home = crate::test_support::EnvRestore::set_path("TACHI_HOME", temp_home.path());
+        let _runs = crate::test_support::EnvRestore::set_path("TACHI_RUN_ROOT", temp_runs.path());
+        let _path = crate::test_support::EnvRestore::set_os("PATH", &joined_path);
+        let server = test_server();
+
+        let raw = staff_start(&server, staff_request("tachi"))
+            .await
+            .expect("spawn failure remains asynchronously accepted");
+        let mut cleanup_guard = StaffCleanupGuard::arm(&raw);
+        let response: Value = serde_json::from_str(&raw).expect("canonical response JSON");
+        let dispatch_id = response["dispatch_id"].as_str().expect("dispatch id");
+        let run_dir = dispatch_runs_root().join(dispatch_id);
+        let (status, result) = wait_for_staff_terminal(&run_dir).await;
+        wait_for_staff_cleanup(dispatch_id).await;
+        cleanup_guard.disarm();
+
+        assert_eq!(
+            terminal_staff_state(&status),
+            "TASK_STATE_FAILED",
+            "failed child updates canonical receipt"
+        );
+        assert!(
+            result.contains("staff fake worker"),
+            "failed canonical result.md: {result}"
+        );
+        let trajectory = std::fs::read_to_string(run_dir.join("trajectory.jsonl"))
+            .expect("canonical trajectory");
+        assert_eq!(
+            trajectory
+                .matches("\"event\":\"dispatch_received\"")
+                .count(),
+            1,
+            "no second receipt lifecycle"
+        );
+        assert_eq!(
+            trajectory
+                .matches("\"event\":\"subprocess_finished\"")
+                .count(),
+            1,
+            "one terminal child record"
+        );
+        assert_eq!(
+            std::fs::read_dir(dispatch_runs_root())
+                .expect("run root")
+                .count(),
+            1,
+            "cleanup remains owned by the one canonical run"
+        );
+    }
 
     /// Discrimination test: a `StaffStartRequest` JSON that OMITS
     /// `staffing_reason` is REJECTED at deserialization — the field is
@@ -450,7 +625,8 @@ mod tests {
     ///
     /// RED-before-fix proof: before `staffing_reason` was added as a required
     /// field, this deserialization SUCCEEDED (all fields were optional and the
-    /// reason was a free-string marker that into_params dropped). After the
+    /// reason was a free-string marker that the retired compatibility bridge
+    /// dropped. After the
     /// fix, it fails — the gate is structural.
     #[test]
     fn staff_start_request_without_reason_is_rejected_at_deserialize() {
@@ -494,12 +670,10 @@ mod tests {
         );
     }
 
-    /// Discrimination test: `into_params()` carries `staffing_reason` THROUGH
-    /// to `TachiDispatchParams.staffing_reason` (it is NOT dropped like the
-    /// retired free-string markers were). This is the contract that makes the
-    /// reason reach the kernel gate and the receipt stamp.
+    /// The typed request retains its required admission reason without a
+    /// Staff-facing projection into launch mechanics.
     #[test]
-    fn into_params_carries_staffing_reason_through() {
+    fn typed_request_carries_staffing_reason_without_flat_projection() {
         let request = StaffStartRequest {
             task: "prove reason is carried through".to_string(),
             staffing_reason: TachiDispatchReason::CrossDeviceRemote,
@@ -507,43 +681,56 @@ mod tests {
             worker: Some("codex".to_string()),
             project: Some("tachi".to_string()),
             stage: Some("execute".to_string()),
+            execution_level: None,
             issue_ref: Some("o/r#42".to_string()),
             pr_ref: Some("o/r#43".to_string()),
             flow_id: Some("flow_xyz".to_string()),
+            completion_predicate: None,
             recommendation_ref: Some("rec-xyz".to_string()),
         };
-        let params = request.into_params();
         assert_eq!(
-            params.staffing_reason,
+            request.staffing_reason,
             TachiDispatchReason::CrossDeviceRemote,
-            "into_params must carry staffing_reason through to the kernel, not drop it"
+            "the typed request must retain its required admission reason"
         );
-        // Semantic fields still map through.
-        assert_eq!(params.task, "prove reason is carried through");
-        assert_eq!(params.agent.as_deref(), Some("codex"));
-        assert_eq!(params.profile.as_deref(), Some("codex_55_review"));
-        assert_eq!(params.project.as_deref(), Some("tachi"));
-        assert_eq!(params.stage.as_deref(), Some("execute"));
-        assert_eq!(params.issue_ref.as_deref(), Some("o/r#42"));
-        assert_eq!(params.pr_ref.as_deref(), Some("o/r#43"));
-        assert_eq!(params.flow_id.as_deref(), Some("flow_xyz"));
+        assert_eq!(request.task, "prove reason is carried through");
+        assert_eq!(request.worker.as_deref(), Some("codex"));
+        assert_eq!(request.profile.as_deref(), Some("codex_55_review"));
+        assert_eq!(request.project.as_deref(), Some("tachi"));
+        assert_eq!(request.stage.as_deref(), Some("execute"));
+        assert_eq!(request.issue_ref.as_deref(), Some("o/r#42"));
+        assert_eq!(request.pr_ref.as_deref(), Some("o/r#43"));
+        assert_eq!(request.flow_id.as_deref(), Some("flow_xyz"));
+    }
+
+    #[test]
+    fn staff_production_surface_rejects_flat_dispatch_facade_mutants() {
+        let source = include_str!("mod.rs");
+        for forbidden in [
+            ["TachiDispatch", "Params"].concat(),
+            ["into_dispatch", "_params"].concat(),
+            ["into_", "params"].concat(),
+        ] {
+            assert!(
+                !source.contains(&forbidden),
+                "Staff production code must not mention {forbidden}"
+            );
+            assert!(
+                format!("{source}\n{forbidden}").contains(&forbidden),
+                "the Staff flat-facade detector must reject a deliberate mutant"
+            );
+        }
     }
 
     /// Boundary test: a `StaffStartRequest` JSON that attempts to set
-    /// execution-shaped fields is silently ignored, and the resulting mapped
-    /// `TachiDispatchParams` maps every execution field to its kernel-side
-    /// default. The forbidden names simply don't exist on the struct.
+    /// execution-shaped fields fails deserialization loudly (deny_unknown_fields).
     #[test]
     fn staff_start_request_has_no_execution_fields() {
-        let raw = serde_json::json!({
+        let hostile = serde_json::json!({
             "task": "prove the boundary",
             "staffing_reason": "native_subagent_unavailable",
             "worker": "claude",
-            "profile": "codex_55_review",
-            "project": "tachi",
-            "stage": "execute",
-            "flow_id": "flow-123",
-            // ── hostile / out-of-boundary fields: must be ignored ──────────
+            // ── hostile / out-of-boundary fields: must fail loudly ──────────
             "cwd": "/evil/absolute/path",
             "command": ["rm", "-rf", "/"],
             "transport": "acpx",
@@ -558,34 +745,34 @@ mod tests {
             "env_id": "lease-evil",
             "unmanaged_cwd": true,
         });
-        let request: StaffStartRequest = serde_json::from_value(raw).expect("parses");
-        let params = request.into_params();
-
-        // Intent fields + reason DO map through.
-        assert_eq!(params.task, "prove the boundary");
-        assert_eq!(params.agent.as_deref(), Some("claude"));
-        assert_eq!(params.profile.as_deref(), Some("codex_55_review"));
-        assert_eq!(params.project.as_deref(), Some("tachi"));
-        assert_eq!(params.stage.as_deref(), Some("execute"));
-        assert_eq!(params.flow_id.as_deref(), Some("flow-123"));
-        assert_eq!(
-            params.staffing_reason,
-            TachiDispatchReason::NativeSubagentUnavailable
+        let err = serde_json::from_value::<StaffStartRequest>(hostile).unwrap_err();
+        assert!(
+            err.to_string().contains("unknown field"),
+            "hostile execution fields must fail deserialization loudly: {err}"
         );
 
-        // ── Execution fields MUST all be at kernel defaults ─────────────────
-        assert_eq!(params.cwd, None, "Staff must never set cwd");
-        assert_eq!(params.command, Vec::<String>::new(), "no command smuggle");
-        assert_eq!(params.harness_transport, None, "no transport override");
-        assert_eq!(params.sandbox, None, "no sandbox smuggle");
-        assert_eq!(params.allowed_tools, Vec::<String>::new());
-        assert_eq!(params.credential_profiles, Vec::<String>::new());
-        assert_eq!(params.allowed_mcp_servers, Vec::<String>::new());
-        assert_eq!(params.inject_tachi_mcp, None);
-        assert_eq!(params.permission_profile, None);
-        assert_eq!(params.env_id, None);
-        assert_eq!(params.unmanaged_cwd, None);
-        assert_eq!(params.timeout_secs, DEFAULT_STAFF_DISPATCH_TIMEOUT_SECS);
+        let valid = serde_json::json!({
+            "task": "prove the boundary",
+            "staffing_reason": "native_subagent_unavailable",
+            "worker": "claude",
+            "profile": "codex_55_review",
+            "project": "tachi",
+            "stage": "execute",
+            "flow_id": "flow-123",
+        });
+        let request: StaffStartRequest = serde_json::from_value(valid).expect("parses");
+
+        // Semantic intent stays in the typed request.
+        assert_eq!(request.task, "prove the boundary");
+        assert_eq!(request.worker.as_deref(), Some("claude"));
+        assert_eq!(request.profile.as_deref(), Some("codex_55_review"));
+        assert_eq!(request.project.as_deref(), Some("tachi"));
+        assert_eq!(request.stage.as_deref(), Some("execute"));
+        assert_eq!(request.flow_id.as_deref(), Some("flow-123"));
+        assert_eq!(
+            request.staffing_reason,
+            TachiDispatchReason::NativeSubagentUnavailable
+        );
     }
 
     /// Discrimination test: the v1 schema does NOT expose `dispatch_id` on a
@@ -597,8 +784,11 @@ mod tests {
             "staffing_reason": "explicit_user_request",
             "dispatch_id": "caller-forged-id",
         });
-        let request: StaffStartRequest = serde_json::from_value(raw).expect("parses");
-        assert_eq!(request.task, "prove no dispatch_id on start");
+        let err = serde_json::from_value::<StaffStartRequest>(raw).unwrap_err();
+        assert!(
+            err.to_string().contains("unknown field"),
+            "caller-forged dispatch_id must fail deserialization loudly: {err}"
+        );
     }
 
     /// `staff_status` reads ONLY the canonical receipt. Seeds a canonical
@@ -685,7 +875,7 @@ mod tests {
 
     // ─── tachi#1675 PR1 Seam B: record_route_decision_best_effort ──────────
 
-    fn test_server() -> MemoryServer {
+    pub(crate) fn test_server() -> MemoryServer {
         let db_path = crate::utils::test_fixture_path(format!(
             "staffing-seam-b-{}.sqlite",
             uuid::Uuid::new_v4()
@@ -807,13 +997,12 @@ mod tests {
 
         // Seed a recommendation row whose recommended_profile MATCHES the
         // eventual selection -> override_flag must be false.
-        let recommendation_id = "rec-match".to_string();
-        server
+        let recommendation = server
             .with_global_store(|store| {
                 memcore::insert_route_recommendation(
                     store.connection(),
                     &memcore::NewRouteRecommendation {
-                        recommendation_id: recommendation_id.clone(),
+                        recommendation_id: "rec-match".to_string(),
                         task_type: Some("fix_request".to_string()),
                         risk: "low".to_string(),
                         candidates: serde_json::json!([{"profile": "wizard_sonnet"}]),
@@ -831,7 +1020,7 @@ mod tests {
         seed_status_json(dispatch_id, "env-1", "dev", "claude-sonnet-5");
         let raw = fake_raw_response(dispatch_id, "wizard_sonnet");
 
-        record_route_decision_best_effort(&server, &raw, Some(&recommendation_id));
+        record_route_decision_best_effort(&server, &raw, Some(&recommendation));
 
         let row = server
             .with_global_store_read(|store| {
@@ -848,15 +1037,12 @@ mod tests {
         );
     }
 
-    /// BUG-10: a `recommendation_ref` that does NOT resolve to any
-    /// `route_recommendations` row (stale, typo'd, forged — no row is ever
-    /// seeded here) must NOT be recorded as 'advised'. The ledger must never
-    /// fabricate advice that was never actually given: the honest floor for
-    /// an unresolved ref is identical to no ref at all — 'unadvised' with
-    /// `recommendation_id` stored NULL.
+    /// #1814: route evidence consumes the pre-acceptance recommendation fact.
+    /// Deleting its source row after resolution must not cause a second query
+    /// to downgrade a valid accepted decision to `unadvised`.
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
-    async fn record_route_decision_unadvised_when_recommendation_ref_does_not_resolve() {
+    async fn record_route_decision_uses_carried_recommendation_after_source_delete() {
         let _guard = crate::utils::global_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -864,12 +1050,40 @@ mod tests {
         let _tachi_home = crate::test_support::EnvRestore::set_path("TACHI_HOME", temp_home.path());
         let server = test_server();
 
-        // Deliberately NO route_recommendations row seeded for this id.
+        let recommendation = server
+            .with_global_store(|store| {
+                memcore::insert_route_recommendation(
+                    store.connection(),
+                    &memcore::NewRouteRecommendation {
+                        recommendation_id: "rec-carried-after-delete".to_string(),
+                        task_type: Some("fix_request".to_string()),
+                        risk: "low".to_string(),
+                        candidates: serde_json::json!([{"profile": "wizard_sonnet"}]),
+                        recommended_profile: Some("wizard_sonnet".to_string()),
+                        policy_source_revision: Some("rev-carried".to_string()),
+                        rows_considered: 1,
+                        occurred_at: memcore::now_utc_iso(),
+                    },
+                )
+                .map_err(|error| error.to_string())
+            })
+            .expect("seed carried recommendation");
+        server
+            .with_global_store(|store| {
+                store
+                    .connection()
+                    .execute(
+                        "DELETE FROM route_recommendations WHERE recommendation_id = ?1",
+                        [&recommendation.recommendation_id],
+                    )
+                    .map_err(|error| error.to_string())
+            })
+            .expect("delete recommendation after typed resolution");
         let dispatch_id = "20260810T000006Z-claude-ffffffff";
         seed_status_json(dispatch_id, "env-1", "dev", "claude-sonnet-5");
         let raw = fake_raw_response(dispatch_id, "wizard_sonnet");
 
-        record_route_decision_best_effort(&server, &raw, Some("rec-does-not-exist"));
+        record_route_decision_best_effort(&server, &raw, Some(&recommendation));
 
         let row = server
             .with_global_store_read(|store| {
@@ -877,14 +1091,11 @@ mod tests {
                     .map_err(|e| e.to_string())
             })
             .unwrap()
-            .expect("route_decisions row still lands even when the ref is unresolved");
+            .expect("route decision lands from carried fact");
+        assert_eq!(row.assignment_mode, "advised");
         assert_eq!(
-            row.assignment_mode, "unadvised",
-            "an unresolved recommendation_ref must never be recorded as advised"
-        );
-        assert!(
-            row.recommendation_id.is_none(),
-            "recommendation_id must be NULL, not the unresolved ref string"
+            row.recommendation_id.as_deref(),
+            Some(recommendation.recommendation_id.as_str())
         );
         assert!(!row.override_flag);
     }
@@ -899,13 +1110,12 @@ mod tests {
         let _tachi_home = crate::test_support::EnvRestore::set_path("TACHI_HOME", temp_home.path());
         let server = test_server();
 
-        let recommendation_id = "rec-diverge".to_string();
-        server
+        let recommendation = server
             .with_global_store(|store| {
                 memcore::insert_route_recommendation(
                     store.connection(),
                     &memcore::NewRouteRecommendation {
-                        recommendation_id: recommendation_id.clone(),
+                        recommendation_id: "rec-diverge".to_string(),
                         task_type: Some("fix_request".to_string()),
                         risk: "low".to_string(),
                         candidates: serde_json::json!([{"profile": "codex_55_review"}]),
@@ -924,7 +1134,7 @@ mod tests {
         // Caller actually got routed to a DIFFERENT profile than advised.
         let raw = fake_raw_response(dispatch_id, "wizard_sonnet");
 
-        record_route_decision_best_effort(&server, &raw, Some(&recommendation_id));
+        record_route_decision_best_effort(&server, &raw, Some(&recommendation));
 
         let row = server
             .with_global_store_read(|store| {
@@ -971,5 +1181,119 @@ mod tests {
 
         assert_eq!(before_claims, count_of("session_claims"));
         assert_eq!(before_identities, count_of("agent_identities"));
+    }
+
+    /// Typed Staff resolution validates recommendation ownership before the
+    /// canonical receipt/evidence lifecycle. A stale reference must therefore
+    /// leave neither a run artifact nor a route_decisions projection behind.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn staff_start_refuses_unknown_recommendation_before_artifacts_or_evidence() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let temp_home = tempfile::tempdir().expect("temp home");
+        let _tachi_home = crate::test_support::EnvRestore::set_path("TACHI_HOME", temp_home.path());
+        let server = test_server();
+        let before_runs = std::fs::read_dir(dispatch_runs_root())
+            .map(|entries| entries.count())
+            .unwrap_or(0);
+
+        let err = staff_start(
+            &server,
+            StaffStartRequest {
+                task: "refuse stale recommendation".to_string(),
+                staffing_reason: TachiDispatchReason::ExplicitUserRequest,
+                profile: None,
+                worker: Some("codex".to_string()),
+                project: Some("named-project".to_string()),
+                stage: None,
+                execution_level: None,
+                issue_ref: None,
+                pr_ref: None,
+                flow_id: None,
+                completion_predicate: None,
+                recommendation_ref: Some("missing-recommendation".to_string()),
+            },
+        )
+        .await
+        .expect_err("unknown recommendation must fail before acceptance");
+        assert!(err.contains("Unknown or stale recommendation_ref"));
+        assert_eq!(
+            std::fs::read_dir(dispatch_runs_root())
+                .map(|entries| entries.count())
+                .unwrap_or(0),
+            before_runs,
+            "refusal must create zero canonical run artifacts"
+        );
+        let route_rows: i64 = server
+            .with_global_store_read(|store| {
+                store
+                    .connection()
+                    .query_row("SELECT COUNT(*) FROM route_decisions", [], |row| row.get(0))
+                    .map_err(|error| error.to_string())
+            })
+            .expect("count route evidence");
+        assert_eq!(route_rows, 0, "refusal must write zero route evidence rows");
+    }
+
+    /// Authority refusal is before claim persistence as well as before the
+    /// canonical receipt lifecycle. The linked issue/flow must not become an
+    /// active claim when the selected provider cannot honor the contract.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn staff_start_authority_refusal_leaves_zero_claim_workspace_or_evidence() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let temp_home = tempfile::tempdir().expect("temp home");
+        let temp_runs = tempfile::tempdir().expect("temp canonical run root");
+        let _tachi_home = crate::test_support::EnvRestore::set_path("TACHI_HOME", temp_home.path());
+        let _runs = crate::test_support::EnvRestore::set_path("TACHI_RUN_ROOT", temp_runs.path());
+        let server = test_server();
+        let before_claims: i64 = server
+            .with_global_store_read(|store| {
+                store
+                    .connection()
+                    .query_row("SELECT COUNT(*) FROM session_claims", [], |row| row.get(0))
+                    .map_err(|error| error.to_string())
+            })
+            .expect("count claims before refusal");
+
+        let mut request = staff_request("tachi");
+        request.profile = Some("deepseek_explore".to_string());
+        request.worker = Some("custom".to_string());
+        request.issue_ref = Some("kckylechen1/tachi#1814-authority".to_string());
+        request.flow_id = Some("flow_1814_authority_refusal".to_string());
+        let error = staff_start(&server, request).await.expect_err(
+            "uncertified shell-capable read-only authority must refuse before acceptance",
+        );
+        assert!(error.contains("not kill-test certified"), "{error}");
+        assert!(error.contains("fail-closed"), "{error}");
+
+        let after_claims: i64 = server
+            .with_global_store_read(|store| {
+                store
+                    .connection()
+                    .query_row("SELECT COUNT(*) FROM session_claims", [], |row| row.get(0))
+                    .map_err(|error| error.to_string())
+            })
+            .expect("count claims after refusal");
+        assert_eq!(
+            after_claims, before_claims,
+            "authority refusal creates zero claims"
+        );
+        assert_eq!(
+            std::fs::read_dir(temp_runs.path())
+                .expect("read isolated run root")
+                .count(),
+            0,
+            "authority refusal creates zero workspaces/artifacts"
+        );
+        assert_eq!(
+            route_decisions_count(&server),
+            0,
+            "authority refusal creates zero evidence"
+        );
     }
 }

@@ -336,48 +336,41 @@ async fn chat_lane_records_success_usage_to_vault_db() {
         .expect("mock provider should succeed");
     assert_eq!(out, "usage recorded");
 
-    let mut row = None;
-    for _ in 0..40 {
-        let conn = rusqlite::Connection::open(db.path()).expect("open usage db");
-        let table_exists: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'llm_usage'",
-                [],
-                |r| r.get(0),
-            )
-            .expect("query sqlite_master");
-        if table_exists > 0 {
-            let result = conn.query_row(
-                "SELECT lane, model, provider_host, provider_logical_name, provider_key_id,
-                        prompt_tokens, completion_tokens, total_tokens, max_tokens,
-                        request_chars, response_chars
-                 FROM llm_usage
-                 ORDER BY id DESC
-                 LIMIT 1",
-                [],
-                |r| {
-                    Ok((
-                        r.get::<_, String>(0)?,
-                        r.get::<_, String>(1)?,
-                        r.get::<_, String>(2)?,
-                        r.get::<_, String>(3)?,
-                        r.get::<_, String>(4)?,
-                        r.get::<_, Option<i64>>(5)?,
-                        r.get::<_, Option<i64>>(6)?,
-                        r.get::<_, Option<i64>>(7)?,
-                        r.get::<_, i64>(8)?,
-                        r.get::<_, i64>(9)?,
-                        r.get::<_, i64>(10)?,
-                    ))
-                },
-            );
-            if let Ok(value) = result {
-                row = Some(value);
-                break;
-            }
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    client
+        .await_provider_health_persistence()
+        .await
+        .expect("provider health persistence should complete successfully");
+    client
+        .await_llm_usage_persistence_for_tests()
+        .await
+        .expect("usage persistence should complete successfully");
+    let conn = rusqlite::Connection::open(db.path()).expect("open usage db");
+    let row = conn
+        .query_row(
+            "SELECT lane, model, provider_host, provider_logical_name, provider_key_id,
+                    prompt_tokens, completion_tokens, total_tokens, max_tokens,
+                    request_chars, response_chars
+             FROM llm_usage
+             ORDER BY id DESC
+             LIMIT 1",
+            [],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?,
+                    r.get::<_, Option<i64>>(5)?,
+                    r.get::<_, Option<i64>>(6)?,
+                    r.get::<_, Option<i64>>(7)?,
+                    r.get::<_, i64>(8)?,
+                    r.get::<_, i64>(9)?,
+                    r.get::<_, i64>(10)?,
+                ))
+            },
+        )
+        .expect("usage row should be persisted");
 
     let (
         lane,
@@ -391,7 +384,7 @@ async fn chat_lane_records_success_usage_to_vault_db() {
         max_tokens,
         request_chars,
         response_chars,
-    ) = row.expect("usage row should be persisted");
+    ) = row;
     assert_eq!(lane, "extract");
     assert_eq!(model, "mock-usage-model");
     assert_eq!(provider_host, "127.0.0.1");
@@ -407,13 +400,9 @@ async fn chat_lane_records_success_usage_to_vault_db() {
     server_task.abort();
 }
 
-/// #1681 PR-D review (CP5, round 2): `model` in `call_provider_tier` is
-/// `model_override` unwrapped — caller-controlled — and this success path
-/// used to persist it into `llm_usage.model` verbatim. This is the same
-/// hostile shape the ingress gate already bounds at the counting/log seam
-/// (newline, control character, length past the 64-char cap); the write
-/// sink must apply the identical bound rather than a second, unaudited copy
-/// of it.
+/// `model_override` is caller-controlled, while the success path persists a
+/// model identifier into `llm_usage.model`. Newlines, control characters, and
+/// values past the 64-character cap must be bounded before that durable write.
 #[tokio::test]
 async fn chat_lane_success_usage_bounds_the_caller_supplied_model_override() {
     use axum::{routing::post, Json, Router};
@@ -484,9 +473,8 @@ async fn chat_lane_success_usage_bounds_the_caller_supplied_model_override() {
         }],
     );
 
-    // Caller-controlled model_override: a newline (the same log-line-forging
-    // shape the gate closes) plus a control character plus well past the
-    // 64-char bound.
+    // Caller-controlled model_override: a newline, a control character, and a
+    // value well past the 64-character log/storage bound.
     let malicious_model = format!("evil\nmodel\u{0007}{}", "x".repeat(100));
     assert!(malicious_model.chars().count() > 64);
 
@@ -496,31 +484,22 @@ async fn chat_lane_success_usage_bounds_the_caller_supplied_model_override() {
         .expect("mock provider should succeed even with a hostile model_override");
     assert_eq!(out, "usage recorded");
 
-    let mut stored_model = None;
-    for _ in 0..40 {
-        let conn = rusqlite::Connection::open(db.path()).expect("open usage db");
-        let table_exists: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'llm_usage'",
-                [],
-                |r| r.get(0),
-            )
-            .expect("query sqlite_master");
-        if table_exists > 0 {
-            let result: Result<String, _> = conn.query_row(
-                "SELECT model FROM llm_usage ORDER BY id DESC LIMIT 1",
-                [],
-                |r| r.get(0),
-            );
-            if let Ok(value) = result {
-                stored_model = Some(value);
-                break;
-            }
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-
-    let stored_model = stored_model.expect("usage row should be persisted");
+    client
+        .await_provider_health_persistence()
+        .await
+        .expect("provider health persistence should complete successfully");
+    client
+        .await_llm_usage_persistence_for_tests()
+        .await
+        .expect("usage persistence should complete successfully");
+    let conn = rusqlite::Connection::open(db.path()).expect("open usage db");
+    let stored_model: String = conn
+        .query_row(
+            "SELECT model FROM llm_usage ORDER BY id DESC LIMIT 1",
+            [],
+            |r| r.get(0),
+        )
+        .expect("usage row should be persisted");
     assert_ne!(
         stored_model, malicious_model,
         "the raw caller-supplied model_override must not be persisted verbatim"
@@ -531,8 +510,8 @@ async fn chat_lane_success_usage_bounds_the_caller_supplied_model_override() {
     );
     assert!(
         stored_model.chars().count() <= 65,
-        "the stored model must respect the same 64-char + truncation-marker bound as the \
-         ingress gate: {stored_model:?}"
+        "the stored model must respect the 64-char + truncation-marker bound: \
+         {stored_model:?}"
     );
     assert!(
         stored_model.ends_with('…'),

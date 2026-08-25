@@ -62,10 +62,11 @@ pub use profiles::{
     profile_matches_agent, profile_projected_evidence_required_from_overlay,
     profile_required_skill_ids, profile_resolved_model, profile_skill_loadout_json,
     profile_uses_opencode_adapter, profile_weak_against, recommendation_identity_receipt,
-    resolve_and_apply_dispatch_profile, resolve_dispatch_profile, DispatchProfileAlias,
-    DispatchProfileDef, ResolvedDispatchProfile, DISPATCH_POLICY_PROPOSAL_NS, DISPATCH_PROFILES,
-    DISPATCH_PROFILE_ALIASES, MIN_EVOLUTION_SAMPLES, MIN_ROUTE_POLICY_RULE_SAMPLES,
-    PROFILE_CARD_OVERLAY_NS, ROUTE_POLICY_RULE_NS, ROUTE_POLICY_RULE_SCORE_BONUS,
+    resolve_and_apply_dispatch_profile, resolve_and_apply_staff_assignment_profile,
+    resolve_dispatch_profile, DispatchProfileAlias, DispatchProfileDef, ResolvedDispatchProfile,
+    DISPATCH_POLICY_PROPOSAL_NS, DISPATCH_PROFILES, DISPATCH_PROFILE_ALIASES,
+    MIN_EVOLUTION_SAMPLES, MIN_ROUTE_POLICY_RULE_SAMPLES, PROFILE_CARD_OVERLAY_NS,
+    ROUTE_POLICY_RULE_NS, ROUTE_POLICY_RULE_SCORE_BONUS,
 };
 pub use registry::{
     dispatch_agent_help_list, fallback_chain, mcp_inject_supported, normalize_dispatch_agent_name,
@@ -88,4 +89,7 @@ pub use signatures::{
     self_report_trust, signature_def, ProjectedCounterClause, Severity, SignatureDef,
     SignatureEvidenceRow, SignatureRowKind, ACT_R_ACTIVATION_FLOOR, ACT_R_DECAY_RATE,
     ACT_R_MIN_AGE_DAYS, COUNTER_CLAUSE_TOP_N, ERROR_SIGNATURE_TAXONOMY, SIGNATURE_ALIASES,
+};
+pub use tachi_params::{
+    ExecutionGrant, LaunchSpec, ResolvedStaffAssignment, StaffAssignmentRequest, StaffRunReceipt,
 };

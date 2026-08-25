@@ -43,7 +43,7 @@ fn write_intake_flow(flow_id: &str, issue: &crate::task_lifecycle::IssueSnapshot
     .expect("write intake artifacts");
 }
 
-fn write_passed_verification(flow_id: &str) {
+fn write_passed_verification(server: &crate::MemoryServer, flow_id: &str, head_sha: &str) {
     let run_dir = crate::task_lifecycle::run_dir_for_flow_id(flow_id).expect("run dir");
     std::fs::write(
         run_dir.join("verification.json"),
@@ -63,6 +63,35 @@ fn write_passed_verification(flow_id: &str) {
         .expect("verification json"),
     )
     .expect("write verification");
+    // #1454 F1/G2/F6: the cycle verdict is the gate result over the
+    // server-owned receipt store, evaluated against the server-known GitHub
+    // head. Seed the full canonical receipt set (executor's G2 shape) so the
+    // happy path stays green (the ledger alone no longer mints "verified").
+    let home = server.tachi_home_dir();
+    for kind in crate::verify_ops::MERGE_REQUIRED_RUN_KINDS {
+        let receipt = json!({
+            "flow_id": flow_id,
+            "kind": kind,
+            "head_sha": head_sha,
+            "status": "passed",
+            "reason": null,
+            "exit_code": 0,
+            "log_path": "/tmp/cycle-status-seed.log",
+            "duration_ms": 1,
+            "ran_at": "2026-08-18T00:00:00Z",
+            "timed_out": false,
+            "kill_abandoned": false,
+            "source_head": head_sha,
+            "executed_in_detached_copy": true,
+            "copy_head_before": head_sha,
+            "copy_head_after": head_sha,
+            "copy_clean_before": true,
+            "copy_clean_after": true,
+            "tool_version": "seed-tool-1.0",
+        });
+        crate::verify_ops::seed_run_receipt_for_test(&home, flow_id, kind, &receipt)
+            .expect("seed receipt");
+    }
 }
 
 mod f2_gh_lifecycle_coaching;

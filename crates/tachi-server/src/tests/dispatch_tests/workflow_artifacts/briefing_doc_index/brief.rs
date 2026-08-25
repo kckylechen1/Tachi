@@ -43,17 +43,19 @@ async fn tachi_task_brief_uses_wiki_hits_for_debug_checklist() {
         })
         .expect("seed wiki debugging note");
 
-    let response = server
-        .tachi_task_brief(Parameters(TaskBriefParams {
+    let response = crate::copilot_ops::handle_tachi_task_brief(
+        &server,
+        TaskBriefParams {
             task: "Debug MCP argument serialization bug".to_string(),
             agent_id: Some("copilot".to_string()),
             project: None,
             path_prefix: None,
             domain: Some("coding".to_string()),
             top_k: 3,
-        }))
-        .await
-        .expect("tachi_task_brief should succeed");
+        },
+    )
+    .await
+    .expect("tachi_task_brief should succeed");
 
     let json: Value = serde_json::from_str(&response).expect("task brief response json");
     assert!(

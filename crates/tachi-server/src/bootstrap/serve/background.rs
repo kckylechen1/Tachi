@@ -460,6 +460,16 @@ pub(super) fn load_cached_hub_tools(server: &MemoryServer) {
     }
 }
 
+const DEFAULT_DISTILL_INTERVAL_SECS: u64 = 86_400;
+
+fn configured_distill_interval_secs() -> u64 {
+    std::env::var("DISTILL_INTERVAL_SECS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .filter(|&value| value > 0)
+        .unwrap_or(DEFAULT_DISTILL_INTERVAL_SECS)
+}
+
 pub(super) fn report_pipeline_and_spawn_daily_distill(
     server: &MemoryServer,
     app_home: &std::path::Path,
@@ -495,10 +505,7 @@ pub(super) fn report_pipeline_and_spawn_daily_distill(
         // Phase 1 daily batch distill. Default cadence is 24h; the legacy
         // per-capture `MemoryDistill` enqueue is gone, so this scheduler must
         // remain active even when external pipeline workers are disabled.
-        let distill_interval_secs: u64 = std::env::var("DISTILL_INTERVAL_SECS")
-            .ok()
-            .and_then(|value| value.parse().ok())
-            .unwrap_or(86_400);
+        let distill_interval_secs = configured_distill_interval_secs();
 
         // Logged at decision time, not after the 60s warmup: a daemon that
         // dies inside the warmup must still have said what it decided.
@@ -1006,6 +1013,18 @@ mod tests {
     fn server_with_home(home: &std::path::Path) -> MemoryServer {
         MemoryServer::new_with_home_for_test(home.join("global.db"), None, home.to_path_buf())
             .expect("server")
+    }
+
+    #[test]
+    fn zero_distill_interval_uses_daily_default() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _interval = EnvRestore::set("DISTILL_INTERVAL_SECS", "0");
+        assert_eq!(
+            configured_distill_interval_secs(),
+            DEFAULT_DISTILL_INTERVAL_SECS
+        );
     }
 
     /// #1605 discriminating test: a global-store-only daemon that still has a

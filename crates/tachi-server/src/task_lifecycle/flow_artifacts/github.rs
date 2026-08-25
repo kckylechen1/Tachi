@@ -23,6 +23,8 @@ pub(crate) fn write_intake_flow_artifacts(
             "automation_plan": automation_plan,
         }),
         None,
+        // No verification ledger exists at intake; no verdict to display.
+        None,
         &string_array_field(automation_plan, "leader_gate_reasons"),
     );
     write_text_atomic(&pr_handoff_path, &pr_handoff)?;

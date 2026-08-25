@@ -5,9 +5,12 @@ pub(super) struct DispatchBackendContext<'a> {
     pub(super) trajectory_path: &'a Path,
     pub(super) workspace_dir: &'a Path,
     pub(super) dispatch_id: &'a str,
-    pub(super) agent_norm: &'a str,
-    pub(super) params: &'a TachiDispatchParams,
+    pub(super) request: &'a tachi_params::StaffAssignmentRequest,
+    pub(super) assignment: &'a tachi_params::ResolvedStaffAssignment,
+    pub(super) grant: &'a tachi_params::ExecutionGrant,
+    pub(super) command: &'a [String],
     pub(super) prompt: &'a str,
+    pub(super) custom_launch_spec: Option<&'a tachi_params::LaunchSpec>,
     pub(super) prompt_md_path: &'a Path,
     pub(super) mcp_config_path: Option<&'a PathBuf>,
     pub(super) v2: bool,
@@ -16,6 +19,27 @@ pub(super) struct DispatchBackendContext<'a> {
     pub(super) harness_transport: &'a str,
     pub(super) harness_server_url: &'a Option<String>,
     pub(super) timeout_secs_for_status: u64,
+}
+
+fn build_custom_command_from_launch_spec(
+    spec: &tachi_params::LaunchSpec,
+) -> Result<tokio::process::Command, String> {
+    if spec.backend != "custom" {
+        return Err("server-minted LaunchSpec does not authorize the custom backend".to_string());
+    }
+    let (program, args) = spec
+        .command
+        .split_first()
+        .ok_or_else(|| "server-minted custom LaunchSpec has no command".to_string())?;
+    let mut command = tokio::process::Command::new(program);
+    command.args(args);
+    if let Some(cwd) = &spec.cwd {
+        command.current_dir(cwd);
+    }
+    for (key, value) in &spec.env_vars {
+        command.env(key, value);
+    }
+    Ok(command)
 }
 
 pub(super) struct PreparedDispatchBackend {
@@ -45,8 +69,8 @@ pub(super) fn prepare_dispatch_backend(
             trajectory_path: ctx.trajectory_path,
             workspace_dir: ctx.workspace_dir,
             dispatch_id: ctx.dispatch_id,
-            agent_norm: ctx.agent_norm,
-            params: ctx.params,
+            assignment: ctx.assignment,
+            request: ctx.request,
             backend,
             error: err,
             v2: ctx.v2,
@@ -64,8 +88,8 @@ pub(super) fn prepare_dispatch_backend(
             ctx.server,
             ctx.dispatch_id,
             "backend",
-            Some(ctx.agent_norm),
-            ctx.params.project.as_deref(),
+            Some(&ctx.assignment.selected_backend),
+            ctx.request.project.as_deref(),
         );
     };
 
@@ -77,8 +101,12 @@ pub(super) fn prepare_dispatch_backend(
                 return Err(err);
             }
         };
-        let acpx_spec = match build_acpx_command_spec(ctx.params, ctx.agent_norm, &acpx_prompt_path)
-        {
+        let acpx_spec = match build_acpx_command_spec(
+            ctx.request,
+            ctx.assignment,
+            ctx.grant,
+            &acpx_prompt_path,
+        ) {
             Ok(spec) => spec,
             Err(err) => {
                 record_backend_prepare_failure("acpx", &err);
@@ -90,7 +118,7 @@ pub(super) fn prepare_dispatch_backend(
             json!({
                 "event": "execution_backend_prepared",
                 "dispatch_id": ctx.dispatch_id,
-                "agent": ctx.agent_norm,
+                "agent": ctx.assignment.selected_backend,
                 "execution_backend": "acpx",
                 "acpx": acpx_spec.metadata.clone(),
                 "timestamp": Utc::now().to_rfc3339(),
@@ -101,8 +129,10 @@ pub(super) fn prepare_dispatch_backend(
     } else if native_acp_enabled {
         let native_spec = match build_native_acp_run_spec(
             &ctx.server.tachi_home_dir(),
-            ctx.params,
-            ctx.agent_norm,
+            ctx.request,
+            ctx.assignment,
+            ctx.grant,
+            ctx.command,
             ctx.prompt,
         ) {
             Ok(spec) => spec,
@@ -116,7 +146,7 @@ pub(super) fn prepare_dispatch_backend(
             json!({
                 "event": "execution_backend_prepared",
                 "dispatch_id": ctx.dispatch_id,
-                "agent": ctx.agent_norm,
+                "agent": ctx.assignment.selected_backend,
                 "execution_backend": "acp_native",
                 "acp_native": native_spec.metadata.clone(),
                 "timestamp": Utc::now().to_rfc3339(),
@@ -125,13 +155,37 @@ pub(super) fn prepare_dispatch_backend(
         execution_backend_metadata = Some(native_spec.metadata.clone());
         DispatchExecution::NativeAcp(native_spec)
     } else {
-        let cmd = match ctx.agent_norm {
-            "claude" => build_claude_command(ctx.params, ctx.prompt, ctx.mcp_config_path)?,
-            "codex" => build_codex_command(ctx.params, ctx.prompt, ctx.mcp_config_path)?,
-            "grok" => build_grok_command(ctx.params, ctx.prompt, ctx.mcp_config_path)?,
-            "kimi" => build_kimi_command(ctx.params, ctx.prompt)?,
-            "custom" => build_custom_command(ctx.params, ctx.prompt)?,
-            "opencode" => build_opencode_command(ctx.params, ctx.prompt)?,
+        let cmd = match ctx.assignment.selected_backend.as_str() {
+            "claude" => build_claude_command(
+                ctx.assignment,
+                ctx.grant,
+                ctx.command,
+                ctx.prompt,
+                ctx.mcp_config_path,
+            )?,
+            "codex" => build_codex_command(
+                ctx.assignment,
+                ctx.grant,
+                ctx.command,
+                ctx.prompt,
+                ctx.mcp_config_path,
+            )?,
+            "grok" => build_grok_command(
+                ctx.assignment,
+                ctx.grant,
+                ctx.command,
+                ctx.prompt,
+                ctx.mcp_config_path,
+            )?,
+            "kimi" => build_kimi_command(ctx.assignment, ctx.grant, ctx.command, ctx.prompt)?,
+            "custom" => {
+                build_custom_command_from_launch_spec(ctx.custom_launch_spec.ok_or_else(|| {
+                    "custom backend requires a server-minted LaunchSpec".to_string()
+                })?)?
+            }
+            "opencode" => {
+                build_opencode_command(ctx.assignment, ctx.grant, ctx.command, ctx.prompt)?
+            }
             other => {
                 return Err(format!(
                     "Internal error: unhandled dispatch agent '{}'. {}",
@@ -150,4 +204,207 @@ pub(super) fn prepare_dispatch_backend(
         acpx_enabled,
         native_acp_enabled,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assignment(
+        worker: &str,
+        backend: &str,
+        model: Option<&str>,
+    ) -> tachi_params::ResolvedStaffAssignment {
+        let mut assignment = tachi_params::ResolvedStaffAssignment::new(
+            "assignment-only-selector",
+            tachi_params::TachiDispatchReason::ExplicitUserRequest,
+            worker,
+            backend,
+        );
+        if let Some(model) = model {
+            assignment = assignment.with_model(model);
+        }
+        assignment
+    }
+
+    fn grant(cwd: &str) -> tachi_params::ExecutionGrant {
+        tachi_params::ExecutionGrant {
+            grant_id: "backend-selector-grant".to_string(),
+            env_id: None,
+            unmanaged_cwd_allowed: false,
+            allowed_cwd: Some(cwd.into()),
+            credential_profiles: Vec::new(),
+            mcp_access: None,
+            allowed_tools: Vec::new(),
+            permission_profile: Some("default".to_string()),
+            sandbox: None,
+            max_turns: None,
+            timeout_secs: 5,
+        }
+    }
+
+    fn prepared_command(
+        assignment: &tachi_params::ResolvedStaffAssignment,
+        grant: &tachi_params::ExecutionGrant,
+        custom_launch_spec: Option<&tachi_params::LaunchSpec>,
+        command: &[String],
+    ) -> Result<tokio::process::Command, String> {
+        let temp = tempfile::tempdir().expect("backend selector tempdir");
+        let request = tachi_params::StaffAssignmentRequest::new(
+            tachi_params::TachiDispatchReason::ExplicitUserRequest,
+            "select from assignment",
+        );
+        let prepared = prepare_dispatch_backend(DispatchBackendContext {
+            server: &crate::tests::make_server(),
+            trajectory_path: &temp.path().join("trajectory.jsonl"),
+            workspace_dir: temp.path(),
+            dispatch_id: "assignment-only-selector",
+            request: &request,
+            assignment,
+            grant,
+            command,
+            prompt: "task",
+            custom_launch_spec,
+            prompt_md_path: &temp.path().join("prompt.md"),
+            mcp_config_path: None,
+            v2: false,
+            plan_generated_at: None,
+            plan_duration_ms: None,
+            harness_transport: "cli",
+            harness_server_url: &None,
+            capability_bundle_card: &Value::Null,
+            timeout_secs_for_status: 5,
+        })?;
+        match prepared.execution {
+            DispatchExecution::Subprocess(command) => Ok(command),
+            DispatchExecution::NativeAcp(_) => {
+                Err("cli transport must prepare a subprocess".to_string())
+            }
+        }
+    }
+
+    #[test]
+    fn assignment_only_backend_selector_controls_claude_and_custom_launch_values() {
+        // Deliberately disagree: production selection must follow
+        // `selected_backend`, never a stale normalized ingress agent or worker.
+        let claude_assignment = assignment("custom", "claude", Some("typed-claude"));
+        let claude_grant = grant("/typed/claude-cwd");
+        let claude = prepared_command(
+            &claude_assignment,
+            &claude_grant,
+            None,
+            &["poisoned-command".to_string()],
+        )
+        .expect("claude backend prepares without a custom spec");
+        assert_eq!(claude.as_std().get_program(), "claude");
+        assert_eq!(
+            claude.as_std().get_current_dir(),
+            Some(Path::new("/typed/claude-cwd"))
+        );
+        assert!(claude
+            .as_std()
+            .get_args()
+            .map(|arg| arg.to_string_lossy())
+            .collect::<Vec<_>>()
+            .windows(2)
+            .any(|pair| pair == ["--model", "typed-claude"]));
+
+        let custom_assignment = assignment("claude", "custom", None);
+        let custom_grant = grant("/typed/custom-cwd");
+        let custom_launch_spec = super::super::mint_custom_launch_spec(
+            &custom_assignment,
+            &custom_grant,
+            &[
+                "python3".to_string(),
+                "-m".to_string(),
+                "typed_worker".to_string(),
+            ],
+            "typed task",
+            "cli",
+            &None,
+        )
+        .expect("server mints the custom launch spec after admission");
+        assert_eq!(
+            custom_launch_spec.timeout_secs, custom_grant.timeout_secs,
+            "the adapter spec must bind the canonical grant timeout before backend preparation"
+        );
+        super::super::validate_custom_launch_spec_timeout(
+            &custom_launch_spec,
+            custom_grant.timeout_secs,
+        )
+        .expect("production boundary accepts the canonical grant timeout");
+        let mut timeout_mutant = custom_launch_spec.clone();
+        timeout_mutant.timeout_secs += 1;
+        let timeout_err = super::super::validate_custom_launch_spec_timeout(
+            &timeout_mutant,
+            custom_grant.timeout_secs,
+        )
+        .expect_err("one-sided spec timeout mutation must fail before backend preparation");
+        assert!(
+            timeout_err.contains("timeout diverged"),
+            "timeout mismatch must have a stable fail-closed receipt: {timeout_err}"
+        );
+        let missing_spec = prepared_command(
+            &custom_assignment,
+            &grant("/legacy-bootstrap-poison"),
+            None,
+            &["poisoned-command".to_string()],
+        )
+        .expect_err("custom backend must not fall back to a flat carrier");
+        assert!(
+            missing_spec.contains("server-minted LaunchSpec"),
+            "custom backend bypass must fail structurally: {missing_spec}"
+        );
+        let custom = prepared_command(
+            &custom_assignment,
+            &grant("/legacy-bootstrap-poison"),
+            Some(&custom_launch_spec),
+            &[
+                "poisoned-command".to_string(),
+                "--legacy-bootstrap-poison".to_string(),
+            ],
+        )
+        .expect("custom backend consumes only the server-minted spec");
+        assert_eq!(custom.as_std().get_program(), "python3");
+        assert_eq!(
+            custom.as_std().get_current_dir(),
+            Some(Path::new("/typed/custom-cwd"))
+        );
+        assert_eq!(
+            custom
+                .as_std()
+                .get_args()
+                .map(|arg| arg.to_string_lossy().to_string())
+                .collect::<Vec<_>>(),
+            vec!["-m", "typed_worker", "typed task"],
+        );
+
+        let mut no_cwd_grant = custom_grant.clone();
+        no_cwd_grant.allowed_cwd = None;
+        let no_cwd_spec = super::super::mint_custom_launch_spec(
+            &custom_assignment,
+            &no_cwd_grant,
+            &["python3".to_string(), "-c".to_string(), "pass".to_string()],
+            "typed task without cwd",
+            "cli",
+            &None,
+        )
+        .expect("server preserves an absent grant cwd in the custom spec");
+        assert!(
+            no_cwd_spec.cwd.is_none(),
+            "an absent grant cwd must not be collapsed to the process cwd"
+        );
+        let no_cwd = prepared_command(
+            &custom_assignment,
+            &grant("/legacy-bootstrap-poison"),
+            Some(&no_cwd_spec),
+            &["poisoned-command".to_string()],
+        )
+        .expect("custom backend preserves the absent server-minted cwd");
+        assert_eq!(
+            no_cwd.as_std().get_current_dir(),
+            None,
+            "the adapter must not turn an absent cwd into '.'"
+        );
+    }
 }

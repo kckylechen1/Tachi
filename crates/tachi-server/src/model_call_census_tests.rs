@@ -335,7 +335,7 @@ enum ModelCallDisposition {
     PersistedModelInvocation,
     RecorderRunDirectory,
     RecorderRunDirectoryWithTypedReceipt,
-    HubCallResponseOnly,
+    SkillResponseOnly,
     ReadinessResponseOnly,
     RecallCacheEphemeral,
     FoundryRecallPersistenceDisabled,
@@ -357,7 +357,7 @@ impl ModelCallDisposition {
             Self::RecorderRunDirectoryWithTypedReceipt => {
                 "recorder_run_directory_with_typed_receipt"
             }
-            Self::HubCallResponseOnly => "hub_call_response_only",
+            Self::SkillResponseOnly => "skill_response_only",
             Self::ReadinessResponseOnly => "readiness_response_only",
             Self::RecallCacheEphemeral => "recall_cache_ephemeral",
             Self::FoundryRecallPersistenceDisabled => "foundry_recall_persistence_disabled",
@@ -542,53 +542,411 @@ fn model_call_registry() -> Vec<ModelCallRecord> {
     use ModelCallClassification::*;
     use ModelCallDisposition::*;
     vec![
-        record("github_corpus_pilot_generate_provider_receipt", "bin/github_corpus_pilot.rs", "generate", CallReasoningLlmProviderOnlyWithReceipt, 1, "already-receipted GitHub corpus pilot ledger", GithubCorpusReceiptLedger, AlreadyReceiptBearing),
-        record_with_successor("bootstrap_backfill_generate_summary", "bootstrap/backfill.rs", "generate_summary_with_retry", GenerateSummary, GenerateSummaryWithReceipt, 1, "legacy metadata backfill summary", BackgroundEnrichment, Owned1523),
-        record_with_successor("bootstrap_backfill_extract_metadata", "bootstrap/backfill.rs", "extract_metadata_with_retry", ExtractMetadata, ExtractMetadataWithReceipt, 1, "legacy metadata backfill extraction", BackgroundEnrichment, Owned1523),
-        record("continuity_pipeline_candidate_distill_receipt", "continuity_ops/pipeline.rs", "maybe_spawn_session_continuity_pipeline", CallDistillLlmWithReceipt, 1, "continuity candidate event provenance", PersistedModelInvocation, Covered1522),
-        record("continuity_pipeline_outcome_reasoning_receipt", "continuity_ops/pipeline.rs", "maybe_spawn_session_continuity_pipeline", CallReasoningLlmWithReceipt, 1, "continuity outcome label provenance", PersistedModelInvocation, Covered1522),
-        record("daily_health_reasoning", "daily_pipeline/health.rs", "run_health_check", CallReasoningLlmWithReceipt, 1, "daily health report artifact + model-invocations-v1 sidecar + health-only wiki", DailyReportArtifact, Covered1522),
-        record("daily_routing_reasoning", "daily_pipeline/routing.rs", "run_routing_analysis_stage", CallReasoningLlmWithReceipt, 1, "daily routing report artifact + model-invocations-v1 sidecar", DailyReportArtifact, Covered1522),
-        record_with_successor("dispatch_plan_recorder", "dispatch_ops/dispatch_v2.rs", "call_plan_llm", RecordCall, RecordCallWithReceipt, 1, "dispatch plan run artifact recorder", RecorderRunDirectory, Owned1536),
-        record_with_successor("dispatch_plan_provider_call", "dispatch_ops/dispatch_v2.rs", "call_plan_llm", CallReasoningLlmProviderOnly, CallReasoningLlmProviderOnlyWithReceipt, 1, "dispatch plan model call inside recorder closure", RecorderRunDirectory, Owned1536),
-        record_with_successor("docs_classify_extract_metadata", "docs_ops/classify.rs", "classify_and_extract_metadata", CallExtractLlm, CallExtractLlmWithReceipt, 1, "docs organize filesystem mutation metadata", DocsResearchDerivedMetadata, Owned1537),
-        record_with_successor("enrichment_flush_generate_summary", "enrichment.rs", "flush_enrichment_batch", GenerateSummary, GenerateSummaryWithReceipt, 1, "background enrichment summary", BackgroundEnrichment, Owned1523),
-        record_with_successor("enrichment_flush_extract_metadata", "enrichment.rs", "flush_enrichment_batch", ExtractMetadata, ExtractMetadataWithReceipt, 1, "background enrichment metadata", BackgroundEnrichment, Owned1523),
-        record_with_successor("enrichment_flush_expand_keywords", "enrichment.rs", "flush_enrichment_batch", ExpandSearchKeywords, ExpandSearchKeywordsWithReceipt, 1, "background keyword enrichment", BackgroundEnrichment, Owned1523),
-        record("readiness_synthesize_answer_reasoning_receipt", "facade_memory_ops/readiness_ops.rs", "synthesize_answer", CallReasoningLlmWithReceipt, 1, "readiness response-only synthesis", ReadinessResponseOnly, Transient),
-        record("daily_distill_claude_batch_recorder_receipt", "foundry_runtime_ops/daily_distill/runner.rs", "call_claude_batch", RecordCallWithReceipt, 1, "daily distill recorder with typed receipt", RecorderRunDirectoryWithTypedReceipt, Covered1522),
-        record("daily_distill_claude_batch_model_receipt", "foundry_runtime_ops/daily_distill/runner.rs", "call_claude_batch", CallDistillLlmWithReceipt, 1, "daily distill model call inside recorder closure", PersistedModelInvocation, Covered1522),
-        record("daily_distill_api_batch_model_receipt", "foundry_runtime_ops/daily_distill/runner.rs", "call_api_batch_distill", CallDistillLlmWithReceipt, 1, "daily distill raw API batch", PersistedModelInvocation, Covered1522),
-        record("daily_distill_fallback_model_receipt", "foundry_runtime_ops/daily_distill/runner.rs", "fallback_distill_with_receipt", CallDistillLlmWithReceipt, 1, "daily distill fallback", PersistedModelInvocation, Covered1522),
-        record("capture_session_extract_receipt", "foundry_runtime_ops/handlers/capture_session.rs", "handle_capture_session", CallExtractLlmWithReceipt, 1, "capture session durable drafts", PersistedModelInvocation, Covered1522),
-        record("maintenance_distill_job_generate_receipt", "foundry_runtime_ops/maintenance/distill_job.rs", "process_memory_distill_job", GenerateDistillWithReceipt, 1, "maintenance guide distill", PersistedModelInvocation, Covered1522),
-        record("foundry_recall_compaction_extract", "foundry_runtime_ops/recall.rs", "run_compaction_model", CallExtractLlm, 1, "foundry recall persistence disabled", FoundryRecallPersistenceDisabled, Transient),
-        record("recall_cache_query_extract", "foundry_runtime_ops/recall_cache/queries.rs", "generate_recall_cache_query_via_llm", CallExtractLlm, 1, "ephemeral recall_cache query", RecallCacheEphemeral, Transient),
-        record("wiki_evolver_draft_distill_receipt", "foundry_runtime_ops/wiki_evolver.rs", "synthesize_wiki_draft", CallDistillLlmWithReceipt, 1, "REM wiki draft durable facade write", PersistedModelInvocation, Covered1522),
-        // #1690 C3 re-anchor: hub_call's extract call is a response-only sink.
-        // The trajectory-distill durable snapshot this row used to cite is
-        // DELETED (slice C); the receipt-bearing API stays but the invocation
-        // is consumed by the truncation guard (`LLM_OUTPUT_TRUNCATED` reject in
-        // `execute_skill_prompt_with_receipt`) and dropped — no model
-        // invocation is persisted on the normal hub_call path. Keep the
-        // truncation guard pinned: it is the reason the receipt API is used
-        // here at all.
-        record("hub_call_execute_skill_extract_receipt", "hub_ops/call.rs", "execute_skill_prompt_with_receipt", CallExtractLlmWithReceipt, 1, "hub_call skill-execution response (invocation receipt consumed by the truncation guard only; trajectory-distill sink retired #1690)", HubCallResponseOnly, Covered1522),
-        record_with_successor("hub_register_recorder", "hub_ops/register.rs", "handle_hub_register", RecordCall, RecordCallWithReceipt, 1, "hub capability register recorder", RecorderRunDirectory, Owned1535),
-        record_with_successor("hub_register_extract", "hub_ops/register.rs", "handle_hub_register", CallExtractLlm, CallExtractLlmWithReceipt, 1, "hub capability register model call inside recorder closure", RecorderRunDirectory, Owned1535),
-        record_with_successor("hub_security_scan_extract", "hub_ops/security_scan/llm_scan.rs", "scan_skill_definition_with_llm", CallExtractLlm, CallExtractLlmWithReceipt, 1, "hub capability security scan weak-tier call", StaffingTelemetry, Owned1535),
-        record_with_successor("hub_security_vote_recorder", "hub_ops/security_scan/llm_scan.rs", "one_vote", RecordCall, RecordCallWithReceipt, 1, "hub capability security scan vote recorder", RecorderRunDirectory, Owned1535),
-        record_with_successor("hub_security_vote_provider_call", "hub_ops/security_scan/llm_scan.rs", "one_vote", CallReasoningLlmProviderOnly, CallReasoningLlmProviderOnlyWithReceipt, 1, "hub capability security scan vote model call inside recorder closure", RecorderRunDirectory, Owned1535),
-        record_with_successor("contradiction_verify_extract", "memory_search_ops/contradiction.rs", "verify_contradiction_candidate", CallExtractLlm, CallExtractLlmWithReceipt, 1, "contradiction supersede follow-up", ContradictionSupersedeFollowup, Owned1524),
-        record("ingest_event_extract_facts_receipt", "pipeline_ops/ingest/event.rs", "handle_ingest_event", ExtractFactsWithReceipt, 1, "event fact extraction durable facts", PersistedModelInvocation, Covered1522),
-        record("ingest_extract_facts_receipt", "pipeline_ops/ingest/extract.rs", "handle_extract_facts", ExtractFactsWithReceipt, 1, "standalone fact extraction durable facts", PersistedModelInvocation, Covered1522),
-        record_with_successor("research_digest_extract", "research_ops.rs", "build_digest", CallExtractLlm, CallExtractLlmWithReceipt, 1, "research digest artifact", DocsResearchDerivedMetadata, Owned1536),
-        record("provider_probe_report_extract", "status_ops/status_health/probes.rs", "run_provider_probe_report_with_migration_authority", CallExtractLlm, 1, "provider probe cache extract", ProviderProbeOnly, OperationalProbe),
-        record("provider_probe_report_distill", "status_ops/status_health/probes.rs", "run_provider_probe_report_with_migration_authority", CallDistillLlm, 1, "provider probe cache distill", ProviderProbeOnly, OperationalProbe),
-        record("provider_rotation_probe_extract", "status_ops/status_health/probes.rs", "probe_rotation_member", CallExtractLlm, 1, "provider rotation probe extract", ProviderProbeOnly, OperationalProbe),
-        record("provider_rotation_probe_distill", "status_ops/status_health/probes.rs", "probe_rotation_member", CallDistillLlm, 1, "provider rotation probe distill", ProviderProbeOnly, OperationalProbe),
-        record("wiki_ingest_extract_receipt", "wiki_ops/ingest.rs", "extract_ingest_metadata", CallExtractLlmWithReceipt, 1, "wiki ingest durable metadata", PersistedModelInvocation, Covered1522),
-        record("workflow_closure_draft_distill_receipt", "workflow_closure.rs", "draft_from_result", GenerateDistillWithReceipt, 1, "workflow closure wiki draft durable facade write", PersistedModelInvocation, Covered1522),
+        record(
+            "github_corpus_pilot_generate_provider_receipt",
+            "bin/github_corpus_pilot.rs",
+            "generate",
+            CallReasoningLlmProviderOnlyWithReceipt,
+            1,
+            "already-receipted GitHub corpus pilot ledger",
+            GithubCorpusReceiptLedger,
+            AlreadyReceiptBearing,
+        ),
+        record_with_successor(
+            "bootstrap_backfill_generate_summary",
+            "bootstrap/backfill.rs",
+            "generate_summary_with_retry",
+            GenerateSummary,
+            GenerateSummaryWithReceipt,
+            1,
+            "legacy metadata backfill summary",
+            BackgroundEnrichment,
+            Owned1523,
+        ),
+        record_with_successor(
+            "bootstrap_backfill_extract_metadata",
+            "bootstrap/backfill.rs",
+            "extract_metadata_with_retry",
+            ExtractMetadata,
+            ExtractMetadataWithReceipt,
+            1,
+            "legacy metadata backfill extraction",
+            BackgroundEnrichment,
+            Owned1523,
+        ),
+        record(
+            "continuity_pipeline_candidate_distill_receipt",
+            "continuity_ops/pipeline.rs",
+            "maybe_spawn_session_continuity_pipeline",
+            CallDistillLlmWithReceipt,
+            1,
+            "continuity candidate event provenance",
+            PersistedModelInvocation,
+            Covered1522,
+        ),
+        record(
+            "continuity_pipeline_outcome_reasoning_receipt",
+            "continuity_ops/pipeline.rs",
+            "maybe_spawn_session_continuity_pipeline",
+            CallReasoningLlmWithReceipt,
+            1,
+            "continuity outcome label provenance",
+            PersistedModelInvocation,
+            Covered1522,
+        ),
+        record(
+            "daily_health_reasoning",
+            "daily_pipeline/health.rs",
+            "run_health_check",
+            CallReasoningLlmWithReceipt,
+            1,
+            "daily health report artifact + model-invocations-v1 sidecar + health-only wiki",
+            DailyReportArtifact,
+            Covered1522,
+        ),
+        record(
+            "daily_routing_reasoning",
+            "daily_pipeline/routing.rs",
+            "run_routing_analysis_stage",
+            CallReasoningLlmWithReceipt,
+            1,
+            "daily routing report artifact + model-invocations-v1 sidecar",
+            DailyReportArtifact,
+            Covered1522,
+        ),
+        record_with_successor(
+            "dispatch_plan_recorder",
+            "dispatch_ops/dispatch_v2.rs",
+            "call_plan_llm",
+            RecordCall,
+            RecordCallWithReceipt,
+            1,
+            "dispatch plan run artifact recorder",
+            RecorderRunDirectory,
+            Owned1536,
+        ),
+        record_with_successor(
+            "dispatch_plan_provider_call",
+            "dispatch_ops/dispatch_v2.rs",
+            "call_plan_llm",
+            CallReasoningLlmProviderOnly,
+            CallReasoningLlmProviderOnlyWithReceipt,
+            1,
+            "dispatch plan model call inside recorder closure",
+            RecorderRunDirectory,
+            Owned1536,
+        ),
+        record_with_successor(
+            "docs_classify_extract_metadata",
+            "docs_ops/classify.rs",
+            "classify_and_extract_metadata",
+            CallExtractLlm,
+            CallExtractLlmWithReceipt,
+            1,
+            "docs organize filesystem mutation metadata",
+            DocsResearchDerivedMetadata,
+            Owned1537,
+        ),
+        record_with_successor(
+            "enrichment_flush_generate_summary",
+            "enrichment.rs",
+            "flush_enrichment_batch",
+            GenerateSummary,
+            GenerateSummaryWithReceipt,
+            1,
+            "background enrichment summary",
+            BackgroundEnrichment,
+            Owned1523,
+        ),
+        record_with_successor(
+            "enrichment_flush_extract_metadata",
+            "enrichment.rs",
+            "flush_enrichment_batch",
+            ExtractMetadata,
+            ExtractMetadataWithReceipt,
+            1,
+            "background enrichment metadata",
+            BackgroundEnrichment,
+            Owned1523,
+        ),
+        record_with_successor(
+            "enrichment_flush_expand_keywords",
+            "enrichment.rs",
+            "flush_enrichment_batch",
+            ExpandSearchKeywords,
+            ExpandSearchKeywordsWithReceipt,
+            1,
+            "background keyword enrichment",
+            BackgroundEnrichment,
+            Owned1523,
+        ),
+        record(
+            "readiness_synthesize_answer_reasoning_receipt",
+            "facade_memory_ops/readiness_ops.rs",
+            "synthesize_answer",
+            CallReasoningLlmWithReceipt,
+            1,
+            "readiness response-only synthesis",
+            ReadinessResponseOnly,
+            Transient,
+        ),
+        record(
+            "daily_distill_claude_batch_recorder_receipt",
+            "foundry_runtime_ops/daily_distill/runner.rs",
+            "call_claude_batch",
+            RecordCallWithReceipt,
+            1,
+            "daily distill recorder with typed receipt",
+            RecorderRunDirectoryWithTypedReceipt,
+            Covered1522,
+        ),
+        record(
+            "daily_distill_claude_batch_model_receipt",
+            "foundry_runtime_ops/daily_distill/runner.rs",
+            "call_claude_batch",
+            CallDistillLlmWithReceipt,
+            1,
+            "daily distill model call inside recorder closure",
+            PersistedModelInvocation,
+            Covered1522,
+        ),
+        record(
+            "daily_distill_api_batch_model_receipt",
+            "foundry_runtime_ops/daily_distill/runner.rs",
+            "call_api_batch_distill",
+            CallDistillLlmWithReceipt,
+            1,
+            "daily distill raw API batch",
+            PersistedModelInvocation,
+            Covered1522,
+        ),
+        record(
+            "daily_distill_fallback_model_receipt",
+            "foundry_runtime_ops/daily_distill/runner.rs",
+            "fallback_distill_with_receipt",
+            CallDistillLlmWithReceipt,
+            1,
+            "daily distill fallback",
+            PersistedModelInvocation,
+            Covered1522,
+        ),
+        record(
+            "capture_session_extract_receipt",
+            "foundry_runtime_ops/handlers/capture_session.rs",
+            "handle_capture_session",
+            CallExtractLlmWithReceipt,
+            1,
+            "capture session durable drafts",
+            PersistedModelInvocation,
+            Covered1522,
+        ),
+        record(
+            "maintenance_distill_job_generate_receipt",
+            "foundry_runtime_ops/maintenance/distill_job.rs",
+            "process_memory_distill_job",
+            GenerateDistillWithReceipt,
+            1,
+            "maintenance guide distill",
+            PersistedModelInvocation,
+            Covered1522,
+        ),
+        record(
+            "foundry_recall_compaction_extract",
+            "foundry_runtime_ops/recall.rs",
+            "run_compaction_model",
+            CallExtractLlm,
+            1,
+            "foundry recall persistence disabled",
+            FoundryRecallPersistenceDisabled,
+            Transient,
+        ),
+        record(
+            "recall_cache_query_extract",
+            "foundry_runtime_ops/recall_cache/queries.rs",
+            "generate_recall_cache_query_via_llm",
+            CallExtractLlm,
+            1,
+            "ephemeral recall_cache query",
+            RecallCacheEphemeral,
+            Transient,
+        ),
+        record(
+            "wiki_evolver_draft_distill_receipt",
+            "foundry_runtime_ops/wiki_evolver.rs",
+            "synthesize_wiki_draft",
+            CallDistillLlmWithReceipt,
+            1,
+            "REM wiki draft durable facade write",
+            PersistedModelInvocation,
+            Covered1522,
+        ),
+        record(
+            "hub_call_execute_skill_extract_receipt",
+            "hub_ops/call.rs",
+            "execute_skill_prompt",
+            CallExtractLlmWithReceipt,
+            1,
+            "normal hub_call response-only skill execution",
+            SkillResponseOnly,
+            Transient,
+        ),
+        record_with_successor(
+            "hub_register_recorder",
+            "hub_ops/register.rs",
+            "handle_hub_register",
+            RecordCall,
+            RecordCallWithReceipt,
+            1,
+            "hub capability register recorder",
+            RecorderRunDirectory,
+            Owned1535,
+        ),
+        record_with_successor(
+            "hub_register_extract",
+            "hub_ops/register.rs",
+            "handle_hub_register",
+            CallExtractLlm,
+            CallExtractLlmWithReceipt,
+            1,
+            "hub capability register model call inside recorder closure",
+            RecorderRunDirectory,
+            Owned1535,
+        ),
+        record_with_successor(
+            "hub_security_scan_extract",
+            "hub_ops/security_scan/llm_scan.rs",
+            "scan_skill_definition_with_llm",
+            CallExtractLlm,
+            CallExtractLlmWithReceipt,
+            1,
+            "hub capability security scan weak-tier call",
+            StaffingTelemetry,
+            Owned1535,
+        ),
+        record_with_successor(
+            "hub_security_vote_recorder",
+            "hub_ops/security_scan/llm_scan.rs",
+            "one_vote",
+            RecordCall,
+            RecordCallWithReceipt,
+            1,
+            "hub capability security scan vote recorder",
+            RecorderRunDirectory,
+            Owned1535,
+        ),
+        record_with_successor(
+            "hub_security_vote_provider_call",
+            "hub_ops/security_scan/llm_scan.rs",
+            "one_vote",
+            CallReasoningLlmProviderOnly,
+            CallReasoningLlmProviderOnlyWithReceipt,
+            1,
+            "hub capability security scan vote model call inside recorder closure",
+            RecorderRunDirectory,
+            Owned1535,
+        ),
+        record_with_successor(
+            "contradiction_verify_extract",
+            "memory_search_ops/contradiction.rs",
+            "verify_contradiction_candidate",
+            CallExtractLlm,
+            CallExtractLlmWithReceipt,
+            1,
+            "contradiction supersede follow-up",
+            ContradictionSupersedeFollowup,
+            Owned1524,
+        ),
+        record(
+            "ingest_event_extract_facts_receipt",
+            "pipeline_ops/ingest/event.rs",
+            "handle_ingest_event",
+            ExtractFactsWithReceipt,
+            1,
+            "event fact extraction durable facts",
+            PersistedModelInvocation,
+            Covered1522,
+        ),
+        record(
+            "ingest_extract_facts_receipt",
+            "pipeline_ops/ingest/extract.rs",
+            "handle_extract_facts",
+            ExtractFactsWithReceipt,
+            1,
+            "standalone fact extraction durable facts",
+            PersistedModelInvocation,
+            Covered1522,
+        ),
+        record_with_successor(
+            "research_digest_extract",
+            "research_ops.rs",
+            "build_digest",
+            CallExtractLlm,
+            CallExtractLlmWithReceipt,
+            1,
+            "research digest artifact",
+            DocsResearchDerivedMetadata,
+            Owned1536,
+        ),
+        record(
+            "provider_probe_report_extract",
+            "status_ops/status_health/probes.rs",
+            "run_provider_probe_report_with_migration_authority",
+            CallExtractLlm,
+            1,
+            "provider probe cache extract",
+            ProviderProbeOnly,
+            OperationalProbe,
+        ),
+        record(
+            "provider_probe_report_distill",
+            "status_ops/status_health/probes.rs",
+            "run_provider_probe_report_with_migration_authority",
+            CallDistillLlm,
+            1,
+            "provider probe cache distill",
+            ProviderProbeOnly,
+            OperationalProbe,
+        ),
+        record(
+            "provider_rotation_probe_extract",
+            "status_ops/status_health/probes.rs",
+            "probe_rotation_member",
+            CallExtractLlm,
+            1,
+            "provider rotation probe extract",
+            ProviderProbeOnly,
+            OperationalProbe,
+        ),
+        record(
+            "provider_rotation_probe_distill",
+            "status_ops/status_health/probes.rs",
+            "probe_rotation_member",
+            CallDistillLlm,
+            1,
+            "provider rotation probe distill",
+            ProviderProbeOnly,
+            OperationalProbe,
+        ),
+        record(
+            "wiki_ingest_extract_receipt",
+            "wiki_ops/ingest.rs",
+            "extract_ingest_metadata",
+            CallExtractLlmWithReceipt,
+            1,
+            "wiki ingest durable metadata",
+            PersistedModelInvocation,
+            Covered1522,
+        ),
+        record(
+            "workflow_closure_draft_distill_receipt",
+            "workflow_closure.rs",
+            "draft_from_result",
+            GenerateDistillWithReceipt,
+            1,
+            "workflow closure wiki draft durable facade write",
+            PersistedModelInvocation,
+            Covered1522,
+        ),
     ]
 }
 
@@ -737,17 +1095,24 @@ fn detect_model_api_calls(surface_lines: &[String]) -> Vec<(usize, ModelApi)> {
     let mut offset = 0usize;
     while offset < surface.len() {
         let rest = &surface[offset..];
+        let prefix_len = if rest.starts_with('.') {
+            Some(1)
+        } else if rest.starts_with("::") {
+            Some(2)
+        } else {
+            None
+        };
         let mut matched = None;
-        for api in ModelApi::all().iter().copied() {
-            for prefix in [".", "::"] {
-                let call = format!("{prefix}{}", api.as_str());
-                if rest.starts_with(&call) && model_api_call_has_open_paren(rest, call.len()) {
-                    matched = Some((api, call.len()));
+        if let Some(prefix_len) = prefix_len {
+            let after_prefix = &rest[prefix_len..];
+            for api in ModelApi::all().iter().copied() {
+                let name = api.as_str();
+                if after_prefix.starts_with(name)
+                    && model_api_call_has_open_paren(after_prefix, name.len())
+                {
+                    matched = Some((api, prefix_len + name.len()));
                     break;
                 }
-            }
-            if matched.is_some() {
-                break;
             }
         }
         if let Some((api, len)) = matched {
@@ -1115,6 +1480,23 @@ async fn production(llm: &LlmClient) {
         "{actual:#?}"
     );
     assert_eq!(actual[0].owner, "production");
+}
+
+#[test]
+fn model_call_scanner_rejects_similar_names_and_function_values() {
+    let actual = discover_model_calls_in_source(
+        "synthetic.rs",
+        r#"
+async fn production(llm: &LlmClient) {
+    let _function = llm.call_extract_llm;
+    llm.call_extract_llm_suffix("not the registered API").await;
+    llm.call_extract_llm /* comments are blanked by the lexical surface */
+        ("system", "user", None, 0.0, 8).await;
+}
+"#,
+    );
+    assert_eq!(actual.len(), 1, "{actual:#?}");
+    assert_eq!(actual[0].api, ModelApi::CallExtractLlm);
 }
 
 #[test]

@@ -54,23 +54,29 @@ impl super::super::super::LlmClient {
                 .read()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .tracker();
-            tracker.begin();
+            let background_persist_lock = Arc::clone(&self.background_persist_lock);
+            let completion = tracker.track();
             handle.spawn(async move {
-                let result = tokio::task::spawn_blocking(move || {
-                    Self::persist_key_health_blocking(db_path, migration, health)
-                })
-                .await
-                .map_err(|err| {
-                    let cause = if err.is_cancelled() {
-                        crate::llm::PROVIDER_HEALTH_PERSIST_CANCELLED_CAUSE
-                    } else {
-                        "provider_health_persist_join_failure"
-                    };
-                    format!("persist vault key health for {logical_name}:{key_id}: {cause}: {err}")
-                })
-                .and_then(|inner| inner);
+                let _completion = completion;
+                let result = {
+                    let _persist_guard = background_persist_lock.lock().await;
+                    tokio::task::spawn_blocking(move || {
+                        Self::persist_key_health_blocking(db_path, migration, health)
+                    })
+                    .await
+                    .map_err(|err| {
+                        let cause = if err.is_cancelled() {
+                            crate::llm::PROVIDER_HEALTH_PERSIST_CANCELLED_CAUSE
+                        } else {
+                            "provider_health_persist_join_failure"
+                        };
+                        format!(
+                            "persist vault key health for {logical_name}:{key_id}: {cause}: {err}"
+                        )
+                    })
+                    .and_then(|inner| inner)
+                };
                 Self::record_key_health_persist_result(&persist_state, result);
-                tracker.complete();
             });
         } else {
             let result = Self::persist_key_health_blocking(db_path, migration, health);

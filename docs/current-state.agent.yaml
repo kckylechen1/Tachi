@@ -87,7 +87,7 @@ implemented_now:
         'leave'/'check' actions retired — zero live external callers found in the
         caller sweep. Same-host advisory messages now go through
         tachi_a2a(action='respond') (#1751); structured
-        task batons go through tachi_orchestrator(action='handoff_write'|'handoff_read')."
+        task continuity goes through the canonical tachi_task receipt/read model."
       - "promote_issue (memo -> GitHub issue) survives as the one documented
         capability without a replacement (#1037 is the deferred future leaf for
         explicit issue/global handoff publication); it only reads pre-existing

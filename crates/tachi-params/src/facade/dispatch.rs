@@ -279,6 +279,430 @@ pub struct TachiDispatchParams {
     pub inject_card: Option<bool>,
 }
 
+// ─── Staffing Ownership Boundaries (Issue #1692 C5) ─────────────────────────
+
+/// Typed public semantic request for staffing (Issue #1692 C5).
+/// Contains only semantic intent, context, and user constraints.
+/// Machine/authority/transport plumbing is strictly omitted and rejected.
+#[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct StaffAssignmentRequest {
+    /// #1319 admission contract: typed reason execution is leaving the host harness.
+    pub staffing_reason: TachiDispatchReason,
+
+    /// Task description / semantic outcome required from the worker.
+    pub task: String,
+
+    /// Semantic dispatch profile hint (e.g. "claude_plan", "codex_55_review").
+    #[serde(default)]
+    pub profile: Option<String>,
+
+    /// Semantic worker backend hint (e.g. "claude", "codex", "custom").
+    #[serde(default)]
+    pub worker: Option<String>,
+
+    /// Task class/scope hints.
+    #[serde(default)]
+    pub stage: Option<String>,
+
+    /// Declared execution level.
+    #[serde(default)]
+    pub execution_level: Option<ExecutionLevel>,
+
+    /// GitHub issue reference bound to this assignment.
+    #[serde(default)]
+    pub issue_ref: Option<String>,
+
+    /// GitHub PR reference bound to this assignment.
+    #[serde(default)]
+    pub pr_ref: Option<String>,
+
+    /// Tachi flow id for feature-scoped linkage.
+    #[serde(default)]
+    pub flow_id: Option<String>,
+
+    /// Optional named project DB for context search.
+    #[serde(default)]
+    pub project: Option<String>,
+
+    /// Machine-checkable completion predicate for the assignment.
+    #[serde(default)]
+    pub completion_predicate: Option<CompletionPredicate>,
+
+    /// Recommendation reference if this assignment followed prior advice.
+    #[serde(default)]
+    pub recommendation_ref: Option<String>,
+}
+
+impl StaffAssignmentRequest {
+    pub fn new(staffing_reason: TachiDispatchReason, task: impl Into<String>) -> Self {
+        Self {
+            staffing_reason,
+            task: task.into(),
+            profile: None,
+            worker: None,
+            stage: None,
+            execution_level: None,
+            issue_ref: None,
+            pr_ref: None,
+            flow_id: None,
+            project: None,
+            completion_predicate: None,
+            recommendation_ref: None,
+        }
+    }
+
+    pub fn with_profile(mut self, profile: impl Into<String>) -> Self {
+        self.profile = Some(profile.into());
+        self
+    }
+
+    pub fn with_worker(mut self, worker: impl Into<String>) -> Self {
+        self.worker = Some(worker.into());
+        self
+    }
+
+    pub fn with_stage(mut self, stage: impl Into<String>) -> Self {
+        self.stage = Some(stage.into());
+        self
+    }
+
+    pub fn with_execution_level(mut self, level: ExecutionLevel) -> Self {
+        self.execution_level = Some(level);
+        self
+    }
+
+    pub fn with_issue_ref(mut self, issue_ref: impl Into<String>) -> Self {
+        self.issue_ref = Some(issue_ref.into());
+        self
+    }
+
+    pub fn with_pr_ref(mut self, pr_ref: impl Into<String>) -> Self {
+        self.pr_ref = Some(pr_ref.into());
+        self
+    }
+
+    pub fn with_flow_id(mut self, flow_id: impl Into<String>) -> Self {
+        self.flow_id = Some(flow_id.into());
+        self
+    }
+
+    pub fn with_project(mut self, project: impl Into<String>) -> Self {
+        self.project = Some(project.into());
+        self
+    }
+
+    pub fn with_completion_predicate(mut self, predicate: CompletionPredicate) -> Self {
+        self.completion_predicate = Some(predicate);
+        self
+    }
+
+    pub fn with_recommendation_ref(mut self, recommendation_ref: impl Into<String>) -> Self {
+        self.recommendation_ref = Some(recommendation_ref.into());
+        self
+    }
+}
+
+/// Server-produced admission and policy resolution result (Issue #1692 C5).
+/// Produced strictly by policy/admission gates; not a public caller-authored schema.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ResolvedStaffAssignment {
+    pub assignment_id: String,
+    pub staffing_reason: TachiDispatchReason,
+    pub selected_worker: String,
+    pub selected_profile: Option<String>,
+    pub selected_backend: String,
+    pub selected_model: Option<String>,
+    pub execution_level: Option<ExecutionLevel>,
+    pub recommendation_ref: Option<String>,
+    pub host_adapter: Option<String>,
+    pub evidence_required: Vec<String>,
+    pub fallback_chain: Vec<String>,
+    pub route_explanation: Vec<String>,
+    pub identity_receipt: serde_json::Value,
+}
+
+impl ResolvedStaffAssignment {
+    pub fn new(
+        assignment_id: impl Into<String>,
+        staffing_reason: TachiDispatchReason,
+        selected_worker: impl Into<String>,
+        selected_backend: impl Into<String>,
+    ) -> Self {
+        Self {
+            assignment_id: assignment_id.into(),
+            staffing_reason,
+            selected_worker: selected_worker.into(),
+            selected_profile: None,
+            selected_backend: selected_backend.into(),
+            selected_model: None,
+            execution_level: None,
+            recommendation_ref: None,
+            host_adapter: None,
+            evidence_required: Vec::new(),
+            fallback_chain: Vec::new(),
+            route_explanation: Vec::new(),
+            identity_receipt: serde_json::Value::Null,
+        }
+    }
+
+    pub fn with_profile(mut self, profile: impl Into<String>) -> Self {
+        self.selected_profile = Some(profile.into());
+        self
+    }
+
+    pub fn with_model(mut self, model: impl Into<String>) -> Self {
+        self.selected_model = Some(model.into());
+        self
+    }
+
+    pub fn with_execution_level(mut self, execution_level: ExecutionLevel) -> Self {
+        self.execution_level = Some(execution_level);
+        self
+    }
+
+    pub fn with_recommendation_ref(mut self, recommendation_ref: impl Into<String>) -> Self {
+        self.recommendation_ref = Some(recommendation_ref.into());
+        self
+    }
+
+    pub fn with_host_adapter(mut self, adapter: impl Into<String>) -> Self {
+        self.host_adapter = Some(adapter.into());
+        self
+    }
+
+    pub fn with_evidence_required(mut self, evidence: Vec<String>) -> Self {
+        self.evidence_required = evidence;
+        self
+    }
+
+    pub fn with_fallback_chain(mut self, chain: Vec<String>) -> Self {
+        self.fallback_chain = chain;
+        self
+    }
+
+    pub fn with_route_explanation(mut self, explanation: Vec<String>) -> Self {
+        self.route_explanation = explanation;
+        self
+    }
+
+    pub fn with_identity_receipt(mut self, receipt: serde_json::Value) -> Self {
+        self.identity_receipt = receipt;
+        self
+    }
+}
+
+/// Authority-layer output granting permissions, sandbox, credentials, and tools (Issue #1692 C5).
+/// Minted exclusively by authority/resource enforcement layers; cannot be deserialized from public Staff JSON.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ExecutionGrant {
+    pub grant_id: String,
+    pub env_id: Option<String>,
+    pub unmanaged_cwd_allowed: bool,
+    pub allowed_cwd: Option<std::path::PathBuf>,
+    pub credential_profiles: Vec<String>,
+    pub mcp_access: Option<DispatchMcpAccessParams>,
+    pub allowed_tools: Vec<String>,
+    pub permission_profile: Option<String>,
+    pub sandbox: Option<String>,
+    pub max_turns: Option<u32>,
+    pub timeout_secs: u64,
+}
+
+impl ExecutionGrant {
+    pub fn new(grant_id: impl Into<String>) -> Self {
+        Self {
+            grant_id: grant_id.into(),
+            env_id: None,
+            unmanaged_cwd_allowed: false,
+            allowed_cwd: None,
+            credential_profiles: Vec::new(),
+            mcp_access: None,
+            allowed_tools: Vec::new(),
+            permission_profile: None,
+            sandbox: None,
+            max_turns: None,
+            timeout_secs: default_dispatch_timeout(),
+        }
+    }
+
+    pub fn with_env_id(mut self, env_id: impl Into<String>) -> Self {
+        self.env_id = Some(env_id.into());
+        self
+    }
+
+    pub fn with_unmanaged_cwd(mut self, allowed: bool) -> Self {
+        self.unmanaged_cwd_allowed = allowed;
+        self
+    }
+
+    pub fn with_allowed_cwd(mut self, cwd: impl Into<std::path::PathBuf>) -> Self {
+        self.allowed_cwd = Some(cwd.into());
+        self
+    }
+
+    pub fn with_credential_profiles(mut self, profiles: Vec<String>) -> Self {
+        self.credential_profiles = profiles;
+        self
+    }
+
+    pub fn with_mcp_access(mut self, access: DispatchMcpAccessParams) -> Self {
+        self.mcp_access = Some(access);
+        self
+    }
+
+    pub fn with_allowed_tools(mut self, tools: Vec<String>) -> Self {
+        self.allowed_tools = tools;
+        self
+    }
+
+    pub fn with_permission_profile(mut self, profile: impl Into<String>) -> Self {
+        self.permission_profile = Some(profile.into());
+        self
+    }
+
+    pub fn with_sandbox(mut self, sandbox: impl Into<String>) -> Self {
+        self.sandbox = Some(sandbox.into());
+        self
+    }
+
+    pub fn with_max_turns(mut self, max_turns: u32) -> Self {
+        self.max_turns = Some(max_turns);
+        self
+    }
+
+    pub fn with_timeout_secs(mut self, timeout_secs: u64) -> Self {
+        self.timeout_secs = timeout_secs;
+        self
+    }
+}
+
+/// Backend adapter execution mechanics (Issue #1692 C5).
+/// Consumed strictly by execution backends/adapters; has no public schema and does not accept arbitrary caller fields.
+#[derive(Clone, serde::Serialize)]
+pub struct LaunchSpec {
+    pub backend: String,
+    pub command: Vec<String>,
+    pub cwd: Option<std::path::PathBuf>,
+    #[serde(skip_serializing)]
+    pub env_vars: std::collections::HashMap<String, String>,
+    pub prompt: String,
+    pub timeout_secs: u64,
+    pub harness_transport: Option<String>,
+    pub harness_server_url: Option<String>,
+}
+
+impl std::fmt::Debug for LaunchSpec {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("LaunchSpec")
+            .field("backend", &self.backend)
+            .field("command_len", &self.command.len())
+            .field("cwd_set", &self.cwd.is_some())
+            .field("env_var_count", &self.env_vars.len())
+            .field("timeout_secs", &self.timeout_secs)
+            .field("harness_transport", &self.harness_transport)
+            .field("harness_server_url", &self.harness_server_url)
+            .finish()
+    }
+}
+
+impl LaunchSpec {
+    pub fn new(
+        backend: impl Into<String>,
+        command: Vec<String>,
+        cwd: impl Into<std::path::PathBuf>,
+        prompt: impl Into<String>,
+        timeout_secs: u64,
+    ) -> Self {
+        Self {
+            backend: backend.into(),
+            command,
+            cwd: Some(cwd.into()),
+            env_vars: std::collections::HashMap::new(),
+            prompt: prompt.into(),
+            timeout_secs,
+            harness_transport: None,
+            harness_server_url: None,
+        }
+    }
+
+    pub fn with_env_var(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.env_vars.insert(key.into(), value.into());
+        self
+    }
+
+    pub fn with_harness_transport(mut self, transport: impl Into<String>) -> Self {
+        self.harness_transport = Some(transport.into());
+        self
+    }
+
+    pub fn with_harness_server_url(mut self, url: impl Into<String>) -> Self {
+        self.harness_server_url = Some(url.into());
+        self
+    }
+}
+
+/// Append-only observed lifecycle facts for a staffing run (Issue #1692 C5).
+/// Readback and observation only — never caller-authored success.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct StaffRunReceipt {
+    pub dispatch_id: String,
+    pub assignment_id: Option<String>,
+    pub state: String,
+    pub run_dir: String,
+    pub suggested_complete_command: serde_json::Value,
+    pub started_at: Option<String>,
+    pub finished_at: Option<String>,
+    pub exit_code: Option<i32>,
+    pub identity_receipt: Option<serde_json::Value>,
+}
+
+impl StaffRunReceipt {
+    pub fn new(
+        dispatch_id: impl Into<String>,
+        run_dir: impl Into<String>,
+        suggested_complete_command: serde_json::Value,
+    ) -> Self {
+        Self {
+            dispatch_id: dispatch_id.into(),
+            assignment_id: None,
+            state: "working".to_string(),
+            run_dir: run_dir.into(),
+            suggested_complete_command,
+            started_at: None,
+            finished_at: None,
+            exit_code: None,
+            identity_receipt: None,
+        }
+    }
+
+    pub fn with_assignment_id(mut self, assignment_id: impl Into<String>) -> Self {
+        self.assignment_id = Some(assignment_id.into());
+        self
+    }
+
+    pub fn with_started_at(mut self, started_at: impl Into<String>) -> Self {
+        self.started_at = Some(started_at.into());
+        self
+    }
+
+    pub fn with_finished_at(mut self, finished_at: impl Into<String>) -> Self {
+        self.finished_at = Some(finished_at.into());
+        self
+    }
+
+    pub fn with_exit_code(mut self, exit_code: i32) -> Self {
+        self.exit_code = Some(exit_code);
+        self
+    }
+
+    pub fn with_identity_receipt(mut self, identity_receipt: serde_json::Value) -> Self {
+        self.identity_receipt = Some(identity_receipt);
+        self
+    }
+}
+
 // ─── Facade: task completion + eval ledger ───────────────────────────────────
 
 #[derive(Debug, Clone, Default, Deserialize, serde::Serialize, JsonSchema)]
@@ -816,4 +1240,294 @@ pub struct SignatureRecordParams {
     /// dispatch profile/agent.
     #[serde(default)]
     pub vendor: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn staff_assignment_request_roundtrip_and_mapping() {
+        let raw = serde_json::json!({
+            "task": "Refactor staffing types",
+            "staffing_reason": "durable_cross_session",
+            "profile": "claude_plan",
+            "worker": "claude",
+            "stage": "plan",
+            "execution_level": "L1",
+            "issue_ref": "kckylechen1/tachi#1692",
+            "flow_id": "flow-c5",
+        });
+
+        let req: StaffAssignmentRequest = serde_json::from_value(raw).expect("deserializes");
+        assert_eq!(req.task, "Refactor staffing types");
+        assert_eq!(
+            req.staffing_reason,
+            TachiDispatchReason::DurableCrossSession
+        );
+        assert_eq!(req.execution_level, Some(ExecutionLevel::L1));
+    }
+
+    #[test]
+    fn execution_grant_owner_mint_extracts_authorities() {
+        let raw = serde_json::json!({
+            "task": "Test grant",
+            "staffing_reason": "explicit_user_request",
+            "cwd": "/workspace/target",
+            "unmanaged_cwd": true,
+            "sandbox": "workspace-write",
+            "permission_profile": "allowlist",
+            "allowed_tools": ["Bash", "Read"],
+            "max_turns": 25,
+            "timeout_secs": 1200,
+        });
+
+        let params: TachiDispatchParams = serde_json::from_value(raw).expect("deserializes");
+        let grant = ExecutionGrant {
+            grant_id: "grant-123".to_string(),
+            env_id: params.env_id.clone(),
+            unmanaged_cwd_allowed: params.unmanaged_cwd.unwrap_or(false),
+            allowed_cwd: params.cwd.as_ref().map(Into::into),
+            credential_profiles: params.credential_profiles.clone(),
+            mcp_access: params.mcp_access.clone(),
+            allowed_tools: params.allowed_tools.clone(),
+            permission_profile: params.permission_profile.clone(),
+            sandbox: params.sandbox.clone(),
+            max_turns: params.max_turns,
+            timeout_secs: params.timeout_secs,
+        };
+        assert_eq!(grant.grant_id, "grant-123");
+        assert!(grant.unmanaged_cwd_allowed);
+        assert_eq!(
+            grant.allowed_cwd,
+            Some(std::path::PathBuf::from("/workspace/target"))
+        );
+        assert_eq!(grant.sandbox.as_deref(), Some("workspace-write"));
+        assert_eq!(grant.allowed_tools, vec!["Bash", "Read"]);
+        assert_eq!(grant.max_turns, Some(25));
+        assert_eq!(grant.timeout_secs, 1200);
+    }
+
+    #[test]
+    fn staff_assignment_request_builder_and_roundtrip() {
+        let req = StaffAssignmentRequest::new(
+            TachiDispatchReason::DurableCrossSession,
+            "Refactor staffing types",
+        )
+        .with_profile("claude_plan")
+        .with_worker("claude")
+        .with_stage("plan")
+        .with_execution_level(ExecutionLevel::L1)
+        .with_issue_ref("kckylechen1/tachi#1692")
+        .with_pr_ref("kckylechen1/tachi#1812")
+        .with_flow_id("flow-c5")
+        .with_project("tachi")
+        .with_recommendation_ref("rec-123");
+
+        assert_eq!(req.task, "Refactor staffing types");
+        assert_eq!(
+            req.staffing_reason,
+            TachiDispatchReason::DurableCrossSession
+        );
+        assert_eq!(req.profile.as_deref(), Some("claude_plan"));
+        assert_eq!(req.worker.as_deref(), Some("claude"));
+        assert_eq!(req.stage.as_deref(), Some("plan"));
+        assert_eq!(req.execution_level, Some(ExecutionLevel::L1));
+        assert_eq!(req.issue_ref.as_deref(), Some("kckylechen1/tachi#1692"));
+        assert_eq!(req.pr_ref.as_deref(), Some("kckylechen1/tachi#1812"));
+        assert_eq!(req.flow_id.as_deref(), Some("flow-c5"));
+        assert_eq!(req.project.as_deref(), Some("tachi"));
+        assert_eq!(req.recommendation_ref.as_deref(), Some("rec-123"));
+
+        let serialized = serde_json::to_value(&req).expect("serializes");
+        let deserialized: StaffAssignmentRequest =
+            serde_json::from_value(serialized).expect("deserializes");
+        assert_eq!(deserialized.task, req.task);
+        assert_eq!(deserialized.staffing_reason, req.staffing_reason);
+    }
+
+    #[test]
+    fn resolved_staff_assignment_builder_and_roundtrip() {
+        let resolved = ResolvedStaffAssignment::new(
+            "assign-456",
+            TachiDispatchReason::NativeSubagentUnavailable,
+            "codex",
+            "subprocess",
+        )
+        .with_profile("codex_55_review")
+        .with_model("gpt-5.5")
+        .with_host_adapter("codex_exec")
+        .with_evidence_required(vec!["test_result".into(), "clippy".into()])
+        .with_fallback_chain(vec!["claude".into()])
+        .with_route_explanation(vec!["review lane separation".into()])
+        .with_identity_receipt(serde_json::json!({"model": "gpt-5.5", "verified": true}));
+
+        assert_eq!(resolved.assignment_id, "assign-456");
+        assert_eq!(
+            resolved.staffing_reason,
+            TachiDispatchReason::NativeSubagentUnavailable
+        );
+        assert_eq!(resolved.selected_worker, "codex");
+        assert_eq!(resolved.selected_backend, "subprocess");
+        assert_eq!(
+            resolved.selected_profile.as_deref(),
+            Some("codex_55_review")
+        );
+        assert_eq!(resolved.selected_model.as_deref(), Some("gpt-5.5"));
+        assert_eq!(resolved.evidence_required.len(), 2);
+        assert_eq!(resolved.fallback_chain, vec!["claude"]);
+
+        let serialized = serde_json::to_value(&resolved).expect("serializes");
+        assert_eq!(serialized["assignment_id"], "assign-456");
+        assert_eq!(serialized["selected_worker"], "codex");
+    }
+
+    #[test]
+    fn execution_grant_builder_and_roundtrip() {
+        let grant = ExecutionGrant::new("grant-789")
+            .with_env_id("env-managed-1")
+            .with_unmanaged_cwd(false)
+            .with_allowed_cwd("/workspace/tachi")
+            .with_credential_profiles(vec!["github_read".into()])
+            .with_allowed_tools(vec!["view_file".into(), "run_command".into()])
+            .with_permission_profile("allowlist")
+            .with_sandbox("workspace-write")
+            .with_max_turns(30)
+            .with_timeout_secs(1800);
+
+        assert_eq!(grant.grant_id, "grant-789");
+        assert_eq!(grant.env_id.as_deref(), Some("env-managed-1"));
+        assert!(!grant.unmanaged_cwd_allowed);
+        assert_eq!(
+            grant.allowed_cwd,
+            Some(std::path::PathBuf::from("/workspace/tachi"))
+        );
+        assert_eq!(grant.credential_profiles, vec!["github_read"]);
+        assert_eq!(grant.allowed_tools, vec!["view_file", "run_command"]);
+        assert_eq!(grant.sandbox.as_deref(), Some("workspace-write"));
+        assert_eq!(grant.max_turns, Some(30));
+        assert_eq!(grant.timeout_secs, 1800);
+
+        let serialized = serde_json::to_value(&grant).expect("serializes");
+        assert_eq!(serialized["grant_id"], "grant-789");
+        assert_eq!(serialized["env_id"], "env-managed-1");
+    }
+
+    #[test]
+    fn launch_spec_builder_and_roundtrip() {
+        let spec = LaunchSpec::new(
+            "codex_exec",
+            vec!["codex".into(), "exec".into()],
+            "/workspace/tachi",
+            "Execute review",
+            900,
+        )
+        .with_env_var("TACHI_LAUNCHSPEC_SECRET", "launchspec-post-spec-sentinel")
+        .with_harness_transport("subprocess")
+        .with_harness_server_url("http://127.0.0.1:4321");
+
+        assert_eq!(spec.backend, "codex_exec");
+        assert_eq!(spec.command, vec!["codex", "exec"]);
+        assert_eq!(spec.cwd, Some(std::path::PathBuf::from("/workspace/tachi")));
+        assert_eq!(spec.prompt, "Execute review");
+        assert_eq!(spec.timeout_secs, 900);
+        assert_eq!(
+            spec.env_vars
+                .get("TACHI_LAUNCHSPEC_SECRET")
+                .map(String::as_str),
+            Some("launchspec-post-spec-sentinel")
+        );
+        assert_eq!(spec.harness_transport.as_deref(), Some("subprocess"));
+        assert_eq!(
+            spec.harness_server_url.as_deref(),
+            Some("http://127.0.0.1:4321")
+        );
+
+        let serialized = serde_json::to_value(&spec).expect("serializes");
+        assert_eq!(serialized["backend"], "codex_exec");
+        assert_eq!(serialized["prompt"], "Execute review");
+        assert!(
+            serialized.get("env_vars").is_none(),
+            "adapter diagnostics must not serialize environment material: {serialized}"
+        );
+        let debug = format!("{spec:?}");
+        assert!(
+            !debug.contains("TACHI_LAUNCHSPEC_SECRET")
+                && !debug.contains("launchspec-post-spec-sentinel"),
+            "adapter diagnostics must not expose environment material: {debug}"
+        );
+    }
+
+    #[test]
+    fn staff_assignment_request_rejects_hostile_execution_fields() {
+        // Each input is deserialized independently: a multi-field payload can
+        // stop at its first unknown key and leave a later forbidden family
+        // unexercised. Deserialization precedes any server/artifact operation.
+        for (field, value) in [
+            ("command", serde_json::json!(["sh", "-c", "echo pwned"])),
+            ("cwd", serde_json::json!("/root")),
+            ("env", serde_json::json!({"SECRET": "pwned"})),
+            ("env_id", serde_json::json!("fake-env")),
+            ("credentials", serde_json::json!(["admin"])),
+            ("credential_profiles", serde_json::json!(["admin"])),
+            ("allowed_tools", serde_json::json!(["Bash"])),
+            ("sandbox", serde_json::json!("danger-full-access")),
+            ("harness_transport", serde_json::json!("cli")),
+            (
+                "harness_server_url",
+                serde_json::json!("http://127.0.0.1:4321"),
+            ),
+        ] {
+            let mut hostile = serde_json::json!({
+                "task": "Reject hostile execution field",
+                "staffing_reason": "durable_cross_session",
+            });
+            hostile[field] = value;
+            let err = serde_json::from_value::<StaffAssignmentRequest>(hostile).unwrap_err();
+            assert!(
+                err.to_string().contains("unknown field") && err.to_string().contains(field),
+                "hostile '{field}' must fail before server artifacts: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn staff_assignment_request_rejects_caller_minted_dispatch_id() {
+        let hostile = serde_json::json!({
+            "task": "Reject forged dispatch id",
+            "staffing_reason": "explicit_user_request",
+            "dispatch_id": "forged-id",
+        });
+        let err = serde_json::from_value::<StaffAssignmentRequest>(hostile).unwrap_err();
+        assert!(
+            err.to_string().contains("unknown field"),
+            "forged dispatch_id must fail deserialization: {err}"
+        );
+    }
+
+    #[test]
+    fn staff_run_receipt_builder_and_roundtrip() {
+        let receipt = StaffRunReceipt::new(
+            "dispatch-20260820-test",
+            "/tmp/runs/dispatch-20260820-test",
+            serde_json::json!({"action": "complete", "status": "success"}),
+        )
+        .with_assignment_id("assign-456")
+        .with_started_at("2026-08-20T11:00:00Z")
+        .with_finished_at("2026-08-20T11:05:00Z")
+        .with_exit_code(0)
+        .with_identity_receipt(serde_json::json!({"verified": true}));
+
+        assert_eq!(receipt.dispatch_id, "dispatch-20260820-test");
+        assert_eq!(receipt.assignment_id.as_deref(), Some("assign-456"));
+        assert_eq!(receipt.state, "working");
+        assert_eq!(receipt.exit_code, Some(0));
+        assert_eq!(receipt.started_at.as_deref(), Some("2026-08-20T11:00:00Z"));
+        assert_eq!(receipt.finished_at.as_deref(), Some("2026-08-20T11:05:00Z"));
+
+        let serialized = serde_json::to_value(&receipt).expect("serializes");
+        assert_eq!(serialized["dispatch_id"], "dispatch-20260820-test");
+        assert_eq!(serialized["state"], "working");
+        assert_eq!(serialized["assignment_id"], "assign-456");
+    }
 }

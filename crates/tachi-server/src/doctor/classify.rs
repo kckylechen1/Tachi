@@ -363,14 +363,54 @@ fn job_breakdown_from_counts(counts: memcore::db::FoundryJobStatusCounts) -> Job
     }
 }
 
-pub(crate) fn scope_hint_for(path: &Path) -> String {
-    let n = path.to_string_lossy().replace('\\', "/");
-    if n.contains("/.tachi/global/") {
+pub fn scope_hint_for(path: &Path) -> String {
+    scope_hint_for_in_home(path, &crate::path_utils::tachi_home())
+}
+
+fn is_global_identity(path: &Path, tachi_home: &Path) -> bool {
+    for filename in [
+        memcore::MEMORY_DB_FILENAME,
+        memcore::LEGACY_MEMORY_DB_FILENAME,
+    ] {
+        for candidate in [
+            tachi_home.join(filename),
+            tachi_home.join("global").join(filename),
+        ] {
+            if path == candidate {
+                return true;
+            }
+            if let (Ok(canon_path), Ok(canon_candidate)) = (
+                std::fs::canonicalize(path),
+                std::fs::canonicalize(&candidate),
+            ) {
+                if canon_path == canon_candidate {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+pub fn scope_hint_for_in_home(path: &Path, tachi_home: &Path) -> String {
+    if is_global_identity(path, tachi_home) {
         return "global".to_string();
     }
+    let n = path.to_string_lossy().replace('\\', "/");
     if let Some((_, rest)) = n.split_once("/.tachi/projects/") {
         let proj = rest.split('/').next().unwrap_or("unknown");
         return format!("project:{proj}");
+    }
+    if let Some((_, rest)) = n.split_once("/.sigil/projects/") {
+        let proj = rest.split('/').next().unwrap_or("unknown");
+        return format!("project:{proj}");
+    }
+    let projects_dir = tachi_home.join("projects");
+    if let Ok(rel) = path.strip_prefix(&projects_dir) {
+        if let Some(first) = rel.components().next() {
+            let proj = first.as_os_str().to_string_lossy();
+            return format!("project:{proj}");
+        }
     }
     if let Some((_, rest)) = n.split_once("/.openclaw/extensions/tachi/data/agents/") {
         let agent = rest.split('/').next().unwrap_or("unknown");
@@ -399,4 +439,55 @@ pub(crate) fn scope_hint_for(path: &Path) -> String {
         return "sigil-legacy".to_string();
     }
     "unknown".to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn global_scope_requires_an_exact_configured_home_identity() {
+        let configured = Path::new("/configured/.tachi");
+        for path in [
+            configured.join(memcore::MEMORY_DB_FILENAME),
+            configured.join(memcore::LEGACY_MEMORY_DB_FILENAME),
+            configured.join("global").join(memcore::MEMORY_DB_FILENAME),
+            configured
+                .join("global")
+                .join(memcore::LEGACY_MEMORY_DB_FILENAME),
+        ] {
+            assert_eq!(scope_hint_for_in_home(&path, configured), "global");
+        }
+
+        assert_ne!(
+            scope_hint_for_in_home(Path::new("/repo/.tachi/global/memory.db"), configured),
+            "global"
+        );
+        assert_ne!(
+            scope_hint_for_in_home(Path::new("/repo/.tachi/memory.db"), configured),
+            "global"
+        );
+
+        if let Some(user_home) = dirs::home_dir() {
+            let custom_home = user_home.join("configured-custom-tachi-home-not-default");
+            for default_home in [user_home.join(".tachi"), user_home.join(".sigil")] {
+                for filename in [
+                    memcore::MEMORY_DB_FILENAME,
+                    memcore::LEGACY_MEMORY_DB_FILENAME,
+                ] {
+                    for path in [
+                        default_home.join(filename),
+                        default_home.join("global").join(filename),
+                    ] {
+                        assert_ne!(
+                            scope_hint_for_in_home(&path, &custom_home),
+                            "global",
+                            "default-home DB must not override configured authority: {}",
+                            path.display()
+                        );
+                    }
+                }
+            }
+        }
+    }
 }

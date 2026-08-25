@@ -1,6 +1,125 @@
 use super::*;
 use crate::skill_policy::{CODING_ARCHITECTURE_DECISION, SUPERPOWER_WRITING_PLANS};
 
+/// #1814 discriminator: the typed Staff boundary must retain the server
+/// resolver's profile semantics without constructing a flat dispatch carrier.
+#[test]
+fn typed_staff_server_resolver_matches_flat_profile_semantics_table() {
+    let server = crate::staffing_ops::tests::test_server();
+    let cases = [
+        ("canonical codex", "codex_55_review", Some("codex"), None),
+        ("deprecated alias", "glm_51_impl", None, None),
+        (
+            "opencode defaults",
+            "opencode_builder",
+            Some("opencode"),
+            None,
+        ),
+        (
+            "worker override",
+            "codex_55_review",
+            Some("claude"),
+            Some("review"),
+        ),
+    ];
+
+    for (name, profile, worker, stage) in cases {
+        let mut flat = params();
+        flat.profile = Some(profile.to_string());
+        flat.agent = worker.map(str::to_string);
+        flat.stage = stage.map(str::to_string);
+        let flat_resolved = resolve_and_apply_dispatch_profile_for_server(&server, &mut flat)
+            .unwrap_or_else(|error| panic!("{name}: flat resolver: {error}"));
+
+        let mut staff = tachi_params::StaffAssignmentRequest {
+            task: format!("{name} typed resolver parity"),
+            staffing_reason: tachi_params::TachiDispatchReason::DurableCrossSession,
+            profile: Some(profile.to_string()),
+            worker: worker.map(str::to_string),
+            stage: stage.map(str::to_string),
+            execution_level: None,
+            issue_ref: Some("kckylechen1/tachi#194".to_string()),
+            pr_ref: None,
+            flow_id: None,
+            project: None,
+            completion_predicate: None,
+            recommendation_ref: None,
+        };
+        let typed = crate::dispatch_profile::resolve_and_apply_staff_assignment_profile_for_server(
+            &server, &mut staff,
+        )
+        .unwrap_or_else(|error| panic!("{name}: typed resolver: {error}"));
+
+        assert_eq!(
+            typed.selected_profile, flat_resolved.selected_profile,
+            "{name}: profile"
+        );
+        assert_eq!(typed.agent, flat_resolved.agent, "{name}: worker/backend");
+        assert_eq!(staff.stage, flat.stage, "{name}: stage defaults");
+        assert_eq!(
+            typed.selected_model, flat_resolved.selected_model,
+            "{name}: model/stage defaults"
+        );
+        assert_eq!(
+            serde_json::to_value(&typed.mcp_access).expect("typed MCP JSON"),
+            serde_json::to_value(&flat_resolved.mcp_access).expect("flat MCP JSON"),
+            "{name}: MCP/tools"
+        );
+        assert_eq!(
+            typed.credential_profiles, flat_resolved.credential_profiles,
+            "{name}: credentials"
+        );
+        assert_eq!(
+            typed.required_skills, flat_resolved.required_skills,
+            "{name}: required skills"
+        );
+        assert_eq!(
+            typed.tool_profile, flat_resolved.tool_profile,
+            "{name}: tool profile"
+        );
+        assert_eq!(
+            typed.launch_command, flat_resolved.launch_command,
+            "{name}: OpenCode launch defaults"
+        );
+        assert_eq!(
+            typed.evidence_required, flat_resolved.evidence_required,
+            "{name}: evidence"
+        );
+        assert_eq!(
+            typed.fallback_chain, flat_resolved.fallback_chain,
+            "{name}: fallback"
+        );
+        assert_eq!(
+            typed.identity_receipt, flat_resolved.identity_receipt,
+            "{name}: identity"
+        );
+    }
+
+    let mut refused = tachi_params::StaffAssignmentRequest {
+        task: "typed resolver refusal".to_string(),
+        staffing_reason: tachi_params::TachiDispatchReason::DurableCrossSession,
+        profile: Some("not-a-profile".to_string()),
+        worker: None,
+        stage: None,
+        execution_level: None,
+        issue_ref: None,
+        pr_ref: None,
+        flow_id: None,
+        project: None,
+        completion_predicate: None,
+        recommendation_ref: None,
+    };
+    let error = crate::dispatch_profile::resolve_and_apply_staff_assignment_profile_for_server(
+        &server,
+        &mut refused,
+    )
+    .expect_err("unknown typed Staff profile must refuse before launch");
+    assert!(
+        error.contains("Unknown") || error.contains("unknown"),
+        "refusal: {error}"
+    );
+}
+
 #[test]
 fn dispatch_profile_selects_backend_and_mcp_contract() {
     let mut params = params();

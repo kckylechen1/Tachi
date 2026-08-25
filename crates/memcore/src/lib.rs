@@ -51,26 +51,14 @@ pub mod canonical_digest;
 /// Model-broker catalog row types (tachi#1681). `admin`-gated because all
 /// six catalog tables are `SchemaScope::Product`.
 ///
-/// # A merge-time reconciliation lives here: the credential deny list
+/// # Canonical endpoint credential guard
 ///
 /// [`catalog::endpoint`] is this stack's single source for "this endpoint URL
 /// is smuggling a credential" — the credential-shaped query keys and the
-/// userinfo scan over the authority. Both refusal sites here call it: the
-/// catalog import in `tachi-llm`, which must not write such a URL into a
-/// durable operator-visible row, and the broker CLI's rendering, which must
-/// not print one.
-///
-/// A **second copy of the same list** lives on another branch: #1682 slice-1's
-/// `tachi-llm` `llm/broker/canonical.rs` carries an identical eight-entry list
-/// for its `EndpointUrl::new` request-path check (`e4072ddd`). It was written
-/// before this module existed, and the two lists are identical today — which is
-/// exactly the state in which a duplicated rule looks harmless. Whichever of
-/// the two branches lands second owes the merge one deletion: the request-path
-/// check calls `memcore::catalog::endpoint::endpoint_credential_leak` and keeps
-/// no list of its own. This is not stylistic. The catalog side of this same
-/// rule had already drifted once — it checked userinfo only, so
-/// `?api_key=sk-live-…` walked into the `endpoint_ref` column — and a rule two
-/// callers each own a copy of is a rule that gets extended on one side only.
+/// userinfo scan over the authority. Catalog import calls this guard before a
+/// URL can enter a durable operator-visible row, and the broker CLI calls it
+/// before rendering one. Keep the rule here rather than duplicating its deny
+/// list at each caller.
 #[cfg(feature = "admin")]
 pub mod catalog;
 pub mod db;
@@ -86,6 +74,7 @@ pub mod namespace;
 pub mod near_dup;
 pub mod noise;
 pub mod path_router;
+pub mod private_partition;
 pub mod recall_config;
 pub mod recall_coverage;
 mod recall_impressions;
@@ -250,16 +239,13 @@ pub use foundry::{
 #[cfg(feature = "admin")]
 pub use hub::{HubCapability, VirtualCapabilityBinding};
 pub use kernel_policy::{EmbedPolicy, KernelPolicy};
-/// The #1681/#1682 model-broker seam's fixture resolver: test scaffolding,
-/// never production routing, so its re-export carries the same
-/// `broker-fixtures` gate as the type itself (codex PR #1739 CONCERN-5).
-/// Downstream leaves opt in explicitly from `[dev-dependencies]`.
+/// Test-only model-broker fixture resolver. Its re-export carries the same
+/// `broker-fixtures` gate as the type itself, so downstream tests must opt in
+/// explicitly from `[dev-dependencies]`.
 #[cfg(any(test, feature = "broker-fixtures"))]
 pub use model_broker_seam::StaticFixtureResolver;
-/// Model-broker seam (#1681/#1682). This list is the *reachable closure* of the
-/// five frozen seam types, enumerated rather than assumed (codex PR #1739
-/// BUG-6): a type is here only if a consumer must be able to name it to build an
-/// input for, or read a field out of, one of the five.
+/// Reachable public closure of the model-broker control-plane seam. A type is
+/// listed only when a consumer must name it to build an input or read an output.
 ///
 /// - `ModelRef` → `SeamError` (its constructor's error).
 /// - `ResolvedDeployment` → `ResolvedDeploymentParts` (its constructor's input
@@ -285,6 +271,16 @@ pub use model_broker_seam::{
     OperationalResolver, PinContext, ResolutionOutcome, ResolutionRevisions, ResolvedDeployment,
     ResolvedDeploymentParts, ResolverInput, RetryAfter, RetryContext, SeamError, Selection,
     WireDialect, FALLBACK_ORDER_CAP,
+};
+pub use private_partition::{
+    AdmittedPartition, CapabilityReceipt, PartitionCapability, PartitionKeyProvider,
+    PrivatePartition, PrivatePartitionOpenContext, StaticKeyProvider, SubjectId, TrustDomainId,
+    STORE_PRIVATE_PARTITION_KEY,
+};
+pub use store::immutable_supersession::{
+    SupersessionClaimOutcome, SupersessionCommitResult, SupersessionError, SupersessionErrorKind,
+    SupersessionExpectedState, SupersessionReceipt, SUPERSESSION_RECEIPT_EVENT_TYPE,
+    SUPERSESSION_RECEIPT_NAMESPACE, SUPERSESSION_ROUTE_IMMUTABLE_CLAIM,
 };
 // `DeploymentCapabilities` (the seam's flat bool projection) is deliberately
 // NOT re-exported at the crate root: PR-B's catalog row type of the same name
@@ -433,6 +429,9 @@ pub struct MemoryStore {
     /// see [`Self::with_kernel_policy`] for how a caller attaches a
     /// non-default policy after opening.
     pub(crate) policy: KernelPolicy,
+    /// tachi#1668: set only when this handle was opened through
+    /// [`PrivatePartition`]. Generic opens leave it `None`.
+    pub(crate) admitted_partition: Option<crate::private_partition::AdmittedPartition>,
 }
 
 #[cfg(test)]

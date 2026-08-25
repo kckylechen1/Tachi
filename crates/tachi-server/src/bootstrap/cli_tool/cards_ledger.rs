@@ -527,6 +527,12 @@ fn read_existing_mirrors(
         None,
         schema_migration.clone(),
     )?;
+    read_existing_mirrors_from_server(&server)
+}
+
+fn read_existing_mirrors_from_server(
+    server: &crate::MemoryServer,
+) -> Result<BTreeMap<String, memcore::MemoryEntry>, Box<dyn std::error::Error>> {
     let entries: Vec<memcore::MemoryEntry> = server
         .with_global_store_read(|store| {
             store
@@ -553,6 +559,105 @@ fn read_existing_mirrors(
     Ok(map)
 }
 
+#[derive(Clone)]
+enum CardSyncExecution {
+    Cli,
+    // Transition-matrix tests exercise the real handlers and SQLite store but
+    // reuse one initialized server instead of re-running schema setup per row.
+    #[cfg(test)]
+    ReusedTestServer(std::sync::Arc<crate::MemoryServer>),
+}
+
+impl CardSyncExecution {
+    fn read_existing_mirrors(
+        &self,
+        db_path: &PathBuf,
+        schema_migration: &memcore::MigrationAuthority,
+    ) -> Result<BTreeMap<String, memcore::MemoryEntry>, Box<dyn std::error::Error>> {
+        match self {
+            Self::Cli => read_existing_mirrors(db_path, schema_migration),
+            #[cfg(test)]
+            Self::ReusedTestServer(server) => read_existing_mirrors_from_server(server),
+        }
+    }
+
+    async fn save_mirror(
+        &self,
+        args: serde_json::Map<String, Value>,
+        db_path: &PathBuf,
+        app_home: &PathBuf,
+        schema_migration: &memcore::MigrationAuthority,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        match self {
+            Self::Cli => {
+                dispatch_cli_tool_with_migration_authority(
+                    "save_memory",
+                    args,
+                    db_path,
+                    None,
+                    app_home,
+                    schema_migration,
+                    |server, args_map| {
+                        Box::pin(async move {
+                            let params: SaveMemoryParams =
+                                serde_json::from_value(Value::Object(args_map))
+                                    .map_err(|e| format!("invalid save_memory args: {e}"))?;
+                            handle_save_memory(&server, params).await
+                        })
+                    },
+                )
+                .await?;
+            }
+            #[cfg(test)]
+            Self::ReusedTestServer(server) => {
+                let params: SaveMemoryParams = serde_json::from_value(Value::Object(args))?;
+                handle_save_memory(server, params)
+                    .await
+                    .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn archive_mirror(
+        &self,
+        args: serde_json::Map<String, Value>,
+        db_path: &PathBuf,
+        app_home: &PathBuf,
+        schema_migration: &memcore::MigrationAuthority,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        match self {
+            Self::Cli => {
+                dispatch_cli_operate_tool_with_migration_authority(
+                    "archive_memory",
+                    args,
+                    db_path,
+                    None,
+                    app_home,
+                    schema_migration,
+                    |server, args_map| {
+                        Box::pin(async move {
+                            let params: ArchiveMemoryParams =
+                                serde_json::from_value(Value::Object(args_map))
+                                    .map_err(|e| format!("invalid archive_memory args: {e}"))?;
+                            handle_archive_memory(&server, params).await
+                        })
+                    },
+                )
+                .await?;
+            }
+            #[cfg(test)]
+            Self::ReusedTestServer(server) => {
+                let params: ArchiveMemoryParams = serde_json::from_value(Value::Object(args))?;
+                handle_archive_memory(server, params)
+                    .await
+                    .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug)]
 pub(super) struct CardSyncRow {
     seat: String,
@@ -567,7 +672,16 @@ async fn sync_cards(
     app_home: &PathBuf,
     schema_migration: &memcore::MigrationAuthority,
 ) -> Result<Vec<CardSyncRow>, Box<dyn std::error::Error>> {
-    sync_cards_selected(dir, None, true, db_path, app_home, schema_migration).await
+    sync_cards_selected(
+        dir,
+        None,
+        true,
+        db_path,
+        app_home,
+        schema_migration,
+        CardSyncExecution::Cli,
+    )
+    .await
 }
 
 /// Targeted post-apply mirror update. It intentionally does not run the
@@ -580,8 +694,16 @@ async fn sync_one_card(
     app_home: &PathBuf,
     schema_migration: &memcore::MigrationAuthority,
 ) -> Result<CardSyncRow, Box<dyn std::error::Error>> {
-    let rows =
-        sync_cards_selected(dir, Some(seat), false, db_path, app_home, schema_migration).await?;
+    let rows = sync_cards_selected(
+        dir,
+        Some(seat),
+        false,
+        db_path,
+        app_home,
+        schema_migration,
+        CardSyncExecution::Cli,
+    )
+    .await?;
     rows.into_iter()
         .find(|r| r.seat == seat)
         .ok_or_else(|| format!("target card {seat}.md was not mirrored").into())
@@ -594,12 +716,13 @@ async fn sync_cards_selected(
     db_path: &PathBuf,
     app_home: &PathBuf,
     schema_migration: &memcore::MigrationAuthority,
+    execution: CardSyncExecution,
 ) -> Result<Vec<CardSyncRow>, Box<dyn std::error::Error>> {
     let files = match selected_seat {
         Some(seat) => vec![read_card_file(dir, seat)?],
         None => scan_card_files(dir)?,
     };
-    let mut existing = read_existing_mirrors(db_path, schema_migration)?;
+    let mut existing = execution.read_existing_mirrors(db_path, schema_migration)?;
     let mut rows = Vec::with_capacity(files.len());
 
     for scanned_file in &files {
@@ -700,22 +823,9 @@ async fn sync_cards_selected(
             args.insert("id".into(), json!(prior_entry.id.clone()));
         }
 
-        dispatch_cli_tool_with_migration_authority(
-            "save_memory",
-            args,
-            db_path,
-            None,
-            app_home,
-            schema_migration,
-            |server, args_map| {
-                Box::pin(async move {
-                    let params: SaveMemoryParams = serde_json::from_value(Value::Object(args_map))
-                        .map_err(|e| format!("invalid save_memory args: {e}"))?;
-                    handle_save_memory(&server, params).await
-                })
-            },
-        )
-        .await?;
+        execution
+            .save_mirror(args, db_path, app_home, schema_migration)
+            .await?;
 
         let revision = prior.as_ref().map(|entry| entry.revision + 1).unwrap_or(1);
         rows.push(CardSyncRow {
@@ -729,7 +839,8 @@ async fn sync_cards_selected(
             content_hash: file.hash.clone(),
         });
         if selected_seat.is_some() {
-            let verified = read_existing_mirrors(db_path, schema_migration)?
+            let verified = execution
+                .read_existing_mirrors(db_path, schema_migration)?
                 .remove(&file.seat)
                 .ok_or("targeted mirror row missing after write")?;
             let m = &verified.metadata;
@@ -765,23 +876,9 @@ async fn sync_cards_selected(
             let mut args = serde_json::Map::new();
             args.insert("id".into(), json!(entry.id.clone()));
 
-            dispatch_cli_operate_tool_with_migration_authority(
-                "archive_memory",
-                args,
-                db_path,
-                None,
-                app_home,
-                schema_migration,
-                |server, args_map| {
-                    Box::pin(async move {
-                        let params: ArchiveMemoryParams =
-                            serde_json::from_value(Value::Object(args_map))
-                                .map_err(|e| format!("invalid archive_memory args: {e}"))?;
-                        handle_archive_memory(&server, params).await
-                    })
-                },
-            )
-            .await?;
+            execution
+                .archive_mirror(args, db_path, app_home, schema_migration)
+                .await?;
 
             rows.push(CardSyncRow {
                 seat,
@@ -1095,6 +1192,39 @@ aliases: [codex-cli, codex-app-server]
         (app_home, db_path)
     }
 
+    fn reusable_test_server(
+        db_path: &PathBuf,
+        schema_migration: &memcore::MigrationAuthority,
+    ) -> std::sync::Arc<crate::MemoryServer> {
+        std::sync::Arc::new(
+            crate::cli_client::build_in_process_server_with_migration_authority(
+                db_path,
+                None,
+                schema_migration.clone(),
+            )
+            .expect("test server"),
+        )
+    }
+
+    async fn sync_cards_reusing_server(
+        server: &std::sync::Arc<crate::MemoryServer>,
+        dir: &Path,
+        db_path: &PathBuf,
+        app_home: &PathBuf,
+        schema_migration: &memcore::MigrationAuthority,
+    ) -> Result<Vec<CardSyncRow>, Box<dyn std::error::Error>> {
+        sync_cards_selected(
+            dir,
+            None,
+            true,
+            db_path,
+            app_home,
+            schema_migration,
+            CardSyncExecution::ReusedTestServer(std::sync::Arc::clone(server)),
+        )
+        .await
+    }
+
     fn find_row<'a>(rows: &'a [CardSyncRow], seat: &str) -> &'a CardSyncRow {
         rows.iter()
             .find(|row| row.seat == seat)
@@ -1173,6 +1303,7 @@ aliases: [codex-cli, codex-app-server]
         let cards_dir = temp.path().join("cards");
         std::fs::create_dir_all(&cards_dir).expect("cards dir");
         let schema_migration = memcore::MigrationAuthority::Deny;
+        let server = reusable_test_server(&db_path, &schema_migration);
 
         write_fixture(
             &cards_dir,
@@ -1182,9 +1313,10 @@ aliases: [codex-cli, codex-app-server]
         write_fixture(&cards_dir, "grok-4.5", "## 状态:未校准(白卡)\n(待积累)\n");
 
         // 1) Two fixture cards → two `created` rows, revision 1 each.
-        let rows = sync_cards(&cards_dir, &db_path, &app_home, &schema_migration)
-            .await
-            .expect("first sync");
+        let rows =
+            sync_cards_reusing_server(&server, &cards_dir, &db_path, &app_home, &schema_migration)
+                .await
+                .expect("first sync");
         assert_eq!(rows.len(), 2, "{rows:?}");
         let wizard_row = find_row(&rows, "wizard-sonnet");
         assert_eq!(wizard_row.status, "created");
@@ -1200,7 +1332,7 @@ aliases: [codex-cli, codex-app-server]
         assert_eq!(grok_row.revision, 1);
 
         // Mirror rows carry the counter-clause presence signal correctly.
-        let mirrors = read_existing_mirrors(&db_path, &schema_migration).expect("read mirrors");
+        let mirrors = read_existing_mirrors_from_server(&server).expect("read mirrors");
         assert!(
             mirrors["wizard-sonnet"]
                 .metadata
@@ -1219,9 +1351,10 @@ aliases: [codex-cli, codex-app-server]
         );
 
         // 2) Rerun with no file changes → both `unchanged`, revision holds.
-        let rows2 = sync_cards(&cards_dir, &db_path, &app_home, &schema_migration)
-            .await
-            .expect("rerun sync");
+        let rows2 =
+            sync_cards_reusing_server(&server, &cards_dir, &db_path, &app_home, &schema_migration)
+                .await
+                .expect("rerun sync");
         assert_eq!(find_row(&rows2, "wizard-sonnet").status, "unchanged");
         assert_eq!(find_row(&rows2, "wizard-sonnet").revision, 1);
         assert_eq!(find_row(&rows2, "grok-4.5").status, "unchanged");
@@ -1234,9 +1367,10 @@ aliases: [codex-cli, codex-app-server]
             "wizard-sonnet",
             "## 反制条款(派单包必带)\n- always pwd-check the worktree\n- NEW: also verify db identity\n",
         );
-        let rows3 = sync_cards(&cards_dir, &db_path, &app_home, &schema_migration)
-            .await
-            .expect("edit sync");
+        let rows3 =
+            sync_cards_reusing_server(&server, &cards_dir, &db_path, &app_home, &schema_migration)
+                .await
+                .expect("edit sync");
         let edited = find_row(&rows3, "wizard-sonnet");
         assert_eq!(edited.status, "updated");
         assert_eq!(edited.revision, 2);
@@ -1247,9 +1381,10 @@ aliases: [codex-cli, codex-app-server]
         // removed: still present in the DB with archived=true. The untouched
         // sibling still reports (from the per-file loop) as `unchanged`.
         std::fs::remove_file(cards_dir.join("grok-4.5.md")).expect("remove fixture");
-        let rows4 = sync_cards(&cards_dir, &db_path, &app_home, &schema_migration)
-            .await
-            .expect("archive sync");
+        let rows4 =
+            sync_cards_reusing_server(&server, &cards_dir, &db_path, &app_home, &schema_migration)
+                .await
+                .expect("archive sync");
         assert_eq!(rows4.len(), 2, "{rows4:?}");
         assert_eq!(find_row(&rows4, "wizard-sonnet").status, "unchanged");
         let grok_after = find_row(&rows4, "grok-4.5");
@@ -1257,7 +1392,7 @@ aliases: [codex-cli, codex-app-server]
         assert_eq!(grok_after.revision, 2);
 
         let mirrors_after =
-            read_existing_mirrors(&db_path, &schema_migration).expect("read mirrors after archive");
+            read_existing_mirrors_from_server(&server).expect("read mirrors after archive");
         let grok_entry = mirrors_after
             .get("grok-4.5")
             .expect("archived row must still exist, not be deleted");
@@ -1266,9 +1401,10 @@ aliases: [codex-cli, codex-app-server]
 
         // Rerun again with the file still absent: no repeat `archived`
         // report (already-settled state is not re-announced every run).
-        let rows5 = sync_cards(&cards_dir, &db_path, &app_home, &schema_migration)
-            .await
-            .expect("second post-delete sync");
+        let rows5 =
+            sync_cards_reusing_server(&server, &cards_dir, &db_path, &app_home, &schema_migration)
+                .await
+                .expect("second post-delete sync");
         assert!(
             rows5.iter().all(|row| row.seat != "grok-4.5"),
             "an already-archived, still-missing seat should not reappear in the report: {rows5:?}"
@@ -1440,44 +1576,31 @@ aliases: [codex-cli, codex-app-server]
         let cards = temp.path().join("cards");
         std::fs::create_dir(&cards).unwrap();
         let card = cards.join("target.md");
+        let schema_migration = memcore::MigrationAuthority::Deny;
+        let server = reusable_test_server(&db_path, &schema_migration);
         std::fs::write(&card, "## Counter\n- source A\n").unwrap();
-        sync_cards(
-            &cards,
-            &db_path,
-            &app_home,
-            &memcore::MigrationAuthority::Deny,
-        )
-        .await
-        .unwrap();
+        sync_cards_reusing_server(&server, &cards, &db_path, &app_home, &schema_migration)
+            .await
+            .unwrap();
 
         std::fs::write(&card, "## Counter\n- source B\n").unwrap();
         let apply_lock = super::super::cards_governance::lock(&card).unwrap();
         assert!(
-            sync_cards(
-                &cards,
-                &db_path,
-                &app_home,
-                &memcore::MigrationAuthority::Deny,
-            )
-            .await
-            .unwrap_err()
-            .to_string()
-            .contains("lock"),
+            sync_cards_reusing_server(&server, &cards, &db_path, &app_home, &schema_migration,)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("lock"),
             "full sync must not proceed from a pre-lock source snapshot"
         );
-        let mirrors = read_existing_mirrors(&db_path, &memcore::MigrationAuthority::Deny).unwrap();
+        let mirrors = read_existing_mirrors_from_server(&server).unwrap();
         assert!(mirrors["target"].text.contains("source A"));
         drop(apply_lock);
 
-        sync_cards(
-            &cards,
-            &db_path,
-            &app_home,
-            &memcore::MigrationAuthority::Deny,
-        )
-        .await
-        .unwrap();
-        let mirrors = read_existing_mirrors(&db_path, &memcore::MigrationAuthority::Deny).unwrap();
+        sync_cards_reusing_server(&server, &cards, &db_path, &app_home, &schema_migration)
+            .await
+            .unwrap();
+        let mirrors = read_existing_mirrors_from_server(&server).unwrap();
         assert!(mirrors["target"].text.contains("source B"));
     }
 

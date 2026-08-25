@@ -7,7 +7,7 @@ fn tachi_verify_action_schema(
 ) -> rmcp::schemars::Schema {
     string_enum_schema(
         &super::action_enums::TachiVerifyAction::all_wire_strings(),
-        "Required Tachi verification ledger action (start/record/status/board).",
+        "Required Tachi verification ledger action (start/record/status/board/run).",
         generator,
     )
 }
@@ -18,16 +18,6 @@ fn tachi_staff_action_schema(
     string_enum_schema(
         action_inventory::TACHI_STAFF_ACTIONS,
         "Required Tachi staffing action.",
-        generator,
-    )
-}
-
-fn tachi_orchestrator_action_schema(
-    generator: &mut rmcp::schemars::SchemaGenerator,
-) -> rmcp::schemars::Schema {
-    string_enum_schema(
-        action_inventory::TACHI_ORCHESTRATOR_ACTIONS,
-        "Required Tachi orchestrator action.",
         generator,
     )
 }
@@ -64,7 +54,7 @@ pub struct TachiVerifyCheckItem {
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct TachiVerifyParams {
-    /// Action: start / record / status / board (F4 typed enum).
+    /// Action: start / record / status / board / run (F4 typed enum).
     #[schemars(schema_with = "tachi_verify_action_schema")]
     pub action: super::TachiVerifyAction,
 
@@ -105,6 +95,10 @@ pub struct TachiVerifyParams {
     pub status: Option<String>,
 
     /// Process exit code when known.
+    ///
+    /// NEVER persisted from caller input: `tachi_verify start/record` strips
+    /// caller-authored authority fields at write (ledger::base_item), so this
+    /// field only round-trips through params — it is not durable evidence.
     #[serde(
         default,
         deserialize_with = "crate::coerce::opt_i64_from_string_or_number"
@@ -113,6 +107,10 @@ pub struct TachiVerifyParams {
     pub exit_code: Option<i64>,
 
     /// Path to a durable log/artifact for this verification run.
+    ///
+    /// NEVER persisted from caller input (same strip rule as `exit_code`);
+    /// the server-executed `action=run` path writes its own server-observed
+    /// log path into the ledger item and receipt.
     #[serde(default)]
     pub log_path: Option<String>,
 
@@ -139,6 +137,24 @@ pub struct TachiVerifyParams {
     /// Batch record/start payload. Cannot be combined with single-check fields (check_id/kind/command/commands).
     #[serde(default)]
     pub checks: Vec<TachiVerifyCheckItem>,
+
+    /// action=run only (#1454): closed-set verification kind the server
+    /// executes — version-sync, clippy, fmt, audit, nextest, portable-contract,
+    /// doc (the full ci.yml rust-job surface; see
+    /// `tachi-server::verify_ops::MERGE_REQUIRED_RUN_KINDS`). No caller-supplied
+    /// argv is ever accepted; the server maps kind → its own command table.
+    #[serde(default)]
+    pub check_kind: Option<String>,
+
+    /// action=run only (#1454): per-run timeout in seconds. Default 1800;
+    /// capped at 3600 (provisional, dispatch clause 9). Server-enforced via
+    /// kill-on-timeout; never a caller-negotiated relaxation of the cap.
+    #[serde(
+        default,
+        deserialize_with = "crate::coerce::opt_u64_from_string_or_number"
+    )]
+    #[schemars(schema_with = "crate::coerce::opt_integer_from_string_or_number_schema")]
+    pub timeout_secs: Option<u64>,
 }
 
 // ─── Facade: tachi_staff (external staffing via canonical dispatch kernel) ────
@@ -162,6 +178,7 @@ pub struct TachiVerifyParams {
 /// level (so `status` can omit it) but REQUIRED semantically for `start` —
 /// enforced by the handler, not by a cross-action struct field.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct TachiStaffParams {
     /// Action: "start" | "status"
     #[schemars(schema_with = "tachi_staff_action_schema")]
@@ -224,19 +241,54 @@ pub struct TachiStaffParams {
     /// `tachi_dispatch(action='recommend')` call returned, when this start
     /// was placed on that advice. Optional and start-only — absence is
     /// itself evidence (`assignment_mode` records `unadvised`, never a
-    /// fabricated advisory). Not validated against a live
-    /// `route_recommendations` row here; the acceptance-time writer treats
-    /// a stale/unknown ref the same as any other reference id.
+    /// fabricated advisory). Typed Staff resolution validates it before
+    /// acceptance: an unknown or stale reference is refused with zero claim,
+    /// workspace artifact, or route-decision evidence.
     #[serde(default)]
     pub recommendation_ref: Option<String>,
 }
 
-// ─── Facade: orchestrator (persistent TODO / handoff) ────────────────────────
+impl TachiStaffParams {
+    pub fn to_assignment_request(&self) -> Result<crate::facade::StaffAssignmentRequest, String> {
+        if self.dispatch_id.is_some() {
+            return Err(
+                "dispatch_id is minted by the kernel and cannot be specified when action='start'"
+                    .to_string(),
+            );
+        }
+        let staffing_reason = self
+            .staffing_reason
+            .ok_or_else(|| "staffing_reason is required when action='start'".to_string())?;
+        let task = self
+            .task
+            .as_deref()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .ok_or_else(|| "task is required when action='start'".to_string())?
+            .to_string();
 
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
+        Ok(crate::facade::StaffAssignmentRequest {
+            staffing_reason,
+            task,
+            profile: self.profile.clone(),
+            worker: self.worker.clone(),
+            stage: self.stage.clone(),
+            execution_level: None,
+            issue_ref: self.issue_ref.clone(),
+            pr_ref: self.pr_ref.clone(),
+            flow_id: self.flow_id.clone(),
+            project: self.project.clone(),
+            completion_predicate: None,
+            recommendation_ref: self.recommendation_ref.clone(),
+        })
+    }
+}
+
+// ─── Internal: orchestrator (persistent hard_state TODO / handoff) ─────────
+
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
 pub struct TachiOrchestratorParams {
     /// todo_list | todo_update | handoff_write | handoff_read | recovery_briefing
-    #[schemars(schema_with = "tachi_orchestrator_action_schema")]
     pub action: String,
     #[serde(default)]
     pub task_id: Option<String>,
@@ -667,4 +719,97 @@ pub struct TachiBoardParams {
     /// flag.
     #[serde(default)]
     pub verbose: Option<bool>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tachi_staff_params_rejects_hostile_execution_fields() {
+        // Check each model-facing execution field separately. A combined
+        // payload may stop at its first unknown key and mask a widened schema.
+        for (field, value) in [
+            ("command", serde_json::json!(["sh", "-c", "echo pwned"])),
+            ("cwd", serde_json::json!("/etc")),
+            ("env", serde_json::json!({"SECRET": "pwned"})),
+            ("env_vars", serde_json::json!({"SECRET": "pwned"})),
+            ("credentials", serde_json::json!(["admin"])),
+            ("credential_profiles", serde_json::json!(["admin"])),
+            ("allowed_tools", serde_json::json!(["Bash"])),
+            ("tools", serde_json::json!(["Bash"])),
+            ("sandbox", serde_json::json!("danger-full-access")),
+            ("harness_transport", serde_json::json!("cli")),
+            (
+                "harness_server_url",
+                serde_json::json!("http://127.0.0.1:4321"),
+            ),
+            ("timeout_secs", serde_json::json!(1)),
+            ("pid", serde_json::json!(1234)),
+            ("process_id", serde_json::json!("forged-process")),
+            ("exit_code", serde_json::json!(0)),
+            ("result", serde_json::json!("forged result")),
+            ("result_written", serde_json::json!(true)),
+        ] {
+            let mut hostile = serde_json::json!({
+                "action": "start",
+                "task": "Do work",
+                "staffing_reason": "explicit_user_request",
+            });
+            hostile[field] = value;
+            let err = serde_json::from_value::<TachiStaffParams>(hostile).unwrap_err();
+            assert!(
+                err.to_string().contains("unknown field") && err.to_string().contains(field),
+                "tachi_staff must reject model-facing '{field}' before any artifact: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn tachi_staff_params_to_assignment_request_maps_cleanly() {
+        let raw = serde_json::json!({
+            "action": "start",
+            "task": "Clean mapping",
+            "staffing_reason": "durable_cross_session",
+            "worker": "claude",
+            "profile": "claude_plan",
+            "stage": "plan",
+            "project": "tachi",
+            "issue_ref": "kckylechen1/tachi#1692",
+            "pr_ref": "kckylechen1/tachi#1812",
+            "flow_id": "flow-c5",
+            "recommendation_ref": "rec-999",
+        });
+        let params: TachiStaffParams = serde_json::from_value(raw).expect("deserializes");
+        let req = params.to_assignment_request().expect("maps to request");
+        assert_eq!(req.task, "Clean mapping");
+        assert_eq!(
+            req.staffing_reason,
+            crate::facade::TachiDispatchReason::DurableCrossSession
+        );
+        assert_eq!(req.worker.as_deref(), Some("claude"));
+        assert_eq!(req.profile.as_deref(), Some("claude_plan"));
+        assert_eq!(req.stage.as_deref(), Some("plan"));
+        assert_eq!(req.project.as_deref(), Some("tachi"));
+        assert_eq!(req.issue_ref.as_deref(), Some("kckylechen1/tachi#1692"));
+        assert_eq!(req.pr_ref.as_deref(), Some("kckylechen1/tachi#1812"));
+        assert_eq!(req.flow_id.as_deref(), Some("flow-c5"));
+        assert_eq!(req.recommendation_ref.as_deref(), Some("rec-999"));
+    }
+
+    #[test]
+    fn tachi_staff_params_rejects_forged_dispatch_id_on_start() {
+        let raw = serde_json::json!({
+            "action": "start",
+            "task": "Forged dispatch_id",
+            "staffing_reason": "explicit_user_request",
+            "dispatch_id": "forged-id-123",
+        });
+        let params: TachiStaffParams = serde_json::from_value(raw).expect("deserializes");
+        let err = params.to_assignment_request().unwrap_err();
+        assert!(
+            err.contains("dispatch_id is minted by the kernel"),
+            "action='start' must reject caller-supplied dispatch_id: {err}"
+        );
+    }
 }

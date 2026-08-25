@@ -8,17 +8,18 @@ use super::dispatch_v2::{
 };
 use super::kanban_helpers::{close_kanban_row_on_early_exit, init_kanban_task};
 use super::launcher::{
-    build_claude_command, build_codex_command, build_custom_command, build_grok_command,
-    build_kimi_command, build_opencode_command,
+    build_claude_command, build_codex_command, build_grok_command, build_kimi_command,
+    build_opencode_command,
 };
 use super::mcp_config::generate_mcp_config;
-use super::prompt::{assemble_prompt_with_trace, resolve_effective_skills};
+use super::prompt::{assemble_resolved_prompt_with_trace, resolve_assignment_skills};
 use crate::agent_registry::{
     dispatch_agent_help_list, mcp_inject_supported, normalize_dispatch_agent_name,
     resolve_dispatch_agent,
 };
 use crate::dispatch_profile::{
-    resolve_and_apply_dispatch_profile_for_server, ResolvedDispatchProfile,
+    resolve_and_apply_dispatch_profile_for_server,
+    resolve_and_apply_staff_assignment_profile_for_server, ResolvedDispatchProfile,
 };
 use crate::tool_params::TachiDispatchParams;
 use crate::vault_ops::read_unlocked_vault_secret;
@@ -33,6 +34,7 @@ use tachi_credential_profile::{
     find_credential_profile, plan_credential_materialization_with_run_dir, profile_secret_names,
     CredentialApplyOptions, CredentialMaterializeReport,
 };
+use tachi_params::StaffAssignmentRequest;
 
 const DISPATCH_DEDUPE_STALE_LOCK_SECS: i64 = 300;
 
@@ -44,15 +46,15 @@ fn is_opencode_serve_transport(transport: &str) -> bool {
 }
 
 fn infer_harness_server_url(
-    params: &TachiDispatchParams,
+    harness_server_url: &Option<String>,
+    command: &[String],
     harness_transport: &str,
 ) -> Option<String> {
-    params.harness_server_url.clone().or_else(|| {
+    harness_server_url.clone().or_else(|| {
         if !is_opencode_serve_transport(harness_transport) {
             return None;
         }
-        params
-            .command
+        command
             .windows(2)
             .find(|pair| pair.first().is_some_and(|arg| arg == "--attach"))
             .and_then(|pair| pair.get(1))
@@ -91,11 +93,11 @@ fn opencode_serve_preflight_error(status: &Value, server_url: Option<&str>) -> S
     )
 }
 
-fn opencode_sop_label(agent_norm: &str, params: &TachiDispatchParams) -> Option<String> {
+fn opencode_sop_label(agent_norm: &str, request: &StaffAssignmentRequest) -> Option<String> {
     if agent_norm != "opencode" {
         return None;
     }
-    let route = crate::copilot_ops::build_task_brief_routing(&params.task);
+    let route = crate::copilot_ops::build_task_brief_routing(&request.task, &[]);
     let selected = route
         .selected_sops
         .iter()
@@ -126,6 +128,8 @@ mod credential_apply;
 mod credentials;
 mod dedupe;
 mod execution;
+#[cfg(test)]
+pub(crate) use execution::background_dispatch_cleanup_complete;
 mod flow_setup;
 mod harness_preflight;
 mod plan_stage;
@@ -138,7 +142,11 @@ mod workspace_setup;
 mod tests;
 
 use self::artifacts::{write_dispatch_artifacts, DispatchArtifactInputs, DispatchArtifacts};
-use self::authority::{compile_dispatch_contract, contract_receipt};
+#[cfg(test)]
+use self::authority::{compile_dispatch_contract, mint_execution_grant};
+use self::authority::{
+    compile_dispatch_contract_from_mechanics, contract_receipt, mint_execution_grant_from_mechanics,
+};
 use self::backend::{prepare_dispatch_backend, DispatchBackendContext, PreparedDispatchBackend};
 use self::backend_failure::*;
 use self::credential_apply::{
@@ -152,6 +160,7 @@ use self::flow_setup::{init_kanban_and_flow, FlowSetupInputs};
 use self::harness_preflight::{run_harness_preflight, HarnessPreflightInputs};
 use self::plan_stage::{run_v2_plan_stage, PlanStageInputs};
 use self::response_helpers::*;
+use self::start::assert_nested_mcp_profile_mechanics;
 use self::start::*;
 use self::workspace_setup::prepare_workspace_and_mcp;
 
@@ -169,17 +178,71 @@ pub(crate) use self::recovery::recover_orphaned_dispatch_runs;
 /// `resolve_dispatch_start` (before any stage/preflight/spawn work) so the
 /// entry-point sandbox validation below knows which transport a request will
 /// actually reach.
-fn effective_harness_transport(params: &TachiDispatchParams, agent_norm: &str) -> String {
-    params.harness_transport.clone().unwrap_or_else(|| {
+fn effective_harness_transport(
+    harness_transport: Option<&str>,
+    command: &[String],
+    agent_norm: &str,
+) -> String {
+    harness_transport.map(str::to_string).unwrap_or_else(|| {
         if agent_norm == "custom"
-            && params.command.first().is_some_and(|cmd| cmd == "opencode")
-            && params.command.iter().any(|arg| arg == "--attach")
+            && command.first().is_some_and(|cmd| cmd == "opencode")
+            && command.iter().any(|arg| arg == "--attach")
         {
             "opencode_serve".to_string()
         } else {
             "cli".to_string()
         }
     })
+}
+
+/// Mints the adapter-only custom subprocess contract after the server has
+/// admitted the resolved assignment and execution grant. Bootstrap mechanics
+/// may reach this owner, but the backend receives only the resulting spec.
+fn mint_custom_launch_spec(
+    assignment: &tachi_params::ResolvedStaffAssignment,
+    grant: &tachi_params::ExecutionGrant,
+    command: &[String],
+    prompt: &str,
+    harness_transport: &str,
+    harness_server_url: &Option<String>,
+) -> Result<tachi_params::LaunchSpec, String> {
+    let launch = tachi_dispatch::build_custom_launch(
+        &tachi_dispatch::DispatchLaunchParams {
+            cwd: grant
+                .allowed_cwd
+                .as_ref()
+                .map(|cwd| cwd.to_string_lossy().into_owned()),
+            model: assignment.selected_model.clone(),
+            permission_profile: grant.permission_profile.clone(),
+            allowed_tools: grant.allowed_tools.clone(),
+            max_turns: grant.max_turns,
+            sandbox: grant.sandbox.clone(),
+            command: command.to_vec(),
+        },
+        prompt,
+    )?;
+    let mut spec = launch.into_launch_spec(
+        assignment.selected_backend.clone(),
+        prompt,
+        grant.timeout_secs,
+        HashMap::new(),
+    );
+    spec.harness_transport = Some(harness_transport.to_string());
+    spec.harness_server_url = harness_server_url.clone();
+    Ok(spec)
+}
+
+fn validate_custom_launch_spec_timeout(
+    spec: &tachi_params::LaunchSpec,
+    canonical_timeout_secs: u64,
+) -> Result<(), String> {
+    if spec.timeout_secs != canonical_timeout_secs {
+        return Err(
+            "server-minted custom LaunchSpec timeout diverged from the canonical execution grant"
+                .to_string(),
+        );
+    }
+    Ok(())
 }
 
 /// #971 review-fix (F3): output of the guarded post-BOARD-FIRST-init
@@ -209,6 +272,13 @@ pub(crate) async fn handle_tachi_dispatch(
     server: &MemoryServer,
     mut params: TachiDispatchParams,
 ) -> Result<String, String> {
+    enforce_dispatch_depth(server)?;
+    let (_, execution_level) = crate::host_profile::authorize_dispatch(params.execution_level)?;
+    let start = resolve_dispatch_start(server, &mut params, Utc::now(), execution_level)?;
+    launch_canonical_dispatch(server, start).await
+}
+
+fn enforce_dispatch_depth(server: &MemoryServer) -> Result<(), String> {
     // #1251: fail-closed recursive-dispatch depth gate — BEFORE any run
     // directory, workspace, prompt, credential, or child process. The depth is
     // read from the SESSION identity (populated from the per-call
@@ -236,24 +306,37 @@ pub(crate) async fn handle_tachi_dispatch(
         crate::session_identity::MAX_DISPATCH_DEPTH,
     )?;
 
-    // Fail before ANY run directory, workspace, prompt, or child process is
-    // created. This is the machine boundary; confirmation for a permitted L3
-    // action remains the responsibility of that action's existing gate.
-    let (host_profile, execution_level) =
-        crate::host_profile::authorize_dispatch(params.execution_level)?;
-    let now = Utc::now();
+    Ok(())
+}
+
+async fn launch_canonical_dispatch(
+    server: &MemoryServer,
+    start: DispatchStart,
+) -> Result<String, String> {
+    let (host_profile, _) =
+        crate::host_profile::authorize_dispatch(start.resolved_assignment.execution_level)?;
     let DispatchStart {
         dispatch_id,
+        request,
+        _legacy_auto_capability_bundle,
+        requested_skills,
+        context_query,
+        tool_profile,
+        command,
+        harness_transport: requested_harness_transport,
+        harness_server_url: requested_harness_server_url,
+        raw_cwd,
+        raw_credential_profiles,
         agent_norm,
         resolved_profile,
+        resolved_assignment,
+        resolved_recommendation: _,
         profile_payload,
-        timeout_secs_for_status,
-        timeout,
-        inject_tachi,
-        inject_hub,
         workspace_dir,
-        host_adapter,
-    } = resolve_dispatch_start(server, &mut params, now)?;
+        inject_card,
+        verbose,
+        mut mechanics,
+    } = start;
 
     // 0a. Resolve the execution-environment binding through the fail-safe gate
     // (#894 S1) before ANY workspace/preflight/spawn work. env_id → cwd from the
@@ -262,34 +345,18 @@ pub(crate) async fn handle_tachi_dispatch(
     // (status ledger, completion predicate, launcher), and the resolution is
     // stamped into status.json so the ledger records managed/unmanaged/default.
     let env_resolution = server.resolve_dispatch_env_binding(
-        params.env_id.as_deref(),
-        params.cwd.as_deref(),
-        params.unmanaged_cwd.unwrap_or(false),
+        mechanics.env_id.as_deref(),
+        raw_cwd.as_deref(),
+        mechanics.unmanaged_cwd,
     )?;
+    let status_cwd = env_resolution
+        .cwd()
+        .map(|cwd| cwd.to_string())
+        .or_else(|| raw_cwd.clone());
     if let Some(resolved_cwd) = env_resolution.cwd() {
-        params.cwd = Some(resolved_cwd.to_string());
+        mechanics.cwd = Some(resolved_cwd.to_string());
     }
     let env_stamp = env_resolution.stamp();
-    let env_id_stamp = env_resolution.env_id().map(str::to_string);
-
-    // #1001: zero-ceremony presence claim — auto-register/heartbeat so a
-    // briefing read from another session sees this dispatch is in flight.
-    // Degrades to no-op on any storage error; never fails dispatch.
-    crate::claims_ops::auto_register_or_heartbeat_claim(
-        server,
-        &crate::claims_ops::ClaimHookInput {
-            issue_ref: params.issue_ref.clone(),
-            flow_id: params.flow_id.clone(),
-            dispatch_id: Some(dispatch_id.clone()),
-            // TachiDispatchParams has no bare `branch` field (branch naming is
-            // an internal detail of workspace/env provisioning, not a
-            // dispatch param); env_resolution's cwd is the closest available
-            // identity and is not branch-shaped, so this hook leaves branch
-            // unset rather than guessing.
-            branch: None,
-            declared_file_scope: None,
-        },
-    );
 
     // 0b. Compile the effective-authority contract before ANY stage/preflight/
     // spawn work (#894 S2d). This is the single choke-point every dispatch
@@ -319,13 +386,22 @@ pub(crate) async fn handle_tachi_dispatch(
     // stale claim. Every other shell-capable read-only lane is still refused
     // pre-spawn: no primitive, no receipt, no isolation (see
     // `tachi_dispatch::authority` invariants 4 and 5).
-    let harness_transport = effective_harness_transport(&params, &agent_norm);
+    let harness_transport = effective_harness_transport(
+        requested_harness_transport.as_deref(),
+        &command,
+        &agent_norm,
+    );
+    // Resolve default skills and their stage instruction once. Authority may
+    // narrow this list; its mounted output is the sole downstream skill list.
+    let (requested_skills, stage_instruction) =
+        resolve_assignment_skills(&request, &requested_skills);
+    mechanics.skills = requested_skills;
     let backend_version = tachi_dispatch::probe_provider_version(
         &agent_norm,
         tachi_dispatch::transport_kind(&harness_transport),
     );
-    let effective_contract = compile_dispatch_contract(
-        &mut params,
+    let effective_contract = compile_dispatch_contract_from_mechanics(
+        &mut mechanics,
         &agent_norm,
         &harness_transport,
         &resolved_profile,
@@ -333,9 +409,38 @@ pub(crate) async fn handle_tachi_dispatch(
         backend_version.as_deref(),
     )?;
     let authority_receipt = contract_receipt(&effective_contract);
+    assert_nested_mcp_profile_mechanics(&mechanics, &resolved_profile)?;
+    let execution_grant = mint_execution_grant_from_mechanics(
+        &mut mechanics,
+        format!("{dispatch_id}:authority"),
+        &env_resolution,
+    )?;
+    // #1001: zero-ceremony presence claim — auto-register/heartbeat only after
+    // authority compilation and grant minting have admitted this dispatch. A
+    // refusal must leave no active claim for an execution that cannot start.
+    // Storage errors remain a no-op and never fail an admitted dispatch.
+    crate::claims_ops::auto_register_or_heartbeat_claim(
+        server,
+        &crate::claims_ops::ClaimHookInput {
+            issue_ref: request.issue_ref.clone(),
+            flow_id: request.flow_id.clone(),
+            dispatch_id: Some(dispatch_id.clone()),
+            branch: None,
+            declared_file_scope: None,
+        },
+    );
+    let mcp_access = execution_grant.mcp_access.as_ref();
+    let inject_tachi = mcp_access
+        .and_then(|access| access.inject_tachi_mcp)
+        .unwrap_or(false);
+    let inject_hub = mcp_access
+        .and_then(|access| access.inject_hub_mcps)
+        .unwrap_or(false);
+    let timeout_secs_for_status = execution_grant.timeout_secs;
+    let timeout = Duration::from_secs(timeout_secs_for_status);
 
     // #1319-E1 defense-in-depth staffing-reason gate. `staffing_reason` is
-    // non-optional on `TachiDispatchParams`, so every well-typed caller carries
+    // non-optional in the typed ingress contract, so every well-typed caller carries
     // a typed reason. This is a RELEASE-ACTIVE check (not debug_assert, which
     // vanishes in release builds) so the kernel-side backstop claim holds in
     // production: a caller that somehow reached here with an out-of-variant
@@ -350,7 +455,7 @@ pub(crate) async fn handle_tachi_dispatch(
     // check can only trip a memory-safety violation or an ABI-break, both of
     // which must fail closed rather than stamp a bogus receipt.)
     if !matches!(
-        params.staffing_reason,
+        resolved_assignment.staffing_reason,
         tachi_params::TachiDispatchReason::ExplicitUserRequest
             | tachi_params::TachiDispatchReason::DurableCrossSession
             | tachi_params::TachiDispatchReason::CrossDeviceRemote
@@ -366,7 +471,7 @@ pub(crate) async fn handle_tachi_dispatch(
     // 1. Create isolated workspace directory + MCP config
     //
     // `agent_seat` is the lane identity written to `TACHI_AGENT_SEAT`, distinct
-    // from `params.tool_profile` (a shared capability selector). Use the
+    // from the shared capability selector. Use the
     // already lane-unique dispatch id so claims and runtime receipts cannot
     // collide merely because two workers share a profile.
     //
@@ -387,9 +492,11 @@ pub(crate) async fn handle_tachi_dispatch(
         &dispatch_id,
         inject_tachi,
         inject_hub,
-        params.tool_profile.as_deref(),
+        tool_profile.as_deref(),
         agent_seat,
-        &params.allowed_mcp_servers,
+        &mcp_access
+            .map(|access| access.allowed_mcp_servers.clone())
+            .unwrap_or_default(),
     )
     .await?;
 
@@ -399,16 +506,16 @@ pub(crate) async fn handle_tachi_dispatch(
     // (up to 180s) LLM call. External pollers must see *something* the
     // instant a dispatch is accepted, not only after the plan stage
     // succeeds. Every field serialized here is available straight off
-    // `params` + `DispatchStart` — no prompt/artifact/plan dependency.
-    // `v2` is not yet decided (that needs `params.stage`, which IS already
-    // resolved) so compute it early too; feedback_rules is not known yet
-    // (it comes from `write_dispatch_artifacts` below) and is seeded as a
+    // the request, resolved assignment, execution grant, and private start
+    // owners — no prompt/artifact/plan dependency.
+    // `v2` is not yet decided (that needs the resolved request stage, which IS already
+    // resolved) so compute it early too; feedback_rules are not known yet
+    // (they come from `write_dispatch_artifacts` below) and are seeded as a
     // neutral "pending" placeholder here, then overwritten by the existing
     // post-artifacts `write_status_json` call once real values exist.
-    // #1690 C1: the retired capability-bundle receipt field is NOT part of
-    // this seed — no status.json write may emit it, including as null.
-    let harness_server_url = infer_harness_server_url(&params, &harness_transport);
-    let v2_decision = v2_enabled_from_env(params.stage.as_deref());
+    let harness_server_url =
+        infer_harness_server_url(&requested_harness_server_url, &command, &harness_transport);
+    let v2_decision = v2_enabled_from_env(request.stage.as_deref());
     let v2 = matches!(v2_decision, V2Decision::Enabled);
 
     write_status_json(
@@ -423,17 +530,18 @@ pub(crate) async fn handle_tachi_dispatch(
         None,
         None,
         Some(json!({
-            "agent": agent_norm.clone(),
-            "task": params.task.clone(),
+            "agent": resolved_assignment.selected_backend.clone(),
+            "task": request.task.clone(),
             "state": "TASK_STATE_WORKING",
             "updated_at": Utc::now().to_rfc3339(),
             "run_dir": workspace_dir.to_string_lossy(),
             "result_written": false,
             "harness_transport": harness_transport.clone(),
             "harness_server_url": harness_server_url.clone(),
-            "host_adapter": host_adapter.clone(),
+            "host_adapter": resolved_assignment.host_adapter.clone(),
             "host_profile": host_profile.name(),
-            "execution_level": execution_level.as_str(),
+            "execution_level": serde_json::to_value(resolved_assignment.execution_level)
+                .unwrap_or(Value::Null),
             "feedback_rules": Value::Null,
             "timeout_secs": timeout_secs_for_status,
             // #894 S2d: the authority receipt — compiled workspace authority,
@@ -444,25 +552,25 @@ pub(crate) async fn handle_tachi_dispatch(
             // #1319-E1: stamp the typed staffing reason into the canonical
             // receipt so external staffing is auditable — the reason admission
             // happened on (not just that it was non-None).
-            "staffing_reason": serde_json::to_value(params.staffing_reason)
+            "staffing_reason": serde_json::to_value(resolved_assignment.staffing_reason)
                 .unwrap_or(Value::Null),
-            "identity_receipt": resolved_profile.identity_receipt,
+            "identity_receipt": resolved_assignment.identity_receipt.clone(),
             // #878-A: persist the working directory + completion predicate so
             // the complete gate (handler.rs) and the watchdog (execution.rs) can
             // machine-verify self-reported / exit-0 success against a contract.
-            "cwd": params.cwd.clone(),
+            "cwd": status_cwd.clone(),
             "completion_predicate":
-                serde_json::to_value(&params.completion_predicate).unwrap_or(Value::Null),
+                serde_json::to_value(&request.completion_predicate).unwrap_or(Value::Null),
             // #774 round 3: stamp the dispatch's named project (if any) into
             // the receipt itself. Daemon-restart orphan recovery
             // (`recover_orphaned_dispatch_runs`) only has this on-disk
-            // status.json to read from — it has no live `TachiDispatchParams`
+            // status.json to read from — it has no live dispatch input
             // — so unless `project` rides along in the receipt, a crash
             // mid-flight silently drops a named-project dispatch's terminal
             // outcome row into the default store instead of the named one,
             // splitting the same first-writer-wins invariant round 2 fixed
             // for the backend/preflight/watchdog/early-exit paths.
-            "project": params.project.clone(),
+            "project": request.project.clone(),
         })),
     );
 
@@ -482,9 +590,21 @@ pub(crate) async fn handle_tachi_dispatch(
     );
 
     // 2. Assemble prompt & write audit files to workspace
-    let prompt_assembly = assemble_prompt_with_trace(server, &params).await;
+    let effective_skills_for_files = effective_contract.mounted_skills.clone();
+    let prompt_assembly = assemble_resolved_prompt_with_trace(
+        server,
+        &request,
+        &resolved_assignment,
+        &execution_grant,
+        &resolved_profile,
+        &effective_skills_for_files,
+        stage_instruction.as_deref(),
+        None,
+        context_query.as_deref(),
+        inject_card,
+    )
+    .await;
     let base_prompt = prompt_assembly.prompt.clone();
-    let (effective_skills_for_files, _) = resolve_effective_skills(&params);
 
     let DispatchArtifacts {
         plan_path,
@@ -495,8 +615,10 @@ pub(crate) async fn handle_tachi_dispatch(
     } = write_dispatch_artifacts(DispatchArtifactInputs {
         workspace_dir: &workspace_dir,
         dispatch_id: &dispatch_id,
-        agent_norm: &agent_norm,
-        params: &params,
+        request: &request,
+        assignment: &resolved_assignment,
+        grant: &execution_grant,
+        profile: &resolved_profile,
         base_prompt: &base_prompt,
         prompt_assembly: &prompt_assembly,
         effective_skills_for_files: &effective_skills_for_files,
@@ -504,10 +626,9 @@ pub(crate) async fn handle_tachi_dispatch(
     })
     .await?;
 
-    // Enrich status.json now that feedback_rules is known. Same call shape
-    // as the original single seed — now the SECOND write, not the first
-    // (receipt-first seed above is the first). Neither write emits the
-    // retired capability-bundle key (#1690 C1).
+    // Enrich status.json now that feedback_rules are known. Same call shape
+    // as the original single seed — now the SECOND
+    // write, not the first (receipt-first seed above is the first).
     write_status_json(
         &workspace_dir,
         &dispatch_id,
@@ -520,17 +641,18 @@ pub(crate) async fn handle_tachi_dispatch(
         None,
         None,
         Some(json!({
-            "agent": agent_norm.clone(),
-            "task": params.task.clone(),
+            "agent": resolved_assignment.selected_backend.clone(),
+            "task": request.task.clone(),
             "state": "TASK_STATE_WORKING",
             "updated_at": Utc::now().to_rfc3339(),
             "run_dir": workspace_dir.to_string_lossy(),
             "result_written": false,
             "harness_transport": harness_transport.clone(),
             "harness_server_url": harness_server_url.clone(),
-            "host_adapter": host_adapter.clone(),
+            "host_adapter": resolved_assignment.host_adapter.clone(),
             "host_profile": host_profile.name(),
-            "execution_level": execution_level.as_str(),
+            "execution_level": serde_json::to_value(resolved_assignment.execution_level)
+                .unwrap_or(Value::Null),
             "feedback_rules": feedback_rules_trace.clone(),
             "timeout_secs": timeout_secs_for_status,
             // #894 S2d: same authority receipt as the receipt-first seed above
@@ -539,24 +661,24 @@ pub(crate) async fn handle_tachi_dispatch(
             // #1319-E1: stamp the typed staffing reason into the canonical
             // receipt so external staffing is auditable — the reason admission
             // happened on (not just that it was non-None).
-            "staffing_reason": serde_json::to_value(params.staffing_reason)
+            "staffing_reason": serde_json::to_value(resolved_assignment.staffing_reason)
                 .unwrap_or(Value::Null),
-            "identity_receipt": resolved_profile.identity_receipt,
+            "identity_receipt": resolved_assignment.identity_receipt.clone(),
             // #878-A: persist the working directory + completion predicate so
             // the complete gate (handler.rs) and the watchdog (execution.rs) can
             // machine-verify self-reported / exit-0 success against a contract.
-            "cwd": params.cwd.clone(),
+            "cwd": status_cwd.clone(),
             // #894 S1: record how the working directory was bound so the ledger
             // distinguishes managed (leased) envs from opted-in unmanaged cwds
             // and the daemon default.
             "env": env_stamp,
-            "env_id": env_id_stamp,
+            "env_id": execution_grant.env_id.clone(),
             "completion_predicate":
-                serde_json::to_value(&params.completion_predicate).unwrap_or(Value::Null),
+                serde_json::to_value(&request.completion_predicate).unwrap_or(Value::Null),
             // #774 round 3: same rationale as the receipt-first seed above —
             // re-stamped here since this write's `extra` is a fresh object,
             // not a merge with the seed's.
-            "project": params.project.clone(),
+            "project": request.project.clone(),
         })),
     );
 
@@ -573,16 +695,15 @@ pub(crate) async fn handle_tachi_dispatch(
     init_kanban_and_flow(FlowSetupInputs {
         server,
         dispatch_id: &dispatch_id,
-        params: &params,
-        agent_norm: &agent_norm,
+        request: &request,
+        assignment: &resolved_assignment,
+        grant: &execution_grant,
+        resolved_profile: &resolved_profile,
         plan_path: &plan_path,
         workspace_dir: &workspace_dir,
         prompt_md_path: &prompt_md_path,
         context_md_path: &context_md_path,
         trajectory_path: &trajectory_path,
-        evidence_required: &resolved_profile.evidence_required,
-        route_explanation: &resolved_profile.route_explanation,
-        identity_receipt: &resolved_profile.identity_receipt,
     })
     .await?;
 
@@ -607,9 +728,9 @@ pub(crate) async fn handle_tachi_dispatch(
         // it directly (see plan_stage.rs) ahead of this guard ever seeing them.
         let plan_stage_outcome = run_v2_plan_stage(PlanStageInputs {
             server,
-            params: &params,
+            request: &request,
             dispatch_id: &dispatch_id,
-            agent_norm: &agent_norm,
+            assignment: &resolved_assignment,
             resolved_profile: &resolved_profile,
             profile_payload: &profile_payload,
             base_prompt: &base_prompt,
@@ -628,6 +749,21 @@ pub(crate) async fn handle_tachi_dispatch(
         let prompt = plan_stage_outcome.prompt;
         let plan_duration_ms = plan_stage_outcome.plan_duration_ms;
         let plan_generated_at = plan_stage_outcome.plan_generated_at;
+        let custom_launch_spec = (resolved_assignment.selected_backend == "custom")
+            .then(|| {
+                mint_custom_launch_spec(
+                    &resolved_assignment,
+                    &execution_grant,
+                    &command,
+                    &prompt,
+                    &harness_transport,
+                    &harness_server_url,
+                )
+            })
+            .transpose()?;
+        if let Some(spec) = custom_launch_spec.as_ref() {
+            validate_custom_launch_spec_timeout(spec, timeout_secs_for_status)?;
+        }
 
         // 5. Build execution backend
         let PreparedDispatchBackend {
@@ -641,9 +777,12 @@ pub(crate) async fn handle_tachi_dispatch(
             trajectory_path: &trajectory_path,
             workspace_dir: &workspace_dir,
             dispatch_id: &dispatch_id,
-            agent_norm: &agent_norm,
-            params: &params,
+            request: &request,
+            assignment: &resolved_assignment,
+            grant: &execution_grant,
+            command: &command,
             prompt: &prompt,
+            custom_launch_spec: custom_launch_spec.as_ref(),
             prompt_md_path: &prompt_md_path,
             mcp_config_path: mcp_config_path.as_ref(),
             v2,
@@ -657,19 +796,20 @@ pub(crate) async fn handle_tachi_dispatch(
         // 6. Inject legacy vault env + materialize credentials
         inject_legacy_vault_env(
             server,
-            params.cwd.as_deref().map(std::path::Path::new),
+            execution_grant.allowed_cwd.as_deref(),
             &mut execution,
             &trajectory_path,
             &dispatch_id,
-            &agent_norm,
+            &resolved_assignment,
         );
 
         let credentials = apply_materialized_credentials(
             CredentialApplyInputs {
                 server,
-                params: &params,
-                agent_norm: &agent_norm,
-                selected_profile: resolved_profile.selected_profile.as_deref(),
+                request: &request,
+                grant: &execution_grant,
+                raw_credential_profiles: &raw_credential_profiles,
+                assignment: &resolved_assignment,
                 workspace_dir: &workspace_dir,
                 trajectory_path: &trajectory_path,
                 dispatch_id: &dispatch_id,
@@ -678,7 +818,6 @@ pub(crate) async fn handle_tachi_dispatch(
                 plan_duration_ms,
                 harness_transport: &harness_transport,
                 harness_server_url: &harness_server_url,
-                host_adapter: &host_adapter,
                 execution_backend_name,
                 execution_backend_metadata: &execution_backend_metadata,
                 acpx_enabled,
@@ -695,24 +834,24 @@ pub(crate) async fn handle_tachi_dispatch(
             harness_server_url: &harness_server_url,
             credential_env: &credentials.env,
             dispatch_id: &dispatch_id,
-            agent_norm: &agent_norm,
-            task: &params.task,
+            assignment: &resolved_assignment,
+            task: &request.task,
             trajectory_path: &trajectory_path,
             workspace_dir: &workspace_dir,
             v2,
             plan_generated_at: plan_generated_at.as_deref(),
             plan_duration_ms,
-            host_adapter: &host_adapter,
+            host_adapter: &resolved_assignment.host_adapter,
             execution_backend_name,
             execution_backend_metadata: &execution_backend_metadata,
             acpx_enabled,
             native_acp_enabled,
             timeout_secs_for_status,
-            project: params.project.as_deref(),
+            project: request.project.as_deref(),
         })?;
 
         let flow_dispatch_slot =
-            reserve_dispatch_slot(params.flow_id.as_deref(), &params.task, &dispatch_id)?;
+            reserve_dispatch_slot(request.flow_id.as_deref(), &request.task, &dispatch_id)?;
 
         Ok(PostInitDispatchOutcome::Ready(Box::new(ReadyDispatch {
             execution,
@@ -748,7 +887,7 @@ pub(crate) async fn handle_tachi_dispatch(
                 server,
                 &dispatch_id,
                 "post-init dispatch stage",
-                params.project.as_deref(),
+                request.project.as_deref(),
             )
             .await;
             return Err(e);
@@ -760,9 +899,9 @@ pub(crate) async fn handle_tachi_dispatch(
     spawn_background_dispatch(BackgroundDispatchContext {
         server: server.clone(),
         dispatch_id: dispatch_id.clone(),
-        agent: agent_norm.clone(),
-        project: params.project.clone(),
-        stage: params.stage.clone(),
+        agent: resolved_assignment.selected_worker.clone(),
+        project: request.project.clone(),
+        stage: request.stage.clone(),
         trajectory_path: trajectory_path.clone(),
         workspace_dir: workspace_dir.clone(),
         v2,
@@ -773,8 +912,8 @@ pub(crate) async fn handle_tachi_dispatch(
         feedback_rules_trace: feedback_rules_trace.clone(),
         harness_transport: harness_transport.clone(),
         harness_server_url: harness_server_url.clone(),
-        host_adapter: host_adapter.clone(),
-        opencode_sop_label: opencode_sop_label(&agent_norm, &params),
+        host_adapter: resolved_assignment.host_adapter.clone(),
+        opencode_sop_label: opencode_sop_label(&resolved_assignment.selected_worker, &request),
         execution_backend_metadata: execution_backend_metadata.clone(),
         execution,
         flow_dispatch_slot,
@@ -784,7 +923,7 @@ pub(crate) async fn handle_tachi_dispatch(
     // 9. Immediately return — main agent is unblocked!
     build_dispatch_response(DispatchResponseInputs {
         dispatch_id: &dispatch_id,
-        agent_norm: &agent_norm,
+        assignment: &resolved_assignment,
         profile_payload: &profile_payload,
         resolved_profile: &resolved_profile,
         authority: &authority_receipt,
@@ -792,18 +931,42 @@ pub(crate) async fn handle_tachi_dispatch(
         feedback_rules_trace: &feedback_rules_trace,
         harness_transport: &harness_transport,
         harness_server_url: &harness_server_url,
-        host_adapter: &host_adapter,
         execution_backend_name,
         execution_backend_metadata: &execution_backend_metadata,
         acpx_enabled,
         native_acp_enabled,
         v2,
         plan_duration_ms,
-        params: &params,
+        request: &request,
+        verbose,
         plan_path: &plan_path,
         prompt_md_path: &prompt_md_path,
         context_md_path: &context_md_path,
         trajectory_path: &trajectory_path,
         workspace_dir: &workspace_dir_for_response,
     })
+}
+
+/// Typed Staff ingress. Admission and recommendation validation happen before
+/// the canonical kernel can create a receipt or any artifact. The legacy
+/// bootstrap handler remains the sole compatibility entry for its flat probe
+/// payload; Staff itself only supplies semantic request data.
+pub(crate) async fn launch_staff_assignment(
+    server: &MemoryServer,
+    request: tachi_params::StaffAssignmentRequest,
+) -> Result<
+    (
+        String,
+        tachi_params::ResolvedStaffAssignment,
+        Option<memcore::RouteRecommendationRow>,
+    ),
+    String,
+> {
+    enforce_dispatch_depth(server)?;
+    let (_, execution_level) = crate::host_profile::authorize_dispatch(request.execution_level)?;
+    let start = resolve_staff_dispatch_start(server, request, Utc::now(), execution_level)?;
+    let assignment = start.resolved_assignment.clone();
+    let recommendation = start.resolved_recommendation.clone();
+    let raw = launch_canonical_dispatch(server, start).await?;
+    Ok((raw, assignment, recommendation))
 }

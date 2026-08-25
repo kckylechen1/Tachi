@@ -26,6 +26,12 @@ pub(crate) async fn handle_hub_register(
     server: &MemoryServer,
     params: HubRegisterParams,
 ) -> Result<String, String> {
+    if crate::builtins::is_retired_builtin_capability_id(&params.id) {
+        return Err(format!(
+            "Capability '{}' is retired and cannot be registered.",
+            params.id
+        ));
+    }
     ensure_hub_definition_size("hub_register", &params.definition)?;
 
     let (target_db, warning) = server.resolve_write_scope(&params.scope);

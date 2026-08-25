@@ -2,15 +2,47 @@ use super::*;
 
 pub(super) struct DispatchStart {
     pub(super) dispatch_id: String,
+    pub(super) request: tachi_params::StaffAssignmentRequest,
+    pub(super) legacy_auto_capability_bundle: Option<bool>,
+    pub(super) requested_skills: Vec<String>,
+    pub(super) context_query: Option<String>,
+    pub(super) tool_profile: Option<String>,
+    pub(super) command: Vec<String>,
+    pub(super) harness_transport: Option<String>,
+    pub(super) harness_server_url: Option<String>,
+    pub(super) raw_cwd: Option<String>,
+    pub(super) raw_credential_profiles: Vec<String>,
     pub(super) agent_norm: String,
     pub(super) resolved_profile: ResolvedDispatchProfile,
+    pub(super) resolved_assignment: tachi_params::ResolvedStaffAssignment,
+    pub(super) resolved_recommendation: Option<memcore::RouteRecommendationRow>,
     pub(super) profile_payload: Value,
-    pub(super) timeout_secs_for_status: u64,
-    pub(super) timeout: Duration,
-    pub(super) inject_tachi: bool,
-    pub(super) inject_hub: bool,
     pub(super) workspace_dir: PathBuf,
-    pub(super) host_adapter: Option<String>,
+    pub(super) inject_card: bool,
+    pub(super) verbose: bool,
+    pub(super) mechanics: DispatchLaunchMechanics,
+}
+
+/// Server-owned launch mechanics. This is not a facade carrier: bootstrap
+/// normalizes it once from flat input, while Staff receives it only from typed
+/// profile resolution.
+pub(super) struct DispatchLaunchMechanics {
+    pub(super) cwd: Option<String>,
+    pub(super) env_id: Option<String>,
+    pub(super) unmanaged_cwd: bool,
+    pub(super) skills: Vec<String>,
+    pub(super) model: Option<String>,
+    pub(super) permission_profile: Option<String>,
+    pub(super) allowed_tools: Vec<String>,
+    pub(super) max_turns: Option<u32>,
+    pub(super) sandbox: Option<String>,
+    pub(super) command: Vec<String>,
+    pub(super) credential_profiles: Vec<String>,
+    pub(super) mcp_access: Option<tachi_params::DispatchMcpAccessParams>,
+    pub(super) inject_tachi_mcp: Option<bool>,
+    pub(super) inject_hub_mcps: Option<bool>,
+    pub(super) allowed_mcp_servers: Vec<String>,
+    pub(super) timeout_secs: u64,
 }
 
 // ─── Dispatch start resolution ───────────────────────────────────────────────
@@ -19,33 +51,90 @@ pub(super) fn resolve_dispatch_start(
     server: &MemoryServer,
     params: &mut TachiDispatchParams,
     now: chrono::DateTime<Utc>,
+    execution_level: tachi_params::ExecutionLevel,
 ) -> Result<DispatchStart, String> {
-    let resolved_profile = resolve_and_apply_dispatch_profile_for_server(server, params)?;
+    // Preserve only the caller's profile spelling for diagnostics/replay. The
+    // typed request itself must be minted after profile resolution so omitted
+    // stage and other profile defaults reach every typed consumer.
+    let raw_request_profile = params.profile.clone();
+    let raw_cwd = params.cwd.clone();
+    // #1815 P1: resolve into the acknowledged compatibility projection first.
+    // The canonical outputs below are minted before that projection reaches the
+    // remaining P2/P3 consumers; final #1814 deletes this bridge entirely.
+    let mut legacy_projection = params.clone();
+    let resolved_profile =
+        resolve_and_apply_dispatch_profile_for_server(server, &mut legacy_projection)?;
+    reconcile_resolved_profile_compatibility(&mut legacy_projection, &resolved_profile);
+    // Credential failure receipts are forensic evidence, not launch authority.
+    // Capture the resolved compatibility projection before the grant trims and
+    // deduplicates it so profile-added defaults and caller spelling are both
+    // visible if materialization fails.
+    let raw_credential_profiles = legacy_projection.credential_profiles.clone();
+    let request = tachi_params::StaffAssignmentRequest {
+        staffing_reason: legacy_projection.staffing_reason,
+        task: legacy_projection.task.clone(),
+        profile: raw_request_profile,
+        worker: legacy_projection.agent.clone(),
+        stage: legacy_projection.stage.clone(),
+        execution_level: legacy_projection.execution_level,
+        issue_ref: legacy_projection.issue_ref.clone(),
+        pr_ref: legacy_projection.pr_ref.clone(),
+        flow_id: legacy_projection.flow_id.clone(),
+        project: legacy_projection.project.clone(),
+        completion_predicate: legacy_projection.completion_predicate.clone(),
+        recommendation_ref: None,
+    };
+    let legacy_auto_capability_bundle = legacy_projection.auto_capability_bundle;
     let mut agent_norm = resolved_profile.agent.clone();
     let dispatch_id = new_dispatch_id(now, &agent_norm);
 
     agent_norm = if let Some(agent) = normalize_dispatch_agent_name(&agent_norm) {
         agent
     } else {
-        let agent = params.agent.as_deref().unwrap_or("");
+        let agent = legacy_projection.agent.as_deref().unwrap_or("");
         return Err(format!(
             "Unknown agent '{}'. Supported: {}",
             agent.trim(),
             dispatch_agent_help_list()
         ));
     };
-    params.agent = Some(agent_norm.clone());
+    legacy_projection.agent = Some(agent_norm.clone());
+
+    // #1815 P1: the profile resolver still writes the legacy ingress for
+    // untouched P2/P3/#1814 consumers. This typed result is the authoritative
+    // selection record; the exact legacy projection is checked below and must
+    // be deleted when those consumers migrate.
+    let resolved_assignment = tachi_params::ResolvedStaffAssignment {
+        assignment_id: dispatch_id.clone(),
+        staffing_reason: legacy_projection.staffing_reason,
+        selected_worker: agent_norm.clone(),
+        selected_profile: resolved_profile.selected_profile.clone(),
+        selected_backend: agent_norm.clone(),
+        selected_model: legacy_projection.model.clone(),
+        execution_level: Some(execution_level),
+        recommendation_ref: None,
+        host_adapter: resolved_profile.host_adapter.clone(),
+        evidence_required: resolved_profile.evidence_required.clone(),
+        fallback_chain: resolved_profile.fallback_chain.clone(),
+        route_explanation: resolved_profile.route_explanation.clone(),
+        identity_receipt: serde_json::to_value(&resolved_profile.identity_receipt)
+            .unwrap_or(serde_json::Value::Null),
+    };
+    apply_assignment_legacy_projection(
+        params,
+        legacy_projection,
+        &resolved_assignment,
+        &resolved_profile,
+    )?;
 
     let profile_payload =
         serde_json::to_value(&resolved_profile).unwrap_or_else(|_| json!({"agent": agent_norm}));
-    let timeout_secs_for_status = params.timeout_secs;
-    let timeout = Duration::from_secs(timeout_secs_for_status);
-    let inject_tachi = params.inject_tachi_mcp.unwrap_or(false);
-    let inject_hub = params.inject_hub_mcps.unwrap_or(false);
+    let inject_card = params.inject_card.unwrap_or(true);
+    let verbose = params.verbose.unwrap_or(false);
 
     // Validate backend/MCP compatibility before creating the run ledger. A
     // rejected dispatch should not leave an empty run directory with no status.
-    if inject_tachi || inject_hub {
+    if params.inject_tachi_mcp.unwrap_or(false) || params.inject_hub_mcps.unwrap_or(false) {
         if matches!(agent_norm.as_str(), "custom" | "opencode") {
             return Err(
                 "inject_tachi_mcp / inject_hub_mcps are not supported for custom/opencode subprocess backends."
@@ -67,18 +156,222 @@ pub(super) fn resolve_dispatch_start(
     }
 
     let workspace_dir = dispatch_runs_root().join(&dispatch_id);
-    let host_adapter = resolved_profile.host_adapter.clone();
-
     Ok(DispatchStart {
         dispatch_id,
+        request,
+        legacy_auto_capability_bundle,
+        requested_skills: params.skills.clone(),
+        context_query: params.context_query.clone(),
+        tool_profile: params.tool_profile.clone(),
+        command: params.command.clone(),
+        harness_transport: params.harness_transport.clone(),
+        harness_server_url: params.harness_server_url.clone(),
+        raw_cwd,
+        raw_credential_profiles,
         agent_norm,
         resolved_profile,
+        resolved_assignment,
+        resolved_recommendation: None,
         profile_payload,
-        timeout_secs_for_status,
-        timeout,
-        inject_tachi,
-        inject_hub,
         workspace_dir,
-        host_adapter,
+        inject_card,
+        verbose,
+        mechanics: DispatchLaunchMechanics {
+            cwd: params.cwd.clone(),
+            env_id: params.env_id.clone(),
+            unmanaged_cwd: params.unmanaged_cwd.unwrap_or(false),
+            skills: params.skills.clone(),
+            model: params.model.clone(),
+            permission_profile: params.permission_profile.clone(),
+            allowed_tools: params.allowed_tools.clone(),
+            max_turns: params.max_turns,
+            sandbox: params.sandbox.clone(),
+            command: params.command.clone(),
+            credential_profiles: params.credential_profiles.clone(),
+            mcp_access: params.mcp_access.clone(),
+            inject_tachi_mcp: params.inject_tachi_mcp,
+            inject_hub_mcps: params.inject_hub_mcps,
+            allowed_mcp_servers: params.allowed_mcp_servers.clone(),
+            timeout_secs: params.timeout_secs,
+        },
     })
+}
+
+pub(super) fn resolve_staff_dispatch_start(
+    server: &MemoryServer,
+    mut request: tachi_params::StaffAssignmentRequest,
+    now: chrono::DateTime<Utc>,
+    execution_level: tachi_params::ExecutionLevel,
+) -> Result<DispatchStart, String> {
+    let resolved_recommendation = if let Some(recommendation_ref) =
+        request.recommendation_ref.as_deref()
+    {
+        server
+            .with_global_store_read(|store| {
+                memcore::get_route_recommendation(store.connection(), recommendation_ref)
+                    .map_err(|error| error.to_string())
+            })?
+            .ok_or_else(|| format!("Unknown or stale recommendation_ref '{recommendation_ref}'"))
+            .map(Some)?
+    } else {
+        None
+    };
+    let resolved_profile =
+        resolve_and_apply_staff_assignment_profile_for_server(server, &mut request)?;
+    let agent_norm = normalize_dispatch_agent_name(&resolved_profile.agent).ok_or_else(|| {
+        format!(
+            "Unknown agent '{}'. Supported: {}",
+            resolved_profile.agent.trim(),
+            dispatch_agent_help_list()
+        )
+    })?;
+    let dispatch_id = new_dispatch_id(now, &agent_norm);
+    let resolved_assignment = tachi_params::ResolvedStaffAssignment {
+        assignment_id: dispatch_id.clone(),
+        staffing_reason: request.staffing_reason,
+        selected_worker: agent_norm.clone(),
+        selected_profile: resolved_profile.selected_profile.clone(),
+        selected_backend: agent_norm.clone(),
+        selected_model: resolved_profile.selected_model.clone(),
+        execution_level: Some(execution_level),
+        recommendation_ref: request.recommendation_ref.clone(),
+        host_adapter: resolved_profile.host_adapter.clone(),
+        evidence_required: resolved_profile.evidence_required.clone(),
+        fallback_chain: resolved_profile.fallback_chain.clone(),
+        route_explanation: resolved_profile.route_explanation.clone(),
+        identity_receipt: serde_json::to_value(&resolved_profile.identity_receipt)
+            .unwrap_or(serde_json::Value::Null),
+    };
+    let mcp_access = resolved_profile.mcp_access.clone();
+    let mechanics = DispatchLaunchMechanics {
+        cwd: None,
+        env_id: None,
+        unmanaged_cwd: false,
+        skills: resolved_profile.required_skills.clone(),
+        model: resolved_profile.selected_model.clone(),
+        permission_profile: None,
+        allowed_tools: Vec::new(),
+        max_turns: None,
+        sandbox: None,
+        command: resolved_profile.launch_command.clone(),
+        credential_profiles: resolved_profile.credential_profiles.clone(),
+        inject_tachi_mcp: mcp_access.inject_tachi_mcp,
+        inject_hub_mcps: mcp_access.inject_hub_mcps,
+        allowed_mcp_servers: mcp_access.allowed_mcp_servers.clone(),
+        mcp_access: Some(mcp_access),
+        timeout_secs: 600,
+    };
+    Ok(DispatchStart {
+        dispatch_id: dispatch_id.clone(),
+        request,
+        legacy_auto_capability_bundle: Some(resolved_profile.auto_capability_bundle),
+        requested_skills: mechanics.skills.clone(),
+        context_query: None,
+        tool_profile: resolved_profile.tool_profile.clone(),
+        command: resolved_profile.launch_command.clone(),
+        harness_transport: resolved_profile.harness_transport.clone(),
+        harness_server_url: resolved_profile.harness_server_url.clone(),
+        raw_cwd: None,
+        raw_credential_profiles: resolved_profile.credential_profiles.clone(),
+        agent_norm,
+        profile_payload: serde_json::to_value(&resolved_profile).unwrap_or(serde_json::Value::Null),
+        workspace_dir: dispatch_runs_root().join(&dispatch_id),
+        inject_card: true,
+        verbose: false,
+        resolved_profile,
+        resolved_assignment,
+        resolved_recommendation,
+        mechanics,
+    })
+}
+
+/// #1815 P1 compatibility assertion. P2/P3 migrate these consumers to the
+/// typed assignment; final #1814 removes the legacy `TachiDispatchParams`
+/// projection. Keeping this comparison at the ingress makes a one-sided edit
+/// fail before receipt, artifact, backend, or spawn work begins.
+pub(super) fn assert_assignment_legacy_projection(
+    params: &TachiDispatchParams,
+    assignment: &tachi_params::ResolvedStaffAssignment,
+    resolved_profile: &ResolvedDispatchProfile,
+) -> Result<(), String> {
+    let matches = assignment.staffing_reason == params.staffing_reason
+        && params.agent.as_deref() == Some(assignment.selected_backend.as_str())
+        && assignment.selected_worker == assignment.selected_backend
+        && assignment.selected_profile
+            == params
+                .profile
+                .as_deref()
+                .map(str::trim)
+                .filter(|profile| !profile.is_empty())
+                .map(str::to_string)
+        && assignment.selected_model == params.model
+        && assignment.execution_level == params.execution_level
+        && assignment.recommendation_ref.is_none()
+        && assignment.host_adapter == resolved_profile.host_adapter
+        && assignment.evidence_required == resolved_profile.evidence_required
+        && assignment.fallback_chain == resolved_profile.fallback_chain
+        && assignment.route_explanation == resolved_profile.route_explanation
+        && assignment.identity_receipt
+            == serde_json::to_value(&resolved_profile.identity_receipt)
+                .unwrap_or(serde_json::Value::Null);
+    if matches {
+        Ok(())
+    } else {
+        Err("dispatch assignment and legacy compatibility projection diverged".to_string())
+    }
+}
+
+pub(super) fn assert_nested_mcp_profile_mechanics(
+    params: &DispatchLaunchMechanics,
+    resolved_profile: &ResolvedDispatchProfile,
+) -> Result<(), String> {
+    if serde_json::to_value(&params.mcp_access).ok()
+        == serde_json::to_value(Some(&resolved_profile.mcp_access)).ok()
+    {
+        Ok(())
+    } else {
+        Err("nested MCP profile projection diverged from resolved profile".to_string())
+    }
+}
+
+#[cfg(test)]
+pub(super) fn assert_nested_mcp_profile_projection(
+    params: &TachiDispatchParams,
+    resolved_profile: &ResolvedDispatchProfile,
+) -> Result<(), String> {
+    if serde_json::to_value(&params.mcp_access).ok()
+        == serde_json::to_value(Some(&resolved_profile.mcp_access)).ok()
+    {
+        Ok(())
+    } else {
+        Err("nested MCP profile projection diverged from resolved profile".to_string())
+    }
+}
+
+fn apply_assignment_legacy_projection(
+    params: &mut TachiDispatchParams,
+    mut legacy_projection: TachiDispatchParams,
+    assignment: &tachi_params::ResolvedStaffAssignment,
+    resolved_profile: &ResolvedDispatchProfile,
+) -> Result<(), String> {
+    // This is the sole temporary P1 write-back. The selected values come from
+    // the typed assignment; the remaining fields were resolved by the private
+    // ResolvedDispatchProfile context while preserving untouched caller input.
+    legacy_projection.agent = Some(assignment.selected_backend.clone());
+    legacy_projection.model = assignment.selected_model.clone();
+    legacy_projection.execution_level = assignment.execution_level;
+    *params = legacy_projection;
+    assert_assignment_legacy_projection(params, assignment, resolved_profile)
+}
+
+/// Preserve the resolver's nested MCP profile context for profile-facing
+/// consumers. The existing top-level MCP fields remain the independent
+/// workspace/launch authority and are reconciled into the grant later. Credential
+/// profiles are the resolver's trimmed and deduplicated context, not the caller's
+/// raw spelling.
+fn reconcile_resolved_profile_compatibility(
+    legacy_projection: &mut TachiDispatchParams,
+    resolved_profile: &ResolvedDispatchProfile,
+) {
+    legacy_projection.mcp_access = Some(resolved_profile.mcp_access.clone());
 }

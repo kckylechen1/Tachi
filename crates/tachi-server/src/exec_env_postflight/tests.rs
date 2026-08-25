@@ -948,6 +948,35 @@ fn rewrite_preimage(
     .expect("write pre-image");
 }
 
+/// Keep the gate-level no-witness tests runnable on a target where the runtime
+/// probe itself refuses. The fallback is still an actual on-disk data image
+/// with `CtimeWitness::None`; the tests below continue through the original
+/// `PostflightGate::run` assertions rather than treating capture refusal as a
+/// substitute verdict.
+fn capture_preimage_or_write_none_image(fx: &Fixture, gate: &PostflightGate) {
+    match gate.capture_preimage() {
+        Ok(_) => {}
+        Err(err) => {
+            assert!(
+                err.contains("runtime filesystem probe") || err.contains("ctime witness"),
+                "capture refusal must be caused by the unavailable ctime witness: {err}"
+            );
+            let image = manifest::capture(&manifest::CaptureSpec::new(fx.ws(), None))
+                .expect("the raw image must still be constructible for the gate refusal test");
+            assert_eq!(
+                image.ctime_witness,
+                CtimeWitness::None,
+                "the fallback image must carry the pessimistic witness"
+            );
+            fs::write(
+                fx.preimage_path(),
+                serde_json::to_vec(&image).expect("serialize fallback pre-image"),
+            )
+            .expect("write fallback pre-image");
+        }
+    }
+}
+
 #[test]
 fn the_preimage_is_sealed_with_an_observed_clock_barrier_past_every_ctime() {
     let fx = Fixture::new();
@@ -1153,11 +1182,11 @@ fn the_clock_probe_is_written_outside_every_walk_root() {
 // them: the tests below put the gate in the state each precondition failure
 // produces and assert it refuses, exactly as the barrier-absent test above does.
 
+#[cfg(unix)]
 #[test]
 fn a_sealed_preimage_names_the_ctime_witness_it_actually_used() {
-    // The positive half. On unix the witness is POSIX ctime, and the gate is
-    // willing to run. If this ever records `None` on a platform where the gate
-    // still passes, the refusal below has been disconnected.
+    // The positive half. On a native Unix filesystem the runtime probe performs
+    // an mtime backdate/restore and accepts only an independent ctime advance.
     let fx = Fixture::new();
     let gate = fx.gate(WriteContract::DetectAndReject);
     let pre = gate.capture_preimage().expect("pre-image");
@@ -1165,10 +1194,10 @@ fn a_sealed_preimage_names_the_ctime_witness_it_actually_used() {
     assert_eq!(
         pre.ctime_witness,
         CtimeWitness::PosixCtime,
-        "a unix capture must record the POSIX ctime witness, or its ctime fields prove nothing"
+        "a native Unix capture must record the runtime-confirmed POSIX ctime witness"
     );
     pre.verify_timestamp_preconditions()
-        .expect("a single-filesystem unix capture satisfies both preconditions");
+        .expect("a native single-filesystem capture satisfies both preconditions");
     assert!(
         pre.foreign_device_paths.is_empty(),
         "a single-filesystem workspace must not report foreign devices: {:?}",
@@ -1176,19 +1205,92 @@ fn a_sealed_preimage_names_the_ctime_witness_it_actually_used() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn the_runtime_ctime_probe_accepts_only_independent_change_time() {
+    let fx = Fixture::new();
+    let roots = vec![fx.ws().to_path_buf()];
+
+    assert_eq!(
+        manifest::ctime_witness_kind(fx.ws(), &roots),
+        CtimeWitness::PosixCtime,
+        "native POSIX ctime must advance after the probe backdates and restores mtime"
+    );
+    assert_eq!(
+        manifest::ctime_witness_from_observation(
+            FsTime::new(100, 0),
+            FsTime::new(100, 0),
+            FsTime::new(99, 0),
+            FsTime::new(100, 0),
+            FsTime::new(101, 0),
+        ),
+        CtimeWitness::PosixCtime,
+        "an independent ctime advance after restoring mtime must be accepted"
+    );
+    assert_eq!(
+        manifest::ctime_witness_from_observation(
+            FsTime::new(100, 0),
+            FsTime::new(100, 0),
+            FsTime::new(99, 0),
+            FsTime::new(100, 0),
+            FsTime::new(100, 0),
+        ),
+        CtimeWitness::None,
+        "a derived/restored ctime with no independent advance must be rejected"
+    );
+}
+
+#[test]
+fn a_capture_requires_a_ctime_witness_for_each_walk_root() {
+    // Put the optional second root inside the workspace. The workspace probe
+    // still has a parent outside both roots, but the nested root's parent is
+    // inside the workspace and must therefore be refused. A workspace-only
+    // compile-time assumption would incorrectly stamp PosixCtime here.
+    let workspace = tempfile::tempdir().expect("workspace tempdir");
+    let gitdir = workspace.path().join("nested-gitdir");
+    fs::create_dir_all(&gitdir).expect("nested gitdir");
+    fs::write(workspace.path().join("tracked.txt"), b"tracked\n").expect("tracked");
+    fs::write(gitdir.join("HEAD"), b"ref: refs/heads/main\n").expect("HEAD");
+
+    let image = manifest::capture(&manifest::CaptureSpec::new(workspace.path(), Some(&gitdir)))
+        .expect("capture remains a data image; sealing supplies the fail-closed refusal");
+    assert_eq!(
+        image.ctime_witness,
+        CtimeWitness::None,
+        "every actual walk root must establish ctime semantics before the image can claim PosixCtime"
+    );
+}
+
+#[test]
+fn a_derived_ctime_that_returns_after_mtime_restore_is_rejected() {
+    // Synthetic nearest-negative case: a filesystem derives ctime from mtime.
+    // Backdating and restoring mtime succeeds, but ctime returns to its
+    // original value instead of advancing as an independent inode witness.
+    assert_eq!(
+        manifest::ctime_witness_from_observation(
+            FsTime::new(100, 0),
+            FsTime::new(100, 0),
+            FsTime::new(99, 0),
+            FsTime::new(100, 0),
+            FsTime::new(100, 0),
+        ),
+        CtimeWitness::None,
+        "derived/restored ctime must not qualify as PosixCtime"
+    );
+}
+
 #[test]
 fn an_image_with_no_ctime_witness_is_not_a_pass() {
-    // The platform hole this review caught: `#[cfg(not(unix))] unix_ctime` used
-    // to return `created()`, which does NOT advance when a file's contents
-    // change — so the barrier spin could "observe" an advance in a field that
-    // can never move and MANUFACTURE a proof. That is worse than the original
-    // fail-open: the original lost a signal, this one invents one.
+    // A runtime probe that cannot establish independent ctime (including a
+    // derived-ctime Unix filesystem) must fail closed. Creation time and mtime
+    // are not substitutes: neither proves mutate-then-restore.
     //
-    // The refusal is data-driven precisely so it can be exercised from a unix
-    // test: this is byte-for-byte the pre-image such a platform produces.
+    // The refusal is data-driven precisely so it can be exercised on a native
+    // Unix build: this is byte-for-byte the pre-image such a filesystem
+    // produces.
     let fx = Fixture::new();
     let gate = fx.gate(WriteContract::DetectAndReject);
-    gate.capture_preimage().expect("pre-image");
+    capture_preimage_or_write_none_image(&fx, &gate);
 
     rewrite_preimage(&fx.preimage_path(), |obj| {
         obj.insert(
@@ -1220,7 +1322,7 @@ fn an_absent_ctime_witness_field_reads_as_none_not_as_a_guarantee() {
     // into the guarantee the image never carried.
     let fx = Fixture::new();
     let gate = fx.gate(WriteContract::DetectAndReject);
-    gate.capture_preimage().expect("pre-image");
+    capture_preimage_or_write_none_image(&fx, &gate);
 
     rewrite_preimage(&fx.preimage_path(), |obj| {
         obj.remove("ctime_witness");

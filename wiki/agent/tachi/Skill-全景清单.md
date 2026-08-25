@@ -102,7 +102,6 @@
 | coding-debug-pattern | Capture repeatable debug patterns for coding agents | tachi-hub | `skill:coding-debug-pattern` |
 | coding-gotcha-capture | Promote a recurring coding pitfall into a permanent gotcha note | tachi-hub | `skill:coding-gotcha-capture` |
 | cso | Chief Security Officer mode: OWASP Top 10 audit, STRIDE threat modeling | gstack / tachi-hub | `skill:cso` |
-| trajectory-distiller | Distill execution traces into reusable skill documents | tachi-hub | `skill:trajectory-distiller` |
 
 ### 🌐 Browser / Testing (7)
 
@@ -297,7 +296,7 @@
 | deepl, claude-skills-zh-cn | 多语言支持 |
 | feishu-doc-reader, data-analysis | 工具集成 |
 | coding-* 系列 (5个) | 编码模式库 |
-| trajectory-distiller, learn, retro | 学习与回顾 |
+| learn, retro | 学习与回顾 |
 | 所有 external plugin (discord/telegram/imessage) | 通讯集成 |
 
 ---

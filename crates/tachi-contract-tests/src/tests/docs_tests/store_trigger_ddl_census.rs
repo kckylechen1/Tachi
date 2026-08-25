@@ -545,6 +545,60 @@ const EXEMPTIONS: &[Exemption<'static>] = &[
                 occurrences: 1,
             },
             Site {
+                symbol: "install_authority_row_guards",
+                trigger: "TACHI_AUTHORITY_HARD_STATE_DELETE_GUARD",
+                ddl: "e9f7d57e6ed05487",
+                occurrences: 1,
+            },
+            Site {
+                symbol: "install_authority_row_guards",
+                trigger: "TACHI_AUTHORITY_HARD_STATE_INSERT_GUARD",
+                ddl: "b197c7596cafdb3a",
+                occurrences: 1,
+            },
+            Site {
+                symbol: "install_authority_row_guards",
+                trigger: "TACHI_AUTHORITY_HARD_STATE_UPDATE_GUARD",
+                ddl: "088c65c0ac15a272",
+                occurrences: 1,
+            },
+            Site {
+                symbol: "install_authority_row_guards",
+                trigger: "TACHI_CANONICAL_SUPERSESSION_EDGE_DELETE_GUARD",
+                ddl: "46f26d0fed72be9c",
+                occurrences: 1,
+            },
+            Site {
+                symbol: "install_authority_row_guards",
+                trigger: "TACHI_CANONICAL_SUPERSESSION_EDGE_INSERT_GUARD",
+                ddl: "8c95df2eab0d1c3f",
+                occurrences: 1,
+            },
+            Site {
+                symbol: "install_authority_row_guards",
+                trigger: "TACHI_CANONICAL_SUPERSESSION_EDGE_UPDATE_GUARD",
+                ddl: "7d37af0a8da366de",
+                occurrences: 1,
+            },
+            Site {
+                symbol: "install_authority_row_guards",
+                trigger: "TACHI_SUPERSESSION_EVENT_DELETE_GUARD",
+                ddl: "9808dc1dc3f318ec",
+                occurrences: 1,
+            },
+            Site {
+                symbol: "install_authority_row_guards",
+                trigger: "TACHI_SUPERSESSION_EVENT_INSERT_GUARD",
+                ddl: "0ddbc17b53178011",
+                occurrences: 1,
+            },
+            Site {
+                symbol: "install_authority_row_guards",
+                trigger: "TACHI_SUPERSESSION_EVENT_UPDATE_GUARD",
+                ddl: "100f286dd78f4ed9",
+                occurrences: 1,
+            },
+            Site {
                 symbol: "install_ingest_stable_owner_fence",
                 trigger: "INGEST_STABLE_OWNER_FENCE",
                 ddl: "85cc694adcebac24",
@@ -575,7 +629,11 @@ const EXEMPTIONS: &[Exemption<'static>] = &[
                 occurrences: 1,
             },
         ],
-        reason: "the wall's own module. INGEST_STABLE_OWNER_FENCE is the \
+        reason: "the wall's own module. The nine install_authority_row_guards \
+                 sites are the byte-exact TEMP triggers admitted only while \
+                 the internal typed-DML or canonical-edge token is armed; bodies \
+                 read 2026-08-17. \
+                 INGEST_STABLE_OWNER_FENCE is the \
                  byte-exact temp-trigger shape the authorizer admits under the \
                  owner-fence token (install_ingest_stable_owner_fence, \
                  remove_ingest_stable_owner_fence, and the two scoped_owner_fence \
@@ -971,7 +1029,7 @@ const EXEMPTIONS: &[Exemption<'static>] = &[
                  reaching a guarded connection from here.",
     },
     Exemption {
-        path: "crates/tachi-server/src/bootstrap/wiki_corpus.rs",
+        path: "crates/tachi-server/src/bootstrap/wiki_corpus/apply.rs",
         basis: ExemptionBasis::DeclaredByReviewerNotProven {
             signed_by: "Codex Luna, bodies read 2026-08-01",
         },
@@ -982,6 +1040,19 @@ const EXEMPTIONS: &[Exemption<'static>] = &[
                 ddl: "ffd56ed2b7788f70",
                 occurrences: 1,
             },
+        ],
+        reason: "maybe_inject_copy_after_receipt_prepared installs the hard-delete \
+                 sentinel through a second direct rusqlite::Connection::open(target_path). \
+                 These test-fixture sites use an unrestricted/file connection to install \
+                 or remove the sentinel; they are not #1443 false-failure injection \
+                 through guarded MemoryStore::connection. Bodies read 2026-08-01.",
+    },
+    Exemption {
+        path: "crates/tachi-server/src/bootstrap/wiki_corpus/tests.rs",
+        basis: ExemptionBasis::DeclaredByReviewerNotProven {
+            signed_by: "Codex Luna, bodies read 2026-08-01",
+        },
+        sites: &[
             Site {
                 symbol: "remove_memory_hard_delete_guard",
                 trigger: "WIKI_CORPUS_NO_HARD_DELETE",
@@ -989,13 +1060,11 @@ const EXEMPTIONS: &[Exemption<'static>] = &[
                 occurrences: 1,
             },
         ],
-        reason: "maybe_inject_copy_after_receipt_prepared installs the hard-delete \
-                 sentinel through a second direct rusqlite::Connection::open(target_path), \
-                 and remove_memory_hard_delete_guard removes it through a second \
-                 direct rusqlite::Connection::open(path). These test-fixture sites \
-                 use an unrestricted/file connection to install or remove the sentinel; \
-                 they are not #1443 false-failure injection through guarded \
-                 MemoryStore::connection. Bodies read 2026-08-01.",
+        reason: "remove_memory_hard_delete_guard removes the hard-delete sentinel \
+                 through a second direct rusqlite::Connection::open(path). These \
+                 test-fixture sites use an unrestricted/file connection to install \
+                 or remove the sentinel; they are not #1443 false-failure injection \
+                 through guarded MemoryStore::connection. Bodies read 2026-08-01.",
     },
     Exemption {
         path: "crates/tachi-server/src/mcp_pool/proxy.rs",

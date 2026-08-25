@@ -6,6 +6,10 @@ use serde_json::json;
 use std::collections::{HashMap, HashSet};
 use tachi_hub::{capability_callable, capability_visibility_for_cap};
 
+fn hub_capability_is_callable(cap: &HubCapability) -> bool {
+    !crate::builtins::is_retired_builtin_capability_id(&cap.id) && capability_callable(cap)
+}
+
 pub(crate) async fn handle_hub_discover(
     server: &MemoryServer,
     params: HubDiscoverParams,
@@ -53,6 +57,9 @@ pub(super) fn hub_discover_inner(
     let mut output: Vec<serde_json::Value> = Vec::new();
 
     for cap in &project_caps {
+        if crate::builtins::is_retired_builtin_capability_id(&cap.id) {
+            continue;
+        }
         if params.enabled_only && !cap.enabled {
             continue;
         }
@@ -64,12 +71,15 @@ pub(super) fn hub_discover_inner(
                 "visibility".into(),
                 json!(capability_visibility_for_cap(cap).as_str()),
             );
-            o.insert("callable".into(), json!(capability_callable(cap)));
+            o.insert("callable".into(), json!(hub_capability_is_callable(cap)));
         }
         redact_sensitive_value(&mut obj);
         output.push(obj);
     }
     for cap in &global_caps {
+        if crate::builtins::is_retired_builtin_capability_id(&cap.id) {
+            continue;
+        }
         if params.enabled_only && !cap.enabled {
             continue;
         }
@@ -83,7 +93,7 @@ pub(super) fn hub_discover_inner(
                 "visibility".into(),
                 json!(capability_visibility_for_cap(cap).as_str()),
             );
-            o.insert("callable".into(), json!(capability_callable(cap)));
+            o.insert("callable".into(), json!(hub_capability_is_callable(cap)));
         }
         redact_sensitive_value(&mut obj);
         output.push(obj);
@@ -104,12 +114,16 @@ pub(crate) async fn handle_hub_get(
         })? {
             let mut obj = serde_json::to_value(&cap).unwrap_or(json!(null));
             if let Some(o) = obj.as_object_mut() {
+                if crate::builtins::is_retired_builtin_capability_id(&cap.id) {
+                    o.insert("enabled".into(), json!(false));
+                    o.insert("review_status".into(), json!("rejected"));
+                }
                 o.insert("db".into(), json!("project"));
                 o.insert(
                     "visibility".into(),
                     json!(capability_visibility_for_cap(&cap).as_str()),
                 );
-                o.insert("callable".into(), json!(capability_callable(&cap)));
+                o.insert("callable".into(), json!(hub_capability_is_callable(&cap)));
             }
             redact_sensitive_value(&mut obj);
             return serde_json::to_string(&obj).map_err(|e| format!("serialize: {e}"));
@@ -123,12 +137,16 @@ pub(crate) async fn handle_hub_get(
         Some(cap) => {
             let mut obj = serde_json::to_value(&cap).unwrap_or(json!(null));
             if let Some(o) = obj.as_object_mut() {
+                if crate::builtins::is_retired_builtin_capability_id(&cap.id) {
+                    o.insert("enabled".into(), json!(false));
+                    o.insert("review_status".into(), json!("rejected"));
+                }
                 o.insert("db".into(), json!("global"));
                 o.insert(
                     "visibility".into(),
                     json!(capability_visibility_for_cap(&cap).as_str()),
                 );
-                o.insert("callable".into(), json!(capability_callable(&cap)));
+                o.insert("callable".into(), json!(hub_capability_is_callable(&cap)));
             }
             redact_sensitive_value(&mut obj);
             serde_json::to_string(&obj).map_err(|e| format!("serialize: {e}"))
@@ -142,6 +160,12 @@ pub(crate) async fn handle_hub_feedback(
     server: &MemoryServer,
     params: HubFeedbackParams,
 ) -> Result<String, String> {
+    if crate::builtins::is_retired_builtin_capability_id(&params.id) {
+        return Err(format!(
+            "Capability '{}' is retired and cannot accept feedback.",
+            params.id
+        ));
+    }
     if server.has_project_db() {
         let found = server.with_project_store(|store| {
             store
@@ -181,6 +205,10 @@ pub(crate) async fn handle_hub_stats(server: &MemoryServer) -> Result<String, St
             .hub_list(None, false)
             .map_err(|e| format!("hub list: {e}"))
     })?;
+    let global_caps = global_caps
+        .into_iter()
+        .filter(|cap| !crate::builtins::is_retired_builtin_capability_id(&cap.id))
+        .collect::<Vec<_>>();
     let project_caps = if server.has_project_db() {
         server.with_project_store(|store| {
             store
@@ -190,6 +218,10 @@ pub(crate) async fn handle_hub_stats(server: &MemoryServer) -> Result<String, St
     } else {
         vec![]
     };
+    let project_caps = project_caps
+        .into_iter()
+        .filter(|cap| !crate::builtins::is_retired_builtin_capability_id(&cap.id))
+        .collect::<Vec<_>>();
 
     let total = global_caps.len() + project_caps.len();
     let mut by_type: HashMap<String, usize> = HashMap::new();

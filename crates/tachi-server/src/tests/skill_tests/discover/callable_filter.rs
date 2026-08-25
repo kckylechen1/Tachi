@@ -79,3 +79,109 @@ async fn tachi_skill_discover_defaults_to_callable_approved_skills() {
         Some("local_approved_cache")
     );
 }
+
+#[tokio::test]
+async fn retired_trajectory_distiller_is_absent_from_hub_and_skill_discovery() {
+    let (server, _project_db) =
+        crate::tests::make_server_with_project_fixture("retired-trajectory-discover");
+    let global = make_skill_capability(
+        crate::builtins::RETIRED_TRAJECTORY_DISTILLER_ID,
+        "trajectory-distiller",
+        "Historical global trajectory writer",
+        "listed",
+    );
+    let mut project = global.clone();
+    project.description = "Historical project trajectory writer".to_string();
+    server
+        .with_global_store(|store| {
+            store
+                .hub_register(&global)
+                .map_err(|error| error.to_string())
+        })
+        .expect("inject historical global row");
+    server
+        .with_project_store(|store| {
+            store
+                .hub_register(&project)
+                .map_err(|error| error.to_string())
+        })
+        .expect("inject historical project row");
+
+    let hub_raw = crate::hub_ops::handle_hub_discover(
+        &server,
+        crate::tool_params::HubDiscoverParams {
+            query: Some("trajectory-distiller".to_string()),
+            cap_type: Some("skill".to_string()),
+            enabled_only: false,
+        },
+    )
+    .await
+    .expect("hub discovery should succeed");
+    let hub_results: Vec<Value> = serde_json::from_str(&hub_raw).expect("hub discover JSON");
+    assert!(hub_results.iter().all(|cap| {
+        cap.get("id").and_then(Value::as_str)
+            != Some(crate::builtins::RETIRED_TRAJECTORY_DISTILLER_ID)
+    }));
+
+    let skill_raw = server
+        .tachi_skill(Parameters(TachiSkillParams {
+            action: "discover".to_string(),
+            query: Some("trajectory-distiller".to_string()),
+            cap_type: Some("skill".to_string()),
+            enabled_only: Some(false),
+            limit: Some(20),
+            skill_id: None,
+            args: None,
+        }))
+        .await
+        .expect("tachi_skill discover should succeed");
+    let skill_results: Value = serde_json::from_str(&skill_raw).expect("skill discover JSON");
+    assert!(skill_results["results"]
+        .as_array()
+        .expect("skill results")
+        .iter()
+        .all(|cap| {
+            cap.get("id").and_then(Value::as_str)
+                != Some(crate::builtins::RETIRED_TRAJECTORY_DISTILLER_ID)
+        }));
+}
+
+#[tokio::test]
+async fn hub_get_projects_historical_trajectory_distiller_as_immutable_retired_state() {
+    let (server, _project_db) =
+        crate::tests::make_server_with_project_fixture("retired-trajectory-get");
+    let legacy = make_skill_capability(
+        crate::builtins::RETIRED_TRAJECTORY_DISTILLER_ID,
+        "trajectory-distiller",
+        "Historical approved and enabled project trajectory writer",
+        "listed",
+    );
+    assert!(legacy.enabled);
+    assert_eq!(legacy.review_status, "approved");
+    server
+        .with_project_store(|store| {
+            store
+                .hub_register(&legacy)
+                .map_err(|error| error.to_string())
+        })
+        .expect("inject approved historical project row");
+
+    let raw = crate::hub_ops::handle_hub_get(
+        &server,
+        crate::tool_params::HubGetParams {
+            id: crate::builtins::RETIRED_TRAJECTORY_DISTILLER_ID.to_string(),
+        },
+    )
+    .await
+    .expect("retired tombstone lookup should remain audit-visible");
+    let response: Value = serde_json::from_str(&raw).expect("hub_get JSON");
+
+    assert_eq!(
+        response["id"],
+        json!(crate::builtins::RETIRED_TRAJECTORY_DISTILLER_ID)
+    );
+    assert_eq!(response["db"], json!("project"));
+    assert_eq!(response["enabled"], json!(false));
+    assert_eq!(response["review_status"], json!("rejected"));
+    assert_eq!(response["callable"], json!(false));
+}

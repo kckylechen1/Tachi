@@ -30,6 +30,8 @@
 //!     and status.json.
 
 use serde_json::Value;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Instant;
 
 /// System prompt prepended to the Stage-1 task body. Kept verbatim so the
@@ -140,6 +142,45 @@ pub(super) struct PlanOutcome {
     pub duration_ms: u64,
 }
 
+#[cfg(test)]
+#[derive(Clone)]
+pub(super) enum PlanStageTestOverride {
+    Success {
+        plan_md: String,
+        duration_ms: u64,
+    },
+    SuccessWithAssertion {
+        plan_md: String,
+        duration_ms: u64,
+        assert_before_return: PlanStageTestAssertion,
+    },
+    Failure(String),
+    Pending,
+}
+
+#[cfg(test)]
+pub(super) type PlanStageTestAssertion =
+    for<'a> fn(
+        &'a crate::MemoryServer,
+        &'a str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>;
+
+#[cfg(test)]
+fn plan_stage_test_override() -> &'static std::sync::Mutex<Option<PlanStageTestOverride>> {
+    static OVERRIDE: std::sync::OnceLock<std::sync::Mutex<Option<PlanStageTestOverride>>> =
+        std::sync::OnceLock::new();
+    OVERRIDE.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+/// One-shot planner outcome injection for the dispatch lifecycle discriminator.
+/// Compiled out of production: provider execution remains the only runtime path.
+#[cfg(test)]
+pub(super) fn set_plan_stage_test_override(value: Option<PlanStageTestOverride>) {
+    *plan_stage_test_override()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = value;
+}
+
 /// Run Stage 1. Returns the plan body and elapsed time, or a descriptive
 /// error suitable for surfacing to the caller AND for writing to status.json.
 pub(super) async fn run_plan_stage(
@@ -147,6 +188,38 @@ pub(super) async fn run_plan_stage(
     task: &str,
     label: &str,
 ) -> Result<PlanOutcome, String> {
+    #[cfg(test)]
+    let override_result = {
+        plan_stage_test_override()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+    };
+    #[cfg(test)]
+    if let Some(override_result) = override_result {
+        return match override_result {
+            PlanStageTestOverride::Success {
+                plan_md,
+                duration_ms,
+            } => Ok(PlanOutcome {
+                plan_md,
+                duration_ms,
+            }),
+            PlanStageTestOverride::SuccessWithAssertion {
+                plan_md,
+                duration_ms,
+                assert_before_return,
+            } => {
+                assert_before_return(server, label).await;
+                Ok(PlanOutcome {
+                    plan_md,
+                    duration_ms,
+                })
+            }
+            PlanStageTestOverride::Failure(error) => Err(error),
+            PlanStageTestOverride::Pending => std::future::pending().await,
+        };
+    }
     if task.trim().is_empty() {
         return Err("dispatch v2: task is empty; cannot plan".to_string());
     }
@@ -229,8 +302,62 @@ pub(super) fn append_trajectory_event(trajectory_path: &std::path::Path, event: 
 }
 
 /// Write (or overwrite) `<run_dir>/status.json` with the V2 audit fields.
+pub(crate) fn stamp_route_decision_id(
+    run_dir: &std::path::Path,
+    route_decision_id: &str,
+) -> Result<(), String> {
+    let lock = status_json_lock_for(run_dir);
+    let _guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let path = run_dir.join("status.json");
+    let Some(Value::Object(mut status)) = crate::task_lifecycle::read_json_file(&path)
+        .map_err(|error| format!("read {}: {error}", path.display()))?
+    else {
+        return Err(format!("missing or malformed {}", path.display()));
+    };
+    status.insert(
+        "route_decision_id".to_string(),
+        Value::String(route_decision_id.to_string()),
+    );
+    let body = serde_json::to_vec_pretty(&Value::Object(status))
+        .map_err(|error| format!("serialize {}: {error}", path.display()))?;
+    crate::utils::write_owner_only_file_atomic(&path, &body)
+        .map_err(|error| format!("write {}: {error}", path.display()))
+}
+
+/// Return the shared, weakly retained mutex for one canonical run receipt.
+/// Every `status.json` read-modify-write must take this lock, including ACP
+/// identity acknowledgement, lifecycle terminalization, and route evidence.
+/// Weak retention avoids keeping a lock entry for every historical run.
+pub(crate) fn status_json_lock_for(run_dir: &std::path::Path) -> Arc<Mutex<()>> {
+    static LOCKS: OnceLock<Mutex<HashMap<std::path::PathBuf, Weak<Mutex<()>>>>> = OnceLock::new();
+    // Run directories exist before any status writer can legitimately update
+    // them, so their canonical path gives every relative, `..`, or symlink
+    // spelling the same receipt mutex. Keep a non-panicking absolute fallback
+    // for defensive callers that are still assembling a new run directory.
+    let lock_key = run_dir.canonicalize().unwrap_or_else(|_| {
+        if run_dir.is_absolute() {
+            run_dir.to_path_buf()
+        } else {
+            std::env::current_dir()
+                .map(|current_dir| current_dir.join(run_dir))
+                .unwrap_or_else(|_| run_dir.to_path_buf())
+        }
+    });
+    let mut locks = LOCKS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    if let Some(lock) = locks.get(&lock_key).and_then(Weak::upgrade) {
+        return lock;
+    }
+    let lock = Arc::new(Mutex::new(()));
+    locks.insert(lock_key, Arc::downgrade(&lock));
+    lock
+}
+
 #[allow(clippy::too_many_arguments)]
-pub(super) fn write_status_json(
+pub(crate) fn write_status_json(
     run_dir: &std::path::Path,
     dispatch_id: &str,
     v2: bool,
@@ -243,6 +370,8 @@ pub(super) fn write_status_json(
     total_duration_ms: Option<u64>,
     extra: Option<Value>,
 ) {
+    let lock = status_json_lock_for(run_dir);
+    let _guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut obj = serde_json::Map::new();
     obj.insert("dispatch_id".into(), Value::String(dispatch_id.to_string()));
     obj.insert("v2".into(), Value::Bool(v2));
@@ -290,6 +419,7 @@ pub(super) fn write_status_json(
                 "identity_receipt",
                 "resolved_completion",
                 "completion_recovery",
+                "project",
                 // tachi#1675 PR1 Seam B: `route_decision_id` is stamped ONCE,
                 // as a best-effort convenience copy of the `route_decisions`
                 // row's id, by `staffing_ops::staff_start` shortly after

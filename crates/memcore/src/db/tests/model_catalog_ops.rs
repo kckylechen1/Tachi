@@ -260,7 +260,7 @@ fn deployments_are_listable_by_catalog_source() {
             .map(|row| row.deployment_id.as_str())
             .collect::<Vec<_>>(),
         vec!["env:extract"],
-        "the #1685 cutover has to be able to ask 'what did env produce' exactly"
+        "catalog provenance must answer 'what did env produce' exactly"
     );
     assert_eq!(list_model_deployments(&conn).expect("all rows").len(), 2);
 }

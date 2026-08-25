@@ -16,70 +16,40 @@ fn truncate(s: &str, n: usize) -> String {
     }
 }
 
-type CapabilityRow = (
-    String,
-    String,
-    String,
-    i64,
-    String,
-    i32,
-    String,
-    String,
-    i64,
-);
-
-pub(super) fn cmd_list(
+pub fn collect_list_filtered_with<F>(
     db: &Path,
     type_filter: Option<&str>,
     show_all: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
+    include_capability: F,
+) -> Result<Vec<memcore::HubCapability>, Box<dyn std::error::Error>>
+where
+    F: Fn(&memcore::HubCapability) -> bool,
+{
     let conn = open_ro(db)?;
-    let mut sql = String::from(
-        "SELECT id, type, name, version, description, enabled, review_status, health_status, uses
-         FROM hub_capabilities WHERE 1=1",
-    );
-    if !show_all {
-        sql.push_str(" AND enabled = 1");
-    }
-    if type_filter.is_some() {
-        sql.push_str(" AND type = ?1");
-    }
-    sql.push_str(" ORDER BY type, name");
+    let mut capabilities = memcore::db::hub_list(&conn, type_filter, !show_all)?
+        .into_iter()
+        .filter(include_capability)
+        .collect::<Vec<_>>();
+    capabilities.sort_by(|left, right| {
+        left.cap_type
+            .cmp(&right.cap_type)
+            .then_with(|| left.name.cmp(&right.name))
+    });
+    Ok(capabilities)
+}
 
-    let mut stmt = conn.prepare(&sql)?;
-    let rows: Vec<CapabilityRow> = if let Some(t) = type_filter {
-        stmt.query_map([t], |r| {
-            Ok((
-                r.get(0)?,
-                r.get(1)?,
-                r.get(2)?,
-                r.get(3)?,
-                r.get(4)?,
-                r.get(5)?,
-                r.get(6)?,
-                r.get(7)?,
-                r.get(8)?,
-            ))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?
-    } else {
-        stmt.query_map([], |r| {
-            Ok((
-                r.get(0)?,
-                r.get(1)?,
-                r.get(2)?,
-                r.get(3)?,
-                r.get(4)?,
-                r.get(5)?,
-                r.get(6)?,
-                r.get(7)?,
-                r.get(8)?,
-            ))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?
-    };
+pub fn cmd_list_filtered<F>(
+    db: &Path,
+    type_filter: Option<&str>,
+    show_all: bool,
+    include_capability: F,
+) -> Result<(), Box<dyn std::error::Error>>
+where
+    F: Fn(&memcore::HubCapability) -> bool,
+{
+    let capabilities = collect_list_filtered_with(db, type_filter, show_all, include_capability)?;
 
-    if rows.is_empty() {
+    if capabilities.is_empty() {
         println!("(no capabilities)");
         return Ok(());
     }
@@ -89,27 +59,35 @@ pub(super) fn cmd_list(
         "id", "type", "name", "v", "review", "health", "uses"
     );
     println!("{}", "─".repeat(120));
-    for (id, ty, name, ver, desc, enabled, review, health, uses) in &rows {
-        let id_disp = if *enabled == 0 {
-            format!("{} (off)", id)
+    for cap in &capabilities {
+        let id_disp = if !cap.enabled {
+            format!("{} (off)", cap.id)
         } else {
-            id.clone()
+            cap.id.clone()
         };
         println!(
             "{:<32} {:<7} {:<28} {:>3} {:<9} {:<8} {:>5}  {}",
             truncate(&id_disp, 32),
-            truncate(ty, 7),
-            truncate(name, 28),
-            ver,
-            truncate(review, 9),
-            truncate(health, 8),
-            uses,
-            truncate(desc, 60)
+            truncate(&cap.cap_type, 7),
+            truncate(&cap.name, 28),
+            cap.version,
+            truncate(&cap.review_status, 9),
+            truncate(&cap.health_status, 8),
+            cap.uses,
+            truncate(&cap.description, 60)
         );
     }
     println!();
-    println!("{} capabilities shown", rows.len());
+    println!("{} capabilities shown", capabilities.len());
     Ok(())
+}
+
+pub(super) fn cmd_list(
+    db: &Path,
+    type_filter: Option<&str>,
+    show_all: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    cmd_list_filtered(db, type_filter, show_all, |_| true)
 }
 
 pub(super) fn cmd_show(db: &Path, id: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -237,30 +215,90 @@ pub(super) fn cmd_bindings(db: &Path) -> Result<(), Box<dyn std::error::Error>> 
     Ok(())
 }
 
-pub fn cmd_stats(db: &Path) -> Result<(), Box<dyn std::error::Error>> {
+#[derive(Debug, Clone, PartialEq)]
+pub struct HubStatsSnapshot {
+    pub memories: i64,
+    pub edges: i64,
+    pub capabilities: usize,
+    pub enabled_capabilities: usize,
+    pub by_type: std::collections::HashMap<String, usize>,
+    pub total_uses: u64,
+    pub total_successes: u64,
+    pub virtual_bindings: i64,
+}
+
+pub fn collect_stats_filtered<F>(
+    db: &Path,
+    include_capability: F,
+) -> Result<HubStatsSnapshot, Box<dyn std::error::Error>>
+where
+    F: Fn(&memcore::HubCapability) -> bool,
+{
     let conn = open_ro(db)?;
 
     let count = |sql: &str| -> rusqlite::Result<i64> { conn.query_row(sql, [], |r| r.get(0)) };
 
     let memories = count("SELECT COUNT(*) FROM memories").unwrap_or(0);
     let edges = count("SELECT COUNT(*) FROM edges").unwrap_or(0);
-    let caps_total = count("SELECT COUNT(*) FROM hub_capabilities").unwrap_or(0);
-    let caps_enabled =
-        count("SELECT COUNT(*) FROM hub_capabilities WHERE enabled = 1").unwrap_or(0);
-    let skills = count("SELECT COUNT(*) FROM hub_capabilities WHERE type='skill'").unwrap_or(0);
-    let plugins = count("SELECT COUNT(*) FROM hub_capabilities WHERE type='plugin'").unwrap_or(0);
-    let mcps = count("SELECT COUNT(*) FROM hub_capabilities WHERE type='mcp'").unwrap_or(0);
-    let bindings = count("SELECT COUNT(*) FROM virtual_capability_bindings").unwrap_or(0);
+    let capabilities = memcore::db::hub_list(&conn, None, false)?
+        .into_iter()
+        .filter(include_capability)
+        .collect::<Vec<_>>();
+    let enabled_capabilities = capabilities.iter().filter(|cap| cap.enabled).count();
+    let mut by_type = std::collections::HashMap::new();
+    for cap in &capabilities {
+        *by_type.entry(cap.cap_type.clone()).or_insert(0) += 1;
+    }
+    let total_uses = capabilities.iter().map(|cap| cap.uses).sum();
+    let total_successes = capabilities.iter().map(|cap| cap.successes).sum();
+    let virtual_bindings = count("SELECT COUNT(*) FROM virtual_capability_bindings").unwrap_or(0);
+
+    Ok(HubStatsSnapshot {
+        memories,
+        edges,
+        capabilities: capabilities.len(),
+        enabled_capabilities,
+        by_type,
+        total_uses,
+        total_successes,
+        virtual_bindings,
+    })
+}
+
+pub fn cmd_stats_filtered<F>(
+    db: &Path,
+    include_capability: F,
+) -> Result<(), Box<dyn std::error::Error>>
+where
+    F: Fn(&memcore::HubCapability) -> bool,
+{
+    let stats = collect_stats_filtered(db, include_capability)?;
 
     println!("Tachi Hub stats — {}", db.display());
-    println!("  memories          : {memories}");
-    println!("  edges             : {edges}");
-    println!("  capabilities      : {caps_total} ({caps_enabled} enabled)");
-    println!("    └─ skill  : {skills}");
-    println!("    └─ plugin : {plugins}");
-    println!("    └─ mcp    : {mcps}");
-    println!("  virtual bindings  : {bindings}");
+    println!("  memories          : {}", stats.memories);
+    println!("  edges             : {}", stats.edges);
+    println!(
+        "  capabilities      : {} ({} enabled)",
+        stats.capabilities, stats.enabled_capabilities
+    );
+    println!(
+        "    └─ skill  : {}",
+        stats.by_type.get("skill").copied().unwrap_or(0)
+    );
+    println!(
+        "    └─ plugin : {}",
+        stats.by_type.get("plugin").copied().unwrap_or(0)
+    );
+    println!(
+        "    └─ mcp    : {}",
+        stats.by_type.get("mcp").copied().unwrap_or(0)
+    );
+    println!("  virtual bindings  : {}", stats.virtual_bindings);
     Ok(())
+}
+
+pub fn cmd_stats(db: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    cmd_stats_filtered(db, |_| true)
 }
 
 pub(super) fn cmd_doctor(app_home: &Path, fix: bool) -> Result<(), Box<dyn std::error::Error>> {

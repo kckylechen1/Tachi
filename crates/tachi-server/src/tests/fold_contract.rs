@@ -5,7 +5,7 @@
 //! that could (or could not) reach a handler before the fold must have the
 //! identical reachability for the `(profile, verb, action)` it became. This
 //! module computes a callable matrix over the seven tool profiles by driving
-//! the **real MCP `call_tool` choke point** (`call_tool_via_server`, the same
+//! the **real MCP `call_tool` choke point** (`call_tool_on_server`, the same
 //! entry point `profile_tests::tool_profile` uses), so the harness catches
 //! anything a unit-level `facade_action_allowed` check would miss (tool-level
 //! visibility, the action gate, and their interaction).
@@ -20,7 +20,7 @@
 //! under `admin`) so a fold that silently widened *both* the alias and the verb
 //! to a bundle can't pass equivalence alone.
 
-use super::{call_tool_via_server, make_server};
+use super::{call_tool_on_server, make_server};
 use serde_json::json;
 
 /// The seven tool profiles the authorization matrix is enumerated over.
@@ -58,15 +58,13 @@ pub(crate) struct FoldPair {
     pub canonical_action: &'static str,
 }
 
-/// Drive one `(profile, tool, action)` call through the real MCP `call_tool`
-/// path and classify the authorization outcome.
-pub(crate) async fn reachability(profile: &str, tool: &str, action: Option<&str>) -> Reachability {
-    let server = make_server();
-    server.set_tool_profile(Some(
-        tachi_hub::parse_tool_profile(profile)
-            .unwrap_or_else(|| panic!("profile '{profile}' should parse")),
-    ));
-
+/// Drive one `(tool, action)` call through the real MCP `call_tool` path on a
+/// server whose profile was fixed by the caller, and classify the outcome.
+async fn reachability(
+    server: crate::MemoryServer,
+    tool: &str,
+    action: Option<&str>,
+) -> Reachability {
     let mut args = serde_json::Map::new();
     if let Some(action) = action {
         args.insert("action".to_string(), json!(action));
@@ -75,7 +73,7 @@ pub(crate) async fn reachability(profile: &str, tool: &str, action: Option<&str>
     // A JSON-RPC-level Err only occurs *after* the visibility + action gates
     // (they return Ok(...) results): a parameter-binding error means the call
     // was already authorized, so it counts as Callable.
-    let result = match call_tool_via_server(server, tool, Some(args)).await {
+    let result = match call_tool_on_server(server, tool, Some(args)).await {
         Ok(result) => result,
         Err(_) => return Reachability::Callable,
     };
@@ -105,11 +103,20 @@ pub(crate) async fn reachability(profile: &str, tool: &str, action: Option<&str>
 /// the per-cell fold invariant: the fold changed the surface shape, not who can
 /// reach it.
 pub(crate) async fn assert_fold_matrix_equivalence(pairs: &[FoldPair]) {
-    for pair in pairs {
-        for &profile in CONTRACT_PROFILES {
-            let legacy = reachability(profile, pair.legacy_name, None).await;
-            let folded =
-                reachability(profile, pair.canonical_tool, Some(pair.canonical_action)).await;
+    for &profile in CONTRACT_PROFILES {
+        let server = make_server();
+        server.set_tool_profile(Some(
+            tachi_hub::parse_tool_profile(profile)
+                .unwrap_or_else(|| panic!("profile '{profile}' should parse")),
+        ));
+        for pair in pairs {
+            let legacy = reachability((*server).clone(), pair.legacy_name, None).await;
+            let folded = reachability(
+                (*server).clone(),
+                pair.canonical_tool,
+                Some(pair.canonical_action),
+            )
+            .await;
             assert_eq!(
                 legacy, folded,
                 "fold changed reachability for profile='{profile}': legacy '{}' = {legacy:?} but \
@@ -126,21 +133,30 @@ pub(crate) async fn assert_fold_matrix_equivalence(pairs: &[FoldPair]) {
 /// equivalence alone would still pass if a fold widened *both* sides
 /// identically, so admin-only folds pin the absolute expectation here.
 pub(crate) async fn assert_admin_only(pairs: &[FoldPair]) {
-    for pair in pairs {
-        for &profile in CONTRACT_PROFILES {
-            let expected = if profile == "admin" {
-                Reachability::Callable
-            } else {
-                Reachability::ToolHidden
-            };
-            let legacy = reachability(profile, pair.legacy_name, None).await;
+    for &profile in CONTRACT_PROFILES {
+        let server = make_server();
+        server.set_tool_profile(Some(
+            tachi_hub::parse_tool_profile(profile)
+                .unwrap_or_else(|| panic!("profile '{profile}' should parse")),
+        ));
+        let expected = if profile == "admin" {
+            Reachability::Callable
+        } else {
+            Reachability::ToolHidden
+        };
+        for pair in pairs {
+            let legacy = reachability((*server).clone(), pair.legacy_name, None).await;
             assert_eq!(
                 legacy, expected,
                 "admin-only legacy alias '{}' must be {expected:?} for profile='{profile}'",
                 pair.legacy_name
             );
-            let folded =
-                reachability(profile, pair.canonical_tool, Some(pair.canonical_action)).await;
+            let folded = reachability(
+                (*server).clone(),
+                pair.canonical_tool,
+                Some(pair.canonical_action),
+            )
+            .await;
             assert_eq!(
                 folded, expected,
                 "admin-only {}(action='{}') must be {expected:?} for profile='{profile}'",

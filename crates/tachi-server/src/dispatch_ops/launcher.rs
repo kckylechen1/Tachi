@@ -1,20 +1,27 @@
-use crate::tool_params::TachiDispatchParams;
 use std::path::PathBuf;
 use tachi_dispatch::{
     build_claude_launch, build_codex_launch, build_custom_launch, build_grok_launch,
     build_kimi_launch, DispatchLaunchParams, LaunchCommand,
 };
+use tachi_params::{ExecutionGrant, ResolvedStaffAssignment};
 use tokio::process::Command;
 
-fn launch_params(params: &TachiDispatchParams) -> DispatchLaunchParams {
+fn launch_params(
+    assignment: &ResolvedStaffAssignment,
+    grant: &ExecutionGrant,
+    command: &[String],
+) -> DispatchLaunchParams {
     DispatchLaunchParams {
-        cwd: params.cwd.clone(),
-        model: params.model.clone(),
-        permission_profile: params.permission_profile.clone(),
-        allowed_tools: params.allowed_tools.clone(),
-        max_turns: params.max_turns,
-        sandbox: params.sandbox.clone(),
-        command: params.command.clone(),
+        cwd: grant
+            .allowed_cwd
+            .as_ref()
+            .map(|cwd| cwd.to_string_lossy().to_string()),
+        model: assignment.selected_model.clone(),
+        permission_profile: grant.permission_profile.clone(),
+        allowed_tools: grant.allowed_tools.clone(),
+        max_turns: grant.max_turns,
+        sandbox: grant.sandbox.clone(),
+        command: command.to_vec(),
     }
 }
 
@@ -27,18 +34,28 @@ fn command_from_launch(spec: LaunchCommand) -> Command {
     cmd
 }
 
-pub(super) fn resolve_permission_profile(params: &TachiDispatchParams) -> Result<&str, String> {
-    let resolved = tachi_dispatch::resolve_permission_profile(&launch_params(params))?;
+pub(super) fn resolve_permission_profile(grant: &ExecutionGrant) -> Result<&str, String> {
+    let resolved = tachi_dispatch::resolve_permission_profile(&DispatchLaunchParams {
+        cwd: None,
+        model: None,
+        permission_profile: grant.permission_profile.clone(),
+        allowed_tools: grant.allowed_tools.clone(),
+        max_turns: grant.max_turns,
+        sandbox: grant.sandbox.clone(),
+        command: Vec::new(),
+    })?;
     Ok(resolved.as_str())
 }
 
 pub(super) fn build_claude_command(
-    params: &TachiDispatchParams,
+    assignment: &ResolvedStaffAssignment,
+    grant: &ExecutionGrant,
+    command: &[String],
     prompt: &str,
     mcp_config_path: Option<&PathBuf>,
 ) -> Result<Command, String> {
     build_claude_launch(
-        &launch_params(params),
+        &launch_params(assignment, grant, command),
         prompt,
         mcp_config_path.map(PathBuf::as_path),
     )
@@ -46,12 +63,14 @@ pub(super) fn build_claude_command(
 }
 
 pub(super) fn build_codex_command(
-    params: &TachiDispatchParams,
+    assignment: &ResolvedStaffAssignment,
+    grant: &ExecutionGrant,
+    command: &[String],
     prompt: &str,
     mcp_config_path: Option<&PathBuf>,
 ) -> Result<Command, String> {
     build_codex_launch(
-        &launch_params(params),
+        &launch_params(assignment, grant, command),
         prompt,
         mcp_config_path.map(PathBuf::as_path),
     )
@@ -59,12 +78,14 @@ pub(super) fn build_codex_command(
 }
 
 pub(super) fn build_grok_command(
-    params: &TachiDispatchParams,
+    assignment: &ResolvedStaffAssignment,
+    grant: &ExecutionGrant,
+    command: &[String],
     prompt: &str,
     mcp_config_path: Option<&PathBuf>,
 ) -> Result<Command, String> {
     build_grok_launch(
-        &launch_params(params),
+        &launch_params(assignment, grant, command),
         prompt,
         mcp_config_path.map(PathBuf::as_path),
     )
@@ -72,17 +93,21 @@ pub(super) fn build_grok_command(
 }
 
 pub(super) fn build_kimi_command(
-    params: &TachiDispatchParams,
+    assignment: &ResolvedStaffAssignment,
+    grant: &ExecutionGrant,
+    command: &[String],
     prompt: &str,
 ) -> Result<Command, String> {
-    build_kimi_launch(&launch_params(params), prompt).map(command_from_launch)
+    build_kimi_launch(&launch_params(assignment, grant, command), prompt).map(command_from_launch)
 }
 
 pub(super) fn build_custom_command(
-    params: &TachiDispatchParams,
+    assignment: &ResolvedStaffAssignment,
+    grant: &ExecutionGrant,
+    command: &[String],
     prompt: &str,
 ) -> Result<Command, String> {
-    build_custom_launch(&launch_params(params), prompt).map(command_from_launch)
+    build_custom_launch(&launch_params(assignment, grant, command), prompt).map(command_from_launch)
 }
 
 /// `agent='opencode'` shares its launch mechanics with `agent='custom'` (both
@@ -95,13 +120,15 @@ pub(super) fn build_custom_command(
 /// typed. Check the one precondition that trips this in practice (missing
 /// `command`) before delegating, so the error stays in the caller's own words.
 pub(super) fn build_opencode_command(
-    params: &TachiDispatchParams,
+    assignment: &ResolvedStaffAssignment,
+    grant: &ExecutionGrant,
+    command: &[String],
     prompt: &str,
 ) -> Result<Command, String> {
-    if params.command.is_empty() {
+    if command.is_empty() {
         return Err(opencode_missing_command_error());
     }
-    build_custom_command(params, prompt)
+    build_custom_command(assignment, grant, command, prompt)
 }
 
 fn opencode_missing_command_error() -> String {
@@ -119,6 +146,55 @@ fn opencode_missing_command_error() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tool_params::TachiDispatchParams;
+
+    fn owners(
+        backend: &str,
+        model: Option<&str>,
+        cwd: Option<&str>,
+        permission_profile: Option<&str>,
+        allowed_tools: &[&str],
+        sandbox: Option<&str>,
+        max_turns: Option<u32>,
+    ) -> (
+        tachi_params::ResolvedStaffAssignment,
+        tachi_params::ExecutionGrant,
+    ) {
+        let backend = backend.to_string();
+        (
+            tachi_params::ResolvedStaffAssignment {
+                assignment_id: "test-assignment".to_string(),
+                staffing_reason: tachi_params::TachiDispatchReason::ExplicitUserRequest,
+                selected_worker: backend.clone(),
+                selected_profile: None,
+                selected_backend: backend,
+                selected_model: model.map(str::to_string),
+                execution_level: None,
+                recommendation_ref: None,
+                host_adapter: None,
+                evidence_required: Vec::new(),
+                fallback_chain: Vec::new(),
+                route_explanation: Vec::new(),
+                identity_receipt: serde_json::Value::Null,
+            },
+            tachi_params::ExecutionGrant {
+                grant_id: "test-grant".to_string(),
+                env_id: None,
+                unmanaged_cwd_allowed: false,
+                allowed_cwd: cwd.map(Into::into),
+                credential_profiles: Vec::new(),
+                mcp_access: None,
+                allowed_tools: allowed_tools
+                    .iter()
+                    .map(|tool| (*tool).to_string())
+                    .collect(),
+                permission_profile: permission_profile.map(str::to_string),
+                sandbox: sandbox.map(str::to_string),
+                max_turns,
+                timeout_secs: 5,
+            },
+        )
+    }
 
     fn dispatch_params(agent: &str) -> TachiDispatchParams {
         TachiDispatchParams {
@@ -175,8 +251,23 @@ mod tests {
         params.cwd = Some("/work/repo".to_string());
         let mcp_path = PathBuf::from("/tmp/tachi-mcp.json");
 
-        let cmd =
-            build_claude_command(&params, "inspect", Some(&mcp_path)).expect("claude command");
+        let (assignment, grant) = owners(
+            "claude",
+            Some("sonnet"),
+            Some("/work/repo"),
+            Some("allowlist"),
+            &["Read", "Bash(git status*)"],
+            None,
+            Some(3),
+        );
+        let cmd = build_claude_command(
+            &assignment,
+            &grant,
+            &params.command,
+            "inspect",
+            Some(&mcp_path),
+        )
+        .expect("claude command");
         let args = command_args(&cmd);
 
         assert!(args
@@ -207,7 +298,17 @@ mod tests {
         params.max_turns = Some(4);
         params.model = Some("gpt-5-codex".to_string());
 
-        let cmd = build_codex_command(&params, "fix it", None).expect("codex command");
+        let (assignment, grant) = owners(
+            "codex",
+            Some("gpt-5-codex"),
+            Some("/work/repo"),
+            None,
+            &[],
+            Some("read-only"),
+            Some(4),
+        );
+        let cmd = build_codex_command(&assignment, &grant, &params.command, "fix it", None)
+            .expect("codex command");
         let args = command_args(&cmd);
 
         assert!(args
@@ -227,12 +328,15 @@ mod tests {
             "worker".to_string(),
         ];
 
-        let cmd = build_custom_command(&params, "run task").expect("custom command");
+        let (assignment, grant) = owners("custom", None, None, None, &[], None, None);
+        let cmd = build_custom_command(&assignment, &grant, &params.command, "run task")
+            .expect("custom command");
         assert_eq!(command_args(&cmd), vec!["-m", "worker", "run task"]);
 
         params.command = vec!["/tmp/python3".to_string()];
+        let (assignment, grant) = owners("custom", None, None, None, &[], None, None);
         assert!(
-            build_custom_command(&params, "run task").is_err(),
+            build_custom_command(&assignment, &grant, &params.command, "run task").is_err(),
             "trusted basenames should not bless untrusted paths"
         );
     }
@@ -245,7 +349,8 @@ mod tests {
     #[test]
     fn opencode_agent_missing_command_keeps_user_vocabulary_and_points_at_profiles() {
         let params = dispatch_params("opencode");
-        let err = build_opencode_command(&params, "run task")
+        let (assignment, grant) = owners("opencode", None, None, None, &[], None, None);
+        let err = build_opencode_command(&assignment, &grant, &params.command, "run task")
             .expect_err("agent='opencode' with no command must fail");
 
         assert!(
@@ -285,7 +390,70 @@ mod tests {
         let mut params = dispatch_params("opencode");
         params.command = vec!["opencode".to_string(), "run".to_string()];
 
-        let cmd = build_opencode_command(&params, "run task").expect("opencode command");
+        let (assignment, grant) = owners("opencode", None, None, None, &[], None, None);
+        let cmd = build_opencode_command(&assignment, &grant, &params.command, "run task")
+            .expect("opencode command");
         assert_eq!(command_args(&cmd), vec!["run", "run task"]);
+    }
+
+    #[test]
+    fn p3_cross_backend_launchers_use_frozen_typed_owners_not_poisoned_legacy_params() {
+        let (claude_assignment, claude_grant) = owners(
+            "claude",
+            Some("typed-claude"),
+            Some("/typed/claude"),
+            Some("allowlist"),
+            &["Read"],
+            None,
+            None,
+        );
+        let claude_args = command_args(
+            &build_claude_command(&claude_assignment, &claude_grant, &[], "task", None)
+                .expect("typed claude launch"),
+        );
+        assert!(claude_args
+            .windows(2)
+            .any(|pair| pair == ["--model", "typed-claude"]));
+        assert!(claude_args
+            .windows(2)
+            .any(|pair| pair == ["--allowedTools", "Read"]));
+
+        let (codex_assignment, codex_grant) = owners(
+            "codex",
+            Some("typed-codex"),
+            Some("/typed/codex"),
+            None,
+            &[],
+            Some("read-only"),
+            Some(3),
+        );
+        let codex_args = command_args(
+            &build_codex_command(&codex_assignment, &codex_grant, &[], "task", None)
+                .expect("typed codex launch"),
+        );
+        assert!(codex_args
+            .windows(2)
+            .any(|pair| pair == ["-m", "typed-codex"]));
+        assert!(codex_args
+            .windows(2)
+            .any(|pair| pair == ["-C", "/typed/codex"]));
+        assert!(codex_args
+            .windows(2)
+            .any(|pair| pair == ["--sandbox", "read-only"]));
+        assert!(codex_args
+            .windows(2)
+            .any(|pair| pair == ["-c", "max_turns=3"]));
+
+        let private_command = vec![
+            "python3".to_string(),
+            "-m".to_string(),
+            "typed_worker".to_string(),
+        ];
+        let (custom_assignment, custom_grant) = owners("custom", None, None, None, &[], None, None);
+        let custom_args = command_args(
+            &build_custom_command(&custom_assignment, &custom_grant, &private_command, "task")
+                .expect("private adapter command remains authoritative"),
+        );
+        assert_eq!(custom_args, vec!["-m", "typed_worker", "task"]);
     }
 }

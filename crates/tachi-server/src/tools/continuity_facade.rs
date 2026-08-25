@@ -3,7 +3,7 @@ use super::*;
 #[tool_router(router = continuity_tool_router, vis = "pub(crate)")]
 impl MemoryServer {
     #[tool(
-        description = "Unified memory facade. Actions: search (hybrid recall), get (fetch one memory by id), save (persist entry; prefer tachi_save for decisions), extract_facts (LLM atomize logs), briefing (session start), checkpoint (handoff), alerts (warnings when stuck), ask (Q&A over evidence), consolidate (merge duplicates). Use tachi_briefing for zero-arg briefing alias."
+        description = "Unified memory facade. Actions: search (hybrid recall), get (fetch one memory by id), save (persist entry), extract_facts (LLM atomize logs), briefing (session start), checkpoint (handoff), alerts (warnings when stuck), ask (Q&A over evidence), consolidate (merge duplicates)."
     )]
     pub(crate) async fn tachi_memory(
         &self,
@@ -53,65 +53,6 @@ impl MemoryServer {
         crate::domain_adapter_ops::handle_tachi_domain_adapter(self, params).await
     }
 
-    /// Zero-param briefing alias. Call at the start of any non-trivial task to
-    /// load prior session context without having to remember the action name.
-    #[tool(
-        description = "Call at the START of any non-trivial task. Returns project-scoped memories, pending global handoffs (cross-project issue board), wiki, kanban, and checkpoints. Zero params — compact mode; uses current git repo. For all-global briefing use tachi_memory(action='briefing', scope='all')."
-    )]
-    pub(crate) async fn tachi_briefing(&self) -> Result<String, String> {
-        let named = crate::memory_search_ops::resolve_workspace_named_project();
-        let query = named
-            .as_ref()
-            .map(|name| format!("{name} current task recent decisions blockers next steps"));
-        let params = TachiMemoryParams {
-            action: "briefing".to_string(),
-            issue_ref: None,
-            format: Some("markdown".to_string()),
-            query,
-            scope: None,
-            top_k: 6,
-            path_prefix: None,
-            file_context: None,
-            error_context: None,
-            category: None,
-            include_archived: false,
-            include_training: false,
-            enable_rerank: false,
-            as_of: None,
-            synthesize: false,
-            model: None,
-            agent_role: None,
-            text: None,
-            title: None,
-            summary: None,
-            topic: None,
-            keywords: vec![],
-            entities: vec![],
-            importance: None,
-            retention_policy: None,
-            kind: None,
-            path: None,
-            id: None,
-            force: false,
-            source: None,
-            valid_from: None,
-            valid_until: None,
-            project: named,
-            project_explicit: false,
-            domain: None,
-            metadata: None,
-            files: Vec::new(),
-            references: Vec::new(),
-            compact: true,
-            proposal_id: None,
-            review_status: None,
-            notes: None,
-            confirm: false,
-            state_filter: None,
-        };
-        crate::facade_memory_ops::handle_tachi_memory(self, params).await
-    }
-
     #[tool(
         description = "Unified search across wiki and memory. Use scope to target 'wiki', 'memory', or 'all' (default)."
     )]
@@ -146,10 +87,10 @@ impl MemoryServer {
     ) -> Result<String, String> {
         crate::research_ops::handle_tachi_research(self, params).await
     }
+}
 
-    #[tool(
-        description = "Save a conclusion (preference, decision, or lesson) after any meaningful step — do NOT wait for session end. For raw logs or general text, use tachi_memory(action='extract_facts')."
-    )]
+#[allow(dead_code)]
+impl MemoryServer {
     pub(crate) async fn tachi_save(
         &self,
         Parameters(params): Parameters<TachiSaveParams>,

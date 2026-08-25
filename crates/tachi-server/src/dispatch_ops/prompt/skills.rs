@@ -1,21 +1,17 @@
-use crate::tool_params::TachiDispatchParams;
+use tachi_params::StaffAssignmentRequest;
 
-/// Resolve the effective skills list. Per #1690 C3 S1, skills come ONLY from
-/// the explicit `params.skills` param — which already includes the profile's
-/// STATIC reviewed skill list (`common_skills` + `signature_skills`,
-/// materialized by `resolve_and_apply_dispatch_profile` when the caller passed
-/// none). There is NO automatic derivation from the stage or from task-selected
-/// SOPs: stage defaults and task-SOP promotion are retired.
-///
-/// The stage key is an explicit caller-chosen param, so its advisory
-/// instruction (e.g. the "plan first" line for stage=auto) is still rendered:
-/// that is a projection of the explicit stage choice, not skill selection.
-pub(in crate::dispatch_ops) fn resolve_effective_skills(
-    params: &TachiDispatchParams,
+/// Resolve the explicit skill list and preserve only the advisory stage
+/// instruction. #1690 C3 S1 retires stage defaults and task-SOP promotion.
+pub(in crate::dispatch_ops) fn resolve_assignment_skills(
+    request: &StaffAssignmentRequest,
+    explicit_skills: &[String],
 ) -> (Vec<String>, Option<String>) {
-    let stage_key = crate::skill_policy::dispatch_stage_key(params.stage.as_deref());
+    let stage_key = crate::skill_policy::dispatch_stage_key(request.stage.as_deref());
     let auto_instruction = crate::skill_policy::dispatch_stage_instruction(&stage_key);
-    (params.skills.clone(), auto_instruction)
+    if !explicit_skills.is_empty() {
+        return (explicit_skills.to_vec(), auto_instruction);
+    }
+    (Vec::new(), auto_instruction)
 }
 
 pub(super) fn render_skill_invocation_contract(

@@ -8,9 +8,9 @@ pub(super) struct HarnessPreflightInputs<'a> {
     pub(super) harness_server_url: &'a Option<String>,
     pub(super) credential_env: &'a HashMap<String, String>,
     pub(super) dispatch_id: &'a str,
-    pub(super) agent_norm: &'a str,
+    pub(super) assignment: &'a tachi_params::ResolvedStaffAssignment,
     pub(super) task: &'a str,
-    /// The dispatch's `TachiDispatchParams::project`, threaded through so a
+    /// The semantic request's `project`, threaded through so a
     /// preflight-failure terminal outcome row lands in the same DB a later
     /// `tachi_complete` for this dispatch would resolve to (scope symmetry,
     /// #774 round 2).
@@ -52,7 +52,7 @@ pub(super) fn run_harness_preflight(inputs: HarnessPreflightInputs<'_>) -> Resul
             json!({
                 "event": "harness_preflight_failed",
                 "dispatch_id": inputs.dispatch_id,
-                "agent": inputs.agent_norm,
+                "agent": inputs.assignment.selected_worker,
                 "harness_transport": inputs.harness_transport,
                 "harness_server_url": inputs.harness_server_url,
                 "harness_server_status": harness_status.clone(),
@@ -77,7 +77,7 @@ pub(super) fn run_harness_preflight(inputs: HarnessPreflightInputs<'_>) -> Resul
             None,
             inputs.plan_duration_ms,
             Some(json!({
-                "agent": inputs.agent_norm,
+                "agent": inputs.assignment.selected_worker,
                 "task": inputs.task,
                 "state": "TASK_STATE_FAILED",
                 "updated_at": Utc::now().to_rfc3339(),
@@ -101,10 +101,83 @@ pub(super) fn run_harness_preflight(inputs: HarnessPreflightInputs<'_>) -> Resul
             inputs.server,
             inputs.dispatch_id,
             "preflight",
-            Some(inputs.agent_norm),
+            Some(&inputs.assignment.selected_worker),
             inputs.project,
         );
         return Err(err);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn p3_typed_assignment_and_private_inputs_drive_preflight_failure() {
+        let server = crate::tests::make_server();
+        let workspace = tempfile::tempdir().expect("preflight workspace");
+        let assignment = tachi_params::ResolvedStaffAssignment {
+            assignment_id: "p3-preflight-assignment".to_string(),
+            staffing_reason: tachi_params::TachiDispatchReason::ExplicitUserRequest,
+            selected_worker: "custom".to_string(),
+            selected_profile: Some("typed-profile".to_string()),
+            selected_backend: "custom".to_string(),
+            selected_model: None,
+            execution_level: None,
+            recommendation_ref: None,
+            host_adapter: None,
+            evidence_required: Vec::new(),
+            fallback_chain: Vec::new(),
+            route_explanation: Vec::new(),
+            identity_receipt: Value::Null,
+        };
+        let private_url = None;
+        let private_env = HashMap::new();
+        let private_metadata = None;
+        let private_bundle = Value::Null;
+        let err = run_harness_preflight(HarnessPreflightInputs {
+            server: &server,
+            harness_transport: "opencode_serve",
+            harness_server_url: &private_url,
+            credential_env: &private_env,
+            dispatch_id: "p3-preflight",
+            assignment: &assignment,
+            task: "typed preflight",
+            project: None,
+            trajectory_path: &workspace.path().join("trajectory.jsonl"),
+            workspace_dir: workspace.path(),
+            v2: false,
+            plan_generated_at: None,
+            plan_duration_ms: None,
+            host_adapter: &assignment.host_adapter,
+            execution_backend_name: Some("custom"),
+            execution_backend_metadata: &private_metadata,
+            acpx_enabled: false,
+            native_acp_enabled: false,
+            capability_bundle_card: &private_bundle,
+            timeout_secs_for_status: 5,
+        })
+        .expect_err("missing private harness URL must fail the typed preflight branch");
+        let status: Value = serde_json::from_str(
+            &std::fs::read_to_string(workspace.path().join("status.json"))
+                .expect("typed preflight failure writes status"),
+        )
+        .expect("typed preflight status JSON");
+        assert_eq!(
+            status["state"],
+            Value::String("TASK_STATE_FAILED".to_string())
+        );
+        assert_eq!(status["agent"], Value::String("custom".to_string()));
+        assert_eq!(
+            status["harness_transport"],
+            Value::String("opencode_serve".to_string())
+        );
+        assert_eq!(
+            std::fs::read_to_string(workspace.path().join("result.md"))
+                .expect("typed preflight failure writes result"),
+            err,
+            "private missing URL failure must be the observable terminal result"
+        );
+    }
 }

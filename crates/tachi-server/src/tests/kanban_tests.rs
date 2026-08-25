@@ -1,5 +1,8 @@
 use super::make_server;
-use crate::kanban::{CheckInboxParams, PostCardParams, UpdateCardParams};
+use crate::kanban::{
+    handle_check_inbox, handle_post_card, handle_update_card, CheckInboxParams, PostCardParams,
+    UpdateCardParams,
+};
 use crate::tool_params::GetMemoryParams;
 use rmcp::handler::server::wrapper::Parameters;
 use serde_json::{json, Value};

@@ -131,20 +131,20 @@ pub(super) fn credential_report_ready(report: &CredentialMaterializeReport) -> b
 
 pub(super) fn materialize_dispatch_credentials(
     server: &MemoryServer,
-    params: &TachiDispatchParams,
+    grant: &tachi_params::ExecutionGrant,
     agent_norm: &str,
     selected_profile: Option<&str>,
     run_dir: &Path,
 ) -> Result<DispatchCredentialMaterialization, String> {
-    if params.credential_profiles.is_empty() {
+    if grant.credential_profiles.is_empty() {
         return Ok(DispatchCredentialMaterialization {
             reports: Vec::new(),
             env: HashMap::new(),
         });
     }
 
-    let cwd = params.cwd.as_deref().map(Path::new);
-    let mut profile_names = params
+    let cwd = grant.allowed_cwd.as_deref();
+    let mut profile_names = grant
         .credential_profiles
         .iter()
         .map(|profile| profile.trim().to_string())
@@ -206,4 +206,45 @@ pub(super) fn materialize_dispatch_credentials(
     }
 
     Ok(DispatchCredentialMaterialization { reports, env })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn p3_typed_grant_rejects_missing_credential_selector_without_flat_dispatch_params() {
+        let server = crate::tests::make_server();
+        let run_dir = tempfile::tempdir().expect("credential run dir");
+        let missing_selector = "p3-typed-missing-credential-selector";
+        let grant = tachi_params::ExecutionGrant {
+            grant_id: "p3-credential-grant".to_string(),
+            env_id: None,
+            unmanaged_cwd_allowed: false,
+            allowed_cwd: None,
+            credential_profiles: vec![missing_selector.to_string()],
+            mcp_access: None,
+            allowed_tools: Vec::new(),
+            permission_profile: None,
+            sandbox: None,
+            max_turns: None,
+            timeout_secs: 5,
+        };
+        let err = match materialize_dispatch_credentials(
+            &server,
+            &grant,
+            "custom",
+            Some("typed-profile"),
+            run_dir.path(),
+        ) {
+            Err(err) => err,
+            Ok(_) => {
+                panic!("typed missing selector must fail in the production credential consumer")
+            }
+        };
+        assert!(
+            err.contains(missing_selector),
+            "production materializer must report the independently minted selector: {err}"
+        );
+    }
 }

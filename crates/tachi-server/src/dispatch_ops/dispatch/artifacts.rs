@@ -3,8 +3,10 @@ use super::*;
 pub(super) struct DispatchArtifactInputs<'a> {
     pub(super) workspace_dir: &'a Path,
     pub(super) dispatch_id: &'a str,
-    pub(super) agent_norm: &'a str,
-    pub(super) params: &'a TachiDispatchParams,
+    pub(super) request: &'a tachi_params::StaffAssignmentRequest,
+    pub(super) assignment: &'a tachi_params::ResolvedStaffAssignment,
+    pub(super) grant: &'a tachi_params::ExecutionGrant,
+    pub(super) profile: &'a ResolvedDispatchProfile,
     pub(super) base_prompt: &'a str,
     pub(super) prompt_assembly: &'a crate::dispatch_ops::prompt::PromptAssembly,
     pub(super) effective_skills_for_files: &'a [String],
@@ -33,31 +35,33 @@ pub(super) async fn write_dispatch_artifacts(
         .await
         .map_err(|e| format!("Failed to write prompt.md: {e}"))?;
 
+    let feedback_rules_trace = ctx.prompt_assembly.feedback_rules.clone();
+
     let context_md_path = ctx.workspace_dir.join("context.md");
     let context_summary = {
         let mut sections = Vec::new();
         sections.push(format!("# Dispatch Context: {}", ctx.dispatch_id));
-        sections.push(format!("Agent: {}", ctx.agent_norm));
+        sections.push(format!("Agent: {}", ctx.assignment.selected_backend));
         sections.push(format!(
             "Dispatch profile: {}",
-            ctx.params.profile.as_deref().unwrap_or("none")
+            ctx.request.profile.as_deref().unwrap_or("none")
         ));
         sections.push(format!(
             "Tool profile: {}",
-            ctx.params.tool_profile.as_deref().unwrap_or("none")
+            ctx.profile.tool_profile.as_deref().unwrap_or("none")
         ));
-        if let Some(flow_id) = ctx.params.flow_id.as_deref() {
+        if let Some(flow_id) = ctx.request.flow_id.as_deref() {
             sections.push(format!("Flow: {}", flow_id));
         }
-        if let Some(issue_ref) = ctx.params.issue_ref.as_deref() {
+        if let Some(issue_ref) = ctx.request.issue_ref.as_deref() {
             sections.push(format!("Issue: {}", issue_ref));
         }
-        if let Some(pr_ref) = ctx.params.pr_ref.as_deref() {
+        if let Some(pr_ref) = ctx.request.pr_ref.as_deref() {
             sections.push(format!("PR: {}", pr_ref));
         }
         sections.push(format!(
             "Stage: {}",
-            ctx.params.stage.as_deref().unwrap_or("none")
+            ctx.request.stage.as_deref().unwrap_or("none")
         ));
         sections.push(format!("V2: {}", ctx.v2));
         sections.push(format!("Skills: {:?}", ctx.effective_skills_for_files));
@@ -68,8 +72,6 @@ pub(super) async fn write_dispatch_artifacts(
     tokio::fs::write(&context_md_path, &context_summary)
         .await
         .map_err(|e| format!("Failed to write context.md: {e}"))?;
-
-    let feedback_rules_trace = ctx.prompt_assembly.feedback_rules.clone();
 
     // #971 receipt-first: `handle_tachi_dispatch` now appends a
     // "dispatch_received" event to this same trajectory.jsonl path BEFORE
@@ -86,15 +88,15 @@ pub(super) async fn write_dispatch_artifacts(
     let started_event = json!({
         "event": "dispatch_started",
         "dispatch_id": ctx.dispatch_id,
-        "agent": ctx.agent_norm,
-        "stage": ctx.params.stage,
-        "profile": ctx.params.profile,
-        "tool_profile": ctx.params.tool_profile,
-        "mcp_access": ctx.params.mcp_access,
-        "allowed_mcp_servers": ctx.params.allowed_mcp_servers,
-        "issue_ref": ctx.params.issue_ref,
-        "pr_ref": ctx.params.pr_ref,
-        "flow_id": ctx.params.flow_id,
+        "agent": ctx.assignment.selected_backend,
+        "stage": ctx.request.stage,
+        "profile": ctx.request.profile,
+        "tool_profile": ctx.profile.tool_profile,
+        "mcp_access": ctx.profile.mcp_access,
+        "allowed_mcp_servers": ctx.grant.mcp_access.as_ref().map(|access| &access.allowed_mcp_servers),
+        "issue_ref": ctx.request.issue_ref,
+        "pr_ref": ctx.request.pr_ref,
+        "flow_id": ctx.request.flow_id,
         "feedback_rules": feedback_rules_trace.clone(),
         "v2": ctx.v2,
         "timestamp": Utc::now().to_rfc3339(),

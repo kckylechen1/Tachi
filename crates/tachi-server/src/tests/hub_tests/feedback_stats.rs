@@ -132,6 +132,57 @@ async fn hub_stats_returns_capability_counts() {
 }
 
 #[tokio::test]
+async fn hub_stats_excludes_retired_global_and_project_tombstones() {
+    let (server, _project_db) =
+        crate::tests::make_server_with_project_fixture("retired-trajectory-stats");
+    let before: Value = serde_json::from_str(
+        &server
+            .hub_stats()
+            .await
+            .expect("baseline hub_stats should succeed"),
+    )
+    .expect("baseline stats JSON");
+    let mut global = crate::tests::make_skill_capability(
+        crate::builtins::RETIRED_TRAJECTORY_DISTILLER_ID,
+        "trajectory-distiller",
+        "Historical global trajectory writer omitted from stats",
+        "listed",
+    );
+    global.uses = 101;
+    global.successes = 99;
+    let mut project = global.clone();
+    project.description = "Historical project trajectory writer omitted from stats".to_string();
+    project.uses = 203;
+    project.successes = 197;
+    server
+        .with_global_store(|store| {
+            store
+                .hub_register(&global)
+                .map_err(|error| error.to_string())
+        })
+        .expect("inject retired global stats row");
+    server
+        .with_project_store(|store| {
+            store
+                .hub_register(&project)
+                .map_err(|error| error.to_string())
+        })
+        .expect("inject retired project stats row");
+
+    let after: Value = serde_json::from_str(
+        &server
+            .hub_stats()
+            .await
+            .expect("post-injection hub_stats should succeed"),
+    )
+    .expect("post-injection stats JSON");
+    assert_eq!(
+        after, before,
+        "retired tombstones must not affect Hub stats"
+    );
+}
+
+#[tokio::test]
 async fn hub_disconnect_returns_ok_for_nonexistent_server() {
     let server = make_server();
 

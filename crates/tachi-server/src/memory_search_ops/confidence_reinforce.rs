@@ -1,21 +1,10 @@
 use crate::memory_search_ops::auto_link::{should_reinforce, should_supersede};
-use memcore::{MemoryEntry, MemoryStore};
+use memcore::{ExpectedMemoryState, MemoryEntry, MemoryStore};
 use serde_json::json;
 use std::collections::HashSet;
 
 pub(crate) fn confidence_increment(similarity: f64) -> f64 {
     (0.1 * similarity).clamp(0.0, 0.1)
-}
-
-pub(crate) fn apply_confidence_reinforcement(
-    store: &mut MemoryStore,
-    reinforced_id: &str,
-    increment: f64,
-    reinforced_at: &str,
-) -> Result<(), String> {
-    store
-        .reinforce_confidence(reinforced_id, increment, reinforced_at)
-        .map_err(|e| format!("update confidence reinforcement: {e}"))
 }
 
 pub(crate) fn collect_reinforcement_candidates(
@@ -31,13 +20,19 @@ pub(crate) fn apply_confidence_reinforcement_links(
     store: &mut MemoryStore,
     entry: &MemoryEntry,
 ) -> Result<usize, String> {
+    let Some(entry) = store
+        .get(&entry.id)
+        .map_err(|error| format!("read committed reinforcement source: {error}"))?
+    else {
+        return Ok(0);
+    };
     if entry.entities.is_empty() || entry.vector.is_none() {
         return Ok(0);
     }
 
     let mut reinforced = 0usize;
     let mut seen_targets = HashSet::<String>::new();
-    for candidate in collect_reinforcement_candidates(store, entry)? {
+    for candidate in collect_reinforcement_candidates(store, &entry)? {
         if !seen_targets.insert(candidate.id.clone()) {
             continue;
         }
@@ -62,11 +57,11 @@ pub(crate) fn apply_confidence_reinforcement_links(
                 )
             })
             .fold(0.0_f64, f64::max);
-        let supersedes = should_supersede(entry, &candidate, shared.len(), symbolic_score);
-        let Some(similarity) = vector_similarity_between(entry, &candidate) else {
+        let supersedes = should_supersede(&entry, &candidate, shared.len(), symbolic_score);
+        let Some(similarity) = vector_similarity_between(&entry, &candidate) else {
             continue;
         };
-        if !should_reinforce(entry, &candidate, shared.len(), similarity, supersedes) {
+        if !should_reinforce(&entry, &candidate, shared.len(), similarity, supersedes) {
             continue;
         }
 
@@ -89,17 +84,24 @@ pub(crate) fn apply_confidence_reinforcement_links(
         };
         // tachi#1646: vector-similarity `reinforces` edges are a heuristic
         // Tachi computed itself.
-        store
-            .add_edge_with_provenance(
+        let source_superseded_by = store
+            .supersession_target(&entry.id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| format!("reinforcement source disappeared: {}", entry.id))?;
+        let target_superseded_by = store
+            .supersession_target(&candidate.id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| format!("reinforcement target disappeared: {}", candidate.id))?;
+        let committed = store
+            .commit_confidence_reinforcement(
                 &edge,
-                &memcore::db::EdgeProvenance {
-                    authority: Some(memcore::db::EdgeAuthority::DerivedHeuristic),
-                    ..Default::default()
-                },
+                increment,
+                &now,
+                &ExpectedMemoryState::from_entry(&entry, source_superseded_by.as_deref()),
+                &ExpectedMemoryState::from_entry(&candidate, target_superseded_by.as_deref()),
             )
-            .map_err(|e| format!("{e}"))?;
-        apply_confidence_reinforcement(store, &candidate.id, increment, &now)?;
-        reinforced += 1;
+            .map_err(|error| error.to_string())?;
+        reinforced += usize::from(committed);
     }
 
     Ok(reinforced)
@@ -161,50 +163,6 @@ mod tests {
     }
 
     #[test]
-    fn confidence_reinforcement_updates_metadata_confidence() {
-        let mut store = memcore::MemoryStore::open_in_memory().unwrap();
-        let mut old_entry = test_entry("old", "durable supported fact");
-        old_entry.metadata = json!({ "confidence": 0.70 });
-        store.upsert(&old_entry).unwrap();
-
-        apply_confidence_reinforcement(&mut store, "old", 0.08, "2026-01-01T00:00:00Z").unwrap();
-
-        let updated = store.get("old").unwrap().unwrap();
-        let confidence = updated
-            .metadata
-            .get("confidence")
-            .and_then(|value| value.as_f64())
-            .unwrap();
-        assert!((confidence - 0.78).abs() < 1e-9, "confidence={confidence}");
-        assert_eq!(
-            updated
-                .metadata
-                .get("confidence_reinforced_at")
-                .and_then(|value| value.as_str()),
-            Some("2026-01-01T00:00:00Z")
-        );
-    }
-
-    #[test]
-    fn confidence_reinforcement_falls_back_to_importance() {
-        let mut store = memcore::MemoryStore::open_in_memory().unwrap();
-        let mut old_entry = test_entry("old", "durable supported fact");
-        old_entry.importance = 0.60;
-        old_entry.metadata = json!({});
-        store.upsert(&old_entry).unwrap();
-
-        apply_confidence_reinforcement(&mut store, "old", 0.10, "2026-01-01T00:00:00Z").unwrap();
-
-        let updated = store.get("old").unwrap().unwrap();
-        let confidence = updated
-            .metadata
-            .get("confidence")
-            .and_then(|value| value.as_f64())
-            .unwrap();
-        assert!((confidence - 0.70).abs() < 1e-9, "confidence={confidence}");
-    }
-
-    #[test]
     fn vector_similarity_ignores_non_finite_vectors() {
         let mut new_entry = test_entry("new", "new vector");
         let mut old_entry = test_entry("old", "old vector");
@@ -241,6 +199,10 @@ mod tests {
             .unwrap();
         assert_eq!(edges.len(), 1);
         assert_eq!(edges[0].target_id, "old");
+        assert_eq!(
+            memcore::db::edge_authority(&edges[0]),
+            Some(memcore::db::EdgeAuthority::DerivedHeuristic)
+        );
 
         let updated = store.get("old").unwrap().unwrap();
         let confidence = updated

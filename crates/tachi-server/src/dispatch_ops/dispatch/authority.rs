@@ -41,13 +41,57 @@ use tachi_dispatch::{
     ProviderQualification, SkillRequest,
 };
 
+/// Authority issuance records the admitted values in the server-owned grant.
+pub(super) fn mint_execution_grant_from_mechanics(
+    params: &mut DispatchLaunchMechanics,
+    grant_id: impl Into<String>,
+    env_resolution: &crate::exec_env_ops::EnvResolution,
+) -> Result<tachi_params::ExecutionGrant, String> {
+    // The running launch path historically reads the top-level MCP knobs.
+    // Preserve that precedence in the grant without rewriting the independent
+    // nested profile metadata consumed by prompt, receipt, and progress paths.
+    let mut mcp_access = params.mcp_access.clone();
+    if let Some(access) = mcp_access.as_mut() {
+        access.inject_tachi_mcp = params.inject_tachi_mcp;
+        access.inject_hub_mcps = params.inject_hub_mcps;
+        access.allowed_mcp_servers = params.allowed_mcp_servers.clone();
+    }
+    let grant = tachi_params::ExecutionGrant {
+        grant_id: grant_id.into(),
+        env_id: env_resolution.env_id().map(str::to_string),
+        unmanaged_cwd_allowed: matches!(
+            env_resolution,
+            crate::exec_env_ops::EnvResolution::Unmanaged { .. }
+        ),
+        allowed_cwd: env_resolution.cwd().map(std::path::PathBuf::from),
+        credential_profiles: canonical_credential_profiles(&params.credential_profiles),
+        mcp_access,
+        allowed_tools: params.allowed_tools.clone(),
+        permission_profile: params.permission_profile.clone(),
+        sandbox: params.sandbox.clone(),
+        max_turns: params.max_turns,
+        timeout_secs: params.timeout_secs,
+    };
+    Ok(grant)
+}
+
+fn canonical_credential_profiles(raw: &[String]) -> Vec<String> {
+    raw.iter().fold(Vec::new(), |mut canonical, profile| {
+        let profile = profile.trim();
+        if !profile.is_empty() && !canonical.iter().any(|seen| seen == profile) {
+            canonical.push(profile.to_string());
+        }
+        canonical
+    })
+}
+
 /// Compile the dispatch's effective authority contract and apply it to
 /// `params`. Returns the contract (for the receipt) or a typed-error string.
 ///
-/// `params` is mutated in exactly two ways, both of which can only *narrow*:
+/// `params` is mutated in exactly three ways, all derived from effective authority:
 /// `sandbox` becomes the compiled level (or `None` for providers with no
 /// sandbox primitive — never a vendor default), and `skills` becomes the
-/// mounted subset.
+/// mounted subset; `permission_profile` records the admitted replay spelling.
 ///
 /// `qualifications` and `backend_version` are parameters rather than the const +
 /// a probe call, so the tests can pin each world explicitly: the certified binary
@@ -63,14 +107,15 @@ use tachi_dispatch::{
 /// refuses to hand it back for any other version — including an unknown one.
 /// That is the whole point of an evidence-based certification: it expires when
 /// the evidence stops describing the thing you are about to run.
-pub(super) fn compile_dispatch_contract(
-    params: &mut TachiDispatchParams,
+pub(super) fn compile_dispatch_contract_from_mechanics(
+    params: &mut DispatchLaunchMechanics,
     agent_norm: &str,
     harness_transport: &str,
     resolved_profile: &ResolvedDispatchProfile,
     qualifications: &[ProviderQualification],
     backend_version: Option<&str>,
 ) -> Result<EffectiveContract, String> {
+    let admitted_permission_spelling = params.permission_profile.clone();
     let permission_profile = tachi_dispatch::resolve_permission_profile(&DispatchLaunchParams {
         cwd: params.cwd.clone(),
         model: params.model.clone(),
@@ -81,12 +126,9 @@ pub(super) fn compile_dispatch_contract(
         command: params.command.clone(),
     })?;
 
-    // Compile the mount from `params.skills` exactly as the caller (or the
-    // profile's STATIC reviewed skills, materialized by
-    // `resolve_and_apply_dispatch_profile` when the caller passed none) left
-    // it. #1690 C3 S1: there is NO stage-default or task-SOP auto-derivation —
-    // the old `resolve_effective_skills` fallback is retired, so an empty list
-    // stays empty all the way to the compiler.
+    // The coordinator resolves the semantic candidate once before this
+    // authority compiler. This boundary only filters that candidate and mints
+    // the admitted mount; defaults must not reappear after a filter empties it.
     let skills = params
         .skills
         .iter()
@@ -115,6 +157,67 @@ pub(super) fn compile_dispatch_contract(
 
     params.sandbox = contract.sandbox_arg.clone();
     params.skills = contract.mounted_skills.clone();
+    // The typed grant records this admitted authority. Keep a successful
+    // `verify` spelling replay-safe for the downstream launcher: it is an
+    // accepted alias with a distinct headless opt-in, not a request to replay
+    // as `full`. Omitted input projects to the explicit default spelling.
+    params.permission_profile =
+        admitted_permission_spelling.or_else(|| Some(permission_profile.as_str().to_string()));
+    Ok(contract)
+}
+
+#[cfg(test)]
+fn test_mechanics(params: &TachiDispatchParams) -> DispatchLaunchMechanics {
+    DispatchLaunchMechanics {
+        cwd: params.cwd.clone(),
+        env_id: params.env_id.clone(),
+        unmanaged_cwd: params.unmanaged_cwd.unwrap_or(false),
+        skills: params.skills.clone(),
+        model: params.model.clone(),
+        permission_profile: params.permission_profile.clone(),
+        allowed_tools: params.allowed_tools.clone(),
+        max_turns: params.max_turns,
+        sandbox: params.sandbox.clone(),
+        command: params.command.clone(),
+        credential_profiles: params.credential_profiles.clone(),
+        mcp_access: params.mcp_access.clone(),
+        inject_tachi_mcp: params.inject_tachi_mcp,
+        inject_hub_mcps: params.inject_hub_mcps,
+        allowed_mcp_servers: params.allowed_mcp_servers.clone(),
+        timeout_secs: params.timeout_secs,
+    }
+}
+
+#[cfg(test)]
+pub(super) fn mint_execution_grant(
+    params: &mut TachiDispatchParams,
+    grant_id: impl Into<String>,
+    env_resolution: &crate::exec_env_ops::EnvResolution,
+) -> Result<tachi_params::ExecutionGrant, String> {
+    mint_execution_grant_from_mechanics(&mut test_mechanics(params), grant_id, env_resolution)
+}
+
+#[cfg(test)]
+pub(super) fn compile_dispatch_contract(
+    params: &mut TachiDispatchParams,
+    agent_norm: &str,
+    harness_transport: &str,
+    resolved_profile: &ResolvedDispatchProfile,
+    qualifications: &[ProviderQualification],
+    backend_version: Option<&str>,
+) -> Result<EffectiveContract, String> {
+    let mut mechanics = test_mechanics(params);
+    let contract = compile_dispatch_contract_from_mechanics(
+        &mut mechanics,
+        agent_norm,
+        harness_transport,
+        resolved_profile,
+        qualifications,
+        backend_version,
+    )?;
+    params.sandbox = mechanics.sandbox;
+    params.skills = mechanics.skills;
+    params.permission_profile = mechanics.permission_profile;
     Ok(contract)
 }
 
@@ -127,6 +230,44 @@ pub(super) fn contract_receipt(contract: &EffectiveContract) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_assignment(
+        backend: &str,
+        model: Option<&str>,
+    ) -> tachi_params::ResolvedStaffAssignment {
+        let backend = backend.to_string();
+        tachi_params::ResolvedStaffAssignment {
+            assignment_id: "test-assignment".to_string(),
+            staffing_reason: tachi_params::TachiDispatchReason::ExplicitUserRequest,
+            selected_worker: backend.clone(),
+            selected_profile: Some("codex_55_review".to_string()),
+            selected_backend: backend,
+            selected_model: model.map(str::to_string),
+            execution_level: None,
+            recommendation_ref: None,
+            host_adapter: None,
+            evidence_required: Vec::new(),
+            fallback_chain: Vec::new(),
+            route_explanation: Vec::new(),
+            identity_receipt: Value::Null,
+        }
+    }
+
+    fn test_grant(sandbox: Option<&str>) -> tachi_params::ExecutionGrant {
+        tachi_params::ExecutionGrant {
+            grant_id: "test-grant".to_string(),
+            env_id: None,
+            unmanaged_cwd_allowed: false,
+            allowed_cwd: None,
+            credential_profiles: Vec::new(),
+            mcp_access: None,
+            allowed_tools: Vec::new(),
+            permission_profile: None,
+            sandbox: sandbox.map(str::to_string),
+            max_turns: None,
+            timeout_secs: 5,
+        }
+    }
     use crate::dispatch_profile::resolve_and_apply_dispatch_profile;
     use serde_json::json;
     use tachi_dispatch::{CODEX_CLI_RECEIPT, PROVIDER_QUALIFICATIONS};
@@ -173,6 +314,20 @@ mod tests {
         (params, resolved)
     }
 
+    macro_rules! compile_contract_from_legacy_projection {
+        ($params:expr, $agent:expr, $transport:expr, $profile:expr, $qualifications:expr, $version:expr $(,)?) => {{
+            let params = $params;
+            compile_dispatch_contract(
+                params,
+                $agent,
+                $transport,
+                $profile,
+                $qualifications,
+                $version,
+            )
+        }};
+    }
+
     /// #894 S2d discriminating test ④ (server half): a review-profile dispatch
     /// that omits `sandbox` must compile to read-only and hand the launcher an
     /// explicit `--sandbox read-only`. Before this slice, `params.sandbox` was
@@ -189,7 +344,7 @@ mod tests {
         }));
         assert_eq!(params.sandbox, None, "the caller omitted sandbox");
 
-        let contract = compile_dispatch_contract(
+        let contract = compile_contract_from_legacy_projection!(
             &mut params,
             "codex",
             "cli",
@@ -213,7 +368,10 @@ mod tests {
             tachi_dispatch::Enforcement::Enforced { .. }
         ));
 
-        let cmd = build_codex_command(&params, "review", None).expect("codex command");
+        let assignment = test_assignment("codex", None);
+        let grant = test_grant(Some("read-only"));
+        let cmd = build_codex_command(&assignment, &grant, &params.command, "review", None)
+            .expect("codex command");
         let args = cmd
             .as_std()
             .get_args()
@@ -263,7 +421,7 @@ mod tests {
             "profile": "codex_55_review",
             "sandbox": "workspace-write",
         }));
-        let err = compile_dispatch_contract(
+        let err = compile_contract_from_legacy_projection!(
             &mut params,
             "codex",
             "cli",
@@ -299,7 +457,7 @@ mod tests {
             "permission_profile": "full",
         }));
 
-        let err = compile_dispatch_contract(
+        let err = compile_contract_from_legacy_projection!(
             &mut params,
             "codex",
             "cli",
@@ -344,7 +502,7 @@ mod tests {
             ],
         }));
 
-        let contract = compile_dispatch_contract(
+        let contract = compile_contract_from_legacy_projection!(
             &mut params,
             "codex",
             "cli",
@@ -384,7 +542,7 @@ mod tests {
                 "skill:waza-write",
             ],
         }));
-        let exec_contract = compile_dispatch_contract(
+        let exec_contract = compile_contract_from_legacy_projection!(
             &mut exec_params,
             "custom",
             "cli",
@@ -417,7 +575,7 @@ mod tests {
             "staffing_reason": "explicit_user_request",
             "profile": "deepseek_explore",
         }));
-        let err = compile_dispatch_contract(
+        let err = compile_contract_from_legacy_projection!(
             &mut params,
             "custom",
             "cli",
@@ -460,7 +618,7 @@ mod tests {
                 "staffing_reason": "explicit_user_request",
                 "profile": "codex_55_review",
             }));
-            let err = compile_dispatch_contract(
+            let err = compile_contract_from_legacy_projection!(
                 &mut params,
                 "codex",
                 "cli",
@@ -493,7 +651,7 @@ mod tests {
             "staffing_reason": "explicit_user_request",
             "profile": "opencode_builder",
         }));
-        let contract = compile_dispatch_contract(
+        let contract = compile_contract_from_legacy_projection!(
             &mut params,
             "custom",
             "cli",

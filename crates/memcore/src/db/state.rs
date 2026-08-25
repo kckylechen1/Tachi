@@ -43,6 +43,11 @@ pub(crate) fn refuse_general_mutation_namespace(
              insert_state_if_absent"
         )));
     }
+    if namespace == crate::store::immutable_supersession::SUPERSESSION_RECEIPT_NAMESPACE {
+        return Err(MemoryError::InvalidArg(format!(
+            "hard_state namespace '{namespace}' is write-once supersession evidence and cannot be {operation} through a general state API"
+        )));
+    }
     refuse_operator_maintenance_authority_namespace(namespace, operation)?;
     Ok(())
 }
@@ -226,6 +231,7 @@ pub fn reap_expired_state(conn: &Connection, now_rfc3339: &str) -> Result<usize,
         "DELETE FROM hard_state
          WHERE namespace != ?2
            AND namespace != ?3
+           AND namespace != ?4
            AND json_valid(value_json)
            AND json_type(value_json, '$.expires_at') = 'text'
            AND datetime(json_extract(value_json, '$.expires_at')) IS NOT NULL
@@ -233,7 +239,8 @@ pub fn reap_expired_state(conn: &Connection, now_rfc3339: &str) -> Result<usize,
         params![
             now_rfc3339,
             crate::db::store_profile::STORE_IDENTITY_NAMESPACE,
-            OPERATOR_MAINTENANCE_RECEIPT_NAMESPACE
+            OPERATOR_MAINTENANCE_RECEIPT_NAMESPACE,
+            crate::store::immutable_supersession::SUPERSESSION_RECEIPT_NAMESPACE,
         ],
     )?;
     Ok(removed)
@@ -298,6 +305,7 @@ pub fn backfill_missing_expires_at(
     // every future call site to avoid passing this namespace in.
     if namespace == crate::db::store_profile::STORE_IDENTITY_NAMESPACE
         || namespace == OPERATOR_MAINTENANCE_RECEIPT_NAMESPACE
+        || namespace == crate::store::immutable_supersession::SUPERSESSION_RECEIPT_NAMESPACE
     {
         return Ok(0);
     }

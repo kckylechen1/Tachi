@@ -19,12 +19,12 @@
 //! `env:{lane}` catalog rows are re-resolved by *every* process from *its own*
 //! environment (#1681 D3's compatibility window). Two daemons with different
 //! env therefore flip the same row back and forth, each bumping its revision,
-//! and until now nothing anywhere reviewed that. Binding an alias to such a row
-//! makes the flip visible and refusable: the plan records the deployment
+//! so binding an alias to such a row must make the flip visible and refusable.
+//! The plan records the deployment
 //! revision it read, and apply refuses on `deployment_revision_drift` if
-//! another process moved it in between. The flip-flop is not prevented here —
-//! that is #1685's cutover — but it can no longer happen underneath a reviewed
-//! routing decision without saying so.
+//! another process moved it in between. The flip-flop is not prevented here,
+//! but it cannot happen underneath a reviewed routing decision without saying
+//! so.
 //!
 //! # What this module deliberately does not do
 //!

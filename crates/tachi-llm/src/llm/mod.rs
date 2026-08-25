@@ -8,11 +8,9 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 
 mod auth_probe;
-/// tachi#1682 slice-1: sans-IO ProviderWire trait and OpenAI-compat adapter.
-pub mod broker;
-/// tachi#1681 D3/D7 PR-B: env-chain → catalog import. Public because the
-/// status projection (tachi-server) and the #1685 consumer cutover both
-/// consume the projection; nothing in this crate reads the catalog back.
+/// Env-chain → catalog import. Public because the status projection
+/// (tachi-server) consumes the projection; nothing in this crate reads the
+/// catalog back to choose a route.
 pub mod catalog_import;
 mod chat_lanes;
 mod circuit_breaker;
@@ -22,7 +20,6 @@ mod embedding;
 /// disagrees with the stored index is refused at resolution.
 pub mod embedding_config;
 mod helpers;
-pub mod ingress_gate;
 mod provider_health;
 mod rerank;
 
@@ -96,6 +93,12 @@ pub struct LlmClient {
     provider_materialization_lock: Arc<Mutex<()>>,
     provider_health_reload: Arc<RwLock<ProviderHealthReloadState>>,
     provider_health_persist: Arc<RwLock<ProviderHealthPersistState>>,
+    /// FIFO ownership for same-client background SQLite open+write phases.
+    /// Model calls enqueue work but never wait on this lock.
+    background_persist_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Tracks fire-and-forget usage writes so tests can join the exact
+    /// persistence boundary without changing production call latency.
+    llm_usage_persist: Arc<RwLock<ProviderHealthPersistState>>,
     /// Counts for the deployment-health seam (#1681 D4, PR-C). Not an
     /// `RwLock`: nothing reads these to decide anything, so atomics are the
     /// whole state — and a health counter must never be able to contend with
@@ -106,35 +109,12 @@ pub struct LlmClient {
     /// Full-chain (all tiers) outage streak per lane (#1197) — feeds
     /// `provider_health_status().lane_outages`.
     pub(crate) lane_outage: LaneOutageTracker,
-    /// Counts model references that reached the provider call without having
-    /// been resolved (#1681 PR-D debt (a)). Report-only: it changes no
-    /// routing, and it is the evidence #1685's cutover will be measured
-    /// against. Deliberately **not** folded into `ProviderHealthStatus` yet —
-    /// that serialized contract would ship a field #1685 immediately reshapes.
-    pub(crate) ingress_gate: ingress_gate::IngressReferenceGate,
     /// Test-only: last provider arm entered by `rerank()` (dispatch seam probe).
     #[cfg(test)]
     last_rerank_dispatch: Arc<std::sync::Mutex<Option<RerankProviderKind>>>,
 }
 
 impl LlmClient {
-    /// Model references that reached a provider call without having been
-    /// resolved, per lane (#1681 PR-D debt (a)).
-    ///
-    /// A report, not a control: nothing branches on this. It is the evidence
-    /// for what #1685's cutover has to cover, and its going to zero is the
-    /// evidence the cutover is complete.
-    pub fn unresolved_model_references(&self) -> Vec<ingress_gate::UnresolvedReferenceReport> {
-        self.ingress_gate.snapshot()
-    }
-
-    /// Sightings that arrived after the gate's distinct-reference cap. Nonzero
-    /// means [`Self::unresolved_model_references`] is a sample rather than the
-    /// whole list.
-    pub fn unresolved_model_reference_overflow(&self) -> u64 {
-        self.ingress_gate.overflow()
-    }
-
     /// Record which rerank arm `rerank()` actually entered (test discrimination).
     #[inline]
     fn note_rerank_dispatch(&self, kind: RerankProviderKind) {
@@ -212,6 +192,16 @@ impl LlmClient {
         })
         .join();
         assert!(result.is_err(), "poisoning thread must panic");
+    }
+
+    #[cfg(test)]
+    pub(in crate::llm) async fn await_llm_usage_persistence_for_tests(&self) -> Result<(), String> {
+        let tracker = self
+            .llm_usage_persist
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .tracker();
+        tracker.wait_until_terminal().await
     }
 }
 

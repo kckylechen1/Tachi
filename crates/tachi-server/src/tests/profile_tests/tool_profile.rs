@@ -140,7 +140,7 @@ async fn coordinate_profile_exposes_advanced_coordination_facades() {
         .expect("tool discovery should work");
 
     assert!(tools.contains("`tachi_staff`"));
-    assert!(tools.contains("`tachi_orchestrator`"));
+    assert!(!tools.contains("`tachi_orchestrator`"));
 }
 
 /// #1319-E2 recursive-dispatch guard: a worker/delegate MUST NOT see

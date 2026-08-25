@@ -2,9 +2,6 @@ pub const OBSERVE_TOOL_PATTERNS: &[&str] = &[
     "tachi_a2a",
     "tachi_tools",
     "tachi_wiki_search",
-    // #1690 C3 slice A: recommend_capability / recommend_skill /
-    // recommend_toolchain retired with the "second model brain" — the routes
-    // are gone, so the tray entries died with them.
     // General Hub discovery remains visible for broad observe profiles; skill
     // workflow discovery should prefer tachi_skill(action='discover').
     "hub_discover",
@@ -12,7 +9,6 @@ pub const OBSERVE_TOOL_PATTERNS: &[&str] = &[
     "memory_stats",
     "runtime_info",
     "tachi_status",
-    "wiki_search",
     // Facade read tools
     "tachi_search",
     "tachi_web_search",
@@ -24,12 +20,6 @@ pub const OBSERVE_TOOL_PATTERNS: &[&str] = &[
     "tachi_task",
     // Unified memory facade (search action is read-only)
     "tachi_memory",
-    // Continuity event facade (query action is read-only)
-    "tachi_event",
-    // Zero-param session-start alias for tachi_memory(action='briefing')
-    "tachi_briefing",
-    // Component governance read model (Issue #796)
-    "tachi_component",
     // Research verb (read-side evidence pipeline; #530)
     "tachi_research",
     // Peer-publication broker read surface (#1016 S1): advisory, structurally
@@ -47,17 +37,12 @@ pub const REMEMBER_TOOL_PATTERNS: &[&str] = &[
     // #517 soft-deprecate: standalone run_skill removed from remember tray —
     // use tachi_skill(action='run'). Tool remains registered for backcompat.
     "ingest_event",
-    // Facade write tool
-    "tachi_save",
-    "tachi_complete",
     // Facade wiki write (action=write)
     "tachi_wiki",
     // Facade skill workflow (discover / run / bundle)
     "tachi_skill",
     // Unified memory facade (save / extract_facts are write ops)
     "tachi_memory",
-    // Continuity event facade (emit action is append-only write)
-    "tachi_event",
     // Repo-shape adapter facade (imports into continuity events/projections)
     "tachi_domain_adapter",
 ];
@@ -69,7 +54,6 @@ pub const COORDINATE_TOOL_PATTERNS: &[&str] = &[
     // (`promote_issue`).
     // Facade coordination tools
     "tachi_handoff",
-    "tachi_orchestrator",
     "tachi_agents",
     // GitHub tools (bundle membership for classification; visibility gated by vault token)
     "tachi_gh",
@@ -89,16 +73,11 @@ pub const OPERATE_TOOL_PATTERNS: &[&str] = &[
     "recall_context",
     "capture_session",
     "archive_memory",
-    "find_similar_memory",
     "get_pipeline_status",
     "sync_memories",
     "hub_call",
     "hub_disconnect",
     "wiki_lint",
-    // #1690 C3 slice A: the standalone `run_skill` / `prepare_capability_bundle`
-    // backcompat routes are retired — they were pure forwarders to
-    // `handle_run_skill` / `handle_prepare_capability_bundle`. Canonical
-    // surface: tachi_skill(action='run' | 'bundle').
     // Vault session management (password-protected)
     "vault_unlock",
     "vault_lock",
@@ -122,10 +101,6 @@ pub const STANDARD_MINIMAL_TOOL_PATTERNS: &[&str] = &[
     "tachi_verify",
     // Unified memory facade (search / save / extract_facts)
     "tachi_memory",
-    // Zero-param session-start briefing (calls tachi_memory(action='briefing') internally)
-    "tachi_briefing",
-    // Direct notepad/conclusion saver facade (high-frequency)
-    "tachi_save",
     // Live web search. Keep in standard because some agents lack host search,
     // and future wiki/research ledger flows need one canonical search intake.
     "tachi_web_search",
@@ -151,26 +126,20 @@ pub const STANDARD_MINIMAL_TOOL_PATTERNS: &[&str] = &[
 /// denied by [`super::action_policy::facade_action_allowed`] (plan/complete/
 /// status/board/wait/briefing/doc_index only). `tachi_skill` is limited to
 /// discover/run/bundle by the same gate.
-///
-/// #1690 C3 slice A: standalone `run_skill` is retired — workers use
-/// `tachi_skill(action='run')`.
 pub const DELEGATE_MINIMAL_TOOL_PATTERNS: &[&str] = &[
     "tachi_a2a",
     "tachi_tools",
     "runtime_info",
     // Unified memory facade (daily actions only under action policy)
     "tachi_memory",
-    // Continuity events (query + append; no promote under action policy)
-    "tachi_event",
     "tachi_web_search",
-    "tachi_browse",
+    // Wiki facade (search/browse/read under action policy)
+    "tachi_wiki",
     // Self-rescue when stuck
     "tachi_unstick",
     // Task facade — action policy denies dispatch/recommend/merge/…
     "tachi_task",
-    // Declare task completion (standalone backcompat; prefer tachi_task complete)
-    "tachi_complete",
-    // Canonical skill workflow facade (discover/run/bundle under action policy)
+    // Canonical skill workflow facade (discover/run under action policy)
     "tachi_skill",
     // Peer-publication broker (#1016 S1): a worker lane reads a peer's advisory
     // presence to avoid colliding blind. Read-only; no write path exists.

@@ -2201,6 +2201,7 @@ mod tests {
         let _app_home = crate::test_support::EnvRestore::remove("TACHI_APP_HOME");
         let _tachi_root = crate::test_support::EnvRestore::remove("TACHI_ROOT");
         let _memory_db = crate::test_support::EnvRestore::remove("MEMORY_DB_PATH");
+        let _no_tty = crate::test_support::EnvRestore::set("TACHI_TEST_FORCE_NO_TTY", "1");
         let _cwd = crate::test_support::CwdRestore::set(&repo);
 
         let cli = Cli {

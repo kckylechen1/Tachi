@@ -1864,6 +1864,54 @@ mod tests {
         matches!(result, Err(MemoryError::DbCreateTargetExists { .. }))
     }
 
+    /// Display remediation text for the #1119 refusal is build-form-branched:
+    /// the admin build (this crate's default test build) must keep pointing
+    /// at the tachi-server deploy ritual. The portable branch is pinned in
+    /// `portable-kernel`'s contract test, which resolves memcore without
+    /// `admin` — workspace feature unification makes both assertions
+    /// impossible in one build. 2026-08-16 Hyperion mis-chase: a portable
+    /// shell operator chased this hint for a flag their binary does not have.
+    #[test]
+    fn opt_in_required_remediation_text_points_admin_builds_at_tachi_server() {
+        // Tripwire on the compile-time constant, deliberately (same shape as
+        // the post-#1062 tripwire in exec_env_reaper): it states the premise
+        // every assertion below depends on — this build resolved memcore with
+        // `admin` on, so only the admin branch of the remediation text is
+        // pinnable here. `clippy` calls a constant assertion pointless because
+        // a constant cannot surprise you at runtime; that is exactly why it is
+        // here.
+        #[allow(clippy::assertions_on_constants)]
+        {
+            assert!(
+                crate::ADMIN_SURFACE_ENABLED,
+                "this test pins the admin branch; the portable branch is pinned in \
+                 portable-kernel's portable_contract test"
+            );
+        }
+        let err = schema_migration_opt_in_required_error(21, Path::new("/data/legacy.db"));
+        let text = err.to_string();
+        assert!(
+            text.contains("refusing to migrate db schema 21 -> "),
+            "skeleton must survive the hint split: {text}"
+        );
+        assert!(
+            text.contains(
+                "pass --allow-schema-migration to tachi-server, which becomes a typed \
+                 MigrationAuthority::Allow threaded to every DB open (never a process env var)"
+            ),
+            "admin builds keep the tachi-server deploy-ritual guidance: {text}"
+        );
+        assert!(
+            !text.contains("hypermem migrate"),
+            "admin builds must not carry the portable-shell remediation: {text}"
+        );
+        assert!(
+            text.contains("/data/legacy.db.migration-bak.")
+                && text.contains("/data/legacy.db.migration-marker"),
+            "backup/marker trail hints must survive the hint split: {text}"
+        );
+    }
+
     /// The frozen assertion this REPLACES (old route:
     /// `opt_in_gate_with_is_noop_for_fresh_db`, which inferred "fresh" from a
     /// `sqlite_master` table count). New semantics: a full-schema DB that still

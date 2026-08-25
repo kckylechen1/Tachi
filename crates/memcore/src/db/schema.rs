@@ -229,6 +229,29 @@ pub fn init_schema_with_label_mut(
     current_db_path: &Path,
     ctx: &crate::db::DbOpenContext,
 ) -> Result<SchemaInitOutcome, MemoryError> {
+    init_schema_with_label_mut_inner(conn, db_label, current_db_path, ctx, true)
+}
+
+/// Initialize an admitted in-memory private image without ever materializing
+/// migration backups or marker files. The caller owns durability by sealing
+/// the resulting image; writing plaintext migration artifacts would escape
+/// that boundary.
+pub(crate) fn init_private_schema_with_label_mut(
+    conn: &mut Connection,
+    db_label: &str,
+    logical_db_path: &Path,
+    ctx: &crate::db::DbOpenContext,
+) -> Result<SchemaInitOutcome, MemoryError> {
+    init_schema_with_label_mut_inner(conn, db_label, logical_db_path, ctx, false)
+}
+
+fn init_schema_with_label_mut_inner(
+    conn: &mut Connection,
+    db_label: &str,
+    current_db_path: &Path,
+    ctx: &crate::db::DbOpenContext,
+    filesystem_artifacts: bool,
+) -> Result<SchemaInitOutcome, MemoryError> {
     super::ensure_reserved_reference_write_guard(conn)?;
     crate::db::migrations::check_schema_version_gate(conn)?;
     // #1119: typed migration gate. Runs BEFORE any backup/DDL/migration/stamp
@@ -241,7 +264,9 @@ pub fn init_schema_with_label_mut(
     // file is fresh, whatever its content (#1119 owner ruling A). Sampled
     // BEFORE the transaction writes the new stamp.
     let fresh = crate::db::migrations::read_schema_version(conn)? == 0;
-    maybe_backup_before_migration(conn, current_db_path)?;
+    if filesystem_artifacts {
+        maybe_backup_before_migration(conn, current_db_path)?;
+    }
     apply_connection_pragmas(conn)?;
 
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -274,7 +299,9 @@ pub fn init_schema_with_label_mut(
     }
     tx.commit()?;
 
-    remember_migration_fingerprint(conn, current_db_path)?;
+    if filesystem_artifacts {
+        remember_migration_fingerprint(conn, current_db_path)?;
+    }
     Ok(SchemaInitOutcome { report, identity })
 }
 

@@ -17,6 +17,12 @@ pub struct DispatchRisk {
     pub blocked_profiles: Vec<String>,
 }
 
+/// The `/eval/YYYY-MM-DD` memory entries the recommendation scorer read until
+/// tachi#1675 PR4. Retired as a ROUTING evidence base by that cutover; the
+/// entries themselves remain readable human notes (`tachi_agent_eval`'s
+/// `aggregate_live`/`telemetry` still serve them).
+pub const ROUTE_EVIDENCE_SOURCE_LIVE_EVAL_MEMORY: &str = "live_eval_memory";
+
 /// The tachi#1675 decision-fact ledger (`route_recommendations` /
 /// `route_decisions` / `eval_rubric_scores` joined onto the canonical outcome
 /// and adjudication spines). The evidence base `recommend` sources from after
@@ -36,6 +42,13 @@ pub const ROUTE_EVIDENCE_SOURCE_DECISION_FACT_LEDGER: &str = "decision_fact_ledg
 /// provenance nobody wrote down.
 pub const RETIRED_EVIDENCE_SOURCE_SKIP_REASON: &str = "retired_evidence_source";
 
+/// The zero-signal fallback reason of the legacy `/eval`-memory scorer. Kept
+/// ONLY for that path: the #1202 owner ruling
+/// (`docs/engineering/architecture/dispatch-lifecycle.md` §4.2) demoted MBIT to
+/// derived evidence, so a routing answer whose only stated ground is "the MBIT
+/// card fits" is exactly what design D7 forbids on the ledger path.
+pub const BASELINE_MBIT_FIT_REASON: &str = "baseline_mbit_fit";
+
 /// A candidate the ledger has no usable row about. Deliberately NOT a fit
 /// claim: it names the absence, and the projection's answer for the response
 /// as a whole is `abstain` (design D7).
@@ -43,22 +56,22 @@ pub const NO_LEDGER_EVIDENCE_REASON: &str = "no_ledger_evidence";
 
 /// Which evidence base fed a scoring run (tachi#1675 PR4, design D6 phase 2).
 ///
-/// #1690 C3: the legacy `LiveEvalMemory` source was retired end-to-end — no
-/// production path constructs it (the recommendation seam always passes
-/// `DecisionFactLedger`), so its variant, the `live_eval_memory` wire token,
-/// and the MBIT-named `baseline_mbit_fit` no-signal reason are deleted rather
-/// than renamed. The type stays threaded because the response declares the
-/// evidence base verbatim.
+/// Threaded rather than inferred: the evidence flip must be declared in the
+/// response and must change the zero-signal fallback reason, and both of those
+/// are decisions a caller makes, not something the scorer can guess from the
+/// rows it was handed (an empty row slice looks the same either way).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RouteEvidenceSource {
-    /// The decision-fact ledger (`route_recommendations` / `route_decisions`
-    /// / `eval_rubric_scores`).
+    /// Pre-PR4: `/eval/YYYY-MM-DD` memory entries.
+    LiveEvalMemory,
+    /// Post-PR4: the decision-fact ledger.
     DecisionFactLedger,
 }
 
 impl RouteEvidenceSource {
     pub const fn as_str(self) -> &'static str {
         match self {
+            RouteEvidenceSource::LiveEvalMemory => ROUTE_EVIDENCE_SOURCE_LIVE_EVAL_MEMORY,
             RouteEvidenceSource::DecisionFactLedger => ROUTE_EVIDENCE_SOURCE_DECISION_FACT_LEDGER,
         }
     }
@@ -66,12 +79,13 @@ impl RouteEvidenceSource {
     /// The reason recorded for a candidate that accumulated NO scoring signal
     /// at all.
     ///
-    /// This is the whole of design D7's in-scope half: the no-evidence branch
-    /// names the absence (`no_ledger_evidence`) and the decision abstains.
-    /// #1690 C3 removed the legacy `/eval`-memory path that used to answer
-    /// with the retired MBIT fit token.
+    /// This is the whole of design D7's in-scope half: on the ledger path the
+    /// no-evidence branch names the absence (`no_ledger_evidence`) and the
+    /// decision abstains; `baseline_mbit_fit` survives only on the legacy
+    /// `/eval`-memory path.
     pub const fn no_signal_reason(self) -> &'static str {
         match self {
+            RouteEvidenceSource::LiveEvalMemory => BASELINE_MBIT_FIT_REASON,
             RouteEvidenceSource::DecisionFactLedger => NO_LEDGER_EVIDENCE_REASON,
         }
     }
@@ -697,11 +711,16 @@ pub fn build_dispatch_recommendation_response(
         .iter()
         .map(|candidate| candidate.performance_samples)
         .sum::<u32>();
-    let evidence_note = match (
-        evidence_source,
-        route_policy_rules.applied.is_empty(),
-        live_matched_samples,
-    ) {
+    let evidence_note = match (evidence_source, route_policy_rules.applied.is_empty(), live_matched_samples) {
+        (RouteEvidenceSource::LiveEvalMemory, false, _) => {
+            "route_policy_weighted: recommendation used matching /eval evidence plus approved route-policy rules."
+        }
+        (RouteEvidenceSource::LiveEvalMemory, true, 0) => {
+            "low_sample_fallback: no matching live /eval profile/subagent evidence; deterministic static-profile/risk fit dominated."
+        }
+        (RouteEvidenceSource::LiveEvalMemory, true, _) => {
+            "live_eval_weighted: recommendation used matching /eval profile/subagent evidence."
+        }
         (RouteEvidenceSource::DecisionFactLedger, false, _) => {
             "route_policy_weighted: recommendation used usable decision-fact-ledger rows plus approved route-policy rules."
         }
@@ -1418,7 +1437,7 @@ mod tests {
             &[],
             &[],
             &[],
-            RouteEvidenceSource::DecisionFactLedger,
+            RouteEvidenceSource::LiveEvalMemory,
         );
         let competitor_candidate = score_profile_candidate(
             competitor,
@@ -1427,7 +1446,7 @@ mod tests {
             &[],
             &[],
             &[],
-            RouteEvidenceSource::DecisionFactLedger,
+            RouteEvidenceSource::LiveEvalMemory,
         );
 
         assert_eq!(executor_candidate.failure_count, 3);
@@ -1439,19 +1458,18 @@ mod tests {
         );
     }
 
-    /// tachi#1675 PR4 / design D7: a candidate with no evidence says exactly
-    /// that (`no_ledger_evidence`) and NEVER the retired `baseline_mbit_fit`
-    /// token — the #1202 ruling demoted MBIT to derived evidence, so "the card
-    /// fits" is not a routing ground, and #1690 C3 deleted the legacy
-    /// `/eval`-memory source that used to emit it. The literal token is pinned
-    /// as an absence so a regression that resurrects the MBIT vocabulary fails
-    /// here even if it never re-introduces the const.
+    /// tachi#1675 PR4 / design D7: on the ledger path a candidate with no
+    /// evidence says exactly that (`no_ledger_evidence`) and NEVER
+    /// `baseline_mbit_fit` — the #1202 ruling demoted MBIT to derived evidence,
+    /// so "the card fits" is not a routing ground. The legacy `/eval`-memory
+    /// path keeps its own fallback, which is why the source is threaded rather
+    /// than the string simply deleted.
     ///
     /// A risk with NO reasons and NO role-matching task type is the point: it
     /// makes EVERY profile a zero-signal candidate, so the fallback is what is
     /// under test rather than an incidental scoring path.
     #[test]
-    fn zero_signal_candidates_never_name_the_retired_mbit_fit() {
+    fn the_ledger_path_never_falls_back_to_a_baseline_mbit_fit() {
         let risk = DispatchRisk {
             task_type: "unknown_request".to_string(),
             risk: "medium".to_string(),
@@ -1485,8 +1503,8 @@ mod tests {
                 !candidate
                     .reasons
                     .iter()
-                    .any(|reason| reason == "baseline_mbit_fit"),
-                "{} reported the retired MBIT fit token: {:?}",
+                    .any(|reason| reason == BASELINE_MBIT_FIT_REASON),
+                "{} reported a baseline MBIT fit on the ledger path: {:?}",
                 candidate.profile,
                 candidate.reasons
             );
@@ -1500,16 +1518,35 @@ mod tests {
                 candidate.reasons
             );
         }
+
+        // The legacy path is unchanged — the flip moved which evidence is
+        // read, it did not silently rewrite the old path's vocabulary.
+        let legacy = recommend_dispatch_profile_candidates(
+            &risk,
+            &[],
+            &[],
+            &[],
+            &loadout,
+            RouteEvidenceSource::LiveEvalMemory,
+            |_| Ok(Vec::new()),
+        )
+        .expect("memory-sourced candidates");
+        assert!(legacy.iter().all(|candidate| candidate
+            .reasons
+            .iter()
+            .any(|reason| reason == BASELINE_MBIT_FIT_REASON)));
     }
 
-    /// The declared source is one vocabulary — the #1690 C3 contraction
-    /// deleted the legacy `live_eval_memory` spelling alongside its source
-    /// variant, so the surviving name is pinned exactly.
+    /// The declared source is one vocabulary, not two spellings.
     #[test]
     fn evidence_sources_declare_stable_names() {
         assert_eq!(
             RouteEvidenceSource::DecisionFactLedger.as_str(),
             "decision_fact_ledger"
+        );
+        assert_eq!(
+            RouteEvidenceSource::LiveEvalMemory.as_str(),
+            "live_eval_memory"
         );
     }
 
@@ -1537,7 +1574,7 @@ mod tests {
             &[],
             &[],
             &[],
-            RouteEvidenceSource::DecisionFactLedger,
+            RouteEvidenceSource::LiveEvalMemory,
         );
         let explorer_candidate = score_profile_candidate(
             explorer,
@@ -1546,7 +1583,7 @@ mod tests {
             &[],
             &[],
             &[],
-            RouteEvidenceSource::DecisionFactLedger,
+            RouteEvidenceSource::LiveEvalMemory,
         );
 
         assert!(

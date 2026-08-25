@@ -23,7 +23,6 @@ fn coordinate_surface_includes_memory_and_workflow_tools() {
     let filtered = filter_tool_defs(
         vec![
             test_tool("tachi_memory"),
-            test_tool("tachi_save"),
             test_tool("search_memory"),
             test_tool("save_memory"),
             test_tool("ingest_event"),
@@ -42,7 +41,6 @@ fn coordinate_surface_includes_memory_and_workflow_tools() {
         names,
         vec![
             "tachi_memory".to_string(),
-            "tachi_save".to_string(),
             "ingest_event".to_string(),
             "tachi_verify".to_string()
         ]
@@ -54,7 +52,6 @@ fn explicit_remember_surface_excludes_admin_tools() {
     let filtered = filter_tool_defs(
         vec![
             test_tool("tachi_memory"),
-            test_tool("tachi_save"),
             test_tool("search_memory"),
             test_tool("save_memory"),
             test_tool("ingest_event"),
@@ -69,11 +66,7 @@ fn explicit_remember_surface_excludes_admin_tools() {
         .collect();
     assert_eq!(
         names,
-        vec![
-            "tachi_memory".to_string(),
-            "tachi_save".to_string(),
-            "ingest_event".to_string()
-        ]
+        vec!["tachi_memory".to_string(), "ingest_event".to_string()]
     );
 }
 
@@ -157,8 +150,6 @@ fn standard_profile_restricts_to_allow_list() {
             "tachi_task".to_string(),
             "tachi_verify".to_string(),
             "tachi_memory".to_string(),
-            "tachi_briefing".to_string(),
-            "tachi_save".to_string(),
             "tachi_web_search".to_string(),
             "tachi_wiki".to_string(),
             "tachi_skill".to_string(),
@@ -177,17 +168,18 @@ fn delegate_profile_restricts_to_allow_list() {
             // Delegate tools (should pass)
             test_tool("tachi_memory"),
             test_tool("tachi_web_search"),
-            test_tool("tachi_browse"),
+            test_tool("tachi_wiki"),
             test_tool("tachi_unstick"),
             // F3: task facade is on the list; dispatch gated by action policy
             test_tool("tachi_task"),
-            test_tool("tachi_complete"),
             test_tool("tachi_skill"),
             // #517: standalone run_skill no longer on default delegate tray
             test_tool("run_skill"),
+            test_tool("tachi_complete"),
             // Old tools that should be excluded from delegate
             test_tool("tachi_search"),
             test_tool("tachi_save"),
+            test_tool("tachi_browse"),
             // Should be excluded:
             test_tool("tachi_handoff"),
             test_tool("tachi_dispatch"),
@@ -214,10 +206,9 @@ fn delegate_profile_restricts_to_allow_list() {
         vec![
             "tachi_memory".to_string(),
             "tachi_web_search".to_string(),
-            "tachi_browse".to_string(),
+            "tachi_wiki".to_string(),
             "tachi_unstick".to_string(),
             "tachi_task".to_string(),
-            "tachi_complete".to_string(),
             "tachi_skill".to_string(),
         ]
     );

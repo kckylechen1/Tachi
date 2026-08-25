@@ -484,6 +484,34 @@ impl super::super::LlmClient {
         // check. Shares the same `validate()` as the env path (#1096 R2).
         config.rerank.validate()?;
 
+        // Every configured chat endpoint eventually carries an Authorization
+        // header. Refuse credential-bearing URLs at the common fallible
+        // constructor, before an HTTP client exists, so env-derived and
+        // directly injected primary/fallback configs share memcore's single
+        // canonical rule.
+        for (lane, endpoint) in [
+            ("extract", config.extract.base_url.as_str()),
+            ("summary", config.summary.base_url.as_str()),
+            ("reasoning", config.reasoning.base_url.as_str()),
+            ("distill", config.distill.base_url.as_str()),
+        ] {
+            if let Some(leak) = memcore::catalog::endpoint::endpoint_credential_leak(endpoint) {
+                return Err(format!("chat lane '{lane}' endpoint refused: {leak}"));
+            }
+        }
+        for (lane, lane_config) in [
+            ("extract fallback", fallbacks.extract.as_ref()),
+            ("summary fallback", fallbacks.summary.as_ref()),
+            ("reasoning fallback", fallbacks.reasoning.as_ref()),
+            ("distill fallback", fallbacks.distill.as_ref()),
+        ] {
+            if let Some(leak) = lane_config.and_then(|lane_config| {
+                memcore::catalog::endpoint::endpoint_credential_leak(&lane_config.base_url)
+            }) {
+                return Err(format!("chat lane '{lane}' endpoint refused: {leak}"));
+            }
+        }
+
         // Ensure a rustls crypto provider is installed before any HTTPS client
         // is built. reqwest uses rustls-no-provider, so this is required.
         crate::install_tls_provider();
@@ -525,11 +553,12 @@ impl super::super::LlmClient {
             provider_materialization_lock: Arc::new(std::sync::Mutex::new(())),
             provider_health_reload: Arc::new(RwLock::new(provider_health_reload)),
             provider_health_persist: Arc::new(RwLock::new(ProviderHealthPersistState::default())),
+            background_persist_lock: Arc::new(tokio::sync::Mutex::new(())),
+            llm_usage_persist: Arc::new(RwLock::new(ProviderHealthPersistState::default())),
             deployment_health: Arc::new(DeploymentHealthCounters::default()),
             claude_cli_failure: Arc::new(RwLock::new(None)),
             circuit_breakers: super::super::CircuitBreakerRegistry::new(),
             lane_outage: super::super::LaneOutageTracker::new(),
-            ingress_gate: super::super::ingress_gate::IngressReferenceGate::new(),
             #[cfg(test)]
             last_rerank_dispatch: Arc::new(std::sync::Mutex::new(None)),
         })

@@ -1,16 +1,16 @@
 use super::ledger::{read_verification_ledger, record_items};
 use super::receipt::{
-    recorded_check_ids, render_record_receipt, shape_record_response, shape_status_response,
-    validate_record_params,
+    recorded_check_ids, render_record_receipt, shape_record_response, shape_run_response,
+    shape_status_response, validate_record_params,
 };
 use super::recent::recent_verification_summaries;
 use super::render::{gate_for_status, render_compact_status, render_status};
 use super::storage::{empty_ledger, normalize_status};
-use super::*;
+use super::{run_verification_check, *};
 use crate::facade_memory_ops::wants_full_format;
 
 pub(crate) async fn handle_tachi_verify(
-    _server: &MemoryServer,
+    server: &MemoryServer,
     params: TachiVerifyParams,
 ) -> Result<String, String> {
     use crate::tool_params::TachiVerifyAction;
@@ -27,10 +27,24 @@ pub(crate) async fn handle_tachi_verify(
             let status = normalize_status(params.status.as_deref(), "passed")?;
             record_items(&params, &status)?
         }
+        TachiVerifyAction::Run => {
+            // #1454 slice 2: server-executed check. Only flow_id + check_kind
+            // are read from the caller; argv, head_sha, exit code, and log
+            // path are all produced by the executor (verify_ops::run).
+            let flow_id = params
+                .flow_id
+                .as_deref()
+                .ok_or_else(|| "flow_id is required for tachi_verify run".to_string())?;
+            let check_kind = params
+                .check_kind
+                .as_deref()
+                .ok_or_else(|| "check_kind is required for tachi_verify run".to_string())?;
+            run_verification_check(server, flow_id, check_kind, params.timeout_secs).await?
+        }
         TachiVerifyAction::Status | TachiVerifyAction::Board => {
             if let Some(flow_id) = params.flow_id.as_deref() {
                 let ledger = read_verification_ledger(flow_id)?;
-                let gate = gate_for_status(&params, ledger.as_ref())?;
+                let gate = gate_for_status(server, &params, ledger.as_ref())?;
                 json!({
                     "status": "completed",
                     "action": action_str,
@@ -42,15 +56,25 @@ pub(crate) async fn handle_tachi_verify(
                 json!({
                     "status": "completed",
                     "action": action_str,
-                    "runs": recent_verification_summaries(params.limit.unwrap_or(DEFAULT_STATUS_LIMIT as u32) as usize),
+                    "runs": recent_verification_summaries(
+                        &server.tachi_home_dir(),
+                        params.limit.unwrap_or(DEFAULT_STATUS_LIMIT as u32) as usize,
+                    ),
                 })
             }
         }
     };
 
-    if matches!(action, TachiVerifyAction::Start | TachiVerifyAction::Record) {
-        let recorded_ids = recorded_check_ids(&params);
-        let shaped = shape_record_response(&raw, &params, &recorded_ids);
+    if matches!(
+        action,
+        TachiVerifyAction::Start | TachiVerifyAction::Record | TachiVerifyAction::Run
+    ) {
+        let shaped = if matches!(action, TachiVerifyAction::Run) {
+            shape_run_response(&raw, &params)
+        } else {
+            let recorded_ids = recorded_check_ids(&params);
+            shape_record_response(&raw, &params, &recorded_ids)
+        };
         if params
             .format
             .as_deref()

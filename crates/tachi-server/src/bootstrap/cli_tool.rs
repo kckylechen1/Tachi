@@ -287,10 +287,18 @@ pub(super) async fn run_cli_command(
                 // its receipt -- that is the whole point of recording the
                 // failure instead of returning `Err` -- but it must not exit 0.
                 // Print first, then fail: the receipt is the evidence.
-                let had_failures = report.legacy_adoption_had_failures();
+                let had_legacy_failures = report.legacy_adoption_had_failures();
+                let had_repair_failures = report.sibling_repair_had_failures();
                 let report = serde_json::to_value(report).map_err(std::io::Error::other)?;
                 print_pretty_json(&report)?;
-                if had_failures {
+                if had_repair_failures {
+                    return Err(std::io::Error::other(
+                        "sibling repair did not complete cleanly; see `sibling_repair.errors` and \
+                         `sibling_repair.rows` in the printed receipt",
+                    )
+                    .into());
+                }
+                if had_legacy_failures {
                     return Err(std::io::Error::other(
                         "legacy adoption did not complete cleanly; see \
                          `legacy_adoption.errors` and `legacy_adoption.remediation` in the \

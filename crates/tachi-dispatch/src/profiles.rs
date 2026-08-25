@@ -11,13 +11,13 @@ use crate::native_skill_ids::{
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::collections::HashSet;
-use tachi_params::{DispatchMcpAccessParams, TachiDispatchParams};
+use tachi_params::{DispatchMcpAccessParams, StaffAssignmentRequest, TachiDispatchParams};
 
 pub const DISPATCH_POLICY_PROPOSAL_NS: &str = "dispatch_route_policy_proposals";
 pub const ROUTE_POLICY_RULE_NS: &str = "dispatch_route_policy_rules";
 pub const PROFILE_CARD_OVERLAY_NS: &str = "dispatch_profile_card_overlays";
-pub const MIN_ROUTE_POLICY_RULE_SAMPLES: u32 = 2;
 pub const MIN_EVOLUTION_SAMPLES: u32 = 10;
+pub const MIN_ROUTE_POLICY_RULE_SAMPLES: u32 = 2;
 pub const ROUTE_POLICY_RULE_SCORE_BONUS: f64 = 35.0;
 
 #[derive(Debug, Clone, Copy)]
@@ -65,13 +65,7 @@ pub const DISPATCH_PROFILES: &[DispatchProfileDef] = &[
         inject_hub_mcps: false,
         github_read: true,
         write_actions: false,
-        allowed_facades: &[
-            "tachi_briefing",
-            "tachi_memory",
-            "tachi_event",
-            "tachi_wiki",
-            "tachi_task",
-        ],
+        allowed_facades: &["tachi_memory", "tachi_event", "tachi_wiki", "tachi_task"],
         allowed_mcp_servers: &[],
         credential_profiles: &[],
         common_skills: &[SUPERPOWER_WRITING_PLANS, WAZA_THINK],
@@ -177,13 +171,7 @@ pub const DISPATCH_PROFILES: &[DispatchProfileDef] = &[
         inject_hub_mcps: false,
         github_read: true,
         write_actions: false,
-        allowed_facades: &[
-            "tachi_briefing",
-            "tachi_memory",
-            "tachi_event",
-            "tachi_wiki",
-            "tachi_task",
-        ],
+        allowed_facades: &["tachi_memory", "tachi_event", "tachi_wiki", "tachi_task"],
         allowed_mcp_servers: &[],
         credential_profiles: &[],
         common_skills: &[
@@ -291,13 +279,7 @@ pub const DISPATCH_PROFILES: &[DispatchProfileDef] = &[
         inject_hub_mcps: false,
         github_read: true,
         write_actions: false,
-        allowed_facades: &[
-            "tachi_briefing",
-            "tachi_memory",
-            "tachi_event",
-            "tachi_task",
-            "tachi_wiki",
-        ],
+        allowed_facades: &["tachi_memory", "tachi_event", "tachi_task", "tachi_wiki"],
         allowed_mcp_servers: &[],
         credential_profiles: &[],
         common_skills: &[WAZA_CHECK, WAZA_THINK],
@@ -343,9 +325,22 @@ pub const DISPATCH_PROFILE_ALIASES: &[DispatchProfileAlias] = &[DispatchProfileA
 pub struct ResolvedDispatchProfile {
     pub selected_profile: Option<String>,
     pub agent: String,
+    /// Model selected by the profile resolver. This is resolution-owned rather
+    /// than a Staff caller input.
+    #[serde(skip_serializing)]
+    pub selected_model: Option<String>,
+    /// Profile-owned launch defaults. Staff never supplies these fields.
+    #[serde(skip_serializing)]
+    pub launch_command: Vec<String>,
+    #[serde(skip_serializing)]
+    pub harness_transport: Option<String>,
+    #[serde(skip_serializing)]
+    pub harness_server_url: Option<String>,
     pub role: Option<String>,
     pub tool_profile: Option<String>,
     pub mcp_access: DispatchMcpAccessParams,
+    #[serde(skip_serializing)]
+    pub required_skills: Vec<String>,
     pub evidence_required: Vec<String>,
     pub fallback_chain: Vec<String>,
     pub credential_profiles: Vec<String>,
@@ -706,14 +701,284 @@ where
     Ok(ResolvedDispatchProfile {
         selected_profile,
         agent: agent_norm,
+        selected_model: params.model.clone(),
+        launch_command: params.command.clone(),
+        harness_transport: params.harness_transport.clone(),
+        harness_server_url: params.harness_server_url.clone(),
         role: profile.map(|p| p.role.to_string()),
         tool_profile: params.tool_profile.clone(),
         mcp_access,
+        required_skills: params.skills.clone(),
         evidence_required,
         fallback_chain,
         credential_profiles,
         route_explanation,
         host_adapter: profile.and_then(profile_host_adapter).map(str::to_string),
+        identity_receipt,
+    })
+}
+
+/// Resolve a model-facing Staff assignment without constructing the legacy
+/// flat dispatch facade. The returned profile carries every profile-owned
+/// launch default needed by the server-owned canonical launch kernel.
+pub fn resolve_and_apply_staff_assignment_profile<F, S, E>(
+    request: &mut StaffAssignmentRequest,
+    mut profile_required_skills: S,
+    mut profile_evidence_required: E,
+    mut harness_attach_ready: F,
+) -> Result<ResolvedDispatchProfile, String>
+where
+    F: FnMut(&str) -> bool,
+    S: FnMut(&DispatchProfileDef) -> Result<Vec<String>, String>,
+    E: FnMut(&DispatchProfileDef) -> Result<Vec<String>, String>,
+{
+    let mut route_explanation = Vec::new();
+    let requested_profile = request
+        .profile
+        .clone()
+        .filter(|value| !value.trim().is_empty());
+    let requested_worker = request
+        .worker
+        .clone()
+        .filter(|value| !value.trim().is_empty());
+    let alias = requested_profile
+        .as_deref()
+        .and_then(dispatch_profile_alias);
+    let profile = match requested_profile.as_deref() {
+        Some(raw) => Some(resolve_dispatch_profile(raw).ok_or_else(|| {
+            format!(
+                "Unknown dispatch profile '{}'. Supported: {}",
+                raw.trim(),
+                supported_dispatch_profile_names().join(", ")
+            )
+        })?),
+        None => None,
+    };
+    let identity_requested = crate::DispatchIdentityRequest {
+        profile: request.profile.clone(),
+        model: None,
+        agent: request.worker.clone(),
+        harness: None,
+    };
+
+    if let Some(alias) = alias {
+        request.profile = Some(alias.replacement.to_string());
+        route_explanation.push(format!(
+            "deprecated dispatch profile alias '{}' resolved to '{}'; {} ({})",
+            alias.alias, alias.replacement, alias.reason, alias.release_window
+        ));
+    }
+
+    let mut selected_model = None;
+    let mut launch_command = Vec::new();
+    let mut harness_transport = None;
+    let mut harness_server_url = None;
+    let (
+        mcp_access,
+        required_skills,
+        evidence_required,
+        credential_profiles,
+        host_adapter,
+        selected_profile,
+    ) = if let Some(profile) = profile {
+        request.profile = Some(profile.name.to_string());
+        route_explanation.push(format!(
+            "selected DispatchProfile '{}' ({})",
+            profile.name, profile.role
+        ));
+        if requested_worker.is_none() {
+            request.worker = Some(profile.backend.to_string());
+            route_explanation.push(format!("profile selected backend '{}'", profile.backend));
+        } else if requested_worker.as_deref() != Some(profile.backend) {
+            route_explanation.push(format!(
+                "explicit agent '{}' overrides profile backend '{}'",
+                requested_worker.as_deref().unwrap_or(""),
+                profile.backend
+            ));
+        }
+        if request.stage.is_none() {
+            request.stage = profile.stage.map(str::to_string);
+        }
+        selected_model = profile_resolved_model(profile);
+        let access = DispatchMcpAccessParams {
+            inject_tachi_mcp: Some(profile.inject_tachi_mcp),
+            inject_hub_mcps: Some(profile.inject_hub_mcps),
+            allowed_facades: profile
+                .allowed_facades
+                .iter()
+                .map(|value| (*value).to_string())
+                .collect(),
+            allowed_mcp_servers: profile
+                .allowed_mcp_servers
+                .iter()
+                .map(|value| (*value).to_string())
+                .collect(),
+            github_read: Some(profile.github_read),
+            write_actions: Some(profile.write_actions),
+            issue_refs: request.issue_ref.iter().cloned().collect(),
+            pr_refs: request.pr_ref.iter().cloned().collect(),
+            fallback: Some(if profile.github_read {
+                "Use MCP/GitHub read tools when available; if unavailable, report issue_context_unavailable instead of guessing.".to_string()
+            } else {
+                "Use leader-provided issue packet; do not perform GitHub writes.".to_string()
+            }),
+        };
+        let credentials = profile
+            .credential_profiles
+            .iter()
+            .map(|value| (*value).to_string())
+            .collect::<Vec<_>>();
+        if profile_uses_opencode_adapter(profile) {
+            let model = selected_model.clone().ok_or_else(|| {
+                format!("profile '{}' uses OpenCode but has no model", profile.name)
+            })?;
+            let transport = std::env::var("TACHI_OPENCODE_TRANSPORT")
+                .unwrap_or_else(|_| "cli".to_string())
+                .to_ascii_lowercase();
+            if matches!(transport.as_str(), "serve" | "opencode_serve" | "server") {
+                let server_url = std::env::var("TACHI_OPENCODE_SERVER_URL")
+                    .unwrap_or_else(|_| "http://127.0.0.1:4321".to_string());
+                harness_server_url = Some(server_url.clone());
+                if harness_attach_ready(&server_url) {
+                    harness_transport = Some("opencode_serve".to_string());
+                    let directory = std::env::current_dir()
+                        .ok()
+                        .map(|path| path.to_string_lossy().to_string())
+                        .unwrap_or_else(|| ".".to_string());
+                    launch_command = vec![
+                        "opencode".to_string(),
+                        "run".to_string(),
+                        "--attach".to_string(),
+                        server_url,
+                        "--dir".to_string(),
+                        directory,
+                        "--agent".to_string(),
+                        profile.role.to_string(),
+                        "--model".to_string(),
+                        model.clone(),
+                    ];
+                    route_explanation.push(format!(
+                        "profile selected typed OpenCode serve transport for model '{}'",
+                        model
+                    ));
+                } else {
+                    harness_transport = Some("opencode_cli".to_string());
+                    launch_command = vec![
+                        "opencode".to_string(),
+                        "--pure".to_string(),
+                        "run".to_string(),
+                        "--model".to_string(),
+                        model.clone(),
+                    ];
+                    route_explanation.push(format!("requested opencode serve at {server_url}, but readiness probe failed; falling back to opencode CLI for model '{model}'"));
+                }
+            } else {
+                harness_transport = Some("opencode_cli".to_string());
+                launch_command = vec![
+                    "opencode".to_string(),
+                    "--pure".to_string(),
+                    "run".to_string(),
+                    "--model".to_string(),
+                    model.clone(),
+                ];
+                route_explanation.push(format!(
+                    "profile selected typed OpenCode CLI transport for model '{}'",
+                    model
+                ));
+            }
+        }
+        if !credentials.is_empty() {
+            route_explanation.push(format!(
+                "profile requires credential profile(s): {}",
+                credentials.join(", ")
+            ));
+        }
+        (
+            access,
+            profile_required_skills(profile)?,
+            profile_evidence_required(profile)?,
+            credentials,
+            profile_host_adapter(profile).map(str::to_string),
+            Some(profile.name.to_string()),
+        )
+    } else {
+        (
+            DispatchMcpAccessParams {
+                inject_tachi_mcp: None,
+                inject_hub_mcps: None,
+                allowed_facades: Vec::new(),
+                allowed_mcp_servers: Vec::new(),
+                github_read: Some(request.issue_ref.is_some() || request.pr_ref.is_some()),
+                write_actions: Some(false),
+                issue_refs: request.issue_ref.iter().cloned().collect(),
+                pr_refs: request.pr_ref.iter().cloned().collect(),
+                fallback: Some(
+                    "Use leader-provided context if GitHub/MCP issue reads are unavailable."
+                        .to_string(),
+                ),
+            },
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            None,
+            None,
+        )
+    };
+    let worker = request
+        .worker
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "agent or profile is required for dispatch".to_string())?;
+    let agent = crate::normalize_dispatch_agent_name(&worker).unwrap_or(worker);
+    let fallback_chain = crate::fallback_chain(&agent)
+        .iter()
+        .map(|value| (*value).to_string())
+        .collect();
+    let (concrete_model_release, provider_model, provider_model_version) =
+        crate::provider_model_parts(selected_model.as_deref());
+    let identity_receipt = crate::DispatchIdentityReceipt::planned(
+        identity_requested,
+        crate::DispatchIdentityEffective {
+            profile: selected_profile.clone(),
+            model: selected_model.clone(),
+            model_lineage_id: profile
+                .map(profile_model_lineage_id)
+                .unwrap_or_else(|| crate::model_lineage_id(selected_model.as_deref(), &agent)),
+            concrete_model_release,
+            provider_model,
+            provider_model_version,
+            backend: agent.clone(),
+            harness: host_adapter.clone().unwrap_or_else(|| agent.clone()),
+            role: profile
+                .map(|profile| profile.role)
+                .unwrap_or("unknown")
+                .to_string(),
+            seat: crate::UNKNOWN_IDENTITY.to_string(),
+            transport: harness_transport
+                .clone()
+                .unwrap_or_else(|| "cli".to_string()),
+            adapter_version: crate::UNKNOWN_IDENTITY.to_string(),
+            carrier_version: crate::UNKNOWN_IDENTITY.to_string(),
+        },
+        route_explanation.join("; "),
+        profile.is_some_and(|profile| profile.allow_cross_lineage_override),
+    );
+    Ok(ResolvedDispatchProfile {
+        selected_profile,
+        agent,
+        selected_model,
+        launch_command,
+        harness_transport,
+        harness_server_url,
+        role: profile.map(|profile| profile.role.to_string()),
+        tool_profile: profile.map(|profile| profile.tool_profile.to_string()),
+        mcp_access,
+        required_skills,
+        evidence_required,
+        fallback_chain,
+        credential_profiles,
+        route_explanation,
+        host_adapter,
         identity_receipt,
     })
 }
@@ -914,17 +1179,11 @@ pub fn profile_json(profile: &DispatchProfileDef) -> Value {
 pub fn profile_json_with_overlay(profile: &DispatchProfileDef, overlay: Option<&Value>) -> Value {
     profile_json_with_loadout_and_evidence_contract(
         profile,
-        // #1690 B1/C3: the loadout is the STATIC reviewed baseline only — the
-        // legacy `add_signature_skills` overlay merge is retired end-to-end,
-        // so an overlay row seeded with it is inert history, never projected
-        // into the card. The evidence contract (what a packet must carry) is
-        // enforcement and still merges its overlay.
+        // #1690 B1/C3: the loadout is the STATIC reviewed baseline only. The
+        // legacy skill/passive/weakness overlay projections are inert history;
+        // only the evidence contract remains enforceable at this boundary.
         profile_skill_loadout_json(profile),
         profile_evidence_contract_json_with_overlay(profile, overlay),
-        // #1690 B1: `weak_against` is the STATIC reviewed baseline only — the
-        // legacy `add_weak_against` overlay merge is retired end-to-end, so an
-        // overlay row seeded with that key is inert history, never projected
-        // into the card.
         profile_weak_against(profile),
     )
 }
@@ -1149,54 +1408,6 @@ mod tests {
             out.insert(path.clone());
             receipt_key_paths(value, &path, out);
         }
-    }
-
-    #[test]
-    fn overlay_projection_preserves_profile_card_payload_shape() {
-        let profile = resolve_dispatch_profile("opencode_builder").expect("profile");
-        let overlay = json!({
-            "add_signature_skills": ["skill:custom-fast-fix", "skill:custom-fast-fix"],
-            "add_passive_traits": ["evidence_backed_change_control"],
-            "add_evidence_required": ["regression_tests"],
-            "add_weak_against": ["research_request"],
-            "demotion_targets": [SUPERPOWER_EXECUTING_PLANS, "skill:not-in-profile"],
-            "source_proposal_ids": ["proposal-a"],
-        });
-
-        // #1690 C3: the loadout is the STATIC reviewed baseline — the legacy
-        // `add_signature_skills` overlay key is retired, so the seeded skill
-        // must NOT project and the loadout shape carries no overlay projection
-        // metadata at all.
-        let loadout = profile_skill_loadout_json(profile);
-        assert_eq!(loadout["projected_signature_skills"], json!([]));
-        assert_eq!(loadout["projection"]["status"], json!("baseline"));
-
-        // The evidence contract (what a packet must carry) is enforcement and
-        // still merges its overlay.
-        let evidence = profile_evidence_contract_json_with_overlay(profile, Some(&overlay));
-        assert_eq!(evidence["projected_required"], json!(["regression_tests"]));
-        assert_eq!(evidence["projection"]["status"], json!("applied_overlay"));
-
-        // #1690 B1: the legacy `add_weak_against` overlay key is retired — the
-        // seeded "research_request" must NOT project into the card's
-        // `weak_against`, which carries the static reviewed baseline only.
-        let card = profile_json_with_overlay(profile, Some(&overlay));
-        assert_eq!(
-            card["weak_against"],
-            json!(["ambiguous_architecture", "unbounded_refactor",])
-        );
-        // The skill-loadout half of the card is equally static: the seeded
-        // signature skill stays out of both `signature_skills` and the
-        // always-empty read-only `projected_signature_skills` history key.
-        assert!(!card["skill_loadout"]["signature_skills"]
-            .as_array()
-            .expect("signature skills")
-            .iter()
-            .any(|skill| skill == &json!("skill:custom-fast-fix")));
-        assert_eq!(
-            card["skill_loadout"]["projected_signature_skills"],
-            json!([])
-        );
     }
 
     #[test]

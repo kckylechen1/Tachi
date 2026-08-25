@@ -706,14 +706,10 @@ pub(crate) fn handle_route_policy_review(
         // same connection and transaction, so no external route writer can
         // land after validation but before the lifecycle transition.
         let tx = store
-            .connection_mut()
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .begin_state_transaction(rusqlite::TransactionBehavior::Immediate)
             .map_err(|e| format!("open route policy review tx: {e}"))?;
-        let (raw, version) = memcore::db::get_state(
-            &tx,
-            DISPATCH_POLICY_PROPOSAL_NS,
-            proposal_id,
-        )
+        let (raw, version) = tx
+            .get_state(DISPATCH_POLICY_PROPOSAL_NS, proposal_id)
             .map_err(|e| format!("load route policy proposal: {e}"))?
             .ok_or_else(|| format!("route policy proposal not found: {proposal_id}"))?;
         let mut value: Value =
@@ -756,7 +752,7 @@ pub(crate) fn handle_route_policy_review(
         // be detected, not just the last one. Mirrors the same check apply.rs
         // runs immediately before mutating routing state.
         if kind == "route_policy" {
-            let source_rows = memcore::db::list_state(&tx, ROUTE_POLICY_RULE_NS)
+            let source_rows = tx.list_state(ROUTE_POLICY_RULE_NS)
                 .map_err(|e| format!("list active route policy rules for review: {e}"))?;
             let live_source_revision = route_policy_source_revision(&source_rows);
             validate_route_policy_proposal(proposal_id, &value, Some(&live_source_revision))?;
@@ -777,7 +773,7 @@ pub(crate) fn handle_route_policy_review(
                     "unknown_profile: evidence_contract proposal {proposal_id} references {profile_name}"
                 )
             })?;
-            let overlay = memcore::db::get_state(&tx, PROFILE_CARD_OVERLAY_NS, profile.name)
+            let overlay = tx.get_state(PROFILE_CARD_OVERLAY_NS, profile.name)
                 .map_err(|e| format!("load profile/card overlay for review: {e}"))?;
             let live_source_revision =
                 evidence_contract_source_revision(profile, overlay.as_ref());
@@ -807,8 +803,7 @@ pub(crate) fn handle_route_policy_review(
         // happened to land on the same content-addressed id) raced us and the
         // row's version moved, refuse to overwrite — the caller must reload
         // and re-decide against the current state.
-        let updated = memcore::db::set_state_if_version(
-            &tx,
+        let updated = tx.set_state_if_version(
             DISPATCH_POLICY_PROPOSAL_NS,
             proposal_id,
             &next,

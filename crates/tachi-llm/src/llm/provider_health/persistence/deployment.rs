@@ -211,16 +211,20 @@ impl super::super::super::LlmClient {
                 .read()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .tracker();
-            tracker.begin();
+            let background_persist_lock = Arc::clone(&self.background_persist_lock);
+            let completion = tracker.track();
             handle.spawn(async move {
-                let outcome = tokio::task::spawn_blocking(move || {
-                    Self::record_deployment_outcome_blocking(db_path, migration, record)
-                })
-                .await
-                .map_err(|err| format!("join failure: {err}"))
-                .and_then(|inner| inner);
+                let _completion = completion;
+                let outcome = {
+                    let _persist_guard = background_persist_lock.lock().await;
+                    tokio::task::spawn_blocking(move || {
+                        Self::record_deployment_outcome_blocking(db_path, migration, record)
+                    })
+                    .await
+                    .map_err(|err| format!("join failure: {err}"))
+                    .and_then(|inner| inner)
+                };
                 Self::note_deployment_outcome_result(&counters, outcome);
-                tracker.complete();
             });
         } else {
             let outcome = Self::record_deployment_outcome_blocking(db_path, migration, record);
