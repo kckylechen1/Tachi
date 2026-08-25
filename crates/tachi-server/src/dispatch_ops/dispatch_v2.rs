@@ -503,7 +503,7 @@ impl StatusJsonTarget {
     ) -> Result<Self, &'static str> {
         #[cfg(unix)]
         {
-            return match managed_anchor {
+            match managed_anchor {
                 ManagedTerminalStatusAnchor::Anchored(anchor) => Ok(Self::Anchored(anchor)),
                 ManagedTerminalStatusAnchor::Missing if managed_finalization => {
                     tracing::warn!(
@@ -514,7 +514,7 @@ impl StatusJsonTarget {
                     Err("managed_terminal_status_anchor_missing")
                 }
                 ManagedTerminalStatusAnchor::Missing => Ok(Self::Path(run_dir.join("status.json"))),
-            };
+            }
         }
         #[cfg(not(unix))]
         {
@@ -660,7 +660,7 @@ pub(crate) fn write_status_json_with_managed_anchor(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::collapsible_match, clippy::too_many_arguments)]
 fn write_status_json_inner(
     run_dir: &std::path::Path,
     dispatch_id: &str,
