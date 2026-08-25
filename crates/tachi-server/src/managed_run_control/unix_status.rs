@@ -94,6 +94,10 @@ impl AnchoredRunStatus {
         Arc::clone(&self.lock)
     }
 
+    pub(crate) fn same_physical_directory(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.directory, &other.directory)
+    }
+
     pub(crate) fn status_path(&self) -> PathBuf {
         self.run_dir.join("status.json")
     }

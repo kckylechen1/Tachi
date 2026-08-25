@@ -77,6 +77,77 @@ struct CompletionVerdict {
     override_reason: Option<String>,
 }
 
+enum CompletionStatusTarget {
+    Path(std::path::PathBuf),
+    #[cfg(unix)]
+    Anchored(crate::managed_run_control::AnchoredRunStatus),
+}
+
+impl CompletionStatusTarget {
+    fn for_path(run_dir: &std::path::Path) -> Self {
+        Self::Path(run_dir.join("status.json"))
+    }
+
+    #[cfg(unix)]
+    fn anchored(anchor: &crate::managed_run_control::AnchoredRunStatus) -> Self {
+        Self::Anchored(anchor.clone())
+    }
+
+    fn lock(&self) -> std::sync::Arc<std::sync::Mutex<()>> {
+        match self {
+            Self::Path(path) => crate::dispatch_ops::status_json_lock_for(
+                path.parent()
+                    .expect("completion status path has a run directory parent"),
+            ),
+            #[cfg(unix)]
+            Self::Anchored(anchor) => anchor.lock(),
+        }
+    }
+
+    fn status_path(&self) -> std::path::PathBuf {
+        match self {
+            Self::Path(path) => path.clone(),
+            #[cfg(unix)]
+            Self::Anchored(anchor) => anchor.status_path(),
+        }
+    }
+
+    fn read_json(&self) -> Result<Option<Value>, String> {
+        match self {
+            Self::Path(path) => {
+                let Some(run_dir) = path.parent() else {
+                    return Err(format!(
+                        "completion status path has no parent: {}",
+                        path.display()
+                    ));
+                };
+                let Some(raw) = crate::dispatch_ops::read_text_file_within(
+                    run_dir,
+                    path,
+                    COMPLETION_RECEIPT_STATUS_MAX_BYTES,
+                )?
+                else {
+                    return Ok(None);
+                };
+                serde_json::from_str(&raw)
+                    .map(Some)
+                    .map_err(|error| format!("parse {}: {error}", path.display()))
+            }
+            #[cfg(unix)]
+            Self::Anchored(anchor) => anchor.read_json(),
+        }
+    }
+
+    fn write_atomic(&self, bytes: &[u8]) -> Result<(), String> {
+        match self {
+            Self::Path(path) => crate::utils::write_owner_only_file_atomic(path, bytes)
+                .map_err(|error| error.to_string()),
+            #[cfg(unix)]
+            Self::Anchored(anchor) => anchor.write_atomic(bytes),
+        }
+    }
+}
+
 fn ensure_completion_artifact_read_support(dispatch_id: Option<&str>) -> Result<(), String> {
     if dispatch_id.is_some_and(|dispatch_id| !dispatch_id.trim().is_empty()) {
         crate::dispatch_ops::ensure_descriptor_reads_supported()?;
@@ -84,11 +155,17 @@ fn ensure_completion_artifact_read_support(dispatch_id: Option<&str>) -> Result<
     Ok(())
 }
 
+struct ManagedCompletionLease {
+    generation: u64,
+    #[cfg(unix)]
+    status_anchor: crate::managed_run_control::AnchoredRunStatus,
+}
+
 fn admit_managed_completion(
     server: &MemoryServer,
     dispatch_id: Option<&str>,
     persist_admission: bool,
-) -> Result<Option<u64>, String> {
+) -> Result<Option<ManagedCompletionLease>, String> {
     let Some(dispatch_id) = dispatch_id.filter(|id| !id.trim().is_empty()) else {
         return Ok(None);
     };
@@ -96,12 +173,30 @@ fn admit_managed_completion(
         return Ok(None);
     }
     let run_dir = resolved_completion_run_dir(&server.tachi_home_dir(), dispatch_id)?;
-    let status_lock = crate::dispatch_ops::status_json_lock_for(&run_dir);
+    let target = {
+        #[cfg(unix)]
+        if persist_admission {
+            let anchor = crate::managed_run_control::AnchoredRunStatus::open(&run_dir)
+                .map_err(|error| {
+                    format!(
+                        "cannot anchor managed completion status for dispatch_id={dispatch_id}: {error:?}"
+                    )
+                })?;
+            CompletionStatusTarget::anchored(&anchor)
+        } else {
+            CompletionStatusTarget::for_path(&run_dir)
+        }
+        #[cfg(not(unix))]
+        {
+            CompletionStatusTarget::for_path(&run_dir)
+        }
+    };
+    let status_lock = target.lock();
     let _status_guard = status_lock
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let status_path = run_dir.join("status.json");
-    let Some(mut status) = crate::task_lifecycle::read_json_file(&status_path)? else {
+    let status_path = target.status_path();
+    let Some(mut status) = target.read_json()? else {
         return Ok(None);
     };
     let object = status.as_object_mut().ok_or_else(|| {
@@ -120,6 +215,9 @@ fn admit_managed_completion(
     if object.get("lifecycle_owner").and_then(Value::as_str) != Some("memory_server_managed_custom")
     {
         return Ok(None);
+    }
+    if object.get("dispatch_id").and_then(Value::as_str) != Some(dispatch_id) {
+        return Err("managed completion dispatch identity mismatch".to_string());
     }
     if crate::managed_run_control::cancellation_blocks_terminal_writer(object) {
         return Err("managed cancellation owns terminal completion".to_string());
@@ -152,7 +250,20 @@ fn admit_managed_completion(
         .managed_run_controls
         .acquire_completion_lease(dispatch_id)
         .ok_or_else(|| "managed completion already admitted".to_string())?;
-    let mut lease = ManagedCompletionLeaseAcquisitionGuard::arm(server, dispatch_id, generation);
+    #[cfg(unix)]
+    let status_anchor = match &target {
+        CompletionStatusTarget::Anchored(anchor) => anchor.clone(),
+        CompletionStatusTarget::Path(_) => {
+            return Err("managed completion status anchor missing".to_string());
+        }
+    };
+    let mut lease = ManagedCompletionLeaseAcquisitionGuard::arm(
+        server,
+        dispatch_id,
+        generation,
+        #[cfg(unix)]
+        status_anchor.clone(),
+    );
     object.insert(
         "completion_recovery".to_string(),
         json!({ "status": "completion_admitted" }),
@@ -160,7 +271,7 @@ fn admit_managed_completion(
     crate::managed_run_control::advance_status_revision(object)?;
     let body = serde_json::to_vec_pretty(&status)
         .map_err(|error| format!("serialize managed completion admission: {error}"))?;
-    if let Err(error) = crate::utils::write_owner_only_file_atomic(&status_path, &body) {
+    if let Err(error) = target.write_atomic(&body) {
         return Err(format!("persist managed completion admission: {error}"));
     }
     Ok(Some(lease.disarm()))
@@ -172,7 +283,7 @@ fn admit_managed_completion(
 fn revoke_managed_completion_admission(
     server: &MemoryServer,
     dispatch_id: Option<&str>,
-    generation: u64,
+    lease: &ManagedCompletionLease,
 ) -> Result<(), String> {
     let Some(dispatch_id) = dispatch_id.filter(|id| !id.trim().is_empty()) else {
         return Ok(());
@@ -180,13 +291,18 @@ fn revoke_managed_completion_admission(
     if !crate::dispatch_ops::is_valid_dispatch_id(dispatch_id) {
         return Ok(());
     }
+    #[cfg(not(unix))]
     let run_dir = resolved_completion_run_dir(&server.tachi_home_dir(), dispatch_id)?;
-    let status_lock = crate::dispatch_ops::status_json_lock_for(&run_dir);
+    #[cfg(unix)]
+    let target = CompletionStatusTarget::anchored(&lease.status_anchor);
+    #[cfg(not(unix))]
+    let target = CompletionStatusTarget::for_path(&run_dir);
+    let status_lock = target.lock();
     let _status_guard = status_lock
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let status_path = run_dir.join("status.json");
-    let Some(mut status) = crate::task_lifecycle::read_json_file(&status_path)? else {
+    let status_path = target.status_path();
+    let Some(mut status) = target.read_json()? else {
         return Ok(());
     };
     let object = status.as_object_mut().ok_or_else(|| {
@@ -195,9 +311,12 @@ fn revoke_managed_completion_admission(
             status_path.display()
         )
     })?;
+    if object.get("dispatch_id").and_then(Value::as_str) != Some(dispatch_id) {
+        return Err("managed completion dispatch identity mismatch".to_string());
+    }
     if server
         .managed_run_controls
-        .owns_completion_lease(dispatch_id, generation)
+        .owns_completion_lease(dispatch_id, lease.generation)
         && object
             .get("completion_recovery")
             .and_then(Value::as_object)
@@ -210,12 +329,13 @@ fn revoke_managed_completion_admission(
         crate::managed_run_control::advance_status_revision(object)?;
         let body = serde_json::to_vec_pretty(&status)
             .map_err(|error| format!("serialize managed completion admission rollback: {error}"))?;
-        crate::utils::write_owner_only_file_atomic(&status_path, &body)
+        target
+            .write_atomic(&body)
             .map_err(|error| format!("persist managed completion admission rollback: {error}"))?;
     }
     server
         .managed_run_controls
-        .release_completion_lease(dispatch_id, generation);
+        .release_completion_lease(dispatch_id, lease.generation);
     Ok(())
 }
 
@@ -226,21 +346,35 @@ struct ManagedCompletionLeaseAcquisitionGuard {
     server: MemoryServer,
     dispatch_id: String,
     generation: Option<u64>,
+    #[cfg(unix)]
+    status_anchor: crate::managed_run_control::AnchoredRunStatus,
 }
 
 impl ManagedCompletionLeaseAcquisitionGuard {
-    fn arm(server: &MemoryServer, dispatch_id: &str, generation: u64) -> Self {
+    fn arm(
+        server: &MemoryServer,
+        dispatch_id: &str,
+        generation: u64,
+        #[cfg(unix)] status_anchor: crate::managed_run_control::AnchoredRunStatus,
+    ) -> Self {
         Self {
             server: server.clone(),
             dispatch_id: dispatch_id.to_string(),
             generation: Some(generation),
+            #[cfg(unix)]
+            status_anchor,
         }
     }
 
-    fn disarm(&mut self) -> u64 {
-        self.generation
-            .take()
-            .expect("completion lease is transferred once")
+    fn disarm(&mut self) -> ManagedCompletionLease {
+        ManagedCompletionLease {
+            generation: self
+                .generation
+                .take()
+                .expect("completion lease is transferred once"),
+            #[cfg(unix)]
+            status_anchor: self.status_anchor.clone(),
+        }
     }
 }
 
@@ -254,45 +388,56 @@ impl Drop for ManagedCompletionLeaseAcquisitionGuard {
     }
 }
 
-/// A registry generation owns the persisted fence; no volatile identity token
-/// is exposed in status or a completion response.
+/// A registry generation and the one opened status anchor own the persisted
+/// fence; no volatile identity token is exposed in status or a completion
+/// response.
 struct ManagedCompletionAdmissionGuard {
     server: MemoryServer,
     dispatch_id: Option<String>,
-    generation: Option<u64>,
+    lease: Option<ManagedCompletionLease>,
 }
 
 impl ManagedCompletionAdmissionGuard {
-    fn arm(server: &MemoryServer, dispatch_id: Option<&str>, generation: Option<u64>) -> Self {
+    fn arm(
+        server: &MemoryServer,
+        dispatch_id: Option<&str>,
+        lease: Option<ManagedCompletionLease>,
+    ) -> Self {
         Self {
             server: server.clone(),
             dispatch_id: dispatch_id.map(str::to_string),
-            generation,
+            lease,
         }
     }
 
     fn disarm(&mut self) {
-        if let Some(generation) = self.generation.take() {
+        if let Some(lease) = self.lease.take() {
             if let Some(dispatch_id) = self.dispatch_id.as_deref() {
                 self.server
                     .managed_run_controls
-                    .release_completion_lease(dispatch_id, generation);
+                    .release_completion_lease(dispatch_id, lease.generation);
             }
         }
     }
 
     fn verify(&self) -> Result<(), String> {
-        let (Some(dispatch_id), Some(generation)) = (self.dispatch_id.as_deref(), self.generation)
+        let (Some(dispatch_id), Some(lease)) = (self.dispatch_id.as_deref(), self.lease.as_ref())
         else {
             return Ok(());
         };
-        let run_dir = resolved_completion_run_dir(&self.server.tachi_home_dir(), dispatch_id)?;
-        let status_lock = crate::dispatch_ops::status_json_lock_for(&run_dir);
+        #[cfg(unix)]
+        let target = CompletionStatusTarget::anchored(&lease.status_anchor);
+        #[cfg(not(unix))]
+        let target = CompletionStatusTarget::for_path(&resolved_completion_run_dir(
+            &self.server.tachi_home_dir(),
+            dispatch_id,
+        )?);
+        let status_lock = target.lock();
         let _status_guard = status_lock
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let status_path = run_dir.join("status.json");
-        let Some(mut status) = crate::task_lifecycle::read_json_file(&status_path)? else {
+        let status_path = target.status_path();
+        let Some(mut status) = target.read_json()? else {
             return Err("managed completion status disappeared after admission".to_string());
         };
         let object = status.as_object_mut().ok_or_else(|| {
@@ -301,7 +446,7 @@ impl ManagedCompletionAdmissionGuard {
                 status_path.display()
             )
         })?;
-        validate_managed_completion_admission(&self.server, dispatch_id, generation, object)
+        validate_managed_completion_admission(&self.server, dispatch_id, lease.generation, object)
     }
 
     fn persist_resolved_completion_receipt(
@@ -312,8 +457,8 @@ impl ManagedCompletionAdmissionGuard {
         eval_memory_id: &str,
         reviewed: bool,
     ) -> Result<(), String> {
-        let (Some(owned_dispatch_id), Some(generation)) =
-            (self.dispatch_id.as_deref(), self.generation)
+        let (Some(owned_dispatch_id), Some(lease)) =
+            (self.dispatch_id.as_deref(), self.lease.as_ref())
         else {
             return persist_resolved_completion_receipt(
                 server,
@@ -326,14 +471,61 @@ impl ManagedCompletionAdmissionGuard {
         if owned_dispatch_id != dispatch_id {
             return Err("managed completion admission dispatch identity changed".to_string());
         }
-        let run_dir = resolved_completion_run_dir(&server.tachi_home_dir(), dispatch_id)?;
-        persist_resolved_completion_receipt_at_with_admission(
-            &run_dir,
+        #[cfg(unix)]
+        let target = CompletionStatusTarget::anchored(&lease.status_anchor);
+        #[cfg(not(unix))]
+        let target = CompletionStatusTarget::for_path(&resolved_completion_run_dir(
+            &server.tachi_home_dir(),
+            dispatch_id,
+        )?);
+        persist_resolved_completion_receipt_at_target(
+            &target,
             dispatch_id,
             new_state,
             eval_memory_id,
             reviewed,
-            Some((server, generation)),
+            Some((server, lease.generation)),
+        )
+    }
+
+    fn persist_pending_completion_recovery_receipt(
+        &self,
+        server: &MemoryServer,
+        dispatch_id: &str,
+        new_state: &str,
+        eval_memory_id: &str,
+        reviewed: bool,
+        dispatch_outcome: &Value,
+    ) -> Result<(), String> {
+        let (Some(owned_dispatch_id), Some(lease)) =
+            (self.dispatch_id.as_deref(), self.lease.as_ref())
+        else {
+            return persist_pending_completion_recovery_receipt(
+                server,
+                dispatch_id,
+                new_state,
+                eval_memory_id,
+                reviewed,
+                dispatch_outcome,
+            );
+        };
+        if owned_dispatch_id != dispatch_id {
+            return Err("managed completion admission dispatch identity changed".to_string());
+        }
+        #[cfg(unix)]
+        let target = CompletionStatusTarget::anchored(&lease.status_anchor);
+        #[cfg(not(unix))]
+        let target = CompletionStatusTarget::for_path(&resolved_completion_run_dir(
+            &server.tachi_home_dir(),
+            dispatch_id,
+        )?);
+        persist_pending_completion_recovery_receipt_at_target(
+            &target,
+            dispatch_id,
+            new_state,
+            eval_memory_id,
+            reviewed,
+            dispatch_outcome,
         )
     }
 }
@@ -350,6 +542,9 @@ fn validate_managed_completion_admission(
         || !server.managed_run_controls.contains(dispatch_id)
     {
         return Err("managed completion admission lease is no longer owned".to_string());
+    }
+    if object.get("dispatch_id").and_then(Value::as_str) != Some(dispatch_id) {
+        return Err("managed completion dispatch identity mismatch".to_string());
     }
     if object
         .get("execution_classification")
@@ -374,18 +569,13 @@ fn validate_managed_completion_admission(
 
 impl Drop for ManagedCompletionAdmissionGuard {
     fn drop(&mut self) {
-        if let Some(generation) = self.generation.take() {
+        if let Some(lease) = self.lease.take() {
             if let Err(error) = revoke_managed_completion_admission(
                 &self.server,
                 self.dispatch_id.as_deref(),
-                generation,
+                &lease,
             ) {
                 tracing::error!(error = %error, "failed to revoke stranded managed completion admission");
-            }
-            if let Some(dispatch_id) = self.dispatch_id.as_deref() {
-                self.server
-                    .managed_run_controls
-                    .release_completion_lease(dispatch_id, generation);
             }
         }
     }
@@ -544,8 +734,9 @@ fn persist_resolved_completion_receipt_at(
     eval_memory_id: &str,
     reviewed: bool,
 ) -> Result<(), String> {
-    persist_resolved_completion_receipt_at_with_admission(
-        run_dir,
+    let target = CompletionStatusTarget::for_path(run_dir);
+    persist_resolved_completion_receipt_at_target(
+        &target,
         dispatch_id,
         new_state,
         eval_memory_id,
@@ -554,37 +745,23 @@ fn persist_resolved_completion_receipt_at(
     )
 }
 
-fn persist_resolved_completion_receipt_at_with_admission(
-    run_dir: &std::path::Path,
+fn persist_resolved_completion_receipt_at_target(
+    target: &CompletionStatusTarget,
     dispatch_id: &str,
     new_state: &str,
     eval_memory_id: &str,
     reviewed: bool,
     admission: Option<(&MemoryServer, u64)>,
 ) -> Result<(), String> {
-    let status_lock = crate::dispatch_ops::status_json_lock_for(run_dir);
+    let status_lock = target.lock();
     let _status_guard = status_lock
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let status_path = run_dir.join("status.json");
-    let mut status = match crate::dispatch_ops::read_text_file_within(
-        run_dir,
-        &status_path,
-        COMPLETION_RECEIPT_STATUS_MAX_BYTES,
-    )
-    .map_err(|error| {
-        format!(
-            "cannot persist resolved completion receipt for dispatch_id={dispatch_id}: \
-                 {error}"
-        )
+    let status_path = target.status_path();
+    let mut status = match target.read_json().map_err(|error| {
+        format!("cannot persist resolved completion receipt for dispatch_id={dispatch_id}: {error}")
     })? {
-        Some(raw) => serde_json::from_str(&raw).map_err(|error| {
-            format!(
-                "cannot persist resolved completion receipt for dispatch_id={dispatch_id}: \
-                 parse {}: {error}",
-                status_path.display()
-            )
-        })?,
+        Some(status) => status,
         None => json!({ "dispatch_id": dispatch_id }),
     };
     #[cfg(test)]
@@ -592,10 +769,16 @@ fn persist_resolved_completion_receipt_at_with_admission(
     let status_object = status.as_object_mut().ok_or_else(|| {
         format!(
             "cannot persist resolved completion receipt for dispatch_id={dispatch_id}: \
-             {} is not a JSON object",
+            {} is not a JSON object",
             status_path.display()
         )
     })?;
+    if status_object.get("dispatch_id").and_then(Value::as_str) != Some(dispatch_id) {
+        return Err(format!(
+            "cannot persist resolved completion receipt for dispatch_id={dispatch_id}: \
+             managed completion dispatch identity mismatch"
+        ));
+    }
     if let Some((server, generation)) = admission {
         validate_managed_completion_admission(server, dispatch_id, generation, status_object)?;
     }
@@ -630,7 +813,7 @@ fn persist_resolved_completion_receipt_at_with_admission(
             "cannot serialize resolved completion receipt for dispatch_id={dispatch_id}: {error}"
         )
     })?;
-    crate::utils::write_owner_only_file_atomic(&status_path, body.as_bytes()).map_err(|error| {
+    target.write_atomic(body.as_bytes()).map_err(|error| {
         format!(
             "cannot persist resolved completion receipt for dispatch_id={dispatch_id}: \
              write {}: {error}",
@@ -658,8 +841,9 @@ fn persist_pending_completion_recovery_receipt(
         ));
     }
     let run_dir = resolved_completion_run_dir(&server.tachi_home_dir(), dispatch_id)?;
-    persist_pending_completion_recovery_receipt_at(
-        &run_dir,
+    let target = CompletionStatusTarget::for_path(&run_dir);
+    persist_pending_completion_recovery_receipt_at_target(
+        &target,
         dispatch_id,
         new_state,
         eval_memory_id,
@@ -668,6 +852,7 @@ fn persist_pending_completion_recovery_receipt(
     )
 }
 
+#[cfg(test)]
 fn persist_pending_completion_recovery_receipt_at(
     run_dir: &std::path::Path,
     dispatch_id: &str,
@@ -676,26 +861,34 @@ fn persist_pending_completion_recovery_receipt_at(
     reviewed: bool,
     dispatch_outcome: &Value,
 ) -> Result<(), String> {
-    let status_lock = crate::dispatch_ops::status_json_lock_for(run_dir);
+    let target = CompletionStatusTarget::for_path(run_dir);
+    persist_pending_completion_recovery_receipt_at_target(
+        &target,
+        dispatch_id,
+        new_state,
+        eval_memory_id,
+        reviewed,
+        dispatch_outcome,
+    )
+}
+
+fn persist_pending_completion_recovery_receipt_at_target(
+    target: &CompletionStatusTarget,
+    dispatch_id: &str,
+    new_state: &str,
+    eval_memory_id: &str,
+    reviewed: bool,
+    dispatch_outcome: &Value,
+) -> Result<(), String> {
+    let status_lock = target.lock();
     let _status_guard = status_lock
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let status_path = run_dir.join("status.json");
-    let mut status = match crate::dispatch_ops::read_text_file_within(
-        run_dir,
-        &status_path,
-        COMPLETION_RECEIPT_STATUS_MAX_BYTES,
-    )
-    .map_err(|error| {
+    let status_path = target.status_path();
+    let mut status = match target.read_json().map_err(|error| {
         format!("cannot persist completion recovery receipt for dispatch_id={dispatch_id}: {error}")
     })? {
-        Some(raw) => serde_json::from_str(&raw).map_err(|error| {
-            format!(
-                "cannot persist completion recovery receipt for dispatch_id={dispatch_id}: \
-                 parse {}: {error}",
-                status_path.display()
-            )
-        })?,
+        Some(status) => status,
         None => json!({ "dispatch_id": dispatch_id }),
     };
     #[cfg(test)]
@@ -703,10 +896,16 @@ fn persist_pending_completion_recovery_receipt_at(
     let status_object = status.as_object_mut().ok_or_else(|| {
         format!(
             "cannot persist completion recovery receipt for dispatch_id={dispatch_id}: \
-             {} is not a JSON object",
+            {} is not a JSON object",
             status_path.display()
         )
     })?;
+    if status_object.get("dispatch_id").and_then(Value::as_str) != Some(dispatch_id) {
+        return Err(format!(
+            "cannot persist completion recovery receipt for dispatch_id={dispatch_id}: \
+             managed completion dispatch identity mismatch"
+        ));
+    }
     crate::managed_run_control::reconcile_pending_cancellation_unavailable(
         status_object,
         "completion_winner",
@@ -739,7 +938,7 @@ fn persist_pending_completion_recovery_receipt_at(
             "cannot serialize completion recovery receipt for dispatch_id={dispatch_id}: {error}"
         )
     })?;
-    crate::utils::write_owner_only_file_atomic(&status_path, body.as_bytes()).map_err(|error| {
+    target.write_atomic(body.as_bytes()).map_err(|error| {
         format!(
             "cannot persist completion recovery receipt for dispatch_id={dispatch_id}: \
              write {}: {error}",
@@ -893,6 +1092,7 @@ pub(crate) async fn handle_tachi_complete(
     // earlier read-only check keeps invalid inputs cheap; this fence prevents
     // cancellation from winning between validation and eval/outcome writes.
     let admission_token = admit_managed_completion(server, params.dispatch_id.as_deref(), true)?;
+    let managed_completion_admitted = admission_token.is_some();
     let mut managed_admission = ManagedCompletionAdmissionGuard::arm(
         server,
         params.dispatch_id.as_deref(),
@@ -913,7 +1113,7 @@ pub(crate) async fn handle_tachi_complete(
     // projected as an eval, outcome, receipt, or terminal completion.
     let eval_memory_id = match classify_completion_eval_save(&save_json)? {
         CompletionEvalSave::Durable(id) => id,
-        CompletionEvalSave::NotRecorded if admission_token.is_some() => {
+        CompletionEvalSave::NotRecorded if managed_completion_admitted => {
             return Err("completion eval was not durably recorded".to_string());
         }
         CompletionEvalSave::NotRecorded => {
@@ -1033,7 +1233,7 @@ pub(crate) async fn handle_tachi_complete(
             // local recovery may only reconcile the canonical outcome and its
             // receipt on a later complete call.
             let recovery_receipt = match managed_admission.verify().and_then(|()| {
-                persist_pending_completion_recovery_receipt(
+                managed_admission.persist_pending_completion_recovery_receipt(
                     server,
                     dispatch_id,
                     verdict.new_state,
@@ -2683,7 +2883,8 @@ mod tests {
             owner_b_attempt
                 .join()
                 .expect("second completion admission thread")
-                .expect_err("a concurrent completion must not share admission"),
+                .err()
+                .expect("a concurrent completion must not share admission"),
             "managed completion already admitted"
         );
         let after_b_rejection: Value = serde_json::from_slice(
@@ -2699,12 +2900,12 @@ mod tests {
         .expect("blocked cancellation JSON");
         assert_eq!(blocked["receipt"], "cancellation_unavailable");
 
-        revoke_managed_completion_admission(&server, Some(dispatch_id), owner_a)
+        revoke_managed_completion_admission(&server, Some(dispatch_id), &owner_a)
             .expect("first owner rollback");
         let owner_b = admit_managed_completion(&server, Some(dispatch_id), true)
             .expect("second completion admission after rollback")
             .expect("second admission owns a token");
-        revoke_managed_completion_admission(&server, Some(dispatch_id), owner_a)
+        revoke_managed_completion_admission(&server, Some(dispatch_id), &owner_a)
             .expect("stale owner rollback is harmless");
         let after: Value = serde_json::from_slice(
             &std::fs::read(&status_path).expect("read second admission marker"),
@@ -2715,7 +2916,7 @@ mod tests {
             json!({"status": "completion_admitted"}),
             "a stale completion unwind must not erase another owner's marker"
         );
-        revoke_managed_completion_admission(&server, Some(dispatch_id), owner_b)
+        revoke_managed_completion_admission(&server, Some(dispatch_id), &owner_b)
             .expect("second owner rollback");
     }
 
@@ -2741,7 +2942,8 @@ mod tests {
         invalid["status_revision"] = json!("not-a-u64");
         std::fs::write(&status_path, invalid.to_string()).expect("persist invalid revision");
         let error = admit_managed_completion(&server, Some(dispatch_id), true)
-            .expect_err("invalid canonical revision rejects admission");
+            .err()
+            .expect("invalid canonical revision rejects admission");
         assert!(
             error.contains("status_revision"),
             "unexpected admission error: {error}"
@@ -2752,8 +2954,72 @@ mod tests {
         let generation = admit_managed_completion(&server, Some(dispatch_id), true)
             .expect("a corrected admission may acquire a released lease")
             .expect("managed completion owns the corrected admission");
-        revoke_managed_completion_admission(&server, Some(dispatch_id), generation)
+        revoke_managed_completion_admission(&server, Some(dispatch_id), &generation)
             .expect("release corrected admission");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn issue_1833_managed_completion_receipt_stays_on_admitted_a_after_replacement() {
+        let (server, _home) = crate::tests::make_server_with_temp_home();
+        let dispatch_id = "20260825T183308Z-completion-physical-identity";
+        seed_managed_working_status(&server, dispatch_id, None);
+        let run_a = server.tachi_home_dir().join("runs").join(dispatch_id);
+        let replacement_b = server
+            .tachi_home_dir()
+            .join("runs")
+            .join("replacement-completion-physical-identity");
+        let parked_a = server
+            .tachi_home_dir()
+            .join("runs")
+            .join("parked-completion-physical-identity");
+        let (_receiver, _run_guard) = server
+            .managed_run_controls
+            .register(dispatch_id)
+            .expect("managed cancellation registry");
+
+        let admission_token = admit_managed_completion(&server, Some(dispatch_id), true)
+            .expect("managed completion admission")
+            .expect("managed completion lease");
+        let admitted_a = std::fs::read(run_a.join("status.json")).expect("admitted A status");
+        std::fs::create_dir_all(&replacement_b).expect("replacement B directory");
+        std::fs::write(replacement_b.join("status.json"), &admitted_a)
+            .expect("byte-identical replacement B status");
+        let b_before = std::fs::read(replacement_b.join("status.json"))
+            .expect("replacement B before completion");
+        let mut admission =
+            ManagedCompletionAdmissionGuard::arm(&server, Some(dispatch_id), Some(admission_token));
+
+        std::fs::rename(&run_a, &parked_a).expect("park admitted A");
+        std::fs::rename(&replacement_b, &run_a).expect("install replacement B at A");
+
+        admission
+            .verify()
+            .expect("completion verification remains on admitted A");
+        admission
+            .persist_resolved_completion_receipt(
+                &server,
+                dispatch_id,
+                "TASK_STATE_COMPLETED",
+                "eval-1833-physical-identity",
+                true,
+            )
+            .expect("authoritative completion receipt remains on admitted A");
+        admission.disarm();
+
+        let a_after: Value = serde_json::from_slice(
+            &std::fs::read(parked_a.join("status.json")).expect("completed A status"),
+        )
+        .expect("completed A JSON");
+        assert_eq!(
+            a_after["resolved_completion"]["state"], "TASK_STATE_COMPLETED",
+            "authoritative completion must remain on the admitted physical A"
+        );
+        assert_eq!(
+            std::fs::read(run_a.join("status.json")).expect("replacement B after completion"),
+            b_before,
+            "replacement B must remain byte-identical and untouched"
+        );
     }
 
     #[test]

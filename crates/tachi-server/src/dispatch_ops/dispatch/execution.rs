@@ -8,6 +8,7 @@ use super::super::dispatch_v2::stamp_route_decision_id;
 use super::super::dispatch_v2::write_status_json;
 use super::super::dispatch_v2::{
     append_trajectory_event, status_json_lock_for, write_status_json_for_terminal,
+    ManagedTerminalStatusAnchor,
 };
 use super::super::kanban_helpers::{get_kanban_state, should_cleanup_run, update_kanban_state};
 use super::super::subprocess::{
@@ -38,16 +39,16 @@ const WATCHDOG_STATUS_MAX_BYTES: usize = 1024 * 1024;
 fn read_status_json_for_terminal(
     workspace_dir: &Path,
     status_path: &Path,
-    managed_cancellation: Option<&crate::managed_run_control::ManagedCancelCommand>,
+    managed_anchor: &ManagedTerminalStatusAnchor,
 ) -> Result<Option<Value>, String> {
     #[cfg(unix)]
-    if let Some(command) = managed_cancellation {
-        let lock = command.status_anchor.lock();
+    if let ManagedTerminalStatusAnchor::Anchored(anchor) = managed_anchor {
+        let lock = anchor.lock();
         let _guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        return command.status_anchor.read_json();
+        return anchor.read_json();
     }
     #[cfg(not(unix))]
-    let _ = managed_cancellation;
+    let _ = managed_anchor;
 
     let Some(raw) = crate::dispatch_ops::read_text_file_within(
         workspace_dir,
@@ -65,6 +66,29 @@ fn read_status_json_for_terminal(
                 status_path.display()
             )
         })
+}
+
+fn managed_terminal_status_anchor(
+    registry: &crate::managed_run_control::ManagedRunControlRegistry,
+    dispatch_id: &str,
+    managed_cancellation: Option<&crate::managed_run_control::ManagedCancelCommand>,
+) -> ManagedTerminalStatusAnchor {
+    #[cfg(unix)]
+    {
+        if let Some(command) = managed_cancellation {
+            return ManagedTerminalStatusAnchor::Anchored(command.status_anchor.clone());
+        }
+        if let Some(anchor) = registry.accepted_status_anchor(dispatch_id) {
+            return ManagedTerminalStatusAnchor::Anchored(anchor);
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = registry;
+        let _ = dispatch_id;
+        let _ = managed_cancellation;
+    }
+    ManagedTerminalStatusAnchor::Missing
 }
 
 pub(super) enum DispatchExecution {
@@ -534,6 +558,8 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
             match completion_receipt_state_after_admission(
                 &workspace_dir_for_spawn,
                 watchdog_interval,
+                &server_clone.managed_run_controls,
+                &d_id,
                 managed_cancellation.as_ref(),
             )
             .await
@@ -561,6 +587,8 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
             match completion_receipt_state_after_admission(
                 &workspace_dir_for_spawn,
                 watchdog_interval,
+                &server_clone.managed_run_controls,
+                &d_id,
                 managed_cancellation.as_ref(),
             )
             .await
@@ -599,6 +627,8 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
             match completion_receipt_state_after_admission(
                 &workspace_dir_for_spawn,
                 watchdog_interval,
+                &server_clone.managed_run_controls,
+                &d_id,
                 managed_cancellation.as_ref(),
             )
             .await
@@ -911,10 +941,15 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
         // Preserve dispatch-time contract fields across the final status rewrite
         // so complete/watchdog can still evaluate the #878-A predicate after exit.
         let status_path = workspace_dir_for_spawn.join("status.json");
+        let managed_terminal_anchor = managed_terminal_status_anchor(
+            &server_clone.managed_run_controls,
+            &d_id,
+            managed_cancellation.as_ref(),
+        );
         let (prev_status, final_status_read_error) = match read_status_json_for_terminal(
             &workspace_dir_for_spawn,
             &status_path,
-            managed_cancellation.as_ref(),
+            &managed_terminal_anchor,
         ) {
             Ok(status) => (status, None),
             Err(error) => (None, Some(error)),
@@ -1028,7 +1063,7 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                 "timeout_secs": timeout_secs_for_spawn,
                 "managed_cancellation_finalization": managed_finalization,
             })),
-            managed_cancellation.as_ref(),
+            managed_terminal_anchor,
         );
 
         if matches!(
@@ -1368,11 +1403,10 @@ fn completion_receipt_state(run_dir: &std::path::Path) -> Result<CompletionRecei
 
 fn completion_receipt_state_for_terminal(
     run_dir: &std::path::Path,
-    managed_cancellation: Option<&crate::managed_run_control::ManagedCancelCommand>,
+    managed_anchor: &ManagedTerminalStatusAnchor,
 ) -> Result<CompletionReceiptState, String> {
     let status_path = run_dir.join("status.json");
-    let Some(status) = read_status_json_for_terminal(run_dir, &status_path, managed_cancellation)?
-    else {
+    let Some(status) = read_status_json_for_terminal(run_dir, &status_path, managed_anchor)? else {
         return Ok(CompletionReceiptState::Open);
     };
     completion_receipt_state_from_status(&status)
@@ -1454,10 +1488,14 @@ fn completion_receipt_state_from_status(status: &Value) -> Result<CompletionRece
 async fn completion_receipt_state_after_admission(
     run_dir: &std::path::Path,
     poll_interval: Duration,
+    registry: &crate::managed_run_control::ManagedRunControlRegistry,
+    dispatch_id: &str,
     managed_cancellation: Option<&crate::managed_run_control::ManagedCancelCommand>,
 ) -> Result<CompletionReceiptState, String> {
     loop {
-        match completion_receipt_state_for_terminal(run_dir, managed_cancellation)? {
+        let managed_anchor =
+            managed_terminal_status_anchor(registry, dispatch_id, managed_cancellation);
+        match completion_receipt_state_for_terminal(run_dir, &managed_anchor)? {
             CompletionReceiptState::AdmissionInProgress => tokio::time::sleep(poll_interval).await,
             state => return Ok(state),
         }

@@ -488,7 +488,7 @@ enum StatusJsonTarget {
     Anchored(crate::managed_run_control::AnchoredRunStatus),
 }
 
-enum ManagedTerminalStatusAnchor {
+pub(crate) enum ManagedTerminalStatusAnchor {
     Missing,
     #[cfg(unix)]
     Anchored(crate::managed_run_control::AnchoredRunStatus),
@@ -501,14 +501,11 @@ impl StatusJsonTarget {
         managed_finalization: bool,
         managed_anchor: ManagedTerminalStatusAnchor,
     ) -> Result<Self, &'static str> {
-        if !managed_finalization {
-            return Ok(Self::Path(run_dir.join("status.json")));
-        }
         #[cfg(unix)]
         {
             return match managed_anchor {
                 ManagedTerminalStatusAnchor::Anchored(anchor) => Ok(Self::Anchored(anchor)),
-                ManagedTerminalStatusAnchor::Missing => {
+                ManagedTerminalStatusAnchor::Missing if managed_finalization => {
                     tracing::warn!(
                         dispatch_id,
                         run_dir = %run_dir.display(),
@@ -516,13 +513,18 @@ impl StatusJsonTarget {
                     );
                     Err("managed_terminal_status_anchor_missing")
                 }
+                ManagedTerminalStatusAnchor::Missing => Ok(Self::Path(run_dir.join("status.json"))),
             };
         }
         #[cfg(not(unix))]
         {
-            let _ = dispatch_id;
-            let _ = managed_anchor;
-            Err("unsupported_platform")
+            if managed_finalization {
+                let _ = dispatch_id;
+                let _ = managed_anchor;
+                Err("unsupported_platform")
+            } else {
+                Ok(Self::Path(run_dir.join("status.json")))
+            }
         }
     }
 
@@ -606,17 +608,8 @@ pub(crate) fn write_status_json_for_terminal(
     duration_ms_execute: Option<u64>,
     total_duration_ms: Option<u64>,
     extra: Option<Value>,
-    managed_command: Option<&crate::managed_run_control::ManagedCancelCommand>,
+    managed_anchor: ManagedTerminalStatusAnchor,
 ) -> Option<crate::managed_run_control::CancelCompletion> {
-    #[cfg(unix)]
-    let managed_anchor = managed_command
-        .map(|command| ManagedTerminalStatusAnchor::Anchored(command.status_anchor.clone()))
-        .unwrap_or(ManagedTerminalStatusAnchor::Missing);
-    #[cfg(not(unix))]
-    let managed_anchor = {
-        let _ = managed_command;
-        ManagedTerminalStatusAnchor::Missing
-    };
     write_status_json_inner(
         run_dir,
         dispatch_id,

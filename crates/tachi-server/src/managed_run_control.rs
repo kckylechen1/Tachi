@@ -1,6 +1,7 @@
 //! Volatile same-daemon control for managed custom runs. Registry entries carry
-//! only a bounded channel and generation; Child/PID/PGID/command/env remain in
-//! the background execution task.
+//! a bounded channel, generation, and (after acceptance) the run's physical
+//! status anchor; Child/PID/PGID/command/env remain in the background
+//! execution task.
 #[cfg(all(test, unix))]
 mod repair_tests;
 #[cfg(all(test, unix))]
@@ -325,6 +326,8 @@ mod cancellation_receipt_regression_tests {
 struct Entry {
     generation: u64,
     sender: mpsc::Sender<ManagedCancelCommand>,
+    #[cfg(unix)]
+    status_anchor: Option<AnchoredRunStatus>,
 }
 
 pub(crate) struct ManagedCancelCommand {
@@ -479,6 +482,8 @@ impl ManagedRunControlRegistry {
             Entry {
                 generation: *next,
                 sender,
+                #[cfg(unix)]
+                status_anchor: None,
             },
         );
         Ok((
@@ -496,6 +501,56 @@ impl ManagedRunControlRegistry {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .contains_key(dispatch_id)
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn install_accepted_status_anchor(
+        &self,
+        dispatch_id: &str,
+        status_anchor: AnchoredRunStatus,
+    ) -> Result<mpsc::Sender<ManagedCancelCommand>, &'static str> {
+        let mut entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(entry) = entries.get_mut(dispatch_id) else {
+            return Err("absent_same_daemon_handle");
+        };
+        if entry.status_anchor.is_some() {
+            return Err("duplicate_cancellation");
+        }
+        entry.status_anchor = Some(status_anchor);
+        Ok(entry.sender.clone())
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn accepted_status_anchor(&self, dispatch_id: &str) -> Option<AnchoredRunStatus> {
+        self.entries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(dispatch_id)
+            .and_then(|entry| entry.status_anchor.clone())
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn clear_accepted_status_anchor(
+        &self,
+        dispatch_id: &str,
+        status_anchor: &AnchoredRunStatus,
+    ) {
+        let mut entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(entry) = entries.get_mut(dispatch_id) {
+            if entry
+                .status_anchor
+                .as_ref()
+                .is_some_and(|accepted| accepted.same_physical_directory(status_anchor))
+            {
+                entry.status_anchor = None;
+            }
+        }
     }
 }
 
@@ -655,22 +710,6 @@ pub(crate) async fn request_managed_custom_cancel(
                     "duplicate_cancellation",
                 ));
             }
-            let sender = {
-                let entries = server
-                    .managed_run_controls
-                    .entries
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner());
-                let Some(entry) = entries.get(dispatch_id) else {
-                    return Ok(unavailable(
-                        dispatch_id,
-                        expected,
-                        Some(observed),
-                        "absent_same_daemon_handle",
-                    ));
-                };
-                entry.sender.clone()
-            };
             object.insert(
                 "cancellation".to_string(),
                 cancellation_receipt(
@@ -685,9 +724,21 @@ pub(crate) async fn request_managed_custom_cancel(
             crate::managed_run_control::advance_status_revision(object)?;
             let body = serde_json::to_vec_pretty(&status)
                 .map_err(|e| format!("serialize cancellation_requested: {e}"))?;
-            status_dir
-                .write_atomic(&body)
-                .map_err(|e| format!("persist cancellation_requested: {e}"))?;
+            let sender = match server
+                .managed_run_controls
+                .install_accepted_status_anchor(dispatch_id, status_dir.clone())
+            {
+                Ok(sender) => sender,
+                Err(reason) => {
+                    return Ok(unavailable(dispatch_id, expected, Some(observed), reason));
+                }
+            };
+            if let Err(error) = status_dir.write_atomic(&body) {
+                server
+                    .managed_run_controls
+                    .clear_accepted_status_anchor(dispatch_id, &status_dir);
+                return Err(format!("persist cancellation_requested: {error}"));
+            }
             (sender, observed)
         };
         let (response, receiver) = oneshot::channel();

@@ -41,6 +41,23 @@ async fn cancel_and_observe_command(
     }
 }
 
+async fn wait_for_cancellation_requested(status_path: &Path) {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if let Ok(raw) = std::fs::read_to_string(status_path) {
+                if let Ok(status) = serde_json::from_str::<Value>(&raw) {
+                    if status["cancellation"]["receipt"] == "cancellation_requested" {
+                        return;
+                    }
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("cancellation acceptance marker");
+}
+
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn issue_1833_in_root_alias_cannot_mutate_b_or_send_an_a_command() {
@@ -397,4 +414,86 @@ async fn issue_1833_terminal_finalization_stays_with_the_accepted_physical_run()
         original["cancellation"]["receipt"], "cancellation_confirmed",
         "terminal finalization must remain durable on the accepted physical A"
     );
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn issue_1833_queued_cancellation_terminalization_stays_on_accepted_a() {
+    let _serial = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let home = tempfile::tempdir().expect("home");
+    let runs_root = home.path().join("runs");
+    std::fs::create_dir_all(&runs_root).expect("runs root");
+    let _home = crate::test_support::EnvRestore::set_path("TACHI_HOME", home.path());
+    let _runs = crate::test_support::EnvRestore::set_path("TACHI_RUN_ROOT", &runs_root);
+    let dispatch_id = "20260825T183307Z-predequeue-terminal";
+    let run_a = runs_root.join(dispatch_id);
+    let run_b = runs_root.join("replacement-predequeue-terminal");
+    let parked_a = runs_root.join("parked-predequeue-terminal");
+    write_managed_status(&run_a, dispatch_id, 7);
+    let initial_a = std::fs::read(run_a.join("status.json")).expect("initial A status");
+    write_managed_status(&run_b, dispatch_id, 7);
+    assert_eq!(
+        initial_a,
+        std::fs::read(run_b.join("status.json")).expect("initial B status"),
+        "replacement B starts byte-identical to the visible A receipt"
+    );
+    let b_before = std::fs::read(run_b.join("status.json")).expect("status B before");
+    let server = MemoryServer::new(home.path().join("server.sqlite"), None).expect("server");
+    let (receiver, _guard) = server
+        .managed_run_controls
+        .register(dispatch_id)
+        .expect("register A control");
+
+    let request_server = server.clone();
+    let request = tokio::spawn(async move {
+        request_managed_custom_cancel(&request_server, dispatch_id, 7)
+            .await
+            .expect("cancellation request")
+    });
+    wait_for_cancellation_requested(&run_a.join("status.json")).await;
+    let accepted_anchor = server
+        .managed_run_controls
+        .accepted_status_anchor(dispatch_id)
+        .expect("accepted cancellation anchor");
+
+    std::fs::rename(&run_a, &parked_a).expect("park accepted A");
+    std::fs::rename(&run_b, &run_a).expect("install replacement B at A");
+
+    let _ = crate::dispatch_ops::write_status_json_for_terminal(
+        &run_a,
+        dispatch_id,
+        false,
+        None,
+        None,
+        "n/a",
+        Some(0),
+        None,
+        None,
+        None,
+        Some(json!({
+            "state": "TASK_STATE_COMPLETED",
+            "result_written": true,
+            "completion_winner": "natural_completion_before_cancel_dequeue",
+        })),
+        crate::dispatch_ops::ManagedTerminalStatusAnchor::Anchored(accepted_anchor),
+    );
+
+    let a_after: Value = serde_json::from_slice(
+        &std::fs::read(parked_a.join("status.json")).expect("terminal A status"),
+    )
+    .expect("terminal A JSON");
+    assert_eq!(
+        a_after["state"], "TASK_STATE_COMPLETED",
+        "natural completion before command dequeue must terminalize accepted A"
+    );
+    assert_eq!(
+        std::fs::read(run_a.join("status.json")).expect("replacement B after"),
+        b_before,
+        "replacement B must remain byte-identical and untouched"
+    );
+
+    request.abort();
+    drop(receiver);
 }
