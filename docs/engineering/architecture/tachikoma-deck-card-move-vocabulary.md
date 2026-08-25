@@ -558,7 +558,7 @@ Evolution rules:
 - Proposals may be automatic.
 - Default card changes must be reviewed before taking effect.
 
-## Public Facade Rule
+## Public Facade Rule — `tachi_task cancel` retired; `tachi_staff cancel` active
 
 Tachikoma features must stay inside existing domain facades. Do not add new
 public facades such as `tachi_card` or `tachi_deck` while an existing facade can
@@ -678,7 +678,7 @@ version should not add GitHub writes, daemon scheduling, or auto-merge behavior.
 - Keep probes local and isolated.
 - Do not run broad Rust gates by default.
 
-### Phase 3: acpx execution backend skeleton
+### Phase 3: acpx execution backend skeleton — Task cancel retired; Staff cancel active
 
 - Add an opt-in acpx execution backend through `harness_transport="acpx"`.
 - Build acpx commands from dispatch params and Card authority in one adapter.
