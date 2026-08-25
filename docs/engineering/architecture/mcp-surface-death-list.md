@@ -185,21 +185,22 @@ runtime escape hatches.
 | Graph/state primitives | **DONE under open #757 — graph/state slice only; dead-code layer removed #913:** MCP registration removed for `add_edge` / `set_state` / `get_state` / `get_edges` / `memory_graph`; the tachi-server-side `MemoryServer` facade helpers that used to wrap them (`graph_state_ops.rs`, `tools/graph_state_facade.rs`) were deleted outright once #913 found zero remaining in-crate callers. Only the `memcore::MemoryStore` boundary (`store/graph.rs`, `store/state.rs`) remains, called directly by in-crate consumers (auto-link, contradiction detection, wiki lint, orchestrator/foundry state, etc.). | Internal only; agents use facades. | Internalized off MCP surface. |
 | Runtime/adapter primitives | `recall_context`, `capture_session`, compaction, and section tools live in operate patterns at `patterns.rs:84-108`. | Keep out of standard; do not delete yet. | Host adapters may own these calls. |
 
-### Batch F: Worker Escape Hatches, Do Not Delete Before Action-Level Filtering
+### Batch F: Worker Escape Hatches After Action-Level Filtering
 
-These tools look like standalone clutter, but they currently compensate for a
-real facade/profile mismatch: `delegate` omits `tachi_task` to prevent recursive
-dispatch, so workers need separate completion, rescue, and skill execution
-entrypoints.
+Action-level filtering resolved the former facade/profile mismatch. The
+`delegate` profile now includes `tachi_task` and `tachi_skill`, while typed
+action policy admits only the worker-safe task and skill actions. The retired
+direct completion and skill routes cannot be restored by profile selection;
+`tachi_unstick` remains the explicit worker self-rescue surface.
 
-| Surface | Current evidence | Decision | Blocker before deletion |
+| Surface | Current evidence | Decision | Remaining work |
 | --- | --- | --- | --- |
-| `tachi_complete` | Delegate allow-list includes it at `patterns.rs:158`; facade granularity notes explain delegate cannot expose all of `tachi_task` because that would expose dispatch. | Retired (executed). | Let delegate call `tachi_task(action="complete")` without `dispatch`. |
-| `tachi_unstick` | Delegate allow-list includes it at `patterns.rs:157`; observe patterns include it at `patterns.rs:22`. | Keep as worker self-rescue. | Provide equivalent rescue path in a worker-safe facade. |
-| `run_skill` | Delegate allow-list includes it at `patterns.rs:161`; remember patterns include it at `patterns.rs:43`. | Retired (executed; skills are static reviewed now). | Replace with action-scoped `tachi_skill(action="run")` that is safe for delegates. |
-| `tachi_event` | Delegate allow-list includes it at `patterns.rs:153`. | Keep while continuity events are worker-facing. | Decide whether event append/query folds into memory/task. |
-| `runtime_info` and `tachi_tools` | Standard/delegate allow-lists include both at `patterns.rs:115-117` and `:148-149`; unknown-tool errors route users to `tachi_tools`. | Keep. | None; these are readiness/discovery, not product clutter. |
-| `tachi_verify` | Standard allow-list includes it at `patterns.rs:125`; dispatch law requires verification evidence. | Keep. | None until verification ledger is absorbed elsewhere. |
+| `tachi_complete` (retired) | The direct route is retired; delegates complete work through the action-scoped `tachi_task(action="complete")` path. | Retired (executed). | None. |
+| `tachi_unstick` | The delegate and observe bundles still expose this dedicated self-rescue route. | Keep as worker self-rescue. | Decide only if an equivalent worker-safe facade action is added. |
+| `run_skill` (retired) | The direct route is retired; delegates execute reviewed skills through action-scoped `tachi_skill(action="run")`. | Retired (executed; skills are static reviewed now). | None. |
+| `tachi_event` | The delegate bundle still exposes continuity events. | Keep while continuity events are worker-facing. | Decide whether event append/query folds into memory/task. |
+| `runtime_info` and `tachi_tools` | Standard and delegate bundles retain readiness/discovery surfaces; unknown-tool errors route users to `tachi_tools`. | Keep. | None. |
+| `tachi_verify` | Standard retains the verification ledger required by dispatch law. | Keep. | None until verification evidence is absorbed elsewhere. |
 
 ## Proposed Leaf Queue
 

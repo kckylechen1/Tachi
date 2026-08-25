@@ -33,7 +33,7 @@ The target split is:
    - standalone `run_skill` was retired by #1690/#757; new callers use `tachi_skill(action="discover"|"run")`, while `hub_discover` remains the general hub discovery route
    - raw hub / pack / vc governance tools should not leak into ordinary agent surfaces
 4. Workflow tools are not kernel primitives.
-   - `ghost_*` stays hidden; `post_card`/`check_inbox`/`update_card` and the proposal review/project tools are retired; unless a host or profile explicitly asks for them
+   - `ghost_*` stays hidden; all retired routes — `post_card`, `check_inbox`, `update_card`, and the proposal review/project routes — cannot be revived by selecting a host or profile
 5. Filtering must only reduce exposure.
    - Effective surface is the intersection of:
      - built-in surface bundle selection
