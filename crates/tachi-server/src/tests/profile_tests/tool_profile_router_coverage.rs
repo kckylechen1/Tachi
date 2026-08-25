@@ -822,56 +822,20 @@ fn retired_surface_documentation_has_markers() {
             // stay section-scoped. (Docs lint guards drift, not adversarial
             // prose — the residual: a line crafted to place a marker within 20
             // chars while meaning something else is accepted as out of scope.)
-            let header_has_marker = marker_words.iter().any(|m| section_header.contains(m));
-            // Enumeration rule: a line naming ≥2 retired tokens with any marker
-            // is a retirement record (e.g. "all retired: `a`, `b`") — adjacency
-            // can't stretch across a list. A single token + a marker still needs
-            // adjacency (20 chars) so "Deprecated clients should call X" fails.
-            let retired_hit_count = {
-                let mut n = 0usize;
-                for tok in native_tokens
-                    .iter()
-                    .chain(skill_tokens.iter())
-                    .chain(facade_retired_tokens.iter())
-                {
-                    if is_exact_identifier_hit(line, tok) {
-                        n += 1;
-                    }
-                }
-                n
-            };
-            let line_has_any_marker = marker_words.iter().any(|m| line.contains(m));
+            let retired_hit_count = native_tokens
+                .iter()
+                .chain(skill_tokens.iter())
+                .chain(facade_retired_tokens.iter())
+                .filter(|token| is_exact_identifier_hit(line, token))
+                .count();
             let marker_near = |line: &str, tok: &str| {
-                if header_has_marker {
-                    return true;
-                }
-                if retired_hit_count >= 2 && line_has_any_marker {
-                    return true;
-                }
-                // Adjacency is 20 characters (not bytes — a byte window is 3x
-                // too tight for CJK lines and misses adjacent markers there).
-                let chars: Vec<(usize, char)> = line.char_indices().collect();
-                for abs in exact_identifier_starts(line, tok) {
-                    // char index of the hit
-                    let ci = chars.partition_point(|(b, _)| *b < abs);
-                    let lo_ci = ci.saturating_sub(20);
-                    let hi_ci = (ci + tok.chars().count() + 20).min(chars.len());
-                    if hi_ci > lo_ci {
-                        let (lo_b, hi_b) = (
-                            chars[lo_ci].0,
-                            if hi_ci == chars.len() {
-                                line.len()
-                            } else {
-                                chars[hi_ci].0
-                            },
-                        );
-                        let window = &line[lo_b..hi_b];
-                        if marker_words.iter().any(|m| window.contains(m)) {
-                            return true;
-                        }
-                    }
-                }
-                false
+                retirement_marker_applies(
+                    line,
+                    tok,
+                    section_header,
+                    &marker_words,
+                    retired_hit_count,
+                )
             };
 
             // native retired: exact bounded ident token + instruction context (B1)
@@ -970,6 +934,92 @@ fn retired_surface_documentation_has_markers() {
     );
 }
 
+fn retirement_marker_applies(
+    line: &str,
+    tok: &str,
+    section_header: &str,
+    marker_words: &[&str],
+    retired_hit_count: usize,
+) -> bool {
+    if marker_words
+        .iter()
+        .any(|marker| section_header.contains(marker))
+    {
+        return true;
+    }
+    if retired_hit_count >= 2 && line_is_retirement_record(line, marker_words) {
+        return true;
+    }
+
+    // Adjacency is 20 characters (not bytes — a byte window is 3x too tight
+    // for CJK lines and misses adjacent markers there).
+    let chars: Vec<(usize, char)> = line.char_indices().collect();
+    for abs in exact_identifier_starts(line, tok) {
+        let char_index = chars.partition_point(|(byte, _)| *byte < abs);
+        let low_char_index = char_index.saturating_sub(20);
+        let high_char_index = (char_index + tok.chars().count() + 20).min(chars.len());
+        if high_char_index <= low_char_index {
+            continue;
+        }
+        let low_byte = chars[low_char_index].0;
+        let high_byte = if high_char_index == chars.len() {
+            line.len()
+        } else {
+            chars[high_char_index].0
+        };
+        let window = &line[low_byte..high_byte];
+        if marker_words.iter().any(|marker| window.contains(marker)) {
+            return true;
+        }
+    }
+    false
+}
+
+fn line_is_retirement_record(line: &str, marker_words: &[&str]) -> bool {
+    let lowered = line.to_ascii_lowercase();
+    if [
+        "should call",
+        "should use",
+        "must call",
+        "must use",
+        "please call",
+        "please use",
+    ]
+    .iter()
+    .any(|instruction| lowered.contains(instruction))
+    {
+        return false;
+    }
+    if !marker_words.iter().any(|marker| line.contains(marker)) {
+        return false;
+    }
+
+    [
+        "all retired",
+        "all since retired",
+        "both retired",
+        "then retired",
+        "are retired",
+        "is retired",
+        "were retired",
+        "retired by",
+        "retired from",
+        "retired/internalized",
+        "retired shorthand",
+        "routes deleted",
+        "were deleted",
+        "were dropped",
+        "registration removed",
+        "all retired names",
+        "已退役",
+        "皆已退役",
+    ]
+    .iter()
+    .any(|record| lowered.contains(record))
+        || (line.trim_start().starts_with('|')
+            && marker_words.iter().any(|marker| line.contains(marker)))
+}
+
 fn is_exact_identifier_hit(line: &str, tok: &str) -> bool {
     exact_identifier_starts(line, tok).next().is_some()
 }
@@ -1008,8 +1058,7 @@ fn exact_identifier_at_start(value: &str, tok: &str) -> bool {
 
 fn contains_quoted_identifier(line: &str, tok: &str, delimiter: char) -> bool {
     exact_identifier_starts(line, tok).any(|start| {
-        line[..start].ends_with(delimiter)
-            && line[start + tok.len()..].starts_with(delimiter)
+        line[..start].ends_with(delimiter) && line[start + tok.len()..].starts_with(delimiter)
     })
 }
 
@@ -1576,6 +1625,53 @@ mod matcher_unit_tests {
         assert!(!is_exact_identifier_hit(
             "tachi_complete_v2",
             "tachi_complete"
+        ));
+    }
+
+    #[test]
+    fn marker_exemption_requires_token_adjacency_or_section_scope() {
+        let markers = [
+            "retir",
+            "RETIR",
+            "Retir",
+            "退役",
+            "历史",
+            "historical",
+            "Historical",
+            "deprecated",
+            "Deprecated",
+        ];
+        let teaching = "Deprecated clients should call tachi_save and tachi_task(action=dispatch).";
+
+        assert!(is_exact_identifier_hit(teaching, "tachi_save"));
+        assert!(contains_action_assignment(teaching, "dispatch"));
+        for token in ["tachi_save", "dispatch"] {
+            assert!(
+                !retirement_marker_applies(teaching, token, "", &markers, 2),
+                "a distant line-global marker must not exempt live teaching of {token}"
+            );
+        }
+
+        assert!(retirement_marker_applies(
+            "Use `tachi_save` (retired only for historical compatibility).",
+            "tachi_save",
+            "",
+            &markers,
+            1,
+        ));
+        assert!(retirement_marker_applies(
+            "The old client called tachi_task(action=dispatch).",
+            "dispatch",
+            "## Historical compatibility",
+            &markers,
+            1,
+        ));
+        assert!(retirement_marker_applies(
+            "Legacy routes `tachi_save` and `dispatch` were retired.",
+            "tachi_save",
+            "",
+            &markers,
+            2,
         ));
     }
 

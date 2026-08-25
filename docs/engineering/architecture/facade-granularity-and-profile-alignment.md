@@ -117,10 +117,12 @@ someone hand-types `--profile observe+coordinate`. That is dead design.
 
 ### The deeper problem: facades broke tool-level filtering
 
-`ToolProfile` trims by **tool name** via glob matching
-([`profiles/matching.rs#L77-L112`](../../../crates/tachi-server/src/profiles/matching.rs)).
-But a facade packs many capabilities behind one name (`tachi_task` = 10 actions), so a profile can
-only allow or deny the *entire* `tachi_task` — it cannot deny just `dispatch` (the retired Task dispatch action).
+`ToolProfile` first trims by **tool name** via glob matching
+([`tool_profiles/matching.rs`](../../../crates/tachi-hub/src/tool_profiles/matching.rs)).
+Facades still pack many capabilities behind one name, but the server now applies a second,
+action-level gate ([`action_policy.rs`](../../../crates/tachi-hub/src/tool_profiles/action_policy.rs)).
+That gate lets a profile expose selected `tachi_task` actions without reviving the retired
+`dispatch` action.
 
 ## 4. Case study: the `delegate`/worker surface proves the mismatch
 
@@ -150,13 +152,14 @@ Two important nuances:
 | codex_55_review | `standard` (needs to see more) |
 | kimi_arch / deepseek_explore / kimi_ux | `observe` (read-only review/exploration) |
 
-**The `delegate` allow-list once omitted `tachi_task` entirely.** (Historical: the retired `dispatch` action could not be denied alone.) Today `delegate` carries an action-scoped `tachi_task` subset (`complete`/`status`/`board`/`brief` per `tool_profiles/patterns.rs` + `action_policy.rs`) — the coarse-facade problem this passage warned about was resolved by action-level policy.
-the worker (recursive dispatch). The cost: workers cannot use `complete` or `status` from the
-facade, and must fall back to standalone legacy tools (`tachi_task(action="complete")`, `tachi_unstick`) that never
-moved into a facade.
-
-> This is the smoking gun: **`delegate` still needs a pile of un-faceted legacy tools precisely because
-> the facade is too coarse for `ToolProfile` to deny `dispatch` alone.**
+**The `delegate` allow-list once omitted `tachi_task` entirely.** Historical tool-name-only
+filtering could not expose task completion without also exposing the then-present worker-launch
+action. Today `DELEGATE_MINIMAL_TOOL_PATTERNS` includes `tachi_task`, and
+`delegate_facade_action_allowed` admits exactly `complete`/`status`/`board`/`brief`. The typed
+`TachiTaskAction` inventory no longer contains the retired `dispatch` action, so workers use those
+four canonical task actions directly without gaining a recursive worker-launch path.
+`tachi_unstick` remains a separate self-rescue tool; the retired direct `tachi_complete` route is no
+longer required as a completion escape hatch.
 
 ## 4b. `handoff_ops` deprecated — memo vs. baton split (resolved #1016)
 
