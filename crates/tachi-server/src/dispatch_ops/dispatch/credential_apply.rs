@@ -59,7 +59,6 @@ pub(super) struct CredentialApplyInputs<'a> {
     pub(super) execution_backend_metadata: &'a Option<Value>,
     pub(super) acpx_enabled: bool,
     pub(super) native_acp_enabled: bool,
-    pub(super) capability_bundle_card: &'a Value,
     pub(super) timeout_secs_for_status: u64,
 }
 
@@ -120,7 +119,6 @@ pub(super) fn apply_materialized_credentials(
                     "execution_backend": inputs.execution_backend_name,
                     "acpx": if inputs.acpx_enabled { inputs.execution_backend_metadata.clone() } else { None },
                     "acp_native": if inputs.native_acp_enabled { inputs.execution_backend_metadata.clone() } else { None },
-                    "capability_bundle": inputs.capability_bundle_card.clone(),
                     "timeout_secs": inputs.timeout_secs_for_status,
                     "error": err.clone(),
                 })),

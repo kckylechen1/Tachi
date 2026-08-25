@@ -47,6 +47,61 @@ async fn unknown_tool_returns_tool_error_without_crashing_service() {
     assert!(message.contains("tachi_tachi_tournament"));
 }
 
+/// #1690 C3 slice A discriminator: the retired "second model brain" tool
+/// family must be rejected by the MCP router as unknown tools — a typed
+/// tool-level error, never silently routed or aliased to a surviving handler.
+/// RED pre-fix (the routes exist, so a well-formed call routes and succeeds
+/// with `is_error=false`), GREEN post-fix (no route → `tool not found`).
+#[tokio::test]
+async fn f1690_retired_recommend_family_is_rejected_by_router() {
+    for tool_name in [
+        "recommend_capability",
+        "recommend_skill",
+        "recommend_toolchain",
+        "prepare_capability_bundle",
+        // #1690 C3: skill_evolve joins the retired set — LLM telemetry-driven
+        // skill versioning is gone end-to-end; distill_trajectory follows with
+        // the trajectory→skill snapshot/registration pipeline.
+        "skill_evolve",
+        "distill_trajectory",
+    ] {
+        let server = make_server();
+        // Admin profile sees every registered tool, so a routed (pre-fix) call
+        // is not blocked by profile visibility — only router membership can
+        // reject it.
+        server.set_tool_profile(Some(
+            tachi_hub::parse_tool_profile("admin").expect("admin profile should parse"),
+        ));
+
+        let mut args = serde_json::Map::new();
+        args.insert("query".to_string(), serde_json::json!("incident"));
+
+        let result = call_tool_via_server(server, tool_name, Some(args))
+            .await
+            .expect("retired tool should return a tool-level error, not a transport error");
+
+        assert_eq!(
+            result.is_error,
+            Some(true),
+            "'{tool_name}' must be rejected as an unknown tool post-#1690, got: {result:?}"
+        );
+        let message = result
+            .content
+            .first()
+            .and_then(|content| content.as_text())
+            .map(|text| text.text.as_str())
+            .unwrap_or("");
+        assert!(
+            message.contains("tool not found"),
+            "expected a typed tool-not-found error for '{tool_name}', got: {message}"
+        );
+        assert!(
+            message.contains(tool_name),
+            "rejection message should name the retired tool, got: {message}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn standard_profile_exposes_agent_intents_not_execution_internals() {
     let server = make_server();

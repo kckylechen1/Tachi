@@ -194,10 +194,14 @@ pub(super) fn render_dispatch_profile_overlay(
                 profile_def,
             ) {
                 Ok(loadout) => {
+                    // #1690 C3: `projected_signature_skills` (the retired
+                    // loadout-evolution overlay merge) is NOT rendered — the
+                    // loadout is the static reviewed baseline. The evidence
+                    // contract (what a packet must carry) is enforcement and
+                    // keeps its `projected_required` line below.
                     for label in [
                         "common_skills",
                         "signature_skills",
-                        "projected_signature_skills",
                         "passive_traits",
                         "projected_passive_traits",
                         "forbidden_skills",
@@ -253,31 +257,6 @@ pub(super) fn render_dispatch_profile_overlay(
                 }
                 Err(err) => {
                     lines.push(format!("  - evidence_contract_error: {err}"));
-                }
-            }
-            match crate::dispatch_profile::profile_json_for_server(server, profile_def) {
-                Ok(profile_json) => {
-                    let card_fields = ["projected_weak_against", "demotion_targets"];
-                    let mut emitted = false;
-                    for label in card_fields {
-                        let items = profile_json
-                            .get(label)
-                            .and_then(|value| value.as_array())
-                            .into_iter()
-                            .flatten()
-                            .filter_map(|value| value.as_str())
-                            .collect::<Vec<_>>();
-                        if !items.is_empty() {
-                            if !emitted {
-                                lines.push("- profile_card_evolution:".to_string());
-                                emitted = true;
-                            }
-                            lines.push(format!("  - {label}: {}", items.join(", ")));
-                        }
-                    }
-                }
-                Err(err) => {
-                    lines.push(format!("  - profile_card_error: {err}"));
                 }
             }
         }

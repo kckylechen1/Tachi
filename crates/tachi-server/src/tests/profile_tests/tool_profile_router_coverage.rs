@@ -82,6 +82,7 @@ fn bundle_count(tool_name: &str) -> usize {
 
 const ADMIN_ONLY_NATIVE_ROUTE_NAMES: &[&str] = &[
     "chain_skills",
+    "check_inbox",
     "dlq_list",
     "dlq_retry",
     "hub_export_skills",
@@ -99,6 +100,8 @@ const ADMIN_ONLY_NATIVE_ROUTE_NAMES: &[&str] = &[
     "sandbox_list_policies",
     "sandbox_set_policy",
     "sandbox_set_rule",
+    "save_memory",
+    "search_memory",
     "tachi_audit_log",
     "tachi_component",
     "tachi_event",
@@ -184,6 +187,20 @@ const RETIRED_NATIVE_ALIASES: &[&str] = &[
     "tachi_orchestrator",
     "tachi_plan",
     "tachi_progress_check",
+    "wiki_browse",
+    // #1690 C3: standalone skill aliases and recommendation routes are retired
+    // end-to-end. Their duplicate entries preserve the branch census while the
+    // main-side inventory above remains authoritative.
+    "run_skill",
+    "prepare_capability_bundle",
+    "recommend_capability",
+    "recommend_skill",
+    "recommend_toolchain",
+    // #1690 C3: skill_evolve (LLM telemetry-driven skill versioning) and
+    // distill_trajectory (trajectory → skill snapshot/registration) are retired
+    // end-to-end — no canonical replacement survives the contraction.
+    "skill_evolve",
+    "distill_trajectory",
     "tachi_save",
     "tachi_task_brief",
     "update_card",
@@ -191,9 +208,20 @@ const RETIRED_NATIVE_ALIASES: &[&str] = &[
     "wiki_search",
 ];
 
-const FOLDED_NATIVE_COMPAT_TOOLS: &[&str] = &[];
+// Main has since retired these branch-era folded/admin-only routes completely.
+// Keep the original categories as census inputs; the guards below enforce the
+// stricter retired-route fate when a name also appears above.
+const FOLDED_NATIVE_COMPAT_TOOLS: &[&str] = &["get_memory"];
 
-const PROFILE_RETIRED_DIRECT_TOOLS: &[&str] = &[];
+const PROFILE_RETIRED_DIRECT_TOOLS: &[&str] = &[
+    "check_inbox",
+    "post_card",
+    "remember",
+    "save_memory",
+    "search_memory",
+    "tachi_task_brief",
+    "update_card",
+];
 
 #[test]
 fn every_standard_and_delegate_allow_list_entry_exists_in_tool_router() {
@@ -243,6 +271,7 @@ fn every_real_tool_is_either_bundled_or_explicitly_admin_only() {
         .collect();
     let expected_admin_only: BTreeSet<String> = ADMIN_ONLY_NATIVE_ROUTE_NAMES
         .iter()
+        .filter(|name| !RETIRED_NATIVE_ALIASES.contains(name))
         .map(|name| (*name).to_string())
         .collect();
 
@@ -339,8 +368,8 @@ fn folded_native_compat_tools_stay_admin_only() {
 
     for tool_name in FOLDED_NATIVE_COMPAT_TOOLS {
         assert!(
-            route_names.contains(*tool_name),
-            "folded compatibility tool '{tool_name}' should remain routable for admin/backcompat"
+            !route_names.contains(*tool_name),
+            "main-retired folded compatibility tool '{tool_name}' must not be reintroduced"
         );
         assert!(
             bundle_count(tool_name) == 0,
@@ -360,8 +389,8 @@ fn profile_retired_direct_tools_stay_admin_only() {
 
     for tool_name in PROFILE_RETIRED_DIRECT_TOOLS {
         assert!(
-            route_names.contains(*tool_name),
-            "profile-retired direct tool '{tool_name}' should remain routable for admin/backcompat"
+            !route_names.contains(*tool_name),
+            "main-retired direct tool '{tool_name}' must not be reintroduced"
         );
         assert!(
             bundle_count(tool_name) == 0,
@@ -376,7 +405,15 @@ fn profile_retired_direct_tools_stay_admin_only() {
 }
 
 #[test]
-fn skill_facade_advertises_canonical_actions() {
+fn tachi_skill_facade_advertises_canonical_run_and_bundle_actions() {
+    // #1690 C3 slice A re-anchor: this test used to pin that the retired
+    // `run_skill` / `prepare_capability_bundle` backcompat routes stayed
+    // registered and pointed at tachi_skill. Those routes are now RETIRED
+    // (their "stays retired" fate is guarded by `retired_native_aliases_stay_retired`
+    // via `RETIRED_NATIVE_ALIASES`); what survives is the canonical facade's
+    // advertisement of the actions the deleted routes used to forward to.
+    // #1690 C3 slice C: the surviving static action set is {discover, run} —
+    // the description must advertise exactly those and teach no retired action.
     let descriptions = native_route_descriptions();
 
     let tachi_skill = descriptions
@@ -390,6 +427,16 @@ fn skill_facade_advertises_canonical_actions() {
         tachi_skill.contains("action='run'"),
         "tachi_skill description should advertise canonical run action: {tachi_skill}"
     );
+    assert!(
+        tachi_skill.contains("action='discover'"),
+        "tachi_skill description should advertise canonical discover action: {tachi_skill}"
+    );
+    for retired in ["bundle", "loadout", "from_pattern"] {
+        assert!(
+            !tachi_skill.contains(&format!("action='{retired}'")),
+            "tachi_skill description must not teach retired action '{retired}': {tachi_skill}"
+        );
+    }
 }
 
 #[test]

@@ -6,14 +6,11 @@ pub(crate) struct TaskBriefRouting {
     pub(crate) tool_plan: Vec<Value>,
 }
 
-pub(crate) fn build_task_brief_routing(
-    task: &str,
-    recommended_skills: &[Value],
-) -> TaskBriefRouting {
+pub(crate) fn build_task_brief_routing(task: &str) -> TaskBriefRouting {
     let intent = classify_task_intent(task);
     TaskBriefRouting {
         intent,
-        selected_sops: build_selected_sops(intent, recommended_skills),
+        selected_sops: build_selected_sops(intent),
         tool_plan: build_tool_plan(intent),
     }
 }
@@ -157,8 +154,8 @@ pub(super) fn is_ascii_word_char(ch: char) -> bool {
     ch.is_ascii_alphanumeric() || ch == '_'
 }
 
-pub(super) fn build_selected_sops(intent: &str, recommended_skills: &[Value]) -> Vec<Value> {
-    let mut sops = match intent {
+pub(super) fn build_selected_sops(intent: &str) -> Vec<Value> {
+    let sops = match intent {
         "review_request" => vec![sop(
             "skill:waza-check",
             "waza/check",
@@ -239,23 +236,14 @@ pub(super) fn build_selected_sops(intent: &str, recommended_skills: &[Value]) ->
         )],
     };
 
-    for skill in recommended_skills.iter().take(3) {
-        let id = skill.get("id").and_then(|v| v.as_str()).unwrap_or("");
-        if id.is_empty()
-            || sops
-                .iter()
-                .any(|sop| sop.get("id").and_then(|v| v.as_str()) == Some(id))
-        {
-            continue;
-        }
-        sops.push(json!({
-            "id": id,
-            "name": skill.get("name").and_then(|v| v.as_str()).unwrap_or(id),
-            "source": "hub_recommendation",
-            "reason": skill.get("description").and_then(|v| v.as_str()).unwrap_or("Recommended by local skill matching."),
-            "activation_hint": "Call tachi_skill(action='discover') or run the corresponding host skill when available.",
-        }));
-    }
+    // #1690 C3 slice A: the hub-scored `recommend_skills_light` augmentation is
+    // retired with the "second model brain". The static intent→SOP map above
+    // already routes every briefed intent to its native skills (sourced from
+    // the static native skill registry in `skill_policy`); a scored
+    // hub-recommendation loop added nothing honest on top of it, so the
+    // `source: "hub_recommendation"` rows are gone. `recommended_skills` in the
+    // brief output is now the static projection
+    // `copilot_ops::support::native_skill_suggestions`.
     sops
 }
 

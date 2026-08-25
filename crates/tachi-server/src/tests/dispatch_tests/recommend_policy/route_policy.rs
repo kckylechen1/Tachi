@@ -247,6 +247,42 @@ async fn tachi_task_route_simulate_compares_policy_variants_from_live_eval() {
     );
 }
 
+/// #1690 slice C (oracle J1): `route_simulate` output on an EMPTY eval store
+/// must not carry retired MBIT language. The no-rows caveat used to say
+/// "deterministic MBIT/risk fit" — production-reachable prose, because the
+/// tune facade is an operator surface (`tachi_tune(action='route_simulate')`),
+/// not a test-only path. RED pre-repair: the empty-store caveat emits "MBIT";
+/// GREEN: absent, case-insensitively, from the whole serialized response.
+#[tokio::test]
+async fn route_simulate_empty_store_output_carries_no_mbit_language() {
+    let (server, _temp_home) = make_server_with_temp_home();
+
+    let mut params = tune_params("route_simulate");
+    params.limit = Some(50);
+    let raw = run_tune(&server, params)
+        .await
+        .expect("route_simulate on empty eval store should succeed");
+    let sim: serde_json::Value = serde_json::from_str(&raw).expect("route simulation JSON");
+    assert_eq!(sim["row_count"], json!(0), "empty eval store fixture");
+
+    // Sanity anchor: the empty-store fallback caveat must still be emitted,
+    // so a future behavior change cannot silently make this pass.
+    let caveats = sim["caveats"]
+        .as_array()
+        .expect("caveats present on empty store");
+    assert!(
+        caveats.iter().any(|caveat| caveat
+            .as_str()
+            .is_some_and(|text| text.contains("no /eval rows found"))),
+        "the empty-store fallback caveat must still be present: {sim:#}"
+    );
+
+    assert!(
+        !raw.to_ascii_lowercase().contains("mbit"),
+        "route_simulate output must not contain retired MBIT language: {raw}"
+    );
+}
+
 /// tachi#1200 item 1 (judgmental test named by the issue): a `tachi_complete`
 /// call that carries `dispatch_id` but omits `profile` must still land its
 /// eval row where `route_simulate` can match it — via the auto-inject from

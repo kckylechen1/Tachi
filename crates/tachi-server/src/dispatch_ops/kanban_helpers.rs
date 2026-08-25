@@ -13,7 +13,6 @@ pub(super) async fn init_kanban_task(
     assignment: &tachi_params::ResolvedStaffAssignment,
     grant: &tachi_params::ExecutionGrant,
     profile: &crate::dispatch_profile::ResolvedDispatchProfile,
-    auto_capability_bundle: Option<bool>,
     plan_path: Option<&str>,
 ) -> Result<(), String> {
     let agent = assignment.selected_backend.as_str();
@@ -35,7 +34,6 @@ pub(super) async fn init_kanban_task(
         "issue_ref": request.issue_ref,
         "pr_ref": request.pr_ref,
         "flow_id": request.flow_id,
-        "auto_capability_bundle": auto_capability_bundle,
         "plan_file": plan_path,
         "eval_ledger_id": null,
     });

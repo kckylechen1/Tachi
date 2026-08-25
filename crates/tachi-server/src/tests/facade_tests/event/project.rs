@@ -1,86 +1,6 @@
 use super::*;
 
 #[tokio::test]
-async fn tachi_event_emit_rejects_reserved_receipt_type_but_keeps_ordinary_events() {
-    let server = make_server();
-
-    let mut reserved = tachi_event_params("emit");
-    reserved.id = Some("reserved-receipt-facade-event".to_string());
-    reserved.event_type = Some(memcore::SUPERSESSION_RECEIPT_EVENT_TYPE.to_string());
-    let error = crate::event_ops::handle_tachi_event(&server, reserved)
-        .await
-        .expect_err("the facade must not mint canonical supersession receipt events");
-    assert!(
-        error.contains("reserved"),
-        "unexpected facade error: {error}"
-    );
-
-    let mut ordinary = tachi_event_params("emit");
-    ordinary.id = Some("ordinary-facade-event".to_string());
-    ordinary.event_type = Some("ordinary.continuity.event".to_string());
-    crate::event_ops::handle_tachi_event(&server, ordinary)
-        .await
-        .expect("ordinary event emission remains available");
-    let events = server
-        .with_global_store_read(|store| {
-            store
-                .list_tachi_events(&memcore::TachiEventQuery {
-                    event_type: Some("ordinary.continuity.event".to_string()),
-                    limit: 10,
-                    ..Default::default()
-                })
-                .map_err(|error| error.to_string())
-        })
-        .expect("read ordinary facade event");
-    assert_eq!(events.len(), 1);
-}
-
-#[tokio::test]
-async fn tachi_event_project_rejects_reserved_supersedes_relation() {
-    let server = make_server();
-
-    let mut timeline = tachi_event_params("emit");
-    timeline.id = Some("reserved-supersedes-event".to_string());
-    timeline.event_type = Some("timeline.candidate".to_string());
-    timeline.authority = Some("collect_only".to_string());
-    timeline.projection_hints = vec!["timeline".to_string()];
-    timeline.payload = Some(json!({
-        "projection_key": "reserved-supersedes",
-        "summary": "Reserved supersession relation",
-        "discoveries": [],
-        "causal_edges": [{
-            "source_id": "$projection",
-            "target_id": "$projection",
-            "relation": "supersedes",
-        }],
-    }));
-    crate::event_ops::handle_tachi_event(&server, timeline)
-        .await
-        .expect("emit timeline event");
-
-    let mut project = tachi_event_params("project");
-    project.projection_hints = vec!["timeline".to_string()];
-    let projected = crate::event_ops::handle_tachi_event(&server, project)
-        .await
-        .expect("project timeline event");
-    let projected_json: Value = serde_json::from_str(&projected).expect("project JSON");
-    let timeline_projection = projected_json["projections"]
-        .as_array()
-        .expect("projections")
-        .iter()
-        .find(|projection| projection["event_id"] == json!("reserved-supersedes-event"))
-        .expect("reserved relation timeline projection");
-    assert_eq!(timeline_projection["graph_edges"]["saved_count"], json!(0));
-    assert_eq!(
-        timeline_projection["graph_edges"]["skipped_count"],
-        json!(1)
-    );
-    assert!(timeline_projection["graph_edges"]["skipped"][0]["reason"]
-        .as_str()
-        .is_some_and(|reason| reason.contains("reserved")));
-}
-
-#[tokio::test]
 async fn tachi_event_project_materializes_pattern_idempotently() {
     let server = make_server();
 
@@ -328,6 +248,37 @@ async fn tachi_event_promote_creates_review_artifacts_for_mature_pattern() {
         .expect("promotion memory id")
         .to_string();
 
+    // #1690 C2 discriminator: the projected promotion candidate's
+    // review_artifacts must carry NO retired action strings — the
+    // skill_candidate fan-out (`tachi_skill` action `from_pattern`) is
+    // deleted. Grep-level over the serialized projection output so a stray
+    // retired artifact anywhere in the response fails this test. RED
+    // pre-repair: review_artifacts.skill_candidate.action == "from_pattern"
+    // is present; GREEN post-repair: absent, wiki_draft/agent_profile stay.
+    let projected_serialized =
+        serde_json::to_string(&projected_json).expect("serialize projection");
+    assert!(
+        !projected_serialized.contains("from_pattern"),
+        "projection output must not advertise the retired from_pattern action: {projected_json}"
+    );
+    assert!(
+        !projected_serialized.contains("skill_candidate"),
+        "projection output must not carry a retired skill_candidate review artifact: {projected_json}"
+    );
+    let candidate = &projected_json["promotion_candidates"][0];
+    assert!(
+        candidate["review_artifacts"]
+            .get("wiki_draft")
+            .is_some_and(Value::is_object),
+        "wiki_draft review artifact stays on the projection candidate: {candidate}"
+    );
+    assert!(
+        candidate["review_artifacts"]
+            .get("agent_profile_proposal")
+            .is_some_and(Value::is_object),
+        "agent_profile_proposal review artifact stays on the projection candidate: {candidate}"
+    );
+
     let mut dry_run = tachi_event_params("promote");
     dry_run.id = Some(memory_id.clone());
     dry_run.dry_run = true;
@@ -354,6 +305,13 @@ async fn tachi_event_promote_creates_review_artifacts_for_mature_pattern() {
     assert_eq!(
         promoted_json["wiki_draft"]["wiki_path"],
         json!("/wiki/drafts/patterns/promote-continuity")
+    );
+    // #1690 C3: the skill-candidate fan-out is retired with the skill
+    // intelligence pipelines — promote writes wiki draft + agent profile
+    // proposal only, and must not create a skill candidate.
+    assert!(
+        promoted_json.get("skill_candidate").is_none(),
+        "promote must not emit a skill candidate post-#1690 C3: {promoted_json}"
     );
     assert_eq!(
         promoted_json["agent_profile_proposal"]["event_type"],

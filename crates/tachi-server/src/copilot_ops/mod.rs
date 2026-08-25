@@ -13,9 +13,6 @@ use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-#[cfg(test)]
-use memcore::HubCapability;
-
 const DEBUG_CHECKLIST_LIMIT: usize = 4;
 const FALLBACK_DEBUG_CHECKLIST: [&str; DEBUG_CHECKLIST_LIMIT] = [
     "Start from the observed error and trace where the invariant first becomes false.",

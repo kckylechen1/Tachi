@@ -1390,8 +1390,6 @@ fn profile_payload_preserves_nested_mcp_while_grant_uses_launch_authority() {
         resolved_profile: &start.resolved_profile,
         authority: &authority,
         credential_reports_json: &empty_reports,
-        capability_bundle_card: &empty_value,
-        capability_bundle_file: "",
         feedback_rules_trace: &empty_value,
         harness_transport: "cli",
         harness_server_url: &no_server_url,

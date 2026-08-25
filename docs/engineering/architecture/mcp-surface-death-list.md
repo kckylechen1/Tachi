@@ -96,7 +96,7 @@ otherwise.
 | `tachi_tune` | route/recall tuning | Extracted from task/memory in #1426. Admin/operator only — never part of the standard keep-set. |
 | `tachi_verify` | verification ledger | Keep as evidence ledger for dispatch and safe-merge workflows. |
 | `tachi_wiki` | wiki facade | Canonical wiki search/browse/read/write facade. |
-| `tachi_skill` | skill facade | Canonical discover/run facade. |
+| `tachi_skill` | skill facade | Canonical discover/run facade (the retired `bundle`/`loadout` actions were deleted by #1690 C3). |
 | `tachi_web_search` | web search intake | Keep only as a compatibility intake where a host lacks web search; #1467 leaves research reasoning with the host model. |
 | `vault_status` | safe credential readiness | Read-only status only; write/get vault tools stay out of daily profiles. |
 | `tachi_gh` | GitHub/evidence facade | Keep if GitHub remains part of ship/evidence workflows; move duplicated task PR actions here. |
@@ -107,18 +107,19 @@ and removed from current profile allow-lists. Their canonical replacements are
 
 ## Historical Death List
 
-### Batch A: Executed — Hard-Retire Old Direct Memory Names
+### Batch A: Hard-Retire Old Direct Names
 
-The raw memory routes (`search_memory`, `save_memory`, `remember`, `get_memory`, `find_similar_memory`)
-have been retired and removed from the MCP tool router. All operations are canonically unified under `tachi_memory`.
+At the recorded base, owner policy from #566 was hard retire rather than alias
+infrastructure. The table captured the then-proposed sequence: remove names from
+ordinary profiles, migrate internal callers, then consider wrapper or CLI
+compatibility removal. It is not a current action queue.
 
 | Surface | Current evidence | Replacement | Decision | Next leaf |
 | --- | --- | --- | --- | --- |
-| `search_memory` | **DONE Batch A:** Retired from MCP tool router. | `tachi_memory(action="search")` | Hard-retired direct MCP name. | — |
-| `save_memory` | **DONE Batch A:** Retired from MCP tool router. | `tachi_memory(action="save")` | Hard-retired direct MCP name. | — |
-| `remember` | **DONE Batch A:** Retired from MCP tool router. | `tachi_memory(action="save")` | Hard-retired direct MCP name. | — |
-| `get_memory` | **DONE Batch A:** Retired from MCP tool router. | `tachi_memory(action="get")` | Hard-retired direct MCP name. | — |
-| `find_similar_memory` | **DONE Batch A:** Retired from MCP tool router and operate profile. | `tachi_memory(action="search")` | Hard-retired direct MCP name. | — |
+| `search_memory` | Still in observe patterns at `crates/tachi-hub/src/tool_profiles/patterns.rs:10`; daemon CLI remaps to `tachi_memory(action="search")` at `crates/tachi-server/src/cli_client/tool_map.rs:18`. | `tachi_memory(action="search")` | Hard-retire direct MCP name. | Profile-hide in #756, then migrate direct tests/callers and delete wrapper. |
+| `save_memory` | Still in remember patterns at `patterns.rs:38`; daemon CLI remaps to `tachi_memory(action="save")` at `tool_map.rs:17`. | `tachi_memory(action="save")` | Hard-retire direct MCP name. | Same batch as `search_memory`. |
+| `remember` | Still in remember patterns at `patterns.rs:39`; remaps with `save_memory` at `tool_map.rs:17`. | `tachi_memory(action="save")` | Hard-retire direct MCP name and keep only CLI prose if needed. | Same batch as `save_memory`. |
+| `get_memory` | Already folded admin-only in `FOLDED_NATIVE_COMPAT_TOOLS` at `crates/tachi-server/src/tests/profile_tests/tool_profile_router_coverage.rs:155`; daemon CLI remaps to `tachi_memory(action="get")` at `tool_map.rs:19`. | `tachi_memory(action="get")` | Delete candidate after caller migration. | Remove direct wrapper once tests stop using it as public MCP. |
 | `extract_facts` | Still a standalone remember tool and remaps to `tachi_memory(action="extract_facts")` at `tool_map.rs:16`. | `tachi_memory(action="extract_facts")` | Fold candidate, not first cut. | Decide whether high-frequency use justifies standalone entry. |
 
 ### Batch A2: Fold Wiki Duplicate Aliases
@@ -134,17 +135,21 @@ delete wrappers.
 | `tachi_wiki_write` | Direct wiki write remains in remember patterns at `patterns.rs:40`; CLI map routes `tachi_wiki_write` and `wiki_write` to `tachi_wiki(action="write")` at `tool_map.rs:21`. | `tachi_wiki(action="write")` | Fold/delete candidate. | Same wiki alias leaf. |
 | `tachi_browse` | Facade read tool remains in observe patterns at `patterns.rs:23`. | `tachi_wiki(action="browse")` if browse stays a wiki action. | Fold candidate, but not first cut. | Confirm delegate dogfood before removing; delegate currently exposes `tachi_browse`. |
 
-### Batch B: Executed — Retire Direct Kanban Tools
+### Batch B: Retire Direct Kanban Tools
 
-These routes are implementation details of the dispatch/card board and have been
-removed from the model-facing MCP router (`kanban_tool_router` retired). Internal
-storage/handlers remain for test and internal orchestration.
+These routes are implementation details of the dispatch/card board. They should
+not be a model-facing collaboration API if `tachi_task` owns the agent workflow
+(`tachi_arena` was deleted in #1319-D2, so it is no longer an alternative home
+for any of these).
 
 | Surface | Current evidence | Replacement | Decision | Next leaf |
 | --- | --- | --- | --- | --- |
-| `check_inbox` | **DONE Batch B:** Removed from MCP tool router; tests migrated to internal handlers. | `tachi_task(action="board")` / `tachi_a2a`. | Deleted direct MCP route. | — |
-| `post_card` | **DONE Batch B:** Removed from MCP tool router; tests migrated to internal handlers. | `tachi_staff(action="start")` / `tachi_a2a`. | Deleted direct MCP route. | — |
-| `update_card` | **DONE Batch B:** Removed from MCP tool router; tests migrated to internal handlers. | `tachi_task(action="status")` / `tachi_a2a`. | Deleted direct MCP route. | — |
+| `check_inbox` | Direct tool in `crates/tachi-server/src/tools.rs:109`; in coordinate profile at `patterns.rs:61`. | `tachi_task(action="board")`. | Profile-retire, then delete public route. | Move kanban tests to handlers or canonical facade; remove MCP route. |
+| `post_card` | Direct tool in `tools.rs:101`; in coordinate profile at `patterns.rs:64`. | `tachi_staff(action="start")` or an internal board write (`tachi_task(action="dispatch")` and `tachi_arena(action="spawn")` were both deleted, #1319-C2/D2). | Profile-retire, then delete public route. | Same kanban route deletion leaf. |
+| `update_card` | Direct tool in `tools.rs:117`; in coordinate profile at `patterns.rs:65`. | `tachi_task(action="complete"|"status")`, `tachi_staff(action="cancel")`, or an internal board update. | Profile-retire, then delete public route. | Same kanban route deletion leaf. |
+
+Do not delete the kanban storage/handler code in this batch. Only delete the MCP
+route after the canonical task/staff flows cover the same dogfood path.
 
 ### Batch C: Executed — deprecated dispatch facades removed (PR #822; tracked by #757)
 
@@ -223,9 +228,10 @@ direct completion and skill routes cannot be restored by profile selection;
 6. **Split overloaded task/memory tuning actions.**
    Move self-tuning actions to an admin-only `tachi_tune` or equivalent before
    deleting duplicate action aliases.
-7. **Introduce action-level filtering for delegates.**
-   Only after this could `tachi_complete`, `tachi_unstick`, `run_skill`, and (all since retired)
-   similar worker escape hatches be folded safely.
+7. **DONE — introduce action-level filtering for delegates.**
+   Delegates now use action-scoped `tachi_task` and `tachi_skill`; the direct
+   `tachi_complete` and `run_skill` routes are retired. `tachi_unstick` remains
+   the explicit worker-safe rescue surface.
 8. **Decide admin facade shape.**
    Either keep admin as full bypass for emergency use only, or replace it with
    explicit admin facades (`tachi_admin`, `tachi_hub`, `tachi_vault`) and a

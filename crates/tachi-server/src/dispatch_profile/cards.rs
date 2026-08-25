@@ -5,23 +5,24 @@ pub(crate) fn profile_required_skill_ids(profile: &DispatchProfileDef) -> Vec<St
 }
 
 pub(crate) fn profile_required_skill_ids_for_server(
-    server: &MemoryServer,
+    _server: &MemoryServer,
     profile: &DispatchProfileDef,
 ) -> Result<Vec<String>, String> {
-    let overlay = load_profile_overlay(server, profile.name)?;
-    Ok(tachi_dispatch::profile_required_skill_ids_with_overlay(
-        profile,
-        overlay.as_ref(),
-    ))
+    // #1690 C3: the skill loadout is the STATIC reviewed baseline only — the
+    // legacy `add_signature_skills` overlay merge is retired end-to-end, so
+    // an overlay row seeded with it never alters required skills.
+    Ok(tachi_dispatch::profile_required_skill_ids(profile))
 }
 
 pub(crate) fn profile_skill_loadout_json_for_server(
     server: &MemoryServer,
     profile: &DispatchProfileDef,
 ) -> Result<Value, String> {
-    let overlay = load_profile_overlay(server, profile.name)?;
-    let mut loadout =
-        tachi_dispatch::profile_skill_loadout_json_with_overlay(profile, overlay.as_ref());
+    // #1690 C3: the loadout is the STATIC reviewed baseline — the legacy
+    // `add_signature_skills` overlay merge is retired (see
+    // `profile_json_with_overlay`); only the read-time `self_report_trust`
+    // marker is still injected.
+    let mut loadout = tachi_dispatch::profile_skill_loadout_json(profile);
     inject_self_report_trust(server, profile, &mut loadout)?;
     Ok(loadout)
 }
@@ -60,28 +61,6 @@ pub(crate) fn profile_evidence_required_for_server(
 ) -> Result<Vec<String>, String> {
     let overlay = load_profile_overlay(server, profile.name)?;
     Ok(tachi_dispatch::profile_evidence_required_with_overlay(
-        profile,
-        overlay.as_ref(),
-    ))
-}
-
-pub(crate) fn profile_weak_against_for_server(
-    server: &MemoryServer,
-    profile: &DispatchProfileDef,
-) -> Result<Vec<String>, String> {
-    let overlay = load_profile_overlay(server, profile.name)?;
-    Ok(tachi_dispatch::profile_weak_against_with_overlay(
-        profile,
-        overlay.as_ref(),
-    ))
-}
-
-pub(crate) fn profile_demotion_targets(
-    server: &MemoryServer,
-    profile: &DispatchProfileDef,
-) -> Result<Vec<String>, String> {
-    let overlay = load_profile_overlay(server, profile.name)?;
-    Ok(tachi_dispatch::profile_demotion_targets_from_overlay(
         profile,
         overlay.as_ref(),
     ))

@@ -18,7 +18,6 @@ pub(super) struct DispatchBackendContext<'a> {
     pub(super) plan_duration_ms: Option<u64>,
     pub(super) harness_transport: &'a str,
     pub(super) harness_server_url: &'a Option<String>,
-    pub(super) capability_bundle_card: &'a Value,
     pub(super) timeout_secs_for_status: u64,
 }
 
@@ -83,7 +82,6 @@ pub(super) fn prepare_dispatch_backend(
             plan_duration_ms: ctx.plan_duration_ms,
             harness_transport: ctx.harness_transport,
             harness_server_url: ctx.harness_server_url,
-            capability_bundle_card: ctx.capability_bundle_card,
             timeout_secs_for_status: ctx.timeout_secs_for_status,
         });
         // #773 Layer-2 ② (hole b): backend-prep failure is a terminal dispatch
@@ -283,7 +281,6 @@ mod tests {
             plan_duration_ms: None,
             harness_transport: "cli",
             harness_server_url: &None,
-            capability_bundle_card: &Value::Null,
             timeout_secs_for_status: 5,
         })?;
         match prepared.execution {
@@ -474,7 +471,6 @@ mod tests {
                 plan_duration_ms: None,
                 harness_transport: transport,
                 harness_server_url: &None,
-                capability_bundle_card: &Value::Null,
                 timeout_secs_for_status: grant.timeout_secs,
             })
             .expect("concrete backend preparation")

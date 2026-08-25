@@ -165,9 +165,13 @@ pub(crate) async fn handle_tachi_task_brief(
         false,
     )
     .await?;
-    let skills = recommend_skills_light(server, &params.task, 5).unwrap_or_default();
     let debug_checklist = build_debug_checklist(&wiki_rows);
-    let routing = build_task_brief_routing(&params.task, &skills);
+    // #1690 C3 slice A: the scored skill recommender is retired. The brief's
+    // `recommended_skills` is now a static projection of its own intent routing
+    // (native skills only, from `skill_policy`'s static registry — no scoring,
+    // telemetry, or pattern signals).
+    let routing = build_task_brief_routing(&params.task);
+    let skills = native_skill_suggestions(&routing.selected_sops, 5);
 
     let route_rec =
         build_route_recommendation(server, &params.task, params.project.as_deref()).await;
@@ -366,8 +370,10 @@ pub(crate) async fn handle_tachi_feature_briefing(
     let memory_rows = memory_rows?;
     let eval_rows = eval_rows?;
 
-    let skills = recommend_skills_light(server, &query, 5).unwrap_or_default();
-    let routing = build_task_brief_routing(&query, &skills);
+    // #1690 C3 slice A: static native-skill projection, same as the task brief
+    // path — no scoring/telemetry/pattern signals.
+    let routing = build_task_brief_routing(&query);
+    let skills = native_skill_suggestions(&routing.selected_sops, 5);
     let route_recommendation = feature_dispatch_recommendation(server, params, &query);
     let current_stage = infer_feature_stage(&run_artifacts, &board);
     let guide_hits = feature_guide_hits(

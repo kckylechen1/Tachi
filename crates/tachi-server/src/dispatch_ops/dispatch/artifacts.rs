@@ -18,8 +18,6 @@ pub(super) struct DispatchArtifacts {
     pub(super) prompt_md_path: PathBuf,
     pub(super) context_md_path: PathBuf,
     pub(super) trajectory_path: PathBuf,
-    pub(super) capability_bundle_file: String,
-    pub(super) capability_bundle_card: Value,
     pub(super) feedback_rules_trace: Value,
 }
 
@@ -37,23 +35,7 @@ pub(super) async fn write_dispatch_artifacts(
         .await
         .map_err(|e| format!("Failed to write prompt.md: {e}"))?;
 
-    let capability_bundle_path = ctx.workspace_dir.join("capability_bundle.json");
-    let mut capability_bundle_trace = ctx.prompt_assembly.capability_bundle.clone();
-    if let Some(obj) = capability_bundle_trace.as_object_mut() {
-        obj.insert(
-            "feedback_rules".to_string(),
-            ctx.prompt_assembly.feedback_rules.clone(),
-        );
-    }
     let feedback_rules_trace = ctx.prompt_assembly.feedback_rules.clone();
-    let capability_bundle_artifact = serde_json::to_string_pretty(&capability_bundle_trace)
-        .map_err(|e| format!("Failed to serialize capability bundle artifact: {e}"))?;
-    tokio::fs::write(&capability_bundle_path, capability_bundle_artifact)
-        .await
-        .map_err(|e| format!("Failed to write capability_bundle.json: {e}"))?;
-    let capability_bundle_file = capability_bundle_path.to_string_lossy().to_string();
-    let capability_bundle_card =
-        capability_bundle_summary(&capability_bundle_trace, Some(&capability_bundle_file));
 
     let context_md_path = ctx.workspace_dir.join("context.md");
     let context_summary = {
@@ -83,22 +65,6 @@ pub(super) async fn write_dispatch_artifacts(
         ));
         sections.push(format!("V2: {}", ctx.v2));
         sections.push(format!("Skills: {:?}", ctx.effective_skills_for_files));
-        sections.push(format!(
-            "Capability bundle: status={} requested={} injected={} artifact={}",
-            capability_bundle_trace
-                .get("status")
-                .and_then(|value| value.as_str())
-                .unwrap_or("unknown"),
-            capability_bundle_trace
-                .get("requested")
-                .and_then(|value| value.as_bool())
-                .unwrap_or(false),
-            capability_bundle_trace
-                .get("injected")
-                .and_then(|value| value.as_bool())
-                .unwrap_or(false),
-            capability_bundle_file
-        ));
         sections.push(String::new());
         sections.push(ctx.base_prompt.to_string());
         sections.join("\n\n")
@@ -131,12 +97,6 @@ pub(super) async fn write_dispatch_artifacts(
         "issue_ref": ctx.request.issue_ref,
         "pr_ref": ctx.request.pr_ref,
         "flow_id": ctx.request.flow_id,
-        "auto_capability_bundle": if capability_bundle_trace["source"] == "unset" {
-            None
-        } else {
-            capability_bundle_trace["requested"].as_bool()
-        },
-        "capability_bundle": capability_bundle_card.clone(),
         "feedback_rules": feedback_rules_trace.clone(),
         "v2": ctx.v2,
         "timestamp": Utc::now().to_rfc3339(),
@@ -191,8 +151,6 @@ pub(super) async fn write_dispatch_artifacts(
         prompt_md_path,
         context_md_path,
         trajectory_path,
-        capability_bundle_file,
-        capability_bundle_card,
         feedback_rules_trace,
     })
 }

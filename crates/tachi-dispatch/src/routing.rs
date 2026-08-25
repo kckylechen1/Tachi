@@ -223,7 +223,6 @@ pub struct RecommendationProfilePayload {
     pub evidence_contract: Value,
     pub resolved_skills: Vec<String>,
     pub resolved_skill_loadout: Value,
-    pub profile_card: Value,
 }
 
 pub fn route_eval_rows(rows: &[EvalRow]) -> Vec<RouteEvalRow> {
@@ -717,7 +716,7 @@ pub fn build_dispatch_recommendation_response(
             "route_policy_weighted: recommendation used matching /eval evidence plus approved route-policy rules."
         }
         (RouteEvidenceSource::LiveEvalMemory, true, 0) => {
-            "low_sample_fallback: no matching live /eval profile/subagent evidence; deterministic MBIT/risk fit dominated."
+            "low_sample_fallback: no matching live /eval profile/subagent evidence; deterministic static-profile/risk fit dominated."
         }
         (RouteEvidenceSource::LiveEvalMemory, true, _) => {
             "live_eval_weighted: recommendation used matching /eval profile/subagent evidence."
@@ -772,7 +771,6 @@ pub fn build_dispatch_recommendation_response(
             "performance_matrix_hits": performance_matrix_hits,
         },
         "route_policy_rules": route_policy_rules,
-        "profile_card": profile_payload.profile_card.clone(),
         "candidates": candidates,
     }))
 }
@@ -1267,7 +1265,7 @@ pub fn route_simulation_caveats(
     ];
     if row_count == 0 {
         caveats.push(
-            "no /eval rows found; recommendations must fall back to deterministic MBIT/risk fit"
+            "no /eval rows found; recommendations must fall back to deterministic static-profile fit"
                 .to_string(),
         );
     }

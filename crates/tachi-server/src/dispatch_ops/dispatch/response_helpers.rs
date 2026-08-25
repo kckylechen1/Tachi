@@ -24,40 +24,6 @@ pub(super) fn suggested_complete_payload(
     })
 }
 
-pub(super) fn capability_bundle_summary(
-    trace: &serde_json::Value,
-    artifact_file: Option<&str>,
-) -> serde_json::Value {
-    json!({
-        "status": trace.get("status").cloned().unwrap_or(serde_json::Value::Null),
-        "requested": trace.get("requested").and_then(|value| value.as_bool()).unwrap_or(false),
-        "disabled": trace.get("disabled").and_then(|value| value.as_bool()).unwrap_or(false),
-        "injected": trace.get("injected").and_then(|value| value.as_bool()).unwrap_or(false),
-        "host": trace.get("host").cloned().unwrap_or(serde_json::Value::Null),
-        "query": trace.get("query").cloned().unwrap_or(serde_json::Value::Null),
-        "source": trace.get("source").cloned().unwrap_or(serde_json::Value::Null),
-        "primary_skill": trace.get("primary_skill").cloned().unwrap_or(serde_json::Value::Null),
-        "supporting_capabilities_count": trace
-            .get("supporting_capabilities")
-            .and_then(|value| value.as_array())
-            .map(|items| items.len())
-            .unwrap_or(0),
-        "packs_count": trace
-            .get("packs")
-            .and_then(|value| value.as_array())
-            .map(|items| items.len())
-            .unwrap_or(0),
-        "host_tools_count": trace
-            .get("host_tools")
-            .and_then(|value| value.as_array())
-            .map(|items| items.len())
-            .unwrap_or(0),
-        "reason": trace.get("reason").cloned().unwrap_or(serde_json::Value::Null),
-        "error": trace.get("error").cloned().unwrap_or(serde_json::Value::Null),
-        "artifact_file": artifact_file,
-    })
-}
-
 /// Scope guard that deletes a temporary MCP config file when dropped.
 /// Logs a warning if cleanup fails so leaking temp files is observable.
 pub(super) struct McpCleanup(pub(super) Option<PathBuf>);
@@ -97,8 +63,6 @@ pub(super) struct DispatchResponseInputs<'a> {
     /// #894 S2d effective-authority receipt (compiled contract + enforcement).
     pub(super) authority: &'a Value,
     pub(super) credential_reports_json: &'a [Value],
-    pub(super) capability_bundle_card: &'a Value,
-    pub(super) capability_bundle_file: &'a str,
     pub(super) feedback_rules_trace: &'a Value,
     pub(super) harness_transport: &'a str,
     pub(super) harness_server_url: &'a Option<String>,
@@ -130,8 +94,7 @@ pub(super) fn build_dispatch_response(
     // tachi#1173 item 1: dispatch receipt slimming. The default response is a
     // slim receipt (dispatch_id/state/run_dir/suggested_complete_command plus
     // other small metadata already useful post-dispatch); the fat routing
-    // card (mbit_card x3 via `profile`/`dispatch_profile`, identity_receipt
-    // x2, personality dump) is selection-time information an agent needs
+    // card (`profile`, identity_receipt) is selection-time information an agent needs
     // when CHOOSING a profile, not receipt information it needs after
     // dispatch already committed to one — so it moves behind verbose=true (or
     // a separate operator-only local `tachi card show` diagnostic).
@@ -154,9 +117,6 @@ pub(super) fn build_dispatch_response(
         "issue_ref": inputs.request.issue_ref,
         "pr_ref": inputs.request.pr_ref,
         "flow_id": inputs.request.flow_id,
-        "auto_capability_bundle": inputs.resolved_profile.auto_capability_bundle,
-        "capability_bundle": inputs.capability_bundle_card,
-        "capability_bundle_file": inputs.capability_bundle_file,
         "feedback_rules": inputs.feedback_rules_trace,
         "harness_transport": inputs.harness_transport,
         "harness_server_url": inputs.harness_server_url,
@@ -185,14 +145,6 @@ pub(super) fn build_dispatch_response(
         object.insert(
             "identity_receipt".to_string(),
             inputs.assignment.identity_receipt.clone(),
-        );
-        object.insert(
-            "dispatch_profile".to_string(),
-            inputs
-                .resolved_profile
-                .profile_card
-                .clone()
-                .unwrap_or(Value::Null),
         );
     }
 

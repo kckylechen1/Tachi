@@ -140,5 +140,6 @@ mod tests {
         let value: Value = serde_json::from_str(&normalized).unwrap();
         assert_eq!(value["action"], "discover");
         assert_eq!(value["status"], "completed");
+        assert!(value.get("results").is_some());
     }
 }

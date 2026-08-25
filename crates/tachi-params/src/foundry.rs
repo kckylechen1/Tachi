@@ -21,10 +21,6 @@ fn default_capture_min_chars() -> usize {
     24
 }
 
-fn default_recommend_limit() -> usize {
-    5
-}
-
 fn default_compact_trigger() -> String {
     "token_pressure".to_string()
 }
@@ -417,90 +413,4 @@ pub struct SectionBuildParams {
     /// Optional maximum token budget for the rendered block
     #[serde(default)]
     pub target_tokens: Option<usize>,
-}
-
-// ─── Recommend / Bundle ─────────────────────────────────────────────────────
-
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub struct RecommendCapabilityParams {
-    /// Natural language task or intent query
-    pub query: String,
-
-    /// Optional host/runtime name (e.g. openclaw, codex, trae)
-    #[serde(default)]
-    pub host: Option<String>,
-
-    /// Optional capability type filter: skill | plugin | mcp
-    #[serde(default)]
-    pub cap_type: Option<String>,
-
-    /// Max recommendations to return
-    #[serde(default = "default_recommend_limit")]
-    pub limit: usize,
-
-    /// Include hidden capabilities in ranking
-    #[serde(default)]
-    pub include_hidden: bool,
-
-    /// Include currently uncallable capabilities in ranking
-    #[serde(default)]
-    pub include_uncallable: bool,
-}
-
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub struct RecommendSkillParams {
-    /// Natural language task or intent query
-    pub query: String,
-
-    /// Optional host/runtime name (e.g. openclaw, codex, trae)
-    #[serde(default)]
-    pub host: Option<String>,
-
-    /// Max skill recommendations to return
-    #[serde(default = "default_recommend_limit")]
-    pub limit: usize,
-
-    /// Include currently uncallable skills in ranking
-    #[serde(default)]
-    pub include_uncallable: bool,
-}
-
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub struct RecommendToolchainParams {
-    /// Natural language task or intent query
-    pub query: String,
-
-    /// Optional host/runtime name (e.g. openclaw, codex, trae)
-    #[serde(default)]
-    pub host: Option<String>,
-
-    /// Max skill recommendations to include
-    #[serde(default = "default_recommend_limit")]
-    pub skill_limit: usize,
-
-    /// Max supporting capability recommendations to include
-    #[serde(default = "default_recommend_limit")]
-    pub capability_limit: usize,
-}
-
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub struct PrepareCapabilityBundleParams {
-    /// Natural language task or intent query
-    pub query: String,
-
-    /// Optional host/runtime name (e.g. openclaw, codex, trae)
-    #[serde(default)]
-    pub host: Option<String>,
-
-    /// Max skill recommendations to consider
-    #[serde(default = "default_recommend_limit")]
-    pub skill_limit: usize,
-
-    /// Max supporting capability recommendations to consider
-    #[serde(default = "default_recommend_limit")]
-    pub capability_limit: usize,
-
-    /// If true, include a rendered section artifact in the response
-    #[serde(default = "default_true")]
-    pub include_section: bool,
 }
