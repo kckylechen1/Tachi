@@ -124,25 +124,56 @@ jobs:
              'printf "cargo-audit %s (fake)\n" "${SIMULATE_CARGO_AUDIT_VERSION:-0.22.2}"' >"${setup_stub_dir}/cargo-audit"
            printf '%s\n' \
              '#!/bin/sh' \
-             'printf "cargo-clippy %s (fake)\n" "${SIMULATE_CLIPPY_VERSION:-0.1.97}"' >"${setup_stub_dir}/cargo-clippy"
+             'printf "clippy %s (fake)\n" "${SIMULATE_CLIPPY_VERSION:-0.1.97}"' >"${setup_stub_dir}/cargo-clippy"
            printf '%s\n' \
              '#!/bin/sh' \
              'printf "%s\n" "${SIMULATE_NODE_VERSION:-v20.0.0}"' >"${setup_stub_dir}/node"
+           printf '%s\n' \
+             '#!/bin/sh' \
+             'if [ "${1:-}" != api ] || [ "${2:-}" != user ] || [ "${3:-}" != --jq ] || [ "${4:-}" != .login ]; then exit 2; fi' \
+             'if [ -n "${GH_TOKEN:-}" ]; then' \
+             '  printf "GH_TOKEN\n" >"${GH_STUB_USED_FILE}"' \
+             '  [ "${GH_TOKEN}" = valid-gh-token ] || exit 1' \
+             'elif [ -n "${GITHUB_TOKEN:-}" ]; then' \
+             '  printf "GITHUB_TOKEN\n" >"${GH_STUB_USED_FILE}"' \
+             '  [ "${GITHUB_TOKEN}" = valid-github-token ] || exit 1' \
+             'else' \
+             '  printf "NO_TOKEN\n" >"${GH_STUB_USED_FILE}"' \
+             '  exit 1' \
+             'fi' \
+             'printf "stub-user\n"' >"${setup_stub_dir}/gh"
            chmod +x "${setup_stub_dir}"/*
 
            run_fake_setup() {
-             SIMULATE_MISSING_COMPONENT="${1:-}" \
+             local auth_case="${7:-none}"
+             local -a auth_env=(env -u GITHUB_TOKEN -u GH_TOKEN)
+             case "${auth_case}" in
+               none) ;;
+               invalid-github) auth_env+=(GITHUB_TOKEN=invalid-github-token) ;;
+               invalid-gh) auth_env+=(GH_TOKEN=invalid-gh-token) ;;
+               both-gh-wins) auth_env+=(GITHUB_TOKEN=invalid-github-token GH_TOKEN=valid-gh-token) ;;
+               *) echo "unknown gh auth fixture: ${auth_case}" >&2; return 2 ;;
+             esac
+             "${auth_env[@]}" \
+               SIMULATE_MISSING_COMPONENT="${1:-}" \
                SIMULATE_NODE_VERSION="${2:-v20.0.0}" \
                SIMULATE_RUSTC_VERSION="${3:-1.97.0}" \
                SIMULATE_CARGO_VERSION="${4-1.97.0}" \
                SIMULATE_CARGO_AUDIT_VERSION="${5:-0.22.2}" \
                SIMULATE_CLIPPY_VERSION="${6-0.1.97}" \
+               GH_STUB_USED_FILE="${setup_test_root}/gh-used" \
                CARGO_HOME="${setup_test_root}/cargo-home" \
                PATH="${setup_stub_dir}" \
                /bin/bash .agents/setup >"${setup_test_root}/output" 2>&1
            }
 
+          rm -f -- "${setup_test_root}/gh-used"
           run_fake_setup
+          if [[ -e "${setup_test_root}/gh-used" ]]; then
+            echo 'setup performed gh auth network work with no token env' >&2
+            exit 1
+          fi
+          grep -F 'setup: skip -- gh present but no token env set' "${setup_test_root}/output"
           for tool in "${required_tools[@]}"; do
             mv "${setup_stub_dir}/${tool}" "${setup_stub_dir}/${tool}.disabled"
             if run_fake_setup; then
@@ -188,14 +219,44 @@ jobs:
            fi
            grep -F 'cargo-audit=0.22.1(required:0.22.2)' "${setup_test_root}/output"
 
-           # A4: exercise clippy-version mapping through the guarded assertion (use "" for SIMULATE_CARGO_VERSION
-           # so -z guard is true and detailed pin runs; stubs report matching cargo/rustc but mismatched clippy)
-           if run_fake_setup "" v20.0.0 1.97.0 "" 0.22.2 0.1.96; then
+           # A4: exact cargo/rustc with wrong cargo-clippy must reject even when
+           # SIMULATE_CARGO_VERSION is inherited by the hermetic fixture.
+           if run_fake_setup "" v20.0.0 1.97.0 1.97.0 0.22.2 0.1.96; then
              echo 'setup accepted a mismatched effective clippy' >&2
              exit 1
            fi
            grep -F 'cargo-clippy --version resolved to: 0.1.96' "${setup_test_root}/output"
            grep -F 'required (derived from channel 1.97.0): 0.1.97' "${setup_test_root}/output"
+
+           # A5: gh auth is optional without token env, but token-env poisoning
+           # fails closed; GH_TOKEN is the effective value when both are set.
+           if run_fake_setup "" v20.0.0 1.97.0 1.97.0 0.22.2 0.1.97 invalid-github; then
+             echo 'setup accepted an invalid GITHUB_TOKEN' >&2
+             exit 1
+           fi
+           grep -F 'effective gh auth env invalid (set: GITHUB_TOKEN)' "${setup_test_root}/output"
+           if grep -F 'invalid-github-token' "${setup_test_root}/output" >/dev/null; then
+             echo 'setup exposed GITHUB_TOKEN fixture material' >&2
+             exit 1
+           fi
+           if run_fake_setup "" v20.0.0 1.97.0 1.97.0 0.22.2 0.1.97 invalid-gh; then
+             echo 'setup accepted an invalid GH_TOKEN' >&2
+             exit 1
+           fi
+           grep -F 'effective gh auth env invalid (set: GH_TOKEN)' "${setup_test_root}/output"
+           if grep -F 'invalid-gh-token' "${setup_test_root}/output" >/dev/null; then
+             echo 'setup exposed GH_TOKEN fixture material' >&2
+             exit 1
+           fi
+           if ! run_fake_setup "" v20.0.0 1.97.0 1.97.0 0.22.2 0.1.97 both-gh-wins; then
+             echo 'setup rejected GH_TOKEN precedence fixture' >&2
+             exit 1
+           fi
+           grep -F 'GH_TOKEN' "${setup_test_root}/gh-used"
+           if grep -F 'GITHUB_TOKEN' "${setup_test_root}/gh-used" >/dev/null; then
+             echo 'gh stub did not use GH_TOKEN precedence' >&2
+             exit 1
+           fi
 
   rust:
     name: Rust workspace

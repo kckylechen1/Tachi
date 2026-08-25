@@ -91,42 +91,39 @@ if command -v cargo >/dev/null 2>&1; then
   done
 fi
 
-# A1 toolchain pin assertion (fail-closed; gated so CI stub harness with SIMULATE_* fakes is unaffected)
-if [[ -z "${SIMULATE_CARGO_VERSION:-}" ]]; then
-  cargo_resolved="$(command -v cargo 2>/dev/null || echo 'not-found')"
-  if command -v cargo >/dev/null 2>&1; then
-    cargo_version="$(cd -- "${REPO_ROOT}" && cargo --version 2>/dev/null || true)"
-    read -r cargo_name cargo_actual _ <<<"${cargo_version}"
-    if [[ "${cargo_name:-}" != cargo || "${cargo_actual:-}" != "${REQUIRED_RUST_VERSION}" ]]; then
-      printf 'setup: FAILED -- toolchain pin mismatch\n' >&2
-      printf '  cargo --version resolved to: %s\n' "${cargo_actual:-unknown}"
-      printf '  required channel from rust-toolchain.toml: %s\n' "${REQUIRED_RUST_VERSION}"
-      printf '  command -v cargo: %s\n' "${cargo_resolved}"
-      printf '  rustup shims (or direct toolchain bin dir) must precede Homebrew on PATH.\n' >&2
-      printf '  Example: export PATH="/Users/kckylechen/.rustup/toolchains/1.97.0-aarch64-apple-darwin/bin:$PATH"\n' >&2
-      exit 1
-    fi
+# A1 toolchain pin assertion (fail-closed; SIMULATE_* only controls hermetic test stubs)
+cargo_resolved="$(command -v cargo 2>/dev/null || echo 'not-found')"
+if command -v cargo >/dev/null 2>&1; then
+  cargo_version="$(cd -- "${REPO_ROOT}" && cargo --version 2>/dev/null || true)"
+  read -r cargo_name cargo_actual _ <<<"${cargo_version}"
+  if [[ "${cargo_name:-}" != cargo || "${cargo_actual:-}" != "${REQUIRED_RUST_VERSION}" ]]; then
+    printf 'setup: FAILED -- toolchain pin mismatch\n' >&2
+    printf '  cargo --version resolved to: %s\n' "${cargo_actual:-unknown}"
+    printf '  required channel from rust-toolchain.toml: %s\n' "${REQUIRED_RUST_VERSION}"
+    printf '  command -v cargo: %s\n' "${cargo_resolved}"
+    printf '  rustup shims (or direct toolchain bin dir) must precede Homebrew on PATH.\n' >&2
+    printf '  Example: export PATH="/Users/kckylechen/.rustup/toolchains/1.97.0-aarch64-apple-darwin/bin:$PATH"\n' >&2
   fi
+fi
 
-  clippy_resolved="$(command -v cargo-clippy 2>/dev/null || echo 'not-found')"
-  if command -v cargo-clippy >/dev/null 2>&1; then
-    clippy_version="$(cd -- "${REPO_ROOT}" && cargo-clippy --version 2>/dev/null || true)"
-    read -r clippy_name clippy_actual _ <<<"${clippy_version}"
-    rust_minor="${REQUIRED_RUST_VERSION#*.}"; rust_minor="${rust_minor%%.*}"
-    expected_clippy="0.1.${rust_minor}"
-    if [[ "${clippy_name:-}" != clippy || "${clippy_actual:-}" != "${expected_clippy}" ]]; then
-      printf 'setup: FAILED -- toolchain pin mismatch\n' >&2
-      printf '  cargo-clippy --version resolved to: %s\n' "${clippy_actual:-unknown}"
-      printf '  required (derived from channel %s): %s\n' "${REQUIRED_RUST_VERSION}" "${expected_clippy}"
-      printf '  command -v cargo-clippy: %s\n' "${clippy_resolved}"
-      printf '  rustup shims must precede Homebrew on PATH.\n' >&2
-      exit 1
-    fi
-  else
-    printf 'setup: FAILED -- toolchain pin: cargo-clippy not resolvable in PATH\n' >&2
+clippy_resolved="$(command -v cargo-clippy 2>/dev/null || echo 'not-found')"
+if command -v cargo-clippy >/dev/null 2>&1; then
+  clippy_version="$(cd -- "${REPO_ROOT}" && cargo-clippy --version 2>/dev/null || true)"
+  read -r clippy_name clippy_actual _ <<<"${clippy_version}"
+  rust_minor="${REQUIRED_RUST_VERSION#*.}"; rust_minor="${rust_minor%%.*}"
+  expected_clippy="0.1.${rust_minor}"
+  if [[ "${clippy_name:-}" != clippy || "${clippy_actual:-}" != "${expected_clippy}" ]]; then
+    printf 'setup: FAILED -- toolchain pin mismatch\n' >&2
+    printf '  cargo-clippy --version resolved to: %s\n' "${clippy_actual:-unknown}"
+    printf '  required (derived from channel %s): %s\n' "${REQUIRED_RUST_VERSION}" "${expected_clippy}"
     printf '  command -v cargo-clippy: %s\n' "${clippy_resolved}"
-    exit 1
+    printf '  rustup shims must precede Homebrew on PATH.\n' >&2
+    missing+=("cargo-clippy=${clippy_actual:-unknown}(required:${expected_clippy})")
   fi
+else
+  printf 'setup: FAILED -- toolchain pin: cargo-clippy not resolvable in PATH\n' >&2
+  printf '  command -v cargo-clippy: %s\n' "${clippy_resolved}"
+  missing+=("cargo-clippy@rust-${REQUIRED_RUST_VERSION}")
 fi
 
 # gh auth check (A2/A3): gh is optional. Fail ONLY on token-env poisoning (the case where GH_TOKEN or GITHUB_TOKEN is set but invalid).
