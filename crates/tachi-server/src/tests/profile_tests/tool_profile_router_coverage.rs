@@ -1008,8 +1008,8 @@ fn exact_identifier_at_start(value: &str, tok: &str) -> bool {
 
 fn contains_quoted_identifier(line: &str, tok: &str, delimiter: char) -> bool {
     exact_identifier_starts(line, tok).any(|start| {
-        line[..start].chars().next_back() == Some(delimiter)
-            && line[start + tok.len()..].chars().next() == Some(delimiter)
+        line[..start].ends_with(delimiter)
+            && line[start + tok.len()..].starts_with(delimiter)
     })
 }
 
