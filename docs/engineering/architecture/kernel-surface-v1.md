@@ -260,7 +260,7 @@ Tachi now expresses exposure through additive bundles instead of mutually exclus
 (`memory_graph` / `get_edges` were dropped (retired) from `observe` in #757 — internalized
 off the MCP surface entirely, not just this bundle.)
 
-### `remember` (retired name)
+### `remember` (live profile/bundle; native `remember` tool alias retired)
 
 - `observe` +
 - `save_memory` (retired name; canonical `tachi_memory(action="save")`)
@@ -269,13 +269,13 @@ off the MCP surface entirely, not just this bundle.)
 
 ### `coordinate`
 
-- `remember` (retired name) +
+- live `remember` profile/bundle (native `remember` tool alias retired) +
 - `ghost_*`
 - kanban / delegation / handoff
 
 ### `operate`
 
-- `remember` (retired name) +
+- live `remember` profile/bundle (native `remember` tool alias retired) +
 - `recall_context`
 - `capture_session`
 - `compact_context`

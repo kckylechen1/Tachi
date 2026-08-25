@@ -101,11 +101,11 @@ short-circuits to true only for admin/full profiles.
 ## 3. ToolProfile status — mostly hollowed out
 
 There are two unrelated "profile" concepts. This section is about **`ToolProfile`** (tool-surface
-trimming), defined in [`profiles/types.rs`](../../../crates/tachi-server/src/profiles/types.rs).
+trimming), defined in [`tool_profiles/types.rs`](../../../crates/tachi-hub/src/tool_profiles/types.rs).
 
 The early design had five additive bundles: `observe / remember / coordinate / operate / admin`.
-But v1.0 introduced the facade surface and, with it, `standard_minimal` — a hard-coded 14-tool
-allow-list ([`profiles/patterns.rs`](../../../crates/tachi-server/src/profiles/patterns.rs) → `STANDARD_MINIMAL_TOOL_PATTERNS`).
+But v1.0 introduced the facade surface and, with it, `standard_minimal` — a curated
+allow-list ([`tool_profiles/patterns.rs`](../../../crates/tachi-hub/src/tool_profiles/patterns.rs) → `STANDARD_MINIMAL_TOOL_PATTERNS`).
 The net effect:
 
 - **default = `standard` = the hard allow-list**, bypassing bundles

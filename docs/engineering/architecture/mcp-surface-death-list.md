@@ -49,9 +49,9 @@ authority.
 - `admin` is not a curated management profile. `tool_visible()` returns true
   immediately for admin, so admin exposes the full native catalog plus any
   directly exposed proxy/skill tools.
-- The source currently contains 103 routed `#[tool]` methods. The old 132-tool
-  and 76/56 breakdown is retired; regenerate profile-level counts under #1319
-  rather than treating that historical split as current truth.
+- The source-owned routed `#[tool]` inventory is the current census. The old
+  132-tool and 76/56 breakdown is retired; regenerate profile-level counts
+  under #1319 rather than treating a prose snapshot as current truth.
 
 The product goal is stricter than profile hiding: daily agents should see a
 small canonical surface, and retired capabilities should disappear instead of
@@ -209,7 +209,7 @@ direct completion and skill routes cannot be restored by profile selection;
    routes remained available for admin/backcompat at that migration stage.
 2. **Migrate raw memory direct callers.**
    Convert tests, CLI text, and internal dogfood to `tachi_memory` actions.
-   Then retired (executed): `search_memory`, `save_memory`, `remember`, and possibly
+   Then retired (executed): native `search_memory`, `save_memory`, and `remember` MCP wrappers, and possibly
    `get_memory` (retired) MCP wrappers.
 3. **Retire direct kanban MCP routes.**
    Move direct tests to handlers or task/arena facades, then remove
