@@ -1016,8 +1016,6 @@ fn line_is_retirement_record(line: &str, marker_words: &[&str]) -> bool {
     ]
     .iter()
     .any(|record| lowered.contains(record))
-        || (line.trim_start().starts_with('|')
-            && marker_words.iter().any(|marker| line.contains(marker)))
 }
 
 fn is_exact_identifier_hit(line: &str, tok: &str) -> bool {
@@ -1669,6 +1667,19 @@ mod matcher_unit_tests {
         assert!(retirement_marker_applies(
             "Legacy routes `tachi_save` and `dispatch` were retired.",
             "tachi_save",
+            "",
+            &markers,
+            2,
+        ));
+
+        let mixed_table = "| Subagent dispatch | `tachi_dispatch()` + `tachi_task(action=complete)` (`tachi_complete` RETIRED) |";
+        assert!(
+            !retirement_marker_applies(mixed_table, "tachi_dispatch", "", &markers, 2),
+            "a marker for one retired token in a table row must not exempt another token"
+        );
+        assert!(retirement_marker_applies(
+            mixed_table,
+            "tachi_complete",
             "",
             &markers,
             2,
