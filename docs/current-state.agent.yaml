@@ -68,14 +68,13 @@ implemented_now:
       - configurable via RATE_LIMIT_RPM / RATE_LIMIT_BURST env vars
       - "per-agent override slot exists (AgentProfile.rate_limit_rpm/burst) but is unreachable since issue 757 (no facade sets it); all sessions use the global env default"
 
-  skill_evolve:
+  generated_skill_workflow:
+    status: retired
     tools:
-      - skill_evolve
+      - skill_evolve (retired; use reviewed tachi_skill discover/run)
     features:
-      - LLM-powered prompt improvement
-      - creates versioned capability (skill:name/vN)
-      - optional auto-activation via hub_version_routes
-      - feedback recording in handle_run_skill
+      - Historical LLM-powered prompt improvement workflow; no live model-facing route
+      - Canonical reviewed skill discovery/execution uses tachi_skill(action=discover|run)
 
   agent_profile:
     tools: []
@@ -103,11 +102,11 @@ implemented_now:
         dedicated 30-day handoff GC branch was retired along with the write path)"
 
   dispatch_v2:
-    actions: dispatch / status
+    actions: status / board
     features:
-      - dispatch packet generation with injected execution SOP
+      - dispatch packet generation with injected execution SOP (operator/host-harness path)
       - read-only Shell flow status
-      - tachi_task dispatch + kanban board
+      - tachi_task status + board continuity; worker launch uses tachi_staff only for explicit exceptions
       - auto-daemon readiness probe
       - watchdog polling for kanban state
 

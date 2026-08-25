@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tachi_hub::{
     tool_matches_bundle, tool_name_matches_pattern, ToolBundle, COORDINATE_TOOL_PATTERNS,
     DELEGATE_MINIMAL_TOOL_PATTERNS, OBSERVE_TOOL_PATTERNS, OPERATE_TOOL_PATTERNS,
@@ -392,6 +392,28 @@ fn skill_facade_advertises_canonical_actions() {
     );
 }
 
+#[test]
+fn memory_facade_runtime_and_schema_do_not_teach_retired_save_alias() {
+    let tool = native_route_definitions()
+        .into_iter()
+        .find(|tool| tool.name == "tachi_memory")
+        .expect("canonical tachi_memory facade should stay registered");
+    let description = tool.description.as_deref().unwrap_or_default();
+    assert!(
+        !description.contains("tachi_save"),
+        "live tachi_memory tool description must not recommend retired tachi_save: {description}"
+    );
+
+    let schema = serde_json::to_value(&tool.input_schema)
+        .expect("live tachi_memory input schema must serialize");
+    let schema_text = serde_json::to_string(&schema)
+        .expect("live tachi_memory input schema must render for contract inspection");
+    assert!(
+        !schema_text.contains("tachi_save"),
+        "live tachi_memory input schema must not teach retired tachi_save: {schema_text}"
+    );
+}
+
 /// #1098: every name in the single typed action-effect authority's cache
 /// membership lists (`crate::server_state::CACHEABLE_TOOLS` /
 /// `CACHE_INVALIDATING_TOOLS`, sourced from `crate::action_effect`) must be a
@@ -536,9 +558,14 @@ fn f1098_every_live_native_route_classifies_without_panicking() {
 /// hand-pinned HISTORICAL_SKILL_RETIRED (the retired set from census history).
 /// HISTORICAL_SKILL_SUPERSET is independent hand-maintained grows-only list of
 /// all skill actions ever (live + retired); see B4 repair.
-/// Scans ACTIVE documentation surface line-by-line: `docs/**` (EXCLUDING
-/// `docs/archive/**`), `README.md`, `README.zh-CN.md`, `README.classical.md`,
-/// `prompts/**`.
+/// Scans the ACTIVE documentation surface line-by-line: `docs/**` (EXCLUDING
+/// the existing `docs/archive/**` historical tree), the three root READMEs,
+/// and `prompts/**`. Markdown/text plus tracked YAML, JSON, and config-shaped
+/// files are included; unreadable/non-UTF-8 files and symlinks fail loudly.
+/// Explicitly classified `*.fixture.json` files and JSON under
+/// `docs/engineering/receipts/**` or `docs/engineering/artifacts/**` are machine
+/// data rather than teaching surfaces, but they are still enumerated and must be
+/// readable; arbitrary JSON, Markdown/prose, and all YAML/config remain governed.
 /// Line-based. Exempt only if line carries a retirement marker or under nearest
 /// preceding section header (#...) carrying one. (Headers inside code fences ignored.)
 /// Markers: retired, RETIRED, 退役, historical, 历史.
@@ -549,7 +576,8 @@ fn f1098_every_live_native_route_classifies_without_panicking() {
 /// (ii) code-fence CONTENT presence (distinct from header logic);
 /// (iii) table row with exact tok in FIRST cell;
 /// (iv) verb adjacency (EN: use/call/invoke/run/via + CN: 使用/调用/通过/采用/用 ) within same line;
-/// (v) `action = "x"` with flexible spacing around = and quotes.
+/// (v) `action = "x"` / `actions: x` / JSON equivalents with flexible spacing,
+/// and raw `tachi_task dispatch` references.
 /// For tachi_skill retired: hit on tachi_skill ctx, action=... (flex), or fence content.
 /// Native retired: verb/ ( /action/table/fence/inline-code.
 /// Must pass on current (clean) tree. Negative/prohibition teaching lines are ok if marked.
@@ -560,23 +588,21 @@ fn retired_surface_documentation_has_markers() {
     let repo_root = Path::new(manifest_dir).join("../..");
 
     let mut files: Vec<std::path::PathBuf> = vec![];
-    // READMEs
-    for name in ["README.md", "README.zh-CN.md", "README.classical.md"] {
-        let p = repo_root.join(name);
-        if p.exists() {
-            files.push(p);
-        }
-    }
-    // prompts/** (recursive per B2)
+    // prompts/** (recursive per B2; no archive exclusion was present here).
     let prompts_dir = repo_root.join("prompts");
-    if prompts_dir.is_dir() {
-        collect_prompts_files(&prompts_dir, &mut files);
-    }
-    // docs/** (exclude archive)
+    collect_governed_files(&prompts_dir, false, &mut files)
+        .unwrap_or_else(|error| panic!("{error}"));
+    // docs/** (preserve the existing archive exclusion).
     let docs_dir = repo_root.join("docs");
-    if docs_dir.is_dir() {
-        collect_docs_files(&docs_dir, &mut files);
+    collect_governed_files(&docs_dir, true, &mut files).unwrap_or_else(|error| panic!("{error}"));
+    // The root README set is part of the existing governed surface and is
+    // required, so a missing/unreadable path cannot silently shrink coverage.
+    for name in ["README.md", "README.zh-CN.md", "README.classical.md"] {
+        let path = repo_root.join(name);
+        register_governed_file(&path, &mut files).unwrap_or_else(|error| panic!("{error}"));
     }
+    files.sort_unstable();
+    files.dedup();
 
     let marker_words = [
         "retir",
@@ -682,6 +708,12 @@ fn retired_surface_documentation_has_markers() {
         "pr_handoff",
         "release_note",
     ];
+    let facade_retired_tokens: BTreeSet<&str> = TACHI_TASK_RETIRED_ACTIONS
+        .iter()
+        .chain(TACHI_MEMORY_RETIRED_C2B_ACTIONS.iter())
+        .chain(FACADE_RETIRED_ACTIONS.iter())
+        .copied()
+        .collect();
     // Fully deleted native routes (absent from router AND from RETIRED_NATIVE_ALIASES):
     // verified absent from the live router below, so a reintroduction fails loudly.
     const DELETED_NATIVE_ROUTES: &[&str] = &["tachi_dispatch", "tachi_board", "approve_merge"];
@@ -724,10 +756,15 @@ fn retired_surface_documentation_has_markers() {
     }
 
     for file in &files {
-        let content = match std::fs::read_to_string(file) {
-            Ok(c) => c,
-            Err(_) => continue,
-        };
+        let content = read_governed_file(file).unwrap_or_else(|error| panic!("{error}"));
+        // Machine-data exemption is intentionally path/shape based and narrow:
+        // readability and path safety are still enforced above, while frozen
+        // fixture/receipt/artifact JSON bytes are not interpreted as model-facing
+        // instructions. Ordinary JSON, Markdown/prose, and every YAML/config file
+        // remain in the teaching scan below.
+        if classify_governed_file(&repo_root, file) == GovernedFileKind::MachineData {
+            continue;
+        }
         let lines: Vec<&str> = content.lines().collect();
         let rel = file
             .strip_prefix(&repo_root)
@@ -766,11 +803,8 @@ fn retired_surface_documentation_has_markers() {
                 if boundary == "}" || boundary == "{" || boundary == "}," {
                     fence_current_tool = None;
                 }
-                if let Some(m) = line.find("\"tool\"") {
-                    let rest = &line[m..];
-                    if let Some(name) = rest.split('"').nth(3) {
-                        fence_current_tool = Some(name.to_string());
-                    }
+                if let Some(name) = keyed_identifier_value(line, "tool") {
+                    fence_current_tool = Some(name.to_string());
                 }
             } else {
                 fence_current_tool = None;
@@ -798,9 +832,7 @@ fn retired_surface_documentation_has_markers() {
                 for tok in native_tokens
                     .iter()
                     .chain(skill_tokens.iter())
-                    .chain(TACHI_TASK_RETIRED_ACTIONS.iter())
-                    .chain(TACHI_MEMORY_RETIRED_C2B_ACTIONS.iter())
-                    .chain(FACADE_RETIRED_ACTIONS.iter())
+                    .chain(facade_retired_tokens.iter())
                 {
                     if is_exact_identifier_hit(line, tok) {
                         n += 1;
@@ -816,12 +848,10 @@ fn retired_surface_documentation_has_markers() {
                 if retired_hit_count >= 2 && line_has_any_marker {
                     return true;
                 }
-                let mut start = 0usize;
-                // adjacency is 20 CHARS (not bytes — a byte window is 3x too
-                // tight for CJK lines and misses adjacent markers there).
+                // Adjacency is 20 characters (not bytes — a byte window is 3x
+                // too tight for CJK lines and misses adjacent markers there).
                 let chars: Vec<(usize, char)> = line.char_indices().collect();
-                while let Some(idx) = line[start..].find(tok) {
-                    let abs = start + idx;
+                for abs in exact_identifier_starts(line, tok) {
                     // char index of the hit
                     let ci = chars.partition_point(|(b, _)| *b < abs);
                     let lo_ci = ci.saturating_sub(20);
@@ -840,7 +870,6 @@ fn retired_surface_documentation_has_markers() {
                             return true;
                         }
                     }
-                    start = abs + 1;
                 }
                 false
             };
@@ -869,8 +898,8 @@ fn retired_surface_documentation_has_markers() {
             // tachi_skill retired tokens: tachi_skill ctx, flex action=, or fence content in
             // code-shaped context (same prose-in-fence guard as native).
             for tok in &skill_tokens {
-                let has_tachi_skill_ctx = line.contains("tachi_skill");
-                let has_action_form = contains_flex_action(line, tok);
+                let has_tachi_skill_ctx = contains_exact_identifier(line, "tachi_skill");
+                let has_action_form = contains_action_assignment(line, tok);
                 let is_teaching = has_tachi_skill_ctx
                     || has_action_form
                     || (in_code_fence && code_shaped(line, tok));
@@ -887,43 +916,41 @@ fn retired_surface_documentation_has_markers() {
             // "cancel"/"merge"/"card") — these are common English words, so they ONLY
             // count when pinned to a facade context on the same line where the token is
             // NOT live on any facade named on that line. E.g. `tachi_task(action="cancel")`
-            // fires (cancel is dead on task); a memory-row line naming tachi_memory and
-            // listing `briefing` (live on memory) does not fire just because tachi_task
-            // is also named on the line. A bare action="tok" (no facade named) fires only
-            // when the token is retired from EVERY facade (e.g. cancel/dispatch/wait).
+            // and raw `tachi_task dispatch` both fire. A memory-row line naming
+            // tachi_memory and listing `briefing` (live on memory) does not fire just
+            // because tachi_task is also named on the line. A bare action/actions key
+            // fires only when the token is retired from EVERY facade (e.g. dispatch).
             let live_memory = TACHI_MEMORY_ACTIONS;
             let live_task: Vec<&str> = tachi_params::TachiTaskAction::primary_wire_strings(); // authoritative enum (单源)
-            for tok in TACHI_TASK_RETIRED_ACTIONS
-                .iter()
-                .chain(TACHI_MEMORY_RETIRED_C2B_ACTIONS.iter())
-                .chain(FACADE_RETIRED_ACTIONS.iter())
-            {
-                let owner_facade = if TACHI_MEMORY_RETIRED_C2B_ACTIONS.contains(tok) {
+            for tok in facade_retired_tokens.iter().copied() {
+                let owner_facade = if TACHI_MEMORY_RETIRED_C2B_ACTIONS.contains(&tok) {
                     "tachi_memory"
                 } else {
                     "tachi_task"
                 };
-                let live_on_named_facade = (line.contains("tachi_memory")
-                    && live_memory.contains(tok))
-                    || (line.contains("tachi_task") && live_task.contains(tok))
-                    || (line.contains("tachi_skill") && TACHI_SKILL_ACTIONS.contains(tok));
-                let live_on_named_facade = live_on_named_facade
-                    || (line.contains("tachi_gh") && TACHI_GH_ACTIONS.contains(tok));
-                let live_anywhere = live_memory.contains(tok)
-                    || live_task.contains(tok)
-                    || TACHI_SKILL_ACTIONS.contains(tok)
-                    || TACHI_GH_ACTIONS.contains(tok)
-                    || TACHI_TUNE_ACTIONS.contains(tok);
-                let facade_named = line.contains(owner_facade)
+                let live_on_named_facade = (contains_exact_identifier(line, "tachi_memory")
+                    && live_memory.contains(&tok))
+                    || (contains_exact_identifier(line, "tachi_task") && live_task.contains(&tok))
+                    || (contains_exact_identifier(line, "tachi_skill")
+                        && TACHI_SKILL_ACTIONS.contains(&tok))
+                    || (contains_exact_identifier(line, "tachi_gh")
+                        && TACHI_GH_ACTIONS.contains(&tok));
+                let live_anywhere = live_memory.contains(&tok)
+                    || live_task.contains(&tok)
+                    || TACHI_SKILL_ACTIONS.contains(&tok)
+                    || TACHI_GH_ACTIONS.contains(&tok)
+                    || TACHI_TUNE_ACTIONS.contains(&tok);
+                let facade_named = contains_exact_identifier(line, owner_facade)
                     || fence_current_tool.as_deref() == Some(owner_facade);
-                let quoted = line.contains(&format!("\"{}\"", tok))
-                    || line.contains(&format!("'{}'", tok))
-                    || line.contains(&format!("`{}`", tok));
-                let has_action_form = contains_flex_action(line, tok);
+                let quoted = contains_quoted_identifier(line, tok, '"')
+                    || contains_quoted_identifier(line, tok, '\'')
+                    || contains_quoted_identifier(line, tok, '`');
+                let has_action_form = contains_action_assignment(line, tok);
+                let has_facade_pair = contains_identifier_pair(line, owner_facade, tok);
                 let is_teaching = !live_on_named_facade
-                    && ((facade_named && (has_action_form || quoted))
+                    && ((facade_named && (has_action_form || quoted || has_facade_pair))
                         || (has_action_form && !live_anywhere)
-                        || (in_code_fence && contains_flex_action(line, tok) && !live_anywhere));
+                        || (in_code_fence && has_action_form && !live_anywhere));
                 if is_teaching && is_exact_identifier_hit(line, tok) && !marker_near(line, tok) {
                     bad_hits.push(format!(
                         "{}:{}: unmarked retired facade action '{}'",
@@ -944,29 +971,132 @@ fn retired_surface_documentation_has_markers() {
 }
 
 fn is_exact_identifier_hit(line: &str, tok: &str) -> bool {
-    if !line.contains(tok) {
-        return false;
-    }
-    let mut search_start = 0usize;
-    while let Some(idx) = line[search_start..].find(tok) {
-        let abs_idx = search_start + idx;
-        let before = if abs_idx == 0 {
-            '\0'
+    exact_identifier_starts(line, tok).next().is_some()
+}
+
+fn exact_identifier_starts<'a>(line: &'a str, tok: &'a str) -> impl Iterator<Item = usize> + 'a {
+    line.match_indices(tok).filter_map(move |(start, _)| {
+        let before = line[..start].chars().next_back();
+        let end = start + tok.len();
+        let after = line[end..].chars().next();
+        if before.is_none_or(|character| !is_ascii_identifier_char(character))
+            && after.is_none_or(|character| !is_ascii_identifier_char(character))
+        {
+            Some(start)
         } else {
-            line.as_bytes()[abs_idx - 1] as char
-        };
-        let after_pos = abs_idx + tok.len();
-        let after = if after_pos >= line.len() {
-            '\0'
-        } else {
-            line.as_bytes()[after_pos] as char
-        };
-        if !before.is_alphanumeric() && before != '_' && !after.is_alphanumeric() && after != '_' {
-            return true;
+            None
         }
-        search_start = abs_idx + 1;
+    })
+}
+
+fn contains_exact_identifier(line: &str, tok: &str) -> bool {
+    is_exact_identifier_hit(line, tok)
+}
+
+fn is_ascii_identifier_char(character: char) -> bool {
+    character == '_' || character.is_ascii_alphanumeric()
+}
+
+fn exact_identifier_at_start(value: &str, tok: &str) -> bool {
+    let Some(rest) = value.strip_prefix(tok) else {
+        return false;
+    };
+    rest.chars()
+        .next()
+        .is_none_or(|character| !is_ascii_identifier_char(character))
+}
+
+fn contains_quoted_identifier(line: &str, tok: &str, delimiter: char) -> bool {
+    exact_identifier_starts(line, tok).any(|start| {
+        line[..start].chars().next_back() == Some(delimiter)
+            && line[start + tok.len()..].chars().next() == Some(delimiter)
+    })
+}
+
+fn contains_call_syntax(line: &str, tok: &str) -> bool {
+    exact_identifier_starts(line, tok)
+        .any(|start| line[start + tok.len()..].trim_start().starts_with('('))
+}
+
+fn keyed_value_tail<'a>(line: &'a str, key: &str) -> Option<&'a str> {
+    for start in exact_identifier_starts(line, key) {
+        let mut rest = &line[start + key.len()..];
+        rest = rest.trim_start();
+        if let Some(delimiter) = rest.chars().next() {
+            if delimiter == '"' || delimiter == '\'' {
+                rest = &rest[delimiter.len_utf8()..];
+                rest = rest.trim_start();
+            }
+        }
+        let separator = rest.chars().next()?;
+        if separator != '=' && separator != ':' {
+            continue;
+        }
+        return Some(rest[separator.len_utf8()..].trim_start());
     }
-    false
+    None
+}
+
+fn contains_keyed_identifier(line: &str, key: &str, tok: &str) -> bool {
+    let Some(mut value) = keyed_value_tail(line, key) else {
+        return false;
+    };
+    let is_collection = value
+        .chars()
+        .next()
+        .is_some_and(|character| matches!(character, '[' | '(' | '{'));
+    if is_collection {
+        return is_exact_identifier_hit(value, tok);
+    }
+    for delimiter in ['"', '\'', '`'] {
+        if value.starts_with(delimiter) {
+            value = &value[delimiter.len_utf8()..];
+            break;
+        }
+    }
+    exact_identifier_at_start(value, tok)
+}
+
+fn contains_action_assignment(line: &str, tok: &str) -> bool {
+    contains_keyed_identifier(line, "action", tok)
+        || contains_keyed_identifier(line, "actions", tok)
+}
+
+fn keyed_identifier_value<'a>(line: &'a str, key: &str) -> Option<&'a str> {
+    let mut value = keyed_value_tail(line, key)?;
+    for delimiter in ['"', '\'', '`'] {
+        if value.starts_with(delimiter) {
+            value = &value[delimiter.len_utf8()..];
+            break;
+        }
+    }
+    let end = value
+        .char_indices()
+        .find(|(_, character)| !is_ascii_identifier_char(*character))
+        .map_or(value.len(), |(index, _)| index);
+    (!value[..end].is_empty()).then_some(&value[..end])
+}
+
+fn contains_identifier_pair(line: &str, first: &str, second: &str) -> bool {
+    let first_starts: Vec<usize> = exact_identifier_starts(line, first).collect();
+    let second_starts: Vec<usize> = exact_identifier_starts(line, second).collect();
+    first_starts.iter().any(|first_start| {
+        second_starts.iter().any(|second_start| {
+            if first_start == second_start {
+                return false;
+            }
+            let (start, end) = if first_start < second_start {
+                (first_start + first.len(), *second_start)
+            } else {
+                (second_start + second.len(), *first_start)
+            };
+            let between = &line[start..end];
+            between.chars().count() <= 8
+                && between
+                    .chars()
+                    .all(|character| !is_ascii_identifier_char(character))
+        })
+    })
 }
 
 /// Parse fence opener from trimmed line: returns (char, len) if starts with 3+ ``` or ~~~ .
@@ -998,27 +1128,10 @@ fn parse_fence_opener(trimmed: &str) -> Option<(char, usize)> {
 /// JSON-ish `"tool": "tok"` / `"action": "tok"` pair. Bare prose quoted inside
 /// an example fence (e.g. a "remember more" sentence) is not teaching.
 fn code_shaped(line: &str, tok: &str) -> bool {
-    contains_flex_action(line, tok)
-        || line.contains(&format!("{}(", tok))
-        || line.contains(&format!("`{}`", tok))
-        || line.contains(&format!("\"{}\"", tok))
-}
-
-fn contains_flex_action(line: &str, tok: &str) -> bool {
-    let l = line.to_lowercase();
-    let t = tok.to_lowercase();
-    // (v) flexible spacing: action = "x" , action="x", action= "x" etc, ' or "
-    let patterns = [
-        format!("action=\"{}\"", t),
-        format!("action='{}'", t),
-        format!("action = \"{}\"", t),
-        format!("action = '{}'", t),
-        format!("action= \"{}\"", t),
-        format!("action= '{}'", t),
-        format!("action =\"{}\"", t),
-        format!("action ='{}'", t),
-    ];
-    patterns.iter().any(|p| l.contains(p))
+    contains_action_assignment(line, tok)
+        || contains_call_syntax(line, tok)
+        || contains_quoted_identifier(line, tok, '`')
+        || contains_quoted_identifier(line, tok, '"')
 }
 
 fn is_table_first_cell_hit(line: &str, tok: &str) -> bool {
@@ -1040,35 +1153,32 @@ fn is_table_first_cell_hit(line: &str, tok: &str) -> bool {
 }
 
 fn is_teaching_context(line: &str, tok: &str) -> bool {
-    let l = line.to_lowercase();
-    let t = tok.to_lowercase();
     // B1 (iv) verb adjacency: EN {use,call,invoke,run,via} + CN {使用,调用,通过,采用,用} within same line
-    // (attached or spaced; ` after verb for inline)
+    // (attached or spaced; ` after verb for inline). The helpers use exact
+    // ASCII word boundaries and Unicode-safe slices, so `misuse run_skill` and
+    // `请调用tachi_complete完成任务` are handled distinctly.
     let en_verbs = ["use", "call", "invoke", "run", "via"];
     let cn_verbs = ["使用", "调用", "通过", "采用", "用"];
     for v in en_verbs {
-        if l.contains(&format!("{} {}", v, t)) || l.contains(&format!("{} `{}", v, t)) {
+        if contains_word_then_identifier(line, v, tok) {
             return true;
         }
     }
     for v in cn_verbs {
-        if l.contains(&format!("{}{}", v, t))
-            || l.contains(&format!("{} {}", v, t))
-            || l.contains(&format!("{} `{}", v, t))
-        {
+        if contains_prefix_then_identifier(line, v, tok) {
             return true;
         }
     }
     // (i) inline-code/backtick presence of exact retired token = teaching
-    if line.contains(&format!("`{}`", tok)) || line.contains(&format!("`{}`", t)) {
+    if contains_quoted_identifier(line, tok, '`') {
         return true;
     }
     // tok( form
-    if line.contains(&format!("{}(", tok)) {
+    if contains_call_syntax(line, tok) {
         return true;
     }
     // (v) flex action= (also covers native)
-    if contains_flex_action(line, tok) {
+    if contains_action_assignment(line, tok) {
         return true;
     }
     // (iii) table row containing exact retired token in the FIRST cell = teaching
@@ -1078,38 +1188,209 @@ fn is_teaching_context(line: &str, tok: &str) -> bool {
     false
 }
 
-fn collect_docs_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let p = entry.path();
-            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            if name == "archive" {
-                continue;
-            }
-            if p.is_dir() {
-                collect_docs_files(&p, out);
-            } else if let Some(ext) = p.extension().and_then(|e| e.to_str()) {
-                if ext == "md" || ext == "mdx" {
-                    out.push(p);
-                }
-            }
+fn contains_word_then_identifier(line: &str, word: &str, tok: &str) -> bool {
+    let lowered = line.to_ascii_lowercase();
+    let word = word.to_ascii_lowercase();
+    let tok = tok.to_ascii_lowercase();
+    let found = exact_identifier_starts(&lowered, &word).any(|start| {
+        let mut rest = &lowered[start + word.len()..];
+        rest = rest.trim_start();
+        if rest.starts_with('`') {
+            rest = &rest['`'.len_utf8()..];
         }
+        exact_identifier_at_start(rest, &tok)
+    });
+    found
+}
+
+fn contains_prefix_then_identifier(line: &str, prefix: &str, tok: &str) -> bool {
+    line.match_indices(prefix).any(|(start, _)| {
+        let before = line[..start].chars().next_back();
+        if before.is_some_and(is_ascii_identifier_char) {
+            return false;
+        }
+        let mut rest = &line[start + prefix.len()..];
+        rest = rest.trim_start();
+        if rest.starts_with('`') {
+            rest = &rest['`'.len_utf8()..];
+        }
+        exact_identifier_at_start(rest, tok)
+    })
+}
+
+const GOVERNED_TEXT_EXTENSIONS: &[&str] = &[
+    "md",
+    "mdx",
+    "txt",
+    "yaml",
+    "yml",
+    "json",
+    "jsonc",
+    "toml",
+    "ini",
+    "cfg",
+    "conf",
+    "config",
+    "properties",
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GovernedFileKind {
+    Prose,
+    ActiveStructured,
+    MachineData,
+}
+
+fn classify_governed_file(repo_root: &Path, path: &Path) -> GovernedFileKind {
+    let relative = path.strip_prefix(repo_root).unwrap_or(path);
+    let filename = relative.file_name().and_then(|name| name.to_str());
+    let machine_data_root = relative.starts_with(Path::new("docs/engineering/receipts"))
+        || relative.starts_with(Path::new("docs/engineering/artifacts"));
+    let is_json = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("json"));
+    if filename.is_some_and(|name| name.ends_with(".fixture.json"))
+        || (machine_data_root && is_json)
+    {
+        GovernedFileKind::MachineData
+    } else if is_governed_text_path(path)
+        && path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| {
+                !matches!(
+                    extension.to_ascii_lowercase().as_str(),
+                    "md" | "mdx" | "txt"
+                )
+            })
+    {
+        GovernedFileKind::ActiveStructured
+    } else {
+        GovernedFileKind::Prose
     }
 }
 
-fn collect_prompts_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let p = entry.path();
-            if p.is_dir() {
-                collect_prompts_files(&p, out);
-            } else if let Some(ext) = p.extension().and_then(|e| e.to_str()) {
-                if ext == "md" || ext == "mdx" || ext == "txt" {
-                    out.push(p);
-                }
-            }
+fn is_governed_text_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            GOVERNED_TEXT_EXTENSIONS
+                .iter()
+                .any(|allowed| extension.eq_ignore_ascii_case(allowed))
+        })
+}
+
+fn register_governed_file(path: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
+    let metadata = std::fs::symlink_metadata(path).map_err(|error| {
+        format!(
+            "governed active file '{}' cannot be inspected: {error}",
+            path.display()
+        )
+    })?;
+    if metadata.file_type().is_symlink() {
+        return Err(format!(
+            "governed active file '{}' is a symlink; symlinks are not followed",
+            path.display()
+        ));
+    }
+    if !metadata.is_file() {
+        return Err(format!(
+            "governed active path '{}' is not a regular file",
+            path.display()
+        ));
+    }
+    if !is_governed_text_path(path) {
+        return Err(format!(
+            "governed active file '{}' has an unsupported text extension",
+            path.display()
+        ));
+    }
+    out.push(path.to_path_buf());
+    Ok(())
+}
+
+fn collect_governed_files(
+    dir: &Path,
+    skip_archive: bool,
+    out: &mut Vec<PathBuf>,
+) -> Result<(), String> {
+    let metadata = std::fs::symlink_metadata(dir).map_err(|error| {
+        format!(
+            "governed active directory '{}' cannot be inspected: {error}",
+            dir.display()
+        )
+    })?;
+    if metadata.file_type().is_symlink() {
+        return Err(format!(
+            "governed active directory '{}' is a symlink; symlinks are not followed",
+            dir.display()
+        ));
+    }
+    if !metadata.is_dir() {
+        return Err(format!(
+            "governed active path '{}' is not a directory",
+            dir.display()
+        ));
+    }
+
+    let entries = std::fs::read_dir(dir).map_err(|error| {
+        format!(
+            "governed active directory '{}' cannot be read: {error}",
+            dir.display()
+        )
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            format!(
+                "governed active directory '{}' has an unreadable entry: {error}",
+                dir.display()
+            )
+        })?;
+        let path = entry.path();
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("");
+        // This preserves the pre-existing docs/archive historical exclusion;
+        // prompts had no such exclusion, so callers pass false there.
+        if skip_archive && name == "archive" {
+            continue;
+        }
+
+        let metadata = std::fs::symlink_metadata(&path).map_err(|error| {
+            format!(
+                "governed active path '{}' cannot be inspected: {error}",
+                path.display()
+            )
+        })?;
+        if metadata.file_type().is_symlink() {
+            return Err(format!(
+                "governed active path '{}' is a symlink; symlinks are not followed",
+                path.display()
+            ));
+        }
+        if metadata.is_dir() {
+            collect_governed_files(&path, skip_archive, out)?;
+        } else if metadata.is_file() && is_governed_text_path(&path) {
+            out.push(path);
+        } else if !metadata.is_file() {
+            return Err(format!(
+                "governed active path '{}' is not a regular file or directory",
+                path.display()
+            ));
         }
     }
+    Ok(())
+}
+
+fn read_governed_file(path: &Path) -> Result<String, String> {
+    std::fs::read_to_string(path).map_err(|error| {
+        format!(
+            "governed active file '{}' is unreadable or not UTF-8: {error}",
+            path.display()
+        )
+    })
 }
 
 #[cfg(test)]
@@ -1168,6 +1449,12 @@ mod matcher_unit_tests {
                 "tachi_complete",
                 true,
                 "CN 用 verb B1(iv) (round2)",
+            ),
+            (
+                r#"请调用tachi_complete完成任务"#,
+                "tachi_complete",
+                true,
+                "Unicode-adjacent CN verb must remain a teaching hit",
             ),
             (
                 r#"| tachi_complete | completion tool |"#,
@@ -1234,6 +1521,18 @@ mod matcher_unit_tests {
                 true,
                 "W2: retired facade action in action= form",
             ),
+            (
+                r#"actions: dispatch / status"#,
+                "dispatch",
+                true,
+                "W2: YAML-style plural action key",
+            ),
+            (
+                r#"interaction="dispatch""#,
+                "dispatch",
+                false,
+                "boundary: interaction= is not action=",
+            ),
             // W2: bare English word without action/facade context must NOT fire
             (r#"remember to merge the PR"#, "merge", false, "W2: bare English 'merge' is not a retired-action hit"),
         ];
@@ -1247,5 +1546,131 @@ mod matcher_unit_tests {
                 note, tok, line
             );
         }
+    }
+
+    #[test]
+    fn matcher_boundaries_cover_raw_facade_and_unicode_forms() {
+        assert!(contains_action_assignment("actions: dispatch", "dispatch"));
+        assert!(contains_action_assignment(
+            r#""action": "dispatch""#,
+            "dispatch"
+        ));
+        assert!(!contains_action_assignment(
+            r#"interaction="dispatch""#,
+            "dispatch"
+        ));
+        assert!(contains_identifier_pair(
+            "tachi_task dispatch",
+            "tachi_task",
+            "dispatch"
+        ));
+        assert!(!contains_identifier_pair(
+            "tachi_task_dispatch",
+            "tachi_task",
+            "dispatch"
+        ));
+        assert!(is_teaching_context(
+            "请调用tachi_complete完成任务",
+            "tachi_complete"
+        ));
+        assert!(!is_exact_identifier_hit(
+            "tachi_complete_v2",
+            "tachi_complete"
+        ));
+    }
+
+    #[test]
+    fn governed_file_classification_is_narrow_and_pins_active_raw_forms() {
+        let root = Path::new("/repo");
+        assert_eq!(
+            classify_governed_file(
+                root,
+                &root.join("docs/engineering/architecture/example.fixture.json")
+            ),
+            GovernedFileKind::MachineData
+        );
+        assert_eq!(
+            classify_governed_file(root, &root.join("docs/engineering/receipts/example.json")),
+            GovernedFileKind::MachineData
+        );
+        assert_eq!(
+            classify_governed_file(root, &root.join("docs/engineering/artifacts/example.json")),
+            GovernedFileKind::MachineData
+        );
+        assert_eq!(
+            classify_governed_file(root, &root.join("docs/engineering/receipts/example.md")),
+            GovernedFileKind::Prose
+        );
+
+        // The exemption is not an extension-wide JSON/config bypass: active
+        // YAML and ordinary JSON stay in the strict teaching surface.
+        assert_eq!(
+            classify_governed_file(root, &root.join("docs/current-state.agent.yaml")),
+            GovernedFileKind::ActiveStructured
+        );
+        assert_eq!(
+            classify_governed_file(
+                root,
+                &root.join("docs/engineering/architecture/ordinary.json")
+            ),
+            GovernedFileKind::ActiveStructured
+        );
+        assert_eq!(
+            classify_governed_file(root, &root.join("prompts/guide.md")),
+            GovernedFileKind::Prose
+        );
+        assert!(contains_action_assignment("actions: dispatch", "dispatch"));
+        assert!(contains_action_assignment(
+            r#"{"action": "dispatch"}"#,
+            "dispatch"
+        ));
+        assert!(contains_identifier_pair(
+            "tachi_task dispatch",
+            "tachi_task",
+            "dispatch"
+        ));
+        assert!(!contains_action_assignment(
+            "interaction=dispatch",
+            "dispatch"
+        ));
+    }
+
+    #[test]
+    fn governed_file_reading_fails_loudly_for_non_utf8() {
+        let root = std::env::temp_dir().join(format!(
+            "tachi-profile-lint-non-utf8-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir(&root).expect("create non-UTF-8 test directory");
+        let path = root.join("invalid.md");
+        std::fs::write(&path, [0xff, 0xfe]).expect("write non-UTF-8 test file");
+        let result = read_governed_file(&path);
+        std::fs::remove_dir_all(&root).expect("remove non-UTF-8 test directory");
+
+        let error = result.expect_err("non-UTF-8 governed file must fail loudly");
+        assert!(error.contains("unreadable or not UTF-8"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn governed_file_collection_rejects_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let root = std::env::temp_dir().join(format!(
+            "tachi-profile-lint-symlink-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir(&root).expect("create symlink test directory");
+        let target = root.join("target.md");
+        let link = root.join("link.md");
+        std::fs::write(&target, "retired").expect("write symlink target");
+        symlink(&target, &link).expect("create symlink test fixture");
+
+        let mut files = Vec::new();
+        let result = collect_governed_files(&root, false, &mut files);
+        std::fs::remove_dir_all(&root).expect("remove symlink test directory");
+
+        let error = result.expect_err("symlinked governed file must fail loudly");
+        assert!(error.contains("symlink; symlinks are not followed"));
     }
 }

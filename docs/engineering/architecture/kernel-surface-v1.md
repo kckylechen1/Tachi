@@ -98,7 +98,8 @@ remain proposed unless a later issue adds executable emission and projection
 tests for them.
 
 This boundary is deliberately smaller than Tachi's full MCP surface. A consumer
-that only wants memory should not need `tachi_gh`, `tachi_task` dispatch,
+that only wants memory should not need `tachi_gh`, the retired `tachi_task`
+dispatch action,
 `ship`, release notes, or GitHub PR lifecycle actions.
 
 ### Memory Ontology

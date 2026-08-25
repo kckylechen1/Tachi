@@ -570,7 +570,7 @@ if goal.audit_required && outcome == "success" {
 | **实时反馈** | 每 turn 更新 goal 状态 | 仅 dispatch 开始/结束更新 |
 | **用户控制** | `/goal pause/resume/clear` | 需通过 kanban API 操作 |
 | **Token 精度** | 精确到 token | 粗粒度 turn |
-| **UI 集成** | TUI 显示 goal 进度 | 无原生 UI（依赖 tachi_board） |
+| **UI 集成** | TUI 显示 goal 进度 | 无原生 UI（旧 `tachi_board` 已退役；依赖内部 kanban 状态） |
 
 ---
 
