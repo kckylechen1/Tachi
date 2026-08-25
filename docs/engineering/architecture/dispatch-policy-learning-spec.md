@@ -52,9 +52,9 @@ invent calls that are not exposed yet.
 | route recommendation | `tachi_tune(action="route_simulate")` | implemented |
 | route policy replay | `tachi_tune(action="route_simulate")` | implemented |
 | route policy proposals | `tachi_tune(action="route_proposals"|"route_review"|"route_apply")` (admin-only since #1426) | implemented |
-| external staffing exception | `tachi_staff(action="start", staffing_reason=..., profile=...)` (the retired `tachi_task(action="dispatch")` was deleted in #1319-C2) | implemented; not ordinary delegation |
+| external staffing exception | `tachi_staff(action="start", staffing_reason=..., profile=...)` (`tachi_task(action="dispatch")` retired and deleted in #1319-C2) | implemented; not ordinary delegation |
 | worker board | `tachi_task(action="board")` | implemented |
-| completion and eval | `tachi_task(action="complete")` / `tachi_complete` | implemented |
+| completion and eval | `tachi_task(action="complete")` | implemented |
 | skill discovery / execution | `tachi_skill(action="discover"|"run")` | implemented |
 | release and closure | `tachi_gh(action="release_note")` / `tachi_gh(action="close_loop")` | implemented |
 
@@ -188,7 +188,7 @@ evaluation under `/eval`.
 
 ## Live Eval and Performance Matrix
 
-`tachi_complete` writes production eval memory under `/eval/YYYY-MM-DD/...`.
+`tachi_task(action="complete")` writes production eval memory under `/eval/YYYY-MM-DD/...`.
 Ordinary recall excludes this evidence. `tachi_agent_eval(action="aggregate_live")`
 reads the live eval rows and produces aggregate scores and the performance
 matrix.

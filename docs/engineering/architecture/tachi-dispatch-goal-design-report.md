@@ -246,7 +246,7 @@ Avoid repeating work already completed. Choose the next concrete action.
 
 ## Completion Audit Gate
 
-Before calling `tachi_complete`, you MUST perform a completion audit:
+Before calling `tachi_task(action="complete")`, you MUST perform a completion audit:
 1. Restate the task as concrete deliverables or success criteria
 2. Build a checklist mapping every requirement to concrete evidence
 3. Inspect files, command output, test results for each item
@@ -254,13 +254,13 @@ Before calling `tachi_complete`, you MUST perform a completion audit:
 5. Identify any missing, incomplete, or unverified requirement
 6. Treat uncertainty as NOT achieved; continue working
 
-Only call `tachi_complete` when the audit confirms full achievement.
+Only call `tachi_task(action="complete")` when the audit confirms full achievement.
 ```
 
 **与 Codex 的差异**：
 - Codex 用 `untrusted_objective` XML tag；Tachi 用 Markdown section（更简单）
 - Codex 注入每个 turn；Tachi 注入每个 dispatch（异步架构差异）
-- Tachi 明确提及 `tachi_complete` 调用点
+- Tachi 明确提及 `tachi_task(action="complete")` 调用点
 
 ### 3.4 状态机映射
 
@@ -273,7 +273,7 @@ TASK_STATE_WORKING ──pause──► TASK_STATE_PENDING ──resume──►
       ▼
 TASK_STATE_INPUT_REQUIRED
       │
-      │ audit passed + tachi_complete
+      │ audit passed + tachi_task(action="complete")
       ▼
 TASK_STATE_COMPLETED
 ```
@@ -479,7 +479,7 @@ if let Some(g) = goal {
 
 ### 5.4 complete_ops.rs 集成
 
-在 `handle_tachi_complete()` 中增加：
+在 `handle_tachi_complete()` (tachi_task complete 桥接) 中增加：
 
 ```rust
 if goal.audit_required && outcome == "success" {
@@ -513,7 +513,7 @@ if goal.audit_required && outcome == "success" {
 
 ### Phase 4: Audit Gate（2 天）
 
-- [ ] 在 `tachi_complete` 中加入 audit validation
+- [ ] 在 `tachi_task(action="complete")` 中加入 audit validation
 - [ ] 设计 audit checklist 数据结构
 - [ ] 实现 checklist 在 trajectory 中的记录
 - [ ] 测试 audit 失败/通过场景
@@ -522,7 +522,7 @@ if goal.audit_required && outcome == "success" {
 
 - [ ] 增强 kanban 初始化（goal metadata）
 - [ ] 状态映射（GoalStatus → a2a_state）
-- [ ] `tachi_board` 查询支持 goal 过滤
+- [ ] (retired route) `tachi_board` 查询支持 goal 过滤
 
 **总计**: 8 个工作日
 
@@ -570,7 +570,7 @@ if goal.audit_required && outcome == "success" {
 | **实时反馈** | 每 turn 更新 goal 状态 | 仅 dispatch 开始/结束更新 |
 | **用户控制** | `/goal pause/resume/clear` | 需通过 kanban API 操作 |
 | **Token 精度** | 精确到 token | 粗粒度 turn |
-| **UI 集成** | TUI 显示 goal 进度 | 无原生 UI（依赖 tachi_board） |
+| **UI 集成** | TUI 显示 goal 进度 | 无原生 UI（旧 `tachi_board` 已退役；依赖内部 kanban 状态） |
 
 ---
 

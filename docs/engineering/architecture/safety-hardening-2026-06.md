@@ -21,13 +21,13 @@ Replay authority is positive, never inferred. `action_effect::dlq_replay_metadat
 
 Proxy-qualified `server__tool` names always receive no local metadata from `dlq_replay_metadata()`. A remote alias therefore cannot borrow the effect classification of a similarly named native facade and is denied unless a future server-owned per-remote-tool authority is added.
 
-`search_memory` and `tachi_memory(action="search")` are non-replayable because their production paths record access telemetry. `STANDALONE_UNSAFE_ROUTES` and `facade_action_effect()` classify them accordingly; explicitly safe reads such as `tachi_event(action="metrics")` retain replay authority.
+`search_memory` (retired name) and `tachi_memory(action="search")` are non-replayable because their production paths record access telemetry. `STANDALONE_UNSAFE_ROUTES` and `facade_action_effect()` classify them accordingly; explicitly safe reads such as `tachi_event(action="metrics")` retain replay authority.
 
 The `f1098_live_action_inventory_has_explicit_effect_metadata()` ratchet enumerates `native_route_definitions()` and each schema action enum through `action_inventory_from_live_schema()`, then requires every advertised action to have independent `facade_action_effect()` metadata. Newly advertised or invented actions without that mapping remain unclassified and fail closed.
 
 ## Dispatch dedupe
 
-When `tachi_dispatch` is invoked without `flow_id`, the task string is hashed and a lock file is taken under:
+When `tachi_dispatch` (retired route) was invoked without `flow_id`, the task string is hashed and a lock file is taken under:
 
 ```text
 ~/.tachi/runs/.dispatch-dedupe/<hash>.lock

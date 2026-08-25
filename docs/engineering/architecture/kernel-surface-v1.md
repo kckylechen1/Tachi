@@ -43,7 +43,7 @@ Examples:
 - `memory_search`
 - `memory_save`
 - `memory_get`
-- `memory_graph`
+- `memory_graph`(已退役)
 - `section.build`
 - `compact.rollup`
 - `compact.session_memory`
@@ -98,7 +98,8 @@ remain proposed unless a later issue adds executable emission and projection
 tests for them.
 
 This boundary is deliberately smaller than Tachi's full MCP surface. A consumer
-that only wants memory should not need `tachi_gh`, `tachi_task` dispatch,
+that only wants memory should not need `tachi_gh`, the retired `tachi_task`
+dispatch action,
 `ship`, release notes, or GitHub PR lifecycle actions.
 
 ### Memory Ontology
@@ -250,31 +251,31 @@ Tachi now expresses exposure through additive bundles instead of mutually exclus
 
 ### `observe`
 
-- `search_memory`
-- `tachi_memory(action="get")`; native `get_memory` is admin/backcompat only
+- `search_memory` (retired name; canonical `tachi_memory(action="search")`)
+- `tachi_memory(action="get")`; native `get_memory` is retired (not routable at all)
 - `list_memories`
 - `memory_stats`
 - `tachi_skill(action="discover")`
 
-(`memory_graph` / `get_edges` were dropped from `observe` in #757 — internalized
+(`memory_graph` / `get_edges` were dropped (retired) from `observe` in #757 — internalized
 off the MCP surface entirely, not just this bundle.)
 
-### `remember`
+### `remember` (live profile/bundle; native `remember` tool alias retired)
 
 - `observe` +
-- `save_memory`
+- `save_memory` (retired name; canonical `tachi_memory(action="save")`)
 - `extract_facts`
-- `tachi_skill(action="run")`; native `run_skill` is backcompat only
+- `tachi_skill(action="run")`; native `run_skill` is retired by #1690
 
 ### `coordinate`
 
-- `remember` +
+- live `remember` profile/bundle (native `remember` tool alias retired) +
 - `ghost_*`
 - kanban / delegation / handoff
 
 ### `operate`
 
-- `remember` +
+- live `remember` profile/bundle (native `remember` tool alias retired) +
 - `recall_context`
 - `capture_session`
 - `compact_context`

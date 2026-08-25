@@ -146,7 +146,7 @@ Goal: Hyperion-HyperTachi stops being “old monorepo clone” and becomes:
 ```
 portable-workspace/
   memcore/          # path or published crate
-  memory-server-lite/   # optional: MCP/CLI profile = remember/coordinate-lite
+  memory-server-lite/   # optional: MCP/CLI profile = live remember/coordinate-lite (native remember tool alias retired)
 ```
 
 Concrete Tachi-side work:

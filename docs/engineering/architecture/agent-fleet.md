@@ -63,7 +63,7 @@ Historical samples may name `gemini`, `qwen`, `copilot`, etc. When training the 
 
 ## Acceptance (Phase 1 code)
 
-- [ ] `tachi_dispatch` accepts `claude`, `codex`, `grok`, `kimi`, `custom`
+- [ ] `tachi_dispatch` (retired route — now `tachi_staff`) accepted `claude`, `codex`, `grok`, `kimi`, `custom`
 - [ ] Static `agent_registry` lists only the four workers (+ documents `custom`)
 - [ ] `inject_tachi_mcp` / `inject_hub_mcps` rejected for `codex` and `kimi`
 - [ ] Unit tests cover alias normalization and command argv for each agent

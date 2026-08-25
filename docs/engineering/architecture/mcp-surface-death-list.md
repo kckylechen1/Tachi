@@ -42,16 +42,16 @@ is a staffing projection census, not a census of unrelated lifecycle/GitHub
 writes into the shared flow directory; none of these stores is an additional
 authority.
 
-- `standard` is a 16-tool allow-list in `STANDARD_MINIMAL_TOOL_PATTERNS` after
-  removing `tachi_arena` and `tachi_agent_eval`; its `tachi_task` schema also
-  omits operator-only `dispatch`.
-- `delegate` is an 11-tool allow-list in `DELEGATE_MINIMAL_TOOL_PATTERNS`.
+- `standard` is the curated allow-list in `STANDARD_MINIMAL_TOOL_PATTERNS`;
+  its `tachi_task` schema also omits operator-only `dispatch`.
+- `delegate` is the worker-safe allow-list in `DELEGATE_MINIMAL_TOOL_PATTERNS`;
+  source, rather than this historical document, owns its exact count.
 - `admin` is not a curated management profile. `tool_visible()` returns true
   immediately for admin, so admin exposes the full native catalog plus any
   directly exposed proxy/skill tools.
-- The source currently contains 103 routed `#[tool]` methods. The old 132-tool
-  and 76/56 breakdown is retired; regenerate profile-level counts under #1319
-  rather than treating that historical split as current truth.
+- The source-owned routed `#[tool]` inventory is the current census. The old
+  132-tool and 76/56 breakdown is retired; regenerate profile-level counts
+  under #1319 rather than treating a prose snapshot as current truth.
 
 The product goal is stricter than profile hiding: daily agents should see a
 small canonical surface, and retired capabilities should disappear instead of
@@ -63,18 +63,18 @@ This ledger used a worktree-local CodeGraph index, not only string search:
 `codegraph init -i .` indexed 1,370 files, 14,044 nodes, and 44,711 edges.
 Relevant checks:
 
-- `codegraph query tachi_dispatch --path .` shows
-  `MemoryServer::tachi_dispatch` at
+- `codegraph query tachi_dispatch --path .` showed (historical; tachi_dispatch is retired)
+  `MemoryServer::tachi_dispatch` (retired) at
   `crates/tachi-server/src/tools/dispatch_facade.rs:18`, plus many
-  `tachi_dispatch` crate/module imports. Deletion leaves must target the MCP
+  `tachi_dispatch` (retired) crate/module imports. Deletion leaves must target the MCP
   wrapper route, not broad string matches against the dispatch implementation
   crate.
-- `codegraph callers MemoryServer::tachi_dispatch --path .` reports no direct
+- `codegraph callers MemoryServer::tachi_dispatch` (retired) — historical: reported no direct
   Rust callers for the wrapper method, matching its deprecated/backcompat route
   classification.
-- `codegraph impact MemoryServer::tachi_complete --path . --depth 2` reports 20
+- `codegraph impact MemoryServer::tachi_complete --path . --depth 2` (historical command; tachi_complete is retired) reports 20
   affected symbols, mostly completion/eval/dispatch tests. That is why
-  `tachi_complete` is in the worker-escape-hatch batch, not in an immediate
+  `tachi_complete` (retired) was in the worker-escape-hatch batch (all since retired), not in an immediate
   delete batch.
 - `codegraph impact remap_daemon_tool --path . --depth 2` reports
   `call_daemon_tool` and `maybe_forward_tool`, confirming old-name retirement
@@ -101,9 +101,9 @@ otherwise.
 | `vault_status` | safe credential readiness | Read-only status only; write/get vault tools stay out of daily profiles. |
 | `tachi_gh` | GitHub/evidence facade | Keep if GitHub remains part of ship/evidence workflows; move duplicated task PR actions here. |
 
-`tachi_save` and `tachi_briefing` are convenience shorthands, not separate
-capabilities. Keep them only if dogfood shows the shorthand materially reduces
-friction; otherwise fold them into `tachi_memory`.
+`tachi_save` and `tachi_briefing` were convenience shorthands, both retired
+and removed from current profile allow-lists. Their canonical replacements are
+`tachi_memory(action="save")` and `tachi_memory(action="briefing")`.
 
 ## Historical Death List
 
@@ -129,7 +129,7 @@ delete wrappers.
 
 | Surface | Current evidence | Replacement | Decision | Next leaf |
 | --- | --- | --- | --- | --- |
-| `tachi_wiki_search` | Direct wiki search remains in observe patterns at `patterns.rs:4`; CLI map already routes `tachi_wiki_search` and `wiki_search` to `tachi_wiki(action="search")` at `tool_map.rs:20`. | `tachi_wiki(action="search")` | Fold/delete candidate. | Migrate tests/docs to `tachi_wiki`. |
+| `tachi_wiki_search` | Direct wiki search remains live in observe patterns at `patterns.rs:4`; the CLI map routes both `tachi_wiki_search` and the retired `wiki_search` alias to `tachi_wiki(action="search")` at `tool_map.rs:20`. | `tachi_wiki(action="search")` | Fold/delete candidate; not retired. | Migrate tests/docs before a separate deletion leaf. |
 | `wiki_search` | **DONE:** Retired and removed from MCP tool router and observe patterns. | `tachi_wiki(action="search")` | Hard-retired alias. | — |
 | `tachi_wiki_write` | Direct wiki write remains in remember patterns at `patterns.rs:40`; CLI map routes `tachi_wiki_write` and `wiki_write` to `tachi_wiki(action="write")` at `tool_map.rs:21`. | `tachi_wiki(action="write")` | Fold/delete candidate. | Same wiki alias leaf. |
 | `tachi_browse` | Facade read tool remains in observe patterns at `patterns.rs:23`. | `tachi_wiki(action="browse")` if browse stays a wiki action. | Fold candidate, but not first cut. | Confirm delegate dogfood before removing; delegate currently exposes `tachi_browse`. |
@@ -152,7 +152,7 @@ These entries record the completed compatibility-route deletion. They are not a 
 
 | Surface | Current evidence | Replacement | Decision | Next leaf |
 | --- | --- | --- | --- | --- |
-| `tachi_dispatch` | **DONE Batch C (PR #822):** the model-facing route and folded-compat entry are absent; the internal handler remains reachable through the canonical task path. Open migration tracker #757 owns later reconciliation, not this deletion again. | `tachi_task(action="dispatch")` | Deleted. | — |
+| `tachi_dispatch` | **DONE Batch C (PR #822):** the model-facing route and folded-compat entry are absent; the internal handler remains reachable through the canonical task path. Open migration tracker #757 owns later reconciliation, not this deletion again. | `tachi_staff` (the Task dispatch action itself was retired later, #1319-C2) | Deleted. | — |
 | `tachi_board` | **DONE Batch C (PR #822):** the model-facing route and folded-compat entry are absent; the internal board handler remains behind the canonical task path. Open migration tracker #757 owns later reconciliation, not this deletion again. | `tachi_task(action="board")` | Deleted. | — |
 | `approve_merge` | **DONE Batch C (PR #822):** the direct route is absent; PR merge remains on `tachi_gh(action="safe_merge")`. Open migration tracker #757 remains active for other surfaces. | `tachi_gh(action="safe_merge")` for PRs. | Deleted direct route; Task merge retired later. | — |
 
@@ -164,10 +164,10 @@ to the correct facade, then deleting duplicate action aliases.
 | Surface | Current evidence | Replacement | Decision | Next leaf |
 | --- | --- | --- | --- | --- |
 | `tachi_task` PR actions | **DONE under open #757 — PR-action slice only:** removed from `tachi_task` enum/router; canonical only on `tachi_gh`. Shared lifecycle handlers remain under `task_lifecycle` for `tachi_gh` / ship. | `tachi_gh` for PR/GitHub work. | Deleted dual entry. | — |
-| `tachi_task` tuning actions | **DONE under #1426:** `route_simulate`/`proposals`/`review_proposal`/`apply_proposals` are gone from the `TachiTaskAction` enum and router; `FromStr` rejects them with a pointer at the new surface. Handlers live at `tune_ops/route_policy/`. | `tachi_tune(action='route_simulate'\|'route_proposals'\|'route_review'\|'route_apply')`, admin-only by omission from every profile pattern array. | Extracted. | — |
+| `tachi_task` tuning actions | **DONE under #1426:** `route_simulate` (all retired)/`proposals`/`review_proposal`/`apply_proposals` are gone from the `TachiTaskAction` enum and router; `FromStr` rejects them with a pointer at the new surface. Handlers live at `tune_ops/route_policy/`. | `tachi_tune(action='route_simulate'\|'route_proposals'\|'route_review'\|'route_apply')`, admin-only by omission from every profile pattern array. | Extracted. | — |
 | `tachi_memory` tuning actions | **DONE under #1426:** `recall_simulate`/`recall_proposals`/`review_recall_proposal`/`apply_recall_proposals` are gone from `TACHI_MEMORY_ACTIONS`, the action schema, and the router; the handlers moved to `tune_ops/recall_*`. | `tachi_tune(action='recall_simulate'\|'recall_proposals'\|'recall_review'\|'recall_apply')`, admin-only. | Extracted. | — |
-| `tachi_save` shorthand | Standard allow-list includes it at `patterns.rs:130`. | `tachi_memory(action="save")`. | Fold candidate, keep only if dogfood proves value. | Dogfood decision after Batch A. |
-| `tachi_briefing` shorthand | Standard allow-list includes it at `patterns.rs:128`; separate briefing also exists in `tachi_memory` and the feature-scoped `tachi_task(action="brief")`. | `tachi_memory(action="briefing")`. | Fold candidate. | Dogfood decision after action-level profile design. |
+| `tachi_save` shorthand (retired) | Absent from current profile allow-lists and the live router. | `tachi_memory(action="save")`. | Retired (executed). | — |
+| `tachi_briefing` shorthand (retired) | Absent from current profile allow-lists and the live router; canonical briefing remains on `tachi_memory` and feature-scoped `tachi_task(action="brief")`. | `tachi_memory(action="briefing")`. | Retired (executed). | — |
 
 ### Batch E: Admin Quarantine, Not Immediate Deletion
 
@@ -185,21 +185,22 @@ runtime escape hatches.
 | Graph/state primitives | **DONE under open #757 — graph/state slice only; dead-code layer removed #913:** MCP registration removed for `add_edge` / `set_state` / `get_state` / `get_edges` / `memory_graph`; the tachi-server-side `MemoryServer` facade helpers that used to wrap them (`graph_state_ops.rs`, `tools/graph_state_facade.rs`) were deleted outright once #913 found zero remaining in-crate callers. Only the `memcore::MemoryStore` boundary (`store/graph.rs`, `store/state.rs`) remains, called directly by in-crate consumers (auto-link, contradiction detection, wiki lint, orchestrator/foundry state, etc.). | Internal only; agents use facades. | Internalized off MCP surface. |
 | Runtime/adapter primitives | `recall_context`, `capture_session`, compaction, and section tools live in operate patterns at `patterns.rs:84-108`. | Keep out of standard; do not delete yet. | Host adapters may own these calls. |
 
-### Batch F: Worker Escape Hatches, Do Not Delete Before Action-Level Filtering
+### Batch F: Worker Escape Hatches After Action-Level Filtering
 
-These tools look like standalone clutter, but they currently compensate for a
-real facade/profile mismatch: `delegate` omits `tachi_task` to prevent recursive
-dispatch, so workers need separate completion, rescue, and skill execution
-entrypoints.
+Action-level filtering resolved the former facade/profile mismatch. The
+`delegate` profile now includes `tachi_task` and `tachi_skill`, while typed
+action policy admits only the worker-safe task and skill actions. The retired
+direct completion and skill routes cannot be restored by profile selection;
+`tachi_unstick` remains the explicit worker self-rescue surface.
 
-| Surface | Current evidence | Decision | Blocker before deletion |
+| Surface | Current evidence | Decision | Remaining work |
 | --- | --- | --- | --- |
-| `tachi_complete` | Delegate allow-list includes it at `patterns.rs:158`; facade granularity notes explain delegate cannot expose all of `tachi_task` because that would expose dispatch. | Keep until action-level filtering exists. | Let delegate call `tachi_task(action="complete")` without `dispatch`. |
-| `tachi_unstick` | Delegate allow-list includes it at `patterns.rs:157`; observe patterns include it at `patterns.rs:22`. | Keep as worker self-rescue. | Provide equivalent rescue path in a worker-safe facade. |
-| `run_skill` | Delegate allow-list includes it at `patterns.rs:161`; remember patterns include it at `patterns.rs:43`. | Keep for injected/recommended skills. | Replace with action-scoped `tachi_skill(action="run")` that is safe for delegates. |
-| `tachi_event` | Delegate allow-list includes it at `patterns.rs:153`. | Keep while continuity events are worker-facing. | Decide whether event append/query folds into memory/task. |
-| `runtime_info` and `tachi_tools` | Standard/delegate allow-lists include both at `patterns.rs:115-117` and `:148-149`; unknown-tool errors route users to `tachi_tools`. | Keep. | None; these are readiness/discovery, not product clutter. |
-| `tachi_verify` | Standard allow-list includes it at `patterns.rs:125`; dispatch law requires verification evidence. | Keep. | None until verification ledger is absorbed elsewhere. |
+| `tachi_complete` (retired) | The direct route is retired; delegates complete work through the action-scoped `tachi_task(action="complete")` path. | Retired (executed). | None. |
+| `tachi_unstick` | The delegate and observe bundles still expose this dedicated self-rescue route. | Keep as worker self-rescue. | Decide only if an equivalent worker-safe facade action is added. |
+| `run_skill` (retired) | The direct route is retired; delegates execute reviewed skills through action-scoped `tachi_skill(action="run")`. | Retired (executed; skills are static reviewed now). | None. |
+| `tachi_event` | The delegate bundle still exposes continuity events. | Keep while continuity events are worker-facing. | Decide whether event append/query folds into memory/task. |
+| `runtime_info` and `tachi_tools` | Standard and delegate bundles retain readiness/discovery surfaces; unknown-tool errors route users to `tachi_tools`. | Keep. | None. |
+| `tachi_verify` | Standard retains the verification ledger required by dispatch law. | Keep. | None until verification evidence is absorbed elsewhere. |
 
 ## Proposed Leaf Queue
 
@@ -208,13 +209,13 @@ entrypoints.
    routes remained available for admin/backcompat at that migration stage.
 2. **Migrate raw memory direct callers.**
    Convert tests, CLI text, and internal dogfood to `tachi_memory` actions.
-   Then delete `search_memory`, `save_memory`, `remember`, and possibly
-   `get_memory` MCP wrappers.
+   Then retired (executed): native `search_memory`, `save_memory`, and `remember` MCP wrappers, and possibly
+   `get_memory` (retired) MCP wrappers.
 3. **Retire direct kanban MCP routes.**
    Move direct tests to handlers or task/arena facades, then remove
-   `check_inbox`, `post_card`, and `update_card` from MCP.
+   `check_inbox`, `post_card`, and `update_card` from MCP (executed, all retired).
 4. **DONE Batch C via PR #822; open #757 tracks later migration work.**
-   `tachi_dispatch`, `tachi_board`, and the direct `approve_merge` route are no
+   (all retired) `tachi_dispatch`, `tachi_board`, and the direct `approve_merge` route are no
    longer model-facing; GitHub merge behavior remains on `tachi_gh`.
 5. **Fold direct wiki aliases.**
    Move docs/tests/callers to `tachi_wiki` actions, then delete direct wiki
@@ -223,7 +224,7 @@ entrypoints.
    Move self-tuning actions to an admin-only `tachi_tune` or equivalent before
    deleting duplicate action aliases.
 7. **Introduce action-level filtering for delegates.**
-   Only after this can `tachi_complete`, `tachi_unstick`, `run_skill`, and
+   Only after this could `tachi_complete`, `tachi_unstick`, `run_skill`, and (all since retired)
    similar worker escape hatches be folded safely.
 8. **Decide admin facade shape.**
    Either keep admin as full bypass for emergency use only, or replace it with

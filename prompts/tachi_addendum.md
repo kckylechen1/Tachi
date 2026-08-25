@@ -11,8 +11,8 @@
 
 ## 三条铁律
 
-1. **先搜后写**。任何"我记得我们之前……"念头，先 `tachi_memory(action="search")` 或 `tachi_wiki(action="search")`。命中就引用，未命中再 `tachi_save` / `tachi_memory(action="save")`。
-2. **结构化保存**。`tachi_save` 必须带 `path`、`topic`、`entities`、`keywords`。乱写一句话进 `/` 是垃圾，会被 capture gate 拦截或 distill 误吞。
+1. **先搜后写**。任何"我记得我们之前……"念头，先 `tachi_memory(action="search")` 或 `tachi_wiki(action="search")`。命中就引用，未命中再 `tachi_memory(action="save")`。
+2. **结构化保存**。`tachi_memory(action="save")` 必须带 `path`、`topic`、`entities`、`keywords`。乱写一句话进 `/` 是垃圾，会被 capture gate 拦截或 distill 误吞。 (旧 `tachi_save` 为 stdio 兼容别名，已退役；RETIRED)
 3. **Skill 优先**。复杂任务先 `tachi_skill(action="discover")` / `tachi_skill(action="run")`，不要自己重写 prompt。
 4. **原生 subagent 优先**。普通本地派工使用宿主 harness 自带的 subagent；Tachi 默认只负责 memory、policy、claims、ledger、receipt 和 eval。只有用户明确要求、任务必须跨当前会话持久化、跨设备/远程接力，或宿主没有可用 subagent 时，才使用带 typed `staffing_reason` 的 `tachi_staff(action="start")`。
 
@@ -21,7 +21,7 @@
 | 场景 | 工具 | 备注 |
 |---|---|---|
 | 检索历史 | `tachi_memory(action="search")` | 默认 hybrid（vector + FTS + graph + decay）。指定 `path_prefix` 可大幅提速。 |
-| 写入事实 | `tachi_save` | `path` 形如 `/<project>/<topic>/<subtopic>`，**不要**用 `/`。 |
+| 写入事实 | `tachi_memory(action="save")` | `path` 形如 `/<project>/<topic>/<subtopic>`，**不要**用 `/`。 |
 | 统一记忆面 | `tachi_memory(action=...)` | `search` / `get` / `save` / `briefing` / `checkpoint` / `alerts` / `ask` / `extract_facts` / `consolidate`。健康与就绪状态读 `tachi_status` / `runtime_info`，工作进度读 `tachi_task(action="status")`。 |
 | 任务与回执 | `tachi_task(action=...)` | `intake` / `claim` / `heartbeat` / `handoff` / `release` / `board` / `status` / `complete` / `adjudicate` / `brief` 为 memory/ledger 面；带 `flow_id`/issue/PR 引用的 `status` 返回嵌套 cycle read model。外部 worker 例外见下方 `tachi_staff`，不是默认 subagent。PR 生命周期用 `tachi_gh`。Operator-only dispatch diagnostics stay outside the model-facing Task surface. |
 | 工作验证 | `tachi_verify(action=...)` | `start` / `record` / `status` / `board` / `run`。`run` 由服务端在 flow 的 claimed worktree 的服务端 detached copy 里执行封闭集检查（version-sync / clippy / fmt / audit / nextest / portable-contract / doc），写 `server_run:<kind>` 证据——safe_merge authority gate 只认它。 |
@@ -40,7 +40,7 @@
 2. 响应带回 canonical `dispatch_id`；用 `tachi_staff(action="status", dispatch_id=...)` 查询该 worker 的运行状态。
 3. Worker 进程生命周期、超时与结果落盘由承接的 staffing kernel 管理；不再有 arena 的 open/spawn/board/collect/close 流程——该 API 已随 #1319 移除。
 
-## tachi_save 范式
+## tachi_memory(action="save") 范式 (tachi_save 已退役 RETIRED)
 
 ```jsonc
 // ✅ 好
@@ -90,7 +90,7 @@ tachi clean --dry-run           # 安全清理 target/worktree/temp（默认 dry
 
 - 不要往 `/foundry/*` 手动写。
 - 不要 `path = "/"` + `topic = ""`。
-- 不要把整段对话当 text 塞进 `tachi_save`；用 `extract_facts` 或 `ingest_event`。
+- 不要把整段对话当 text 塞进 `tachi_memory(action="save")`；用 `extract_facts` 或 `ingest_event`。 (旧 `tachi_save` RETIRED)
 - 不要在 ghost topic 上 publish 后立刻自己 subscribe 同一 topic 自我喂养。
 - 不要无 `coherence_key`/`topic`/`entity` 的高频写入 —— 会被 distill 跳过，浪费配额。
 - 不要把活的 SQLite 库放进 iCloud / Dropbox / OneDrive；同步加密 bundle 和 event log 即可。
