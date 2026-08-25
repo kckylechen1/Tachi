@@ -317,6 +317,22 @@ fn execute_sweep(report: &mut SweepReport) {
         {
             Ok(out) if out.status.success() => {
                 report.removed.push(candidate.path.clone());
+                let _ = Command::new("git")
+                    .args(["-C", repo_root, "worktree", "prune"])
+                    .output();
+                if !branch.is_empty()
+                    && branch != "HEAD"
+                    && branch != "main"
+                    && branch != "master"
+                    && branch != "trunk"
+                {
+                    let _ = Command::new("git")
+                        .args(["-C", repo_root, "branch", "-D", branch])
+                        .output();
+                    let _ = Command::new("git")
+                        .args(["-C", repo_root, "push", "origin", "--delete", branch])
+                        .output();
+                }
             }
             Ok(out) => {
                 report.errors.push(format!(

@@ -389,3 +389,173 @@ async fn safe_merge_missing_worktree_warns_does_not_fail_merge() {
         None => std::env::remove_var("TACHI_HOME"),
     }
 }
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn safe_merge_auto_resolves_worktree_from_registry_when_worktree_is_none() {
+    // Refs #1118: when caller passes worktree=None, safe_merge should auto-discover
+    // the registered worktree matching the PR's head_ref.
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let tmp = tempfile::tempdir().unwrap();
+    let original_run_root = std::env::var_os("TACHI_RUN_ROOT");
+    std::env::set_var("TACHI_RUN_ROOT", tmp.path());
+    let home = tempfile::tempdir().unwrap();
+    let original_home = std::env::var_os("TACHI_HOME");
+    let original_sys_home = std::env::var_os("HOME");
+    std::env::set_var("TACHI_HOME", home.path());
+    std::env::set_var("HOME", home.path());
+
+    let bin_dir = tmp.path().join("bin");
+    std::fs::create_dir_all(&bin_dir).unwrap();
+    let (bin_path, marker_path) = install_fake_cleaner(&bin_dir, true);
+    let original_clean_bin = std::env::var_os("TACHI_CLEAN_BIN");
+    std::env::set_var("TACHI_CLEAN_BIN", &bin_path);
+
+    // Create a worktree dir to reclaim
+    let repo_dir = tmp.path().join("repo-auto");
+    let worktree = tmp.path().join("wt-auto-reclaim");
+    std::fs::create_dir_all(&repo_dir).unwrap();
+    std::fs::create_dir_all(&worktree).unwrap();
+
+    let branch = "feat/auto-reclaim-branch";
+    tachi_clean::registry::register_worktree(tachi_clean::registry::RegisterOptions {
+        path: worktree.clone(),
+        repo_root: repo_dir.clone(),
+        branch: branch.to_string(),
+        dispatch_id: None,
+        pr: Some("42".to_string()),
+        output: tachi_clean::registry::RegisterOutputFormat::Json,
+    })
+    .unwrap();
+
+    let expected_canonical_path = std::fs::canonicalize(&worktree)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+
+    let flow = "flow_reclaim-auto";
+    write_verification(tmp.path(), flow, "passed", "deadbeef");
+    seed_full_passed_set(home.path(), flow, "deadbeef", None);
+
+    let mut pr = ready_pr();
+    pr.head_ref = Some(branch.to_string());
+    let client = MockGhClient::new()
+        .with_pr("o/r", pr)
+        .with_checks("o/r", 42, vec![]);
+
+    let out = handle_github_safe_merge(
+        &client,
+        "o/r",
+        42,
+        MergeStrategy::Squash,
+        false, // not dry-run
+        Some(flow),
+        &[],
+        MergeGatePolicy::standard(),
+        None, // no explicit worktree passed — tests auto-resolution!
+        true, // reclaim_worktree
+    )
+    .await
+    .expect("merge + auto-reclaim ok");
+
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["merge_executed"], true, "merge should have executed");
+    assert_eq!(v["reclamation"]["attempted"], true);
+    assert_eq!(v["reclamation"]["reclaimed"], true);
+    assert_eq!(
+        v["reclamation"]["worktree"].as_str().unwrap(),
+        expected_canonical_path
+    );
+
+    // The cleaner was invoked with the auto-resolved worktree path.
+    let invocations = std::fs::read_to_string(&marker_path).unwrap();
+    assert!(
+        invocations.contains("wt-remove"),
+        "expected cleaner to be invoked with wt-remove; got: {invocations}"
+    );
+    assert!(
+        !worktree.exists(),
+        "auto-resolved worktree should have been removed by cleaner"
+    );
+
+    if let Some(v) = original_run_root {
+        std::env::set_var("TACHI_RUN_ROOT", v);
+    } else {
+        std::env::remove_var("TACHI_RUN_ROOT");
+    }
+    match original_home {
+        Some(v) => std::env::set_var("TACHI_HOME", v),
+        None => std::env::remove_var("TACHI_HOME"),
+    }
+    match original_sys_home {
+        Some(v) => std::env::set_var("HOME", v),
+        None => std::env::remove_var("HOME"),
+    }
+    match original_clean_bin {
+        Some(v) => std::env::set_var("TACHI_CLEAN_BIN", v),
+        None => std::env::remove_var("TACHI_CLEAN_BIN"),
+    }
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn safe_merge_skips_reclamation_when_no_worktree_mapped_and_registry_misses() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let tmp = tempfile::tempdir().unwrap();
+    let original_run_root = std::env::var_os("TACHI_RUN_ROOT");
+    std::env::set_var("TACHI_RUN_ROOT", tmp.path());
+    let home = tempfile::tempdir().unwrap();
+    let original_home = std::env::var_os("TACHI_HOME");
+    let original_sys_home = std::env::var_os("HOME");
+    std::env::set_var("TACHI_HOME", home.path());
+    std::env::set_var("HOME", home.path());
+
+    let flow = "flow_reclaim-unmapped";
+    write_verification(tmp.path(), flow, "passed", "deadbeef");
+    seed_full_passed_set(home.path(), flow, "deadbeef", None);
+
+    let mut pr = ready_pr();
+    pr.head_ref = Some("feat/unregistered-branch".to_string());
+    let client = MockGhClient::new()
+        .with_pr("o/r", pr)
+        .with_checks("o/r", 42, vec![]);
+
+    let out = handle_github_safe_merge(
+        &client,
+        "o/r",
+        42,
+        MergeStrategy::Squash,
+        false,
+        Some(flow),
+        &[],
+        MergeGatePolicy::standard(),
+        None, // no explicit worktree
+        true, // reclaim_worktree
+    )
+    .await
+    .expect("merge ok");
+
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["merge_executed"], true);
+    assert_eq!(v["reclamation"]["attempted"], false);
+    assert_eq!(v["reclamation"]["skipped"], "no_worktree_mapped");
+
+    if let Some(v) = original_run_root {
+        std::env::set_var("TACHI_RUN_ROOT", v);
+    } else {
+        std::env::remove_var("TACHI_RUN_ROOT");
+    }
+    match original_home {
+        Some(v) => std::env::set_var("TACHI_HOME", v),
+        None => std::env::remove_var("TACHI_HOME"),
+    }
+    match original_sys_home {
+        Some(v) => std::env::set_var("HOME", v),
+        None => std::env::remove_var("HOME"),
+    }
+}
