@@ -478,7 +478,7 @@ impl ManagedCompletionAdmissionGuard {
             &server.tachi_home_dir(),
             dispatch_id,
         )?);
-        persist_resolved_completion_receipt_at_target(
+        persist_resolved_completion_receipt_at_with_admission(
             &target,
             dispatch_id,
             new_state,
@@ -519,7 +519,7 @@ impl ManagedCompletionAdmissionGuard {
             &server.tachi_home_dir(),
             dispatch_id,
         )?);
-        persist_pending_completion_recovery_receipt_at_target(
+        persist_pending_completion_recovery_receipt_at(
             &target,
             dispatch_id,
             new_state,
@@ -735,7 +735,7 @@ fn persist_resolved_completion_receipt_at(
     reviewed: bool,
 ) -> Result<(), String> {
     let target = CompletionStatusTarget::for_path(run_dir);
-    persist_resolved_completion_receipt_at_target(
+    persist_resolved_completion_receipt_at_with_admission(
         &target,
         dispatch_id,
         new_state,
@@ -745,7 +745,7 @@ fn persist_resolved_completion_receipt_at(
     )
 }
 
-fn persist_resolved_completion_receipt_at_target(
+fn persist_resolved_completion_receipt_at_with_admission(
     target: &CompletionStatusTarget,
     dispatch_id: &str,
     new_state: &str,
@@ -842,7 +842,7 @@ fn persist_pending_completion_recovery_receipt(
     }
     let run_dir = resolved_completion_run_dir(&server.tachi_home_dir(), dispatch_id)?;
     let target = CompletionStatusTarget::for_path(&run_dir);
-    persist_pending_completion_recovery_receipt_at_target(
+    persist_pending_completion_recovery_receipt_at(
         &target,
         dispatch_id,
         new_state,
@@ -853,7 +853,7 @@ fn persist_pending_completion_recovery_receipt(
 }
 
 #[cfg(test)]
-fn persist_pending_completion_recovery_receipt_at(
+fn persist_pending_completion_recovery_receipt_for_test(
     run_dir: &std::path::Path,
     dispatch_id: &str,
     new_state: &str,
@@ -862,7 +862,7 @@ fn persist_pending_completion_recovery_receipt_at(
     dispatch_outcome: &Value,
 ) -> Result<(), String> {
     let target = CompletionStatusTarget::for_path(run_dir);
-    persist_pending_completion_recovery_receipt_at_target(
+    persist_pending_completion_recovery_receipt_at(
         &target,
         dispatch_id,
         new_state,
@@ -872,7 +872,7 @@ fn persist_pending_completion_recovery_receipt_at(
     )
 }
 
-fn persist_pending_completion_recovery_receipt_at_target(
+fn persist_pending_completion_recovery_receipt_at(
     target: &CompletionStatusTarget,
     dispatch_id: &str,
     new_state: &str,
@@ -3112,7 +3112,7 @@ mod tests {
             "error": "dispatch outcome persistence failed after retry_memory_locked(op=dispatch_outcomes_upsert, db_label=global): database is locked"
         });
 
-        persist_pending_completion_recovery_receipt_at(
+        persist_pending_completion_recovery_receipt_for_test(
             &run_dir,
             dispatch_id,
             "TASK_STATE_COMPLETED",
@@ -3138,7 +3138,7 @@ mod tests {
             "the recovery writer advances the shared revision"
         );
 
-        persist_pending_completion_recovery_receipt_at(
+        persist_pending_completion_recovery_receipt_for_test(
             &run_dir,
             dispatch_id,
             "TASK_STATE_COMPLETED",
@@ -3315,7 +3315,7 @@ mod tests {
             install_completion_status_read_barrier(Arc::clone(&read), Arc::clone(&resume));
         let writer_dir = recovery_dir.clone();
         let recovery_writer = std::thread::spawn(move || {
-            persist_pending_completion_recovery_receipt_at(
+            persist_pending_completion_recovery_receipt_for_test(
                 &writer_dir,
                 recovery_dispatch_id,
                 "TASK_STATE_COMPLETED",
