@@ -34,6 +34,16 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Instant;
 
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+enum StatusJsonLockKey {
+    #[cfg(unix)]
+    UnixDirectory {
+        device: u64,
+        inode: u64,
+    },
+    Path(std::path::PathBuf),
+}
+
 #[cfg(test)]
 fn managed_terminal_status_write_failures(
 ) -> &'static Mutex<std::collections::HashSet<std::path::PathBuf>> {
@@ -83,7 +93,7 @@ fn take_managed_terminal_status_write_failure(status_path: &std::path::Path) -> 
 /// ownership under the same receipt mutex with an explicitly unavailable
 /// FAILED receipt before volatile dispatch ownership is released.
 fn persist_managed_terminal_status_failure(
-    path: &std::path::Path,
+    target: &StatusJsonTarget,
     status: &mut serde_json::Map<String, Value>,
 ) -> Result<(), String> {
     status.insert(
@@ -122,9 +132,10 @@ fn persist_managed_terminal_status_failure(
         .expect("managed cancellation receipt was just initialized")
         .insert("observed_status_revision".to_string(), revision);
     let body = serde_json::to_vec_pretty(&Value::Object(status.clone()))
-        .map_err(|error| format!("serialize {}: {error}", path.display()))?;
-    crate::utils::write_owner_only_file_atomic(path, &body)
-        .map_err(|error| format!("write {}: {error}", path.display()))
+        .map_err(|error| format!("serialize {}: {error}", target.status_path().display()))?;
+    target
+        .write_atomic(&body)
+        .map_err(|error| format!("write {}: {error}", target.status_path().display()))
 }
 
 /// System prompt prepended to the Stage-1 task body. Kept verbatim so the
@@ -423,12 +434,23 @@ pub(crate) fn stamp_route_decision_id(
 /// identity acknowledgement, lifecycle terminalization, and route evidence.
 /// Weak retention avoids keeping a lock entry for every historical run.
 pub(crate) fn status_json_lock_for(run_dir: &std::path::Path) -> Arc<Mutex<()>> {
-    static LOCKS: OnceLock<Mutex<HashMap<std::path::PathBuf, Weak<Mutex<()>>>>> = OnceLock::new();
-    // Run directories exist before any status writer can legitimately update
-    // them, so their canonical path gives every relative, `..`, or symlink
-    // spelling the same receipt mutex. Keep a non-panicking absolute fallback
-    // for defensive callers that are still assembling a new run directory.
-    let lock_key = run_dir.canonicalize().unwrap_or_else(|_| {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+
+        let mut options = std::fs::OpenOptions::new();
+        options
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_CLOEXEC);
+        if let Ok(directory) = options.open(run_dir) {
+            if let Ok(metadata) = directory.metadata() {
+                return status_json_lock_for_identity(metadata.dev(), metadata.ino());
+            }
+        }
+    }
+    // Keep a non-panicking absolute fallback for defensive callers that are
+    // still assembling a new run directory or whose directory disappeared.
+    let path = run_dir.canonicalize().unwrap_or_else(|_| {
         if run_dir.is_absolute() {
             run_dir.to_path_buf()
         } else {
@@ -437,6 +459,16 @@ pub(crate) fn status_json_lock_for(run_dir: &std::path::Path) -> Arc<Mutex<()>> 
                 .unwrap_or_else(|_| run_dir.to_path_buf())
         }
     });
+    status_json_lock_for_key(StatusJsonLockKey::Path(path))
+}
+
+#[cfg(unix)]
+pub(crate) fn status_json_lock_for_identity(device: u64, inode: u64) -> Arc<Mutex<()>> {
+    status_json_lock_for_key(StatusJsonLockKey::UnixDirectory { device, inode })
+}
+
+fn status_json_lock_for_key(lock_key: StatusJsonLockKey) -> Arc<Mutex<()>> {
+    static LOCKS: OnceLock<Mutex<HashMap<StatusJsonLockKey, Weak<Mutex<()>>>>> = OnceLock::new();
     let mut locks = LOCKS
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
@@ -448,6 +480,78 @@ pub(crate) fn status_json_lock_for(run_dir: &std::path::Path) -> Arc<Mutex<()>> 
     let lock = Arc::new(Mutex::new(()));
     locks.insert(lock_key, Arc::downgrade(&lock));
     lock
+}
+
+enum StatusJsonTarget {
+    Path(std::path::PathBuf),
+    #[cfg(unix)]
+    Anchored(crate::managed_run_control::AnchoredRunStatus),
+}
+
+impl StatusJsonTarget {
+    fn for_run(
+        run_dir: &std::path::Path,
+        dispatch_id: &str,
+        managed_finalization: bool,
+    ) -> Result<Self, &'static str> {
+        if !managed_finalization {
+            return Ok(Self::Path(run_dir.join("status.json")));
+        }
+        #[cfg(unix)]
+        {
+            return crate::managed_run_control::AnchoredRunStatus::open(run_dir)
+                .map(Self::Anchored)
+                .map_err(|error| {
+                    tracing::warn!(
+                        dispatch_id,
+                        run_dir = %run_dir.display(),
+                        error = ?error,
+                        "managed terminal writer refused an unanchored status directory"
+                    );
+                    "managed_terminal_status_unreadable"
+                });
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = dispatch_id;
+            Err("unsupported_platform")
+        }
+    }
+
+    fn lock(&self) -> Arc<Mutex<()>> {
+        match self {
+            Self::Path(path) => status_json_lock_for(
+                path.parent()
+                    .expect("status.json path is always constructed beneath a run directory"),
+            ),
+            #[cfg(unix)]
+            Self::Anchored(status) => status.lock(),
+        }
+    }
+
+    fn status_path(&self) -> std::path::PathBuf {
+        match self {
+            Self::Path(path) => path.clone(),
+            #[cfg(unix)]
+            Self::Anchored(status) => status.status_path(),
+        }
+    }
+
+    fn read_json(&self) -> Result<Option<Value>, String> {
+        match self {
+            Self::Path(path) => crate::task_lifecycle::read_json_file(path),
+            #[cfg(unix)]
+            Self::Anchored(status) => status.read_json(),
+        }
+    }
+
+    fn write_atomic(&self, bytes: &[u8]) -> Result<(), String> {
+        match self {
+            Self::Path(path) => crate::utils::write_owner_only_file_atomic(path, bytes),
+            #[cfg(unix)]
+            Self::Anchored(status) => status.write_atomic(bytes),
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -464,7 +568,21 @@ pub(crate) fn write_status_json(
     total_duration_ms: Option<u64>,
     extra: Option<Value>,
 ) -> Option<crate::managed_run_control::CancelCompletion> {
-    let lock = status_json_lock_for(run_dir);
+    let managed_finalization_requested = extra
+        .as_ref()
+        .and_then(Value::as_object)
+        .and_then(|extra| extra.get("managed_cancellation_finalization"))
+        .is_some_and(|finalization| !finalization.is_null());
+    let target =
+        match StatusJsonTarget::for_run(run_dir, dispatch_id, managed_finalization_requested) {
+            Ok(target) => target,
+            Err(reason) => {
+                return Some(crate::managed_run_control::CancelCompletion::Unavailable(
+                    reason,
+                ));
+            }
+        };
+    let lock = target.lock();
     let _guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut obj = serde_json::Map::new();
     obj.insert("dispatch_id".into(), Value::String(dispatch_id.to_string()));
@@ -500,22 +618,22 @@ pub(crate) fn write_status_json(
             obj.insert(k, v);
         }
     }
-    let managed_finalization = obj.remove("managed_cancellation_finalization");
+    let managed_finalization = obj
+        .remove("managed_cancellation_finalization")
+        .filter(|finalization| !finalization.is_null());
+    debug_assert_eq!(
+        managed_finalization.is_some(),
+        managed_finalization_requested
+    );
     let mut managed_terminal = None;
 
-    let path = run_dir.join("status.json");
+    let path = target.status_path();
+    let previous_status = target.read_json().ok().flatten();
     // Managed cancellation may acknowledge only a committed canonical
     // receipt.  Ordinary terminal writes retain their historical best-effort
     // compatibility, but this path must refuse a missing/corrupt prior
     // receipt rather than manufacturing CANCELED in a fresh object.
-    if managed_finalization.is_some()
-        && !matches!(
-            std::fs::read_to_string(&path)
-                .ok()
-                .and_then(|raw| serde_json::from_str::<Value>(&raw).ok()),
-            Some(Value::Object(_))
-        )
-    {
+    if managed_finalization.is_some() && !matches!(&previous_status, Some(Value::Object(_))) {
         return Some(crate::managed_run_control::CancelCompletion::Unavailable(
             "managed_terminal_status_unreadable",
         ));
@@ -523,8 +641,15 @@ pub(crate) fn write_status_json(
     // Host-profile routing is fixed at dispatch acceptance. Later lifecycle
     // writers (preflight failure, watchdog, completion) describe a changing
     // state but must not erase that admission decision from the receipt.
-    if let Ok(previous) = std::fs::read_to_string(&path) {
-        if let Ok(Value::Object(mut previous)) = serde_json::from_str::<Value>(&previous) {
+    if let Some(previous_status) = previous_status {
+        if let Value::Object(mut previous) = previous_status {
+            if managed_finalization.is_some()
+                && previous.get("dispatch_id").and_then(Value::as_str) != Some(dispatch_id)
+            {
+                return Some(crate::managed_run_control::CancelCompletion::Unavailable(
+                    "managed_terminal_dispatch_identity_mismatch",
+                ));
+            }
             let proposed_terminal = obj
                 .get("state")
                 .and_then(Value::as_str)
@@ -696,13 +821,14 @@ pub(crate) fn write_status_json(
         if managed_finalization.is_some() && take_managed_terminal_status_write_failure(&path) {
             Err("injected managed terminal status write failure".to_string())
         } else {
-            crate::utils::write_owner_only_file_atomic(&path, body.as_bytes())
+            target.write_atomic(body.as_bytes())
         };
     #[cfg(not(test))]
-    let write_result = crate::utils::write_owner_only_file_atomic(&path, body.as_bytes());
+    let write_result = target.write_atomic(body.as_bytes());
     if let Err(e) = write_result {
         if managed_finalization.is_some() {
-            if let Err(fallback_error) = persist_managed_terminal_status_failure(&path, &mut obj) {
+            if let Err(fallback_error) = persist_managed_terminal_status_failure(&target, &mut obj)
+            {
                 eprintln!(
                     "[dispatch-v2] managed terminal write failed ({e}); fallback also failed: {fallback_error}"
                 );

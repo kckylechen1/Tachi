@@ -336,11 +336,13 @@ pub(crate) fn collect_run_task_for_server(
 }
 
 /// tachi#1173 board autopsy review: `dispatch_id` here is caller-supplied
-/// (via `tachi_task(action='wait'|'status'|'cancel')` or `tachi_board`'s
-/// `flow_id` expansion) and gets joined directly onto `runs_dir` below. A
-/// value containing a path separator or a `..` component would otherwise let
-/// a caller read (or, worse, have `read_failure_tail` read) an arbitrary file
-/// outside `~/.tachi/runs` -- e.g. `dispatch_id = "../../../../etc/passwd"`.
+/// (via `tachi_task(action='status')`,
+/// `tachi_staff(action='cancel', dispatch_id, expected_status_revision)`, or
+/// `tachi_board`'s `flow_id` expansion) and gets joined directly onto
+/// `runs_dir` below. A value containing a path separator or a `..` component
+/// would otherwise let a caller read (or, worse, have `read_failure_tail`
+/// read) an arbitrary file outside `~/.tachi/runs` -- e.g.
+/// `dispatch_id = "../../../../etc/passwd"`.
 /// tachi#1173 k2 fix: the character allowlist and the canonicalize-and-confine
 /// defense-in-depth layer are now the shared `dispatch_ops::path_gate` gate
 /// (three more caller-supplied-dispatch_id call sites needed the identical

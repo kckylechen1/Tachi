@@ -1,6 +1,16 @@
 //! Volatile same-daemon control for managed custom runs. Registry entries carry
 //! only a bounded channel and generation; Child/PID/PGID/command/env remain in
 //! the background execution task.
+#[cfg(all(test, unix))]
+mod repair_tests;
+#[cfg(all(test, unix))]
+mod test_hooks;
+#[cfg(unix)]
+mod unix_status;
+
+#[cfg(unix)]
+pub(crate) use unix_status::AnchoredRunStatus;
+
 use crate::MemoryServer;
 use chrono::Utc;
 use serde_json::{json, Value};
@@ -545,56 +555,22 @@ pub(crate) async fn request_managed_custom_cancel(
                 "invalid_dispatch_identity",
             ));
         }
-        let runs_root = crate::dispatch_ops::dispatch_runs_root();
-        let canonical_runs_root = match runs_root.canonicalize() {
-            Ok(root) if root.is_dir() => root,
-            _ => {
+        let run_dir = crate::dispatch_ops::dispatch_runs_root().join(dispatch_id);
+        let status_dir = match AnchoredRunStatus::open(&run_dir) {
+            Ok(status_dir) => status_dir,
+            Err(error) => {
                 return Ok(unavailable(
                     dispatch_id,
                     expected,
                     None,
-                    "absent_same_daemon_handle",
+                    error.cancellation_reason(),
                 ));
             }
         };
-        let candidate_run_dir = runs_root.join(dispatch_id);
-        let canonical_run_dir = match candidate_run_dir.canonicalize() {
-            Ok(run_dir) => run_dir,
-            Err(_) => {
-                return Ok(unavailable(
-                    dispatch_id,
-                    expected,
-                    None,
-                    "absent_same_daemon_handle",
-                ));
-            }
-        };
-        if !crate::dispatch_ops::canonical_dir_is_within(&canonical_run_dir, &canonical_runs_root) {
-            return Ok(unavailable(
-                dispatch_id,
-                expected,
-                None,
-                "run_directory_outside_runs_root",
-            ));
-        }
-        if !canonical_run_dir.is_dir() {
-            return Ok(unavailable(
-                dispatch_id,
-                expected,
-                None,
-                "absent_same_daemon_handle",
-            ));
-        }
-        // The canonical path is deliberately retained for every subsequent
-        // lock/read/write and the cancellation wait. The caller-visible
-        // spelling may be a symlink, so reusing it after the gate would reopen
-        // the path-confinement race this check is meant to close.
-        let run_dir = canonical_run_dir;
-        let lock = crate::dispatch_ops::status_json_lock_for(&run_dir);
+        let lock = status_dir.lock();
         let (sender, observed) = {
             let _guard = lock.lock().unwrap_or_else(|p| p.into_inner());
-            let path = run_dir.join("status.json");
-            let Some(mut status) = crate::task_lifecycle::read_json_file(&path)? else {
+            let Some(mut status) = status_dir.read_json()? else {
                 return Ok(unavailable(
                     dispatch_id,
                     expected,
@@ -610,6 +586,14 @@ pub(crate) async fn request_managed_custom_cancel(
                     "malformed_canonical_receipt",
                 ));
             };
+            if object.get("dispatch_id").and_then(Value::as_str) != Some(dispatch_id) {
+                return Ok(unavailable(
+                    dispatch_id,
+                    expected,
+                    None,
+                    "dispatch_identity_mismatch",
+                ));
+            }
             let Some(observed) = object.get("status_revision").and_then(Value::as_u64) else {
                 return Ok(unavailable(
                     dispatch_id,
@@ -697,7 +681,8 @@ pub(crate) async fn request_managed_custom_cancel(
             crate::managed_run_control::advance_status_revision(object)?;
             let body = serde_json::to_vec_pretty(&status)
                 .map_err(|e| format!("serialize cancellation_requested: {e}"))?;
-            crate::utils::write_owner_only_file_atomic(&path, &body)
+            status_dir
+                .write_atomic(&body)
                 .map_err(|e| format!("persist cancellation_requested: {e}"))?;
             (sender, observed)
         };
@@ -711,8 +696,8 @@ pub(crate) async fn request_managed_custom_cancel(
             })
             .is_err()
         {
-            return record_unavailable_if_pending(
-                &run_dir,
+            return record_unavailable_if_pending_anchored(
+                &status_dir,
                 dispatch_id,
                 expected,
                 observed,
@@ -720,28 +705,36 @@ pub(crate) async fn request_managed_custom_cancel(
             );
         }
         match receiver.await {
-            Ok(CancelCompletion::Confirmed { .. }) => canonical_cancellation_receipt(&run_dir)
-                .ok_or_else(|| {
+            Ok(CancelCompletion::Confirmed { .. }) => {
+                canonical_cancellation_receipt(&status_dir, dispatch_id).ok_or_else(|| {
                     "managed cancellation committed without a canonical receipt".to_string()
-                }),
-            Ok(CancelCompletion::Unconfirmed) => canonical_cancellation_receipt(&run_dir)
-                .ok_or_else(|| {
+                })
+            }
+            Ok(CancelCompletion::Unconfirmed) => {
+                canonical_cancellation_receipt(&status_dir, dispatch_id).ok_or_else(|| {
                     "managed cancellation committed without a canonical receipt".to_string()
-                }),
+                })
+            }
             Ok(CancelCompletion::Unavailable("credential_cleanup_failed")) => {
-                canonical_cancellation_receipt(&run_dir).ok_or_else(|| {
+                canonical_cancellation_receipt(&status_dir, dispatch_id).ok_or_else(|| {
                     "credential cleanup failure committed without a canonical receipt".to_string()
                 })
             }
-            Ok(CancelCompletion::Unavailable(reason)) => {
-                record_unavailable_if_pending(&run_dir, dispatch_id, expected, observed, reason)
-            }
+            Ok(CancelCompletion::Unavailable(reason)) => record_unavailable_if_pending_anchored(
+                &status_dir,
+                dispatch_id,
+                expected,
+                observed,
+                reason,
+            ),
             Err(_) => {
-                if let Some(canonical) = wait_for_terminal_cancellation_receipt(&run_dir).await {
+                if let Some(canonical) =
+                    wait_for_terminal_cancellation_receipt(&status_dir, dispatch_id).await
+                {
                     Ok(canonical)
                 } else {
-                    record_unavailable_if_pending(
-                        &run_dir,
+                    record_unavailable_if_pending_anchored(
+                        &status_dir,
                         dispatch_id,
                         expected,
                         observed,
@@ -1073,26 +1066,125 @@ pub(crate) fn apply_dequeued_cancellation_to_terminal_status(
 /// A dropped responder can race the background terminal writer after a runner
 /// has selected timeout. Do not manufacture an intermediate unavailable
 /// receipt: wait briefly for the terminal writer's canonical receipt first.
-async fn wait_for_terminal_cancellation_receipt(run_dir: &std::path::Path) -> Option<String> {
+#[cfg(unix)]
+async fn wait_for_terminal_cancellation_receipt(
+    status_dir: &AnchoredRunStatus,
+    dispatch_id: &str,
+) -> Option<String> {
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
     while tokio::time::Instant::now() < deadline {
-        let status_path = run_dir.join("status.json");
-        if let Ok(Some(status)) = crate::task_lifecycle::read_json_file(&status_path) {
-            let terminal = status
-                .get("state")
-                .and_then(Value::as_str)
-                .is_some_and(|state| state != "TASK_STATE_WORKING");
-            if terminal {
-                if let Some(canonical) = canonical_cancellation_receipt(run_dir) {
-                    return Some(canonical);
-                }
-            }
+        if let Some(canonical) = terminal_cancellation_receipt(status_dir, dispatch_id) {
+            return Some(canonical);
         }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
     None
 }
 
+#[cfg(unix)]
+fn record_unavailable_if_pending_anchored(
+    status_dir: &AnchoredRunStatus,
+    dispatch_id: &str,
+    expected: u64,
+    fallback_observed: u64,
+    reason: &str,
+) -> Result<String, String> {
+    let lock = status_dir.lock();
+    let _guard = lock.lock().unwrap_or_else(|p| p.into_inner());
+    let Some(mut status) = status_dir.read_json()? else {
+        return Ok(unavailable(
+            dispatch_id,
+            expected,
+            Some(fallback_observed),
+            reason,
+        ));
+    };
+    let Some(object) = status.as_object_mut() else {
+        return Ok(unavailable(
+            dispatch_id,
+            expected,
+            Some(fallback_observed),
+            reason,
+        ));
+    };
+    if object.get("dispatch_id").and_then(Value::as_str) != Some(dispatch_id) {
+        return Ok(unavailable(
+            dispatch_id,
+            expected,
+            Some(fallback_observed),
+            "dispatch_identity_mismatch",
+        ));
+    }
+    let observed = object
+        .get("status_revision")
+        .and_then(Value::as_u64)
+        .unwrap_or(fallback_observed);
+    if matches!(
+        reason,
+        "credential_cleanup_failed" | "credential_cleanup_status_persist_failed"
+    ) {
+        return Ok(unavailable(dispatch_id, expected, Some(observed), reason));
+    }
+    if object.get("state").and_then(Value::as_str) == Some("TASK_STATE_WORKING")
+        && object
+            .get("cancellation")
+            .and_then(Value::as_object)
+            .and_then(|receipt| receipt.get("receipt"))
+            .and_then(Value::as_str)
+            == Some("cancellation_requested")
+    {
+        object.insert(
+            "cancellation".to_string(),
+            cancellation_receipt(
+                "cancellation_unavailable",
+                dispatch_id,
+                expected,
+                observed,
+                Some(reason),
+                None,
+            ),
+        );
+        let committed_revision = crate::managed_run_control::advance_status_revision(object)?;
+        if let Some(receipt) = object
+            .get_mut("cancellation")
+            .and_then(Value::as_object_mut)
+        {
+            receipt.insert(
+                "observed_status_revision".to_string(),
+                Value::from(committed_revision),
+            );
+        }
+        let committed_receipt = object
+            .get("cancellation")
+            .cloned()
+            .expect("cancellation receipt was inserted before persistence");
+        let body = serde_json::to_vec_pretty(&status)
+            .map_err(|e| format!("serialize cancellation_unavailable: {e}"))?;
+        status_dir
+            .write_atomic(&body)
+            .map_err(|e| format!("persist cancellation_unavailable: {e}"))?;
+        return serde_json::to_string(&committed_receipt)
+            .map_err(|error| format!("serialize committed cancellation receipt: {error}"));
+    }
+    if matches!(
+        object
+            .get("cancellation")
+            .and_then(Value::as_object)
+            .and_then(|receipt| receipt.get("receipt"))
+            .and_then(Value::as_str),
+        Some("cancellation_unavailable" | "cancellation_confirmed" | "termination_unconfirmed")
+    ) {
+        return serde_json::to_string(
+            object
+                .get("cancellation")
+                .expect("canonical cancellation receipt was observed"),
+        )
+        .map_err(|error| format!("serialize canonical cancellation receipt: {error}"));
+    }
+    Ok(unavailable(dispatch_id, expected, Some(observed), reason))
+}
+
+#[cfg(test)]
 fn record_unavailable_if_pending(
     run_dir: &std::path::Path,
     dispatch_id: &str,
@@ -1187,10 +1279,36 @@ fn record_unavailable_if_pending(
     Ok(unavailable(dispatch_id, expected, Some(observed), reason))
 }
 
-fn canonical_cancellation_receipt(run_dir: &std::path::Path) -> Option<String> {
-    let lock = crate::dispatch_ops::status_json_lock_for(run_dir);
+#[cfg(unix)]
+fn canonical_cancellation_receipt(
+    status_dir: &AnchoredRunStatus,
+    dispatch_id: &str,
+) -> Option<String> {
+    let lock = status_dir.lock();
     let _guard = lock.lock().unwrap_or_else(|p| p.into_inner());
-    let status = crate::task_lifecycle::read_json_file(&run_dir.join("status.json")).ok()??;
+    let status = status_dir.read_json().ok()??;
+    if status.get("dispatch_id").and_then(Value::as_str) != Some(dispatch_id) {
+        return None;
+    }
+    serde_json::to_string(status.get("cancellation")?).ok()
+}
+
+#[cfg(unix)]
+fn terminal_cancellation_receipt(
+    status_dir: &AnchoredRunStatus,
+    dispatch_id: &str,
+) -> Option<String> {
+    let lock = status_dir.lock();
+    let _guard = lock.lock().unwrap_or_else(|p| p.into_inner());
+    let status = status_dir.read_json().ok()??;
+    if status.get("dispatch_id").and_then(Value::as_str) != Some(dispatch_id)
+        || !status
+            .get("state")
+            .and_then(Value::as_str)
+            .is_some_and(|state| state != "TASK_STATE_WORKING")
+    {
+        return None;
+    }
     serde_json::to_string(status.get("cancellation")?).ok()
 }
 

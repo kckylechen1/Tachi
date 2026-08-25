@@ -2,7 +2,7 @@
 
 Status: active vocabulary; execution-ownership sections superseded by
 `dispatch-lifecycle.md` and issue #749
-Updated: 2026-07-20
+Updated: 2026-08-25
 Related: GitHub issue #381, GitHub issue #382, GitHub issue #383,
 `docs/engineering/architecture/dispatch-policy-learning-spec.md`,
 `docs/engineering/architecture/credentialed-dispatch-profiles.md`
@@ -572,7 +572,7 @@ carry the workflow.
 | upstream source status | `tachi skill-surface sources` | implemented |
 | upstream source sync planning | `tachi skill-surface sync-plan` | starter implemented |
 | execution backend selection | existing dispatch path via `harness_transport="acpx"` with additive backend metadata | starter implemented |
-| dispatch backend status/cancel | `tachi_task(action="status" \| "cancel", dispatch_id=...)` | starter implemented |
+| dispatch backend status/cancel | status: `tachi_task(action="status", dispatch_id=...)`; cancel: `tachi_staff(action="cancel", dispatch_id=..., expected_status_revision=...)` | starter implemented |
 | Poke smoke suite | `tachi poke run --suite smoke` | starter implemented |
 | Card evolution proposals | `tachi_tune(action="route_proposals" \| "route_apply")` (moved off `tachi_task` in #1426) | implemented |
 
@@ -685,8 +685,10 @@ version should not add GitHub writes, daemon scheduling, or auto-merge behavior.
 - Run one-shot execution from Tachi-generated `prompt.md`.
 - Optionally run named sessions with `TACHI_ACPX_RUN_MODE=session` and store
   status/cancel control argv in run metadata.
-- Route `tachi_task(action="status" | "cancel")` through dispatch-scoped acpx
-  status/cancel controls when the run used acpx session mode.
+- Route `tachi_task(action="status", dispatch_id=...)` and
+  `tachi_staff(action="cancel", dispatch_id=..., expected_status_revision=...)`
+  through dispatch-scoped acpx status/cancel controls when the run used acpx
+  session mode.
 - Persist raw JSON/ACP output as `acpx_events.jsonl`.
 - Map basic events into existing trajectory/progress/status/result artifacts.
 - Detect missing acpx/Node prerequisites with actionable errors.

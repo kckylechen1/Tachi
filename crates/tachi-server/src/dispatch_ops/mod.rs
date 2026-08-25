@@ -40,6 +40,8 @@ pub(crate) use dispatch::{load_dispatch_identity_receipt_checked, DispatchReceip
 pub(crate) use dispatch_v2::fail_next_managed_terminal_status_write;
 pub(crate) use dispatch_v2::stamp_route_decision_id;
 pub(crate) use dispatch_v2::status_json_lock_for;
+#[cfg(unix)]
+pub(crate) use dispatch_v2::status_json_lock_for_identity;
 #[cfg(test)]
 pub(crate) use dispatch_v2::write_status_json;
 pub(crate) use harness::{
