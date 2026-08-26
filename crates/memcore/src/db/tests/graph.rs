@@ -2435,4 +2435,58 @@ fn graph_expand_as_of_anchors_edge_validity_at_the_instant() {
     assert!(
         graph_expand_as_of(&conn, &["root".into()], 1, None, false, "not-a-timestamp").is_err()
     );
+
+    // An instant Chrono accepts but SQLite cannot anchor (year +10000 is
+    // outside the julianday range) must fail loud the same way — NULL from
+    // julianday would otherwise silently drop ordinary edges again.
+    assert!(graph_expand_as_of(
+        &conn,
+        &["root".into()],
+        1,
+        None,
+        false,
+        "+10000-01-01T00:00:00Z"
+    )
+    .is_err());
+}
+
+#[test]
+fn graph_expand_as_of_bounds_historical_edge_fan_out() {
+    // A historical instant re-exposes long-expired edges the now-anchored
+    // predicate excluded; the as_of variant caps its traversal work so a
+    // dense expired neighborhood cannot amplify unboundedly.
+    let mut conn = make_conn();
+    upsert(&mut conn, &make_entry("cap-root", "cap fixture"), false).unwrap();
+    for i in 0..(AS_OF_EXPANSION_EDGE_LIMIT + 10) {
+        let target = format!("cap-nbr-{i}");
+        upsert(&mut conn, &make_entry(&target, "cap neighbor"), false).unwrap();
+        add_edge(
+            &conn,
+            &MemoryEdge {
+                source_id: "cap-root".into(),
+                target_id: target,
+                relation: "follows".into(),
+                weight: 1.0,
+                metadata: serde_json::json!({}),
+                created_at: "2019-01-01T00:00:00Z".into(),
+                valid_from: "2019-01-01T00:00:00Z".into(),
+                valid_to: Some("2020-01-01T00:00:00Z".into()),
+            },
+        )
+        .unwrap();
+    }
+    let replay = graph_expand_as_of(
+        &conn,
+        &["cap-root".into()],
+        1,
+        None,
+        false,
+        "2019-06-01T00:00:00Z",
+    )
+    .unwrap();
+    assert!(
+        replay.edges.len() <= AS_OF_EXPANSION_EDGE_LIMIT,
+        "edge fan-out must respect the as_of ceiling: {}",
+        replay.edges.len()
+    );
 }

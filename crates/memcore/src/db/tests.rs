@@ -188,3 +188,5 @@ mod sqlite_security_floor {
         assert_eq!(val, 42);
     }
 }
+#[cfg(test)]
+use crate::db::graph::AS_OF_EXPANSION_EDGE_LIMIT;

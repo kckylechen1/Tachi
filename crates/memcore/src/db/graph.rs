@@ -1116,18 +1116,37 @@ pub fn graph_expand_as_of(
     // as-of search APIs: a malformed instant must be a loud MemoryError,
     // never a silently partial graph (julianday(?) of garbage is SQL NULL,
     // which drops the validity predicate for ordinary edges while legacy
-    // blank-valid_from rows survive).
+    // blank-valid_from rows survive). Chrono also accepts instants outside
+    // SQLite's own parseable range (e.g. year +10000), so the canonical
+    // string is pre-flighted through julianday itself: NULL means the
+    // engine cannot anchor this instant and the call fails loud rather
+    // than silently dropping ordinary edges.
     let canonical = normalize_utc_iso(as_of_utc)?;
+    let anchored: Option<f64> = conn.query_row("SELECT julianday(?1)", [&canonical], |row| {
+        row.get::<_, Option<f64>>(0)
+    })?;
+    if anchored.is_none() {
+        return Err(MemoryError::InvalidArg(format!(
+            "as_of instant {canonical} is outside the SQLite julianday range"
+        )));
+    }
     graph_expand_limited_with_as_of(
         conn,
         seed_ids,
         max_hops,
         relation_filter,
-        usize::MAX,
+        AS_OF_EXPANSION_EDGE_LIMIT,
         wiki_corpus_store,
         Some(&canonical),
     )
 }
+
+/// Edge ceiling for point-in-time expansion: a caller-selected historical
+/// instant can re-expose arbitrarily many long-expired edges that the
+/// now-anchored predicate excluded, so the as_of variant bounds its
+/// traversal work. Graph expansion is best-effort enrichment — truncation
+/// at this scale degrades gracefully, never errors.
+pub(crate) const AS_OF_EXPANSION_EDGE_LIMIT: usize = 4096;
 
 /// BFS graph expansion with a global edge ceiling enforced in each SQLite batch.
 pub fn graph_expand_limited(
