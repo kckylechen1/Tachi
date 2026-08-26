@@ -87,6 +87,12 @@ impl MockGhClient {
     }
 }
 
+impl Default for MockGhClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait]
 impl GhClient for MockGhClient {
     async fn pr_view(&self, repo: &str, number: u64) -> Result<PrState, GhError> {
