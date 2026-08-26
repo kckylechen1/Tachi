@@ -6,10 +6,6 @@ license = "AGPL-3.0-only"
 publish = false
 description = "Report-only orphan build-artifact reaper for Tachi (#894 S2b), extracted from tachi-server."
 
-[features]
-default = []
-test-support = []
-
 [dependencies]
 memcore = { path = "../memcore" }
 rusqlite = { workspace = true }

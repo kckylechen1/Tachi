@@ -256,7 +256,7 @@ fn reap_sealed(
     now: SystemTime,
     probe: &HolderProbe,
 ) -> Result<ReapReport, DestructiveRefusal> {
-    run_orphan_reap_with_probe(conn, opts, &resolved_sources(), now, probe)
+    run_orphan_reap_with_sources_and_probe(conn, opts, &resolved_sources(), now, probe)
 }
 
 /// The sheathed body (the only way `force` reaches the delete path), on fully
@@ -2252,7 +2252,7 @@ fn an_incomplete_protection_set_never_exits_clean() {
     assert!(reap_exit_status(&complete).is_ok(), "{complete:?}");
 
     // Now break a protection source — for this run, and this run only.
-    let gapped = run_orphan_reap_with_probe(
+    let gapped = run_orphan_reap_with_sources_and_probe(
         store.connection_mut(),
         &opts(&root, false),
         &resolved_sources().without_home(),
@@ -2394,7 +2394,7 @@ fn a_gapped_run_and_a_resolved_run_are_in_flight_together_without_contaminating_
     let (gapped, resolved) = std::thread::scope(|scope| {
         let gapped = scope.spawn(|| {
             let mut store = open_store(&gapped_root);
-            run_orphan_reap_with_probe(
+            run_orphan_reap_with_sources_and_probe(
                 store.connection_mut(),
                 &opts(&gapped_root, false),
                 &resolved_sources().without_home(),
@@ -2405,7 +2405,7 @@ fn a_gapped_run_and_a_resolved_run_are_in_flight_together_without_contaminating_
         });
         let resolved = scope.spawn(|| {
             let mut store = open_store(&resolved_root);
-            run_orphan_reap_with_probe(
+            run_orphan_reap_with_sources_and_probe(
                 store.connection_mut(),
                 &opts(&resolved_root, false),
                 &resolved_sources(),
@@ -2480,9 +2480,8 @@ fn no_test_mutates_the_process_environment() {
     }
 }
 
-/// The public production entry point must never accept a caller-selected holder
-/// probe. A permissive probe would turn the final live-holder fence into caller
-/// policy instead of a production invariant.
+/// The public production entry point must never accept caller-selected protection
+/// sources or a holder probe. Either would turn a production fence into caller policy.
 #[test]
 fn public_reap_entry_uses_only_the_real_holder_probe() {
     let production = include_str!("lib.rs");
@@ -2490,23 +2489,32 @@ fn public_reap_entry_uses_only_the_real_holder_probe() {
         .find("pub fn run_orphan_reap(")
         .expect("public reaper entry point must exist");
     let seam_offset = production[public_start..]
-        .find("\nfn run_orphan_reap_with_probe(")
-        .expect("private holder-probe seam must follow the public entry point");
+        .find("\nfn run_orphan_reap_with_sources_and_probe(")
+        .expect("private sources-and-probe seam must follow the public entry point");
     let public_entry = &production[public_start..public_start + seam_offset];
 
     assert!(
-        !public_entry.contains("HolderProbe"),
-        "the public production entry point must not accept an injectable HolderProbe:\n\
+        !public_entry.contains("HolderProbe") && !public_entry.contains("ProtectionSources<'_>"),
+        "the public production entry point must not accept injectable fences:\n{public_entry}"
+    );
+    let gate = public_entry
+        .find("certify_destructive(opts.force)?")
+        .expect("public entry must certify destructive intent");
+    let sources = public_entry
+        .find("ProtectionSources::from_process_env()")
+        .expect("public entry must construct real protection sources");
+    let probe = public_entry
+        .find("&lsof_holder_probe")
+        .expect("public entry must fix the real lsof probe");
+    assert!(
+        gate < sources && sources < probe,
+        "the destructive gate must precede environment/process reads and the real holder probe:\n\
          {public_entry}"
     );
     assert!(
-        public_entry.contains("&lsof_holder_probe"),
-        "the public production entry point must fix the real lsof probe:\n{public_entry}"
-    );
-    assert!(
-        !production.contains("pub fn run_orphan_reap_with_probe(")
-            && !production.contains("pub(crate) fn run_orphan_reap_with_probe("),
-        "the injectable seam must remain private to this module"
+        !production.contains("pub fn run_orphan_reap_with_sources_and_probe(")
+            && !production.contains("pub(crate) fn run_orphan_reap_with_sources_and_probe("),
+        "the injectable sources-and-probe seam must remain private to this module"
     );
 }
 

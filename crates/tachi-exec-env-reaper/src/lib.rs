@@ -675,11 +675,11 @@ pub(crate) type LiveBuildScan = dyn Fn() -> (Vec<PathBuf>, Vec<String>);
 /// The lock-shaped fixes (`#[serial]`, `--test-threads=1`, widening the old `env_lock` to
 /// every test in the module) all treat the symptom: the shared mutable global is still
 /// there, still implicit, and the next test that forgets to take the lock is bitten
-/// again. So the global is *gone* from the call graph instead. The environment is read
-/// exactly once, at the process edge ([`Self::from_process_env`], called by the CLI), and
-/// from there the protected set is computed from a value that was handed to it. A test
-/// hands it a value with `home: None` and gets fail-closed behaviour in its own thread,
-/// affecting nobody.
+/// again. So the global is *gone* from the reaper body instead. The public production
+/// entry reads it exactly once, after the destructive gate
+/// ([`Self::from_process_env`]), and from there the protected set is computed from a
+/// value that was handed to the private body. A test hands that body a value with
+/// `home: None` and gets fail-closed behaviour in its own thread, affecting nobody.
 ///
 /// ## What is a snapshot and what is live
 ///
@@ -711,8 +711,9 @@ pub struct ProtectionSources<'a> {
 static PROCESS_TABLE: fn() -> (Vec<PathBuf>, Vec<String>) = live_build_target_dirs;
 
 impl ProtectionSources<'static> {
-    /// **The only place the process environment is read.** Called at the process edge (the
-    /// CLI), once per run.
+    /// **The only constructor that reads the process environment.** The public reaper
+    /// calls it only after its destructive gate; the report-only doctor patrol also uses
+    /// it to build the same protected set.
     pub fn from_process_env() -> Self {
         let var = |key: &str| {
             std::env::var_os(key)
@@ -724,58 +725,6 @@ impl ProtectionSources<'static> {
             shared_cargo_target_dir: var(SHARED_CARGO_TARGET_DIR_ENV),
             home: var("HOME").or_else(|| var("USERPROFILE")),
             live_builds: &PROCESS_TABLE,
-        }
-    }
-}
-
-/// Test-only stand-in for the process table: no build is running anywhere, on any
-/// machine, ever. Backs [`ProtectionSources::deterministic_for_cli_test`] below.
-#[cfg(any(test, feature = "test-support"))]
-fn no_live_builds_for_cli_test() -> (Vec<PathBuf>, Vec<String>) {
-    (Vec::new(), Vec::new())
-}
-
-#[cfg(any(test, feature = "test-support"))]
-static NO_LIVE_BUILDS_FOR_CLI_TEST: fn() -> (Vec<PathBuf>, Vec<String>) =
-    no_live_builds_for_cli_test;
-
-#[cfg(any(test, feature = "test-support"))]
-impl ProtectionSources<'static> {
-    /// A CLI-level test's alternative to [`Self::from_process_env`] — same shape, but
-    /// every field is a fixed, ambient-free value instead of a real environment/process
-    /// read.
-    ///
-    /// [`Self::from_process_env`] shells out to the real `ps -Awwo command=` (via
-    /// [`live_build_target_dirs`]) and reads the real `CARGO_TARGET_DIR` / `HOME`. That
-    /// is correct for production, but it makes a CLI-level test of `reap_exit_status`'s
-    /// gate ORDER (protected-set-incomplete vs. scan-incomplete) hostage to whatever
-    /// else is running on the test machine at the moment `cargo test` executes it: `ps`
-    /// sees every process's full command line, and a whitespace-tokenizing scan
-    /// (`target_dirs_from_process_line`) cannot tell a live cargo build's
-    /// `CARGO_TARGET_DIR=` assignment from that literal substring appearing in some
-    /// unrelated process's argv — a `grep` for it, a shell wrapper quoting a command
-    /// that mentions it, this very repo's own `AGENTS.md` line 18 being `cat`'d or
-    /// searched by a concurrent agent session. When that happens the value captured is
-    /// the raw, unexpanded text (e.g. the literal `$HOME/.cache/sigil-shared-target`,
-    /// never resolved because nothing shell-expanded it), `protected_paths` reports it
-    /// as a relative-path warning, and `reap_exit_status` refuses on "protected set
-    /// incomplete" — a REAL fail-closed gate, just not the one under test — before the
-    /// scan ever reaches the missing root this test named (#1196).
-    ///
-    /// So this constructor reads nothing ambient at all: `home` is a fixed path (so the
-    /// protected set can still be computed — a `None` home is BUG 3's OWN gap, and
-    /// asserting the DIFFERENT "scan incomplete" gate needs that one closed), and
-    /// `live_builds` is [`NO_LIVE_BUILDS_FOR_CLI_TEST`] rather than the real process
-    /// table. This proves the CLI's actual production code path end-to-end
-    /// (`run_orphan_reap_cli_with_sources`, exercised by the real
-    /// `run_orphan_reap_cli` too) still refuses a scan that cannot see its whole scope
-    /// — deterministically, on every machine, regardless of what else is running on it.
-    pub fn deterministic_for_cli_test() -> Self {
-        Self {
-            cargo_target_dir: None,
-            shared_cargo_target_dir: None,
-            home: Some(PathBuf::from("/nonexistent-home-for-cli-test")),
-            live_builds: &NO_LIVE_BUILDS_FOR_CLI_TEST,
         }
     }
 }
@@ -2097,22 +2046,30 @@ pub struct ReapOptions {
 /// The gate is duplicated in the CLI on purpose (which refuses before even opening the
 /// ledger). Two fences, one source of truth: both call [`certify_destructive`].
 ///
-/// `sources` is what the run may protect from ([`ProtectionSources`]) — passed in, not
-/// read from the ambient environment, so the protected set is a function of an argument
-/// the caller can see and a test can supply. The holder fence is not injectable through
-/// this production entry point: it always uses [`lsof_holder_probe`].
+/// Protection sources and the holder fence are not injectable through this production
+/// entry point. Only after the destructive gate succeeds does it snapshot the real
+/// process environment with [`ProtectionSources::from_process_env`], then it enters the
+/// private body with [`lsof_holder_probe`].
 pub fn run_orphan_reap(
     conn: &mut rusqlite::Connection,
     opts: &ReapOptions,
-    sources: &ProtectionSources<'_>,
     now: SystemTime,
 ) -> Result<ReapReport, DestructiveRefusal> {
-    run_orphan_reap_with_probe(conn, opts, sources, now, &lsof_holder_probe)
+    certify_destructive(opts.force)?;
+    let sources = ProtectionSources::from_process_env();
+    Ok(run_orphan_reap_uncertified(
+        conn,
+        opts,
+        &sources,
+        now,
+        &lsof_holder_probe,
+    ))
 }
 
-/// Crate-local test seam for the sealed entry point. Production callers cannot
-/// replace the real holder fence with a permissive probe.
-fn run_orphan_reap_with_probe(
+/// Crate-local test seam for the sealed entry point. Production callers cannot replace
+/// either the real protection sources or the real holder fence.
+#[cfg(test)]
+fn run_orphan_reap_with_sources_and_probe(
     conn: &mut rusqlite::Connection,
     opts: &ReapOptions,
     sources: &ProtectionSources<'_>,

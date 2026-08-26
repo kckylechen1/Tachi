@@ -511,24 +511,6 @@ fn run_clean_command_sync(action: CleanAction) -> Result<(), String> {
 /// `--force` waives this no more than it waives any other fence (see
 /// `cli_force_is_refused_at_the_gate` below for the current gate behavior).
 fn run_orphan_reap_cli(opts: ReapOptions, output: OutputFormat) -> Result<(), String> {
-    // The protected set's sources are read from the process environment HERE — at the
-    // edge, once — and handed to the reaper as a value. The reaper itself reads no
-    // ambient state, which is what keeps "HOME is unset" a property of one run instead of
-    // a property of the process (see `ProtectionSources`). This is the ONLY production
-    // call site of `from_process_env` in this function's call graph; everything below
-    // this line is `run_orphan_reap_cli_with_sources`, which a test may call with a
-    // different, deterministic `ProtectionSources` instead (see
-    // `cli_force_is_refused_at_the_gate` and
-    // `ProtectionSources::deterministic_for_cli_test`, #1196).
-    let sources = tachi_exec_env_reaper::ProtectionSources::from_process_env();
-    run_orphan_reap_cli_with_sources(opts, output, &sources)
-}
-
-fn run_orphan_reap_cli_with_sources(
-    opts: ReapOptions,
-    output: OutputFormat,
-    sources: &tachi_exec_env_reaper::ProtectionSources<'_>,
-) -> Result<(), String> {
     // The first gate, above everything: no ledger, no filesystem, no process table.
     // #1379: `DESTRUCTIVE_CERTIFIED` is `false` again, so `--force` is refused here
     // and returns a `DestructiveRefusal` before anything else runs. It stays the first
@@ -559,7 +541,6 @@ fn run_orphan_reap_cli_with_sources(
     let report = tachi_exec_env_reaper::run_orphan_reap(
         store.connection_mut(),
         &opts,
-        sources,
         std::time::SystemTime::now(),
     )
     .map_err(|refusal| refusal.to_string())?;
@@ -587,38 +568,31 @@ mod tests {
     /// property under `--force` can no longer be exercised through this entry point.
     /// See git blame / #1379 for the old reading.
     ///
-    /// The hermetic fixture (isolated `TACHI_HOME`, deterministic `ProtectionSources`)
-    /// is still worth keeping: it proves the refusal happens *before* the ledger open,
-    /// not because of some unrelated ambient state, and that the emitted error carries
-    /// the `tachi#1379` blocking defect.
+    /// Calling the real CLI helper is safe here because its first operation is the
+    /// destructive gate. The sentinel root, environment, process table and ledger are
+    /// therefore never observed.
     #[test]
     fn cli_force_is_refused_at_the_gate() {
-        crate::test_support::with_tachi_home(|_home| {
-            let sources = tachi_exec_env_reaper::ProtectionSources::deterministic_for_cli_test();
-            let err = run_orphan_reap_cli_with_sources(
-                ReapOptions {
-                    roots: vec![PathBuf::from(
-                        "/tachi-reaper-this-root-must-never-be-scanned",
-                    )],
-                    max_age_days: 7,
-                    force: true,
-                },
-                OutputFormat::Text,
-                &sources,
-            )
-            .expect_err(
-                "--force must be refused now: tachi#1379 revoked the 2026-07-17 certification",
-            );
+        let err = run_orphan_reap_cli(
+            ReapOptions {
+                roots: vec![PathBuf::from(
+                    "/tachi-reaper-this-root-must-never-be-scanned",
+                )],
+                max_age_days: 7,
+                force: true,
+            },
+            OutputFormat::Text,
+        )
+        .expect_err("--force must be refused now: tachi#1379 revoked the 2026-07-17 certification");
 
-            assert!(
-                err.contains("tachi#1379"),
-                "the refusal must name the blocking finding: {err}"
-            );
-            assert!(
-                err.contains("not certified") || err.contains("is refused"),
-                "the refusal must say the destructive path is refused: {err}"
-            );
-        });
+        assert!(
+            err.contains("tachi#1379"),
+            "the refusal must name the blocking finding: {err}"
+        );
+        assert!(
+            err.contains("not certified") || err.contains("is refused"),
+            "the refusal must say the destructive path is refused: {err}"
+        );
     }
 
     // NOTE: there is deliberately no CLI-level test of a *healthy* --force run (one

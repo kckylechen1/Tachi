@@ -285,10 +285,9 @@ pub(crate) fn scan_orphan_build_resources_strict(
 }
 
 /// [`scan_orphan_build_resources`]'s production body, with the scan roots
-/// INJECTED rather than read from `default_orphan_roots()` — the same "real
-/// production path, controlled inputs" idiom `exec_env_reaper`'s own CLI
-/// already uses (`run_orphan_reap_cli_with_sources` vs `run_orphan_reap_cli`,
-/// `ProtectionSources::deterministic_for_cli_test()` vs `::from_process_env()`).
+/// INJECTED rather than read from `default_orphan_roots()` — a private
+/// "real production path, controlled inputs" seam used only by this module's
+/// tests.
 /// `default_orphan_roots()` always includes real system paths
 /// (`/private/tmp`, `~/.cache`, …) regardless of any env override a test
 /// might set, so a hermetic test of THIS function needs its own seam rather
