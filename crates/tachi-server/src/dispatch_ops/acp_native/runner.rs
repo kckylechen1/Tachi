@@ -11,6 +11,7 @@ use super::super::dispatch_v2::append_trajectory_event;
 use super::session::write_native_acp_session_record;
 use super::{NativeAcpConnection, NativeAcpRunSpec, ACP_STREAM_FILE};
 
+#[cfg(test)]
 pub(in crate::dispatch_ops) async fn run_native_acp_dispatch(
     spec: NativeAcpRunSpec,
     run_dir: &Path,

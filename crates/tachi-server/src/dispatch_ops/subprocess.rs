@@ -317,6 +317,7 @@ fn pause_managed_pre_spawn() {
     }
 }
 
+#[cfg(test)]
 pub(super) async fn run_agent_subprocess(
     cmd: Command,
     timeout: Duration,
@@ -1491,6 +1492,7 @@ mod issue_1825_non_unix_tests {
     }
 }
 
+#[cfg(test)]
 pub(super) async fn run_opencode_sop_subprocess(
     cmd: Command,
     timeout: Duration,
