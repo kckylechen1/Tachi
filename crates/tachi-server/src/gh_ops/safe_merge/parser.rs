@@ -5,7 +5,7 @@ use super::*;
 /// exercise the JSON shape without spawning `gh`.
 pub(in crate::gh_ops) fn parse_pr_view_json(
     v: &serde_json::Value,
-    checks: Vec<crate::gh_safe_merge::CheckRun>,
+    checks: Vec<tachi_gh_safe_merge::CheckRun>,
 ) -> Result<PrState, String> {
     let number = v
         .get("number")

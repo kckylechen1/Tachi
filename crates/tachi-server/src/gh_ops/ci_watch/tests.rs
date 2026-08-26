@@ -2,10 +2,10 @@ use super::*;
 use crate::gh_ops::safe_merge::{
     ingest_check_state_transition, CheckStateIngestRequest, CheckStateLedgerState, CheckStateRead,
 };
-use crate::gh_safe_merge::{CheckRun, GhError};
 use async_trait::async_trait;
 use serde_json::json;
 use std::time::Duration;
+use tachi_gh_safe_merge::{CheckRun, GhError};
 
 /// A reader whose response can vary per call, so a single test can simulate a
 /// pending→failed transition across two cycles.
@@ -539,7 +539,7 @@ async fn ci_watch_records_stale_when_observed_head_diverges() {
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn ci_watch_blanket_reader_populates_observed_head_sha_from_pr_view() {
-    use crate::gh_safe_merge::{
+    use tachi_gh_safe_merge::{
         ChecksState, Mergeable, MockGhClient, PrLifecycleState, PrState, ReviewDecision,
     };
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -703,7 +703,7 @@ async fn ci_watch_spawn_exits_on_shutdown_cancel() {
 #[tokio::test]
 async fn ci_watch_pr_view_gated_on_expected_head_sha() {
     use crate::gh_ops::safe_merge::CheckStateReader;
-    use crate::gh_safe_merge::{
+    use tachi_gh_safe_merge::{
         ChecksState, Mergeable, MockGhClient, PrLifecycleState, PrState, ReviewDecision,
     };
 

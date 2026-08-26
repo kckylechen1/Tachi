@@ -19,9 +19,9 @@
 #     known-reds group.
 #   * Completeness gate: before declaring OK, the report is checked against the
 #     full `cargo nextest list` set across ${NEXTEST_PACKAGES[@]} (today:
-#     tachi-server + tachi-bootstrap-tests + tachi-contract-tests +
-#     tachi-credential-profile + tachi-github-runtime + tachi-lesson-forge +
-#     tachi-build-broker + tachi-llm + tachi-foundry) — a valid-but-incomplete (truncated)
+#     tachi-credential-profile + tachi-gh-safe-merge + tachi-github-runtime +
+#     tachi-lesson-forge + tachi-build-broker + tachi-llm + tachi-foundry) —
+#     a valid-but-incomplete (truncated)
 #     JUnit is refused (exit 4), since it could hide a new red that never got
 #     to run.
 #
@@ -89,7 +89,7 @@ trap 'rm -f "${KNOWN_FILE}" "${EXPECTED_FILE}" "${FAILED_FILE}" "${PRESENT_FILE}
 # Deliberately NOT `--workspace`: that would pull thousands of unrelated inline
 # tests from every other crate into EXPECTED, which is a different gate with
 # different semantics.
-NEXTEST_PACKAGES=(-p tachi-server -p tachi-bootstrap-tests -p tachi-contract-tests -p tachi-credential-profile -p tachi-github-runtime -p tachi-lesson-forge -p tachi-build-broker -p tachi-llm -p tachi-foundry)
+NEXTEST_PACKAGES=(-p tachi-server -p tachi-bootstrap-tests -p tachi-contract-tests -p tachi-credential-profile -p tachi-gh-safe-merge -p tachi-github-runtime -p tachi-lesson-forge -p tachi-build-broker -p tachi-llm -p tachi-foundry)
 
 # Refuse a list whose binary-id-stripped names are not unique.
 #

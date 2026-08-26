@@ -1,7 +1,7 @@
 use super::*;
-use crate::gh_safe_merge::{CheckRun, IssueState};
 use reqwest::{StatusCode, Url};
 use serde_json::Value;
+use tachi_gh_safe_merge::{CheckRun, IssueState};
 
 const DEFAULT_GITHUB_API_BASE: &str = "https://api.github.com";
 const DEFAULT_GITHUB_GRAPHQL_URL: &str = "https://api.github.com/graphql";

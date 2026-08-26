@@ -1,8 +1,3 @@
-use crate::gh_safe_merge::{
-    evaluate_merge_gate_with_policy, CheckRun, ChecksState, ClosingIssueLabels, GhClient, GhError,
-    MergeDecision, MergeGatePolicy, MergeGatePolicyMode, MergeResult, MergeStrategy, Mergeable,
-    PrLifecycleState, PrState, ReviewDecision,
-};
 use crate::task_lifecycle::{append_github_event, merge_github_status, run_dir_for_flow_id};
 use crate::tool_params::{
     GhCommentParams, GhIssueCreateParams, GhIssueListParams, GhIssueReadParams, GhLabelParams,
@@ -17,6 +12,11 @@ use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::process::Command;
+use tachi_gh_safe_merge::{
+    evaluate_merge_gate_with_policy, CheckRun, ChecksState, ClosingIssueLabels, GhClient, GhError,
+    MergeDecision, MergeGatePolicy, MergeGatePolicyMode, MergeResult, MergeStrategy, Mergeable,
+    PrLifecycleState, PrState, ReviewDecision,
+};
 
 const DEFAULT_REVIEW_AUTHOR_FILTER: &str = "gemini";
 type GhPrCommentsBundle = (Vec<Value>, Vec<Value>, Vec<Value>);
