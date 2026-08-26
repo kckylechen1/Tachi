@@ -35,7 +35,7 @@ pub fn sample_pr_json(number: u64, state: &str, merged: bool, updated_at: &str) 
     json!({
         "number": number,
         "title": format!("Corpus pilot PR {number}"),
-        "body": format!("Fixes the gate. See https://example.com/external-link (text only)."),
+        "body": "Fixes the gate. See https://example.com/external-link (text only).",
         "state": state,
         "headRefOid": format!("head{number:04x}"),
         "baseRefOid": "base0001",

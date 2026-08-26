@@ -183,7 +183,9 @@ pub(crate) fn load_rows(conn: &Connection) -> Result<(Vec<RawRow>, usize, bool),
                     ));
                 }
                 row.vector = Some(
-                    blob.chunks_exact(4)
+                    blob.as_chunks::<4>()
+                        .0
+                        .iter()
                         .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
                         .collect(),
                 );
