@@ -22,6 +22,7 @@ EXPECTED_PACKAGES = [
     "tachi-lesson-forge",
     "tachi-build-broker",
     "tachi-llm",
+    "tachi-foundry",
 ]
 
 
