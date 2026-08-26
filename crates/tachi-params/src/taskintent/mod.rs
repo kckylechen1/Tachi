@@ -24,7 +24,10 @@
 //!
 //! * **DECISION (OPEN) TB-5/A** — capability catalog: shipped as a CLOSED
 //!   enum ([`wire::Capability`]); an owner flip to a runtime-admitted
-//!   catalog is a deliberate golden-changing PR.
+//!   catalog is a deliberate golden-changing PR. The variant set was
+//!   extended once by the owner's surfaced override (2026-08-26:
+//!   `repository_implementation`, the ratified V-program acceptance
+//!   capability — see [`wire::Capability`] docs).
 //! * **DECISION (OPEN) TB-7/B** — interim idempotency carrier: NO interim
 //!   journal shipped; see [`idempotency`] for the honest record of what the
 //!   in-process binding can and cannot survive (the Tachi-restart half

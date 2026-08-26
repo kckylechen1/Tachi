@@ -375,6 +375,51 @@ mod tests {
     }
 
     #[test]
+    fn repository_implementation_follows_the_same_requester_bounded_law() {
+        // Owner override (TB-5/A surfaced 2026-08-26): the ratified
+        // V-program text adds `repository_implementation` as the watershed
+        // acceptance capability. The carrier stays the closed enum; the
+        // TB-5 intersection law binds the new variant exactly like the
+        // other two — deny by default, admit only from the requester's own
+        // authority set.
+        let mut intent = sample_intent(BoundedText::new("implement the leaf").expect("bounded"));
+        intent.capability_request = CapabilityRequest {
+            capability: Capability::RepositoryImplementation,
+        };
+        // Not in the requester's admitted set → typed rejection.
+        assert_eq!(
+            admit(&intent, &authority()),
+            Err(AdmissionRejection::CapabilityNotAdmitted)
+        );
+        // In the set → admits, and the pre-existing variants keep the
+        // identical law against this single-capability authority (no
+        // loosening leaked into their intersection check).
+        let granted = AdmittedAuthority::of([Capability::RepositoryImplementation]);
+        assert_eq!(admit(&intent, &granted), Ok(()));
+        let mut read_only = sample_intent(BoundedText::new("investigate").expect("bounded"));
+        read_only.capability_request = CapabilityRequest {
+            capability: Capability::ReadOnlyInvestigation,
+        };
+        assert_eq!(
+            admit(&read_only, &granted),
+            Err(AdmissionRejection::CapabilityNotAdmitted),
+            "the pre-existing variants keep the identical intersection law"
+        );
+        // Forbidden-content law is unchanged for the new capability's
+        // intents (write-class capability does not smuggle write-class
+        // CONTENT): a command-shaped objective still rejects.
+        let mut malicious = intent.clone();
+        malicious.objective = BoundedText::new("git push --force origin master").expect("bounded");
+        assert_eq!(
+            admit(&malicious, &granted),
+            Err(AdmissionRejection::ForbiddenContent {
+                category: ForbiddenCategory::Command,
+                field: "objective",
+            })
+        );
+    }
+
+    #[test]
     fn differing_bundle_content_yields_identical_admission_decision() {
         // TB-4 seam law / DoD admission test: the ONLY difference is
         // bundle/guidance content ⇒ identical admission decision on every

@@ -32,6 +32,14 @@
 //! `CapabilityId` catalog (option (b)) remains available to the owner; the
 //! golden pins whichever variant set ships, so an owner flip is a
 //! deliberate golden-changing PR, never a silent drift.
+//!
+//! Owner override exercised once (2026-08-26, zeroclaw #234 rows 1–2): the
+//! owner's ratified V-program text names `capability_request =
+//! repository_implementation` as THE acceptance capability for the watershed
+//! vertical, which is the surfaced owner override TB-5/A reserved — the
+//! third variant below was added by that ratification. The carrier stays
+//! the closed enum (option (b) remains unflipped); the golden example keeps
+//! `reasoning_review`, so the cross-repo pinned digest did NOT move.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -102,6 +110,10 @@ impl From<Timestamp> for String {
 /// requested capability must already be permitted by the requester's own
 /// admitted profile) is enforced at admission against
 /// [`super::RequesterAuthorityPort`], never against guidance content.
+///
+/// Variant-set note: the third variant is the owner's surfaced TB-5/A
+/// override (2026-08-26) — see the module docs. Adding a variant is a
+/// deliberate, golden-visible extension, never silent drift.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Capability {
@@ -109,9 +121,19 @@ pub enum Capability {
     /// ReasoningSubAgent vertical's successor capability).
     ReasoningReview,
     /// Read-only investigation over admitted repos, docs, and issues. Cannot
-    /// express write authority; write-class work is not representable on
-    /// this wire until the owner extends the catalog.
+    /// express write authority: write-class work is representable on this
+    /// wire ONLY through the owner-ratified [`Capability::RepositoryImplementation`]
+    /// variant.
     ReadOnlyInvestigation,
+    /// Repository implementation: write-class work producing repository
+    /// changes (source diffs, verification evidence) under the ordinary
+    /// dispatch/eval/adjudication spines. Added by the owner's surfaced
+    /// TB-5/A override — the ratified V-program text names
+    /// `repository_implementation` as THE acceptance capability for the
+    /// watershed vertical (zeroclaw #234 rows 1–2). Placement, credentials,
+    /// and sandboxing remain Tachi admission territory; this variant still
+    /// cannot name a vendor, CLI, model, or tool.
+    RepositoryImplementation,
 }
 
 /// The capability an intent requests (TB-5). One capability per intent.
@@ -367,6 +389,52 @@ pub(super) mod tests {
     fn bounded_text_caps_unbounded_transcripts() {
         assert!(BoundedText::new("x".repeat(BOUNDED_TEXT_MAX)).is_ok());
         assert!(BoundedText::new("x".repeat(BOUNDED_TEXT_MAX + 1)).is_err());
+    }
+
+    #[test]
+    fn capability_wire_forms_round_trip_and_the_enum_stays_closed() {
+        // TB-5/A: exactly the ratified variants admit on the wire, each
+        // under its snake_case wire form; the closed enum fails closed on
+        // anything else (the zeroclaw #234 live-receipt blocker class).
+        let ratified: [(Capability, &str); 3] = [
+            (Capability::ReasoningReview, "reasoning_review"),
+            (Capability::ReadOnlyInvestigation, "read_only_investigation"),
+            (
+                Capability::RepositoryImplementation,
+                "repository_implementation",
+            ),
+        ];
+        for (variant, wire) in ratified {
+            assert_eq!(
+                serde_json::to_value(variant).expect("serializes"),
+                serde_json::Value::String(wire.to_string()),
+                "wire form for {variant:?}"
+            );
+            let decoded: Capability =
+                serde_json::from_value(serde_json::Value::String(wire.to_string()))
+                    .expect("decodes");
+            assert_eq!(decoded, variant, "round-trip for {wire}");
+        }
+        // The V2b acceptance capability decodes through the full
+        // CapabilityRequest envelope (the exact live shape zeroclaw #234
+        // submitted when tachi rejected it).
+        let request: CapabilityRequest = serde_json::from_value(serde_json::json!({
+            "capability": "repository_implementation"
+        }))
+        .expect("V2b acceptance capability decodes");
+        assert_eq!(request.capability, Capability::RepositoryImplementation);
+        // Fail-closed: an unknown variant is a decode error naming the
+        // expected set — never a silent default. Vendor/CLI-shaped
+        // capability tokens stay structurally unrepresentable.
+        let error = serde_json::from_value::<Capability>(serde_json::Value::String(
+            "vendor_cli_run".to_string(),
+        ))
+        .expect_err("unknown variant must fail decode");
+        let message = error.to_string();
+        assert!(message.contains("unknown variant"), "{message}");
+        assert!(message.contains("reasoning_review"), "{message}");
+        assert!(message.contains("read_only_investigation"), "{message}");
+        assert!(message.contains("repository_implementation"), "{message}");
     }
 
     #[test]
