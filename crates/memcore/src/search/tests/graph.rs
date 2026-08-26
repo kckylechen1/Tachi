@@ -474,19 +474,23 @@ fn as_of_search_anchors_graph_edge_validity_at_the_instant() {
     // Hyperion #3010 wiring: hybrid_search must route an as_of search's graph
     // expansion through the instant-anchored edge predicate. A future-dated
     // edge (valid_from 2027) links the seed to the neighbor: a plain expanded
-    // search injects the neighbor, a 2026-01-01 replay must not — entry-level
-    // validity alone cannot tell these apart because both entries carry
-    // window-free validity.
+    // search injects the neighbor, a 2026-01-01 replay must not.
     let mut conn = setup();
+    // BOTH entries carry explicit past validity windows: entry-level
+    // valid_at alone cannot exclude future-nbr at the replay instant, so
+    // only the edge's temporal predicate can — deleting the as_of routing
+    // would let the neighbor leak back in (cold-review R1 finding: the
+    // original fixture's upsert-defaulted timestamp made this test hollow).
     let mut seed = memory_entry("seed", "ReplayEdge probe text", &["replayedge"]);
     seed.valid_from = "2019-01-01T00:00:00Z".to_string();
     insert_entry(&mut conn, seed);
-    insert(
-        &mut conn,
+    let mut future_nbr = memory_entry(
         "future-nbr",
         "Only reachable through a future-dated edge",
         &["irrelevantkw"],
     );
+    future_nbr.valid_from = "2019-01-01T00:00:00Z".to_string();
+    insert_entry(&mut conn, future_nbr);
     add_edge(
         &conn,
         &MemoryEdge {

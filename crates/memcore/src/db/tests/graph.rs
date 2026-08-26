@@ -2393,4 +2393,39 @@ fn graph_expand_as_of_anchors_edge_validity_at_the_instant() {
     )
     .unwrap();
     assert!(later.distances.contains_key("future-nbr"));
+
+    // Sub-second precision (cold-review R1): an edge beginning 500ms AFTER
+    // the instant must not leak in. datetime() truncates to whole seconds
+    // and admitted it; julianday() keeps the half-open interval aligned
+    // with the entry-level Chrono comparison.
+    upsert(
+        &mut conn,
+        &make_entry("ms-nbr", "sub-second fixture"),
+        false,
+    )
+    .unwrap();
+    add_edge(&conn, &edge("ms-nbr", "2026-01-01T00:00:00.500Z", None)).unwrap();
+    let at_instant = graph_expand_as_of(
+        &conn,
+        &["root".into()],
+        1,
+        None,
+        false,
+        "2026-01-01T00:00:00.000Z",
+    )
+    .unwrap();
+    assert!(
+        !at_instant.distances.contains_key("ms-nbr"),
+        "an edge starting 500ms after the instant must be hidden"
+    );
+    let after_edge = graph_expand_as_of(
+        &conn,
+        &["root".into()],
+        1,
+        None,
+        false,
+        "2026-01-01T00:00:00.600Z",
+    )
+    .unwrap();
+    assert!(after_edge.distances.contains_key("ms-nbr"));
 }

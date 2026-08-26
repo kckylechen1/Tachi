@@ -939,12 +939,16 @@ fn get_edges_batch(
     // created after the instant nor loses edges that were valid then but
     // have since expired. An empty valid_from (the serde default) is
     // always-valid, matching how reads treated it before it gained a
-    // temporal role.
+    // temporal role. The as_of branch compares via julianday(): datetime()
+    // truncates to whole seconds, which would let an edge leak up to 999ms
+    // before its valid_from and expire up to 999ms early — the entry-level
+    // valid_at filter compares full Chrono precision, and the edge half
+    // must match that half-open interval (cold-review R1 finding).
     let validity_sql = match as_of_utc {
         None => " AND (valid_to IS NULL OR datetime(valid_to) > datetime('now'))".to_string(),
         Some(_) => {
-            " AND (valid_from IS NULL OR valid_from = '' OR datetime(valid_from) <= datetime(?)) \
-         AND (valid_to IS NULL OR datetime(valid_to) > datetime(?))"
+            " AND (valid_from IS NULL OR valid_from = '' OR julianday(valid_from) <= julianday(?)) \
+         AND (valid_to IS NULL OR julianday(valid_to) > julianday(?))"
                 .to_string()
         }
     };
