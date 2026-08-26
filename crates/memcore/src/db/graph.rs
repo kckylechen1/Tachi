@@ -6,7 +6,7 @@ use crate::error::MemoryError;
 use crate::relation_ontology::ComponentGovernanceRelation;
 use crate::types::{ExpectedMemoryState, GraphExpandResult, GraphTraversalInjection, MemoryEdge};
 
-use super::common::{normalize_utc_iso_or_now, now_utc_iso};
+use super::common::{normalize_utc_iso, normalize_utc_iso_or_now, now_utc_iso};
 use super::memory_crud::{fetch_by_ids, fetch_by_ids_excluding_store_internal};
 
 // #1558: MemCore cannot depend on tachi-llm (tachi-llm already depends on
@@ -943,7 +943,7 @@ fn get_edges_batch(
     // truncates to whole seconds, which would let an edge leak up to 999ms
     // before its valid_from and expire up to 999ms early — the entry-level
     // valid_at filter compares full Chrono precision, and the edge half
-    // must match that half-open interval (cold-review R1 finding).
+    // must match that half-open interval.
     let validity_sql = match as_of_utc {
         None => " AND (valid_to IS NULL OR datetime(valid_to) > datetime('now'))".to_string(),
         Some(_) => {
@@ -1112,6 +1112,12 @@ pub fn graph_expand_as_of(
     wiki_corpus_store: bool,
     as_of_utc: &str,
 ) -> Result<GraphExpandResult, MemoryError> {
+    // Validate and canonicalize at this public boundary, mirroring the
+    // as-of search APIs: a malformed instant must be a loud MemoryError,
+    // never a silently partial graph (julianday(?) of garbage is SQL NULL,
+    // which drops the validity predicate for ordinary edges while legacy
+    // blank-valid_from rows survive).
+    let canonical = normalize_utc_iso(as_of_utc)?;
     graph_expand_limited_with_as_of(
         conn,
         seed_ids,
@@ -1119,7 +1125,7 @@ pub fn graph_expand_as_of(
         relation_filter,
         usize::MAX,
         wiki_corpus_store,
-        Some(as_of_utc),
+        Some(&canonical),
     )
 }
 

@@ -479,8 +479,7 @@ fn as_of_search_anchors_graph_edge_validity_at_the_instant() {
     // BOTH entries carry explicit past validity windows: entry-level
     // valid_at alone cannot exclude future-nbr at the replay instant, so
     // only the edge's temporal predicate can — deleting the as_of routing
-    // would let the neighbor leak back in (cold-review R1 finding: the
-    // original fixture's upsert-defaulted timestamp made this test hollow).
+    // would let the neighbor leak back in.
     let mut seed = memory_entry("seed", "ReplayEdge probe text", &["replayedge"]);
     seed.valid_from = "2019-01-01T00:00:00Z".to_string();
     insert_entry(&mut conn, seed);

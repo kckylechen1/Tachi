@@ -2394,7 +2394,7 @@ fn graph_expand_as_of_anchors_edge_validity_at_the_instant() {
     .unwrap();
     assert!(later.distances.contains_key("future-nbr"));
 
-    // Sub-second precision (cold-review R1): an edge beginning 500ms AFTER
+    // Sub-second precision: an edge beginning 500ms AFTER
     // the instant must not leak in. datetime() truncates to whole seconds
     // and admitted it; julianday() keeps the half-open interval aligned
     // with the entry-level Chrono comparison.
@@ -2428,4 +2428,11 @@ fn graph_expand_as_of_anchors_edge_validity_at_the_instant() {
     )
     .unwrap();
     assert!(after_edge.distances.contains_key("ms-nbr"));
+
+    // A malformed instant is a loud error at the public boundary, never a
+    // silently partial graph (julianday(garbage) is NULL, which would drop
+    // the validity predicate and hide every ordinary edge).
+    assert!(
+        graph_expand_as_of(&conn, &["root".into()], 1, None, false, "not-a-timestamp").is_err()
+    );
 }
