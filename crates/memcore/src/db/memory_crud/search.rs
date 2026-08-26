@@ -309,15 +309,9 @@ pub fn search_fts(
     let as_of_utc = as_of
         .map(|instant| normalize_sqlite_as_of(conn, instant))
         .transpose()?;
-    let safe_query = simple_query_input(query);
-
-    if safe_query.is_empty() {
-        return Ok(HashMap::new());
-    }
-
-    search_fts_match(
+    search_fts_with_normalized_as_of(
         conn,
-        &safe_query,
+        query,
         true,
         limit,
         include_archived,
@@ -325,11 +319,48 @@ pub fn search_fts(
         path_prefix,
         as_of_utc.as_deref(),
         surface,
+        wiki_corpus_store,
+    )
+}
+
+/// Shared execution path for FTS callers that already hold a canonical,
+/// SQLite-representable `as_of`. The caller owns that preflight so expansion
+/// can validate once before fan-out instead of once per expanded query.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn search_fts_with_normalized_as_of(
+    conn: &Connection,
+    query: &str,
+    use_simple_query: bool,
+    limit: usize,
+    include_archived: bool,
+    include_superseded: bool,
+    path_prefix: Option<&str>,
+    as_of_utc: Option<&str>,
+    surface: Option<Surface>,
+    wiki_corpus_store: bool,
+) -> Result<HashMap<String, f64>, MemoryError> {
+    let safe_query = use_simple_query.then(|| simple_query_input(query));
+    let match_query = safe_query.as_deref().unwrap_or(query);
+    if match_query.is_empty() || (!use_simple_query && match_query.trim().is_empty()) {
+        return Ok(HashMap::new());
+    }
+
+    search_fts_match(
+        conn,
+        match_query,
+        use_simple_query,
+        limit,
+        include_archived,
+        include_superseded,
+        path_prefix,
+        as_of_utc,
+        surface,
         WikiCorpusGate::resolve(wiki_corpus_store, path_prefix),
     )
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 pub(crate) fn search_fts_raw_match(
     conn: &Connection,
     match_query: &str,
@@ -344,10 +375,7 @@ pub(crate) fn search_fts_raw_match(
     let as_of_utc = as_of
         .map(|instant| normalize_sqlite_as_of(conn, instant))
         .transpose()?;
-    if match_query.trim().is_empty() {
-        return Ok(HashMap::new());
-    }
-    search_fts_match(
+    search_fts_with_normalized_as_of(
         conn,
         match_query,
         false,
@@ -357,7 +385,7 @@ pub(crate) fn search_fts_raw_match(
         path_prefix,
         as_of_utc.as_deref(),
         surface,
-        WikiCorpusGate::resolve(wiki_corpus_store, path_prefix),
+        wiki_corpus_store,
     )
 }
 

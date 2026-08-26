@@ -154,7 +154,9 @@ pub(crate) use memory_crud::query_hash;
 pub(crate) use memory_crud::record_access;
 pub(crate) use memory_crud::record_access_with_updates;
 pub use memory_crud::refuse_retired_sticky_row_within_tx;
+#[cfg(test)]
 pub(crate) use memory_crud::search_fts_raw_match;
+pub(crate) use memory_crud::search_fts_with_normalized_as_of;
 pub(crate) use memory_crud::search_symbolic_candidates_with_relevance;
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use memory_crud::supersede_with_metadata_if_expected_state;

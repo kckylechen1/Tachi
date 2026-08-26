@@ -30,7 +30,9 @@ pub use read::{
     list_active_wiki_ingest_predecessors, list_by_path, list_by_path_active_unsuperseded,
     list_by_path_recent, list_user_facing_wiki_entries, list_wiki_duplicate_candidates,
 };
+#[cfg(test)]
 pub(crate) use search::search_fts_raw_match;
+pub(crate) use search::search_fts_with_normalized_as_of;
 pub(crate) use search::search_symbolic_candidates_with_relevance;
 pub(crate) use search::wiki_corpus_store_sql_splice;
 pub use search::{
