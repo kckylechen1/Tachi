@@ -6,7 +6,7 @@ use crate::error::MemoryError;
 use crate::relation_ontology::ComponentGovernanceRelation;
 use crate::types::{ExpectedMemoryState, GraphExpandResult, GraphTraversalInjection, MemoryEdge};
 
-use super::common::{normalize_utc_iso, normalize_utc_iso_or_now, now_utc_iso};
+use super::common::{normalize_sqlite_as_of, normalize_utc_iso_or_now, now_utc_iso};
 use super::memory_crud::{fetch_by_ids, fetch_by_ids_excluding_store_internal};
 
 // #1558: MemCore cannot depend on tachi-llm (tachi-llm already depends on
@@ -1121,15 +1121,7 @@ pub fn graph_expand_as_of(
     // string is pre-flighted through julianday itself: NULL means the
     // engine cannot anchor this instant and the call fails loud rather
     // than silently dropping ordinary edges.
-    let canonical = normalize_utc_iso(as_of_utc)?;
-    let anchored: Option<f64> = conn.query_row("SELECT julianday(?1)", [&canonical], |row| {
-        row.get::<_, Option<f64>>(0)
-    })?;
-    if anchored.is_none() {
-        return Err(MemoryError::InvalidArg(format!(
-            "as_of instant {canonical} is outside the SQLite julianday range"
-        )));
-    }
+    let canonical = normalize_sqlite_as_of(conn, as_of_utc)?;
     graph_expand_limited_with_as_of(
         conn,
         seed_ids,
