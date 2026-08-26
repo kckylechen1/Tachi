@@ -1,4 +1,4 @@
-//! Orphan-reaper test module, split out of `exec_env_reaper.rs` (#1423).
+//! Orphan-reaper test module, split out of tachi-server's exec_env_reaper module (#1423).
 //!
 //! Pure relocation: no test was added, removed, renamed, re-`#[ignore]`d, or
 //! had an assertion weakened. The only edits are the two that the move itself
@@ -9,7 +9,10 @@ use super::*;
 use std::collections::BTreeSet;
 
 fn unique_temp_dir(prefix: &str) -> PathBuf {
-    let path = crate::utils::test_fixture_path(format!("{prefix}-{}", uuid::Uuid::new_v4()));
+    let path = std::env::temp_dir().join(format!(
+        "tachi-exec-env-reaper-{prefix}-{}",
+        uuid::Uuid::new_v4()
+    ));
     let _ = std::fs::remove_dir_all(&path);
     std::fs::create_dir_all(&path).unwrap();
     path
@@ -2376,18 +2379,15 @@ fn no_test_mutates_the_process_environment() {
     let forbidden = ["set", "remove"].map(|verb| format!("env::{verb}_var"));
     // The module was split (#1423): the fence must scan production AND this
     // test file, or a mutation reintroduced on either side walks past it.
-    let sources = [
-        include_str!("../exec_env_reaper.rs"),
-        include_str!("tests.rs"),
-    ];
+    let sources = [include_str!("lib.rs"), include_str!("tests.rs")];
 
     for needle in &forbidden {
         assert!(
             !sources
                 .iter()
                 .any(|source| source.contains(needle.as_str())),
-            "`{needle}` is back in exec_env_reaper.rs (production) or \
-             exec_env_reaper/tests.rs (this test module). It mutates the environment of \
+            "`{needle}` is back in tachi-exec-env-reaper/src/lib.rs (production) or \
+             tachi-exec-env-reaper/src/tests.rs (this test module). It mutates the environment of \
              the whole test process, which is what made every reaper test depend on HOME \
              and turned an unrelated test red. Inject a `ProtectionSources` instead."
         );
@@ -2435,8 +2435,8 @@ mod kill_tests {
     /// `#[ignore]`: this is the out-of-band event S2d's own module doc describes
     /// — it deletes real directories on the machine that runs it (inside its own
     /// temp roots only) and is not something an ordinary `cargo test` should run
-    /// unattended. Run explicitly: `cargo test --offline -p tachi-server --lib \
-    /// exec_env_reaper::tests::kill_tests:: -- --ignored --nocapture`.
+    /// unattended. Run explicitly: `cargo test --offline -p tachi-exec-env-reaper --lib \
+    /// tests::kill_tests:: -- --ignored --nocapture`.
     #[cfg(unix)]
     #[ignore = "#1062 kill-test: real deletes under real --force; run explicitly, not on every cargo test"]
     #[test]
@@ -2610,11 +2610,9 @@ mod kill_tests {
         // Printed, never written — see the section doc above for why checking in
         // the receipt is a human act, not something this test does to itself.
         println!("\n─── #1062 orphan reaper kill-test receipt (S2d shape) ───");
-        println!("kill_test = \"crates/tachi-server/src/exec_env_reaper/tests.rs\"");
-        println!(
-            "kill_test_fn = \"exec_env_reaper::tests::kill_tests::orphan_reaper_kill_test_matrix\""
-        );
-        println!("binary = \"tachi-server\"");
+        println!("kill_test = \"crates/tachi-exec-env-reaper/src/tests.rs\"");
+        println!("kill_test_fn = \"tests::kill_tests::orphan_reaper_kill_test_matrix\"");
+        println!("binary = \"tachi-exec-env-reaper\"");
         println!("binary_version = \"{}\"", env!("CARGO_PKG_VERSION"));
         println!("host_os = \"{}\"", std::env::consts::OS);
         println!("result = \"pass\"");

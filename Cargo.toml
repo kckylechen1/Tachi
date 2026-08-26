@@ -57,6 +57,9 @@ members = [
     # workspace membership, and the nextest known-red gate is widened with this
     # crate when the tests move out of tachi-server.
     "crates/tachi-build-broker",
+    # Report-only orphan build-artifact reaper (#894 S2b), carved out of
+    # tachi-server with its complete safety/certification test suite.
+    "crates/tachi-exec-env-reaper",
     "crates/tachi-hub",
     "crates/tachi-llm",
     "crates/tachi-merge-ops",

@@ -1,12 +1,12 @@
 use std::path::PathBuf;
 use tachi_bootstrap::cli::{CleanAction, WorktreeAction};
 
-use crate::exec_env_reaper::ReapOptions;
 use tachi_clean::sweep::SweepOptions;
 use tachi_clean::tachi_clean::TachiCleanOptions;
 use tachi_clean::target_clean::TargetCleanOptions;
 use tachi_clean::wt_clean::{OutputFormat, WtRemoveOptions};
 use tachi_clean::wt_open::{self, CargoTargetPolicy, OpenOptions};
+use tachi_exec_env_reaper::ReapOptions;
 
 pub(crate) async fn run_clean_command(
     action: CleanAction,
@@ -272,7 +272,7 @@ fn sweep_stale_exec_env_leases_cli(force: bool) {
 }
 
 /// Three states, the same doctrine as `exec_env_reaper`'s `HolderCheck`
-/// (`crates/tachi-server/src/exec_env_reaper.rs:330-343`): a stale-lease sweep
+/// (`crates/tachi-exec-env-reaper/src/lib.rs:330-343`): a stale-lease sweep
 /// may only ever act on a *confirmed* absence, never on "the stat call did
 /// not work". [`std::path::Path::exists`] collapses every `stat` error —
 /// `NotFound` as much as `PermissionDenied` or a mount hiccup — into the same
@@ -458,7 +458,7 @@ fn run_clean_command_sync(action: CleanAction) -> Result<(), String> {
         } => run_orphan_reap_cli(
             ReapOptions {
                 roots: if root.is_empty() {
-                    crate::exec_env_reaper::default_orphan_roots()
+                    tachi_exec_env_reaper::default_orphan_roots()
                 } else {
                     root
                 },
@@ -489,7 +489,7 @@ fn run_clean_command_sync(action: CleanAction) -> Result<(), String> {
 /// proceeded past the gate, opened the ledger, and genuinely reclaimed on a healthy scan.
 /// That certification has been revoked: `tachi#1379` showed the 2026-07-17 matrix never
 /// staged an inode-reuse race against BUG 2's `(dev, ino)` fence, and that race defeats
-/// the fence on real hardware. So [`crate::exec_env_reaper::certify_destructive`] rejects
+/// the fence on real hardware. So [`tachi_exec_env_reaper::certify_destructive`] rejects
 /// every `--force` request at the gate again, and the CLI prints the reason and exits
 /// non-zero. The gate call stays: the day #1379's handle-pinning fix lands, an
 /// inode-reuse scenario is added to the kill-test matrix, and a fresh receipt is checked
@@ -504,7 +504,7 @@ fn run_clean_command_sync(action: CleanAction) -> Result<(), String> {
 /// is grouped out of that ledger and a report that silently loses half its history is
 /// the off-the-books reclaim #1029 called out, in reverse.
 ///
-/// Exit status comes from [`crate::exec_env_reaper::reap_exit_status`]: a run whose scan
+/// Exit status comes from [`tachi_exec_env_reaper::reap_exit_status`]: a run whose scan
 /// left `incomplete-or-error` units (a named root that is not there, a subtree `read_dir`
 /// could not open) or whose protected set could not be fully resolved (`ps` unavailable,
 /// `HOME` unset) exits non-zero, because it cannot honestly say it saw its whole scope —
@@ -520,22 +520,22 @@ fn run_orphan_reap_cli(opts: ReapOptions, output: OutputFormat) -> Result<(), St
     // different, deterministic `ProtectionSources` instead (see
     // `cli_force_is_refused_at_the_gate` and
     // `ProtectionSources::deterministic_for_cli_test`, #1196).
-    let sources = crate::exec_env_reaper::ProtectionSources::from_process_env();
+    let sources = tachi_exec_env_reaper::ProtectionSources::from_process_env();
     run_orphan_reap_cli_with_sources(opts, output, &sources)
 }
 
 fn run_orphan_reap_cli_with_sources(
     opts: ReapOptions,
     output: OutputFormat,
-    sources: &crate::exec_env_reaper::ProtectionSources<'_>,
+    sources: &tachi_exec_env_reaper::ProtectionSources<'_>,
 ) -> Result<(), String> {
     // The first gate, above everything: no ledger, no filesystem, no process table.
     // #1379: `DESTRUCTIVE_CERTIFIED` is `false` again, so `--force` is refused here
     // and returns a `DestructiveRefusal` before anything else runs. It stays the first
     // thing asked so a future RE-CERTIFICATION only has to flip the constant, not
     // re-wire every caller.
-    if let Err(refusal) = crate::exec_env_reaper::certify_destructive(opts.force) {
-        crate::exec_env_reaper::emit_destructive_refusal(&refusal, output)?;
+    if let Err(refusal) = tachi_exec_env_reaper::certify_destructive(opts.force) {
+        tachi_exec_env_reaper::emit_destructive_refusal(&refusal, output)?;
         return Err(refusal.to_string());
     }
 
@@ -556,21 +556,21 @@ fn run_orphan_reap_cli_with_sources(
     // itself, the second of the two gates that "cannot be routed around" (see that
     // function's doc comment) — but on THIS build it never fires, for the same reason
     // the gate above does.
-    let report = crate::exec_env_reaper::run_orphan_reap(
+    let report = tachi_exec_env_reaper::run_orphan_reap(
         store.connection_mut(),
         &opts,
         sources,
         std::time::SystemTime::now(),
-        &crate::exec_env_reaper::lsof_holder_probe,
+        &tachi_exec_env_reaper::lsof_holder_probe,
     )
     .map_err(|refusal| refusal.to_string())?;
-    crate::exec_env_reaper::emit_reap_report(&report, output)?;
+    tachi_exec_env_reaper::emit_reap_report(&report, output)?;
     // The report is emitted first, THEN the exit status is derived from it — an
     // incomplete run must still show the operator what it did see. `reap_exit_status`
     // is the single place that rule lives (sol's frozen accounting invariant: a run
     // that could not examine its whole authorized scope may not exit 0, `--force`
     // waives it no more than any other gate).
-    crate::exec_env_reaper::reap_exit_status(&report)
+    tachi_exec_env_reaper::reap_exit_status(&report)
 }
 
 #[cfg(test)]
@@ -595,7 +595,7 @@ mod tests {
     #[test]
     fn cli_force_is_refused_at_the_gate() {
         crate::test_support::with_tachi_home(|_home| {
-            let sources = crate::exec_env_reaper::ProtectionSources::deterministic_for_cli_test();
+            let sources = tachi_exec_env_reaper::ProtectionSources::deterministic_for_cli_test();
             let err = run_orphan_reap_cli_with_sources(
                 ReapOptions {
                     roots: vec![PathBuf::from(
