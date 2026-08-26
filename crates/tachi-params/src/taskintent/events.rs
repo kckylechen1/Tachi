@@ -5,14 +5,16 @@
 //! `recorded_at`, payload digest, visibility class.
 //!
 //! **Sequence assignment is a deterministic projection, not a stored
-//! cursor**: events are derived per-task from the ordered fact log kept by
-//! the [`super::TaskFactSource`], sorted by `(recorded_at, event_id)`, and
-//! numbered `1..` in that order. Reconnect with `after_seq = last_seen`
+//! cursor**: events are derived per-task from the APPEND-ORDERED fact log
+//! kept by the [`super::TaskFactSource`] (dedup by stable `event_id`,
+//! first occurrence wins) and numbered `1..` in that order. Because the
+//! log is append-only and sequences follow append order — never timestamps
+//! — a fact appended later (even with a backdated `recorded_at`) always
+//! takes the next sequence and previously delivered `(seq, event_id)`
+//! pairs are never renumbered. Reconnect with `after_seq = last_seen`
 //! therefore replays EXACTLY the missed events with no gaps and no
-//! duplicates — the derivation is a pure function of the fact log, so a
-//! re-read after downtime cannot fork. Duplicate delivery of a known
-//! `(seq, event_id)` is deterministically suppressed (dedup by `event_id`
-//! at derivation time and again at page assembly).
+//! duplicates; duplicate delivery of a known `(seq, event_id)` is
+//! deterministically suppressed.
 //!
 //! TB-10: stale events never regress canonical state — event derivation is
 //! read-only over facts, and the dimension projections (TB-16) fold facts
@@ -108,6 +110,10 @@ pub enum TaskEventPayload {
     TaskSubmitted {
         /// Canonical intent digest (TB-7 rule 1).
         intent_digest: String,
+        /// The admitted requester who submitted — later lifecycle
+        /// operations (intervene/stop) must present the SAME requester
+        /// (requester-owns-task check).
+        requester: String,
         /// The intent-derived contract projection (objective, constraints,
         /// expected artifacts, evaluation requirement) — plan-independent.
         contract: IntentContractProjection,
@@ -130,6 +136,11 @@ pub enum TaskEventPayload {
         stop_id: String,
         /// `graceful` or `hard`.
         mode: String,
+        /// The recorded reason (advisory content carried by the stop-alias
+        /// interventions; NOT part of the stop request identity — the
+        /// frozen `request_stop` signature has no reason, and the alias
+        /// law (TB-11) requires both entries to share ONE binding).
+        reason: String,
     },
     /// The lifecycle OWNER confirmed a terminal (e.g. cancellation confirmed
     /// by the harness — TB-12).
@@ -216,17 +227,22 @@ pub struct ExpectedArtifactProjection {
 }
 
 impl TaskEvent {
-    /// Derive the ordered event list for a task's raw fact log: stable sort
-    /// by `(recorded_at, event_id)`, dedup by `event_id`, assign `seq = 1..`.
+    /// Derive the ordered event list for a task's raw fact log in APPEND
+    /// ORDER: dedup by `event_id` (first occurrence wins), then assign
+    /// `seq = 1..`.
+    ///
+    /// Monotonicity law (TB-9 durability): sequences are a pure function
+    /// of the append order of an append-only log. Facts appended later —
+    /// including INGESTED facts with BACKDATED `recorded_at` — always
+    /// receive higher sequences than anything already delivered, so
+    /// previously delivered `(seq, event_id)` pairs are never renumbered
+    /// and `after_seq` cursors never miss an event. Timestamps are
+    /// display/provenance fields, never ordering authority.
     pub(crate) fn derive(facts: Vec<TaskEvent>) -> Vec<TaskEvent> {
-        let mut facts = facts;
-        facts.sort_by(|a, b| {
-            (a.recorded_at.as_str(), a.event_id.as_str())
-                .cmp(&(b.recorded_at.as_str(), b.event_id.as_str()))
-        });
-        facts.dedup_by(|a, b| a.event_id == b.event_id);
+        let mut seen = std::collections::BTreeSet::new();
         facts
             .into_iter()
+            .filter(|event| seen.insert(event.event_id.clone()))
             .enumerate()
             .map(|(index, mut event)| {
                 event.seq = (index + 1) as u64;
@@ -255,15 +271,48 @@ mod tests {
     }
 
     #[test]
-    fn derivation_assigns_monotonic_gapless_seq() {
-        // Deliberately unordered input.
+    fn derivation_assigns_monotonic_gapless_seq_in_append_order() {
+        // Deliberately time-unordered input: append order rules, timestamps
+        // do not.
         let derived = TaskEvent::derive(vec![
             event("c", "2026-08-25T03:00:00Z"),
             event("a", "2026-08-25T01:00:00Z"),
             event("b", "2026-08-25T02:00:00Z"),
         ]);
+        let ids: Vec<&str> = derived.iter().map(|e| e.event_id.as_str()).collect();
+        assert_eq!(ids, vec!["c", "a", "b"], "append order is the seq order");
         let seqs: Vec<u64> = derived.iter().map(|e| e.seq).collect();
         assert_eq!(seqs, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn backdated_appended_facts_get_new_sequences_never_renumbering() {
+        // TB-9 durability: a later-appended, back-DATED fact must not
+        // renumber already-delivered events.
+        let first = TaskEvent::derive(vec![
+            event("a", "2026-08-25T01:00:00Z"),
+            event("b", "2026-08-25T02:00:00Z"),
+        ]);
+        assert_eq!(
+            first
+                .iter()
+                .map(|e| (e.seq, e.event_id.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(1, "a"), (2, "b")]
+        );
+        let grown = TaskEvent::derive(vec![
+            event("a", "2026-08-25T01:00:00Z"),
+            event("b", "2026-08-25T02:00:00Z"),
+            event("late-but-backdated", "2026-08-24T00:00:00Z"),
+        ]);
+        assert_eq!(
+            grown
+                .iter()
+                .map(|e| (e.seq, e.event_id.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(1, "a"), (2, "b"), (3, "late-but-backdated")],
+            "the backdated append takes the NEXT seq; prior seqs stable"
+        );
     }
 
     #[test]

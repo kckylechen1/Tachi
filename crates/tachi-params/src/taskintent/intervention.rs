@@ -264,9 +264,26 @@ pub enum InterventionError {
     /// rule 3, applied to interventions per rule 6).
     #[error("request id conflict: {0}")]
     RequestIdConflict(#[source] super::idempotency::RequestConflict),
-    /// The task does not exist.
+    /// The task does not exist, or the requester does not own it (both map
+    /// to this refusal — existence is not leaked to non-owners).
     #[error("task not found")]
     NotFound,
+    /// The requester is not admitted by the authority source.
+    #[error("requester not admitted")]
+    RequesterNotAdmitted,
+    /// An intervention text matched a TB-4 forbidden category.
+    #[error("intervention rejected: {category} in field `{field}`")]
+    ForbiddenContent {
+        /// The matched category.
+        category: super::admission::ForbiddenCategory,
+        /// The offending field.
+        field: &'static str,
+    },
+    /// The request tuple is bound but its receipt has not materialized
+    /// (ambiguous in-flight window — the parallel of submit's
+    /// `ReconciliationUnknown`).
+    #[error("intervention pending reconciliation")]
+    ReconciliationUnknown,
     /// The lifecycle owner disappeared while the request was in flight;
     /// nothing was mutated (the stop path records disappearance as a fact
     /// instead — TB-12).

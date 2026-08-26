@@ -154,7 +154,9 @@ pub fn scan_text(field: &'static str, value: &BoundedText) -> Result<(), Admissi
         return Err(reject(ForbiddenCategory::WorktreePath, field));
     }
     for marker in WORKTREE_MARKERS {
-        if lower.contains(marker) {
+        // The text is matched lowercased, so the marker must be too
+        // (`/Users/` would never match otherwise).
+        if lower.contains(&marker.to_ascii_lowercase()) {
             return Err(reject(ForbiddenCategory::WorktreePath, field));
         }
     }
@@ -174,6 +176,15 @@ pub fn scan_text(field: &'static str, value: &BoundedText) -> Result<(), Admissi
 
 fn reject(category: ForbiddenCategory, field: &'static str) -> AdmissionRejection {
     AdmissionRejection::ForbiddenContent { category, field }
+}
+
+/// Scan one intervention text (TB-4 extends to every text-bearing value on
+/// the bridge surface, including intervention notes/prompts/reasons).
+pub fn scan_intervention_text(
+    field: &'static str,
+    value: &BoundedText,
+) -> Result<(), AdmissionRejection> {
+    scan_text(field, value)
 }
 
 /// Scan EVERY text-bearing value of an intent (TB-4 check: "over every

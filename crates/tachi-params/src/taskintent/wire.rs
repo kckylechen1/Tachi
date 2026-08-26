@@ -116,6 +116,7 @@ pub enum Capability {
 
 /// The capability an intent requests (TB-5). One capability per intent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CapabilityRequest {
     /// The requested capability (closed enum, TB-5/A option (a)).
     pub capability: Capability,
@@ -123,6 +124,7 @@ pub struct CapabilityRequest {
 
 /// Where a task's source material lives (TB-3 `source_refs`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SourceRef {
     /// Kind of source (closed set).
     pub kind: SourceKind,
@@ -147,6 +149,7 @@ pub enum SourceKind {
 
 /// A semantic constraint on the work (TB-3 `constraints`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TaskConstraint {
     /// Human-readable constraint statement. Content-scanned (TB-4).
     pub description: BoundedText,
@@ -156,6 +159,7 @@ pub struct TaskConstraint {
 /// the TB-13 "success without required artifact is not contract success"
 /// check).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ArtifactExpectation {
     /// Closed artifact class, e.g. `report`, `diff`, `verification_log`.
     /// Deliberately not a path: naming an output path would be execution
@@ -182,6 +186,7 @@ pub enum ArtifactClass {
 /// Evaluation independence requirement (TB-3 `evaluation_requirement`;
 /// classes frozen by TB-17).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EvaluationRequirement {
     /// Required independence class for the evaluation of this task's result.
     pub independence: IndependenceClass,
@@ -213,6 +218,7 @@ pub enum IndependenceClass {
 /// caller-selected worktree path as execution authority is forbidden wire
 /// content (TB-4) and is not representable here.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkspaceSourceRef {
     /// Repository identity (e.g. `owner/name`). Bounded, content-scanned.
     pub repo: BoundedText,
@@ -265,6 +271,7 @@ pub enum PrivacyClass {
 /// The frozen host semantic wire (TB-3). Exactly the fields below; see the
 /// module docs for the freeze list and the golden test that pins it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TaskIntentV1 {
     /// Schema version tag (`task-intent.v1`).
     pub schema: String,

@@ -152,11 +152,13 @@ pub trait LifecycleOwnerPort: Send + Sync {
     /// Forward a stop request.
     fn request_stop(&self, task_ref: &TaskRef, mode: StopMode, reason: &str) -> OwnerForwardResult;
 
-    /// Forward a non-stop intervention.
+    /// Forward a non-stop intervention. The FULL typed intervention
+    /// travels — notes, prompts, and independence classes are the payload
+    /// the owner acts on, not just the operation discriminant.
     fn forward_intervention(
         &self,
         task_ref: &TaskRef,
-        operation: InterventionV1Static,
+        intervention: &InterventionV1,
     ) -> OwnerForwardResult;
 }
 
@@ -233,6 +235,13 @@ pub struct TaskIntentBridge {
     plans: Arc<dyn PlanAdmissionPort>,
     owners: Arc<dyn LifecycleOwnerPort>,
     clock: Arc<dyn BridgeClock>,
+    /// Serializes this bridge instance's mutating operations (submit /
+    /// intervene / request_stop) so concurrent duplicate requests
+    /// linearize: the second duplicate finds the first one's binding and
+    /// replays instead of double-executing (TB-7). Shared across clones;
+    /// cross-instance concurrency collapses at the binding store's atomic
+    /// `bind` (the [`RequestBindingStore`] contract).
+    op_lock: Arc<std::sync::Mutex<()>>,
 }
 
 impl TaskIntentBridge {
@@ -252,6 +261,7 @@ impl TaskIntentBridge {
             plans,
             owners,
             clock,
+            op_lock: Arc::new(std::sync::Mutex::new(())),
         }
     }
 
@@ -299,6 +309,10 @@ impl TaskIntentBridge {
             return SubmitReceipt::Rejected(rejection);
         }
 
+        // Mutation region: linearized per-instance by the op lock, and
+        // cross-instance by the binding store's atomic bind.
+        let _guard = self.op_lock.lock().expect("bridge op lock poisoned");
+
         // TB-7 tuple law, checked before any mutation.
         if let Some(binding) = self
             .bindings
@@ -312,16 +326,7 @@ impl TaskIntentBridge {
             }
             return match binding.bound {
                 // Rule 2: same digest ⇒ same TaskRef, never a second worker.
-                BoundRef::Task(task_ref) => match self.facts.facts(&task_ref) {
-                    Err(_) => SubmitReceipt::Unavailable,
-                    Ok(facts) if facts.is_empty() => {
-                        SubmitReceipt::ReconciliationUnknown { digest }
-                    }
-                    Ok(_) => SubmitReceipt::Admitted {
-                        task_ref,
-                        replayed: true,
-                    },
-                },
+                BoundRef::Task(task_ref) => self.replay_task(&task_ref, intent),
                 // Same tuple bound to a non-submit operation with a matching
                 // digest: still a cross-operation conflict.
                 _ => SubmitReceipt::RequestIdConflict {
@@ -348,17 +353,37 @@ impl TaskIntentBridge {
 
         // Bind FIRST, then materialize: the window between them is exactly
         // the TB-7 rule-4 ambiguity a replay reconciles (never a second
-        // spawn: the lookup above short-circuits before minting).
-        if let Err(conflict) = self.bindings.bind(
+        // spawn: the lookup above and the bind's same-digest-return below
+        // both short-circuit before a second mint can take effect).
+        match self.bindings.bind(
             &intent.requester,
             &request_id.to_string(),
             &digest,
             BoundRef::Task(task_ref.clone()),
         ) {
-            return SubmitReceipt::RequestIdConflict {
-                bound_digest: conflict.bound_digest().to_string(),
-                submitted_digest: digest,
-            };
+            Ok(returned) => {
+                // Lost the race against a concurrent duplicate? The store
+                // returns the WINNER's binding — reconcile onto it, never
+                // materialize a second task.
+                match returned.bound {
+                    BoundRef::Task(bound_task) if bound_task != task_ref => {
+                        return self.replay_task(&bound_task, intent);
+                    }
+                    BoundRef::Task(_) => {}
+                    _ => {
+                        return SubmitReceipt::RequestIdConflict {
+                            bound_digest: returned.digest,
+                            submitted_digest: digest,
+                        }
+                    }
+                }
+            }
+            Err(conflict) => {
+                return SubmitReceipt::RequestIdConflict {
+                    bound_digest: conflict.bound_digest().to_string(),
+                    submitted_digest: digest,
+                }
+            }
         }
 
         let contract = contract_projection(intent);
@@ -370,6 +395,7 @@ impl TaskIntentBridge {
             VisibilityClass::Internal,
             TaskEventPayload::TaskSubmitted {
                 intent_digest: digest.clone(),
+                requester: intent.requester.to_string(),
                 contract: contract.clone(),
             },
         );
@@ -384,11 +410,71 @@ impl TaskIntentBridge {
             TaskEventPayload::PlanAdmitted { plan },
         );
         if self.facts.append(&task_ref, admitted).is_err() {
+            // TaskSubmitted landed, PlanAdmitted did not: the replay path
+            // self-heals the plan (see `replay_task`). This call cannot
+            // claim success it did not observe.
             return SubmitReceipt::ReconciliationUnknown { digest };
         }
         SubmitReceipt::Admitted {
             task_ref,
             replayed: false,
+        }
+    }
+
+    /// Replay/reconcile a bound submit onto its task (TB-7 rules 2 and 4).
+    /// `Admitted` requires the `TaskSubmitted` fact to have MATERIALIZED —
+    /// a non-empty log alone is not admission. A missing `PlanAdmitted`
+    /// fact is self-healed by re-running plan admission (TB-2 allows
+    /// re-targeting; the task identity never changes).
+    fn replay_task(&self, task_ref: &TaskRef, intent: &TaskIntentV1) -> SubmitReceipt {
+        let facts = match self.facts.facts(task_ref) {
+            Err(_) => return SubmitReceipt::Unavailable,
+            Ok(facts) => facts,
+        };
+        let materialized = facts
+            .iter()
+            .any(|f| matches!(f.payload, TaskEventPayload::TaskSubmitted { .. }));
+        if !materialized {
+            return SubmitReceipt::ReconciliationUnknown {
+                digest: intent.canonical_digest(),
+            };
+        }
+        let has_plan = facts
+            .iter()
+            .any(|f| matches!(f.payload, TaskEventPayload::PlanAdmitted { .. }));
+        if !has_plan {
+            match self
+                .plans
+                .admit_plan(task_ref, intent.routing_preference.as_ref())
+            {
+                Ok(plan) => {
+                    let now = self.clock.now_utc_iso();
+                    let event = self.fact(
+                        EventSource::BridgeAdmission,
+                        format!("evt-{}", uuid::Uuid::new_v4().simple()),
+                        &now,
+                        VisibilityClass::Internal,
+                        TaskEventPayload::PlanAdmitted { plan },
+                    );
+                    if self.facts.append(task_ref, event).is_err() {
+                        return SubmitReceipt::ReconciliationUnknown {
+                            digest: intent.canonical_digest(),
+                        };
+                    }
+                }
+                Err(PlanAdmissionError::Unavailable) => {
+                    return SubmitReceipt::ReconciliationUnknown {
+                        digest: intent.canonical_digest(),
+                    }
+                }
+                // The task exists; with no admissible plan the snapshot
+                // honestly shows no plan. Admission stands.
+                Err(PlanAdmissionError::NoAdmittedPlan) => {}
+            }
+        }
+        SubmitReceipt::Admitted {
+            task_ref: task_ref.clone(),
+            replayed: true,
         }
     }
 
@@ -415,12 +501,13 @@ impl TaskIntentBridge {
             return Err(GetError::NotFound);
         }
         let limit = limit.max(1);
+        let total_missed = events.iter().filter(|event| event.seq > after_seq).count();
         let missed: Vec<TaskEvent> = events
             .into_iter()
             .filter(|event| event.seq > after_seq)
             .take(limit)
             .collect();
-        let has_more = missed.len() == limit;
+        let has_more = total_missed > missed.len();
         Ok(TaskEventPage {
             task_ref: task_ref.clone(),
             events: missed,
@@ -474,8 +561,22 @@ impl TaskIntentBridge {
             return Ok(InterventionReceipt::Stop(receipt));
         }
 
+        // Requester admission (same authority surface as submit) and
+        // requester-owns-task: a requester may only intervene on the task
+        // it submitted. Both refusals collapse to NotFound so existence is
+        // not leaked to non-owners.
+        let authority = match self.authority.resolve(requester) {
+            Err(RequesterAuthorityError::Unavailable) => {
+                return Err(InterventionError::Unavailable)
+            }
+            Err(RequesterAuthorityError::NotAdmitted) => {
+                return Err(InterventionError::RequesterNotAdmitted)
+            }
+            Ok(authority) => authority,
+        };
+        let _ = authority; // capability scope is submit-time; interventions need admission only.
         let events = self.derived_events(task_ref)?;
-        if events.is_empty() {
+        if events.is_empty() || !requester_owns(&events, requester) {
             return Err(InterventionError::NotFound);
         }
         let snapshot = self.snapshot_from(task_ref, &events);
@@ -492,52 +593,74 @@ impl TaskIntentBridge {
                 });
             }
         }
-        // TB-7 rule 6 tuple law.
+        // TB-4: intervention texts are content on the bridge surface and
+        // are scanned like every other text-bearing value.
+        if let Err(rejection) = scan_intervention_texts(intervention) {
+            let AdmissionRejection::ForbiddenContent { category, field } = rejection else {
+                return Err(InterventionError::Unavailable);
+            };
+            return Err(InterventionError::ForbiddenContent { category, field });
+        }
+
+        let _guard = self.op_lock.lock().expect("bridge op lock poisoned");
+
+        // TB-7 rule 6 tuple law: bind FIRST (atomic reserve), forward
+        // SECOND — a concurrent duplicate collapses at the bind and can
+        // never double-forward.
         let digest = composite_digest(&serde_json::json!({
             "task": task_ref.as_wire(),
             "intervention": intervention.canonical_digest(),
         }));
-        if let Some(binding) = self.bindings.lookup(requester, &request_id.to_string()) {
-            let conflict = || {
-                InterventionError::RequestIdConflict(RequestConflict::RequestIdConflict {
-                    bound_digest: binding.digest.clone(),
-                    submitted_digest: digest.clone(),
-                })
-            };
-            if binding.digest != digest {
-                return Err(conflict());
-            }
-            if let BoundRef::Intervention {
-                task,
-                intervention_id,
-            } = binding.bound
-            {
-                if task == *task_ref {
-                    return Ok(replay_receipt(op, intervention_id));
+        let intervention_id = format!("iv:{}", uuid::Uuid::new_v4().simple());
+        let bound_id = match self.bindings.bind(
+            requester,
+            &request_id.to_string(),
+            &digest,
+            BoundRef::Intervention {
+                task: task_ref.clone(),
+                intervention_id: intervention_id.clone(),
+            },
+        ) {
+            Ok(returned) => match returned.bound {
+                BoundRef::Intervention {
+                    task,
+                    intervention_id: bound,
+                } if task == *task_ref => bound,
+                // Cross-operation or cross-task use of the same tuple.
+                _ => {
+                    return Err(InterventionError::RequestIdConflict(
+                        RequestConflict::RequestIdConflict {
+                            bound_digest: returned.digest,
+                            submitted_digest: digest,
+                        },
+                    ))
                 }
+            },
+            Err(conflict) => return Err(InterventionError::RequestIdConflict(conflict)),
+        };
+        // Replayed tuple already materialized? Return the one receipt.
+        if let Ok(events_now) = self.derived_events(task_ref) {
+            let materialized = events_now.iter().any(|e| match &e.payload {
+                TaskEventPayload::InterventionForwarded {
+                    intervention_id, ..
+                } => intervention_id == &bound_id,
+                _ => false,
+            });
+            if materialized {
+                return Ok(replay_receipt(op, bound_id));
             }
-            return Err(conflict());
         }
-        // Forward to the lifecycle owner (tachi#1678 typed request).
-        match self.owners.forward_intervention(task_ref, op) {
+        // Forward the FULL typed intervention to the lifecycle owner
+        // (tachi#1678 request path); the payload travels, not just the op.
+        match self.owners.forward_intervention(task_ref, intervention) {
             OwnerForwardResult::Unsupported => {
                 // The advertisement and the owner can disagree; the owner is
-                // authority: typed refusal, zero mutation.
+                // authority: typed refusal. The binding remains so a replay
+                // of the same tuple re-attempts (and is refused again)
+                // rather than silently binding to nothing.
                 Err(InterventionError::UnsupportedByLifecycleOwner { operation: op })
             }
             OwnerForwardResult::Forwarded => {
-                let intervention_id = format!("iv:{}", uuid::Uuid::new_v4().simple());
-                if let Err(conflict) = self.bindings.bind(
-                    requester,
-                    &request_id.to_string(),
-                    &digest,
-                    BoundRef::Intervention {
-                        task: task_ref.clone(),
-                        intervention_id: intervention_id.clone(),
-                    },
-                ) {
-                    return Err(InterventionError::RequestIdConflict(conflict));
-                }
                 let now = self.clock.now_utc_iso();
                 let event = self.fact(
                     EventSource::LifecycleOwner {
@@ -548,13 +671,17 @@ impl TaskIntentBridge {
                     VisibilityClass::Internal,
                     TaskEventPayload::InterventionForwarded {
                         operation: op_token(op).to_string(),
-                        intervention_id: intervention_id.clone(),
+                        intervention_id: bound_id.clone(),
                     },
                 );
                 if self.facts.append(task_ref, event).is_err() {
-                    return Err(InterventionError::Unavailable);
+                    // Bound but not materialized: the parallel of submit's
+                    // ambiguous window. The next same-tuple call re-attempts
+                    // the forward (owner-side dedup is the production
+                    // carrier's concern).
+                    return Err(InterventionError::ReconciliationUnknown);
                 }
-                Ok(replay_receipt(op, intervention_id))
+                Ok(replay_receipt(op, bound_id))
             }
             OwnerForwardResult::Disappeared => Err(InterventionError::OwnerDisappeared),
         }
@@ -597,8 +724,19 @@ impl TaskIntentBridge {
         expected_task_revision: Option<u64>,
         op: InterventionV1Static,
     ) -> Result<StopReceipt, InterventionError> {
+        // Requester admission + requester-owns-task (collapsed to NotFound
+        // so existence is not leaked).
+        match self.authority.resolve(requester) {
+            Err(RequesterAuthorityError::Unavailable) => {
+                return Err(InterventionError::Unavailable)
+            }
+            Err(RequesterAuthorityError::NotAdmitted) => {
+                return Err(InterventionError::RequesterNotAdmitted)
+            }
+            Ok(_) => {}
+        }
         let events = self.derived_events(task_ref)?;
-        if events.is_empty() {
+        if events.is_empty() || !requester_owns(&events, requester) {
             return Err(InterventionError::NotFound);
         }
         let snapshot = self.snapshot_from(task_ref, &events);
@@ -613,40 +751,79 @@ impl TaskIntentBridge {
                 });
             }
         }
-        // The stop identity digest is {task, mode} ONLY: the stop-alias
+        // TB-4: the stop reason is scanned like every text-bearing value.
+        if let Err(rejection) = super::admission::scan_intervention_text(
+            "stop.reason",
+            &super::wire::BoundedText::new(reason).map_err(|_| InterventionError::Unavailable)?,
+        ) {
+            let AdmissionRejection::ForbiddenContent { category, field } = rejection else {
+                return Err(InterventionError::Unavailable);
+            };
+            return Err(InterventionError::ForbiddenContent { category, field });
+        }
+
+        let _guard = self.op_lock.lock().expect("bridge op lock poisoned");
+
+        // Stop identity digest = {task, mode} ONLY: the stop-alias
         // interventions (TB-11) and `request_stop` must share ONE
         // idempotency binding for the same stop operation regardless of
-        // entry point; a reason is recorded on the fact, not part of the
-        // request identity.
+        // entry point; the reason rides the fact, not the identity (the
+        // frozen `request_stop` signature has no reason parameter).
         let digest = composite_digest(&serde_json::json!({
             "task": task_ref.as_wire(),
             "mode": mode.as_str(),
         }));
-        if let Some(binding) = self.bindings.lookup(requester, &request_id.to_string()) {
-            if binding.digest != digest {
-                return Err(InterventionError::RequestIdConflict(
-                    RequestConflict::RequestIdConflict {
-                        bound_digest: binding.digest,
-                        submitted_digest: digest,
-                    },
-                ));
-            }
-            if let BoundRef::Stop { task, stop_id } = binding.bound {
-                if task == *task_ref {
-                    return Ok(current_stop_receipt(
-                        &events,
-                        task_ref,
-                        &stop_id,
-                        mode,
-                        &request_id.to_string(),
-                    ));
+        // Bind FIRST (atomic reserve), forward SECOND — concurrent
+        // duplicates collapse at the bind; only the winner forwards.
+        let stop_id = format!("stop:{}", uuid::Uuid::new_v4().simple());
+        let (bound_id, was_fresh) = match self.bindings.bind(
+            requester,
+            &request_id.to_string(),
+            &digest,
+            BoundRef::Stop {
+                task: task_ref.clone(),
+                stop_id: stop_id.clone(),
+            },
+        ) {
+            Ok(returned) => match returned.bound {
+                BoundRef::Stop {
+                    task,
+                    stop_id: bound,
+                } => {
+                    // Fresh bind returns OUR mint; a same-digest replay
+                    // returns the winner's binding instead.
+                    let fresh = bound == stop_id;
+                    if task != *task_ref {
+                        return Err(InterventionError::RequestIdConflict(
+                            RequestConflict::RequestIdConflict {
+                                bound_digest: returned.digest,
+                                submitted_digest: digest,
+                            },
+                        ));
+                    }
+                    (bound, fresh)
                 }
-            }
-            return Err(InterventionError::RequestIdConflict(
-                RequestConflict::RequestIdConflict {
-                    bound_digest: binding.digest,
-                    submitted_digest: digest,
-                },
+                _ => {
+                    return Err(InterventionError::RequestIdConflict(
+                        RequestConflict::RequestIdConflict {
+                            bound_digest: returned.digest,
+                            submitted_digest: digest,
+                        },
+                    ))
+                }
+            },
+            Err(conflict) => return Err(InterventionError::RequestIdConflict(conflict)),
+        };
+        // A replayed tuple that already materialized reports its CURRENT
+        // stage and is NOT re-forwarded (a stop re-forwarded on replay
+        // could duplicate the owner side effect).
+        if !was_fresh {
+            return Ok(current_stop_receipt(
+                &events,
+                task_ref,
+                &bound_id,
+                mode,
+                &request_id.to_string(),
             ));
         }
 
@@ -655,18 +832,6 @@ impl TaskIntentBridge {
                 Err(InterventionError::UnsupportedByLifecycleOwner { operation: op })
             }
             forward => {
-                let stop_id = format!("stop:{}", uuid::Uuid::new_v4().simple());
-                if let Err(conflict) = self.bindings.bind(
-                    requester,
-                    &request_id.to_string(),
-                    &digest,
-                    BoundRef::Stop {
-                        task: task_ref.clone(),
-                        stop_id: stop_id.clone(),
-                    },
-                ) {
-                    return Err(InterventionError::RequestIdConflict(conflict));
-                }
                 let stage = match forward {
                     OwnerForwardResult::Forwarded => StopStage::Forwarded,
                     // TB-12: disappearance after possible side effects is
@@ -685,12 +850,13 @@ impl TaskIntentBridge {
                     &now,
                     VisibilityClass::Internal,
                     TaskEventPayload::StopRequested {
-                        stop_id: stop_id.clone(),
+                        stop_id: bound_id.clone(),
                         mode: mode.as_str().to_string(),
+                        reason: reason.to_string(),
                     },
                 );
                 if self.facts.append(task_ref, requested).is_err() {
-                    return Err(InterventionError::Unavailable);
+                    return Err(InterventionError::ReconciliationUnknown);
                 }
                 if forward == OwnerForwardResult::Disappeared {
                     let event = self.fact(
@@ -708,7 +874,7 @@ impl TaskIntentBridge {
                 }
                 Ok(StopReceipt {
                     task_ref: task_ref.clone(),
-                    stop_id,
+                    stop_id: bound_id,
                     mode,
                     stage,
                     request_id: request_id.to_string(),
@@ -832,6 +998,7 @@ impl TaskIntentBridge {
             .find_map(|e| match &e.payload {
                 TaskEventPayload::TaskSubmitted {
                     intent_digest,
+                    requester: _,
                     contract,
                 } => Some((Some(contract.clone()), intent_digest.clone())),
                 _ => None,
@@ -906,6 +1073,35 @@ impl From<GetError> for InterventionError {
     }
 }
 
+/// Requester-owns-task: the task's `TaskSubmitted` fact names this
+/// requester. Non-owners get the same NotFound as strangers (existence is
+/// not leaked).
+fn requester_owns(events: &[TaskEvent], requester: &RequesterRef) -> bool {
+    let owner = requester.to_string();
+    events.iter().any(|e| match &e.payload {
+        TaskEventPayload::TaskSubmitted { requester, .. } => *requester == owner,
+        _ => false,
+    })
+}
+
+/// TB-4 scan over every text-bearing intervention field.
+fn scan_intervention_texts(
+    intervention: &InterventionV1,
+) -> Result<(), super::admission::AdmissionRejection> {
+    use super::admission::scan_intervention_text as scan;
+    match intervention {
+        InterventionV1::ProvideAdditionalContext { note } => scan("intervention.note", note),
+        InterventionV1::RequestCorrection { note } => scan("intervention.note", note),
+        InterventionV1::RequestContinuation { note } => scan("intervention.note", note),
+        InterventionV1::RequestIndependentReview { .. } => Ok(()),
+        InterventionV1::RequestUserInput { prompt } => scan("intervention.prompt", prompt),
+        InterventionV1::RequestPause | InterventionV1::RequestResume => Ok(()),
+        InterventionV1::RequestGracefulStop { reason }
+        | InterventionV1::RequestHardCancel { reason } => scan("intervention.reason", reason),
+        InterventionV1::Escalate { reason } => scan("intervention.reason", reason),
+    }
+}
+
 fn op_token(op: InterventionV1Static) -> &'static str {
     match op {
         InterventionV1Static::ProvideAdditionalContext => "provide_context",
@@ -961,7 +1157,12 @@ fn current_stop_receipt(
     let mut stage = StopStage::Forwarded;
     for event in events {
         match &event.payload {
-            TaskEventPayload::OwnerConfirmedTerminal { .. } => stage = StopStage::Confirmed,
+            // ONLY an owner-confirmed CANCELLATION confirms the stop — a
+            // confirmed "completed" (the work finished on its own) is not
+            // a stop confirmation (TB-12).
+            TaskEventPayload::OwnerConfirmedTerminal { terminal } if terminal == "cancelled" => {
+                stage = StopStage::Confirmed;
+            }
             TaskEventPayload::OwnerDisappeared => stage = StopStage::OutcomeUnknown,
             _ => {}
         }

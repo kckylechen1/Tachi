@@ -151,7 +151,7 @@ mod tests {
         fn forward_intervention(
             &self,
             _task_ref: &TaskRef,
-            _operation: crate::taskintent::InterventionV1Static,
+            _intervention: &crate::taskintent::InterventionV1,
         ) -> crate::taskintent::bridge::OwnerForwardResult {
             crate::taskintent::bridge::OwnerForwardResult::Forwarded
         }
