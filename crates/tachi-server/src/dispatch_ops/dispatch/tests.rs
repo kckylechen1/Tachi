@@ -1493,8 +1493,34 @@ fn required_postflight_workspace_uses_the_resolved_lease_or_fails_closed() {
         std::path::PathBuf::from("/leased/workspace")
     );
 
+    let unmanaged = crate::exec_env_ops::EnvResolution::Unmanaged {
+        cwd: "/unmanaged/workspace".to_string(),
+    };
+    let error = required_postflight_workspace(&unmanaged)
+        .expect_err("required postflight needs a fenceable managed lease");
+    assert!(error.contains("requires a managed env_id"), "{error}");
+
     let default = crate::exec_env_ops::EnvResolution::Default;
     let error = required_postflight_workspace(&default)
         .expect_err("a required gate must not disappear when default cwd is absent");
-    assert!(error.contains("no resolved lease workspace"), "{error}");
+    assert!(error.contains("requires a managed env_id"), "{error}");
+}
+
+#[test]
+fn postflight_handoff_has_no_pid_reconstruction_or_signal_capability() {
+    let execution_source = include_str!("execution.rs");
+    for forbidden in [
+        "child_pid_for_postflight",
+        "ProcessGroupLiveness::for_worker_pid",
+        "terminate_process_group(",
+    ] {
+        assert!(
+            !execution_source.contains(forbidden),
+            "postflight execution must consume typed runner evidence, not `{forbidden}`"
+        );
+    }
+    assert!(
+        execution_source.contains("gate.run(&runner_liveness)"),
+        "the production postflight handoff must consume typed runner liveness"
+    );
 }

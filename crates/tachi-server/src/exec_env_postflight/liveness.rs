@@ -27,6 +27,58 @@ pub trait DescendantLiveness: Send + Sync {
     fn describe(&self) -> String;
 }
 
+/// Terminal liveness evidence produced by the runner that owned the worker.
+///
+/// This type deliberately carries no PID. Once a runner has reaped its group
+/// leader, the numeric PID/PGID may be reused and no downstream postflight
+/// code may reconstruct ownership or signal through that number.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RunnerLivenessEvidence {
+    /// The runner failed or was cancelled before spawning a worker.
+    NoWorkerSpawned,
+    /// The runner terminated and reaped the worker tree, then proved the
+    /// process group absent while it still owned the lifecycle transition.
+    ConfirmedReaped { proof: &'static str },
+    /// The runner could not prove terminal descendant state. Postflight must
+    /// fail closed before scanning the workspace or releasing artifacts.
+    Indeterminate { detail: String },
+}
+
+impl RunnerLivenessEvidence {
+    pub(crate) fn confirmed_reaped() -> Self {
+        Self::ConfirmedReaped {
+            proof: "runner_owned_process_group_absent",
+        }
+    }
+
+    pub(crate) fn indeterminate(detail: impl Into<String>) -> Self {
+        Self::Indeterminate {
+            detail: detail.into(),
+        }
+    }
+}
+
+impl DescendantLiveness for RunnerLivenessEvidence {
+    fn any_alive(&self) -> Result<bool, String> {
+        match self {
+            Self::NoWorkerSpawned | Self::ConfirmedReaped { .. } => Ok(false),
+            Self::Indeterminate { detail } => Err(format!(
+                "runner could not establish terminal descendant liveness: {detail}"
+            )),
+        }
+    }
+
+    fn describe(&self) -> String {
+        match self {
+            Self::NoWorkerSpawned => "no worker spawned".to_string(),
+            Self::ConfirmedReaped { proof } => format!("worker tree reaped ({proof})"),
+            Self::Indeterminate { detail } => {
+                format!("indeterminate runner liveness ({detail})")
+            }
+        }
+    }
+}
+
 /// Liveness of the worker's process group.
 #[derive(Debug, Clone, Copy)]
 pub struct ProcessGroupLiveness {

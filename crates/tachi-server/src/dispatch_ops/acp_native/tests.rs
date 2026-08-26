@@ -164,8 +164,7 @@ printf '%s\n' '{"jsonrpc":"2.0","id":"tachi-acp-3","result":{"content":[{"type":
 
 #[cfg(unix)]
 #[tokio::test]
-async fn native_acp_timeout_retains_child_identity_for_postflight_liveness() {
-    use crate::exec_env_postflight::DescendantLiveness;
+async fn native_acp_timeout_returns_runner_owned_terminal_liveness() {
     use std::collections::HashMap;
     use std::os::unix::fs::PermissionsExt;
     use std::time::Duration;
@@ -201,20 +200,19 @@ async fn native_acp_timeout_retains_child_identity_for_postflight_liveness() {
     )
     .await;
 
-    let child_pid = outcome
-        .child_pid
-        .expect("native timeout must retain the spawned child pid");
+    assert!(matches!(
+        &outcome.liveness,
+        crate::exec_env_postflight::RunnerLivenessEvidence::ConfirmedReaped { .. }
+    ));
     let error = match outcome.result {
         Ok(_) => panic!("slow native adapter must time out"),
         Err(error) => error,
     };
     assert!(error.contains("timed out"), "{error}");
-    let probe = crate::exec_env_postflight::ProcessGroupLiveness::for_worker_pid(child_pid);
     assert!(
-        !probe
-            .any_alive()
-            .expect("probe native timeout process group"),
-        "native timeout must reap the process group before returning"
+        !crate::exec_env_postflight::DescendantLiveness::any_alive(&outcome.liveness)
+            .expect("typed native timeout terminal evidence"),
+        "native timeout must return runner-owned terminal evidence without a PID handoff"
     );
 }
 

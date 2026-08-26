@@ -59,7 +59,7 @@ async fn run_native_acp_dispatch_inner(
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true);
+        .kill_on_drop(false);
     crate::dispatch_ops::subprocess::configure_process_group(&mut cmd);
     for (name, value) in &spec.env {
         cmd.env(name, value);
@@ -70,18 +70,33 @@ async fn run_native_acp_dispatch_inner(
         Err(error) => {
             return DispatchRunOutcome::failure(
                 format!("Failed to spawn native ACP adapter: {error}"),
-                None,
+                crate::exec_env_postflight::RunnerLivenessEvidence::NoWorkerSpawned,
             )
         }
     };
     let child_pid = child.id();
+    #[cfg(unix)]
+    let mut process_group =
+        crate::dispatch_ops::subprocess::ManagedProcessGroupGuard::arm(child_pid);
     let stdin = child
         .stdin
         .take()
         .ok_or_else(|| "Native ACP adapter stdin was not piped".to_string());
     let stdin = match stdin {
         Ok(stdin) => stdin,
-        Err(error) => return DispatchRunOutcome::failure(error, child_pid),
+        Err(error) => {
+            #[cfg(unix)]
+            let (_, liveness) = crate::dispatch_ops::subprocess::terminate_reap_and_prove(
+                &mut child,
+                &mut process_group,
+            )
+            .await;
+            #[cfg(not(unix))]
+            let liveness = crate::exec_env_postflight::RunnerLivenessEvidence::indeterminate(
+                "native ACP process-group terminal proof is unavailable on this platform",
+            );
+            return DispatchRunOutcome::failure(error, liveness);
+        }
     };
     let stdout = child
         .stdout
@@ -89,7 +104,19 @@ async fn run_native_acp_dispatch_inner(
         .ok_or_else(|| "Native ACP adapter stdout was not piped".to_string());
     let stdout = match stdout {
         Ok(stdout) => stdout,
-        Err(error) => return DispatchRunOutcome::failure(error, child_pid),
+        Err(error) => {
+            #[cfg(unix)]
+            let (_, liveness) = crate::dispatch_ops::subprocess::terminate_reap_and_prove(
+                &mut child,
+                &mut process_group,
+            )
+            .await;
+            #[cfg(not(unix))]
+            let liveness = crate::exec_env_postflight::RunnerLivenessEvidence::indeterminate(
+                "native ACP process-group terminal proof is unavailable on this platform",
+            );
+            return DispatchRunOutcome::failure(error, liveness);
+        }
     };
     let mut stderr = match child
         .stderr
@@ -97,7 +124,19 @@ async fn run_native_acp_dispatch_inner(
         .ok_or_else(|| "Native ACP adapter stderr was not piped".to_string())
     {
         Ok(stderr) => stderr,
-        Err(error) => return DispatchRunOutcome::failure(error, child_pid),
+        Err(error) => {
+            #[cfg(unix)]
+            let (_, liveness) = crate::dispatch_ops::subprocess::terminate_reap_and_prove(
+                &mut child,
+                &mut process_group,
+            )
+            .await;
+            #[cfg(not(unix))]
+            let liveness = crate::exec_env_postflight::RunnerLivenessEvidence::indeterminate(
+                "native ACP process-group terminal proof is unavailable on this platform",
+            );
+            return DispatchRunOutcome::failure(error, liveness);
+        }
     };
     let stderr_task = tokio::spawn(async move {
         let mut captured = String::new();
@@ -118,7 +157,16 @@ async fn run_native_acp_dispatch_inner(
         Ok(outcome) => outcome,
         Err(_) => {
             let _ = connection.close_stdin().await;
-            crate::dispatch_ops::subprocess::reap_timed_out_child(&mut child, child_pid).await;
+            #[cfg(unix)]
+            let (_, liveness) = crate::dispatch_ops::subprocess::terminate_reap_and_prove(
+                &mut child,
+                &mut process_group,
+            )
+            .await;
+            #[cfg(not(unix))]
+            let liveness = crate::exec_env_postflight::RunnerLivenessEvidence::indeterminate(
+                "native ACP process-group terminal proof is unavailable on this platform",
+            );
             let _ = stderr_task.await;
             append_trajectory_event(
                 trajectory_path,
@@ -136,17 +184,27 @@ async fn run_native_acp_dispatch_inner(
                     "Native ACP dispatch timed out after {}s (process group killed)",
                     timeout.as_secs()
                 ),
-                child_pid,
+                liveness,
             );
         }
     };
     let close_result = connection.close_stdin().await;
     let stream_result = connection.persist_raw_stream(run_dir);
 
-    let graceful_exit = tokio::time::timeout(Duration::from_millis(1500), child.wait()).await;
-    let (process_exit_code, process_exit_error) = match graceful_exit {
-        Ok(Ok(status)) => (status.code(), None),
-        Ok(Err(err)) => {
+    #[cfg(unix)]
+    let root_exit = crate::dispatch_ops::subprocess::wait_for_owned_root_exit(
+        child_pid,
+        Duration::from_millis(1500),
+    )
+    .await;
+    #[cfg(unix)]
+    let (status, liveness) =
+        crate::dispatch_ops::subprocess::terminate_reap_and_prove(&mut child, &mut process_group)
+            .await;
+    #[cfg(unix)]
+    let (process_exit_code, process_exit_error) = match (root_exit, status) {
+        (Ok(true), Ok(status)) => (status.code(), None),
+        (Err(err), _) | (_, Err(err)) => {
             append_trajectory_event(
                 trajectory_path,
                 json!({
@@ -157,11 +215,9 @@ async fn run_native_acp_dispatch_inner(
                     "timestamp": Utc::now().to_rfc3339(),
                 }),
             );
-            crate::dispatch_ops::subprocess::reap_timed_out_child(&mut child, child_pid).await;
             (None, Some(format!("Native ACP adapter wait failed: {err}")))
         }
-        Err(_) => {
-            crate::dispatch_ops::subprocess::reap_timed_out_child(&mut child, child_pid).await;
+        (Ok(false), Ok(_)) => {
             append_trajectory_event(
                 trajectory_path,
                 json!({
@@ -178,10 +234,33 @@ async fn run_native_acp_dispatch_inner(
             )
         }
     };
+    #[cfg(not(unix))]
+    let (process_exit_code, process_exit_error, liveness) = {
+        let graceful_exit = tokio::time::timeout(Duration::from_millis(1500), child.wait()).await;
+        let pair = match graceful_exit {
+            Ok(Ok(status)) => (status.code(), None),
+            Ok(Err(err)) => (None, Some(format!("Native ACP adapter wait failed: {err}"))),
+            Err(_) => {
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                (
+                    None,
+                    Some("Native ACP adapter did not exit after stdin close".to_string()),
+                )
+            }
+        };
+        (
+            pair.0,
+            pair.1,
+            crate::exec_env_postflight::RunnerLivenessEvidence::indeterminate(
+                "native ACP process-group terminal proof is unavailable on this platform",
+            ),
+        )
+    };
     let stderr_output = stderr_task.await.unwrap_or_default();
 
     if let Some(error) = process_exit_error {
-        return DispatchRunOutcome::failure(error, child_pid);
+        return DispatchRunOutcome::failure(error, liveness);
     }
 
     if let Err(err) = close_result {
@@ -222,7 +301,7 @@ async fn run_native_acp_dispatch_inner(
             } else {
                 format!("; adapter stderr: {stderr_tail}")
             };
-            return DispatchRunOutcome::failure(format!("{err}{suffix}"), child_pid);
+            return DispatchRunOutcome::failure(format!("{err}{suffix}"), liveness);
         }
     };
 
@@ -235,7 +314,7 @@ async fn run_native_acp_dispatch_inner(
             &stream_path,
             dispatch_id,
         ) {
-            return DispatchRunOutcome::failure(error, child_pid);
+            return DispatchRunOutcome::failure(error, liveness);
         }
     }
 
@@ -255,10 +334,12 @@ async fn run_native_acp_dispatch_inner(
         }),
     );
 
-    DispatchRunOutcome::success(DispatchResult {
-        output: outcome.output,
-        exit_code: Some(0),
-        observed_model: outcome.observed_model,
-        child_pid,
-    })
+    DispatchRunOutcome::success(
+        DispatchResult {
+            output: outcome.output,
+            exit_code: Some(0),
+            observed_model: outcome.observed_model,
+        },
+        liveness,
+    )
 }

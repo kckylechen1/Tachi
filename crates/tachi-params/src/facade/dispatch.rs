@@ -280,7 +280,8 @@ pub struct TachiDispatchParams {
 
     /// Optional declared file scope for workspace-write lanes (#894 S2e / #1322).
     /// When set under a workspace-write contract, postflight ensures only changes
-    /// within these declared paths are accepted.
+    /// within these declared paths are accepted, and the admitted scope is
+    /// recorded on the dispatch's automatic presence claim.
     #[serde(default)]
     pub declared_file_scope: Option<Vec<String>>,
 }

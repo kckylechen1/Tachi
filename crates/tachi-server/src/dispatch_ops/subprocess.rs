@@ -7,7 +7,6 @@ use tokio::sync::{mpsc, Semaphore};
 
 const DEFAULT_OPENCODE_SOP_MAX_CONCURRENCY: usize = 2;
 const MAX_OPENCODE_SOP_CONCURRENCY: usize = 32;
-const PROCESS_GROUP_TERM_GRACE: Duration = Duration::from_millis(1500);
 
 static OPENCODE_SOP_SEMAPHORE: OnceLock<Semaphore> = OnceLock::new();
 
@@ -346,7 +345,13 @@ pub(super) async fn run_managed_custom_subprocess_outcome(
         let _ = run_dir;
         // A platform without process-group control still runs an ordinary
         // custom LaunchSpec. Only the cancellation control plane is absent.
-        return ManagedSubprocessOutcome::plain(run_agent_subprocess(cmd, timeout).await);
+        let outcome = run_agent_subprocess_with_liveness(cmd, timeout).await;
+        return ManagedSubprocessOutcome {
+            result: outcome.result,
+            liveness: outcome.liveness,
+            cancellation: None,
+            termination_proof: None,
+        };
     }
     #[cfg(unix)]
     {
@@ -406,7 +411,7 @@ pub(super) async fn run_managed_custom_subprocess_outcome(
                             Err(format!("Agent process error: {error}"))
                         }
                     };
-                    return ManagedSubprocessOutcome::plain_with_pid(result, pid);
+                    return ManagedSubprocessOutcome::plain_confirmed(result);
                 }
                 Ok(false) => {}
                 Err(error) => {
@@ -414,10 +419,11 @@ pub(super) async fn run_managed_custom_subprocess_outcome(
                     process_group.prepare_group_for_root_reap(sigterm).await;
                     let _ = reap_managed_root(&mut child, &mut process_group).await;
                     drain_managed_output(stdout_task, stderr_task).await;
-                    return ManagedSubprocessOutcome::plain_with_pid(
+                    return ManagedSubprocessOutcome::plain_after_reap(
                         Err(format!("managed child probe failed: {error}")),
-                        pid,
-                    );
+                        &process_group,
+                    )
+                    .await;
                 }
             }
             // `biased` below otherwise gives a simultaneously-ready cancel
@@ -435,10 +441,11 @@ pub(super) async fn run_managed_custom_subprocess_outcome(
                 process_group.prepare_group_for_root_reap(sigterm).await;
                 let _ = reap_managed_root(&mut child, &mut process_group).await;
                 drain_managed_output(stdout_task, stderr_task).await;
-                return ManagedSubprocessOutcome::plain_with_pid(
+                return ManagedSubprocessOutcome::plain_after_reap(
                     Err("process timed out".to_string()),
-                    pid,
-                );
+                    &process_group,
+                )
+                .await;
             }
             #[cfg(test)]
             pause_managed_before_select(run_dir);
@@ -452,13 +459,14 @@ pub(super) async fn run_managed_custom_subprocess_outcome(
                     process_group.prepare_group_for_root_reap(sigterm).await;
                     let _ = reap_managed_root(&mut child, &mut process_group).await;
                     drain_managed_output(stdout_task, stderr_task).await;
-                    return ManagedSubprocessOutcome::plain_with_pid(
+                    return ManagedSubprocessOutcome::plain_after_reap(
                         Err(format!(
                             "Agent process timed out after {}s (process group killed)",
                             timeout.as_secs()
                         )),
-                        pid,
-                    );
+                        &process_group,
+                    )
+                    .await;
                 }
                 command = cancellations.recv() => {
                     let Some(command) = command else {
@@ -466,23 +474,25 @@ pub(super) async fn run_managed_custom_subprocess_outcome(
                         process_group.prepare_group_for_root_reap(sigterm).await;
                         let _ = reap_managed_root(&mut child, &mut process_group).await;
                         drain_managed_output(stdout_task, stderr_task).await;
-                        return ManagedSubprocessOutcome::plain_with_pid(
+                        return ManagedSubprocessOutcome::plain_after_reap(
                             Err("managed cancellation channel closed".to_string()),
-                            pid,
-                        );
+                            &process_group,
+                        )
+                        .await;
                     };
                     if tokio::time::Instant::now() >= deadline {
                         let sigterm = process_group.signal(libc::SIGTERM);
                         process_group.prepare_group_for_root_reap(sigterm).await;
                         let _ = reap_managed_root(&mut child, &mut process_group).await;
                         drain_managed_output(stdout_task, stderr_task).await;
-                        return ManagedSubprocessOutcome::plain_with_pid(
+                        return ManagedSubprocessOutcome::plain_after_reap(
                             Err(format!(
                                 "Agent process timed out after {}s (process group killed)",
                                 timeout.as_secs()
                             )),
-                            pid,
-                        );
+                            &process_group,
+                        )
+                        .await;
                     }
                     #[cfg(test)]
                     let mut command = command;
@@ -621,13 +631,14 @@ pub(super) async fn run_managed_custom_subprocess_outcome(
                     process_group.prepare_group_for_root_reap(sigterm).await;
                     let _ = reap_managed_root(&mut child, &mut process_group).await;
                     drain_managed_output(stdout_task, stderr_task).await;
-                    return ManagedSubprocessOutcome::plain_with_pid(
+                    return ManagedSubprocessOutcome::plain_after_reap(
                         Err(format!(
                             "Agent process timed out after {}s (process group killed)",
                             timeout.as_secs()
                         )),
-                        pid,
-                    );
+                        &process_group,
+                    )
+                    .await;
                 }
                 _ = tokio::time::sleep(Duration::from_millis(10)) => {}
             }
@@ -637,7 +648,7 @@ pub(super) async fn run_managed_custom_subprocess_outcome(
 
 pub(super) struct ManagedSubprocessOutcome {
     pub(super) result: Result<DispatchResult, String>,
-    pub(super) child_pid: Option<u32>,
+    pub(super) liveness: crate::exec_env_postflight::RunnerLivenessEvidence,
     pub(super) cancellation: Option<crate::managed_run_control::ManagedCancelCommand>,
     pub(super) termination_proof: Option<&'static str>,
 }
@@ -645,8 +656,17 @@ pub(super) struct ManagedSubprocessOutcome {
 impl ManagedSubprocessOutcome {
     pub(super) fn plain(result: Result<DispatchResult, String>) -> Self {
         Self {
-            child_pid: result.as_ref().ok().and_then(|result| result.child_pid),
             result,
+            liveness: crate::exec_env_postflight::RunnerLivenessEvidence::NoWorkerSpawned,
+            cancellation: None,
+            termination_proof: None,
+        }
+    }
+
+    pub(super) fn indeterminate(result: Result<DispatchResult, String>, detail: String) -> Self {
+        Self {
+            result,
+            liveness: crate::exec_env_postflight::RunnerLivenessEvidence::indeterminate(detail),
             cancellation: None,
             termination_proof: None,
         }
@@ -654,24 +674,49 @@ impl ManagedSubprocessOutcome {
 
     pub(super) fn plain_with_pid(
         result: Result<DispatchResult, String>,
-        child_pid: Option<u32>,
+        _child_pid: Option<u32>,
     ) -> Self {
         Self {
-            child_pid,
             result,
+            liveness: crate::exec_env_postflight::RunnerLivenessEvidence::indeterminate(
+                "managed runner did not confirm process-group absence",
+            ),
             cancellation: None,
             termination_proof: None,
+        }
+    }
+
+    fn plain_confirmed(result: Result<DispatchResult, String>) -> Self {
+        Self {
+            result,
+            liveness: crate::exec_env_postflight::RunnerLivenessEvidence::confirmed_reaped(),
+            cancellation: None,
+            termination_proof: None,
+        }
+    }
+
+    #[cfg(unix)]
+    async fn plain_after_reap(
+        result: Result<DispatchResult, String>,
+        process_group: &ManagedProcessGroupGuard,
+    ) -> Self {
+        if process_group.prove_absence_after_root_reaped().await {
+            Self::plain_confirmed(result)
+        } else {
+            Self::plain_with_pid(result, None)
         }
     }
 
     fn dequeued_with_pid(
         result: Result<DispatchResult, String>,
         command: crate::managed_run_control::ManagedCancelCommand,
-        child_pid: Option<u32>,
+        _child_pid: Option<u32>,
     ) -> Self {
         Self {
-            child_pid,
             result,
+            liveness: crate::exec_env_postflight::RunnerLivenessEvidence::indeterminate(
+                "managed runner did not confirm process-group absence",
+            ),
             cancellation: Some(command),
             termination_proof: None,
         }
@@ -682,9 +727,14 @@ impl ManagedSubprocessOutcome {
         command: crate::managed_run_control::ManagedCancelCommand,
         termination_proof: &'static str,
     ) -> Self {
+        let liveness = if termination_proof == "spawn_suppressed" {
+            crate::exec_env_postflight::RunnerLivenessEvidence::NoWorkerSpawned
+        } else {
+            crate::exec_env_postflight::RunnerLivenessEvidence::confirmed_reaped()
+        };
         Self {
-            child_pid: result.as_ref().ok().and_then(|result| result.child_pid),
             result,
+            liveness,
             cancellation: Some(command),
             termination_proof: Some(termination_proof),
         }
@@ -694,11 +744,11 @@ impl ManagedSubprocessOutcome {
         result: Result<DispatchResult, String>,
         command: crate::managed_run_control::ManagedCancelCommand,
         termination_proof: &'static str,
-        child_pid: Option<u32>,
+        _child_pid: Option<u32>,
     ) -> Self {
         Self {
-            child_pid,
             result,
+            liveness: crate::exec_env_postflight::RunnerLivenessEvidence::confirmed_reaped(),
             cancellation: Some(command),
             termination_proof: Some(termination_proof),
         }
@@ -833,7 +883,7 @@ async fn finish_managed_output(
     status: std::process::ExitStatus,
     stdout_task: tokio::task::JoinHandle<Vec<u8>>,
     stderr_task: tokio::task::JoinHandle<Vec<u8>>,
-    child_pid: Option<u32>,
+    _child_pid: Option<u32>,
 ) -> Result<DispatchResult, String> {
     let stdout = collect_pipe(stdout_task).await?;
     let stderr = collect_pipe(stderr_task).await?;
@@ -848,7 +898,6 @@ async fn finish_managed_output(
         output,
         exit_code: status.code(),
         observed_model: None,
-        child_pid,
     })
 }
 
@@ -867,6 +916,11 @@ fn observe_managed_root_exit_without_reap(
     child_pid: Option<u32>,
     _run_dir: &std::path::Path,
 ) -> std::io::Result<bool> {
+    observe_root_exit_without_reap(child_pid)
+}
+
+#[cfg(unix)]
+fn observe_root_exit_without_reap(child_pid: Option<u32>) -> std::io::Result<bool> {
     let Some(child_pid) = child_pid else {
         return Ok(true);
     };
@@ -920,7 +974,45 @@ async fn reap_managed_root(
 }
 
 #[cfg(unix)]
-struct ManagedProcessGroupGuard {
+pub(crate) async fn wait_for_owned_root_exit(
+    child_pid: Option<u32>,
+    timeout: Duration,
+) -> std::io::Result<bool> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if observe_root_exit_without_reap(child_pid)? {
+            return Ok(true);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Ok(false);
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+#[cfg(unix)]
+pub(crate) async fn terminate_reap_and_prove(
+    child: &mut tokio::process::Child,
+    process_group: &mut ManagedProcessGroupGuard,
+) -> (
+    std::io::Result<std::process::ExitStatus>,
+    crate::exec_env_postflight::RunnerLivenessEvidence,
+) {
+    let sigterm = process_group.signal(libc::SIGTERM);
+    process_group.prepare_group_for_root_reap(sigterm).await;
+    let status = reap_managed_root(child, process_group).await;
+    let liveness = if process_group.prove_absence_after_root_reaped().await {
+        crate::exec_env_postflight::RunnerLivenessEvidence::confirmed_reaped()
+    } else {
+        crate::exec_env_postflight::RunnerLivenessEvidence::indeterminate(
+            "process group absence was not confirmed after root reap",
+        )
+    };
+    (status, liveness)
+}
+
+#[cfg(unix)]
+pub(crate) struct ManagedProcessGroupGuard {
     state: ManagedProcessGroupState,
 }
 
@@ -932,7 +1024,7 @@ enum ManagedProcessGroupState {
 
 #[cfg(unix)]
 impl ManagedProcessGroupGuard {
-    fn arm(pid: Option<u32>) -> Self {
+    pub(crate) fn arm(pid: Option<u32>) -> Self {
         Self {
             state: ManagedProcessGroupState::RootLive(pid),
         }
@@ -1420,7 +1512,7 @@ pub(super) async fn run_opencode_sop_subprocess_with_liveness(
         Err(error) => {
             return DispatchRunOutcome::failure(
                 format!("opencode SOP subprocess limiter closed: {error}"),
-                None,
+                crate::exec_env_postflight::RunnerLivenessEvidence::NoWorkerSpawned,
             )
         }
     };
@@ -1435,9 +1527,10 @@ async fn run_agent_subprocess_inner(
     cmd.stdin(std::process::Stdio::null());
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
-    // If this task is dropped (daemon shutdown, spawning task cancelled, ...),
-    // tokio kills the child via SIGKILL instead of leaving it orphaned.
-    cmd.kill_on_drop(true);
+    // The runner-owned guard terminates and synchronously reaps on unwind. It
+    // keeps the leader unreaped until all group signalling is complete, so no
+    // signal can target a recycled numeric PID/PGID.
+    cmd.kill_on_drop(false);
     configure_process_group(cmd);
 
     let mut child = match cmd.spawn() {
@@ -1445,26 +1538,23 @@ async fn run_agent_subprocess_inner(
         Err(error) => {
             return DispatchRunOutcome::failure(
                 format!("Failed to spawn agent process: {error}"),
-                None,
+                crate::exec_env_postflight::RunnerLivenessEvidence::NoWorkerSpawned,
             )
         }
     };
     let child_pid = child.id();
+    #[cfg(unix)]
+    let mut process_group = ManagedProcessGroupGuard::arm(child_pid);
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
     let stdout_task = tokio::spawn(read_pipe(stdout));
     let stderr_task = tokio::spawn(read_pipe(stderr));
 
-    let status = match tokio::time::timeout(timeout, child.wait()).await {
-        Ok(Ok(status)) => {
-            terminate_process_group(child_pid, libc::SIGTERM);
-            status
-        }
-        Ok(Err(error)) => {
-            return DispatchRunOutcome::failure(format!("Agent process error: {error}"), child_pid)
-        }
-        Err(_) => {
-            reap_timed_out_child(&mut child, child_pid).await;
+    #[cfg(unix)]
+    let (status, liveness) = match wait_for_owned_root_exit(child_pid, timeout).await {
+        Ok(true) => terminate_reap_and_prove(&mut child, &mut process_group).await,
+        Ok(false) => {
+            let (_, liveness) = terminate_reap_and_prove(&mut child, &mut process_group).await;
             if let Some(sop_label) = opencode_sop_label {
                 tracing::warn!(
                     sop = sop_label,
@@ -1477,19 +1567,59 @@ async fn run_agent_subprocess_inner(
                     "Agent process timed out after {}s (process group killed)",
                     timeout.as_secs()
                 ),
-                child_pid,
+                liveness,
+            );
+        }
+        Err(error) => {
+            let (_, liveness) = terminate_reap_and_prove(&mut child, &mut process_group).await;
+            return DispatchRunOutcome::failure(
+                format!("Agent process observation error: {error}"),
+                liveness,
             );
         }
     };
 
+    #[cfg(not(unix))]
+    let (status, liveness) = match tokio::time::timeout(timeout, child.wait()).await {
+        Ok(status) => (
+            status,
+            crate::exec_env_postflight::RunnerLivenessEvidence::indeterminate(
+                "process-group terminal proof is unavailable on this platform",
+            ),
+        ),
+        Err(_) => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            return DispatchRunOutcome::failure(
+                format!("Agent process timed out after {}s", timeout.as_secs()),
+                crate::exec_env_postflight::RunnerLivenessEvidence::indeterminate(
+                    "process-group terminal proof is unavailable on this platform",
+                ),
+            );
+        }
+    };
+
+    let status = match status {
+        Ok(status) => status,
+        Err(error) => {
+            return DispatchRunOutcome::failure(format!("Agent process error: {error}"), liveness)
+        }
+    };
+    if matches!(
+        liveness,
+        crate::exec_env_postflight::RunnerLivenessEvidence::Indeterminate { .. }
+    ) {
+        return DispatchRunOutcome::failure("termination_unconfirmed", liveness);
+    }
+
     let exit_code = status.code();
     let stdout = match collect_pipe(stdout_task).await {
         Ok(stdout) => stdout,
-        Err(error) => return DispatchRunOutcome::failure(error, child_pid),
+        Err(error) => return DispatchRunOutcome::failure(error, liveness.clone()),
     };
     let stderr = match collect_pipe(stderr_task).await {
         Ok(stderr) => stderr,
-        Err(error) => return DispatchRunOutcome::failure(error, child_pid),
+        Err(error) => return DispatchRunOutcome::failure(error, liveness.clone()),
     };
 
     let output_text = if stdout.is_empty() && !stderr.is_empty() {
@@ -1500,12 +1630,14 @@ async fn run_agent_subprocess_inner(
         stdout
     };
 
-    DispatchRunOutcome::success(DispatchResult {
-        output: output_text,
-        exit_code,
-        observed_model: None,
-        child_pid,
-    })
+    DispatchRunOutcome::success(
+        DispatchResult {
+            output: output_text,
+            exit_code,
+            observed_model: None,
+        },
+        liveness,
+    )
 }
 
 async fn read_pipe(pipe: Option<impl tokio::io::AsyncRead + Unpin>) -> Vec<u8> {
@@ -1522,29 +1654,6 @@ async fn collect_pipe(task: tokio::task::JoinHandle<Vec<u8>>) -> Result<String, 
         .await
         .map_err(|e| format!("Agent output reader task failed: {e}"))?;
     Ok(String::from_utf8_lossy(&bytes).to_string())
-}
-
-pub(crate) async fn reap_timed_out_child(
-    child: &mut tokio::process::Child,
-    child_pid: Option<u32>,
-) -> bool {
-    terminate_process_group(child_pid, libc::SIGTERM);
-    let child_exited = match tokio::time::timeout(PROCESS_GROUP_TERM_GRACE, child.wait()).await {
-        Ok(Ok(_)) => true,
-        Ok(Err(err)) => {
-            tracing::warn!(error = %err, "failed while waiting for timed-out subprocess");
-            false
-        }
-        Err(_) => false,
-    };
-    terminate_process_group(child_pid, libc::SIGKILL);
-    if !child_exited {
-        if let Err(err) = child.kill().await {
-            tracing::warn!(error = %err, "failed to kill timed-out subprocess");
-        }
-        let _ = child.wait().await;
-    }
-    child_exited
 }
 
 fn opencode_sop_semaphore() -> &'static Semaphore {
@@ -1635,6 +1744,41 @@ mod tests {
     use super::*;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
+
+    #[cfg(unix)]
+    #[test]
+    fn pre_spawn_managed_cancellation_returns_no_worker_spawned_evidence() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            temp.path().join("status.json"),
+            serde_json::json!({
+                "dispatch_id": "pre-spawn-cancel",
+                "state": "TASK_STATE_WORKING",
+                "status_revision": 1,
+            })
+            .to_string(),
+        )
+        .expect("status");
+        let (response, _receiver) = tokio::sync::oneshot::channel();
+        let outcome =
+            finish_pre_spawn_cancellation(crate::managed_run_control::ManagedCancelCommand {
+                expected_status_revision: 1,
+                response,
+                status_anchor: crate::managed_run_control::AnchoredRunStatus::open(temp.path())
+                    .expect("status anchor"),
+                test_observation: None,
+            });
+
+        assert!(matches!(
+            outcome.liveness,
+            crate::exec_env_postflight::RunnerLivenessEvidence::NoWorkerSpawned
+        ));
+        assert!(matches!(
+            outcome.result,
+            Err(ref error) if error == "managed_cancelled"
+        ));
+        assert_eq!(outcome.termination_proof, Some("spawn_suppressed"));
+    }
 
     #[tokio::test]
     async fn run_agent_subprocess_closes_child_stdin() {

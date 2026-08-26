@@ -66,6 +66,7 @@ use serde_json::{json, Value};
 
 pub use liveness::{
     DescendantLiveness, MissingLivenessEvidence, ProcessGroupLiveness, ReapedLiveness,
+    RunnerLivenessEvidence,
 };
 pub use manifest::{
     CaptureSpec, CtimeWitness, DeltaKind, FsTime, WorkspaceDelta, WorkspaceManifest,
@@ -293,11 +294,11 @@ pub enum GateVerdict {
         deltas: Vec<WorkspaceDelta>,
         entries_checked: usize,
     },
-    /// The gate could not decide. Artifacts are withheld; the lease is NOT
-    /// quarantined (that would race a live writer).
+    /// The gate could not decide. Artifacts are withheld and the managed lease
+    /// is fenced against reuse without scanning the live workspace.
     Blocked { reason: BlockReason, detail: String },
     /// The gate could not execute to a decision. Artifacts are withheld and
-    /// the lease is left alone because no terminal rejection was established.
+    /// the managed lease is fenced against reuse.
     Error { detail: String },
 }
 
@@ -402,9 +403,40 @@ pub struct GateOutcome {
     pub clock_barrier: ClockBarrierEvidence,
     pub verdict: GateVerdict,
     pub checked_at: String,
+    lease_action: LeaseAction,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LeaseAction {
+    None,
+    PendingFence,
+    Quarantined,
+    FenceFailed,
+}
+
+impl LeaseAction {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::PendingFence => "pending_fence",
+            Self::Quarantined => "quarantined",
+            Self::FenceFailed => "fence_failed",
+        }
+    }
 }
 
 impl GateOutcome {
+    fn lease_action_statement(&self) -> &'static str {
+        match self.lease_action {
+            LeaseAction::None => "No lease fence was required.",
+            LeaseAction::PendingFence => "The managed lease must be fenced before reuse.",
+            LeaseAction::Quarantined => "The managed lease resources were quarantined.",
+            LeaseAction::FenceFailed => {
+                "The managed lease resource fence failed to persist; reuse remains refused."
+            }
+        }
+    }
+
     /// The honest caveat for a run with unhashed subtrees (`None` when the whole
     /// image was hashed).
     ///
@@ -438,11 +470,11 @@ impl GateOutcome {
         matches!(self.verdict, GateVerdict::Clean { .. })
     }
 
-    /// Must the lease be quarantined? Only for a terminal rejection — never
-    /// while the gate is blocked on live descendants (enforcement point 5:
-    /// quarantine/reclaim happen only after the process tree is gone).
+    /// Must the lease be fenced? Every non-clean required gate outcome is
+    /// indeterminate for reuse and must fence the actual managed lease before
+    /// a canonical terminal receipt can claim quarantine.
     pub fn lease_quarantine_required(&self) -> bool {
-        matches!(self.verdict, GateVerdict::Rejected { .. })
+        !matches!(self.verdict, GateVerdict::Clean { .. })
     }
 
     /// The prohibited deltas, for the receipt.
@@ -483,13 +515,14 @@ impl GateOutcome {
                 let mut lines = vec![format!(
                     "{} postflight gate REJECTED lease {} ({}): the workspace at {} changed in \
                      {} way(s) the contract ({}) does not accept. No patch and no result are \
-                     emitted; the lease is quarantined. This gate proves {}; it does not prove {}.",
+                     emitted. {} This gate proves {}; it does not prove {}.",
                     naming::POSTURE,
                     self.env_id,
                     reason.as_str(),
                     self.workspace_root,
                     deltas.len(),
                     self.contract_label,
+                    self.lease_action_statement(),
                     naming::PROVES,
                     naming::DOES_NOT_PROVE,
                 )];
@@ -514,20 +547,20 @@ impl GateOutcome {
             }
             GateVerdict::Blocked { reason, detail } => Some(format!(
                 "{} postflight gate could not decide for lease {} ({}): {}. Artifacts are \
-                 withheld and the lease is left alone — quarantine and reclaim run only after \
-                 every descendant process has terminated.",
+                withheld. {}",
                 naming::POSTURE,
                 self.env_id,
                 reason.as_str(),
-                detail
+                detail,
+                self.lease_action_statement()
             )),
             GateVerdict::Error { detail } => Some(format!(
                 "{} postflight gate could not execute for lease {}: {}. Artifacts are \
-                 withheld and the lease is left alone because no terminal quarantine verdict \
-                 was established.",
+                withheld. {}",
                 naming::POSTURE,
                 self.env_id,
-                detail
+                detail,
+                self.lease_action_statement()
             )),
         }
     }
@@ -559,11 +592,7 @@ impl GateOutcome {
         } else {
             "withheld"
         };
-        let lease_action = if self.lease_quarantine_required() {
-            "quarantined"
-        } else {
-            "none"
-        };
+        let lease_action = self.lease_action.as_str();
         json!({
             "gate": "exec_env_postflight",
             "preimage_custody": PREIMAGE_CUSTODY,
@@ -735,8 +764,8 @@ impl PostflightGate {
     /// Run the gate after the worker has terminated.
     ///
     /// Order is load-bearing:
-    /// 1. **descendants first** — a live process means no decision, no
-    ///    quarantine, no reclaim (enforcement point 5);
+    /// 1. **descendants first** — a live process means no workspace scan or
+    ///    artifact release; the managed lease may still be fenced against reuse;
     /// 2. then load the parent-held pre-image (which carries the **pinned** walk
     ///    roots);
     /// 3. then re-scan **those roots** and compare;
@@ -757,6 +786,11 @@ impl PostflightGate {
         // established, and the only value it can name before step 3b is
         // `NotEstablished`.
         let base = |verdict: GateVerdict, unhashed: Vec<String>, barrier: ClockBarrierEvidence| {
+            let lease_action = if matches!(&verdict, GateVerdict::Clean { .. }) {
+                LeaseAction::None
+            } else {
+                LeaseAction::PendingFence
+            };
             GateOutcome {
                 env_id: self.env_id.clone(),
                 workspace_root: self.workspace_root.to_string_lossy().to_string(),
@@ -767,6 +801,7 @@ impl PostflightGate {
                 clock_barrier: barrier,
                 verdict,
                 checked_at: checked_at.clone(),
+                lease_action,
             }
         };
 
@@ -974,6 +1009,7 @@ impl PostflightGate {
                 detail: detail.into(),
             },
             checked_at: chrono::Utc::now().to_rfc3339(),
+            lease_action: LeaseAction::PendingFence,
         }
     }
 
@@ -1018,8 +1054,9 @@ pub trait QuarantineSink {
     fn quarantine(&self, outcome: &GateOutcome) -> Result<(), String>;
 }
 
-/// Parent-side forensic sink: writes the receipt to an owner-only file outside
-/// the workspace and logs the failure loudly.
+/// Explicit forensic sink for callers that supply an owner-controlled
+/// directory. Production dispatch relies on the canonical DB fence and
+/// terminal receipt instead of this optional file.
 #[derive(Debug, Clone)]
 pub struct FileQuarantineSink {
     pub dir: PathBuf,
@@ -1048,12 +1085,11 @@ impl QuarantineSink for FileQuarantineSink {
     }
 }
 
-/// Server-side quarantine sink: writes the forensic JSON receipt via [`FileQuarantineSink`]
-/// and fences the physical lease resources in the database (`exec_env_resources.state = 'quarantined'`).
+/// Server-side quarantine sink: atomically fences the physical lease resources
+/// in the canonical database (`exec_env_resources.state = 'quarantined'`).
 #[derive(Clone)]
 pub(crate) struct DaemonQuarantineSink {
     pub(crate) server: crate::server_state::MemoryServer,
-    pub(crate) file_sink: Option<FileQuarantineSink>,
 }
 
 impl QuarantineSink for DaemonQuarantineSink {
@@ -1076,9 +1112,6 @@ impl QuarantineSink for DaemonQuarantineSink {
                         outcome.env_id
                     )
                 })?;
-        }
-        if let Some(file_sink) = &self.file_sink {
-            file_sink.quarantine(outcome)?;
         }
         Ok(())
     }
@@ -1111,10 +1144,14 @@ pub fn rejection_log_message(outcome: &GateOutcome) -> String {
 /// second [`QuarantineSink`] over the same call: state transitions stay
 /// single-writer inside the ledger's own reclaim function, and this gate never
 /// writes lease state directly.
-pub fn apply_verdict(outcome: &GateOutcome, sink: &dyn QuarantineSink) -> Result<bool, String> {
+pub fn apply_verdict(outcome: &mut GateOutcome, sink: &dyn QuarantineSink) -> Result<bool, String> {
     if !outcome.lease_quarantine_required() {
         return Ok(false);
     }
-    sink.quarantine(outcome)?;
+    outcome.lease_action = LeaseAction::Quarantined;
+    if let Err(error) = sink.quarantine(outcome) {
+        outcome.lease_action = LeaseAction::FenceFailed;
+        return Err(error);
+    }
     Ok(true)
 }

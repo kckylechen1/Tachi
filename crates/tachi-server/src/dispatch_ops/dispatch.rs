@@ -119,30 +119,34 @@ pub(crate) struct DispatchResult {
     /// it through its typed runtime config options. CLI subprocesses have no
     /// corresponding acknowledgement channel and leave this absent.
     pub observed_model: Option<String>,
-    /// Worker process group / child process ID for descendant liveness evidence (#1322).
-    pub child_pid: Option<u32>,
 }
 
-/// Runner output retains the worker identity even when execution fails. The
-/// postflight gate must probe that process group on error/timeout rather than
-/// translating a missing success result into proof that the tree was reaped.
+/// Runner output carries only terminal liveness evidence. Numeric worker IDs
+/// never cross this handoff because a PID may be reused after the runner reaps
+/// its group leader.
 pub(crate) struct DispatchRunOutcome {
     pub result: Result<DispatchResult, String>,
-    pub child_pid: Option<u32>,
+    pub liveness: crate::exec_env_postflight::RunnerLivenessEvidence,
 }
 
 impl DispatchRunOutcome {
-    pub(crate) fn success(result: DispatchResult) -> Self {
+    pub(crate) fn success(
+        result: DispatchResult,
+        liveness: crate::exec_env_postflight::RunnerLivenessEvidence,
+    ) -> Self {
         Self {
-            child_pid: result.child_pid,
             result: Ok(result),
+            liveness,
         }
     }
 
-    pub(crate) fn failure(error: impl Into<String>, child_pid: Option<u32>) -> Self {
+    pub(crate) fn failure(
+        error: impl Into<String>,
+        liveness: crate::exec_env_postflight::RunnerLivenessEvidence,
+    ) -> Self {
         Self {
             result: Err(error.into()),
-            child_pid,
+            liveness,
         }
     }
 }
@@ -408,8 +412,13 @@ fn required_postflight_workspace(
     env_resolution: &crate::exec_env_ops::EnvResolution,
 ) -> Result<PathBuf, String> {
     match env_resolution {
-        crate::exec_env_ops::EnvResolution::Managed { cwd, .. }
-        | crate::exec_env_ops::EnvResolution::Unmanaged { cwd } => {
+        crate::exec_env_ops::EnvResolution::Managed { cwd, env_id } => {
+            if env_id.trim().is_empty() {
+                return Err(
+                    "required postflight gate resolved an empty managed env_id; refusing to spawn"
+                        .to_string(),
+                );
+            }
             let path = PathBuf::from(cwd);
             if path.as_os_str().is_empty() {
                 return Err(
@@ -419,8 +428,12 @@ fn required_postflight_workspace(
             }
             Ok(path)
         }
+        crate::exec_env_ops::EnvResolution::Unmanaged { .. } => Err(
+            "required postflight gate requires a managed env_id and lease workspace; an unmanaged cwd cannot be fenced; refusing to spawn"
+                .to_string(),
+        ),
         crate::exec_env_ops::EnvResolution::Default => Err(
-            "required postflight gate has no resolved lease workspace (default env has no cwd); refusing to spawn"
+            "required postflight gate requires a managed env_id and lease workspace; default env has no lease to fence; refusing to spawn"
                 .to_string(),
         ),
     }
@@ -658,7 +671,7 @@ async fn launch_canonical_dispatch(
             flow_id: request.flow_id.clone(),
             dispatch_id: Some(dispatch_id.clone()),
             branch: None,
-            declared_file_scope: None,
+            declared_file_scope: mechanics.declared_file_scope.clone(),
         },
     );
     let mcp_access = execution_grant.mcp_access.as_ref();
@@ -1221,7 +1234,8 @@ async fn launch_canonical_dispatch(
     };
 
     // 7b. Compile and initialize the ExecEnv postflight gate (#894 S2e, #1322).
-    // Pre-spawn preimage is captured in a parent-owned location outside the worker workspace.
+    // Pre-spawn preimage is retained in parent-owned memory and never exposed
+    // through a same-UID worker-writable filesystem path.
     // A required preimage failure fails closed immediately BEFORE spawning the worker.
     let postflight_applicability = crate::exec_env_postflight::compile_postflight_applicability(
         effective_contract.workspace_authority,

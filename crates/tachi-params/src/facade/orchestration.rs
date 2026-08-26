@@ -251,7 +251,8 @@ pub struct TachiStaffParams {
     #[serde(default)]
     pub recommendation_ref: Option<String>,
 
-    /// Optional declared file scope for workspace-write lanes (#894 S2e / #1322).
+    /// Optional declared file scope for workspace-write lanes (#894 S2e / #1322),
+    /// retained on the admitted dispatch's automatic presence claim.
     #[serde(default)]
     pub declared_file_scope: Option<Vec<String>>,
 }

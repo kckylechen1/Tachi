@@ -676,6 +676,47 @@ pub fn quarantine_resource(
     Ok(outcome)
 }
 
+/// Quarantine a set of resources as one all-or-nothing lease-level fence.
+///
+/// Unlike repeated [`quarantine_resource`] calls, this holds one SQLite write
+/// transaction across every resource. A failure on any resource rolls back
+/// all earlier transitions, so a lease can never be only partly fenced.
+pub fn quarantine_resources_atomically(
+    conn: &mut Connection,
+    resource_ids: &[String],
+    reason: &str,
+) -> Result<Vec<String>, MemoryError> {
+    let tx = write_tx(conn)?;
+    let mut quarantined = Vec::new();
+    for resource_id in resource_ids {
+        let Some(state) = state_in_tx(&tx, resource_id)? else {
+            continue;
+        };
+        match state {
+            ResourceState::Quarantined => quarantined.push(resource_id.clone()),
+            ResourceState::Reclaimed => {}
+            ResourceState::Active | ResourceState::Reclaiming | ResourceState::ReclaimFailed => {
+                let now = normalize_utc_iso_or_now("");
+                let changed = tx.execute(
+                    "UPDATE exec_env_resources \
+                     SET state = 'quarantined', reclaim_reason = ?2, updated_at = ?3 \
+                     WHERE resource_id = ?1 \
+                       AND state IN ('active', 'reclaiming', 'reclaim_failed')",
+                    params![resource_id, reason, now],
+                )?;
+                if changed == 0 {
+                    return Err(MemoryError::Internal(format!(
+                        "exec_env_resource '{resource_id}': atomic quarantine matched 0 rows"
+                    )));
+                }
+                quarantined.push(resource_id.clone());
+            }
+        }
+    }
+    tx.commit()?;
+    Ok(quarantined)
+}
+
 /// Result of [`release_quarantine`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReleaseQuarantineOutcome {

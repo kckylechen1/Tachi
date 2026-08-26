@@ -386,14 +386,18 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                     .await
                     {
                         Ok(outcome) => outcome,
-                        Err(error) => super::super::subprocess::ManagedSubprocessOutcome::plain(
-                            Err(format!("managed subprocess panicked: {error}")),
-                        ),
+                        Err(error) => {
+                            super::super::subprocess::ManagedSubprocessOutcome::indeterminate(
+                                Err(format!("managed subprocess panicked: {error}")),
+                                "managed runner task panicked after spawn state became unknown"
+                                    .to_string(),
+                            )
+                        }
                     };
                     (
                         crate::dispatch_ops::dispatch::DispatchRunOutcome {
                             result: outcome.result,
-                            child_pid: outcome.child_pid,
+                            liveness: outcome.liveness,
                         },
                         outcome.cancellation,
                         outcome.termination_proof,
@@ -413,7 +417,7 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                     None,
                 ),
             };
-        let child_pid_for_postflight = runner_outcome.child_pid;
+        let runner_liveness = runner_outcome.liveness;
         let result = runner_outcome.result;
         let execute_duration_ms = execute_started_instant.elapsed().as_millis() as u64;
 
@@ -514,44 +518,17 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
 
         // --- POSTFLIGHT GATE: verify write-contract and liveness (#894 S2e, #1322) ---
         let postflight_outcome = if let Some(gate) = &postflight_gate_for_spawn {
-            let liveness: Box<dyn crate::exec_env_postflight::DescendantLiveness + Send + Sync> =
-                match child_pid_for_postflight {
-                    Some(pid) => Box::new(
-                        crate::exec_env_postflight::ProcessGroupLiveness::for_worker_pid(pid),
-                    ),
-                    None => Box::new(crate::exec_env_postflight::MissingLivenessEvidence::new(
-                        "runner returned no worker process identity",
-                    )),
-                };
-            let mut outcome = gate.run(liveness.as_ref());
-            for _ in 0..3 {
-                if !matches!(&outcome, Ok(o) if matches!(o.verdict, crate::exec_env_postflight::GateVerdict::Blocked { reason: crate::exec_env_postflight::BlockReason::DescendantsAlive, .. }))
-                {
-                    break;
-                }
-                if let Some(pid) = child_pid_for_postflight {
-                    crate::dispatch_ops::subprocess::terminate_process_group(
-                        Some(pid),
-                        libc::SIGTERM,
-                    );
-                    tokio::time::sleep(Duration::from_millis(50)).await;
-                    crate::dispatch_ops::subprocess::terminate_process_group(
-                        Some(pid),
-                        libc::SIGKILL,
-                    );
-                    tokio::time::sleep(Duration::from_millis(50)).await;
-                }
-                outcome = gate.run(liveness.as_ref());
-            }
+            // The runner owns termination and reap. Postflight receives typed
+            // terminal evidence only; no numeric PID crosses this handoff and
+            // this layer has no signalling capability.
+            let outcome = gate.run(&runner_liveness);
             match outcome {
-                Ok(outcome) => {
+                Ok(mut outcome) => {
                     let quarantine_sink = crate::exec_env_postflight::DaemonQuarantineSink {
                         server: server_clone.clone(),
-                        file_sink: Some(crate::exec_env_postflight::FileQuarantineSink {
-                            dir: workspace_dir_for_spawn.clone(),
-                        }),
                     };
-                    match crate::exec_env_postflight::apply_verdict(&outcome, &quarantine_sink) {
+                    match crate::exec_env_postflight::apply_verdict(&mut outcome, &quarantine_sink)
+                    {
                         Ok(_) => {
                             append_trajectory_event(
                                 &traj_path_for_spawn,
@@ -560,15 +537,14 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                             Some(outcome)
                         }
                         Err(error) => {
-                            let error_outcome = gate.execution_error(
-                                liveness.as_ref(),
-                                format!("quarantine persistence failed: {error}"),
-                            );
+                            outcome.verdict = crate::exec_env_postflight::GateVerdict::Error {
+                                detail: format!("resource fence persistence failed: {error}"),
+                            };
                             append_trajectory_event(
                                 &traj_path_for_spawn,
-                                error_outcome.trajectory_event(),
+                                outcome.trajectory_event(),
                             );
-                            Some(error_outcome)
+                            Some(outcome)
                         }
                     }
                 }
@@ -578,10 +554,23 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                         error = %err,
                         "postflight gate execution failed"
                     );
-                    let error_outcome = gate.execution_error(
-                        liveness.as_ref(),
+                    let mut error_outcome = gate.execution_error(
+                        &runner_liveness,
                         format!("required gate execution failed: {err}"),
                     );
+                    let quarantine_sink = crate::exec_env_postflight::DaemonQuarantineSink {
+                        server: server_clone.clone(),
+                    };
+                    if let Err(fence_error) = crate::exec_env_postflight::apply_verdict(
+                        &mut error_outcome,
+                        &quarantine_sink,
+                    ) {
+                        error_outcome.verdict = crate::exec_env_postflight::GateVerdict::Error {
+                            detail: format!(
+                                "required gate execution failed: {err}; resource fence persistence failed: {fence_error}"
+                            ),
+                        };
+                    }
                     append_trajectory_event(&traj_path_for_spawn, error_outcome.trajectory_event());
                     Some(error_outcome)
                 }

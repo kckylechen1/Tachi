@@ -58,6 +58,7 @@ use memcore::{
     EnvClass, ExecEnvLease, ExecEnvSelector, ExecEnvState, NewExecEnvLease, NewExecEnvResource,
     ReclaimOutcome, ResourceKind, ResourceState,
 };
+use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use tachi_clean::wt_clean::OutputFormat;
 use tachi_clean::wt_open::{open_worktree, CargoTargetPolicy, OpenOptions, OpenReport};
@@ -756,7 +757,7 @@ pub(crate) fn ensure_resource(
 /// Fence all active resources bound to a lease in the resource ledger (#894 S2a/S2c/S2e, #1322).
 ///
 /// Looks up all active bindings for `env_id` in `exec_env_resource_bindings` and transitions
-/// each resource row to `quarantined` via [`memcore::quarantine_resource`].
+/// every resource row to `quarantined` in one SQLite transaction.
 pub(crate) fn quarantine_lease_resources(
     conn: &mut rusqlite::Connection,
     env_id: &str,
@@ -765,7 +766,7 @@ pub(crate) fn quarantine_lease_resources(
     if env_id.trim().is_empty() {
         return Ok(Vec::new());
     }
-    let sql = "SELECT resource_id FROM exec_env_resource_bindings WHERE env_id = ?1 AND released_at IS NULL";
+    let sql = "SELECT resource_id FROM exec_env_resource_bindings WHERE env_id = ?1 AND released_at IS NULL ORDER BY resource_id";
     let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
     let resource_ids: Vec<String> = stmt
         .query_map(rusqlite::params![env_id], |row| row.get(0))
@@ -774,27 +775,8 @@ pub(crate) fn quarantine_lease_resources(
         .map_err(|e| format!("read active resources for exec env {env_id}: {e}"))?;
     drop(stmt);
 
-    let mut quarantined = Vec::new();
-    for resource_id in resource_ids {
-        match memcore::quarantine_resource(conn, &resource_id, reason) {
-            Ok(
-                memcore::QuarantineOutcome::Quarantined { .. }
-                | memcore::QuarantineOutcome::AlreadyQuarantined { .. },
-            ) => {
-                quarantined.push(resource_id);
-            }
-            Ok(
-                memcore::QuarantineOutcome::NotFound
-                | memcore::QuarantineOutcome::AlreadyReclaimed { .. },
-            ) => {}
-            Err(err) => {
-                return Err(format!(
-                    "quarantine resource {resource_id} for exec env {env_id}: {err}"
-                ));
-            }
-        }
-    }
-    Ok(quarantined)
+    memcore::quarantine_resources_atomically(conn, &resource_ids, reason)
+        .map_err(|err| format!("atomically quarantine resources for exec env {env_id}: {err}"))
 }
 
 // Compatibility shim for old exec_env_ops::ensure_resource_allow_quarantined
@@ -841,6 +823,31 @@ impl MemoryServer {
             })?,
             None => None,
         };
+        if let Some(id) = trimmed_env_id {
+            let quarantined_resource = self.with_global_store_read(|store| {
+                store
+                    .connection()
+                    .query_row(
+                        "SELECT r.resource_id \
+                         FROM exec_env_resource_bindings b \
+                         JOIN exec_env_resources r ON r.resource_id = b.resource_id \
+                         WHERE b.env_id = ?1 AND b.released_at IS NULL \
+                           AND r.state = 'quarantined' \
+                         ORDER BY r.resource_id LIMIT 1",
+                        rusqlite::params![id],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .optional()
+                    .map_err(|error| error.to_string())
+            })?;
+            if let Some(resource_id) = quarantined_resource {
+                return Err(format!(
+                    "env_id '{id}' is bound to quarantined resource '{resource_id}'; refusing \
+                     re-dispatch until the canonical resource release path clears the fence \
+                     (fail-closed, #1322)"
+                ));
+            }
+        }
         resolve_env_binding(env_id, cwd, unmanaged_cwd, lease.as_ref())
     }
 
@@ -938,6 +945,59 @@ mod tests {
         let l = lease(ExecEnvState::Reclaimed, "/wt/managed");
         let err = resolve_env_binding(Some("env-x"), None, false, Some(&l)).unwrap_err();
         assert!(err.contains("not active"), "got: {err}");
+    }
+
+    #[test]
+    fn managed_dispatch_rejects_a_lease_with_a_quarantined_bound_resource() {
+        let temp = tempfile::tempdir().expect("temp server");
+        let server = MemoryServer::new(temp.path().join("global.sqlite"), None).expect("server");
+        server
+            .with_global_store(|store| {
+                memcore::insert_exec_env(
+                    store.connection_mut(),
+                    &NewExecEnvLease {
+                        env_id: "env-fenced".to_string(),
+                        kind: "worktree".to_string(),
+                        path: "/wt/fenced".to_string(),
+                        repo_root: "/repo".to_string(),
+                        branch: "fenced".to_string(),
+                        base_sha: "abc1234".to_string(),
+                        dispatch_id: None,
+                        env_class: EnvClass::EditOnly,
+                        created_at: String::new(),
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+                memcore::insert_resource(
+                    store.connection_mut(),
+                    &NewExecEnvResource {
+                        resource_id: "res-fenced".to_string(),
+                        kind: ResourceKind::Worktree,
+                        path: "/wt/fenced".to_string(),
+                        bytes: None,
+                        created_at: String::new(),
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+                memcore::bind_resource(store.connection_mut(), "env-fenced", "res-fenced")
+                    .map_err(|error| error.to_string())?;
+                memcore::quarantine_resource(
+                    store.connection_mut(),
+                    "res-fenced",
+                    "postflight indeterminate",
+                )
+                .map_err(|error| error.to_string())?;
+                Ok(())
+            })
+            .expect("seed fenced managed env");
+
+        let error = server
+            .resolve_dispatch_env_binding(Some("env-fenced"), None, false)
+            .expect_err("a quarantined lease resource must block production admission");
+        assert!(
+            error.contains("quarantined resource 'res-fenced'"),
+            "{error}"
+        );
     }
 
     #[test]

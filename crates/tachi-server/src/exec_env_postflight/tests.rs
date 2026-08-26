@@ -518,7 +518,7 @@ fn a_live_descendant_blocks_the_gate_without_quarantine_or_release() {
     gate.capture_preimage().expect("pre-image");
     fs::write(fx.ws().join("src/tracked.rs"), b"still writing\n").expect("mid-run write");
 
-    let outcome = gate.run(&StillRunning).expect("gate run");
+    let mut outcome = gate.run(&StillRunning).expect("gate run");
     let GateVerdict::Blocked { reason, .. } = &outcome.verdict else {
         panic!(
             "the gate must not decide while a descendant lives: {:?}",
@@ -529,12 +529,13 @@ fn a_live_descendant_blocks_the_gate_without_quarantine_or_release() {
     // Nothing is released...
     assert!(!outcome.artifacts_released());
     assert!(outcome.release("patch").is_err());
-    // ...and the lease is NOT quarantined/reclaimed while a process could still
-    // be writing into it (that would race the writer).
-    assert!(!outcome.lease_quarantine_required());
+    // The gate did not scan while the descendant was alive, but the managed
+    // lease is fenced against reuse because terminal liveness is unresolved.
+    assert!(outcome.lease_quarantine_required());
     let sink = RecordingSink::default();
-    assert!(!apply_verdict(&outcome, &sink).expect("apply"));
-    assert_eq!(sink.count(), 0);
+    assert!(apply_verdict(&mut outcome, &sink).expect("apply"));
+    assert_eq!(sink.count(), 1);
+    assert_eq!(outcome.receipt()["lease_action"], "quarantined");
 }
 
 #[test]
@@ -563,22 +564,36 @@ fn missing_liveness_evidence_fails_before_workspace_scan() {
 }
 
 #[test]
+fn no_worker_spawned_is_explicit_terminal_evidence_for_required_postflight() {
+    let fx = Fixture::new();
+    let gate = fx.gate(WriteContract::DetectAndReject);
+    gate.capture_preimage().expect("pre-image");
+    let outcome = gate
+        .run(&super::RunnerLivenessEvidence::NoWorkerSpawned)
+        .expect("pre-spawn cancellation has explicit terminal evidence");
+    assert!(matches!(outcome.verdict, GateVerdict::Clean { .. }));
+    assert_eq!(outcome.receipt()["liveness_probe"], "no worker spawned");
+    assert_eq!(outcome.receipt()["lease_action"], "none");
+}
+
+#[test]
 fn required_gate_execution_error_has_an_error_receipt() {
     let fx = Fixture::new();
     let gate = fx.gate(WriteContract::DetectAndReject);
     gate.capture_preimage().expect("pre-image");
-    let outcome = gate.execution_error(&Reaped, "synthetic gate execution failure");
+    let mut outcome = gate.execution_error(&Reaped, "synthetic gate execution failure");
 
     assert_eq!(outcome.verdict_label(), "error");
     assert!(!outcome.artifacts_released());
-    assert!(!outcome.lease_quarantine_required());
+    assert!(outcome.lease_quarantine_required());
     assert_eq!(outcome.receipt()["verdict"], "error");
     assert_eq!(
         outcome.receipt()["error"],
         "synthetic gate execution failure"
     );
-    assert_eq!(outcome.receipt()["lease_action"], "none");
-    assert!(apply_verdict(&outcome, &RecordingSink::default()).is_ok());
+    assert_eq!(outcome.receipt()["lease_action"], "pending_fence");
+    assert!(apply_verdict(&mut outcome, &RecordingSink::default()).is_ok());
+    assert_eq!(outcome.receipt()["lease_action"], "quarantined");
 }
 
 #[cfg(unix)]
@@ -820,14 +835,14 @@ impl QuarantineSink for RecordingSink {
 #[test]
 fn rejection_quarantines_the_lease_and_writes_a_forensic_receipt() {
     let fx = Fixture::new();
-    let outcome = fx.run_worker(WriteContract::DetectAndReject, |ws| {
+    let mut outcome = fx.run_worker(WriteContract::DetectAndReject, |ws| {
         fs::write(ws.join("src/tracked.rs"), b"tampered\n").expect("edit");
     });
 
     let sink = FileQuarantineSink {
         dir: fx.quarantine_dir(),
     };
-    assert!(apply_verdict(&outcome, &sink).expect("quarantine"));
+    assert!(apply_verdict(&mut outcome, &sink).expect("quarantine"));
 
     let receipts: Vec<_> = fs::read_dir(fx.quarantine_dir())
         .expect("quarantine dir")
@@ -858,9 +873,9 @@ fn rejection_quarantines_the_lease_and_writes_a_forensic_receipt() {
 #[test]
 fn a_clean_verdict_quarantines_nothing() {
     let fx = Fixture::new();
-    let outcome = fx.run_worker(WriteContract::DetectAndReject, |_ws| {});
+    let mut outcome = fx.run_worker(WriteContract::DetectAndReject, |_ws| {});
     let sink = RecordingSink::default();
-    assert!(!apply_verdict(&outcome, &sink).expect("apply"));
+    assert!(!apply_verdict(&mut outcome, &sink).expect("apply"));
     assert_eq!(sink.count(), 0);
 }
 
@@ -1648,7 +1663,6 @@ async fn test_daemon_quarantine_sink_fences_resource() {
 
     let sink = DaemonQuarantineSink {
         server: server.clone(),
-        file_sink: None,
     };
     sink.quarantine(&outcome)
         .expect("quarantine should succeed");
@@ -1679,21 +1693,27 @@ async fn daemon_quarantine_sink_propagates_resource_failure_before_receipt() {
     let db_path = temp.path().join("test_global.sqlite");
     let server = MemoryServer::new(db_path.clone(), None).expect("server");
     let env_id = "env_test_1322_failure";
-    let res_id = "res_test_1322_failure";
+    let first_res_id = "res_test_1322_failure_a";
+    let second_res_id = "res_test_1322_failure_b";
 
     server
         .with_global_store(|store| {
             let conn = store.connection();
-            conn.execute(
-                "INSERT INTO exec_env_resources (resource_id, kind, path, bytes, measured_at, state, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, 'active', ?6, ?6)",
-                rusqlite::params![res_id, "worktree", "/path/to/tree", 0, "2026-08-25T00:00:00Z", "2026-08-25T00:00:00Z"],
-            )
-            .map_err(|error| error.to_string())?;
-            conn.execute(
-                "INSERT INTO exec_env_resource_bindings (binding_id, env_id, resource_id, created_at) VALUES (?1, ?2, ?3, ?4)",
-                rusqlite::params!["bind_failure_1", env_id, res_id, "2026-08-25T00:00:00Z"],
-            )
-            .map_err(|error| error.to_string())?;
+            for (resource_id, path, binding_id) in [
+                (first_res_id, "/path/to/tree", "bind_failure_1"),
+                (second_res_id, "/path/to/target", "bind_failure_2"),
+            ] {
+                conn.execute(
+                    "INSERT INTO exec_env_resources (resource_id, kind, path, bytes, measured_at, state, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, 'active', ?6, ?6)",
+                    rusqlite::params![resource_id, "worktree", path, 0, "2026-08-25T00:00:00Z", "2026-08-25T00:00:00Z"],
+                )
+                .map_err(|error| error.to_string())?;
+                conn.execute(
+                    "INSERT INTO exec_env_resource_bindings (binding_id, env_id, resource_id, created_at) VALUES (?1, ?2, ?3, ?4)",
+                    rusqlite::params![binding_id, env_id, resource_id, "2026-08-25T00:00:00Z"],
+                )
+                .map_err(|error| error.to_string())?;
+            }
             Ok(())
         })
         .expect("setup db");
@@ -1706,12 +1726,12 @@ async fn daemon_quarantine_sink_propagates_resource_failure_before_receipt() {
         .execute_batch(
             "CREATE TRIGGER fail_postflight_resource_quarantine
              BEFORE UPDATE OF state ON exec_env_resources
-             WHEN NEW.state = 'quarantined'
+             WHEN NEW.state = 'quarantined' AND OLD.resource_id = 'res_test_1322_failure_b'
              BEGIN SELECT RAISE(ABORT, 'injected resource quarantine failure'); END;",
         )
         .expect("install quarantine failure trigger");
 
-    let outcome = GateOutcome {
+    let mut outcome = GateOutcome {
         env_id: env_id.to_string(),
         workspace_root: "/path/to/tree".to_string(),
         contract_label: "detect_and_reject",
@@ -1725,40 +1745,35 @@ async fn daemon_quarantine_sink_propagates_resource_failure_before_receipt() {
             entries_checked: 1,
         },
         checked_at: "2026-08-25T00:00:00Z".to_string(),
+        lease_action: super::LeaseAction::PendingFence,
     };
-    let quarantine_dir = TempDir::new().expect("quarantine dir");
     let sink = DaemonQuarantineSink {
         server: server.clone(),
-        file_sink: Some(FileQuarantineSink {
-            dir: quarantine_dir.path().to_path_buf(),
-        }),
     };
 
-    let error = sink
-        .quarantine(&outcome)
+    let error = apply_verdict(&mut outcome, &sink)
         .expect_err("resource persistence failure must propagate");
     assert!(
         error.contains("injected resource quarantine failure"),
         "{error}"
     );
-    assert_eq!(
-        fs::read_dir(quarantine_dir.path())
-            .expect("read quarantine dir")
-            .count(),
-        0,
-        "a failed resource transition must not leave a quarantine-looking receipt"
-    );
+    assert_eq!(outcome.receipt()["lease_action"], "fence_failed");
     server
         .with_global_store(|store| {
-            let state: String = store
-                .connection()
-                .query_row(
-                    "SELECT state FROM exec_env_resources WHERE resource_id = ?1",
-                    rusqlite::params![res_id],
-                    |row| row.get(0),
-                )
-                .map_err(|error| error.to_string())?;
-            assert_eq!(state, "active");
+            for resource_id in [first_res_id, second_res_id] {
+                let state: String = store
+                    .connection()
+                    .query_row(
+                        "SELECT state FROM exec_env_resources WHERE resource_id = ?1",
+                        rusqlite::params![resource_id],
+                        |row| row.get(0),
+                    )
+                    .map_err(|error| error.to_string())?;
+                assert_eq!(
+                    state, "active",
+                    "atomic rollback must restore {resource_id}"
+                );
+            }
             Ok(())
         })
         .expect("check failed resource state");
