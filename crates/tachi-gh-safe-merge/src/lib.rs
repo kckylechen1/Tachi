@@ -1,29 +1,28 @@
-//! Safe-merge gate logic for `tachi_gh safe_merge`.
+//! Pure GitHub safe-merge contracts for `tachi_gh safe_merge`.
 //!
-//! This module is split into two layers:
+//! This crate owns the deterministic, side-effect-free gate, the serializable
+//! PR/check/decision types, and the `GhClient` trait contract. The gate has no
+//! I/O, clock, or `gh` subprocess dependency: callers provide a `PrState`, and
+//! `evaluate_merge_gate` decides whether a PR is allowed to merge.
 //!
-//! 1. **Pure decision logic** — `evaluate_merge_gate(&PrState) -> MergeDecision`.
-//!    No I/O, no clock, no `gh` subprocess. Fully unit-testable from struct
-//!    literals. This is the "safe" part of safe-merge: a deterministic,
-//!    auditable function that decides whether a PR is allowed to merge.
+//! The server boundary stays in `tachi-server`:
 //!
-//! 2. **`GhClient` trait** — the GitHub-side I/O surface that
-//!    `tachi_gh safe_merge` needs to drive the gate end-to-end:
-//!      - `pr_view`         — fetch latest PR state for a gate evaluation
-//!      - `pr_merge`        — actually merge (only called when gate is Ready)
-//!      - `issue_view`      — fetch linked issue state (e.g. for closes-link)
-//!      - `issue_create`    — open a tracking issue from a brainstorm flow
-//!      - `checks_list`     — granular per-check status for events log
+//! - `gh_ops/safe_merge/cli.rs` and `gh_ops/safe_merge/http.rs` own the
+//!   `CliGhClient` and other GitHub transports;
+//! - `gh_ops/safe_merge/handler.rs` and its neighboring modules own the
+//!   `tachi_gh safe_merge` orchestration, verification, events, and ledger
+//!   effects.
 //!
-//!    Two impls are provided:
-//!      - `CliGhClient` — wraps the existing sanitized `gh` subprocess in
-//!        `gh_ops` (production path).
-//!      - `MockGhClient` — in-memory fixture builder for integration tests
-//!        of the orchestrator without spawning `gh` or hitting the network.
+//! `GhClient` is the narrow contract those server paths consume:
 //!
-//! Wiring into the `tachi_gh` MCP action lands in the next commit; the trait
-//! and decision function are shipped here with full unit-test coverage so
-//! the orchestrator commit can land green in one shot.
+//! - `pr_view` fetches the latest PR state for a gate evaluation;
+//! - `pr_merge` performs a merge only after the caller has a `Ready` decision;
+//! - `issue_create` opens a tracking issue from a brainstorm flow;
+//! - `checks_list` reads the granular check status used by the event/log path.
+//!
+//! `MockGhClient` is an in-memory fixture for this crate's tests and for
+//! downstream tests that explicitly enable the non-default `test-support`
+//! feature. It never spawns `gh` or contacts the network.
 //!
 //! Section 五 of `tachi-shell-github-convoy-touchy-agent-prompt.md` is the
 //! authoritative spec for the `merge_state` vocabulary and event kinds; the

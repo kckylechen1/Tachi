@@ -47,7 +47,7 @@ the worker contributes no judgment beyond following the checklist and reacting t
 | Piece | Location | Role in ship |
 | --- | --- | --- |
 | `tachi_gh ship` | `gh_ops/ship.rs` | mechanical stage/commit/push/PR-create (today: caller-authored prose) |
-| `tachi_gh safe_merge` | `gh_safe_merge/` | gated GitHub merge: verification.json, protected labels, preview-unless-confirm |
+| `tachi_gh safe_merge` | `crates/tachi-gh-safe-merge/` (pure gate/types/`GhClient` contract) + `gh_ops/safe_merge/` (server transports/orchestration) | gated GitHub merge: verification.json, protected labels, preview-unless-confirm |
 | `tachi_verify` | `verify_ops/` | evidence ledger: seed required checks → runners record → merge gate consumes |
 | `tachi_staff start` / `tachi_task complete` | `staffing_ops/` + `dispatch_ops/` | admit + spawn backend workers (claude/codex/grok/kimi/opencode, acpx/ACP), eval rows |
 | `tachi_task intake` / `tachi_gh close_loop` | task/GitHub facades | issue→flow binding and closure write-back (local worktree merge retired #1683 C1a) |
