@@ -18,6 +18,53 @@ pub use daily_distill::{
     MAX_DISTILL_SCAN_LIMIT, MIN_BUCKET_SIZE,
 };
 
+/// Classification for a manifest DB discovered by the foundry scheduler.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FoundryRoute {
+    /// The daemon's own global DB.
+    Global,
+    /// The daemon's own project DB.
+    Project,
+    /// A named project under the Tachi home.
+    NamedProject(String),
+    /// A DB that can be opened directly by absolute path.
+    Path,
+    /// A DB that cannot be routed by the current worker.
+    Orphan(&'static str),
+}
+
+/// Classify a foundry route from server-computed facts.
+pub fn classify_foundry_route(
+    own_global: bool,
+    own_project: bool,
+    named_project: Option<String>,
+    path_route_eligible: bool,
+    scope_hint: &str,
+) -> FoundryRoute {
+    if own_global {
+        return FoundryRoute::Global;
+    }
+    if own_project {
+        return FoundryRoute::Project;
+    }
+    if let Some(name) = named_project {
+        return FoundryRoute::NamedProject(name);
+    }
+    if path_route_eligible {
+        return FoundryRoute::Path;
+    }
+
+    let reason = match scope_hint {
+        "agent" => "agent_db",
+        "foundry" => "foundry_db",
+        "vault" => "vault_db",
+        "hub" => "hub_db",
+        "" => "unscoped",
+        _ => "unrouted",
+    };
+    FoundryRoute::Orphan(reason)
+}
+
 const FOUNDRY_DISTILL_MIN_BATCH: usize = 3;
 pub const FOUNDRY_DISTILL_SOURCE: &str = "foundry_distill";
 const DISTILLED_SOURCE_ARCHIVE_IMPORTANCE_CEILING: f64 = 0.85;
@@ -1184,6 +1231,52 @@ mod tests {
             query_diversity: 0,
             tier: "raw".to_string(),
         }
+    }
+
+    #[test]
+    fn classify_foundry_route_obeys_global_project_named_path_precedence() {
+        assert_eq!(
+            classify_foundry_route(true, true, Some("named".to_string()), true, "agent"),
+            FoundryRoute::Global
+        );
+        assert_eq!(
+            classify_foundry_route(false, true, Some("named".to_string()), true, "agent"),
+            FoundryRoute::Project
+        );
+        assert_eq!(
+            classify_foundry_route(false, false, Some("named".to_string()), true, "agent"),
+            FoundryRoute::NamedProject("named".to_string())
+        );
+        assert_eq!(
+            classify_foundry_route(false, false, None, true, "agent"),
+            FoundryRoute::Path
+        );
+    }
+
+    #[test]
+    fn classify_foundry_route_maps_all_orphan_scope_hints() {
+        for (scope_hint, reason) in [
+            ("agent", "agent_db"),
+            ("foundry", "foundry_db"),
+            ("vault", "vault_db"),
+            ("hub", "hub_db"),
+            ("", "unscoped"),
+            ("unknown", "unrouted"),
+        ] {
+            assert_eq!(
+                classify_foundry_route(false, false, None, false, scope_hint),
+                FoundryRoute::Orphan(reason),
+                "scope hint {scope_hint:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn classify_foundry_route_preserves_empty_named_project() {
+        assert_eq!(
+            classify_foundry_route(false, false, Some(String::new()), false, ""),
+            FoundryRoute::NamedProject(String::new())
+        );
     }
 
     #[test]

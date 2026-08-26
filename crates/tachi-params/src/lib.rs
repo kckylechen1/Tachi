@@ -22,6 +22,13 @@ mod recall_evidence;
 mod refinery;
 mod sandbox;
 mod status;
+/// Host TaskIntent bridge (tachi#1840): the V2a vertical over existing
+/// staffing/dispatch/eval truth — wire types + golden, TB-7 idempotency,
+/// three-dimension projections, intervention/stop law, result projection.
+/// Exposed as a named module (its item names — `TaskRef`, `Capability`,
+/// … — are bridge-shaped, not param-shaped; callers read better
+/// qualified).
+pub mod taskintent;
 pub mod util;
 
 pub use agent::*;

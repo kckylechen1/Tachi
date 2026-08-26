@@ -42,6 +42,10 @@ members = [
     # census derives its scan roots from this list. Deliberately NOT in
     # default-members: it is a dependency of tachi-server, which is a default
     # member, so it is already built transitively.
+    # Pure GitHub safe-merge gate/type/client contract. Membership is
+    # load-bearing because its moved unit tests belong to the covered nextest
+    # package set; it has no server or MemoryServer dependency.
+    "crates/tachi-gh-safe-merge",
     "crates/tachi-github-runtime",
     # Lesson-forge domain runtime (#1611 Track T3, carve 3). Membership is
     # load-bearing, not bookkeeping — the DDL/test census roots come from

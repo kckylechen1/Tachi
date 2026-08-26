@@ -50,7 +50,7 @@ async fn promote_handoff_issue_updates_memory_and_flow_artifacts() {
             vec!["Create a tracked GitHub issue".to_string()],
         ),
     );
-    let client = crate::gh_safe_merge::MockGhClient::new();
+    let client = tachi_gh_safe_merge::MockGhClient::new();
 
     let promoted = promote_handoff_issue_with_client(
         &server,
@@ -114,7 +114,7 @@ async fn promote_rejects_invalid_flow_id_before_issue_creation() {
         &server,
         pending_memo("memo-invalid-flow", "Invalid flow id test", vec![]),
     );
-    let client = crate::gh_safe_merge::MockGhClient::new();
+    let client = tachi_gh_safe_merge::MockGhClient::new();
 
     let err = promote_handoff_issue_with_client(
         &server,
@@ -151,7 +151,7 @@ async fn promote_dedup_returns_already_promoted_without_force() {
         &server,
         pending_memo("memo-dedup", "Dedup test memo", vec!["step".to_string()]),
     );
-    let client = crate::gh_safe_merge::MockGhClient::new();
+    let client = tachi_gh_safe_merge::MockGhClient::new();
 
     // First promote succeeds
     let first = promote_handoff_issue_with_client(
@@ -216,7 +216,7 @@ async fn promote_force_creates_new_issue_even_if_already_promoted() {
         &server,
         pending_memo("memo-force", "Force re-promote test", vec![]),
     );
-    let client = crate::gh_safe_merge::MockGhClient::new();
+    let client = tachi_gh_safe_merge::MockGhClient::new();
 
     // First promote
     let first = promote_handoff_issue_with_client(

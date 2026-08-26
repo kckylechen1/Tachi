@@ -1,16 +1,18 @@
 #!/usr/bin/env bash
 # nextest-census.sh — append one JSONL row per failed test in the covered
 # packages (tachi-server + tachi-bootstrap-tests + tachi-contract-tests +
-# tachi-credential-profile + tachi-github-runtime + tachi-lesson-forge +
-# tachi-build-broker + tachi-llm) (#1278 step ①)
+# tachi-credential-profile + tachi-gh-safe-merge + tachi-github-runtime +
+# tachi-lesson-forge + tachi-build-broker + tachi-llm + tachi-foundry)
+# (#1278 step ①)
 #
 # Usage:
 #   scripts/nextest-census.sh
 #
 # Behavior:
 #   1. Runs `cargo nextest run -p tachi-server -p tachi-bootstrap-tests -p tachi-contract-tests
-#      -p tachi-credential-profile -p tachi-github-runtime -p tachi-lesson-forge -p tachi-build-broker
-#      -p tachi-llm --no-fail-fast` once
+#      -p tachi-credential-profile -p tachi-gh-safe-merge -p tachi-github-runtime
+#      -p tachi-lesson-forge -p tachi-build-broker -p tachi-llm -p tachi-foundry
+#      --no-fail-fast` once
 #      with JUnit output enabled. Set NEXTEST_TEST_THREADS
 #      to pass an explicit nextest concurrency setting through to the run. The
 #      package set must stay in sync with NEXTEST_PACKAGES in
@@ -93,7 +95,7 @@ echo "nextest-census: target_dir=${TARGET_DIR} source=${TARGET_SOURCE} state_at_
 set +e
 (
   cd "${ROOT}"
-  nextest_args=(nextest run -p tachi-server -p tachi-bootstrap-tests -p tachi-contract-tests -p tachi-credential-profile -p tachi-github-runtime -p tachi-lesson-forge -p tachi-build-broker -p tachi-llm --no-fail-fast --profile census --target-dir "${TARGET_DIR}")
+  nextest_args=(nextest run -p tachi-server -p tachi-bootstrap-tests -p tachi-contract-tests -p tachi-credential-profile -p tachi-gh-safe-merge -p tachi-github-runtime -p tachi-lesson-forge -p tachi-build-broker -p tachi-llm -p tachi-foundry --no-fail-fast --profile census --target-dir "${TARGET_DIR}")
   if [[ "${TEST_THREADS}" != "default" ]]; then
     nextest_args+=(--test-threads "${TEST_THREADS}")
   fi

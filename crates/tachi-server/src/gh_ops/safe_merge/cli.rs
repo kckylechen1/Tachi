@@ -84,7 +84,7 @@ impl<'a> GhClient for CliGhClient<'a> {
         title: &str,
         body: Option<&str>,
         labels: &[String],
-    ) -> Result<crate::gh_safe_merge::IssueState, GhError> {
+    ) -> Result<tachi_gh_safe_merge::IssueState, GhError> {
         validate_repo(repo).map_err(GhError::Sanitized)?;
         let (mut cmd, token) = self.build()?;
         cmd.args(["issue", "create"])
@@ -110,7 +110,7 @@ impl<'a> GhClient for CliGhClient<'a> {
                     "gh issue create returned an unparseable issue URL: {url}"
                 ))
             })?;
-        Ok(crate::gh_safe_merge::IssueState {
+        Ok(tachi_gh_safe_merge::IssueState {
             number,
             title: title.to_string(),
             state: "OPEN".to_string(),
@@ -122,7 +122,7 @@ impl<'a> GhClient for CliGhClient<'a> {
         &self,
         repo: &str,
         pr_number: u64,
-    ) -> Result<Vec<crate::gh_safe_merge::CheckRun>, GhError> {
+    ) -> Result<Vec<tachi_gh_safe_merge::CheckRun>, GhError> {
         validate_repo(repo).map_err(GhError::Sanitized)?;
         // `gh pr checks` may exit non-zero when checks have failed; we still
         // want to parse the JSON. Run it directly and tolerate non-zero exit
@@ -186,7 +186,7 @@ impl<'a> GhClient for CliGhClient<'a> {
                     "pending" | "" => ("in_progress".to_string(), None),
                     _ => ("completed".to_string(), Some(bucket.clone())),
                 };
-                crate::gh_safe_merge::CheckRun {
+                tachi_gh_safe_merge::CheckRun {
                     name,
                     conclusion,
                     status,

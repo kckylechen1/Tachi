@@ -2379,6 +2379,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tachi-gh-safe-merge"
+version = "1.9.2"
+dependencies = [
+ "async-trait",
+ "serde",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
 name = "tachi-github-runtime"
 version = "1.9.2"
 dependencies = [
@@ -2454,8 +2464,10 @@ dependencies = [
  "memcore",
  "ring",
  "rmcp",
+ "rusqlite",
  "serde",
  "serde_json",
+ "thiserror 2.0.18",
  "tracing",
  "uuid",
 ]
@@ -2501,6 +2513,7 @@ dependencies = [
  "tachi-credential-profile",
  "tachi-dispatch",
  "tachi-foundry",
+ "tachi-gh-safe-merge",
  "tachi-github-runtime",
  "tachi-hub",
  "tachi-lesson-forge",

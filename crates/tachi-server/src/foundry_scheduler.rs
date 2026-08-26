@@ -34,6 +34,7 @@ use tokio::sync::mpsc;
 use tokio::time::{interval, Instant, MissedTickBehavior};
 
 use memcore::{load_pending_foundry_jobs, MemoryStore, PersistedFoundryJob};
+use tachi_foundry::FoundryRoute as Route;
 
 use crate::foundry_runtime_ops::FoundryMaintenanceItem;
 use crate::manifest::{DbRole, Manifest};
@@ -46,7 +47,7 @@ mod worker;
 
 use routing::{classify_route_in_home, manifest_label_for, path_hash};
 pub use scheduler::FoundryScheduler;
-use types::{Route, WorkerHandle};
+use types::WorkerHandle;
 pub use types::{WorkerMetrics, MANIFEST_REFRESH_INTERVAL, POLL_INTERVAL};
 use worker::run_db_worker;
 
