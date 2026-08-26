@@ -925,6 +925,7 @@ fn get_edges_batch(
     ids: &[String],
     relation_filter: Option<&str>,
     limit: usize,
+    as_of_utc: Option<&str>,
 ) -> Result<Vec<MemoryEdge>, MemoryError> {
     if ids.is_empty() {
         return Ok(Vec::new());
@@ -932,12 +933,28 @@ fn get_edges_batch(
 
     let placeholders = (0..ids.len()).map(|_| "?").collect::<Vec<_>>().join(", ");
 
+    // `None` keeps the historical now-anchored predicate byte-for-byte;
+    // `Some(as_of)` anchors BOTH edge validity bounds at the requested
+    // instant instead of the wall clock, so a replay neither sees edges
+    // created after the instant nor loses edges that were valid then but
+    // have since expired. An empty valid_from (the serde default) is
+    // always-valid, matching how reads treated it before it gained a
+    // temporal role.
+    let validity_sql = match as_of_utc {
+        None => " AND (valid_to IS NULL OR datetime(valid_to) > datetime('now'))".to_string(),
+        Some(_) => {
+            " AND (valid_from IS NULL OR valid_from = '' OR datetime(valid_from) <= datetime(?)) \
+         AND (valid_to IS NULL OR datetime(valid_to) > datetime(?))"
+                .to_string()
+        }
+    };
+
     let base_sql = format!(
         "SELECT source_id, target_id, relation, weight, metadata, created_at, valid_from, valid_to \
          FROM memory_edges \
-         WHERE (source_id IN ({ph}) OR target_id IN ({ph})) \
-         AND (valid_to IS NULL OR datetime(valid_to) > datetime('now'))",
-        ph = placeholders
+         WHERE (source_id IN ({ph}) OR target_id IN ({ph})){validity}",
+        ph = placeholders,
+        validity = validity_sql
     );
 
     let full_sql = if relation_filter.is_some() {
@@ -966,12 +983,16 @@ fn get_edges_batch(
     };
 
     let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> =
-        Vec::with_capacity(ids.len() * 2 + 2);
+        Vec::with_capacity(ids.len() * 2 + 4);
     for id in ids {
         param_values.push(Box::new(id.clone()));
     }
     for id in ids {
         param_values.push(Box::new(id.clone()));
+    }
+    if let Some(as_of) = as_of_utc {
+        param_values.push(Box::new(as_of.to_string()));
+        param_values.push(Box::new(as_of.to_string()));
     }
     if let Some(rel) = relation_filter {
         param_values.push(Box::new(rel.to_string()));
@@ -1074,6 +1095,30 @@ pub fn graph_expand(
     )
 }
 
+/// Point-in-time BFS graph expansion: identical to [`graph_expand`] except
+/// edge validity is anchored at `as_of_utc` (RFC3339, normalized) instead of
+/// the wall clock. Entry-level validity remains the search layer's
+/// `valid_at` filter; this closes the edge half of look-ahead-free replay
+/// (Hyperion #3010).
+pub fn graph_expand_as_of(
+    conn: &Connection,
+    seed_ids: &[String],
+    max_hops: u32,
+    relation_filter: Option<&str>,
+    wiki_corpus_store: bool,
+    as_of_utc: &str,
+) -> Result<GraphExpandResult, MemoryError> {
+    graph_expand_limited_with_as_of(
+        conn,
+        seed_ids,
+        max_hops,
+        relation_filter,
+        usize::MAX,
+        wiki_corpus_store,
+        Some(as_of_utc),
+    )
+}
+
 /// BFS graph expansion with a global edge ceiling enforced in each SQLite batch.
 pub fn graph_expand_limited(
     conn: &Connection,
@@ -1082,6 +1127,28 @@ pub fn graph_expand_limited(
     relation_filter: Option<&str>,
     edge_limit: usize,
     wiki_corpus_store: bool,
+) -> Result<GraphExpandResult, MemoryError> {
+    graph_expand_limited_with_as_of(
+        conn,
+        seed_ids,
+        max_hops,
+        relation_filter,
+        edge_limit,
+        wiki_corpus_store,
+        None,
+    )
+}
+
+/// The shared BFS core; `as_of_utc` selects between the historical
+/// now-anchored edge predicate (None) and the instant-anchored one.
+fn graph_expand_limited_with_as_of(
+    conn: &Connection,
+    seed_ids: &[String],
+    max_hops: u32,
+    relation_filter: Option<&str>,
+    edge_limit: usize,
+    wiki_corpus_store: bool,
+    as_of_utc: Option<&str>,
 ) -> Result<GraphExpandResult, MemoryError> {
     use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -1131,7 +1198,8 @@ pub fn graph_expand_limited(
         // budget, while never fetching more than the global edge ceiling.
         let batch_limit = remaining_edges.saturating_add(seen_edges.len());
         let frontier_ids: HashSet<&str> = frontier.iter().map(String::as_str).collect();
-        let edges_batch = get_edges_batch(conn, &frontier, relation_filter, batch_limit)?;
+        let edges_batch =
+            get_edges_batch(conn, &frontier, relation_filter, batch_limit, as_of_utc)?;
         for edge in edges_batch {
             if all_edges.len() >= edge_limit {
                 break;

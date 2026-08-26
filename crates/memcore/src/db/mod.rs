@@ -126,8 +126,8 @@ pub use graph::{
     add_component_governance_edge, add_component_governance_edge_with_provenance, avg_importance,
     close_related_to_fog, count_active_observations, count_same_topic, edge_authority,
     get_contradiction_count, get_edges, get_edges_limited, get_superseded_ids, graph_expand,
-    graph_expand_limited, invalidate_observation, list_observations_for_edge, remove_edge,
-    ConfirmedContradictionOutcome, EdgeAuthority, EdgeObservation, EdgeProvenance,
+    graph_expand_as_of, graph_expand_limited, invalidate_observation, list_observations_for_edge,
+    remove_edge, ConfirmedContradictionOutcome, EdgeAuthority, EdgeObservation, EdgeProvenance,
 };
 pub(crate) use graph::{add_edge, add_edge_with_provenance};
 pub(crate) use graph::{row_matches_expected_state, validate_confirmed_contradiction};

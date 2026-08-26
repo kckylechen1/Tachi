@@ -2299,3 +2299,98 @@ fn confirmed_contradiction_transaction_stamps_model_receipt_backed_authority() {
         );
     }
 }
+
+#[test]
+fn graph_expand_as_of_anchors_edge_validity_at_the_instant() {
+    // Hyperion #3010: a point-in-time expansion must anchor BOTH edge bounds
+    // at the requested instant — a replay neither leaks an edge created after
+    // the instant nor loses an edge that was valid then but has since
+    // expired. Plain expansion keeps the historical now-anchored predicate.
+    let mut conn = make_conn();
+    for id in [
+        "root",
+        "always-nbr",
+        "future-nbr",
+        "lapsed-nbr",
+        "blank-nbr",
+    ] {
+        upsert(&mut conn, &make_entry(id, "graph as-of fixture"), false).unwrap();
+    }
+    let edge = |target: &str, valid_from: &str, valid_to: Option<&str>| MemoryEdge {
+        source_id: "root".into(),
+        target_id: target.into(),
+        relation: "follows".into(),
+        weight: 1.0,
+        metadata: serde_json::json!({}),
+        created_at: String::new(),
+        valid_from: valid_from.into(),
+        valid_to: valid_to.map(str::to_string),
+    };
+    add_edge(&conn, &edge("always-nbr", "2019-01-01T00:00:00Z", None)).unwrap();
+    // Not yet valid until 2027: visible to a now-anchored read, hidden to a
+    // 2026 replay.
+    add_edge(&conn, &edge("future-nbr", "2027-01-01T00:00:00Z", None)).unwrap();
+    // Valid 2019→2026-06: expired today, still valid at a 2026-01-01 replay.
+    add_edge(
+        &conn,
+        &edge(
+            "lapsed-nbr",
+            "2019-01-01T00:00:00Z",
+            Some("2026-06-01T00:00:00Z"),
+        ),
+    )
+    .unwrap();
+    // A LEGACY row with a genuinely empty valid_from (written before
+    // write_edge_row started defaulting it to created_at) stays always-valid.
+    // New edges with an empty field normalize valid_from to now on write, so
+    // they are correctly invisible to earlier replays — this row must bypass
+    // add_edge to reproduce the pre-normalization shape.
+    conn.execute(
+        "INSERT INTO memory_edges (source_id, target_id, relation, weight, metadata, created_at, valid_from, valid_to)          VALUES ('root', 'blank-nbr', 'follows', 1.0, '{}', '', '', NULL)",
+        [],
+    )
+    .unwrap();
+
+    let plain = graph_expand(&conn, &["root".into()], 1, None, false).unwrap();
+    assert!(plain.distances.contains_key("always-nbr"));
+    assert!(
+        plain.distances.contains_key("future-nbr"),
+        "now-anchored reads ignore valid_from (historical behavior)"
+    );
+    assert!(plain.distances.contains_key("blank-nbr"));
+    assert!(
+        !plain.distances.contains_key("lapsed-nbr"),
+        "now-anchored reads drop expired edges (historical behavior)"
+    );
+
+    let replay = graph_expand_as_of(
+        &conn,
+        &["root".into()],
+        1,
+        None,
+        false,
+        "2026-01-01T00:00:00Z",
+    )
+    .unwrap();
+    assert!(replay.distances.contains_key("always-nbr"));
+    assert!(
+        replay.distances.contains_key("lapsed-nbr"),
+        "an edge expired today was valid at the replay instant"
+    );
+    assert!(replay.distances.contains_key("blank-nbr"));
+    assert!(
+        !replay.distances.contains_key("future-nbr"),
+        "an edge created after the instant must not leak into the replay"
+    );
+
+    let later = graph_expand_as_of(
+        &conn,
+        &["root".into()],
+        1,
+        None,
+        false,
+        "2028-01-01T00:00:00Z",
+    )
+    .unwrap();
+    assert!(later.distances.contains_key("future-nbr"));
+}

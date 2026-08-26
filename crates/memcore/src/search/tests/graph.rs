@@ -468,3 +468,62 @@ fn graph_injection_provenance_pins_equal_weight_tie_to_first_processed_edge() {
     assert_eq!(provenance.from_id, "seed");
     assert_eq!(provenance.distance, 2);
 }
+
+#[test]
+fn as_of_search_anchors_graph_edge_validity_at_the_instant() {
+    // Hyperion #3010 wiring: hybrid_search must route an as_of search's graph
+    // expansion through the instant-anchored edge predicate. A future-dated
+    // edge (valid_from 2027) links the seed to the neighbor: a plain expanded
+    // search injects the neighbor, a 2026-01-01 replay must not — entry-level
+    // validity alone cannot tell these apart because both entries carry
+    // window-free validity.
+    let mut conn = setup();
+    let mut seed = memory_entry("seed", "ReplayEdge probe text", &["replayedge"]);
+    seed.valid_from = "2019-01-01T00:00:00Z".to_string();
+    insert_entry(&mut conn, seed);
+    insert(
+        &mut conn,
+        "future-nbr",
+        "Only reachable through a future-dated edge",
+        &["irrelevantkw"],
+    );
+    add_edge(
+        &conn,
+        &MemoryEdge {
+            source_id: "seed".to_string(),
+            target_id: "future-nbr".to_string(),
+            relation: "supports".to_string(),
+            weight: 1.0,
+            metadata: json!({}),
+            created_at: "2026-08-01T00:00:00Z".to_string(),
+            valid_from: "2027-01-01T00:00:00Z".to_string(),
+            valid_to: None,
+        },
+    )
+    .unwrap();
+
+    let plain_opts = SearchOptions {
+        top_k: 5,
+        record_access: false,
+        graph_expand_hops: 1,
+        ..Default::default()
+    };
+    let plain = hybrid_search(&conn, "ReplayEdge probe text", &plain_opts).unwrap();
+    let plain_ids: Vec<&str> = plain.iter().map(|r| r.entry.id.as_str()).collect();
+    assert!(
+        plain_ids.contains(&"future-nbr"),
+        "now-anchored expansion ignores edge valid_from: {plain_ids:?}"
+    );
+
+    let replay_opts = SearchOptions {
+        as_of: Some("2026-01-01T00:00:00Z".to_string()),
+        ..plain_opts
+    };
+    let replay = hybrid_search(&conn, "ReplayEdge probe text", &replay_opts).unwrap();
+    let replay_ids: Vec<&str> = replay.iter().map(|r| r.entry.id.as_str()).collect();
+    assert_eq!(
+        replay_ids,
+        vec!["seed"],
+        "the future edge must not leak into the replay"
+    );
+}

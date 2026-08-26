@@ -8,7 +8,7 @@ use super::{
     count_distinct_access_days, count_distinct_promotion_days, count_memories_missing_domain,
     count_memories_rows, count_memories_vec_rows, delete, edge_authority, ensure_anchor,
     fetch_by_ids, foundry_job_status_counts, gc_tables, get_all, get_edges, get_edges_limited,
-    graph_expand, graph_expand_limited, init_schema, insert_tachi_event,
+    graph_expand, graph_expand_as_of, graph_expand_limited, init_schema, insert_tachi_event,
     insert_tachi_event_if_absent, invalidate_observation, list_by_path,
     list_by_path_active_unsuperseded, list_eval_evidence,
     list_memories_by_category_and_path_prefix, list_memories_by_path_prefix,
