@@ -6,7 +6,7 @@ use crate::db::StoreProfile;
 use crate::error::MemoryError;
 use crate::types::{default_retention_for, MemoryCategory, MemoryEntry, MemoryScope, MemorySource};
 
-use super::common::{normalize_utc_iso, now_utc_iso, row_to_entry};
+use super::common::{normalize_sqlite_as_of, normalize_utc_iso, now_utc_iso, row_to_entry};
 use super::sqlite_vec::serialize_f32;
 
 mod access;

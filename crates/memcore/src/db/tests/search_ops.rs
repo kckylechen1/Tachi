@@ -247,6 +247,94 @@ fn search_vec_respects_as_of_validity_window() {
 }
 
 #[test]
+fn search_vec_rejects_sqlite_unrepresentable_as_of_before_query() {
+    let conn = make_conn();
+    let error = search_vec(
+        &conn,
+        &[0.1_f32; 1024],
+        1,
+        false,
+        false,
+        None,
+        Some("+10000-01-01T00:00:00Z"),
+        None,
+        false,
+    )
+    .expect_err("vector search must reject an as_of SQLite cannot represent");
+    assert!(matches!(
+        error,
+        crate::MemoryError::InvalidArg(ref message)
+            if message.contains("outside the SQLite julianday range")
+    ));
+}
+
+#[test]
+fn search_fts_rejects_sqlite_unrepresentable_as_of_before_empty_query_return() {
+    let conn = make_conn();
+    let error = search_fts(
+        &conn,
+        "",
+        1,
+        false,
+        false,
+        None,
+        Some("+10000-01-01T00:00:00Z"),
+        None,
+        false,
+    )
+    .expect_err("FTS must validate as_of before its empty-query return");
+    assert!(matches!(
+        error,
+        crate::MemoryError::InvalidArg(ref message)
+            if message.contains("outside the SQLite julianday range")
+    ));
+}
+
+#[test]
+fn search_fts_raw_match_rejects_sqlite_unrepresentable_as_of_before_empty_query_return() {
+    let conn = make_conn();
+    let error = search_fts_raw_match(
+        &conn,
+        " ",
+        1,
+        false,
+        false,
+        None,
+        Some("+10000-01-01T00:00:00Z"),
+        None,
+        false,
+    )
+    .expect_err("raw FTS must validate as_of before its empty-query return");
+    assert!(matches!(
+        error,
+        crate::MemoryError::InvalidArg(ref message)
+            if message.contains("outside the SQLite julianday range")
+    ));
+}
+
+#[test]
+fn search_symbolic_candidates_rejects_sqlite_unrepresentable_as_of_before_empty_return() {
+    let conn = make_conn();
+    let error = search_symbolic_candidates(
+        &conn,
+        "!!!",
+        1,
+        false,
+        false,
+        None,
+        Some("+10000-01-01T00:00:00Z"),
+        None,
+        false,
+    )
+    .expect_err("symbolic search must validate as_of before its empty-candidate return");
+    assert!(matches!(
+        error,
+        crate::MemoryError::InvalidArg(ref message)
+            if message.contains("outside the SQLite julianday range")
+    ));
+}
+
+#[test]
 fn search_vec_knn_with_k_constraint() {
     let mut conn = make_conn();
     let has_vec: i64 = conn

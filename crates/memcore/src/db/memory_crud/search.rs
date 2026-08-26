@@ -8,7 +8,7 @@ use crate::namespace::{surface_sql_splice, Surface};
 use crate::types::MemoryEntry;
 
 use super::{
-    normalize_utc_iso, row_to_entry, serialize_f32, simple_query_input, MEMORY_SELECT_COLUMNS,
+    normalize_sqlite_as_of, row_to_entry, serialize_f32, simple_query_input, MEMORY_SELECT_COLUMNS,
     MEMORY_SELECT_COLUMNS_QUALIFIED,
 };
 
@@ -159,10 +159,12 @@ pub fn search_vec(
     surface: Option<Surface>,
     wiki_corpus_store: bool,
 ) -> Result<HashMap<String, f64>, MemoryError> {
+    let as_of_utc = as_of
+        .map(|instant| normalize_sqlite_as_of(conn, instant))
+        .transpose()?;
     let blob = serialize_f32(query_vec);
     let wiki_gate = WikiCorpusGate::resolve(wiki_corpus_store, path_prefix);
     let path_like = path_prefix.map(|prefix| format!("{prefix}%"));
-    let as_of_utc = as_of.map(normalize_utc_iso).transpose()?;
 
     let mut k_fetch = top_k.min(SQLITE_VEC_KNN_MAX_K);
     let mut rows = run_search_vec_query(
@@ -304,6 +306,9 @@ pub fn search_fts(
     surface: Option<Surface>,
     wiki_corpus_store: bool,
 ) -> Result<HashMap<String, f64>, MemoryError> {
+    let as_of_utc = as_of
+        .map(|instant| normalize_sqlite_as_of(conn, instant))
+        .transpose()?;
     let safe_query = simple_query_input(query);
 
     if safe_query.is_empty() {
@@ -318,7 +323,7 @@ pub fn search_fts(
         include_archived,
         include_superseded,
         path_prefix,
-        as_of,
+        as_of_utc.as_deref(),
         surface,
         WikiCorpusGate::resolve(wiki_corpus_store, path_prefix),
     )
@@ -336,6 +341,9 @@ pub(crate) fn search_fts_raw_match(
     surface: Option<Surface>,
     wiki_corpus_store: bool,
 ) -> Result<HashMap<String, f64>, MemoryError> {
+    let as_of_utc = as_of
+        .map(|instant| normalize_sqlite_as_of(conn, instant))
+        .transpose()?;
     if match_query.trim().is_empty() {
         return Ok(HashMap::new());
     }
@@ -347,7 +355,7 @@ pub(crate) fn search_fts_raw_match(
         include_archived,
         include_superseded,
         path_prefix,
-        as_of,
+        as_of_utc.as_deref(),
         surface,
         WikiCorpusGate::resolve(wiki_corpus_store, path_prefix),
     )
@@ -362,11 +370,10 @@ fn search_fts_match(
     include_archived: bool,
     include_superseded: bool,
     path_prefix: Option<&str>,
-    as_of: Option<&str>,
+    as_of_utc: Option<&str>,
     surface: Option<Surface>,
     wiki_gate: WikiCorpusGate,
 ) -> Result<HashMap<String, f64>, MemoryError> {
-    let as_of_utc = as_of.map(normalize_utc_iso).transpose()?;
     let path_like = path_prefix.map(|prefix| format!("{prefix}%"));
     let match_operand = if use_simple_query {
         "simple_query(?1)"
@@ -405,7 +412,7 @@ fn search_fts_match(
             limit as i64,
             include_superseded as i64,
             path_like,
-            as_of_utc.as_deref()
+            as_of_utc
         ],
         |row| {
             let id: String = row.get(0)?;
@@ -458,6 +465,9 @@ pub fn search_symbolic_candidates(
     surface: Option<Surface>,
     wiki_corpus_store: bool,
 ) -> Result<Vec<MemoryEntry>, MemoryError> {
+    let as_of_utc = as_of
+        .map(|instant| normalize_sqlite_as_of(conn, instant))
+        .transpose()?;
     search_symbolic_candidates_with_relevance(
         conn,
         query,
@@ -466,7 +476,7 @@ pub fn search_symbolic_candidates(
         include_archived,
         include_superseded,
         path_prefix,
-        as_of,
+        as_of_utc.as_deref(),
         surface,
         wiki_corpus_store,
     )
@@ -484,7 +494,7 @@ pub(crate) fn search_symbolic_candidates_with_relevance(
     include_archived: bool,
     include_superseded: bool,
     path_prefix: Option<&str>,
-    as_of: Option<&str>,
+    as_of_utc: Option<&str>,
     surface: Option<Surface>,
     wiki_corpus_store: bool,
 ) -> Result<Vec<MemoryEntry>, MemoryError> {
@@ -496,7 +506,6 @@ pub(crate) fn search_symbolic_candidates_with_relevance(
 
     register_symbolic_score_function(conn)?;
 
-    let as_of_utc = as_of.map(normalize_utc_iso).transpose()?;
     let wiki_gate = WikiCorpusGate::resolve(wiki_corpus_store, path_prefix);
     let path_like = path_prefix.map(|prefix| format!("{prefix}%"));
 
@@ -520,7 +529,7 @@ pub(crate) fn search_symbolic_candidates_with_relevance(
             include_archived,
             include_superseded,
             path_like.as_deref(),
-            as_of_utc.as_deref(),
+            as_of_utc,
             surface,
             wiki_gate,
         );
@@ -534,7 +543,7 @@ pub(crate) fn search_symbolic_candidates_with_relevance(
         include_archived,
         include_superseded,
         path_like.as_deref(),
-        as_of_utc.as_deref(),
+        as_of_utc,
         surface,
         wiki_gate,
     )

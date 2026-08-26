@@ -2306,6 +2306,7 @@ fn graph_expand_as_of_anchors_edge_validity_at_the_instant() {
     // at the requested instant — a replay neither leaks an edge created after
     // the instant nor loses an edge that was valid then but has since
     // expired. Plain expansion keeps the historical now-anchored predicate.
+    const REPLAY_AS_OF: &str = "2026-01-01T00:00:00Z";
     let mut conn = make_conn();
     for id in [
         "root",
@@ -2313,6 +2314,8 @@ fn graph_expand_as_of_anchors_edge_validity_at_the_instant() {
         "future-nbr",
         "lapsed-nbr",
         "blank-nbr",
+        "starts-at-as-of",
+        "ends-at-as-of",
     ] {
         upsert(&mut conn, &make_entry(id, "graph as-of fixture"), false).unwrap();
     }
@@ -2340,6 +2343,15 @@ fn graph_expand_as_of_anchors_edge_validity_at_the_instant() {
         ),
     )
     .unwrap();
+    // The graph interval is half-open: an edge beginning exactly at the
+    // replay instant is active, while one ending exactly at it is already
+    // closed.
+    add_edge(&conn, &edge("starts-at-as-of", REPLAY_AS_OF, None)).unwrap();
+    add_edge(
+        &conn,
+        &edge("ends-at-as-of", "2019-01-01T00:00:00Z", Some(REPLAY_AS_OF)),
+    )
+    .unwrap();
     // A LEGACY row with a genuinely empty valid_from (written before
     // write_edge_row started defaulting it to created_at) stays always-valid.
     // New edges with an empty field normalize valid_from to now on write, so
@@ -2363,19 +2375,19 @@ fn graph_expand_as_of_anchors_edge_validity_at_the_instant() {
         "now-anchored reads drop expired edges (historical behavior)"
     );
 
-    let replay = graph_expand_as_of(
-        &conn,
-        &["root".into()],
-        1,
-        None,
-        false,
-        "2026-01-01T00:00:00Z",
-    )
-    .unwrap();
+    let replay = graph_expand_as_of(&conn, &["root".into()], 1, None, false, REPLAY_AS_OF).unwrap();
     assert!(replay.distances.contains_key("always-nbr"));
     assert!(
         replay.distances.contains_key("lapsed-nbr"),
         "an edge expired today was valid at the replay instant"
+    );
+    assert!(
+        replay.distances.contains_key("starts-at-as-of"),
+        "valid_from == as_of must be included"
+    );
+    assert!(
+        !replay.distances.contains_key("ends-at-as-of"),
+        "valid_to == as_of must be excluded"
     );
     assert!(replay.distances.contains_key("blank-nbr"));
     assert!(
