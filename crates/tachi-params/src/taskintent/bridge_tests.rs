@@ -249,6 +249,80 @@ fn append_owner_terminal(rig: &Rig, task_ref: &TaskRef, terminal: &str) {
 // ── DoD row 1: golden wire + submit envelope ─────────────────────────────
 
 #[test]
+fn repository_implementation_flows_end_to_end_without_golden_drift() {
+    // Owner override (TB-5/A surfaced 2026-08-26, zeroclaw #234 rows 1–2):
+    // `repository_implementation` is THE acceptance capability for the
+    // watershed vertical. It must clear the FULL bridge exactly like the
+    // golden capability does — while the golden EXAMPLE keeps
+    // `reasoning_review`, so the cross-repo pinned digest (zeroclaw #238)
+    // does NOT move. Schema extension without example drift.
+    let file: serde_json::Value = serde_json::from_str(GOLDEN_TASK_INTENT_V1).expect("golden");
+    assert_eq!(
+        file["intent"]["capability_request"]["capability"], "reasoning_review",
+        "golden example capability is deliberately unchanged"
+    );
+    assert_eq!(
+        file["digest_sha256"], "84ab23166aba2fd25c4c98d9f23bb52a81ffbdd82d99653bb0758ae840ce3a31",
+        "the pinned digest did not move: no zeroclaw-side re-pin is owed"
+    );
+
+    let mut intent = golden_intent();
+    intent.capability_request = CapabilityRequest {
+        capability: Capability::RepositoryImplementation,
+    };
+    let request = RequestId::new("req-repo-impl").expect("bounded");
+
+    // TB-5 intersection law reaches the new variant through the bridge:
+    // the default rig's authority admits only ReasoningReview.
+    assert!(matches!(
+        rig_managed().bridge.submit(&intent, &request),
+        SubmitReceipt::Rejected(AdmissionRejection::CapabilityNotAdmitted)
+    ));
+
+    // With the requester's authority covering it: fresh admission, TaskRef
+    // minted by Tachi, TaskSubmitted fact recorded.
+    let facts = Arc::new(InMemoryTaskFacts::new());
+    let admitting = TaskIntentBridge::new(
+        Arc::new(InProcessRequestBindings::new()),
+        facts.clone(),
+        FakeAuthority::admitting(&[
+            Capability::ReasoningReview,
+            Capability::ReadOnlyInvestigation,
+            Capability::RepositoryImplementation,
+        ]),
+        FakePlans::managed(),
+        FakeOwners::forwarding(),
+        Arc::new(SystemBridgeClock),
+    );
+    let task_ref = match admitting.submit(&intent, &request) {
+        SubmitReceipt::Admitted {
+            task_ref,
+            replayed: false,
+        } => task_ref,
+        other => panic!("expected fresh admission for repository_implementation, got {other:?}"),
+    };
+    assert!(task_ref.as_wire().starts_with("task:"));
+    let recorded = facts.facts(&task_ref).expect("facts");
+    assert_eq!(
+        recorded
+            .iter()
+            .filter(|f| matches!(f.payload, TaskEventPayload::TaskSubmitted { .. }))
+            .count(),
+        1,
+        "exactly one TaskSubmitted fact"
+    );
+    // TB-7 replay law holds for the new capability: same tuple, same digest
+    // ⇒ same TaskRef, replayed=true, never a second worker.
+    match admitting.submit(&intent, &request) {
+        SubmitReceipt::Admitted {
+            task_ref: replayed_ref,
+            replayed: true,
+        } => assert_eq!(replayed_ref, task_ref, "same TaskRef on replay"),
+        other => panic!("expected replay, got {other:?}"),
+    }
+}
+
+#[test]
 fn golden_decodes_and_round_trips_byte_identically() {
     let file: serde_json::Value = serde_json::from_str(GOLDEN_TASK_INTENT_V1).expect("golden JSON");
     let intent: TaskIntentV1 =
