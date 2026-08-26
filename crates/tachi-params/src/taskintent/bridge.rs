@@ -411,7 +411,12 @@ impl TaskIntentBridge {
                         reason: "no_admitted_execution_plan".to_string(),
                     },
                 );
-                let _ = self.facts.append(&task_ref, event);
+                if self.facts.append(&task_ref, event).is_err() {
+                    // The refusal could not be recorded: claiming a
+                    // definitive rejection the log cannot replay would be
+                    // dishonest — return the ambiguous window instead.
+                    return SubmitReceipt::ReconciliationUnknown { digest };
+                }
                 return SubmitReceipt::Rejected(AdmissionRejection::NoAdmittedExecutionPlan);
             }
             Ok(plan) => plan,
@@ -467,12 +472,11 @@ impl TaskIntentBridge {
             Err(_) => return SubmitReceipt::Unavailable,
             Ok(facts) => facts,
         };
-        if facts
-            .iter()
-            .any(|f| matches!(f.payload, TaskEventPayload::SubmitRejected { .. }))
-        {
-            return SubmitReceipt::Rejected(AdmissionRejection::NoAdmittedExecutionPlan);
-        }
+        // Verify the tuple FIRST: a materialized TaskSubmitted must name
+        // the SAME requester and digest as the bound tuple. This check
+        // precedes the SubmitRejected shortcut so a corrupted/mixed log
+        // (SubmitRejected + a mismatched TaskSubmitted) resolves to a typed
+        // conflict, never to a wrong definitive answer.
         let submitted = facts.iter().find_map(|f| match &f.payload {
             TaskEventPayload::TaskSubmitted {
                 intent_digest,
@@ -481,19 +485,27 @@ impl TaskIntentBridge {
             } => Some((intent_digest.clone(), requester.clone())),
             _ => None,
         });
-        let Some((bound_digest_log, bound_requester)) = submitted else {
+        if let Some((bound_digest_log, bound_requester)) = submitted {
+            if bound_digest_log != intent.canonical_digest()
+                || bound_requester != intent.requester.to_string()
+            {
+                // The log under this bound ref does not match the tuple: a
+                // conflict, never a silent admission onto foreign truth.
+                return SubmitReceipt::RequestIdConflict {
+                    bound_digest: bound_digest_log,
+                    submitted_digest: intent.canonical_digest(),
+                };
+            }
+        } else if facts
+            .iter()
+            .any(|f| matches!(f.payload, TaskEventPayload::SubmitRejected { .. }))
+        {
+            // No TaskSubmitted, but a recorded definitive refusal: the
+            // tuple replays to the same typed rejection.
+            return SubmitReceipt::Rejected(AdmissionRejection::NoAdmittedExecutionPlan);
+        } else {
             return SubmitReceipt::ReconciliationUnknown {
                 digest: intent.canonical_digest(),
-            };
-        };
-        if bound_digest_log != intent.canonical_digest()
-            || bound_requester != intent.requester.to_string()
-        {
-            // The log under this bound ref does not match the tuple: a
-            // conflict, never a silent admission onto foreign truth.
-            return SubmitReceipt::RequestIdConflict {
-                bound_digest: bound_digest_log,
-                submitted_digest: intent.canonical_digest(),
             };
         }
         let has_plan = facts
@@ -526,7 +538,24 @@ impl TaskIntentBridge {
                 }
                 Err(PlanAdmissionError::NoAdmittedPlan) => {
                     // Consistent with the initial-submit refusal: without
-                    // an admissible plan this submit is not admitted.
+                    // an admissible plan this submit is not admitted — and
+                    // the definitive refusal is RECORDED so later replays
+                    // of the same tuple stay deterministically Rejected.
+                    let now = self.clock.now_utc_iso();
+                    let event = self.fact(
+                        EventSource::BridgeAdmission,
+                        format!("evt-{}", uuid::Uuid::new_v4().simple()),
+                        &now,
+                        VisibilityClass::Internal,
+                        TaskEventPayload::SubmitRejected {
+                            reason: "no_admitted_execution_plan".to_string(),
+                        },
+                    );
+                    if self.facts.append(task_ref, event).is_err() {
+                        return SubmitReceipt::ReconciliationUnknown {
+                            digest: intent.canonical_digest(),
+                        };
+                    }
                     return SubmitReceipt::Rejected(AdmissionRejection::NoAdmittedExecutionPlan);
                 }
             }
@@ -675,22 +704,35 @@ impl TaskIntentBridge {
             "task": task_ref.as_wire(),
             "intervention": intervention.canonical_digest(),
         }));
-        let intervention_id = format!("iv:{}", uuid::Uuid::new_v4().simple());
-        let bound_id = match self.bindings.bind(
+        let minted_id = format!("iv:{}", uuid::Uuid::new_v4().simple());
+        let (bound_id, fresh) = match self.bindings.bind(
             requester,
             &request_id.to_string(),
             &digest,
             BoundRef::Intervention {
                 task: task_ref.clone(),
-                intervention_id: intervention_id.clone(),
+                intervention_id: minted_id.clone(),
             },
         ) {
             Ok(returned) => match returned.bound {
                 BoundRef::Intervention {
                     task,
                     intervention_id: bound,
-                } if task == *task_ref => bound,
-                // Cross-operation or cross-task use of the same tuple.
+                } => {
+                    if task != *task_ref {
+                        return Err(InterventionError::RequestIdConflict(
+                            RequestConflict::RequestIdConflict {
+                                bound_digest: returned.digest,
+                                submitted_digest: digest,
+                            },
+                        ));
+                    }
+                    // Fresh bind returns OUR mint; a same-digest replay
+                    // returns the winner's binding instead — only the
+                    // FRESH binder may forward.
+                    (bound.clone(), bound == minted_id)
+                }
+                // Cross-operation use of the same tuple.
                 _ => {
                     return Err(InterventionError::RequestIdConflict(
                         RequestConflict::RequestIdConflict {
@@ -702,17 +744,23 @@ impl TaskIntentBridge {
             },
             Err(conflict) => return Err(InterventionError::RequestIdConflict(conflict)),
         };
-        // Replayed tuple already materialized? Return the one receipt.
-        if let Ok(events_now) = self.derived_events(task_ref) {
-            let materialized = events_now.iter().any(|e| match &e.payload {
-                TaskEventPayload::InterventionForwarded {
-                    intervention_id, ..
-                } => intervention_id == &bound_id,
-                _ => false,
-            });
-            if materialized {
-                return Ok(replay_receipt(op, bound_id));
+        if !fresh {
+            // Replayed tuple already materialized? Return the one receipt.
+            if let Ok(events_now) = self.derived_events(task_ref) {
+                let materialized = events_now.iter().any(|e| match &e.payload {
+                    TaskEventPayload::InterventionForwarded {
+                        intervention_id, ..
+                    } => intervention_id == &bound_id,
+                    _ => false,
+                });
+                if materialized {
+                    return Ok(replay_receipt(op, bound_id));
+                }
             }
+            // Bound but not materialized: the winner is mid-flight (or
+            // died after forwarding). NEVER re-forward — the parallel of
+            // submit's ambiguous window.
+            return Err(InterventionError::ReconciliationUnknown);
         }
         // Forward the FULL typed intervention to the lifecycle owner
         // (tachi#1678 request path); the payload travels, not just the op.
@@ -802,8 +850,23 @@ impl TaskIntentBridge {
             }
             Ok(_) => {}
         }
+        // TB-4: the stop reason is scanned like every text-bearing value.
+        if let Err(rejection) = super::admission::scan_intervention_text(
+            "stop.reason",
+            &super::wire::BoundedText::new(reason).map_err(|_| InterventionError::Unavailable)?,
+        ) {
+            let AdmissionRejection::ForbiddenContent { category, field } = rejection else {
+                return Err(InterventionError::Unavailable);
+            };
+            return Err(InterventionError::ForbiddenContent { category, field });
+        }
+
+        // Linearize BEFORE reading state (same law as intervene:
+        // ownership, advertisement, and the revision compare-and-apply all
+        // observe post-lock truth).
+        let _guard = self.op_lock.lock().expect("bridge op lock poisoned");
         let events = self.derived_events(task_ref)?;
-        if events.is_empty() || !requester_owns(&events, requester) {
+        if !has_task_submitted(&events) || !requester_owns(&events, requester) {
             return Err(InterventionError::NotFound);
         }
         let snapshot = self.snapshot_from(task_ref, &events);
@@ -818,18 +881,6 @@ impl TaskIntentBridge {
                 });
             }
         }
-        // TB-4: the stop reason is scanned like every text-bearing value.
-        if let Err(rejection) = super::admission::scan_intervention_text(
-            "stop.reason",
-            &super::wire::BoundedText::new(reason).map_err(|_| InterventionError::Unavailable)?,
-        ) {
-            let AdmissionRejection::ForbiddenContent { category, field } = rejection else {
-                return Err(InterventionError::Unavailable);
-            };
-            return Err(InterventionError::ForbiddenContent { category, field });
-        }
-
-        let _guard = self.op_lock.lock().expect("bridge op lock poisoned");
 
         // Stop identity digest = {task, mode} ONLY: the stop-alias
         // interventions (TB-11) and `request_stop` must share ONE
@@ -1240,16 +1291,23 @@ fn current_stop_receipt(
             }
         }
     }
-    for event in events {
-        match &event.payload {
-            // ONLY an owner-confirmed CANCELLATION confirms the stop — a
-            // confirmed "completed" (the work finished on its own) is not
-            // a stop confirmation (TB-12).
-            TaskEventPayload::OwnerConfirmedTerminal { terminal } if terminal == "cancelled" => {
-                stage = StopStage::Confirmed;
+    // Terminal promotions apply only to a stop that MATERIALIZED (stage
+    // Forwarded): a bound-but-unmaterialized stop cannot skip straight to
+    // Confirmed/OutcomeUnknown off task-level facts from an older stop.
+    if stage == StopStage::Forwarded {
+        for event in events {
+            match &event.payload {
+                // ONLY an owner-confirmed CANCELLATION confirms the stop —
+                // a confirmed "completed" (the work finished on its own) is
+                // not a stop confirmation (TB-12).
+                TaskEventPayload::OwnerConfirmedTerminal { terminal }
+                    if terminal == "cancelled" =>
+                {
+                    stage = StopStage::Confirmed;
+                }
+                TaskEventPayload::OwnerDisappeared => stage = StopStage::OutcomeUnknown,
+                _ => {}
             }
-            TaskEventPayload::OwnerDisappeared => stage = StopStage::OutcomeUnknown,
-            _ => {}
         }
     }
     StopReceipt {
