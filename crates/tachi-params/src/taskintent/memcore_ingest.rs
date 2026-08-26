@@ -133,6 +133,7 @@ mod tests {
             Ok(AdmittedAuthority::of([
                 Capability::ReasoningReview,
                 Capability::ReadOnlyInvestigation,
+                Capability::RepositoryImplementation,
             ]))
         }
     }
