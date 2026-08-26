@@ -390,10 +390,10 @@ impl HolderCheck {
     }
 }
 
-/// Injectable holder probe — the real one shells out to `lsof`; tests pass a
-/// closure so the decision logic is exercised without depending on the host's
-/// process table.
-pub type HolderProbe = dyn Fn(&Path, Option<HolderExclusion>) -> HolderCheck;
+/// Injectable holder probe — the real one shells out to `lsof`; this private
+/// seam lets crate-local tests exercise the decision logic without depending on
+/// the host's process table.
+type HolderProbe = dyn Fn(&Path, Option<HolderExclusion>) -> HolderCheck;
 
 /// The one holder the reaper itself creates while pinning a candidate's inode.
 /// Both fields must match before an `lsof` row is ignored; excluding the whole
@@ -2099,8 +2099,20 @@ pub struct ReapOptions {
 ///
 /// `sources` is what the run may protect from ([`ProtectionSources`]) — passed in, not
 /// read from the ambient environment, so the protected set is a function of an argument
-/// the caller can see and a test can supply.
+/// the caller can see and a test can supply. The holder fence is not injectable through
+/// this production entry point: it always uses [`lsof_holder_probe`].
 pub fn run_orphan_reap(
+    conn: &mut rusqlite::Connection,
+    opts: &ReapOptions,
+    sources: &ProtectionSources<'_>,
+    now: SystemTime,
+) -> Result<ReapReport, DestructiveRefusal> {
+    run_orphan_reap_with_probe(conn, opts, sources, now, &lsof_holder_probe)
+}
+
+/// Crate-local test seam for the sealed entry point. Production callers cannot
+/// replace the real holder fence with a permissive probe.
+fn run_orphan_reap_with_probe(
     conn: &mut rusqlite::Connection,
     opts: &ReapOptions,
     sources: &ProtectionSources<'_>,

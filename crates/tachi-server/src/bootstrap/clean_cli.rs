@@ -561,7 +561,6 @@ fn run_orphan_reap_cli_with_sources(
         &opts,
         sources,
         std::time::SystemTime::now(),
-        &tachi_exec_env_reaper::lsof_holder_probe,
     )
     .map_err(|refusal| refusal.to_string())?;
     tachi_exec_env_reaper::emit_reap_report(&report, output)?;

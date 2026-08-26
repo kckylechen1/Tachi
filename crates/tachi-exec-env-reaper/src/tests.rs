@@ -1,9 +1,11 @@
 //! Orphan-reaper test module, split out of tachi-server's exec_env_reaper module (#1423).
 //!
-//! Relocated test suite: no test was added, removed, renamed, re-`#[ignore]`d,
+//! Relocated test suite: no existing test was removed, renamed, re-`#[ignore]`d,
 //! or had an assertion weakened. The crate-local fixture keeps tachi-server's
 //! suite-scoped root and stale-fixture GC contract; the process-env source guard
-//! reads BOTH files, and the kill-test receipt names this file as its source.
+//! reads BOTH files. This new file is only the source named by future kill-test
+//! receipt templates. The historical checked-in receipt remains bound to the old
+//! tachi-server source blob and is intentionally unchanged.
 
 use super::*;
 use std::collections::BTreeSet;
@@ -254,7 +256,7 @@ fn reap_sealed(
     now: SystemTime,
     probe: &HolderProbe,
 ) -> Result<ReapReport, DestructiveRefusal> {
-    run_orphan_reap(conn, opts, &resolved_sources(), now, probe)
+    run_orphan_reap_with_probe(conn, opts, &resolved_sources(), now, probe)
 }
 
 /// The sheathed body (the only way `force` reaches the delete path), on fully
@@ -2250,7 +2252,7 @@ fn an_incomplete_protection_set_never_exits_clean() {
     assert!(reap_exit_status(&complete).is_ok(), "{complete:?}");
 
     // Now break a protection source — for this run, and this run only.
-    let gapped = run_orphan_reap(
+    let gapped = run_orphan_reap_with_probe(
         store.connection_mut(),
         &opts(&root, false),
         &resolved_sources().without_home(),
@@ -2392,7 +2394,7 @@ fn a_gapped_run_and_a_resolved_run_are_in_flight_together_without_contaminating_
     let (gapped, resolved) = std::thread::scope(|scope| {
         let gapped = scope.spawn(|| {
             let mut store = open_store(&gapped_root);
-            run_orphan_reap(
+            run_orphan_reap_with_probe(
                 store.connection_mut(),
                 &opts(&gapped_root, false),
                 &resolved_sources().without_home(),
@@ -2403,7 +2405,7 @@ fn a_gapped_run_and_a_resolved_run_are_in_flight_together_without_contaminating_
         });
         let resolved = scope.spawn(|| {
             let mut store = open_store(&resolved_root);
-            run_orphan_reap(
+            run_orphan_reap_with_probe(
                 store.connection_mut(),
                 &opts(&resolved_root, false),
                 &resolved_sources(),
@@ -2476,6 +2478,36 @@ fn no_test_mutates_the_process_environment() {
              and turned an unrelated test red. Inject a `ProtectionSources` instead."
         );
     }
+}
+
+/// The public production entry point must never accept a caller-selected holder
+/// probe. A permissive probe would turn the final live-holder fence into caller
+/// policy instead of a production invariant.
+#[test]
+fn public_reap_entry_uses_only_the_real_holder_probe() {
+    let production = include_str!("lib.rs");
+    let public_start = production
+        .find("pub fn run_orphan_reap(")
+        .expect("public reaper entry point must exist");
+    let seam_offset = production[public_start..]
+        .find("\nfn run_orphan_reap_with_probe(")
+        .expect("private holder-probe seam must follow the public entry point");
+    let public_entry = &production[public_start..public_start + seam_offset];
+
+    assert!(
+        !public_entry.contains("HolderProbe"),
+        "the public production entry point must not accept an injectable HolderProbe:\n\
+         {public_entry}"
+    );
+    assert!(
+        public_entry.contains("&lsof_holder_probe"),
+        "the public production entry point must fix the real lsof probe:\n{public_entry}"
+    );
+    assert!(
+        !production.contains("pub fn run_orphan_reap_with_probe(")
+            && !production.contains("pub(crate) fn run_orphan_reap_with_probe("),
+        "the injectable seam must remain private to this module"
+    );
 }
 
 // ── #1062/#1379 kill-test matrix (S2d shape) — #[ignore]d, not yet re-run ────
