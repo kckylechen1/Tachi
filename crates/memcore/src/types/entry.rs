@@ -509,7 +509,7 @@ impl MemoryEntry {
     /// Fold legacy `persons` into `entities` and clear `persons` before persisting.
     /// All new write paths should call this (or rely on `memory_crud` upsert).
     pub fn fold_persons_into_entities(&mut self) {
-        let persons: Vec<String> = self.persons.drain(..).collect();
+        let persons = std::mem::take(&mut self.persons);
         fold_person_names_into_entities(&mut self.entities, persons);
     }
 
