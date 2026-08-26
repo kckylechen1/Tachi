@@ -38,6 +38,7 @@ full = [
     "dep:memory-server-manifest-audit",
     "dep:memory-server-rescue",
     "dep:tachi-clean",
+    "dep:tachi-exec-env-reaper",
 ]
 
 # Kernel + serving only. Adds no operator crates. Compiling this profile is the
@@ -70,6 +71,7 @@ tachi-hub = { path = "../tachi-hub", optional = true }
 tachi-merge-ops = { path = "../tachi-merge-ops", optional = true }
 tachi-llm = { path = "../tachi-llm" }
 tachi-clean = { path = "../../tools/cleaner", optional = true }
+tachi-exec-env-reaper = { path = "../tachi-exec-env-reaper", optional = true }
 rmcp = { version = "1.2", features = ["server", "transport-io", "macros", "client", "transport-child-process", "transport-streamable-http-client", "transport-streamable-http-client-reqwest", "server-side-http", "transport-streamable-http-server", "schemars"] }
 # `http` is needed at the stdio proxy transport layer to forward the bound
 # project identity (X-Tachi-Project) to the daemon via rmcp's custom_headers
@@ -126,6 +128,7 @@ icu_properties = "2.2"
 vault-kit = { path = "../vault-kit" }
 
 [dev-dependencies]
+tachi-exec-env-reaper = { path = "../tachi-exec-env-reaper" }
 tempfile = "3"
 memcore = { path = "../memcore", features = ["test-support"] }
 memory-server-runtime = { path = "../memory-server-runtime", features = ["test-support"] }

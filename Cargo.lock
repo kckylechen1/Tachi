@@ -2368,6 +2368,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "tachi-exec-env-reaper"
+version = "1.9.2"
+dependencies = [
+ "libc",
+ "memcore",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tachi-clean",
+ "uuid",
+]
+
+[[package]]
 name = "tachi-foundry"
 version = "1.9.2"
 dependencies = [
@@ -2512,6 +2525,7 @@ dependencies = [
  "tachi-clean",
  "tachi-credential-profile",
  "tachi-dispatch",
+ "tachi-exec-env-reaper",
  "tachi-foundry",
  "tachi-gh-safe-merge",
  "tachi-github-runtime",

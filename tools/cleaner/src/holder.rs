@@ -16,7 +16,7 @@
 //! same outcome as `Clear` and callers must never treat it as safe to
 //! reclaim — mirrors the `HolderCheck::Unknown` precedent already
 //! established (and sealed) for the destructive kill path in
-//! `exec_env_reaper.rs` under #1062. This module only ever detects; it
+//! `tachi-exec-env-reaper/src/lib.rs` under #1062. This module only ever detects; it
 //! never signals or kills a process.
 
 use std::path::Path;

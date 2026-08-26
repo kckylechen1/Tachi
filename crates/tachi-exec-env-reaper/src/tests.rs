@@ -1,15 +1,104 @@
-//! Orphan-reaper test module, split out of `exec_env_reaper.rs` (#1423).
+//! Orphan-reaper test module, split out of tachi-server's exec_env_reaper module (#1423).
 //!
-//! Pure relocation: no test was added, removed, renamed, re-`#[ignore]`d, or
-//! had an assertion weakened. The only edits are the two that the move itself
-//! forces — the process-env source guard now reads BOTH files, and the
-//! kill-test receipt names this file as its source.
+//! Relocated test suite: no existing test was removed, renamed, re-`#[ignore]`d,
+//! or had an assertion weakened. The crate-local fixture keeps tachi-server's
+//! suite-scoped root and stale-fixture GC contract; the process-env source guard
+//! reads BOTH files. This new file is only the source named by future kill-test
+//! receipt templates. The historical checked-in receipt remains bound to the old
+//! tachi-server source blob and is intentionally unchanged.
 
 use super::*;
 use std::collections::BTreeSet;
 
+const TEST_FIXTURE_ROOT_NAME: &str = "tachi-tests";
+const TEST_FIXTURE_MAX_AGE: Duration = Duration::from_secs(3600);
+
+fn suite_fixture_root() -> PathBuf {
+    std::env::temp_dir().join(TEST_FIXTURE_ROOT_NAME)
+}
+
+fn parse_run_dir_pid(name: &str) -> Option<u32> {
+    let rest = name.strip_prefix("run-")?;
+    let (pid_str, uuid_part) = rest.split_once('-')?;
+    if uuid_part.is_empty() {
+        return None;
+    }
+    pid_str.parse().ok().filter(|pid| *pid > 1)
+}
+
+fn process_alive(pid: u32) -> bool {
+    if pid <= 1 {
+        return false;
+    }
+    // SAFETY: signal 0 is an existence/permission probe; does not deliver.
+    let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    if rc == 0 {
+        return true;
+    }
+    let err = std::io::Error::last_os_error();
+    matches!(err.raw_os_error(), Some(code) if code == libc::EPERM)
+}
+
+fn is_mtime_stale(entry: &std::fs::DirEntry, now: SystemTime) -> bool {
+    entry
+        .metadata()
+        .ok()
+        .and_then(|metadata| metadata.modified().ok())
+        .and_then(|mtime| now.duration_since(mtime).ok())
+        .is_some_and(|age| age > TEST_FIXTURE_MAX_AGE)
+}
+
+fn gc_stale_test_fixtures(suite_root: &Path, now: SystemTime, keep: Option<&Path>) -> usize {
+    let Ok(entries) = std::fs::read_dir(suite_root) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if keep.is_some_and(|keep| keep == path.as_path()) || !is_mtime_stale(&entry, now) {
+            continue;
+        }
+        if path.is_dir() {
+            if let Some(name) = path.file_name().and_then(|name| name.to_str()) {
+                if let Some(pid) = parse_run_dir_pid(name) {
+                    if process_alive(pid) {
+                        continue;
+                    }
+                }
+            }
+            if std::fs::remove_dir_all(&path).is_ok() {
+                removed += 1;
+            }
+        } else if std::fs::remove_file(&path).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
+fn test_fixture_root() -> PathBuf {
+    static RUN: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    RUN.get_or_init(|| {
+        let suite = suite_fixture_root();
+        let _ = std::fs::create_dir_all(&suite);
+        let run = suite.join(format!(
+            "run-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let _ = gc_stale_test_fixtures(&suite, SystemTime::now(), Some(run.as_path()));
+        let _ = std::fs::create_dir_all(&run);
+        run
+    })
+    .clone()
+}
+
+fn test_fixture_path(name: impl AsRef<Path>) -> PathBuf {
+    test_fixture_root().join(name)
+}
+
 fn unique_temp_dir(prefix: &str) -> PathBuf {
-    let path = crate::utils::test_fixture_path(format!("{prefix}-{}", uuid::Uuid::new_v4()));
+    let path = test_fixture_path(format!("{prefix}-{}", uuid::Uuid::new_v4()));
     let _ = std::fs::remove_dir_all(&path);
     std::fs::create_dir_all(&path).unwrap();
     path
@@ -167,7 +256,7 @@ fn reap_sealed(
     now: SystemTime,
     probe: &HolderProbe,
 ) -> Result<ReapReport, DestructiveRefusal> {
-    run_orphan_reap(conn, opts, &resolved_sources(), now, probe)
+    run_orphan_reap_with_sources_and_probe(conn, opts, &resolved_sources(), now, probe)
 }
 
 /// The sheathed body (the only way `force` reaches the delete path), on fully
@@ -240,7 +329,8 @@ fn a_scan_root_that_contains_a_protected_path_is_still_walked() {
     );
 
     let candidates =
-        scan_orphan_candidates(&[root.clone()], &protection, aged_now(30), 7).candidates;
+        scan_orphan_candidates(std::slice::from_ref(&root), &protection, aged_now(30), 7)
+            .candidates;
     assert!(
         candidates.iter().any(|c| c.path == dead),
         "the dead sibling must survive the walk: {candidates:?}"
@@ -565,8 +655,13 @@ fn scan_selects_stale_named_dirs_and_ignores_the_rest() {
     let cargo_home = root.join("nested/codex-cargo-home-1");
     std::fs::create_dir_all(&cargo_home).unwrap();
 
-    let candidates =
-        scan_orphan_candidates(&[root.clone()], &Protection::default(), aged_now(30), 7).candidates;
+    let candidates = scan_orphan_candidates(
+        std::slice::from_ref(&root),
+        &Protection::default(),
+        aged_now(30),
+        7,
+    )
+    .candidates;
     let paths: Vec<_> = candidates.iter().map(|c| c.path.clone()).collect();
 
     assert!(paths.contains(&dead), "stale *-target must be a candidate");
@@ -596,8 +691,13 @@ fn the_scan_neither_measures_nor_probes() {
     let root = unique_temp_dir("tachi-reaper-cheap-scan");
     make_target_dir(&root, "some-target");
 
-    let candidates =
-        scan_orphan_candidates(&[root.clone()], &Protection::default(), aged_now(30), 7).candidates;
+    let candidates = scan_orphan_candidates(
+        std::slice::from_ref(&root),
+        &Protection::default(),
+        aged_now(30),
+        7,
+    )
+    .candidates;
 
     assert_eq!(candidates.len(), 1);
     assert!(
@@ -659,7 +759,7 @@ fn scan_skips_protected_shared_target() {
     let shared = make_target_dir(&root, "sigil-shared-target");
 
     let scan = scan_orphan_candidates(
-        &[root.clone()],
+        std::slice::from_ref(&root),
         &Protection::new([shared.clone()], Vec::new()),
         aged_now(30),
         7,
@@ -701,7 +801,8 @@ fn a_deep_fresh_file_keeps_the_whole_tree_fresh() {
     // …and the only fresh thing is at depth 3, where cargo actually writes.
 
     let candidates =
-        scan_orphan_candidates(&[root.clone()], &Protection::default(), now, 7).candidates;
+        scan_orphan_candidates(std::slice::from_ref(&root), &Protection::default(), now, 7)
+            .candidates;
 
     assert_eq!(candidates.len(), 1);
     assert!(
@@ -2072,7 +2173,7 @@ fn duplicate_roots_are_walked_once_and_counted_once() {
     let protection = Protection::default();
     let now = aged_now(30);
 
-    let once = scan_orphan_candidates(&[root.clone()], &protection, now, 7);
+    let once = scan_orphan_candidates(std::slice::from_ref(&root), &protection, now, 7);
     let twice = scan_orphan_candidates(
         &[root.clone(), root.clone(), alias.clone()],
         &protection,
@@ -2163,7 +2264,7 @@ fn an_incomplete_protection_set_never_exits_clean() {
     assert!(reap_exit_status(&complete).is_ok(), "{complete:?}");
 
     // Now break a protection source — for this run, and this run only.
-    let gapped = run_orphan_reap(
+    let gapped = run_orphan_reap_with_sources_and_probe(
         store.connection_mut(),
         &opts(&root, false),
         &resolved_sources().without_home(),
@@ -2305,7 +2406,7 @@ fn a_gapped_run_and_a_resolved_run_are_in_flight_together_without_contaminating_
     let (gapped, resolved) = std::thread::scope(|scope| {
         let gapped = scope.spawn(|| {
             let mut store = open_store(&gapped_root);
-            run_orphan_reap(
+            run_orphan_reap_with_sources_and_probe(
                 store.connection_mut(),
                 &opts(&gapped_root, false),
                 &resolved_sources().without_home(),
@@ -2316,7 +2417,7 @@ fn a_gapped_run_and_a_resolved_run_are_in_flight_together_without_contaminating_
         });
         let resolved = scope.spawn(|| {
             let mut store = open_store(&resolved_root);
-            run_orphan_reap(
+            run_orphan_reap_with_sources_and_probe(
                 store.connection_mut(),
                 &opts(&resolved_root, false),
                 &resolved_sources(),
@@ -2376,22 +2477,57 @@ fn no_test_mutates_the_process_environment() {
     let forbidden = ["set", "remove"].map(|verb| format!("env::{verb}_var"));
     // The module was split (#1423): the fence must scan production AND this
     // test file, or a mutation reintroduced on either side walks past it.
-    let sources = [
-        include_str!("../exec_env_reaper.rs"),
-        include_str!("tests.rs"),
-    ];
+    let sources = [include_str!("lib.rs"), include_str!("tests.rs")];
 
     for needle in &forbidden {
         assert!(
             !sources
                 .iter()
                 .any(|source| source.contains(needle.as_str())),
-            "`{needle}` is back in exec_env_reaper.rs (production) or \
-             exec_env_reaper/tests.rs (this test module). It mutates the environment of \
+            "`{needle}` is back in tachi-exec-env-reaper/src/lib.rs (production) or \
+             tachi-exec-env-reaper/src/tests.rs (this test module). It mutates the environment of \
              the whole test process, which is what made every reaper test depend on HOME \
              and turned an unrelated test red. Inject a `ProtectionSources` instead."
         );
     }
+}
+
+/// The public production entry point must never accept caller-selected protection
+/// sources or a holder probe. Either would turn a production fence into caller policy.
+#[test]
+fn public_reap_entry_uses_only_the_real_holder_probe() {
+    let production = include_str!("lib.rs");
+    let public_start = production
+        .find("pub fn run_orphan_reap(")
+        .expect("public reaper entry point must exist");
+    let seam_offset = production[public_start..]
+        .find("\nfn run_orphan_reap_with_sources_and_probe(")
+        .expect("private sources-and-probe seam must follow the public entry point");
+    let public_entry = &production[public_start..public_start + seam_offset];
+
+    assert!(
+        !public_entry.contains("HolderProbe") && !public_entry.contains("ProtectionSources<'_>"),
+        "the public production entry point must not accept injectable fences:\n{public_entry}"
+    );
+    let gate = public_entry
+        .find("certify_destructive(opts.force)?")
+        .expect("public entry must certify destructive intent");
+    let sources = public_entry
+        .find("ProtectionSources::from_process_env()")
+        .expect("public entry must construct real protection sources");
+    let probe = public_entry
+        .find("&lsof_holder_probe")
+        .expect("public entry must fix the real lsof probe");
+    assert!(
+        gate < sources && sources < probe,
+        "the destructive gate must precede environment/process reads and the real holder probe:\n\
+         {public_entry}"
+    );
+    assert!(
+        !production.contains("pub fn run_orphan_reap_with_sources_and_probe(")
+            && !production.contains("pub(crate) fn run_orphan_reap_with_sources_and_probe("),
+        "the injectable sources-and-probe seam must remain private to this module"
+    );
 }
 
 // ── #1062/#1379 kill-test matrix (S2d shape) — #[ignore]d, not yet re-run ────
@@ -2435,8 +2571,8 @@ mod kill_tests {
     /// `#[ignore]`: this is the out-of-band event S2d's own module doc describes
     /// — it deletes real directories on the machine that runs it (inside its own
     /// temp roots only) and is not something an ordinary `cargo test` should run
-    /// unattended. Run explicitly: `cargo test --offline -p tachi-server --lib \
-    /// exec_env_reaper::tests::kill_tests:: -- --ignored --nocapture`.
+    /// unattended. Run explicitly: `cargo test --offline -p tachi-exec-env-reaper --lib \
+    /// tests::kill_tests:: -- --ignored --nocapture`.
     #[cfg(unix)]
     #[ignore = "#1062 kill-test: real deletes under real --force; run explicitly, not on every cargo test"]
     #[test]
@@ -2610,11 +2746,9 @@ mod kill_tests {
         // Printed, never written — see the section doc above for why checking in
         // the receipt is a human act, not something this test does to itself.
         println!("\n─── #1062 orphan reaper kill-test receipt (S2d shape) ───");
-        println!("kill_test = \"crates/tachi-server/src/exec_env_reaper/tests.rs\"");
-        println!(
-            "kill_test_fn = \"exec_env_reaper::tests::kill_tests::orphan_reaper_kill_test_matrix\""
-        );
-        println!("binary = \"tachi-server\"");
+        println!("kill_test = \"crates/tachi-exec-env-reaper/src/tests.rs\"");
+        println!("kill_test_fn = \"tests::kill_tests::orphan_reaper_kill_test_matrix\"");
+        println!("binary = \"tachi-exec-env-reaper\"");
         println!("binary_version = \"{}\"", env!("CARGO_PKG_VERSION"));
         println!("host_os = \"{}\"", std::env::consts::OS);
         println!("result = \"pass\"");

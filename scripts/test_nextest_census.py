@@ -22,6 +22,7 @@ EXPECTED_PACKAGES = [
     "tachi-github-runtime",
     "tachi-lesson-forge",
     "tachi-build-broker",
+    "tachi-exec-env-reaper",
     "tachi-llm",
     "tachi-foundry",
 ]

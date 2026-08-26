@@ -19,7 +19,7 @@
 //!    instant); and [`ledger_held_paths`], a read of the `exec_env_resources`
 //!    lease ledger (tachi#1184 cross-vendor review C3) — a `ps`/`lsof` probe
 //!    alone cannot see a `BuildPrivate` lease's target dir held only via a
-//!    live binding, never an open fd (`exec_env_reaper.rs:854-869` documents
+//!    live binding, never an open fd (`tachi-exec-env-reaper/src/lib.rs:854-869` documents
 //!    the exact same blind spot for the certified reaper's own holder
 //!    check), so this patrol reuses the same structural fix the reaper
 //!    already ships (`memcore::list_bound_resource_paths`) rather than
@@ -179,7 +179,7 @@ pub(crate) enum StalenessState {
 /// 1. blessed basename (the machine's known-good shared target, tachi#1184
 ///    item 2's own defense-in-depth layer, independent of env/ledger state),
 /// 2. ledger-held (a `BuildPrivate` lease has this path bound RIGHT NOW —
-///    tachi#1184 review C3: the exact blind spot `exec_env_reaper.rs:854-869`
+///    tachi#1184 review C3: the exact blind spot `tachi-exec-env-reaper/src/lib.rs:854-869`
 ///    documents for `ps`/`lsof`-only holder checks, closed here the same way
 ///    the certified reaper closes it: consult the lease ledger, not just the
 ///    process table),
@@ -250,7 +250,7 @@ fn ledger_held_paths(global_db_path: &Path, immutable: bool) -> Result<HashSet<S
 
 /// Scan the reaper's own default orphan roots (`/private/tmp`, `$TMPDIR`,
 /// `~/.cache`, …) for private build-resource directories that look dead:
-/// name-shaped like a target dir ([`crate::exec_env_reaper::classify_orphan_dir_name`]),
+/// name-shaped like a target dir ([`tachi_exec_env_reaper::classify_orphan_dir_name`]),
 /// not on the blessed allowlist, not ledger-held, not env/process-protected,
 /// stale past `max_age_days`, and with no live holder.
 ///
@@ -268,7 +268,7 @@ pub(crate) fn scan_orphan_build_resources(
     scan_orphan_build_resources_with_roots(
         max_age_days,
         global_db_path,
-        &crate::exec_env_reaper::default_orphan_roots(),
+        &tachi_exec_env_reaper::default_orphan_roots(),
     )
 }
 
@@ -279,16 +279,15 @@ pub(crate) fn scan_orphan_build_resources_strict(
     scan_orphan_build_resources_with_roots_mode(
         max_age_days,
         global_db_path,
-        &crate::exec_env_reaper::default_orphan_roots(),
+        &tachi_exec_env_reaper::default_orphan_roots(),
         true,
     )
 }
 
 /// [`scan_orphan_build_resources`]'s production body, with the scan roots
-/// INJECTED rather than read from `default_orphan_roots()` — the same "real
-/// production path, controlled inputs" idiom `exec_env_reaper`'s own CLI
-/// already uses (`run_orphan_reap_cli_with_sources` vs `run_orphan_reap_cli`,
-/// `ProtectionSources::deterministic_for_cli_test()` vs `::from_process_env()`).
+/// INJECTED rather than read from `default_orphan_roots()` — a private
+/// "real production path, controlled inputs" seam used only by this module's
+/// tests.
 /// `default_orphan_roots()` always includes real system paths
 /// (`/private/tmp`, `~/.cache`, …) regardless of any env override a test
 /// might set, so a hermetic test of THIS function needs its own seam rather
@@ -325,11 +324,10 @@ fn scan_orphan_build_resources_with_roots_mode(
         }
     };
 
-    let sources = crate::exec_env_reaper::ProtectionSources::from_process_env();
-    let protection = crate::exec_env_reaper::protected_paths(&sources);
+    let sources = tachi_exec_env_reaper::ProtectionSources::from_process_env();
+    let protection = tachi_exec_env_reaper::protected_paths(&sources);
     let now = SystemTime::now();
-    let scan =
-        crate::exec_env_reaper::scan_orphan_candidates(roots, &protection, now, max_age_days);
+    let scan = tachi_exec_env_reaper::scan_orphan_candidates(roots, &protection, now, max_age_days);
 
     scan.candidates
         .iter()
@@ -343,19 +341,19 @@ fn scan_orphan_build_resources_with_roots_mode(
                 && !is_ledger_held(&candidate.path, &ledger_held)
                 && matches!(
                     candidate.staleness,
-                    crate::exec_env_reaper::Staleness::Stale { .. }
+                    tachi_exec_env_reaper::Staleness::Stale { .. }
                 )
         })
         .filter_map(|candidate| {
-            let holder = match crate::exec_env_reaper::lsof_holder_probe(&candidate.path, None) {
-                crate::exec_env_reaper::HolderCheck::None => HolderState::Unheld,
-                crate::exec_env_reaper::HolderCheck::Held(_) => HolderState::Held,
-                crate::exec_env_reaper::HolderCheck::Unknown(_) => HolderState::Unknown,
+            let holder = match tachi_exec_env_reaper::lsof_holder_probe(&candidate.path, None) {
+                tachi_exec_env_reaper::HolderCheck::None => HolderState::Unheld,
+                tachi_exec_env_reaper::HolderCheck::Held(_) => HolderState::Held,
+                tachi_exec_env_reaper::HolderCheck::Unknown(_) => HolderState::Unknown,
             };
             let staleness = match candidate.staleness {
-                crate::exec_env_reaper::Staleness::Stale { .. } => StalenessState::Stale,
-                crate::exec_env_reaper::Staleness::Fresh { .. } => StalenessState::Fresh,
-                crate::exec_env_reaper::Staleness::Unprovable(_) => StalenessState::Unprovable,
+                tachi_exec_env_reaper::Staleness::Stale { .. } => StalenessState::Stale,
+                tachi_exec_env_reaper::Staleness::Fresh { .. } => StalenessState::Fresh,
+                tachi_exec_env_reaper::Staleness::Unprovable(_) => StalenessState::Unprovable,
             };
             if !should_flag_candidate(&candidate.path, &ledger_held, holder, staleness) {
                 return None;
@@ -364,7 +362,7 @@ fn scan_orphan_build_resources_with_roots_mode(
                 path: candidate.path.display().to_string(),
                 kind: candidate.kind,
                 age_days: candidate.staleness.age_days(),
-                bytes: Some(crate::exec_env_reaper::dir_size(&candidate.path)),
+                bytes: Some(tachi_exec_env_reaper::dir_size(&candidate.path)),
             };
             Some(orphan_target_warning(&facts))
         })

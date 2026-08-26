@@ -122,7 +122,6 @@ mod exec_env_ops;
 /// only reference in the whole crate: no dispatch path calls it, so no dispatch
 /// is gated by it today.
 pub mod exec_env_postflight;
-mod exec_env_reaper;
 mod facade_memory_ops;
 mod facade_save_ops;
 mod facade_search_ops;
