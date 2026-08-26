@@ -329,7 +329,8 @@ fn a_scan_root_that_contains_a_protected_path_is_still_walked() {
     );
 
     let candidates =
-        scan_orphan_candidates(&[root.clone()], &protection, aged_now(30), 7).candidates;
+        scan_orphan_candidates(std::slice::from_ref(&root), &protection, aged_now(30), 7)
+            .candidates;
     assert!(
         candidates.iter().any(|c| c.path == dead),
         "the dead sibling must survive the walk: {candidates:?}"
@@ -654,8 +655,13 @@ fn scan_selects_stale_named_dirs_and_ignores_the_rest() {
     let cargo_home = root.join("nested/codex-cargo-home-1");
     std::fs::create_dir_all(&cargo_home).unwrap();
 
-    let candidates =
-        scan_orphan_candidates(&[root.clone()], &Protection::default(), aged_now(30), 7).candidates;
+    let candidates = scan_orphan_candidates(
+        std::slice::from_ref(&root),
+        &Protection::default(),
+        aged_now(30),
+        7,
+    )
+    .candidates;
     let paths: Vec<_> = candidates.iter().map(|c| c.path.clone()).collect();
 
     assert!(paths.contains(&dead), "stale *-target must be a candidate");
@@ -685,8 +691,13 @@ fn the_scan_neither_measures_nor_probes() {
     let root = unique_temp_dir("tachi-reaper-cheap-scan");
     make_target_dir(&root, "some-target");
 
-    let candidates =
-        scan_orphan_candidates(&[root.clone()], &Protection::default(), aged_now(30), 7).candidates;
+    let candidates = scan_orphan_candidates(
+        std::slice::from_ref(&root),
+        &Protection::default(),
+        aged_now(30),
+        7,
+    )
+    .candidates;
 
     assert_eq!(candidates.len(), 1);
     assert!(
@@ -748,7 +759,7 @@ fn scan_skips_protected_shared_target() {
     let shared = make_target_dir(&root, "sigil-shared-target");
 
     let scan = scan_orphan_candidates(
-        &[root.clone()],
+        std::slice::from_ref(&root),
         &Protection::new([shared.clone()], Vec::new()),
         aged_now(30),
         7,
@@ -790,7 +801,8 @@ fn a_deep_fresh_file_keeps_the_whole_tree_fresh() {
     // …and the only fresh thing is at depth 3, where cargo actually writes.
 
     let candidates =
-        scan_orphan_candidates(&[root.clone()], &Protection::default(), now, 7).candidates;
+        scan_orphan_candidates(std::slice::from_ref(&root), &Protection::default(), now, 7)
+            .candidates;
 
     assert_eq!(candidates.len(), 1);
     assert!(
@@ -2161,7 +2173,7 @@ fn duplicate_roots_are_walked_once_and_counted_once() {
     let protection = Protection::default();
     let now = aged_now(30);
 
-    let once = scan_orphan_candidates(&[root.clone()], &protection, now, 7);
+    let once = scan_orphan_candidates(std::slice::from_ref(&root), &protection, now, 7);
     let twice = scan_orphan_candidates(
         &[root.clone(), root.clone(), alias.clone()],
         &protection,
