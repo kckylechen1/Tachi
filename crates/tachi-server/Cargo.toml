@@ -63,6 +63,7 @@ tachi-credential-profile = { path = "../tachi-credential-profile" }
 tachi-dispatch = { path = "../tachi-dispatch", optional = true }
 tachi-foundry = { path = "../tachi-foundry", optional = true }
 tachi-github-runtime = { path = "../tachi-github-runtime" }
+tachi-gh-safe-merge = { path = "../tachi-gh-safe-merge" }
 tachi-lesson-forge = { path = "../tachi-lesson-forge" }
 tachi-build-broker = { path = "../tachi-build-broker" }
 tachi-hub = { path = "../tachi-hub", optional = true }
@@ -129,6 +130,7 @@ tempfile = "3"
 memcore = { path = "../memcore", features = ["test-support"] }
 memory-server-runtime = { path = "../memory-server-runtime", features = ["test-support"] }
 tachi-llm = { path = "../tachi-llm", features = ["test-support"] }
+tachi-gh-safe-merge = { path = "../tachi-gh-safe-merge", features = ["test-support"] }
 # Dev-dep only, so `cargo build --release` never sees this feature. It
 # makes vault-kit's `test_support::derive_cheap` (m=64 KiB vs the
 # production m=65536 KiB) available to tachi-server's own test binary; it

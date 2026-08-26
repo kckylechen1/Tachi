@@ -1,6 +1,6 @@
 use super::*;
-use crate::gh_safe_merge::{CheckRun, MockGhClient};
 use std::sync::Mutex;
+use tachi_gh_safe_merge::{CheckRun, MockGhClient};
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 

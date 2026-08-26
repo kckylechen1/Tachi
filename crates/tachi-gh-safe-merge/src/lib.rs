@@ -35,7 +35,7 @@
 
 mod client;
 mod gate;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 mod mock;
 #[cfg(test)]
 mod tests;
@@ -45,8 +45,8 @@ pub use client::{GhClient, GhError, IssueState, MergeResult, MergeStrategy};
 #[cfg(test)]
 pub(crate) use gate::evaluate_merge_gate;
 pub use gate::evaluate_merge_gate_with_policy;
-#[cfg(test)]
-pub(crate) use mock::MockGhClient;
+#[cfg(any(test, feature = "test-support"))]
+pub use mock::MockGhClient;
 pub use types::{
     CheckRun, ChecksState, ClosingIssueLabels, MergeDecision, MergeGatePolicy, MergeGatePolicyMode,
     Mergeable, PrLifecycleState, PrState, ReviewDecision,

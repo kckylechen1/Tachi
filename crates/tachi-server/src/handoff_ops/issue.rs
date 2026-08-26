@@ -1,11 +1,11 @@
 use crate::gh_ops::gh_client_for_server;
-use crate::gh_safe_merge::GhClient;
 use crate::server_state::{HandoffMemo, MemoryServer};
 use crate::task_lifecycle::{append_github_event, merge_github_status, run_dir_for_flow_id};
 use crate::tool_params::HandoffPromoteIssueParams;
 use chrono::Utc;
 use memcore::{MemoryEntry, MemoryStore};
 use serde_json::json;
+use tachi_gh_safe_merge::GhClient;
 
 use super::identity::resolve_from_agent;
 use super::memo::memo_from_entry;

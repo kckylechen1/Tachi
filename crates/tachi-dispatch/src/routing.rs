@@ -1314,6 +1314,7 @@ fn dispatch_risk_needles() -> &'static [(&'static str, &'static str)] {
         ("体验", "touches agent_experience"),
         ("safe_merge", "touches GitHub merge gate"),
         ("gh_safe_merge.rs", "touches GitHub merge gate"),
+        ("tachi-gh-safe-merge", "touches GitHub merge gate"),
         ("merge", "touches merge/release gate"),
         ("schema", "touches schema boundary"),
         ("migration", "touches migration behavior"),
@@ -1646,5 +1647,18 @@ mod tests {
         assert_eq!(scores[0], ("best", 42.0));
         assert_eq!(scores[1], ("worst_finite", -1.0));
         assert!(scores[2..].iter().all(|(_, score)| !score.is_finite()));
+    }
+
+    #[test]
+    fn risk_classifier_recognizes_extracted_safe_merge_crate_path() {
+        let paths = vec!["crates/tachi-gh-safe-merge/src/gate.rs".to_string()];
+        let risk =
+            classify_dispatch_risk("inspect the changed file", "unknown_request", None, &paths);
+
+        assert!(risk
+            .reasons
+            .iter()
+            .any(|reason| reason == "touches GitHub merge gate"));
+        assert_eq!(risk.risk, "high");
     }
 }
