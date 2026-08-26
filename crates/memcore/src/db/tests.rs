@@ -29,6 +29,7 @@ use super::{
     get_sandbox_policy, list_sandbox_policies, set_sandbox_policy, vault_touch_entry,
     vault_upsert_entry,
 };
+use crate::db::graph::AS_OF_EXPANSION_EDGE_LIMIT;
 use chrono::Utc;
 use rusqlite::{params, Connection};
 use serde_json::json;
@@ -188,5 +189,3 @@ mod sqlite_security_floor {
         assert_eq!(val, 42);
     }
 }
-#[cfg(test)]
-use crate::db::graph::AS_OF_EXPANSION_EDGE_LIMIT;
