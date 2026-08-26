@@ -1,4 +1,5 @@
 use super::*;
+use tachi_foundry::classify_foundry_route;
 
 /// Decide how to route jobs found in `db_path`. The daemon's own global +
 /// project DBs route via the existing `with_store_for_scope` path; any DB
@@ -11,36 +12,27 @@ pub(super) fn classify_route_in_home(
     own_project: Option<&Path>,
     tachi_home: &Path,
 ) -> Route {
-    if paths_equal(db_path, own_global) {
-        return Route::Global;
-    }
-    if let Some(proj) = own_project {
-        if paths_equal(db_path, proj) {
-            return Route::Project;
-        }
-    }
-    if let Some(name) = crate::path_utils::named_project_for_db_path_in_home(db_path, tachi_home) {
-        return Route::NamedProject(name);
-    }
-    if entry.allow_write
+    let own_global_match = paths_equal(db_path, own_global);
+    let own_project_match = own_project.is_some_and(|project| paths_equal(db_path, project));
+    let named_project = if own_global_match || own_project_match {
+        None
+    } else {
+        crate::path_utils::named_project_for_db_path_in_home(db_path, tachi_home)
+    };
+    let path_route_eligible = entry.allow_write
         && entry.schema_kind == "tachi"
         && matches!(
             entry.role,
             DbRole::Agent | DbRole::Foundry | DbRole::Unknown
-        )
-    {
-        return Route::Path;
-    }
-    // Use scope_hint to give the operator a more readable orphan reason.
-    let reason: &'static str = match entry.scope_hint.as_str() {
-        "agent" => "agent_db",
-        "foundry" => "foundry_db",
-        "vault" => "vault_db",
-        "hub" => "hub_db",
-        "" => "unscoped",
-        _ => "unrouted",
-    };
-    Route::Orphan(reason)
+        );
+
+    classify_foundry_route(
+        own_global_match,
+        own_project_match,
+        named_project,
+        path_route_eligible,
+        &entry.scope_hint,
+    )
 }
 
 pub(super) fn paths_equal(a: &Path, b: &Path) -> bool {

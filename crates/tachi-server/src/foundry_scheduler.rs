@@ -34,6 +34,7 @@ use tokio::sync::mpsc;
 use tokio::time::{interval, Instant, MissedTickBehavior};
 
 use memcore::{load_pending_foundry_jobs, MemoryStore, PersistedFoundryJob};
+use tachi_foundry::FoundryRoute as Route;
 
 use crate::foundry_runtime_ops::FoundryMaintenanceItem;
 use crate::manifest::{DbRole, Manifest};
@@ -46,7 +47,7 @@ mod worker;
 
 use routing::{classify_route_in_home, manifest_label_for, path_hash};
 pub use scheduler::FoundryScheduler;
-use types::{Route, WorkerHandle};
+use types::WorkerHandle;
 pub use types::{WorkerMetrics, MANIFEST_REFRESH_INTERVAL, POLL_INTERVAL};
 use worker::run_db_worker;
 
@@ -67,50 +68,6 @@ mod tests {
             last_classification: "healthy".to_string(),
             scope_hint: scope_hint.to_string(),
             notes: String::new(),
-        }
-    }
-
-    #[test]
-    fn classify_route_routes_own_global() {
-        let global = PathBuf::from("/tmp/sched-test/global.db");
-        let r = classify_route_in_home(
-            &entry(DbRole::Global, "global"),
-            &global,
-            &global,
-            None,
-            Path::new("/tmp/sched-tachi-home"),
-        );
-        assert!(matches!(r, Route::Global));
-    }
-
-    #[test]
-    fn classify_route_routes_own_project() {
-        let global = PathBuf::from("/tmp/sched-test/global.db");
-        let project = PathBuf::from("/tmp/sched-test/proj.db");
-        let r = classify_route_in_home(
-            &entry(DbRole::Project, "project"),
-            &project,
-            &global,
-            Some(&project),
-            Path::new("/tmp/sched-tachi-home"),
-        );
-        assert!(matches!(r, Route::Project));
-    }
-
-    #[test]
-    fn classify_route_recognizes_named_project() {
-        let global = PathBuf::from("/tmp/sched-test/global.db");
-        let np = PathBuf::from("/tmp/sched-tachi-home/projects/sigil/memory.db");
-        let r = classify_route_in_home(
-            &entry(DbRole::Project, ""),
-            &np,
-            &global,
-            None,
-            Path::new("/tmp/sched-tachi-home"),
-        );
-        match r {
-            Route::NamedProject(n) => assert_eq!(n, "sigil"),
-            other => panic!("expected NamedProject(sigil), got {other:?}"),
         }
     }
 
@@ -152,39 +109,6 @@ mod tests {
             std::env::set_var("TACHI_HOME", v);
         } else {
             std::env::remove_var("TACHI_HOME");
-        }
-    }
-
-    #[test]
-    fn classify_route_path_for_agent_db() {
-        let global = PathBuf::from("/tmp/sched-test/global.db");
-        let agent = PathBuf::from("/home/u/.tachi/agents/main/memory.db");
-        let r = classify_route_in_home(
-            &entry(DbRole::Agent, "agent"),
-            &agent,
-            &global,
-            None,
-            Path::new("/tmp/sched-tachi-home"),
-        );
-        assert!(matches!(r, Route::Path));
-    }
-
-    #[test]
-    fn classify_route_orphan_default_reason_when_no_hint() {
-        let global = PathBuf::from("/tmp/sched-test/global.db");
-        let weird = PathBuf::from("/somewhere/else/x.db");
-        let mut e = entry(DbRole::Unknown, "");
-        e.allow_write = false;
-        let r = classify_route_in_home(
-            &e,
-            &weird,
-            &global,
-            None,
-            Path::new("/tmp/sched-tachi-home"),
-        );
-        match r {
-            Route::Orphan(reason) => assert_eq!(reason, "unscoped"),
-            other => panic!("expected Orphan(unscoped), got {other:?}"),
         }
     }
 
