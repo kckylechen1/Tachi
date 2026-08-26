@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Instant;
 
 use crate::{
-    db::{get_superseded_ids, graph_expand},
+    db::{get_superseded_ids, graph_expand, graph_expand_as_of},
     error::MemoryError,
     namespace::surface_of,
     types::{
@@ -99,13 +99,26 @@ pub(super) fn append_graph_expansion(
     let rel_filter = opts.graph_relation_filter.as_deref();
 
     // Graph expansion is a best-effort enrichment; failures are non-fatal.
-    let Ok(expand_result) = graph_expand(
-        conn,
-        &seed_ids,
-        opts.graph_expand_hops,
-        rel_filter,
-        opts.wiki_corpus_store,
-    ) else {
+    // Point-in-time searches anchor edge validity at the requested instant
+    // too; plain searches keep the now-anchored predicate (Hyperion #3010).
+    let expand_call = match as_of_utc {
+        Some(instant) => graph_expand_as_of(
+            conn,
+            &seed_ids,
+            opts.graph_expand_hops,
+            rel_filter,
+            opts.wiki_corpus_store,
+            instant,
+        ),
+        None => graph_expand(
+            conn,
+            &seed_ids,
+            opts.graph_expand_hops,
+            rel_filter,
+            opts.wiki_corpus_store,
+        ),
+    };
+    let Ok(expand_result) = expand_call else {
         let receipt = phase_start.map(|s| GraphPhaseReceipt {
             enabled: true,
             failed: true,

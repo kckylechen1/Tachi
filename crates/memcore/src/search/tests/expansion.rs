@@ -1,6 +1,30 @@
 use super::*;
 
 #[test]
+fn fts_expansion_rejects_sqlite_unrepresentable_as_of_before_empty_query() {
+    let conn = setup();
+    let error = search_fts_with_expansion_config(
+        &conn,
+        "",
+        1,
+        false,
+        false,
+        None,
+        Some("+10000-01-01T00:00:00Z"),
+        &RecallConfig::default(),
+        false,
+        None,
+        false,
+    )
+    .expect_err("FTS expansion must validate as_of before its empty-query return");
+    assert!(matches!(
+        error,
+        crate::MemoryError::InvalidArg(ref message)
+            if message.contains("outside the SQLite julianday range")
+    ));
+}
+
+#[test]
 fn fts_or_fallback_is_enabled_by_default_and_preserves_all_terms_precision() {
     let mut conn = setup();
     insert(

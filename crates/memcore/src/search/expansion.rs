@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 use crate::{
-    db::{search_fts, search_fts_raw_match},
+    db::{normalize_sqlite_as_of, search_fts_with_normalized_as_of},
     error::MemoryError,
     namespace::Surface,
     recall_config::RecallConfig,
@@ -261,6 +261,9 @@ pub(super) fn search_fts_with_expansion_config(
     surface: Option<Surface>,
     wiki_corpus_store: bool,
 ) -> Result<FtsScoresWithGroups, MemoryError> {
+    let as_of_utc = as_of
+        .map(|instant| normalize_sqlite_as_of(conn, instant))
+        .transpose()?;
     let mut merged = HashMap::new();
     let mut groups: Option<Vec<FtsExpansionGroupReceipt>> = sample.then(Vec::new);
     for (idx, fts_query) in expanded_fts_queries(query, recall_config.max_expanded_fts_queries)
@@ -273,14 +276,15 @@ pub(super) fn search_fts_with_expansion_config(
             recall_config.expanded_fts_score_factor
         };
         let group_start = sample.then(Instant::now);
-        let group_hits = search_fts(
+        let group_hits = search_fts_with_normalized_as_of(
             conn,
             &fts_query,
+            true,
             limit,
             include_archived,
             include_superseded,
             path_prefix,
-            as_of,
+            as_of_utc.as_deref(),
             surface,
             wiki_corpus_store,
         )?;
@@ -307,14 +311,15 @@ pub(super) fn search_fts_with_expansion_config(
             fts_or_fallback_match_query(query, recall_config.or_fallback_fts_max_terms)
         {
             let fallback_start = sample.then(Instant::now);
-            let fallback_hits = search_fts_raw_match(
+            let fallback_hits = search_fts_with_normalized_as_of(
                 conn,
                 &or_query,
+                false,
                 limit,
                 include_archived,
                 include_superseded,
                 path_prefix,
-                as_of,
+                as_of_utc.as_deref(),
                 surface,
                 wiki_corpus_store,
             )?;

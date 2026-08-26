@@ -8,7 +8,7 @@ use crate::namespace::{surface_sql_splice, Surface};
 use crate::types::MemoryEntry;
 
 use super::{
-    normalize_utc_iso, row_to_entry, serialize_f32, simple_query_input, MEMORY_SELECT_COLUMNS,
+    normalize_sqlite_as_of, row_to_entry, serialize_f32, simple_query_input, MEMORY_SELECT_COLUMNS,
     MEMORY_SELECT_COLUMNS_QUALIFIED,
 };
 
@@ -159,10 +159,12 @@ pub fn search_vec(
     surface: Option<Surface>,
     wiki_corpus_store: bool,
 ) -> Result<HashMap<String, f64>, MemoryError> {
+    let as_of_utc = as_of
+        .map(|instant| normalize_sqlite_as_of(conn, instant))
+        .transpose()?;
     let blob = serialize_f32(query_vec);
     let wiki_gate = WikiCorpusGate::resolve(wiki_corpus_store, path_prefix);
     let path_like = path_prefix.map(|prefix| format!("{prefix}%"));
-    let as_of_utc = as_of.map(normalize_utc_iso).transpose()?;
 
     let mut k_fetch = top_k.min(SQLITE_VEC_KNN_MAX_K);
     let mut rows = run_search_vec_query(
@@ -304,27 +306,61 @@ pub fn search_fts(
     surface: Option<Surface>,
     wiki_corpus_store: bool,
 ) -> Result<HashMap<String, f64>, MemoryError> {
-    let safe_query = simple_query_input(query);
-
-    if safe_query.is_empty() {
-        return Ok(HashMap::new());
-    }
-
-    search_fts_match(
+    let as_of_utc = as_of
+        .map(|instant| normalize_sqlite_as_of(conn, instant))
+        .transpose()?;
+    search_fts_with_normalized_as_of(
         conn,
-        &safe_query,
+        query,
         true,
         limit,
         include_archived,
         include_superseded,
         path_prefix,
-        as_of,
+        as_of_utc.as_deref(),
+        surface,
+        wiki_corpus_store,
+    )
+}
+
+/// Shared execution path for FTS callers that already hold a canonical,
+/// SQLite-representable `as_of`. The caller owns that preflight so expansion
+/// can validate once before fan-out instead of once per expanded query.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn search_fts_with_normalized_as_of(
+    conn: &Connection,
+    query: &str,
+    use_simple_query: bool,
+    limit: usize,
+    include_archived: bool,
+    include_superseded: bool,
+    path_prefix: Option<&str>,
+    as_of_utc: Option<&str>,
+    surface: Option<Surface>,
+    wiki_corpus_store: bool,
+) -> Result<HashMap<String, f64>, MemoryError> {
+    let safe_query = use_simple_query.then(|| simple_query_input(query));
+    let match_query = safe_query.as_deref().unwrap_or(query);
+    if match_query.is_empty() || (!use_simple_query && match_query.trim().is_empty()) {
+        return Ok(HashMap::new());
+    }
+
+    search_fts_match(
+        conn,
+        match_query,
+        use_simple_query,
+        limit,
+        include_archived,
+        include_superseded,
+        path_prefix,
+        as_of_utc,
         surface,
         WikiCorpusGate::resolve(wiki_corpus_store, path_prefix),
     )
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 pub(crate) fn search_fts_raw_match(
     conn: &Connection,
     match_query: &str,
@@ -336,10 +372,10 @@ pub(crate) fn search_fts_raw_match(
     surface: Option<Surface>,
     wiki_corpus_store: bool,
 ) -> Result<HashMap<String, f64>, MemoryError> {
-    if match_query.trim().is_empty() {
-        return Ok(HashMap::new());
-    }
-    search_fts_match(
+    let as_of_utc = as_of
+        .map(|instant| normalize_sqlite_as_of(conn, instant))
+        .transpose()?;
+    search_fts_with_normalized_as_of(
         conn,
         match_query,
         false,
@@ -347,9 +383,9 @@ pub(crate) fn search_fts_raw_match(
         include_archived,
         include_superseded,
         path_prefix,
-        as_of,
+        as_of_utc.as_deref(),
         surface,
-        WikiCorpusGate::resolve(wiki_corpus_store, path_prefix),
+        wiki_corpus_store,
     )
 }
 
@@ -362,11 +398,10 @@ fn search_fts_match(
     include_archived: bool,
     include_superseded: bool,
     path_prefix: Option<&str>,
-    as_of: Option<&str>,
+    as_of_utc: Option<&str>,
     surface: Option<Surface>,
     wiki_gate: WikiCorpusGate,
 ) -> Result<HashMap<String, f64>, MemoryError> {
-    let as_of_utc = as_of.map(normalize_utc_iso).transpose()?;
     let path_like = path_prefix.map(|prefix| format!("{prefix}%"));
     let match_operand = if use_simple_query {
         "simple_query(?1)"
@@ -405,7 +440,7 @@ fn search_fts_match(
             limit as i64,
             include_superseded as i64,
             path_like,
-            as_of_utc.as_deref()
+            as_of_utc
         ],
         |row| {
             let id: String = row.get(0)?;
@@ -458,6 +493,9 @@ pub fn search_symbolic_candidates(
     surface: Option<Surface>,
     wiki_corpus_store: bool,
 ) -> Result<Vec<MemoryEntry>, MemoryError> {
+    let as_of_utc = as_of
+        .map(|instant| normalize_sqlite_as_of(conn, instant))
+        .transpose()?;
     search_symbolic_candidates_with_relevance(
         conn,
         query,
@@ -466,7 +504,7 @@ pub fn search_symbolic_candidates(
         include_archived,
         include_superseded,
         path_prefix,
-        as_of,
+        as_of_utc.as_deref(),
         surface,
         wiki_corpus_store,
     )
@@ -484,7 +522,7 @@ pub(crate) fn search_symbolic_candidates_with_relevance(
     include_archived: bool,
     include_superseded: bool,
     path_prefix: Option<&str>,
-    as_of: Option<&str>,
+    as_of_utc: Option<&str>,
     surface: Option<Surface>,
     wiki_corpus_store: bool,
 ) -> Result<Vec<MemoryEntry>, MemoryError> {
@@ -496,7 +534,6 @@ pub(crate) fn search_symbolic_candidates_with_relevance(
 
     register_symbolic_score_function(conn)?;
 
-    let as_of_utc = as_of.map(normalize_utc_iso).transpose()?;
     let wiki_gate = WikiCorpusGate::resolve(wiki_corpus_store, path_prefix);
     let path_like = path_prefix.map(|prefix| format!("{prefix}%"));
 
@@ -520,7 +557,7 @@ pub(crate) fn search_symbolic_candidates_with_relevance(
             include_archived,
             include_superseded,
             path_like.as_deref(),
-            as_of_utc.as_deref(),
+            as_of_utc,
             surface,
             wiki_gate,
         );
@@ -534,7 +571,7 @@ pub(crate) fn search_symbolic_candidates_with_relevance(
         include_archived,
         include_superseded,
         path_like.as_deref(),
-        as_of_utc.as_deref(),
+        as_of_utc,
         surface,
         wiki_gate,
     )
