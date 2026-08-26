@@ -128,6 +128,72 @@ fn hybrid_search_respects_as_of_validity_window() {
 }
 
 #[test]
+fn hybrid_search_rejects_sqlite_unrepresentable_as_of_with_candidates() {
+    let mut conn = setup();
+    insert(
+        &mut conn,
+        "sqlite-range-candidate",
+        "SQLiteRangeNeedle ordinary result",
+        &["sqlite-range"],
+    );
+    // Keep one legacy row eligible under the existing lexical SQL predicate:
+    // the normalized +10000 instant begins with '+', so ordinary digit-led
+    // timestamps sort after it before SQLite representability is considered.
+    conn.execute(
+        "UPDATE memories SET timestamp = '', valid_from = '' WHERE id = 'sqlite-range-candidate'",
+        [],
+    )
+    .unwrap();
+
+    let error = hybrid_search(
+        &conn,
+        "SQLiteRangeNeedle",
+        &SearchOptions {
+            top_k: 5,
+            graph_expand_hops: 1,
+            record_access: false,
+            as_of: Some("+10000-01-01T00:00:00Z".to_string()),
+            ..Default::default()
+        },
+    )
+    .expect_err("SQLite-unrepresentable as_of must fail before graph errors are suppressed");
+
+    assert!(
+        matches!(
+            error,
+            MemoryError::InvalidArg(ref message)
+                if message.contains("outside the SQLite julianday range")
+        ),
+        "unexpected error: {error:?}"
+    );
+}
+
+#[test]
+fn hybrid_search_rejects_sqlite_unrepresentable_as_of_without_candidates() {
+    let conn = setup();
+    let error = hybrid_search(
+        &conn,
+        "SQLiteRangeNeedleNoCandidates",
+        &SearchOptions {
+            graph_expand_hops: 1,
+            record_access: false,
+            as_of: Some("+10000-01-01T00:00:00Z".to_string()),
+            ..Default::default()
+        },
+    )
+    .expect_err("SQLite-unrepresentable as_of must fail before the empty-candidate return");
+
+    assert!(
+        matches!(
+            error,
+            MemoryError::InvalidArg(ref message)
+                if message.contains("outside the SQLite julianday range")
+        ),
+        "unexpected error: {error:?}"
+    );
+}
+
+#[test]
 fn supersede_closes_open_valid_until_for_point_in_time_recall() {
     let mut conn = setup();
     let mut old = memory_entry("sup-old", "SupersedeNeedle old memory", &[]);

@@ -2034,8 +2034,8 @@ fn add_edge_without_authority_scrubs_reserved_key() {
     );
 }
 
-/// Authority spoofing via the unclassified door (tachi#1646 round-2
-/// MUST-FIX 1): a caller that never goes through `add_edge_with_provenance`
+/// Authority spoofing via the unclassified door (tachi#1646):
+/// a caller that never goes through `add_edge_with_provenance`
 /// (so `EdgeProvenance::authority` is `None`) but hands `add_edge` a
 /// pre-baked `metadata.authority` string — e.g. a trusted class like
 /// `"model_receipt_backed"` copy-pasted from an existing row, or crafted by
@@ -2298,4 +2298,207 @@ fn confirmed_contradiction_transaction_stamps_model_receipt_backed_authority() {
             "both contradiction-pipeline projections must stamp ModelReceiptBacked: {edge:?}"
         );
     }
+}
+
+#[test]
+fn graph_expand_as_of_anchors_edge_validity_at_the_instant() {
+    // Hyperion #3010: a point-in-time expansion must anchor BOTH edge bounds
+    // at the requested instant — a replay neither leaks an edge created after
+    // the instant nor loses an edge that was valid then but has since
+    // expired. Plain expansion keeps the historical now-anchored predicate.
+    const REPLAY_AS_OF: &str = "2026-01-01T00:00:00Z";
+    let mut conn = make_conn();
+    for id in [
+        "root",
+        "always-nbr",
+        "future-nbr",
+        "lapsed-nbr",
+        "blank-nbr",
+        "starts-at-as-of",
+        "ends-at-as-of",
+    ] {
+        upsert(&mut conn, &make_entry(id, "graph as-of fixture"), false).unwrap();
+    }
+    let edge = |target: &str, valid_from: &str, valid_to: Option<&str>| MemoryEdge {
+        source_id: "root".into(),
+        target_id: target.into(),
+        relation: "follows".into(),
+        weight: 1.0,
+        metadata: serde_json::json!({}),
+        created_at: String::new(),
+        valid_from: valid_from.into(),
+        valid_to: valid_to.map(str::to_string),
+    };
+    add_edge(&conn, &edge("always-nbr", "2019-01-01T00:00:00Z", None)).unwrap();
+    // Not yet valid until 2027: visible to a now-anchored read, hidden to a
+    // 2026 replay.
+    add_edge(&conn, &edge("future-nbr", "2027-01-01T00:00:00Z", None)).unwrap();
+    // Valid 2019→2026-06: expired today, still valid at a 2026-01-01 replay.
+    add_edge(
+        &conn,
+        &edge(
+            "lapsed-nbr",
+            "2019-01-01T00:00:00Z",
+            Some("2026-06-01T00:00:00Z"),
+        ),
+    )
+    .unwrap();
+    // The graph interval is half-open: an edge beginning exactly at the
+    // replay instant is active, while one ending exactly at it is already
+    // closed.
+    add_edge(&conn, &edge("starts-at-as-of", REPLAY_AS_OF, None)).unwrap();
+    add_edge(
+        &conn,
+        &edge("ends-at-as-of", "2019-01-01T00:00:00Z", Some(REPLAY_AS_OF)),
+    )
+    .unwrap();
+    // A LEGACY row with a genuinely empty valid_from (written before
+    // write_edge_row started defaulting it to created_at) stays always-valid.
+    // New edges with an empty field normalize valid_from to now on write, so
+    // they are correctly invisible to earlier replays — this row must bypass
+    // add_edge to reproduce the pre-normalization shape.
+    conn.execute(
+        "INSERT INTO memory_edges (source_id, target_id, relation, weight, metadata, created_at, valid_from, valid_to)          VALUES ('root', 'blank-nbr', 'follows', 1.0, '{}', '', '', NULL)",
+        [],
+    )
+    .unwrap();
+
+    let plain = graph_expand(&conn, &["root".into()], 1, None, false).unwrap();
+    assert!(plain.distances.contains_key("always-nbr"));
+    assert!(
+        plain.distances.contains_key("future-nbr"),
+        "now-anchored reads ignore valid_from (historical behavior)"
+    );
+    assert!(plain.distances.contains_key("blank-nbr"));
+    assert!(
+        !plain.distances.contains_key("lapsed-nbr"),
+        "now-anchored reads drop expired edges (historical behavior)"
+    );
+
+    let replay = graph_expand_as_of(&conn, &["root".into()], 1, None, false, REPLAY_AS_OF).unwrap();
+    assert!(replay.distances.contains_key("always-nbr"));
+    assert!(
+        replay.distances.contains_key("lapsed-nbr"),
+        "an edge expired today was valid at the replay instant"
+    );
+    assert!(
+        replay.distances.contains_key("starts-at-as-of"),
+        "valid_from == as_of must be included"
+    );
+    assert!(
+        !replay.distances.contains_key("ends-at-as-of"),
+        "valid_to == as_of must be excluded"
+    );
+    assert!(replay.distances.contains_key("blank-nbr"));
+    assert!(
+        !replay.distances.contains_key("future-nbr"),
+        "an edge created after the instant must not leak into the replay"
+    );
+
+    let later = graph_expand_as_of(
+        &conn,
+        &["root".into()],
+        1,
+        None,
+        false,
+        "2028-01-01T00:00:00Z",
+    )
+    .unwrap();
+    assert!(later.distances.contains_key("future-nbr"));
+
+    // Sub-second precision: an edge beginning 500ms AFTER
+    // the instant must not leak in. datetime() truncates to whole seconds
+    // and admitted it; julianday() keeps the half-open interval aligned
+    // with the entry-level Chrono comparison.
+    upsert(
+        &mut conn,
+        &make_entry("ms-nbr", "sub-second fixture"),
+        false,
+    )
+    .unwrap();
+    add_edge(&conn, &edge("ms-nbr", "2026-01-01T00:00:00.500Z", None)).unwrap();
+    let at_instant = graph_expand_as_of(
+        &conn,
+        &["root".into()],
+        1,
+        None,
+        false,
+        "2026-01-01T00:00:00.000Z",
+    )
+    .unwrap();
+    assert!(
+        !at_instant.distances.contains_key("ms-nbr"),
+        "an edge starting 500ms after the instant must be hidden"
+    );
+    let after_edge = graph_expand_as_of(
+        &conn,
+        &["root".into()],
+        1,
+        None,
+        false,
+        "2026-01-01T00:00:00.600Z",
+    )
+    .unwrap();
+    assert!(after_edge.distances.contains_key("ms-nbr"));
+
+    // A malformed instant is a loud error at the public boundary, never a
+    // silently partial graph (julianday(garbage) is NULL, which would drop
+    // the validity predicate and hide every ordinary edge).
+    assert!(
+        graph_expand_as_of(&conn, &["root".into()], 1, None, false, "not-a-timestamp").is_err()
+    );
+
+    // An instant Chrono accepts but SQLite cannot anchor (year +10000 is
+    // outside the julianday range) must fail loud the same way — NULL from
+    // julianday would otherwise silently drop ordinary edges again.
+    assert!(graph_expand_as_of(
+        &conn,
+        &["root".into()],
+        1,
+        None,
+        false,
+        "+10000-01-01T00:00:00Z"
+    )
+    .is_err());
+}
+
+#[test]
+fn graph_expand_as_of_bounds_historical_edge_fan_out() {
+    // A historical instant re-exposes long-expired edges the now-anchored
+    // predicate excluded; the as_of variant caps its traversal work so a
+    // dense expired neighborhood cannot amplify unboundedly.
+    let mut conn = make_conn();
+    upsert(&mut conn, &make_entry("cap-root", "cap fixture"), false).unwrap();
+    for i in 0..(AS_OF_EXPANSION_EDGE_LIMIT + 10) {
+        let target = format!("cap-nbr-{i}");
+        upsert(&mut conn, &make_entry(&target, "cap neighbor"), false).unwrap();
+        add_edge(
+            &conn,
+            &MemoryEdge {
+                source_id: "cap-root".into(),
+                target_id: target,
+                relation: "follows".into(),
+                weight: 1.0,
+                metadata: serde_json::json!({}),
+                created_at: "2019-01-01T00:00:00Z".into(),
+                valid_from: "2019-01-01T00:00:00Z".into(),
+                valid_to: Some("2020-01-01T00:00:00Z".into()),
+            },
+        )
+        .unwrap();
+    }
+    let replay = graph_expand_as_of(
+        &conn,
+        &["cap-root".into()],
+        1,
+        None,
+        false,
+        "2019-06-01T00:00:00Z",
+    )
+    .unwrap();
+    assert!(
+        replay.edges.len() <= AS_OF_EXPANSION_EDGE_LIMIT,
+        "edge fan-out must respect the as_of ceiling: {}",
+        replay.edges.len()
+    );
 }

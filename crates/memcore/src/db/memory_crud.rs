@@ -6,7 +6,7 @@ use crate::db::StoreProfile;
 use crate::error::MemoryError;
 use crate::types::{default_retention_for, MemoryCategory, MemoryEntry, MemoryScope, MemorySource};
 
-use super::common::{normalize_utc_iso, now_utc_iso, row_to_entry};
+use super::common::{normalize_sqlite_as_of, normalize_utc_iso, now_utc_iso, row_to_entry};
 use super::sqlite_vec::serialize_f32;
 
 mod access;
@@ -30,7 +30,9 @@ pub use read::{
     list_active_wiki_ingest_predecessors, list_by_path, list_by_path_active_unsuperseded,
     list_by_path_recent, list_user_facing_wiki_entries, list_wiki_duplicate_candidates,
 };
+#[cfg(test)]
 pub(crate) use search::search_fts_raw_match;
+pub(crate) use search::search_fts_with_normalized_as_of;
 pub(crate) use search::search_symbolic_candidates_with_relevance;
 pub(crate) use search::wiki_corpus_store_sql_splice;
 pub use search::{

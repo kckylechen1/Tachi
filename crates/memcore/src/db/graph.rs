@@ -6,7 +6,7 @@ use crate::error::MemoryError;
 use crate::relation_ontology::ComponentGovernanceRelation;
 use crate::types::{ExpectedMemoryState, GraphExpandResult, GraphTraversalInjection, MemoryEdge};
 
-use super::common::{normalize_utc_iso_or_now, now_utc_iso};
+use super::common::{normalize_sqlite_as_of, normalize_utc_iso_or_now, now_utc_iso};
 use super::memory_crud::{fetch_by_ids, fetch_by_ids_excluding_store_internal};
 
 // #1558: MemCore cannot depend on tachi-llm (tachi-llm already depends on
@@ -537,13 +537,13 @@ fn clamp_edge_weight(weight: f64) -> f64 {
 /// `add_edge` handed a pre-baked `{"authority":"model_receipt_backed"}`
 /// straight through, that string would round-trip as a trusted
 /// classification no writer ever actually made — authority spoofing via the
-/// unclassified door (tachi#1646 round-2 MUST-FIX 1). An unclassified write
+/// unclassified door (tachi#1646). An unclassified write
 /// carries *no* authority claim, full stop, so the key must be **absent**,
 /// never merely "whatever the caller happened to put there". Legacy rows
 /// (pre-#1646, no migration) and post-#1646 unclassified rows both read back
 /// `None` from `edge_authority` because the key is absent — never because we
 /// trusted a caller-supplied string. This is a behavior change from the
-/// pre-round-2 "clone only" version: metadata is no longer guaranteed
+/// earlier "clone only" design: metadata is no longer guaranteed
 /// byte-for-byte identical when the caller's own payload happened to contain
 /// the reserved key, but it *is* guaranteed byte-for-byte identical for every
 /// caller that never touches `metadata.authority`, which is every legitimate
@@ -624,7 +624,7 @@ fn stamp_authority(
 /// *unless* the caller's own payload already carried an `"authority"` key —
 /// [`stamp_authority`] scrubs that reserved key on the unclassified path so a
 /// plain `add_edge` cannot be used to spoof a trusted classification no
-/// writer actually made (tachi#1646 round-2 MUST-FIX 1).
+/// writer actually made (tachi#1646).
 fn write_edge_row(
     conn: &Connection,
     edge: &MemoryEdge,
@@ -925,6 +925,7 @@ fn get_edges_batch(
     ids: &[String],
     relation_filter: Option<&str>,
     limit: usize,
+    as_of_utc: Option<&str>,
 ) -> Result<Vec<MemoryEdge>, MemoryError> {
     if ids.is_empty() {
         return Ok(Vec::new());
@@ -932,12 +933,32 @@ fn get_edges_batch(
 
     let placeholders = (0..ids.len()).map(|_| "?").collect::<Vec<_>>().join(", ");
 
+    // `None` keeps the historical now-anchored predicate byte-for-byte;
+    // `Some(as_of)` anchors BOTH edge validity bounds at the requested
+    // instant instead of the wall clock, so a replay neither sees edges
+    // created after the instant nor loses edges that were valid then but
+    // have since expired. An empty valid_from (the serde default) is
+    // always-valid, matching how reads treated it before it gained a
+    // temporal role. The as_of branch compares via julianday(): datetime()
+    // truncates to whole seconds, which would let an edge leak up to 999ms
+    // before its valid_from and expire up to 999ms early — the entry-level
+    // valid_at filter compares full Chrono precision, and the edge half
+    // must match that half-open interval.
+    let validity_sql = match as_of_utc {
+        None => " AND (valid_to IS NULL OR datetime(valid_to) > datetime('now'))".to_string(),
+        Some(_) => {
+            " AND (valid_from IS NULL OR valid_from = '' OR julianday(valid_from) <= julianday(?)) \
+         AND (valid_to IS NULL OR julianday(valid_to) > julianday(?))"
+                .to_string()
+        }
+    };
+
     let base_sql = format!(
         "SELECT source_id, target_id, relation, weight, metadata, created_at, valid_from, valid_to \
          FROM memory_edges \
-         WHERE (source_id IN ({ph}) OR target_id IN ({ph})) \
-         AND (valid_to IS NULL OR datetime(valid_to) > datetime('now'))",
-        ph = placeholders
+         WHERE (source_id IN ({ph}) OR target_id IN ({ph})){validity}",
+        ph = placeholders,
+        validity = validity_sql
     );
 
     let full_sql = if relation_filter.is_some() {
@@ -966,12 +987,16 @@ fn get_edges_batch(
     };
 
     let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> =
-        Vec::with_capacity(ids.len() * 2 + 2);
+        Vec::with_capacity(ids.len() * 2 + 4);
     for id in ids {
         param_values.push(Box::new(id.clone()));
     }
     for id in ids {
         param_values.push(Box::new(id.clone()));
+    }
+    if let Some(as_of) = as_of_utc {
+        param_values.push(Box::new(as_of.to_string()));
+        param_values.push(Box::new(as_of.to_string()));
     }
     if let Some(rel) = relation_filter {
         param_values.push(Box::new(rel.to_string()));
@@ -1074,6 +1099,47 @@ pub fn graph_expand(
     )
 }
 
+/// Point-in-time BFS graph expansion: identical to [`graph_expand`] except
+/// edge validity is anchored at `as_of_utc` (RFC3339, normalized) instead of
+/// the wall clock. Entry-level validity remains the search layer's
+/// `valid_at` filter; this closes the edge half of look-ahead-free replay
+/// (Hyperion #3010).
+pub fn graph_expand_as_of(
+    conn: &Connection,
+    seed_ids: &[String],
+    max_hops: u32,
+    relation_filter: Option<&str>,
+    wiki_corpus_store: bool,
+    as_of_utc: &str,
+) -> Result<GraphExpandResult, MemoryError> {
+    // Validate and canonicalize at this public boundary, mirroring the
+    // as-of search APIs: a malformed instant must be a loud MemoryError,
+    // never a silently partial graph (julianday(?) of garbage is SQL NULL,
+    // which drops the validity predicate for ordinary edges while legacy
+    // blank-valid_from rows survive). Chrono also accepts instants outside
+    // SQLite's own parseable range (e.g. year +10000), so the canonical
+    // string is pre-flighted through julianday itself: NULL means the
+    // engine cannot anchor this instant and the call fails loud rather
+    // than silently dropping ordinary edges.
+    let canonical = normalize_sqlite_as_of(conn, as_of_utc)?;
+    graph_expand_limited_with_as_of(
+        conn,
+        seed_ids,
+        max_hops,
+        relation_filter,
+        AS_OF_EXPANSION_EDGE_LIMIT,
+        wiki_corpus_store,
+        Some(&canonical),
+    )
+}
+
+/// Edge ceiling for point-in-time expansion: a caller-selected historical
+/// instant can re-expose arbitrarily many long-expired edges that the
+/// now-anchored predicate excluded, so the as_of variant bounds its
+/// traversal work. Graph expansion is best-effort enrichment — truncation
+/// at this scale degrades gracefully, never errors.
+pub(crate) const AS_OF_EXPANSION_EDGE_LIMIT: usize = 4096;
+
 /// BFS graph expansion with a global edge ceiling enforced in each SQLite batch.
 pub fn graph_expand_limited(
     conn: &Connection,
@@ -1082,6 +1148,28 @@ pub fn graph_expand_limited(
     relation_filter: Option<&str>,
     edge_limit: usize,
     wiki_corpus_store: bool,
+) -> Result<GraphExpandResult, MemoryError> {
+    graph_expand_limited_with_as_of(
+        conn,
+        seed_ids,
+        max_hops,
+        relation_filter,
+        edge_limit,
+        wiki_corpus_store,
+        None,
+    )
+}
+
+/// The shared BFS core; `as_of_utc` selects between the historical
+/// now-anchored edge predicate (None) and the instant-anchored one.
+fn graph_expand_limited_with_as_of(
+    conn: &Connection,
+    seed_ids: &[String],
+    max_hops: u32,
+    relation_filter: Option<&str>,
+    edge_limit: usize,
+    wiki_corpus_store: bool,
+    as_of_utc: Option<&str>,
 ) -> Result<GraphExpandResult, MemoryError> {
     use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -1131,7 +1219,8 @@ pub fn graph_expand_limited(
         // budget, while never fetching more than the global edge ceiling.
         let batch_limit = remaining_edges.saturating_add(seen_edges.len());
         let frontier_ids: HashSet<&str> = frontier.iter().map(String::as_str).collect();
-        let edges_batch = get_edges_batch(conn, &frontier, relation_filter, batch_limit)?;
+        let edges_batch =
+            get_edges_batch(conn, &frontier, relation_filter, batch_limit, as_of_utc)?;
         for edge in edges_batch {
             if all_edges.len() >= edge_limit {
                 break;
