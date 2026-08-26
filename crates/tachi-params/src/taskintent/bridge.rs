@@ -508,6 +508,17 @@ impl TaskIntentBridge {
                 digest: intent.canonical_digest(),
             };
         }
+        // A recorded definitive refusal is TERMINAL for the tuple: TB-7
+        // replay determinism — the same (requester, request_id) + digest
+        // must always yield the same answer. Without this, a rejection
+        // recorded during heal could flip to Admitted when a lane becomes
+        // available on a later replay.
+        if facts
+            .iter()
+            .any(|f| matches!(f.payload, TaskEventPayload::SubmitRejected { .. }))
+        {
+            return SubmitReceipt::Rejected(AdmissionRejection::NoAdmittedExecutionPlan);
+        }
         let has_plan = facts
             .iter()
             .any(|f| matches!(f.payload, TaskEventPayload::PlanAdmitted { .. }));

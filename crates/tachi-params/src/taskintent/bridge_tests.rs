@@ -1796,3 +1796,66 @@ fn revision_check_observes_post_lock_truth() {
         Err(InterventionError::RevisionConflict { .. })
     ));
 }
+
+#[test]
+fn recorded_rejection_is_terminal_even_when_a_plan_later_admits() {
+    // Round-4 finding: TaskSubmitted persisted, heal found no lane and
+    // recorded SubmitRejected; when a lane later becomes available, the
+    // same tuple must STAY deterministically Rejected (TB-7 replay law).
+    let rig = rig_managed();
+    let intent = golden_intent();
+    let request = RequestId::new("req-r4").expect("bounded");
+    let task_ref = TaskRef::mint(format!("task:{}", "r4-window"));
+    rig.bindings
+        .bind(
+            &intent.requester,
+            "req-r4",
+            &intent.canonical_digest(),
+            BoundRef::Task(task_ref.clone()),
+        )
+        .expect("bind");
+    // TaskSubmitted materialized...
+    let payload = TaskEventPayload::TaskSubmitted {
+        intent_digest: intent.canonical_digest(),
+        requester: intent.requester.to_string(),
+        contract: IntentContractProjection {
+            objective: intent.objective.as_str().to_string(),
+            constraints: vec![],
+            expected_artifacts: vec![],
+            evaluation_requirement: intent.evaluation_requirement.independence,
+        },
+    };
+    let value = serde_json::to_value(&payload).expect("serializes");
+    bridge_facts_append(
+        &rig.facts,
+        &task_ref,
+        "r4-submitted",
+        payload,
+        value,
+        "2026-08-25T0004Z",
+    );
+    // ...then heal found no lane and recorded the definitive refusal.
+    let payload = TaskEventPayload::SubmitRejected {
+        reason: "no_admitted_execution_plan".to_string(),
+    };
+    let value = serde_json::to_value(&payload).expect("serializes");
+    bridge_facts_append(
+        &rig.facts,
+        &task_ref,
+        "r4-rejected",
+        payload,
+        value,
+        "2026-08-25T0005Z",
+    );
+    // The lane is available NOW (rig plans admit freely) — the replay must
+    // still return the same typed rejection, never flip to Admitted.
+    for _ in 0..2 {
+        assert!(matches!(
+            rig.bridge.submit(&intent, &request),
+            SubmitReceipt::Rejected(AdmissionRejection::NoAdmittedExecutionPlan)
+        ));
+    }
+    // And no plan was sneaked onto the task.
+    let snapshot = rig.bridge.get(&task_ref).expect("snapshot");
+    assert!(snapshot.plan.is_none());
+}
