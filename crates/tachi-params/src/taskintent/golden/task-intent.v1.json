@@ -1,0 +1,44 @@
+{
+  "digest_sha256": "84ab23166aba2fd25c4c98d9f23bb52a81ffbdd82d99653bb0758ae840ce3a31",
+  "intent": {
+    "schema": "task-intent.v1",
+    "objective": "Review the V2a vertical scorecard against the 13 DoD rows and report deviations.",
+    "capability_request": {
+      "capability": "reasoning_review"
+    },
+    "requester": "zeroclaw-host-alpha",
+    "parent_ref": null,
+    "supervisor_ref": null,
+    "context_bundle_ref": "bundle-7f3a9c",
+    "source_refs": [
+      {
+        "kind": "issue",
+        "locator": "kckylechen1/tachi#1840"
+      }
+    ],
+    "constraints": [
+      {
+        "description": "No new ledgers; assemble existing primitives only."
+      }
+    ],
+    "expected_artifacts": [
+      {
+        "artifact_class": "report",
+        "description": "Scorecard report with per-row evidence",
+        "required": true
+      }
+    ],
+    "evaluation_requirement": {
+      "independence": "fresh_context_cross_vendor"
+    },
+    "workspace_source": {
+      "repo": "kckylechen1/tachi",
+      "git_ref": "master"
+    },
+    "routing_preference": "prefer_tachi_managed",
+    "approval_requirement": "not_required",
+    "privacy_class": "internal",
+    "expiry": "2026-12-01T00:00:00+00:00",
+    "retry_of": null
+  }
+}

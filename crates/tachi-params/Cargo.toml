@@ -7,6 +7,14 @@ license = "AGPL-3.0-only"
 [dependencies]
 memcore = { path = "../memcore" }
 chrono = { workspace = true }
+# Typed error enums for the taskintent bridge module (tachi#1840). Already a
+# workspace dependency compiled for memcore; this adds no new crate to the
+# build, only a direct-dependency edge.
+thiserror = { workspace = true }
+# rusqlite for the taskintent bridge's read-only ingest adapter over
+# existing dispatch_outcomes truth (tachi#1840). Already resolved in this
+# workspace's dependency graph (memcore's store layer); direct edge only.
+rusqlite = { workspace = true }
 rmcp = { version = "1.2", features = ["schemars"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
