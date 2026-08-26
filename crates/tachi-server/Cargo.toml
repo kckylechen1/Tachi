@@ -128,6 +128,7 @@ icu_properties = "2.2"
 vault-kit = { path = "../vault-kit" }
 
 [dev-dependencies]
+tachi-exec-env-reaper = { path = "../tachi-exec-env-reaper", features = ["test-support"] }
 tempfile = "3"
 memcore = { path = "../memcore", features = ["test-support"] }
 memory-server-runtime = { path = "../memory-server-runtime", features = ["test-support"] }

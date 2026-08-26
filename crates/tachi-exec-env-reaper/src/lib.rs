@@ -730,13 +730,16 @@ impl ProtectionSources<'static> {
 
 /// Test-only stand-in for the process table: no build is running anywhere, on any
 /// machine, ever. Backs [`ProtectionSources::deterministic_for_cli_test`] below.
+#[cfg(any(test, feature = "test-support"))]
 fn no_live_builds_for_cli_test() -> (Vec<PathBuf>, Vec<String>) {
     (Vec::new(), Vec::new())
 }
 
+#[cfg(any(test, feature = "test-support"))]
 static NO_LIVE_BUILDS_FOR_CLI_TEST: fn() -> (Vec<PathBuf>, Vec<String>) =
     no_live_builds_for_cli_test;
 
+#[cfg(any(test, feature = "test-support"))]
 impl ProtectionSources<'static> {
     /// A CLI-level test's alternative to [`Self::from_process_env`] — same shape, but
     /// every field is a fixed, ambient-free value instead of a real environment/process

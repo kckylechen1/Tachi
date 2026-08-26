@@ -1,18 +1,102 @@
 //! Orphan-reaper test module, split out of tachi-server's exec_env_reaper module (#1423).
 //!
-//! Pure relocation: no test was added, removed, renamed, re-`#[ignore]`d, or
-//! had an assertion weakened. The only edits are the two that the move itself
-//! forces — the process-env source guard now reads BOTH files, and the
-//! kill-test receipt names this file as its source.
+//! Relocated test suite: no test was added, removed, renamed, re-`#[ignore]`d,
+//! or had an assertion weakened. The crate-local fixture keeps tachi-server's
+//! suite-scoped root and stale-fixture GC contract; the process-env source guard
+//! reads BOTH files, and the kill-test receipt names this file as its source.
 
 use super::*;
 use std::collections::BTreeSet;
 
+const TEST_FIXTURE_ROOT_NAME: &str = "tachi-tests";
+const TEST_FIXTURE_MAX_AGE: Duration = Duration::from_secs(3600);
+
+fn suite_fixture_root() -> PathBuf {
+    std::env::temp_dir().join(TEST_FIXTURE_ROOT_NAME)
+}
+
+fn parse_run_dir_pid(name: &str) -> Option<u32> {
+    let rest = name.strip_prefix("run-")?;
+    let (pid_str, uuid_part) = rest.split_once('-')?;
+    if uuid_part.is_empty() {
+        return None;
+    }
+    pid_str.parse().ok().filter(|pid| *pid > 1)
+}
+
+fn process_alive(pid: u32) -> bool {
+    if pid <= 1 {
+        return false;
+    }
+    // SAFETY: signal 0 is an existence/permission probe; does not deliver.
+    let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    if rc == 0 {
+        return true;
+    }
+    let err = std::io::Error::last_os_error();
+    matches!(err.raw_os_error(), Some(code) if code == libc::EPERM)
+}
+
+fn is_mtime_stale(entry: &std::fs::DirEntry, now: SystemTime) -> bool {
+    entry
+        .metadata()
+        .ok()
+        .and_then(|metadata| metadata.modified().ok())
+        .and_then(|mtime| now.duration_since(mtime).ok())
+        .is_some_and(|age| age > TEST_FIXTURE_MAX_AGE)
+}
+
+fn gc_stale_test_fixtures(suite_root: &Path, now: SystemTime, keep: Option<&Path>) -> usize {
+    let Ok(entries) = std::fs::read_dir(suite_root) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if keep.is_some_and(|keep| keep == path.as_path()) || !is_mtime_stale(&entry, now) {
+            continue;
+        }
+        if path.is_dir() {
+            if let Some(name) = path.file_name().and_then(|name| name.to_str()) {
+                if let Some(pid) = parse_run_dir_pid(name) {
+                    if process_alive(pid) {
+                        continue;
+                    }
+                }
+            }
+            if std::fs::remove_dir_all(&path).is_ok() {
+                removed += 1;
+            }
+        } else if std::fs::remove_file(&path).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
+fn test_fixture_root() -> PathBuf {
+    static RUN: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    RUN.get_or_init(|| {
+        let suite = suite_fixture_root();
+        let _ = std::fs::create_dir_all(&suite);
+        let run = suite.join(format!(
+            "run-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let _ = gc_stale_test_fixtures(&suite, SystemTime::now(), Some(run.as_path()));
+        let _ = std::fs::create_dir_all(&run);
+        run
+    })
+    .clone()
+}
+
+fn test_fixture_path(name: impl AsRef<Path>) -> PathBuf {
+    test_fixture_root().join(name)
+}
+
 fn unique_temp_dir(prefix: &str) -> PathBuf {
-    let path = std::env::temp_dir().join(format!(
-        "tachi-exec-env-reaper-{prefix}-{}",
-        uuid::Uuid::new_v4()
-    ));
+    let path = test_fixture_path(format!("{prefix}-{}", uuid::Uuid::new_v4()));
     let _ = std::fs::remove_dir_all(&path);
     std::fs::create_dir_all(&path).unwrap();
     path

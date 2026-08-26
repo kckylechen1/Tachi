@@ -2371,6 +2371,7 @@ dependencies = [
 name = "tachi-exec-env-reaper"
 version = "1.9.2"
 dependencies = [
+ "libc",
  "memcore",
  "rusqlite",
  "serde",
