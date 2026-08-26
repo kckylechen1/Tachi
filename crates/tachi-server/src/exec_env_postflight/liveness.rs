@@ -97,6 +97,35 @@ impl DescendantLiveness for ProcessGroupLiveness {
     }
 }
 
+/// A runner failure without a captured worker identity is not evidence that
+/// the worker tree was reaped. This probe makes that missing evidence an
+/// explicit fail-closed error before the gate can scan or release anything.
+#[derive(Debug, Clone)]
+pub struct MissingLivenessEvidence {
+    reason: String,
+}
+
+impl MissingLivenessEvidence {
+    pub fn new(reason: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+        }
+    }
+}
+
+impl DescendantLiveness for MissingLivenessEvidence {
+    fn any_alive(&self) -> Result<bool, String> {
+        Err(format!(
+            "descendant liveness evidence is unavailable: {}",
+            self.reason
+        ))
+    }
+
+    fn describe(&self) -> String {
+        format!("missing descendant liveness evidence ({})", self.reason)
+    }
+}
+
 /// A probe that reports all descendants reaped (used when the runner has reaped the child process).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ReapedLiveness;

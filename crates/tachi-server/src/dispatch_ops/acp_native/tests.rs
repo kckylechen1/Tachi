@@ -162,6 +162,62 @@ printf '%s\n' '{"jsonrpc":"2.0","id":"tachi-acp-3","result":{"content":[{"type":
     assert_eq!(outcome.observed_model.as_deref(), Some("openai/gpt-5.2"));
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn native_acp_timeout_retains_child_identity_for_postflight_liveness() {
+    use crate::exec_env_postflight::DescendantLiveness;
+    use std::collections::HashMap;
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::Duration;
+
+    let temp = tempfile::tempdir().expect("temp ACP run directory");
+    let adapter = temp.path().join("slow-adapter.sh");
+    std::fs::write(&adapter, "#!/bin/sh\nsleep 30\n").expect("write slow ACP adapter");
+    let mut permissions = std::fs::metadata(&adapter)
+        .expect("adapter metadata")
+        .permissions();
+    permissions.set_mode(0o700);
+    std::fs::set_permissions(&adapter, permissions).expect("make adapter executable");
+
+    let outcome = super::run_native_acp_dispatch_with_liveness(
+        super::NativeAcpRunSpec {
+            command: "/bin/sh".to_string(),
+            args: vec![adapter.to_string_lossy().to_string()],
+            cwd: temp.path().to_path_buf(),
+            prompt: "timeout test".to_string(),
+            mode: super::NativeAcpRunMode::OneShot,
+            permission_label: "approve-reads".to_string(),
+            session: None,
+            session_record_path: None,
+            session_distill_path: None,
+            metadata: json!({}),
+            env: HashMap::new(),
+        },
+        temp.path(),
+        &temp.path().join("trajectory.jsonl"),
+        "timeout-dispatch",
+        "codex",
+        Duration::from_millis(100),
+    )
+    .await;
+
+    let child_pid = outcome
+        .child_pid
+        .expect("native timeout must retain the spawned child pid");
+    let error = match outcome.result {
+        Ok(_) => panic!("slow native adapter must time out"),
+        Err(error) => error,
+    };
+    assert!(error.contains("timed out"), "{error}");
+    let probe = crate::exec_env_postflight::ProcessGroupLiveness::for_worker_pid(child_pid);
+    assert!(
+        !probe
+            .any_alive()
+            .expect("probe native timeout process group"),
+        "native timeout must reap the process group before returning"
+    );
+}
+
 /// Realistic ACP `PermissionOption` list: every option carries the typed
 /// `kind` the real protocol sends (`allow_once` / `reject_once`), not just a
 /// human-readable id/name. Used by every test so both ALLOW and DENY (which

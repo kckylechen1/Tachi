@@ -1481,3 +1481,20 @@ fn flow_dispatch_slot_reclaims_stale_lock_when_run_status_is_missing() {
         std::env::remove_var("TACHI_RUN_ROOT");
     }
 }
+
+#[test]
+fn required_postflight_workspace_uses_the_resolved_lease_or_fails_closed() {
+    let managed = crate::exec_env_ops::EnvResolution::Managed {
+        cwd: "/leased/workspace".to_string(),
+        env_id: "env-1322".to_string(),
+    };
+    assert_eq!(
+        required_postflight_workspace(&managed).expect("managed lease workspace"),
+        std::path::PathBuf::from("/leased/workspace")
+    );
+
+    let default = crate::exec_env_ops::EnvResolution::Default;
+    let error = required_postflight_workspace(&default)
+        .expect_err("a required gate must not disappear when default cwd is absent");
+    assert!(error.contains("no resolved lease workspace"), "{error}");
+}

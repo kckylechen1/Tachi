@@ -770,8 +770,8 @@ pub(crate) fn quarantine_lease_resources(
     let resource_ids: Vec<String> = stmt
         .query_map(rusqlite::params![env_id], |row| row.get(0))
         .map_err(|e| e.to_string())?
-        .filter_map(Result::ok)
-        .collect();
+        .collect::<Result<_, _>>()
+        .map_err(|e| format!("read active resources for exec env {env_id}: {e}"))?;
     drop(stmt);
 
     let mut quarantined = Vec::new();
@@ -788,12 +788,9 @@ pub(crate) fn quarantine_lease_resources(
                 | memcore::QuarantineOutcome::AlreadyReclaimed { .. },
             ) => {}
             Err(err) => {
-                tracing::warn!(
-                    env_id = %env_id,
-                    resource_id = %resource_id,
-                    error = %err,
-                    "failed to quarantine resource for lease"
-                );
+                return Err(format!(
+                    "quarantine resource {resource_id} for exec env {env_id}: {err}"
+                ));
             }
         }
     }

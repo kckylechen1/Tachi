@@ -59,11 +59,14 @@ pub mod manifest;
 mod tests;
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Value};
 
-pub use liveness::{DescendantLiveness, ProcessGroupLiveness, ReapedLiveness};
+pub use liveness::{
+    DescendantLiveness, MissingLivenessEvidence, ProcessGroupLiveness, ReapedLiveness,
+};
 pub use manifest::{
     CaptureSpec, CtimeWitness, DeltaKind, FsTime, WorkspaceDelta, WorkspaceManifest,
 };
@@ -293,6 +296,9 @@ pub enum GateVerdict {
     /// The gate could not decide. Artifacts are withheld; the lease is NOT
     /// quarantined (that would race a live writer).
     Blocked { reason: BlockReason, detail: String },
+    /// The gate could not execute to a decision. Artifacts are withheld and
+    /// the lease is left alone because no terminal rejection was established.
+    Error { detail: String },
 }
 
 /// What THIS RUN established about the capture-time clock — not what is true of
@@ -452,6 +458,7 @@ impl GateOutcome {
             GateVerdict::Clean { .. } => "clean",
             GateVerdict::Rejected { .. } => "rejected",
             GateVerdict::Blocked { .. } => "blocked",
+            GateVerdict::Error { .. } => "error",
         }
     }
 
@@ -514,6 +521,14 @@ impl GateOutcome {
                 reason.as_str(),
                 detail
             )),
+            GateVerdict::Error { detail } => Some(format!(
+                "{} postflight gate could not execute for lease {}: {}. Artifacts are \
+                 withheld and the lease is left alone because no terminal quarantine verdict \
+                 was established.",
+                naming::POSTURE,
+                self.env_id,
+                detail
+            )),
         }
     }
 
@@ -525,7 +540,7 @@ impl GateOutcome {
             GateVerdict::Rejected {
                 entries_checked, ..
             } => Some(*entries_checked),
-            GateVerdict::Blocked { .. } => None,
+            GateVerdict::Blocked { .. } | GateVerdict::Error { .. } => None,
         };
         let reject_reason = match &self.verdict {
             GateVerdict::Rejected { reason, .. } => Some(reason.as_str()),
@@ -533,6 +548,10 @@ impl GateOutcome {
         };
         let block_reason = match &self.verdict {
             GateVerdict::Blocked { reason, .. } => Some(reason.as_str()),
+            _ => None,
+        };
+        let error = match &self.verdict {
+            GateVerdict::Error { detail } => Some(detail),
             _ => None,
         };
         let artifacts = if self.artifacts_released() {
@@ -547,6 +566,7 @@ impl GateOutcome {
         };
         json!({
             "gate": "exec_env_postflight",
+            "preimage_custody": PREIMAGE_CUSTODY,
             "posture": naming::POSTURE,
             "proves": naming::PROVES,
             "does_not_prove": naming::DOES_NOT_PROVE,
@@ -558,6 +578,7 @@ impl GateOutcome {
             "verdict": self.verdict_label(),
             "reject_reason": reject_reason,
             "block_reason": block_reason,
+            "error": error,
             "entries_checked": entries_checked,
             "content_unhashed_paths": self.content_unhashed_paths,
             "content_unhashed_note": self.unhashed_caveat(),
@@ -592,6 +613,10 @@ impl GateOutcome {
 
 const MAX_DELTAS_IN_MESSAGE: usize = 20;
 
+/// The pre-image is held in the daemon's address space, not in a pathname the
+/// same-UID worker can open, replace, or unlink.
+pub const PREIMAGE_CUSTODY: &str = "parent_process_memory";
+
 /// The gate itself: parent-side pre-image capture, then the postflight compare.
 #[derive(Debug, Clone)]
 pub struct PostflightGate {
@@ -599,10 +624,10 @@ pub struct PostflightGate {
     pub env_id: String,
     /// The lease workspace the worker runs in.
     pub workspace_root: PathBuf,
-    /// Where the parent keeps the pre-image. MUST be outside **every**
-    /// worker-writable root (enforced) — a pre-image the worker can rewrite
-    /// proves nothing.
-    pub preimage_path: PathBuf,
+    /// The sealed pre-image stays in the daemon's address space. A same-UID
+    /// worker is a separate process and cannot modify this value through a
+    /// filesystem pathname.
+    preimage: Arc<Mutex<Option<WorkspaceManifest>>>,
     pub contract: WriteContract,
     /// Directory names (e.g. [`manifest::BUILD_ARTIFACT_DIR_NAMES`]) whose
     /// subtrees are walked and fingerprinted but **not content-hashed**.
@@ -627,13 +652,12 @@ impl PostflightGate {
     pub fn new(
         env_id: impl Into<String>,
         workspace_root: impl Into<PathBuf>,
-        preimage_path: impl Into<PathBuf>,
         contract: WriteContract,
     ) -> PostflightGate {
         PostflightGate {
             env_id: env_id.into(),
             workspace_root: workspace_root.into(),
-            preimage_path: preimage_path.into(),
+            preimage: Arc::new(Mutex::new(None)),
             contract,
             unhashed_dir_names: Vec::new(),
         }
@@ -647,20 +671,6 @@ impl PostflightGate {
             .map(|name| (*name).to_string())
             .collect();
         self
-    }
-
-    /// The worker-writable roots this gate covers: the lease workspace, plus a
-    /// linked worktree's external git metadata dir. Both are writable by a
-    /// same-UID worker, so both constrain where the pre-image may live.
-    fn worker_writable_roots(&self, gitdir: Option<&Path>) -> Vec<(&'static str, PathBuf)> {
-        let mut roots = vec![("the lease workspace", self.workspace_root.clone())];
-        if let Some(gitdir) = gitdir {
-            roots.push((
-                "the lease's external git metadata dir (gitdir)",
-                gitdir.to_path_buf(),
-            ));
-        }
-        roots
     }
 
     /// Capture the pre-image. Call this **before the worker is spawned** — a
@@ -678,10 +688,6 @@ impl PostflightGate {
     /// end. No pre-image file is written in that case.
     pub fn capture_preimage(&self) -> Result<WorkspaceManifest, String> {
         let gitdir = manifest::resolve_external_git_dir(&self.workspace_root);
-        ensure_preimage_outside_worker_writable_roots(
-            &self.worker_writable_roots(gitdir.as_deref()),
-            &self.preimage_path,
-        )?;
         let mut manifest = manifest::capture(&CaptureSpec {
             workspace_root: &self.workspace_root,
             gitdir_root: gitdir.as_deref(),
@@ -718,10 +724,11 @@ impl PostflightGate {
                 self.workspace_root.display()
             )
         })?;
-        let bytes = serde_json::to_vec(&manifest)
-            .map_err(|e| format!("serialize workspace pre-image: {e}"))?;
-        crate::utils::write_owner_only_file_atomic(&self.preimage_path, &bytes)
-            .map_err(|e| format!("write workspace pre-image: {e}"))?;
+        let mut preimage = self
+            .preimage
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *preimage = Some(manifest.clone());
         Ok(manifest)
     }
 
@@ -788,7 +795,7 @@ impl PostflightGate {
                     GateVerdict::Rejected {
                         reason: RejectReason::UnusableImage,
                         deltas: vec![WorkspaceDelta {
-                            path: self.preimage_path.to_string_lossy().to_string(),
+                            path: format!("<{PREIMAGE_CUSTODY} pre-image>"),
                             kind: DeltaKind::Unreadable,
                             detail: format!("pre-image unusable: {e}"),
                             facets: Vec::new(),
@@ -885,7 +892,7 @@ impl PostflightGate {
         // between capture and gate.
         let barrier_check = pre
             .verify_clock_barriers()
-            .map_err(|why| (self.preimage_path.to_string_lossy().to_string(), why))
+            .map_err(|why| (format!("<{PREIMAGE_CUSTODY} pre-image>"), why))
             .and_then(|()| {
                 post.verify_timestamp_preconditions()
                     .map_err(|why| (self.workspace_root.to_string_lossy().to_string(), why))
@@ -940,13 +947,50 @@ impl PostflightGate {
     }
 
     fn load_preimage(&self) -> Result<WorkspaceManifest, String> {
-        let bytes = std::fs::read(&self.preimage_path).map_err(|e| {
-            format!(
-                "read pre-image {}: {e}",
-                self.preimage_path.to_string_lossy()
-            )
-        })?;
-        serde_json::from_slice(&bytes).map_err(|e| format!("parse pre-image: {e}"))
+        self.preimage
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+            .ok_or_else(|| format!("{PREIMAGE_CUSTODY} pre-image is missing"))
+    }
+
+    /// Construct a canonical receipt when a required gate could not execute.
+    /// This is intentionally distinct from [`GateVerdict::Blocked`]: the
+    /// liveness probe may have answered, but some other gate operation failed.
+    pub fn execution_error(
+        &self,
+        liveness: &dyn DescendantLiveness,
+        detail: impl Into<String>,
+    ) -> GateOutcome {
+        GateOutcome {
+            env_id: self.env_id.clone(),
+            workspace_root: self.workspace_root.to_string_lossy().to_string(),
+            contract_label: self.contract.label(),
+            declared_scope: self.contract.declared_paths(),
+            liveness_probe: liveness.describe(),
+            content_unhashed_paths: Vec::new(),
+            clock_barrier: ClockBarrierEvidence::NotEstablished,
+            verdict: GateVerdict::Error {
+                detail: detail.into(),
+            },
+            checked_at: chrono::Utc::now().to_rfc3339(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn replace_preimage_for_test(&self, manifest: WorkspaceManifest) {
+        *self
+            .preimage
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(manifest);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_preimage_for_test(&self) -> bool {
+        self.preimage
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_some()
     }
 }
 
@@ -963,53 +1007,6 @@ fn merge_unhashed(pre: &WorkspaceManifest, post: &WorkspaceManifest) -> Vec<Stri
     all.sort();
     all.dedup();
     all
-}
-
-/// The pre-image must live where the worker cannot reach it — and this module
-/// declares **two** worker-writable roots, not one: the lease workspace *and* a
-/// linked worktree's external git metadata dir (`gitdir`). A pre-image inside
-/// either could be rewritten by the very worker it is meant to convict (the gate
-/// would then compare the worker's own story against itself), so this is a hard
-/// fail, not a warning.
-///
-/// `roots` is `(human label, path)`; every root the caller can name as
-/// worker-writable must be in it.
-pub fn ensure_preimage_outside_worker_writable_roots(
-    roots: &[(&str, PathBuf)],
-    preimage_path: &Path,
-) -> Result<(), String> {
-    let preimage = canonical_or_literal(preimage_path);
-    for (label, root) in roots {
-        let root = canonical_or_literal(root);
-        if preimage.starts_with(&root) {
-            return Err(format!(
-                "pre-image {} is inside {label} {} — the worker could rewrite it; the pre-image \
-                 must be held by the parent, outside EVERY root the worker can write",
-                preimage.display(),
-                root.display()
-            ));
-        }
-    }
-    Ok(())
-}
-
-/// Canonicalize when possible (resolves `..`, symlinked temp dirs such as
-/// macOS `/var` → `/private/var`), otherwise fall back to the literal path — a
-/// not-yet-created pre-image file has no canonical form.
-fn canonical_or_literal(path: &Path) -> PathBuf {
-    if let Ok(canonical) = path.canonicalize() {
-        return canonical;
-    }
-    match path.parent() {
-        Some(parent) => match parent.canonicalize() {
-            Ok(canonical_parent) => match path.file_name() {
-                Some(name) => canonical_parent.join(name),
-                None => canonical_parent,
-            },
-            Err(_) => path.to_path_buf(),
-        },
-        None => path.to_path_buf(),
-    }
 }
 
 /// Where a rejected lease's evidence goes.
@@ -1061,20 +1058,27 @@ pub(crate) struct DaemonQuarantineSink {
 
 impl QuarantineSink for DaemonQuarantineSink {
     fn quarantine(&self, outcome: &GateOutcome) -> Result<(), String> {
-        if let Some(file_sink) = &self.file_sink {
-            let _ = file_sink.quarantine(outcome);
-        }
         if !outcome.env_id.is_empty() {
             let reason = outcome
                 .failure_message()
                 .unwrap_or_else(|| format!("{} postflight rejection", naming::POSTURE));
-            let _ = self.server.with_global_store(|store| {
-                crate::exec_env_ops::quarantine_lease_resources(
-                    store.connection_mut(),
-                    &outcome.env_id,
-                    &reason,
-                )
-            });
+            self.server
+                .with_global_store(|store| {
+                    crate::exec_env_ops::quarantine_lease_resources(
+                        store.connection_mut(),
+                        &outcome.env_id,
+                        &reason,
+                    )
+                })
+                .map_err(|error| {
+                    format!(
+                        "persist quarantine for exec env {}: {error}",
+                        outcome.env_id
+                    )
+                })?;
+        }
+        if let Some(file_sink) = &self.file_sink {
+            file_sink.quarantine(outcome)?;
         }
         Ok(())
     }

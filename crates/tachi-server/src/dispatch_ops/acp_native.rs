@@ -13,7 +13,9 @@ mod spec;
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
 pub(super) use runner::run_native_acp_dispatch;
+pub(super) use runner::run_native_acp_dispatch_with_liveness;
 pub(super) use spec::{build_native_acp_run_spec, is_native_acp_transport};
 
 const ACP_STREAM_FILE: &str = "acp.stream.ndjson";

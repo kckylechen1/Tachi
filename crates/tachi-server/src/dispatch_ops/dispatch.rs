@@ -123,6 +123,30 @@ pub(crate) struct DispatchResult {
     pub child_pid: Option<u32>,
 }
 
+/// Runner output retains the worker identity even when execution fails. The
+/// postflight gate must probe that process group on error/timeout rather than
+/// translating a missing success result into proof that the tree was reaped.
+pub(crate) struct DispatchRunOutcome {
+    pub result: Result<DispatchResult, String>,
+    pub child_pid: Option<u32>,
+}
+
+impl DispatchRunOutcome {
+    pub(crate) fn success(result: DispatchResult) -> Self {
+        Self {
+            child_pid: result.child_pid,
+            result: Ok(result),
+        }
+    }
+
+    pub(crate) fn failure(error: impl Into<String>, child_pid: Option<u32>) -> Self {
+        Self {
+            result: Err(error.into()),
+            child_pid,
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ManagedControlOrigin {
     DirectHandle,
@@ -374,6 +398,32 @@ fn effective_harness_transport(
             "cli".to_string()
         }
     })
+}
+
+/// Resolve the workspace that a required postflight gate must inspect from
+/// the already-admitted environment binding. A missing default cwd is not a
+/// reason to omit the gate: it means there is no real lease workspace to
+/// inspect, so the dispatch must fail closed before a worker is spawned.
+fn required_postflight_workspace(
+    env_resolution: &crate::exec_env_ops::EnvResolution,
+) -> Result<PathBuf, String> {
+    match env_resolution {
+        crate::exec_env_ops::EnvResolution::Managed { cwd, .. }
+        | crate::exec_env_ops::EnvResolution::Unmanaged { cwd } => {
+            let path = PathBuf::from(cwd);
+            if path.as_os_str().is_empty() {
+                return Err(
+                    "required postflight gate resolved an empty lease workspace; refusing to spawn"
+                        .to_string(),
+                );
+            }
+            Ok(path)
+        }
+        crate::exec_env_ops::EnvResolution::Default => Err(
+            "required postflight gate has no resolved lease workspace (default env has no cwd); refusing to spawn"
+                .to_string(),
+        ),
+    }
 }
 
 /// Mints the adapter-only custom subprocess contract after the server has
@@ -1179,34 +1229,52 @@ async fn launch_canonical_dispatch(
     );
     let postflight_gate = match postflight_applicability {
         crate::exec_env_postflight::PostflightApplicability::Required(contract) => {
-            if let Some(lease_path) = status_cwd.as_deref().map(PathBuf::from) {
-                let preimage_dir = if lease_path.starts_with(crate::path_utils::tachi_home()) {
-                    std::env::temp_dir().join("tachi_postflight_preimages")
-                } else {
-                    crate::path_utils::tachi_home().join("postflight_preimages")
-                };
-                let _ = std::fs::create_dir_all(&preimage_dir);
-                let preimage_path = preimage_dir.join(format!("{dispatch_id}.json"));
-                let env_id_str = execution_grant.env_id.as_deref().unwrap_or("");
-                let gate = crate::exec_env_postflight::PostflightGate::new(
-                    env_id_str,
-                    &lease_path,
-                    &preimage_path,
-                    contract,
-                )
-                .with_build_artifacts_unhashed();
-                if let Err(error) = gate.capture_preimage() {
+            let lease_path = match required_postflight_workspace(&env_resolution) {
+                Ok(path) => path,
+                Err(error) => {
+                    let _ = server.with_global_store(|store| {
+                        cleanup_ephemeral_credential_materializations(store, &workspace_dir, false)
+                    });
+                    release_flow_dispatch_slot(flow_dispatch_slot);
                     if let Some(guard) = managed_run_guard {
                         drop(guard);
                     }
+                    close_kanban_row_on_early_exit(
+                        server,
+                        &dispatch_id,
+                        "required postflight workspace resolution",
+                        request.project.as_deref(),
+                    )
+                    .await;
                     return Err(format!(
-                        "handle_tachi_dispatch: postflight preimage capture failed: {error}; zero worker process was spawned"
+                        "handle_tachi_dispatch: {error}; zero worker process was spawned"
                     ));
                 }
-                Some(gate)
-            } else {
-                None
+            };
+            let env_id_str = execution_grant.env_id.as_deref().unwrap_or("");
+            let gate =
+                crate::exec_env_postflight::PostflightGate::new(env_id_str, lease_path, contract)
+                    .with_build_artifacts_unhashed();
+            if let Err(error) = gate.capture_preimage() {
+                let _ = server.with_global_store(|store| {
+                    cleanup_ephemeral_credential_materializations(store, &workspace_dir, false)
+                });
+                release_flow_dispatch_slot(flow_dispatch_slot);
+                if let Some(guard) = managed_run_guard {
+                    drop(guard);
+                }
+                close_kanban_row_on_early_exit(
+                    server,
+                    &dispatch_id,
+                    "postflight preimage capture",
+                    request.project.as_deref(),
+                )
+                .await;
+                return Err(format!(
+                    "handle_tachi_dispatch: postflight preimage capture failed: {error}; zero worker process was spawned"
+                ));
             }
+            Some(gate)
         }
         crate::exec_env_postflight::PostflightApplicability::NotApplicable => None,
     };

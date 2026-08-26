@@ -6,7 +6,7 @@ use serde_json::json;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
-use super::super::dispatch::DispatchResult;
+use super::super::dispatch::{DispatchResult, DispatchRunOutcome};
 use super::super::dispatch_v2::append_trajectory_event;
 use super::session::write_native_acp_session_record;
 use super::{NativeAcpConnection, NativeAcpRunSpec, ACP_STREAM_FILE};
@@ -19,18 +19,30 @@ pub(in crate::dispatch_ops) async fn run_native_acp_dispatch(
     agent: &str,
     timeout: Duration,
 ) -> Result<DispatchResult, String> {
-    match tokio::time::timeout(
+    run_native_acp_dispatch_with_liveness(
+        spec,
+        run_dir,
+        trajectory_path,
+        dispatch_id,
+        agent,
         timeout,
-        run_native_acp_dispatch_inner(spec, run_dir, trajectory_path, dispatch_id, agent),
     )
     .await
-    {
-        Ok(result) => result,
-        Err(_) => Err(format!(
-            "Native ACP dispatch timed out after {}s (adapter killed)",
-            timeout.as_secs()
-        )),
-    }
+    .result
+}
+
+pub(in crate::dispatch_ops) async fn run_native_acp_dispatch_with_liveness(
+    spec: NativeAcpRunSpec,
+    run_dir: &Path,
+    trajectory_path: &Path,
+    dispatch_id: &str,
+    agent: &str,
+    timeout: Duration,
+) -> DispatchRunOutcome {
+    // The inner runner owns the timeout after it has spawned the adapter, so a
+    // timeout cannot drop the future before the parent retains its process
+    // group identity for postflight liveness probing.
+    run_native_acp_dispatch_inner(spec, run_dir, trajectory_path, dispatch_id, agent, timeout).await
 }
 
 async fn run_native_acp_dispatch_inner(
@@ -39,7 +51,8 @@ async fn run_native_acp_dispatch_inner(
     trajectory_path: &Path,
     dispatch_id: &str,
     agent: &str,
-) -> Result<DispatchResult, String> {
+    timeout: Duration,
+) -> DispatchRunOutcome {
     let mut cmd = Command::new(&spec.command);
     cmd.args(&spec.args)
         .current_dir(&spec.cwd)
@@ -47,26 +60,45 @@ async fn run_native_acp_dispatch_inner(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
+    crate::dispatch_ops::subprocess::configure_process_group(&mut cmd);
     for (name, value) in &spec.env {
         cmd.env(name, value);
     }
 
-    let mut child = cmd
-        .spawn()
-        .map_err(|err| format!("Failed to spawn native ACP adapter: {err}"))?;
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            return DispatchRunOutcome::failure(
+                format!("Failed to spawn native ACP adapter: {error}"),
+                None,
+            )
+        }
+    };
     let child_pid = child.id();
     let stdin = child
         .stdin
         .take()
-        .ok_or_else(|| "Native ACP adapter stdin was not piped".to_string())?;
+        .ok_or_else(|| "Native ACP adapter stdin was not piped".to_string());
+    let stdin = match stdin {
+        Ok(stdin) => stdin,
+        Err(error) => return DispatchRunOutcome::failure(error, child_pid),
+    };
     let stdout = child
         .stdout
         .take()
-        .ok_or_else(|| "Native ACP adapter stdout was not piped".to_string())?;
-    let mut stderr = child
+        .ok_or_else(|| "Native ACP adapter stdout was not piped".to_string());
+    let stdout = match stdout {
+        Ok(stdout) => stdout,
+        Err(error) => return DispatchRunOutcome::failure(error, child_pid),
+    };
+    let mut stderr = match child
         .stderr
         .take()
-        .ok_or_else(|| "Native ACP adapter stderr was not piped".to_string())?;
+        .ok_or_else(|| "Native ACP adapter stderr was not piped".to_string())
+    {
+        Ok(stderr) => stderr,
+        Err(error) => return DispatchRunOutcome::failure(error, child_pid),
+    };
     let stderr_task = tokio::spawn(async move {
         let mut captured = String::new();
         let _ = stderr.read_to_string(&mut captured).await;
@@ -82,13 +114,38 @@ async fn run_native_acp_dispatch_inner(
         run_dir,
         trajectory_path,
     );
-    let outcome = connection.run_prompt_turn(&spec).await;
+    let outcome = match tokio::time::timeout(timeout, connection.run_prompt_turn(&spec)).await {
+        Ok(outcome) => outcome,
+        Err(_) => {
+            let _ = connection.close_stdin().await;
+            crate::dispatch_ops::subprocess::reap_timed_out_child(&mut child, child_pid).await;
+            let _ = stderr_task.await;
+            append_trajectory_event(
+                trajectory_path,
+                json!({
+                    "event": "acp_native_dispatch_timed_out",
+                    "dispatch_id": dispatch_id,
+                    "agent": agent,
+                    "timeout_secs": timeout.as_secs(),
+                    "child_pid": child_pid,
+                    "timestamp": Utc::now().to_rfc3339(),
+                }),
+            );
+            return DispatchRunOutcome::failure(
+                format!(
+                    "Native ACP dispatch timed out after {}s (process group killed)",
+                    timeout.as_secs()
+                ),
+                child_pid,
+            );
+        }
+    };
     let close_result = connection.close_stdin().await;
     let stream_result = connection.persist_raw_stream(run_dir);
 
     let graceful_exit = tokio::time::timeout(Duration::from_millis(1500), child.wait()).await;
-    let process_exit_code = match graceful_exit {
-        Ok(Ok(status)) => status.code(),
+    let (process_exit_code, process_exit_error) = match graceful_exit {
+        Ok(Ok(status)) => (status.code(), None),
         Ok(Err(err)) => {
             append_trajectory_event(
                 trajectory_path,
@@ -100,11 +157,11 @@ async fn run_native_acp_dispatch_inner(
                     "timestamp": Utc::now().to_rfc3339(),
                 }),
             );
-            None
+            crate::dispatch_ops::subprocess::reap_timed_out_child(&mut child, child_pid).await;
+            (None, Some(format!("Native ACP adapter wait failed: {err}")))
         }
         Err(_) => {
-            let _ = child.kill().await;
-            let _ = child.wait().await;
+            crate::dispatch_ops::subprocess::reap_timed_out_child(&mut child, child_pid).await;
             append_trajectory_event(
                 trajectory_path,
                 json!({
@@ -115,10 +172,17 @@ async fn run_native_acp_dispatch_inner(
                     "timestamp": Utc::now().to_rfc3339(),
                 }),
             );
-            None
+            (
+                None,
+                Some("Native ACP adapter did not exit after stdin close".to_string()),
+            )
         }
     };
     let stderr_output = stderr_task.await.unwrap_or_default();
+
+    if let Some(error) = process_exit_error {
+        return DispatchRunOutcome::failure(error, child_pid);
+    }
 
     if let Err(err) = close_result {
         append_trajectory_event(
@@ -158,19 +222,21 @@ async fn run_native_acp_dispatch_inner(
             } else {
                 format!("; adapter stderr: {stderr_tail}")
             };
-            return Err(format!("{err}{suffix}"));
+            return DispatchRunOutcome::failure(format!("{err}{suffix}"), child_pid);
         }
     };
 
     if let Some(record_path) = spec.session_record_path.as_ref() {
-        write_native_acp_session_record(
+        if let Err(error) = write_native_acp_session_record(
             &spec,
             record_path,
             spec.session_distill_path.as_ref(),
             &outcome,
             &stream_path,
             dispatch_id,
-        )?;
+        ) {
+            return DispatchRunOutcome::failure(error, child_pid);
+        }
     }
 
     append_trajectory_event(
@@ -189,7 +255,7 @@ async fn run_native_acp_dispatch_inner(
         }),
     );
 
-    Ok(DispatchResult {
+    DispatchRunOutcome::success(DispatchResult {
         output: outcome.output,
         exit_code: Some(0),
         observed_model: outcome.observed_model,

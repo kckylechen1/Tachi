@@ -1,6 +1,4 @@
-use super::super::acp_native::{
-    is_native_acp_transport, run_native_acp_dispatch, NativeAcpRunSpec,
-};
+use super::super::acp_native::{is_native_acp_transport, NativeAcpRunSpec};
 use super::super::acpx::{is_acpx_transport, persist_acpx_events_and_map};
 #[cfg(test)]
 use super::super::dispatch_v2::stamp_route_decision_id;
@@ -12,8 +10,8 @@ use super::super::dispatch_v2::{
 };
 use super::super::kanban_helpers::{get_kanban_state, should_cleanup_run, update_kanban_state};
 use super::super::subprocess::{
-    run_agent_subprocess, run_managed_custom_subprocess_outcome, run_opencode_sop_subprocess,
-    tail_chars,
+    run_agent_subprocess_with_liveness, run_managed_custom_subprocess_outcome,
+    run_opencode_sop_subprocess_with_liveness, tail_chars,
 };
 use super::dedupe::release_flow_dispatch_slot;
 use super::response_helpers::McpCleanup;
@@ -355,10 +353,10 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
             }),
         );
 
-        let (result, mut managed_cancellation, managed_termination_proof) =
+        let (runner_outcome, mut managed_cancellation, managed_termination_proof) =
             match execution_for_spawn {
                 DispatchExecution::Subprocess(cmd) if agent_for_watchdog == "opencode" => (
-                    run_opencode_sop_subprocess(
+                    run_opencode_sop_subprocess_with_liveness(
                         cmd,
                         timeout,
                         opencode_sop_label_for_spawn
@@ -369,9 +367,11 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                     None,
                     None,
                 ),
-                DispatchExecution::Subprocess(cmd) => {
-                    (run_agent_subprocess(cmd, timeout).await, None, None)
-                }
+                DispatchExecution::Subprocess(cmd) => (
+                    run_agent_subprocess_with_liveness(cmd, timeout).await,
+                    None,
+                    None,
+                ),
                 DispatchExecution::ManagedCustom(cmd, receiver) => {
                     let managed_run_dir = workspace_dir_for_spawn.clone();
                     let outcome = match tokio::spawn(async move {
@@ -391,13 +391,16 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                         ),
                     };
                     (
-                        outcome.result,
+                        crate::dispatch_ops::dispatch::DispatchRunOutcome {
+                            result: outcome.result,
+                            child_pid: outcome.child_pid,
+                        },
                         outcome.cancellation,
                         outcome.termination_proof,
                     )
                 }
                 DispatchExecution::NativeAcp(spec) => (
-                    run_native_acp_dispatch(
+                    super::super::acp_native::run_native_acp_dispatch_with_liveness(
                         spec,
                         &workspace_dir_for_spawn,
                         &traj_path_for_spawn,
@@ -410,6 +413,8 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                     None,
                 ),
             };
+        let child_pid_for_postflight = runner_outcome.child_pid;
+        let result = runner_outcome.result;
         let execute_duration_ms = execute_started_instant.elapsed().as_millis() as u64;
 
         // CLI subprocesses intentionally never acknowledge a receipt: they
@@ -509,16 +514,14 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
 
         // --- POSTFLIGHT GATE: verify write-contract and liveness (#894 S2e, #1322) ---
         let postflight_outcome = if let Some(gate) = &postflight_gate_for_spawn {
-            let child_pid = match &result {
-                Ok(r) => r.child_pid,
-                Err(_) => None,
-            };
             let liveness: Box<dyn crate::exec_env_postflight::DescendantLiveness + Send + Sync> =
-                match child_pid {
+                match child_pid_for_postflight {
                     Some(pid) => Box::new(
                         crate::exec_env_postflight::ProcessGroupLiveness::for_worker_pid(pid),
                     ),
-                    None => Box::new(crate::exec_env_postflight::ReapedLiveness),
+                    None => Box::new(crate::exec_env_postflight::MissingLivenessEvidence::new(
+                        "runner returned no worker process identity",
+                    )),
                 };
             let mut outcome = gate.run(liveness.as_ref());
             for _ in 0..3 {
@@ -526,7 +529,7 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                 {
                     break;
                 }
-                if let Some(pid) = child_pid {
+                if let Some(pid) = child_pid_for_postflight {
                     crate::dispatch_ops::subprocess::terminate_process_group(
                         Some(pid),
                         libc::SIGTERM,
@@ -542,15 +545,32 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
             }
             match outcome {
                 Ok(outcome) => {
-                    append_trajectory_event(&traj_path_for_spawn, outcome.trajectory_event());
                     let quarantine_sink = crate::exec_env_postflight::DaemonQuarantineSink {
                         server: server_clone.clone(),
                         file_sink: Some(crate::exec_env_postflight::FileQuarantineSink {
                             dir: workspace_dir_for_spawn.clone(),
                         }),
                     };
-                    let _ = crate::exec_env_postflight::apply_verdict(&outcome, &quarantine_sink);
-                    Some(outcome)
+                    match crate::exec_env_postflight::apply_verdict(&outcome, &quarantine_sink) {
+                        Ok(_) => {
+                            append_trajectory_event(
+                                &traj_path_for_spawn,
+                                outcome.trajectory_event(),
+                            );
+                            Some(outcome)
+                        }
+                        Err(error) => {
+                            let error_outcome = gate.execution_error(
+                                liveness.as_ref(),
+                                format!("quarantine persistence failed: {error}"),
+                            );
+                            append_trajectory_event(
+                                &traj_path_for_spawn,
+                                error_outcome.trajectory_event(),
+                            );
+                            Some(error_outcome)
+                        }
+                    }
                 }
                 Err(err) => {
                     tracing::error!(
@@ -558,17 +578,12 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                         error = %err,
                         "postflight gate execution failed"
                     );
-                    append_trajectory_event(
-                        &traj_path_for_spawn,
-                        json!({
-                            "event": "exec_env_postflight",
-                            "dispatch_id": d_id,
-                            "timestamp": Utc::now().to_rfc3339(),
-                            "status": "error",
-                            "error": err,
-                        }),
+                    let error_outcome = gate.execution_error(
+                        liveness.as_ref(),
+                        format!("required gate execution failed: {err}"),
                     );
-                    None
+                    append_trajectory_event(&traj_path_for_spawn, error_outcome.trajectory_event());
+                    Some(error_outcome)
                 }
             }
         } else {
