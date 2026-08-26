@@ -537,13 +537,13 @@ fn clamp_edge_weight(weight: f64) -> f64 {
 /// `add_edge` handed a pre-baked `{"authority":"model_receipt_backed"}`
 /// straight through, that string would round-trip as a trusted
 /// classification no writer ever actually made — authority spoofing via the
-/// unclassified door (tachi#1646 round-2 MUST-FIX 1). An unclassified write
+/// unclassified door (tachi#1646). An unclassified write
 /// carries *no* authority claim, full stop, so the key must be **absent**,
 /// never merely "whatever the caller happened to put there". Legacy rows
 /// (pre-#1646, no migration) and post-#1646 unclassified rows both read back
 /// `None` from `edge_authority` because the key is absent — never because we
 /// trusted a caller-supplied string. This is a behavior change from the
-/// pre-round-2 "clone only" version: metadata is no longer guaranteed
+/// earlier "clone only" design: metadata is no longer guaranteed
 /// byte-for-byte identical when the caller's own payload happened to contain
 /// the reserved key, but it *is* guaranteed byte-for-byte identical for every
 /// caller that never touches `metadata.authority`, which is every legitimate
@@ -624,7 +624,7 @@ fn stamp_authority(
 /// *unless* the caller's own payload already carried an `"authority"` key —
 /// [`stamp_authority`] scrubs that reserved key on the unclassified path so a
 /// plain `add_edge` cannot be used to spoof a trusted classification no
-/// writer actually made (tachi#1646 round-2 MUST-FIX 1).
+/// writer actually made (tachi#1646).
 fn write_edge_row(
     conn: &Connection,
     edge: &MemoryEdge,

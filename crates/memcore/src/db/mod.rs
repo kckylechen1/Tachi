@@ -97,7 +97,7 @@ pub use dispatch_outcomes::{
     DispatchOutcomeRow, NewDispatchOutcome, OutcomeEvidenceClass,
 };
 // The three raw-`Connection` constructors are gated with the accessor pair on
-// `MemoryStore` (#1585 review round 3): a bare connection is a raw-SQL bypass
+// `MemoryStore` (#1585): a bare connection is a raw-SQL bypass
 // of the `store_identity` write-once guards, so the non-test portable surface
 // does not get one. The read-only probes below stay portable.
 pub use doctor_probe::{

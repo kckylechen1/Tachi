@@ -2034,8 +2034,8 @@ fn add_edge_without_authority_scrubs_reserved_key() {
     );
 }
 
-/// Authority spoofing via the unclassified door (tachi#1646 round-2
-/// MUST-FIX 1): a caller that never goes through `add_edge_with_provenance`
+/// Authority spoofing via the unclassified door (tachi#1646):
+/// a caller that never goes through `add_edge_with_provenance`
 /// (so `EdgeProvenance::authority` is `None`) but hands `add_edge` a
 /// pre-baked `metadata.authority` string — e.g. a trusted class like
 /// `"model_receipt_backed"` copy-pasted from an existing row, or crafted by
