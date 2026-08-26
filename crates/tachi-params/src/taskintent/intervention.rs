@@ -62,7 +62,12 @@ pub const INTERVENTION_V1_OPERATIONS: &[InterventionV1Static] = &[
 
 /// The frozen 10-op intervention vocabulary (TB-11).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "op", rename_all = "snake_case")]
+// Externally tagged WITH `deny_unknown_fields`: serde's internal tagging
+// silently ignores `deny_unknown_fields`, so the closed-wire guarantee
+// requires the external representation `{"variant": ...}` / `"variant"`.
+// Nothing consumes this wire yet (V2b pins the final shape); closing it
+// now is cheaper than closing it after a consumer exists.
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum InterventionV1 {
     /// Provide additional context to the running work.
     ProvideAdditionalContext {

@@ -154,11 +154,14 @@ pub trait LifecycleOwnerPort: Send + Sync {
 
     /// Forward a non-stop intervention. The FULL typed intervention
     /// travels — notes, prompts, and independence classes are the payload
-    /// the owner acts on, not just the operation discriminant.
+    /// the owner acts on — together with the STABLE intervention id from
+    /// the TB-7 binding, so the owner side can dedup replays of the same
+    /// request.
     fn forward_intervention(
         &self,
         task_ref: &TaskRef,
         intervention: &InterventionV1,
+        intervention_id: &str,
     ) -> OwnerForwardResult;
 }
 
@@ -286,14 +289,25 @@ impl TaskIntentBridge {
         }
         let digest = intent.canonical_digest();
 
-        // TB-18: a deliberate retry references a real prior task.
+        // TB-18: a deliberate retry references a real prior task OWNED BY
+        // THE SAME REQUESTER (foreign retry lineage is refused).
         if let Some(prior) = &intent.retry_of {
             match self.facts.facts(prior) {
                 Err(_) => return SubmitReceipt::Unavailable,
                 Ok(prior_facts) if prior_facts.is_empty() => {
                     return SubmitReceipt::Rejected(AdmissionRejection::UnknownRetryLineage)
                 }
-                Ok(_) => {}
+                Ok(prior_facts) => {
+                    let owned = prior_facts.iter().any(|f| match &f.payload {
+                        TaskEventPayload::TaskSubmitted { requester, .. } => {
+                            requester == &intent.requester.to_string()
+                        }
+                        _ => false,
+                    });
+                    if !owned {
+                        return SubmitReceipt::Rejected(AdmissionRejection::UnknownRetryLineage);
+                    }
+                }
             }
         }
 
@@ -339,22 +353,11 @@ impl TaskIntentBridge {
         // TB-6: Tachi mints the TaskRef, after admission.
         let task_ref = TaskRef::mint(format!("task:{}", uuid::Uuid::new_v4().simple()));
 
-        // TB-2: the staffing plane chooses the plan.
-        let plan = match self
-            .plans
-            .admit_plan(&task_ref, intent.routing_preference.as_ref())
-        {
-            Err(PlanAdmissionError::Unavailable) => return SubmitReceipt::Unavailable,
-            Err(PlanAdmissionError::NoAdmittedPlan) => {
-                return SubmitReceipt::Rejected(AdmissionRejection::NoAdmittedExecutionPlan)
-            }
-            Ok(plan) => plan,
-        };
-
-        // Bind FIRST, then materialize: the window between them is exactly
-        // the TB-7 rule-4 ambiguity a replay reconciles (never a second
-        // spawn: the lookup above and the bind's same-digest-return below
-        // both short-circuit before a second mint can take effect).
+        // BIND FIRST — the atomic tuple reservation precedes every
+        // side-effecting call (plan admission can launch work): a
+        // concurrent duplicate collapses HERE, before any lane is touched.
+        // The window between bind and materialization is exactly the TB-7
+        // rule-4 ambiguity a replay reconciles.
         match self.bindings.bind(
             &intent.requester,
             &request_id.to_string(),
@@ -364,7 +367,7 @@ impl TaskIntentBridge {
             Ok(returned) => {
                 // Lost the race against a concurrent duplicate? The store
                 // returns the WINNER's binding — reconcile onto it, never
-                // materialize a second task.
+                // admit a second plan or materialize a second task.
                 match returned.bound {
                     BoundRef::Task(bound_task) if bound_task != task_ref => {
                         return self.replay_task(&bound_task, intent);
@@ -385,6 +388,34 @@ impl TaskIntentBridge {
                 }
             }
         }
+
+        // TB-2: the staffing plane chooses the plan — AFTER the tuple is
+        // reserved, so at most one caller ever reaches this call per
+        // tuple.
+        let plan = match self
+            .plans
+            .admit_plan(&task_ref, intent.routing_preference.as_ref())
+        {
+            Err(PlanAdmissionError::Unavailable) => return SubmitReceipt::Unavailable,
+            Err(PlanAdmissionError::NoAdmittedPlan) => {
+                // Record the definitive refusal on the bound task's log so
+                // the same tuple replays to the same typed rejection
+                // instead of an eternal ambiguity.
+                let now = self.clock.now_utc_iso();
+                let event = self.fact(
+                    EventSource::BridgeAdmission,
+                    format!("evt-{}", uuid::Uuid::new_v4().simple()),
+                    &now,
+                    VisibilityClass::Internal,
+                    TaskEventPayload::SubmitRejected {
+                        reason: "no_admitted_execution_plan".to_string(),
+                    },
+                );
+                let _ = self.facts.append(&task_ref, event);
+                return SubmitReceipt::Rejected(AdmissionRejection::NoAdmittedExecutionPlan);
+            }
+            Ok(plan) => plan,
+        };
 
         let contract = contract_projection(intent);
         let now = self.clock.now_utc_iso();
@@ -423,20 +454,46 @@ impl TaskIntentBridge {
 
     /// Replay/reconcile a bound submit onto its task (TB-7 rules 2 and 4).
     /// `Admitted` requires the `TaskSubmitted` fact to have MATERIALIZED —
-    /// a non-empty log alone is not admission. A missing `PlanAdmitted`
-    /// fact is self-healed by re-running plan admission (TB-2 allows
-    /// re-targeting; the task identity never changes).
+    /// a non-empty log alone is not admission — and the fact must name the
+    /// SAME requester and digest as the bound tuple (defensive: a sound
+    /// binding store guarantees this; the check keeps reconciliation
+    /// honest against a corrupted or adversarial log). A missing
+    /// `PlanAdmitted` fact is self-healed by re-running plan admission
+    /// (TB-2 allows re-targeting; the task identity never changes); a heal
+    /// that finds NO admissible plan is the same definitive rejection the
+    /// initial submit returns.
     fn replay_task(&self, task_ref: &TaskRef, intent: &TaskIntentV1) -> SubmitReceipt {
         let facts = match self.facts.facts(task_ref) {
             Err(_) => return SubmitReceipt::Unavailable,
             Ok(facts) => facts,
         };
-        let materialized = facts
+        if facts
             .iter()
-            .any(|f| matches!(f.payload, TaskEventPayload::TaskSubmitted { .. }));
-        if !materialized {
+            .any(|f| matches!(f.payload, TaskEventPayload::SubmitRejected { .. }))
+        {
+            return SubmitReceipt::Rejected(AdmissionRejection::NoAdmittedExecutionPlan);
+        }
+        let submitted = facts.iter().find_map(|f| match &f.payload {
+            TaskEventPayload::TaskSubmitted {
+                intent_digest,
+                requester,
+                ..
+            } => Some((intent_digest.clone(), requester.clone())),
+            _ => None,
+        });
+        let Some((bound_digest_log, bound_requester)) = submitted else {
             return SubmitReceipt::ReconciliationUnknown {
                 digest: intent.canonical_digest(),
+            };
+        };
+        if bound_digest_log != intent.canonical_digest()
+            || bound_requester != intent.requester.to_string()
+        {
+            // The log under this bound ref does not match the tuple: a
+            // conflict, never a silent admission onto foreign truth.
+            return SubmitReceipt::RequestIdConflict {
+                bound_digest: bound_digest_log,
+                submitted_digest: intent.canonical_digest(),
             };
         }
         let has_plan = facts
@@ -467,9 +524,11 @@ impl TaskIntentBridge {
                         digest: intent.canonical_digest(),
                     }
                 }
-                // The task exists; with no admissible plan the snapshot
-                // honestly shows no plan. Admission stands.
-                Err(PlanAdmissionError::NoAdmittedPlan) => {}
+                Err(PlanAdmissionError::NoAdmittedPlan) => {
+                    // Consistent with the initial-submit refusal: without
+                    // an admissible plan this submit is not admitted.
+                    return SubmitReceipt::Rejected(AdmissionRejection::NoAdmittedExecutionPlan);
+                }
             }
         }
         SubmitReceipt::Admitted {
@@ -481,7 +540,7 @@ impl TaskIntentBridge {
     /// `get(TaskRef)` (TB-8/TB-15): read projection over canonical truth.
     pub fn get(&self, task_ref: &TaskRef) -> Result<TaskSnapshot, GetError> {
         let events = self.derived_events(task_ref)?;
-        if events.is_empty() {
+        if !has_task_submitted(&events) {
             return Err(GetError::NotFound);
         }
         Ok(self.snapshot_from(task_ref, &events))
@@ -497,7 +556,7 @@ impl TaskIntentBridge {
         limit: usize,
     ) -> Result<TaskEventPage, GetError> {
         let events = self.derived_events(task_ref)?;
-        if events.is_empty() {
+        if !has_task_submitted(&events) {
             return Err(GetError::NotFound);
         }
         let limit = limit.max(1);
@@ -526,6 +585,15 @@ impl TaskIntentBridge {
         expected_task_revision: Option<u64>,
     ) -> Result<InterventionReceipt, InterventionError> {
         let op = intervention.discriminant();
+        // TB-4 first and uniformly: every text-bearing intervention field
+        // is scanned before any disposition (including the lineage
+        // refusals below), so no refusal path becomes a content bypass.
+        if let Err(rejection) = scan_intervention_texts(intervention) {
+            let AdmissionRejection::ForbiddenContent { category, field } = rejection else {
+                return Err(InterventionError::Unavailable);
+            };
+            return Err(InterventionError::ForbiddenContent { category, field });
+        }
         // TB-11: these are new task/adjudication lineage (tachi#1623/#1675),
         // NOT session interventions — typed refusal, zero mutation, no
         // fresh-task fallback.
@@ -575,12 +643,18 @@ impl TaskIntentBridge {
             Ok(authority) => authority,
         };
         let _ = authority; // capability scope is submit-time; interventions need admission only.
+                           // Linearize BEFORE reading state: ownership, advertisement, and
+                           // the `expected_task_revision` compare-and-apply must all observe
+                           // POST-LOCK truth (two requesters validating revision N
+                           // concurrently must not both mutate — the second observes N+1 and
+                           // conflicts).
+        let _guard = self.op_lock.lock().expect("bridge op lock poisoned");
         let events = self.derived_events(task_ref)?;
-        if events.is_empty() || !requester_owns(&events, requester) {
+        if !has_task_submitted(&events) || !requester_owns(&events, requester) {
             return Err(InterventionError::NotFound);
         }
         let snapshot = self.snapshot_from(task_ref, &events);
-        // Advertisement check FIRST: typed refusal, zero mutation (TB-11).
+        // Advertisement check: typed refusal, zero mutation (TB-11).
         if !snapshot.supported_interventions.contains(&op) {
             return Err(InterventionError::UnsupportedByLifecycleOwner { operation: op });
         }
@@ -593,16 +667,6 @@ impl TaskIntentBridge {
                 });
             }
         }
-        // TB-4: intervention texts are content on the bridge surface and
-        // are scanned like every other text-bearing value.
-        if let Err(rejection) = scan_intervention_texts(intervention) {
-            let AdmissionRejection::ForbiddenContent { category, field } = rejection else {
-                return Err(InterventionError::Unavailable);
-            };
-            return Err(InterventionError::ForbiddenContent { category, field });
-        }
-
-        let _guard = self.op_lock.lock().expect("bridge op lock poisoned");
 
         // TB-7 rule 6 tuple law: bind FIRST (atomic reserve), forward
         // SECOND — a concurrent duplicate collapses at the bind and can
@@ -652,7 +716,10 @@ impl TaskIntentBridge {
         }
         // Forward the FULL typed intervention to the lifecycle owner
         // (tachi#1678 request path); the payload travels, not just the op.
-        match self.owners.forward_intervention(task_ref, intervention) {
+        match self
+            .owners
+            .forward_intervention(task_ref, intervention, &bound_id)
+        {
             OwnerForwardResult::Unsupported => {
                 // The advertisement and the owner can disagree; the owner is
                 // authority: typed refusal. The binding remains so a replay
@@ -896,7 +963,7 @@ impl TaskIntentBridge {
         result_revision: Option<u64>,
     ) -> Result<ResultProjectionV1, CollectError> {
         let events = self.derived_events(task_ref)?;
-        if events.is_empty() {
+        if !has_task_submitted(&events) {
             return Err(CollectError::NotFound);
         }
         let expected: Vec<ExpectedArtifactProjection> = events
@@ -1073,6 +1140,15 @@ impl From<GetError> for InterventionError {
     }
 }
 
+/// A task EXISTS on this bridge only once its `TaskSubmitted` fact has
+/// materialized: bound-but-unmaterialized and bound-then-rejected refs are
+/// NOT tasks (get/watch/collect all say NotFound).
+fn has_task_submitted(events: &[TaskEvent]) -> bool {
+    events
+        .iter()
+        .any(|e| matches!(e.payload, TaskEventPayload::TaskSubmitted { .. }))
+}
+
 /// Requester-owns-task: the task's `TaskSubmitted` fact names this
 /// requester. Non-owners get the same NotFound as strangers (existence is
 /// not leaked).
@@ -1147,14 +1223,23 @@ fn composite_digest(value: &serde_json::Value) -> String {
 fn current_stop_receipt(
     events: &[TaskEvent],
     task_ref: &TaskRef,
-    stop_id: &str,
+    bound_stop_id: &str,
     mode: StopMode,
     request_id: &str,
 ) -> StopReceipt {
-    // Replay reflects the CURRENT stage, derived from the fact log: a later
-    // OwnerConfirmedTerminal advances Confirmed; OwnerDisappeared pins
-    // OutcomeUnknown.
-    let mut stage = StopStage::Forwarded;
+    // Replay reflects the CURRENT stage, derived from the fact log.
+    // Bound-but-unmaterialized ⇒ Requested (the forward state is unknown,
+    // never claimed): only THIS stop's materialized StopRequested fact
+    // states a forward happened; only an owner-confirmed CANCELLATION
+    // confirms; disappearance pins OutcomeUnknown.
+    let mut stage = StopStage::Requested;
+    for event in events {
+        if let TaskEventPayload::StopRequested { stop_id, .. } = &event.payload {
+            if stop_id == bound_stop_id {
+                stage = StopStage::Forwarded;
+            }
+        }
+    }
     for event in events {
         match &event.payload {
             // ONLY an owner-confirmed CANCELLATION confirms the stop — a
@@ -1169,7 +1254,7 @@ fn current_stop_receipt(
     }
     StopReceipt {
         task_ref: task_ref.clone(),
-        stop_id: stop_id.to_string(),
+        stop_id: bound_stop_id.to_string(),
         mode,
         stage,
         request_id: request_id.to_string(),

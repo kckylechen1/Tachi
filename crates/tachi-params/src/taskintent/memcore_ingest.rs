@@ -152,6 +152,7 @@ mod tests {
             &self,
             _task_ref: &TaskRef,
             _intervention: &crate::taskintent::InterventionV1,
+            _intervention_id: &str,
         ) -> crate::taskintent::bridge::OwnerForwardResult {
             crate::taskintent::bridge::OwnerForwardResult::Forwarded
         }

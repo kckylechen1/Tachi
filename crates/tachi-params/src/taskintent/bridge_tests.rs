@@ -126,6 +126,7 @@ impl LifecycleOwnerPort for FakeOwners {
         &self,
         _task_ref: &TaskRef,
         intervention: &InterventionV1,
+        _intervention_id: &str,
     ) -> OwnerForwardResult {
         self.forwarded
             .lock()
@@ -1439,14 +1440,20 @@ fn concurrent_duplicate_submits_materialize_exactly_one_task() {
         })
         .collect();
     let mut refs = Vec::new();
+    let mut reconciling = 0;
     for handle in handles {
         match handle.join().expect("thread") {
             SubmitReceipt::Admitted { task_ref, replayed } => {
                 refs.push((task_ref, replayed));
             }
+            // A loser racing ahead of the winner's materialization gets
+            // the honest ambiguous window — never a second task.
+            SubmitReceipt::ReconciliationUnknown { .. } => reconciling += 1,
             other => panic!("expected admissions, got {other:?}"),
         }
     }
+    assert!(!refs.is_empty(), "at least one admission");
+    assert_eq!(refs.len() + reconciling, 4);
     let first = refs[0].0.clone();
     assert!(
         refs.iter().all(|(r, _)| *r == first),
@@ -1559,4 +1566,233 @@ fn bridge_facts_append(
             },
         )
         .expect("append");
+}
+
+// ── codex round-2 review regressions ──────────────────────────────────────
+
+#[test]
+fn cross_instance_duplicate_interventions_forward_exactly_once() {
+    // R2-2: two bridge instances sharing stores (separate op locks) must
+    // still forward exactly once — the fresh binder forwards; the loser
+    // reconciles, never re-forwards.
+    use std::thread;
+    let facts = Arc::new(InMemoryTaskFacts::new());
+    let bindings = Arc::new(InProcessRequestBindings::new());
+    let owners = FakeOwners::forwarding();
+    let make_bridge = || {
+        TaskIntentBridge::new(
+            bindings.clone(),
+            facts.clone(),
+            FakeAuthority::admitting(&[Capability::ReasoningReview]),
+            FakePlans::managed(),
+            owners.clone(),
+            Arc::new(SystemBridgeClock),
+        )
+    };
+    let intent = golden_intent();
+    let request = RequestId::new("req-r2iv").expect("bounded");
+    let task_ref = match make_bridge().submit(&intent, &request) {
+        SubmitReceipt::Admitted { task_ref, .. } => task_ref,
+        other => panic!("expected admission, got {other:?}"),
+    };
+    // Declare context support.
+    let payload = TaskEventPayload::OwnerCapabilitiesDeclared {
+        operations: vec![InterventionV1Static::ProvideAdditionalContext],
+    };
+    let value = serde_json::to_value(&payload).expect("serializes");
+    bridge_facts_append(
+        &facts,
+        &task_ref,
+        "caps-r2",
+        payload,
+        value,
+        "2026-08-25T0003Z",
+    );
+    let intervention = InterventionV1::ProvideAdditionalContext {
+        note: BoundedText::new("note").expect("bounded"),
+    };
+    let iv_request = RequestId::new("iv-r2").expect("bounded");
+    let handles: Vec<_> = (0..4)
+        .map(|_| {
+            let bridge = make_bridge();
+            let task_ref = task_ref.clone();
+            let intervention = intervention.clone();
+            let requester = intent.requester.clone();
+            let iv_request = iv_request.clone();
+            thread::spawn(move || {
+                bridge.intervene(&task_ref, &intervention, &requester, &iv_request, None)
+            })
+        })
+        .collect();
+    let mut receipts = 0;
+    let mut reconciling = 0;
+    for handle in handles {
+        match handle.join().expect("thread") {
+            Ok(_) => receipts += 1,
+            Err(InterventionError::ReconciliationUnknown) => reconciling += 1,
+            Err(other) => panic!("unexpected error: {other:?}"),
+        }
+    }
+    assert!(receipts >= 1, "the winner produced a receipt");
+    assert_eq!(
+        owners.forwarded.lock().expect("forwarded").len(),
+        1,
+        "exactly one forward across instances"
+    );
+    assert_eq!(receipts + reconciling, 4);
+}
+
+#[test]
+fn bound_but_unmaterialized_stop_replay_reports_requested_not_forwarded() {
+    // R2-4: no StopRequested fact ⇒ Requested, never a claimed forward.
+    let rig = rig_managed();
+    let intent = golden_intent();
+    let task_ref = submit_ok(&rig, &intent, "req-r2stop");
+    // Simulate the bound-but-unmaterialized window: bind directly, do NOT
+    // let the bridge forward.
+    let digest = {
+        let composite = serde_json::json!({
+            "task": task_ref.as_wire(),
+            "mode": StopMode::Graceful.as_str(),
+        });
+        memcore::canonical_digest::canonical_json_digest_hex(&composite)
+    };
+    rig.bindings
+        .bind(
+            &intent.requester,
+            "stop-r2",
+            &digest,
+            BoundRef::Stop {
+                task: task_ref.clone(),
+                stop_id: "stop:phantom".to_string(),
+            },
+        )
+        .expect("bind");
+    let stop_request = RequestId::new("stop-r2").expect("bounded");
+    let receipt = rig
+        .bridge
+        .request_stop(
+            &task_ref,
+            StopMode::Graceful,
+            &intent.requester,
+            &stop_request,
+            None,
+        )
+        .expect("replayed receipt");
+    assert_eq!(receipt.stage, StopStage::Requested, "forward state unknown");
+    assert_eq!(receipt.stop_id, "stop:phantom");
+}
+
+#[test]
+fn heal_failure_returns_the_typed_rejection_not_admitted() {
+    // R2-5: replay-time NoAdmittedPlan ⇒ Rejected, consistent with the
+    // initial-submit refusal (never Admitted-without-plan).
+    let facts = Arc::new(InMemoryTaskFacts::new());
+    let bindings = Arc::new(InProcessRequestBindings::new());
+    let refusing = Arc::new(FakePlans {
+        mode: LifecycleMode::TachiManagedBatch,
+        owner: "managed-custom-backend",
+        counter: AtomicUsize::new(0),
+        refuse: true,
+    });
+    let clock = FixedClock::new();
+    let rig = Rig {
+        bridge: TaskIntentBridge::new(
+            bindings.clone(),
+            facts.clone(),
+            FakeAuthority::admitting(&[Capability::ReasoningReview]),
+            refusing,
+            FakeOwners::forwarding(),
+            Arc::new(clock.clone()),
+        ),
+        facts,
+        bindings,
+        clock,
+    };
+    let intent = golden_intent();
+    let request = RequestId::new("req-refuse").expect("bounded");
+    // Initial submit with no lane.
+    assert!(matches!(
+        rig.bridge.submit(&intent, &request),
+        SubmitReceipt::Rejected(AdmissionRejection::NoAdmittedExecutionPlan)
+    ));
+    // The bound-then-rejected task does not exist for get.
+    let bound = rig
+        .bindings
+        .lookup(&intent.requester, "req-refuse")
+        .expect("bound");
+    let BoundRef::Task(task_ref) = bound.bound else {
+        panic!("bound task");
+    };
+    assert_eq!(rig.bridge.get(&task_ref), Err(GetError::NotFound));
+    // Replay returns the SAME typed rejection (SubmitResolved fact).
+    assert!(matches!(
+        rig.bridge.submit(&intent, &request),
+        SubmitReceipt::Rejected(AdmissionRejection::NoAdmittedExecutionPlan)
+    ));
+}
+
+#[test]
+fn intervention_wire_denies_unknown_fields() {
+    // R2-6: InterventionV1 decode is closed.
+    let ok = serde_json::to_value(&InterventionV1::RequestPause).expect("ser");
+    assert!(serde_json::from_value::<InterventionV1>(ok).is_ok());
+    let mut smuggled = serde_json::json!({"op": "request_pause", "command": "rm -rf /"});
+    smuggled["op"] = "request_pause".into();
+    assert!(
+        serde_json::from_value::<InterventionV1>(smuggled).is_err(),
+        "unknown fields on the intervention wire must fail decode"
+    );
+}
+
+#[test]
+fn foreign_retry_lineage_is_rejected() {
+    // R2-8: retry_of must reference a task owned by the SAME requester.
+    let rig = rig_managed();
+    let intent = golden_intent();
+    let task_ref = submit_ok(&rig, &intent, "req-foreign");
+    let mut retry = golden_intent();
+    retry.requester = RequesterRef::claim("another-host").expect("bounded");
+    retry.retry_of = Some(task_ref);
+    let request = RequestId::new("req-foreign-retry").expect("bounded");
+    assert!(matches!(
+        rig.bridge.submit(&retry, &request),
+        SubmitReceipt::Rejected(AdmissionRejection::UnknownRetryLineage)
+    ));
+}
+
+#[test]
+fn revision_check_observes_post_lock_truth() {
+    // R2-3 discrimination: after one mutation bumps the revision, a
+    // stale-expected-revision request conflicts even though BOTH callers
+    // observed the same pre-mutation snapshot.
+    let rig = rig_managed();
+    let intent = golden_intent();
+    let task_ref = submit_ok(&rig, &intent, "req-rev");
+    let requester = intent.requester.clone();
+    let snapshot = rig.bridge.get(&task_ref).expect("snapshot");
+    let revision = snapshot.task_revision;
+    // First stop with the correct revision: mutates (bumps revision).
+    let first = RequestId::new("stop-rev-1").expect("bounded");
+    rig.bridge
+        .request_stop(
+            &task_ref,
+            StopMode::Graceful,
+            &requester,
+            &first,
+            Some(revision),
+        )
+        .expect("first stop applies");
+    // Second request presenting the SAME (now stale) revision conflicts.
+    let second = RequestId::new("stop-rev-2").expect("bounded");
+    assert!(matches!(
+        rig.bridge.request_stop(
+            &task_ref,
+            StopMode::Hard,
+            &requester,
+            &second,
+            Some(revision)
+        ),
+        Err(InterventionError::RevisionConflict { .. })
+    ));
 }

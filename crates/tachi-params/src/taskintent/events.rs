@@ -118,6 +118,13 @@ pub enum TaskEventPayload {
         /// expected artifacts, evaluation requirement) — plan-independent.
         contract: IntentContractProjection,
     },
+    /// The submit was bound then definitively refused (no execution lane
+    /// admitted the intent). Replay of the same tuple resolves to the
+    /// typed rejection instead of an eternal ambiguity.
+    SubmitRejected {
+        /// Machine-readable refusal reason.
+        reason: String,
+    },
     /// An ExecutionPlan was admitted for the task (plan identity is
     /// Tachi-chosen; TB-2).
     PlanAdmitted {
