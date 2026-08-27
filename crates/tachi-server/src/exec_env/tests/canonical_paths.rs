@@ -2,7 +2,9 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use memcore::{EnvClass, ExecEnvSelector, NewExecEnvLease, ReclaimOutcome};
+use memcore::{
+    EnvClass, ExecEnvSelector, NewExecEnvLease, NewExecEnvResource, ReclaimOutcome, ResourceKind,
+};
 
 use super::{admit_agent_connection, handle_task_claim};
 use crate::exec_env_ops::{provision_managed_env, ProvisionEnvOptions};
@@ -110,12 +112,13 @@ fn symlinked_root_persists_one_path_for_holder_and_collision_checks() {
                 Some(canonical_tree.as_str()),
                 "the symlinked spelling must not survive the WorkClaim write"
             );
+            let lease_path = claim.worktree_path.expect("canonical claim path");
             memcore::insert_exec_env(
                 store.connection(),
                 &NewExecEnvLease {
                     env_id: "env-canonical".to_string(),
                     kind: "worktree".to_string(),
-                    path: claim.worktree_path.expect("canonical claim path"),
+                    path: lease_path.clone(),
                     repo_root: projects.display().to_string(),
                     branch: "goal/1253-canonical-path".to_string(),
                     base_sha: "2969d6aa".to_string(),
@@ -123,6 +126,23 @@ fn symlinked_root_persists_one_path_for_holder_and_collision_checks() {
                     env_class: EnvClass::EditOnly,
                     created_at: String::new(),
                 },
+            )
+            .map_err(|error| error.to_string())?;
+            memcore::insert_resource(
+                store.connection_mut(),
+                &NewExecEnvResource {
+                    resource_id: "resource-canonical".to_string(),
+                    kind: ResourceKind::Worktree,
+                    path: lease_path,
+                    bytes: None,
+                    created_at: String::new(),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+            memcore::bind_resource(
+                store.connection_mut(),
+                "env-canonical",
+                "resource-canonical",
             )
             .map_err(|error| error.to_string())?;
             memcore::bind_work_claim_exec_env(
