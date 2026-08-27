@@ -661,6 +661,9 @@ pub struct PostflightGate {
     /// worker is a separate process and cannot modify this value through a
     /// filesystem pathname.
     preimage: Arc<Mutex<Option<WorkspaceManifest>>>,
+    /// Descriptor pin for the exact published worktree object. Pathname
+    /// replacement before or after the worker run makes the gate fail closed.
+    worktree_authority: Option<memcore::anchored_fs::AnchoredDirectory>,
     pub contract: WriteContract,
     /// Directory names (e.g. [`manifest::BUILD_ARTIFACT_DIR_NAMES`]) whose
     /// subtrees are walked and fingerprinted but **not content-hashed**.
@@ -691,6 +694,7 @@ impl PostflightGate {
             env_id: env_id.into(),
             workspace_root: workspace_root.into(),
             preimage: Arc::new(Mutex::new(None)),
+            worktree_authority: None,
             contract,
             unhashed_dir_names: Vec::new(),
         }
@@ -704,6 +708,31 @@ impl PostflightGate {
             .map(|name| (*name).to_string())
             .collect();
         self
+    }
+
+    pub fn with_worktree_authority(
+        mut self,
+        authority: memcore::anchored_fs::AnchoredDirectory,
+    ) -> PostflightGate {
+        self.worktree_authority = Some(authority);
+        self
+    }
+
+    fn verify_workspace_identity(&self, phase: &str) -> Result<(), String> {
+        let Some(authority) = self.worktree_authority.as_ref() else {
+            return Ok(());
+        };
+        match authority.matches_absolute_path(&self.workspace_root) {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(format!(
+                "{phase}: managed worktree object changed at '{}'",
+                self.workspace_root.display()
+            )),
+            Err(error) => Err(format!(
+                "{phase}: cannot re-establish managed worktree object at '{}': {error}",
+                self.workspace_root.display()
+            )),
+        }
     }
 
     /// Capture the pre-image. Call this **before the worker is spawned** — a
@@ -720,6 +749,7 @@ impl PostflightGate {
     /// not start under this contract rather than run and be un-provable at the
     /// end. No pre-image file is written in that case.
     pub fn capture_preimage(&self) -> Result<WorkspaceManifest, String> {
+        self.verify_workspace_identity("before pre-image capture")?;
         let gitdir = manifest::resolve_external_git_dir(&self.workspace_root);
         let mut manifest = manifest::capture(&CaptureSpec {
             workspace_root: &self.workspace_root,
@@ -757,6 +787,7 @@ impl PostflightGate {
                 self.workspace_root.display()
             )
         })?;
+        self.verify_workspace_identity("after pre-image capture")?;
         let mut preimage = self
             .preimage
             .lock()
@@ -848,6 +879,7 @@ impl PostflightGate {
             }
         };
 
+        self.verify_workspace_identity("before post-image capture")?;
         // (3) Re-scan — against the roots the PARENT pinned before the spawn.
         // A pinned gitdir the worker deleted or moved fails closed as an
         // unreadable (and therefore unprovable) root, not as a clean run.
@@ -876,6 +908,7 @@ impl PostflightGate {
                 ))
             }
         };
+        self.verify_workspace_identity("after post-image capture")?;
 
         let entries_checked = pre.len().max(post.len());
         let unhashed = merge_unhashed(&pre, &post);

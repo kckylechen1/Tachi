@@ -70,7 +70,17 @@ async fn run_native_acp_dispatch_inner(
     defer_artifacts: bool,
 ) -> DispatchRunOutcome {
     let mut cmd = Command::new(&spec.command);
-    cmd.args(&spec.args).current_dir(&spec.cwd);
+    cmd.args(&spec.args);
+    if let Some(authority) = spec.cwd_authority.as_ref() {
+        if let Err(error) = authority.anchor_command_cwd(cmd.as_std_mut()) {
+            return DispatchRunOutcome::failure(
+                format!("pin native ACP child cwd: {error}"),
+                crate::exec_env_postflight::RunnerLivenessEvidence::NoWorkerSpawned,
+            );
+        }
+    } else {
+        cmd.current_dir(&spec.cwd);
+    }
     for name in &spec.env_remove {
         cmd.env_remove(name);
     }

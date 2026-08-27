@@ -27,6 +27,7 @@ pub(super) struct NativeAcpRunSpec {
     pub command: String,
     pub args: Vec<String>,
     pub cwd: PathBuf,
+    pub cwd_authority: Option<memcore::anchored_fs::AnchoredDirectory>,
     pub prompt: String,
     pub mode: NativeAcpRunMode,
     pub permission_label: String,

@@ -20,6 +20,12 @@ mod imp {
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct DirectoryIdentity {
+        pub device: u64,
+        pub inode: u64,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum CreateFileOutcome {
         Created,
         Exists,
@@ -226,7 +232,7 @@ mod imp {
             File::from(unsafe { OwnedFd::from_raw_fd(fd) }).sync_all()
         }
 
-        fn identity(&self) -> io::Result<(u64, u64)> {
+        pub fn identity(&self) -> io::Result<DirectoryIdentity> {
             let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
             // SAFETY: stat points to writable storage and fd is live.
             if unsafe { libc::fstat(self.fd.as_ref().as_raw_fd(), stat.as_mut_ptr()) } != 0 {
@@ -234,7 +240,33 @@ mod imp {
             }
             // SAFETY: fstat succeeded and initialized stat.
             let stat = unsafe { stat.assume_init() };
-            Ok((stat.st_dev as u64, stat.st_ino))
+            Ok(DirectoryIdentity {
+                device: stat.st_dev as u64,
+                inode: stat.st_ino,
+            })
+        }
+
+        /// Make this already-open directory the child's cwd without reopening
+        /// its mutable pathname between validation and spawn.
+        pub fn anchor_command_cwd(&self, command: &mut std::process::Command) -> io::Result<()> {
+            use std::os::unix::process::CommandExt;
+
+            // Avoid any pathname lookup of the managed worktree in the child;
+            // pre_exec replaces this harmless stable cwd with fchdir.
+            command.current_dir("/");
+            let authority = self.clone();
+            // SAFETY: fchdir is async-signal-safe and the captured descriptor
+            // remains live in the command until the child has executed.
+            unsafe {
+                command.pre_exec(move || {
+                    if libc::fchdir(authority.fd.as_ref().as_raw_fd()) == 0 {
+                        Ok(())
+                    } else {
+                        Err(io::Error::last_os_error())
+                    }
+                });
+            }
+            Ok(())
         }
 
         fn unlink(&self, name: &CString) -> io::Result<()> {
@@ -352,6 +384,12 @@ mod imp {
     pub struct AnchoredDirectory;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct DirectoryIdentity {
+        pub device: u64,
+        pub inode: u64,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum CreateFileOutcome {
         Created,
         Exists,
@@ -371,6 +409,14 @@ mod imp {
         }
 
         pub fn matches_absolute_path(&self, _path: &Path) -> io::Result<bool> {
+            unsupported()
+        }
+
+        pub fn identity(&self) -> io::Result<DirectoryIdentity> {
+            unsupported()
+        }
+
+        pub fn anchor_command_cwd(&self, _command: &mut std::process::Command) -> io::Result<()> {
             unsupported()
         }
 
@@ -395,7 +441,7 @@ mod imp {
     }
 }
 
-pub use imp::{AnchoredDirectory, CreateFileOutcome};
+pub use imp::{AnchoredDirectory, CreateFileOutcome, DirectoryIdentity};
 
 #[cfg(all(test, unix))]
 mod tests {
@@ -413,5 +459,24 @@ mod tests {
                 .expect_err("invalid component must be refused");
             assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
         }
+    }
+
+    #[test]
+    fn anchored_child_cwd_survives_same_path_directory_replacement() {
+        let root = tempfile::tempdir().unwrap();
+        let managed = root.path().join("managed");
+        let captured = root.path().join("captured");
+        std::fs::create_dir(&managed).unwrap();
+        let authority = AnchoredDirectory::open_absolute(&managed.canonicalize().unwrap()).unwrap();
+        std::fs::rename(&managed, &captured).unwrap();
+        std::fs::create_dir(&managed).unwrap();
+
+        let mut command = std::process::Command::new("/bin/sh");
+        command.args(["-c", "touch child-was-here"]);
+        authority.anchor_command_cwd(&mut command).unwrap();
+        assert!(command.status().unwrap().success());
+
+        assert!(captured.join("child-was-here").exists());
+        assert!(!managed.join("child-was-here").exists());
     }
 }

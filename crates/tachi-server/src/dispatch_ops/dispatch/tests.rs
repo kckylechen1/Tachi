@@ -1524,3 +1524,23 @@ fn postflight_handoff_has_no_pid_reconstruction_or_signal_capability() {
         "the production postflight handoff must consume typed runner liveness"
     );
 }
+
+#[test]
+fn required_postflight_finalizes_lease_before_carrier_artifact_publication() {
+    let source = include_str!("execution.rs");
+    let finalization = source
+        .find("let lease_release = match")
+        .expect("lease finalization seam");
+    let post_finalization = &source[finalization..];
+    let acpx_publication = finalization
+        + post_finalization
+            .find("persist_acpx_events_and_map(")
+            .expect("ACPX publication seam");
+    let native_publication = finalization
+        + post_finalization
+            .find("publish_native_acp_artifacts(")
+            .expect("native ACP publication seam");
+
+    assert!(finalization < acpx_publication);
+    assert!(finalization < native_publication);
+}

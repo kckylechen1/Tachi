@@ -1374,6 +1374,52 @@ impl MemoryServer {
         resolve_env_binding(env_id, cwd, unmanaged_cwd, lease.as_ref())
     }
 
+    /// Re-open and pin the exact managed worktree object recorded at
+    /// publication. The returned descriptor is retained through child spawn;
+    /// callers must use it as cwd authority rather than reopening the path.
+    pub(crate) fn open_dispatch_worktree_authority(
+        &self,
+        resolution: &EnvResolution,
+    ) -> Result<Option<memcore::anchored_fs::AnchoredDirectory>, String> {
+        let EnvResolution::Managed { cwd, env_id } = resolution else {
+            return Ok(None);
+        };
+        #[cfg(not(unix))]
+        {
+            let _ = (cwd, env_id);
+            return Err(
+                "managed dispatch requires descriptor-pinned cwd identity on this platform"
+                    .to_string(),
+            );
+        }
+        #[cfg(unix)]
+        {
+            let expected = self.with_global_store_read(|store| {
+                memcore::get_exec_env_worktree_identity(store.connection(), env_id)
+                    .map_err(|error| error.to_string())
+            })?
+            .ok_or_else(|| {
+                format!(
+                    "env_id '{env_id}' has no persisted worktree device/inode identity; refusing legacy path-only dispatch"
+                )
+            })?;
+            let authority = memcore::anchored_fs::AnchoredDirectory::open_absolute(Path::new(cwd))
+                .map_err(|error| {
+                    format!("open descriptor-pinned cwd for env_id '{env_id}': {error}")
+                })?;
+            let observed = authority
+                .identity()
+                .map_err(|error| format!("read cwd identity for env_id '{env_id}': {error}"))?;
+            if observed != expected {
+                return Err(format!(
+                    "env_id '{env_id}' worktree object changed since publication: expected device={} inode={}, observed device={} inode={}",
+                    expected.device, expected.inode, observed.device, observed.inode
+                ));
+            }
+            Ok(Some(authority))
+        }
+    }
+
     /// Ordinary reclaim path for a lease (#894 S1). Flips `active` ->
     /// `reclaimed` transactionally and idempotently. The external cleaner uses
     /// memcore's removal-claim protocol so it owns the lease before deleting.

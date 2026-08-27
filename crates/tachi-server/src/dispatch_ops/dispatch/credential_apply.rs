@@ -228,6 +228,7 @@ mod cargo_target_tests {
             command: "agent".to_string(),
             args: Vec::new(),
             cwd: PathBuf::from("/wt/private"),
+            cwd_authority: None,
             prompt: String::new(),
             mode: crate::dispatch_ops::acp_native::NativeAcpRunMode::OneShot,
             permission_label: "default".to_string(),

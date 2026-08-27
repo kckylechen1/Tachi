@@ -171,15 +171,24 @@ fn plan_wt_remove(
         return report;
     }
 
-    if !is_registered_or_marked(&worktree_root) {
-        report.warnings.push(
-            "worktree is not registered in ~/.tachi/worktrees.json and has no .tachi-worktree.json marker; allowing dry-run only until dispatch registry integration lands"
-                .to_string(),
-        );
-        if !dry_run {
+    match registry::verify_worktree_ownership(&worktree_root) {
+        Ok(true) => {}
+        Ok(false) => {
+            report.warnings.push(
+                "worktree is not registered in ~/.tachi/worktrees.json and has no valid .tachi-worktree.json marker; allowing dry-run only until dispatch registry integration lands"
+                    .to_string(),
+            );
+            if !dry_run {
+                report
+                    .errors
+                    .push("refusing to remove unregistered worktree with --force".to_string());
+                return report;
+            }
+        }
+        Err(error) => {
             report
                 .errors
-                .push("refusing to remove unregistered worktree with --force".to_string());
+                .push(format!("refusing to remove worktree: {error}"));
             return report;
         }
     }
@@ -613,11 +622,6 @@ fn repo_root_from_worktree(worktree_root: &Path) -> Result<PathBuf, String> {
     std::fs::canonicalize(repo_root).map_err(|err| format!("cannot canonicalize repo root: {err}"))
 }
 
-fn is_registered_or_marked(worktree_root: &Path) -> bool {
-    worktree_root.join(".tachi-worktree.json").exists()
-        || registry::registry_contains(worktree_root)
-}
-
 /// `git status --porcelain` entries for `worktree_root`, excluding the
 /// Tachi marker file itself. `pub(crate)` so the sweep/reclaim path
 /// (`sweep.rs`) can apply the SAME dirty guard as this direct-close path
@@ -784,6 +788,98 @@ mod tests {
         .unwrap();
 
         (HomeGuard(old_home), worktree)
+    }
+
+    #[test]
+    fn force_remove_refuses_registry_row_without_marker_evidence() {
+        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let root = unique_temp_dir("wt-clean-missing-marker");
+        let (_home_guard, worktree) = setup_registered_worktree(&root);
+        std::fs::remove_file(worktree.join(".tachi-worktree.json")).unwrap();
+
+        let report = plan_wt_remove(
+            &worktree,
+            false,
+            &|_| crate::work_claim::DbHolderEvidence::Clear,
+            &|_| HolderEvidence::Clear,
+        );
+        assert!(!report.allowed);
+        assert!(
+            report.errors.join(" | ").contains("marker"),
+            "registry row alone must not authorize force removal: {:?}",
+            report.errors
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn force_remove_refuses_legacy_registry_and_marker_without_identity() {
+        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let root = unique_temp_dir("wt-clean-legacy-identity");
+        let (_home_guard, worktree) = setup_registered_worktree(&root);
+        let registry_path = root.join("home/.tachi/worktrees.json");
+        for path in [registry_path, worktree.join(".tachi-worktree.json")] {
+            let mut value: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            if let Some(records) = value
+                .get_mut("worktrees")
+                .and_then(serde_json::Value::as_array_mut)
+            {
+                let record = records.first_mut().unwrap();
+                record.as_object_mut().unwrap().remove("device");
+                record.as_object_mut().unwrap().remove("inode");
+            } else {
+                let record = value.as_object_mut().unwrap();
+                record.remove("device");
+                record.remove("inode");
+            }
+            std::fs::write(
+                &path,
+                format!("{}\n", serde_json::to_string_pretty(&value).unwrap()),
+            )
+            .unwrap();
+        }
+
+        let report = plan_wt_remove(
+            &worktree,
+            false,
+            &|_| crate::work_claim::DbHolderEvidence::Clear,
+            &|_| HolderEvidence::Clear,
+        );
+        assert!(!report.allowed);
+        assert!(
+            report.errors.join(" | ").contains("device/inode identity"),
+            "legacy records must fail closed: {:?}",
+            report.errors
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ownership_verification_refuses_same_path_replacement_with_stale_marker() {
+        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let root = unique_temp_dir("wt-clean-identity-replacement");
+        let (_home_guard, worktree) = setup_registered_worktree(&root);
+        let marker = std::fs::read(worktree.join(".tachi-worktree.json")).unwrap();
+        let captured = root.join("captured-worktree");
+        std::fs::rename(&worktree, &captured).unwrap();
+        std::fs::create_dir(&worktree).unwrap();
+        std::fs::write(worktree.join(".tachi-worktree.json"), marker).unwrap();
+
+        let error = registry::verify_worktree_ownership(&worktree).unwrap_err();
+        assert!(
+            error.contains("identity changed"),
+            "same-path replacement must fail closed: {error}"
+        );
+        assert!(
+            captured.exists(),
+            "the original registered directory must remain untouched"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

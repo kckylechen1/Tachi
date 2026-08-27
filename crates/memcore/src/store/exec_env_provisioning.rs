@@ -64,7 +64,7 @@ impl MemoryStore {
         resources: &[ExecEnvProvisioningResource],
         private_target_reservation: Option<&ExecEnvPrivateTargetReservation>,
     ) -> Result<PublishedExecEnv, MemoryError> {
-        self.publish_exec_env_atomically_inner(lease, resources, private_target_reservation, false)
+        self.publish_exec_env_atomically_inner(lease, resources, private_target_reservation, None)
     }
 
     /// Publish paths whose physical worktree identity was already established
@@ -92,7 +92,18 @@ impl MemoryStore {
                 lease.path
             )));
         }
-        self.publish_exec_env_atomically_inner(lease, resources, private_target_reservation, true)
+        let identity = authority.identity().map_err(|error| {
+            MemoryError::InvalidArg(format!(
+                "cannot read anchored worktree identity for '{}': {error}",
+                lease.path
+            ))
+        })?;
+        self.publish_exec_env_atomically_inner(
+            lease,
+            resources,
+            private_target_reservation,
+            Some(identity),
+        )
     }
 
     fn publish_exec_env_atomically_inner(
@@ -100,7 +111,7 @@ impl MemoryStore {
         lease: &db::exec_env::NewExecEnvLease,
         resources: &[ExecEnvProvisioningResource],
         private_target_reservation: Option<&ExecEnvPrivateTargetReservation>,
-        worktree_paths_prevalidated: bool,
+        worktree_identity: Option<crate::anchored_fs::DirectoryIdentity>,
     ) -> Result<PublishedExecEnv, MemoryError> {
         if resources.is_empty() {
             return Err(MemoryError::InvalidArg(format!(
@@ -109,7 +120,7 @@ impl MemoryStore {
             )));
         }
         let normalize = |kind, path: &str| {
-            if worktree_paths_prevalidated && kind == db::exec_env_resources::ResourceKind::Worktree
+            if worktree_identity.is_some() && kind == db::exec_env_resources::ResourceKind::Worktree
             {
                 let path = Path::new(path);
                 if !path.is_absolute()
@@ -219,6 +230,22 @@ impl MemoryStore {
                 now,
             ],
         )?;
+        if let Some(identity) = worktree_identity {
+            let device = i64::try_from(identity.device).map_err(|_| {
+                MemoryError::InvalidArg(
+                    "worktree device identity exceeds SQLite INTEGER".to_string(),
+                )
+            })?;
+            let inode = i64::try_from(identity.inode).map_err(|_| {
+                MemoryError::InvalidArg(
+                    "worktree inode identity exceeds SQLite INTEGER".to_string(),
+                )
+            })?;
+            tx.execute(
+                "INSERT INTO exec_env_worktree_identities (env_id, device, inode, captured_at) VALUES (?1, ?2, ?3, ?4)",
+                params![lease.env_id, device, inode, now],
+            )?;
+        }
 
         let mut published = Vec::with_capacity(resources.len());
         for resource in &resources {
@@ -407,5 +434,49 @@ impl MemoryStore {
             worktree,
             build_target,
         })
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn anchored_publication_persists_the_descriptor_device_and_inode() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().canonicalize().unwrap();
+        let authority = crate::anchored_fs::AnchoredDirectory::open_absolute(&path).unwrap();
+        let expected = authority.identity().unwrap();
+        let path = path.to_string_lossy().into_owned();
+        let lease = db::exec_env::NewExecEnvLease {
+            env_id: "env-anchored-identity".to_string(),
+            kind: "worktree".to_string(),
+            path: path.clone(),
+            repo_root: path.clone(),
+            branch: "test/anchored".to_string(),
+            base_sha: "abc1234".to_string(),
+            dispatch_id: None,
+            env_class: db::exec_env::EnvClass::EditOnly,
+            created_at: String::new(),
+        };
+        let resources = [ExecEnvProvisioningResource {
+            kind: db::exec_env_resources::ResourceKind::Worktree,
+            path,
+            bytes: None,
+        }];
+        let mut store = MemoryStore::open_in_memory().unwrap();
+
+        store
+            .publish_exec_env_atomically_anchored(&lease, &resources, None, &authority)
+            .unwrap();
+
+        assert_eq!(
+            db::exec_env::get_exec_env_worktree_identity(
+                store.connection(),
+                "env-anchored-identity"
+            )
+            .unwrap(),
+            Some(expected)
+        );
     }
 }

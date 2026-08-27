@@ -98,6 +98,24 @@ pub(super) enum DispatchExecution {
     NativeAcp(NativeAcpRunSpec),
 }
 
+impl DispatchExecution {
+    pub(super) fn anchor_managed_cwd(
+        &mut self,
+        authority: &memcore::anchored_fs::AnchoredDirectory,
+    ) -> Result<(), String> {
+        match self {
+            DispatchExecution::Subprocess(command)
+            | DispatchExecution::ManagedCustom(command, _) => authority
+                .anchor_command_cwd(command.as_std_mut())
+                .map_err(|error| format!("pin managed child cwd: {error}")),
+            DispatchExecution::NativeAcp(spec) => {
+                spec.cwd_authority = Some(authority.clone());
+                Ok(())
+            }
+        }
+    }
+}
+
 /// Private lifecycle evidence that this registered Staff-managed run owns only
 /// its own run-scoped ephemeral materializations. It is established before
 /// background handoff and is independent of process exit or completion state.
@@ -702,6 +720,25 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
         };
 
         if let Some(outcome) = postflight_outcome.as_mut() {
+            // Finalize the exclusive lease before making any worker-authored
+            // carrier artifact visible. A clean verdict with a failed lease
+            // transition is still a failed gate and must release no output.
+            let lease_release = match early_exit_cleanup.postflight_dispatch_lease_mut() {
+                Some(lease) if outcome.artifacts_released() => lease.release_clean(),
+                Some(lease) if outcome.lease_fenced() => lease.release_after_fence(),
+                Some(_) => Err(
+                    "postflight lease remains exclusively admitted because its resource fence was not persisted"
+                        .to_string(),
+                ),
+                None => Err("required postflight gate lost its dispatch lease guard".to_string()),
+            };
+            if let Err(error) = lease_release {
+                outcome.verdict = crate::exec_env_postflight::GateVerdict::Error {
+                    detail: format!("postflight lease finalization failed closed: {error}"),
+                };
+                append_trajectory_event(&traj_path_for_spawn, outcome.trajectory_event());
+            }
+
             if outcome.artifacts_released() {
                 let mut publication_error = None;
                 if let Some(raw_output) = pending_acpx_output.take() {
@@ -764,21 +801,6 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                 }
             }
 
-            let lease_release = match early_exit_cleanup.postflight_dispatch_lease_mut() {
-                Some(lease) if outcome.artifacts_released() => lease.release_clean(),
-                Some(lease) if outcome.lease_fenced() => lease.release_after_fence(),
-                Some(_) => Err(
-                    "postflight lease remains exclusively admitted because its resource fence was not persisted"
-                        .to_string(),
-                ),
-                None => Err("required postflight gate lost its dispatch lease guard".to_string()),
-            };
-            if let Err(error) = lease_release {
-                outcome.verdict = crate::exec_env_postflight::GateVerdict::Error {
-                    detail: format!("postflight lease finalization failed closed: {error}"),
-                };
-                append_trajectory_event(&traj_path_for_spawn, outcome.trajectory_event());
-            }
             if outcome.artifacts_released() {
                 append_trajectory_event(
                     &traj_path_for_spawn,

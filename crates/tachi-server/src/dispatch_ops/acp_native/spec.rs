@@ -102,6 +102,7 @@ pub(in crate::dispatch_ops) fn build_native_acp_run_spec(
         command,
         args,
         cwd,
+        cwd_authority: None,
         prompt: prompt.to_string(),
         mode,
         permission_label: permission_label.to_string(),

@@ -335,6 +335,30 @@ pub fn get_exec_env(conn: &Connection, env_id: &str) -> Result<Option<ExecEnvLea
     Ok(lease)
 }
 
+pub fn get_exec_env_worktree_identity(
+    conn: &Connection,
+    env_id: &str,
+) -> Result<Option<crate::anchored_fs::DirectoryIdentity>, MemoryError> {
+    let identity = conn
+        .query_row(
+            "SELECT device, inode FROM exec_env_worktree_identities WHERE env_id = ?1",
+            params![env_id],
+            |row| {
+                let device: i64 = row.get(0)?;
+                let inode: i64 = row.get(1)?;
+                if device < 0 || inode < 0 {
+                    return Err(rusqlite::Error::IntegralValueOutOfRange(0, device));
+                }
+                Ok(crate::anchored_fs::DirectoryIdentity {
+                    device: device as u64,
+                    inode: inode as u64,
+                })
+            },
+        )
+        .optional()?;
+    Ok(identity)
+}
+
 /// Fetch the single *active* lease for a workspace path, if any. Reclaimed rows
 /// for the same path are ignored so a re-provisioned path resolves to the live
 /// lease.

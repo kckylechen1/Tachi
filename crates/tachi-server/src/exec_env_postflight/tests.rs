@@ -194,6 +194,34 @@ fn clean_run_passes_and_releases_the_patch() {
     assert!(outcome.failure_message().is_none());
 }
 
+#[cfg(unix)]
+#[test]
+fn descriptor_bound_gate_refuses_same_path_directory_replacement() {
+    let fx = Fixture::new();
+    let workspace = fx.ws().canonicalize().unwrap();
+    let captured = workspace.with_extension("captured-worktree");
+    let authority = memcore::anchored_fs::AnchoredDirectory::open_absolute(&workspace).unwrap();
+    let gate = PostflightGate::new(
+        "env-test",
+        workspace.clone(),
+        WriteContract::DetectAndReject,
+    )
+    .with_worktree_authority(authority);
+    gate.capture_preimage().expect("capture original object");
+
+    fs::rename(&workspace, &captured).unwrap();
+    fs::create_dir(&workspace).unwrap();
+    fs::write(workspace.join("external.txt"), b"replacement\n").unwrap();
+
+    let error = gate
+        .run(&Reaped)
+        .expect_err("same-path replacement must fail before post-image certification");
+    assert!(error.contains("managed worktree object changed"), "{error}");
+    assert!(workspace.join("external.txt").exists());
+    fs::remove_dir_all(&workspace).unwrap();
+    fs::rename(&captured, &workspace).unwrap();
+}
+
 // ─── the eight mutation surfaces ────────────────────────────────────────────
 
 #[test]

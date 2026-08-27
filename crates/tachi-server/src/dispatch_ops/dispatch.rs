@@ -598,6 +598,7 @@ async fn launch_canonical_dispatch(
         raw_cwd.as_deref(),
         mechanics.unmanaged_cwd,
     )?;
+    let managed_worktree_authority = server.open_dispatch_worktree_authority(&env_resolution)?;
     let status_cwd = env_resolution
         .cwd()
         .map(|cwd| cwd.to_string())
@@ -1176,7 +1177,7 @@ async fn launch_canonical_dispatch(
             return Err(error);
         }
     };
-    let (execution, managed_run_guard) = if let Some((receiver, guard)) = managed_registration {
+    let (mut execution, managed_run_guard) = if let Some((receiver, guard)) = managed_registration {
         if let Err(error) =
             crate::managed_run_control::mark_managed_custom_start(&workspace_dir, &dispatch_id)
         {
@@ -1239,6 +1240,10 @@ async fn launch_canonical_dispatch(
         (execution, None)
     };
 
+    if let Some(authority) = managed_worktree_authority.as_ref() {
+        execution.anchor_managed_cwd(authority)?;
+    }
+
     // 7b. Compile and initialize the ExecEnv postflight gate (#894 S2e, #1322).
     // Pre-spawn preimage is retained in parent-owned memory and never exposed
     // through a same-UID worker-writable filesystem path.
@@ -1296,9 +1301,12 @@ async fn launch_canonical_dispatch(
                         ));
                 }
             };
-            let gate =
+            let mut gate =
                 crate::exec_env_postflight::PostflightGate::new(env_id_str, lease_path, contract)
                     .with_build_artifacts_unhashed();
+            if let Some(authority) = managed_worktree_authority.as_ref() {
+                gate = gate.with_worktree_authority(authority.clone());
+            }
             if let Err(error) = gate.capture_preimage() {
                 let release_error = dispatch_lease.release_without_spawn().err();
                 let _ = server.with_global_store(|store| {
