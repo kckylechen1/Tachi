@@ -76,14 +76,17 @@ job served by this runner.
 ## Installation (host, once)
 
 ```bash
-# Prerequisite: the setup-rust composite action runs under pwsh.
-brew install --cask powershell
+# Prerequisite: the setup-rust composite action runs under pwsh. If the
+# brew stable cask is unavailable, stage the official osx-arm64 tarball:
+#   mkdir -p ~/runner-tachi/pwsh && cd ~/runner-tachi/pwsh
+#   curl -sL -o pwsh.tar.gz https://github.com/PowerShell/PowerShell/releases/download/<ver>/powershell-<ver>-osx-arm64.tar.gz
+#   tar xzf pwsh.tar.gz && rm pwsh.tar.gz
+# and add ~/runner-tachi/pwsh to the runner .path below.
 
 mkdir -p ~/runner-tachi && cd ~/runner-tachi
 # Fetch the latest actions-runner release for osx-arm64 and unpack it here.
-# Registration token (treat as a secret; never echo it):
-gh api repos/kckylechen1/tachi/actions/runners/registration-token \
-  --jq .token > /dev/null   # pipe straight into config, do not store
+# Registration token: single-use, short-lived; pipe straight from gh into
+# config.sh via command substitution -- never echoed, never stored.
 ./config.sh --url https://github.com/kckylechen1/tachi \
   --token "$(gh api repos/kckylechen1/tachi/actions/runners/registration-token --jq .token)" \
   --name tachi-acceptance-1 --labels tachi-acceptance --ephemeral=no
@@ -128,14 +131,19 @@ Then install and start the launchd service:
 ## Job hygiene (tracked, reviewable)
 
 - `.github/scripts/runner_hygiene.sh preflight <gib>` — every lane, first
-  step after checkout: removes residue a cancelled predecessor left
-  (`target/`, `node_modules/` inside the workspace), reports the disk ledger,
-  enforces the watermark.
+  step after checkout: terminates processes a cancelled predecessor left
+  holding the workspace (delegating to the tracked killer with
+  `SCAN_ROOT=$GITHUB_WORKSPACE`; refusing loudly if they cannot be
+  terminated), removes file residue (`target/`, `node_modules/`), reports
+  the disk ledger, and enforces the watermark. The `gitleaks` lane adds an
+  inline pre-checkout disk gate because its full-history checkout precedes
+  script availability.
 - `.github/scripts/runner_hygiene.sh cleanup` — every lane, last step with
-  `if: always()`: removes the same residue and reports disk again. Target
-  storage is **per-job ephemeral** (in-workspace `target/`, deleted at job
-  end); there is deliberately no shared unbounded `target/` and no private
-  `CARGO_TARGET_DIR` (#1184 law).
+  `if: always()`: wipes the entire workspace contents (including `.git`) so
+  the runner holds no per-job disk between jobs; every job pays a fresh
+  checkout. Target storage is therefore **per-job ephemeral** by
+  construction; there is deliberately no shared unbounded `target/` and no
+  private `CARGO_TARGET_DIR` (#1184 law).
 - Caches that live outside the disposable workspace and are bounded by the
   toolchain/dependency universe, not by job count:
   `~/.rustup` (pinned 1.97.0 toolchain — shared with the developer seat),
@@ -175,8 +183,11 @@ their arguments (editors, indexers) are listed as foreign and left alone.
 If lsof discovery fails the script exits non-zero with UNKNOWN state
 instead of claiming success.
 
-The next job's preflight removes any partial `target/` residue, so a
-cancelled build cannot poison its successor.
+Automatic `cancel-in-progress` does not invoke this script, but every
+lane's preflight does (with `SCAN_ROOT` narrowed to that job's workspace):
+it terminates leftover workspace-holding processes before building and
+refuses loudly if they survive, then wipes file residue — so a cancelled
+build cannot silently poison its successor.
 
 ## Rollback / decommission
 

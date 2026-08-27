@@ -25,24 +25,27 @@ set -euo pipefail
 
 mode="${1:-list}"
 runner_root="${RUNNER_ROOT:-$HOME/runner-tachi}"
-work_root="${runner_root}/_work"
+# SCAN_ROOT narrows the domain for job-side use: runner_hygiene.sh preflight
+# invokes this killer with SCAN_ROOT="$GITHUB_WORKSPACE" so only processes
+# holding that one workspace are terminated.
+scan_root="${SCAN_ROOT:-${runner_root}/_work}"
 
-if [ ! -d "${work_root}" ]; then
-  echo "kill-strays: runner work root ${work_root} does not exist; nothing to scan" >&2
+if [ ! -d "${scan_root}" ]; then
+  echo "kill-strays: runner work root ${scan_root} does not exist; nothing to scan" >&2
   exit 0
 fi
 # lsof reports physical (symlink-resolved) cwd paths (e.g. /private/tmp for
 # /tmp on macOS); compare against the physical work root or every match is
 # silently missed. The argv scan keeps both spellings (ERE-escaped) so
 # processes quoting either form are visible in `list`.
-logical_root="${work_root}"
-work_root="$(cd "${work_root}" && pwd -P)"
+logical_root="${scan_root}"
+scan_root="$(cd "${scan_root}" && pwd -P)"
 
 ere_escape() {
   printf '%s' "$1" | sed 's#[][\\.*^$(){}?+|/]#\\&#g'
 }
 
-argv_pattern="($(ere_escape "${logical_root}")|$(ere_escape "${work_root}"))"
+argv_pattern="($(ere_escape "${logical_root}")|$(ere_escape "${scan_root}"))"
 
 # Move our own cwd out of the scan domain: this script's transient pipeline
 # children (awk/subshells) inherit cwd and would otherwise appear as -- and
@@ -77,7 +80,7 @@ snapshot_cwd_under_root() {
   local prot
   prot="$(protected_pids | tr '\n' '|')"
   prot="${prot%|}"
-  printf '%s\n' "${LSOF_LINES:-}" | awk -v root="${work_root}" -v prot="^(${prot})$" '
+  printf '%s\n' "${LSOF_LINES:-}" | awk -v root="${scan_root}" -v prot="^(${prot})$" '
     /^p[0-9]+$/ { pid = substr($0, 2) }
     /^n\// {
       cwd = substr($0, 2)
@@ -104,7 +107,7 @@ foreign_argv_matches() {
     [ -n "${pid}" ] || continue
     cwd="$(snapshot_cwd_of "${pid}")"
     case "${cwd}" in
-      "${work_root}"|"${work_root}"/*) ;; # already a cwd victim
+      "${scan_root}"|"${scan_root}"/*) ;; # already a cwd victim
       *) printf '  pid=%s cwd=%s cmd=%s\n' "${pid}" "${cwd}" "$(cmd_of "${pid}")" ;;
     esac
   done
@@ -117,16 +120,16 @@ case "${mode}" in
     snapshot || { echo "::error::kill-strays: lsof discovery failed; live-process state UNKNOWN" >&2; exit 5; }
     v_out="$(snapshot_cwd_under_root)"
     if [ -z "${v_out}" ] && ! pgrep -f "${argv_pattern}" >/dev/null 2>&1; then
-      echo "kill-strays: no live processes are rooted in ${work_root}"
+      echo "kill-strays: no live processes are rooted in ${scan_root}"
       exit 0
     fi
     if [ -n "${v_out}" ]; then
-      echo "kill-strays: KILL CANDIDATES (cwd under ${work_root}; self/ancestors excluded):"
+      echo "kill-strays: KILL CANDIDATES (cwd under ${scan_root}; self/ancestors excluded):"
       printf '%s\n' "${v_out}" | while IFS="$(printf '\t')" read -r pid cwd; do
         printf '  pid=%s cwd=%s cmd=%s\n' "${pid}" "${cwd}" "$(cmd_of "${pid}")"
       done
     else
-      echo "kill-strays: no kill candidates with cwd under ${work_root}"
+      echo "kill-strays: no kill candidates with cwd under ${scan_root}"
     fi
     f_out="$(foreign_argv_matches)"
     [ -n "${f_out}" ] && { echo "kill-strays: FOREIGN argv-only matches (NOT signalled; listed for the operator):"; printf '%s\n' "${f_out}"; }
@@ -135,10 +138,10 @@ case "${mode}" in
     snapshot || { echo "::error::kill-strays: lsof discovery failed; live-process state UNKNOWN, nothing signalled" >&2; exit 5; }
     pids="$(victims | tr '\n' ' ')"
     if [ -z "${pids// /}" ]; then
-      echo "kill-strays: no kill candidates with cwd under ${work_root} (run 'list' to inspect argv-only matches)"
+      echo "kill-strays: no kill candidates with cwd under ${scan_root} (run 'list' to inspect argv-only matches)"
       exit 0
     fi
-    echo "kill-strays: terminating (cwd under ${work_root}): ${pids}"
+    echo "kill-strays: terminating (cwd under ${scan_root}): ${pids}"
     # shellcheck disable=SC2086
     kill -TERM ${pids} 2>/dev/null || true
     sleep 3
