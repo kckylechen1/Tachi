@@ -110,6 +110,7 @@ pub(in crate::dispatch_ops) fn build_native_acp_run_spec(
         session_distill_path,
         metadata,
         env: HashMap::new(),
+        env_remove: std::collections::HashSet::new(),
     })
 }
 

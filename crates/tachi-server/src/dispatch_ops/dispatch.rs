@@ -359,8 +359,8 @@ use self::authority::{
 use self::backend::{prepare_dispatch_backend, DispatchBackendContext, PreparedDispatchBackend};
 use self::backend_failure::*;
 use self::credential_apply::{
-    apply_materialized_credentials, inject_legacy_vault_env, CredentialApplyInputs,
-    CredentialApplyOutcome,
+    apply_materialized_credentials, enforce_exec_env_cargo_target, inject_legacy_vault_env,
+    CredentialApplyInputs, CredentialApplyOutcome,
 };
 use self::credentials::*;
 use self::dedupe::*;
@@ -1075,6 +1075,8 @@ async fn launch_canonical_dispatch(
             },
             &mut execution,
         )?;
+
+        enforce_exec_env_cargo_target(server, &execution_grant, &mut execution)?;
 
         // 7. Harness preflight (opencode_serve only)
         run_harness_preflight(HarnessPreflightInputs {

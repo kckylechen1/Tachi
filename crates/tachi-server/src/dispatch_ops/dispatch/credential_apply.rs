@@ -67,6 +67,50 @@ pub(super) struct CredentialApplyOutcome {
     pub(super) reports_json: Vec<Value>,
 }
 
+fn apply_cargo_target_policy(
+    execution: &mut DispatchExecution,
+    policy: &memcore::ExecEnvCargoTarget,
+) {
+    const KEY: &str = "CARGO_TARGET_DIR";
+    match execution {
+        DispatchExecution::Subprocess(cmd) | DispatchExecution::ManagedCustom(cmd, _) => {
+            cmd.env_remove(KEY);
+            if let memcore::ExecEnvCargoTarget::Private(path) = policy {
+                cmd.env(KEY, path);
+            }
+        }
+        DispatchExecution::NativeAcp(spec) => {
+            spec.env.remove(KEY);
+            spec.env_remove.insert(KEY.to_string());
+            if let memcore::ExecEnvCargoTarget::Private(path) = policy {
+                spec.env_remove.remove(KEY);
+                spec.env.insert(KEY.to_string(), path.clone());
+            }
+        }
+    }
+}
+
+/// Apply the managed lease's Cargo target contract after every other env
+/// materializer. This final writer prevents daemon or credential-profile
+/// inheritance from overriding the physical resource bound in the ExecEnv
+/// ledger. Unallocated managed classes explicitly clear the inherited value.
+pub(super) fn enforce_exec_env_cargo_target(
+    server: &MemoryServer,
+    grant: &tachi_params::ExecutionGrant,
+    execution: &mut DispatchExecution,
+) -> Result<Option<memcore::ExecEnvCargoTarget>, String> {
+    let Some(env_id) = grant.env_id.as_deref() else {
+        return Ok(None);
+    };
+    let policy = server.with_global_store(|store| {
+        memcore::exec_env_cargo_target(store.connection(), env_id).map_err(|error| {
+            format!("derive Cargo target for managed exec env '{env_id}': {error}")
+        })
+    })?;
+    apply_cargo_target_policy(execution, &policy);
+    Ok(Some(policy))
+}
+
 /// Materialize dispatch credentials, inject env into execution, and emit
 /// trajectory events. On failure writes the full status.json error payload
 /// (including backend metadata) and returns Err.
@@ -164,4 +208,82 @@ pub(super) fn apply_materialized_credentials(
         env: dispatch_credentials.env,
         reports_json: credential_reports_json,
     })
+}
+
+#[cfg(test)]
+mod cargo_target_tests {
+    use super::*;
+    use crate::dispatch_ops::acp_native::NativeAcpRunSpec;
+
+    fn command_env(command: &tokio::process::Command, key: &str) -> Option<Option<String>> {
+        command
+            .as_std()
+            .get_envs()
+            .find(|(name, _)| *name == key)
+            .map(|(_, value)| value.map(|value| value.to_string_lossy().into_owned()))
+    }
+
+    fn native_spec() -> NativeAcpRunSpec {
+        NativeAcpRunSpec {
+            command: "agent".to_string(),
+            args: Vec::new(),
+            cwd: PathBuf::from("/wt/private"),
+            prompt: String::new(),
+            mode: crate::dispatch_ops::acp_native::NativeAcpRunMode::OneShot,
+            permission_label: "default".to_string(),
+            session: None,
+            session_record_path: None,
+            session_distill_path: None,
+            metadata: serde_json::Value::Null,
+            env: HashMap::from([("CARGO_TARGET_DIR".to_string(), "/inherited".to_string())]),
+            env_remove: std::collections::HashSet::new(),
+        }
+    }
+
+    #[test]
+    fn private_target_overrides_conflicting_env_for_subprocess_and_native_acp() {
+        let mut command = tokio::process::Command::new("agent");
+        command.env("CARGO_TARGET_DIR", "/inherited");
+        let mut subprocess = DispatchExecution::Subprocess(command);
+        let private = memcore::ExecEnvCargoTarget::Private("/wt/private/target".to_string());
+        apply_cargo_target_policy(&mut subprocess, &private);
+        let DispatchExecution::Subprocess(command) = subprocess else {
+            unreachable!()
+        };
+        assert_eq!(
+            command_env(&command, "CARGO_TARGET_DIR"),
+            Some(Some("/wt/private/target".to_string()))
+        );
+
+        let mut native = DispatchExecution::NativeAcp(native_spec());
+        apply_cargo_target_policy(&mut native, &private);
+        let DispatchExecution::NativeAcp(spec) = native else {
+            unreachable!()
+        };
+        assert_eq!(
+            spec.env.get("CARGO_TARGET_DIR").map(String::as_str),
+            Some("/wt/private/target")
+        );
+        assert!(!spec.env_remove.contains("CARGO_TARGET_DIR"));
+    }
+
+    #[test]
+    fn unallocated_managed_env_clears_conflicting_target_for_all_runners() {
+        let mut command = tokio::process::Command::new("agent");
+        command.env("CARGO_TARGET_DIR", "/inherited");
+        let mut subprocess = DispatchExecution::Subprocess(command);
+        apply_cargo_target_policy(&mut subprocess, &memcore::ExecEnvCargoTarget::Unallocated);
+        let DispatchExecution::Subprocess(command) = subprocess else {
+            unreachable!()
+        };
+        assert_eq!(command_env(&command, "CARGO_TARGET_DIR"), Some(None));
+
+        let mut native = DispatchExecution::NativeAcp(native_spec());
+        apply_cargo_target_policy(&mut native, &memcore::ExecEnvCargoTarget::Unallocated);
+        let DispatchExecution::NativeAcp(spec) = native else {
+            unreachable!()
+        };
+        assert!(!spec.env.contains_key("CARGO_TARGET_DIR"));
+        assert!(spec.env_remove.contains("CARGO_TARGET_DIR"));
+    }
 }

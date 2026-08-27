@@ -256,6 +256,70 @@ pub enum BindOutcome {
     AlreadyBound { binding_id: String },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExecEnvCargoTarget {
+    Unallocated,
+    Private(String),
+}
+
+/// Resolve the effective Cargo target contract from the lease and its live
+/// physical-resource bindings. Dispatch uses this value to override inherited
+/// `CARGO_TARGET_DIR`, so Cargo and the resource ledger share one source of
+/// truth.
+pub fn exec_env_cargo_target(
+    conn: &Connection,
+    env_id: &str,
+) -> Result<ExecEnvCargoTarget, MemoryError> {
+    let lease: Option<(String, String)> = conn
+        .query_row(
+            "SELECT env_class, state FROM exec_envs WHERE env_id = ?1",
+            params![env_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let Some((class_raw, state)) = lease else {
+        return Err(MemoryError::NotFound(format!("exec_env '{env_id}'")));
+    };
+    if state != "active" {
+        return Err(MemoryError::InvalidArg(format!(
+            "exec_env '{env_id}' is '{state}'; Cargo target policy is only derived before active dispatch admission"
+        )));
+    }
+    let class = super::exec_env::EnvClass::parse(&class_raw)?;
+    let mut stmt = conn.prepare(
+        "SELECT r.path, r.state FROM exec_env_resource_bindings b
+         JOIN exec_env_resources r ON r.resource_id = b.resource_id
+         WHERE b.env_id = ?1 AND b.released_at IS NULL AND r.kind = 'build_target'
+         ORDER BY r.resource_id",
+    )?;
+    let targets: Vec<(String, String)> = stmt
+        .query_map(params![env_id], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<Result<_, _>>()?;
+
+    if class.allocates_build_target() {
+        let [(path, resource_state)] = targets.as_slice() else {
+            return Err(MemoryError::InvalidArg(format!(
+                "build-private exec_env '{env_id}' must have exactly one live build_target binding, found {}",
+                targets.len()
+            )));
+        };
+        if resource_state != "active" || !std::path::Path::new(path).is_absolute() {
+            return Err(MemoryError::InvalidArg(format!(
+                "build-private exec_env '{env_id}' target '{path}' is '{resource_state}' or non-absolute"
+            )));
+        }
+        Ok(ExecEnvCargoTarget::Private(path.clone()))
+    } else if targets.is_empty() {
+        Ok(ExecEnvCargoTarget::Unallocated)
+    } else {
+        Err(MemoryError::InvalidArg(format!(
+            "exec_env '{env_id}' class '{}' must not hold build_target resources, found {}",
+            class.as_str(),
+            targets.len()
+        )))
+    }
+}
+
 /// Result of [`release_binding`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReleaseBindingOutcome {
@@ -1225,6 +1289,56 @@ mod tests {
             bytes: None,
             created_at: String::new(),
         }
+    }
+
+    #[test]
+    fn cargo_target_policy_is_derived_from_class_and_live_binding() {
+        let mut conn = open_conn();
+        insert_exec_env(
+            &conn,
+            &NewExecEnvLease {
+                env_id: "env-private".to_string(),
+                kind: "worktree".to_string(),
+                path: "/wt/private".to_string(),
+                repo_root: "/repo".to_string(),
+                branch: "tachi/private".to_string(),
+                base_sha: "abc123".to_string(),
+                dispatch_id: None,
+                env_class: EnvClass::BuildPrivate,
+                created_at: String::new(),
+            },
+        )
+        .unwrap();
+        insert_resource(
+            &mut conn,
+            &new_resource(
+                "target-private",
+                ResourceKind::BuildTarget,
+                "/wt/private/target",
+            ),
+        )
+        .unwrap();
+        bind_resource(&mut conn, "env-private", "target-private").unwrap();
+        assert_eq!(
+            exec_env_cargo_target(&conn, "env-private").unwrap(),
+            ExecEnvCargoTarget::Private("/wt/private/target".to_string())
+        );
+
+        seed_env(&conn, "env-edit");
+        assert_eq!(
+            exec_env_cargo_target(&conn, "env-edit").unwrap(),
+            ExecEnvCargoTarget::Unallocated
+        );
+        insert_resource(
+            &mut conn,
+            &new_resource("target-forbidden", ResourceKind::BuildTarget, "/shared"),
+        )
+        .unwrap();
+        bind_resource(&mut conn, "env-edit", "target-forbidden").unwrap();
+        assert!(exec_env_cargo_target(&conn, "env-edit")
+            .unwrap_err()
+            .to_string()
+            .contains("must not hold build_target"));
     }
 
     /// A deleter that reports `freed` bytes and counts how many times it ran —

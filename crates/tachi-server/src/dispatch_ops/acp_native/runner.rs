@@ -71,6 +71,9 @@ async fn run_native_acp_dispatch_inner(
 ) -> DispatchRunOutcome {
     let mut cmd = Command::new(&spec.command);
     cmd.args(&spec.args).current_dir(&spec.cwd);
+    for name in &spec.env_remove {
+        cmd.env_remove(name);
+    }
     for (name, value) in &spec.env {
         cmd.env(name, value);
     }

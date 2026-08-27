@@ -1,5 +1,5 @@
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use tokio::io::{BufReader, Lines};
 use tokio::process::{ChildStdin, ChildStdout};
@@ -35,6 +35,7 @@ pub(super) struct NativeAcpRunSpec {
     pub session_distill_path: Option<PathBuf>,
     pub metadata: Value,
     pub env: HashMap<String, String>,
+    pub env_remove: HashSet<String>,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
