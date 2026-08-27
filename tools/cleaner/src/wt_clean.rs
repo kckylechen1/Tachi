@@ -417,6 +417,39 @@ fn execute_wt_remove_with_claim(
             return;
         }
     };
+    // Revalidate the physical ownership records after the destructive lease
+    // claim.  Planning is deliberately earlier than execution, so a same-
+    // path replacement can have happened after the plan was admitted.  The
+    // removal claim serializes dispatch against deletion, but it does not
+    // pin the pathname's directory object; only this fresh registry/marker/
+    // device+inode check can prove that the object about to be removed is
+    // still the one that was planned.  Abort the claim before measuring,
+    // recording, or invoking `git worktree remove` on any ambiguity.
+    match registry::verify_worktree_ownership(Path::new(&path)) {
+        Ok(true) => {}
+        Ok(false) => {
+            report.errors.push(
+                "refusing to remove: worktree ownership could not be revalidated after the ExecEnv removal claim (registry and marker records are missing)".to_string(),
+            );
+            if let Err(abort_error) = removal_claim.abort() {
+                report.errors.push(format!(
+                    "ExecEnv removal claim abort also failed; lease remains fail-closed: {abort_error}"
+                ));
+            }
+            return;
+        }
+        Err(error) => {
+            report.errors.push(format!(
+                "refusing to remove: worktree ownership could not be revalidated after the ExecEnv removal claim ({error})"
+            ));
+            if let Err(abort_error) = removal_claim.abort() {
+                report.errors.push(format!(
+                    "ExecEnv removal claim abort also failed; lease remains fail-closed: {abort_error}"
+                ));
+            }
+            return;
+        }
+    }
     let reclaimed_bytes = match work_claim::measure_worktree_bytes(Path::new(&path)) {
         Ok(bytes) => bytes,
         Err(err) => {
@@ -442,6 +475,35 @@ fn execute_wt_remove_with_claim(
             ));
         }
         return;
+    }
+
+    // The scrap write above can block long enough for the pathname to be
+    // replaced after the post-claim check.  Revalidate immediately before
+    // the path-based Git deletion as the final execution-boundary guard.
+    match registry::verify_worktree_ownership(Path::new(&path)) {
+        Ok(true) => {}
+        Ok(false) => {
+            report.errors.push(
+                "refusing to remove: worktree ownership changed before git worktree remove (registry and marker records are missing)".to_string(),
+            );
+            if let Err(abort_error) = removal_claim.abort() {
+                report.errors.push(format!(
+                    "ExecEnv removal claim abort also failed; lease remains fail-closed: {abort_error}"
+                ));
+            }
+            return;
+        }
+        Err(error) => {
+            report.errors.push(format!(
+                "refusing to remove: worktree ownership changed before git worktree remove ({error})"
+            ));
+            if let Err(abort_error) = removal_claim.abort() {
+                report.errors.push(format!(
+                    "ExecEnv removal claim abort also failed; lease remains fail-closed: {abort_error}"
+                ));
+            }
+            return;
+        }
     }
 
     match Command::new("git")
@@ -1250,6 +1312,129 @@ mod tests {
         // Symlink first: recursive removal of `root` must not follow it
         // into `live_wt` and delete the still-registered live worktree.
         let _ = std::fs::remove_file(&stale_wt);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The ordinary destructive close must revalidate ownership after it has
+    /// claimed the ExecEnv lease.  This test performs the replacement inside
+    /// the injected claim callback, so a check that only runs before the claim
+    /// cannot pass: the old worktree is moved aside, a different Git worktree
+    /// is created at the same pathname, and the old marker is copied onto it.
+    #[test]
+    fn execute_refuses_same_path_replacement_after_removal_claim() {
+        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let root = unique_temp_dir("wt-clean-execute-identity");
+        let (_home_guard, worktree) = setup_registered_worktree(&root);
+        let repo = root.join("repo");
+        let captured = root.join("captured-original");
+        let marker = std::fs::read(worktree.join(".tachi-worktree.json")).unwrap();
+        let registered_path = registered_path_string(&worktree);
+
+        let report = plan_wt_remove(
+            &worktree,
+            false,
+            &|_| crate::work_claim::DbHolderEvidence::Clear,
+            &|_| HolderEvidence::Clear,
+        );
+        assert!(
+            report.allowed,
+            "the original registered worktree must be removable before the swap: {:?}",
+            report.errors
+        );
+
+        let claim_called = std::cell::Cell::new(false);
+        let mut report = report;
+        execute_wt_remove_with_claim(&mut report, &|_| {
+            claim_called.set(true);
+            assert!(Command::new("git")
+                .args([
+                    "worktree",
+                    "move",
+                    worktree.to_str().unwrap(),
+                    captured.to_str().unwrap(),
+                ])
+                .current_dir(&repo)
+                .status()
+                .unwrap()
+                .success());
+            assert!(Command::new("git")
+                .args([
+                    "worktree",
+                    "add",
+                    "-b",
+                    "feature/execute-replacement",
+                    worktree.to_str().unwrap(),
+                ])
+                .current_dir(&repo)
+                .status()
+                .unwrap()
+                .success());
+            std::fs::write(worktree.join(".tachi-worktree.json"), &marker).unwrap();
+            Ok(crate::work_claim::legacy_removal_claim_for_test())
+        });
+
+        assert!(
+            claim_called.get(),
+            "the replacement must be installed after the removal claim callback is entered"
+        );
+        assert!(
+            !report.removed,
+            "same-path replacement must not be deleted: {report:?}"
+        );
+        let joined = report.errors.join(" | ");
+        assert!(
+            joined.contains("could not be revalidated") && joined.contains("identity changed"),
+            "the execution-boundary refusal must name the ownership identity failure: {joined}"
+        );
+        assert!(
+            worktree.exists(),
+            "the replacement worktree must remain on disk after refusal"
+        );
+        assert!(
+            captured.exists(),
+            "the original worktree must remain on disk after refusal"
+        );
+        let worktree_list = Command::new("git")
+            .args(["-C", repo.to_str().unwrap(), "worktree", "list"])
+            .output()
+            .unwrap();
+        let worktree_list = String::from_utf8_lossy(&worktree_list.stdout);
+        assert!(
+            worktree_list.contains("feature/execute-replacement"),
+            "the replacement Git worktree must remain registered: {worktree_list}"
+        );
+
+        let listed = registry::list_registered_worktrees().expect("read registry");
+        assert_eq!(
+            listed.len(),
+            1,
+            "the original registry row must remain after the refused removal: {listed:?}"
+        );
+        assert_eq!(
+            listed[0].path, registered_path,
+            "the registry must not be rewritten to authorize the replacement"
+        );
+
+        let _ = Command::new("git")
+            .args([
+                "-C",
+                repo.to_str().unwrap(),
+                "worktree",
+                "remove",
+                "--force",
+                worktree.to_str().unwrap(),
+            ])
+            .status();
+        let _ = Command::new("git")
+            .args([
+                "-C",
+                repo.to_str().unwrap(),
+                "worktree",
+                "remove",
+                "--force",
+                captured.to_str().unwrap(),
+            ])
+            .status();
         let _ = std::fs::remove_dir_all(&root);
     }
 

@@ -322,7 +322,7 @@ pub(super) async fn run_agent_subprocess(
     cmd: Command,
     timeout: Duration,
 ) -> Result<DispatchResult, String> {
-    run_agent_subprocess_with_liveness(cmd, timeout, false)
+    run_agent_subprocess_with_liveness(cmd, timeout, false, None)
         .await
         .result
 }
@@ -331,9 +331,18 @@ pub(super) async fn run_agent_subprocess_with_liveness(
     mut cmd: Command,
     timeout: Duration,
     require_postflight_containment: bool,
+    cwd_authority: Option<memcore::anchored_fs::AnchoredDirectory>,
 ) -> DispatchRunOutcome {
     let escape_contained =
         require_postflight_containment && configure_required_postflight_containment(&mut cmd);
+    if let Some(authority) = cwd_authority.as_ref() {
+        if let Err(error) = authority.anchor_command_cwd(cmd.as_std_mut()) {
+            return DispatchRunOutcome::failure(
+                format!("restore managed child cwd after containment wrapping: {error}"),
+                crate::exec_env_postflight::RunnerLivenessEvidence::NoWorkerSpawned,
+            );
+        }
+    }
     run_agent_subprocess_inner(
         &mut cmd,
         timeout,
@@ -350,6 +359,7 @@ pub(super) async fn run_managed_custom_subprocess_outcome(
     mut cancellations: mpsc::Receiver<crate::managed_run_control::ManagedCancelCommand>,
     run_dir: &std::path::Path,
     require_postflight_containment: bool,
+    cwd_authority: Option<memcore::anchored_fs::AnchoredDirectory>,
 ) -> ManagedSubprocessOutcome {
     #[cfg(not(unix))]
     {
@@ -357,8 +367,13 @@ pub(super) async fn run_managed_custom_subprocess_outcome(
         let _ = run_dir;
         // A platform without process-group control still runs an ordinary
         // custom LaunchSpec. Only the cancellation control plane is absent.
-        let outcome =
-            run_agent_subprocess_with_liveness(cmd, timeout, require_postflight_containment).await;
+        let outcome = run_agent_subprocess_with_liveness(
+            cmd,
+            timeout,
+            require_postflight_containment,
+            cwd_authority,
+        )
+        .await;
         return ManagedSubprocessOutcome {
             result: outcome.result,
             liveness: outcome.liveness,
@@ -370,6 +385,13 @@ pub(super) async fn run_managed_custom_subprocess_outcome(
     {
         let escape_contained =
             require_postflight_containment && configure_required_postflight_containment(&mut cmd);
+        if let Some(authority) = cwd_authority.as_ref() {
+            if let Err(error) = authority.anchor_command_cwd(cmd.as_std_mut()) {
+                return ManagedSubprocessOutcome::plain(Err(format!(
+                    "restore managed child cwd after containment wrapping: {error}"
+                )));
+            }
+        }
         #[cfg(test)]
         pause_managed_pre_spawn();
         if let Ok(command) = cancellations.try_recv() {
@@ -805,7 +827,8 @@ pub(crate) async fn run_managed_custom_subprocess(
     run_dir: &std::path::Path,
 ) -> Result<DispatchResult, String> {
     let outcome =
-        run_managed_custom_subprocess_outcome(cmd, timeout, cancellations, run_dir, false).await;
+        run_managed_custom_subprocess_outcome(cmd, timeout, cancellations, run_dir, false, None)
+            .await;
     if let Some(command) = outcome.cancellation {
         #[cfg(unix)]
         let completion = crate::managed_run_control::finalize_dequeued_managed_cancellation(
@@ -1541,6 +1564,7 @@ pub(super) async fn run_opencode_sop_subprocess_with_liveness(
     timeout: Duration,
     sop_label: &str,
     require_postflight_containment: bool,
+    cwd_authority: Option<memcore::anchored_fs::AnchoredDirectory>,
 ) -> DispatchRunOutcome {
     let _permit = opencode_sop_semaphore().acquire().await;
     let _permit = match _permit {
@@ -1554,6 +1578,14 @@ pub(super) async fn run_opencode_sop_subprocess_with_liveness(
     };
     let escape_contained =
         require_postflight_containment && configure_required_postflight_containment(&mut cmd);
+    if let Some(authority) = cwd_authority.as_ref() {
+        if let Err(error) = authority.anchor_command_cwd(cmd.as_std_mut()) {
+            return DispatchRunOutcome::failure(
+                format!("restore managed child cwd after containment wrapping: {error}"),
+                crate::exec_env_postflight::RunnerLivenessEvidence::NoWorkerSpawned,
+            );
+        }
+    }
     run_agent_subprocess_inner(
         &mut cmd,
         timeout,
@@ -1930,7 +1962,8 @@ async fn required_postflight_kernel_containment_discriminates_setsid_escape() {
         .arg("required_postflight_containment_child_cannot_setsid")
         .arg("--nocapture")
         .env("TACHI_TEST_ATTEMPT_SETSID", "1");
-    let outcome = run_agent_subprocess_with_liveness(command, Duration::from_secs(10), true).await;
+    let outcome =
+        run_agent_subprocess_with_liveness(command, Duration::from_secs(10), true, None).await;
     let result = outcome.result.expect("contained child test must pass");
     assert_eq!(result.exit_code, Some(0));
     assert!(matches!(

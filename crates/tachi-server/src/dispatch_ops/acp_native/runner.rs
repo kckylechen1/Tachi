@@ -71,14 +71,7 @@ async fn run_native_acp_dispatch_inner(
 ) -> DispatchRunOutcome {
     let mut cmd = Command::new(&spec.command);
     cmd.args(&spec.args);
-    if let Some(authority) = spec.cwd_authority.as_ref() {
-        if let Err(error) = authority.anchor_command_cwd(cmd.as_std_mut()) {
-            return DispatchRunOutcome::failure(
-                format!("pin native ACP child cwd: {error}"),
-                crate::exec_env_postflight::RunnerLivenessEvidence::NoWorkerSpawned,
-            );
-        }
-    } else {
+    if spec.cwd_authority.is_none() {
         cmd.current_dir(&spec.cwd);
     }
     for name in &spec.env_remove {
@@ -89,6 +82,14 @@ async fn run_native_acp_dispatch_inner(
     }
     let escape_contained = defer_artifacts
         && crate::dispatch_ops::subprocess::configure_required_postflight_containment(&mut cmd);
+    if let Some(authority) = spec.cwd_authority.as_ref() {
+        if let Err(error) = authority.anchor_command_cwd(cmd.as_std_mut()) {
+            return DispatchRunOutcome::failure(
+                format!("pin native ACP child cwd after containment wrapping: {error}"),
+                crate::exec_env_postflight::RunnerLivenessEvidence::NoWorkerSpawned,
+            );
+        }
+    }
     cmd.stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());

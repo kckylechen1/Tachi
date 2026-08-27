@@ -479,4 +479,31 @@ mod tests {
         assert!(captured.join("child-was-here").exists());
         assert!(!managed.join("child-was-here").exists());
     }
+
+    #[test]
+    fn reanchoring_a_copied_command_preserves_the_anchored_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let managed = root.path().join("managed");
+        let captured = root.path().join("captured");
+        std::fs::create_dir(&managed).unwrap();
+        let authority = AnchoredDirectory::open_absolute(&managed.canonicalize().unwrap()).unwrap();
+
+        let mut original = std::process::Command::new("/bin/true");
+        authority.anchor_command_cwd(&mut original).unwrap();
+        let copied_cwd = original.get_current_dir().unwrap().to_path_buf();
+
+        std::fs::rename(&managed, &captured).unwrap();
+        std::fs::create_dir(&managed).unwrap();
+
+        // Mirrors a containment wrapper which rebuilds Command and copies only
+        // the cwd. Reapplying the authority after wrapping restores the hook.
+        let mut wrapped = std::process::Command::new("/bin/sh");
+        wrapped
+            .args(["-c", "touch copied-wrapper-was-here"])
+            .current_dir(copied_cwd);
+        authority.anchor_command_cwd(&mut wrapped).unwrap();
+        assert!(wrapped.status().unwrap().success());
+        assert!(captured.join("copied-wrapper-was-here").exists());
+        assert!(!managed.join("copied-wrapper-was-here").exists());
+    }
 }

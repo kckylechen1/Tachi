@@ -220,6 +220,7 @@ pub(super) struct BackgroundDispatchContext {
     pub(super) opencode_sop_label: Option<String>,
     pub(super) execution_backend_metadata: Option<Value>,
     pub(super) execution: DispatchExecution,
+    pub(super) cwd_authority: Option<memcore::anchored_fs::AnchoredDirectory>,
     pub(super) flow_dispatch_slot: Option<PathBuf>,
     pub(super) mcp_config_path: Option<PathBuf>,
     pub(super) managed_run_guard: Option<crate::managed_run_control::ManagedRunGuard>,
@@ -419,6 +420,7 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
     let opencode_sop_label_for_spawn = ctx.opencode_sop_label;
     let execution_backend_metadata_for_spawn = ctx.execution_backend_metadata;
     let execution_for_spawn = ctx.execution;
+    let cwd_authority_for_spawn = ctx.cwd_authority;
     let flow_dispatch_slot_for_spawn = ctx.flow_dispatch_slot;
     let mcp_config_path = ctx.mcp_config_path;
     let managed_run_guard = ctx.managed_run_guard;
@@ -470,6 +472,7 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                             .as_deref()
                             .unwrap_or("opencode_sop"),
                         require_postflight_containment,
+                        cwd_authority_for_spawn.clone(),
                     )
                     .await,
                     None,
@@ -480,6 +483,7 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                         cmd,
                         timeout,
                         require_postflight_containment,
+                        cwd_authority_for_spawn.clone(),
                     )
                     .await,
                     None,
@@ -494,6 +498,7 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                             receiver,
                             &managed_run_dir,
                             require_postflight_containment,
+                            cwd_authority_for_spawn.clone(),
                         )
                         .await
                     })

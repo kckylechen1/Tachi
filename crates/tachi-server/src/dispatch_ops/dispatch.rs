@@ -442,6 +442,19 @@ fn required_postflight_workspace(
     }
 }
 
+/// Carrier protocols must resolve their cwd from the descriptor-bound process
+/// cwd, not reopen the mutable lease pathname after dispatch admission.
+fn carrier_execution_grant(
+    grant: &tachi_params::ExecutionGrant,
+    descriptor_bound: bool,
+) -> tachi_params::ExecutionGrant {
+    let mut carrier_grant = grant.clone();
+    if descriptor_bound {
+        carrier_grant.allowed_cwd = Some(PathBuf::from("."));
+    }
+    carrier_grant
+}
+
 /// Mints the adapter-only custom subprocess contract after the server has
 /// admitted the resolved assignment and execution grant. Bootstrap mechanics
 /// may reach this owner, but the backend receives only the resulting spec.
@@ -998,11 +1011,13 @@ async fn launch_canonical_dispatch(
         let prompt = plan_stage_outcome.prompt;
         let plan_duration_ms = plan_stage_outcome.plan_duration_ms;
         let plan_generated_at = plan_stage_outcome.plan_generated_at;
+        let carrier_execution_grant =
+            carrier_execution_grant(&execution_grant, managed_worktree_authority.is_some());
         let custom_launch_spec = (resolved_assignment.selected_backend == "custom")
             .then(|| {
                 mint_custom_launch_spec(
                     &resolved_assignment,
-                    &execution_grant,
+                    &carrier_execution_grant,
                     &command,
                     &prompt,
                     &harness_transport,
@@ -1029,7 +1044,7 @@ async fn launch_canonical_dispatch(
             dispatch_id: &dispatch_id,
             request: &request,
             assignment: &resolved_assignment,
-            grant: &execution_grant,
+            grant: &carrier_execution_grant,
             command: &command,
             prompt: &prompt,
             custom_launch_spec: custom_launch_spec.as_ref(),
@@ -1358,6 +1373,7 @@ async fn launch_canonical_dispatch(
         opencode_sop_label: opencode_sop_label(&resolved_assignment.selected_worker, &request),
         execution_backend_metadata: execution_backend_metadata.clone(),
         execution,
+        cwd_authority: managed_worktree_authority.clone(),
         flow_dispatch_slot,
         mcp_config_path,
         managed_run_guard,

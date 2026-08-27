@@ -1544,3 +1544,36 @@ fn required_postflight_finalizes_lease_before_carrier_artifact_publication() {
     assert!(finalization < acpx_publication);
     assert!(finalization < native_publication);
 }
+
+#[test]
+fn descriptor_bound_carriers_receive_dot_instead_of_the_mutable_lease_path() {
+    let grant = tachi_params::ExecutionGrant {
+        grant_id: "carrier-cwd-test".to_string(),
+        env_id: Some("env-test".to_string()),
+        unmanaged_cwd_allowed: false,
+        allowed_cwd: Some(std::path::PathBuf::from("/managed/lease/path")),
+        credential_profiles: Vec::new(),
+        mcp_access: None,
+        allowed_tools: Vec::new(),
+        permission_profile: None,
+        sandbox: None,
+        max_turns: None,
+        timeout_secs: 300,
+    };
+
+    let anchored = carrier_execution_grant(&grant, true);
+    assert_eq!(
+        anchored.allowed_cwd.as_deref(),
+        Some(std::path::Path::new(".")),
+        "Codex -C, ACPX --cwd, native ACP session cwd, and custom launch cwd must all resolve from the descriptor-bound process cwd"
+    );
+    assert_eq!(
+        carrier_execution_grant(&grant, false).allowed_cwd,
+        grant.allowed_cwd,
+        "unmanaged/default carriers retain their ordinary cwd contract"
+    );
+
+    let source = include_str!("../dispatch.rs");
+    assert!(source.contains("grant: &carrier_execution_grant,"));
+    assert!(source.contains("&carrier_execution_grant,\n                    &command,"));
+}
