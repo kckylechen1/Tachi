@@ -119,9 +119,11 @@ fn classify_claim(
     match reduced.status {
         ReductionStatusV1::Conflicted => (true, Some(HandoffStaleReasonV1::NowConflicted), None),
         ReductionStatusV1::Current => {
-            // The newest current head decides freshness: a head identical to
-            // the bound one keeps the claim current; a strictly newer one
-            // makes it stale with a replacement head.
+            // The newest current head decides freshness by its RECONCILED
+            // position `(instant, revision)` — the assertion id is excluded:
+            // two agreeing heads at the same instant+revision are the same
+            // evidence position, and a claim bound to either is current
+            // (the id must not manufacture a phantom supersession).
             let newest = reduced
                 .current_heads
                 .iter()
@@ -130,7 +132,7 @@ fn classify_claim(
                 None => (true, Some(HandoffStaleReasonV1::NoCurrentHead), None),
                 Some(head) => {
                     let key = super::types::head_order_key(head);
-                    if key == bound_key {
+                    if (key.0, key.1.clone()) == (bound_key.0, bound_key.1.clone()) {
                         (false, None, None)
                     } else {
                         (
@@ -243,10 +245,15 @@ fn classify_lifecycle_claim(
     if family_conflicted {
         return (true, Some(HandoffStaleReasonV1::NowConflicted), None);
     }
-    match (newest, newest_head) {
-        (None, _) => (true, Some(HandoffStaleReasonV1::NoCurrentHead), None),
-        (Some(key), head) => {
-            if key == bound_key || !any_current {
+    match (newest, newest_head, newest_tie) {
+        (None, _, _) => (true, Some(HandoffStaleReasonV1::NoCurrentHead), None),
+        // Freshness is decided on the RECONCILED family key
+        // `(instant, revision)` — the assertion id is excluded, exactly as
+        // in `resolve_family` and `classify_claim`: agreeing sibling heads
+        // at the bound position are the same evidence, and a lexically
+        // larger sibling id must not manufacture a phantom supersession.
+        (Some(_), head, Some(tie)) => {
+            if tie == (bound_key.0, bound_key.1.clone()) || !any_current {
                 (false, None, None)
             } else {
                 (
@@ -255,6 +262,15 @@ fn classify_lifecycle_claim(
                     head,
                 )
             }
+        }
+        (Some(_), head, None) => {
+            // Unreachable (any head sets `newest_tie`), but stay honest
+            // rather than guessing: treat as superseded by the newest head.
+            (
+                true,
+                Some(HandoffStaleReasonV1::SupersededByNewerHead),
+                head,
+            )
         }
     }
 }

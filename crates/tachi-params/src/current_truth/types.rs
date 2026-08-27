@@ -133,10 +133,17 @@ impl PredicateV1 {
             | PredicateV1::PrOpen
             | PredicateV1::PrClosedUnmerged
             | PredicateV1::OwnerAcceptancePresent => matches!(value, AssertionValueV1::Unit),
-            PredicateV1::ImplementationPrLinked => matches!(
-                value,
-                AssertionValueV1::ObjectRefs(_) | AssertionValueV1::ObjectRef(_)
-            ),
+            PredicateV1::ImplementationPrLinked => {
+                // The typed relation names PULL REQUESTS only — an issue or
+                // commit target is a malformed relation, not a link.
+                match value {
+                    AssertionValueV1::ObjectRefs(objects) => objects
+                        .iter()
+                        .all(|object| matches!(object, GithubObjectRefV1::PullRequest(_))),
+                    AssertionValueV1::ObjectRef(GithubObjectRefV1::PullRequest(_)) => true,
+                    _ => false,
+                }
+            }
             PredicateV1::PrMerged | PredicateV1::ImplementationPresent => matches!(
                 value,
                 AssertionValueV1::CommitSha(_) | AssertionValueV1::Unit

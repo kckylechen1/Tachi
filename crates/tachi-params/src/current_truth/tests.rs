@@ -1924,12 +1924,14 @@ fn inadmissible_same_id_row_never_conflicts_admitted_group() {
 /// keeps the lifecycle view `Conflicted` — nothing is selected from it.
 #[test]
 fn conflicted_member_at_max_key_keeps_family_conflicted() {
-    // Two lineages disagree about issue_open at the same revision.
-    let open_a = AssertionV1 {
-        assertion_id: "r4-open-a".to_string(),
-        subject: issue(100),
-        predicate: PredicateV1::IssueOpen,
-        value: AssertionValueV1::Unit,
+    // Two lineages disagree about pr_merged at the same revision — both
+    // values are ADMISSIBLE shapes (different merge SHAs), so this
+    // conflict state is reachable through the store, not just in-memory.
+    let merged_a = AssertionV1 {
+        assertion_id: "r4-merged-a".to_string(),
+        subject: pr(200),
+        predicate: PredicateV1::PrMerged,
+        value: AssertionValueV1::CommitSha("merge111".to_string()),
         issuer: "adapter-a".to_string(),
         authority_class: AuthorityClassV1::GitHubTypedObject,
         source_ref: SourceRefV1 {
@@ -1943,24 +1945,27 @@ fn conflicted_member_at_max_key_keeps_family_conflicted() {
         review_state: ReviewStateV1::Observed,
         visibility: VisibilityClassV1::Public,
     };
-    // Same predicate, same lineage-visible ordering, DIFFERENT issuer
-    // asserting a contradictory value shape (CommitSha vs Unit on the same
-    // predicate) — values disagree across lineages at the same revision.
-    let mut open_b = open_a.clone();
-    open_b.assertion_id = "r4-open-b".to_string();
-    open_b.issuer = "adapter-b".to_string();
-    open_b.source_ref.source = "adapter-b".to_string();
-    open_b.value = AssertionValueV1::CommitSha("not-a-state-value".to_string());
+    // Same predicate, same instant+revision, DIFFERENT issuer asserting a
+    // different merge SHA — values disagree across lineages.
+    let mut merged_b = merged_a.clone();
+    merged_b.assertion_id = "r4-merged-b".to_string();
+    merged_b.issuer = "adapter-b".to_string();
+    merged_b.source_ref.source = "adapter-b".to_string();
+    merged_b.value = AssertionValueV1::CommitSha("merge222".to_string());
 
-    let reduction = reduce(&[open_a, open_b]);
+    // The conflicted state is store-reachable, not only hand-built.
+    let store = open_store();
+    store.append(&merged_a).expect("append a");
+    store.append(&merged_b).expect("append b");
+    let reduction = reduce(&store.assertions().unwrap());
     assert_eq!(
-        reduction.get(&issue(100), PredicateV1::IssueOpen).status,
+        reduction.get(&pr(200), PredicateV1::PrMerged).status,
         ReductionStatusV1::Conflicted,
         "fixture setup: the predicate itself must be conflicted"
     );
     assert_eq!(
-        reduction.issue_lifecycle(&issue(100)),
-        IssueLifecycleView::Conflicted,
+        reduction.pr_lifecycle(&pr(200)),
+        PrLifecycleView::Conflicted,
         "a conflicted member owning the max key keeps the family conflicted"
     );
 }
@@ -2678,4 +2683,191 @@ fn fresh_posture_last_fresh_at_must_parse() {
         Err(CurrentTruthStoreError::MalformedObservedAt(_)) => {}
         other => panic!("expected MalformedObservedAt, got {other:?}"),
     }
+}
+
+// ── Codex R2 round 7 accepted findings ─────────────────────────────────────
+
+/// R7-a: the typed `implementation_pr_linked` relation names PULL REQUESTS
+/// only — an issue or commit target, or a mixed set, is a malformed
+/// relation and is rejected at append and decode.
+#[test]
+fn link_target_must_be_a_pull_request() {
+    let base = AssertionV1 {
+        assertion_id: "r11-link".to_string(),
+        subject: issue(100),
+        predicate: PredicateV1::ImplementationPrLinked,
+        value: AssertionValueV1::ObjectRefs(vec![GithubObjectRefV1::PullRequest(200)]),
+        issuer: "github-refresh-v1".to_string(),
+        authority_class: AuthorityClassV1::GitHubTypedObject,
+        source_ref: SourceRefV1 {
+            source: "github-snapshot-adapter".to_string(),
+            revision: "r11".to_string(),
+        },
+        observed_at: "2026-08-26T10:00:00Z".to_string(),
+        effective_at: "2026-08-26T10:00:00Z".to_string(),
+        supersedes_assertion_id: None,
+        evidence_refs: vec![],
+        review_state: ReviewStateV1::Observed,
+        visibility: VisibilityClassV1::Public,
+    };
+    let store = open_store();
+    store
+        .append(&base)
+        .expect("a pull-request link set is admissible");
+
+    let mut issue_target = base.clone();
+    issue_target.assertion_id = "r11-link-issue".to_string();
+    issue_target.source_ref.revision = "r11-b".to_string();
+    issue_target.value = AssertionValueV1::ObjectRef(GithubObjectRefV1::Issue(7));
+    match store.append(&issue_target) {
+        Err(CurrentTruthStoreError::PredicateValueNotAdmissible(_)) => {}
+        other => panic!("issue link target must be rejected, got {other:?}"),
+    }
+
+    let mut mixed = base.clone();
+    mixed.assertion_id = "r11-link-mixed".to_string();
+    mixed.source_ref.revision = "r11-c".to_string();
+    mixed.value = AssertionValueV1::ObjectRefs(vec![
+        GithubObjectRefV1::PullRequest(200),
+        GithubObjectRefV1::Commit("abc123".to_string()),
+    ]);
+    match store.append(&mixed) {
+        Err(CurrentTruthStoreError::PredicateValueNotAdmissible(_)) => {}
+        other => panic!("mixed link targets must be rejected, got {other:?}"),
+    }
+
+    // Decode side: an out-of-band row with an issue target is corrupt.
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        r#"
+        CREATE TABLE current_truth_assertions (
+            assertion_id TEXT PRIMARY KEY, subject_repo TEXT NOT NULL,
+            subject_kind TEXT NOT NULL, subject_id TEXT NOT NULL,
+            predicate TEXT NOT NULL, value_json TEXT NOT NULL,
+            issuer TEXT NOT NULL, authority TEXT NOT NULL,
+            source_id TEXT NOT NULL, source_revision TEXT NOT NULL,
+            observed_at TEXT NOT NULL, effective_at TEXT NOT NULL,
+            supersedes TEXT, evidence_json TEXT NOT NULL DEFAULT '[]',
+            review_state TEXT NOT NULL, visibility TEXT NOT NULL,
+            value_digest TEXT NOT NULL, recorded_at TEXT NOT NULL DEFAULT '',
+            UNIQUE (subject_repo, subject_kind, subject_id, predicate,
+                    authority, issuer, source_id, source_revision)
+        );
+        INSERT INTO current_truth_assertions VALUES (
+            'r11-corrupt-link', 'a/b', 'issue', '1',
+            'implementation_pr_linked', '{"object_ref":{"issue":7}}', 'i',
+            'github_typed_object', 's', 'r', '2026-08-26T00:00:00Z', '',
+            NULL, '[]', 'observed', 'public', 'd', '');
+        "#,
+    )
+    .unwrap();
+    let store2 = CurrentTruthSqliteStore::with_connection(conn).expect("adopt");
+    match store2.assertions() {
+        Err(CurrentTruthStoreError::CorruptRow(message)) => {
+            assert!(
+                message.contains("not admissible"),
+                "names the malformed relation: {message}"
+            );
+        }
+        other => panic!("expected CorruptRow, got {other:?}"),
+    }
+}
+
+/// R7-c: staleness tracks the RECONCILED evidence position
+/// `(instant, revision)`, never the assertion-id tiebreak — two agreeing
+/// heads at the same instant+revision are the same evidence, so a claim
+/// bound to either sibling stays current (family AND plain predicate).
+#[test]
+fn agreeing_sibling_head_at_same_revision_does_not_stale_claim() {
+    let head_a = AssertionV1 {
+        assertion_id: "aaa-sibling".to_string(),
+        subject: issue(100),
+        predicate: PredicateV1::IssueClosed,
+        value: AssertionValueV1::Unit,
+        issuer: "adapter-a".to_string(),
+        authority_class: AuthorityClassV1::OwnerDecision,
+        source_ref: SourceRefV1 {
+            source: "adapter-a".to_string(),
+            revision: "rev-same".to_string(),
+        },
+        observed_at: "2026-08-26T12:00:00Z".to_string(),
+        effective_at: "2026-08-26T12:00:00Z".to_string(),
+        supersedes_assertion_id: None,
+        evidence_refs: vec![],
+        review_state: ReviewStateV1::Observed,
+        visibility: VisibilityClassV1::Public,
+    };
+    // Same predicate, same instant+revision, different lineage and a
+    // lexically LARGER id — agreeing value.
+    let mut head_z = head_a.clone();
+    head_z.assertion_id = "zzz-sibling".to_string();
+    head_z.issuer = "owner-tool".to_string();
+    head_z.source_ref.source = "owner-tool".to_string();
+
+    let reduction = reduce(&[head_a.clone(), head_z.clone()]);
+    assert_eq!(
+        reduction.issue_lifecycle(&issue(100)),
+        IssueLifecycleView::Closed
+    );
+    assert_eq!(
+        reduction
+            .get(&issue(100), PredicateV1::IssueClosed)
+            .current_heads
+            .len(),
+        2,
+        "both agreeing sibling heads are current evidence"
+    );
+
+    // A family claim bound to the lexically smaller sibling stays current.
+    let packet = HandoffPacketV1 {
+        handoff_id: "r12-handoff".to_string(),
+        generated_at: "2026-08-26T12:00:30Z".to_string(),
+        repo: REPO.to_string(),
+        claim_bindings: vec![super::handoff::HandoffClaimBindingV1 {
+            subject: issue(100),
+            predicate: PredicateV1::IssueClosed,
+            head: EvidenceHeadV1::of(&head_a),
+        }],
+    };
+    let report = evaluate_handoff_staleness(&packet, &reduction);
+    assert!(
+        !report.claims[0].stale,
+        "an agreeing sibling at the same (instant, revision) is the same evidence position"
+    );
+
+    // The same artifact must not fire for a plain (non-family) predicate:
+    // two agreeing link sets at the same instant+revision.
+    let mut link_a = head_a.clone();
+    link_a.assertion_id = "aaa-link".to_string();
+    link_a.predicate = PredicateV1::ImplementationPrLinked;
+    link_a.authority_class = AuthorityClassV1::GitHubTypedObject;
+    link_a.value = AssertionValueV1::ObjectRefs(vec![GithubObjectRefV1::PullRequest(200)]);
+    let mut link_z = link_a.clone();
+    link_z.assertion_id = "zzz-link".to_string();
+    link_z.issuer = "reviewer-1".to_string();
+    link_z.authority_class = AuthorityClassV1::ReviewedDisposition;
+    link_z.source_ref.source = "reviewed-mapping".to_string();
+
+    let reduction = reduce(&[link_a.clone(), link_z]);
+    assert_eq!(
+        reduction
+            .get(&issue(100), PredicateV1::ImplementationPrLinked)
+            .status,
+        ReductionStatusV1::Current
+    );
+    let packet = HandoffPacketV1 {
+        handoff_id: "r12-handoff-link".to_string(),
+        generated_at: "2026-08-26T12:00:30Z".to_string(),
+        repo: REPO.to_string(),
+        claim_bindings: vec![super::handoff::HandoffClaimBindingV1 {
+            subject: issue(100),
+            predicate: PredicateV1::ImplementationPrLinked,
+            head: EvidenceHeadV1::of(&link_a),
+        }],
+    };
+    let report = evaluate_handoff_staleness(&packet, &reduction);
+    assert!(
+        !report.claims[0].stale,
+        "plain-predicate claims use the same reconciled (instant, revision) rule"
+    );
 }
