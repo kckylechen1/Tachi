@@ -3096,3 +3096,123 @@ fn assertion_status_exposes_the_full_four_status_law() {
         ReductionStatusV1::Unknown
     );
 }
+
+// ── Codex R2 round 10 accepted findings ────────────────────────────────────
+
+/// R10-1: duplicate snapshot rows for one PR must not mint a duplicated
+/// (non-canonical) relation set — the mint dedups by PR number, so a
+/// repeated PR row still yields an admissible canonical set and the whole
+/// refresh batch lands.
+#[test]
+fn duplicate_pr_rows_mint_deduped_canonical_set() {
+    let mut state = state_v1();
+    state.pull_requests.push(snapshot_pr(
+        200,
+        SnapshotPrStateV1::Open,
+        "2026-08-26T10:00:00Z",
+        "rev1-pr-duplicate-row",
+        vec![100],
+    ));
+    let minted = mint_assertions(&state);
+    let link = minted
+        .iter()
+        .find(|a| a.predicate == PredicateV1::ImplementationPrLinked)
+        .unwrap();
+    assert_eq!(
+        link.value,
+        AssertionValueV1::ObjectRefs(vec![GithubObjectRefV1::PullRequest(200)]),
+        "duplicate PR rows dedup to one canonical member"
+    );
+    let store = open_store();
+    store
+        .append_all(&minted)
+        .expect("the whole refresh batch lands despite the duplicate row");
+}
+
+/// R10-2: an empty revert SHA is the documented gap form, not a batch
+/// failure — the revert FACT still holds and reconciles.
+#[test]
+fn empty_revert_sha_is_gap_form_not_batch_failure() {
+    let mut state = state_v2();
+    state.observations.push(SnapshotObservationV1 {
+        kind: SnapshotObservationKindV1::MergeReverted {
+            number: 200,
+            revert_commit_sha: String::new(),
+            original_merge_sha: "mergeabc123".to_string(),
+        },
+        observed_at: "2026-08-26T11:30:00Z".to_string(),
+        revision: "rev2-revert-gap".to_string(),
+        visibility: VisibilityClassV1::Public,
+    });
+    let minted = mint_assertions(&state);
+    let revert = minted
+        .iter()
+        .find(|a| a.predicate == PredicateV1::MergeReverted)
+        .expect("the revert observation still mints");
+    assert_eq!(revert.value, AssertionValueV1::Unit, "empty SHA = gap form");
+    let store = open_store();
+    store
+        .append_all(&minted)
+        .expect("the whole refresh batch lands with the gap-form revert");
+    let reduction = reduce(&store.assertions().unwrap());
+    assert_eq!(
+        reduction.pr_lifecycle(&pr(200)),
+        PrLifecycleView::MergeReverted,
+        "the revert fact still reconciles without its SHA"
+    );
+}
+
+/// R10-3: per-assertion classification stays truthful inside a conflicted
+/// group — an older lineage member is `Superseded` (history), the
+/// disagreeing heads are `Conflicted` (retained evidence).
+#[test]
+fn assertion_status_supersedes_older_members_of_conflicted_groups() {
+    let base = AssertionV1 {
+        assertion_id: "r16-old-merged".to_string(),
+        subject: pr(200),
+        predicate: PredicateV1::PrMerged,
+        value: AssertionValueV1::CommitSha("merge000".to_string()),
+        issuer: "adapter-a".to_string(),
+        authority_class: AuthorityClassV1::GitHubTypedObject,
+        source_ref: SourceRefV1 {
+            source: "adapter-a".to_string(),
+            revision: "r16-m0".to_string(),
+        },
+        observed_at: "2026-08-26T09:00:00Z".to_string(),
+        effective_at: "2026-08-26T09:00:00Z".to_string(),
+        supersedes_assertion_id: None,
+        evidence_refs: vec![],
+        review_state: ReviewStateV1::Observed,
+        visibility: VisibilityClassV1::Public,
+    };
+    let mut newer_same_lineage = base.clone();
+    newer_same_lineage.assertion_id = "r16-new-merged".to_string();
+    newer_same_lineage.source_ref.revision = "r16-m1".to_string();
+    newer_same_lineage.observed_at = "2026-08-26T10:00:00Z".to_string();
+    newer_same_lineage.effective_at = newer_same_lineage.observed_at.clone();
+    newer_same_lineage.value = AssertionValueV1::CommitSha("merge111".to_string());
+    let mut rival = newer_same_lineage.clone();
+    rival.assertion_id = "r16-rival-merged".to_string();
+    rival.issuer = "adapter-b".to_string();
+    rival.source_ref.source = "adapter-b".to_string();
+    rival.source_ref.revision = "r16-m1b".to_string();
+    rival.value = AssertionValueV1::CommitSha("merge222".to_string());
+
+    let reduction = reduce(&[base.clone(), newer_same_lineage.clone(), rival.clone()]);
+    let group = reduction.get(&pr(200), PredicateV1::PrMerged);
+    assert_eq!(group.status, ReductionStatusV1::Conflicted);
+    assert_eq!(
+        reduction.assertion_status(&base),
+        ReductionStatusV1::Superseded,
+        "the older lineage member is history even in a conflicted group"
+    );
+    assert_eq!(
+        reduction.assertion_status(&newer_same_lineage),
+        ReductionStatusV1::Conflicted,
+        "the disagreeing lineage heads are retained conflict evidence"
+    );
+    assert_eq!(
+        reduction.assertion_status(&rival),
+        ReductionStatusV1::Conflicted
+    );
+}

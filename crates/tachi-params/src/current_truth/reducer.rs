@@ -131,15 +131,13 @@ impl ReductionV1 {
     /// `current | superseded | conflicted | unknown`):
     ///
     /// * `Current` — the assertion is a current head of its group;
-    /// * `Superseded` — the assertion is a retained superseded head of a
-    ///   `Current` group (an older lineage member the newest head
-    ///   replaced — history, cited via `superseded_heads`);
-    /// * `Conflicted` — the assertion is retained evidence of a
-    ///   `Conflicted` group;
+    /// * `Superseded` — the assertion is a retained superseded head (an
+    ///   older lineage member the newest head replaced — history, cited
+    ///   via `superseded_heads`, retained for conflicted groups too);
+    /// * `Conflicted` — the assertion is retained conflict evidence (a
+    ///   lineage head of a `Conflicted` group);
     /// * `Unknown` — the group has no admitted reduction, or the assertion
-    ///   is not classified by the output (filtered at admission, or a
-    ///   non-head member of a conflicted group whose retained evidence is
-    ///   the lineage heads only).
+    ///   is not classified by the output (e.g. filtered at admission).
     pub fn assertion_status(&self, assertion: &AssertionV1) -> ReductionStatusV1 {
         let Some(reduced) = self
             .predicates
@@ -159,6 +157,7 @@ impl ReductionV1 {
             (ReductionStatusV1::Current, true, _) => ReductionStatusV1::Current,
             (ReductionStatusV1::Current, _, true) => ReductionStatusV1::Superseded,
             (ReductionStatusV1::Conflicted, true, _) => ReductionStatusV1::Conflicted,
+            (ReductionStatusV1::Conflicted, _, true) => ReductionStatusV1::Superseded,
             _ => ReductionStatusV1::Unknown,
         }
     }
@@ -268,14 +267,17 @@ pub fn reduce(assertions: &[AssertionV1]) -> ReductionV1 {
         sort_heads(&mut superseded_heads);
         let reduced = if conflicted {
             // Conflicted keeps every lineage head as evidence — nothing is
-            // selected, nothing is dropped, nothing is guessed.
+            // selected, nothing is guessed — and retains the superseded
+            // heads as well, so per-assertion classification
+            // (`assertion_status`) stays truthful: an older lineage member
+            // is Superseded even when its group is conflicted.
             ReducedPredicateV1 {
                 subject,
                 predicate,
                 status: ReductionStatusV1::Conflicted,
                 values: Vec::new(),
                 current_heads,
-                superseded_heads: Vec::new(),
+                superseded_heads,
             }
         } else {
             ReducedPredicateV1 {

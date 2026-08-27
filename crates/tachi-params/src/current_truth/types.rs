@@ -75,7 +75,8 @@ pub enum PredicateV1 {
     PrMerged,
     /// The PR closed without merging.
     PrClosedUnmerged,
-    /// The merge was reverted; value carries the revert commit SHA.
+    /// The merge was reverted; value carries the revert commit SHA (`Unit`
+    /// = gap form: the revert fact holds, its SHA was not evidenced).
     MergeReverted,
     /// The issue was reopened after a close (typed observation).
     IssueReopened,
@@ -157,9 +158,13 @@ impl PredicateV1 {
                 AssertionValueV1::Unit => true,
                 _ => false,
             },
-            PredicateV1::MergeReverted => {
-                matches!(value, AssertionValueV1::CommitSha(sha) if non_empty_sha(sha))
-            }
+            PredicateV1::MergeReverted => match value {
+                AssertionValueV1::CommitSha(sha) => non_empty_sha(sha),
+                // The documented evidence-gap form: the revert fact holds,
+                // the revert SHA was not evidenced.
+                AssertionValueV1::Unit => true,
+                _ => false,
+            },
             PredicateV1::HandoffCurrent | PredicateV1::HandoffStale => {
                 matches!(value, AssertionValueV1::HandoffId(_))
             }
@@ -180,7 +185,8 @@ impl std::fmt::Display for PredicateV1 {
 #[serde(rename_all = "snake_case")]
 pub enum AssertionValueV1 {
     /// The predicate carries no payload beyond its subject — including the
-    /// evidence-gap form of `pr_merged` (merged, merge SHA not evidenced).
+    /// evidence-gap forms of `pr_merged` (merged, merge SHA not evidenced)
+    /// and `merge_reverted` (reverted, revert SHA not evidenced).
     Unit,
     /// A typed object reference (legacy single-link form; the minting path
     /// emits [`AssertionValueV1::ObjectRefs`]).

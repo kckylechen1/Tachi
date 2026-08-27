@@ -205,6 +205,10 @@ pub fn mint_assertions(state: &GithubRepositoryStateV1) -> Vec<AssertionV1> {
             .filter(|pr| pr.linked_issues.contains(&issue.number))
             .collect();
         linked_prs_snapshot.sort_by_key(|pr| pr.number);
+        // Snapshot rows are not contractually unique: duplicate rows for one
+        // PR must not mint a duplicated (non-canonical) relation set that
+        // the store's admission gate would reject — dedup by PR number.
+        linked_prs_snapshot.dedup_by_key(|pr| pr.number);
         let linked: Vec<GithubObjectRefV1> = linked_prs_snapshot
             .iter()
             .map(|pr| GithubObjectRefV1::PullRequest(pr.number))
@@ -316,16 +320,27 @@ pub fn mint_assertions(state: &GithubRepositoryStateV1) -> Vec<AssertionV1> {
                 original_merge_sha,
             } => {
                 let subject = state.pr_subject(*number);
+                // Gap-normalized exactly like a merge SHA: an empty revert
+                // SHA is no evidence, but the revert FACT still holds — the
+                // Unit gap form keeps the observation admissible instead of
+                // rolling back the whole refresh batch.
+                let value = if revert_commit_sha.is_empty() {
+                    AssertionValueV1::Unit
+                } else {
+                    AssertionValueV1::CommitSha(revert_commit_sha.clone())
+                };
                 let mut assertion = base_assertion(
                     &subject,
                     PredicateV1::MergeReverted,
-                    AssertionValueV1::CommitSha(revert_commit_sha.clone()),
+                    value,
                     &source.clone(),
                     &observation.revision,
                     &observation.observed_at,
                     observation.visibility,
                 );
-                assertion.evidence_refs.push(original_merge_sha.clone());
+                if !original_merge_sha.is_empty() {
+                    assertion.evidence_refs.push(original_merge_sha.clone());
+                }
                 out.push(assertion);
             }
         }
