@@ -36,18 +36,7 @@ pub(in crate::dispatch_ops) fn persist_acpx_events_and_map(
             serde_json::to_string(&event)
                 .map_err(|err| format!("Failed to serialize acpx event: {err}"))?,
         );
-        if let Some(mapped) = map_acpx_event(dispatch_id, agent, &event) {
-            if release_artifacts {
-                let target_progress = mapped
-                    .get("tachi_target")
-                    .and_then(Value::as_str)
-                    .is_some_and(|target| target == "progress");
-                if target_progress {
-                    append_trajectory_event(&progress_path, mapped.clone());
-                } else {
-                    append_trajectory_event(trajectory_path, mapped.clone());
-                }
-            }
+        if map_acpx_event(dispatch_id, agent, &event).is_some() {
             mapped_events += 1;
         }
         if final_response.is_none() && is_final_acpx_event(&event) {
@@ -69,6 +58,24 @@ pub(in crate::dispatch_ops) fn persist_acpx_events_and_map(
         let raw_payload = format!("{}\n", raw_lines.join("\n"));
         crate::utils::write_owner_only_file_atomic(&events_file, raw_payload.as_bytes())
             .map_err(|err| format!("Failed to write {ACPX_EVENTS_FILE}: {err}"))?;
+        // The raw carrier artifact is the only fallible publication step. Do
+        // it before any mapped event becomes visible so an I/O failure cannot
+        // leave a public trajectory/progress prefix behind.
+        for line in &raw_lines {
+            let event = serde_json::from_str::<Value>(line)
+                .map_err(|err| format!("Failed to reparse staged acpx event: {err}"))?;
+            if let Some(mapped) = map_acpx_event(dispatch_id, agent, &event) {
+                let target_progress = mapped
+                    .get("tachi_target")
+                    .and_then(Value::as_str)
+                    .is_some_and(|target| target == "progress");
+                if target_progress {
+                    append_trajectory_event(&progress_path, mapped);
+                } else {
+                    append_trajectory_event(trajectory_path, mapped);
+                }
+            }
+        }
         append_trajectory_event(
             trajectory_path,
             json!({

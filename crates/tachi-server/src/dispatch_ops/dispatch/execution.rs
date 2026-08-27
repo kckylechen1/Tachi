@@ -365,6 +365,7 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
             }),
         );
 
+        let require_postflight_containment = postflight_gate_for_spawn.is_some();
         let (runner_outcome, mut managed_cancellation, managed_termination_proof) =
             match execution_for_spawn {
                 DispatchExecution::Subprocess(cmd) if agent_for_watchdog == "opencode" => (
@@ -374,13 +375,19 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                         opencode_sop_label_for_spawn
                             .as_deref()
                             .unwrap_or("opencode_sop"),
+                        require_postflight_containment,
                     )
                     .await,
                     None,
                     None,
                 ),
                 DispatchExecution::Subprocess(cmd) => (
-                    run_agent_subprocess_with_liveness(cmd, timeout).await,
+                    run_agent_subprocess_with_liveness(
+                        cmd,
+                        timeout,
+                        require_postflight_containment,
+                    )
+                    .await,
                     None,
                     None,
                 ),
@@ -392,6 +399,7 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                             timeout,
                             receiver,
                             &managed_run_dir,
+                            require_postflight_containment,
                         )
                         .await
                     })
@@ -410,6 +418,7 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                         crate::dispatch_ops::dispatch::DispatchRunOutcome {
                             result: outcome.result,
                             liveness: outcome.liveness,
+                            deferred_native_acp: None,
                         },
                         outcome.cancellation,
                         outcome.termination_proof,
@@ -423,6 +432,7 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                         &d_id,
                         &agent_for_watchdog,
                         timeout,
+                        require_postflight_containment,
                     )
                     .await,
                     None,
@@ -430,6 +440,7 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                 ),
             };
         let runner_liveness = runner_outcome.liveness;
+        let mut pending_native_acp_artifacts = runner_outcome.deferred_native_acp;
         let result = runner_outcome.result;
         let execute_duration_ms = execute_started_instant.elapsed().as_millis() as u64;
 
@@ -610,22 +621,8 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
         };
 
         if let Some(outcome) = postflight_outcome.as_mut() {
-            let lease_release = match early_exit_cleanup.postflight_dispatch_lease_mut() {
-                Some(lease) if outcome.artifacts_released() => lease.release_clean(),
-                Some(lease) if outcome.lease_fenced() => lease.release_after_fence(),
-                Some(_) => Err(
-                    "postflight lease remains exclusively admitted because its resource fence was not persisted"
-                        .to_string(),
-                ),
-                None => Err("required postflight gate lost its dispatch lease guard".to_string()),
-            };
-            if let Err(error) = lease_release {
-                outcome.verdict = crate::exec_env_postflight::GateVerdict::Error {
-                    detail: format!("postflight lease finalization failed closed: {error}"),
-                };
-                append_trajectory_event(&traj_path_for_spawn, outcome.trajectory_event());
-            }
             if outcome.artifacts_released() {
+                let mut publication_error = None;
                 if let Some(raw_output) = pending_acpx_output.take() {
                     match persist_acpx_events_and_map(
                         &workspace_dir_for_spawn,
@@ -643,18 +640,64 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                             }));
                         }
                         Err(error) => {
-                            outcome.verdict = crate::exec_env_postflight::GateVerdict::Error {
-                                detail: format!(
-                                    "postflight approved output but carrier artifact publication failed: {error}"
-                                ),
-                            };
-                            append_trajectory_event(
-                                &traj_path_for_spawn,
-                                outcome.trajectory_event(),
-                            );
+                            publication_error = Some(format!(
+                                "postflight approved output but ACPX artifact publication failed: {error}"
+                            ));
                         }
                     }
                 }
+                if publication_error.is_none() {
+                    if let Some(deferred) = pending_native_acp_artifacts.take() {
+                        if let Err(error) =
+                            crate::dispatch_ops::acp_native::publish_native_acp_artifacts(
+                                deferred,
+                                &workspace_dir_for_spawn,
+                                &traj_path_for_spawn,
+                                &d_id,
+                                &agent_for_watchdog,
+                            )
+                        {
+                            publication_error = Some(format!(
+                                "postflight approved output but native ACP artifact publication failed: {error}"
+                            ));
+                        }
+                    }
+                }
+                if let Some(error) = publication_error {
+                    outcome.verdict =
+                        crate::exec_env_postflight::GateVerdict::Error { detail: error };
+                    let quarantine_sink = crate::exec_env_postflight::DaemonQuarantineSink {
+                        server: server_clone.clone(),
+                    };
+                    if let Err(fence_error) =
+                        crate::exec_env_postflight::apply_verdict(outcome, &quarantine_sink)
+                    {
+                        outcome.verdict = crate::exec_env_postflight::GateVerdict::Error {
+                            detail: format!(
+                                "carrier artifact publication failed and resource fence persistence failed: {fence_error}"
+                            ),
+                        };
+                    }
+                    append_trajectory_event(&traj_path_for_spawn, outcome.trajectory_event());
+                }
+            }
+
+            let lease_release = match early_exit_cleanup.postflight_dispatch_lease_mut() {
+                Some(lease) if outcome.artifacts_released() => lease.release_clean(),
+                Some(lease) if outcome.lease_fenced() => lease.release_after_fence(),
+                Some(_) => Err(
+                    "postflight lease remains exclusively admitted because its resource fence was not persisted"
+                        .to_string(),
+                ),
+                None => Err("required postflight gate lost its dispatch lease guard".to_string()),
+            };
+            if let Err(error) = lease_release {
+                outcome.verdict = crate::exec_env_postflight::GateVerdict::Error {
+                    detail: format!("postflight lease finalization failed closed: {error}"),
+                };
+                append_trajectory_event(&traj_path_for_spawn, outcome.trajectory_event());
+            }
+            if outcome.artifacts_released() {
                 append_trajectory_event(
                     &traj_path_for_spawn,
                     json!({

@@ -127,6 +127,7 @@ pub(crate) struct DispatchResult {
 pub(crate) struct DispatchRunOutcome {
     pub result: Result<DispatchResult, String>,
     pub liveness: crate::exec_env_postflight::RunnerLivenessEvidence,
+    pub deferred_native_acp: Option<crate::dispatch_ops::acp_native::NativeAcpDeferredArtifacts>,
 }
 
 impl DispatchRunOutcome {
@@ -137,6 +138,7 @@ impl DispatchRunOutcome {
         Self {
             result: Ok(result),
             liveness,
+            deferred_native_acp: None,
         }
     }
 
@@ -147,6 +149,7 @@ impl DispatchRunOutcome {
         Self {
             result: Err(error.into()),
             liveness,
+            deferred_native_acp: None,
         }
     }
 }

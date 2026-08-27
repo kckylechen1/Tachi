@@ -9,7 +9,10 @@ use tokio::process::Command;
 use super::super::dispatch::{DispatchResult, DispatchRunOutcome};
 use super::super::dispatch_v2::append_trajectory_event;
 use super::session::write_native_acp_session_record;
-use super::{NativeAcpConnection, NativeAcpRunSpec, ACP_STREAM_FILE};
+use super::{
+    NativeAcpConnection, NativeAcpDeferredArtifacts, NativeAcpEventTarget, NativeAcpPromptOutcome,
+    NativeAcpRunSpec, ACP_STREAM_FILE,
+};
 
 #[cfg(test)]
 pub(in crate::dispatch_ops) async fn run_native_acp_dispatch(
@@ -27,6 +30,7 @@ pub(in crate::dispatch_ops) async fn run_native_acp_dispatch(
         dispatch_id,
         agent,
         timeout,
+        false,
     )
     .await
     .result
@@ -39,11 +43,21 @@ pub(in crate::dispatch_ops) async fn run_native_acp_dispatch_with_liveness(
     dispatch_id: &str,
     agent: &str,
     timeout: Duration,
+    defer_artifacts: bool,
 ) -> DispatchRunOutcome {
     // The inner runner owns the timeout after it has spawned the adapter, so a
     // timeout cannot drop the future before the parent retains its process
     // group identity for postflight liveness probing.
-    run_native_acp_dispatch_inner(spec, run_dir, trajectory_path, dispatch_id, agent, timeout).await
+    run_native_acp_dispatch_inner(
+        spec,
+        run_dir,
+        trajectory_path,
+        dispatch_id,
+        agent,
+        timeout,
+        defer_artifacts,
+    )
+    .await
 }
 
 async fn run_native_acp_dispatch_inner(
@@ -53,11 +67,16 @@ async fn run_native_acp_dispatch_inner(
     dispatch_id: &str,
     agent: &str,
     timeout: Duration,
+    defer_artifacts: bool,
 ) -> DispatchRunOutcome {
     let mut cmd = Command::new(&spec.command);
-    cmd.args(&spec.args)
-        .current_dir(&spec.cwd)
-        .stdin(std::process::Stdio::piped())
+    cmd.args(&spec.args).current_dir(&spec.cwd);
+    for (name, value) in &spec.env {
+        cmd.env(name, value);
+    }
+    let escape_contained = defer_artifacts
+        && crate::dispatch_ops::subprocess::configure_required_postflight_containment(&mut cmd);
+    cmd.stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
     #[cfg(unix)]
@@ -65,9 +84,6 @@ async fn run_native_acp_dispatch_inner(
     #[cfg(not(unix))]
     cmd.kill_on_drop(true);
     crate::dispatch_ops::subprocess::configure_process_group(&mut cmd);
-    for (name, value) in &spec.env {
-        cmd.env(name, value);
-    }
 
     let mut child = match cmd.spawn() {
         Ok(child) => child,
@@ -93,6 +109,7 @@ async fn run_native_acp_dispatch_inner(
             let (_, liveness) = crate::dispatch_ops::subprocess::terminate_reap_and_prove(
                 &mut child,
                 &mut process_group,
+                escape_contained,
             )
             .await;
             #[cfg(not(unix))]
@@ -112,6 +129,7 @@ async fn run_native_acp_dispatch_inner(
             let (_, liveness) = crate::dispatch_ops::subprocess::terminate_reap_and_prove(
                 &mut child,
                 &mut process_group,
+                escape_contained,
             )
             .await;
             #[cfg(not(unix))]
@@ -131,6 +149,7 @@ async fn run_native_acp_dispatch_inner(
             let (_, liveness) = crate::dispatch_ops::subprocess::terminate_reap_and_prove(
                 &mut child,
                 &mut process_group,
+                escape_contained,
             )
             .await;
             #[cfg(not(unix))]
@@ -162,6 +181,7 @@ async fn run_native_acp_dispatch_inner(
             let (_, liveness) = crate::dispatch_ops::subprocess::terminate_reap_and_prove(
                 &mut child,
                 &mut process_group,
+                escape_contained,
             )
             .await;
             #[cfg(not(unix))]
@@ -189,7 +209,6 @@ async fn run_native_acp_dispatch_inner(
         }
     };
     let close_result = connection.close_stdin().await;
-    let stream_result = connection.persist_raw_stream(run_dir);
 
     #[cfg(unix)]
     let root_exit = crate::dispatch_ops::subprocess::wait_for_owned_root_exit(
@@ -198,9 +217,12 @@ async fn run_native_acp_dispatch_inner(
     )
     .await;
     #[cfg(unix)]
-    let (status, liveness) =
-        crate::dispatch_ops::subprocess::terminate_reap_and_prove(&mut child, &mut process_group)
-            .await;
+    let (status, liveness) = crate::dispatch_ops::subprocess::terminate_reap_and_prove(
+        &mut child,
+        &mut process_group,
+        escape_contained,
+    )
+    .await;
     #[cfg(unix)]
     let (process_exit_code, process_exit_error) = match (root_exit, status) {
         (Ok(true), Ok(status)) => (status.code(), None),
@@ -285,23 +307,6 @@ async fn run_native_acp_dispatch_inner(
             }),
         );
     }
-    let stream_path = match stream_result {
-        Ok(path) => path,
-        Err(err) => {
-            append_trajectory_event(
-                trajectory_path,
-                json!({
-                    "event": "acp_native_stream_persist_failed",
-                    "dispatch_id": dispatch_id,
-                    "agent": agent,
-                    "error": err,
-                    "timestamp": Utc::now().to_rfc3339(),
-                }),
-            );
-            run_dir.join(ACP_STREAM_FILE)
-        }
-    };
-
     let outcome = match outcome {
         Ok(outcome) => outcome,
         Err(err) => {
@@ -315,19 +320,62 @@ async fn run_native_acp_dispatch_inner(
         }
     };
 
+    let result = DispatchResult {
+        output: outcome.output.clone(),
+        exit_code: Some(0),
+        observed_model: outcome.observed_model.clone(),
+    };
+    let deferred = NativeAcpDeferredArtifacts {
+        spec,
+        outcome,
+        process_exit_code,
+    };
+    if defer_artifacts {
+        DispatchRunOutcome {
+            result: Ok(result),
+            liveness,
+            deferred_native_acp: Some(deferred),
+        }
+    } else if let Err(error) =
+        publish_native_acp_artifacts(deferred, run_dir, trajectory_path, dispatch_id, agent)
+    {
+        DispatchRunOutcome::failure(error, liveness)
+    } else {
+        DispatchRunOutcome::success(result, liveness)
+    }
+}
+
+pub(in crate::dispatch_ops) fn publish_native_acp_artifacts(
+    deferred: NativeAcpDeferredArtifacts,
+    run_dir: &Path,
+    trajectory_path: &Path,
+    dispatch_id: &str,
+    agent: &str,
+) -> Result<(), String> {
+    let NativeAcpDeferredArtifacts {
+        spec,
+        outcome,
+        process_exit_code,
+    } = deferred;
+    let stream_path = persist_raw_stream(&outcome, run_dir)?;
+
     if let Some(record_path) = spec.session_record_path.as_ref() {
-        if let Err(error) = write_native_acp_session_record(
+        write_native_acp_session_record(
             &spec,
             record_path,
             spec.session_distill_path.as_ref(),
             &outcome,
             &stream_path,
             dispatch_id,
-        ) {
-            return DispatchRunOutcome::failure(error, liveness);
-        }
+        )?;
     }
-
+    for event in outcome.staged_events {
+        let target = match event.target {
+            NativeAcpEventTarget::Progress => run_dir.join("progress.jsonl"),
+            NativeAcpEventTarget::Trajectory => trajectory_path.to_path_buf(),
+        };
+        append_trajectory_event(&target, event.payload);
+    }
     append_trajectory_event(
         trajectory_path,
         json!({
@@ -343,13 +391,28 @@ async fn run_native_acp_dispatch_inner(
             "timestamp": Utc::now().to_rfc3339(),
         }),
     );
+    Ok(())
+}
 
-    DispatchRunOutcome::success(
-        DispatchResult {
-            output: outcome.output,
-            exit_code: Some(0),
-            observed_model: outcome.observed_model,
-        },
-        liveness,
-    )
+fn persist_raw_stream(
+    outcome: &NativeAcpPromptOutcome,
+    run_dir: &Path,
+) -> Result<std::path::PathBuf, String> {
+    let stream_path = run_dir.join(ACP_STREAM_FILE);
+    let lines = outcome
+        .raw_messages
+        .iter()
+        .map(|message| {
+            serde_json::to_string(message)
+                .map_err(|err| format!("serialize ACP stream message: {err}"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let payload = if lines.is_empty() {
+        String::new()
+    } else {
+        format!("{}\n", lines.join("\n"))
+    };
+    crate::utils::write_owner_only_file_atomic(&stream_path, payload.as_bytes())
+        .map_err(|err| format!("write {ACP_STREAM_FILE}: {err}"))?;
+    Ok(stream_path)
 }

@@ -11,10 +11,11 @@
 //! so `pgid == worker pid`), which makes "any descendant alive?" a single
 //! `kill(-pgid, 0)` probe rather than a `ps` table walk.
 //!
-//! **Stated blind spot:** a descendant that calls `setsid()` leaves the group
-//! and becomes invisible to this probe. That is a real hole and it is named
-//! here rather than papered over — it is one more reason this posture is
-//! `detect-and-reject` and never a claim of prevention.
+//! A descendant that calls `setsid()` leaves the group and becomes invisible
+//! to this probe. Therefore process-group absence alone is never promoted to
+//! `ConfirmedReaped`; production runners report it as `Indeterminate` and a
+//! required postflight gate fences the lease without scanning or releasing
+//! worker-authored artifacts.
 
 /// Can the parent still see a live process from this worker's tree?
 pub trait DescendantLiveness: Send + Sync {
@@ -45,9 +46,9 @@ pub enum RunnerLivenessEvidence {
 }
 
 impl RunnerLivenessEvidence {
-    pub(crate) fn confirmed_reaped() -> Self {
+    pub(crate) fn confirmed_contained_reaped() -> Self {
         Self::ConfirmedReaped {
-            proof: "runner_owned_process_group_absent",
+            proof: "kernel_denied_process_group_escape_and_owned_group_absent",
         }
     }
 

@@ -15,7 +15,7 @@ mod tests;
 
 #[cfg(test)]
 pub(super) use runner::run_native_acp_dispatch;
-pub(super) use runner::run_native_acp_dispatch_with_liveness;
+pub(super) use runner::{publish_native_acp_artifacts, run_native_acp_dispatch_with_liveness};
 pub(super) use spec::{build_native_acp_run_spec, is_native_acp_transport};
 
 const ACP_STREAM_FILE: &str = "acp.stream.ndjson";
@@ -49,8 +49,8 @@ pub(super) struct NativeAcpSession {
     pub source: &'static str,
 }
 
-#[derive(Debug)]
-struct NativeAcpPromptOutcome {
+#[derive(Debug, Clone)]
+pub(in crate::dispatch_ops) struct NativeAcpPromptOutcome {
     output: String,
     session_id: String,
     agent_session_id: Option<String>,
@@ -59,6 +59,26 @@ struct NativeAcpPromptOutcome {
     prompt_result: Value,
     used_existing_session: bool,
     observed_model: Option<String>,
+    staged_events: Vec<NativeAcpStagedEvent>,
+}
+
+#[derive(Debug, Clone)]
+pub(in crate::dispatch_ops) struct NativeAcpStagedEvent {
+    pub target: NativeAcpEventTarget,
+    pub payload: Value,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(in crate::dispatch_ops) enum NativeAcpEventTarget {
+    Progress,
+    Trajectory,
+}
+
+#[derive(Debug)]
+pub(in crate::dispatch_ops) struct NativeAcpDeferredArtifacts {
+    pub spec: NativeAcpRunSpec,
+    pub outcome: NativeAcpPromptOutcome,
+    pub process_exit_code: Option<i32>,
 }
 
 struct NativeAcpConnection {
@@ -67,11 +87,11 @@ struct NativeAcpConnection {
     raw_messages: Vec<Value>,
     final_text_parts: Vec<String>,
     mapped_events: usize,
+    staged_events: Vec<NativeAcpStagedEvent>,
     observed_model: Option<String>,
     request_index: u64,
     permission_label: String,
     dispatch_id: String,
     agent: String,
-    run_dir: PathBuf,
     trajectory_path: PathBuf,
 }

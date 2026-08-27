@@ -322,7 +322,7 @@ pub(super) async fn run_agent_subprocess(
     cmd: Command,
     timeout: Duration,
 ) -> Result<DispatchResult, String> {
-    run_agent_subprocess_with_liveness(cmd, timeout)
+    run_agent_subprocess_with_liveness(cmd, timeout, false)
         .await
         .result
 }
@@ -330,8 +330,11 @@ pub(super) async fn run_agent_subprocess(
 pub(super) async fn run_agent_subprocess_with_liveness(
     mut cmd: Command,
     timeout: Duration,
+    require_postflight_containment: bool,
 ) -> DispatchRunOutcome {
-    run_agent_subprocess_inner(&mut cmd, timeout, None).await
+    let escape_contained =
+        require_postflight_containment && configure_required_postflight_containment(&mut cmd);
+    run_agent_subprocess_inner(&mut cmd, timeout, None, escape_contained).await
 }
 
 pub(super) async fn run_managed_custom_subprocess_outcome(
@@ -339,6 +342,7 @@ pub(super) async fn run_managed_custom_subprocess_outcome(
     timeout: Duration,
     mut cancellations: mpsc::Receiver<crate::managed_run_control::ManagedCancelCommand>,
     run_dir: &std::path::Path,
+    require_postflight_containment: bool,
 ) -> ManagedSubprocessOutcome {
     #[cfg(not(unix))]
     {
@@ -346,7 +350,8 @@ pub(super) async fn run_managed_custom_subprocess_outcome(
         let _ = run_dir;
         // A platform without process-group control still runs an ordinary
         // custom LaunchSpec. Only the cancellation control plane is absent.
-        let outcome = run_agent_subprocess_with_liveness(cmd, timeout).await;
+        let outcome =
+            run_agent_subprocess_with_liveness(cmd, timeout, require_postflight_containment).await;
         return ManagedSubprocessOutcome {
             result: outcome.result,
             liveness: outcome.liveness,
@@ -356,6 +361,8 @@ pub(super) async fn run_managed_custom_subprocess_outcome(
     }
     #[cfg(unix)]
     {
+        let escape_contained =
+            require_postflight_containment && configure_required_postflight_containment(&mut cmd);
         #[cfg(test)]
         pause_managed_pre_spawn();
         if let Ok(command) = cancellations.try_recv() {
@@ -412,7 +419,7 @@ pub(super) async fn run_managed_custom_subprocess_outcome(
                             Err(format!("Agent process error: {error}"))
                         }
                     };
-                    return ManagedSubprocessOutcome::plain_confirmed(result);
+                    return ManagedSubprocessOutcome::plain_group_reaped(result, escape_contained);
                 }
                 Ok(false) => {}
                 Err(error) => {
@@ -423,6 +430,7 @@ pub(super) async fn run_managed_custom_subprocess_outcome(
                     return ManagedSubprocessOutcome::plain_after_reap(
                         Err(format!("managed child probe failed: {error}")),
                         &process_group,
+                        escape_contained,
                     )
                     .await;
                 }
@@ -445,6 +453,7 @@ pub(super) async fn run_managed_custom_subprocess_outcome(
                 return ManagedSubprocessOutcome::plain_after_reap(
                     Err("process timed out".to_string()),
                     &process_group,
+                    escape_contained,
                 )
                 .await;
             }
@@ -466,6 +475,7 @@ pub(super) async fn run_managed_custom_subprocess_outcome(
                             timeout.as_secs()
                         )),
                         &process_group,
+                        escape_contained,
                     )
                     .await;
                 }
@@ -478,6 +488,7 @@ pub(super) async fn run_managed_custom_subprocess_outcome(
                         return ManagedSubprocessOutcome::plain_after_reap(
                             Err("managed cancellation channel closed".to_string()),
                             &process_group,
+                            escape_contained,
                         )
                         .await;
                     };
@@ -492,6 +503,7 @@ pub(super) async fn run_managed_custom_subprocess_outcome(
                                 timeout.as_secs()
                             )),
                             &process_group,
+                            escape_contained,
                         )
                         .await;
                     }
@@ -603,6 +615,7 @@ pub(super) async fn run_managed_custom_subprocess_outcome(
                             command,
                             "unix_process_group_absent",
                             pid,
+                            escape_contained,
                         );
                     }
                     let _ = status;
@@ -613,6 +626,7 @@ pub(super) async fn run_managed_custom_subprocess_outcome(
                             command,
                             "unix_process_group_absent",
                             pid,
+                            escape_contained,
                         )
                     } else {
                         ManagedSubprocessOutcome::dequeued_with_pid(
@@ -638,6 +652,7 @@ pub(super) async fn run_managed_custom_subprocess_outcome(
                             timeout.as_secs()
                         )),
                         &process_group,
+                        escape_contained,
                     )
                     .await;
                 }
@@ -687,10 +702,16 @@ impl ManagedSubprocessOutcome {
         }
     }
 
-    fn plain_confirmed(result: Result<DispatchResult, String>) -> Self {
+    fn plain_group_reaped(result: Result<DispatchResult, String>, escape_contained: bool) -> Self {
         Self {
             result,
-            liveness: crate::exec_env_postflight::RunnerLivenessEvidence::confirmed_reaped(),
+            liveness: if escape_contained {
+                crate::exec_env_postflight::RunnerLivenessEvidence::confirmed_contained_reaped()
+            } else {
+                crate::exec_env_postflight::RunnerLivenessEvidence::indeterminate(
+                    "owned POSIX process group was reaped, but a descendant could have escaped it with setsid()",
+                )
+            },
             cancellation: None,
             termination_proof: None,
         }
@@ -700,9 +721,10 @@ impl ManagedSubprocessOutcome {
     async fn plain_after_reap(
         result: Result<DispatchResult, String>,
         process_group: &ManagedProcessGroupGuard,
+        escape_contained: bool,
     ) -> Self {
         if process_group.prove_absence_after_root_reaped().await {
-            Self::plain_confirmed(result)
+            Self::plain_group_reaped(result, escape_contained)
         } else {
             Self::plain_with_pid(result, None)
         }
@@ -731,7 +753,9 @@ impl ManagedSubprocessOutcome {
         let liveness = if termination_proof == "spawn_suppressed" {
             crate::exec_env_postflight::RunnerLivenessEvidence::NoWorkerSpawned
         } else {
-            crate::exec_env_postflight::RunnerLivenessEvidence::confirmed_reaped()
+            crate::exec_env_postflight::RunnerLivenessEvidence::indeterminate(
+                "owned POSIX process group was reaped, but a descendant could have escaped it with setsid()",
+            )
         };
         Self {
             result,
@@ -746,10 +770,17 @@ impl ManagedSubprocessOutcome {
         command: crate::managed_run_control::ManagedCancelCommand,
         termination_proof: &'static str,
         _child_pid: Option<u32>,
+        escape_contained: bool,
     ) -> Self {
         Self {
             result,
-            liveness: crate::exec_env_postflight::RunnerLivenessEvidence::confirmed_reaped(),
+            liveness: if escape_contained {
+                crate::exec_env_postflight::RunnerLivenessEvidence::confirmed_contained_reaped()
+            } else {
+                crate::exec_env_postflight::RunnerLivenessEvidence::indeterminate(
+                    "owned POSIX process group was reaped, but a descendant could have escaped it with setsid()",
+                )
+            },
             cancellation: Some(command),
             termination_proof: Some(termination_proof),
         }
@@ -766,7 +797,8 @@ pub(crate) async fn run_managed_custom_subprocess(
     cancellations: mpsc::Receiver<crate::managed_run_control::ManagedCancelCommand>,
     run_dir: &std::path::Path,
 ) -> Result<DispatchResult, String> {
-    let outcome = run_managed_custom_subprocess_outcome(cmd, timeout, cancellations, run_dir).await;
+    let outcome =
+        run_managed_custom_subprocess_outcome(cmd, timeout, cancellations, run_dir, false).await;
     if let Some(command) = outcome.cancellation {
         #[cfg(unix)]
         let completion = crate::managed_run_control::finalize_dequeued_managed_cancellation(
@@ -995,6 +1027,7 @@ pub(crate) async fn wait_for_owned_root_exit(
 pub(crate) async fn terminate_reap_and_prove(
     child: &mut tokio::process::Child,
     process_group: &mut ManagedProcessGroupGuard,
+    escape_contained: bool,
 ) -> (
     std::io::Result<std::process::ExitStatus>,
     crate::exec_env_postflight::RunnerLivenessEvidence,
@@ -1002,8 +1035,12 @@ pub(crate) async fn terminate_reap_and_prove(
     let sigterm = process_group.signal(libc::SIGTERM);
     process_group.prepare_group_for_root_reap(sigterm).await;
     let status = reap_managed_root(child, process_group).await;
-    let liveness = if process_group.prove_absence_after_root_reaped().await {
-        crate::exec_env_postflight::RunnerLivenessEvidence::confirmed_reaped()
+    let liveness = if process_group.prove_absence_after_root_reaped().await && escape_contained {
+        crate::exec_env_postflight::RunnerLivenessEvidence::confirmed_contained_reaped()
+    } else if process_group.prove_absence_after_root_reaped().await {
+        crate::exec_env_postflight::RunnerLivenessEvidence::indeterminate(
+            "owned POSIX process group was reaped, but a descendant could have escaped it with setsid()",
+        )
     } else {
         crate::exec_env_postflight::RunnerLivenessEvidence::indeterminate(
             "process group absence was not confirmed after root reap",
@@ -1496,6 +1533,7 @@ pub(super) async fn run_opencode_sop_subprocess_with_liveness(
     mut cmd: Command,
     timeout: Duration,
     sop_label: &str,
+    require_postflight_containment: bool,
 ) -> DispatchRunOutcome {
     let _permit = opencode_sop_semaphore().acquire().await;
     let _permit = match _permit {
@@ -1507,13 +1545,16 @@ pub(super) async fn run_opencode_sop_subprocess_with_liveness(
             )
         }
     };
-    run_agent_subprocess_inner(&mut cmd, timeout, Some(sop_label)).await
+    let escape_contained =
+        require_postflight_containment && configure_required_postflight_containment(&mut cmd);
+    run_agent_subprocess_inner(&mut cmd, timeout, Some(sop_label), escape_contained).await
 }
 
 async fn run_agent_subprocess_inner(
     cmd: &mut Command,
     timeout: Duration,
     opencode_sop_label: Option<&str>,
+    escape_contained: bool,
 ) -> DispatchRunOutcome {
     cmd.stdin(std::process::Stdio::null());
     cmd.stdout(std::process::Stdio::piped());
@@ -1546,9 +1587,12 @@ async fn run_agent_subprocess_inner(
 
     #[cfg(unix)]
     let (status, liveness) = match wait_for_owned_root_exit(child_pid, timeout).await {
-        Ok(true) => terminate_reap_and_prove(&mut child, &mut process_group).await,
+        Ok(true) => {
+            terminate_reap_and_prove(&mut child, &mut process_group, escape_contained).await
+        }
         Ok(false) => {
-            let (_, liveness) = terminate_reap_and_prove(&mut child, &mut process_group).await;
+            let (_, liveness) =
+                terminate_reap_and_prove(&mut child, &mut process_group, escape_contained).await;
             if let Some(sop_label) = opencode_sop_label {
                 tracing::warn!(
                     sop = sop_label,
@@ -1565,7 +1609,8 @@ async fn run_agent_subprocess_inner(
             );
         }
         Err(error) => {
-            let (_, liveness) = terminate_reap_and_prove(&mut child, &mut process_group).await;
+            let (_, liveness) =
+                terminate_reap_and_prove(&mut child, &mut process_group, escape_contained).await;
             return DispatchRunOutcome::failure(
                 format!("Agent process observation error: {error}"),
                 liveness,
@@ -1672,6 +1717,170 @@ pub(crate) fn configure_process_group(cmd: &mut Command) {
 
 #[cfg(not(unix))]
 pub(crate) fn configure_process_group(_cmd: &mut Command) {}
+
+/// Apply a kernel-enforced rule that prevents a Required-postflight worker or
+/// any inherited descendant from leaving its owned POSIX process group. The
+/// macOS sandbox operation still permits ordinary fork/exec, but denies the
+/// process-control operation used by `setsid`/`setpgid` escapes.
+#[cfg(target_os = "macos")]
+pub(crate) fn configure_required_postflight_containment(cmd: &mut Command) -> bool {
+    const PROFILE: &str = "(version 1)(allow default)(deny process-info-setcontrol)";
+    let original = cmd.as_std();
+    let program = original.get_program().to_os_string();
+    let args = original
+        .get_args()
+        .map(std::ffi::OsStr::to_os_string)
+        .collect::<Vec<_>>();
+    let env = original
+        .get_envs()
+        .map(|(name, value)| {
+            (
+                name.to_os_string(),
+                value.map(std::ffi::OsStr::to_os_string),
+            )
+        })
+        .collect::<Vec<_>>();
+    let cwd = original.get_current_dir().map(std::path::Path::to_path_buf);
+
+    let mut wrapped = Command::new("/usr/bin/sandbox-exec");
+    wrapped.arg("-p").arg(PROFILE).arg(program).args(args);
+    if let Some(cwd) = cwd {
+        wrapped.current_dir(cwd);
+    }
+    for (name, value) in env {
+        if let Some(value) = value {
+            wrapped.env(name, value);
+        } else {
+            wrapped.env_remove(name);
+        }
+    }
+    *cmd = wrapped;
+    true
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn configure_required_postflight_containment(cmd: &mut Command) -> bool {
+    use std::os::unix::process::CommandExt;
+
+    // SAFETY: the closure runs after fork and before exec. It performs only
+    // prctl syscalls plus stack-local BPF construction; no allocation or lock
+    // is touched in the child. The installed filter is inherited across both
+    // fork/clone and exec, so descendants cannot later call setsid/setpgid to
+    // leave the process group whose lifecycle the parent owns.
+    unsafe {
+        cmd.pre_exec(install_linux_postflight_escape_filter);
+    }
+    true
+}
+
+#[cfg(target_os = "linux")]
+fn install_linux_postflight_escape_filter() -> std::io::Result<()> {
+    const BPF_LD_W_ABS: u16 = 0x20;
+    const BPF_JMP_JEQ_K: u16 = 0x15;
+    const BPF_RET_K: u16 = 0x06;
+    const SECCOMP_RET_ALLOW: u32 = 0x7fff_0000;
+    const SECCOMP_RET_ERRNO: u32 = 0x0005_0000;
+    const SECCOMP_MODE_FILTER: libc::c_ulong = 2;
+
+    const fn stmt(code: u16, k: u32) -> libc::sock_filter {
+        libc::sock_filter {
+            code,
+            jt: 0,
+            jf: 0,
+            k,
+        }
+    }
+    const fn deny_if(syscall: u32) -> [libc::sock_filter; 2] {
+        [
+            libc::sock_filter {
+                code: BPF_JMP_JEQ_K,
+                jt: 0,
+                jf: 1,
+                k: syscall,
+            },
+            stmt(BPF_RET_K, SECCOMP_RET_ERRNO | libc::EPERM as u32),
+        ]
+    }
+
+    let setsid = deny_if(libc::SYS_setsid as u32);
+    let setpgid = deny_if(libc::SYS_setpgid as u32);
+    let unshare = deny_if(libc::SYS_unshare as u32);
+    let setns = deny_if(libc::SYS_setns as u32);
+    let mut filter = [
+        stmt(BPF_LD_W_ABS, 0),
+        setsid[0],
+        setsid[1],
+        setpgid[0],
+        setpgid[1],
+        unshare[0],
+        unshare[1],
+        setns[0],
+        setns[1],
+        stmt(BPF_RET_K, SECCOMP_RET_ALLOW),
+    ];
+    let program = libc::sock_fprog {
+        len: filter.len() as u16,
+        filter: filter.as_mut_ptr(),
+    };
+    // SAFETY: prctl receives scalar options and a valid pointer to the
+    // stack-resident filter for the duration of the syscall.
+    if unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: no_new_privs is set and `program` points to a valid classic-BPF
+    // array. Failure aborts spawn rather than running uncontained.
+    if unsafe {
+        libc::prctl(
+            libc::PR_SET_SECCOMP,
+            SECCOMP_MODE_FILTER,
+            &program as *const libc::sock_fprog,
+        )
+    } != 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+pub(crate) fn configure_required_postflight_containment(_cmd: &mut Command) -> bool {
+    false
+}
+
+#[cfg(all(test, target_os = "macos"))]
+#[test]
+fn required_postflight_containment_child_cannot_setsid() {
+    if std::env::var_os("TACHI_TEST_ATTEMPT_SETSID").is_none() {
+        return;
+    }
+    // SAFETY: setsid takes no pointers. The required-postflight sandbox must
+    // deny this process-control operation with EPERM.
+    let result = unsafe { libc::setsid() };
+    assert_eq!(result, -1, "required worker unexpectedly escaped its group");
+    assert_eq!(
+        std::io::Error::last_os_error().raw_os_error(),
+        Some(libc::EPERM)
+    );
+}
+
+#[cfg(all(test, target_os = "macos"))]
+#[tokio::test]
+async fn required_postflight_kernel_containment_discriminates_setsid_escape() {
+    let mut command = Command::new(std::env::current_exe().expect("current test binary"));
+    command
+        .arg("required_postflight_containment_child_cannot_setsid")
+        .arg("--nocapture")
+        .env("TACHI_TEST_ATTEMPT_SETSID", "1");
+    let outcome = run_agent_subprocess_with_liveness(command, Duration::from_secs(10), true).await;
+    let result = outcome.result.expect("contained child test must pass");
+    assert_eq!(result.exit_code, Some(0));
+    assert!(matches!(
+        outcome.liveness,
+        crate::exec_env_postflight::RunnerLivenessEvidence::ConfirmedReaped {
+            proof: "kernel_denied_process_group_escape_and_owned_group_absent"
+        }
+    ));
+}
 
 #[cfg(not(unix))]
 pub(crate) async fn terminate_reap_uncontained_child(

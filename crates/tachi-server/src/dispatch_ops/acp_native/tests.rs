@@ -164,6 +164,90 @@ printf '%s\n' '{"jsonrpc":"2.0","id":"tachi-acp-3","result":{"content":[{"type":
 
 #[cfg(unix)]
 #[tokio::test]
+async fn required_postflight_stages_native_acp_artifacts_until_parent_release() {
+    use std::collections::HashMap;
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::Duration;
+
+    let temp = tempfile::tempdir().expect("temp ACP run directory");
+    let adapter = temp.path().join("adapter.sh");
+    std::fs::write(
+        &adapter,
+        r#"#!/bin/sh
+IFS= read -r _
+printf '%s\n' '{"jsonrpc":"2.0","id":"tachi-acp-1","result":{"protocolVersion":1}}'
+IFS= read -r _
+printf '%s\n' '{"jsonrpc":"2.0","id":"tachi-acp-2","result":{"sessionId":"s-1"}}'
+IFS= read -r _
+printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s-1","update":{"sessionUpdate":"agent_message","content":{"type":"text","text":"sensitive-native-output"}}}}'
+printf '%s\n' '{"jsonrpc":"2.0","id":"tachi-acp-3","result":{}}'
+"#,
+    )
+    .expect("write ACP adapter fixture");
+    let mut permissions = std::fs::metadata(&adapter)
+        .expect("adapter metadata")
+        .permissions();
+    permissions.set_mode(0o700);
+    std::fs::set_permissions(&adapter, permissions).expect("make adapter executable");
+
+    let trajectory = temp.path().join("trajectory.jsonl");
+    crate::utils::write_owner_only_file_atomic(&trajectory, b"").expect("trajectory");
+    let mut outcome = super::run_native_acp_dispatch_with_liveness(
+        super::NativeAcpRunSpec {
+            command: "/bin/sh".to_string(),
+            args: vec![adapter.to_string_lossy().to_string()],
+            cwd: temp.path().to_path_buf(),
+            prompt: "test prompt".to_string(),
+            mode: super::NativeAcpRunMode::OneShot,
+            permission_label: "approve-reads".to_string(),
+            session: None,
+            session_record_path: None,
+            session_distill_path: None,
+            metadata: json!({}),
+            env: HashMap::new(),
+        },
+        temp.path(),
+        &trajectory,
+        "staged-dispatch",
+        "codex",
+        Duration::from_secs(2),
+        true,
+    )
+    .await;
+
+    assert_eq!(
+        outcome.result.as_ref().expect("dispatch result").output,
+        "sensitive-native-output"
+    );
+    assert!(!temp.path().join(super::ACP_STREAM_FILE).exists());
+    assert!(!temp.path().join("progress.jsonl").exists());
+    assert!(!std::fs::read_to_string(&trajectory)
+        .expect("trajectory")
+        .contains("sensitive-native-output"));
+
+    super::publish_native_acp_artifacts(
+        outcome
+            .deferred_native_acp
+            .take()
+            .expect("parent-owned deferred artifacts"),
+        temp.path(),
+        &trajectory,
+        "staged-dispatch",
+        "codex",
+    )
+    .expect("publish after clean postflight");
+    assert!(
+        std::fs::read_to_string(temp.path().join(super::ACP_STREAM_FILE))
+            .expect("raw stream")
+            .contains("sensitive-native-output")
+    );
+    assert!(std::fs::read_to_string(temp.path().join("progress.jsonl"))
+        .expect("progress")
+        .contains("sensitive-native-output"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn native_acp_timeout_returns_runner_owned_terminal_liveness() {
     use std::collections::HashMap;
     use std::os::unix::fs::PermissionsExt;
@@ -197,12 +281,14 @@ async fn native_acp_timeout_returns_runner_owned_terminal_liveness() {
         "timeout-dispatch",
         "codex",
         Duration::from_millis(100),
+        false,
     )
     .await;
 
     assert!(matches!(
         &outcome.liveness,
-        crate::exec_env_postflight::RunnerLivenessEvidence::ConfirmedReaped { .. }
+        crate::exec_env_postflight::RunnerLivenessEvidence::Indeterminate { detail }
+            if detail.contains("setsid")
     ));
     let error = match outcome.result {
         Ok(_) => panic!("slow native adapter must time out"),
@@ -210,9 +296,8 @@ async fn native_acp_timeout_returns_runner_owned_terminal_liveness() {
     };
     assert!(error.contains("timed out"), "{error}");
     assert!(
-        !crate::exec_env_postflight::DescendantLiveness::any_alive(&outcome.liveness)
-            .expect("typed native timeout terminal evidence"),
-        "native timeout must return runner-owned terminal evidence without a PID handoff"
+        crate::exec_env_postflight::DescendantLiveness::any_alive(&outcome.liveness).is_err(),
+        "process-group absence cannot prove that no setsid descendant escaped"
     );
 }
 
