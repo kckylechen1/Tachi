@@ -61,6 +61,7 @@ async fn dispatch_profile_declared_credentials_materialize_without_explicit_para
             allowed_agents: None,
             enable_rotation: false,
             rotation_strategy: None,
+            rebind: false,
         }))
         .await
         .expect("vault_set should succeed");
@@ -170,6 +171,7 @@ async fn dispatch_profile_declared_credentials_respect_profile_allowlist() {
             allowed_agents: None,
             enable_rotation: false,
             rotation_strategy: None,
+            rebind: false,
         }))
         .await
         .expect("vault_set should succeed");
@@ -236,6 +238,7 @@ async fn dispatch_profile_credentials_can_allow_backend_agent_name() {
             allowed_agents: Some(vec!["custom".to_string()]),
             enable_rotation: false,
             rotation_strategy: None,
+            rebind: false,
         }))
         .await
         .expect("vault_set should succeed");

@@ -25,6 +25,7 @@ async fn vault_rotation_prefix_get_round_robin_works() {
                 allowed_agents: None,
                 enable_rotation: false,
                 rotation_strategy: None,
+                rebind: false,
             }))
             .await
             .expect("vault_set rotation key should succeed");

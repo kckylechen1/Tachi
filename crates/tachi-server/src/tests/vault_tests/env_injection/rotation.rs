@@ -39,6 +39,7 @@ async fn dispatch_env_injection_uses_logical_rotation_key_not_member_names() {
                 allowed_agents: None,
                 enable_rotation: false,
                 rotation_strategy: None,
+                rebind: false,
             }))
             .await
             .expect("vault_set rotation key should succeed");

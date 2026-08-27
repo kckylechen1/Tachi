@@ -116,6 +116,7 @@ async fn explicit_lock_dominates_refresh_with_prelock_resolved_vault_pools() {
             allowed_agents: None,
             enable_rotation: false,
             rotation_strategy: None,
+            rebind: false,
         },
     )
     .await
@@ -332,6 +333,7 @@ fn locked_provider_refresh_auto_unlocks_once_without_recursive_materialization()
                     allowed_agents: None,
                     enable_rotation: false,
                     rotation_strategy: None,
+                    rebind: false,
                 },
             )
             .await
@@ -412,6 +414,7 @@ fn failed_keychain_auto_unlock_keeps_vault_locked_and_refresh_fails_loudly() {
                     allowed_agents: None,
                     enable_rotation: false,
                     rotation_strategy: None,
+                    rebind: false,
                 },
             )
             .await
@@ -476,6 +479,7 @@ fn bootstrap_auto_unlock_owns_one_provider_refresh() {
                     allowed_agents: None,
                     enable_rotation: false,
                     rotation_strategy: None,
+                    rebind: false,
                 },
             )
             .await

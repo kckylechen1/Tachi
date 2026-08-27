@@ -22,6 +22,7 @@ async fn vault_provider_cache_skips_agent_scoped_api_keys() {
             allowed_agents: Some(vec!["mcp:allowed".to_string()]),
             enable_rotation: false,
             rotation_strategy: None,
+            rebind: false,
         }))
         .await
         .expect("vault_set should succeed");

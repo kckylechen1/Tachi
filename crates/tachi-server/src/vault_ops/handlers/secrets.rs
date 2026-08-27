@@ -22,6 +22,74 @@ pub(crate) async fn handle_vault_set(
                 })
                 .map_err(|e| format!("Failed to check existing entry: {e}"))?;
 
+            let mut rebind_meta: Option<(bool, String, String)> = None;
+            if is_lane_slot_secret_name(&params.name) && secret_type == SECRET_TYPE_API_KEY {
+                if is_new {
+                    let entries = server
+                        .with_global_store_read(|store| {
+                            store.vault_list_entries().map_err(|e| e.to_string())
+                        })
+                        .map_err(|e| format!("Failed to list entries: {e}"))?;
+                    for other in entries {
+                        if other.name == params.name
+                            || other.secret_type != SECRET_TYPE_API_KEY
+                            || is_lane_slot_secret_name(&other.name)
+                        {
+                            continue;
+                        }
+                        let Some(kind) = provider_kind_for_env_name(&other.name) else {
+                            continue;
+                        };
+                        let Ok(plain) = crypto::decrypt(key, &other.encrypted_value, &other.nonce)
+                        else {
+                            continue;
+                        };
+                        let Ok(other_value) = String::from_utf8(plain) else {
+                            continue;
+                        };
+                        if fingerprint_secret(key, kind, &other_value)
+                            == fingerprint_secret(key, kind, &params.value)
+                        {
+                            return Err(copy_existing_account_message(&params.name, &other.name));
+                        }
+                    }
+                } else {
+                    let existing = server
+                        .with_global_store_read(|store| {
+                            store
+                                .vault_get_entry(&params.name)
+                                .map_err(|e| e.to_string())
+                        })
+                        .map_err(|e| format!("Failed to read existing slot: {e}"))?;
+                    if let Some(existing) = existing {
+                        if existing.secret_type == SECRET_TYPE_API_KEY {
+                            let old_bytes =
+                                crypto::decrypt(key, &existing.encrypted_value, &existing.nonce)?;
+                            let old_value = String::from_utf8(old_bytes).map_err(|e| {
+                                format!("Existing slot '{}' is not valid UTF-8: {e}", params.name)
+                            })?;
+                            let provider_kind =
+                                provider_kind_for_env_name(&params.name).unwrap_or("unknown");
+                            match evaluate_lane_slot_overwrite(
+                                &old_value,
+                                &params.value,
+                                provider_kind,
+                                key,
+                                params.rebind,
+                            ) {
+                                Ok(LaneSlotOverwrite::Identical { fingerprint }) => {
+                                    rebind_meta = Some((false, fingerprint.clone(), fingerprint));
+                                }
+                                Ok(LaneSlotOverwrite::Rebound { old_fp, new_fp }) => {
+                                    rebind_meta = Some((true, old_fp, new_fp));
+                                }
+                                Err(err) => return Err(err.operator_message(&params.name)),
+                            }
+                        }
+                    }
+                }
+            }
+
             let now = Utc::now().to_rfc3339();
             let entry = VaultEntry {
                 name: params.name.clone(),
@@ -81,13 +149,18 @@ pub(crate) async fn handle_vault_set(
                 }
             }
 
-            serde_json::to_string(&json!({
+            let mut body = json!({
                 "stored": true,
                 "name": params.name,
                 "secret_type": secret_type,
                 "created": is_new
-            }))
-            .map_err(|e| format!("serialize: {e}"))
+            });
+            if let Some((rebound, old_fp, new_fp)) = rebind_meta {
+                body["rebind"] = json!(rebound);
+                body["old_fingerprint"] = json!(old_fp);
+                body["new_fingerprint"] = json!(new_fp);
+            }
+            serde_json::to_string(&body).map_err(|e| format!("serialize: {e}"))
         })
     })();
 

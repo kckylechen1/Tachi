@@ -494,6 +494,7 @@ async fn opencode_serve_preflight_uses_dispatch_credential_env() {
                 allowed_agents: Some(vec!["custom".to_string()]),
                 enable_rotation: false,
                 rotation_strategy: None,
+                rebind: false,
             },
         ))
         .await

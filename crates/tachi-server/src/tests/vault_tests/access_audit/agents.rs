@@ -34,6 +34,7 @@ async fn vault_get_respects_allowed_agents() {
             allowed_agents: Some(vec!["agent-a".to_string(), "agent-b".to_string()]),
             enable_rotation: false,
             rotation_strategy: None,
+            rebind: false,
         }))
         .await
         .expect("vault_set should succeed");
@@ -93,6 +94,7 @@ async fn vault_acl_g1_bound_agent_allows_restricted_read_without_caller_id() {
             allowed_agents: Some(vec!["alice".to_string()]),
             enable_rotation: false,
             rotation_strategy: None,
+            rebind: false,
         }))
         .await
         .expect("G1 seed should succeed");
@@ -124,6 +126,7 @@ async fn vault_acl_g2_bound_agent_rejects_mismatched_caller_on_read() {
             allowed_agents: Some(vec!["bob".to_string()]),
             enable_rotation: false,
             rotation_strategy: None,
+            rebind: false,
         }))
         .await
         .expect("G2 seed should succeed");
@@ -157,6 +160,7 @@ async fn vault_acl_g3_bound_agent_rejects_mismatched_caller_on_overwrite() {
             allowed_agents: Some(vec!["bob".to_string()]),
             enable_rotation: false,
             rotation_strategy: None,
+            rebind: false,
         }))
         .await
         .expect("G3 seed should succeed");
@@ -171,6 +175,7 @@ async fn vault_acl_g3_bound_agent_rejects_mismatched_caller_on_overwrite() {
             allowed_agents: Some(vec!["bob".to_string()]),
             enable_rotation: false,
             rotation_strategy: None,
+            rebind: false,
         }))
         .await
         .expect_err("G3 caller bob must not override server-bound alice on overwrite");
@@ -208,6 +213,7 @@ async fn vault_acl_g4_unbound_server_preserves_legacy_caller_agent_id() {
             allowed_agents: Some(vec!["alice".to_string()]),
             enable_rotation: false,
             rotation_strategy: None,
+            rebind: false,
         }))
         .await
         .expect("G4 seed should succeed");
@@ -239,6 +245,7 @@ async fn vault_acl_g5_agent_register_is_not_a_vault_binding() {
             allowed_agents: Some(vec!["alice".to_string()]),
             enable_rotation: false,
             rotation_strategy: None,
+            rebind: false,
         }))
         .await
         .expect("G5 seed should succeed");
@@ -300,6 +307,7 @@ async fn vault_setup_rotation_records_success_audit_row() {
                 allowed_agents: None,
                 enable_rotation: false,
                 rotation_strategy: None,
+                rebind: false,
             }))
             .await
             .expect("G7 seed pool member should succeed");
@@ -356,6 +364,7 @@ async fn vault_setup_rotation_denies_restricted_pool_member_when_agent_not_allow
                 allowed_agents,
                 enable_rotation: false,
                 rotation_strategy: None,
+                rebind: false,
             }))
             .await
             .expect("G9 seed pool member should succeed");
@@ -415,6 +424,7 @@ async fn vault_set_api_key_pool_denies_clobbering_restricted_member() {
             allowed_agents: Some(vec!["alice".to_string()]),
             enable_rotation: false,
             rotation_strategy: None,
+            rebind: false,
         }))
         .await
         .expect("G8 seed should succeed");
@@ -468,6 +478,7 @@ async fn vault_set_api_key_pool_gates_member_with_suffix_over_u32_max() {
             allowed_agents: Some(vec!["alice".to_string()]),
             enable_rotation: false,
             rotation_strategy: None,
+            rebind: false,
         }))
         .await
         .expect("G10 seed should succeed");

@@ -57,6 +57,10 @@ pub(crate) struct VaultSetParams {
     pub enable_rotation: bool,
     #[serde(default)]
     pub rotation_strategy: Option<String>,
+    /// Lane slots (`EXTRACT_API_KEY`, …) refuse a fingerprint-changing
+    /// overwrite unless this is set (tachi#1855). Account names ignore it.
+    #[serde(default)]
+    pub rebind: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]

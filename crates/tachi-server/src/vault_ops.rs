@@ -8,6 +8,7 @@ mod params;
 mod resolver;
 mod rotation;
 mod session;
+mod slot_rebind;
 
 pub(crate) use resolver::{classify_vault_read_error, is_env_fallback_eligible, VaultReadState};
 pub(crate) use rotation::collect_rotation_entries;
@@ -28,6 +29,7 @@ pub(crate) use params::{
     VaultRecordKeyResultParams, VaultRemoveParams, VaultSetApiKeyPoolParams, VaultSetParams,
     VaultSetupRotationParams, VaultUnlockParams,
 };
+pub(crate) use slot_rebind::{evaluate_lane_slot_overwrite, is_lane_slot_secret_name};
 
 #[cfg(test)]
 mod tests;

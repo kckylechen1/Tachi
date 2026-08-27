@@ -25,6 +25,7 @@ async fn vault_auto_lock_expires_cached_key() {
             allowed_agents: None,
             enable_rotation: false,
             rotation_strategy: None,
+            rebind: false,
         }))
         .await
         .expect("vault_set should succeed");

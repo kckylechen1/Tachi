@@ -189,6 +189,10 @@ pub enum VaultAction {
         /// Useful for piping: `gh auth token | tachi vault set GH_TOKEN --value-stdin --keychain`
         #[arg(long)]
         value_stdin: bool,
+        /// Lane slots (EXTRACT/SUMMARY/DISTILL/REASONING_API_KEY) refuse a
+        /// fingerprint-changing overwrite unless this flag is set.
+        #[arg(long)]
+        rebind: bool,
     },
     /// Store multiple API keys as one logical rotation pool.
     /// Values are read from stdin, one key per line.

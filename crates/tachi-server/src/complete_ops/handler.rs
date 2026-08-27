@@ -2393,6 +2393,7 @@ mod tests {
                 allowed_agents: None,
                 enable_rotation: false,
                 rotation_strategy: None,
+                rebind: false,
             },
         )
         .await

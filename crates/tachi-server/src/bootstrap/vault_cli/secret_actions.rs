@@ -24,6 +24,7 @@ pub(super) async fn run_secret_action(
             password_file,
             insecure_password_file,
             value_stdin,
+            rebind,
         } => {
             crate::vault_crypto::validate_secret_name(&name)?;
 
@@ -53,13 +54,48 @@ pub(super) async fn run_secret_action(
                 return Err("Secret value cannot be empty".into());
             }
 
-            let encrypt_result = crate::vault_crypto::encrypt(key.bytes(), secret_value.as_bytes());
-            crate::vault_crypto::zero_string(&mut secret_value);
-            let (encrypted_value, nonce) = encrypt_result?;
-
             let is_new = !open_cli_store_read_only(global_db_path)?
                 .vault_entry_exists(&name)
                 .map_err(|e| format!("vault_entry_exists: {e}"))?;
+
+            if crate::vault_ops::is_lane_slot_secret_name(&name)
+                && secret_type == memcore::vault::SECRET_TYPE_API_KEY
+                && !is_new
+            {
+                let store_ro = open_cli_store_read_only(global_db_path)?;
+                if let Some(existing) = store_ro
+                    .vault_get_entry(&name)
+                    .map_err(|e| format!("vault_get_entry: {e}"))?
+                {
+                    if existing.secret_type == memcore::vault::SECRET_TYPE_API_KEY {
+                        let old_bytes = crate::vault_crypto::decrypt(
+                            key.bytes(),
+                            &existing.encrypted_value,
+                            &existing.nonce,
+                        )?;
+                        let old_value = String::from_utf8(old_bytes).map_err(|e| {
+                            format!("Existing slot '{name}' is not valid UTF-8: {e}")
+                        })?;
+                        let provider_kind =
+                            crate::status_ops::status_health::provider_kind_for_env_name(&name)
+                                .unwrap_or("unknown");
+                        if let Err(err) = crate::vault_ops::evaluate_lane_slot_overwrite(
+                            &old_value,
+                            &secret_value,
+                            provider_kind,
+                            key.bytes(),
+                            rebind,
+                        ) {
+                            crate::vault_crypto::zero_string(&mut secret_value);
+                            return Err(err.operator_message(&name).into());
+                        }
+                    }
+                }
+            }
+
+            let encrypt_result = crate::vault_crypto::encrypt(key.bytes(), secret_value.as_bytes());
+            crate::vault_crypto::zero_string(&mut secret_value);
+            let (encrypted_value, nonce) = encrypt_result?;
 
             let now = chrono::Utc::now().to_rfc3339();
             let entry = memcore::vault::VaultEntry {

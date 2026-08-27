@@ -25,6 +25,7 @@ async fn vault_rotation_materializes_provider_pool_under_logical_key() {
                 allowed_agents: None,
                 enable_rotation: false,
                 rotation_strategy: None,
+                rebind: false,
             }))
             .await
             .expect("vault_set rotation key should succeed");

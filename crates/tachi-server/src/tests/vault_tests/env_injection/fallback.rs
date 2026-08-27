@@ -50,6 +50,7 @@ async fn vault_lock_preserves_env_provider_fallback() {
             allowed_agents: None,
             enable_rotation: false,
             rotation_strategy: None,
+            rebind: false,
         }))
         .await
         .expect("vault_set should succeed");
@@ -115,6 +116,7 @@ async fn vault_set_of_unregistered_synthetic_key_never_materializes_into_provide
             allowed_agents: None,
             enable_rotation: false,
             rotation_strategy: None,
+            rebind: false,
         }))
         .await
         .expect("vault_set should succeed");

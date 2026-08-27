@@ -33,6 +33,7 @@ async fn vault_api_key_lease_does_not_decrypt_unrelated_provider_secrets() {
             allowed_agents: None,
             enable_rotation: false,
             rotation_strategy: None,
+            rebind: false,
         }))
         .await
         .expect("vault_set unrelated key should succeed");

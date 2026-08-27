@@ -1,4 +1,5 @@
 use crate::server_state::{CachedVaultKey, MemoryServer};
+use crate::status_ops::status_health::provider_kind_for_env_name;
 use crate::vault_crypto as crypto;
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use chrono::Utc;
@@ -28,6 +29,10 @@ use super::rotation::{
 use super::session::{
     clear_cached_vault_state, ensure_vault_unlock_allowed, is_vault_initialized,
     maybe_auto_lock_vault, read_unlock_password_fifo, record_vault_unlock_failure, with_vault_key,
+};
+use super::slot_rebind::{
+    copy_existing_account_message, evaluate_lane_slot_overwrite, fingerprint_secret,
+    is_lane_slot_secret_name, LaneSlotOverwrite,
 };
 
 mod health;
