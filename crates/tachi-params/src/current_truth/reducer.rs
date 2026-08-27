@@ -125,6 +125,43 @@ impl ReductionV1 {
                 .sum(),
         }
     }
+
+    /// Classify ONE assertion against this reduction — the per-assertion
+    /// view of the four-status law (#1696: the reducer emits
+    /// `current | superseded | conflicted | unknown`):
+    ///
+    /// * `Current` — the assertion is a current head of its group;
+    /// * `Superseded` — the assertion is a retained superseded head of a
+    ///   `Current` group (an older lineage member the newest head
+    ///   replaced — history, cited via `superseded_heads`);
+    /// * `Conflicted` — the assertion is retained evidence of a
+    ///   `Conflicted` group;
+    /// * `Unknown` — the group has no admitted reduction, or the assertion
+    ///   is not classified by the output (filtered at admission, or a
+    ///   non-head member of a conflicted group whose retained evidence is
+    ///   the lineage heads only).
+    pub fn assertion_status(&self, assertion: &AssertionV1) -> ReductionStatusV1 {
+        let Some(reduced) = self
+            .predicates
+            .get(&(assertion.subject.as_token(), assertion.predicate))
+        else {
+            return ReductionStatusV1::Unknown;
+        };
+        let is_head = reduced
+            .current_heads
+            .iter()
+            .any(|head| head.assertion_id == assertion.assertion_id);
+        let is_superseded = reduced
+            .superseded_heads
+            .iter()
+            .any(|head| head.assertion_id == assertion.assertion_id);
+        match (&reduced.status, is_head, is_superseded) {
+            (ReductionStatusV1::Current, true, _) => ReductionStatusV1::Current,
+            (ReductionStatusV1::Current, _, true) => ReductionStatusV1::Superseded,
+            (ReductionStatusV1::Conflicted, true, _) => ReductionStatusV1::Conflicted,
+            _ => ReductionStatusV1::Unknown,
+        }
+    }
 }
 
 /// Reduce a set of assertions. Pure and deterministic: the same set of
@@ -261,13 +298,22 @@ fn sort_heads(heads: &mut [EvidenceHeadV1]) {
 }
 
 /// Semantic value agreement for cross-assertion comparison: the legacy
-/// single-ref form and the one-element set form assert the same fact, so
-/// they agree instead of spuriously conflicting across lineages.
+/// single-ref form and the one-element set form assert the same fact, and
+/// set-valued forms compare as SETS (sorted, deduplicated) — the value
+/// contract already requires the canonical form at admission, so this is
+/// defense-in-depth: two semantically identical relation sets can never
+/// manufacture a conflict through element order.
 fn values_agree(left: &AssertionValueV1, right: &AssertionValueV1) -> bool {
     fn canonical(value: &AssertionValueV1) -> AssertionValueV1 {
         match value {
             AssertionValueV1::ObjectRef(object) => {
                 AssertionValueV1::ObjectRefs(vec![object.clone()])
+            }
+            AssertionValueV1::ObjectRefs(objects) => {
+                let mut sorted = objects.clone();
+                sorted.sort();
+                sorted.dedup();
+                AssertionValueV1::ObjectRefs(sorted)
             }
             other => other.clone(),
         }

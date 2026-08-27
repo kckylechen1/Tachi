@@ -121,11 +121,15 @@ impl PredicateV1 {
     }
 
     /// Whether `value` is an admissible value shape for this predicate
-    /// (#1696: "closed predicate-specific value"). Enforced at append AND
-    /// at decode — a predicate-invalid pairing is malformed typed data,
-    /// never admissible current truth. `Unit` on `pr_merged` and
-    /// `implementation_present` is the documented evidence-gap form.
+    /// (#1696: "closed predicate-specific value"). Enforced at append,
+    /// decode, AND the reducer's admission gate — a predicate-invalid
+    /// pairing is malformed typed data, never admissible current truth.
+    /// `Unit` on `pr_merged` and `implementation_present` is the documented
+    /// evidence-gap form. A `CommitSha` must be non-empty (an empty SHA is
+    /// no evidence — the same gap posture the mint path normalizes), and an
+    /// `ObjectRefs` set must be in canonical order (sorted, deduplicated).
     pub fn admits_value(self, value: &AssertionValueV1) -> bool {
+        let non_empty_sha = |sha: &String| !sha.is_empty();
         match self {
             PredicateV1::IssueOpen
             | PredicateV1::IssueClosed
@@ -135,20 +139,27 @@ impl PredicateV1 {
             | PredicateV1::OwnerAcceptancePresent => matches!(value, AssertionValueV1::Unit),
             PredicateV1::ImplementationPrLinked => {
                 // The typed relation names PULL REQUESTS only — an issue or
-                // commit target is a malformed relation, not a link.
+                // commit target is a malformed relation, not a link — and
+                // the set form is CANONICAL: sorted, deduplicated.
                 match value {
-                    AssertionValueV1::ObjectRefs(objects) => objects
-                        .iter()
-                        .all(|object| matches!(object, GithubObjectRefV1::PullRequest(_))),
+                    AssertionValueV1::ObjectRefs(objects) => {
+                        objects
+                            .iter()
+                            .all(|object| matches!(object, GithubObjectRefV1::PullRequest(_)))
+                            && objects.windows(2).all(|pair| pair[0] < pair[1])
+                    }
                     AssertionValueV1::ObjectRef(GithubObjectRefV1::PullRequest(_)) => true,
                     _ => false,
                 }
             }
-            PredicateV1::PrMerged | PredicateV1::ImplementationPresent => matches!(
-                value,
-                AssertionValueV1::CommitSha(_) | AssertionValueV1::Unit
-            ),
-            PredicateV1::MergeReverted => matches!(value, AssertionValueV1::CommitSha(_)),
+            PredicateV1::PrMerged | PredicateV1::ImplementationPresent => match value {
+                AssertionValueV1::CommitSha(sha) => non_empty_sha(sha),
+                AssertionValueV1::Unit => true,
+                _ => false,
+            },
+            PredicateV1::MergeReverted => {
+                matches!(value, AssertionValueV1::CommitSha(sha) if non_empty_sha(sha))
+            }
             PredicateV1::HandoffCurrent | PredicateV1::HandoffStale => {
                 matches!(value, AssertionValueV1::HandoffId(_))
             }

@@ -2911,3 +2911,188 @@ fn reducer_admission_gate_rejects_inadmissible_value_shapes() {
         "an issue target can never become an implementation PR"
     );
 }
+
+// ── Codex R2 round 9 accepted findings ─────────────────────────────────────
+
+/// R9-1: an empty commit SHA is no evidence — `CommitSha("")` is
+/// inadmissible at append, decode, and the reducer's admission gate, so it
+/// can never count as an evidenced merge (the same gap posture the mint
+/// path applies to missing SHAs).
+#[test]
+fn empty_sha_is_not_evidence() {
+    let base = AssertionV1 {
+        assertion_id: "r14-empty-sha".to_string(),
+        subject: pr(200),
+        predicate: PredicateV1::PrMerged,
+        value: AssertionValueV1::CommitSha(String::new()),
+        issuer: "github-refresh-v1".to_string(),
+        authority_class: AuthorityClassV1::GitHubTypedObject,
+        source_ref: SourceRefV1 {
+            source: "github-snapshot-adapter".to_string(),
+            revision: "r14".to_string(),
+        },
+        observed_at: "2026-08-26T10:00:00Z".to_string(),
+        effective_at: "2026-08-26T10:00:00Z".to_string(),
+        supersedes_assertion_id: None,
+        evidence_refs: vec![],
+        review_state: ReviewStateV1::Observed,
+        visibility: VisibilityClassV1::Public,
+    };
+    let store = open_store();
+    match store.append(&base) {
+        Err(CurrentTruthStoreError::PredicateValueNotAdmissible(_)) => {}
+        other => panic!("empty SHA must be rejected, got {other:?}"),
+    }
+    // And at the pure reducer: never admitted, never evidenced.
+    let reduction = reduce(&[base]);
+    assert_eq!(
+        reduction.get(&pr(200), PredicateV1::PrMerged).status,
+        ReductionStatusV1::Unknown
+    );
+    assert!(!reduction.implementation_present(&pr(200)));
+}
+
+/// R9-2: the set form of a typed relation is CANONICAL (sorted, deduped) —
+/// a non-canonical ordering is inadmissible and can never reach the value
+/// comparison; semantically identical canonical sets agree (no
+/// manufactured conflict).
+#[test]
+fn non_canonical_link_set_is_inadmissible() {
+    let base = AssertionV1 {
+        assertion_id: "r15-link".to_string(),
+        subject: issue(100),
+        predicate: PredicateV1::ImplementationPrLinked,
+        value: AssertionValueV1::ObjectRefs(vec![
+            GithubObjectRefV1::PullRequest(200),
+            GithubObjectRefV1::PullRequest(201),
+        ]),
+        issuer: "github-refresh-v1".to_string(),
+        authority_class: AuthorityClassV1::GitHubTypedObject,
+        source_ref: SourceRefV1 {
+            source: "github-snapshot-adapter".to_string(),
+            revision: "r15".to_string(),
+        },
+        observed_at: "2026-08-26T10:00:00Z".to_string(),
+        effective_at: "2026-08-26T10:00:00Z".to_string(),
+        supersedes_assertion_id: None,
+        evidence_refs: vec![],
+        review_state: ReviewStateV1::Observed,
+        visibility: VisibilityClassV1::Public,
+    };
+    let store = open_store();
+    store
+        .append(&base)
+        .expect("the canonical sorted set is admissible");
+
+    let mut unsorted = base.clone();
+    unsorted.assertion_id = "r15-link-unsorted".to_string();
+    unsorted.source_ref.revision = "r15-b".to_string();
+    unsorted.value = AssertionValueV1::ObjectRefs(vec![
+        GithubObjectRefV1::PullRequest(201),
+        GithubObjectRefV1::PullRequest(200),
+    ]);
+    match store.append(&unsorted) {
+        Err(CurrentTruthStoreError::PredicateValueNotAdmissible(_)) => {}
+        other => panic!("non-canonical set order must be rejected, got {other:?}"),
+    }
+    let mut duplicated = base.clone();
+    duplicated.assertion_id = "r15-link-dup".to_string();
+    duplicated.source_ref.revision = "r15-c".to_string();
+    duplicated.value = AssertionValueV1::ObjectRefs(vec![
+        GithubObjectRefV1::PullRequest(200),
+        GithubObjectRefV1::PullRequest(200),
+    ]);
+    match store.append(&duplicated) {
+        Err(CurrentTruthStoreError::PredicateValueNotAdmissible(_)) => {}
+        other => panic!("duplicated set member must be rejected, got {other:?}"),
+    }
+
+    // Semantically identical canonical sets from two lineages AGREE.
+    let mut reviewer_copy = base.clone();
+    reviewer_copy.assertion_id = "r15-link-reviewer".to_string();
+    reviewer_copy.issuer = "reviewer-1".to_string();
+    reviewer_copy.authority_class = AuthorityClassV1::ReviewedDisposition;
+    reviewer_copy.source_ref.source = "reviewed-mapping".to_string();
+    reviewer_copy.source_ref.revision = "review-r15".to_string();
+    let reduction = reduce(&[base, reviewer_copy]);
+    assert_eq!(
+        reduction
+            .get(&issue(100), PredicateV1::ImplementationPrLinked)
+            .status,
+        ReductionStatusV1::Current,
+        "identical canonical sets agree across lineages"
+    );
+}
+
+/// R9-3: the four-status law is reachable per-assertion — a superseded
+/// lineage member classifies `Superseded` through
+/// `ReductionV1::assertion_status`, the current head `Current`, retained
+/// conflict evidence `Conflicted`, and anything unclassified `Unknown`.
+#[test]
+fn assertion_status_exposes_the_full_four_status_law() {
+    let store = open_store();
+    let v1_minted = mint_assertions(&state_v1());
+    let v2_minted = mint_assertions(&state_v2());
+    store.append_all(&v1_minted).expect("append v1");
+    store.append_all(&v2_minted).expect("append v2");
+    let reduction = reduce(&store.assertions().unwrap());
+
+    let v1_open = v1_minted
+        .iter()
+        .find(|a| a.predicate == PredicateV1::IssueOpen && a.subject == issue(100))
+        .unwrap();
+    let v2_open = v2_minted
+        .iter()
+        .find(|a| a.predicate == PredicateV1::IssueOpen && a.subject == issue(100))
+        .unwrap();
+    assert_eq!(
+        reduction.assertion_status(v1_open),
+        ReductionStatusV1::Superseded,
+        "the older open assertion is superseded by the newer revision"
+    );
+    assert_eq!(
+        reduction.assertion_status(v2_open),
+        ReductionStatusV1::Current
+    );
+
+    // Retained evidence of a conflicted group classifies Conflicted.
+    let conflicted_a = AssertionV1 {
+        assertion_id: "r15-merged-a".to_string(),
+        subject: pr(300),
+        predicate: PredicateV1::PrMerged,
+        value: AssertionValueV1::CommitSha("merge111".to_string()),
+        issuer: "adapter-a".to_string(),
+        authority_class: AuthorityClassV1::GitHubTypedObject,
+        source_ref: SourceRefV1 {
+            source: "adapter-a".to_string(),
+            revision: "rev-r15".to_string(),
+        },
+        observed_at: "2026-08-26T10:00:00Z".to_string(),
+        effective_at: "2026-08-26T10:00:00Z".to_string(),
+        supersedes_assertion_id: None,
+        evidence_refs: vec![],
+        review_state: ReviewStateV1::Observed,
+        visibility: VisibilityClassV1::Public,
+    };
+    let mut conflicted_b = conflicted_a.clone();
+    conflicted_b.assertion_id = "r15-merged-b".to_string();
+    conflicted_b.issuer = "adapter-b".to_string();
+    conflicted_b.source_ref.source = "adapter-b".to_string();
+    conflicted_b.value = AssertionValueV1::CommitSha("merge222".to_string());
+    let reduction = reduce(&[conflicted_a.clone(), conflicted_b]);
+    assert_eq!(
+        reduction.assertion_status(&conflicted_a),
+        ReductionStatusV1::Conflicted
+    );
+
+    // An assertion with no admitted group classifies Unknown.
+    let mut stranger = conflicted_a.clone();
+    stranger.assertion_id = "r15-stranger".to_string();
+    stranger.subject = issue(999);
+    stranger.predicate = PredicateV1::IssueReopened;
+    stranger.value = AssertionValueV1::Unit;
+    assert_eq!(
+        reduction.assertion_status(&stranger),
+        ReductionStatusV1::Unknown
+    );
+}
