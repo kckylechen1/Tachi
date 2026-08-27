@@ -1071,13 +1071,21 @@ const EXEMPTIONS: &[Exemption<'static>] = &[
         basis: ExemptionBasis::DeclaredByReviewerNotProven {
             signed_by: "Codex Sol, body read 2026-08-27",
         },
-        sites: &[Site {
-            symbol: "abandoned_dispatch_with_a_failed_fence_stays_exclusively_fail_closed",
-            trigger: "FAIL_ABANDONED_DISPATCH_FENCE",
-            ddl: "efee4311eb6310e3",
-            occurrences: 1,
-        }],
-        reason: "the test opens a second direct rusqlite::Connection on the file-backed global DB, installs the trigger there, and then drops the admitted guard so the real quarantine update fails; body read 2026-08-27. The file also contains MemoryStore doorways, so this is declared rather than assigned an inapplicable machine proof.",
+        sites: &[
+            Site {
+                symbol: "abandoned_dispatch_with_a_failed_fence_stays_exclusively_fail_closed",
+                trigger: "FAIL_ABANDONED_DISPATCH_FENCE",
+                ddl: "efee4311eb6310e3",
+                occurrences: 1,
+            },
+            Site {
+                symbol: "late_publication_failure_rolls_back_every_intermediate_row",
+                trigger: "FAIL_PRIVATE_RESERVATION",
+                ddl: "701012d43ab1f566",
+                occurrences: 1,
+            },
+        ],
+        reason: "the tests open a second direct rusqlite::Connection on a file-backed DB and install failure triggers there, so the real quarantine or atomic publication transaction fails; bodies read 2026-08-27. The file also contains MemoryStore doorways, so these sites are declared rather than assigned an inapplicable machine proof.",
     },
     Exemption {
         path: "crates/tachi-server/src/exec_env_postflight/tests.rs",
