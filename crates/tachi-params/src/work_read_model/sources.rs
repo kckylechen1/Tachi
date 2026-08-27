@@ -332,12 +332,30 @@ pub enum SnapshotError {
         observed_at: String,
         revision: String,
     },
+    #[error("snapshot observed_at `{observed_at}` for {kind} is not RFC 3339")]
+    InvalidObservedAt { kind: String, observed_at: String },
+}
+
+/// `observed_at` must be a real RFC 3339 timestamp: the shared
+/// `ordering_instant` maps malformed text to the MINIMUM instant, so an
+/// unvalidated malformed snapshot would sort before everything and be
+/// `StaleIgnored`, silently preserving stale truth instead of failing
+/// closed (codex R2 round-10 finding 2).
+fn validate_observed_at(kind: &SourceKind, observed_at: &str) -> Result<(), SnapshotError> {
+    if chrono::DateTime::parse_from_rfc3339(observed_at).is_err() {
+        return Err(SnapshotError::InvalidObservedAt {
+            kind: kind.as_token(),
+            observed_at: observed_at.to_string(),
+        });
+    }
+    Ok(())
 }
 
 impl SourceSnapshot {
     /// Mint a validated snapshot. `revision` must be non-empty; the facts
     /// variant must match the declared kind; a CurrentTruth snapshot's
-    /// stamped repo must equal the view's repo.
+    /// stamped repo must equal the view's repo; `observed_at` must parse
+    /// as RFC 3339.
     pub fn new(
         kind: SourceKind,
         revision: impl Into<String>,
@@ -348,6 +366,8 @@ impl SourceSnapshot {
         if revision.is_empty() {
             return Err(SnapshotError::EmptyRevision(kind.as_token()));
         }
+        let observed_at = observed_at.into();
+        validate_observed_at(&kind, &observed_at)?;
         let actual = facts.kind();
         match (&kind, &actual) {
             (
@@ -373,7 +393,7 @@ impl SourceSnapshot {
             stamp: SourceStamp {
                 kind,
                 revision,
-                observed_at: observed_at.into(),
+                observed_at,
             },
             facts,
         })
@@ -389,6 +409,7 @@ impl SourceSnapshot {
         if self.stamp.revision.is_empty() {
             return Err(SnapshotError::EmptyRevision(self.stamp.kind.as_token()));
         }
+        validate_observed_at(&self.stamp.kind, &self.stamp.observed_at)?;
         let actual = self.facts.kind();
         match (&self.stamp.kind, &actual) {
             (

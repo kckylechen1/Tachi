@@ -1631,7 +1631,15 @@ fn transition_debt_for(
                 {
                     DebtStateV1::Cleared {
                         by: DebtClearingV1::LaterAuthoritativeIssueClosed,
-                        evidence_heads: closed_heads.into_iter().map(|(_, head)| head).collect(),
+                        // Only STRICTLY-causal close heads are cited
+                        // (codex R2 round-10 finding 1): a pre-reopen
+                        // close from another lineage is history, never
+                        // resolution evidence.
+                        evidence_heads: closed_heads
+                            .into_iter()
+                            .filter(|(key, _)| *key > reopen_key)
+                            .map(|(_, head)| head)
+                            .collect(),
                     }
                 }
                 _ => DebtStateV1::Outstanding {

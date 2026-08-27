@@ -1527,6 +1527,132 @@ fn ambiguous_active_dispatch_item_is_collision_blocked() {
     assert!(collision.evidence_refs.contains(&"c-b".to_string()));
 }
 
+/// Hardening (codex R2 round-10 finding 1): a cleared reopen debt cites
+/// only STRICTLY-causal close heads — a pre-reopen close from another
+/// lineage is history, never resolution evidence.
+#[test]
+fn cleared_reopen_debt_cites_only_post_reopen_closes() {
+    let closed_early = repo_state(
+        "r-early2",
+        "2026-08-26T12:00:00Z",
+        snap_issue(
+            100,
+            SnapshotIssueStateV1::Closed,
+            "2026-08-26T12:00:00Z",
+            "rev-early2-iss",
+        ),
+        vec![snap_pr(
+            200,
+            SnapshotPrStateV1::Merged,
+            Some("mergeabc123"),
+            "2026-08-26T12:00:00Z",
+            "rev-early2-pr",
+            vec![100],
+        )],
+        vec![],
+    );
+    // A close from ANOTHER lineage at the pre-reopen time: it stays a
+    // live head (its own lineage) but is not causal.
+    let pre_reopen_close = AssertionV1 {
+        assertion_id: "events-close-early".to_string(),
+        subject: issue_subject(100),
+        predicate: PredicateV1::IssueClosed,
+        value: AssertionValueV1::Unit,
+        issuer: "github-events-adapter".to_string(),
+        authority_class: AuthorityClassV1::GitHubTypedObject,
+        source_ref: SourceRefV1 {
+            source: "github-events".to_string(),
+            revision: "rev-early2-iss".to_string(),
+        },
+        observed_at: "2026-08-26T12:00:00Z".to_string(),
+        effective_at: "2026-08-26T12:00:00Z".to_string(),
+        supersedes_assertion_id: None,
+        evidence_refs: vec!["events-api-5".to_string()],
+        review_state: ReviewStateV1::Observed,
+        visibility: VisibilityClassV1::Public,
+    };
+    let view = ct_view(
+        &[
+            closed_early,
+            state_v4_revert_reopen(),
+            state_v7_issue_closed(),
+        ],
+        &[pre_reopen_close],
+        true,
+    );
+    let mut index = WorkProjectionIndex::new();
+    index.apply_ok(ct_snapshot(view, "ct-1", READ_AT));
+    let set = project(&index, &options());
+    let model = find(&set, ISSUE_TOKEN);
+    match &github_section(model).transition_debt.reopen {
+        DebtStateV1::Cleared { evidence_heads, .. } => {
+            assert!(
+                !evidence_heads.is_empty(),
+                "the causal post-reopen close is cited"
+            );
+            assert!(
+                evidence_heads
+                    .iter()
+                    .all(|head| head.observed_at.as_str() > "2026-08-26T13:30:00Z"),
+                "no pre-reopen close head is cited as resolution evidence: {evidence_heads:?}"
+            );
+        }
+        other => panic!("reopen debt should be cleared, got {other:?}"),
+    }
+}
+
+/// Hardening (codex R2 round-10 finding 2): a malformed `observed_at`
+/// fails closed at apply — it can never sort as oldest and silently
+/// preserve stale truth as `StaleIgnored`.
+#[test]
+fn malformed_observed_at_fails_closed() {
+    // Rejected at the constructor.
+    assert!(matches!(
+        SourceSnapshot::new(
+            SourceKind::WorkClaims,
+            "claims-1",
+            "not-a-timestamp",
+            SourceFacts::WorkClaims(vec![]),
+        ),
+        Err(SnapshotError::InvalidObservedAt { .. })
+    ));
+    // Rejected at apply through the public struct, leaving the index
+    // unchanged (the older snapshot's projection is preserved BECAUSE the
+    // newer one was rejected as malformed, not silently ignored).
+    let valid = claims_snapshot(
+        vec![claim_fact(
+            "c1",
+            Some(&format!("{REPO}#100")),
+            Some("d1"),
+            ClaimStateV1::Active,
+            None,
+            VisibilityClassV1::Public,
+        )],
+        "claims-1",
+        READ_AT,
+    );
+    let malformed = SourceSnapshot {
+        stamp: SourceStamp {
+            kind: SourceKind::WorkClaims,
+            revision: "claims-2".to_string(),
+            observed_at: "garbage".to_string(),
+        },
+        facts: SourceFacts::WorkClaims(vec![]),
+    };
+    let mut index = WorkProjectionIndex::new();
+    index.apply_ok(valid);
+    let err = index
+        .apply(malformed)
+        .expect_err("malformed stamp rejected");
+    assert!(matches!(err, SnapshotError::InvalidObservedAt { .. }));
+    let set = project(&index, &options().with_sees_private(true));
+    let model = find(&set, ISSUE_TOKEN);
+    assert!(
+        matches!(&model.claim, SectionState::Available(section) if !section.claims.is_empty()),
+        "the retained projection still reflects the valid snapshot"
+    );
+}
+
 /// Hardening (codex R2 round-5 finding 4): a snapshot built through the
 /// public struct with a mismatched stamp/facts pairing is rejected at
 /// `apply` — the constructor is not the only fail-closed gate.
