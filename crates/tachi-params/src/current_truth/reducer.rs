@@ -147,8 +147,7 @@ pub fn reduce(assertions: &[AssertionV1]) -> ReductionV1 {
     type LineageMap<'a> = BTreeMap<String, Vec<&'a AssertionV1>>;
     let mut grouped: BTreeMap<(String, PredicateV1), (SubjectRefV1, LineageMap<'_>)> =
         BTreeMap::new();
-    let admitted: Vec<&AssertionV1> =
-        admitted.into_iter().copied().collect();
+    let admitted: Vec<&AssertionV1> = admitted.into_iter().copied().collect();
     for assertion in &admitted {
         grouped
             .entry((assertion.subject.as_token(), assertion.predicate))
