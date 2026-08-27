@@ -1072,10 +1072,10 @@ pub(super) const BASE_SCHEMA_CHUNKS: &[(SchemaScope, &str)] = &[
         -- single source of truth for a provisioned worktree/env: worktree
         -- markers (`.tachi-worktree.json`) and the global `worktrees.json`
         -- become read-only projections/backstops for offline tools (the
-        -- sweep), never a second owner. `state` is the lease lifecycle:
-        -- `active` may be exclusively claimed as `dispatching` or `removing`;
-        -- successful removal and ordinary terminal reclaim end at `reclaimed`.
-        -- `dispatch_id` links a lease to the dispatch that owns it.
+        -- sweep), never a second owner. `state` is the S1 lifecycle
+        -- (`active` -> `reclaimed`); the reclaim transition is a transactional
+        -- state flip written by exactly one reclaim function. `dispatch_id`
+        -- links a lease to the dispatch that owns it.
         --
         -- `env_class` (#894 S2c) is the provisioning policy class — a closed
         -- vocabulary of `edit-only` (default) | `build-ticketed` |
