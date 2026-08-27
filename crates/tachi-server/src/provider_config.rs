@@ -103,10 +103,38 @@ fn vault_api_key_load_from_keychain(global_db_path: &Path) -> tachi_llm::Durable
                 };
             }
         };
+    let pools = group_api_key_values_by_configured_rotations(scan.values, &rotation_prefixes);
+    let mut listed_drops = scan.dropped;
+    promote_configured_rotation_prefix_drops(&mut listed_drops, &pools, &rotation_prefixes);
     tachi_llm::DurableVaultLoad {
-        pools: group_api_key_values_by_configured_rotations(scan.values, &rotation_prefixes),
-        listed_drops: scan.dropped,
+        pools,
+        listed_drops,
         availability: VaultSourceAvailability::Readable,
+    }
+}
+
+/// Prefix aliases resolve `VOYAGE_API_KEY`, not `VOYAGE_API_KEY_1`. Copy a
+/// member drop onto a configured rotation prefix only when that prefix has
+/// no admitted pool — unconfigured member names must not invent prefix
+/// integrity.
+fn promote_configured_rotation_prefix_drops(
+    dropped: &mut HashMap<String, AliasSkipClass>,
+    pools: &HashMap<String, Vec<ProviderSecret>>,
+    rotation_prefixes: &HashSet<String>,
+) {
+    let extra: Vec<(String, AliasSkipClass)> = dropped
+        .iter()
+        .filter_map(|(name, class)| {
+            let (prefix, _) = parse_rotation_member_name(name)?;
+            if rotation_prefixes.contains(prefix) && !pools.contains_key(prefix) {
+                Some((prefix.to_string(), *class))
+            } else {
+                None
+            }
+        })
+        .collect();
+    for (prefix, class) in extra {
+        dropped.entry(prefix).or_insert(class);
     }
 }
 
@@ -245,8 +273,12 @@ fn format_provider_materialization_error(err: String) -> String {
     let unresolved_alias = err.starts_with("Config key ")
         && err.contains("references a Vault alias")
         && !err.contains("not a valid Vault secret name");
-    if (err.starts_with("provider alias ") && err.contains(" could not be resolved from secret "))
-        || unresolved_alias
+    let missing_or_unreadable = err.contains("could not be read")
+        || err.contains("absent from a readable Vault")
+        || err.contains("could not be resolved from secret");
+    if ((err.starts_with("provider alias ") && err.contains(" could not be resolved from secret "))
+        || unresolved_alias)
+        && missing_or_unreadable
     {
         format!(
             "{err} The alias came from config.env or process env. \
@@ -1401,6 +1433,19 @@ mod tests {
         assert!(
             !err.contains("vault_unlock") && !err.contains("vault_set"),
             "malformed alias names are config typos: {err}"
+        );
+    }
+
+    #[test]
+    fn listed_integrity_error_does_not_advise_vault_unlock_or_set() {
+        let err = format_provider_materialization_error(
+            "Config key 'SILICONFLOW_API_KEY' references a Vault alias whose listed secret is unusable (auth_failed)."
+                .to_string(),
+        );
+        assert!(err.contains("unusable (auth_failed)"), "{err}");
+        assert!(
+            !err.contains("vault_unlock") && !err.contains("vault_set"),
+            "listed integrity is not a missing/locked secret: {err}"
         );
     }
 

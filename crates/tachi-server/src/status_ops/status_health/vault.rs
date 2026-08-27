@@ -33,9 +33,6 @@ fn record_keychain_listed_drop(
     class: AliasSkipClass,
 ) {
     dropped.entry(name.to_string()).or_insert(class);
-    if let Some((prefix, _)) = crate::provider_config::parse_rotation_member_name(name) {
-        dropped.entry(prefix.to_string()).or_insert(class);
-    }
 }
 
 fn empty_keychain_scan() -> KeychainApiKeyScan {
@@ -102,6 +99,11 @@ pub(crate) fn load_keychain_vault_api_key_scan(
             || crate::provider_config::parse_rotation_member_name(&entry.name)
                 .is_some_and(|(prefix, _)| prefix.ends_with("_API_KEY"));
         if !is_provider_key {
+            record_keychain_listed_drop(
+                &mut dropped,
+                &entry.name,
+                AliasSkipClass::ListedNotModelProvider,
+            );
             continue;
         }
         if entry.secret_type != "api_key" {
