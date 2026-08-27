@@ -130,11 +130,14 @@ fn probe_worktree_holder_at_db(db_path: &Path, worktree: &Path) -> DbHolderEvide
             return DbHolderEvidence::Unverifiable("worktree path is not valid UTF-8".to_string())
         }
     };
-    let lease = match memcore::find_active_exec_env_by_path(store.connection(), path) {
+    let lease = match memcore::find_live_exec_env_by_path(store.connection(), path) {
         Ok(Some(lease)) => lease,
         Ok(None) => return DbHolderEvidence::NotApplicable,
         Err(err) => return DbHolderEvidence::Unavailable(format!("find ExecEnv: {err}")),
     };
+    if lease.state == memcore::ExecEnvState::Dispatching {
+        return DbHolderEvidence::Held;
+    }
     match memcore::holder_evidence(store.connection(), &lease.env_id) {
         Ok(memcore::HolderEvidence::Clear) => DbHolderEvidence::Clear,
         Ok(memcore::HolderEvidence::NotApplicable) => DbHolderEvidence::NotApplicable,
@@ -253,6 +256,22 @@ mod tests {
         assert_eq!(
             probe_worktree_holder_from_home(&held_home, &worktree),
             DbHolderEvidence::Held
+        );
+
+        let dispatching_home = root.join("dispatching");
+        let dispatching_store = store(&dispatching_home);
+        insert_env(&dispatching_store, &worktree);
+        dispatching_store
+            .connection()
+            .execute(
+                "UPDATE exec_envs SET state='dispatching' WHERE env_id='env-1'",
+                [],
+            )
+            .unwrap();
+        assert_eq!(
+            probe_worktree_holder_from_home(&dispatching_home, &worktree),
+            DbHolderEvidence::Held,
+            "a dispatching lease must block destructive cleanup even before holder evidence exists"
         );
 
         let unverifiable_home = root.join("unverifiable");

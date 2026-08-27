@@ -310,6 +310,24 @@ pub fn find_active_exec_env_by_path(
     Ok(lease)
 }
 
+/// Fetch the newest unreclaimed lease for a workspace path. Destructive
+/// consumers use this broader lookup so the fail-closed `dispatching` state
+/// cannot disappear behind an active-only query.
+pub fn find_live_exec_env_by_path(
+    conn: &Connection,
+    path: &str,
+) -> Result<Option<ExecEnvLease>, MemoryError> {
+    let sql = format!(
+        "SELECT {SELECT_COLUMNS} FROM exec_envs \
+         WHERE path = ?1 AND state IN ('active', 'dispatching') \
+         ORDER BY created_at DESC LIMIT 1"
+    );
+    let lease = conn
+        .query_row(&sql, params![path], row_to_lease)
+        .optional()?;
+    Ok(lease)
+}
+
 /// List leases, optionally filtered by state. Newest first. Used by status
 /// surfaces and the sweep backstop (read-only).
 pub fn list_exec_envs(
@@ -588,6 +606,30 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(active.env_id, "env-5");
+    }
+
+    #[test]
+    fn find_live_by_path_includes_dispatching_and_ignores_reclaimed_rows() {
+        let conn = open_conn();
+        insert_exec_env(&conn, &new_lease("env-live", "/wt/live")).unwrap();
+        conn.execute(
+            "UPDATE exec_envs SET state='dispatching' WHERE env_id='env-live'",
+            [],
+        )
+        .unwrap();
+        let live = find_live_exec_env_by_path(&conn, "/wt/live")
+            .unwrap()
+            .expect("dispatching lease remains visible to destructive consumers");
+        assert_eq!(live.state, ExecEnvState::Dispatching);
+
+        conn.execute(
+            "UPDATE exec_envs SET state='reclaimed' WHERE env_id='env-live'",
+            [],
+        )
+        .unwrap();
+        assert!(find_live_exec_env_by_path(&conn, "/wt/live")
+            .unwrap()
+            .is_none());
     }
 
     #[test]

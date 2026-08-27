@@ -144,8 +144,9 @@ pub use db::eval_replay::{
 };
 #[cfg(feature = "admin")]
 pub use db::exec_env::{
-    find_active_exec_env_by_path, get_exec_env, insert_exec_env, list_exec_envs, reclaim_exec_env,
-    EnvClass, ExecEnvLease, ExecEnvSelector, ExecEnvState, NewExecEnvLease, ReclaimOutcome,
+    find_active_exec_env_by_path, find_live_exec_env_by_path, get_exec_env, insert_exec_env,
+    list_exec_envs, reclaim_exec_env, EnvClass, ExecEnvLease, ExecEnvSelector, ExecEnvState,
+    NewExecEnvLease, ReclaimOutcome,
 };
 #[cfg(feature = "admin")]
 pub use db::exec_env_resources::{
