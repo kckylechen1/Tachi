@@ -540,6 +540,10 @@ pub struct WorkProjectionHealthV1 {
     /// silently; per-issue attribution is the #1696 integration-slice
     /// follow-up).
     pub orphaned_revert_debt_count: usize,
+    /// Verification facts that can anchor to no work item at all (no
+    /// parseable issue ref and no dispatch id joining a claim) — counted
+    /// so they cannot vanish silently (codex R2 round-7 finding 4).
+    pub unbound_verification_count: usize,
     pub conflicted_count: usize,
     pub blocked_count: usize,
     pub refresh_debt_count: usize,

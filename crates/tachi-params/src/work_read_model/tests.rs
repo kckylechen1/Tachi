@@ -726,6 +726,18 @@ fn plain_issue_open_refresh_does_not_clear_reopen_debt() {
         format!("{REPO}:present+transition_debt"),
         "the status token must qualify present with the outstanding debt"
     );
+    assert!(
+        has_blocker(
+            reopen_model,
+            super::types::BlockerKindV1::OutstandingTransitionDebt
+        ),
+        "the REOPEN axis carries the debt blocker, not only revert (codex R2 round-7 finding 6)"
+    );
+    assert!(has_action(
+        reopen_model,
+        NextActionKindV1::RepairRevertOrReopen
+    ));
+    assert!(!reopen_model.success_shaped);
 }
 
 /// Ruling discriminator 3: reopen -> causally later authoritative
@@ -768,11 +780,23 @@ fn causally_later_issue_closed_clears_reopen_debt_without_acceptance() {
     assert!(!has_action(model, NextActionKindV1::AuthorizedGithubClose));
 
     // The revert debt on PR 200 is STILL outstanding — the close cleared
-    // only the reopen axis.
+    // only the reopen axis (codex R2 round-7 finding 7: the residual
+    // surfaces are asserted, not just the enum).
     assert!(matches!(
         &section.transition_debt.revert,
         DebtStateV1::Outstanding { .. }
     ));
+    assert!(has_blocker(
+        model,
+        super::types::BlockerKindV1::OutstandingTransitionDebt
+    ));
+    assert!(has_action(model, NextActionKindV1::RepairRevertOrReopen));
+    assert!(!model.success_shaped);
+    assert_eq!(super::views::board_view(model).column, "reverted");
+    assert_eq!(
+        super::views::status_view(model).github,
+        format!("{REPO}:reverted+transition_debt")
+    );
 }
 
 /// Ruling discriminator 4: revert -> causally later explicitly linked
@@ -810,6 +834,12 @@ fn post_revert_repair_pr_clears_revert_debt() {
     assert!(!has_blocker(
         model,
         super::types::BlockerKindV1::OutstandingTransitionDebt
+    ));
+    // Axis independence (codex R2 round-7 finding 7): this timeline has
+    // no reopen fact at all.
+    assert!(matches!(
+        github_section(model).transition_debt.reopen,
+        DebtStateV1::None
     ));
 }
 
@@ -856,6 +886,19 @@ fn owner_no_repair_required_disposition_clears_revert_debt() {
         }
         other => panic!("revert debt should be cleared by disposition, got {other:?}"),
     }
+    // Axis independence (codex R2 round-7 finding 7): the disposition
+    // cleared ONLY the revert axis — the reopen debt stays outstanding
+    // with its blocker and repair action.
+    assert!(matches!(
+        &github_section(model).transition_debt.reopen,
+        DebtStateV1::Outstanding { .. }
+    ));
+    assert!(has_blocker(
+        model,
+        super::types::BlockerKindV1::OutstandingTransitionDebt
+    ));
+    assert!(has_action(model, NextActionKindV1::RepairRevertOrReopen));
+    assert!(!model.success_shaped);
 }
 
 /// Hardening: a STALE (pre-revert) owner disposition cannot clear a newer
@@ -2098,6 +2141,125 @@ fn equal_key_repair_merge_does_not_clear_revert_debt() {
     );
 }
 
+/// Hardening (codex R2 round-7 finding 3): revision fingerprints are
+/// collision-free — a revision string containing the `@`/`;` delimiters
+/// can never impersonate a different stamp set.
+#[test]
+fn revision_fingerprint_has_no_delimiter_collisions() {
+    let run = || run_fact("d1", true, true, Some(0));
+    // Stamp set A: one run-receipts stamp whose REVISION embeds the
+    // delimiter text that would forge set B under naive `;`-joining.
+    let mut a = WorkProjectionIndex::new();
+    a.apply_ok(runs_snapshot(vec![run()], "s;work_claims@r", READ_AT));
+    // Stamp set B: two real stamps whose joined tokens are
+    // textually identical to set A's single token.
+    let mut b = WorkProjectionIndex::new();
+    b.apply_ok(runs_snapshot(vec![run()], "s", READ_AT));
+    b.apply_ok(claims_snapshot(
+        vec![claim_fact(
+            "c1",
+            Some(&format!("{REPO}#100")),
+            Some("d1"),
+            ClaimStateV1::Released,
+            None,
+            VisibilityClassV1::Public,
+        )],
+        "r",
+        READ_AT,
+    ));
+    let a_set = project(&a, &options().with_sees_private(true));
+    let b_set = project(&b, &options().with_sees_private(true));
+    let a_model = find(&a_set, "dispatch:d1");
+    let b_model = find(&b_set, "dispatch:d1");
+    assert_ne!(
+        a_model.revision, b_model.revision,
+        "delimiter-embedded revisions must not collide with separate stamp sets"
+    );
+}
+
+/// Hardening (codex R2 round-7 finding 4): a verification fact that can
+/// anchor to nothing is counted content-free — it never vanishes
+/// silently.
+#[test]
+fn unbound_verification_fact_is_counted_not_dropped() {
+    let mut index = WorkProjectionIndex::new();
+    index.apply_ok(verification_snapshot(
+        vec![VerificationFactV1 {
+            dispatch_id: None,
+            issue_ref: None,
+            verification_present: true,
+            diff_present: false,
+            evidence_refs: vec![],
+            visibility: VisibilityClassV1::Public,
+        }],
+        "verif-orphan",
+        READ_AT,
+    ));
+    let set = project(&index, &options());
+    assert_eq!(
+        set.health.unbound_verification_count, 1,
+        "an anchorless verification fact stays visible in health"
+    );
+}
+
+/// Hardening (codex R2 round-7 finding 5): outstanding transition debt
+/// outranks staleness on the board — a stale posture never hides the
+/// debt behind a generic `stale` column.
+#[test]
+fn transition_debt_outranks_staleness_on_the_board() {
+    let reopened_unimplemented = repo_state(
+        "r-stale-debt",
+        "2026-08-26T13:00:00Z",
+        snap_issue(
+            100,
+            SnapshotIssueStateV1::Open,
+            "2026-08-26T13:00:00Z",
+            "rev-stale-debt-iss",
+        ),
+        vec![],
+        vec![observation(
+            SnapshotObservationKindV1::IssueReopened { number: 100 },
+            "2026-08-26T13:30:00Z",
+            "rev-stale-debt-reopen",
+        )],
+    );
+    let store = CurrentTruthSqliteStore::open_in_memory().expect("open store");
+    store
+        .append_all(&mint_assertions(&reopened_unimplemented))
+        .expect("append state");
+    store
+        .record_refresh(
+            REPO,
+            false,
+            Some("r-stale-debt"),
+            None,
+            "2026-08-27T11:00:00Z",
+            Some("github unavailable"),
+        )
+        .expect("record stale posture");
+    let view = consumer::read_view(&store, REPO, CallerAuthorizationV1 { sees_private: true })
+        .expect("consumer view");
+
+    let mut index = WorkProjectionIndex::new();
+    index.apply_ok(ct_snapshot(view, "ct-1", READ_AT));
+    let set = project(&index, &options());
+    let model = find(&set, ISSUE_TOKEN);
+    let section = github_section(model);
+    assert!(
+        !section.posture_fresh,
+        "fixture precondition: stale posture"
+    );
+    assert!(matches!(
+        &section.transition_debt.reopen,
+        DebtStateV1::Outstanding { .. }
+    ));
+    assert_eq!(
+        super::views::board_view(model).column,
+        "transition_debt",
+        "debt outranks staleness; the status token carries both markers' information"
+    );
+}
+
 /// Ruling discriminator 6 + #1693 discrimination 10: full rebuild equals
 /// incremental for every R6-2 case, in ANY arrival order — with each
 /// lifecycle stage arriving as its OWN CurrentTruth snapshot (successive
@@ -3318,12 +3480,17 @@ fn revision_fingerprint_covers_contributing_sources_only() {
     sorted.sort();
     sorted.dedup();
     assert_eq!(tokens, sorted);
-    assert!(model
-        .revision
-        .contains("current_truth[kckylechen1/tachi]@ct-1"));
-    assert!(model.revision.contains("work_claims@claims-1"));
-    // A non-contributing source (no snapshot at all) contributes no stamp.
-    assert!(!model.revision.contains("exec_envs@"));
+    // The revision fingerprint is an opaque collision-free hash of the
+    // stamps; stamp membership is asserted structurally above, and the
+    // fingerprint must DIFFER when the stamp set differs.
+    let mut other = full_snapshot_set();
+    other.push(env_snapshot(vec![], "envs-9", "2026-08-27T13:00:00Z"));
+    let other_set = project(&rebuild(other).expect("rebuild"), &options());
+    let other_model = find(&other_set, ISSUE_TOKEN);
+    assert_ne!(
+        model.revision, other_model.revision,
+        "adding a contributing stamp must change the fingerprint"
+    );
 }
 
 /// Env-only join: an env bound by claim id joins the claim's work item and
@@ -3450,13 +3617,19 @@ fn empty_snapshot_is_available_knowledge_not_unavailability() {
         model.claim.is_available(),
         "an empty claims snapshot asserts 'no claims bind', it is not unavailability"
     );
-    assert!(model.revision.contains("work_claims@claims-empty"));
+    assert!(model
+        .source_stamps
+        .iter()
+        .any(|stamp| stamp.as_token() == "work_claims@claims-empty"));
 
     let without = vec![ct_snapshot(view, "ct-1", READ_AT)];
     let set = project(&rebuild(without).expect("rebuild"), &options());
     let model = find(&set, ISSUE_TOKEN);
     assert!(!model.claim.is_available());
-    assert!(!model.revision.contains("work_claims@"));
+    assert!(!model
+        .source_stamps
+        .iter()
+        .any(|stamp| stamp.kind.as_token() == "work_claims"));
 }
 
 /// An issue with no implementation link never projects success-shaped,

@@ -257,6 +257,14 @@ impl DeliveryObservationV1 {
 /// the minting scope here and refuses to serve an unauthorized read from a
 /// private-scoped snapshot (fail-closed: the scope mismatch is treated as
 /// an unusable view for that read, never as filtered content).
+///
+/// Trust seam (codex R2 round-7 finding 1, adjudicated): the scope
+/// marker is recorded by the ADAPTER that minted the view, exactly as
+/// every fact's `visibility` in this module is. A caller that constructs
+/// plain-data snapshots and mislabels them can mislead any projection —
+/// the security boundary is the adapter minting from the authority
+/// (`read_view` enforces real authorization); in-process construction is
+/// inside that boundary by design, consistently for all source kinds.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CurrentTruthFactsV1 {
     pub view: CurrentTruthViewV1,

@@ -402,9 +402,28 @@ pub fn project(index: &WorkProjectionIndex, options: &ProjectionOptions) -> Work
         .map(|view| orphaned_reverted_prs(view).len())
         .sum();
 
+    // Verification facts that can anchor to NOTHING cannot vanish
+    // silently (codex R2 round-7 finding 4): counted content-free like
+    // orphan debt. A dispatch-bound fact never vanishes — the standalone
+    // Dispatch key always exists — so only facts with neither a
+    // parseable issue ref NOR a dispatch id that joins a claim's key
+    // land here.
+    let unbound_verification_count = verification
+        .iter()
+        .filter(|fact| match &fact.issue_ref {
+            Some(issue_ref) if WorkKey::parse_issue_ref(issue_ref).is_some() => false,
+            _ => match &fact.dispatch_id {
+                Some(dispatch_id) => {
+                    !claims_have_dispatch(&work_claims, dispatch_id) && fact.issue_ref.is_none()
+                }
+                None => true,
+            },
+        })
+        .count();
     let health = WorkProjectionHealthV1 {
         visible_work_count: items.len(),
         orphaned_revert_debt_count,
+        unbound_verification_count,
         conflicted_count: items
             .iter()
             .filter(|item| {
@@ -446,6 +465,13 @@ fn claim_work_key(claim: &WorkClaimFactV1) -> WorkKey {
         return WorkKey::Dispatch(dispatch_id.clone());
     }
     WorkKey::Claim(claim.claim_id.clone())
+}
+
+/// Whether any claim carries this dispatch id.
+fn claims_have_dispatch(claims: &[WorkClaimFactV1], dispatch_id: &str) -> bool {
+    claims
+        .iter()
+        .any(|claim| claim.dispatch_id.as_deref() == Some(dispatch_id))
 }
 
 /// A dispatch joins the claim that carries the same dispatch id (issue key
@@ -1934,9 +1960,34 @@ fn forwarded_action(
 /// hash over private rows, ...) is the minting adapter's responsibility
 /// and its disclosure policy, not this projection's: the projection never
 /// decodes or widens it.
+///
+/// Reader-derived state is deliberately NOT in this fingerprint: it is
+/// source provenance only. Claim expiry under `ProjectionOptions`
+/// (caller-supplied `read_at` + TTL) and authorization visibility are
+/// functions of (sources, options); every view therefore carries
+/// `read_at` alongside the revision so consumers never compare states
+/// across different read parameters under one revision (codex R2
+/// round-7 finding 2).
 fn revision_fingerprint(stamps: &[SourceStamp]) -> String {
-    let mut tokens: Vec<String> = stamps.iter().map(|stamp| stamp.as_token()).collect();
+    // Collision-free canonical encoding (codex R2 round-7 finding 3):
+    // each stamp is length-prefixed before hashing so a `kind`/`revision`
+    // containing `@` or `;` can never collide with a different stamp
+    // pair — delimiter-joining alone was forgeable.
+    let mut encoding = String::new();
+    let mut tokens: Vec<(String, String)> = stamps
+        .iter()
+        .map(|stamp| (stamp.kind.as_token(), stamp.revision.clone()))
+        .collect();
     tokens.sort();
     tokens.dedup();
-    tokens.join(";")
+    for (kind, revision) in tokens {
+        encoding.push_str(&kind.len().to_string());
+        encoding.push(':');
+        encoding.push_str(&kind);
+        encoding.push_str(&revision.len().to_string());
+        encoding.push(':');
+        encoding.push_str(&revision);
+        encoding.push('|');
+    }
+    crate::refinery::sha256_hex(encoding.as_bytes())
 }
