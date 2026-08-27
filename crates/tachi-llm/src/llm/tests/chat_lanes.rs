@@ -1,6 +1,7 @@
 use super::super::{
     ChatLaneConfig, CompletionStatusV1, LaneFallbackConfig, ModelEngineKindV1,
     ModelInvocationLaneV1, ProviderInvocationFailureClass, ProviderRuntimeConfig,
+    DEEPSEEK_AUTH_PROBE, SILICONFLOW_AUTH_PROBE,
 };
 use super::*;
 
@@ -62,11 +63,11 @@ fn foundry_lanes_use_deepseek_defaults_when_only_deepseek_key_is_configured() {
     );
 }
 
-/// #1853 P0: `load_lane` selects the first non-empty key, then only uses
-/// DeepSeek URL/model defaults when that key is `DEEPSEEK_API_KEY`. A
-/// SiliconFlow-only install with empty DISTILL_*/REASONING_* must stay on
-/// SiliconFlow — otherwise a filled DeepSeek URL in `.env.example` would
-/// send `SILICONFLOW_API_KEY` to api.deepseek.com.
+/// `load_lane` selects the first non-empty key, then only uses DeepSeek
+/// URL/model defaults when that key is `DEEPSEEK_API_KEY`. A SiliconFlow-only
+/// install with empty DISTILL_*/REASONING_* must stay on SiliconFlow —
+/// otherwise a filled DeepSeek URL in `.env.example` would send
+/// `SILICONFLOW_API_KEY` to api.deepseek.com.
 #[test]
 #[allow(clippy::await_holding_lock)]
 fn foundry_lanes_stay_on_siliconflow_when_only_siliconflow_key_is_configured() {
@@ -162,6 +163,138 @@ fn env_example_does_not_prefill_deepseek_lane_urls() {
             ".env.example {key}={value} pre-fills DeepSeek onto a lane that load_lane() will not bind to DEEPSEEK_API_KEY unless that key is set"
         );
     }
+}
+
+async fn capture_extract_outbound_body(
+    documented_host: Option<&str>,
+    path: &str,
+    model: &str,
+) -> serde_json::Value {
+    use axum::{extract::Json as IncomingJson, routing::post, Json, Router};
+    use std::sync::{Arc, Mutex};
+
+    let captured = Arc::new(Mutex::new(None::<serde_json::Value>));
+    let app = Router::new().route(
+        path,
+        post({
+            let captured = Arc::clone(&captured);
+            move |IncomingJson(body): IncomingJson<serde_json::Value>| {
+                let captured = Arc::clone(&captured);
+                async move {
+                    *captured.lock().unwrap_or_else(|e| e.into_inner()) = Some(body);
+                    Json(serde_json::json!({
+                        "choices": [{
+                            "message": {"role": "assistant", "content": "ok"},
+                            "finish_reason": "stop"
+                        }]
+                    }))
+                }
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind capture provider");
+    let addr = listener.local_addr().expect("capture provider addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("capture provider");
+    });
+
+    let (base_url, resolved) = match documented_host {
+        Some(host) => (
+            format!("http://{host}{path}"),
+            Some(
+                LlmClient::http_client_with_host_resolved_for_tests(host, addr)
+                    .expect("resolved test client"),
+            ),
+        ),
+        None => (format!("http://127.0.0.1:{}{path}", addr.port()), None),
+    };
+    let unused = ChatLaneConfig {
+        base_url: "https://unused.test/v1/chat/completions".to_string(),
+        model: "unused".to_string(),
+        api_key_envs: vec!["UNUSED_API_KEY"],
+    };
+    let config = ProviderRuntimeConfig {
+        extract: ChatLaneConfig {
+            base_url,
+            model: model.to_string(),
+            api_key_envs: vec!["EXTRACT_API_KEY"],
+        },
+        summary: unused.clone(),
+        reasoning: unused.clone(),
+        distill: unused,
+        rerank: RerankConfig {
+            provider: RerankProviderKind::Voyage,
+            local_endpoint: None,
+        },
+    };
+    let client = LlmClient::new_with_config(config, None).expect("client should initialize");
+    if let Some(http) = resolved {
+        client.replace_http_client_for_tests(http);
+    }
+    client.set_provider_secret_pool(
+        "EXTRACT_API_KEY",
+        vec![ProviderSecret {
+            key_id: "EXTRACT_API_KEY".to_string(),
+            value: "test-key".to_string(),
+        }],
+    );
+    client
+        .call_extract_llm("system", "user", None, 0.0, 16)
+        .await
+        .expect("capture provider should answer");
+    server.abort();
+    let body = captured
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+        .expect("call_provider_tier must send a JSON body");
+    body
+}
+
+/// Production-path discriminator: `call_extract_llm` → `call_provider_tier`
+/// must emit the host-specific suppression fields on the wire. A unit test of
+/// `apply_thinking_suppression` alone stays green if that call site is dropped.
+#[tokio::test]
+async fn outbound_extract_request_uses_host_specific_thinking_fields() {
+    let _guard = crate::test_support::global_test_lock().lock();
+    let _env = EnvRestore::unset("TACHI_DISABLE_THINKING_MODELS");
+
+    let official = capture_extract_outbound_body(
+        Some(DEEPSEEK_AUTH_PROBE.host),
+        "/chat/completions",
+        "deepseek-v4-flash",
+    )
+    .await;
+    assert_eq!(official["model"], "deepseek-v4-flash");
+    assert!(
+        official.get("enable_thinking").is_none(),
+        "official DeepSeek outbound body must not carry SiliconFlow keys: {official}"
+    );
+    assert_eq!(
+        official["thinking"]["type"], "disabled",
+        "official Flash must send thinking.disabled on the wire: {official}"
+    );
+
+    let siliconflow = capture_extract_outbound_body(
+        Some(SILICONFLOW_AUTH_PROBE.host),
+        "/v1/chat/completions",
+        "deepseek-v4-flash",
+    )
+    .await;
+    assert_eq!(siliconflow["enable_thinking"], false);
+    assert!(
+        siliconflow.get("thinking").is_none(),
+        "SiliconFlow outbound body must not carry official DeepSeek keys: {siliconflow}"
+    );
+
+    let custom =
+        capture_extract_outbound_body(None, "/chat/completions", "deepseek-v4-flash").await;
+    assert!(
+        custom.get("enable_thinking").is_none() && custom.get("thinking").is_none(),
+        "custom OpenAI-compatible host must send neither suppression field: {custom}"
+    );
 }
 
 #[tokio::test]

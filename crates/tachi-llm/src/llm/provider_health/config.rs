@@ -348,6 +348,31 @@ impl super::super::LlmClient {
             .map_err(|e| format!("Failed to build HTTP client: {e}"))
     }
 
+    /// Swap the pooled client so tests can pin a documented provider host to a
+    /// loopback mock without sending credentials to the real network.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn replace_http_client_for_tests(&self, client: reqwest::Client) {
+        *self.http.write().unwrap_or_else(|e| e.into_inner()) = client;
+    }
+
+    /// Same pooled-client shape as production, plus a single DNS override.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn http_client_with_host_resolved_for_tests(
+        host: &str,
+        addr: std::net::SocketAddr,
+    ) -> Result<reqwest::Client, String> {
+        crate::install_tls_provider();
+        reqwest::Client::builder()
+            .no_proxy()
+            .resolve(host, addr)
+            .connect_timeout(Duration::from_secs(Self::RECALL_CONNECT_TIMEOUT_SECS))
+            .timeout(Duration::from_secs(60))
+            .build()
+            .map_err(|e| format!("Failed to build test HTTP client: {e}"))
+    }
+
     /// Clone the current pooled client out from behind the swap lock. reqwest
     /// clients are cheap to clone (internally `Arc`), and releasing the read
     /// lock before `.await` keeps a rebuild from being blocked by in-flight

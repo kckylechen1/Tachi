@@ -7,12 +7,22 @@ use serde_json::{self, Value};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use super::super::auth_probe_descriptor_for_host;
 use super::super::catalog_import::DeploymentAttribution;
 use super::super::provider_health::{
     ChatLane, ChatLaneConfig, CompletionStatusV1, Generated, ModelInvocationLaneV1,
-    ProviderInvocationFailure, ProviderInvocationFailureClass, ProviderInvocationOutcome,
-    ProviderInvocationReceipt, SelectedProviderSecret,
+    ProviderAuthProbeFamily, ProviderInvocationFailure, ProviderInvocationFailureClass,
+    ProviderInvocationOutcome, ProviderInvocationReceipt, SelectedProviderSecret,
 };
+
+/// Exact-host family for thinking-suppression fields. Lookalikes and custom
+/// OpenAI-compatible hosts are `None` — never inherit SiliconFlow or DeepSeek
+/// request keys from a substring match on the full URL.
+fn thinking_suppression_family(base_url: &str) -> Option<ProviderAuthProbeFamily> {
+    let url = Url::parse(base_url).ok()?;
+    let host = url.host_str()?;
+    auth_probe_descriptor_for_host(host).map(|descriptor| descriptor.family)
+}
 
 /// Maximum retained characters from a caller-supplied model override.
 const MAX_REFERENCE_CHARS: usize = 64;
@@ -86,31 +96,37 @@ impl super::super::LlmClient {
         // Flash is the extract/summary/distill default: official DeepSeek V4
         // thinking is on by default and a tiny probe budget then returns empty
         // content (finish_reason=length, all tokens in reasoning). Pro keeps
-        // thinking unless the env override above names it.
-        let url = base_url.to_ascii_lowercase();
+        // thinking unless the env override above names it. Unknown hosts stay
+        // false — suppression fields are host-specific and must not be guessed.
         let model = model.to_ascii_lowercase();
-        if model.contains("deepseek-v4-flash") {
-            return true;
+        match thinking_suppression_family(base_url) {
+            Some(ProviderAuthProbeFamily::DeepSeek) => model.contains("deepseek-v4-flash"),
+            Some(ProviderAuthProbeFamily::SiliconFlow) => {
+                model.contains("qwen") || model.contains("deepseek")
+            }
+            _ => false,
         }
-        // SiliconFlow Qwen/DeepSeek still needs enable_thinking=false.
-        url.contains("siliconflow") && (model.contains("qwen") || model.contains("deepseek"))
     }
 
     /// Attach the provider-shaped "no thinking" fields for a chat body.
     /// SiliconFlow reads `enable_thinking`. Official DeepSeek V4 documents
     /// `thinking: {type: disabled}` and does not document `enable_thinking`.
-    /// Generate one family per host — do not send SiliconFlow fields to
-    /// api.deepseek.com, or the reverse.
+    /// Emit a family only after the exact probe-table host matches. Custom
+    /// OpenAI-compatible hosts get neither field, even when the env override
+    /// asked to disable thinking — unknown hosts reject unknown keys.
     pub(super) fn apply_thinking_suppression(body: &mut Value, base_url: &str, model: &str) {
         if !Self::should_disable_thinking(base_url, model) {
             return;
         }
-        let url = base_url.to_ascii_lowercase();
-        if url.contains("deepseek.com") {
-            body["thinking"] = serde_json::json!({ "type": "disabled" });
-            return;
+        match thinking_suppression_family(base_url) {
+            Some(ProviderAuthProbeFamily::DeepSeek) => {
+                body["thinking"] = serde_json::json!({ "type": "disabled" });
+            }
+            Some(ProviderAuthProbeFamily::SiliconFlow) => {
+                body["enable_thinking"] = Value::Bool(false);
+            }
+            _ => {}
         }
-        body["enable_thinking"] = Value::Bool(false);
     }
 
     pub async fn call_extract_llm(
@@ -1111,6 +1127,28 @@ mod failure_class_tests {
         assert!(
             siliconflow.get("thinking").is_none(),
             "SiliconFlow does not document official DeepSeek thinking: {siliconflow}"
+        );
+
+        let mut custom = serde_json::json!({"model": "deepseek-v4-flash"});
+        super::super::super::LlmClient::apply_thinking_suppression(
+            &mut custom,
+            "https://llm.example.test/v1/chat/completions",
+            "deepseek-v4-flash",
+        );
+        assert!(
+            custom.get("enable_thinking").is_none() && custom.get("thinking").is_none(),
+            "unknown OpenAI-compatible hosts must not inherit either suppression field: {custom}"
+        );
+
+        let mut lookalike = serde_json::json!({"model": "deepseek-v4-flash"});
+        super::super::super::LlmClient::apply_thinking_suppression(
+            &mut lookalike,
+            "https://api.deepseek.com.attacker.invalid/chat/completions",
+            "deepseek-v4-flash",
+        );
+        assert!(
+            lookalike.get("enable_thinking").is_none() && lookalike.get("thinking").is_none(),
+            "probe-table lookalikes must not inherit DeepSeek suppression: {lookalike}"
         );
     }
 }
