@@ -45,7 +45,7 @@ fn foundry_lanes_use_deepseek_defaults_when_only_deepseek_key_is_configured() {
         distill.base_url,
         "https://api.deepseek.com/chat/completions"
     );
-    assert_eq!(distill.model, "deepseek-chat");
+    assert_eq!(distill.model, "deepseek-v4-flash");
     assert_eq!(
         client.provider_key_id_for_tests(&distill.api_key_envs),
         Some("DEEPSEEK_API_KEY".to_string())
@@ -55,7 +55,7 @@ fn foundry_lanes_use_deepseek_defaults_when_only_deepseek_key_is_configured() {
         reasoning.base_url,
         "https://api.deepseek.com/chat/completions"
     );
-    assert_eq!(reasoning.model, "deepseek-reasoner");
+    assert_eq!(reasoning.model, "deepseek-v4-pro");
     assert_eq!(
         client.provider_key_id_for_tests(&reasoning.api_key_envs),
         Some("DEEPSEEK_API_KEY".to_string())
@@ -1413,7 +1413,7 @@ fn from_env_golden_values() {
     assert_eq!(config.summary.model, "golden-extract-model");
 
     // ── Reasoning: DEEPSEEK_API_KEY triggers DeepSeek provider default.
-    //    No explicit base/model → default URL + deepseek-reasoner. ──
+    //    No explicit base/model → default URL + deepseek-v4-pro. ──
     assert_eq!(
         config.reasoning.api_key_envs,
         vec![
@@ -1430,9 +1430,9 @@ fn from_env_golden_values() {
         config.reasoning.base_url,
         "https://api.deepseek.com/chat/completions"
     );
-    assert_eq!(config.reasoning.model, "deepseek-reasoner");
+    assert_eq!(config.reasoning.model, "deepseek-v4-pro");
 
-    // ── Distill: same DeepSeek provider default path, deepseek-chat model. ──
+    // ── Distill: same DeepSeek provider default path, deepseek-v4-flash. ──
     assert_eq!(
         config.distill.api_key_envs,
         vec![
@@ -1449,7 +1449,7 @@ fn from_env_golden_values() {
         config.distill.base_url,
         "https://api.deepseek.com/chat/completions"
     );
-    assert_eq!(config.distill.model, "deepseek-chat");
+    assert_eq!(config.distill.model, "deepseek-v4-flash");
 
     // ── Rerank: local provider with explicit endpoint. ──
     assert_eq!(config.rerank.provider, RerankProviderKind::Local);
@@ -2535,7 +2535,7 @@ fn lane_fallback_config_from_env_resolves_deepseek_default_for_extract() {
         extract.base_url,
         "https://api.deepseek.com/chat/completions"
     );
-    assert_eq!(extract.model, "deepseek-chat");
+    assert_eq!(extract.model, "deepseek-v4-flash");
     assert_eq!(
         extract.api_key_envs,
         vec!["EXTRACT_FALLBACK_API_KEY", "DEEPSEEK_API_KEY"]

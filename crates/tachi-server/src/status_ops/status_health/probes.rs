@@ -112,6 +112,9 @@ pub(super) async fn run_provider_probe_report_with_migration_authority(
     let llm_embed = llm.clone();
     let llm_rerank = llm.clone();
     let llm_extract = llm.clone();
+    // Thinking-default Flash/GLM spend the first tokens on reasoning; 8
+    // produced finish_reason=length with empty content on live probes.
+    const PROVIDER_CHAT_PROBE_MAX_TOKENS: u32 = 64;
     let (embed, rerank, chat_extract, chat_distill) = tokio::join!(
         tokio::time::timeout(
             std::time::Duration::from_secs(15),
@@ -128,7 +131,7 @@ pub(super) async fn run_provider_probe_report_with_migration_authority(
                 "Provider extract probe. Reply OK only.",
                 None,
                 0.0,
-                8,
+                PROVIDER_CHAT_PROBE_MAX_TOKENS,
             ),
         ),
         tokio::time::timeout(
@@ -138,7 +141,7 @@ pub(super) async fn run_provider_probe_report_with_migration_authority(
                 "Provider distill probe. Reply OK only.",
                 None,
                 0.0,
-                8,
+                PROVIDER_CHAT_PROBE_MAX_TOKENS,
             ),
         ),
     );
@@ -421,7 +424,7 @@ async fn probe_rotation_member(
                     "Provider rotation probe. Reply OK only.",
                     None,
                     0.0,
-                    8,
+                    64,
                 ),
             )
             .await;
@@ -439,7 +442,7 @@ async fn probe_rotation_member(
                     "Provider distill rotation probe. Reply OK only.",
                     None,
                     0.0,
-                    8,
+                    64,
                 ),
             )
             .await;

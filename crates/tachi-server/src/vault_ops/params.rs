@@ -1,10 +1,9 @@
 use crate::vault_crypto as crypto;
-use memcore::vault::SECRET_TYPE_API_KEY;
 use rmcp::schemars::{self, JsonSchema};
 use serde::Deserialize;
 
 fn default_secret_type() -> String {
-    SECRET_TYPE_API_KEY.to_string()
+    String::new()
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]

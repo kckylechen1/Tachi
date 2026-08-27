@@ -4,8 +4,10 @@ const DEFAULT_CHAT_BASE_URL: &str = "https://api.siliconflow.cn/v1/chat/completi
 const DEFAULT_DEEPSEEK_BASE_URL: &str = "https://api.deepseek.com/chat/completions";
 const DEFAULT_EXTRACT_MODEL: &str = "Qwen/Qwen3.5-27B";
 const DEFAULT_REASONING_MODEL: &str = "Qwen/Qwen3.5-27B";
-const DEFAULT_DEEPSEEK_DISTILL_MODEL: &str = "deepseek-chat";
-const DEFAULT_DEEPSEEK_REASONING_MODEL: &str = "deepseek-reasoner";
+/// Official DeepSeek V4 IDs (`deepseek-chat` / `deepseek-reasoner` retired
+/// 2026-07-24). Flash is the cheap distill/extract default; Pro is reasoning.
+const DEFAULT_DEEPSEEK_DISTILL_MODEL: &str = "deepseek-v4-flash";
+const DEFAULT_DEEPSEEK_REASONING_MODEL: &str = "deepseek-v4-pro";
 
 struct ProviderLaneDefault {
     api_key_env: &'static str,

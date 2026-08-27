@@ -10,7 +10,11 @@ pub(crate) async fn handle_vault_set(
         authorize_vault_mutation(server, &params.name, params.agent_id.as_deref())
             .map_err(|e| e.to_string())?;
         with_vault_key(server, |key| {
-            let secret_type = normalize_secret_type(&params.secret_type);
+            let secret_type = if params.secret_type.trim().is_empty() {
+                memcore::infer_vault_secret_type(&params.name)
+            } else {
+                normalize_secret_type(&params.secret_type)
+            };
             let allowed_agents = normalize_allowed_agents(params.allowed_agents.clone());
             let (encrypted_value, nonce) = crypto::encrypt(key, params.value.as_bytes())?;
 

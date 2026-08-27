@@ -26,6 +26,11 @@ pub(super) async fn run_secret_action(
             value_stdin,
         } => {
             crate::vault_crypto::validate_secret_name(&name)?;
+            let secret_type = secret_type
+                .as_deref()
+                .map(memcore::normalize_secret_type)
+                .unwrap_or_else(|| memcore::infer_vault_secret_type(&name))
+                .to_string();
 
             let store_ro = open_cli_store_read_only(global_db_path)?;
             let config = store_ro

@@ -83,13 +83,33 @@ impl super::super::LlmClient {
             return false;
         }
 
-        // Legacy heuristic: disable for specific provider/model combinations
-        // This is kept as a fallback for backwards compatibility
-        if !base_url.to_ascii_lowercase().contains("siliconflow") {
-            return false;
-        }
+        // Flash is the extract/summary/distill default: official DeepSeek V4
+        // thinking is on by default and a tiny probe budget then returns empty
+        // content (finish_reason=length, all tokens in reasoning). Pro keeps
+        // thinking unless the env override above names it.
+        let url = base_url.to_ascii_lowercase();
         let model = model.to_ascii_lowercase();
-        model.contains("qwen") || model.contains("deepseek")
+        if model.contains("deepseek-v4-flash") {
+            return true;
+        }
+        // SiliconFlow Qwen/DeepSeek still needs enable_thinking=false.
+        url.contains("siliconflow") && (model.contains("qwen") || model.contains("deepseek"))
+    }
+
+    /// Attach the provider-shaped "no thinking" fields for a chat body.
+    /// SiliconFlow reads `enable_thinking`; official DeepSeek V4 reads
+    /// `thinking: {type: disabled}`. Sending both is harmless on SiliconFlow
+    /// and is what makes official Flash probes return content.
+    pub(super) fn apply_thinking_suppression(body: &mut Value, base_url: &str, model: &str) {
+        if !Self::should_disable_thinking(base_url, model) {
+            return;
+        }
+        body["enable_thinking"] = Value::Bool(false);
+        let url = base_url.to_ascii_lowercase();
+        let model = model.to_ascii_lowercase();
+        if url.contains("deepseek.com") || model.contains("deepseek-v4-flash") {
+            body["thinking"] = serde_json::json!({ "type": "disabled" });
+        }
     }
 
     pub async fn call_extract_llm(
@@ -423,9 +443,7 @@ impl super::super::LlmClient {
             "temperature": temperature,
             "max_tokens": max_tokens
         });
-        if Self::should_disable_thinking(&cfg.base_url, model) {
-            body["enable_thinking"] = Value::Bool(false);
-        }
+        Self::apply_thinking_suppression(&mut body, &cfg.base_url, model);
 
         let mut last_err = String::new();
         let mut last_class = ProviderInvocationFailureClass::LaneOutage;
@@ -1042,5 +1060,41 @@ mod failure_class_tests {
             assert!(!class.as_str().contains("secret"));
             assert!(!class.as_str().contains("prompt"));
         }
+    }
+
+    #[test]
+    fn official_flash_suppresses_thinking_pro_does_not() {
+        assert!(
+            super::super::super::LlmClient::should_disable_thinking(
+                "https://api.deepseek.com/chat/completions",
+                "deepseek-v4-flash",
+            ),
+            "Flash extract/distill probes empty-content when thinking is left on"
+        );
+        assert!(
+            !super::super::super::LlmClient::should_disable_thinking(
+                "https://api.deepseek.com/chat/completions",
+                "deepseek-v4-pro",
+            ),
+            "Pro reasoning keeps official thinking unless env-overridden"
+        );
+
+        let mut flash = serde_json::json!({"model": "deepseek-v4-flash"});
+        super::super::super::LlmClient::apply_thinking_suppression(
+            &mut flash,
+            "https://api.deepseek.com/chat/completions",
+            "deepseek-v4-flash",
+        );
+        assert_eq!(flash["enable_thinking"], false);
+        assert_eq!(flash["thinking"]["type"], "disabled");
+
+        let mut pro = serde_json::json!({"model": "deepseek-v4-pro"});
+        super::super::super::LlmClient::apply_thinking_suppression(
+            &mut pro,
+            "https://api.deepseek.com/chat/completions",
+            "deepseek-v4-pro",
+        );
+        assert!(pro.get("enable_thinking").is_none());
+        assert!(pro.get("thinking").is_none());
     }
 }
