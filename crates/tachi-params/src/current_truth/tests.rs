@@ -3426,3 +3426,84 @@ fn visibility_change_mints_new_composite_revision() {
         other => panic!("same snapshot token with changed content must be rejected, got {other:?}"),
     }
 }
+
+// ── Codex R2 round 13 accepted finding ─────────────────────────────────────
+
+/// R13-1: link membership is read from the GLOBALLY canonical PR
+/// selection — a public duplicate row that carries the link can never
+/// speak for a PR whose canonical (visibility-first) row is private or
+/// unlinked. Both permutations mint identically.
+#[test]
+fn link_membership_follows_the_canonical_row_not_a_public_duplicate() {
+    let make_state = |public_first: bool| {
+        let mut state = state_v1();
+        // Public duplicate: linked to issue 100.
+        let mut public_linked = snapshot_pr(
+            200,
+            SnapshotPrStateV1::Merged,
+            "2026-08-26T10:00:00Z",
+            "rev1-pr-b",
+            vec![100],
+        );
+        public_linked.visibility = VisibilityClassV1::Public;
+        // Private duplicate: NOT linked — it wins the canonical selection
+        // (visibility-first), so the canonical row says "not linked".
+        let mut private_unlinked = public_linked.clone();
+        private_unlinked.visibility = VisibilityClassV1::Private;
+        private_unlinked.linked_issues = vec![];
+        state.pull_requests = if public_first {
+            vec![public_linked, private_unlinked]
+        } else {
+            vec![private_unlinked, public_linked]
+        };
+        state
+    };
+    let minted_a = mint_assertions(&make_state(true));
+    let minted_b = mint_assertions(&make_state(false));
+    assert_eq!(minted_a, minted_b, "permutation-independent");
+
+    let link = minted_a
+        .iter()
+        .find(|a| a.predicate == PredicateV1::ImplementationPrLinked)
+        .unwrap();
+    assert_eq!(
+        link.value,
+        AssertionValueV1::ObjectRefs(vec![]),
+        "the canonical (private, unlinked) row decides: no relation minted"
+    );
+    let pr_state = minted_a
+        .iter()
+        .find(|a| a.predicate == PredicateV1::PrMerged)
+        .expect("the PR still mints its own state");
+    assert_eq!(
+        pr_state.visibility,
+        VisibilityClassV1::Private,
+        "the PR assertion follows the canonical private row"
+    );
+    // And the inverse fixture (private LINKED row beats public unlinked):
+    // the relation mints, fail-closed to private.
+    let mut inverse = state_v1();
+    let mut public_unlinked = snapshot_pr(
+        200,
+        SnapshotPrStateV1::Merged,
+        "2026-08-26T10:00:00Z",
+        "rev1-pr-b",
+        vec![],
+    );
+    public_unlinked.visibility = VisibilityClassV1::Public;
+    let mut private_linked = public_unlinked.clone();
+    private_linked.visibility = VisibilityClassV1::Private;
+    private_linked.linked_issues = vec![100];
+    inverse.pull_requests = vec![public_unlinked, private_linked];
+    let minted = mint_assertions(&inverse);
+    let link = minted
+        .iter()
+        .find(|a| a.predicate == PredicateV1::ImplementationPrLinked)
+        .unwrap();
+    assert_eq!(
+        link.value,
+        AssertionValueV1::ObjectRefs(vec![GithubObjectRefV1::PullRequest(200)]),
+        "the canonical private linked row decides: the relation mints"
+    );
+    assert_eq!(link.visibility, VisibilityClassV1::Private);
+}

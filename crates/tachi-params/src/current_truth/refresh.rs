@@ -176,6 +176,22 @@ pub fn mint_assertions(state: &GithubRepositoryStateV1) -> Vec<AssertionV1> {
         revision: String::new(),
     };
 
+    // THE canonical PR selection, computed once and shared by the issue
+    // path and the PR path: sort (number asc, rank desc) and dedup by
+    // number keeping the FIRST of each run (= the MAXIMUM-rank row). The
+    // rank puts VISIBILITY first (fail-closed: a Private duplicate always
+    // beats a Public one) and then every mint-derived field including the
+    // canonical linked-issue set — so the retained row is the same under
+    // any input permutation, and a public duplicate row can never speak
+    // for a PR whose canonical row is private.
+    let mut pull_requests_canonical: Vec<&SnapshotPrV1> = state.pull_requests.iter().collect();
+    pull_requests_canonical.sort_by(|a, b| {
+        a.number
+            .cmp(&b.number)
+            .then_with(|| duplicate_rank(b).cmp(&duplicate_rank(a)))
+    });
+    pull_requests_canonical.dedup_by_key(|pr| pr.number);
+
     for issue in &state.issues {
         let subject = state.issue_subject(issue.number);
         let predicate = match issue.state {
@@ -199,26 +215,17 @@ pub fn mint_assertions(state: &GithubRepositoryStateV1) -> Vec<AssertionV1> {
         // The revision is a COMPOSITE over the issue snapshot AND every
         // linked PR's snapshot — a PR-only change (new merge, state move)
         // must change the revision, not collide with the issue-only token.
-        let mut linked_prs_snapshot: Vec<&SnapshotPrV1> = state
-            .pull_requests
+        //
+        // Link membership is read from the GLOBALLY canonicalized PR list
+        // (one duplicate-resolved row per PR, visibility-first rank): the
+        // issue path and the PR path share that single selection, so a
+        // public duplicate row that happens to carry the link can never
+        // speak for a PR whose canonical row is private — or unlinked.
+        let linked_prs_snapshot: Vec<&SnapshotPrV1> = pull_requests_canonical
             .iter()
+            .copied()
             .filter(|pr| pr.linked_issues.contains(&issue.number))
             .collect();
-        // Snapshot rows are not contractually unique: duplicate rows for
-        // one PR must not mint a duplicated (non-canonical) relation set,
-        // and the selection must not depend on snapshot row ORDER — sort by
-        // number then rank DESCENDING; `dedup_by_key` keeps the FIRST of
-        // each run, so the MAXIMUM rank row wins. The rank puts VISIBILITY
-        // FIRST (fail-closed: a Private duplicate always beats a Public
-        // one), then the greatest (revision, updated_at, SHA, state) —
-        // keeping the mint a pure function of the state's CONTENT, not its
-        // permutation.
-        linked_prs_snapshot.sort_by(|a, b| {
-            a.number
-                .cmp(&b.number)
-                .then_with(|| duplicate_rank(b).cmp(&duplicate_rank(a)))
-        });
-        linked_prs_snapshot.dedup_by_key(|pr| pr.number);
         let linked: Vec<GithubObjectRefV1> = linked_prs_snapshot
             .iter()
             .map(|pr| GithubObjectRefV1::PullRequest(pr.number))
@@ -280,19 +287,10 @@ pub fn mint_assertions(state: &GithubRepositoryStateV1) -> Vec<AssertionV1> {
         ));
     }
 
-    // Canonical PR iteration order (number, then duplicate rank DESC, then
-    // dedup by number keeping the max-rank row): the mint is a pure
-    // function of the state's CONTENT — permuting the snapshot rows cannot
-    // even reorder the output, and ONE PR mints exactly ONE PR-state
-    // assertion even if the snapshot carried duplicate rows (issue-level
-    // and PR-level selection cannot disagree).
-    let mut pull_requests_canonical: Vec<&SnapshotPrV1> = state.pull_requests.iter().collect();
-    pull_requests_canonical.sort_by(|a, b| {
-        a.number
-            .cmp(&b.number)
-            .then_with(|| duplicate_rank(b).cmp(&duplicate_rank(a)))
-    });
-    pull_requests_canonical.dedup_by_key(|pr| pr.number);
+    // The PR path iterates the SAME canonical selection computed above:
+    // one PR mints exactly ONE PR-state assertion, and the issue path and
+    // the PR path cannot disagree about a PR's state, visibility, or link
+    // membership.
     for pr in pull_requests_canonical {
         let subject = state.pr_subject(pr.number);
         let (predicate, value) = match pr.state {
@@ -395,10 +393,13 @@ pub fn mint_assertions(state: &GithubRepositoryStateV1) -> Vec<AssertionV1> {
 /// The deterministic ranking of duplicate snapshot rows for one PR.
 /// VISIBILITY comes first (fail-closed: the most restrictive duplicate
 /// always wins — a public duplicate row can never mask a private one);
-/// then everything else the mint derives from a linked PR (composite
-/// revision and timestamp, implementation presence) — so the retained row
-/// is the same under any input permutation.
-fn duplicate_rank(pr: &SnapshotPrV1) -> (u8, String, String, String, u8) {
+/// then every remaining mint-derived field, INCLUDING the canonical
+/// (sorted, deduplicated) linked-issue set — so the retained row is the
+/// same under any input permutation.
+fn duplicate_rank(pr: &SnapshotPrV1) -> (u8, String, String, String, u8, Vec<u64>) {
+    let mut linked = pr.linked_issues.clone();
+    linked.sort_unstable();
+    linked.dedup();
     (
         match pr.visibility {
             VisibilityClassV1::Public => 0,
@@ -412,6 +413,7 @@ fn duplicate_rank(pr: &SnapshotPrV1) -> (u8, String, String, String, u8) {
             SnapshotPrStateV1::Merged => 1,
             SnapshotPrStateV1::ClosedUnmerged => 2,
         },
+        linked,
     )
 }
 
