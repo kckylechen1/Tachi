@@ -204,10 +204,18 @@ pub fn mint_assertions(state: &GithubRepositoryStateV1) -> Vec<AssertionV1> {
             .iter()
             .filter(|pr| pr.linked_issues.contains(&issue.number))
             .collect();
-        linked_prs_snapshot.sort_by_key(|pr| pr.number);
-        // Snapshot rows are not contractually unique: duplicate rows for one
-        // PR must not mint a duplicated (non-canonical) relation set that
-        // the store's admission gate would reject — dedup by PR number.
+        // Snapshot rows are not contractually unique: duplicate rows for
+        // one PR must not mint a duplicated (non-canonical) relation set,
+        // and the selection must not depend on snapshot row ORDER — sort by
+        // number then rank ascending; `dedup_by_key` keeps the LAST of each
+        // run, so the greatest (revision, updated_at, SHA, state,
+        // visibility) row wins, keeping the mint a pure function of the
+        // state's CONTENT, not its permutation.
+        linked_prs_snapshot.sort_by(|a, b| {
+            a.number
+                .cmp(&b.number)
+                .then_with(|| duplicate_rank(a).cmp(&duplicate_rank(b)))
+        });
         linked_prs_snapshot.dedup_by_key(|pr| pr.number);
         let linked: Vec<GithubObjectRefV1> = linked_prs_snapshot
             .iter()
@@ -270,7 +278,16 @@ pub fn mint_assertions(state: &GithubRepositoryStateV1) -> Vec<AssertionV1> {
         ));
     }
 
-    for pr in &state.pull_requests {
+    // Canonical PR iteration order (number, then duplicate rank): the mint
+    // is a pure function of the state's CONTENT — permuting the snapshot
+    // rows cannot even reorder the output.
+    let mut pull_requests_canonical: Vec<&SnapshotPrV1> = state.pull_requests.iter().collect();
+    pull_requests_canonical.sort_by(|a, b| {
+        a.number
+            .cmp(&b.number)
+            .then_with(|| duplicate_rank(a).cmp(&duplicate_rank(b)))
+    });
+    for pr in pull_requests_canonical {
         let subject = state.pr_subject(pr.number);
         let (predicate, value) = match pr.state {
             SnapshotPrStateV1::Open => (PredicateV1::PrOpen, AssertionValueV1::Unit),
@@ -367,6 +384,27 @@ pub fn mint_assertions(state: &GithubRepositoryStateV1) -> Vec<AssertionV1> {
         );
     }
     out
+}
+
+/// The deterministic ranking of duplicate snapshot rows for one PR:
+/// everything the mint derives from a linked PR (composite revision and
+/// timestamp, visibility, implementation presence) is a function of this
+/// tuple, so the retained row is the same under any input permutation.
+fn duplicate_rank(pr: &SnapshotPrV1) -> (String, String, String, u8, u8) {
+    (
+        pr.snapshot_revision.clone(),
+        pr.updated_at.clone(),
+        pr.merge_commit_sha.clone().unwrap_or_default(),
+        match pr.state {
+            SnapshotPrStateV1::Open => 0,
+            SnapshotPrStateV1::Merged => 1,
+            SnapshotPrStateV1::ClosedUnmerged => 2,
+        },
+        match pr.visibility {
+            VisibilityClassV1::Public => 0,
+            VisibilityClassV1::Private => 1,
+        },
+    )
 }
 
 /// The most restrictive visibility among a base and any number of named

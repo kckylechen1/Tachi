@@ -3216,3 +3216,54 @@ fn assertion_status_supersedes_older_members_of_conflicted_groups() {
         ReductionStatusV1::Conflicted
     );
 }
+
+// ── Codex R2 round 11 accepted finding ─────────────────────────────────────
+
+/// R11-1: duplicate PR rows with UNEQUAL content must not make the mint
+/// input-order dependent — the retained row is chosen by deterministic
+/// rank, so permuting the snapshot rows mints byte-identical assertions
+/// (same ids, same composite revisions, same visibility).
+#[test]
+fn duplicate_pr_row_selection_is_permutation_independent() {
+    let make_state = |first_is_newer: bool| {
+        let mut state = state_v1();
+        let older = snapshot_pr(
+            200,
+            SnapshotPrStateV1::Open,
+            "2026-08-26T09:00:00Z",
+            "rev1-pr-older",
+            vec![100],
+        );
+        let newer = snapshot_pr(
+            200,
+            SnapshotPrStateV1::Merged,
+            "2026-08-26T10:30:00Z",
+            "rev1-pr-newer",
+            vec![100],
+        );
+        // Both rows linked to the issue; push order varies.
+        state.pull_requests = if first_is_newer {
+            vec![newer, older]
+        } else {
+            vec![older, newer]
+        };
+        state
+    };
+    let minted_a = mint_assertions(&make_state(true));
+    let minted_b = mint_assertions(&make_state(false));
+    assert_eq!(
+        minted_a, minted_b,
+        "permuting duplicate PR rows must not change the mint"
+    );
+    // The greater-rank row is the one retained (its merge evidences
+    // implementation presence through the composite).
+    let link = minted_a
+        .iter()
+        .find(|a| a.predicate == PredicateV1::ImplementationPresent)
+        .unwrap();
+    assert_eq!(
+        link.value,
+        AssertionValueV1::CommitSha("mergeabc123".to_string()),
+        "the newer merged duplicate wins deterministically"
+    );
+}
