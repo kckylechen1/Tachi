@@ -649,6 +649,18 @@ pub(crate) mod tests {
         let run_dir = dispatch_runs_root().join(dispatch_id);
         let (status, result) = wait_for_staff_terminal(&run_dir).await;
         wait_for_staff_cleanup(dispatch_id).await;
+        let env_id = status["env_id"].as_str().expect("managed Staff env_id");
+        let lease = server
+            .with_global_store_read(|store| {
+                memcore::get_exec_env(store.connection(), env_id).map_err(|error| error.to_string())
+            })
+            .expect("read automatic Staff lease")
+            .expect("automatic Staff lease remains auditable after cleanup");
+        assert_eq!(lease.state, memcore::ExecEnvState::Reclaimed);
+        assert!(
+            !std::path::Path::new(&lease.path).exists(),
+            "clean automatic Staff worktree must be removed"
+        );
 
         assert_eq!(
             terminal_staff_state(&status),
@@ -2386,10 +2398,19 @@ pub(crate) mod tests {
     // ─── tachi#1675 PR1 Seam B: record_route_decision_best_effort ──────────
 
     pub(crate) fn test_server() -> MemoryServer {
-        let db_path = crate::utils::test_fixture_path(format!(
-            "staffing-seam-b-{}.sqlite",
-            uuid::Uuid::new_v4()
-        ));
+        let db_path = std::env::var_os("TACHI_HOME")
+            .filter(|home| !home.is_empty())
+            .map(std::path::PathBuf::from)
+            .map(|home| home.join("global").join(memcore::MEMORY_DB_FILENAME))
+            .unwrap_or_else(|| {
+                crate::utils::test_fixture_path(format!(
+                    "staffing-seam-b-{}.sqlite",
+                    uuid::Uuid::new_v4()
+                ))
+            });
+        if let Some(parent) = db_path.parent() {
+            std::fs::create_dir_all(parent).expect("create Staff test global DB parent");
+        }
         MemoryServer::new(db_path, None).expect("test memory server")
     }
 

@@ -20,6 +20,7 @@ pub(super) struct DispatchStart {
     pub(super) inject_card: bool,
     pub(super) verbose: bool,
     pub(super) mechanics: DispatchLaunchMechanics,
+    pub(super) auto_staff_exec_env: Option<PendingAutoStaffExecEnv>,
 }
 
 /// Server-owned launch mechanics. This is not a facade carrier: bootstrap
@@ -194,6 +195,7 @@ pub(super) fn resolve_dispatch_start(
             timeout_secs: params.timeout_secs,
             declared_file_scope: params.declared_file_scope.clone(),
         },
+        auto_staff_exec_env: None,
     })
 }
 
@@ -282,6 +284,7 @@ pub(super) fn resolve_staff_dispatch_start(
         resolved_assignment,
         resolved_recommendation,
         mechanics,
+        auto_staff_exec_env: None,
     })
 }
 

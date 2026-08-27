@@ -1775,7 +1775,10 @@ pub(crate) fn configure_required_postflight_containment(cmd: &mut Command) -> bo
     true
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 pub(crate) fn configure_required_postflight_containment(cmd: &mut Command) -> bool {
     use std::os::unix::process::CommandExt;
 
@@ -1790,14 +1793,22 @@ pub(crate) fn configure_required_postflight_containment(cmd: &mut Command) -> bo
     true
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 fn install_linux_postflight_escape_filter() -> std::io::Result<()> {
     const BPF_LD_W_ABS: u16 = 0x20;
     const BPF_JMP_JEQ_K: u16 = 0x15;
+    const BPF_JMP_JSET_K: u16 = 0x45;
     const BPF_RET_K: u16 = 0x06;
     const SECCOMP_RET_ALLOW: u32 = 0x7fff_0000;
     const SECCOMP_RET_ERRNO: u32 = 0x0005_0000;
     const SECCOMP_MODE_FILTER: libc::c_ulong = 2;
+    #[cfg(target_arch = "x86_64")]
+    const NATIVE_AUDIT_ARCH: u32 = 0xc000_003e;
+    #[cfg(target_arch = "aarch64")]
+    const NATIVE_AUDIT_ARCH: u32 = 0xc000_00b7;
 
     const fn stmt(code: u16, k: u32) -> libc::sock_filter {
         libc::sock_filter {
@@ -1824,7 +1835,28 @@ fn install_linux_postflight_escape_filter() -> std::io::Result<()> {
     let unshare = deny_if(libc::SYS_unshare as u32);
     let setns = deny_if(libc::SYS_setns as u32);
     let mut filter = [
+        // seccomp_data.arch is at byte offset 4. Refuse compatibility ABIs
+        // wholesale: on x86_64 an i386 process uses different syscall numbers
+        // and would otherwise miss the native setsid/setpgid rules below.
+        stmt(BPF_LD_W_ABS, 4),
+        libc::sock_filter {
+            code: BPF_JMP_JEQ_K,
+            jt: 1,
+            jf: 0,
+            k: NATIVE_AUDIT_ARCH,
+        },
+        stmt(BPF_RET_K, SECCOMP_RET_ERRNO | libc::EPERM as u32),
         stmt(BPF_LD_W_ABS, 0),
+        // x86_64's x32 ABI ORs syscall numbers with 0x4000_0000. Deny that
+        // alternate ABI wholesale so the native-number escape rules below
+        // cannot be bypassed with an x32 setsid/setpgid invocation.
+        libc::sock_filter {
+            code: BPF_JMP_JSET_K,
+            jt: 0,
+            jf: 1,
+            k: 0x4000_0000,
+        },
+        stmt(BPF_RET_K, SECCOMP_RET_ERRNO | libc::EPERM as u32),
         setsid[0],
         setsid[1],
         setpgid[0],
@@ -1857,6 +1889,16 @@ fn install_linux_postflight_escape_filter() -> std::io::Result<()> {
         return Err(std::io::Error::last_os_error());
     }
     Ok(())
+}
+
+#[cfg(all(
+    target_os = "linux",
+    not(any(target_arch = "x86_64", target_arch = "aarch64"))
+))]
+pub(crate) fn configure_required_postflight_containment(_cmd: &mut Command) -> bool {
+    // A Required gate must not claim containment on an architecture whose
+    // native audit ABI and syscall numbers are not explicitly certified.
+    false
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]

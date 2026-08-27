@@ -366,7 +366,7 @@ use self::credentials::*;
 use self::dedupe::*;
 use self::execution::{
     spawn_background_dispatch, BackgroundDispatchContext, DispatchExecution,
-    ManagedEphemeralCredentialCleanupObligation,
+    ManagedEphemeralCredentialCleanupObligation, PendingAutoStaffExecEnv,
 };
 use self::flow_setup::{init_kanban_and_flow, FlowSetupInputs};
 use self::harness_preflight::{run_harness_preflight, HarnessPreflightInputs};
@@ -584,6 +584,7 @@ async fn launch_canonical_dispatch(
         inject_card,
         verbose,
         mut mechanics,
+        auto_staff_exec_env,
     } = start;
 
     // 0a. Resolve the execution-environment binding through the fail-safe gate
@@ -1352,6 +1353,7 @@ async fn launch_canonical_dispatch(
         managed_ephemeral_credential_cleanup,
         postflight_gate,
         postflight_dispatch_lease,
+        auto_staff_exec_env: auto_staff_exec_env.map(PendingAutoStaffExecEnv::handoff),
     });
 
     // 9. Immediately return — main agent is unblocked!
@@ -1398,9 +1400,127 @@ pub(crate) async fn launch_staff_assignment(
 > {
     enforce_dispatch_depth(server)?;
     let (_, execution_level) = crate::host_profile::authorize_dispatch(request.execution_level)?;
-    let start = resolve_staff_dispatch_start(server, request, Utc::now(), execution_level)?;
+    let mut start = resolve_staff_dispatch_start(server, request, Utc::now(), execution_level)?;
+    provision_required_staff_exec_env(server, &mut start)?;
     let assignment = start.resolved_assignment.clone();
     let recommendation = start.resolved_recommendation.clone();
     let raw = launch_canonical_dispatch(server, start, ManagedControlOrigin::StaffFacade).await?;
     Ok((raw, assignment, recommendation))
+}
+
+/// Staff intentionally exposes no cwd/env knobs. For a profile whose authority
+/// ceiling is read-only, the server therefore owns provisioning the isolated
+/// lease that Required postflight needs; otherwise every valid Staff review
+/// would resolve to the unfenceable daemon-default cwd and fail before spawn.
+fn provision_required_staff_exec_env(
+    server: &MemoryServer,
+    start: &mut DispatchStart,
+) -> Result<(), String> {
+    let requires_postflight = start
+        .resolved_profile
+        .selected_profile
+        .as_deref()
+        .and_then(tachi_dispatch::resolve_dispatch_profile)
+        .is_some_and(|profile| !profile.write_actions && profile.role != "executor");
+    if !requires_postflight {
+        return Ok(());
+    }
+
+    let repo_root = match start.request.project.as_deref() {
+        Some(project) => server
+            .resolve_server_named_project_db_path(project)
+            .ok()
+            .and_then(|db| {
+                crate::path_utils::plan_c_project_root_from_local_db_in_home(
+                    &db,
+                    &server.tachi_home_dir(),
+                )
+            })
+            .or_else(test_staff_repo_root_fallback)
+            .ok_or_else(|| {
+                format!(
+                    "Staff project '{project}' has no resolvable repository root for a managed postflight lease"
+                )
+            })?,
+        None => crate::utils::find_project_git_root().ok_or_else(|| {
+            "Staff review has no project and the daemon cwd is not a git repository; cannot provision a managed postflight lease".to_string()
+        })?,
+    };
+    let provisioned = server.with_global_store(|store| {
+        crate::exec_env_ops::provision_managed_env(
+            store,
+            &crate::exec_env_ops::ProvisionEnvOptions {
+                repo_root,
+                path: None,
+                branch: None,
+                base: Some("HEAD".to_string()),
+                task: Some(start.request.task.clone()),
+                role: start.resolved_profile.role.clone(),
+                dispatch_id: Some(start.dispatch_id.clone()),
+                name: Some(format!("{}-postflight", start.dispatch_id)),
+                env_class: memcore::EnvClass::EditOnly,
+                private_target_approval: None,
+                private_target_dir: None,
+                dry_run: false,
+            },
+        )
+    })?;
+    if !provisioned.report.errors.is_empty() {
+        cleanup_failed_staff_provision(server, &provisioned);
+        return Err(format!(
+            "Staff managed postflight env provisioning failed: {}",
+            provisioned.report.errors.join("; ")
+        ));
+    }
+    let env_id = match provisioned.env_id {
+        Some(env_id) => env_id,
+        None => {
+            cleanup_failed_staff_provision(server, &provisioned);
+            return Err(format!(
+                "Staff worktree {} was opened without a managed lease; refusing to dispatch",
+                provisioned.report.path
+            ));
+        }
+    };
+    let path = PathBuf::from(&provisioned.report.path);
+    start.mechanics.env_id = Some(env_id.clone());
+    start.auto_staff_exec_env = Some(PendingAutoStaffExecEnv::new(server.clone(), env_id, path));
+    Ok(())
+}
+
+fn cleanup_failed_staff_provision(
+    server: &MemoryServer,
+    provisioned: &crate::exec_env_ops::ProvisionedEnv,
+) {
+    if !provisioned.report.opened {
+        return;
+    }
+    let path = PathBuf::from(&provisioned.report.path);
+    if let Some(env_id) = provisioned.env_id.clone() {
+        drop(PendingAutoStaffExecEnv::new(server.clone(), env_id, path));
+        return;
+    }
+    if let Err(error) =
+        tachi_clean::wt_clean::run_wt_remove(tachi_clean::wt_clean::WtRemoveOptions {
+            path,
+            force: true,
+            output: tachi_clean::wt_clean::OutputFormat::Json,
+        })
+    {
+        tracing::warn!(
+            path = %provisioned.report.path,
+            error = %error,
+            "failed to remove Staff worktree whose lease provisioning failed"
+        );
+    }
+}
+
+#[cfg(test)]
+fn test_staff_repo_root_fallback() -> Option<PathBuf> {
+    crate::utils::find_project_git_root()
+}
+
+#[cfg(not(test))]
+fn test_staff_repo_root_fallback() -> Option<PathBuf> {
+    None
 }

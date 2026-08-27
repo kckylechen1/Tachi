@@ -28,6 +28,7 @@ impl NativeAcpConnection {
         agent: &str,
         _run_dir: &Path,
         trajectory_path: &Path,
+        defer_worker_text: bool,
     ) -> Self {
         Self {
             stdin: Some(stdin),
@@ -39,6 +40,7 @@ impl NativeAcpConnection {
             observed_model: None,
             request_index: 0,
             permission_label: spec.permission_label.clone(),
+            defer_worker_text,
             dispatch_id: dispatch_id.to_string(),
             agent: agent.to_string(),
             trajectory_path: trajectory_path.to_path_buf(),
@@ -292,7 +294,7 @@ impl NativeAcpConnection {
     /// substring authorizer it described. `authorizer` stays in the receipt
     /// schema as a fixed constant so existing consumers don't need a schema
     /// migration for this field.
-    fn append_permission_receipt(&self, decision: &AcpPermissionDecision) {
+    fn append_permission_receipt(&mut self, decision: &AcpPermissionDecision) {
         let verdict = if decision.allowed { "allow" } else { "deny" };
         const AUTHORIZER: &str = "typed_taxonomy";
         // `raw_kind` is attacker-influenced (it comes straight off the child
@@ -300,21 +302,30 @@ impl NativeAcpConnection {
         // in the trajectory log or the tracing log line, so a hostile agent
         // can't inject control characters / newlines or blow up the log with
         // an oversized field.
-        let raw_kind = sanitize_receipt_field(&decision.raw_kind);
-        append_trajectory_event(
-            &self.trajectory_path,
-            json!({
-                "event": "acp_native_permission_receipt",
-                "dispatch_id": self.dispatch_id,
-                "agent": self.agent,
-                "permission_profile": self.permission_label,
-                "request_kind": decision.kind.as_str(),
-                "raw_tool_kind": raw_kind,
-                "verdict": verdict,
-                "authorizer": AUTHORIZER,
-                "timestamp": Utc::now().to_rfc3339(),
-            }),
-        );
+        let raw_kind = if self.defer_worker_text {
+            "[withheld pending exec_env_postflight]".to_string()
+        } else {
+            sanitize_receipt_field(&decision.raw_kind)
+        };
+        let event = json!({
+            "event": "acp_native_permission_receipt",
+            "dispatch_id": self.dispatch_id,
+            "agent": self.agent,
+            "permission_profile": self.permission_label,
+            "request_kind": decision.kind.as_str(),
+            "raw_tool_kind": raw_kind,
+            "verdict": verdict,
+            "authorizer": AUTHORIZER,
+            "timestamp": Utc::now().to_rfc3339(),
+        });
+        if self.defer_worker_text {
+            self.staged_events.push(NativeAcpStagedEvent {
+                target: NativeAcpEventTarget::PostflightReceipt,
+                payload: event,
+            });
+        } else {
+            append_trajectory_event(&self.trajectory_path, event);
+        }
         if !decision.allowed {
             tracing::warn!(
                 target: "tachi::acp::permission",

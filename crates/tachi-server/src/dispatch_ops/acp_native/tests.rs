@@ -179,6 +179,8 @@ printf '%s\n' '{"jsonrpc":"2.0","id":"tachi-acp-1","result":{"protocolVersion":1
 IFS= read -r _
 printf '%s\n' '{"jsonrpc":"2.0","id":"tachi-acp-2","result":{"sessionId":"s-1"}}'
 IFS= read -r _
+printf '%s\n' '{"jsonrpc":"2.0","id":"permission-1","method":"session/request_permission","params":{"toolCall":{"kind":"SECRET-WORKER-TOOL-KIND"},"options":[{"optionId":"once"}]}}'
+IFS= read -r _
 printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s-1","update":{"sessionUpdate":"agent_message","content":{"type":"text","text":"sensitive-native-output"}}}}'
 printf '%s\n' '{"jsonrpc":"2.0","id":"tachi-acp-3","result":{}}'
 "#,
@@ -228,9 +230,9 @@ printf '%s\n' '{"jsonrpc":"2.0","id":"tachi-acp-3","result":{}}'
     assert!(!temp.path().join("progress.jsonl").exists());
     assert!(!session_record.exists());
     assert!(!session_distill.exists());
-    assert!(!std::fs::read_to_string(&trajectory)
-        .expect("trajectory")
-        .contains("sensitive-native-output"));
+    let preflight_trajectory = std::fs::read_to_string(&trajectory).expect("trajectory");
+    assert!(!preflight_trajectory.contains("sensitive-native-output"));
+    assert!(!preflight_trajectory.contains("SECRET-WORKER-TOOL-KIND"));
 
     let deferred = outcome
         .deferred_native_acp
@@ -269,6 +271,9 @@ printf '%s\n' '{"jsonrpc":"2.0","id":"tachi-acp-3","result":{}}'
             .expect("raw stream")
             .contains("sensitive-native-output")
     );
+    let released_trajectory = std::fs::read_to_string(&trajectory).expect("released trajectory");
+    assert!(!released_trajectory.contains("SECRET-WORKER-TOOL-KIND"));
+    assert!(released_trajectory.contains("[withheld pending exec_env_postflight]"));
     let progress =
         std::fs::read_to_string(temp.path().join("progress.jsonl")).expect("sanitized progress");
     assert!(!progress.contains("sensitive-native-output"));

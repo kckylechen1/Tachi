@@ -105,6 +105,75 @@ pub(super) enum ManagedEphemeralCredentialCleanupObligation {
     Required,
 }
 
+/// A Staff-created read-only worktree that exists only to give Required
+/// postflight a real lease boundary. The pending form removes an untouched
+/// tree if launch fails before background ownership; after handoff, cleanup is
+/// explicit and happens only after a clean postflight verdict. A quarantined
+/// tree is intentionally preserved for inspection.
+pub(super) struct PendingAutoStaffExecEnv {
+    owned: Option<AutoStaffExecEnv>,
+}
+
+pub(super) struct AutoStaffExecEnv {
+    server: MemoryServer,
+    env_id: String,
+    path: PathBuf,
+}
+
+impl PendingAutoStaffExecEnv {
+    pub(super) fn new(server: MemoryServer, env_id: String, path: PathBuf) -> Self {
+        Self {
+            owned: Some(AutoStaffExecEnv {
+                server,
+                env_id,
+                path,
+            }),
+        }
+    }
+
+    pub(super) fn handoff(mut self) -> AutoStaffExecEnv {
+        self.owned.take().expect("pending Staff env owns one lease")
+    }
+}
+
+impl Drop for PendingAutoStaffExecEnv {
+    fn drop(&mut self) {
+        if let Some(owned) = self.owned.take() {
+            owned.cleanup("Staff launch failed before worker spawn");
+        }
+    }
+}
+
+impl AutoStaffExecEnv {
+    fn cleanup(self, reason: &str) {
+        let remove = tachi_clean::wt_clean::run_wt_remove(tachi_clean::wt_clean::WtRemoveOptions {
+            path: self.path.clone(),
+            force: true,
+            output: tachi_clean::wt_clean::OutputFormat::Json,
+        });
+        if let Err(error) = remove {
+            tracing::warn!(
+                env_id = %self.env_id,
+                path = %self.path.display(),
+                error = %error,
+                "automatic Staff exec env cleanup failed; preserving lease and worktree"
+            );
+            return;
+        }
+        if let Err(error) = self.server.reclaim_exec_env(
+            &memcore::ExecEnvSelector::EnvId(self.env_id.clone()),
+            Some(reason),
+        ) {
+            tracing::warn!(
+                env_id = %self.env_id,
+                path = %self.path.display(),
+                error = %error,
+                "automatic Staff worktree was removed but lease reclaim failed"
+            );
+        }
+    }
+}
+
 pub(super) struct BackgroundDispatchContext {
     pub(super) server: MemoryServer,
     pub(super) dispatch_id: String,
@@ -136,6 +205,7 @@ pub(super) struct BackgroundDispatchContext {
         Option<ManagedEphemeralCredentialCleanupObligation>,
     pub(super) postflight_gate: Option<crate::exec_env_postflight::PostflightGate>,
     pub(super) postflight_dispatch_lease: Option<crate::exec_env_ops::ExecEnvDispatchLeaseGuard>,
+    pub(super) auto_staff_exec_env: Option<AutoStaffExecEnv>,
 }
 
 /// Covers an unwind before the ordinary background terminal path reaches its
@@ -332,6 +402,7 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
     let managed_ephemeral_credential_cleanup = ctx.managed_ephemeral_credential_cleanup;
     let postflight_gate_for_spawn = ctx.postflight_gate;
     let postflight_dispatch_lease = ctx.postflight_dispatch_lease;
+    let auto_staff_exec_env = ctx.auto_staff_exec_env;
 
     tokio::task::spawn(async move {
         // Keep the registry entry and its sender alive for the entire
@@ -1366,6 +1437,14 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                     Some(agent_for_watchdog.as_str()),
                     project_for_watchdog.as_deref(),
                 );
+            }
+        }
+        if postflight_outcome
+            .as_ref()
+            .is_some_and(crate::exec_env_postflight::GateOutcome::artifacts_released)
+        {
+            if let Some(owned) = auto_staff_exec_env {
+                owned.cleanup("clean automatic Staff postflight completion");
             }
         }
         early_exit_cleanup.complete();

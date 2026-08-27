@@ -172,6 +172,7 @@ async fn run_native_acp_dispatch_inner(
         agent,
         run_dir,
         trajectory_path,
+        defer_artifacts,
     );
     let outcome = match tokio::time::timeout(timeout, connection.run_prompt_turn(&spec)).await {
         Ok(outcome) => outcome,
@@ -391,11 +392,15 @@ pub(in crate::dispatch_ops) fn publish_native_acp_artifacts(
             )?;
         }
     }
-    if publish_worker_mappings {
-        for event in &outcome.staged_events {
+    for event in &outcome.staged_events {
+        if publish_worker_mappings
+            || matches!(event.target, NativeAcpEventTarget::PostflightReceipt)
+        {
             let target = match event.target {
                 NativeAcpEventTarget::Progress => run_dir.join("progress.jsonl"),
-                NativeAcpEventTarget::Trajectory => trajectory_path.to_path_buf(),
+                NativeAcpEventTarget::Trajectory | NativeAcpEventTarget::PostflightReceipt => {
+                    trajectory_path.to_path_buf()
+                }
             };
             append_trajectory_event(&target, event.payload.clone());
         }

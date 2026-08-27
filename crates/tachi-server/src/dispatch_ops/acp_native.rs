@@ -72,6 +72,9 @@ pub(in crate::dispatch_ops) struct NativeAcpStagedEvent {
 pub(in crate::dispatch_ops) enum NativeAcpEventTarget {
     Progress,
     Trajectory,
+    /// Server-authored permission metadata that is safe to publish only after
+    /// Required postflight releases the carrier's atomic artifact set.
+    PostflightReceipt,
 }
 
 #[derive(Debug, Clone)]
@@ -91,6 +94,7 @@ struct NativeAcpConnection {
     observed_model: Option<String>,
     request_index: u64,
     permission_label: String,
+    defer_worker_text: bool,
     dispatch_id: String,
     agent: String,
     trajectory_path: PathBuf,

@@ -39,7 +39,7 @@ impl DbHolderEvidence {
 pub type DbHolderProbeFn = dyn Fn(&Path) -> DbHolderEvidence;
 
 /// Read holder evidence from the configured Tachi global DB.  The cleaner
-/// shares the runtime's `TACHI_HOME` layout (`<home>/global/memory.db`) and
+/// shares the runtime's `TACHI_HOME` layout and canonical database filename,
 /// never creates or migrates a DB while deciding whether deletion is safe.
 pub fn probe_worktree_holder(worktree: &Path) -> DbHolderEvidence {
     let home = resolve_tachi_home();
@@ -64,12 +64,18 @@ fn resolve_tachi_home() -> PathBuf {
 
 #[cfg(test)]
 pub(crate) fn probe_worktree_holder_from_home(home: &Path, worktree: &Path) -> DbHolderEvidence {
-    probe_worktree_holder_at_db(&home.join("global").join("memory.db"), worktree)
+    probe_worktree_holder_at_db(
+        &home.join("global").join(memcore::MEMORY_DB_FILENAME),
+        worktree,
+    )
 }
 
 #[cfg(not(test))]
 fn probe_worktree_holder_from_home(home: &Path, worktree: &Path) -> DbHolderEvidence {
-    probe_worktree_holder_at_db(&home.join("global").join("memory.db"), worktree)
+    probe_worktree_holder_at_db(
+        &home.join("global").join(memcore::MEMORY_DB_FILENAME),
+        worktree,
+    )
 }
 
 fn probe_worktree_holder_at_db(db_path: &Path, worktree: &Path) -> DbHolderEvidence {
@@ -150,7 +156,7 @@ mod tests {
     }
 
     fn store(home: &Path) -> memcore::MemoryStore {
-        let db = home.join("global").join("memory.db");
+        let db = home.join("global").join(memcore::MEMORY_DB_FILENAME);
         std::fs::create_dir_all(db.parent().unwrap()).unwrap();
         memcore::MemoryStore::open(db.to_str().unwrap()).unwrap()
     }
