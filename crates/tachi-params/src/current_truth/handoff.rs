@@ -177,12 +177,14 @@ fn lifecycle_family(predicate: PredicateV1) -> Option<&'static [PredicateV1]> {
     }
 }
 
-/// Family-aware staleness: the claim is stale when any family member's
-/// current head moved strictly beyond the bound head, when any member is
-/// individually conflicted, or when two members tie at the newest
-/// `(instant, revision)` — the same same-immutable-revision contradiction
-/// the reducer's `resolve_family` treats as a conflicted lifecycle (a tied
-/// lifecycle is never a reliable current claim).
+/// Family-aware staleness, in exact parity with the reducer's
+/// `resolve_family` law: the claim is stale when any family member's
+/// current head moved strictly beyond the bound head, OR the family is
+/// currently conflicted — two members tying at the newest
+/// `(instant, revision)`, or the single member owning that key being
+/// itself `Conflicted`. An OLDER conflicted member superseded by a newer
+/// family fact is history: it does not stale a claim bound at the newer
+/// head.
 fn classify_lifecycle_claim(
     binding: &HandoffClaimBindingV1,
     reduction: &ReductionV1,
@@ -197,14 +199,17 @@ fn classify_lifecycle_claim(
     // rule `resolve_family` uses to detect family contradictions).
     let mut newest_tie: Option<TieKey> = None;
     let mut owners: Vec<PredicateV1> = Vec::new();
-    let mut conflicted = false;
     let mut any_current = false;
     for predicate in family {
         let reduced = reduction.get(&binding.subject, *predicate);
         match reduced.status {
-            ReductionStatusV1::Conflicted => conflicted = true,
-            ReductionStatusV1::Current => {
-                any_current = true;
+            // Parity with resolve_family: conflicted members' heads still
+            // compete for the family's max key — a conflict only matters
+            // where it WINS (or ties).
+            ReductionStatusV1::Current | ReductionStatusV1::Conflicted => {
+                if reduced.status == ReductionStatusV1::Current {
+                    any_current = true;
+                }
                 for head in &reduced.current_heads {
                     let key = super::types::head_order_key(head);
                     let tie = (key.0, key.1.clone());
@@ -231,7 +236,11 @@ fn classify_lifecycle_claim(
             ReductionStatusV1::Superseded | ReductionStatusV1::Unknown => {}
         }
     }
-    if conflicted || owners.len() > 1 {
+    let family_conflicted = owners.len() > 1
+        || owners.iter().any(|predicate| {
+            reduction.get(&binding.subject, *predicate).status == ReductionStatusV1::Conflicted
+        });
+    if family_conflicted {
         return (true, Some(HandoffStaleReasonV1::NowConflicted), None);
     }
     match (newest, newest_head) {

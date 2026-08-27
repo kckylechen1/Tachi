@@ -59,6 +59,8 @@ pub enum CurrentTruthStoreError {
     EmptySourceRevision,
     #[error("predicate `{0}` is projection-computed and may not be asserted by a source")]
     ProjectionPredicateNotAssertable(PredicateV1),
+    #[error("value shape is not admissible for predicate `{0}` (closed predicate-specific value vocabulary)")]
+    PredicateValueNotAdmissible(PredicateV1),
     #[error(
         "ingestion key already recorded with a different value at the same immutable revision: {0:?}"
     )]
@@ -386,6 +388,45 @@ impl CurrentTruthSqliteStore {
         Ok(out)
     }
 
+    /// Subject tokens (identity columns only — no content is decoded on
+    /// this path) of every subject with at least one private row in
+    /// `repo`. Used for fail-closed subject hiding WITHOUT decoding
+    /// private content: a malformed private row can never surface to an
+    /// unauthorized caller, neither as an error nor as error text.
+    pub fn private_subject_tokens(
+        &self,
+        repo: &str,
+    ) -> Result<std::collections::BTreeSet<String>, CurrentTruthStoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT subject_repo || '#' || subject_kind || ':' || subject_id
+             FROM current_truth_assertions
+             WHERE subject_repo = ?1 AND visibility = 'private'",
+        )?;
+        let rows = stmt.query_map(params![repo], |row| row.get::<_, String>(0))?;
+        Ok(rows.collect::<Result<std::collections::BTreeSet<_>, _>>()?)
+    }
+
+    /// Public-visibility assertions for one repository, same deterministic
+    /// ordering. Private rows are filtered in SQL and are NEVER decoded on
+    /// this path.
+    pub fn public_assertions_for_repo(
+        &self,
+        repo: &str,
+    ) -> Result<Vec<AssertionV1>, CurrentTruthStoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT assertion_id, subject_repo, subject_kind, subject_id, predicate,
+                    value_json, issuer, authority, source_id, source_revision,
+                    observed_at, effective_at, supersedes, evidence_json,
+                    review_state, visibility
+             FROM current_truth_assertions
+             WHERE subject_repo = ?1 AND visibility = 'public'
+             ORDER BY subject_repo, subject_kind, subject_id, predicate,
+                      authority, issuer, source_id, source_revision, assertion_id",
+        )?;
+        let rows = stmt.query_map(params![repo], map_assertion_row)?;
+        Self::collect_decoded_rows(rows)
+    }
+
     /// Assertion count for one repository (test/health use).
     pub fn assertion_count(&self, repo: &str) -> Result<usize, CurrentTruthStoreError> {
         let count: i64 = self.conn.query_row(
@@ -479,6 +520,12 @@ impl CurrentTruthSqliteStore {
             return Err(CurrentTruthStoreError::FreshPostureMissingRevision(
                 repo.to_string(),
             ));
+        }
+        // A recorded last-fresh time must be a real RFC 3339 instant.
+        if let Some(at) = last_fresh_at {
+            if !at.is_empty() && chrono::DateTime::parse_from_rfc3339(at).is_err() {
+                return Err(CurrentTruthStoreError::MalformedObservedAt(at.to_string()));
+            }
         }
         // One transaction: the staleness check and the upsert commit
         // atomically, so a concurrent writer on the same file cannot
@@ -589,6 +636,13 @@ impl CurrentTruthSqliteStore {
         }
         if !assertion.predicate.is_source_predicate() {
             return Err(CurrentTruthStoreError::ProjectionPredicateNotAssertable(
+                assertion.predicate,
+            ));
+        }
+        // Closed predicate-specific value vocabulary: a predicate-invalid
+        // value shape is malformed typed data, never admissible history.
+        if !assertion.predicate.admits_value(&assertion.value) {
+            return Err(CurrentTruthStoreError::PredicateValueNotAdmissible(
                 assertion.predicate,
             ));
         }
@@ -823,6 +877,12 @@ fn decode_assertion_row(
     };
     let value = serde_json::from_str::<AssertionValueV1>(&value_json)
         .map_err(|error| CurrentTruthStoreError::CorruptRow(format!("value: {error}")))?;
+    if !predicate.admits_value(&value) {
+        return Err(CurrentTruthStoreError::CorruptRow(format!(
+            "value not admissible for predicate `{}`",
+            predicate.as_str()
+        )));
+    }
     let evidence_refs = serde_json::from_str(&evidence_json)
         .map_err(|error| CurrentTruthStoreError::CorruptRow(format!("evidence: {error}")))?;
     if ![

@@ -17,7 +17,7 @@ use serde::Serialize;
 use super::projection::{projection_health, OpenActionV1, ProjectionHealthV1};
 use super::reducer::ReductionV1;
 use super::store::{CurrentTruthSqliteStore, CurrentTruthStoreError, RefreshPostureRowV1};
-use super::types::{GithubObjectRefV1, PredicateV1, ReductionStatusV1, VisibilityClassV1};
+use super::types::{GithubObjectRefV1, PredicateV1, ReductionStatusV1};
 
 /// Caller authorization for consumer reads. `sees_private` is granted by the
 /// owning server surface, not self-declared by the caller.
@@ -93,19 +93,22 @@ pub fn read_view(
     let posture = store
         .refresh_posture_row(repo)?
         .ok_or_else(|| ConsumerViewError::NoPosture(repo.to_string()))?;
-    let assertions = store.assertions_for_repo(repo)?;
-    let mut hidden_subjects: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    if !authorization.sees_private {
-        for assertion in &assertions {
-            if assertion.visibility == VisibilityClassV1::Private {
-                hidden_subjects.insert(assertion.subject.as_token());
-            }
-        }
-    }
-    let visible: Vec<_> = assertions
-        .into_iter()
-        .filter(|assertion| !hidden_subjects.contains(&assertion.subject.as_token()))
-        .collect();
+    let visible: Vec<_> = if authorization.sees_private {
+        store.assertions_for_repo(repo)?
+    } else {
+        // Private rows are excluded in SQL and NEVER decoded for an
+        // unauthorized caller: a malformed private row can surface neither
+        // as an error nor as content inside error text. Fail-closed
+        // subject hiding (a subject with ANY private row is hidden with
+        // its historical public rows) is decided from identity columns
+        // alone.
+        let hidden_subjects = store.private_subject_tokens(repo)?;
+        store
+            .public_assertions_for_repo(repo)?
+            .into_iter()
+            .filter(|assertion| !hidden_subjects.contains(&assertion.subject.as_token()))
+            .collect()
+    };
     let reduction = super::reducer::reduce(&visible);
     let refresh_debt = usize::from(!posture.fresh);
     let health = projection_health(&reduction, 0, refresh_debt);

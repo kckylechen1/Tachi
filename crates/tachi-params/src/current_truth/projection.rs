@@ -350,7 +350,12 @@ fn chain_conflict_tokens(reduction: &ReductionV1, issue: &SubjectRefV1) -> Vec<S
     let linked = reduction.linked_prs(issue);
     let mut tokens = Vec::new();
     for reduced in reduction.all() {
+        // Same exclusion as `chain_conflicted`: lifecycle-family conflicts
+        // are surfaced by the family gates (`<subject>#lifecycle_conflict`),
+        // not as per-predicate blockers — an older conflicted family member
+        // superseded by a newer fact is history.
         if reduced.status == ReductionStatusV1::Conflicted
+            && !super::reducer::is_lifecycle_family_predicate(reduced.predicate)
             && (reduced.subject == *issue
                 || (reduced.subject.repo == issue.repo && linked.contains(&reduced.subject.object)))
         {

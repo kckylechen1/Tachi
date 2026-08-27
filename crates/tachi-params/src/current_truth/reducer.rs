@@ -449,8 +449,16 @@ impl ReductionV1 {
         self.get(issue, PredicateV1::OwnerAcceptancePresent).status == ReductionStatusV1::Current
     }
 
-    /// Whether any predicate in the subject's reconciliation chain (the
-    /// issue plus its currently linked PRs) is conflicted.
+    /// Whether any NON-family predicate in the subject's reconciliation
+    /// chain (the issue plus its currently linked PRs) is conflicted.
+    ///
+    /// Lifecycle-family predicates (`issue_*`, `pr_*`, `merge_reverted`)
+    /// are deliberately excluded: their families resolve their own
+    /// conflicts via [`ReductionV1::issue_lifecycle`] /
+    /// [`ReductionV1::pr_lifecycle`] — an OLDER conflicted member
+    /// superseded by a newer family fact is history and must not block
+    /// (parity with `resolve_family`); a CURRENT family conflict is caught
+    /// by the family gates, not by this predicate scan.
     pub fn chain_conflicted(&self, issue: &SubjectRefV1) -> bool {
         let mut chain = vec![issue.as_token()];
         chain.extend(
@@ -459,9 +467,27 @@ impl ReductionV1 {
                 .map(|object| pr_subject(issue, object).as_token()),
         );
         self.predicates.values().any(|r| {
-            chain.contains(&r.subject.as_token()) && r.status == ReductionStatusV1::Conflicted
+            chain.contains(&r.subject.as_token())
+                && r.status == ReductionStatusV1::Conflicted
+                && !is_lifecycle_family_predicate(r.predicate)
         })
     }
+}
+
+/// Whether `predicate` belongs to a mutually-exclusive lifecycle family
+/// whose conflicts are resolved by the family view (max-key rule), not by
+/// the per-predicate conflict scan.
+pub(crate) fn is_lifecycle_family_predicate(predicate: PredicateV1) -> bool {
+    matches!(
+        predicate,
+        PredicateV1::IssueOpen
+            | PredicateV1::IssueClosed
+            | PredicateV1::IssueReopened
+            | PredicateV1::PrOpen
+            | PredicateV1::PrMerged
+            | PredicateV1::PrClosedUnmerged
+            | PredicateV1::MergeReverted
+    )
 }
 
 fn pr_subject(issue: &SubjectRefV1, object: &GithubObjectRefV1) -> SubjectRefV1 {

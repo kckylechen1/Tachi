@@ -728,11 +728,14 @@ fn two_authoritative_contradictions_stay_conflicted_with_resolution_action() {
     assert!(!action.blockers.is_empty());
 
     // The same immutable revision contradicting itself is rejected outright.
+    // The tampered value is an ADMISSIBLE shape (the empty link set) so the
+    // rejection exercised here is the ingestion-key contradiction, not the
+    // predicate/value compatibility gate.
     let mut contradictory = mint_assertions(&state_v1())
         .into_iter()
-        .find(|a| a.predicate == PredicateV1::PrOpen)
+        .find(|a| a.predicate == PredicateV1::ImplementationPrLinked)
         .unwrap();
-    contradictory.value = AssertionValueV1::CommitSha("tampered".to_string());
+    contradictory.value = AssertionValueV1::ObjectRefs(vec![]);
     match store.append(&contradictory) {
         Err(CurrentTruthStoreError::ContradictsExistingRevision(_)) => {}
         other => panic!("expected same-revision contradiction rejection, got {other:?}"),
@@ -820,19 +823,24 @@ fn full_rebuild_equals_incremental_projection() {
     let store = open_store();
     let states = [state_v1(), state_v2(), state_v3(), state_v4()];
 
-    // Incremental: reduce + write after every append.
+    // Incremental: reduce + write after every append. The STORED
+    // projection carries the serialized reduction (not a marker string),
+    // so the persisted artifacts themselves are compared below.
     let mut incremental_final = None;
     for state in &states {
         store.append_all(&mint_assertions(state)).expect("append");
         let assertions = store.assertions().unwrap();
         let reduction = reduce(&assertions);
         let generation = generation_digest(&assertions);
+        let view_json = serde_json::to_string(&reduction.all()).unwrap();
         store
-            .write_projection(REPO, &generation, "2026-08-26T00:00:00Z", "incremental")
+            .write_projection(REPO, &generation, "2026-08-26T00:00:00Z", &view_json)
             .expect("write projection");
-        incremental_final = Some((reduction, generation));
+        incremental_final = Some((reduction, generation, view_json));
     }
-    let (incremental_reduction, incremental_generation) = incremental_final.expect("reduced");
+    let (incremental_reduction, incremental_generation, incremental_view) =
+        incremental_final.expect("reduced");
+    let incremental_stored = store.read_projection(REPO).unwrap().expect("stored");
 
     // Full rebuild: drop the projection, re-reduce everything at once.
     store.drop_projection(REPO).expect("drop projection");
@@ -840,9 +848,16 @@ fn full_rebuild_equals_incremental_projection() {
     let assertions = store.assertions().unwrap();
     let rebuild_reduction = reduce(&assertions);
     let rebuild_generation = generation_digest(&assertions);
+    let rebuild_view = serde_json::to_string(&rebuild_reduction.all()).unwrap();
     store
-        .write_projection(REPO, &rebuild_generation, "2026-08-26T00:00:00Z", "rebuild")
+        .write_projection(
+            REPO,
+            &rebuild_generation,
+            "2026-08-26T00:00:00Z",
+            &rebuild_view,
+        )
         .expect("rebuild projection");
+    let rebuild_stored = store.read_projection(REPO).unwrap().expect("stored");
 
     assert_eq!(incremental_generation, rebuild_generation);
     assert_eq!(
@@ -851,6 +866,12 @@ fn full_rebuild_equals_incremental_projection() {
         "canonical equality of the full reduction"
     );
     assert_eq!(incremental_reduction, rebuild_reduction);
+    // The STORED projection artifacts are canonically equal too — the
+    // persisted incremental projection and the persisted rebuild carry the
+    // same content (a stale or marker-string projection cannot pass).
+    assert_eq!(incremental_view, rebuild_view);
+    assert_eq!(incremental_stored.view_json, rebuild_stored.view_json);
+    assert_eq!(incremental_stored.generation, rebuild_stored.generation);
 
     // Dropping/rebuilding the projection never touched the authority.
     assert!(store.assertion_count(REPO).unwrap() > 0);
@@ -2341,4 +2362,320 @@ fn fresh_refresh_posture_requires_revision_and_time() {
             Some("down"),
         )
         .expect("unavailable posture without last-good revision is valid");
+}
+
+// ── Codex R2 round 6 accepted findings ─────────────────────────────────────
+
+/// R6-1a: an OLDER conflicted lifecycle member superseded by a newer family
+/// fact is history — it must not block the projection forever (parity with
+/// `resolve_family`): the family resolved, the action follows the resolved
+/// lifecycle, not the stale per-predicate conflict.
+#[test]
+fn older_conflicted_lifecycle_member_superseded_by_newer_fact_unblocks_projection() {
+    let open_head = AssertionV1 {
+        assertion_id: "r7-open-head".to_string(),
+        subject: issue(100),
+        predicate: PredicateV1::IssueOpen,
+        value: AssertionValueV1::Unit,
+        issuer: "github-refresh-v1".to_string(),
+        authority_class: AuthorityClassV1::GitHubTypedObject,
+        source_ref: SourceRefV1 {
+            source: "github-snapshot-adapter".to_string(),
+            revision: "r7-o1".to_string(),
+        },
+        observed_at: "2026-08-26T10:00:00Z".to_string(),
+        effective_at: "2026-08-26T10:00:00Z".to_string(),
+        supersedes_assertion_id: None,
+        evidence_refs: vec![],
+        review_state: ReviewStateV1::Observed,
+        visibility: VisibilityClassV1::Public,
+    };
+    // Malformed provenance in the SAME lineage: an old open claims to
+    // supersede the strictly newer head — the predicate goes Conflicted at
+    // T1 (both heads at/below T1).
+    let mut open_malformed = open_head.clone();
+    open_malformed.assertion_id = "r7-open-old".to_string();
+    open_malformed.source_ref.revision = "r7-o0".to_string();
+    open_malformed.observed_at = "2026-08-26T09:00:00Z".to_string();
+    open_malformed.effective_at = open_malformed.observed_at.clone();
+    open_malformed.supersedes_assertion_id = Some("r7-open-head".to_string());
+
+    let mut closed_t2 = open_head.clone();
+    closed_t2.assertion_id = "r7-closed-t2".to_string();
+    closed_t2.predicate = PredicateV1::IssueClosed;
+    closed_t2.issuer = "owner-tool".to_string();
+    closed_t2.authority_class = AuthorityClassV1::OwnerDecision;
+    closed_t2.source_ref.revision = "r7-c2".to_string();
+    closed_t2.observed_at = "2026-08-26T12:00:00Z".to_string();
+    closed_t2.effective_at = closed_t2.observed_at.clone();
+
+    // Evidenced, never-reverted merge on a linked PR.
+    let mut merged_pr = open_head.clone();
+    merged_pr.assertion_id = "r7-pr-merged".to_string();
+    merged_pr.subject = pr(200);
+    merged_pr.predicate = PredicateV1::PrMerged;
+    merged_pr.value = AssertionValueV1::CommitSha("mergeabc123".to_string());
+    merged_pr.source_ref.revision = "r7-m1".to_string();
+    merged_pr.observed_at = "2026-08-26T08:00:00Z".to_string();
+    merged_pr.effective_at = merged_pr.observed_at.clone();
+    let mut linked = merged_pr.clone();
+    linked.assertion_id = "r7-link".to_string();
+    linked.subject = issue(100);
+    linked.predicate = PredicateV1::ImplementationPrLinked;
+    linked.value = AssertionValueV1::ObjectRefs(vec![GithubObjectRefV1::PullRequest(200)]);
+
+    let reduction = reduce(&[
+        open_head,
+        open_malformed,
+        closed_t2.clone(),
+        merged_pr,
+        linked,
+    ]);
+    assert_eq!(
+        reduction.get(&issue(100), PredicateV1::IssueOpen).status,
+        ReductionStatusV1::Conflicted,
+        "fixture setup: the older open lineage is conflicted"
+    );
+    assert_eq!(
+        reduction.issue_lifecycle(&issue(100)),
+        IssueLifecycleView::Closed,
+        "the newer close resolves the family"
+    );
+    let action = open_action_for(&reduction, &fresh_posture(), &issue(100));
+    assert_ne!(
+        action.kind,
+        super::types::OpenActionKindV1::ResolveConflict,
+        "an older conflicted family member superseded by a newer fact is history"
+    );
+    assert_eq!(
+        action.kind,
+        super::types::OpenActionKindV1::AwaitOwnerAcceptance
+    );
+}
+
+/// R6-1b: handoff parity — a claim bound at the newer, family-resolving
+/// head is NOT staled by an older conflicted member of the same family.
+#[test]
+fn older_conflicted_member_does_not_stale_newer_family_handoff_claim() {
+    let head = AssertionV1 {
+        assertion_id: "r8-closed-head".to_string(),
+        subject: issue(100),
+        predicate: PredicateV1::IssueClosed,
+        value: AssertionValueV1::Unit,
+        issuer: "owner-tool".to_string(),
+        authority_class: AuthorityClassV1::OwnerDecision,
+        source_ref: SourceRefV1 {
+            source: "github-snapshot-adapter".to_string(),
+            revision: "r8-c2".to_string(),
+        },
+        observed_at: "2026-08-26T12:00:00Z".to_string(),
+        effective_at: "2026-08-26T12:00:00Z".to_string(),
+        supersedes_assertion_id: None,
+        evidence_refs: vec![],
+        review_state: ReviewStateV1::Observed,
+        visibility: VisibilityClassV1::Public,
+    };
+    // Older conflicted open lineage: ONE lineage whose older row carries a
+    // malformed supersedes edge pointing at the strictly newer row — the
+    // open predicate goes Conflicted with heads at T1.
+    let mut open_a = head.clone();
+    open_a.assertion_id = "r8-open-a".to_string();
+    open_a.predicate = PredicateV1::IssueOpen;
+    open_a.issuer = "adapter-a".to_string();
+    open_a.authority_class = AuthorityClassV1::GitHubTypedObject;
+    open_a.source_ref.revision = "r8-o1".to_string();
+    open_a.observed_at = "2026-08-26T10:00:00Z".to_string();
+    open_a.effective_at = open_a.observed_at.clone();
+    let mut open_b = open_a.clone();
+    open_b.assertion_id = "r8-open-b".to_string();
+    open_b.source_ref.revision = "r8-o1b".to_string();
+    open_b.supersedes_assertion_id = Some("r8-open-a".to_string());
+    open_b.observed_at = "2026-08-26T09:30:00Z".to_string();
+    open_b.effective_at = open_b.observed_at.clone();
+
+    let reduction = reduce(&[open_a, open_b, head.clone()]);
+    assert_eq!(
+        reduction.get(&issue(100), PredicateV1::IssueOpen).status,
+        ReductionStatusV1::Conflicted,
+        "fixture setup: the older open predicate is conflicted"
+    );
+    assert_eq!(
+        reduction.issue_lifecycle(&issue(100)),
+        IssueLifecycleView::Closed
+    );
+
+    let packet = HandoffPacketV1 {
+        handoff_id: "r8-handoff".to_string(),
+        generated_at: "2026-08-26T12:00:30Z".to_string(),
+        repo: REPO.to_string(),
+        claim_bindings: vec![super::handoff::HandoffClaimBindingV1 {
+            subject: issue(100),
+            predicate: PredicateV1::IssueClosed,
+            head: EvidenceHeadV1::of(&head),
+        }],
+    };
+    let report = evaluate_handoff_staleness(&packet, &reduction);
+    assert!(
+        !report.claims[0].stale,
+        "the claim is bound at the family-resolving newest head"
+    );
+}
+
+/// R6-4: a malformed PRIVATE row in the requested repository must not
+/// surface to an unauthorized caller — not as an error, not as content in
+/// error text, not as a count change. Private rows are filtered before
+/// decode.
+#[test]
+fn corrupt_private_row_does_not_leak_to_unauthorized_read() {
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        r#"
+        CREATE TABLE current_truth_assertions (
+            assertion_id TEXT PRIMARY KEY, subject_repo TEXT NOT NULL,
+            subject_kind TEXT NOT NULL, subject_id TEXT NOT NULL,
+            predicate TEXT NOT NULL, value_json TEXT NOT NULL,
+            issuer TEXT NOT NULL, authority TEXT NOT NULL,
+            source_id TEXT NOT NULL, source_revision TEXT NOT NULL,
+            observed_at TEXT NOT NULL, effective_at TEXT NOT NULL,
+            supersedes TEXT, evidence_json TEXT NOT NULL DEFAULT '[]',
+            review_state TEXT NOT NULL, visibility TEXT NOT NULL,
+            value_digest TEXT NOT NULL, recorded_at TEXT NOT NULL DEFAULT '',
+            UNIQUE (subject_repo, subject_kind, subject_id, predicate,
+                    authority, issuer, source_id, source_revision)
+        );
+        INSERT INTO current_truth_assertions VALUES (
+            'r9-private-corrupt', 'kckylechen1/tachi', 'issue', '300',
+            'made_up_predicate', '"unit"', 'i', 'github_typed_object', 's',
+            'r', '2026-08-26T00:00:00Z', '', NULL, '[]', 'observed',
+            'private', 'd', '');
+        INSERT INTO current_truth_assertions VALUES (
+            'r9-public-open', 'kckylechen1/tachi', 'issue', '100',
+            'issue_open', '"unit"', 'i', 'github_typed_object', 's', 'r',
+            '2026-08-26T00:00:00Z', '', NULL, '[]', 'observed', 'public',
+            'd', '');
+        "#,
+    )
+    .unwrap();
+    let store = CurrentTruthSqliteStore::with_connection(conn).expect("adopt");
+    store
+        .record_refresh(
+            REPO,
+            true,
+            Some("r1"),
+            Some("2026-08-26T00:00:00Z"),
+            "2026-08-26T00:00:05Z",
+            None,
+        )
+        .expect("posture");
+    let view = consumer::read_view(
+        &store,
+        REPO,
+        CallerAuthorizationV1 {
+            sees_private: false,
+        },
+    )
+    .expect("a corrupt private row must not surface to an unauthorized read");
+    let serialized = serde_json::to_string(&view).unwrap();
+    assert!(
+        !serialized.contains("300"),
+        "no private subject token leaks"
+    );
+    assert!(
+        !serialized.contains("made_up_predicate"),
+        "no private row content leaks"
+    );
+    assert_eq!(view.subjects.len(), 1, "only the public subject is visible");
+    // An authorized caller DOES see the corruption (they may read private
+    // subjects, including that one is corrupt).
+    match consumer::read_view(&store, REPO, CallerAuthorizationV1 { sees_private: true }) {
+        Err(consumer::ConsumerViewError::Store(CurrentTruthStoreError::CorruptRow(_))) => {}
+        other => panic!("authorized read should surface the corrupt private row, got {other:?}"),
+    }
+}
+
+/// R6-5: the closed predicate-specific value vocabulary is enforced at
+/// append AND decode — `IssueClosed + CommitSha` is malformed typed data,
+/// never admissible current truth.
+#[test]
+fn inadmissible_predicate_value_rejected_at_append_and_decode() {
+    let mut assertion = AssertionV1 {
+        assertion_id: "r10-bad-value".to_string(),
+        subject: issue(100),
+        predicate: PredicateV1::IssueClosed,
+        value: AssertionValueV1::CommitSha("mergeabc123".to_string()),
+        issuer: "github-refresh-v1".to_string(),
+        authority_class: AuthorityClassV1::GitHubTypedObject,
+        source_ref: SourceRefV1 {
+            source: "github-snapshot-adapter".to_string(),
+            revision: "r10".to_string(),
+        },
+        observed_at: "2026-08-26T10:00:00Z".to_string(),
+        effective_at: "2026-08-26T10:00:00Z".to_string(),
+        supersedes_assertion_id: None,
+        evidence_refs: vec![],
+        review_state: ReviewStateV1::Observed,
+        visibility: VisibilityClassV1::Public,
+    };
+    let store = open_store();
+    match store.append(&assertion) {
+        Err(CurrentTruthStoreError::PredicateValueNotAdmissible(_)) => {}
+        other => panic!("expected PredicateValueNotAdmissible, got {other:?}"),
+    }
+    // The same pairing written out-of-band is corrupt at read.
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        r#"
+        CREATE TABLE current_truth_assertions (
+            assertion_id TEXT PRIMARY KEY, subject_repo TEXT NOT NULL,
+            subject_kind TEXT NOT NULL, subject_id TEXT NOT NULL,
+            predicate TEXT NOT NULL, value_json TEXT NOT NULL,
+            issuer TEXT NOT NULL, authority TEXT NOT NULL,
+            source_id TEXT NOT NULL, source_revision TEXT NOT NULL,
+            observed_at TEXT NOT NULL, effective_at TEXT NOT NULL,
+            supersedes TEXT, evidence_json TEXT NOT NULL DEFAULT '[]',
+            review_state TEXT NOT NULL, visibility TEXT NOT NULL,
+            value_digest TEXT NOT NULL, recorded_at TEXT NOT NULL DEFAULT '',
+            UNIQUE (subject_repo, subject_kind, subject_id, predicate,
+                    authority, issuer, source_id, source_revision)
+        );
+        INSERT INTO current_truth_assertions VALUES (
+            'r10-bad-value', 'a/b', 'issue', '1', 'issue_closed',
+            '{"commit_sha":"mergeabc123"}', 'i', 'github_typed_object', 's',
+            'r', '2026-08-26T00:00:00Z', '', NULL, '[]', 'observed',
+            'public', 'd', '');
+        "#,
+    )
+    .unwrap();
+    let store2 = CurrentTruthSqliteStore::with_connection(conn).expect("adopt");
+    match store2.assertions() {
+        Err(CurrentTruthStoreError::CorruptRow(message)) => {
+            assert!(
+                message.contains("not admissible"),
+                "names the value incompatibility: {message}"
+            );
+        }
+        other => panic!("expected CorruptRow, got {other:?}"),
+    }
+    // The admissible Unit form still round-trips.
+    assertion.value = AssertionValueV1::Unit;
+    store
+        .append(&assertion)
+        .expect("Unit is admissible for issue_closed");
+}
+
+/// R6-CONCERN: a recorded last-fresh timestamp must parse as RFC 3339.
+#[test]
+fn fresh_posture_last_fresh_at_must_parse() {
+    let store = open_store();
+    match store.record_refresh(
+        REPO,
+        true,
+        Some("r1"),
+        Some("not-a-timestamp"),
+        "2026-08-26T11:00:00Z",
+        None,
+    ) {
+        Err(CurrentTruthStoreError::MalformedObservedAt(_)) => {}
+        other => panic!("expected MalformedObservedAt, got {other:?}"),
+    }
 }

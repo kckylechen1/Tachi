@@ -119,6 +119,35 @@ impl PredicateV1 {
             PredicateV1::HandoffCurrent | PredicateV1::HandoffStale | PredicateV1::OpenAction
         )
     }
+
+    /// Whether `value` is an admissible value shape for this predicate
+    /// (#1696: "closed predicate-specific value"). Enforced at append AND
+    /// at decode — a predicate-invalid pairing is malformed typed data,
+    /// never admissible current truth. `Unit` on `pr_merged` and
+    /// `implementation_present` is the documented evidence-gap form.
+    pub fn admits_value(self, value: &AssertionValueV1) -> bool {
+        match self {
+            PredicateV1::IssueOpen
+            | PredicateV1::IssueClosed
+            | PredicateV1::IssueReopened
+            | PredicateV1::PrOpen
+            | PredicateV1::PrClosedUnmerged
+            | PredicateV1::OwnerAcceptancePresent => matches!(value, AssertionValueV1::Unit),
+            PredicateV1::ImplementationPrLinked => matches!(
+                value,
+                AssertionValueV1::ObjectRefs(_) | AssertionValueV1::ObjectRef(_)
+            ),
+            PredicateV1::PrMerged | PredicateV1::ImplementationPresent => matches!(
+                value,
+                AssertionValueV1::CommitSha(_) | AssertionValueV1::Unit
+            ),
+            PredicateV1::MergeReverted => matches!(value, AssertionValueV1::CommitSha(_)),
+            PredicateV1::HandoffCurrent | PredicateV1::HandoffStale => {
+                matches!(value, AssertionValueV1::HandoffId(_))
+            }
+            PredicateV1::OpenAction => matches!(value, AssertionValueV1::Action(_)),
+        }
+    }
 }
 
 impl std::fmt::Display for PredicateV1 {
