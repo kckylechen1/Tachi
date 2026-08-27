@@ -17,8 +17,8 @@ use super::store::{
     generation_digest, AppendOutcome, CurrentTruthSqliteStore, CurrentTruthStoreError,
 };
 use super::types::{
-    AssertionV1, AssertionValueV1, AuthorityClassV1, GithubObjectRefV1, PredicateV1,
-    ReductionStatusV1, ReviewStateV1, SourceRefV1, SubjectRefV1, VisibilityClassV1,
+    AssertionV1, AssertionValueV1, AuthorityClassV1, EvidenceHeadV1, GithubObjectRefV1,
+    PredicateV1, ReductionStatusV1, ReviewStateV1, SourceRefV1, SubjectRefV1, VisibilityClassV1,
 };
 
 const REPO: &str = "kckylechen1/tachi";
@@ -179,6 +179,39 @@ fn state_v4() -> GithubRepositoryStateV1 {
                 visibility: VisibilityClassV1::Public,
             },
         ],
+    }
+}
+
+/// v5: independent second work set — issue 101 closed with an evidenced
+/// merge on PR 201, issue 102 open with no link. Gives the projection a
+/// non-degenerate action baseline across subjects.
+fn state_v5() -> GithubRepositoryStateV1 {
+    GithubRepositoryStateV1 {
+        repo: REPO.to_string(),
+        refresh_revision: "r5".to_string(),
+        refreshed_at: "2026-08-26T13:50:00Z".to_string(),
+        issues: vec![
+            snapshot_issue(
+                101,
+                SnapshotIssueStateV1::Closed,
+                "2026-08-26T13:50:00Z",
+                "rev5-iss101",
+            ),
+            snapshot_issue(
+                102,
+                SnapshotIssueStateV1::Open,
+                "2026-08-26T13:50:00Z",
+                "rev5-iss102",
+            ),
+        ],
+        pull_requests: vec![snapshot_pr(
+            201,
+            SnapshotPrStateV1::Merged,
+            "2026-08-26T13:50:00Z",
+            "rev5-pr201",
+            vec![101],
+        )],
+        observations: vec![],
     }
 }
 
@@ -831,7 +864,7 @@ fn full_rebuild_equals_incremental_projection() {
 #[test]
 fn open_action_deterministic_and_order_independent() {
     let mut all = Vec::new();
-    for state in [state_v1(), state_v2(), state_v3(), state_v4()] {
+    for state in [state_v1(), state_v2(), state_v3(), state_v4(), state_v5()] {
         all.extend(mint_assertions(&state));
     }
     all.push(owner_acceptance("2026-08-26T14:00:00Z", "rev5"));
@@ -839,6 +872,22 @@ fn open_action_deterministic_and_order_independent() {
     let baseline = reduce(&all);
     let baseline_actions = super::projection::open_actions(&baseline, &fresh_posture());
     let baseline_json = serde_json::to_string(&baseline_actions).unwrap();
+
+    // R5-8 hardening: the baseline must be non-degenerate — a constant
+    // stub (always `no_open_action`) must FAIL this test, so determinism
+    // is only proven over real, distinct, content-bearing actions.
+    let mut baseline_kinds: Vec<_> = baseline_actions.iter().map(|action| action.kind).collect();
+    baseline_kinds.sort_by_key(|kind| kind.as_str());
+    baseline_kinds.dedup();
+    assert_eq!(
+        baseline_kinds,
+        vec![
+            super::types::OpenActionKindV1::AwaitImplementation,
+            super::types::OpenActionKindV1::AwaitOwnerAcceptance,
+            super::types::OpenActionKindV1::RepairRevertOrReopen,
+        ],
+        "the baseline carries three distinct real actions; a constant projection cannot pass"
+    );
 
     // Several fixed permutations (deterministic test, no RNG).
     for permutation in [
@@ -1074,7 +1123,10 @@ fn corrupt_row_surfaces_as_error_not_silent_guess() {
 /// structural, plus idempotent re-mint from the same state.
 #[test]
 fn refresh_minting_is_pure_and_idempotent() {
-    let state = state_v2();
+    // R5-8: v4 (not v2) — the fixture MUST contain a revert observation, or
+    // the revert-evidence clause below asserts over zero rows and passes
+    // vacuously.
+    let state = state_v4();
     let first = mint_assertions(&state);
     let second = mint_assertions(&state);
     assert!(!first.is_empty(), "a non-trivial state mints assertions");
@@ -1084,6 +1136,12 @@ fn refresh_minting_is_pure_and_idempotent() {
             .iter()
             .all(|a| a.authority_class == AuthorityClassV1::GitHubTypedObject),
         "adapter-minted assertions carry the typed-object authority"
+    );
+    assert!(
+        first
+            .iter()
+            .any(|a| a.predicate == PredicateV1::MergeReverted),
+        "fixture guard: the revert-evidence clause must have a row to bite on"
     );
     assert!(
         first
@@ -1910,4 +1968,377 @@ fn missing_and_empty_sha_mint_same_composite_revision() {
         "the gap forms must be revision-identical"
     );
     assert_eq!(minted_missing, minted_empty);
+}
+
+// ── Codex R2 round 5 (final-head review) accepted findings ────────────────
+
+/// R5-1a: an issue lifecycle-family tie (open and closed individually
+/// Current at the identical instant+revision) is a CONFLICT for the
+/// projection too — it must block success-shaped projection with
+/// `resolve_conflict`, never fall through to a quiet `no_open_action`.
+#[test]
+fn lifecycle_family_tie_blocks_success_shaped_projection() {
+    let tied_open = AssertionV1 {
+        assertion_id: "r5-tie-open".to_string(),
+        subject: issue(100),
+        predicate: PredicateV1::IssueOpen,
+        value: AssertionValueV1::Unit,
+        issuer: "adapter".to_string(),
+        authority_class: AuthorityClassV1::GitHubTypedObject,
+        source_ref: SourceRefV1 {
+            source: "github-snapshot-adapter".to_string(),
+            revision: "rev-r5-tie".to_string(),
+        },
+        observed_at: "2026-08-26T10:00:00Z".to_string(),
+        effective_at: "2026-08-26T10:00:00Z".to_string(),
+        supersedes_assertion_id: None,
+        evidence_refs: vec![],
+        review_state: ReviewStateV1::Observed,
+        visibility: VisibilityClassV1::Public,
+    };
+    let mut tied_closed = tied_open.clone();
+    tied_closed.assertion_id = "r5-tie-closed".to_string();
+    tied_closed.predicate = PredicateV1::IssueClosed;
+    tied_closed.issuer = "owner-tool".to_string();
+    tied_closed.authority_class = AuthorityClassV1::OwnerDecision;
+
+    let reduction = reduce(&[tied_open.clone(), tied_closed]);
+    assert_eq!(
+        reduction.issue_lifecycle(&issue(100)),
+        IssueLifecycleView::Conflicted
+    );
+    let action = open_action_for(&reduction, &fresh_posture(), &issue(100));
+    assert_eq!(
+        action.kind,
+        super::types::OpenActionKindV1::ResolveConflict,
+        "a family-tie conflict must block success-shaped projection"
+    );
+    assert!(
+        action
+            .blockers
+            .iter()
+            .any(|blocker| blocker.contains("lifecycle_conflict")),
+        "the family conflict is named as a blocker: {:?}",
+        action.blockers
+    );
+    // The same evidence must also stale a handoff claim bound to the tied
+    // head — a conflicted lifecycle never reads as a current claim.
+    let packet = HandoffPacketV1 {
+        handoff_id: "r5-handoff".to_string(),
+        generated_at: "2026-08-26T10:00:30Z".to_string(),
+        repo: REPO.to_string(),
+        claim_bindings: vec![super::handoff::HandoffClaimBindingV1 {
+            subject: issue(100),
+            predicate: PredicateV1::IssueOpen,
+            head: EvidenceHeadV1::of(&tied_open),
+        }],
+    };
+    let report = evaluate_handoff_staleness(&packet, &reduction);
+    assert!(report.claims[0].stale, "the tied claim is stale");
+    assert_eq!(
+        report.claims[0].reason,
+        Some(HandoffStaleReasonV1::NowConflicted)
+    );
+    // The packet itself is preserved untouched (byte-stable history).
+    assert_eq!(packet.claim_bindings.len(), 1);
+    assert_eq!(packet.claim_bindings[0].head.assertion_id, "r5-tie-open");
+}
+
+/// R5-1b: a PR lifecycle-family tie (merged and closed-unmerged individually
+/// Current at the identical instant+revision) conflicts the linked issue's
+/// projection — `resolve_conflict`, not a guessed `await_implementation`.
+#[test]
+fn pr_family_tie_blocks_success_shaped_projection() {
+    let base = AssertionV1 {
+        assertion_id: String::new(),
+        subject: pr(200),
+        predicate: PredicateV1::PrMerged,
+        value: AssertionValueV1::CommitSha("mergeabc123".to_string()),
+        issuer: "adapter-a".to_string(),
+        authority_class: AuthorityClassV1::GitHubTypedObject,
+        source_ref: SourceRefV1 {
+            source: "github-snapshot-adapter".to_string(),
+            revision: "rev-r5-pr-tie".to_string(),
+        },
+        observed_at: "2026-08-26T11:00:00Z".to_string(),
+        effective_at: "2026-08-26T11:00:00Z".to_string(),
+        supersedes_assertion_id: None,
+        evidence_refs: vec![],
+        review_state: ReviewStateV1::Observed,
+        visibility: VisibilityClassV1::Public,
+    };
+    let mut tied_unmerged = base.clone();
+    tied_unmerged.assertion_id = "r5-pr-unmerged".to_string();
+    tied_unmerged.predicate = PredicateV1::PrClosedUnmerged;
+    tied_unmerged.value = AssertionValueV1::Unit;
+    tied_unmerged.issuer = "adapter-b".to_string();
+
+    let mut linked = base.clone();
+    linked.assertion_id = "r5-link".to_string();
+    linked.subject = issue(100);
+    linked.predicate = PredicateV1::ImplementationPrLinked;
+    linked.value = AssertionValueV1::ObjectRefs(vec![GithubObjectRefV1::PullRequest(200)]);
+    linked.observed_at = "2026-08-26T10:30:00Z".to_string();
+    linked.effective_at = linked.observed_at.clone();
+
+    let mut opened = linked.clone();
+    opened.assertion_id = "r5-open".to_string();
+    opened.predicate = PredicateV1::IssueOpen;
+    opened.value = AssertionValueV1::Unit;
+    opened.source_ref.revision = "rev-r5-iss".to_string();
+
+    let mut merged = base;
+    merged.assertion_id = "r5-pr-merged".to_string();
+
+    let reduction = reduce(&[merged, tied_unmerged, linked, opened]);
+    assert_eq!(
+        reduction.pr_lifecycle(&pr(200)),
+        PrLifecycleView::Conflicted
+    );
+    assert!(
+        !reduction.implementation_present(&issue(100)),
+        "nothing is selected from a conflicted PR family"
+    );
+    let action = open_action_for(&reduction, &fresh_posture(), &issue(100));
+    assert_eq!(
+        action.kind,
+        super::types::OpenActionKindV1::ResolveConflict,
+        "the PR family tie must conflict the linked issue, not guess await_implementation"
+    );
+}
+
+/// R5-3: a reopen superseded by a later close no longer forces
+/// `repair_revert_or_reopen` — the projection consults the RESOLVED
+/// lifecycle, not the standalone `issue_reopened` predicate's currency.
+#[test]
+fn later_close_supersedes_reopen_stops_repair_action() {
+    let closed_t0 = AssertionV1 {
+        assertion_id: "r6-closed-t0".to_string(),
+        subject: issue(100),
+        predicate: PredicateV1::IssueClosed,
+        value: AssertionValueV1::Unit,
+        issuer: "github-refresh-v1".to_string(),
+        authority_class: AuthorityClassV1::GitHubTypedObject,
+        source_ref: SourceRefV1 {
+            source: "github-snapshot-adapter".to_string(),
+            revision: "r6-c0".to_string(),
+        },
+        observed_at: "2026-08-26T09:00:00Z".to_string(),
+        effective_at: "2026-08-26T09:00:00Z".to_string(),
+        supersedes_assertion_id: None,
+        evidence_refs: vec![],
+        review_state: ReviewStateV1::Observed,
+        visibility: VisibilityClassV1::Public,
+    };
+    let mut reopened_t1 = closed_t0.clone();
+    reopened_t1.assertion_id = "r6-reopened-t1".to_string();
+    reopened_t1.predicate = PredicateV1::IssueReopened;
+    reopened_t1.source_ref.revision = "r6-r1".to_string();
+    reopened_t1.observed_at = "2026-08-26T10:00:00Z".to_string();
+    reopened_t1.effective_at = reopened_t1.observed_at.clone();
+    let mut closed_t2 = closed_t0.clone();
+    closed_t2.assertion_id = "r6-closed-t2".to_string();
+    closed_t2.source_ref.revision = "r6-c2".to_string();
+    closed_t2.observed_at = "2026-08-26T11:00:00Z".to_string();
+    closed_t2.effective_at = closed_t2.observed_at.clone();
+
+    // An evidenced merge that was never reverted.
+    let mut merged_pr = closed_t0.clone();
+    merged_pr.assertion_id = "r6-pr-merged".to_string();
+    merged_pr.subject = pr(200);
+    merged_pr.predicate = PredicateV1::PrMerged;
+    merged_pr.value = AssertionValueV1::CommitSha("mergeabc123".to_string());
+    merged_pr.source_ref.revision = "r6-m1".to_string();
+    merged_pr.observed_at = "2026-08-26T08:00:00Z".to_string();
+    merged_pr.effective_at = merged_pr.observed_at.clone();
+    let mut linked = merged_pr.clone();
+    linked.assertion_id = "r6-link".to_string();
+    linked.subject = issue(100);
+    linked.predicate = PredicateV1::ImplementationPrLinked;
+    linked.value = AssertionValueV1::ObjectRefs(vec![GithubObjectRefV1::PullRequest(200)]);
+
+    let reduction = reduce(&[closed_t0, reopened_t1, closed_t2, merged_pr, linked]);
+    assert_eq!(
+        reduction.issue_lifecycle(&issue(100)),
+        IssueLifecycleView::Closed,
+        "the later close supersedes the reopen in the family"
+    );
+    // The standalone predicate stays current (history is never rewritten).
+    assert_eq!(
+        reduction
+            .get(&issue(100), PredicateV1::IssueReopened)
+            .status,
+        ReductionStatusV1::Current
+    );
+    let action = open_action_for(&reduction, &fresh_posture(), &issue(100));
+    assert_ne!(
+        action.kind,
+        super::types::OpenActionKindV1::RepairRevertOrReopen,
+        "a superseded reopen must not force a repair forever"
+    );
+    assert_eq!(
+        action.kind,
+        super::types::OpenActionKindV1::AwaitOwnerAcceptance,
+        "closed + evidenced implementation + no acceptance = await acceptance"
+    );
+}
+
+/// R5-4: an UNKNOWN issue lifecycle never projects `await_owner_acceptance`
+/// — missing issue-state evidence is not "issue no longer open".
+#[test]
+fn unknown_lifecycle_never_projects_owner_acceptance() {
+    let base = AssertionV1 {
+        assertion_id: "r7-pr-merged".to_string(),
+        subject: pr(200),
+        predicate: PredicateV1::PrMerged,
+        value: AssertionValueV1::CommitSha("mergeabc123".to_string()),
+        issuer: "github-refresh-v1".to_string(),
+        authority_class: AuthorityClassV1::GitHubTypedObject,
+        source_ref: SourceRefV1 {
+            source: "github-snapshot-adapter".to_string(),
+            revision: "r7-m1".to_string(),
+        },
+        observed_at: "2026-08-26T11:00:00Z".to_string(),
+        effective_at: "2026-08-26T11:00:00Z".to_string(),
+        supersedes_assertion_id: None,
+        evidence_refs: vec![],
+        review_state: ReviewStateV1::Observed,
+        visibility: VisibilityClassV1::Public,
+    };
+    let mut linked = base.clone();
+    linked.assertion_id = "r7-link".to_string();
+    linked.subject = issue(100);
+    linked.predicate = PredicateV1::ImplementationPrLinked;
+    linked.value = AssertionValueV1::ObjectRefs(vec![GithubObjectRefV1::PullRequest(200)]);
+    linked.observed_at = "2026-08-26T10:30:00Z".to_string();
+    linked.effective_at = linked.observed_at.clone();
+
+    // No issue_open / issue_closed / issue_reopened assertion at all.
+    let reduction = reduce(&[base, linked]);
+    assert_eq!(
+        reduction.issue_lifecycle(&issue(100)),
+        IssueLifecycleView::Unknown
+    );
+    assert!(reduction.implementation_present(&issue(100)));
+    let action = open_action_for(&reduction, &fresh_posture(), &issue(100));
+    assert_ne!(
+        action.kind,
+        super::types::OpenActionKindV1::AwaitOwnerAcceptance,
+        "unknown lifecycle is missing evidence, never a closed-issue inference"
+    );
+    assert_eq!(action.kind, super::types::OpenActionKindV1::NoOpenAction);
+}
+
+/// R5-6: a row with a malformed `observed_at` written out-of-band (bypassing
+/// append validation) is a CORRUPT row at read time — it must surface as an
+/// error, never silently order as the minimum instant and become current.
+#[test]
+fn corrupt_timestamp_row_surfaces_as_error_not_min_instant() {
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        r#"
+        CREATE TABLE current_truth_assertions (
+            assertion_id TEXT PRIMARY KEY, subject_repo TEXT NOT NULL,
+            subject_kind TEXT NOT NULL, subject_id TEXT NOT NULL,
+            predicate TEXT NOT NULL, value_json TEXT NOT NULL,
+            issuer TEXT NOT NULL, authority TEXT NOT NULL,
+            source_id TEXT NOT NULL, source_revision TEXT NOT NULL,
+            observed_at TEXT NOT NULL, effective_at TEXT NOT NULL,
+            supersedes TEXT, evidence_json TEXT NOT NULL DEFAULT '[]',
+            review_state TEXT NOT NULL, visibility TEXT NOT NULL,
+            value_digest TEXT NOT NULL, recorded_at TEXT NOT NULL DEFAULT '',
+            UNIQUE (subject_repo, subject_kind, subject_id, predicate,
+                    authority, issuer, source_id, source_revision)
+        );
+        INSERT INTO current_truth_assertions VALUES (
+            'r8-corrupt-ts', 'a/b', 'issue', '1', 'issue_open', '"unit"', 'i',
+            'github_typed_object', 's', 'r', 'yesterday-ish', '', NULL, '[]',
+            'observed', 'public', 'd', '');
+        "#,
+    )
+    .unwrap();
+    let store = CurrentTruthSqliteStore::with_connection(conn).expect("adopt");
+    match store.assertions() {
+        Err(CurrentTruthStoreError::CorruptRow(message)) => {
+            assert!(
+                message.contains("observed_at"),
+                "names the bad field: {message}"
+            );
+        }
+        other => panic!("expected CorruptRow, got {other:?}"),
+    }
+}
+
+/// R5-7: a corrupt row in ANOTHER repository must not surface through this
+/// repository's read — neither as an error nor as a private-existence leak
+/// in the error text. The repo filter runs before decode.
+#[test]
+fn corrupt_row_in_other_repo_does_not_leak_into_repo_read() {
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        r#"
+        CREATE TABLE current_truth_assertions (
+            assertion_id TEXT PRIMARY KEY, subject_repo TEXT NOT NULL,
+            subject_kind TEXT NOT NULL, subject_id TEXT NOT NULL,
+            predicate TEXT NOT NULL, value_json TEXT NOT NULL,
+            issuer TEXT NOT NULL, authority TEXT NOT NULL,
+            source_id TEXT NOT NULL, source_revision TEXT NOT NULL,
+            observed_at TEXT NOT NULL, effective_at TEXT NOT NULL,
+            supersedes TEXT, evidence_json TEXT NOT NULL DEFAULT '[]',
+            review_state TEXT NOT NULL, visibility TEXT NOT NULL,
+            value_digest TEXT NOT NULL, recorded_at TEXT NOT NULL DEFAULT '',
+            UNIQUE (subject_repo, subject_kind, subject_id, predicate,
+                    authority, issuer, source_id, source_revision)
+        );
+        INSERT INTO current_truth_assertions VALUES (
+            'r9-other-corrupt', 'secret/private', 'issue', '1',
+            'made_up_predicate', '"unit"', 'i', 'github_typed_object', 's',
+            'r', '2026-08-26T00:00:00Z', '', NULL, '[]', 'observed',
+            'private', 'd', '');
+        INSERT INTO current_truth_assertions VALUES (
+            'r9-own-row', 'a/b', 'issue', '7', 'issue_open', '"unit"', 'i',
+            'github_typed_object', 's', 'r', '2026-08-26T00:00:00Z', '',
+            NULL, '[]', 'observed', 'public', 'd', '');
+        "#,
+    )
+    .unwrap();
+    let store = CurrentTruthSqliteStore::with_connection(conn).expect("adopt");
+    let own = store
+        .assertions_for_repo("a/b")
+        .expect("the other repository's corrupt row must not surface here");
+    assert_eq!(own.len(), 1);
+    assert_eq!(own[0].assertion_id, "r9-own-row");
+}
+
+/// R5-5b: a `fresh` refresh posture must carry its source revision and
+/// observation time — "fresh with no revision" is meaningless metadata the
+/// consumer would otherwise trust.
+#[test]
+fn fresh_refresh_posture_requires_revision_and_time() {
+    let store = open_store();
+    match store.record_refresh(REPO, true, None, None, "2026-08-26T11:00:00Z", None) {
+        Err(CurrentTruthStoreError::FreshPostureMissingRevision(_)) => {}
+        other => panic!("expected FreshPostureMissingRevision, got {other:?}"),
+    }
+    // The honest forms still work.
+    store
+        .record_refresh(
+            REPO,
+            true,
+            Some("r1"),
+            Some("2026-08-26T11:00:00Z"),
+            "2026-08-26T11:00:05Z",
+            None,
+        )
+        .expect("fresh with revision and time is valid");
+    store
+        .record_refresh(
+            REPO,
+            false,
+            None,
+            None,
+            "2026-08-26T12:00:00Z",
+            Some("down"),
+        )
+        .expect("unavailable posture without last-good revision is valid");
 }

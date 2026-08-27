@@ -65,6 +65,10 @@ pub enum CurrentTruthStoreError {
     ContradictsExistingRevision(AssertionIngestionKey),
     #[error("stored assertion row is not decodable: {0}")]
     CorruptRow(String),
+    #[error(
+        "a fresh refresh posture must record its source revision and observation time (repo `{0}`)"
+    )]
+    FreshPostureMissingRevision(String),
     #[error("observed_at/effective_at must be RFC 3339 — `{0}` does not parse")]
     MalformedObservedAt(String),
     #[error(
@@ -308,26 +312,38 @@ impl CurrentTruthSqliteStore {
              ORDER BY subject_repo, subject_kind, subject_id, predicate,
                       authority, issuer, source_id, source_revision, assertion_id",
         )?;
-        let rows = stmt.query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, String>(4)?,
-                row.get::<_, String>(5)?,
-                row.get::<_, String>(6)?,
-                row.get::<_, String>(7)?,
-                row.get::<_, String>(8)?,
-                row.get::<_, String>(9)?,
-                row.get::<_, String>(10)?,
-                row.get::<_, String>(11)?,
-                row.get::<_, Option<String>>(12)?,
-                row.get::<_, String>(13)?,
-                row.get::<_, String>(14)?,
-                row.get::<_, String>(15)?,
-            ))
-        })?;
+        let rows = stmt.query_map([], map_assertion_row)?;
+        Self::collect_decoded_rows(rows)
+    }
+
+    /// Assertions for one repository, same deterministic ordering. The
+    /// repository filter runs in SQL BEFORE decode: a corrupt (or private)
+    /// row in another repository can never surface through this read —
+    /// not as a decode error, and not as subject tokens inside one.
+    pub fn assertions_for_repo(
+        &self,
+        repo: &str,
+    ) -> Result<Vec<AssertionV1>, CurrentTruthStoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT assertion_id, subject_repo, subject_kind, subject_id, predicate,
+                    value_json, issuer, authority, source_id, source_revision,
+                    observed_at, effective_at, supersedes, evidence_json,
+                    review_state, visibility
+             FROM current_truth_assertions
+             WHERE subject_repo = ?1
+             ORDER BY subject_repo, subject_kind, subject_id, predicate,
+                      authority, issuer, source_id, source_revision, assertion_id",
+        )?;
+        let rows = stmt.query_map(params![repo], map_assertion_row)?;
+        Self::collect_decoded_rows(rows)
+    }
+
+    fn collect_decoded_rows<F>(
+        rows: rusqlite::MappedRows<'_, F>,
+    ) -> Result<Vec<AssertionV1>, CurrentTruthStoreError>
+    where
+        F: FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<DecodedRow>,
+    {
         let mut out = Vec::new();
         for row in rows {
             let (
@@ -368,18 +384,6 @@ impl CurrentTruthSqliteStore {
             )?);
         }
         Ok(out)
-    }
-
-    /// Assertions for one repository, same deterministic ordering.
-    pub fn assertions_for_repo(
-        &self,
-        repo: &str,
-    ) -> Result<Vec<AssertionV1>, CurrentTruthStoreError> {
-        Ok(self
-            .assertions()?
-            .into_iter()
-            .filter(|assertion| assertion.subject.repo == repo)
-            .collect())
     }
 
     /// Assertion count for one repository (test/health use).
@@ -464,6 +468,16 @@ impl CurrentTruthSqliteStore {
         if chrono::DateTime::parse_from_rfc3339(recorded_at).is_err() {
             return Err(CurrentTruthStoreError::MalformedObservedAt(
                 recorded_at.to_string(),
+            ));
+        }
+        // A fresh posture without its revision/time is meaningless metadata
+        // a consumer would trust as "refresh succeeded at …nothing": refuse.
+        if fresh
+            && (last_fresh_revision.map(str::is_empty).unwrap_or(true)
+                || last_fresh_at.map(str::is_empty).unwrap_or(true))
+        {
+            return Err(CurrentTruthStoreError::FreshPostureMissingRevision(
+                repo.to_string(),
             ));
         }
         // One transaction: the staleness check and the upsert commit
@@ -725,6 +739,48 @@ fn parse_predicate(token: &str) -> Option<PredicateV1> {
     .find(|predicate| predicate.as_str() == token)
 }
 
+/// The raw 16-column tuple a stored row maps to before decoding.
+type DecodedRow = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    Option<String>,
+    String,
+    String,
+    String,
+);
+
+/// Map one SQL row to its raw column tuple (shared by every read path).
+fn map_assertion_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DecodedRow> {
+    Ok((
+        row.get::<_, String>(0)?,
+        row.get::<_, String>(1)?,
+        row.get::<_, String>(2)?,
+        row.get::<_, String>(3)?,
+        row.get::<_, String>(4)?,
+        row.get::<_, String>(5)?,
+        row.get::<_, String>(6)?,
+        row.get::<_, String>(7)?,
+        row.get::<_, String>(8)?,
+        row.get::<_, String>(9)?,
+        row.get::<_, String>(10)?,
+        row.get::<_, String>(11)?,
+        row.get::<_, Option<String>>(12)?,
+        row.get::<_, String>(13)?,
+        row.get::<_, String>(14)?,
+        row.get::<_, String>(15)?,
+    ))
+}
+
 /// Decode one stored row. Unknown closed-vocabulary tokens are **errors**,
 /// never silent guesses — a row this store wrote always round-trips, so an
 /// undecodable row means the table was written by something else and must
@@ -789,6 +845,19 @@ fn decode_assertion_row(
     if !["public", "private"].contains(&visibility.as_str()) {
         return Err(CurrentTruthStoreError::CorruptRow(format!(
             "visibility `{visibility}`"
+        )));
+    }
+    // Timestamps validate at decode exactly as at append: an out-of-band
+    // row with a malformed `observed_at` is corrupt, never a silently
+    // orderable minimum instant that could become current truth.
+    if chrono::DateTime::parse_from_rfc3339(&observed_at).is_err() {
+        return Err(CurrentTruthStoreError::CorruptRow(format!(
+            "observed_at `{observed_at}` is not RFC 3339"
+        )));
+    }
+    if !effective_at.is_empty() && chrono::DateTime::parse_from_rfc3339(&effective_at).is_err() {
+        return Err(CurrentTruthStoreError::CorruptRow(format!(
+            "effective_at `{effective_at}` is not RFC 3339"
         )));
     }
     Ok(AssertionV1 {

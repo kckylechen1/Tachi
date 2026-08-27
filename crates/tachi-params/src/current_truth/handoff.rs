@@ -178,7 +178,11 @@ fn lifecycle_family(predicate: PredicateV1) -> Option<&'static [PredicateV1]> {
 }
 
 /// Family-aware staleness: the claim is stale when any family member's
-/// current head moved strictly beyond the bound head.
+/// current head moved strictly beyond the bound head, when any member is
+/// individually conflicted, or when two members tie at the newest
+/// `(instant, revision)` — the same same-immutable-revision contradiction
+/// the reducer's `resolve_family` treats as a conflicted lifecycle (a tied
+/// lifecycle is never a reliable current claim).
 fn classify_lifecycle_claim(
     binding: &HandoffClaimBindingV1,
     reduction: &ReductionV1,
@@ -186,8 +190,13 @@ fn classify_lifecycle_claim(
 ) -> (bool, Option<HandoffStaleReasonV1>, Option<EvidenceHeadV1>) {
     let bound_key = super::types::head_order_key(&binding.head);
     type HeadKey = (chrono::DateTime<chrono::Utc>, String, String);
+    type TieKey = (chrono::DateTime<chrono::Utc>, String);
     let mut newest: Option<HeadKey> = None;
     let mut newest_head: Option<EvidenceHeadV1> = None;
+    // Members owning a head at the newest tie key (id excluded — the same
+    // rule `resolve_family` uses to detect family contradictions).
+    let mut newest_tie: Option<TieKey> = None;
+    let mut owners: Vec<PredicateV1> = Vec::new();
     let mut conflicted = false;
     let mut any_current = false;
     for predicate in family {
@@ -198,16 +207,31 @@ fn classify_lifecycle_claim(
                 any_current = true;
                 for head in &reduced.current_heads {
                     let key = super::types::head_order_key(head);
+                    let tie = (key.0, key.1.clone());
                     if newest.as_ref().is_none_or(|best| key > *best) {
                         newest = Some(key);
                         newest_head = Some(head.clone());
+                    }
+                    match &mut newest_tie {
+                        None => {
+                            newest_tie = Some(tie);
+                            owners = vec![*predicate];
+                        }
+                        Some(best) => {
+                            if tie > *best {
+                                *best = tie;
+                                owners = vec![*predicate];
+                            } else if tie == *best && !owners.contains(predicate) {
+                                owners.push(*predicate);
+                            }
+                        }
                     }
                 }
             }
             ReductionStatusV1::Superseded | ReductionStatusV1::Unknown => {}
         }
     }
-    if conflicted {
+    if conflicted || owners.len() > 1 {
         return (true, Some(HandoffStaleReasonV1::NowConflicted), None);
     }
     match (newest, newest_head) {

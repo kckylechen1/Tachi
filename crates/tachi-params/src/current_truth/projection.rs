@@ -9,12 +9,14 @@
 //! # Priority order (frozen, deterministic)
 //!
 //! 1. `resolve_conflict` — any conflicted predicate in the subject's chain
-//!    (the issue plus its currently linked PRs) blocks success-shaped
-//!    projection.
+//!    (the issue plus its currently linked PRs), OR a lifecycle-family
+//!    conflict (issue/PR family members tying at the newest key), blocks
+//!    success-shaped projection.
 //! 2. `refresh_unavailable_source` — the repository's refresh posture is
 //!    unavailable; nothing downstream may present as fresh.
-//! 3. `repair_revert_or_reopen` — a merge revert or issue reopen is current
-//!    in the chain.
+//! 3. `repair_revert_or_reopen` — the RESOLVED lifecycle is currently
+//!    reverted/reopened (a historical reopen superseded by a later close
+//!    no longer repairs).
 //! 4. `await_implementation` — the issue is currently open and no effective
 //!    implementation exists (no link at all, or every linked PR closed
 //!    unmerged — a closed-unmerged PR never projects implementation present,
@@ -24,10 +26,10 @@
 //!    not reverted) and the issue is still open with no owner acceptance:
 //!    verification is the missing prerequisite (#1696 discrimination 1's
 //!    "merged, issue open" intermediate state).
-//! 7. `await_owner_acceptance` — implementation present, issue no longer
-//!    open (e.g. owner closed it), but no owner acceptance record exists:
-//!    closure is not acceptance (#1297: `implemented != merged != accepted !=
-//!    owner_closed`).
+//! 7. `await_owner_acceptance` — implementation present, issue currently
+//!    closed, but no owner acceptance record exists: closure is not
+//!    acceptance (#1297: `implemented != merged != accepted !=
+//!    owner_closed`). An unknown lifecycle never reaches this rule.
 //! 8. `no_open_action`.
 
 use serde::Serialize;
@@ -161,21 +163,49 @@ pub fn open_action_for(
     let merged_prs = reduction.linked_merged_prs(issue);
     let implementation_present = reduction.implementation_present(issue);
     let acceptance = reduction.owner_acceptance_present(issue);
-    let reopened_current =
-        reduction.get(issue, PredicateV1::IssueReopened).status == ReductionStatusV1::Current;
+    // The RESOLVED lifecycle decides "currently reopened" — the standalone
+    // `issue_reopened` predicate can stay `Current` as lineage head long
+    // after a newer close superseded it in the family, and a historical
+    // reopen must not force a repair forever.
+    let reopened_current = matches!(lifecycle, IssueLifecycleView::Reopened);
+    let issue_family_conflicted = matches!(lifecycle, IssueLifecycleView::Conflicted);
+    let conflicted_linked_prs: Vec<&GithubObjectRefV1> = linked_prs
+        .iter()
+        .filter(|object| {
+            matches!(
+                reduction.pr_lifecycle(&pr_subject(issue, object)),
+                PrLifecycleView::Conflicted
+            )
+        })
+        .collect();
     let reverted_linked = linked_prs.iter().any(|object| {
         reduction.pr_lifecycle(&pr_subject(issue, object)) == PrLifecycleView::MergeReverted
     });
 
-    // (1) conflict
-    if chain_conflicted {
+    // (1) conflict — individually conflicted predicates in the chain OR a
+    // lifecycle-family conflict (two family members tying at the newest
+    // key, e.g. open+closed at one immutable revision): both block
+    // success-shaped projection.
+    if chain_conflicted || issue_family_conflicted || !conflicted_linked_prs.is_empty() {
+        let mut blockers = chain_conflict_tokens(reduction, issue);
+        if issue_family_conflicted {
+            blockers.push(format!("{}#lifecycle_conflict", issue.as_token()));
+        }
+        for object in &conflicted_linked_prs {
+            blockers.push(format!(
+                "{}#lifecycle_conflict",
+                pr_subject(issue, object).as_token()
+            ));
+        }
+        blockers.sort();
+        blockers.dedup();
         return OpenActionV1 {
             kind: OpenActionKindV1::ResolveConflict,
             subject: issue.clone(),
             owner_class: ActionOwnerClassV1::EngineeringAuthority,
             prerequisite_refs: linked_prs.clone(),
             evidence_heads: chain_heads(reduction, issue),
-            blockers: chain_conflict_tokens(reduction, issue),
+            blockers,
         };
     }
     // (2) refresh unavailable
@@ -253,9 +283,11 @@ pub fn open_action_for(
             blockers: Vec::new(),
         };
     }
-    // (7) await owner acceptance: landed, issue no longer open, but no
-    // acceptance record — closure is not acceptance.
-    if implementation_present && !acceptance {
+    // (7) await owner acceptance: landed, issue currently closed, but no
+    // acceptance record — closure is not acceptance. An UNKNOWN lifecycle
+    // is missing evidence, never "no longer open" (no success-shaped
+    // inference from absent issue-state assertions).
+    if implementation_present && lifecycle == IssueLifecycleView::Closed && !acceptance {
         return OpenActionV1 {
             kind: OpenActionKindV1::AwaitOwnerAcceptance,
             subject: issue.clone(),
