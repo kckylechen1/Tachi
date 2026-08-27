@@ -261,7 +261,7 @@ pub(super) fn skipped_alias_probe_result(
             crate::provider_config::format_skipped_alias_warning(
                 key,
                 retained,
-                report.source_availability,
+                report.skip_class_for(key),
             )
         );
     }

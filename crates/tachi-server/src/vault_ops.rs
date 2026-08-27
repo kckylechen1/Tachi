@@ -1,6 +1,7 @@
 // vault_ops.rs — MCP tool handlers for Tachi Vault
 
 mod access;
+mod alias_integrity;
 mod audit;
 mod env;
 mod handlers;
@@ -14,6 +15,7 @@ pub(crate) use rotation::collect_rotation_entries;
 
 pub(crate) use access::load_unlocked_api_key_secret_pools;
 pub(crate) use access::read_unlocked_vault_secret;
+pub(crate) use alias_integrity::classify_listed_alias_target;
 pub(crate) use env::{
     load_unlocked_env_secrets_for_child_env, load_unlocked_env_secrets_for_child_env_with_consumer,
 };

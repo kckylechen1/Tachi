@@ -15,7 +15,7 @@ pub use tachi_llm::{
     group_api_key_values_by_configured_rotations, is_vault_alias, parse_rotation_member_name,
     parse_vault_alias, vault_alias_line, MaterializeReport, VAULT_ALIAS_PREFIX,
 };
-use tachi_llm::{LlmClient, ProviderSecret, VaultSourceAvailability};
+use tachi_llm::{AliasSkipClass, LlmClient, ProviderSecret, VaultSourceAvailability};
 
 /// #1680/D3: the LLM materialization allowlist — `ModelApi`-class names only.
 /// This is the compile-time allowlist consulted by
@@ -230,9 +230,8 @@ fn format_provider_materialization_error(err: String) -> String {
     // shared sentence: #1393 split that sentence into a revoked case and an
     // unreadable case, and a matcher keyed on the old wording would silently
     // stop attaching remediation to both.
-    let unresolved_alias = err.starts_with("Config key ")
-        && err.contains("references a Vault alias")
-        && (err.contains("absent from a readable Vault") || err.contains("could not be read"));
+    let unresolved_alias =
+        err.starts_with("Config key ") && err.contains("references a Vault alias");
     if (err.starts_with("provider alias ") && err.contains(" could not be resolved from secret "))
         || unresolved_alias
     {
@@ -259,32 +258,19 @@ pub fn format_skipped_alias_reason(reason: &str) -> String {
 }
 
 /// Render one skipped alias with its cache disposition. Inputs are metadata
-/// only: the logical key name and whether that key's prior pool was retained.
-/// The warning deliberately rebuilds a constant reason instead of forwarding
-/// report text, so even a contaminated caller cannot inject an alias target.
-pub fn format_skipped_alias_warning(
-    key: &str,
-    retained: bool,
-    availability: VaultSourceAvailability,
-) -> String {
+/// only: the logical key name, whether that key's prior pool was retained, and
+/// the typed skip class. The warning rebuilds from [`AliasSkipClass`] instead
+/// of forwarding report text, so a contaminated caller cannot inject an alias
+/// target (tachi#1854: listed-row classes must not print revocation wording).
+pub fn format_skipped_alias_warning(key: &str, retained: bool, class: AliasSkipClass) -> String {
     let cache_disposition = if retained {
         "retained last-known-good provider pool"
     } else {
         "no last-known-good provider pool retained"
     };
-    // Derived from the same value materialization decided on, so the operator
-    // line cannot disagree with what actually happened to the cache.
-    let safe_reason = match availability {
-        VaultSourceAvailability::Readable => format!(
-            "Config key '{key}' references a Vault alias whose secret is absent from a readable Vault."
-        ),
-        VaultSourceAvailability::LockedOrUnavailable => format!(
-            "Config key '{key}' references a Vault alias, but the Vault could not be read."
-        ),
-    };
     format!(
         "[provider] skipped alias for '{key}'; {cache_disposition}: {}",
-        format_skipped_alias_reason(&safe_reason)
+        format_skipped_alias_reason(&class.operator_reason(key))
     )
 }
 
@@ -330,6 +316,64 @@ pub fn describe_skipped_alias_report(report: &MaterializeReport) -> String {
     )
 }
 
+/// Upgrade `SecretAbsent` skips to listed-row integrity classes when the
+/// readable Vault actually contains the alias target (tachi#1854).
+fn upgrade_skipped_alias_integrity(server: &MemoryServer, report: &mut MaterializeReport) {
+    if report.source_availability != VaultSourceAvailability::Readable {
+        return;
+    }
+    if report.skipped_aliases.is_empty() {
+        return;
+    }
+    let Ok((entries, mut health_rows)) = server.with_global_store_read(|store| {
+        let entries = store.vault_list_entries().map_err(|e| e.to_string())?;
+        let health = store
+            .vault_list_key_health(None)
+            .map_err(|e| e.to_string())?;
+        Ok::<_, String>((entries, health))
+    }) else {
+        return;
+    };
+    // Match pool loading: in-memory health wins when persist is disabled.
+    for (logical_name, members) in server.llm.provider_health_memory_snapshot() {
+        for (key_id, health) in members {
+            if let Some(existing) = health_rows
+                .iter_mut()
+                .find(|row| row.logical_name == logical_name && row.key_id == key_id)
+            {
+                *existing = health;
+            } else {
+                health_rows.push(health);
+            }
+        }
+    }
+    let allowed = provider_env_keys();
+    let now = chrono::Utc::now();
+    let skipped_keys: Vec<String> = report
+        .skipped_aliases
+        .iter()
+        .map(|(key, _)| key.clone())
+        .collect();
+    for key in skipped_keys {
+        let Ok(env_val) = std::env::var(&key) else {
+            continue;
+        };
+        let Some(target) = parse_vault_alias(&env_val) else {
+            continue;
+        };
+        let Some(class) = crate::vault_ops::classify_listed_alias_target(
+            target,
+            &entries,
+            &health_rows,
+            &allowed,
+            now,
+        ) else {
+            continue;
+        };
+        report.set_skip_class(&key, class);
+    }
+}
+
 pub fn materialize_for_server(server: &MemoryServer) -> Result<MaterializeReport, String> {
     materialize_for_server_inner(server, None)
 }
@@ -339,7 +383,7 @@ fn materialize_for_server_inner(
     after_vault_pools_resolved: Option<Box<dyn FnOnce() + Send>>,
 ) -> Result<MaterializeReport, String> {
     let global = server.global_db_path_buf();
-    tachi_llm::materialize_provider_secrets_from_durable_source(
+    let mut report = tachi_llm::materialize_provider_secrets_from_durable_source(
         server.llm.as_ref(),
         provider_env_keys(),
         || {
@@ -351,7 +395,9 @@ fn materialize_for_server_inner(
             Ok((pools, availability))
         },
     )
-    .map_err(format_provider_materialization_error)
+    .map_err(format_provider_materialization_error)?;
+    upgrade_skipped_alias_integrity(server, &mut report);
+    Ok(report)
 }
 
 #[cfg(test)]
@@ -1381,12 +1427,12 @@ mod tests {
         let retained = format_skipped_alias_warning(
             "VOYAGE_API_KEY",
             true,
-            VaultSourceAvailability::LockedOrUnavailable,
+            AliasSkipClass::from_availability(VaultSourceAvailability::LockedOrUnavailable),
         );
         let no_cache = format_skipped_alias_warning(
             "VOYAGE_API_KEY",
             false,
-            VaultSourceAvailability::Readable,
+            AliasSkipClass::from_availability(VaultSourceAvailability::Readable),
         );
 
         assert!(retained.contains("retained last-known-good provider pool"));
@@ -1404,5 +1450,24 @@ mod tests {
             assert!(!warning.contains(alias_sentinel));
             assert!(!warning.contains(value_sentinel));
         }
+    }
+
+    #[test]
+    fn skipped_alias_warning_listed_unusable_does_not_say_absent() {
+        let warning = format_skipped_alias_warning(
+            "SILICONFLOW_API_KEY",
+            false,
+            AliasSkipClass::ListedUnusableAuthFailed,
+        );
+        assert!(
+            warning.contains("listed secret is unusable (auth_failed)"),
+            "{warning}"
+        );
+        assert!(
+            !warning.contains("absent from a readable Vault"),
+            "{warning}"
+        );
+        assert!(!warning.contains("vault:"));
+        assert!(warning.contains("vault_set"), "{warning}");
     }
 }
