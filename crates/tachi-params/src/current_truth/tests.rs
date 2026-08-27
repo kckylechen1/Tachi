@@ -5,9 +5,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::consumer::{self, CallerAuthorizationV1};
-use super::handoff::{
-    evaluate_handoff_staleness, HandoffPacketV1, HandoffStaleReasonV1,
-};
+use super::handoff::{evaluate_handoff_staleness, HandoffPacketV1, HandoffStaleReasonV1};
 use super::projection::{open_action_for, RefreshPostureV1};
 use super::reducer::{reduce, IssueLifecycleView, PrLifecycleView};
 use super::refresh::{
@@ -39,7 +37,12 @@ fn pr(number: u64) -> SubjectRefV1 {
     }
 }
 
-fn snapshot_issue(number: u64, state: SnapshotIssueStateV1, at: &str, rev: &str) -> SnapshotIssueV1 {
+fn snapshot_issue(
+    number: u64,
+    state: SnapshotIssueStateV1,
+    at: &str,
+    rev: &str,
+) -> SnapshotIssueV1 {
     SnapshotIssueV1 {
         number,
         state,
@@ -279,7 +282,10 @@ fn issue_open_merged_then_owner_close_all_states_distinct() {
         .append_all(&mint_assertions(&state_v1()))
         .expect("append v1");
     let reduction = reduce(&store.assertions().unwrap());
-    assert_eq!(reduction.issue_lifecycle(&issue(100)), IssueLifecycleView::Open);
+    assert_eq!(
+        reduction.issue_lifecycle(&issue(100)),
+        IssueLifecycleView::Open
+    );
     assert_eq!(reduction.pr_lifecycle(&pr(200)), PrLifecycleView::Open);
     assert!(!reduction.implementation_present(&issue(100)));
     let action = open_action_for(&reduction, &fresh_posture(), &issue(100));
@@ -291,7 +297,10 @@ fn issue_open_merged_then_owner_close_all_states_distinct() {
         .append_all(&mint_assertions(&state_v2()))
         .expect("append v2");
     let reduction = reduce(&store.assertions().unwrap());
-    assert_eq!(reduction.issue_lifecycle(&issue(100)), IssueLifecycleView::Open);
+    assert_eq!(
+        reduction.issue_lifecycle(&issue(100)),
+        IssueLifecycleView::Open
+    );
     assert_eq!(reduction.pr_lifecycle(&pr(200)), PrLifecycleView::Merged);
     assert!(reduction.implementation_present(&issue(100)));
     assert!(!reduction.owner_acceptance_present(&issue(100)));
@@ -304,13 +313,21 @@ fn issue_open_merged_then_owner_close_all_states_distinct() {
         .append_all(&mint_assertions(&state_v3()))
         .expect("append v3");
     let reduction = reduce(&store.assertions().unwrap());
-    assert_eq!(reduction.issue_lifecycle(&issue(100)), IssueLifecycleView::Closed);
+    assert_eq!(
+        reduction.issue_lifecycle(&issue(100)),
+        IssueLifecycleView::Closed
+    );
     assert_eq!(reduction.pr_lifecycle(&pr(200)), PrLifecycleView::Merged);
     let action = open_action_for(&reduction, &fresh_posture(), &issue(100));
-    assert_eq!(action.kind, super::types::OpenActionKindV1::AwaitOwnerAcceptance);
+    assert_eq!(
+        action.kind,
+        super::types::OpenActionKindV1::AwaitOwnerAcceptance
+    );
 
     // Phase D: owner acceptance recorded — nothing pending.
-    store.append(&owner_acceptance("2026-08-26T14:00:00Z", "rev5")).expect("append acceptance");
+    store
+        .append(&owner_acceptance("2026-08-26T14:00:00Z", "rev5"))
+        .expect("append acceptance");
     let reduction = reduce(&store.assertions().unwrap());
     assert!(reduction.owner_acceptance_present(&issue(100)));
     let action = open_action_for(&reduction, &fresh_posture(), &issue(100));
@@ -353,7 +370,9 @@ fn handoff_generated_before_merge_becomes_stale_packet_byte_stable() {
     );
     let mut state0 = state_v1();
     state0.issues.push(unrelated);
-    store.append_all(&mint_assertions(&state0)).expect("append unrelated");
+    store
+        .append_all(&mint_assertions(&state0))
+        .expect("append unrelated");
     let reduction = reduce(&store.assertions().unwrap());
     let unrelated_head = reduction
         .get(&issue(300), PredicateV1::IssueOpen)
@@ -398,7 +417,10 @@ fn handoff_generated_before_merge_becomes_stale_packet_byte_stable() {
     let report = evaluate_handoff_staleness(&packet, &reduction);
     assert_eq!(report.stale_claim_count(), 2, "pr_open and link moved");
     for claim in &report.claims {
-        match (claim.binding.subject.as_token().as_str(), claim.binding.predicate) {
+        match (
+            claim.binding.subject.as_token().as_str(),
+            claim.binding.predicate,
+        ) {
             ("kckylechen1/tachi#pull_request:200", PredicateV1::PrOpen) => {
                 assert!(claim.stale);
                 assert_eq!(
@@ -470,7 +492,10 @@ fn merged_reverted_reopened_changes_currents_without_rewriting() {
         "a reverted merge is not effective implementation"
     );
     let action = open_action_for(&reduction, &fresh_posture(), &issue(100));
-    assert_eq!(action.kind, super::types::OpenActionKindV1::RepairRevertOrReopen);
+    assert_eq!(
+        action.kind,
+        super::types::OpenActionKindV1::RepairRevertOrReopen
+    );
     // The old merge assertion is retained as superseded evidence, not gone.
     let merged = reduction.get(&pr(200), PredicateV1::PrMerged);
     assert_eq!(merged.status, ReductionStatusV1::Current);
@@ -499,7 +524,10 @@ fn pr_closed_unmerged_never_projects_implementation_present() {
     );
     assert!(!reduction.implementation_present(&issue(100)));
     let action = open_action_for(&reduction, &fresh_posture(), &issue(100));
-    assert_eq!(action.kind, super::types::OpenActionKindV1::AwaitImplementation);
+    assert_eq!(
+        action.kind,
+        super::types::OpenActionKindV1::AwaitImplementation
+    );
 }
 
 // ── Discrimination 5 ───────────────────────────────────────────────────────
@@ -548,7 +576,9 @@ fn model_summary_wrong_relation_stays_candidate_cannot_affect_truth() {
         authority_class: AuthorityClassV1::ReviewedDisposition,
         ..model_claim.clone()
     };
-    store.append(&rejected).expect("rejected evidence is stored");
+    store
+        .append(&rejected)
+        .expect("rejected evidence is stored");
     let reduction = reduce(&store.assertions().unwrap());
     assert_eq!(
         reduction.linked_prs(&issue(100)),
@@ -585,8 +615,14 @@ fn duplicate_revision_idempotent_out_of_order_older_cannot_regress() {
         .append_all(&mint_assertions(&state_v3()))
         .expect("append v3");
     let reduction_before = reduce(&store.assertions().unwrap());
-    assert_eq!(reduction_before.issue_lifecycle(&issue(100)), IssueLifecycleView::Closed);
-    assert_eq!(reduction_before.pr_lifecycle(&pr(200)), PrLifecycleView::Merged);
+    assert_eq!(
+        reduction_before.issue_lifecycle(&issue(100)),
+        IssueLifecycleView::Closed
+    );
+    assert_eq!(
+        reduction_before.pr_lifecycle(&pr(200)),
+        PrLifecycleView::Merged
+    );
 
     store
         .append_all(&mint_assertions(&state_v1()))
@@ -597,7 +633,10 @@ fn duplicate_revision_idempotent_out_of_order_older_cannot_regress() {
         IssueLifecycleView::Closed,
         "older open revision cannot regress the newer closed fact"
     );
-    assert_eq!(reduction_after.pr_lifecycle(&pr(200)), PrLifecycleView::Merged);
+    assert_eq!(
+        reduction_after.pr_lifecycle(&pr(200)),
+        PrLifecycleView::Merged
+    );
     // The older open assertion is superseded within the open lineage (the
     // closed fact is a different predicate); the newest open head is v2's.
     let open = reduction_after.get(&issue(100), PredicateV1::IssueOpen);
@@ -679,7 +718,14 @@ fn github_unavailable_yields_unknown_stale_never_fabricated_current() {
     assert!(matches!(outcome, RefreshOutcomeV1::Fresh(_)));
     store.append_all(&assertions).expect("append v1");
     store
-        .record_refresh(REPO, true, Some("r1"), Some("2026-08-26T10:00:00Z"), "2026-08-26T10:00:05Z", None)
+        .record_refresh(
+            REPO,
+            true,
+            Some("r1"),
+            Some("2026-08-26T10:00:00Z"),
+            "2026-08-26T10:00:05Z",
+            None,
+        )
         .expect("record fresh");
 
     // Second refresh: the adapter is unreachable.
@@ -688,26 +734,35 @@ fn github_unavailable_yields_unknown_stale_never_fabricated_current() {
     assert!(matches!(outcome, RefreshOutcomeV1::Unavailable { .. }));
     assert!(assertions.is_empty(), "unavailable refresh mints nothing");
     store
-        .record_refresh(REPO, false, None, None, "2026-08-26T11:00:05Z", Some("network unreachable"))
+        .record_refresh(
+            REPO,
+            false,
+            None,
+            None,
+            "2026-08-26T11:00:05Z",
+            Some("network unreachable"),
+        )
         .expect("record unavailable");
 
     // The view must surface the stale posture and the
     // refresh-unavailable action — not a fabricated current state.
-    let view = consumer::read_view(
-        &store,
-        REPO,
-        CallerAuthorizationV1 { sees_private: true },
-    )
-    .expect("view");
+    let view = consumer::read_view(&store, REPO, CallerAuthorizationV1 { sees_private: true })
+        .expect("view");
     assert!(!view.posture.fresh);
-    assert_eq!(view.posture.unavailable_reason.as_deref(), Some("network unreachable"));
+    assert_eq!(
+        view.posture.unavailable_reason.as_deref(),
+        Some("network unreachable")
+    );
     let issue_row = view
         .subjects
         .iter()
         .find(|s| s.subject_token == "kckylechen1/tachi#issue:100")
         .expect("issue row");
     let action = issue_row.open_action.as_ref().expect("action");
-    assert_eq!(action.kind, super::types::OpenActionKindV1::RefreshUnavailableSource);
+    assert_eq!(
+        action.kind,
+        super::types::OpenActionKindV1::RefreshUnavailableSource
+    );
     assert_eq!(view.health.repos_with_refresh_debt, 1);
 
     // A repository with no recorded posture at all is an error, never a
@@ -742,8 +797,7 @@ fn full_rebuild_equals_incremental_projection() {
             .expect("write projection");
         incremental_final = Some((reduction, generation));
     }
-    let (incremental_reduction, incremental_generation) =
-        incremental_final.expect("reduced");
+    let (incremental_reduction, incremental_generation) = incremental_final.expect("reduced");
 
     // Full rebuild: drop the projection, re-reduce everything at once.
     store.drop_projection(REPO).expect("drop projection");
@@ -806,7 +860,11 @@ fn open_action_deterministic_and_order_independent() {
 
     // Repeated evaluation of the same input is stable.
     assert_eq!(
-        serde_json::to_string(&super::projection::open_actions(&baseline, &fresh_posture())).unwrap(),
+        serde_json::to_string(&super::projection::open_actions(
+            &baseline,
+            &fresh_posture()
+        ))
+        .unwrap(),
         baseline_json
     );
 }
@@ -822,7 +880,14 @@ fn consumer_fixture_reads_heads_without_raw_assertion_internals() {
         .append_all(&mint_assertions(&state_v2()))
         .expect("append v2");
     store
-        .record_refresh(REPO, true, Some("r2"), Some("2026-08-26T11:00:00Z"), "2026-08-26T11:00:05Z", None)
+        .record_refresh(
+            REPO,
+            true,
+            Some("r2"),
+            Some("2026-08-26T11:00:00Z"),
+            "2026-08-26T11:00:05Z",
+            None,
+        )
         .expect("record posture");
 
     // This test's imports exercise `consumer::{...}` view types only (see
@@ -831,7 +896,9 @@ fn consumer_fixture_reads_heads_without_raw_assertion_internals() {
     let view = consumer::read_view(
         &store,
         REPO,
-        CallerAuthorizationV1 { sees_private: false },
+        CallerAuthorizationV1 {
+            sees_private: false,
+        },
     )
     .expect("view");
 
@@ -871,13 +938,22 @@ fn unauthorized_caller_cannot_infer_private_subject_existence() {
     let store = open_store();
     store.append_all(&mint_assertions(&state)).expect("append");
     store
-        .record_refresh(REPO, true, Some("r2"), Some("2026-08-26T11:00:00Z"), "2026-08-26T11:00:05Z", None)
+        .record_refresh(
+            REPO,
+            true,
+            Some("r2"),
+            Some("2026-08-26T11:00:00Z"),
+            "2026-08-26T11:00:05Z",
+            None,
+        )
         .expect("record posture");
 
     let unauthorized = consumer::read_view(
         &store,
         REPO,
-        CallerAuthorizationV1 { sees_private: false },
+        CallerAuthorizationV1 {
+            sees_private: false,
+        },
     )
     .expect("unauthorized view");
     let serialized = serde_json::to_string(&unauthorized).unwrap();
@@ -891,19 +967,14 @@ fn unauthorized_caller_cannot_infer_private_subject_existence() {
         "health is computed over the visible set only"
     );
 
-    let authorized = consumer::read_view(
-        &store,
-        REPO,
-        CallerAuthorizationV1 { sees_private: true },
-    )
-    .expect("authorized view");
+    let authorized =
+        consumer::read_view(&store, REPO, CallerAuthorizationV1 { sees_private: true })
+            .expect("authorized view");
     assert_eq!(authorized.subjects.len(), 3);
-    assert!(
-        authorized
-            .subjects
-            .iter()
-            .any(|s| s.subject_token == "kckylechen1/tachi#issue:777")
-    );
+    assert!(authorized
+        .subjects
+        .iter()
+        .any(|s| s.subject_token == "kckylechen1/tachi#issue:777"));
 }
 
 // ── Storage/replay contract extras ─────────────────────────────────────────
@@ -1003,7 +1074,9 @@ fn refresh_minting_is_pure_and_idempotent() {
     assert!(!first.is_empty(), "a non-trivial state mints assertions");
     assert_eq!(first, second, "same state mints identical assertions");
     assert!(
-        first.iter().all(|a| a.authority_class == AuthorityClassV1::GitHubTypedObject),
+        first
+            .iter()
+            .all(|a| a.authority_class == AuthorityClassV1::GitHubTypedObject),
         "adapter-minted assertions carry the typed-object authority"
     );
     assert!(

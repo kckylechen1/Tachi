@@ -144,10 +144,11 @@ pub fn reduce(assertions: &[AssertionV1]) -> ReductionV1 {
         .collect();
 
     // 2. Group by (subject, predicate), then by lineage.
-    let mut grouped: BTreeMap<
-        (String, PredicateV1),
-        (SubjectRefV1, BTreeMap<String, Vec<&&AssertionV1>>),
-    > = BTreeMap::new();
+    type LineageMap<'a> = BTreeMap<String, Vec<&'a AssertionV1>>;
+    let mut grouped: BTreeMap<(String, PredicateV1), (SubjectRefV1, LineageMap<'_>)> =
+        BTreeMap::new();
+    let admitted: Vec<&AssertionV1> =
+        admitted.into_iter().copied().collect();
     for assertion in &admitted {
         grouped
             .entry((assertion.subject.as_token(), assertion.predicate))
@@ -167,7 +168,7 @@ pub fn reduce(assertions: &[AssertionV1]) -> ReductionV1 {
 
         for (_, mut lineage) in lineages {
             // Deterministic order within the lineage: source-supplied only.
-            lineage.sort_by(|a, b| a.order_key().cmp(&b.order_key()));
+            lineage.sort_by_key(|assertion| assertion.order_key());
             // Explicit-edge contradiction: a `supersedes` edge pointing at a
             // strictly newer assertion is malformed provenance.
             for assertion in &lineage {
@@ -295,11 +296,15 @@ struct ResolvedFamily {
 impl ReductionV1 {
     /// The current lifecycle view of an issue subject.
     pub fn issue_lifecycle(&self, subject: &SubjectRefV1) -> IssueLifecycleView {
-        let family = resolve_family(self, subject, &[
-            PredicateV1::IssueOpen,
-            PredicateV1::IssueClosed,
-            PredicateV1::IssueReopened,
-        ]);
+        let family = resolve_family(
+            self,
+            subject,
+            &[
+                PredicateV1::IssueOpen,
+                PredicateV1::IssueClosed,
+                PredicateV1::IssueReopened,
+            ],
+        );
         if family.conflicted {
             return IssueLifecycleView::Conflicted;
         }
@@ -313,12 +318,16 @@ impl ReductionV1 {
 
     /// The current lifecycle view of a PR subject.
     pub fn pr_lifecycle(&self, subject: &SubjectRefV1) -> PrLifecycleView {
-        let family = resolve_family(self, subject, &[
-            PredicateV1::PrOpen,
-            PredicateV1::PrMerged,
-            PredicateV1::PrClosedUnmerged,
-            PredicateV1::MergeReverted,
-        ]);
+        let family = resolve_family(
+            self,
+            subject,
+            &[
+                PredicateV1::PrOpen,
+                PredicateV1::PrMerged,
+                PredicateV1::PrClosedUnmerged,
+                PredicateV1::MergeReverted,
+            ],
+        );
         if family.conflicted {
             return PrLifecycleView::Conflicted;
         }
@@ -339,11 +348,7 @@ impl ReductionV1 {
     pub fn implementation_present(&self, issue: &SubjectRefV1) -> bool {
         let explicit = self.get(issue, PredicateV1::ImplementationPresent);
         if explicit.status == ReductionStatusV1::Current {
-            let newest_impl = explicit
-                .current_heads
-                .iter()
-                .map(evidence_head_key)
-                .max();
+            let newest_impl = explicit.current_heads.iter().map(evidence_head_key).max();
             let reverted_newer = self.linked_prs(issue).iter().any(|object| {
                 let pr = pr_subject(issue, object);
                 let revert = self.get(&pr, PredicateV1::MergeReverted);
@@ -382,7 +387,9 @@ impl ReductionV1 {
     pub fn linked_merged_prs(&self, issue: &SubjectRefV1) -> Vec<GithubObjectRefV1> {
         self.linked_prs(issue)
             .into_iter()
-            .filter(|object| self.pr_lifecycle(&pr_subject(issue, object)) == PrLifecycleView::Merged)
+            .filter(|object| {
+                self.pr_lifecycle(&pr_subject(issue, object)) == PrLifecycleView::Merged
+            })
             .collect()
     }
 

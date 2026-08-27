@@ -161,8 +161,8 @@ pub fn open_action_for(
     let merged_prs = reduction.linked_merged_prs(issue);
     let implementation_present = reduction.implementation_present(issue);
     let acceptance = reduction.owner_acceptance_present(issue);
-    let reopened_current = reduction.get(issue, PredicateV1::IssueReopened).status
-        == ReductionStatusV1::Current;
+    let reopened_current =
+        reduction.get(issue, PredicateV1::IssueReopened).status == ReductionStatusV1::Current;
     let reverted_linked = linked_prs.iter().any(|object| {
         reduction.pr_lifecycle(&pr_subject(issue, object)) == PrLifecycleView::MergeReverted
     });
@@ -204,11 +204,13 @@ pub fn open_action_for(
     // linked PR (a still-open linked PR means implementation is underway —
     // rule 5). A PR closed unmerged never counts as implementation present
     // (#1696 discrimination 4).
-    let has_open_linked_pr = linked_prs.iter().any(|object| {
-        reduction.pr_lifecycle(&pr_subject(issue, object)) == PrLifecycleView::Open
-    });
-    if matches!(lifecycle, IssueLifecycleView::Open | IssueLifecycleView::Reopened)
-        && !implementation_present
+    let has_open_linked_pr = linked_prs
+        .iter()
+        .any(|object| reduction.pr_lifecycle(&pr_subject(issue, object)) == PrLifecycleView::Open);
+    if matches!(
+        lifecycle,
+        IssueLifecycleView::Open | IssueLifecycleView::Reopened
+    ) && !implementation_present
         && !has_open_linked_pr
     {
         return OpenActionV1 {
@@ -221,9 +223,10 @@ pub fn open_action_for(
         };
     }
     // (5) review PR: linked, still open.
-    if linked_prs.iter().any(|object| {
-        reduction.pr_lifecycle(&pr_subject(issue, object)) == PrLifecycleView::Open
-    }) {
+    if linked_prs
+        .iter()
+        .any(|object| reduction.pr_lifecycle(&pr_subject(issue, object)) == PrLifecycleView::Open)
+    {
         return OpenActionV1 {
             kind: OpenActionKindV1::ReviewPr,
             subject: issue.clone(),
@@ -235,7 +238,10 @@ pub fn open_action_for(
     }
     // (6) run verification: landed, issue still open, not accepted.
     if implementation_present
-        && matches!(lifecycle, IssueLifecycleView::Open | IssueLifecycleView::Reopened)
+        && matches!(
+            lifecycle,
+            IssueLifecycleView::Open | IssueLifecycleView::Reopened
+        )
         && !acceptance
     {
         return OpenActionV1 {
@@ -271,16 +277,11 @@ pub fn open_action_for(
 }
 
 /// Derive open actions for every issue subject in the reduction.
-pub fn open_actions(
-    reduction: &ReductionV1,
-    posture: &RefreshPostureV1,
-) -> Vec<OpenActionV1> {
+pub fn open_actions(reduction: &ReductionV1, posture: &RefreshPostureV1) -> Vec<OpenActionV1> {
     reduction
         .subjects()
         .into_iter()
-        .filter(|subject| {
-            matches!(subject.object, GithubObjectRefV1::Issue(_))
-        })
+        .filter(|subject| matches!(subject.object, GithubObjectRefV1::Issue(_)))
         .map(|issue| open_action_for(reduction, posture, &issue))
         .collect()
 }

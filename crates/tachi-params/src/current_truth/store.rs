@@ -27,7 +27,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 use super::types::{
-    AssertionV1, AssertionIngestionKey, AssertionValueV1, AuthorityClassV1, EvidenceHeadV1,
+    AssertionIngestionKey, AssertionV1, AssertionValueV1, AuthorityClassV1, EvidenceHeadV1,
     GithubObjectRefV1, PredicateV1, ReviewStateV1, SourceRefV1, SubjectRefV1, VisibilityClassV1,
 };
 
@@ -155,8 +155,8 @@ impl CurrentTruthSqliteStore {
     /// current truth.
     pub fn append(&self, assertion: &AssertionV1) -> Result<AppendOutcome, CurrentTruthStoreError> {
         Self::validate(assertion)?;
-        let value_json = serde_json::to_string(&assertion.value)
-            .unwrap_or_else(|_| "null".to_string());
+        let value_json =
+            serde_json::to_string(&assertion.value).unwrap_or_else(|_| "null".to_string());
         let value_digest = memcore::canonical_digest::canonical_json_digest_hex(
             &serde_json::to_value(&assertion.value).unwrap_or_default(),
         );
@@ -188,8 +188,8 @@ impl CurrentTruthSqliteStore {
                 assertion.ingestion_key(),
             ));
         }
-        let evidence_json = serde_json::to_string(&assertion.evidence_refs)
-            .unwrap_or_else(|_| "[]".to_string());
+        let evidence_json =
+            serde_json::to_string(&assertion.evidence_refs).unwrap_or_else(|_| "[]".to_string());
         self.conn.execute(
             "INSERT INTO current_truth_assertions (
                 assertion_id, subject_repo, subject_kind, subject_id, predicate,
@@ -223,10 +223,7 @@ impl CurrentTruthSqliteStore {
     /// Append many, returning how many were new. Stops at the first error
     /// (append-only: the already-appended prefix stays, which is safe —
     /// re-running the same batch is idempotent).
-    pub fn append_all(
-        &self,
-        assertions: &[AssertionV1],
-    ) -> Result<usize, CurrentTruthStoreError> {
+    pub fn append_all(&self, assertions: &[AssertionV1]) -> Result<usize, CurrentTruthStoreError> {
         let mut appended = 0;
         for assertion in assertions {
             if self.append(assertion)? == AppendOutcome::Appended {
@@ -382,8 +379,10 @@ impl CurrentTruthSqliteStore {
     /// Drop the disposable projection for one repository. Never touches the
     /// assertion authority.
     pub fn drop_projection(&self, repo: &str) -> Result<(), CurrentTruthStoreError> {
-        self.conn
-            .execute("DELETE FROM current_truth_projection WHERE repo = ?1", params![repo])?;
+        self.conn.execute(
+            "DELETE FROM current_truth_projection WHERE repo = ?1",
+            params![repo],
+        )?;
         Ok(())
     }
 
@@ -637,14 +636,17 @@ fn decode_assertion_row(
             "predicate `{predicate}`"
         )));
     };
-    let value = serde_json::from_str::<AssertionValueV1>(&value_json).map_err(|error| {
-        CurrentTruthStoreError::CorruptRow(format!("value: {error}"))
-    })?;
-    let evidence_refs = serde_json::from_str(&evidence_json).map_err(|error| {
-        CurrentTruthStoreError::CorruptRow(format!("evidence: {error}"))
-    })?;
-    if !["github_typed_object", "owner_decision", "reviewed_disposition", "model_prose"]
-        .contains(&authority.as_str())
+    let value = serde_json::from_str::<AssertionValueV1>(&value_json)
+        .map_err(|error| CurrentTruthStoreError::CorruptRow(format!("value: {error}")))?;
+    let evidence_refs = serde_json::from_str(&evidence_json)
+        .map_err(|error| CurrentTruthStoreError::CorruptRow(format!("evidence: {error}")))?;
+    if ![
+        "github_typed_object",
+        "owner_decision",
+        "reviewed_disposition",
+        "model_prose",
+    ]
+    .contains(&authority.as_str())
     {
         return Err(CurrentTruthStoreError::CorruptRow(format!(
             "authority `{authority}`"

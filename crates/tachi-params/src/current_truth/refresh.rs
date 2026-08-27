@@ -15,8 +15,8 @@
 use serde::{Deserialize, Serialize};
 
 use super::types::{
-    AssertionV1, AssertionValueV1, AuthorityClassV1, GithubObjectRefV1, PredicateV1,
-    ReviewStateV1, SourceRefV1, SubjectRefV1, VisibilityClassV1,
+    AssertionV1, AssertionValueV1, AuthorityClassV1, GithubObjectRefV1, PredicateV1, ReviewStateV1,
+    SourceRefV1, SubjectRefV1, VisibilityClassV1,
 };
 
 /// The authoritative source adapter for one repository's current GitHub
@@ -187,7 +187,9 @@ pub fn mint_assertions(state: &GithubRepositoryStateV1) -> Vec<AssertionV1> {
             SnapshotPrStateV1::Merged => (
                 PredicateV1::PrMerged,
                 AssertionValueV1::CommitSha(
-                    pr.merge_commit_sha.clone().unwrap_or_else(|| "unknown".to_string()),
+                    pr.merge_commit_sha
+                        .clone()
+                        .unwrap_or_else(|| "unknown".to_string()),
                 ),
             ),
             SnapshotPrStateV1::ClosedUnmerged => {
@@ -232,7 +234,9 @@ pub fn mint_assertions(state: &GithubRepositoryStateV1) -> Vec<AssertionV1> {
                     &issue_subject,
                     PredicateV1::ImplementationPresent,
                     AssertionValueV1::CommitSha(
-                        pr.merge_commit_sha.clone().unwrap_or_else(|| "unknown".to_string()),
+                        pr.merge_commit_sha
+                            .clone()
+                            .unwrap_or_else(|| "unknown".to_string()),
                     ),
                     &source.clone(),
                     &pr.snapshot_revision,
@@ -335,8 +339,6 @@ pub fn reconcile_refresh(
             let assertions = mint_assertions(&state);
             (RefreshOutcomeV1::Fresh(state), assertions)
         }
-        unavailable @ RefreshOutcomeV1::Unavailable { .. } => {
-            (unavailable, Vec::new())
-        }
+        unavailable @ RefreshOutcomeV1::Unavailable { .. } => (unavailable, Vec::new()),
     }
 }

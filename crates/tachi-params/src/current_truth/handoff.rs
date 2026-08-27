@@ -9,7 +9,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::reducer::{ReductionV1, ReducedPredicateV1};
+use super::reducer::{ReducedPredicateV1, ReductionV1};
 use super::types::{EvidenceHeadV1, PredicateV1, ReductionStatusV1, SubjectRefV1};
 
 /// One claim inside a handoff packet: a `(subject, predicate)` fact the
@@ -89,15 +89,14 @@ pub fn evaluate_handoff_staleness(
         .claim_bindings
         .iter()
         .map(|binding| {
-            let (stale, reason, replacement_head) = if let Some(family) =
-                lifecycle_family(binding.predicate)
-            {
-                classify_lifecycle_claim(binding, reduction, family)
-            } else {
-                let reduced: ReducedPredicateV1 =
-                    reduction.get(&binding.subject, binding.predicate);
-                classify_claim(binding, &reduced)
-            };
+            let (stale, reason, replacement_head) =
+                if let Some(family) = lifecycle_family(binding.predicate) {
+                    classify_lifecycle_claim(binding, reduction, family)
+                } else {
+                    let reduced: ReducedPredicateV1 =
+                        reduction.get(&binding.subject, binding.predicate);
+                    classify_claim(binding, &reduced)
+                };
             HandoffClaimStalenessV1 {
                 binding: binding.clone(),
                 stale,

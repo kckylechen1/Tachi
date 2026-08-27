@@ -116,9 +116,7 @@ impl PredicateV1 {
     pub fn is_source_predicate(self) -> bool {
         !matches!(
             self,
-            PredicateV1::HandoffCurrent
-                | PredicateV1::HandoffStale
-                | PredicateV1::OpenAction
+            PredicateV1::HandoffCurrent | PredicateV1::HandoffStale | PredicateV1::OpenAction
         )
     }
 }
@@ -170,8 +168,10 @@ impl AuthorityClassV1 {
     /// and never reaches the reducer.
     pub fn may_establish(self, predicate: PredicateV1) -> bool {
         match self {
-            AuthorityClassV1::GitHubTypedObject => predicate.is_source_predicate()
-                && !matches!(predicate, PredicateV1::OwnerAcceptancePresent),
+            AuthorityClassV1::GitHubTypedObject => {
+                predicate.is_source_predicate()
+                    && !matches!(predicate, PredicateV1::OwnerAcceptancePresent)
+            }
             AuthorityClassV1::OwnerDecision => matches!(
                 predicate,
                 PredicateV1::OwnerAcceptancePresent
