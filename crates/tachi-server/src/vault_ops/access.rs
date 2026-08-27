@@ -308,6 +308,19 @@ fn record_listed_drop(
     dropped.entry(name.to_string()).or_insert(class);
 }
 
+/// Rotation aliases look up the prefix (`VOYAGE_API_KEY`), not the member
+/// (`VOYAGE_API_KEY_1`). Record both so an all-skipped rotation is
+/// `ListedFenced` / `ListedEmpty` / … instead of `SecretAbsent`.
+fn record_rotation_listed_drop(
+    dropped: &mut HashMap<String, AliasSkipClass>,
+    prefix: &str,
+    member_name: &str,
+    class: AliasSkipClass,
+) {
+    record_listed_drop(dropped, member_name, class);
+    record_listed_drop(dropped, prefix, class);
+}
+
 fn load_unlocked_api_key_secret_pools_filtered(
     server: &MemoryServer,
     only_logical_name: Option<&str>,
@@ -399,7 +412,12 @@ fn load_unlocked_api_key_secret_pools_filtered(
             let mut pool = Vec::new();
             for (_, entry) in matching {
                 if entry.secret_type != SECRET_TYPE_API_KEY {
-                    record_listed_drop(&mut dropped, &entry.name, AliasSkipClass::ListedWrongType);
+                    record_rotation_listed_drop(
+                        &mut dropped,
+                        &rotation.prefix,
+                        &entry.name,
+                        AliasSkipClass::ListedWrongType,
+                    );
                     continue;
                 }
                 if entry
@@ -407,12 +425,16 @@ fn load_unlocked_api_key_secret_pools_filtered(
                     .as_ref()
                     .is_some_and(|agents| !agents.is_empty())
                 {
-                    record_listed_drop(&mut dropped, &entry.name, AliasSkipClass::ListedFenced);
+                    record_rotation_listed_drop(
+                        &mut dropped,
+                        &rotation.prefix,
+                        &entry.name,
+                        AliasSkipClass::ListedFenced,
+                    );
                     continue;
                 }
                 if let Some(class) = unusable_class(&rotation.prefix, &entry.name) {
-                    record_listed_drop(&mut dropped, &entry.name, class);
-                    record_listed_drop(&mut dropped, &rotation.prefix, class);
+                    record_rotation_listed_drop(&mut dropped, &rotation.prefix, &entry.name, class);
                     continue;
                 }
                 let decrypted = crypto::decrypt(key, &entry.encrypted_value, &entry.nonce)?;
@@ -420,7 +442,12 @@ fn load_unlocked_api_key_secret_pools_filtered(
                     format!("Vault secret '{}' is not valid UTF-8: {e}", entry.name)
                 })?;
                 if value.trim().is_empty() {
-                    record_listed_drop(&mut dropped, &entry.name, AliasSkipClass::ListedEmpty);
+                    record_rotation_listed_drop(
+                        &mut dropped,
+                        &rotation.prefix,
+                        &entry.name,
+                        AliasSkipClass::ListedEmpty,
+                    );
                     continue;
                 }
                 let key_id = entry.name.clone();

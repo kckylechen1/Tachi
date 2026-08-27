@@ -87,23 +87,27 @@ fn vault_api_key_pool_load_from_server(
     })
 }
 
-/// Load API keys via macOS Keychain + global DB (daemon/CLI when memory unlock is empty).
-pub fn vault_api_key_pools_from_keychain(
-    global_db_path: &Path,
-) -> HashMap<String, Vec<ProviderSecret>> {
+fn vault_api_key_load_from_keychain(global_db_path: &Path) -> tachi_llm::DurableVaultLoad {
     let rotation_prefixes = rotation_prefixes_from_global_db(global_db_path);
-    let values = match crate::status_ops::status_health::load_keychain_vault_api_key_values(
-        global_db_path,
-    ) {
-        Ok(values) => values,
-        Err(err) => {
-            tracing::warn!(
-                "[vault] keychain vault read failed during provider key resolution: {err}"
-            );
-            Vec::new()
-        }
-    };
-    group_api_key_values_by_configured_rotations(values, &rotation_prefixes)
+    let scan =
+        match crate::status_ops::status_health::load_keychain_vault_api_key_scan(global_db_path) {
+            Ok(scan) => scan,
+            Err(err) => {
+                tracing::warn!(
+                    "[vault] keychain vault read failed during provider key resolution: {err}"
+                );
+                return tachi_llm::DurableVaultLoad {
+                    pools: HashMap::new(),
+                    listed_drops: HashMap::new(),
+                    availability: VaultSourceAvailability::LockedOrUnavailable,
+                };
+            }
+        };
+    tachi_llm::DurableVaultLoad {
+        pools: group_api_key_values_by_configured_rotations(scan.values, &rotation_prefixes),
+        listed_drops: scan.dropped,
+        availability: VaultSourceAvailability::Readable,
+    }
 }
 
 /// Resolve the Vault-backed provider pools, and report whether the source was
@@ -147,36 +151,36 @@ fn resolve_vault_pools(
             Err(err) => return Err(format!("Failed to unlock Vault provider secrets: {err}")),
         }
     }
-    let pools = vault_api_key_pools_from_keychain(global_db_path);
-    if !pools.is_empty() {
-        return Ok(tachi_llm::DurableVaultLoad::from_pools(
-            pools,
-            VaultSourceAvailability::Readable,
-        ));
+    let keychain = vault_api_key_load_from_keychain(global_db_path);
+    if !keychain.pools.is_empty() || !keychain.listed_drops.is_empty() {
+        return Ok(keychain);
     }
     if vault_config_exists(global_db_path) {
-        return Ok(tachi_llm::DurableVaultLoad::from_pools(pools, availability));
+        return Ok(tachi_llm::DurableVaultLoad::from_pools(
+            keychain.pools,
+            availability,
+        ));
     }
 
     let default_global = default_global_db_path();
     if paths_equal(global_db_path, &default_global) {
-        return Ok(tachi_llm::DurableVaultLoad::from_pools(pools, availability));
+        return Ok(tachi_llm::DurableVaultLoad::from_pools(
+            keychain.pools,
+            availability,
+        ));
     }
 
-    let fallback = vault_api_key_pools_from_keychain(&default_global);
-    if !fallback.is_empty() {
+    let fallback = vault_api_key_load_from_keychain(&default_global);
+    if !fallback.pools.is_empty() || !fallback.listed_drops.is_empty() {
         tracing::warn!(
             "[provider] global DB {} has no initialized Vault; using default Vault DB {} for provider key materialization",
             global_db_path.display(),
             default_global.display()
         );
-        return Ok(tachi_llm::DurableVaultLoad::from_pools(
-            fallback,
-            VaultSourceAvailability::Readable,
-        ));
+        return Ok(fallback);
     }
     Ok(tachi_llm::DurableVaultLoad::from_pools(
-        fallback,
+        fallback.pools,
         availability,
     ))
 }
@@ -238,8 +242,9 @@ fn format_provider_materialization_error(err: String) -> String {
     // shared sentence: #1393 split that sentence into a revoked case and an
     // unreadable case, and a matcher keyed on the old wording would silently
     // stop attaching remediation to both.
-    let unresolved_alias =
-        err.starts_with("Config key ") && err.contains("references a Vault alias");
+    let unresolved_alias = err.starts_with("Config key ")
+        && err.contains("references a Vault alias")
+        && !err.contains("not a valid Vault secret name");
     if (err.starts_with("provider alias ") && err.contains(" could not be resolved from secret "))
         || unresolved_alias
     {
@@ -1384,6 +1389,19 @@ mod tests {
         assert!(surfaced.contains("vault_set"));
         assert!(!surfaced.contains("ANTHROPIC_API_KEY=vault:MISSING_ANTHROPIC"));
         assert!(!surfaced.contains("MISSING_ANTHROPIC"));
+    }
+
+    #[test]
+    fn malformed_alias_error_does_not_advise_vault_unlock_or_set() {
+        let err = format_provider_materialization_error(
+            "Config key 'ANTHROPIC_API_KEY' references a Vault alias that is not a valid Vault secret name; provider refresh refused and prior provider cache left unchanged"
+                .to_string(),
+        );
+        assert!(err.contains("not a valid Vault secret name"), "{err}");
+        assert!(
+            !err.contains("vault_unlock") && !err.contains("vault_set"),
+            "malformed alias names are config typos: {err}"
+        );
     }
 
     #[test]

@@ -1,4 +1,6 @@
+use std::collections::HashMap;
 use std::path::Path;
+use tachi_llm::AliasSkipClass;
 
 fn derive_status_vault_key(
     config: &memcore::vault::VaultConfig,
@@ -14,11 +16,40 @@ fn derive_status_vault_key(
     }
 }
 
+pub(crate) struct KeychainApiKeyScan {
+    pub values: Vec<(String, String)>,
+    pub dropped: HashMap<String, AliasSkipClass>,
+}
+
 pub(crate) fn load_keychain_vault_api_key_values(
     vault_db_path: &Path,
 ) -> Result<Vec<(String, String)>, Box<dyn std::error::Error>> {
+    Ok(load_keychain_vault_api_key_scan(vault_db_path)?.values)
+}
+
+fn record_keychain_listed_drop(
+    dropped: &mut HashMap<String, AliasSkipClass>,
+    name: &str,
+    class: AliasSkipClass,
+) {
+    dropped.entry(name.to_string()).or_insert(class);
+    if let Some((prefix, _)) = crate::provider_config::parse_rotation_member_name(name) {
+        dropped.entry(prefix.to_string()).or_insert(class);
+    }
+}
+
+fn empty_keychain_scan() -> KeychainApiKeyScan {
+    KeychainApiKeyScan {
+        values: Vec::new(),
+        dropped: HashMap::new(),
+    }
+}
+
+pub(crate) fn load_keychain_vault_api_key_scan(
+    vault_db_path: &Path,
+) -> Result<KeychainApiKeyScan, Box<dyn std::error::Error>> {
     if !cfg!(target_os = "macos") {
-        return Ok(Vec::new());
+        return Ok(empty_keychain_scan());
     }
 
     let output = std::process::Command::new("security")
@@ -32,12 +63,12 @@ pub(crate) fn load_keychain_vault_api_key_values(
         ])
         .output()?;
     if !output.status.success() {
-        return Ok(Vec::new());
+        return Ok(empty_keychain_scan());
     }
 
     let password = String::from_utf8(output.stdout)?.trim().to_string();
     if password.is_empty() {
-        return Ok(Vec::new());
+        return Ok(empty_keychain_scan());
     }
 
     let vault_db_str = vault_db_path.to_str().ok_or_else(|| {
@@ -51,7 +82,7 @@ pub(crate) fn load_keychain_vault_api_key_values(
     })?;
     let store = memcore::MemoryStore::open_read_only(vault_db_str)?;
     let Some(config) = store.vault_get_config()? else {
-        return Ok(Vec::new());
+        return Ok(empty_keychain_scan());
     };
 
     // tachi#1080: a wrong Keychain password is the sole benign miss. Invalid
@@ -60,26 +91,41 @@ pub(crate) fn load_keychain_vault_api_key_values(
     let key = match derive_status_vault_key(&config, &password)? {
         Some(key) => key,
         None => {
-            return Ok(Vec::new());
+            return Ok(empty_keychain_scan());
         }
     };
 
-    let mut out = Vec::new();
+    let mut values = Vec::new();
+    let mut dropped = HashMap::new();
     for entry in store.vault_list_entries()? {
         let is_provider_key = entry.name.ends_with("_API_KEY")
             || crate::provider_config::parse_rotation_member_name(&entry.name)
                 .is_some_and(|(prefix, _)| prefix.ends_with("_API_KEY"));
-        if entry.secret_type != "api_key" || !is_provider_key || entry.allowed_agents.is_some() {
+        if !is_provider_key {
+            continue;
+        }
+        if entry.secret_type != "api_key" {
+            record_keychain_listed_drop(&mut dropped, &entry.name, AliasSkipClass::ListedWrongType);
+            continue;
+        }
+        if entry
+            .allowed_agents
+            .as_ref()
+            .is_some_and(|agents| !agents.is_empty())
+        {
+            record_keychain_listed_drop(&mut dropped, &entry.name, AliasSkipClass::ListedFenced);
             continue;
         }
         let decrypted =
             crate::vault_crypto::decrypt(key.bytes(), &entry.encrypted_value, &entry.nonce)?;
         let value = String::from_utf8(decrypted)?;
-        if !value.trim().is_empty() {
-            out.push((entry.name, value));
+        if value.trim().is_empty() {
+            record_keychain_listed_drop(&mut dropped, &entry.name, AliasSkipClass::ListedEmpty);
+            continue;
         }
+        values.push((entry.name, value));
     }
-    Ok(out)
+    Ok(KeychainApiKeyScan { values, dropped })
 }
 
 #[cfg(test)]

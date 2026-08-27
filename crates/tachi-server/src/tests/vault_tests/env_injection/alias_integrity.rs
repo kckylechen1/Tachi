@@ -274,3 +274,65 @@ async fn skip_class_is_the_pool_load_snapshot_not_a_later_reread() {
         report.skipped_aliases
     );
 }
+
+/// Rotation aliases resolve the prefix. When every member is empty, the
+/// prefix drop must be recorded in the same scan — otherwise materialization
+/// reports `SecretAbsent`.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn empty_rotation_members_classify_the_prefix_as_listed_empty() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _env =
+        crate::test_support::EnvRestore::set("SILICONFLOW_API_KEY", "vault:SILICONFLOW_API_KEY");
+    let server = make_server();
+
+    server
+        .vault_init(Parameters(VaultInitParams {
+            password: "alias-integrity-rotation-empty".to_string(),
+        }))
+        .await
+        .expect("vault_init");
+    for name in ["SILICONFLOW_API_KEY_1", "SILICONFLOW_API_KEY_2"] {
+        server
+            .vault_set(Parameters(VaultSetParams {
+                name: name.to_string(),
+                value: "   ".to_string(),
+                agent_id: None,
+                secret_type: "api_key".to_string(),
+                description: "empty rotation member".to_string(),
+                allowed_agents: None,
+                enable_rotation: false,
+                rotation_strategy: None,
+            }))
+            .await
+            .expect("vault_set empty member");
+    }
+    server
+        .vault_setup_rotation(Parameters(VaultSetupRotationParams {
+            prefix: "SILICONFLOW_API_KEY".to_string(),
+            agent_id: None,
+            total_keys: 2,
+            strategy: "round_robin".to_string(),
+        }))
+        .await
+        .expect("vault_setup_rotation");
+
+    let report = crate::provider_config::materialize_for_server(&server)
+        .expect("refresh must degrade, not abort");
+    assert_eq!(
+        report.skip_class_for("SILICONFLOW_API_KEY"),
+        AliasSkipClass::ListedEmpty,
+        "prefix alias must inherit member empty class: {:?}",
+        report.skipped_aliases
+    );
+    let reason = &report
+        .skipped_aliases
+        .iter()
+        .find(|(key, _)| key == "SILICONFLOW_API_KEY")
+        .expect("skip")
+        .1;
+    assert!(reason.contains("empty value"), "{reason}");
+    assert!(!reason.contains("absent from a readable Vault"), "{reason}");
+}
