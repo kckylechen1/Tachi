@@ -1,5 +1,5 @@
 use super::super::acp_native::{is_native_acp_transport, NativeAcpRunSpec};
-use super::super::acpx::{is_acpx_transport, persist_acpx_events_and_map};
+use super::super::acpx::{is_acpx_transport, persist_acpx_events_and_map, AcpxReleaseMode};
 #[cfg(test)]
 use super::super::dispatch_v2::stamp_route_decision_id;
 #[cfg(test)]
@@ -477,13 +477,18 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
         let mut pending_acpx_output: Option<String> = None;
         if is_acpx_transport(&harness_transport_for_spawn) {
             let release_now = postflight_gate_for_spawn.is_none();
+            let release_mode = if release_now {
+                AcpxReleaseMode::ImmediateMapped
+            } else {
+                AcpxReleaseMode::ParseOnly
+            };
             match persist_acpx_events_and_map(
                 &workspace_dir_for_spawn,
                 &traj_path_for_spawn,
                 &d_id,
                 &agent_for_watchdog,
                 &full_output,
-                release_now,
+                release_mode,
             ) {
                 Ok(summary) => {
                     if let Some(final_response) = summary.final_response.clone() {
@@ -630,7 +635,7 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                         &d_id,
                         &agent_for_watchdog,
                         &raw_output,
-                        true,
+                        AcpxReleaseMode::PostflightAtomic,
                     ) {
                         Ok(summary) => {
                             acpx_event_summary_json = Some(json!({
@@ -655,6 +660,7 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                                 &traj_path_for_spawn,
                                 &d_id,
                                 &agent_for_watchdog,
+                                false,
                             )
                         {
                             publication_error = Some(format!(

@@ -191,6 +191,8 @@ printf '%s\n' '{"jsonrpc":"2.0","id":"tachi-acp-3","result":{}}'
     std::fs::set_permissions(&adapter, permissions).expect("make adapter executable");
 
     let trajectory = temp.path().join("trajectory.jsonl");
+    let session_record = temp.path().join("session.json");
+    let session_distill = temp.path().join("session.md");
     crate::utils::write_owner_only_file_atomic(&trajectory, b"").expect("trajectory");
     let mut outcome = super::run_native_acp_dispatch_with_liveness(
         super::NativeAcpRunSpec {
@@ -198,11 +200,14 @@ printf '%s\n' '{"jsonrpc":"2.0","id":"tachi-acp-3","result":{}}'
             args: vec![adapter.to_string_lossy().to_string()],
             cwd: temp.path().to_path_buf(),
             prompt: "test prompt".to_string(),
-            mode: super::NativeAcpRunMode::OneShot,
+            mode: super::NativeAcpRunMode::Session,
             permission_label: "approve-reads".to_string(),
-            session: None,
-            session_record_path: None,
-            session_distill_path: None,
+            session: Some(super::NativeAcpSession {
+                name: "postflight-session".to_string(),
+                source: "test",
+            }),
+            session_record_path: Some(session_record.clone()),
+            session_distill_path: Some(session_distill.clone()),
             metadata: json!({}),
             env: HashMap::new(),
         },
@@ -221,19 +226,42 @@ printf '%s\n' '{"jsonrpc":"2.0","id":"tachi-acp-3","result":{}}'
     );
     assert!(!temp.path().join(super::ACP_STREAM_FILE).exists());
     assert!(!temp.path().join("progress.jsonl").exists());
+    assert!(!session_record.exists());
+    assert!(!session_distill.exists());
     assert!(!std::fs::read_to_string(&trajectory)
         .expect("trajectory")
         .contains("sensitive-native-output"));
 
-    super::publish_native_acp_artifacts(
-        outcome
-            .deferred_native_acp
-            .take()
-            .expect("parent-owned deferred artifacts"),
+    let deferred = outcome
+        .deferred_native_acp
+        .take()
+        .expect("parent-owned deferred artifacts");
+    let blocker = temp.path().join("not-a-directory");
+    std::fs::write(&blocker, b"block session parent").expect("write blocker");
+    let mut failing = deferred.clone();
+    failing.spec.session_record_path = Some(blocker.join("session.json"));
+    let error = super::publish_native_acp_artifacts(
+        failing,
         temp.path(),
         &trajectory,
         "staged-dispatch",
         "codex",
+        false,
+    )
+    .expect_err("session metadata failure must precede raw carrier publication");
+    assert!(error.contains("native ACP session dir"), "{error}");
+    assert!(
+        !temp.path().join(super::ACP_STREAM_FILE).exists(),
+        "a later metadata failure must not leave raw output visible"
+    );
+
+    super::publish_native_acp_artifacts(
+        deferred,
+        temp.path(),
+        &trajectory,
+        "staged-dispatch",
+        "codex",
+        false,
     )
     .expect("publish after clean postflight");
     assert!(
@@ -241,8 +269,15 @@ printf '%s\n' '{"jsonrpc":"2.0","id":"tachi-acp-3","result":{}}'
             .expect("raw stream")
             .contains("sensitive-native-output")
     );
-    assert!(std::fs::read_to_string(temp.path().join("progress.jsonl"))
-        .expect("progress")
+    let progress =
+        std::fs::read_to_string(temp.path().join("progress.jsonl")).expect("sanitized progress");
+    assert!(!progress.contains("sensitive-native-output"));
+    assert!(progress.contains("\"worker_mappings_published\":false"));
+    assert!(!std::fs::read_to_string(session_record)
+        .expect("sanitized session record")
+        .contains("sensitive-native-output"));
+    assert!(!std::fs::read_to_string(session_distill)
+        .expect("sanitized session distill")
         .contains("sensitive-native-output"));
 }
 

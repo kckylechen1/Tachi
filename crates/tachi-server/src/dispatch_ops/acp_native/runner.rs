@@ -337,7 +337,7 @@ async fn run_native_acp_dispatch_inner(
             deferred_native_acp: Some(deferred),
         }
     } else if let Err(error) =
-        publish_native_acp_artifacts(deferred, run_dir, trajectory_path, dispatch_id, agent)
+        publish_native_acp_artifacts(deferred, run_dir, trajectory_path, dispatch_id, agent, true)
     {
         DispatchRunOutcome::failure(error, liveness)
     } else {
@@ -351,30 +351,54 @@ pub(in crate::dispatch_ops) fn publish_native_acp_artifacts(
     trajectory_path: &Path,
     dispatch_id: &str,
     agent: &str,
+    publish_worker_mappings: bool,
 ) -> Result<(), String> {
     let NativeAcpDeferredArtifacts {
         spec,
         outcome,
         process_exit_code,
     } = deferred;
-    let stream_path = persist_raw_stream(&outcome, run_dir)?;
+    let stream_path = run_dir.join(ACP_STREAM_FILE);
 
-    if let Some(record_path) = spec.session_record_path.as_ref() {
-        write_native_acp_session_record(
-            &spec,
-            record_path,
-            spec.session_distill_path.as_ref(),
-            &outcome,
-            &stream_path,
-            dispatch_id,
-        )?;
+    // Required-postflight publication makes the raw stream its sole atomic
+    // worker-authored artifact. Session continuity metadata is deliberately
+    // stripped of prompt/output material and written first, so a later raw
+    // stream failure cannot leave carrier output visible.
+    if !publish_worker_mappings {
+        if let Some(record_path) = spec.session_record_path.as_ref() {
+            write_native_acp_session_record(
+                &spec,
+                record_path,
+                spec.session_distill_path.as_ref(),
+                &outcome,
+                &stream_path,
+                dispatch_id,
+                false,
+            )?;
+        }
     }
-    for event in outcome.staged_events {
-        let target = match event.target {
-            NativeAcpEventTarget::Progress => run_dir.join("progress.jsonl"),
-            NativeAcpEventTarget::Trajectory => trajectory_path.to_path_buf(),
-        };
-        append_trajectory_event(&target, event.payload);
+    persist_raw_stream(&outcome, run_dir)?;
+    if publish_worker_mappings {
+        if let Some(record_path) = spec.session_record_path.as_ref() {
+            write_native_acp_session_record(
+                &spec,
+                record_path,
+                spec.session_distill_path.as_ref(),
+                &outcome,
+                &stream_path,
+                dispatch_id,
+                true,
+            )?;
+        }
+    }
+    if publish_worker_mappings {
+        for event in &outcome.staged_events {
+            let target = match event.target {
+                NativeAcpEventTarget::Progress => run_dir.join("progress.jsonl"),
+                NativeAcpEventTarget::Trajectory => trajectory_path.to_path_buf(),
+            };
+            append_trajectory_event(&target, event.payload.clone());
+        }
     }
     append_trajectory_event(
         trajectory_path,
@@ -388,6 +412,7 @@ pub(in crate::dispatch_ops) fn publish_native_acp_artifacts(
             "mapped_events": outcome.mapped_events,
             "raw_stream": stream_path.to_string_lossy(),
             "process_exit_code": process_exit_code,
+            "worker_mappings_published": publish_worker_mappings,
             "timestamp": Utc::now().to_rfc3339(),
         }),
     );

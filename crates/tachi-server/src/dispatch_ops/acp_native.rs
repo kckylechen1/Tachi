@@ -74,7 +74,7 @@ pub(in crate::dispatch_ops) enum NativeAcpEventTarget {
     Trajectory,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(in crate::dispatch_ops) struct NativeAcpDeferredArtifacts {
     pub spec: NativeAcpRunSpec,
     pub outcome: NativeAcpPromptOutcome,

@@ -129,6 +129,7 @@ pub(super) fn write_native_acp_session_record(
     outcome: &NativeAcpPromptOutcome,
     stream_path: &Path,
     dispatch_id: &str,
+    include_worker_output: bool,
 ) -> Result<(), String> {
     if let Some(parent) = record_path.parent() {
         std::fs::create_dir_all(parent)
@@ -154,7 +155,7 @@ pub(super) fn write_native_acp_session_record(
         &spec.cwd,
         spec.session.as_ref(),
     );
-    let record = json!({
+    let mut record = json!({
         "schema": ACP_SESSION_SCHEMA,
         "session_key": session_key,
         "acp_session_id": outcome.session_id,
@@ -167,18 +168,37 @@ pub(super) fn write_native_acp_session_record(
             "latest_run_stream": stream_path.to_string_lossy(),
             "raw_message_count": outcome.raw_messages.len(),
         },
-        "last_prompt_result": outcome.prompt_result,
-        "last_output_preview": crate::dispatch_ops::subprocess::tail_chars(&outcome.output, 2000),
         "distill_path": distill_path.map(|path| path.to_string_lossy().to_string()),
     });
+    if include_worker_output {
+        let object = record
+            .as_object_mut()
+            .expect("native ACP session record is an object");
+        object.insert(
+            "last_prompt_result".to_string(),
+            outcome.prompt_result.clone(),
+        );
+        object.insert(
+            "last_output_preview".to_string(),
+            Value::String(crate::dispatch_ops::subprocess::tail_chars(
+                &outcome.output,
+                2000,
+            )),
+        );
+    }
     let body = serde_json::to_vec_pretty(&record)
         .map_err(|err| format!("serialize native ACP session record: {err}"))?;
     crate::utils::write_owner_only_file_atomic(record_path, &body)
         .map_err(|err| format!("write native ACP session record: {err}"))?;
 
     if let Some(distill_path) = distill_path {
+        let output_section = if include_worker_output {
+            format!("\n## Last Output\n\n{}\n", outcome.output.trim())
+        } else {
+            String::new()
+        };
         let distill = format!(
-            "# Tachi ACP Session\n\n- schema: {ACP_SESSION_SCHEMA}\n- name: {}\n- acp_session_id: {}\n- agent_session_id: {}\n- command: {} {}\n- cwd: {}\n- last_dispatch_id: {}\n- latest_run_stream: {}\n\n## Last Output\n\n{}\n",
+            "# Tachi ACP Session\n\n- schema: {ACP_SESSION_SCHEMA}\n- name: {}\n- acp_session_id: {}\n- agent_session_id: {}\n- command: {} {}\n- cwd: {}\n- last_dispatch_id: {}\n- latest_run_stream: {}\n{}",
             spec.session
                 .as_ref()
                 .map(|session| session.name.as_str())
@@ -190,7 +210,7 @@ pub(super) fn write_native_acp_session_record(
             spec.cwd.to_string_lossy(),
             dispatch_id,
             stream_path.to_string_lossy(),
-            outcome.output.trim(),
+            output_section,
         );
         crate::utils::write_owner_only_file_atomic(distill_path, distill.as_bytes())
             .map_err(|err| format!("write native ACP session distill: {err}"))?;

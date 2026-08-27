@@ -1067,6 +1067,32 @@ const EXEMPTIONS: &[Exemption<'static>] = &[
                  through guarded MemoryStore::connection. Bodies read 2026-08-01.",
     },
     Exemption {
+        path: "crates/tachi-server/src/exec_env_ops.rs",
+        basis: ExemptionBasis::DeclaredByReviewerNotProven {
+            signed_by: "Codex Sol, body read 2026-08-27",
+        },
+        sites: &[Site {
+            symbol: "abandoned_dispatch_with_a_failed_fence_stays_exclusively_fail_closed",
+            trigger: "FAIL_ABANDONED_DISPATCH_FENCE",
+            ddl: "efee4311eb6310e3",
+            occurrences: 1,
+        }],
+        reason: "the test opens a second direct rusqlite::Connection on the file-backed global DB, installs the trigger there, and then drops the admitted guard so the real quarantine update fails; body read 2026-08-27. The file also contains MemoryStore doorways, so this is declared rather than assigned an inapplicable machine proof.",
+    },
+    Exemption {
+        path: "crates/tachi-server/src/exec_env_postflight/tests.rs",
+        basis: ExemptionBasis::DeclaredByReviewerNotProven {
+            signed_by: "Codex Sol, body read 2026-08-27",
+        },
+        sites: &[Site {
+            symbol: "daemon_quarantine_sink_propagates_resource_failure_before_receipt",
+            trigger: "FAIL_POSTFLIGHT_RESOURCE_QUARANTINE",
+            ddl: "6f65485c4aa9fc08",
+            occurrences: 1,
+        }],
+        reason: "the test opens a second direct rusqlite::Connection on the file-backed server DB and installs the trigger before exercising DaemonQuarantineSink; body read 2026-08-27. The file also uses guarded store connections for setup/assertions, so no machine proof applies.",
+    },
+    Exemption {
         path: "crates/tachi-server/src/mcp_pool/proxy.rs",
         basis: ExemptionBasis::DeclaredByReviewerNotProven {
             signed_by: "tachi#1443 census lane (agent), bodies read 2026-07-26",

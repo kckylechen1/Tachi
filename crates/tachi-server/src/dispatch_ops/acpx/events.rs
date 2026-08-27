@@ -6,13 +6,20 @@ use crate::dispatch_ops::dispatch_v2::append_trajectory_event;
 
 use super::types::{AcpxEventSummary, ACPX_EVENTS_FILE};
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::dispatch_ops) enum AcpxReleaseMode {
+    ParseOnly,
+    ImmediateMapped,
+    PostflightAtomic,
+}
+
 pub(in crate::dispatch_ops) fn persist_acpx_events_and_map(
     workspace_dir: &Path,
     trajectory_path: &Path,
     dispatch_id: &str,
     agent: &str,
     output: &str,
-    release_artifacts: bool,
+    release_mode: AcpxReleaseMode,
 ) -> Result<AcpxEventSummary, String> {
     let events_file = workspace_dir.join(ACPX_EVENTS_FILE);
     let progress_path = workspace_dir.join("progress.jsonl");
@@ -54,25 +61,29 @@ pub(in crate::dispatch_ops) fn persist_acpx_events_and_map(
         );
     }
 
-    if release_artifacts {
+    if release_mode != AcpxReleaseMode::ParseOnly {
         let raw_payload = format!("{}\n", raw_lines.join("\n"));
         crate::utils::write_owner_only_file_atomic(&events_file, raw_payload.as_bytes())
             .map_err(|err| format!("Failed to write {ACPX_EVENTS_FILE}: {err}"))?;
-        // The raw carrier artifact is the only fallible publication step. Do
-        // it before any mapped event becomes visible so an I/O failure cannot
-        // leave a public trajectory/progress prefix behind.
-        for line in &raw_lines {
-            let event = serde_json::from_str::<Value>(line)
-                .map_err(|err| format!("Failed to reparse staged acpx event: {err}"))?;
-            if let Some(mapped) = map_acpx_event(dispatch_id, agent, &event) {
-                let target_progress = mapped
-                    .get("tachi_target")
-                    .and_then(Value::as_str)
-                    .is_some_and(|target| target == "progress");
-                if target_progress {
-                    append_trajectory_event(&progress_path, mapped);
-                } else {
-                    append_trajectory_event(trajectory_path, mapped);
+        // A Required-postflight release has one atomic worker-authored
+        // artifact: the raw event file above. Mapping worker text into shared
+        // append-only progress/trajectory files would create a multi-file
+        // partial-commit surface. Immediate (non-gated) ACPX keeps its legacy
+        // streaming mapping behavior.
+        if release_mode == AcpxReleaseMode::ImmediateMapped {
+            for line in &raw_lines {
+                let event = serde_json::from_str::<Value>(line)
+                    .map_err(|err| format!("Failed to reparse staged acpx event: {err}"))?;
+                if let Some(mapped) = map_acpx_event(dispatch_id, agent, &event) {
+                    let target_progress = mapped
+                        .get("tachi_target")
+                        .and_then(Value::as_str)
+                        .is_some_and(|target| target == "progress");
+                    if target_progress {
+                        append_trajectory_event(&progress_path, mapped);
+                    } else {
+                        append_trajectory_event(trajectory_path, mapped);
+                    }
                 }
             }
         }
@@ -85,6 +96,7 @@ pub(in crate::dispatch_ops) fn persist_acpx_events_and_map(
                 "events_file": events_file.to_string_lossy(),
                 "raw_event_count": raw_lines.len(),
                 "mapped_event_count": mapped_events,
+                "mapped_events_published": release_mode == AcpxReleaseMode::ImmediateMapped,
                 "timestamp": Utc::now().to_rfc3339(),
             }),
         );
