@@ -53,6 +53,8 @@
 //! containment, not enforcement, is the guarantee.
 
 use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::sync::{Mutex, OnceLock};
 
 use memcore::{
     EnvClass, ExecEnvLease, ExecEnvSelector, ExecEnvState, NewExecEnvLease, ReclaimOutcome,
@@ -78,6 +80,54 @@ use crate::server_state::MemoryServer;
 /// timestamp". Bolting a TTL onto this namespace too would give two
 /// independent, potentially-disagreeing reapers authority over the same row.
 pub(crate) const PRIVATE_RESERVATION_NS: &str = "exec_env_private_target";
+
+#[cfg(test)]
+type PublicationFailureHook = Box<dyn FnOnce() + Send + 'static>;
+
+#[cfg(test)]
+fn publication_failure_hook() -> &'static Mutex<Option<PublicationFailureHook>> {
+    static HOOK: OnceLock<Mutex<Option<PublicationFailureHook>>> = OnceLock::new();
+    HOOK.get_or_init(|| Mutex::new(None))
+}
+
+#[cfg(test)]
+pub(crate) struct PublicationFailureHookGuard;
+
+#[cfg(test)]
+impl Drop for PublicationFailureHookGuard {
+    fn drop(&mut self) {
+        publication_failure_hook()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn install_publication_failure_hook(
+    hook: impl FnOnce() + Send + 'static,
+) -> PublicationFailureHookGuard {
+    let previous = publication_failure_hook()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .replace(Box::new(hook));
+    assert!(
+        previous.is_none(),
+        "publication failure hook already installed"
+    );
+    PublicationFailureHookGuard
+}
+
+#[cfg(test)]
+fn run_publication_failure_hook() {
+    if let Some(hook) = publication_failure_hook()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .take()
+    {
+        hook();
+    }
+}
 
 /// Resolve a worktree to the one persisted physical-path spelling. Existing
 /// trees are fully canonicalized. For a claim made before its leaf is created,
@@ -304,15 +354,13 @@ impl ProvisionEnvOptions {
 }
 
 /// Outcome of provisioning: the underlying worktree open report plus the lease
-/// id when a lease row was recorded. `env_id` is `None` when the worktree open
-/// failed / was a dry-run, or when the (non-fatal) lease insert failed — in the
-/// latter case a warning is appended to `report.warnings` and the worktree
-/// stands untracked (no lease). Such an untracked worktree directory is
-/// reclaimed by the age-based `clean sweep` (`tachi_clean::sweep`), not by the
-/// stale-lease backstop (which only reclaims leases, and here none was
-/// recorded). Resource registration failure is returned as an error after the
-/// lease and any partial bindings are rolled back; callers never receive an
-/// active lease that the protected cleanup lifecycle cannot own.
+/// id when its complete ledger publication succeeded. `env_id` is `None` when
+/// the worktree open failed, was a dry-run, or its canonical identity could not
+/// be proven (the last case remains visible in `report.warnings`). Once ledger
+/// publication is attempted it is all-or-nothing: a failure rolls back every
+/// row, runs certified worktree cleanup, and returns a truthful error. Callers
+/// never receive an active lease whose complete resource shape was not
+/// published.
 #[derive(Debug, Clone)]
 pub(crate) struct ProvisionedEnv {
     pub env_id: Option<String>,
@@ -578,10 +626,9 @@ fn reject_private_target_symlink_components(target: &Path) -> Result<(), String>
 /// one source of truth for provisioning instead of a divergent copy.
 ///
 /// Open failures (or dry-run) return the report with `env_id: None` and no
-/// lease. A lease-insert failure after a successful open is non-fatal: the
-/// worktree stands untracked for the age-based sweep. Once a lease insert
-/// succeeds, resource registration is part of the publication boundary: a
-/// failure rolls the lease and partial bindings back and returns an error.
+/// lease. Lease/resource/reservation publication is a single transaction. Any
+/// failure from that transaction rolls it back, attempts synchronous certified
+/// worktree cleanup, and reports both the publication and cleanup outcome.
 pub(crate) fn provision_managed_env(
     store: &mut memcore::MemoryStore,
     opts: &ProvisionEnvOptions,
@@ -671,20 +718,31 @@ pub(crate) fn provision_managed_env(
 
     let build_target = opts.build_target_dir(&report.path)?;
     let build_target = build_target.as_ref().map(|p| p.display().to_string());
-    publish_env_resources_atomically(
+    if let Err(error) = publish_env_resources_atomically(
         store,
         &lease,
         &report.path,
         build_target.as_deref(),
         opts.private_target_approval.as_ref(),
-    )
-    .map_err(|error| {
-        format!(
-            "worktree was created but its exec-env ledger could not be published atomically: \
-             {error}; no partial managed lease is visible and the orphan must be reclaimed by \
-             the age-based clean sweep"
-        )
-    })?;
+    ) {
+        #[cfg(test)]
+        run_publication_failure_hook();
+        let cleanup =
+            tachi_clean::wt_clean::run_wt_remove(tachi_clean::wt_clean::WtRemoveOptions {
+                path: std::path::PathBuf::from(&report.path),
+                force: true,
+                output: tachi_clean::wt_clean::OutputFormat::Json,
+            });
+        return Err(match cleanup {
+            Ok(_) => format!(
+                "exec-env ledger publication failed atomically and the newly opened worktree was removed: {error}"
+            ),
+            Err(cleanup_error) => format!(
+                "exec-env ledger publication failed atomically: {error}; failed to remove newly opened worktree {}: {cleanup_error}",
+                report.path
+            ),
+        });
+    }
     Ok(ProvisionedEnv {
         env_id: Some(env_id),
         report,
