@@ -178,6 +178,10 @@ pub(super) struct BackgroundDispatchContext {
     pub(super) server: MemoryServer,
     pub(super) dispatch_id: String,
     pub(super) agent: String,
+    /// Server-admitted lease identity. Terminal status is rebuilt rather than
+    /// merged, so carry this immutable receipt field through the background
+    /// owner instead of trusting a later filesystem read to recover it.
+    pub(super) env_id: Option<String>,
     pub(super) stage: Option<String>,
     /// The dispatch's `TachiDispatchParams::project`, threaded through so a
     /// watchdog-recorded terminal outcome row lands in the same DB a
@@ -369,6 +373,7 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
     let server_clone = ctx.server;
     let d_id = ctx.dispatch_id;
     let agent_for_watchdog = ctx.agent;
+    let env_id_for_watchdog = ctx.env_id;
     let project_for_watchdog = ctx.project;
     let stage_for_traj = ctx.stage;
     let traj_path_for_spawn = ctx.trajectory_path;
@@ -1353,6 +1358,8 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                 "artifact_read_error": artifact_read_error,
                 "completion_predicate": preserved_predicate,
                 "cwd": preserved_cwd,
+                "env_id": env_id_for_watchdog,
+                "project": project_for_watchdog.clone(),
                 "authority": preserved_authority,
                 "harness_transport": harness_transport_for_spawn.clone(),
                 "harness_server_url": harness_server_url_for_spawn.clone(),

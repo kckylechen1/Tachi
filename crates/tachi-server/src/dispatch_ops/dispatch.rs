@@ -1333,6 +1333,7 @@ async fn launch_canonical_dispatch(
         server: server.clone(),
         dispatch_id: dispatch_id.clone(),
         agent: resolved_assignment.selected_worker.clone(),
+        env_id: execution_grant.env_id.clone(),
         project: request.project.clone(),
         stage: request.stage.clone(),
         trajectory_path: trajectory_path.clone(),
