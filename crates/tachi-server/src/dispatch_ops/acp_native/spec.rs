@@ -50,6 +50,7 @@ pub(in crate::dispatch_ops) fn build_native_acp_run_spec(
         .clone()
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
     let cwd = absolutize_cwd(&cwd);
+    let session_identity_cwd = native_acp_session_identity_cwd(grant, &cwd)?;
     let mode = resolve_native_acp_run_mode()?;
     let permission_label = native_acp_permission_label(resolve_permission_profile(grant)?)?;
     let session = if mode == NativeAcpRunMode::Session {
@@ -57,7 +58,13 @@ pub(in crate::dispatch_ops) fn build_native_acp_run_spec(
     } else {
         None
     };
-    let session_key = native_acp_session_key(agent, &command, &args, &cwd, session.as_ref());
+    let session_key = native_acp_session_key(
+        agent,
+        &command,
+        &args,
+        &session_identity_cwd,
+        session.as_ref(),
+    );
     let (session_record_path, session_distill_path) = if mode == NativeAcpRunMode::Session {
         let record_id = crate::utils::stable_hash(
             &serde_json::to_string(&session_key)
@@ -218,6 +225,25 @@ fn absolutize_cwd(cwd: &Path) -> PathBuf {
         .join(cwd)
 }
 
+fn native_acp_session_identity_cwd(
+    grant: &ExecutionGrant,
+    wire_cwd: &Path,
+) -> Result<PathBuf, String> {
+    if wire_cwd != Path::new(".") {
+        return Ok(wire_cwd.to_path_buf());
+    }
+    let env_id = grant
+        .env_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|env_id| !env_id.is_empty())
+        .ok_or_else(|| {
+            "descriptor-relative native ACP cwd requires an admitted env_id for session isolation"
+                .to_string()
+        })?;
+    Ok(PathBuf::from(format!(".tachi-exec-env/{env_id}")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -225,6 +251,20 @@ mod tests {
     #[test]
     fn descriptor_relative_cwd_is_not_resolved_in_the_daemon() {
         assert_eq!(absolutize_cwd(Path::new(".")), PathBuf::from("."));
+    }
+
+    #[test]
+    fn descriptor_relative_sessions_are_partitioned_by_admitted_env() {
+        let (_, _, mut first, _) = test_owners(None);
+        first.allowed_cwd = Some(PathBuf::from("."));
+        first.env_id = Some("env-first".to_string());
+        let mut second = first.clone();
+        second.env_id = Some("env-second".to_string());
+
+        let first_identity = native_acp_session_identity_cwd(&first, Path::new(".")).unwrap();
+        let second_identity = native_acp_session_identity_cwd(&second, Path::new(".")).unwrap();
+        assert_ne!(first_identity, second_identity);
+        assert_eq!(first_identity, PathBuf::from(".tachi-exec-env/env-first"));
     }
     fn test_owners(
         sandbox: Option<&str>,
