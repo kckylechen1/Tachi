@@ -291,6 +291,7 @@ impl ProvisionEnvOptions {
     /// seat builds, in the seat's own checkout, against the seat's target.
     /// Wiring the tree's cargo at a shared dir is precisely the cross-tree
     /// poisoning we are removing.
+    #[cfg(test)]
     fn cargo_target_policy(&self, worktree_path: &str) -> Result<CargoTargetPolicy, String> {
         match self.env_class {
             EnvClass::EditOnly | EnvClass::BuildTicketed => Ok(CargoTargetPolicy::Unallocated),
@@ -462,6 +463,16 @@ pub(crate) fn validate_provision_request(opts: &ProvisionEnvOptions) -> Result<(
                     approval.reserved_bytes
                 ));
             }
+            if let Some(target_dir) = &opts.private_target_dir {
+                if !target_dir.is_absolute() {
+                    return Err(format!(
+                        "env_class 'build-private' requires an absolute private target dir, got \
+                         '{}': relative cargo target dirs resolve against the invocation cwd and \
+                         cannot back a truthful resource ledger (#894 S2c)",
+                        target_dir.display()
+                    ));
+                }
+            }
             Ok(())
         }
         // An approval supplied for a class that allocates no private target is a
@@ -472,6 +483,35 @@ pub(crate) fn validate_provision_request(opts: &ProvisionEnvOptions) -> Result<(
             class.as_str()
         )),
         (_, None) => Ok(()),
+    }
+}
+
+fn require_private_cargo_target_provision(
+    cargo_dir: &Path,
+    requested_target: &Path,
+    outcome: tachi_clean::wt_open::CargoTargetProvision,
+) -> Result<Option<PathBuf>, String> {
+    match outcome {
+        tachi_clean::wt_open::CargoTargetProvision::Written(dir) => {
+            if dir != requested_target {
+                return Err(format!(
+                    "private cargo target publication mismatch: requested '{}', wrote '{}'",
+                    requested_target.display(),
+                    dir.display()
+                ));
+            }
+            Ok(Some(dir))
+        }
+        tachi_clean::wt_open::CargoTargetProvision::SkippedNotRustRepo => Ok(None),
+        tachi_clean::wt_open::CargoTargetProvision::SkippedExisting => Err(format!(
+            "refusing build-private publication: {} already exists and was not proven to target \
+             the approved path '{}'; existing cargo config is never overwritten",
+            cargo_dir.join("config.toml").display(),
+            requested_target.display()
+        )),
+        tachi_clean::wt_open::CargoTargetProvision::SkippedUnallocated => Err(
+            "build-private cargo target provisioning unexpectedly became unallocated".to_string(),
+        ),
     }
 }
 
@@ -517,17 +557,41 @@ pub(crate) fn provision_managed_env(
     // The worktree path is only known after the open, so the private-target
     // default (`<worktree>/target`) is resolved here and the config written now.
     if opts.env_class == EnvClass::BuildPrivate {
-        match tachi_clean::wt_open::provision_cargo_target_config(
-            std::path::Path::new(&report.path),
-            &opts.cargo_target_policy(&report.path)?,
-        ) {
-            Ok(tachi_clean::wt_open::CargoTargetProvision::Written(dir)) => {
-                report.cargo_target_dir = Some(dir.display().to_string());
+        let worktree = std::path::Path::new(&report.path);
+        let requested_target = opts
+            .build_target_dir(&report.path)?
+            .expect("BuildPrivate always resolves a target dir");
+        let cargo_dir = worktree.join(".cargo");
+        if let Ok(metadata) = std::fs::symlink_metadata(&cargo_dir) {
+            if metadata.file_type().is_symlink() {
+                return Err(format!(
+                    "refusing build-private publication: {} is a symlink, so cargo config could \
+                     escape the managed worktree",
+                    cargo_dir.display()
+                ));
             }
-            Ok(_) => {}
-            Err(err) => report.warnings.push(format!(
-                "private cargo target-dir provisioning failed: {err}"
-            )),
+        }
+        let cargo_config = cargo_dir.join("config.toml");
+        if let Ok(metadata) = std::fs::symlink_metadata(&cargo_config) {
+            if metadata.file_type().is_symlink() {
+                return Err(format!(
+                    "refusing build-private publication: {} is a symlink and cannot prove the \
+                     approved target path",
+                    cargo_config.display()
+                ));
+            }
+        }
+        let outcome = tachi_clean::wt_open::provision_cargo_target_config(
+            worktree,
+            &CargoTargetPolicy::Private(requested_target.clone()),
+        )
+        .map_err(|err| {
+            format!("private cargo target-dir provisioning failed before ledger publication: {err}")
+        })?;
+        if let Some(dir) =
+            require_private_cargo_target_provision(&cargo_dir, &requested_target, outcome)?
+        {
+            report.cargo_target_dir = Some(dir.display().to_string());
         }
     } else if opts.env_class == EnvClass::EditOnly
         && std::path::Path::new(&report.path)
@@ -1650,6 +1714,28 @@ mod tests {
             }),
         ))
         .expect("an approved build-private request is allowed");
+    }
+
+    #[test]
+    fn build_private_relative_target_is_refused_before_worktree_open() {
+        let mut opts = provision_opts(EnvClass::BuildPrivate, Some(approval(1_000)));
+        opts.private_target_dir = Some(PathBuf::from("relative-target"));
+
+        let error = validate_provision_request(&opts).unwrap_err();
+        assert!(error.contains("requires an absolute private target dir"));
+    }
+
+    #[test]
+    fn build_private_existing_cargo_config_cannot_publish_unproven_target() {
+        let error = require_private_cargo_target_provision(
+            Path::new("/wt/.cargo"),
+            Path::new("/wt/approved-target"),
+            tachi_clean::wt_open::CargoTargetProvision::SkippedExisting,
+        )
+        .unwrap_err();
+
+        assert!(error.contains("already exists"));
+        assert!(error.contains("was not proven to target the approved path"));
     }
 
     #[test]
