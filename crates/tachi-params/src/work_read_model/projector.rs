@@ -1151,6 +1151,10 @@ fn project_one(
                 == ReductionStatusV1::Current
                 && issue_lifecycle_open(subject)
                 && !section.conflicted
+                // Closing cannot resolve an outstanding revert — the
+                // repair action owns that state (codex R2 round-11
+                // finding 1).
+                && !transition_debt_outstanding
             {
                 push_action(
                     NextActionKindV1::AuthorizedGithubClose,
@@ -1212,9 +1216,19 @@ fn project_one(
 /// store (mirrors `is_claim_stale` semantics).
 fn reader_side_expiry(fact: &WorkClaimFactV1, options: &ProjectionOptions) -> Option<bool> {
     let ttl = options.claim_ttl_secs?;
+    // Checked TTL arithmetic (codex R2 round-11 finding 3): `u64::MAX as
+    // i64` wraps to -1 and would fabricate immediate expiry, and huge
+    // values can overflow Chrono's date range and panic. A TTL too large
+    // to represent is honestly "not expired yet".
+    let Ok(ttl) = i64::try_from(ttl) else {
+        return Some(false);
+    };
     let heartbeat = crate::current_truth::types::ordering_instant(&fact.heartbeat_at);
     let read_at = crate::current_truth::types::ordering_instant(&options.read_at);
-    Some(heartbeat + chrono::Duration::seconds(ttl as i64) <= read_at)
+    let Some(deadline) = heartbeat.checked_add_signed(chrono::Duration::seconds(ttl)) else {
+        return Some(false);
+    };
+    Some(deadline <= read_at)
 }
 
 /// Typed execution state from timestamps/exit code, never prose.

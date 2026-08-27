@@ -68,9 +68,9 @@ pub use types::{
     AdjudicationSectionV1, BlockerKindV1, BlockerV1, ClaimRowV1, ClaimSectionV1, DebtClearingV1,
     DebtStateV1, DeliverySectionV1, ExecEnvRowV1, ExecEnvSectionV1, ExecutionStateV1,
     GithubSectionV1, HeadDriftV1, ImplementationStatusV1, NextActionKindV1, NextActionV1,
-    ProjectionOptions, RequiredAuthorityV1, RunRowV1, RunSectionV1, SectionState, TransitionDebtV1,
-    VerificationRowV1, VerificationSectionV1, WorkKey, WorkProjectionHealthV1, WorkReadModelSetV1,
-    WorkReadModelV1,
+    ProjectionOptions, ProjectionOptionsError, RequiredAuthorityV1, RunRowV1, RunSectionV1,
+    SectionState, TransitionDebtV1, VerificationRowV1, VerificationSectionV1, WorkKey,
+    WorkProjectionHealthV1, WorkReadModelSetV1, WorkReadModelV1,
 };
 pub use views::{
     board_view, brief_view, status_view, WorkBoardRowV1, WorkBriefV1, WorkStatusRowV1,

@@ -570,15 +570,38 @@ pub struct ProjectionOptions {
     pub authorization: crate::current_truth::consumer::CallerAuthorizationV1,
 }
 
+/// A caller-supplied projection parameter is malformed (codex R2
+/// round-11 finding 2): `read_at` must be RFC 3339 — the shared ordering
+/// parser maps garbage to the MINIMUM instant, which would silently
+/// suppress reader-side claim expiry and present stale truth as fresh.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ProjectionOptionsError {
+    #[error("read_at `{0}` is not RFC 3339")]
+    InvalidReadAt(String),
+}
+
 impl ProjectionOptions {
+    /// Build options. **Invariant:** `read_at` must be an RFC 3339
+    /// timestamp (every internal caller passes an adapter-minted one);
+    /// violating it panics — use [`ProjectionOptions::try_new`] for
+    /// untrusted input.
     pub fn new(read_at: impl Into<String>) -> Self {
-        ProjectionOptions {
-            read_at: read_at.into(),
+        Self::try_new(read_at).expect("ProjectionOptions read_at must be RFC 3339")
+    }
+
+    /// Fallible constructor for untrusted `read_at` input.
+    pub fn try_new(read_at: impl Into<String>) -> Result<Self, ProjectionOptionsError> {
+        let read_at = read_at.into();
+        if chrono::DateTime::parse_from_rfc3339(&read_at).is_err() {
+            return Err(ProjectionOptionsError::InvalidReadAt(read_at));
+        }
+        Ok(ProjectionOptions {
+            read_at,
             claim_ttl_secs: None,
             authorization: crate::current_truth::consumer::CallerAuthorizationV1 {
                 sees_private: false,
             },
-        }
+        })
     }
 
     pub fn with_claim_ttl_secs(mut self, ttl: u64) -> Self {

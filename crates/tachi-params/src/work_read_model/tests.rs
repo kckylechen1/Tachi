@@ -1653,6 +1653,75 @@ fn malformed_observed_at_fails_closed() {
     );
 }
 
+/// Hardening (codex R2 round-11 finding 1): prior acceptance plus an
+/// outstanding revert debt never yields a credentialed close action —
+/// closing cannot resolve a revert; the repair action owns that state.
+#[test]
+fn outstanding_revert_debt_suppresses_authorized_close() {
+    let view = ct_view(
+        &[state_v2_merged_open(), state_v4_revert_reopen()],
+        &[owner_acceptance(
+            "2026-08-26T12:00:00Z",
+            "accept-before-revert",
+        )],
+        true,
+    );
+    let mut index = WorkProjectionIndex::new();
+    index.apply_ok(ct_snapshot(view, "ct-1", READ_AT));
+    let set = project(&index, &options());
+    let model = find(&set, ISSUE_TOKEN);
+    let section = github_section(model);
+    assert!(matches!(
+        &section.transition_debt.revert,
+        DebtStateV1::Outstanding { .. }
+    ));
+    assert!(has_action(model, NextActionKindV1::RepairRevertOrReopen));
+    assert!(
+        !has_action(model, NextActionKindV1::AuthorizedGithubClose),
+        "closing cannot resolve an outstanding revert"
+    );
+}
+
+/// Hardening (codex R2 round-11 findings 2 + 3): projection options fail
+/// closed on malformed `read_at` (the minimum-instant fallback would
+/// silently suppress claim expiry), and an unrepresentable TTL honestly
+/// reads "not expired" instead of wrapping to immediate expiry.
+#[test]
+fn projection_options_fail_closed_on_bad_input() {
+    assert!(matches!(
+        super::types::ProjectionOptions::try_new("not-a-timestamp"),
+        Err(super::ProjectionOptionsError::InvalidReadAt(_))
+    ));
+    assert!(super::types::ProjectionOptions::try_new(READ_AT).is_ok());
+
+    // u64::MAX TTL: no fabricated expiry, no panic.
+    let mut index = WorkProjectionIndex::new();
+    index.apply_ok(claims_snapshot(
+        vec![claim_fact(
+            "c1",
+            Some(&format!("{REPO}#100")),
+            Some("d1"),
+            ClaimStateV1::Active,
+            None,
+            VisibilityClassV1::Public,
+        )],
+        "claims-1",
+        READ_AT,
+    ));
+    let set = project(
+        &index,
+        &options()
+            .with_sees_private(true)
+            .with_claim_ttl_secs(u64::MAX),
+    );
+    let model = find(&set, ISSUE_TOKEN);
+    assert!(
+        !has_blocker(model, super::types::BlockerKindV1::ClaimOrphaned),
+        "u64::MAX TTL must not wrap into fabricated expiry"
+    );
+    assert!(!has_action(model, NextActionKindV1::HandoffOrRelease));
+}
+
 /// Hardening (codex R2 round-5 finding 4): a snapshot built through the
 /// public struct with a mismatched stamp/facts pairing is rejected at
 /// `apply` — the constructor is not the only fail-closed gate.
