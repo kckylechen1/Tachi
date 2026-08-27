@@ -305,7 +305,64 @@ fn insert_exec_env_in_state(
     } else {
         normalize_utc_iso_or_now(&lease.created_at)
     };
-    conn.execute(
+    let worktree_identity = if lease.kind == "worktree" {
+        match std::fs::symlink_metadata(&lease.path) {
+            Ok(_) => {
+                let canonical_path = std::fs::canonicalize(&lease.path).map_err(|error| {
+                    MemoryError::InvalidArg(format!(
+                        "cannot resolve existing worktree '{}': {error}",
+                        lease.path
+                    ))
+                })?;
+                let authority =
+                    crate::anchored_fs::AnchoredDirectory::open_absolute(canonical_path.as_path())
+                        .map_err(|error| {
+                            MemoryError::InvalidArg(format!(
+                                "cannot anchor existing worktree '{}': {error}",
+                                lease.path
+                            ))
+                        })?;
+                Some(authority.identity().map_err(|error| {
+                    MemoryError::InvalidArg(format!(
+                        "cannot read existing worktree identity '{}': {error}",
+                        lease.path
+                    ))
+                })?)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                return Err(MemoryError::InvalidArg(format!(
+                    "cannot inspect worktree '{}': {error}",
+                    lease.path
+                )));
+            }
+        }
+    } else {
+        None
+    };
+    let worktree_identity = if let Some(identity) = worktree_identity {
+        Some((
+            i64::try_from(identity.device).map_err(|_| {
+                MemoryError::InvalidArg(
+                    "worktree device identity exceeds SQLite INTEGER".to_string(),
+                )
+            })?,
+            i64::try_from(identity.inode).map_err(|_| {
+                MemoryError::InvalidArg(
+                    "worktree inode identity exceeds SQLite INTEGER".to_string(),
+                )
+            })?,
+        ))
+    } else {
+        None
+    };
+
+    // Publish the compatibility lease and any physical identity as one unit.
+    // Existing paths must be descriptor-anchorable; only genuinely absent
+    // legacy fixture paths may remain without an identity and dispatch will
+    // continue to reject those fail-closed.
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
         "INSERT INTO exec_envs
          (env_id, kind, path, repo_root, branch, base_sha, dispatch_id, agent_identity_id, claim_id,
           env_class, state, reclaim_reason, schema_version, created_at, reclaimed_at)
@@ -323,6 +380,14 @@ fn insert_exec_env_in_state(
             created_at,
         ],
     )?;
+    if let Some((device, inode)) = worktree_identity {
+        tx.execute(
+            "INSERT INTO exec_env_worktree_identities (env_id, device, inode, captured_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![lease.env_id, device, inode, created_at],
+        )?;
+    }
+    tx.commit()?;
     Ok(())
 }
 
@@ -798,6 +863,25 @@ mod tests {
         assert_eq!(got.dispatch_id.as_deref(), Some("dispatch-1"));
         assert!(got.reclaimed_at.is_none());
         assert!(!got.created_at.is_empty(), "created_at defaults to now");
+    }
+
+    #[test]
+    fn insert_existing_worktree_captures_physical_identity_atomically() {
+        let conn = open_conn();
+        let worktree = tempfile::tempdir().unwrap();
+        let lease = new_lease("env-identity", worktree.path().to_str().unwrap());
+
+        insert_exec_env(&conn, &lease).unwrap();
+
+        let canonical_path = std::fs::canonicalize(worktree.path()).unwrap();
+        let expected = crate::anchored_fs::AnchoredDirectory::open_absolute(&canonical_path)
+            .unwrap()
+            .identity()
+            .unwrap();
+        assert_eq!(
+            get_exec_env_worktree_identity(&conn, "env-identity").unwrap(),
+            Some(expected)
+        );
     }
 
     #[test]

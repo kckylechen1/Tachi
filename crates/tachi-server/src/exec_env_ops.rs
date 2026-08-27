@@ -617,6 +617,24 @@ fn reject_private_target_symlink_components(target: &Path) -> Result<(), String>
     Ok(())
 }
 
+#[cfg(unix)]
+fn same_directory_object(left: &std::fs::Metadata, right: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    left.dev() == right.dev() && left.ino() == right.ino()
+}
+
+#[cfg(windows)]
+fn same_directory_object(left: &std::fs::Metadata, right: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    left.volume_serial_number() == right.volume_serial_number()
+        && left.file_index() == right.file_index()
+}
+
+#[cfg(not(any(unix, windows)))]
+fn same_directory_object(_left: &std::fs::Metadata, _right: &std::fs::Metadata) -> bool {
+    false
+}
+
 fn cleanup_opened_worktree_after_provision_failure(
     report: &mut OpenReport,
     private_target: Option<&Path>,
@@ -1363,7 +1381,13 @@ impl MemoryServer {
             let current_path = std::fs::canonicalize(lease_path).map_err(|error| {
                 format!("env_id '{id}' worktree path cannot be canonicalized at dispatch: {error}")
             })?;
-            if current_path != lease_path {
+            let current_metadata = std::fs::symlink_metadata(&current_path).map_err(|error| {
+                format!(
+                    "env_id '{id}' canonical worktree identity cannot be established at '{}': {error}",
+                    current_path.display()
+                )
+            })?;
+            if !same_directory_object(&metadata, &current_metadata) {
                 return Err(format!(
                     "env_id '{id}' worktree identity changed since publication: stored '{}', current '{}'",
                     lease_path.display(),
@@ -1403,7 +1427,10 @@ impl MemoryServer {
                     "env_id '{env_id}' has no persisted worktree device/inode identity; refusing legacy path-only dispatch"
                 )
             })?;
-            let authority = memcore::anchored_fs::AnchoredDirectory::open_absolute(Path::new(cwd))
+            let canonical_cwd = std::fs::canonicalize(cwd).map_err(|error| {
+                format!("resolve descriptor-pinned cwd for env_id '{env_id}': {error}")
+            })?;
+            let authority = memcore::anchored_fs::AnchoredDirectory::open_absolute(&canonical_cwd)
                 .map_err(|error| {
                     format!("open descriptor-pinned cwd for env_id '{env_id}': {error}")
                 })?;
