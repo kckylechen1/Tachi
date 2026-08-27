@@ -45,8 +45,6 @@ pub struct OpenReport {
     pub base_sha: String,
     pub managed_root: String,
     pub marker_path: Option<String>,
-    #[serde(skip)]
-    pub worktree_authority: Option<memcore::anchored_fs::AnchoredDirectory>,
     /// Shared `CARGO_TARGET_DIR` written to `<worktree>/.cargo/config.toml`
     /// (#484 slice 2), when this is a Rust repo and provisioning happened.
     /// `None` when the worktree is not a Rust repo (no root `Cargo.toml`) or
@@ -615,7 +613,6 @@ pub fn open_worktree(options: OpenOptions) -> Result<OpenReport, String> {
         base_sha: base_sha.clone(),
         managed_root: managed_root.display().to_string(),
         marker_path: None,
-        worktree_authority: None,
         cargo_target_dir: None,
         warnings: Vec::new(),
         errors: Vec::new(),
@@ -814,8 +811,6 @@ pub fn open_worktree(options: OpenOptions) -> Result<OpenReport, String> {
         }
     };
     path = opened_path;
-    report.path = path.display().to_string();
-    report.worktree_authority = Some(authority);
 
     // Write-lane entry gate (tachi#1118 freeze boundary 3, second half):
     // `git status --porcelain` must read empty the moment a freshly
@@ -849,11 +844,7 @@ pub fn open_worktree(options: OpenOptions) -> Result<OpenReport, String> {
     // file-based so it survives any child process/lane that forgets to export
     // CARGO_TARGET_DIR. Never fatal — a failure here does not undo the worktree
     // open. An `Unallocated` (edit-only) worktree gets no config at all.
-    let authority = report
-        .worktree_authority
-        .as_ref()
-        .expect("opened worktree has descriptor authority");
-    match provision_cargo_target_config_with_authority(&path, &options.cargo_target, authority) {
+    match provision_cargo_target_config_with_authority(&path, &options.cargo_target, &authority) {
         Ok(CargoTargetProvision::Written(dir)) => {
             report.cargo_target_dir = Some(dir.display().to_string());
         }
@@ -885,7 +876,7 @@ pub fn open_worktree(options: OpenOptions) -> Result<OpenReport, String> {
             output: RegisterOutputFormat::Json,
         },
         path.clone(),
-        authority,
+        &authority,
     ) {
         Ok(reg) => {
             report.registered = true;
