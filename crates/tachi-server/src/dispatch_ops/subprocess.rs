@@ -334,7 +334,14 @@ pub(super) async fn run_agent_subprocess_with_liveness(
 ) -> DispatchRunOutcome {
     let escape_contained =
         require_postflight_containment && configure_required_postflight_containment(&mut cmd);
-    run_agent_subprocess_inner(&mut cmd, timeout, None, escape_contained).await
+    run_agent_subprocess_inner(
+        &mut cmd,
+        timeout,
+        None,
+        escape_contained,
+        require_postflight_containment,
+    )
+    .await
 }
 
 pub(super) async fn run_managed_custom_subprocess_outcome(
@@ -1547,7 +1554,14 @@ pub(super) async fn run_opencode_sop_subprocess_with_liveness(
     };
     let escape_contained =
         require_postflight_containment && configure_required_postflight_containment(&mut cmd);
-    run_agent_subprocess_inner(&mut cmd, timeout, Some(sop_label), escape_contained).await
+    run_agent_subprocess_inner(
+        &mut cmd,
+        timeout,
+        Some(sop_label),
+        escape_contained,
+        require_postflight_containment,
+    )
+    .await
 }
 
 async fn run_agent_subprocess_inner(
@@ -1555,6 +1569,7 @@ async fn run_agent_subprocess_inner(
     timeout: Duration,
     opencode_sop_label: Option<&str>,
     escape_contained: bool,
+    require_terminal_liveness: bool,
 ) -> DispatchRunOutcome {
     cmd.stdin(std::process::Stdio::null());
     cmd.stdout(std::process::Stdio::piped());
@@ -1641,10 +1656,12 @@ async fn run_agent_subprocess_inner(
             return DispatchRunOutcome::failure(format!("Agent process error: {error}"), liveness)
         }
     };
-    if matches!(
-        liveness,
-        crate::exec_env_postflight::RunnerLivenessEvidence::Indeterminate { .. }
-    ) {
+    if require_terminal_liveness
+        && matches!(
+            liveness,
+            crate::exec_env_postflight::RunnerLivenessEvidence::Indeterminate { .. }
+        )
+    {
         return DispatchRunOutcome::failure("termination_unconfirmed", liveness);
     }
 
