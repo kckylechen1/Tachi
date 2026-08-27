@@ -295,14 +295,6 @@ pub fn insert_exec_env(conn: &Connection, lease: &NewExecEnvLease) -> Result<(),
     insert_exec_env_in_state(conn, lease, ExecEnvState::Active)
 }
 
-/// Reserve a lease identity while its resource ledger is still being built.
-pub fn insert_provisioning_exec_env(
-    conn: &Connection,
-    lease: &NewExecEnvLease,
-) -> Result<(), MemoryError> {
-    insert_exec_env_in_state(conn, lease, ExecEnvState::Provisioning)
-}
-
 fn insert_exec_env_in_state(
     conn: &Connection,
     lease: &NewExecEnvLease,
@@ -370,7 +362,7 @@ pub fn find_live_exec_env_by_path(
 ) -> Result<Option<ExecEnvLease>, MemoryError> {
     let sql = format!(
         "SELECT {SELECT_COLUMNS} FROM exec_envs \
-         WHERE path = ?1 AND state IN ('provisioning', 'active', 'dispatching', 'removing') \
+         WHERE path = ?1 AND state != 'reclaimed' \
          ORDER BY created_at DESC LIMIT 1"
     );
     let lease = conn
@@ -941,6 +933,21 @@ mod tests {
         assert!(find_live_exec_env_by_path(&conn, "/wt/live")
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn find_live_by_path_fails_closed_on_unknown_persisted_state() {
+        let conn = open_conn();
+        insert_exec_env(&conn, &new_lease("env-unknown", "/wt/unknown")).unwrap();
+        conn.execute(
+            "UPDATE exec_envs SET state='future_state' WHERE env_id='env-unknown'",
+            [],
+        )
+        .unwrap();
+
+        let error = find_live_exec_env_by_path(&conn, "/wt/unknown")
+            .expect_err("unknown unreclaimed state must remain visible as an error");
+        assert!(error.to_string().contains("unknown exec_env state"));
     }
 
     #[test]

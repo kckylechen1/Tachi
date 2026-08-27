@@ -927,9 +927,9 @@ pub fn bind_resource(
     let Some(env_state) = env_state else {
         return Err(MemoryError::NotFound(format!("exec_env '{env_id}'")));
     };
-    if env_state != "active" && env_state != "provisioning" {
+    if env_state != "active" {
         return Err(MemoryError::InvalidArg(format!(
-            "exec_env '{env_id}' is '{env_state}'; only active leases or the provisioning owner may bind resources"
+            "exec_env '{env_id}' is '{env_state}'; only active leases may bind resources"
         )));
     }
 

@@ -55,9 +55,11 @@
 use std::path::{Path, PathBuf};
 
 use memcore::{
-    EnvClass, ExecEnvLease, ExecEnvSelector, ExecEnvState, NewExecEnvLease, NewExecEnvResource,
-    ReclaimOutcome, ResourceKind, ResourceState,
+    EnvClass, ExecEnvLease, ExecEnvSelector, ExecEnvState, NewExecEnvLease, ReclaimOutcome,
+    ResourceKind,
 };
+#[cfg(test)]
+use memcore::{NewExecEnvResource, ResourceState};
 use rusqlite::{OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use tachi_clean::wt_clean::OutputFormat;
@@ -556,136 +558,80 @@ pub(crate) fn provision_managed_env(
         created_at: String::new(),
     };
 
-    match memcore::insert_provisioning_exec_env(store.connection_mut(), &lease)
-        .map_err(|e| e.to_string())
-    {
-        Ok(()) => {
-            let build_target = opts.build_target_dir(&report.path)?;
-            let build_target = build_target.as_ref().map(|p| p.display().to_string());
-            register_env_resources_or_rollback(
-                store,
-                &env_id,
-                opts.env_class,
-                &report.path,
-                build_target.as_deref(),
-                opts.private_target_approval.as_ref(),
-            )?;
-            Ok(ProvisionedEnv {
-                env_id: Some(env_id),
-                report,
-            })
-        }
-        Err(err) => {
-            report.warnings.push(format!(
-                "worktree provisioned but exec_env lease record failed: {err}; it is now an \
-                 untracked worktree with no managed lease — reclaim the orphaned directory via \
-                 the age-based `clean sweep`"
-            ));
-            Ok(ProvisionedEnv {
-                env_id: None,
-                report,
-            })
-        }
-    }
+    let build_target = opts.build_target_dir(&report.path)?;
+    let build_target = build_target.as_ref().map(|p| p.display().to_string());
+    publish_env_resources_atomically(
+        store,
+        &lease,
+        &report.path,
+        build_target.as_deref(),
+        opts.private_target_approval.as_ref(),
+    )
+    .map_err(|error| {
+        format!(
+            "worktree was created but its exec-env ledger could not be published atomically: \
+             {error}; no partial managed lease is visible and the orphan must be reclaimed by \
+             the age-based clean sweep"
+        )
+    })?;
+    Ok(ProvisionedEnv {
+        env_id: Some(env_id),
+        report,
+    })
 }
 
-fn register_env_resources_or_rollback(
+fn publish_env_resources_atomically(
     store: &mut memcore::MemoryStore,
-    env_id: &str,
-    class: EnvClass,
+    lease: &NewExecEnvLease,
     worktree_path: &str,
     build_target: Option<&str>,
     approval: Option<&PrivateTargetApproval>,
 ) -> Result<EnvResources, String> {
-    match register_env_resources(store, env_id, class, worktree_path, build_target, approval)
-        .and_then(|resources| {
-            publish_provisioned_env(store, env_id)?;
-            Ok(resources)
-        }) {
-        Ok(resources) => Ok(resources),
-        Err(error) => {
-            rollback_failed_resource_registration(store, env_id).map_err(|rollback_error| {
-                format!(
-                    "resource ledger registration failed for provisioned env {env_id}: {error}; \
-                     lease rollback also failed, leaving the environment fail-closed: \
-                     {rollback_error}"
-                )
-            })?;
-            Err(format!(
-                "resource ledger registration failed for provisioned env {env_id}: {error}; \
-                 the lease and any partial bindings were rolled back"
-            ))
-        }
+    if !lease.env_class.allocates_build_target() && build_target.is_some() {
+        return Err(format!(
+            "env_class '{}' allocates no build target of its own, but a build target dir was supplied",
+            lease.env_class.as_str()
+        ));
     }
-}
+    if lease.env_class.allocates_build_target() != build_target.is_some()
+        || lease.env_class.requires_approval() != approval.is_some()
+    {
+        return Err(format!(
+            "env_class '{}' has incomplete build-target or approval evidence",
+            lease.env_class.as_str()
+        ));
+    }
 
-fn publish_provisioned_env(store: &mut memcore::MemoryStore, env_id: &str) -> Result<(), String> {
-    let tx = store
-        .connection_mut()
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(|error| error.to_string())?;
-    let (bindings, inactive): (i64, i64) = tx
-        .query_row(
-            "SELECT COUNT(*), \
-                    COALESCE(SUM(CASE WHEN r.state = 'active' THEN 0 ELSE 1 END), 0) \
-             FROM exec_env_resource_bindings b \
-             JOIN exec_env_resources r ON r.resource_id = b.resource_id \
-             WHERE b.env_id = ?1 AND b.released_at IS NULL",
-            rusqlite::params![env_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .map_err(|error| error.to_string())?;
-    if bindings == 0 || inactive != 0 {
-        return Err(format!(
-            "refusing to publish exec env {env_id}: {bindings} live bindings, {inactive} non-active resources"
-        ));
+    let mut resources = vec![memcore::ExecEnvProvisioningResource {
+        kind: ResourceKind::Worktree,
+        path: worktree_path.to_string(),
+        bytes: None,
+    }];
+    if let (Some(path), Some(approval)) = (build_target, approval) {
+        resources.push(memcore::ExecEnvProvisioningResource {
+            kind: ResourceKind::BuildTarget,
+            path: path.to_string(),
+            bytes: Some(approval.reserved_bytes),
+        });
     }
-    let changed = tx
-        .execute(
-            "UPDATE exec_envs SET state = 'active' \
-             WHERE env_id = ?1 AND state = 'provisioning'",
-            rusqlite::params![env_id],
-        )
-        .map_err(|error| error.to_string())?;
-    if changed != 1 {
-        return Err(format!(
-            "exec env {env_id} lost its provisioning ownership before publication"
-        ));
-    }
-    tx.commit().map_err(|error| error.to_string())
-}
 
-fn rollback_failed_resource_registration(
-    store: &mut memcore::MemoryStore,
-    env_id: &str,
-) -> Result<(), String> {
-    let tx = store
-        .connection_mut()
-        .transaction_with_behavior(TransactionBehavior::Immediate)
+    let reservation = match (build_target, approval) {
+        (Some(target_path), Some(approval)) => Some(memcore::ExecEnvPrivateTargetReservation {
+            approved_by: approval.approved_by.clone(),
+            reserved_bytes: approval.reserved_bytes,
+            target_path: target_path.to_string(),
+        }),
+        (None, None) => None,
+        _ => return Err("private target and approval must be supplied together".to_string()),
+    };
+
+    let published = store
+        .publish_exec_env_atomically(lease, &resources, reservation.as_ref())
         .map_err(|error| error.to_string())?;
-    tx.execute(
-        "UPDATE exec_env_resource_bindings SET released_at = ?2 \
-         WHERE env_id = ?1 AND released_at IS NULL",
-        rusqlite::params![env_id, chrono::Utc::now().to_rfc3339()],
-    )
-    .map_err(|error| error.to_string())?;
-    tx.execute(
-        "DELETE FROM hard_state WHERE namespace = ?1 AND key = ?2",
-        rusqlite::params![PRIVATE_RESERVATION_NS, env_id],
-    )
-    .map_err(|error| error.to_string())?;
-    let deleted = tx
-        .execute(
-            "DELETE FROM exec_envs WHERE env_id = ?1 AND state = 'provisioning'",
-            rusqlite::params![env_id],
-        )
-        .map_err(|error| error.to_string())?;
-    if deleted != 1 {
-        return Err(format!(
-            "expected one provisioning lease for {env_id}, deleted {deleted}"
-        ));
-    }
-    tx.commit().map_err(|error| error.to_string())
+    Ok(EnvResources {
+        worktree_resource_id: published.worktree.resource_id,
+        build_target_resource_id: published.build_target.map(|resource| resource.resource_id),
+    })
 }
 
 /// Register the physical resources a lease owns and bind them to it (#894 S2a
@@ -701,6 +647,7 @@ fn rollback_failed_resource_registration(
 /// it is **written down** (#894 S2c round-2): the target row's `bytes` is seeded
 /// with the reservation and a provenance row records who approved it. A
 /// reservation nobody records is not a reservation.
+#[cfg(test)]
 pub(crate) fn register_env_resources(
     store: &mut memcore::MemoryStore,
     env_id: &str,
@@ -766,6 +713,7 @@ pub(crate) fn register_env_resources(
 /// target immediately, before a single artifact is built) and a provenance row
 /// (so `bytes` being overwritten by the next real measurement does not erase who
 /// approved what).
+#[cfg(test)]
 fn book_private_reservation(
     store: &mut memcore::MemoryStore,
     env_id: &str,
@@ -816,6 +764,7 @@ pub(crate) struct EnvResources {
 /// state fails closed. A quarantined build target in particular is the
 /// "interrupted cargo poisoned this dir" state — the broker clears it via
 /// `release_quarantine`, and until it does, nothing may bind it.
+#[cfg(test)]
 pub(crate) fn ensure_resource(
     conn: &mut rusqlite::Connection,
     kind: ResourceKind,
@@ -1840,30 +1789,19 @@ mod tests {
         )
         .unwrap();
 
-        memcore::insert_provisioning_exec_env(
-            store.connection(),
-            &NewExecEnvLease {
-                env_id: "env-new".to_string(),
-                kind: "worktree".to_string(),
-                path: "/wt/churn".to_string(),
-                repo_root: "/repo".to_string(),
-                branch: "tachi/894/new".to_string(),
-                base_sha: "def5678".to_string(),
-                dispatch_id: None,
-                env_class: EnvClass::EditOnly,
-                created_at: String::new(),
-            },
-        )
-        .unwrap();
-        let new = register_env_resources_or_rollback(
-            &mut store,
-            "env-new",
-            EnvClass::EditOnly,
-            "/wt/churn",
-            None,
-            None,
-        )
-        .expect("revive reclaimed physical path");
+        let new_lease = NewExecEnvLease {
+            env_id: "env-new".to_string(),
+            kind: "worktree".to_string(),
+            path: "/wt/churn".to_string(),
+            repo_root: "/repo".to_string(),
+            branch: "tachi/894/new".to_string(),
+            base_sha: "def5678".to_string(),
+            dispatch_id: None,
+            env_class: EnvClass::EditOnly,
+            created_at: String::new(),
+        };
+        let new = publish_env_resources_atomically(&mut store, &new_lease, "/wt/churn", None, None)
+            .expect("revive reclaimed physical path");
 
         assert_ne!(new.worktree_resource_id, old.worktree_resource_id);
         assert!(
@@ -1884,14 +1822,7 @@ mod tests {
 
     #[test]
     fn resource_registration_failure_exposes_no_active_lease_or_partial_binding() {
-        let mut store = store_with_lease("env-p", EnvClass::BuildPrivate, "/wt/p");
-        store
-            .connection()
-            .execute(
-                "UPDATE exec_envs SET state = 'provisioning' WHERE env_id = 'env-p'",
-                [],
-            )
-            .unwrap();
+        let mut store = memcore::MemoryStore::open_in_memory().unwrap();
         let target_id = ensure_resource(
             store.connection_mut(),
             ResourceKind::BuildTarget,
@@ -1900,113 +1831,159 @@ mod tests {
         .unwrap();
         memcore::quarantine_resource(store.connection_mut(), &target_id, "poisoned").unwrap();
 
-        let error = register_env_resources_or_rollback(
+        let lease = NewExecEnvLease {
+            env_id: "env-p".to_string(),
+            kind: "worktree".to_string(),
+            path: "/wt/p".to_string(),
+            repo_root: "/repo".to_string(),
+            branch: "tachi/894/p".to_string(),
+            base_sha: "abc1234".to_string(),
+            dispatch_id: None,
+            env_class: EnvClass::BuildPrivate,
+            created_at: String::new(),
+        };
+        let error = publish_env_resources_atomically(
             &mut store,
-            "env-p",
-            EnvClass::BuildPrivate,
+            &lease,
             "/wt/p",
             Some("/wt/p/target"),
             Some(&approval(1_000)),
         )
         .expect_err("quarantined target must fail the whole ledger publication");
-        assert!(error.contains("rolled back"), "{error}");
+        assert!(error.contains("quarantined"), "{error}");
         assert!(memcore::get_exec_env(store.connection(), "env-p")
             .unwrap()
             .is_none());
-        let worktree =
+        assert!(
             memcore::find_resource_by_path(store.connection(), "/wt/p", ResourceKind::Worktree)
                 .unwrap()
-                .expect("partial resource row remains available for orphan reconciliation");
-        assert_eq!(worktree.state, ResourceState::Active);
-        assert_eq!(
-            memcore::active_binding_count(store.connection(), &worktree.resource_id).unwrap(),
-            0
+                .is_none(),
+            "the worktree row inserted before the target refusal must roll back"
         );
         assert_eq!(
             memcore::active_binding_count(store.connection(), &target_id).unwrap(),
             0
         );
+        assert!(private_target_reservation(store.connection(), "env-p")
+            .unwrap()
+            .is_none());
     }
 
     #[test]
-    fn provisioning_binding_and_removal_race_keeps_one_publication_owner() {
-        use std::sync::{Arc, Barrier};
+    fn atomic_private_publication_commits_complete_typed_evidence() {
+        let mut store = memcore::MemoryStore::open_in_memory().unwrap();
+        let lease = NewExecEnvLease {
+            env_id: "env-atomic-private".to_string(),
+            kind: "worktree".to_string(),
+            path: "/wt/atomic-private".to_string(),
+            repo_root: "/repo".to_string(),
+            branch: "tachi/894/atomic-private".to_string(),
+            base_sha: "abc1234".to_string(),
+            dispatch_id: None,
+            env_class: EnvClass::BuildPrivate,
+            created_at: String::new(),
+        };
+        let published = publish_env_resources_atomically(
+            &mut store,
+            &lease,
+            "/wt/atomic-private",
+            Some("/wt/atomic-private/target"),
+            Some(&approval(4_000)),
+        )
+        .unwrap();
 
+        let persisted = memcore::get_exec_env(store.connection(), "env-atomic-private")
+            .unwrap()
+            .unwrap();
+        assert_eq!(persisted.state, ExecEnvState::Active);
+        assert!(
+            memcore::list_exec_envs(store.connection(), Some(ExecEnvState::Provisioning))
+                .unwrap()
+                .is_empty()
+        );
+        let target_id = published.build_target_resource_id.unwrap();
+        let reservation = private_target_reservation(store.connection(), "env-atomic-private")
+            .unwrap()
+            .unwrap();
+        assert_eq!(reservation.resource_id, target_id);
+        assert_eq!(reservation.reserved_bytes, 4_000);
+        assert_eq!(
+            memcore::active_binding_count(store.connection(), &published.worktree_resource_id)
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            memcore::active_binding_count(store.connection(), &target_id).unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn late_publication_failure_rolls_back_every_intermediate_row() {
         let dir = tempfile::tempdir().unwrap();
-        let db = dir.path().join("provision-race.sqlite");
+        let db = dir.path().join("late-publication.sqlite");
         let db_path = db.to_string_lossy().into_owned();
-        let mut seed = memcore::MemoryStore::open(&db_path).unwrap();
-        memcore::insert_provisioning_exec_env(
-            seed.connection(),
-            &NewExecEnvLease {
-                env_id: "env-race".to_string(),
-                kind: "worktree".to_string(),
-                path: "/wt/race".to_string(),
-                repo_root: "/repo".to_string(),
-                branch: "tachi/894/race".to_string(),
-                base_sha: "abc1234".to_string(),
-                dispatch_id: None,
-                env_class: EnvClass::BuildPrivate,
-                created_at: String::new(),
-            },
-        )
-        .unwrap();
-        let worktree_id =
-            ensure_resource(seed.connection_mut(), ResourceKind::Worktree, "/wt/race").unwrap();
-        memcore::bind_resource(seed.connection_mut(), "env-race", &worktree_id).unwrap();
-        let target_id = ensure_resource(
-            seed.connection_mut(),
-            ResourceKind::BuildTarget,
-            "/wt/race/target",
-        )
-        .unwrap();
-
-        let barrier = Arc::new(Barrier::new(2));
-        let removal_barrier = Arc::clone(&barrier);
-        let removal_db = db_path.clone();
-        let removal = std::thread::spawn(move || {
-            let mut store = memcore::MemoryStore::open(&removal_db).unwrap();
-            removal_barrier.wait();
-            memcore::claim_exec_env_removal(store.connection_mut(), "/wt/race")
-        });
-        let binding_barrier = Arc::clone(&barrier);
-        let binding_db = db_path.clone();
-        let binding_target = target_id.clone();
-        let binding = std::thread::spawn(move || {
-            let mut store = memcore::MemoryStore::open(&binding_db).unwrap();
-            binding_barrier.wait();
-            memcore::bind_resource(store.connection_mut(), "env-race", &binding_target)
-        });
-
-        let removal_error = removal
-            .join()
-            .unwrap()
-            .expect_err("a cleaner cannot claim a lease before publication");
-        assert!(removal_error.to_string().contains("provisioning"));
-        binding
-            .join()
-            .unwrap()
-            .expect("the provisioning owner may finish the target binding");
-        publish_provisioned_env(&mut seed, "env-race").unwrap();
-        assert_eq!(
-            memcore::get_exec_env(seed.connection(), "env-race")
-                .unwrap()
-                .unwrap()
-                .state,
-            ExecEnvState::Active
+        let mut store = memcore::MemoryStore::open(&db_path).unwrap();
+        let injector = rusqlite::Connection::open(&db).unwrap();
+        injector
+            .execute_batch(
+                "CREATE TRIGGER fail_private_reservation
+                 BEFORE INSERT ON hard_state
+                 WHEN NEW.namespace = 'exec_env_private_target'
+                 BEGIN
+                   SELECT RAISE(ABORT, 'injected reservation publication failure');
+                 END;",
+            )
+            .unwrap();
+        let lease = NewExecEnvLease {
+            env_id: "env-late-fail".to_string(),
+            kind: "worktree".to_string(),
+            path: "/wt/late".to_string(),
+            repo_root: "/repo".to_string(),
+            branch: "tachi/894/late".to_string(),
+            base_sha: "abc1234".to_string(),
+            dispatch_id: None,
+            env_class: EnvClass::BuildPrivate,
+            created_at: String::new(),
+        };
+        let error = store
+            .publish_exec_env_atomically(
+                &lease,
+                &[
+                    memcore::ExecEnvProvisioningResource {
+                        kind: ResourceKind::Worktree,
+                        path: "/wt/late".to_string(),
+                        bytes: None,
+                    },
+                    memcore::ExecEnvProvisioningResource {
+                        kind: ResourceKind::BuildTarget,
+                        path: "/wt/late/target".to_string(),
+                        bytes: Some(1_000),
+                    },
+                ],
+                Some(&memcore::ExecEnvPrivateTargetReservation {
+                    approved_by: "owner".to_string(),
+                    reserved_bytes: 1_000,
+                    target_path: "/wt/late/target".to_string(),
+                }),
+            )
+            .expect_err("late reservation write failure must abort the transaction");
+        assert!(
+            error
+                .to_string()
+                .contains("injected reservation publication failure"),
+            "{error}"
         );
-
-        assert_eq!(
-            memcore::claim_exec_env_removal(seed.connection_mut(), "/wt/race").unwrap(),
-            Some("env-race".to_string())
-        );
-        assert_eq!(
-            memcore::get_resource(seed.connection(), &target_id)
+        assert!(memcore::get_exec_env(store.connection(), "env-late-fail")
+            .unwrap()
+            .is_none());
+        assert!(memcore::list_resources(store.connection(), None, None)
+            .unwrap()
+            .is_empty());
+        assert!(
+            private_target_reservation(store.connection(), "env-late-fail")
                 .unwrap()
-                .unwrap()
-                .state,
-            ResourceState::Reclaiming,
-            "once published, removal must atomically claim the late-bound in-tree target"
+                .is_none()
         );
     }
 

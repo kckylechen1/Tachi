@@ -37,6 +37,8 @@ pub mod distill;
 pub mod enrichment;
 pub mod events;
 pub mod exact_dedupe;
+#[cfg(feature = "admin")]
+pub mod exec_env_provisioning;
 pub mod gc_candidates;
 pub mod graph;
 #[cfg(feature = "admin")]
