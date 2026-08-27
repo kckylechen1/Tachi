@@ -725,11 +725,11 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
         };
 
         if let Some(outcome) = postflight_outcome.as_mut() {
-            // Finalize the exclusive lease before making any worker-authored
-            // carrier artifact visible. A clean verdict with a failed lease
-            // transition is still a failed gate and must release no output.
+            // Persist the certified outcome before publishing any carrier
+            // artifact. Clean dispatches move into an exclusive `publishing`
+            // state; they do not become reusable until publication succeeds.
             let lease_release = match early_exit_cleanup.postflight_dispatch_lease_mut() {
-                Some(lease) if outcome.artifacts_released() => lease.release_clean(),
+                Some(lease) if outcome.artifacts_released() => lease.begin_publication(),
                 Some(lease) if outcome.lease_fenced() => lease.release_after_fence(),
                 Some(_) => Err(
                     "postflight lease remains exclusively admitted because its resource fence was not persisted"
@@ -737,14 +737,18 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                 ),
                 None => Err("required postflight gate lost its dispatch lease guard".to_string()),
             };
-            if let Err(error) = lease_release {
-                outcome.verdict = crate::exec_env_postflight::GateVerdict::Error {
-                    detail: format!("postflight lease finalization failed closed: {error}"),
-                };
-                append_trajectory_event(&traj_path_for_spawn, outcome.trajectory_event());
-            }
+            let publication_admission_held = match lease_release {
+                Ok(()) => outcome.artifacts_released(),
+                Err(error) => {
+                    outcome.verdict = crate::exec_env_postflight::GateVerdict::Error {
+                        detail: format!("postflight lease finalization failed closed: {error}"),
+                    };
+                    append_trajectory_event(&traj_path_for_spawn, outcome.trajectory_event());
+                    false
+                }
+            };
 
-            if outcome.artifacts_released() {
+            if publication_admission_held {
                 let mut publication_error = None;
                 if let Some(raw_output) = pending_acpx_output.take() {
                     match persist_acpx_events_and_map(
@@ -802,6 +806,30 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                             ),
                         };
                     }
+                    append_trajectory_event(&traj_path_for_spawn, outcome.trajectory_event());
+                }
+            }
+
+            if publication_admission_held {
+                let publication_release = match early_exit_cleanup
+                    .postflight_dispatch_lease_mut()
+                {
+                    Some(lease) if outcome.artifacts_released() => lease.complete_publication(),
+                    Some(lease) if outcome.lease_fenced() => lease.release_after_fence(),
+                    Some(_) => Err(
+                        "postflight publication failed without a persisted resource fence; keeping the lease exclusive"
+                            .to_string(),
+                    ),
+                    None => Err(
+                        "required postflight publication lost its dispatch lease guard".to_string(),
+                    ),
+                };
+                if let Err(error) = publication_release {
+                    outcome.verdict = crate::exec_env_postflight::GateVerdict::Error {
+                        detail: format!(
+                            "postflight publication finalization failed closed: {error}"
+                        ),
+                    };
                     append_trajectory_event(&traj_path_for_spawn, outcome.trajectory_event());
                 }
             }

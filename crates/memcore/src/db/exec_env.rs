@@ -64,6 +64,9 @@ pub enum ExecEnvState {
     /// Exclusively admitted to one in-flight dispatch. A daemon crash leaves
     /// this state fail-closed until an operator reconciles the lease.
     Dispatching,
+    /// The gate certified the dispatch and carrier artifacts are being
+    /// published. This remains exclusive until publication completes.
+    Publishing,
     /// Exclusively claimed by a destructive cleaner. Dispatch admission
     /// refuses this state; a crash remains fail-closed until reconciliation.
     Removing,
@@ -78,6 +81,7 @@ impl ExecEnvState {
             ExecEnvState::Provisioning => "provisioning",
             ExecEnvState::Active => "active",
             ExecEnvState::Dispatching => "dispatching",
+            ExecEnvState::Publishing => "publishing",
             ExecEnvState::Removing => "removing",
             ExecEnvState::Reclaimed => "reclaimed",
         }
@@ -91,10 +95,11 @@ impl ExecEnvState {
             "provisioning" => Ok(ExecEnvState::Provisioning),
             "active" => Ok(ExecEnvState::Active),
             "dispatching" => Ok(ExecEnvState::Dispatching),
+            "publishing" => Ok(ExecEnvState::Publishing),
             "removing" => Ok(ExecEnvState::Removing),
             "reclaimed" => Ok(ExecEnvState::Reclaimed),
             other => Err(MemoryError::InvalidArg(format!(
-                "unknown exec_env state '{other}' (expected 'provisioning', 'active', 'dispatching', 'removing', or 'reclaimed')"
+                "unknown exec_env state '{other}' (expected 'provisioning', 'active', 'dispatching', 'publishing', 'removing', or 'reclaimed')"
             ))),
         }
     }
@@ -793,6 +798,11 @@ pub fn reclaim_exec_env(
                 "refusing to reclaim exec env {env_id}: an admitted dispatch still owns it"
             )))
         }
+        ExecEnvState::Publishing => {
+            return Err(MemoryError::WorkClaimIncompatibleState(format!(
+                "refusing to reclaim exec env {env_id}: certified dispatch artifacts are still publishing"
+            )))
+        }
         ExecEnvState::Removing => {
             return Err(MemoryError::WorkClaimIncompatibleState(format!(
                 "refusing to reclaim exec env {env_id}: a destructive cleaner owns it"
@@ -1220,6 +1230,10 @@ mod tests {
         assert_eq!(
             ExecEnvState::parse("dispatching").unwrap(),
             ExecEnvState::Dispatching
+        );
+        assert_eq!(
+            ExecEnvState::parse("publishing").unwrap(),
+            ExecEnvState::Publishing
         );
         assert_eq!(
             ExecEnvState::parse("removing").unwrap(),

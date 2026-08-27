@@ -222,6 +222,25 @@ fn descriptor_bound_gate_refuses_same_path_directory_replacement() {
     fs::rename(&captured, &workspace).unwrap();
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn descriptor_bound_gate_accepts_var_alias_for_the_same_directory() {
+    let fx = Fixture::new();
+    let alias = fx.ws().to_path_buf();
+    assert!(
+        alias.starts_with("/var"),
+        "fixture should exercise /var alias"
+    );
+    let canonical = alias.canonicalize().unwrap();
+    assert!(canonical.starts_with("/private/var"));
+    let authority = memcore::anchored_fs::AnchoredDirectory::open_absolute(&canonical).unwrap();
+    let gate = PostflightGate::new("env-alias", alias, WriteContract::DetectAndReject)
+        .with_worktree_authority(authority);
+
+    gate.capture_preimage()
+        .expect("the /var alias must resolve to the descriptor-bound object");
+}
+
 // ─── the eight mutation surfaces ────────────────────────────────────────────
 
 #[test]

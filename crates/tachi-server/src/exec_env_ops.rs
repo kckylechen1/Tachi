@@ -1129,7 +1129,7 @@ pub(crate) fn quarantine_lease_resources(
             "exec env {env_id} does not exist; refusing false quarantine"
         ));
     };
-    if lease_state != "active" && lease_state != "dispatching" {
+    if lease_state != "active" && lease_state != "dispatching" && lease_state != "publishing" {
         return Err(format!(
             "exec env {env_id} is {lease_state}; refusing quarantine without a live lease"
         ));
@@ -1235,13 +1235,13 @@ impl ExecEnvDispatchLeaseGuard {
         })
     }
 
-    fn release_state(&mut self) -> Result<(), String> {
+    fn transition_state(&mut self, from: &str, to: &str, disarm: bool) -> Result<(), String> {
         self.server.with_global_store(|store| {
             let changed = store
                 .connection_mut()
                 .execute(
-                    "UPDATE exec_envs SET state = 'active' WHERE env_id = ?1 AND state = 'dispatching'",
-                    rusqlite::params![self.env_id],
+                    "UPDATE exec_envs SET state = ?2 WHERE env_id = ?1 AND state = ?3",
+                    rusqlite::params![self.env_id, to, from],
                 )
                 .map_err(|error| error.to_string())?;
             if changed != 1 {
@@ -1252,20 +1252,47 @@ impl ExecEnvDispatchLeaseGuard {
             }
             Ok(())
         })?;
-        self.armed = false;
+        if disarm {
+            self.armed = false;
+        }
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) fn release_clean(&mut self) -> Result<(), String> {
-        self.release_state()
+        self.transition_state("dispatching", "active", true)
+    }
+
+    pub(crate) fn begin_publication(&mut self) -> Result<(), String> {
+        self.transition_state("dispatching", "publishing", false)
+    }
+
+    pub(crate) fn complete_publication(&mut self) -> Result<(), String> {
+        self.transition_state("publishing", "active", true)
     }
 
     pub(crate) fn release_after_fence(&mut self) -> Result<(), String> {
-        self.release_state()
+        let from = self.server.with_global_store_read(|store| {
+            store
+                .connection()
+                .query_row(
+                    "SELECT state FROM exec_envs WHERE env_id = ?1",
+                    rusqlite::params![self.env_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .map_err(|error| error.to_string())
+        })?;
+        if from != "dispatching" && from != "publishing" {
+            return Err(format!(
+                "exec env {} cannot release fenced state {from}",
+                self.env_id
+            ));
+        }
+        self.transition_state(&from, "active", true)
     }
 
     pub(crate) fn release_without_spawn(&mut self) -> Result<(), String> {
-        self.release_state()
+        self.transition_state("dispatching", "active", true)
     }
 
     fn fence_abandoned(&mut self) {
@@ -1280,7 +1307,7 @@ impl ExecEnvDispatchLeaseGuard {
             )
         });
         if fenced.is_ok() {
-            let _ = self.release_state();
+            let _ = self.release_after_fence();
         }
     }
 }
@@ -1604,6 +1631,29 @@ mod tests {
         first.release_clean().expect("clean release");
         let mut reopened = ExecEnvDispatchLeaseGuard::acquire(&server, "env-exclusive")
             .expect("lease reopens only after clean finalization");
+        reopened
+            .release_without_spawn()
+            .expect("unspawned admission release");
+    }
+
+    #[test]
+    fn postflight_publication_state_remains_exclusive_until_completion() {
+        let temp = tempfile::tempdir().expect("temp server");
+        let server = MemoryServer::new(temp.path().join("global.sqlite"), None).expect("server");
+        seed_dispatchable_env(&server, "env-publishing", "res-publishing");
+
+        let mut first = ExecEnvDispatchLeaseGuard::acquire(&server, "env-publishing")
+            .expect("dispatch admission");
+        first.begin_publication().expect("begin publication");
+        let conflict = match ExecEnvDispatchLeaseGuard::acquire(&server, "env-publishing") {
+            Ok(_) => panic!("publishing lease must remain exclusive"),
+            Err(error) => error,
+        };
+        assert!(conflict.contains("publishing"), "{conflict}");
+
+        first.complete_publication().expect("complete publication");
+        let mut reopened = ExecEnvDispatchLeaseGuard::acquire(&server, "env-publishing")
+            .expect("lease reopens after publication completion");
         reopened
             .release_without_spawn()
             .expect("unspawned admission release");

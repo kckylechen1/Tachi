@@ -722,7 +722,13 @@ impl PostflightGate {
         let Some(authority) = self.worktree_authority.as_ref() else {
             return Ok(());
         };
-        match authority.matches_absolute_path(&self.workspace_root) {
+        let canonical_root = std::fs::canonicalize(&self.workspace_root).map_err(|error| {
+            format!(
+                "{phase}: cannot resolve managed worktree object at '{}': {error}",
+                self.workspace_root.display()
+            )
+        })?;
+        match authority.matches_absolute_path(&canonical_root) {
             Ok(true) => Ok(()),
             Ok(false) => Err(format!(
                 "{phase}: managed worktree object changed at '{}'",
