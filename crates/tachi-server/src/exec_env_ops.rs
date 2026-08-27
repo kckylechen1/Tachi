@@ -18,39 +18,13 @@
 //! | `build-ticketed` | yes | **none** — the seat owns the target it builds in |
 //! | `build-private` | yes | a private target dir — approval + reservation required, both booked |
 //!
-//! ### Why `build-ticketed` binds no target (round-2 fix)
+//! `build-ticketed` targets belong to the runtime executor seat because target
+//! selection depends on the ticket lineage. The broker books and quarantines
+//! the target it actually uses; provisioning must not invent a lease-owned one.
 //!
-//! It reads like it should: the lease causes builds, so book the target. But the
-//! dir those builds run in is the *executor seat's*, and which one — the resident
-//! target or the fork scratch target — is decided per ticket, at run time, by
-//! `build_broker::target::plan_target` from the ticket's lineage. Provisioning
-//! cannot know. Round-1 bound the lease to a dir resolved from
-//! `default_shared_cargo_target_dir()`, and the only production call site passed
-//! `resident_target_dir: None`, so every ticketed lease ended up refcounting a
-//! path **the broker never touches**: the ledger said the lease held a target,
-//! while the seat built somewhere else entirely.
-//!
-//! The broker books the target it actually uses (registers the row, records it
-//! on the executor slot, stamps its generation, quarantines it on an interrupt).
-//! That is the accounting — one writer, on the dir that really got written.
-//!
-//! `edit-only` is a **disk and routing** policy, not a sandbox. Nothing here
-//! stops a worker with a shell and the same UID from running `cargo` in an
-//! edit-only tree — a PATH/tool-table fence is bypassable by anyone who can
-//! spawn a process, and the owner ratified (2026-07-13) that we will not
-//! pretend otherwise. What the class buys:
-//!
-//! - **disk**: no target dir is wired to the tree, so it stays ~14MB;
-//! - **routing**: builds are supposed to go to the build broker's
-//!   machine-unique serialized executor seat ([`crate::build_broker`]) instead
-//!   of N diverged worktrees driving one shared `CARGO_TARGET_DIR`, which is
-//!   what manufactured phantom "symbol not found" compile errors on this
-//!   machine twice in one night.
-//!
-//! If someone ignores the convention and runs cargo in an edit-only tree
-//! anyway, they get a *local* `target/` (reclaimable by the sweep) — they do
-//! NOT get to poison the seat's shared target from a diverged tree. That
-//! containment, not enforcement, is the guarantee.
+//! `edit-only` is a disk and routing policy, not a sandbox. It wires no shared
+//! target into the worktree. A worker can still invoke Cargo, but such a build
+//! uses a local, reclaimable `target/` rather than the executor seat's target.
 
 use std::path::{Path, PathBuf};
 #[cfg(test)]
@@ -69,16 +43,8 @@ use tachi_clean::wt_open::{open_worktree, CargoTargetPolicy, OpenOptions, OpenRe
 
 use crate::server_state::MemoryServer;
 
-/// `hard_state` namespace for booked private-target reservations; key = env_id.
-///
-/// **Deliberately excluded from the #1342 follow-up TTL/backfill pass.** Its
-/// lifecycle is owned by the #894 exec-env-disk-governor design (`exec_env_reaper`,
-/// see that module's doc header), not by a generic `hard_state` `expires_at`
-/// sweep — a private-target reservation is live/reclaim-worthy exactly when
-/// the disk-governor ledger (`exec_env_resources`/leases) says so, which is a
-/// different, already-load-bearing state machine than "past a wall-clock
-/// timestamp". Bolting a TTL onto this namespace too would give two
-/// independent, potentially-disagreeing reapers authority over the same row.
+/// Test-only namespace for private-target reservation assertions.
+#[cfg(test)]
 pub(crate) const PRIVATE_RESERVATION_NS: &str = "exec_env_private_target";
 
 #[cfg(test)]
@@ -234,22 +200,8 @@ pub(crate) struct PrivateTargetApproval {
     pub reserved_bytes: i64,
 }
 
-/// A reservation as it stands **in the ledger** — i.e. the part that survives
-/// the call (#894 S2c round-2).
-///
-/// Round-1 read `PrivateTargetApproval` once, in the validator, and threw it
-/// away: nothing was ever written, so "reserved 40 GB" was a sentence in a CLI
-/// flag and nothing else. Two things record it now, and they answer different
-/// questions:
-///
-/// - the **resource row's `bytes`** is seeded with `reserved_bytes`, so every
-///   consumer of the ledger's byte column counts a reserved target from the
-///   moment it is approved — not from the first time somebody measures it. A
-///   reservation that only shows up once you have already spent the disk is not
-///   a reservation.
-/// - this row keeps the **provenance**: who approved it, how much, for which
-///   dir. `bytes` gets overwritten by the next real measurement; the approval
-///   must not.
+/// Test projection of a private-target reservation persisted in the ledger.
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct PrivateTargetReservation {
     pub env_id: String,
@@ -260,21 +212,8 @@ pub(crate) struct PrivateTargetReservation {
     pub approved_at: String,
 }
 
-/// Read the booked reservation for a lease, if it has one.
-///
-/// **Deliberately unread in production, and this is the honest note about it.**
-/// The write side is live (`provision_env` books the row above); nothing reads
-/// it back yet, so the linter is correct to call this dead. It is kept, rather
-/// than deleted, because the consumer is already named and already needed: the
-/// orphan build-artifact reaper (#894 S2b) currently decides whether a target
-/// dir is live by reading the process table, which cannot see a holder that
-/// declared itself anywhere but `argv`. The ledger is the surface where a
-/// holder *can* declare itself, and this row is a `BuildPrivate` lease doing
-/// exactly that — an approved, sized, attributed claim on a directory. Wiring
-/// the reaper to consult it is the ledger-based holder discovery that the
-/// reaper's destructive path is blocked on; deleting this reader now would only
-/// mean writing it again there.
-#[allow(dead_code)]
+/// Read the booked reservation in tests that verify ledger publication.
+#[cfg(test)]
 pub(crate) fn private_target_reservation(
     conn: &rusqlite::Connection,
     env_id: &str,
@@ -320,9 +259,7 @@ impl ProvisionEnvOptions {
     /// `BuildPrivate` is the only class that resolves one. `EditOnly` gets none
     /// (the entire disk story of the default class) and `BuildTicketed` gets
     /// none either: its builds run in the executor seat's target, which the seat
-    /// picks per ticket and books itself. Handing a ticketed lease a target dir
-    /// here — as round-1 did, defaulting to the machine-shared
-    /// `CARGO_TARGET_DIR` — books a path the broker never builds in.
+    /// picks per ticket and books itself.
     pub(crate) fn build_target_dir(&self, worktree_path: &str) -> Result<Option<PathBuf>, String> {
         match self.env_class {
             EnvClass::EditOnly | EnvClass::BuildTicketed => Ok(None),
@@ -947,7 +884,7 @@ fn publish_env_resources_atomically(
 /// a build target" hold at the seam instead of by convention up the stack.
 ///
 /// `approval` is required exactly when the class allocates a private target, and
-/// it is **written down** (#894 S2c round-2): the target row's `bytes` is seeded
+/// it is **written down**: the target row's `bytes` is seeded
 /// with the reservation and a provenance row records who approved it. A
 /// reservation nobody records is not a reservation.
 #[cfg(test)]
@@ -1011,8 +948,8 @@ pub(crate) fn register_env_resources(
     })
 }
 
-/// Write the reservation down, in the two places that need it (#894 S2c
-/// round-2): the resource row's `bytes` (so disk accounting sees the reserved
+/// Write the reservation down in the two places that need it: the resource
+/// row's `bytes` (so disk accounting sees the reserved
 /// target immediately, before a single artifact is built) and a provenance row
 /// (so `bytes` being overwritten by the next real measurement does not erase who
 /// approved what).
@@ -1235,13 +1172,18 @@ impl ExecEnvDispatchLeaseGuard {
         })
     }
 
-    fn transition_state(&mut self, from: &str, to: &str, disarm: bool) -> Result<(), String> {
+    fn transition_state(
+        &mut self,
+        from: ExecEnvState,
+        to: ExecEnvState,
+        disarm: bool,
+    ) -> Result<(), String> {
         self.server.with_global_store(|store| {
             let changed = store
                 .connection_mut()
                 .execute(
                     "UPDATE exec_envs SET state = ?2 WHERE env_id = ?1 AND state = ?3",
-                    rusqlite::params![self.env_id, to, from],
+                    rusqlite::params![self.env_id, to.as_str(), from.as_str()],
                 )
                 .map_err(|error| error.to_string())?;
             if changed != 1 {
@@ -1260,39 +1202,40 @@ impl ExecEnvDispatchLeaseGuard {
 
     #[cfg(test)]
     pub(crate) fn release_clean(&mut self) -> Result<(), String> {
-        self.transition_state("dispatching", "active", true)
+        self.transition_state(ExecEnvState::Dispatching, ExecEnvState::Active, true)
     }
 
     pub(crate) fn begin_publication(&mut self) -> Result<(), String> {
-        self.transition_state("dispatching", "publishing", false)
+        self.transition_state(ExecEnvState::Dispatching, ExecEnvState::Publishing, false)
     }
 
     pub(crate) fn complete_publication(&mut self) -> Result<(), String> {
-        self.transition_state("publishing", "active", true)
+        self.transition_state(ExecEnvState::Publishing, ExecEnvState::Active, true)
     }
 
     pub(crate) fn release_after_fence(&mut self) -> Result<(), String> {
-        let from = self.server.with_global_store_read(|store| {
-            store
-                .connection()
-                .query_row(
-                    "SELECT state FROM exec_envs WHERE env_id = ?1",
+        self.server.with_global_store(|store| {
+            let changed = store
+                .connection_mut()
+                .execute(
+                    "UPDATE exec_envs SET state = 'active' WHERE env_id = ?1 AND state IN ('dispatching', 'publishing')",
                     rusqlite::params![self.env_id],
-                    |row| row.get::<_, String>(0),
                 )
-                .map_err(|error| error.to_string())
+                .map_err(|error| error.to_string())?;
+            if changed != 1 {
+                return Err(format!(
+                    "exec env {} has no fenced dispatch state to release",
+                    self.env_id
+                ));
+            }
+            Ok(())
         })?;
-        if from != "dispatching" && from != "publishing" {
-            return Err(format!(
-                "exec env {} cannot release fenced state {from}",
-                self.env_id
-            ));
-        }
-        self.transition_state(&from, "active", true)
+        self.armed = false;
+        Ok(())
     }
 
     pub(crate) fn release_without_spawn(&mut self) -> Result<(), String> {
-        self.transition_state("dispatching", "active", true)
+        self.transition_state(ExecEnvState::Dispatching, ExecEnvState::Active, true)
     }
 
     fn fence_abandoned(&mut self) {
