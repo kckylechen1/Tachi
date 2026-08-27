@@ -354,13 +354,12 @@ impl ProvisionEnvOptions {
 }
 
 /// Outcome of provisioning: the underlying worktree open report plus the lease
-/// id when its complete ledger publication succeeded. `env_id` is `None` when
-/// the worktree open failed, was a dry-run, or its canonical identity could not
-/// be proven (the last case remains visible in `report.warnings`). Once ledger
-/// publication is attempted it is all-or-nothing: a failure rolls back every
-/// row, runs certified worktree cleanup, and returns a truthful error. Callers
-/// never receive an active lease whose complete resource shape was not
-/// published.
+/// id when its complete ledger publication succeeded. `env_id` is `None` only
+/// when the worktree open failed or was a dry-run. After an open succeeds,
+/// preparation and ledger publication are fail-closed: either may return an
+/// error only after attempting certified worktree cleanup, while a transaction
+/// failure also rolls back every ledger row. Callers never receive an active
+/// lease whose complete resource shape was not published.
 #[derive(Debug, Clone)]
 pub(crate) struct ProvisionedEnv {
     pub env_id: Option<String>,
@@ -618,48 +617,34 @@ fn reject_private_target_symlink_components(target: &Path) -> Result<(), String>
     Ok(())
 }
 
-/// Single provisioning entrypoint (#894 S1, class-aware since S2c): open a
-/// managed worktree via the `tachi_clean` primitive, record a daemon-owned
-/// lease, then register + bind the physical resources the class allocates. This
-/// is the one place that composes the worktree mechanics with a lease, so every
-/// consumer (the `wt-open` CLI today; a daemon/MCP caller later) wraps exactly
-/// one source of truth for provisioning instead of a divergent copy.
-///
-/// Open failures (or dry-run) return the report with `env_id: None` and no
-/// lease. Lease/resource/reservation publication is a single transaction. Any
-/// failure from that transaction rolls it back, attempts synchronous certified
-/// worktree cleanup, and reports both the publication and cleanup outcome.
-pub(crate) fn provision_managed_env(
-    store: &mut memcore::MemoryStore,
-    opts: &ProvisionEnvOptions,
-) -> Result<ProvisionedEnv, String> {
-    // Fail-closed BEFORE any filesystem work: a refused class must not leave a
-    // half-provisioned worktree behind.
-    validate_provision_request(opts)?;
-
-    let mut report = open_worktree(build_open_options(opts))?;
-    if !report.opened || !report.errors.is_empty() {
-        return Ok(ProvisionedEnv {
-            env_id: None,
-            report,
-        });
+fn cleanup_opened_worktree_after_provision_failure(
+    report: &OpenReport,
+    failure: impl std::fmt::Display,
+) -> String {
+    let cleanup = tachi_clean::wt_clean::run_wt_remove(tachi_clean::wt_clean::WtRemoveOptions {
+        path: PathBuf::from(&report.path),
+        force: true,
+        output: tachi_clean::wt_clean::OutputFormat::Json,
+    });
+    match cleanup {
+        Ok(_) => format!("{failure}; the newly opened worktree was removed"),
+        Err(cleanup_error) => format!(
+            "{failure}; failed to remove newly opened worktree {}: {cleanup_error}",
+            report.path
+        ),
     }
-    report.path = match canonical_worktree_path(&report.path) {
-        Ok(path) => path,
-        Err(error) => {
-            report.warnings.push(format!(
-                "worktree provisioned but its path could not be canonicalized: {error}; no ExecEnv lease was recorded"
-            ));
-            return Ok(ProvisionedEnv {
-                env_id: None,
-                report,
-            });
-        }
-    };
+}
+
+fn prepare_opened_worktree_for_publication(
+    report: &mut OpenReport,
+    opts: &ProvisionEnvOptions,
+) -> Result<Option<String>, String> {
+    report.path = canonical_worktree_path(&report.path)?;
+
     // The worktree path is only known after the open, so the private-target
     // default (`<worktree>/target`) is resolved here and the config written now.
     if opts.env_class == EnvClass::BuildPrivate {
-        let worktree = std::path::Path::new(&report.path);
+        let worktree = Path::new(&report.path);
         let requested_target = opts
             .build_target_dir(&report.path)?
             .expect("BuildPrivate always resolves a target dir");
@@ -688,9 +673,7 @@ pub(crate) fn provision_managed_env(
             report.cargo_target_dir = Some(dir.display().to_string());
         }
     } else if opts.env_class == EnvClass::EditOnly
-        && std::path::Path::new(&report.path)
-            .join("Cargo.toml")
-            .exists()
+        && Path::new(&report.path).join("Cargo.toml").exists()
     {
         // Say the quiet part out loud at the exact moment it matters: this tree
         // has no target dir wired to it, on purpose.
@@ -702,6 +685,46 @@ pub(crate) fn provision_managed_env(
                 .to_string(),
         );
     }
+
+    opts.build_target_dir(&report.path)
+        .map(|target| target.map(|path| path.display().to_string()))
+}
+
+/// Single provisioning entrypoint (#894 S1, class-aware since S2c): open a
+/// managed worktree via the `tachi_clean` primitive, record a daemon-owned
+/// lease, then register + bind the physical resources the class allocates. This
+/// is the one place that composes the worktree mechanics with a lease, so every
+/// consumer (the `wt-open` CLI today; a daemon/MCP caller later) wraps exactly
+/// one source of truth for provisioning instead of a divergent copy.
+///
+/// Open failures (or dry-run) return the report with `env_id: None` and no
+/// lease. Lease/resource/reservation publication is a single transaction. Any
+/// failure from that transaction rolls it back, attempts synchronous certified
+/// worktree cleanup, and reports both the publication and cleanup outcome.
+pub(crate) fn provision_managed_env(
+    store: &mut memcore::MemoryStore,
+    opts: &ProvisionEnvOptions,
+) -> Result<ProvisionedEnv, String> {
+    // Fail-closed BEFORE any filesystem work: a refused class must not leave a
+    // half-provisioned worktree behind.
+    validate_provision_request(opts)?;
+
+    let mut report = open_worktree(build_open_options(opts))?;
+    if !report.opened || !report.errors.is_empty() {
+        return Ok(ProvisionedEnv {
+            env_id: None,
+            report,
+        });
+    }
+    let build_target = match prepare_opened_worktree_for_publication(&mut report, opts) {
+        Ok(build_target) => build_target,
+        Err(error) => {
+            return Err(cleanup_opened_worktree_after_provision_failure(
+                &report,
+                format!("exec-env publication preparation failed: {error}"),
+            ));
+        }
+    };
 
     let env_id = generate_env_id();
     let lease = NewExecEnvLease {
@@ -716,8 +739,6 @@ pub(crate) fn provision_managed_env(
         created_at: String::new(),
     };
 
-    let build_target = opts.build_target_dir(&report.path)?;
-    let build_target = build_target.as_ref().map(|p| p.display().to_string());
     if let Err(error) = publish_env_resources_atomically(
         store,
         &lease,
@@ -727,21 +748,10 @@ pub(crate) fn provision_managed_env(
     ) {
         #[cfg(test)]
         run_publication_failure_hook();
-        let cleanup =
-            tachi_clean::wt_clean::run_wt_remove(tachi_clean::wt_clean::WtRemoveOptions {
-                path: std::path::PathBuf::from(&report.path),
-                force: true,
-                output: tachi_clean::wt_clean::OutputFormat::Json,
-            });
-        return Err(match cleanup {
-            Ok(_) => format!(
-                "exec-env ledger publication failed atomically and the newly opened worktree was removed: {error}"
-            ),
-            Err(cleanup_error) => format!(
-                "exec-env ledger publication failed atomically: {error}; failed to remove newly opened worktree {}: {cleanup_error}",
-                report.path
-            ),
-        });
+        return Err(cleanup_opened_worktree_after_provision_failure(
+            &report,
+            format!("exec-env ledger publication failed atomically: {error}"),
+        ));
     }
     Ok(ProvisionedEnv {
         env_id: Some(env_id),
@@ -1862,6 +1872,89 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn build_private_prepublication_rejection_removes_opened_worktree() {
+        fn contains_worktree_marker(path: &Path) -> bool {
+            let Ok(entries) = std::fs::read_dir(path) else {
+                return false;
+            };
+            entries.filter_map(Result::ok).any(|entry| {
+                entry.file_name() == ".git"
+                    || (entry.file_type().is_ok_and(|kind| kind.is_dir())
+                        && contains_worktree_marker(&entry.path()))
+            })
+        }
+
+        let _environment = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let root = tempfile::tempdir().expect("fixture root");
+        let home = root.path().join("home");
+        let repo = root.path().join("repo");
+        let worktrees = root.path().join("worktrees");
+        std::fs::create_dir_all(repo.join(".cargo")).expect("create tracked cargo config dir");
+        std::fs::write(
+            repo.join(".cargo/config.toml"),
+            "[build]\ntarget-dir = \"/untrusted/shared-target\"\n",
+        )
+        .expect("write tracked conflicting cargo config");
+        std::fs::write(repo.join("README.md"), "fixture\n").expect("write fixture source");
+        assert!(std::process::Command::new("git")
+            .args(["init", repo.to_str().expect("utf8 repo")])
+            .status()
+            .expect("git init")
+            .success());
+        assert!(std::process::Command::new("git")
+            .args(["-C", repo.to_str().expect("utf8 repo"), "add", "."])
+            .status()
+            .expect("git add")
+            .success());
+        assert!(std::process::Command::new("git")
+            .args([
+                "-C",
+                repo.to_str().expect("utf8 repo"),
+                "-c",
+                "user.name=Tachi Test",
+                "-c",
+                "user.email=tachi-test@example.invalid",
+                "commit",
+                "-m",
+                "fixture",
+            ])
+            .status()
+            .expect("git commit")
+            .success());
+
+        let _tachi_home = crate::test_support::EnvRestore::set_path("TACHI_HOME", &home);
+        let _home = crate::test_support::EnvRestore::set_path("HOME", &home);
+        let _worktrees =
+            crate::test_support::EnvRestore::set_path("TACHI_WORKTREES_ROOT", &worktrees);
+        let db = home.join("global").join(memcore::MEMORY_DB_FILENAME);
+        std::fs::create_dir_all(db.parent().expect("global DB parent"))
+            .expect("create global DB parent");
+        let mut store = memcore::MemoryStore::open(db.to_str().expect("utf8 DB")).expect("store");
+        let mut opts = provision_opts(EnvClass::BuildPrivate, Some(approval(1_000)));
+        opts.repo_root = repo;
+        opts.base = Some("HEAD".to_string());
+        opts.name = Some("prepublication-rejection".to_string());
+
+        let error = provision_managed_env(&mut store, &opts)
+            .expect_err("tracked Cargo config must refuse BuildPrivate publication");
+        assert!(error.contains("unproven existing file"), "{error}");
+        assert!(
+            error.contains("newly opened worktree was removed"),
+            "{error}"
+        );
+        assert!(memcore::list_exec_envs(store.connection(), None)
+            .expect("list leases")
+            .is_empty());
+        assert!(
+            !contains_worktree_marker(&worktrees),
+            "prepublication refusal must leave no linked worktree"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn build_private_target_symlink_component_is_rejected() {
         use std::os::unix::fs::symlink;
 
@@ -2041,6 +2134,48 @@ mod tests {
         assert_eq!(
             memcore::active_binding_count(store.connection(), &new.worktree_resource_id).unwrap(),
             1
+        );
+    }
+
+    #[test]
+    fn active_worktree_resource_cannot_bind_a_second_live_lease() {
+        let mut store = memcore::MemoryStore::open_in_memory().unwrap();
+        let first_lease = NewExecEnvLease {
+            env_id: "env-first".to_string(),
+            kind: "worktree".to_string(),
+            path: "/wt/exclusive".to_string(),
+            repo_root: "/repo".to_string(),
+            branch: "tachi/first".to_string(),
+            base_sha: "abc1234".to_string(),
+            dispatch_id: None,
+            env_class: EnvClass::EditOnly,
+            created_at: String::new(),
+        };
+        let first =
+            publish_env_resources_atomically(&mut store, &first_lease, "/wt/exclusive", None, None)
+                .expect("publish first exclusive worktree");
+        let second_lease = NewExecEnvLease {
+            env_id: "env-second".to_string(),
+            branch: "tachi/second".to_string(),
+            ..first_lease
+        };
+
+        let error = publish_env_resources_atomically(
+            &mut store,
+            &second_lease,
+            "/wt/exclusive",
+            None,
+            None,
+        )
+        .expect_err("a physical worktree cannot have two live lease owners");
+        assert!(error.contains("already has 1 live binding"), "{error}");
+        assert!(memcore::get_exec_env(store.connection(), "env-second")
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            memcore::active_binding_count(store.connection(), &first.worktree_resource_id).unwrap(),
+            1,
+            "the refused transaction must not disturb the first owner"
         );
     }
 

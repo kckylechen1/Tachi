@@ -160,6 +160,22 @@ impl MemoryStore {
                     |row| Ok((row.get(0)?, row.get(1)?)),
                 )
                 .optional()?;
+            if resource.kind == db::exec_env_resources::ResourceKind::Worktree {
+                if let Some((resource_id, _)) = existing.as_ref() {
+                    let live_bindings: i64 = tx.query_row(
+                        "SELECT COUNT(*) FROM exec_env_resource_bindings
+                         WHERE resource_id = ?1 AND released_at IS NULL",
+                        [resource_id],
+                        |row| row.get(0),
+                    )?;
+                    if live_bindings != 0 {
+                        return Err(MemoryError::Duplicate(format!(
+                            "worktree resource '{}' at '{}' already has {live_bindings} live binding(s); a physical workspace may belong to only one live exec env",
+                            resource_id, resource.path
+                        )));
+                    }
+                }
+            }
             let resource_id = match existing {
                 None => {
                     let resource_id = Uuid::new_v4().to_string();
