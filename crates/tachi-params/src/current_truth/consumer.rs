@@ -14,7 +14,7 @@
 
 use serde::Serialize;
 
-use super::projection::{open_actions, projection_health, OpenActionV1, ProjectionHealthV1};
+use super::projection::{projection_health, OpenActionV1, ProjectionHealthV1};
 use super::reducer::ReductionV1;
 use super::store::{CurrentTruthSqliteStore, CurrentTruthStoreError, RefreshPostureRowV1};
 use super::types::{GithubObjectRefV1, PredicateV1, ReductionStatusV1, VisibilityClassV1};
@@ -180,27 +180,13 @@ fn value_token(value: &super::types::AssertionValueV1) -> String {
     match value {
         AssertionValueV1::Unit => "unit".to_string(),
         AssertionValueV1::ObjectRef(object) => object.as_token(),
+        AssertionValueV1::ObjectRefs(objects) => objects
+            .iter()
+            .map(|object| object.as_token())
+            .collect::<Vec<_>>()
+            .join(","),
         AssertionValueV1::CommitSha(sha) => sha.clone(),
         AssertionValueV1::HandoffId(id) => id.clone(),
         AssertionValueV1::Action(action) => action.as_str().to_string(),
     }
-}
-
-/// Re-exported for consumers that want the full action list for a view's
-/// reduction (used by tests; same visibility rules apply upstream).
-pub fn view_open_actions(
-    store: &CurrentTruthSqliteStore,
-    repo: &str,
-    authorization: CallerAuthorizationV1,
-    posture: &super::projection::RefreshPostureV1,
-) -> Result<Vec<OpenActionV1>, ConsumerViewError> {
-    let assertions = store.assertions_for_repo(repo)?;
-    let visible: Vec<_> = assertions
-        .into_iter()
-        .filter(|assertion| {
-            authorization.sees_private || assertion.visibility == VisibilityClassV1::Public
-        })
-        .collect();
-    let reduction = super::reducer::reduce(&visible);
-    Ok(open_actions(&reduction, posture))
 }

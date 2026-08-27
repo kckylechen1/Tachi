@@ -115,11 +115,7 @@ fn classify_claim(
     binding: &HandoffClaimBindingV1,
     reduced: &ReducedPredicateV1,
 ) -> (bool, Option<HandoffStaleReasonV1>, Option<EvidenceHeadV1>) {
-    let bound_key = (
-        binding.head.observed_at.clone(),
-        binding.head.source_revision.clone(),
-        binding.head.assertion_id.clone(),
-    );
+    let bound_key = super::types::head_order_key(&binding.head);
     match reduced.status {
         ReductionStatusV1::Conflicted => (true, Some(HandoffStaleReasonV1::NowConflicted), None),
         ReductionStatusV1::Current => {
@@ -129,11 +125,11 @@ fn classify_claim(
             let newest = reduced
                 .current_heads
                 .iter()
-                .max_by(|a, b| head_key(a).cmp(&head_key(b)));
+                .max_by_key(|head| super::types::head_order_key(head));
             match newest {
                 None => (true, Some(HandoffStaleReasonV1::NoCurrentHead), None),
                 Some(head) => {
-                    let key = head_key(head);
+                    let key = super::types::head_order_key(head);
                     if key == bound_key {
                         (false, None, None)
                     } else {
@@ -188,12 +184,9 @@ fn classify_lifecycle_claim(
     reduction: &ReductionV1,
     family: &[PredicateV1],
 ) -> (bool, Option<HandoffStaleReasonV1>, Option<EvidenceHeadV1>) {
-    let bound_key = (
-        binding.head.observed_at.clone(),
-        binding.head.source_revision.clone(),
-        binding.head.assertion_id.clone(),
-    );
-    let mut newest: Option<(String, String, String)> = None;
+    let bound_key = super::types::head_order_key(&binding.head);
+    type HeadKey = (chrono::DateTime<chrono::Utc>, String, String);
+    let mut newest: Option<HeadKey> = None;
     let mut newest_head: Option<EvidenceHeadV1> = None;
     let mut conflicted = false;
     let mut any_current = false;
@@ -204,7 +197,7 @@ fn classify_lifecycle_claim(
             ReductionStatusV1::Current => {
                 any_current = true;
                 for head in &reduced.current_heads {
-                    let key = head_key(head);
+                    let key = super::types::head_order_key(head);
                     if newest.as_ref().is_none_or(|best| key > *best) {
                         newest = Some(key);
                         newest_head = Some(head.clone());
@@ -231,12 +224,4 @@ fn classify_lifecycle_claim(
             }
         }
     }
-}
-
-fn head_key(head: &EvidenceHeadV1) -> (String, String, String) {
-    (
-        head.observed_at.clone(),
-        head.source_revision.clone(),
-        head.assertion_id.clone(),
-    )
 }

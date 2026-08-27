@@ -39,8 +39,8 @@ use std::collections::BTreeMap;
 use serde::Serialize;
 
 use super::types::{
-    AssertionV1, AssertionValueV1, EvidenceHeadV1, GithubObjectRefV1, PredicateV1,
-    ReductionStatusV1, SubjectRefV1,
+    head_order_key, AssertionV1, AssertionValueV1, AuthorityClassV1, EvidenceHeadV1,
+    GithubObjectRefV1, PredicateV1, ReductionStatusV1, SubjectRefV1,
 };
 
 /// The reduction of one `(subject, predicate)` pair.
@@ -143,8 +143,11 @@ pub fn reduce(assertions: &[AssertionV1]) -> ReductionV1 {
         .filter(|a| a.authority_class.may_establish(a.predicate))
         .collect();
 
-    // 2. Group by (subject, predicate), then by lineage.
-    type LineageMap<'a> = BTreeMap<String, Vec<&'a AssertionV1>>;
+    // 2. Group by (subject, predicate), then by lineage. The lineage key is
+    // a typed tuple — never a delimited string — so distinct
+    // `(authority, issuer, source)` triples can never collide.
+    type LineageKey = (AuthorityClassV1, String, String);
+    type LineageMap<'a> = BTreeMap<LineageKey, Vec<&'a AssertionV1>>;
     let mut grouped: BTreeMap<(String, PredicateV1), (SubjectRefV1, LineageMap<'_>)> =
         BTreeMap::new();
     let admitted: Vec<&AssertionV1> = admitted.into_iter().copied().collect();
@@ -153,7 +156,7 @@ pub fn reduce(assertions: &[AssertionV1]) -> ReductionV1 {
             .entry((assertion.subject.as_token(), assertion.predicate))
             .or_insert_with(|| (assertion.subject.clone(), BTreeMap::new()))
             .1
-            .entry(lineage_bucket_key(assertion))
+            .entry(lineage_key_of(assertion))
             .or_default()
             .push(assertion);
     }
@@ -228,26 +231,18 @@ pub fn reduce(assertions: &[AssertionV1]) -> ReductionV1 {
 }
 
 fn sort_heads(heads: &mut [EvidenceHeadV1]) {
-    heads.sort_by(|a, b| {
-        (
-            a.observed_at.clone(),
-            a.source_revision.clone(),
-            a.assertion_id.clone(),
-        )
-            .cmp(&(
-                b.observed_at.clone(),
-                b.source_revision.clone(),
-                b.assertion_id.clone(),
-            ))
-    });
+    heads.sort_by_key(super::types::head_order_key);
 }
 
-/// Lineage bucket key: assertions supersede each other only within one
+/// Lineage key: assertions supersede each other only within one
 /// `(authority_class, issuer, source)` scope for the same subject+predicate.
-fn lineage_bucket_key(assertion: &AssertionV1) -> String {
-    format!(
-        "{:?}|{}|{}",
-        assertion.authority_class, assertion.issuer, assertion.source_ref.source
+/// Typed tuple — a delimited string would let `("a|b","c")` and `("a","b|c")`
+/// collide into one lineage and silently supersede each other.
+fn lineage_key_of(assertion: &AssertionV1) -> (AuthorityClassV1, String, String) {
+    (
+        assertion.authority_class,
+        assertion.issuer.clone(),
+        assertion.source_ref.source.clone(),
     )
 }
 
@@ -340,13 +335,19 @@ impl ReductionV1 {
     }
 
     /// Whether implementation is effectively present for an issue: a current
-    /// `implementation_present` assertion **not** negated by a newer revert
-    /// on a linked PR, or a currently-linked PR whose lifecycle is `Merged`.
-    /// A revert necessarily carries a newer source revision, so a reverted
-    /// merge reads as not-present.
+    /// **evidenced** `implementation_present` assertion (value `CommitSha`)
+    /// not negated by a newer revert on a linked PR, or a currently-linked
+    /// PR whose merge is evidenced. A revert necessarily carries a newer
+    /// source revision, so a reverted merge reads as not-present; the `Unit`
+    /// ("nothing evidenced at this revision") mint form never counts.
     pub fn implementation_present(&self, issue: &SubjectRefV1) -> bool {
         let explicit = self.get(issue, PredicateV1::ImplementationPresent);
-        if explicit.status == ReductionStatusV1::Current {
+        let explicit_evidenced = explicit.status == ReductionStatusV1::Current
+            && explicit
+                .values
+                .iter()
+                .any(|value| matches!(value, AssertionValueV1::CommitSha(_)));
+        if explicit_evidenced {
             let newest_impl = explicit.current_heads.iter().map(evidence_head_key).max();
             let reverted_newer = self.linked_prs(issue).iter().any(|object| {
                 let pr = pr_subject(issue, object);
@@ -370,24 +371,40 @@ impl ReductionV1 {
     }
 
     /// Currently-linked implementation PRs (from the current
-    /// `implementation_pr_linked` value set).
+    /// `implementation_pr_linked` value set — the complete-set form the
+    /// minting path emits; the legacy single-ref form is still read).
     pub fn linked_prs(&self, issue: &SubjectRefV1) -> Vec<GithubObjectRefV1> {
-        self.get(issue, PredicateV1::ImplementationPrLinked)
-            .values
-            .iter()
-            .filter_map(|value| match value {
-                AssertionValueV1::ObjectRef(object) => Some(object.clone()),
-                _ => None,
-            })
-            .collect()
+        let mut out = Vec::new();
+        for value in self.get(issue, PredicateV1::ImplementationPrLinked).values {
+            match value {
+                AssertionValueV1::ObjectRefs(objects) => out.extend(objects.iter().cloned()),
+                AssertionValueV1::ObjectRef(object) => out.push(object.clone()),
+                AssertionValueV1::Unit => {}
+                AssertionValueV1::CommitSha(_) => {}
+                AssertionValueV1::HandoffId(_) => {}
+                AssertionValueV1::Action(_) => {}
+            }
+        }
+        out.sort();
+        out.dedup();
+        out
     }
 
-    /// Linked PRs whose merge is currently effective (merged, not reverted).
+    /// Linked PRs whose merge is currently effective: merged, not reverted,
+    /// AND merge-evidenced — the merged predicate's current value carries an
+    /// actual commit SHA. A merged-without-SHA observation is an evidence
+    /// gap that must not project implementation present.
     pub fn linked_merged_prs(&self, issue: &SubjectRefV1) -> Vec<GithubObjectRefV1> {
         self.linked_prs(issue)
             .into_iter()
             .filter(|object| {
-                self.pr_lifecycle(&pr_subject(issue, object)) == PrLifecycleView::Merged
+                let pr = pr_subject(issue, object);
+                self.pr_lifecycle(&pr) == PrLifecycleView::Merged
+                    && self
+                        .get(&pr, PredicateV1::PrMerged)
+                        .values
+                        .iter()
+                        .any(|value| matches!(value, AssertionValueV1::CommitSha(_)))
             })
             .collect()
     }
@@ -419,35 +436,31 @@ fn pr_subject(issue: &SubjectRefV1, object: &GithubObjectRefV1) -> SubjectRefV1 
     }
 }
 
-fn evidence_head_key(head: &EvidenceHeadV1) -> (String, String, String) {
-    (
-        head.observed_at.clone(),
-        head.source_revision.clone(),
-        head.assertion_id.clone(),
-    )
+fn evidence_head_key(head: &EvidenceHeadV1) -> (chrono::DateTime<chrono::Utc>, String, String) {
+    head_order_key(head)
 }
 
 /// Resolve a mutually-exclusive predicate family to the predicate owning
-/// its newest current head, flagging conflicts (a `Conflicted` member, or
-/// two members sharing the same newest head key — i.e. "open and closed at
-/// the identical immutable revision").
+/// its **newest** current head, flagging conflicts (a `Conflicted` member,
+/// or two members sharing the same newest head key — i.e. "open and closed
+/// at the identical immutable revision"). Newest = max by
+/// [`super::types::head_order_key`] across ALL current heads of every
+/// member — `current_heads` are sorted ascending, so `.first()` would
+/// examine the oldest corroborating head instead.
 fn resolve_family(
     reduction: &ReductionV1,
     subject: &SubjectRefV1,
     family: &[PredicateV1],
 ) -> ResolvedFamily {
+    type HeadKey = (chrono::DateTime<chrono::Utc>, String, String);
     let mut conflicted = false;
-    let mut best: Option<((String, String, String), PredicateV1)> = None;
+    let mut best: Option<(HeadKey, PredicateV1)> = None;
     for predicate in family {
         let reduced = reduction.get(subject, *predicate);
         match reduced.status {
             ReductionStatusV1::Current => {
-                if let Some(head) = reduced.current_heads.first() {
-                    let key = (
-                        head.observed_at.clone(),
-                        head.source_revision.clone(),
-                        head.assertion_id.clone(),
-                    );
+                for head in &reduced.current_heads {
+                    let key = head_order_key(head);
                     match &best {
                         None => best = Some((key, *predicate)),
                         Some((best_key, best_predicate)) => {

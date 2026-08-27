@@ -96,6 +96,9 @@ pub struct SnapshotObservationV1 {
     pub observed_at: String,
     /// Immutable revision token for the observation (event id / commit SHA).
     pub revision: String,
+    /// Subject visibility carried from the source (the observed object's
+    /// visibility — never guessed here).
+    pub visibility: VisibilityClassV1,
 }
 
 /// The typed observation kinds v1 reconciles.
@@ -156,6 +159,14 @@ pub const GITHUB_SNAPSHOT_ISSUER: &str = "github-refresh-v1";
 /// no model; every assertion carries the snapshot's immutable revision and
 /// the snapshot's `updated_at` as `observed_at`. Relations come only from
 /// typed adapter data — title/body similarity is never consulted.
+///
+/// Issue-owned assertions (link set, implementation presence) inherit the
+/// **issue's** visibility so a public PR can never expose a private issue
+/// through its relation rows, and both are minted for EVERY issue at every
+/// revision (empty link set / `Unit` presence = "nothing evidenced now") so
+/// removal arrives as a newer revision instead of silence. A merged PR
+/// without a merge SHA never mints an evidenced `implementation_present` —
+/// missing evidence never becomes success-shaped truth.
 pub fn mint_assertions(state: &GithubRepositoryStateV1) -> Vec<AssertionV1> {
     let mut out = Vec::new();
     let source = SourceRefV1 {
@@ -178,20 +189,68 @@ pub fn mint_assertions(state: &GithubRepositoryStateV1) -> Vec<AssertionV1> {
             &issue.updated_at,
             issue.visibility,
         ));
+
+        // Typed links only: the adapter observed the relation. The value is
+        // the COMPLETE set at this revision (empty set = "linked to
+        // nothing"), so link removal arrives as a newer revision and
+        // supersedes — never as silence that leaves a stale link current.
+        let mut linked: Vec<GithubObjectRefV1> = state
+            .pull_requests
+            .iter()
+            .filter(|pr| pr.linked_issues.contains(&issue.number))
+            .map(|pr| GithubObjectRefV1::PullRequest(pr.number))
+            .collect();
+        linked.sort();
+        linked.dedup();
+        out.push(base_assertion(
+            &subject,
+            PredicateV1::ImplementationPrLinked,
+            AssertionValueV1::ObjectRefs(linked.clone()),
+            &source.clone(),
+            &issue.snapshot_revision,
+            &issue.updated_at,
+            issue.visibility,
+        ));
+
+        // Implementation presence, minted for EVERY issue at every revision
+        // so removal/retraction supersedes instead of leaving a stale
+        // "present" current: `CommitSha(merge)` when a currently-linked PR
+        // merged with an evidenced SHA, `Unit` ("nothing evidenced at this
+        // revision") otherwise. Human reviewed dispositions append the same
+        // predicate through their own lineage.
+        let present = state.pull_requests.iter().find_map(|pr| {
+            if pr.linked_issues.contains(&issue.number)
+                && matches!(pr.state, SnapshotPrStateV1::Merged)
+            {
+                pr.merge_commit_sha.clone().map(AssertionValueV1::CommitSha)
+            } else {
+                None
+            }
+        });
+        out.push(base_assertion(
+            &subject,
+            PredicateV1::ImplementationPresent,
+            present.unwrap_or(AssertionValueV1::Unit),
+            &source.clone(),
+            &issue.snapshot_revision,
+            &issue.updated_at,
+            issue.visibility,
+        ));
     }
 
     for pr in &state.pull_requests {
         let subject = state.pr_subject(pr.number);
         let (predicate, value) = match pr.state {
             SnapshotPrStateV1::Open => (PredicateV1::PrOpen, AssertionValueV1::Unit),
-            SnapshotPrStateV1::Merged => (
-                PredicateV1::PrMerged,
-                AssertionValueV1::CommitSha(
-                    pr.merge_commit_sha
-                        .clone()
-                        .unwrap_or_else(|| "unknown".to_string()),
+            SnapshotPrStateV1::Merged => match &pr.merge_commit_sha {
+                Some(sha) => (
+                    PredicateV1::PrMerged,
+                    AssertionValueV1::CommitSha(sha.clone()),
                 ),
-            ),
+                // Merged, merge SHA not evidenced: the predicate holds but
+                // the evidence gap stays visible in the value shape.
+                None => (PredicateV1::PrMerged, AssertionValueV1::Unit),
+            },
             SnapshotPrStateV1::ClosedUnmerged => {
                 (PredicateV1::PrClosedUnmerged, AssertionValueV1::Unit)
             }
@@ -205,46 +264,6 @@ pub fn mint_assertions(state: &GithubRepositoryStateV1) -> Vec<AssertionV1> {
             &pr.updated_at,
             pr.visibility,
         ));
-
-        // Typed links only: the adapter observed the relation.
-        for issue_number in &pr.linked_issues {
-            let issue_subject = state.issue_subject(*issue_number);
-            let issue_state = state.issues.iter().find(|i| i.number == *issue_number);
-            let (revision, observed_at) = match issue_state {
-                Some(issue) => (issue.snapshot_revision.clone(), issue.updated_at.clone()),
-                None => (pr.snapshot_revision.clone(), pr.updated_at.clone()),
-            };
-            out.push(base_assertion(
-                &issue_subject,
-                PredicateV1::ImplementationPrLinked,
-                AssertionValueV1::ObjectRef(GithubObjectRefV1::PullRequest(pr.number)),
-                &source.clone(),
-                &revision,
-                &observed_at,
-                pr.visibility,
-            ));
-        }
-
-        // A merged PR asserts implementation present on every linked issue —
-        // typed relation + typed merge, both from the object layer.
-        if matches!(pr.state, SnapshotPrStateV1::Merged) {
-            for issue_number in &pr.linked_issues {
-                let issue_subject = state.issue_subject(*issue_number);
-                out.push(base_assertion(
-                    &issue_subject,
-                    PredicateV1::ImplementationPresent,
-                    AssertionValueV1::CommitSha(
-                        pr.merge_commit_sha
-                            .clone()
-                            .unwrap_or_else(|| "unknown".to_string()),
-                    ),
-                    &source.clone(),
-                    &pr.snapshot_revision,
-                    &pr.updated_at,
-                    pr.visibility,
-                ));
-            }
-        }
     }
 
     for observation in &state.observations {
@@ -258,7 +277,7 @@ pub fn mint_assertions(state: &GithubRepositoryStateV1) -> Vec<AssertionV1> {
                     &source.clone(),
                     &observation.revision,
                     &observation.observed_at,
-                    VisibilityClassV1::Public,
+                    observation.visibility,
                 ));
             }
             SnapshotObservationKindV1::MergeReverted {
@@ -274,7 +293,7 @@ pub fn mint_assertions(state: &GithubRepositoryStateV1) -> Vec<AssertionV1> {
                     &source.clone(),
                     &observation.revision,
                     &observation.observed_at,
-                    VisibilityClassV1::Public,
+                    observation.visibility,
                 );
                 assertion.evidence_refs.push(original_merge_sha.clone());
                 out.push(assertion);
@@ -283,13 +302,19 @@ pub fn mint_assertions(state: &GithubRepositoryStateV1) -> Vec<AssertionV1> {
     }
 
     // Deterministic ids derived from the immutable inputs: subject,
-    // predicate, source revision. Same state ⇒ same ids ⇒ idempotent append.
+    // predicate, source revision, and the value digest. The value component
+    // keeps two assertions that share a revision but assert different facts
+    // (e.g. a tampered re-mint) from colliding on one identity.
     for assertion in &mut out {
+        let value_digest = memcore::canonical_digest::canonical_json_digest_hex(
+            &serde_json::to_value(&assertion.value).unwrap_or_default(),
+        );
         assertion.assertion_id = format!(
-            "ct-{}-{}-{}",
+            "ct-{}-{}-{}-{}",
             assertion.subject.as_token(),
             assertion.predicate.as_str(),
-            assertion.source_ref.revision
+            assertion.source_ref.revision,
+            &value_digest[..12.min(value_digest.len())],
         );
     }
     out

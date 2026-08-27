@@ -82,7 +82,8 @@ fn consumer_reads_evidence_heads_and_revisions_across_the_crate_boundary() {
         .evidence_heads
         .first()
         .expect("evidence head");
-    assert_eq!(head.source_revision, "pr7-b2");
+    // Per-issue mint: presence lands at the ISSUE's snapshot revision.
+    assert_eq!(head.source_revision, "iss42-a1");
     assert_eq!(head.source, "github-snapshot-adapter");
 
     // The merged PR row is visible with its merge SHA as the value token.

@@ -132,10 +132,18 @@ impl std::fmt::Display for PredicateV1 {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AssertionValueV1 {
-    /// The predicate carries no payload beyond its subject.
+    /// The predicate carries no payload beyond its subject — including the
+    /// evidence-gap form of `pr_merged` (merged, merge SHA not evidenced).
     Unit,
-    /// A typed object reference (e.g. `implementation_pr_linked` → the PR).
+    /// A typed object reference (legacy single-link form; the minting path
+    /// emits [`AssertionValueV1::ObjectRefs`]).
     ObjectRef(GithubObjectRefV1),
+    /// The **complete** typed relation set for `implementation_pr_linked` at
+    /// one source revision: every PR the adapter currently links, in
+    /// canonical order. An empty set is a positive "linked to nothing"
+    /// observation that supersedes an earlier non-empty set — link removal
+    /// is a new revision, never a rewrite.
+    ObjectRefs(Vec<GithubObjectRefV1>),
     /// A full commit SHA (`pr_merged` → merge SHA, `merge_reverted` → revert
     /// SHA, `implementation_present` → the merged SHA).
     CommitSha(String),
@@ -274,13 +282,16 @@ pub struct AssertionV1 {
 }
 
 impl AssertionV1 {
-    /// The reduction ordering key: `(observed_at, source revision,
+    /// The reduction ordering key: `(observed instant, source revision,
     /// assertion_id)`. All three components are source-supplied or immutable
     /// identity — arrival time (`recorded_at`, store-side) is deliberately
-    /// absent (#1696: "event arrival order is not source revision").
-    pub fn order_key(&self) -> (String, String, String) {
+    /// absent (#1696: "event arrival order is not source revision"). The
+    /// instant is the RFC 3339 `observed_at` parsed to UTC so that
+    /// equivalent timestamps with different offsets order by real time, not
+    /// by lexical accident.
+    pub fn order_key(&self) -> (chrono::DateTime<chrono::Utc>, String, String) {
         (
-            self.observed_at.clone(),
+            ordering_instant(&self.observed_at),
             self.source_ref.revision.clone(),
             self.assertion_id.clone(),
         )
@@ -288,7 +299,9 @@ impl AssertionV1 {
 
     /// The supersession lineage key: assertions may supersede each other only
     /// within the same `(subject, predicate, authority_class, issuer, source)`
-    /// scope (#1696 reduction law).
+    /// scope (#1696 reduction law). The key is a typed tuple — never a
+    /// delimited string — so distinct `(authority, issuer, source)` triples
+    /// can never collide.
     pub fn lineage_key(&self) -> (String, PredicateV1, AuthorityClassV1, String, String) {
         (
             self.subject.as_token(),
@@ -407,4 +420,26 @@ impl EvidenceHeadV1 {
             observed_at: assertion.observed_at.clone(),
         }
     }
+}
+
+/// The ordering instant for an RFC 3339 `observed_at` string, normalized to
+/// UTC. Malformed input falls back deterministically to the minimum
+/// instant: the store rejects malformed timestamps at append, so the
+/// fallback only affects hand-built in-memory sets, where it is the same
+/// for every malformed value (deterministic, never arrival-dependent).
+pub fn ordering_instant(observed_at: &str) -> chrono::DateTime<chrono::Utc> {
+    chrono::DateTime::parse_from_rfc3339(observed_at)
+        .map(|instant| instant.with_timezone(&chrono::Utc))
+        .unwrap_or(chrono::DateTime::<chrono::Utc>::MIN_UTC)
+}
+
+/// The canonical evidence-head ordering key shared by the reducer, the
+/// handoff staleness law, and the projection: `(UTC instant, source
+/// revision, assertion_id)` — all source-supplied or immutable identity.
+pub fn head_order_key(head: &EvidenceHeadV1) -> (chrono::DateTime<chrono::Utc>, String, String) {
+    (
+        ordering_instant(&head.observed_at),
+        head.source_revision.clone(),
+        head.assertion_id.clone(),
+    )
 }

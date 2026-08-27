@@ -50,6 +50,16 @@ pub enum CurrentTruthStoreError {
     ContradictsExistingRevision(AssertionIngestionKey),
     #[error("stored assertion row is not decodable: {0}")]
     CorruptRow(String),
+    #[error("observed_at/effective_at must be RFC 3339 — `{0}` does not parse")]
+    MalformedObservedAt(String),
+    #[error(
+        "refresh record older than the recorded attempt for `{repo}`: {recorded_at} < {existing_attempt_at}"
+    )]
+    StaleRefreshRecord {
+        repo: String,
+        recorded_at: String,
+        existing_attempt_at: String,
+    },
 }
 
 /// The result of an append.
@@ -84,7 +94,7 @@ const ASSERTION_SCHEMA_SQL: &str = r#"
             evidence_json  TEXT NOT NULL DEFAULT '[]',
             review_state   TEXT NOT NULL,
             visibility     TEXT NOT NULL,
-            value_digest   TEXT NOT NULL,
+            content_digest TEXT NOT NULL,
             recorded_at    TEXT NOT NULL DEFAULT '',
             UNIQUE (subject_repo, subject_kind, subject_id, predicate,
                     authority, issuer, source_id, source_revision)
@@ -154,34 +164,63 @@ impl CurrentTruthSqliteStore {
     /// provenance) — the reducer, not the store, keeps it from affecting
     /// current truth.
     pub fn append(&self, assertion: &AssertionV1) -> Result<AppendOutcome, CurrentTruthStoreError> {
-        Self::validate(assertion)?;
-        let value_json =
-            serde_json::to_string(&assertion.value).unwrap_or_else(|_| "null".to_string());
+        let transaction = self.conn.unchecked_transaction()?;
+        let outcome = Self::append_in(&transaction, assertion)?;
+        transaction.commit()?;
+        Ok(outcome)
+    }
+
+    /// Digest over the full assertion content: value digest plus every
+    /// reduction- or visibility-relevant field.
+    fn content_digest(assertion: &AssertionV1) -> String {
         let value_digest = memcore::canonical_digest::canonical_json_digest_hex(
             &serde_json::to_value(&assertion.value).unwrap_or_default(),
         );
-        let existing: Option<(String, String)> = self
-            .conn
+        let basis = serde_json::json!({
+            "value_digest": value_digest,
+            "observed_at": assertion.observed_at,
+            "effective_at": assertion.effective_at,
+            "supersedes": assertion.supersedes_assertion_id,
+            "evidence_refs": assertion.evidence_refs,
+            "review_state": review_token(assertion.review_state),
+            "visibility": visibility_token(assertion.visibility),
+        });
+        memcore::canonical_digest::canonical_json_digest_hex(&basis)
+    }
+
+    /// Append many in ONE transaction: either the whole batch lands or none
+    /// of it does — a mid-batch failure can never leave an append prefix
+    /// visible.
+    pub fn append_all(&self, assertions: &[AssertionV1]) -> Result<usize, CurrentTruthStoreError> {
+        let transaction = self.conn.unchecked_transaction()?;
+        let mut appended = 0;
+        for assertion in assertions {
+            let outcome = Self::append_in(&transaction, assertion)?;
+            if outcome == AppendOutcome::Appended {
+                appended += 1;
+            }
+        }
+        transaction.commit()?;
+        Ok(appended)
+    }
+
+    fn append_in(
+        tx: &rusqlite::Transaction<'_>,
+        assertion: &AssertionV1,
+    ) -> Result<AppendOutcome, CurrentTruthStoreError> {
+        Self::validate(assertion)?;
+        let value_json =
+            serde_json::to_string(&assertion.value).unwrap_or_else(|_| "null".to_string());
+        let content_digest = Self::content_digest(assertion);
+        let existing: Option<String> = tx
             .query_row(
-                "SELECT value_digest, assertion_id FROM current_truth_assertions
-                 WHERE subject_repo = ?1 AND subject_kind = ?2 AND subject_id = ?3
-                   AND predicate = ?4 AND authority = ?5 AND issuer = ?6
-                   AND source_id = ?7 AND source_revision = ?8",
-                params![
-                    assertion.subject.repo,
-                    kind_token(&assertion.subject.object),
-                    id_token(&assertion.subject.object),
-                    assertion.predicate.as_str(),
-                    authority_token(assertion.authority_class),
-                    assertion.issuer,
-                    assertion.source_ref.source,
-                    assertion.source_ref.revision,
-                ],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                "SELECT content_digest FROM current_truth_assertions WHERE assertion_id = ?1",
+                params![assertion.assertion_id],
+                |row| row.get(0),
             )
             .optional()?;
-        if let Some((existing_digest, _)) = existing {
-            if existing_digest == value_digest {
+        if let Some(existing_digest) = existing {
+            if existing_digest == content_digest {
                 return Ok(AppendOutcome::IdempotentDuplicate);
             }
             return Err(CurrentTruthStoreError::ContradictsExistingRevision(
@@ -190,12 +229,12 @@ impl CurrentTruthSqliteStore {
         }
         let evidence_json =
             serde_json::to_string(&assertion.evidence_refs).unwrap_or_else(|_| "[]".to_string());
-        self.conn.execute(
+        let insert = tx.execute(
             "INSERT INTO current_truth_assertions (
                 assertion_id, subject_repo, subject_kind, subject_id, predicate,
                 value_json, issuer, authority, source_id, source_revision,
                 observed_at, effective_at, supersedes, evidence_json,
-                review_state, visibility, value_digest, recorded_at
+                review_state, visibility, content_digest, recorded_at
             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, '')",
             params![
                 assertion.assertion_id,
@@ -214,23 +253,20 @@ impl CurrentTruthSqliteStore {
                 evidence_json,
                 review_token(assertion.review_state),
                 visibility_token(assertion.visibility),
-                value_digest,
+                content_digest,
             ],
-        )?;
-        Ok(AppendOutcome::Appended)
-    }
-
-    /// Append many, returning how many were new. Stops at the first error
-    /// (append-only: the already-appended prefix stays, which is safe —
-    /// re-running the same batch is idempotent).
-    pub fn append_all(&self, assertions: &[AssertionV1]) -> Result<usize, CurrentTruthStoreError> {
-        let mut appended = 0;
-        for assertion in assertions {
-            if self.append(assertion)? == AppendOutcome::Appended {
-                appended += 1;
+        );
+        match insert {
+            Ok(_) => Ok(AppendOutcome::Appended),
+            Err(rusqlite::Error::SqliteFailure(failure, _))
+                if failure.code == rusqlite::ErrorCode::ConstraintViolation =>
+            {
+                Err(CurrentTruthStoreError::ContradictsExistingRevision(
+                    assertion.ingestion_key(),
+                ))
             }
+            Err(error) => Err(error.into()),
         }
-        Ok(appended)
     }
 
     /// Read every assertion in deterministic (identity-keyed) order — the
@@ -387,7 +423,9 @@ impl CurrentTruthSqliteStore {
     }
 
     /// Record one refresh attempt's operational posture. `recorded_at` is
-    /// caller-supplied.
+    /// caller-supplied. Monotonic by attempt instant: an attempt older than
+    /// the recorded one is refused — a late, out-of-order refresh record can
+    /// never erase a newer posture (a newer outage included).
     pub fn record_refresh(
         &self,
         repo: &str,
@@ -397,6 +435,17 @@ impl CurrentTruthSqliteStore {
         recorded_at: &str,
         unavailable_reason: Option<&str>,
     ) -> Result<(), CurrentTruthStoreError> {
+        if let Some(existing) = self.refresh_posture_row(repo)? {
+            if super::types::ordering_instant(recorded_at)
+                < super::types::ordering_instant(&existing.last_attempt_at)
+            {
+                return Err(CurrentTruthStoreError::StaleRefreshRecord {
+                    repo: repo.to_string(),
+                    recorded_at: recorded_at.to_string(),
+                    existing_attempt_at: existing.last_attempt_at,
+                });
+            }
+        }
         self.conn.execute(
             "INSERT INTO current_truth_refresh (
                 repo, fresh, last_fresh_revision, last_fresh_at,
@@ -474,6 +523,20 @@ impl CurrentTruthSqliteStore {
         if !assertion.predicate.is_source_predicate() {
             return Err(CurrentTruthStoreError::ProjectionPredicateNotAssertable(
                 assertion.predicate,
+            ));
+        }
+        // `observed_at` is ordering authority: it must parse as RFC 3339 so
+        // the reduction's instant ordering is real, not lexical accident.
+        if chrono::DateTime::parse_from_rfc3339(&assertion.observed_at).is_err() {
+            return Err(CurrentTruthStoreError::MalformedObservedAt(
+                assertion.observed_at.clone(),
+            ));
+        }
+        if !assertion.effective_at.is_empty()
+            && chrono::DateTime::parse_from_rfc3339(&assertion.effective_at).is_err()
+        {
+            return Err(CurrentTruthStoreError::MalformedObservedAt(
+                assertion.effective_at.clone(),
             ));
         }
         Ok(())

@@ -166,6 +166,7 @@ fn state_v4() -> GithubRepositoryStateV1 {
                 kind: SnapshotObservationKindV1::IssueReopened { number: 100 },
                 observed_at: "2026-08-26T13:30:00Z".to_string(),
                 revision: "rev4-reopen".to_string(),
+                visibility: VisibilityClassV1::Public,
             },
             SnapshotObservationV1 {
                 kind: SnapshotObservationKindV1::MergeReverted {
@@ -175,6 +176,7 @@ fn state_v4() -> GithubRepositoryStateV1 {
                 },
                 observed_at: "2026-08-26T13:30:00Z".to_string(),
                 revision: "rev4-revert".to_string(),
+                visibility: VisibilityClassV1::Public,
             },
         ],
     }
@@ -915,7 +917,10 @@ fn consumer_fixture_reads_heads_without_raw_assertion_internals() {
         .expect("implementation_present row");
     assert_eq!(merged.status, ReductionStatusV1::Current);
     let head = merged.evidence_heads.first().expect("evidence head");
-    assert_eq!(head.source_revision, "rev2-pr");
+    assert_eq!(
+        head.source_revision, "rev2-iss",
+        "per-issue mint at the issue's revision"
+    );
     assert_eq!(head.source, "github-snapshot-adapter");
     let action = issue_row.open_action.as_ref().expect("action");
     assert_eq!(action.kind, super::types::OpenActionKindV1::RunVerification);
@@ -1085,4 +1090,243 @@ fn refresh_minting_is_pure_and_idempotent() {
             .all(|a| !a.evidence_refs.is_empty() || a.predicate != PredicateV1::MergeReverted),
         "revert evidence carries the original merge SHA"
     );
+}
+
+// ── Review round 1 fixes (codex R2, findings 2/3/4/6/7/11) ────────────────
+
+/// A merged PR without a merge SHA is an evidence gap: `pr_merged` holds
+/// with the `Unit` value, but implementation presence is NOT projected and
+/// no success-shaped action fires from missing evidence.
+#[test]
+fn merged_without_sha_is_evidence_gap_not_implementation() {
+    let mut state = state_v2();
+    state.pull_requests[0].merge_commit_sha = None;
+    let store = open_store();
+    store.append_all(&mint_assertions(&state)).expect("append");
+    let reduction = reduce(&store.assertions().unwrap());
+    assert_eq!(reduction.pr_lifecycle(&pr(200)), PrLifecycleView::Merged);
+    let merged = reduction.get(&pr(200), PredicateV1::PrMerged);
+    assert_eq!(merged.status, ReductionStatusV1::Current);
+    assert_eq!(merged.values.first(), Some(&AssertionValueV1::Unit));
+    assert!(
+        !reduction.implementation_present(&issue(100)),
+        "missing merge SHA must not project implementation present"
+    );
+    let action = open_action_for(&reduction, &fresh_posture(), &issue(100));
+    assert_ne!(action.kind, super::types::OpenActionKindV1::RunVerification);
+    assert_eq!(
+        action.kind,
+        super::types::OpenActionKindV1::AwaitImplementation
+    );
+}
+
+/// A typed link removed in a newer snapshot is superseded by the newer
+/// (empty) link set — removal is a new revision, never silence.
+#[test]
+fn removed_link_supersedes_older_link_set() {
+    let store = open_store();
+    store
+        .append_all(&mint_assertions(&state_v2()))
+        .expect("append v2 (linked)");
+    let linked = reduce(&store.assertions().unwrap()).linked_prs(&issue(100));
+    assert_eq!(linked, vec![GithubObjectRefV1::PullRequest(200)]);
+
+    // A newer refresh at r3: the issue is still OPEN, the merge stands, but
+    // the typed link is gone from the snapshot.
+    let unlinked = GithubRepositoryStateV1 {
+        repo: REPO.to_string(),
+        refresh_revision: "r3".to_string(),
+        refreshed_at: "2026-08-26T12:00:00Z".to_string(),
+        issues: vec![snapshot_issue(
+            100,
+            SnapshotIssueStateV1::Open,
+            "2026-08-26T12:00:00Z",
+            "rev3-iss",
+        )],
+        pull_requests: vec![snapshot_pr(
+            200,
+            SnapshotPrStateV1::Merged,
+            "2026-08-26T12:00:00Z",
+            "rev3-pr",
+            vec![],
+        )],
+        observations: vec![],
+    };
+    store
+        .append_all(&mint_assertions(&unlinked))
+        .expect("append v3 (unlinked)");
+    let reduction = reduce(&store.assertions().unwrap());
+    assert!(
+        reduction.linked_prs(&issue(100)).is_empty(),
+        "the removed link must not stay current"
+    );
+    assert!(!reduction.implementation_present(&issue(100)));
+    let action = open_action_for(&reduction, &fresh_posture(), &issue(100));
+    assert_eq!(
+        action.kind,
+        super::types::OpenActionKindV1::AwaitImplementation
+    );
+}
+
+/// A complete multi-PR link set reduces deterministically regardless of the
+/// snapshot's PR ordering: one set-valued assertion per issue per revision,
+/// with value-derived identity.
+#[test]
+fn multi_link_set_is_order_independent() {
+    let mut a = state_v1();
+    a.pull_requests = vec![
+        snapshot_pr(
+            200,
+            SnapshotPrStateV1::Open,
+            "2026-08-26T10:00:00Z",
+            "rev1-pr",
+            vec![100],
+        ),
+        snapshot_pr(
+            201,
+            SnapshotPrStateV1::Open,
+            "2026-08-26T10:00:00Z",
+            "rev1-pr201",
+            vec![100],
+        ),
+    ];
+    let mut b = state_v1();
+    b.pull_requests = vec![
+        snapshot_pr(
+            201,
+            SnapshotPrStateV1::Open,
+            "2026-08-26T10:00:00Z",
+            "rev1-pr201",
+            vec![100],
+        ),
+        snapshot_pr(
+            200,
+            SnapshotPrStateV1::Open,
+            "2026-08-26T10:00:00Z",
+            "rev1-pr",
+            vec![100],
+        ),
+    ];
+    let mut minted_a = mint_assertions(&a);
+    let mut minted_b = mint_assertions(&b);
+    minted_a.sort_by(|x, y| x.assertion_id.cmp(&y.assertion_id));
+    minted_b.sort_by(|x, y| x.assertion_id.cmp(&y.assertion_id));
+    assert_eq!(
+        minted_a, minted_b,
+        "PR ordering in the snapshot is irrelevant"
+    );
+    let mut linked = reduce(&minted_a).linked_prs(&issue(100));
+    linked.sort_by_key(|object| object.as_token());
+    assert_eq!(
+        linked,
+        vec![
+            GithubObjectRefV1::PullRequest(200),
+            GithubObjectRefV1::PullRequest(201),
+        ]
+    );
+}
+
+/// A refresh record older than the recorded attempt is refused: a late,
+/// out-of-order record can never erase a newer posture.
+#[test]
+fn stale_refresh_record_refused() {
+    let store = open_store();
+    store
+        .record_refresh(
+            REPO,
+            false,
+            None,
+            None,
+            "2026-08-26T12:00:00Z",
+            Some("outage"),
+        )
+        .expect("record outage");
+    match store.record_refresh(
+        REPO,
+        true,
+        Some("r1"),
+        Some("2026-08-26T10:00:00Z"),
+        "2026-08-26T11:00:00Z",
+        None,
+    ) {
+        Err(CurrentTruthStoreError::StaleRefreshRecord { .. }) => {}
+        other => panic!("expected StaleRefreshRecord, got {other:?}"),
+    }
+    // The newer attempt still lands.
+    store
+        .record_refresh(
+            REPO,
+            true,
+            Some("r2"),
+            Some("2026-08-26T13:00:00Z"),
+            "2026-08-26T13:00:05Z",
+            None,
+        )
+        .expect("newer attempt accepted");
+    let posture = store.refresh_posture_row(REPO).unwrap().expect("posture");
+    assert!(posture.fresh);
+}
+
+/// `observed_at` must parse as RFC 3339 — ordering authority is a real
+/// instant, not a lexical accident.
+#[test]
+fn malformed_observed_at_rejected_at_append() {
+    let store = open_store();
+    let mut assertion = mint_assertions(&state_v1())
+        .into_iter()
+        .find(|a| a.predicate == PredicateV1::IssueOpen)
+        .unwrap();
+    assertion.observed_at = "not-a-timestamp".to_string();
+    match store.append(&assertion) {
+        Err(CurrentTruthStoreError::MalformedObservedAt(_)) => {}
+        other => panic!("expected MalformedObservedAt, got {other:?}"),
+    }
+}
+
+/// A public PR linked to a private issue exposes nothing about the private
+/// issue: the issue-owned relation and implementation rows inherit the
+/// ISSUE's visibility.
+#[test]
+fn public_pr_never_exposes_linked_private_issue() {
+    let mut state = state_v1();
+    state.issues[0].visibility = VisibilityClassV1::Private;
+    let store = open_store();
+    store.append_all(&mint_assertions(&state)).expect("append");
+    store
+        .record_refresh(
+            REPO,
+            true,
+            Some("r1"),
+            Some("2026-08-26T10:00:00Z"),
+            "2026-08-26T10:00:05Z",
+            None,
+        )
+        .expect("posture");
+    let unauthorized = consumer::read_view(
+        &store,
+        REPO,
+        CallerAuthorizationV1 {
+            sees_private: false,
+        },
+    )
+    .expect("view");
+    let serialized = serde_json::to_string(&unauthorized).unwrap();
+    assert!(
+        !serialized.contains("issue:100"),
+        "no private issue token may leak through its public PR: {serialized}"
+    );
+    assert!(
+        unauthorized
+            .subjects
+            .iter()
+            .any(|s| s.subject_token == "kckylechen1/tachi#pull_request:200"),
+        "the public PR itself remains visible"
+    );
+    let authorized =
+        consumer::read_view(&store, REPO, CallerAuthorizationV1 { sees_private: true })
+            .expect("authorized view");
+    assert!(authorized
+        .subjects
+        .iter()
+        .any(|s| s.subject_token == "kckylechen1/tachi#issue:100"));
 }
