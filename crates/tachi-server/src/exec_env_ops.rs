@@ -307,7 +307,9 @@ impl ProvisionEnvOptions {
 /// stands untracked (no lease). Such an untracked worktree directory is
 /// reclaimed by the age-based `clean sweep` (`tachi_clean::sweep`), not by the
 /// stale-lease backstop (which only reclaims leases, and here none was
-/// recorded).
+/// recorded). Resource registration failure is returned as an error after the
+/// lease and any partial bindings are rolled back; callers never receive an
+/// active lease that the protected cleanup lifecycle cannot own.
 #[derive(Debug, Clone)]
 pub(crate) struct ProvisionedEnv {
     pub env_id: Option<String>,
@@ -478,11 +480,11 @@ pub(crate) fn validate_provision_request(opts: &ProvisionEnvOptions) -> Result<(
 /// consumer (the `wt-open` CLI today; a daemon/MCP caller later) wraps exactly
 /// one source of truth for provisioning instead of a divergent copy.
 ///
-/// Provisioning failures (or dry-run) return the report with `env_id: None` and
-/// no lease. A lease-insert failure after a successful open is non-fatal: the
-/// worktree stands, a warning is attached, and the orphaned worktree directory
-/// is left to the age-based `clean sweep` (there is no lease for the stale-lease
-/// backstop to reclaim in this case).
+/// Open failures (or dry-run) return the report with `env_id: None` and no
+/// lease. A lease-insert failure after a successful open is non-fatal: the
+/// worktree stands untracked for the age-based sweep. Once a lease insert
+/// succeeds, resource registration is part of the publication boundary: a
+/// failure rolls the lease and partial bindings back and returns an error.
 pub(crate) fn provision_managed_env(
     store: &mut memcore::MemoryStore,
     opts: &ProvisionEnvOptions,
@@ -558,22 +560,14 @@ pub(crate) fn provision_managed_env(
         Ok(()) => {
             let build_target = opts.build_target_dir(&report.path)?;
             let build_target = build_target.as_ref().map(|p| p.display().to_string());
-            if let Err(err) = register_env_resources(
+            register_env_resources_or_rollback(
                 store,
                 &env_id,
                 opts.env_class,
                 &report.path,
                 build_target.as_deref(),
                 opts.private_target_approval.as_ref(),
-            ) {
-                // Non-fatal, but loudly non-silent: the lease exists and the
-                // worktree exists; what's missing is the bytes ledger row, which
-                // means the reclaim path cannot free this tree by itself.
-                report.warnings.push(format!(
-                    "worktree + lease recorded but the resource ledger write failed: {err}; \
-                     this env's bytes are not tracked and will need the age-based `clean sweep`"
-                ));
-            }
+            )?;
             Ok(ProvisionedEnv {
                 env_id: Some(env_id),
                 report,
@@ -591,6 +585,60 @@ pub(crate) fn provision_managed_env(
             })
         }
     }
+}
+
+fn register_env_resources_or_rollback(
+    store: &mut memcore::MemoryStore,
+    env_id: &str,
+    class: EnvClass,
+    worktree_path: &str,
+    build_target: Option<&str>,
+    approval: Option<&PrivateTargetApproval>,
+) -> Result<EnvResources, String> {
+    match register_env_resources(store, env_id, class, worktree_path, build_target, approval) {
+        Ok(resources) => Ok(resources),
+        Err(error) => {
+            rollback_failed_resource_registration(store, env_id).map_err(|rollback_error| {
+                format!(
+                    "resource ledger registration failed for provisioned env {env_id}: {error}; \
+                     lease rollback also failed, leaving the environment fail-closed: \
+                     {rollback_error}"
+                )
+            })?;
+            Err(format!(
+                "resource ledger registration failed for provisioned env {env_id}: {error}; \
+                 the lease and any partial bindings were rolled back"
+            ))
+        }
+    }
+}
+
+fn rollback_failed_resource_registration(
+    store: &mut memcore::MemoryStore,
+    env_id: &str,
+) -> Result<(), String> {
+    let tx = store
+        .connection_mut()
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| error.to_string())?;
+    tx.execute(
+        "UPDATE exec_env_resource_bindings SET released_at = ?2 \
+         WHERE env_id = ?1 AND released_at IS NULL",
+        rusqlite::params![env_id, chrono::Utc::now().to_rfc3339()],
+    )
+    .map_err(|error| error.to_string())?;
+    let deleted = tx
+        .execute(
+            "DELETE FROM exec_envs WHERE env_id = ?1 AND state = 'active'",
+            rusqlite::params![env_id],
+        )
+        .map_err(|error| error.to_string())?;
+    if deleted != 1 {
+        return Err(format!(
+            "expected one active lease for {env_id}, deleted {deleted}"
+        ));
+    }
+    tx.commit().map_err(|error| error.to_string())
 }
 
 /// Register the physical resources a lease owns and bind them to it (#894 S2a
@@ -716,10 +764,11 @@ pub(crate) struct EnvResources {
 /// target dir resolves to ONE row that many leases bind (splitting it into two
 /// rows would split its refcount and let a live target be deleted).
 ///
-/// Fail-closed on a row that is not `active`: a reclaimed or quarantined
-/// resource must not silently back a new env. A quarantined build target in
-/// particular is the "interrupted cargo poisoned this dir" state — the broker
-/// clears it via `release_quarantine`, and until it does, nothing may bind it.
+/// A reclaimed path is a prior physical incarnation and is revived through
+/// memcore's one canonical re-registration writer. Every other non-active
+/// state fails closed. A quarantined build target in particular is the
+/// "interrupted cargo poisoned this dir" state — the broker clears it via
+/// `release_quarantine`, and until it does, nothing may bind it.
 pub(crate) fn ensure_resource(
     conn: &mut rusqlite::Connection,
     kind: ResourceKind,
@@ -728,7 +777,10 @@ pub(crate) fn ensure_resource(
     if let Some(existing) =
         memcore::find_resource_by_path(conn, path, kind).map_err(|e| e.to_string())?
     {
-        if existing.state != ResourceState::Active {
+        if existing.state == ResourceState::Active {
+            return Ok(existing.resource_id);
+        }
+        if existing.state != ResourceState::Reclaimed {
             return Err(format!(
                 "resource '{path}' ({}) is '{}', not 'active': it cannot back a new env until it \
                  is cleared (quarantined targets go through the broker's release path; a \
@@ -737,7 +789,6 @@ pub(crate) fn ensure_resource(
                 existing.state.as_str()
             ));
         }
-        return Ok(existing.resource_id);
     }
     let resource_id = uuid::Uuid::new_v4().to_string();
     memcore::insert_resource(
@@ -1715,6 +1766,111 @@ mod tests {
         assert_eq!(
             opts.cargo_target_policy("/wt/private").unwrap(),
             CargoTargetPolicy::Private(PathBuf::from("/wt/private/target"))
+        );
+    }
+
+    #[test]
+    fn reclaimed_worktree_resource_revives_for_same_path_reprovision() {
+        let mut store = store_with_lease("env-old", EnvClass::EditOnly, "/wt/churn");
+        let old = register_env_resources(
+            &mut store,
+            "env-old",
+            EnvClass::EditOnly,
+            "/wt/churn",
+            None,
+            None,
+        )
+        .expect("register first incarnation");
+        assert_eq!(
+            memcore::claim_exec_env_removal(store.connection_mut(), "/wt/churn").unwrap(),
+            Some("env-old".to_string())
+        );
+        memcore::complete_exec_env_removal(
+            store.connection_mut(),
+            "env-old",
+            Some("test removal"),
+            123,
+        )
+        .unwrap();
+
+        memcore::insert_exec_env(
+            store.connection(),
+            &NewExecEnvLease {
+                env_id: "env-new".to_string(),
+                kind: "worktree".to_string(),
+                path: "/wt/churn".to_string(),
+                repo_root: "/repo".to_string(),
+                branch: "tachi/894/new".to_string(),
+                base_sha: "def5678".to_string(),
+                dispatch_id: None,
+                env_class: EnvClass::EditOnly,
+                created_at: String::new(),
+            },
+        )
+        .unwrap();
+        let new = register_env_resources_or_rollback(
+            &mut store,
+            "env-new",
+            EnvClass::EditOnly,
+            "/wt/churn",
+            None,
+            None,
+        )
+        .expect("revive reclaimed physical path");
+
+        assert_ne!(new.worktree_resource_id, old.worktree_resource_id);
+        assert!(
+            memcore::get_resource(store.connection(), &old.worktree_resource_id)
+                .unwrap()
+                .is_none()
+        );
+        let revived = memcore::get_resource(store.connection(), &new.worktree_resource_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(revived.state, ResourceState::Active);
+        assert_eq!(revived.reclaimed_bytes, None);
+        assert_eq!(
+            memcore::active_binding_count(store.connection(), &new.worktree_resource_id).unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn resource_registration_failure_exposes_no_active_lease_or_partial_binding() {
+        let mut store = store_with_lease("env-p", EnvClass::BuildPrivate, "/wt/p");
+        let target_id = ensure_resource(
+            store.connection_mut(),
+            ResourceKind::BuildTarget,
+            "/wt/p/target",
+        )
+        .unwrap();
+        memcore::quarantine_resource(store.connection_mut(), &target_id, "poisoned").unwrap();
+
+        let error = register_env_resources_or_rollback(
+            &mut store,
+            "env-p",
+            EnvClass::BuildPrivate,
+            "/wt/p",
+            Some("/wt/p/target"),
+            Some(&approval(1_000)),
+        )
+        .expect_err("quarantined target must fail the whole ledger publication");
+        assert!(error.contains("rolled back"), "{error}");
+        assert!(memcore::get_exec_env(store.connection(), "env-p")
+            .unwrap()
+            .is_none());
+        let worktree =
+            memcore::find_resource_by_path(store.connection(), "/wt/p", ResourceKind::Worktree)
+                .unwrap()
+                .expect("partial resource row remains available for orphan reconciliation");
+        assert_eq!(worktree.state, ResourceState::Active);
+        assert_eq!(
+            memcore::active_binding_count(store.connection(), &worktree.resource_id).unwrap(),
+            0
+        );
+        assert_eq!(
+            memcore::active_binding_count(store.connection(), &target_id).unwrap(),
+            0
         );
     }
 
