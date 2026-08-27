@@ -1807,3 +1807,107 @@ fn two_connection_refresh_guard_holds() {
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_dir(&dir);
 }
+
+// ── Review round 4 fixes ───────────────────────────────────────────────────
+
+/// An inadmissible row sharing an id with an admitted assertion never
+/// affects the admitted group's truth.
+#[test]
+fn inadmissible_same_id_row_never_conflicts_admitted_group() {
+    let base = mint_assertions(&state_v1());
+    let open = base
+        .iter()
+        .find(|a| a.predicate == PredicateV1::IssueOpen)
+        .unwrap()
+        .clone();
+    // Same id, different content, but REJECTED review state.
+    let mut rejected_twin = open.clone();
+    rejected_twin.evidence_refs = vec!["rejected-noise".to_string()];
+    rejected_twin.review_state = ReviewStateV1::Rejected;
+
+    let reduction = reduce(&[open.clone(), rejected_twin.clone()]);
+    assert_eq!(
+        reduction.get(&issue(100), PredicateV1::IssueOpen).status,
+        ReductionStatusV1::Current,
+        "rejected evidence cannot affect current truth, even via id collision"
+    );
+    // The same pair with BOTH admitted stays a conflict.
+    let mut admitted_twin = rejected_twin;
+    admitted_twin.review_state = ReviewStateV1::Observed;
+    let reduction = reduce(&[open, admitted_twin]);
+    assert_eq!(
+        reduction.get(&issue(100), PredicateV1::IssueOpen).status,
+        ReductionStatusV1::Conflicted
+    );
+}
+
+/// A lifecycle member that is itself `Conflicted` at the family's max key
+/// keeps the lifecycle view `Conflicted` — nothing is selected from it.
+#[test]
+fn conflicted_member_at_max_key_keeps_family_conflicted() {
+    // Two lineages disagree about issue_open at the same revision.
+    let open_a = AssertionV1 {
+        assertion_id: "r4-open-a".to_string(),
+        subject: issue(100),
+        predicate: PredicateV1::IssueOpen,
+        value: AssertionValueV1::Unit,
+        issuer: "adapter-a".to_string(),
+        authority_class: AuthorityClassV1::GitHubTypedObject,
+        source_ref: SourceRefV1 {
+            source: "adapter-a".to_string(),
+            revision: "rev-t1".to_string(),
+        },
+        observed_at: "2026-08-26T10:00:00Z".to_string(),
+        effective_at: "2026-08-26T10:00:00Z".to_string(),
+        supersedes_assertion_id: None,
+        evidence_refs: vec![],
+        review_state: ReviewStateV1::Observed,
+        visibility: VisibilityClassV1::Public,
+    };
+    // Same predicate, same lineage-visible ordering, DIFFERENT issuer
+    // asserting a contradictory value shape (CommitSha vs Unit on the same
+    // predicate) — values disagree across lineages at the same revision.
+    let mut open_b = open_a.clone();
+    open_b.assertion_id = "r4-open-b".to_string();
+    open_b.issuer = "adapter-b".to_string();
+    open_b.source_ref.source = "adapter-b".to_string();
+    open_b.value = AssertionValueV1::CommitSha("not-a-state-value".to_string());
+
+    let reduction = reduce(&[open_a, open_b]);
+    assert_eq!(
+        reduction.get(&issue(100), PredicateV1::IssueOpen).status,
+        ReductionStatusV1::Conflicted,
+        "fixture setup: the predicate itself must be conflicted"
+    );
+    assert_eq!(
+        reduction.issue_lifecycle(&issue(100)),
+        IssueLifecycleView::Conflicted,
+        "a conflicted member owning the max key keeps the family conflicted"
+    );
+}
+
+/// A missing SHA and an empty SHA mint the SAME composite revision — no
+/// phantom revision for a None ⇄ Some(\"\") flip.
+#[test]
+fn missing_and_empty_sha_mint_same_composite_revision() {
+    let mut missing = state_v2();
+    missing.pull_requests[0].merge_commit_sha = None;
+    let mut empty = state_v2();
+    empty.pull_requests[0].merge_commit_sha = Some(String::new());
+
+    let minted_missing = mint_assertions(&missing);
+    let minted_empty = mint_assertions(&empty);
+    let link_of = |minted: &Vec<AssertionV1>| {
+        minted
+            .iter()
+            .find(|a| a.predicate == PredicateV1::ImplementationPrLinked)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(
+        link_of(&minted_missing).source_ref.revision,
+        link_of(&minted_empty).source_ref.revision,
+        "the gap forms must be revision-identical"
+    );
+    assert_eq!(minted_missing, minted_empty);
+}

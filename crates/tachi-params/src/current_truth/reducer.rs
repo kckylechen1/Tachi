@@ -130,15 +130,25 @@ impl ReductionV1 {
 /// always yields the equal [`ReductionV1`]. Duplicate assertion ids are
 /// collapsed; arrival order is never an input.
 pub fn reduce(assertions: &[AssertionV1]) -> ReductionV1 {
-    // Deduplicate by assertion id so a replayed read cannot double-count.
-    // Two DIFFERENT assertions claiming the SAME immutable id is an identity
-    // contradiction: EVERY colliding row is retained (each in its own
-    // (subject, predicate) group) and every affected group is forced
-    // `Conflicted` below — nothing is dropped, so the outcome cannot depend
-    // on which group the colliding rows belong to or on arrival order.
+    // 1. Admission gate FIRST: candidate/rejected evidence and
+    // predicate-inadmissible authority never affect current truth — not
+    // even through an id collision with an admitted row.
+    let admitted_input: Vec<&AssertionV1> = assertions
+        .iter()
+        .filter(|a| a.review_state.is_admitted())
+        .filter(|a| a.authority_class.may_establish(a.predicate))
+        .collect();
+
+    // 2. Deduplicate by assertion id so a replayed read cannot double-count.
+    // Two DIFFERENT admitted assertions claiming the SAME immutable id is
+    // an identity contradiction: EVERY colliding row is retained (each in
+    // its own (subject, predicate) group) and every affected group is
+    // forced `Conflicted` below — nothing is dropped, so the outcome cannot
+    // depend on which groups the colliding rows belong to or on arrival
+    // order.
     let mut by_id: BTreeMap<&str, Vec<&AssertionV1>> = BTreeMap::new();
     let mut collided: BTreeMap<(String, PredicateV1), ()> = BTreeMap::new();
-    for assertion in assertions {
+    for assertion in admitted_input {
         let bucket = by_id.entry(assertion.assertion_id.as_str()).or_default();
         if bucket.contains(&assertion) {
             continue; // byte-identical replay: true duplicate, collapse
@@ -152,17 +162,9 @@ pub fn reduce(assertions: &[AssertionV1]) -> ReductionV1 {
         }
         bucket.push(assertion);
     }
+    let admitted: Vec<&AssertionV1> = by_id.values().flatten().copied().collect();
 
-    // 1. Admission gate.
-    let admitted: Vec<&AssertionV1> = by_id
-        .values()
-        .flatten()
-        .copied()
-        .filter(|a| a.review_state.is_admitted())
-        .filter(|a| a.authority_class.may_establish(a.predicate))
-        .collect();
-
-    // 2. Group by (subject, predicate), then by lineage. The lineage key is
+    // 3. Group by (subject, predicate), then by lineage. The lineage key is
     // a typed tuple — never a delimited string — so distinct
     // `(authority, issuer, source)` triples can never collide.
     type LineageKey = (AuthorityClassV1, String, String);
@@ -525,7 +527,15 @@ fn resolve_family(
             conflicted: false,
         },
         Some((_, owners)) => {
-            let conflicted = owners.len() > 1;
+            // Two members tying at the max key is a same-revision
+            // contradiction; a SINGLE member owning the max key still
+            // conflicts when that member's own reduction is `Conflicted`
+            // (its values disagree at the newest revision — nothing may be
+            // selected from it).
+            let conflicted = owners.len() > 1
+                || owners.iter().any(|predicate| {
+                    reduction.get(subject, *predicate).status == ReductionStatusV1::Conflicted
+                });
             ResolvedFamily {
                 newest: owners.first().copied(),
                 conflicted,

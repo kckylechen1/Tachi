@@ -384,7 +384,13 @@ fn composite_issue_revision(issue: &SnapshotIssueV1, linked_prs: &[&SnapshotPrV1
                 "number": pr.number,
                 "snapshot_revision": pr.snapshot_revision,
                 "state": pr.state,
-                "merge_commit_sha": pr.merge_commit_sha,
+                // Gap-normalized: a missing SHA and an empty SHA are the
+                // same evidence gap, so the composite cannot distinguish
+                // them (no phantom new revision for a None->Some("") flip).
+                "merge_commit_sha": pr
+                    .merge_commit_sha
+                    .as_deref()
+                    .filter(|sha| !sha.is_empty()),
             })
         })
         .collect();
