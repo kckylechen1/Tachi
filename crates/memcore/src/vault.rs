@@ -117,14 +117,14 @@ pub fn is_lane_config_url_name(name: &str) -> bool {
     stem.ends_with("_URL") || stem.ends_with("_BASE_URL")
 }
 
-/// Read-time classifier: existing `other` rows whose names are lane config
-/// are config without a schema bump.
+/// Read-time classifier: lane-config names are config regardless of the
+/// stored type. Pre-#1857 omitted types defaulted to `api_key`, so leftover
+/// `EXTRACT_BASE_URL` rows must list as config without a schema bump.
 pub fn effective_vault_secret_type(name: &str, stored: &str) -> &'static str {
-    let stored = normalize_secret_type(stored);
-    if stored == SECRET_TYPE_OTHER && is_lane_config_secret_name(name) {
+    if is_lane_config_secret_name(name) {
         SECRET_TYPE_CONFIG
     } else {
-        stored
+        normalize_secret_type(stored)
     }
 }
 
@@ -382,8 +382,16 @@ mod tests {
             SECRET_TYPE_CONFIG
         );
         assert_eq!(
+            effective_vault_secret_type("EXTRACT_BASE_URL", "api_key"),
+            SECRET_TYPE_CONFIG
+        );
+        assert_eq!(
             effective_vault_secret_type("DEEPSEEK_API_KEY", "other"),
             SECRET_TYPE_OTHER
+        );
+        assert_eq!(
+            effective_vault_secret_type("CUSTOM_ENDPOINT", "config"),
+            SECRET_TYPE_CONFIG
         );
     }
 }

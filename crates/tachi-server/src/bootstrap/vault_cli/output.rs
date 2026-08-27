@@ -151,6 +151,15 @@ pub(crate) fn lease_api_key_from_store(
         .map_err(|e| format!("vault_list_entries: {e}"))?;
     let health_logical_name =
         crate::vault_ops::canonical_api_key_health_logical_name(store, logical_name)?;
+    if let Some(entry) = entries.iter().find(|entry| entry.name == logical_name) {
+        let effective = memcore::effective_vault_secret_type(&entry.name, &entry.secret_type);
+        if effective != memcore::SECRET_TYPE_API_KEY {
+            return Err(format!(
+                "Vault name '{logical_name}' is {effective}, not a credential; refusing to lease it as an API key"
+            )
+            .into());
+        }
+    }
     let rotation = store
         .vault_get_rotation(&health_logical_name)
         .map_err(|e| format!("vault_get_rotation: {e}"))?;
@@ -183,7 +192,10 @@ pub(crate) fn lease_api_key_from_store(
         let Some(entry) = entries.iter().find(|entry| entry.name == candidate) else {
             continue;
         };
-        if memcore::is_lane_config_secret_name(&entry.name) {
+        if memcore::is_lane_config_secret_name(&entry.name)
+            || memcore::effective_vault_secret_type(&entry.name, &entry.secret_type)
+                != memcore::SECRET_TYPE_API_KEY
+        {
             continue;
         }
         if entry

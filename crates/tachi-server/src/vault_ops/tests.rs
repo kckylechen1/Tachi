@@ -1441,3 +1441,171 @@ async fn vault_set_infers_config_for_lane_urls_and_refuses_api_key() {
     .expect_err("config URLs must not lease as API keys");
     assert!(leased.contains("lane config"), "{leased}");
 }
+
+fn plant_vault_secret(server: &MemoryServer, name: &str, value: &str, secret_type: &str) {
+    with_vault_key(server, |key| {
+        let (encrypted_value, nonce) =
+            crate::vault_crypto::encrypt(key, value.as_bytes()).map_err(|e| e.to_string())?;
+        let now = chrono::Utc::now().to_rfc3339();
+        server
+            .with_global_store(|store| {
+                store
+                    .vault_upsert_entry(&memcore::vault::VaultEntry {
+                        name: name.to_string(),
+                        encrypted_value,
+                        nonce,
+                        secret_type: secret_type.to_string(),
+                        description: "leftover plant".to_string(),
+                        allowed_agents: None,
+                        created_at: now.clone(),
+                        updated_at: now,
+                        accessed_at: String::new(),
+                        access_count: 0,
+                    })
+                    .map_err(|e| e.to_string())
+            })
+            .map_err(|e| format!("plant {name}: {e}"))
+    })
+    .unwrap_or_else(|e| panic!("plant {name}: {e}"));
+}
+
+/// Pre-#1857 omitted types defaulted to `api_key`. Leftover
+/// `EXTRACT_BASE_URL` rows must list as config. Explicit `config` on a
+/// non-lane-config name (`CUSTOM_ENDPOINT`) must still refuse to lease.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn leftover_api_key_lane_config_lists_as_config_and_config_rows_do_not_lease() {
+    let _lock = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let db_path = crate::utils::test_fixture_path(format!(
+        "memory-server-vault-leftover-api-key-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let server = MemoryServer::new(db_path, None).expect("create test server");
+    handle_vault_init(
+        &server,
+        VaultInitParams {
+            password: "leftover-api-key".to_string(),
+        },
+    )
+    .await
+    .expect("vault init");
+
+    plant_vault_secret(
+        &server,
+        "EXTRACT_BASE_URL",
+        "https://api.deepseek.com/chat/completions",
+        "api_key",
+    );
+    plant_vault_secret(
+        &server,
+        "CUSTOM_ENDPOINT",
+        "https://example.test/v1",
+        "config",
+    );
+
+    let listed = handle_vault_list(&server, VaultListParams { secret_type: None })
+        .await
+        .expect("list");
+    let body: serde_json::Value = serde_json::from_str(&listed).expect("list json");
+    let config_names: Vec<&str> = body["config"]
+        .as_array()
+        .expect("config")
+        .iter()
+        .filter_map(|row| row["name"].as_str())
+        .collect();
+    let cred_names: Vec<&str> = body["credentials"]
+        .as_array()
+        .expect("credentials")
+        .iter()
+        .filter_map(|row| row["name"].as_str())
+        .collect();
+    assert!(
+        config_names.contains(&"EXTRACT_BASE_URL"),
+        "leftover api_key EXTRACT_BASE_URL must list as config: {body}"
+    );
+    assert!(
+        config_names.contains(&"CUSTOM_ENDPOINT"),
+        "explicit config CUSTOM_ENDPOINT must list as config: {body}"
+    );
+    assert!(
+        !cred_names.contains(&"EXTRACT_BASE_URL"),
+        "leftover EXTRACT_BASE_URL must not stay in credentials: {body}"
+    );
+    assert!(
+        !cred_names.contains(&"CUSTOM_ENDPOINT"),
+        "CUSTOM_ENDPOINT config must not list as a credential: {body}"
+    );
+
+    let leftover = body["config"]
+        .as_array()
+        .expect("config")
+        .iter()
+        .find(|row| row["name"] == "EXTRACT_BASE_URL")
+        .expect("leftover row");
+    assert_eq!(leftover["secret_type"], "config");
+    assert_eq!(leftover["group"], "config");
+
+    let keys_only = handle_vault_list(
+        &server,
+        VaultListParams {
+            secret_type: Some("api_key".to_string()),
+        },
+    )
+    .await
+    .expect("filter api_key");
+    let keys_body: serde_json::Value = serde_json::from_str(&keys_only).expect("json");
+    let key_names: Vec<&str> = keys_body["secrets"]
+        .as_array()
+        .expect("secrets")
+        .iter()
+        .filter_map(|row| row["name"].as_str())
+        .collect();
+    assert!(
+        !key_names.contains(&"EXTRACT_BASE_URL"),
+        "secret_type=api_key filter must hide leftover lane config: {keys_body}"
+    );
+
+    let leased_url = handle_vault_lease_api_key(
+        &server,
+        VaultLeaseApiKeyParams {
+            name: "EXTRACT_BASE_URL".to_string(),
+            env_name: None,
+            agent_id: None,
+        },
+    )
+    .await
+    .expect_err("leftover lane-config url must not lease");
+    assert!(
+        leased_url.contains("lane config") || leased_url.contains("not a credential"),
+        "{leased_url}"
+    );
+
+    let leased_custom = handle_vault_lease_api_key(
+        &server,
+        VaultLeaseApiKeyParams {
+            name: "CUSTOM_ENDPOINT".to_string(),
+            env_name: None,
+            agent_id: None,
+        },
+    )
+    .await
+    .expect_err("explicit config rows must not lease even when the name is not lane-config-shaped");
+    assert!(
+        leased_custom.contains("config") && leased_custom.contains("not a credential"),
+        "{leased_custom}"
+    );
+
+    let pools = crate::vault_ops::load_unlocked_api_key_secret_pools(&server).expect("pools");
+    assert!(
+        !pools.contains_key("EXTRACT_BASE_URL"),
+        "leftover api_key EXTRACT_BASE_URL must not enter API-key pools: {:?}",
+        pools.keys().collect::<Vec<_>>()
+    );
+    assert!(
+        !pools.contains_key("CUSTOM_ENDPOINT"),
+        "config CUSTOM_ENDPOINT must not enter API-key pools: {:?}",
+        pools.keys().collect::<Vec<_>>()
+    );
+}

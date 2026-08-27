@@ -518,7 +518,9 @@ fn load_unlocked_api_key_secret_pools_filtered(
                     );
                     continue;
                 }
-                if entry.secret_type != SECRET_TYPE_API_KEY {
+                if memcore::effective_vault_secret_type(&entry.name, &entry.secret_type)
+                    != SECRET_TYPE_API_KEY
+                {
                     record_rotation_member_drop(
                         &mut dropped,
                         &mut prefix_drop,
@@ -589,7 +591,9 @@ fn load_unlocked_api_key_secret_pools_filtered(
                 record_listed_drop(&mut dropped, &entry.name, AliasSkipClass::ListedWrongType);
                 continue;
             }
-            if entry.secret_type != SECRET_TYPE_API_KEY {
+            if memcore::effective_vault_secret_type(&entry.name, &entry.secret_type)
+                != SECRET_TYPE_API_KEY
+            {
                 record_listed_drop(&mut dropped, &entry.name, AliasSkipClass::ListedWrongType);
                 continue;
             }

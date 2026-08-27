@@ -35,6 +35,16 @@ fn temp_store() -> memcore::MemoryStore {
 }
 
 fn put_secret(store: &memcore::MemoryStore, key: &[u8; 32], name: &str, value: &str) {
+    put_secret_typed(store, key, name, value, "api_key");
+}
+
+fn put_secret_typed(
+    store: &memcore::MemoryStore,
+    key: &[u8; 32],
+    name: &str,
+    value: &str,
+    secret_type: &str,
+) {
     let (encrypted_value, nonce) =
         crate::vault_crypto::encrypt(key, value.as_bytes()).expect("encrypt test secret");
     store
@@ -42,7 +52,7 @@ fn put_secret(store: &memcore::MemoryStore, key: &[u8; 32], name: &str, value: &
             name: name.to_string(),
             encrypted_value,
             nonce,
-            secret_type: "api_key".to_string(),
+            secret_type: secret_type.to_string(),
             description: "test secret".to_string(),
             allowed_agents: None,
             created_at: "2026-06-09T00:00:00Z".to_string(),
@@ -51,6 +61,27 @@ fn put_secret(store: &memcore::MemoryStore, key: &[u8; 32], name: &str, value: &
             access_count: 0,
         })
         .expect("upsert test secret");
+}
+
+#[test]
+fn local_lease_refuses_explicit_config_even_when_name_is_not_lane_config() {
+    let store = temp_store();
+    let key = crate::vault_crypto::derive_cheap("test-password", b"1234567890123456").expect("key");
+    put_secret_typed(
+        &store,
+        key.bytes(),
+        "CUSTOM_ENDPOINT",
+        "https://example.test/v1",
+        "config",
+    );
+    let err =
+        super::super::vault_cli::lease_api_key_from_store(&store, key.bytes(), "CUSTOM_ENDPOINT")
+            .expect_err("explicit config must not lease as an API key");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("config") && msg.contains("not a credential"),
+        "{msg}"
+    );
 }
 
 #[test]

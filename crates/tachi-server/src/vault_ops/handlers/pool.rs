@@ -230,6 +230,22 @@ pub(crate) async fn handle_vault_lease_api_key(
                 params.name
             ));
         }
+        let stored = server
+            .with_global_store_read(|store| {
+                store
+                    .vault_get_entry(&params.name)
+                    .map_err(|e| e.to_string())
+            })
+            .map_err(|e| format!("Failed to read vault entry: {e}"))?;
+        if let Some(entry) = stored {
+            let effective = memcore::effective_vault_secret_type(&entry.name, &entry.secret_type);
+            if effective != memcore::SECRET_TYPE_API_KEY {
+                return Err(format!(
+                    "Vault name '{}' is {effective}, not a credential; refusing to lease it as an API key",
+                    params.name
+                ));
+            }
+        }
 
         let pool = load_unlocked_api_key_secret_pool(server, &params.name)?;
         let selected = pool.first().ok_or_else(|| {
