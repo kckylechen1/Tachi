@@ -8,16 +8,18 @@
 //! ## State machine (S1)
 //!
 //! ```text
-//!   active ──dispatch admission──▶ dispatching
-//!     ▲                                │
-//!     └── clean / fenced terminal ◀────┘
-//!     ├──removal claim──▶ removing ──success──▶ reclaimed
-//!     │                       │
-//!     │                       └──failure──▶ active
-//!     └──────────reclaim─────────────────▶ reclaimed
+//!   provisioning ──complete resource ledger──▶ active
+//!                                                ├──dispatch──▶ dispatching
+//!                                                │                 │
+//!                                                ◀──── terminal ───┘
+//!                                                ├──removal──▶ removing
+//!                                                │               ├──success──▶ reclaimed
+//!                                                ◀────failure─────┘
+//!                                                └──reclaim──▶ reclaimed
 //!
-//! A crash while `dispatching` stays fail-closed. Reclaim refuses that state;
-//! reconciliation must first establish a clean or fenced terminal outcome.
+//! A crash while `provisioning` or `dispatching` stays fail-closed. Reclaim
+//! refuses either state; reconciliation must establish a complete ledger or a
+//! clean/fenced terminal outcome.
 //! ```
 //!
 //! Normal terminal actions route through [`reclaim_exec_env`]. A destructive
@@ -54,6 +56,9 @@ fn path_is_within(candidate: &str, root: &str) -> bool {
 /// admission state; it prevents two workers from sharing one preimage/lease.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExecEnvState {
+    /// Lease identity is reserved while its complete resource ledger is being
+    /// published. Dispatch and destructive cleanup both reject this state.
+    Provisioning,
     /// Provisioned and in use — the worktree exists and the lease owns it.
     Active,
     /// Exclusively admitted to one in-flight dispatch. A daemon crash leaves
@@ -70,6 +75,7 @@ pub enum ExecEnvState {
 impl ExecEnvState {
     pub fn as_str(self) -> &'static str {
         match self {
+            ExecEnvState::Provisioning => "provisioning",
             ExecEnvState::Active => "active",
             ExecEnvState::Dispatching => "dispatching",
             ExecEnvState::Removing => "removing",
@@ -82,12 +88,13 @@ impl ExecEnvState {
     /// masquerade as `active` (usable) or `reclaimed` (torn down).
     pub fn parse(raw: &str) -> Result<Self, MemoryError> {
         match raw {
+            "provisioning" => Ok(ExecEnvState::Provisioning),
             "active" => Ok(ExecEnvState::Active),
             "dispatching" => Ok(ExecEnvState::Dispatching),
             "removing" => Ok(ExecEnvState::Removing),
             "reclaimed" => Ok(ExecEnvState::Reclaimed),
             other => Err(MemoryError::InvalidArg(format!(
-                "unknown exec_env state '{other}' (expected 'active', 'dispatching', 'removing', or 'reclaimed')"
+                "unknown exec_env state '{other}' (expected 'provisioning', 'active', 'dispatching', 'removing', or 'reclaimed')"
             ))),
         }
     }
@@ -285,6 +292,22 @@ fn row_to_lease(row: &rusqlite::Row<'_>) -> Result<ExecEnvLease, rusqlite::Error
 /// Insert a new lease. Fails if `env_id` already exists — a lease id collision
 /// is a bug, never a silent overwrite that could orphan the prior worktree.
 pub fn insert_exec_env(conn: &Connection, lease: &NewExecEnvLease) -> Result<(), MemoryError> {
+    insert_exec_env_in_state(conn, lease, ExecEnvState::Active)
+}
+
+/// Reserve a lease identity while its resource ledger is still being built.
+pub fn insert_provisioning_exec_env(
+    conn: &Connection,
+    lease: &NewExecEnvLease,
+) -> Result<(), MemoryError> {
+    insert_exec_env_in_state(conn, lease, ExecEnvState::Provisioning)
+}
+
+fn insert_exec_env_in_state(
+    conn: &Connection,
+    lease: &NewExecEnvLease,
+    state: ExecEnvState,
+) -> Result<(), MemoryError> {
     let created_at = if lease.created_at.trim().is_empty() {
         normalize_utc_iso_or_now("")
     } else {
@@ -294,7 +317,7 @@ pub fn insert_exec_env(conn: &Connection, lease: &NewExecEnvLease) -> Result<(),
         "INSERT INTO exec_envs
          (env_id, kind, path, repo_root, branch, base_sha, dispatch_id, agent_identity_id, claim_id,
           env_class, state, reclaim_reason, schema_version, created_at, reclaimed_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, NULL, ?8, 'active', NULL, 1, ?9, NULL)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, NULL, ?8, ?9, NULL, 1, ?10, NULL)",
         params![
             lease.env_id,
             lease.kind,
@@ -304,6 +327,7 @@ pub fn insert_exec_env(conn: &Connection, lease: &NewExecEnvLease) -> Result<(),
             lease.base_sha,
             lease.dispatch_id,
             lease.env_class.as_str(),
+            state.as_str(),
             created_at,
         ],
     )?;
@@ -346,7 +370,7 @@ pub fn find_live_exec_env_by_path(
 ) -> Result<Option<ExecEnvLease>, MemoryError> {
     let sql = format!(
         "SELECT {SELECT_COLUMNS} FROM exec_envs \
-         WHERE path = ?1 AND state IN ('active', 'dispatching', 'removing') \
+         WHERE path = ?1 AND state IN ('provisioning', 'active', 'dispatching', 'removing') \
          ORDER BY created_at DESC LIMIT 1"
     );
     let lease = conn
@@ -678,6 +702,11 @@ pub fn reclaim_exec_env(
     }
     let outcome = match ExecEnvState::parse(&state_raw)? {
         ExecEnvState::Reclaimed => ReclaimOutcome::AlreadyReclaimed { env_id },
+        ExecEnvState::Provisioning => {
+            return Err(MemoryError::WorkClaimIncompatibleState(format!(
+                "refusing to reclaim exec env {env_id}: provisioning has not published its resource ledger"
+            )))
+        }
         ExecEnvState::Dispatching => {
             return Err(MemoryError::WorkClaimIncompatibleState(format!(
                 "refusing to reclaim exec env {env_id}: an admitted dispatch still owns it"

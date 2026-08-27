@@ -556,7 +556,9 @@ pub(crate) fn provision_managed_env(
         created_at: String::new(),
     };
 
-    match memcore::insert_exec_env(store.connection_mut(), &lease).map_err(|e| e.to_string()) {
+    match memcore::insert_provisioning_exec_env(store.connection_mut(), &lease)
+        .map_err(|e| e.to_string())
+    {
         Ok(()) => {
             let build_target = opts.build_target_dir(&report.path)?;
             let build_target = build_target.as_ref().map(|p| p.display().to_string());
@@ -595,7 +597,11 @@ fn register_env_resources_or_rollback(
     build_target: Option<&str>,
     approval: Option<&PrivateTargetApproval>,
 ) -> Result<EnvResources, String> {
-    match register_env_resources(store, env_id, class, worktree_path, build_target, approval) {
+    match register_env_resources(store, env_id, class, worktree_path, build_target, approval)
+        .and_then(|resources| {
+            publish_provisioned_env(store, env_id)?;
+            Ok(resources)
+        }) {
         Ok(resources) => Ok(resources),
         Err(error) => {
             rollback_failed_resource_registration(store, env_id).map_err(|rollback_error| {
@@ -613,6 +619,42 @@ fn register_env_resources_or_rollback(
     }
 }
 
+fn publish_provisioned_env(store: &mut memcore::MemoryStore, env_id: &str) -> Result<(), String> {
+    let tx = store
+        .connection_mut()
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| error.to_string())?;
+    let (bindings, inactive): (i64, i64) = tx
+        .query_row(
+            "SELECT COUNT(*), \
+                    COALESCE(SUM(CASE WHEN r.state = 'active' THEN 0 ELSE 1 END), 0) \
+             FROM exec_env_resource_bindings b \
+             JOIN exec_env_resources r ON r.resource_id = b.resource_id \
+             WHERE b.env_id = ?1 AND b.released_at IS NULL",
+            rusqlite::params![env_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(|error| error.to_string())?;
+    if bindings == 0 || inactive != 0 {
+        return Err(format!(
+            "refusing to publish exec env {env_id}: {bindings} live bindings, {inactive} non-active resources"
+        ));
+    }
+    let changed = tx
+        .execute(
+            "UPDATE exec_envs SET state = 'active' \
+             WHERE env_id = ?1 AND state = 'provisioning'",
+            rusqlite::params![env_id],
+        )
+        .map_err(|error| error.to_string())?;
+    if changed != 1 {
+        return Err(format!(
+            "exec env {env_id} lost its provisioning ownership before publication"
+        ));
+    }
+    tx.commit().map_err(|error| error.to_string())
+}
+
 fn rollback_failed_resource_registration(
     store: &mut memcore::MemoryStore,
     env_id: &str,
@@ -627,15 +669,20 @@ fn rollback_failed_resource_registration(
         rusqlite::params![env_id, chrono::Utc::now().to_rfc3339()],
     )
     .map_err(|error| error.to_string())?;
+    tx.execute(
+        "DELETE FROM hard_state WHERE namespace = ?1 AND key = ?2",
+        rusqlite::params![PRIVATE_RESERVATION_NS, env_id],
+    )
+    .map_err(|error| error.to_string())?;
     let deleted = tx
         .execute(
-            "DELETE FROM exec_envs WHERE env_id = ?1 AND state = 'active'",
+            "DELETE FROM exec_envs WHERE env_id = ?1 AND state = 'provisioning'",
             rusqlite::params![env_id],
         )
         .map_err(|error| error.to_string())?;
     if deleted != 1 {
         return Err(format!(
-            "expected one active lease for {env_id}, deleted {deleted}"
+            "expected one provisioning lease for {env_id}, deleted {deleted}"
         ));
     }
     tx.commit().map_err(|error| error.to_string())
@@ -1793,7 +1840,7 @@ mod tests {
         )
         .unwrap();
 
-        memcore::insert_exec_env(
+        memcore::insert_provisioning_exec_env(
             store.connection(),
             &NewExecEnvLease {
                 env_id: "env-new".to_string(),
@@ -1838,6 +1885,13 @@ mod tests {
     #[test]
     fn resource_registration_failure_exposes_no_active_lease_or_partial_binding() {
         let mut store = store_with_lease("env-p", EnvClass::BuildPrivate, "/wt/p");
+        store
+            .connection()
+            .execute(
+                "UPDATE exec_envs SET state = 'provisioning' WHERE env_id = 'env-p'",
+                [],
+            )
+            .unwrap();
         let target_id = ensure_resource(
             store.connection_mut(),
             ResourceKind::BuildTarget,
@@ -1871,6 +1925,88 @@ mod tests {
         assert_eq!(
             memcore::active_binding_count(store.connection(), &target_id).unwrap(),
             0
+        );
+    }
+
+    #[test]
+    fn provisioning_binding_and_removal_race_keeps_one_publication_owner() {
+        use std::sync::{Arc, Barrier};
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("provision-race.sqlite");
+        let db_path = db.to_string_lossy().into_owned();
+        let mut seed = memcore::MemoryStore::open(&db_path).unwrap();
+        memcore::insert_provisioning_exec_env(
+            seed.connection(),
+            &NewExecEnvLease {
+                env_id: "env-race".to_string(),
+                kind: "worktree".to_string(),
+                path: "/wt/race".to_string(),
+                repo_root: "/repo".to_string(),
+                branch: "tachi/894/race".to_string(),
+                base_sha: "abc1234".to_string(),
+                dispatch_id: None,
+                env_class: EnvClass::BuildPrivate,
+                created_at: String::new(),
+            },
+        )
+        .unwrap();
+        let worktree_id =
+            ensure_resource(seed.connection_mut(), ResourceKind::Worktree, "/wt/race").unwrap();
+        memcore::bind_resource(seed.connection_mut(), "env-race", &worktree_id).unwrap();
+        let target_id = ensure_resource(
+            seed.connection_mut(),
+            ResourceKind::BuildTarget,
+            "/wt/race/target",
+        )
+        .unwrap();
+
+        let barrier = Arc::new(Barrier::new(2));
+        let removal_barrier = Arc::clone(&barrier);
+        let removal_db = db_path.clone();
+        let removal = std::thread::spawn(move || {
+            let mut store = memcore::MemoryStore::open(&removal_db).unwrap();
+            removal_barrier.wait();
+            memcore::claim_exec_env_removal(store.connection_mut(), "/wt/race")
+        });
+        let binding_barrier = Arc::clone(&barrier);
+        let binding_db = db_path.clone();
+        let binding_target = target_id.clone();
+        let binding = std::thread::spawn(move || {
+            let mut store = memcore::MemoryStore::open(&binding_db).unwrap();
+            binding_barrier.wait();
+            memcore::bind_resource(store.connection_mut(), "env-race", &binding_target)
+        });
+
+        let removal_error = removal
+            .join()
+            .unwrap()
+            .expect_err("a cleaner cannot claim a lease before publication");
+        assert!(removal_error.to_string().contains("provisioning"));
+        binding
+            .join()
+            .unwrap()
+            .expect("the provisioning owner may finish the target binding");
+        publish_provisioned_env(&mut seed, "env-race").unwrap();
+        assert_eq!(
+            memcore::get_exec_env(seed.connection(), "env-race")
+                .unwrap()
+                .unwrap()
+                .state,
+            ExecEnvState::Active
+        );
+
+        assert_eq!(
+            memcore::claim_exec_env_removal(seed.connection_mut(), "/wt/race").unwrap(),
+            Some("env-race".to_string())
+        );
+        assert_eq!(
+            memcore::get_resource(seed.connection(), &target_id)
+                .unwrap()
+                .unwrap()
+                .state,
+            ResourceState::Reclaiming,
+            "once published, removal must atomically claim the late-bound in-tree target"
         );
     }
 

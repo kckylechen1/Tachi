@@ -917,16 +917,20 @@ pub fn bind_resource(
 ) -> Result<BindOutcome, MemoryError> {
     let tx = write_tx(conn)?;
 
-    let env_exists: bool = tx
+    let env_state: Option<String> = tx
         .query_row(
-            "SELECT 1 FROM exec_envs WHERE env_id = ?1",
+            "SELECT state FROM exec_envs WHERE env_id = ?1",
             params![env_id],
-            |_| Ok(true),
+            |row| row.get(0),
         )
-        .optional()?
-        .unwrap_or(false);
-    if !env_exists {
+        .optional()?;
+    let Some(env_state) = env_state else {
         return Err(MemoryError::NotFound(format!("exec_env '{env_id}'")));
+    };
+    if env_state != "active" && env_state != "provisioning" {
+        return Err(MemoryError::InvalidArg(format!(
+            "exec_env '{env_id}' is '{env_state}'; only active leases or the provisioning owner may bind resources"
+        )));
     }
 
     let Some(state) = state_in_tx(&tx, resource_id)? else {
@@ -2296,6 +2300,22 @@ mod tests {
             bind_resource(&mut conn, "env-1", "ghost-res").is_err(),
             "binding an unknown resource must fail closed"
         );
+        for state in ["dispatching", "removing", "reclaimed"] {
+            conn.execute(
+                "UPDATE exec_envs SET state = ?1 WHERE env_id = 'env-1'",
+                params![state],
+            )
+            .unwrap();
+            assert!(
+                bind_resource(&mut conn, "env-1", "res-1").is_err(),
+                "a {state} lease must not acquire a late resource binding"
+            );
+        }
+        conn.execute(
+            "UPDATE exec_envs SET state = 'active' WHERE env_id = 'env-1'",
+            [],
+        )
+        .unwrap();
 
         let calls = Cell::new(0);
         reclaim_resource(&mut conn, "res-1", None, counting_deleter(&calls, 10)).unwrap();
