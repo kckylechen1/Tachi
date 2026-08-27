@@ -8,8 +8,10 @@
 //! # Law
 //!
 //! 1. Only assertions whose `review_state` is admitted (`Observed` /
-//!    `Reviewed`) and whose `authority_class` may establish the predicate
-//!    participate. Model prose and rejected evidence never affect current
+//!    `Reviewed`), whose `authority_class` may establish the predicate, and
+//!    whose value shape is admissible for the predicate
+//!    ([`PredicateV1::admits_value`]) participate. Model prose, rejected
+//!    evidence, and predicate-invalid value shapes never affect current
 //!    truth, even when they cite evidence.
 //! 2. Assertions may supersede each other **only within the same lineage** —
 //!    same `(subject, predicate, authority_class, issuer, source)`. Within a
@@ -130,13 +132,17 @@ impl ReductionV1 {
 /// always yields the equal [`ReductionV1`]. Duplicate assertion ids are
 /// collapsed; arrival order is never an input.
 pub fn reduce(assertions: &[AssertionV1]) -> ReductionV1 {
-    // 1. Admission gate FIRST: candidate/rejected evidence and
-    // predicate-inadmissible authority never affect current truth — not
-    // even through an id collision with an admitted row.
+    // 1. Admission gate FIRST: candidate/rejected evidence,
+    //    predicate-inadmissible authority, and predicate-inadmissible value
+    //    shapes never affect current truth — not even through an id
+    //    collision with an admitted row. (The store rejects the last at
+    //    append and decode; this gate makes the pure reducer equally safe
+    //    over hand-built in-memory sets.)
     let admitted_input: Vec<&AssertionV1> = assertions
         .iter()
         .filter(|a| a.review_state.is_admitted())
         .filter(|a| a.authority_class.may_establish(a.predicate))
+        .filter(|a| a.predicate.admits_value(&a.value))
         .collect();
 
     // 2. Deduplicate by assertion id so a replayed read cannot double-count.

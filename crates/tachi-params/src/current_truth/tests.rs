@@ -2871,3 +2871,43 @@ fn agreeing_sibling_head_at_same_revision_does_not_stale_claim() {
         "plain-predicate claims use the same reconciled (instant, revision) rule"
     );
 }
+
+// ── Codex R2 round 8 accepted finding ──────────────────────────────────────
+
+/// R8-1: the value-shape admission gate holds at the PURE reducer too — a
+/// hand-built in-memory set cannot smuggle an issue-target link into
+/// `linked_prs` (the store rejects the pairing; `reduce` must be equally
+/// safe over arbitrary input sets).
+#[test]
+fn reducer_admission_gate_rejects_inadmissible_value_shapes() {
+    let malformed_link = AssertionV1 {
+        assertion_id: "r13-malformed-link".to_string(),
+        subject: issue(100),
+        predicate: PredicateV1::ImplementationPrLinked,
+        value: AssertionValueV1::ObjectRef(GithubObjectRefV1::Issue(7)),
+        issuer: "github-refresh-v1".to_string(),
+        authority_class: AuthorityClassV1::GitHubTypedObject,
+        source_ref: SourceRefV1 {
+            source: "github-snapshot-adapter".to_string(),
+            revision: "r13".to_string(),
+        },
+        observed_at: "2026-08-26T10:00:00Z".to_string(),
+        effective_at: "2026-08-26T10:00:00Z".to_string(),
+        supersedes_assertion_id: None,
+        evidence_refs: vec![],
+        review_state: ReviewStateV1::Observed,
+        visibility: VisibilityClassV1::Public,
+    };
+    let reduction = reduce(&[malformed_link]);
+    assert_eq!(
+        reduction
+            .get(&issue(100), PredicateV1::ImplementationPrLinked)
+            .status,
+        ReductionStatusV1::Unknown,
+        "a predicate-invalid value shape never participates in reduction"
+    );
+    assert!(
+        reduction.linked_prs(&issue(100)).is_empty(),
+        "an issue target can never become an implementation PR"
+    );
+}
