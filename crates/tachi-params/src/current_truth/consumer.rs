@@ -78,6 +78,13 @@ pub enum ConsumerViewError {
 /// store's recorded refresh metadata; a repository with no recorded posture
 /// is **unknown, never fresh** (#1696: GitHub unavailable ⇒ unknown/stale,
 /// never guessed current).
+///
+/// Visibility is **subject-scoped and fail-closed** for unauthorized
+/// callers: a subject with ANY private row (including a public→private
+/// transition's newer rows) is hidden entirely, with its historical public
+/// rows — otherwise a subject that became private would stay exposed
+/// through its older public assertions. Health is computed over the
+/// visible set only, so counts cannot be used to infer hidden existence.
 pub fn read_view(
     store: &CurrentTruthSqliteStore,
     repo: &str,
@@ -87,11 +94,17 @@ pub fn read_view(
         .refresh_posture_row(repo)?
         .ok_or_else(|| ConsumerViewError::NoPosture(repo.to_string()))?;
     let assertions = store.assertions_for_repo(repo)?;
+    let mut hidden_subjects: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    if !authorization.sees_private {
+        for assertion in &assertions {
+            if assertion.visibility == VisibilityClassV1::Private {
+                hidden_subjects.insert(assertion.subject.as_token());
+            }
+        }
+    }
     let visible: Vec<_> = assertions
         .into_iter()
-        .filter(|assertion| {
-            authorization.sees_private || assertion.visibility == VisibilityClassV1::Public
-        })
+        .filter(|assertion| !hidden_subjects.contains(&assertion.subject.as_token()))
         .collect();
     let reduction = super::reducer::reduce(&visible);
     let refresh_debt = usize::from(!posture.fresh);

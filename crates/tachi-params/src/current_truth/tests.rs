@@ -917,9 +917,10 @@ fn consumer_fixture_reads_heads_without_raw_assertion_internals() {
         .expect("implementation_present row");
     assert_eq!(merged.status, ReductionStatusV1::Current);
     let head = merged.evidence_heads.first().expect("evidence head");
-    assert_eq!(
-        head.source_revision, "rev2-iss",
-        "per-issue mint at the issue's revision"
+    assert!(
+        head.source_revision.starts_with("composite-"),
+        "issue-owned relation assertions carry the composite revision: {}",
+        head.source_revision
     );
     assert_eq!(head.source, "github-snapshot-adapter");
     let action = issue_row.open_action.as_ref().expect("action");
@@ -1329,4 +1330,216 @@ fn public_pr_never_exposes_linked_private_issue() {
         .subjects
         .iter()
         .any(|s| s.subject_token == "kckylechen1/tachi#issue:100"));
+}
+
+// ── Review round 2 fixes (codex R2 round 2) ───────────────────────────────
+
+/// A subject that becomes private in a newer revision is hidden entirely —
+/// its older public rows must not keep exposing it.
+#[test]
+fn public_to_private_transition_hides_subject_entirely() {
+    let store = open_store();
+    // v2: everything public.
+    store
+        .append_all(&mint_assertions(&state_v2()))
+        .expect("append v2");
+    // v3: the issue transitioned to private.
+    let mut private = state_v3();
+    private.issues[0].visibility = VisibilityClassV1::Private;
+    store
+        .append_all(&mint_assertions(&private))
+        .expect("append v3");
+    store
+        .record_refresh(
+            REPO,
+            true,
+            Some("r3"),
+            Some("2026-08-26T12:00:00Z"),
+            "2026-08-26T12:00:05Z",
+            None,
+        )
+        .expect("posture");
+
+    let unauthorized = consumer::read_view(
+        &store,
+        REPO,
+        CallerAuthorizationV1 {
+            sees_private: false,
+        },
+    )
+    .expect("view");
+    let serialized = serde_json::to_string(&unauthorized).unwrap();
+    assert!(
+        !serialized.contains("issue:100"),
+        "older public rows must not keep exposing a now-private subject: {serialized}"
+    );
+
+    let authorized =
+        consumer::read_view(&store, REPO, CallerAuthorizationV1 { sees_private: true })
+            .expect("authorized view");
+    assert!(authorized
+        .subjects
+        .iter()
+        .any(|s| s.subject_token == "kckylechen1/tachi#issue:100"));
+}
+
+/// Two merged linked PRs: the presence SHA is picked deterministically by
+/// (instant, PR number, SHA) — snapshot ordering is irrelevant.
+#[test]
+fn two_merged_linked_prs_presence_is_order_independent() {
+    let base = GithubRepositoryStateV1 {
+        repo: REPO.to_string(),
+        refresh_revision: "r1".to_string(),
+        refreshed_at: "2026-08-26T10:00:00Z".to_string(),
+        issues: vec![snapshot_issue(
+            100,
+            SnapshotIssueStateV1::Open,
+            "2026-08-26T10:00:00Z",
+            "rev1-iss",
+        )],
+        pull_requests: vec![],
+        observations: vec![],
+    };
+    let newer_pr = snapshot_pr(
+        300,
+        SnapshotPrStateV1::Merged,
+        "2026-08-26T12:00:00Z",
+        "rev1-pr300",
+        vec![100],
+    );
+    let older_pr = snapshot_pr(
+        200,
+        SnapshotPrStateV1::Merged,
+        "2026-08-26T11:00:00Z",
+        "rev1-pr200",
+        vec![100],
+    );
+
+    let mut order_a = base.clone();
+    order_a.pull_requests = vec![older_pr.clone(), newer_pr.clone()];
+    let mut order_b = base.clone();
+    order_b.pull_requests = vec![newer_pr, older_pr];
+
+    let mut minted_a = mint_assertions(&order_a);
+    let mut minted_b = mint_assertions(&order_b);
+    minted_a.sort_by(|x, y| x.assertion_id.cmp(&y.assertion_id));
+    minted_b.sort_by(|x, y| x.assertion_id.cmp(&y.assertion_id));
+    assert_eq!(minted_a, minted_b, "merged-PR snapshot order is irrelevant");
+
+    let reduction = reduce(&minted_a);
+    let presence = reduction.get(&issue(100), PredicateV1::ImplementationPresent);
+    // The newest merge (PR 300 at 12:00) is the evidenced presence SHA.
+    assert_eq!(
+        presence.values.first(),
+        Some(&AssertionValueV1::CommitSha("mergeabc123".to_string()))
+    );
+    assert!(reduction.implementation_present(&issue(100)));
+}
+
+/// Two DIFFERENT assertions claiming the same immutable id reduce to
+/// `conflicted` regardless of the order they are handed to the reducer.
+#[test]
+fn duplicate_id_different_content_is_order_independent_conflict() {
+    let base = mint_assertions(&state_v1());
+    let mut tampered = base
+        .iter()
+        .find(|a| a.predicate == PredicateV1::IssueOpen)
+        .unwrap()
+        .clone();
+    // Same id, different content (evidence changed).
+    tampered.evidence_refs = vec!["smuggled-evidence".to_string()];
+
+    let forward = reduce(&[base[0].clone(), tampered.clone()]);
+    let backward = reduce(&[tampered, base[0].clone()]);
+    assert_eq!(
+        forward.get(&issue(100), PredicateV1::IssueOpen).status,
+        ReductionStatusV1::Conflicted,
+        "identity contradiction must surface, not silently resolve"
+    );
+    assert_eq!(
+        forward.get(&issue(100), PredicateV1::IssueOpen).status,
+        backward.get(&issue(100), PredicateV1::IssueOpen).status
+    );
+}
+
+/// Two lifecycle predicates tying at the same instant AND source revision
+/// conflict — the id never breaks the tie.
+#[test]
+fn same_instant_and_revision_lifecycle_tie_conflicts() {
+    let tied_open = AssertionV1 {
+        assertion_id: "tie-open-1".to_string(),
+        subject: issue(100),
+        predicate: PredicateV1::IssueOpen,
+        value: AssertionValueV1::Unit,
+        issuer: "adapter".to_string(),
+        authority_class: AuthorityClassV1::GitHubTypedObject,
+        source_ref: SourceRefV1 {
+            source: "github-snapshot-adapter".to_string(),
+            revision: "rev-tie".to_string(),
+        },
+        observed_at: "2026-08-26T10:00:00Z".to_string(),
+        effective_at: "2026-08-26T10:00:00Z".to_string(),
+        supersedes_assertion_id: None,
+        evidence_refs: vec![],
+        review_state: ReviewStateV1::Observed,
+        visibility: VisibilityClassV1::Public,
+    };
+    // A different issuer for the closed claim — a genuinely different
+    // authority asserting the opposite at the identical revision.
+    let mut tied_closed = tied_open.clone();
+    tied_closed.assertion_id = "tie-closed-1".to_string();
+    tied_closed.predicate = PredicateV1::IssueClosed;
+    tied_closed.issuer = "owner-tool".to_string();
+    tied_closed.authority_class = AuthorityClassV1::OwnerDecision;
+
+    let reduction = reduce(&[tied_open, tied_closed]);
+    assert_eq!(
+        reduction.issue_lifecycle(&issue(100)),
+        IssueLifecycleView::Conflicted,
+        "open and closed at the identical instant+revision is a conflict, not an id tiebreak"
+    );
+}
+
+/// A refresh record with a malformed attempt timestamp is refused.
+#[test]
+fn refresh_record_with_malformed_timestamp_refused() {
+    let store = open_store();
+    match store.record_refresh(REPO, true, Some("r1"), Some("t"), "yesterday", None) {
+        Err(CurrentTruthStoreError::MalformedObservedAt(_)) => {}
+        other => panic!("expected MalformedObservedAt, got {other:?}"),
+    }
+}
+
+/// A PR-only change (new merge) changes the composite revision of the
+/// issue-owned relation assertions instead of colliding with the
+/// issue-only token.
+#[test]
+fn pr_only_change_moves_composite_revision_not_collision() {
+    let store = open_store();
+    // v1: PR open, linked.
+    store
+        .append_all(&mint_assertions(&state_v1()))
+        .expect("append v1");
+    // PR merges while the ISSUE snapshot itself did not move.
+    let mut pr_only = state_v1();
+    pr_only.issues[0].snapshot_revision = "rev1-iss".to_string(); // unchanged
+    pr_only.issues[0].updated_at = "2026-08-26T10:00:00Z".to_string(); // unchanged
+    pr_only.pull_requests[0] = snapshot_pr(
+        200,
+        SnapshotPrStateV1::Merged,
+        "2026-08-26T11:30:00Z",
+        "rev2-pr",
+        vec![100],
+    );
+    let minted = mint_assertions(&pr_only);
+    let append = store.append_all(&minted);
+    match append {
+        Ok(count) => assert!(count > 0, "the PR-side change must append new facts"),
+        Err(CurrentTruthStoreError::ContradictsExistingRevision(key)) => {
+            panic!("PR-only change collided at {key:?}");
+        }
+        other => panic!("unexpected append outcome {other:?}"),
+    }
+    let reduction = reduce(&store.assertions().unwrap());
+    assert!(reduction.implementation_present(&issue(100)));
 }

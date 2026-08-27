@@ -194,46 +194,60 @@ pub fn mint_assertions(state: &GithubRepositoryStateV1) -> Vec<AssertionV1> {
         // the COMPLETE set at this revision (empty set = "linked to
         // nothing"), so link removal arrives as a newer revision and
         // supersedes — never as silence that leaves a stale link current.
-        let mut linked: Vec<GithubObjectRefV1> = state
+        // The revision is a COMPOSITE over the issue snapshot AND every
+        // linked PR's snapshot — a PR-only change (new merge, state move)
+        // must change the revision, not collide with the issue-only token.
+        let mut linked_prs_snapshot: Vec<&SnapshotPrV1> = state
             .pull_requests
             .iter()
             .filter(|pr| pr.linked_issues.contains(&issue.number))
+            .collect();
+        linked_prs_snapshot.sort_by_key(|pr| pr.number);
+        let linked: Vec<GithubObjectRefV1> = linked_prs_snapshot
+            .iter()
             .map(|pr| GithubObjectRefV1::PullRequest(pr.number))
             .collect();
-        linked.sort();
-        linked.dedup();
+        let composite_revision = composite_issue_revision(issue, &linked_prs_snapshot);
+        let composite_observed_at = composite_observed_at(issue, &linked_prs_snapshot);
         out.push(base_assertion(
             &subject,
             PredicateV1::ImplementationPrLinked,
-            AssertionValueV1::ObjectRefs(linked.clone()),
+            AssertionValueV1::ObjectRefs(linked),
             &source.clone(),
-            &issue.snapshot_revision,
-            &issue.updated_at,
+            &composite_revision,
+            &composite_observed_at,
             issue.visibility,
         ));
 
         // Implementation presence, minted for EVERY issue at every revision
         // so removal/retraction supersedes instead of leaving a stale
         // "present" current: `CommitSha(merge)` when a currently-linked PR
-        // merged with an evidenced SHA, `Unit` ("nothing evidenced at this
+        // merged with an evidenced SHA — deterministically the merge with
+        // the newest (instant, PR number, SHA) so PR ordering in the
+        // snapshot is irrelevant — and `Unit` ("nothing evidenced at this
         // revision") otherwise. Human reviewed dispositions append the same
         // predicate through their own lineage.
-        let present = state.pull_requests.iter().find_map(|pr| {
-            if pr.linked_issues.contains(&issue.number)
-                && matches!(pr.state, SnapshotPrStateV1::Merged)
-            {
-                pr.merge_commit_sha.clone().map(AssertionValueV1::CommitSha)
-            } else {
-                None
-            }
-        });
+        let present = linked_prs_snapshot
+            .iter()
+            .filter(|pr| matches!(pr.state, SnapshotPrStateV1::Merged))
+            .filter_map(|pr| {
+                pr.merge_commit_sha.clone().map(|sha| {
+                    (
+                        super::types::ordering_instant(&pr.updated_at),
+                        pr.number,
+                        sha,
+                    )
+                })
+            })
+            .max()
+            .map(|(_, _, sha)| AssertionValueV1::CommitSha(sha));
         out.push(base_assertion(
             &subject,
             PredicateV1::ImplementationPresent,
             present.unwrap_or(AssertionValueV1::Unit),
             &source.clone(),
-            &issue.snapshot_revision,
-            &issue.updated_at,
+            &composite_revision,
+            &composite_observed_at,
             issue.visibility,
         ));
     }
@@ -301,23 +315,66 @@ pub fn mint_assertions(state: &GithubRepositoryStateV1) -> Vec<AssertionV1> {
         }
     }
 
-    // Deterministic ids derived from the immutable inputs: subject,
-    // predicate, source revision, and the value digest. The value component
-    // keeps two assertions that share a revision but assert different facts
-    // (e.g. a tampered re-mint) from colliding on one identity.
+    // Deterministic ids derived from every identity-bearing input: subject,
+    // predicate, authority, issuer, source, source revision, and the FULL
+    // value digest (no truncation). Two assertions that differ in any of
+    // these can never collide on one identity, and the same state always
+    // mints the same ids (idempotent append).
     for assertion in &mut out {
         let value_digest = memcore::canonical_digest::canonical_json_digest_hex(
             &serde_json::to_value(&assertion.value).unwrap_or_default(),
         );
         assertion.assertion_id = format!(
-            "ct-{}-{}-{}-{}",
+            "ct-{}-{}-{:?}-{}-{}-{}-{}",
             assertion.subject.as_token(),
             assertion.predicate.as_str(),
+            assertion.authority_class,
+            assertion.issuer,
+            assertion.source_ref.source,
             assertion.source_ref.revision,
-            &value_digest[..12.min(value_digest.len())],
+            value_digest,
         );
     }
     out
+}
+
+/// The composite revision token for issue-owned relation assertions: a
+/// digest over the issue snapshot revision AND every currently-linked PR's
+/// number, snapshot revision, state, and merge SHA (PRs sorted by number —
+/// snapshot order is irrelevant). A PR-only change changes the token; the
+/// same semantic state always yields the same token.
+fn composite_issue_revision(issue: &SnapshotIssueV1, linked_prs: &[&SnapshotPrV1]) -> String {
+    let prs: Vec<serde_json::Value> = linked_prs
+        .iter()
+        .map(|pr| {
+            serde_json::json!({
+                "number": pr.number,
+                "snapshot_revision": pr.snapshot_revision,
+                "state": pr.state,
+                "merge_commit_sha": pr.merge_commit_sha,
+            })
+        })
+        .collect();
+    let basis = serde_json::json!({
+        "issue_snapshot_revision": issue.snapshot_revision,
+        "issue_state": issue.state,
+        "linked_prs": prs,
+    });
+    format!(
+        "composite-{}",
+        memcore::canonical_digest::canonical_json_digest_hex(&basis)
+    )
+}
+
+/// The composite observed instant for issue-owned relation assertions: the
+/// latest `updated_at` across the issue and its currently-linked PRs, so
+/// ordering tracks the newest fact in the relation, not just the issue.
+fn composite_observed_at(issue: &SnapshotIssueV1, linked_prs: &[&SnapshotPrV1]) -> String {
+    std::iter::once(&issue.updated_at)
+        .chain(linked_prs.iter().map(|pr| &pr.updated_at))
+        .max_by_key(|updated_at| super::types::ordering_instant(updated_at))
+        .cloned()
+        .unwrap_or_else(|| issue.updated_at.clone())
 }
 
 #[allow(clippy::too_many_arguments)]

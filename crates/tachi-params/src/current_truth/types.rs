@@ -172,8 +172,12 @@ pub enum AuthorityClassV1 {
 
 impl AuthorityClassV1 {
     /// Whether this authority class may establish `predicate` at all. This is
-    /// the admission law's first gate; a violation is rejected at append time
-    /// and never reaches the reducer.
+    /// the admission law: a violation is **filtered at reduction** — the
+    /// assertion may be stored (append-only history with provenance, e.g.
+    /// model prose kept as candidate evidence) but can never become current
+    /// truth. The store itself trusts its caller; binding WHO may append
+    /// WHICH authority class is the server-integration admission surface, a
+    /// later slice (see `store.rs`'s trust-boundary note).
     pub fn may_establish(self, predicate: PredicateV1) -> bool {
         match self {
             AuthorityClassV1::GitHubTypedObject => {

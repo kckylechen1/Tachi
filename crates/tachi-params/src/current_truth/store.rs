@@ -22,6 +22,21 @@
 //! ingest adapter. The store owns a connection handed to it — the
 //! `MemoryStore` integration seam is a later slice, mirroring how
 //! `taskintent::memcore_ingest` takes a `Connection`.
+//!
+//! # Trust boundary and integration status (#1696 scope)
+//!
+//! **The store trusts its caller.** `authority_class`, `review_state`, and
+//! `issuer` are data fields the caller supplies; this library performs
+//! structural validation only. The semantic admission gate — who may append
+//! which authority class, against which live identity — is the
+//! server-integration admission surface and is deliberately OUT of this
+//! leaf: #1696's verification list ships the store, fixtures, reducer
+//! tests, and the #1693 consumer FIXTURE (discrimination 11), with no
+//! production caller. The follow-up slices that consume this seam must
+//! interpose that admission surface before any untrusted caller reaches
+//! `append`. `tachi_events` remains the collect-only observation ledger;
+//! bridging observations into assertions is a later slice, not a second
+//! authority here.
 
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -170,13 +185,24 @@ impl CurrentTruthSqliteStore {
         Ok(outcome)
     }
 
-    /// Digest over the full assertion content: value digest plus every
-    /// reduction- or visibility-relevant field.
+    /// Digest over the full assertion content INCLUDING identity fields
+    /// (subject, predicate, authority, issuer, source, revision): two
+    /// assertions that differ in any field can never compare equal, so an
+    /// id collision between distinct facts always surfaces as a typed
+    /// rejection instead of a silent duplicate.
     fn content_digest(assertion: &AssertionV1) -> String {
         let value_digest = memcore::canonical_digest::canonical_json_digest_hex(
             &serde_json::to_value(&assertion.value).unwrap_or_default(),
         );
         let basis = serde_json::json!({
+            "subject_repo": assertion.subject.repo,
+            "subject_kind": kind_token(&assertion.subject.object),
+            "subject_id": id_token(&assertion.subject.object),
+            "predicate": assertion.predicate.as_str(),
+            "authority": authority_token(assertion.authority_class),
+            "issuer": assertion.issuer,
+            "source": assertion.source_ref.source,
+            "source_revision": assertion.source_ref.revision,
             "value_digest": value_digest,
             "observed_at": assertion.observed_at,
             "effective_at": assertion.effective_at,
@@ -435,7 +461,33 @@ impl CurrentTruthSqliteStore {
         recorded_at: &str,
         unavailable_reason: Option<&str>,
     ) -> Result<(), CurrentTruthStoreError> {
-        if let Some(existing) = self.refresh_posture_row(repo)? {
+        if chrono::DateTime::parse_from_rfc3339(recorded_at).is_err() {
+            return Err(CurrentTruthStoreError::MalformedObservedAt(
+                recorded_at.to_string(),
+            ));
+        }
+        // One transaction: the staleness check and the upsert commit
+        // atomically, so a concurrent writer on the same file cannot
+        // interleave an older record over a newer one.
+        let transaction = self.conn.unchecked_transaction()?;
+        let existing: Option<RefreshPostureRowV1> = transaction
+            .query_row(
+                "SELECT fresh, last_fresh_revision, last_fresh_at, last_attempt_at,
+                        unavailable_reason
+                 FROM current_truth_refresh WHERE repo = ?1",
+                params![repo],
+                |row| {
+                    Ok(RefreshPostureRowV1 {
+                        fresh: row.get::<_, i64>(0)? != 0,
+                        last_fresh_revision: row.get(1)?,
+                        last_fresh_at: row.get(2)?,
+                        last_attempt_at: row.get(3)?,
+                        unavailable_reason: row.get(4)?,
+                    })
+                },
+            )
+            .optional()?;
+        if let Some(existing) = existing {
             if super::types::ordering_instant(recorded_at)
                 < super::types::ordering_instant(&existing.last_attempt_at)
             {
@@ -446,7 +498,7 @@ impl CurrentTruthSqliteStore {
                 });
             }
         }
-        self.conn.execute(
+        transaction.execute(
             "INSERT INTO current_truth_refresh (
                 repo, fresh, last_fresh_revision, last_fresh_at,
                 last_attempt_at, unavailable_reason
@@ -468,6 +520,7 @@ impl CurrentTruthSqliteStore {
                 unavailable_reason
             ],
         )?;
+        transaction.commit()?;
         Ok(())
     }
 
@@ -566,9 +619,22 @@ pub struct RefreshPostureRowV1 {
 /// Two projections over the same set share a generation; any append changes
 /// it. Pure — usable by both incremental and full-rebuild paths.
 pub fn generation_digest(assertions: &[AssertionV1]) -> String {
-    let mut ids: Vec<&str> = assertions.iter().map(|a| a.assertion_id.as_str()).collect();
-    ids.sort_unstable();
-    let basis = serde_json::json!({ "assertion_ids": ids });
+    let mut pairs: Vec<(&str, String)> = assertions
+        .iter()
+        .map(|assertion| {
+            (
+                assertion.assertion_id.as_str(),
+                serde_json::to_string(assertion).unwrap_or_default(),
+            )
+        })
+        .collect();
+    pairs.sort_unstable();
+    let basis = serde_json::json!({
+        "assertions": pairs
+            .into_iter()
+            .map(|(id, content)| serde_json::json!({"id": id, "content": content}))
+            .collect::<Vec<_>>(),
+    });
     memcore::canonical_digest::canonical_json_digest_hex(&basis)
 }
 

@@ -131,9 +131,27 @@ impl ReductionV1 {
 /// collapsed; arrival order is never an input.
 pub fn reduce(assertions: &[AssertionV1]) -> ReductionV1 {
     // Deduplicate by assertion id so a replayed read cannot double-count.
+    // Two DIFFERENT assertions claiming the SAME immutable id is an identity
+    // contradiction: the keeper is chosen deterministically (min content
+    // serialization — never arrival order) and the affected (subject,
+    // predicate) is forced `Conflicted` below.
     let mut by_id: BTreeMap<&str, &AssertionV1> = BTreeMap::new();
+    let mut collided: BTreeMap<(String, PredicateV1), ()> = BTreeMap::new();
     for assertion in assertions {
-        by_id.insert(assertion.assertion_id.as_str(), assertion);
+        match by_id.get(assertion.assertion_id.as_str()) {
+            Some(existing) if existing != &assertion => {
+                collided.insert((assertion.subject.as_token(), assertion.predicate), ());
+                // Deterministically keep the smaller content — the group is
+                // conflicted either way, so the choice only has to be
+                // order-independent.
+                if content_serialization(assertion) < content_serialization(existing) {
+                    by_id.insert(assertion.assertion_id.as_str(), assertion);
+                }
+            }
+            _ => {
+                by_id.insert(assertion.assertion_id.as_str(), assertion);
+            }
+        }
     }
 
     // 1. Admission gate.
@@ -166,7 +184,7 @@ pub fn reduce(assertions: &[AssertionV1]) -> ReductionV1 {
         let mut current_heads = Vec::new();
         let mut superseded_heads = Vec::new();
         let mut values: Vec<AssertionValueV1> = Vec::new();
-        let mut malformed = false;
+        let mut malformed = collided.contains_key(&(subject_token.clone(), predicate));
 
         for (_, mut lineage) in lineages {
             // Deterministic order within the lineage: source-supplied only.
@@ -189,12 +207,12 @@ pub fn reduce(assertions: &[AssertionV1]) -> ReductionV1 {
             // Same-revision self-contradiction inside the lineage.
             for older_assertion in older {
                 if older_assertion.source_ref.revision == head.source_ref.revision
-                    && older_assertion.value != head.value
+                    && !values_agree(&older_assertion.value, &head.value)
                 {
                     malformed = true;
                 }
             }
-            if !values.contains(&head.value) {
+            if !values.iter().any(|value| values_agree(value, &head.value)) {
                 values.push(head.value.clone());
             }
             current_heads.push(EvidenceHeadV1::of(head));
@@ -232,6 +250,27 @@ pub fn reduce(assertions: &[AssertionV1]) -> ReductionV1 {
 
 fn sort_heads(heads: &mut [EvidenceHeadV1]) {
     heads.sort_by_key(super::types::head_order_key);
+}
+
+/// Deterministic content serialization for the dedup-collision tiebreak —
+/// the same bytes for the same assertion regardless of arrival.
+fn content_serialization(assertion: &AssertionV1) -> String {
+    serde_json::to_string(assertion).unwrap_or_default()
+}
+
+/// Semantic value agreement for cross-assertion comparison: the legacy
+/// single-ref form and the one-element set form assert the same fact, so
+/// they agree instead of spuriously conflicting across lineages.
+fn values_agree(left: &AssertionValueV1, right: &AssertionValueV1) -> bool {
+    fn canonical(value: &AssertionValueV1) -> AssertionValueV1 {
+        match value {
+            AssertionValueV1::ObjectRef(object) => {
+                AssertionValueV1::ObjectRefs(vec![object.clone()])
+            }
+            other => other.clone(),
+        }
+    }
+    canonical(left) == canonical(right)
 }
 
 /// Lineage key: assertions supersede each other only within one
@@ -442,31 +481,37 @@ fn evidence_head_key(head: &EvidenceHeadV1) -> (chrono::DateTime<chrono::Utc>, S
 
 /// Resolve a mutually-exclusive predicate family to the predicate owning
 /// its **newest** current head, flagging conflicts (a `Conflicted` member,
-/// or two members sharing the same newest head key — i.e. "open and closed
-/// at the identical immutable revision"). Newest = max by
-/// [`super::types::head_order_key`] across ALL current heads of every
-/// member — `current_heads` are sorted ascending, so `.first()` would
-/// examine the oldest corroborating head instead.
+/// or two members tying at the same observed instant AND source revision —
+/// i.e. "open and closed at the identical immutable revision"). Newest =
+/// max by instant and revision across ALL current heads of every member —
+/// `current_heads` are sorted ascending, so `.first()` would examine the
+/// oldest corroborating head instead. The tie comparison deliberately
+/// EXCLUDES `assertion_id`: two different predicates tying on (instant,
+/// revision) is a genuine same-revision contradiction that must surface as
+/// `Conflicted`, never resolve by lexicographic id accident.
 fn resolve_family(
     reduction: &ReductionV1,
     subject: &SubjectRefV1,
     family: &[PredicateV1],
 ) -> ResolvedFamily {
-    type HeadKey = (chrono::DateTime<chrono::Utc>, String, String);
+    type TieKey = (chrono::DateTime<chrono::Utc>, String);
+    type FullKey = (chrono::DateTime<chrono::Utc>, String, String);
     let mut conflicted = false;
-    let mut best: Option<(HeadKey, PredicateV1)> = None;
+    let mut best: Option<(FullKey, PredicateV1)> = None;
     for predicate in family {
         let reduced = reduction.get(subject, *predicate);
         match reduced.status {
             ReductionStatusV1::Current => {
                 for head in &reduced.current_heads {
                     let key = head_order_key(head);
+                    let tie: TieKey = (key.0, key.1.clone());
                     match &best {
                         None => best = Some((key, *predicate)),
                         Some((best_key, best_predicate)) => {
-                            if key > *best_key {
+                            let best_tie: TieKey = (best_key.0, best_key.1.clone());
+                            if tie > best_tie {
                                 best = Some((key, *predicate));
-                            } else if key == *best_key && predicate != best_predicate {
+                            } else if tie == best_tie && predicate != best_predicate {
                                 conflicted = true;
                             }
                         }
