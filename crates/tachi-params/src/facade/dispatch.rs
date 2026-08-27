@@ -277,6 +277,13 @@ pub struct TachiDispatchParams {
     /// hand-copies its own countermeasures and does not want them doubled.
     #[serde(default)]
     pub inject_card: Option<bool>,
+
+    /// Optional declared file scope for workspace-write lanes (#894 S2e / #1322).
+    /// When set under a workspace-write contract, postflight ensures only changes
+    /// within these declared paths are accepted, and the admitted scope is
+    /// recorded on the dispatch's automatic presence claim.
+    #[serde(default)]
+    pub declared_file_scope: Option<Vec<String>>,
 }
 
 // ─── Staffing Ownership Boundaries (Issue #1692 C5) ─────────────────────────
@@ -332,6 +339,10 @@ pub struct StaffAssignmentRequest {
     /// Recommendation reference if this assignment followed prior advice.
     #[serde(default)]
     pub recommendation_ref: Option<String>,
+
+    /// Optional declared file scope for workspace-write lanes (#894 S2e / #1322).
+    #[serde(default)]
+    pub declared_file_scope: Option<Vec<String>>,
 }
 
 impl StaffAssignmentRequest {
@@ -349,6 +360,7 @@ impl StaffAssignmentRequest {
             project: None,
             completion_predicate: None,
             recommendation_ref: None,
+            declared_file_scope: None,
         }
     }
 

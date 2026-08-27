@@ -20,6 +20,7 @@ pub(super) struct DispatchStart {
     pub(super) inject_card: bool,
     pub(super) verbose: bool,
     pub(super) mechanics: DispatchLaunchMechanics,
+    pub(super) auto_staff_exec_env: Option<PendingAutoStaffExecEnv>,
 }
 
 /// Server-owned launch mechanics. This is not a facade carrier: bootstrap
@@ -42,6 +43,7 @@ pub(super) struct DispatchLaunchMechanics {
     pub(super) inject_hub_mcps: Option<bool>,
     pub(super) allowed_mcp_servers: Vec<String>,
     pub(super) timeout_secs: u64,
+    pub(super) declared_file_scope: Option<Vec<String>>,
 }
 
 // ─── Dispatch start resolution ───────────────────────────────────────────────
@@ -82,6 +84,7 @@ pub(super) fn resolve_dispatch_start(
         project: legacy_projection.project.clone(),
         completion_predicate: legacy_projection.completion_predicate.clone(),
         recommendation_ref: None,
+        declared_file_scope: legacy_projection.declared_file_scope.clone(),
     };
     let mut agent_norm = resolved_profile.agent.clone();
     let dispatch_id = new_dispatch_id(now, &agent_norm);
@@ -190,7 +193,9 @@ pub(super) fn resolve_dispatch_start(
             inject_hub_mcps: params.inject_hub_mcps,
             allowed_mcp_servers: params.allowed_mcp_servers.clone(),
             timeout_secs: params.timeout_secs,
+            declared_file_scope: params.declared_file_scope.clone(),
         },
+        auto_staff_exec_env: None,
     })
 }
 
@@ -257,6 +262,7 @@ pub(super) fn resolve_staff_dispatch_start(
         allowed_mcp_servers: mcp_access.allowed_mcp_servers.clone(),
         mcp_access: Some(mcp_access),
         timeout_secs: 600,
+        declared_file_scope: request.declared_file_scope.clone(),
     };
     Ok(DispatchStart {
         dispatch_id: dispatch_id.clone(),
@@ -278,6 +284,7 @@ pub(super) fn resolve_staff_dispatch_start(
         resolved_assignment,
         resolved_recommendation,
         mechanics,
+        auto_staff_exec_env: None,
     })
 }
 

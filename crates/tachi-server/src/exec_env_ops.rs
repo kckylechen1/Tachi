@@ -53,11 +53,16 @@
 //! containment, not enforcement, is the guarantee.
 
 use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::sync::{Mutex, OnceLock};
 
 use memcore::{
-    EnvClass, ExecEnvLease, ExecEnvSelector, ExecEnvState, NewExecEnvLease, NewExecEnvResource,
-    ReclaimOutcome, ResourceKind, ResourceState,
+    EnvClass, ExecEnvLease, ExecEnvSelector, ExecEnvState, NewExecEnvLease, ReclaimOutcome,
+    ResourceKind,
 };
+#[cfg(test)]
+use memcore::{NewExecEnvResource, ResourceState};
+use rusqlite::{OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use tachi_clean::wt_clean::OutputFormat;
 use tachi_clean::wt_open::{open_worktree, CargoTargetPolicy, OpenOptions, OpenReport};
@@ -75,6 +80,54 @@ use crate::server_state::MemoryServer;
 /// timestamp". Bolting a TTL onto this namespace too would give two
 /// independent, potentially-disagreeing reapers authority over the same row.
 pub(crate) const PRIVATE_RESERVATION_NS: &str = "exec_env_private_target";
+
+#[cfg(test)]
+type PublicationFailureHook = Box<dyn FnOnce() + Send + 'static>;
+
+#[cfg(test)]
+fn publication_failure_hook() -> &'static Mutex<Option<PublicationFailureHook>> {
+    static HOOK: OnceLock<Mutex<Option<PublicationFailureHook>>> = OnceLock::new();
+    HOOK.get_or_init(|| Mutex::new(None))
+}
+
+#[cfg(test)]
+pub(crate) struct PublicationFailureHookGuard;
+
+#[cfg(test)]
+impl Drop for PublicationFailureHookGuard {
+    fn drop(&mut self) {
+        publication_failure_hook()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn install_publication_failure_hook(
+    hook: impl FnOnce() + Send + 'static,
+) -> PublicationFailureHookGuard {
+    let previous = publication_failure_hook()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .replace(Box::new(hook));
+    assert!(
+        previous.is_none(),
+        "publication failure hook already installed"
+    );
+    PublicationFailureHookGuard
+}
+
+#[cfg(test)]
+fn run_publication_failure_hook() {
+    if let Some(hook) = publication_failure_hook()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .take()
+    {
+        hook();
+    }
+}
 
 /// Resolve a worktree to the one persisted physical-path spelling. Existing
 /// trees are fully canonicalized. For a claim made before its leaf is created,
@@ -288,6 +341,7 @@ impl ProvisionEnvOptions {
     /// seat builds, in the seat's own checkout, against the seat's target.
     /// Wiring the tree's cargo at a shared dir is precisely the cross-tree
     /// poisoning we are removing.
+    #[cfg(test)]
     fn cargo_target_policy(&self, worktree_path: &str) -> Result<CargoTargetPolicy, String> {
         match self.env_class {
             EnvClass::EditOnly | EnvClass::BuildTicketed => Ok(CargoTargetPolicy::Unallocated),
@@ -300,13 +354,12 @@ impl ProvisionEnvOptions {
 }
 
 /// Outcome of provisioning: the underlying worktree open report plus the lease
-/// id when a lease row was recorded. `env_id` is `None` when the worktree open
-/// failed / was a dry-run, or when the (non-fatal) lease insert failed — in the
-/// latter case a warning is appended to `report.warnings` and the worktree
-/// stands untracked (no lease). Such an untracked worktree directory is
-/// reclaimed by the age-based `clean sweep` (`tachi_clean::sweep`), not by the
-/// stale-lease backstop (which only reclaims leases, and here none was
-/// recorded).
+/// id when its complete ledger publication succeeded. `env_id` is `None` only
+/// when the worktree open failed or was a dry-run. After an open succeeds,
+/// preparation and ledger publication are fail-closed: either may return an
+/// error only after attempting certified worktree cleanup, while a transaction
+/// failure also rolls back every ledger row. Callers never receive an active
+/// lease whose complete resource shape was not published.
 #[derive(Debug, Clone)]
 pub(crate) struct ProvisionedEnv {
     pub env_id: Option<String>,
@@ -457,6 +510,16 @@ pub(crate) fn validate_provision_request(opts: &ProvisionEnvOptions) -> Result<(
                     approval.reserved_bytes
                 ));
             }
+            if let Some(target_dir) = &opts.private_target_dir {
+                if !target_dir.is_absolute() {
+                    return Err(format!(
+                        "env_class 'build-private' requires an absolute private target dir, got \
+                         '{}': relative cargo target dirs resolve against the invocation cwd and \
+                         cannot back a truthful resource ledger (#894 S2c)",
+                        target_dir.display()
+                    ));
+                }
+            }
             Ok(())
         }
         // An approval supplied for a class that allocates no private target is a
@@ -470,6 +533,240 @@ pub(crate) fn validate_provision_request(opts: &ProvisionEnvOptions) -> Result<(
     }
 }
 
+fn require_private_cargo_target_provision(
+    cargo_dir: &Path,
+    requested_target: &Path,
+    outcome: tachi_clean::wt_open::CargoTargetProvision,
+) -> Result<Option<PathBuf>, String> {
+    match outcome {
+        tachi_clean::wt_open::CargoTargetProvision::Written(dir) => {
+            if dir != requested_target {
+                return Err(format!(
+                    "private cargo target publication mismatch: requested '{}', wrote '{}'",
+                    requested_target.display(),
+                    dir.display()
+                ));
+            }
+            Ok(Some(dir))
+        }
+        tachi_clean::wt_open::CargoTargetProvision::SkippedNotRustRepo => Ok(None),
+        tachi_clean::wt_open::CargoTargetProvision::SkippedExisting => Err(format!(
+            "refusing build-private publication: {} already exists and was not proven to target \
+             the approved path '{}'; existing cargo config is never overwritten",
+            cargo_dir.join("config.toml").display(),
+            requested_target.display()
+        )),
+        tachi_clean::wt_open::CargoTargetProvision::SkippedUnallocated => Err(
+            "build-private cargo target provisioning unexpectedly became unallocated".to_string(),
+        ),
+    }
+}
+
+fn reject_unproven_cargo_configs(cargo_dir: &Path, requested_target: &Path) -> Result<(), String> {
+    for name in ["config", "config.toml"] {
+        let config = cargo_dir.join(name);
+        match std::fs::symlink_metadata(&config) {
+            Ok(metadata) => {
+                let kind = if metadata.file_type().is_symlink() {
+                    "symlink"
+                } else {
+                    "existing file"
+                };
+                return Err(format!(
+                    "refusing build-private publication: {} is an unproven {kind}; Cargo may use \
+                     it instead of the approved target '{}', and existing config is never overwritten",
+                    config.display(),
+                    requested_target.display()
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(format!(
+                    "refusing build-private publication: cannot inspect {}: {error}",
+                    config.display()
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn reject_private_target_symlink_components(target: &Path) -> Result<(), String> {
+    let mut current = PathBuf::new();
+    for component in target.components() {
+        current.push(component.as_os_str());
+        match std::fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(format!(
+                    "refusing build-private publication: private target '{}' traverses symlink \
+                     component '{}', so the persisted resource path would not establish physical identity",
+                    target.display(),
+                    current.display()
+                ));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+            Err(error) => {
+                return Err(format!(
+                    "refusing build-private publication: cannot establish target identity at '{}': {error}",
+                    current.display()
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn same_directory_object(left: &std::fs::Metadata, right: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    left.dev() == right.dev() && left.ino() == right.ino()
+}
+
+#[cfg(windows)]
+fn same_directory_object(left: &std::fs::Metadata, right: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    left.volume_serial_number() == right.volume_serial_number()
+        && left.file_index() == right.file_index()
+}
+
+#[cfg(not(any(unix, windows)))]
+fn same_directory_object(_left: &std::fs::Metadata, _right: &std::fs::Metadata) -> bool {
+    false
+}
+
+fn cleanup_opened_worktree_after_provision_failure(
+    report: &mut OpenReport,
+    private_target: Option<&Path>,
+    failure: impl std::fmt::Display,
+) -> String {
+    let Some(authority) = report.worktree_authority.as_ref() else {
+        return format!(
+            "{failure}; refused cleanup because the opened worktree has no descriptor authority"
+        );
+    };
+    match authority.matches_absolute_path(Path::new(&report.path)) {
+        Ok(true) => {}
+        Ok(false) => {
+            return format!(
+                "{failure}; refused cleanup because worktree identity changed after open: {}",
+                report.path
+            )
+        }
+        Err(error) => {
+            return format!(
+                "{failure}; refused cleanup because worktree identity could not be re-established at {}: {error}",
+                report.path
+            )
+        }
+    }
+    if let Some(target) = private_target {
+        if let Err(rollback_error) =
+            tachi_clean::wt_open::rollback_private_cargo_target_config_with_authority(
+                Path::new(&report.path),
+                target,
+                authority,
+            )
+        {
+            return format!(
+                "{failure}; failed to roll back the owned private Cargo config through its retained descriptor: {rollback_error}"
+            );
+        }
+    }
+    format!(
+        "{failure}; retained the registered worktree at {} for certified cleanup because a pathname-based delete cannot be made identity-safe against same-UID replacement",
+        report.path
+    )
+}
+
+fn prepare_opened_worktree_for_publication(
+    report: &mut OpenReport,
+    opts: &ProvisionEnvOptions,
+) -> Result<Option<String>, String> {
+    let managed_root = std::fs::canonicalize(&report.managed_root).map_err(|error| {
+        format!(
+            "cannot re-establish managed worktree root '{}': {error}",
+            report.managed_root
+        )
+    })?;
+    let worktree_path = Path::new(&report.path);
+    if !worktree_path.starts_with(&managed_root) || worktree_path == managed_root {
+        return Err(format!(
+            "refusing post-open worktree outside managed root '{}': {}",
+            managed_root.display(),
+            report.path
+        ));
+    }
+    let authority = report
+        .worktree_authority
+        .as_ref()
+        .ok_or_else(|| "opened worktree is missing descriptor authority".to_string())?;
+    match authority.matches_absolute_path(worktree_path) {
+        Ok(true) => {}
+        Ok(false) => {
+            return Err(format!(
+                "refusing post-open worktree whose identity changed: {}",
+                report.path
+            ))
+        }
+        Err(error) => {
+            return Err(format!(
+                "refusing post-open worktree whose descriptor identity cannot be re-established at '{}': {error}",
+                report.path
+            ))
+        }
+    }
+
+    // The worktree path is only known after the open, so the private-target
+    // default (`<worktree>/target`) is resolved here and the config written now.
+    if opts.env_class == EnvClass::BuildPrivate {
+        let worktree = Path::new(&report.path);
+        let requested_target = opts
+            .build_target_dir(&report.path)?
+            .expect("BuildPrivate always resolves a target dir");
+        reject_private_target_symlink_components(&requested_target)?;
+        let cargo_dir = worktree.join(".cargo");
+        if let Ok(metadata) = std::fs::symlink_metadata(&cargo_dir) {
+            if metadata.file_type().is_symlink() {
+                return Err(format!(
+                    "refusing build-private publication: {} is a symlink, so cargo config could \
+                     escape the managed worktree",
+                    cargo_dir.display()
+                ));
+            }
+        }
+        reject_unproven_cargo_configs(&cargo_dir, &requested_target)?;
+        let outcome = tachi_clean::wt_open::provision_cargo_target_config_with_authority(
+            worktree,
+            &CargoTargetPolicy::Private(requested_target.clone()),
+            authority,
+        )
+        .map_err(|err| {
+            format!("private cargo target-dir provisioning failed before ledger publication: {err}")
+        })?;
+        if let Some(dir) =
+            require_private_cargo_target_provision(&cargo_dir, &requested_target, outcome)?
+        {
+            report.cargo_target_dir = Some(dir.display().to_string());
+        }
+    } else if opts.env_class == EnvClass::EditOnly
+        && Path::new(&report.path).join("Cargo.toml").exists()
+    {
+        // Say the quiet part out loud at the exact moment it matters: this tree
+        // has no target dir wired to it, on purpose.
+        report.warnings.push(
+            "env_class 'edit-only': no cargo target dir is wired to this worktree. Run builds \
+             through the build broker (a build ticket into the serialized executor seat), not \
+             in-tree — an in-tree `cargo` here will grow a local target/ that the sweep has to \
+             reclaim. This is a convention, not a fence: nothing stops you (#894 S2c)."
+                .to_string(),
+        );
+    }
+
+    opts.build_target_dir(&report.path)
+        .map(|target| target.map(|path| path.display().to_string()))
+}
+
 /// Single provisioning entrypoint (#894 S1, class-aware since S2c): open a
 /// managed worktree via the `tachi_clean` primitive, record a daemon-owned
 /// lease, then register + bind the physical resources the class allocates. This
@@ -477,11 +774,10 @@ pub(crate) fn validate_provision_request(opts: &ProvisionEnvOptions) -> Result<(
 /// consumer (the `wt-open` CLI today; a daemon/MCP caller later) wraps exactly
 /// one source of truth for provisioning instead of a divergent copy.
 ///
-/// Provisioning failures (or dry-run) return the report with `env_id: None` and
-/// no lease. A lease-insert failure after a successful open is non-fatal: the
-/// worktree stands, a warning is attached, and the orphaned worktree directory
-/// is left to the age-based `clean sweep` (there is no lease for the stale-lease
-/// backstop to reclaim in this case).
+/// Open failures (or dry-run) return the report with `env_id: None` and no
+/// lease. Lease/resource/reservation publication is a single transaction. Any
+/// failure from that transaction rolls it back, attempts synchronous certified
+/// worktree cleanup, and reports both the publication and cleanup outcome.
 pub(crate) fn provision_managed_env(
     store: &mut memcore::MemoryStore,
     opts: &ProvisionEnvOptions,
@@ -497,48 +793,17 @@ pub(crate) fn provision_managed_env(
             report,
         });
     }
-    report.path = match canonical_worktree_path(&report.path) {
-        Ok(path) => path,
+    let build_target = match prepare_opened_worktree_for_publication(&mut report, opts) {
+        Ok(build_target) => build_target,
         Err(error) => {
-            report.warnings.push(format!(
-                "worktree provisioned but its path could not be canonicalized: {error}; no ExecEnv lease was recorded"
+            let private_target = opts.build_target_dir(&report.path).ok().flatten();
+            return Err(cleanup_opened_worktree_after_provision_failure(
+                &mut report,
+                private_target.as_deref(),
+                format!("exec-env publication preparation failed: {error}"),
             ));
-            return Ok(ProvisionedEnv {
-                env_id: None,
-                report,
-            });
         }
     };
-    // The worktree path is only known after the open, so the private-target
-    // default (`<worktree>/target`) is resolved here and the config written now.
-    if opts.env_class == EnvClass::BuildPrivate {
-        match tachi_clean::wt_open::provision_cargo_target_config(
-            std::path::Path::new(&report.path),
-            &opts.cargo_target_policy(&report.path)?,
-        ) {
-            Ok(tachi_clean::wt_open::CargoTargetProvision::Written(dir)) => {
-                report.cargo_target_dir = Some(dir.display().to_string());
-            }
-            Ok(_) => {}
-            Err(err) => report.warnings.push(format!(
-                "private cargo target-dir provisioning failed: {err}"
-            )),
-        }
-    } else if opts.env_class == EnvClass::EditOnly
-        && std::path::Path::new(&report.path)
-            .join("Cargo.toml")
-            .exists()
-    {
-        // Say the quiet part out loud at the exact moment it matters: this tree
-        // has no target dir wired to it, on purpose.
-        report.warnings.push(
-            "env_class 'edit-only': no cargo target dir is wired to this worktree. Run builds \
-             through the build broker (a build ticket into the serialized executor seat), not \
-             in-tree — an in-tree `cargo` here will grow a local target/ that the sweep has to \
-             reclaim. This is a convention, not a fence: nothing stops you (#894 S2c)."
-                .to_string(),
-        );
-    }
 
     let env_id = generate_env_id();
     let lease = NewExecEnvLease {
@@ -553,43 +818,123 @@ pub(crate) fn provision_managed_env(
         created_at: String::new(),
     };
 
-    match memcore::insert_exec_env(store.connection_mut(), &lease).map_err(|e| e.to_string()) {
-        Ok(()) => {
-            let build_target = opts.build_target_dir(&report.path)?;
-            let build_target = build_target.as_ref().map(|p| p.display().to_string());
-            if let Err(err) = register_env_resources(
-                store,
-                &env_id,
-                opts.env_class,
-                &report.path,
-                build_target.as_deref(),
-                opts.private_target_approval.as_ref(),
-            ) {
-                // Non-fatal, but loudly non-silent: the lease exists and the
-                // worktree exists; what's missing is the bytes ledger row, which
-                // means the reclaim path cannot free this tree by itself.
-                report.warnings.push(format!(
-                    "worktree + lease recorded but the resource ledger write failed: {err}; \
-                     this env's bytes are not tracked and will need the age-based `clean sweep`"
-                ));
-            }
-            Ok(ProvisionedEnv {
-                env_id: Some(env_id),
-                report,
-            })
-        }
-        Err(err) => {
-            report.warnings.push(format!(
-                "worktree provisioned but exec_env lease record failed: {err}; it is now an \
-                 untracked worktree with no managed lease — reclaim the orphaned directory via \
-                 the age-based `clean sweep`"
-            ));
-            Ok(ProvisionedEnv {
-                env_id: None,
-                report,
-            })
-        }
+    let authority = report.worktree_authority.as_ref().ok_or_else(|| {
+        "opened worktree lost descriptor authority before publication".to_string()
+    })?;
+    if !authority
+        .matches_absolute_path(Path::new(&report.path))
+        .map_err(|error| format!("verify worktree identity before publication: {error}"))?
+    {
+        return Err(cleanup_opened_worktree_after_provision_failure(
+            &mut report,
+            build_target.as_deref().map(Path::new),
+            "exec-env ledger publication refused because worktree identity changed",
+        ));
     }
+    if let Err(error) = publish_env_resources_atomically(
+        store,
+        &lease,
+        &report.path,
+        build_target.as_deref(),
+        opts.private_target_approval.as_ref(),
+        Some(authority),
+    ) {
+        #[cfg(test)]
+        run_publication_failure_hook();
+        return Err(cleanup_opened_worktree_after_provision_failure(
+            &mut report,
+            build_target.as_deref().map(Path::new),
+            format!("exec-env ledger publication failed atomically: {error}"),
+        ));
+    }
+    let identity_still_matches = report
+        .worktree_authority
+        .as_ref()
+        .expect("publication retains descriptor authority")
+        .matches_absolute_path(Path::new(&report.path))
+        .unwrap_or(false);
+    if !identity_still_matches {
+        quarantine_lease_resources(
+            store.connection_mut(),
+            &env_id,
+            "worktree path identity changed during atomic publication",
+        )
+        .map_err(|error| {
+            format!(
+                "worktree identity changed during publication and mandatory quarantine failed: {error}"
+            )
+        })?;
+        return Err(format!(
+            "worktree identity changed during publication; env {env_id} was quarantined and will not be dispatched"
+        ));
+    }
+    drop(report.worktree_authority.take());
+    Ok(ProvisionedEnv {
+        env_id: Some(env_id),
+        report,
+    })
+}
+
+fn publish_env_resources_atomically(
+    store: &mut memcore::MemoryStore,
+    lease: &NewExecEnvLease,
+    worktree_path: &str,
+    build_target: Option<&str>,
+    approval: Option<&PrivateTargetApproval>,
+    authority: Option<&memcore::anchored_fs::AnchoredDirectory>,
+) -> Result<EnvResources, String> {
+    if !lease.env_class.allocates_build_target() && build_target.is_some() {
+        return Err(format!(
+            "env_class '{}' allocates no build target of its own, but a build target dir was supplied",
+            lease.env_class.as_str()
+        ));
+    }
+    if lease.env_class.allocates_build_target() != build_target.is_some()
+        || lease.env_class.requires_approval() != approval.is_some()
+    {
+        return Err(format!(
+            "env_class '{}' has incomplete build-target or approval evidence",
+            lease.env_class.as_str()
+        ));
+    }
+
+    let mut resources = vec![memcore::ExecEnvProvisioningResource {
+        kind: ResourceKind::Worktree,
+        path: worktree_path.to_string(),
+        bytes: None,
+    }];
+    if let (Some(path), Some(approval)) = (build_target, approval) {
+        resources.push(memcore::ExecEnvProvisioningResource {
+            kind: ResourceKind::BuildTarget,
+            path: path.to_string(),
+            bytes: Some(approval.reserved_bytes),
+        });
+    }
+
+    let reservation = match (build_target, approval) {
+        (Some(target_path), Some(approval)) => Some(memcore::ExecEnvPrivateTargetReservation {
+            approved_by: approval.approved_by.clone(),
+            reserved_bytes: approval.reserved_bytes,
+            target_path: target_path.to_string(),
+        }),
+        (None, None) => None,
+        _ => return Err("private target and approval must be supplied together".to_string()),
+    };
+
+    let published = match authority {
+        Some(authority) => store.publish_exec_env_atomically_anchored(
+            lease,
+            &resources,
+            reservation.as_ref(),
+            authority,
+        ),
+        None => store.publish_exec_env_atomically(lease, &resources, reservation.as_ref()),
+    }
+    .map_err(|error| error.to_string())?;
+    Ok(EnvResources {
+        worktree_resource_id: published.worktree.resource_id,
+        build_target_resource_id: published.build_target.map(|resource| resource.resource_id),
+    })
 }
 
 /// Register the physical resources a lease owns and bind them to it (#894 S2a
@@ -605,6 +950,7 @@ pub(crate) fn provision_managed_env(
 /// it is **written down** (#894 S2c round-2): the target row's `bytes` is seeded
 /// with the reservation and a provenance row records who approved it. A
 /// reservation nobody records is not a reservation.
+#[cfg(test)]
 pub(crate) fn register_env_resources(
     store: &mut memcore::MemoryStore,
     env_id: &str,
@@ -670,6 +1016,7 @@ pub(crate) fn register_env_resources(
 /// target immediately, before a single artifact is built) and a provenance row
 /// (so `bytes` being overwritten by the next real measurement does not erase who
 /// approved what).
+#[cfg(test)]
 fn book_private_reservation(
     store: &mut memcore::MemoryStore,
     env_id: &str,
@@ -715,10 +1062,12 @@ pub(crate) struct EnvResources {
 /// target dir resolves to ONE row that many leases bind (splitting it into two
 /// rows would split its refcount and let a live target be deleted).
 ///
-/// Fail-closed on a row that is not `active`: a reclaimed or quarantined
-/// resource must not silently back a new env. A quarantined build target in
-/// particular is the "interrupted cargo poisoned this dir" state — the broker
-/// clears it via `release_quarantine`, and until it does, nothing may bind it.
+/// A reclaimed path is a prior physical incarnation and is revived through
+/// memcore's one canonical re-registration writer. Every other non-active
+/// state fails closed. A quarantined build target in particular is the
+/// "interrupted cargo poisoned this dir" state — the broker clears it via
+/// `release_quarantine`, and until it does, nothing may bind it.
+#[cfg(test)]
 pub(crate) fn ensure_resource(
     conn: &mut rusqlite::Connection,
     kind: ResourceKind,
@@ -727,7 +1076,10 @@ pub(crate) fn ensure_resource(
     if let Some(existing) =
         memcore::find_resource_by_path(conn, path, kind).map_err(|e| e.to_string())?
     {
-        if existing.state != ResourceState::Active {
+        if existing.state == ResourceState::Active {
+            return Ok(existing.resource_id);
+        }
+        if existing.state != ResourceState::Reclaimed {
             return Err(format!(
                 "resource '{path}' ({}) is '{}', not 'active': it cannot back a new env until it \
                  is cleared (quarantined targets go through the broker's release path; a \
@@ -736,7 +1088,6 @@ pub(crate) fn ensure_resource(
                 existing.state.as_str()
             ));
         }
-        return Ok(existing.resource_id);
     }
     let resource_id = uuid::Uuid::new_v4().to_string();
     memcore::insert_resource(
@@ -751,6 +1102,220 @@ pub(crate) fn ensure_resource(
     )
     .map_err(|e| e.to_string())?;
     Ok(resource_id)
+}
+
+/// Fence all active resources bound to a lease in the resource ledger (#894 S2a/S2c/S2e, #1322).
+///
+/// Looks up all active bindings for `env_id` in `exec_env_resource_bindings` and transitions
+/// every resource row to `quarantined` in one SQLite transaction.
+pub(crate) fn quarantine_lease_resources(
+    conn: &mut rusqlite::Connection,
+    env_id: &str,
+    reason: &str,
+) -> Result<Vec<String>, String> {
+    if env_id.trim().is_empty() {
+        return Err("cannot quarantine resources for an empty exec env id".to_string());
+    }
+    let lease_state: Option<String> = conn
+        .query_row(
+            "SELECT state FROM exec_envs WHERE env_id = ?1",
+            rusqlite::params![env_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| format!("read exec env {env_id} before quarantine: {error}"))?;
+    let Some(lease_state) = lease_state else {
+        return Err(format!(
+            "exec env {env_id} does not exist; refusing false quarantine"
+        ));
+    };
+    if lease_state != "active" && lease_state != "dispatching" && lease_state != "publishing" {
+        return Err(format!(
+            "exec env {env_id} is {lease_state}; refusing quarantine without a live lease"
+        ));
+    }
+    let sql = "SELECT resource_id FROM exec_env_resource_bindings WHERE env_id = ?1 AND released_at IS NULL ORDER BY resource_id";
+    let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
+    let resource_ids: Vec<String> = stmt
+        .query_map(rusqlite::params![env_id], |row| row.get(0))
+        .map_err(|e| e.to_string())?
+        .collect::<Result<_, _>>()
+        .map_err(|e| format!("read active resources for exec env {env_id}: {e}"))?;
+    drop(stmt);
+
+    if resource_ids.is_empty() {
+        return Err(format!(
+            "exec env {env_id} has no live resource bindings; refusing false quarantine"
+        ));
+    }
+
+    memcore::quarantine_resources_atomically(conn, &resource_ids, reason)
+        .map_err(|err| format!("atomically quarantine resources for exec env {env_id}: {err}"))
+}
+
+/// Parent-owned exclusive admission for a Required postflight dispatch.
+///
+/// The transition is persisted before preimage capture. Concurrent callers can
+/// therefore never both observe an active lease and spawn. A crash leaves the
+/// lease in `dispatching`, which is intentionally unusable until reconciled.
+pub(crate) struct ExecEnvDispatchLeaseGuard {
+    server: MemoryServer,
+    env_id: String,
+    armed: bool,
+}
+
+impl ExecEnvDispatchLeaseGuard {
+    pub(crate) fn acquire(server: &MemoryServer, env_id: &str) -> Result<Self, String> {
+        let env_id = env_id.trim();
+        if env_id.is_empty() {
+            return Err("Required postflight dispatch needs a managed exec env id".to_string());
+        }
+        server.with_global_store(|store| {
+            let conn = store.connection_mut();
+            let tx = conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|error| error.to_string())?;
+            let state: Option<String> = tx
+                .query_row(
+                    "SELECT state FROM exec_envs WHERE env_id = ?1",
+                    rusqlite::params![env_id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|error| error.to_string())?;
+            let Some(state) = state else {
+                return Err(format!("exec env {env_id} does not exist"));
+            };
+            if state != "active" {
+                return Err(format!(
+                    "exec env {env_id} is {state}; another dispatch or terminal action owns it"
+                ));
+            }
+            let live_bindings: i64 = tx
+                .query_row(
+                    "SELECT COUNT(*) FROM exec_env_resource_bindings WHERE env_id = ?1 AND released_at IS NULL",
+                    rusqlite::params![env_id],
+                    |row| row.get(0),
+                )
+                .map_err(|error| error.to_string())?;
+            if live_bindings == 0 {
+                return Err(format!(
+                    "exec env {env_id} has no live resource bindings; refusing orphan admission"
+                ));
+            }
+            let quarantined: i64 = tx
+                .query_row(
+                    "SELECT COUNT(*) FROM exec_env_resource_bindings b JOIN exec_env_resources r ON r.resource_id = b.resource_id WHERE b.env_id = ?1 AND b.released_at IS NULL AND r.state = 'quarantined'",
+                    rusqlite::params![env_id],
+                    |row| row.get(0),
+                )
+                .map_err(|error| error.to_string())?;
+            if quarantined != 0 {
+                return Err(format!(
+                    "exec env {env_id} has quarantined resources; refusing dispatch"
+                ));
+            }
+            let changed = tx
+                .execute(
+                    "UPDATE exec_envs SET state = 'dispatching' WHERE env_id = ?1 AND state = 'active'",
+                    rusqlite::params![env_id],
+                )
+                .map_err(|error| error.to_string())?;
+            if changed != 1 {
+                return Err(format!(
+                    "exec env {env_id} changed during dispatch admission"
+                ));
+            }
+            tx.commit().map_err(|error| error.to_string())
+        })?;
+        Ok(Self {
+            server: server.clone(),
+            env_id: env_id.to_string(),
+            armed: true,
+        })
+    }
+
+    fn transition_state(&mut self, from: &str, to: &str, disarm: bool) -> Result<(), String> {
+        self.server.with_global_store(|store| {
+            let changed = store
+                .connection_mut()
+                .execute(
+                    "UPDATE exec_envs SET state = ?2 WHERE env_id = ?1 AND state = ?3",
+                    rusqlite::params![self.env_id, to, from],
+                )
+                .map_err(|error| error.to_string())?;
+            if changed != 1 {
+                return Err(format!(
+                    "exec env {} lost its dispatch admission state",
+                    self.env_id
+                ));
+            }
+            Ok(())
+        })?;
+        if disarm {
+            self.armed = false;
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn release_clean(&mut self) -> Result<(), String> {
+        self.transition_state("dispatching", "active", true)
+    }
+
+    pub(crate) fn begin_publication(&mut self) -> Result<(), String> {
+        self.transition_state("dispatching", "publishing", false)
+    }
+
+    pub(crate) fn complete_publication(&mut self) -> Result<(), String> {
+        self.transition_state("publishing", "active", true)
+    }
+
+    pub(crate) fn release_after_fence(&mut self) -> Result<(), String> {
+        let from = self.server.with_global_store_read(|store| {
+            store
+                .connection()
+                .query_row(
+                    "SELECT state FROM exec_envs WHERE env_id = ?1",
+                    rusqlite::params![self.env_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .map_err(|error| error.to_string())
+        })?;
+        if from != "dispatching" && from != "publishing" {
+            return Err(format!(
+                "exec env {} cannot release fenced state {from}",
+                self.env_id
+            ));
+        }
+        self.transition_state(&from, "active", true)
+    }
+
+    pub(crate) fn release_without_spawn(&mut self) -> Result<(), String> {
+        self.transition_state("dispatching", "active", true)
+    }
+
+    fn fence_abandoned(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let fenced = self.server.with_global_store(|store| {
+            quarantine_lease_resources(
+                store.connection_mut(),
+                &self.env_id,
+                "dispatch aborted before postflight ownership completed",
+            )
+        });
+        if fenced.is_ok() {
+            let _ = self.release_after_fence();
+        }
+    }
+}
+
+impl Drop for ExecEnvDispatchLeaseGuard {
+    fn drop(&mut self) {
+        self.fence_abandoned();
+    }
 }
 
 // Compatibility shim for old exec_env_ops::ensure_resource_allow_quarantined
@@ -797,11 +1362,121 @@ impl MemoryServer {
             })?,
             None => None,
         };
+        if let Some(id) = trimmed_env_id {
+            let quarantined_resource = self.with_global_store_read(|store| {
+                store
+                    .connection()
+                    .query_row(
+                        "SELECT r.resource_id \
+                         FROM exec_env_resource_bindings b \
+                         JOIN exec_env_resources r ON r.resource_id = b.resource_id \
+                         WHERE b.env_id = ?1 AND b.released_at IS NULL \
+                           AND r.state = 'quarantined' \
+                         ORDER BY r.resource_id LIMIT 1",
+                        rusqlite::params![id],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .optional()
+                    .map_err(|error| error.to_string())
+            })?;
+            if let Some(resource_id) = quarantined_resource {
+                return Err(format!(
+                    "env_id '{id}' is bound to quarantined resource '{resource_id}'; refusing \
+                     re-dispatch until the canonical resource release path clears the fence \
+                     (fail-closed, #1322)"
+                ));
+            }
+            let lease = lease
+                .as_ref()
+                .ok_or_else(|| format!("env_id '{id}' has no exec_envs lease"))?;
+            if lease.state != ExecEnvState::Active {
+                return resolve_env_binding(env_id, cwd, unmanaged_cwd, Some(lease));
+            }
+            let lease_path = Path::new(&lease.path);
+            let metadata = std::fs::symlink_metadata(lease_path).map_err(|error| {
+                format!(
+                    "env_id '{id}' worktree identity cannot be established at '{}': {error}",
+                    lease_path.display()
+                )
+            })?;
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err(format!(
+                    "env_id '{id}' worktree path is no longer the managed directory: '{}'",
+                    lease_path.display()
+                ));
+            }
+            let current_path = std::fs::canonicalize(lease_path).map_err(|error| {
+                format!("env_id '{id}' worktree path cannot be canonicalized at dispatch: {error}")
+            })?;
+            let current_metadata = std::fs::symlink_metadata(&current_path).map_err(|error| {
+                format!(
+                    "env_id '{id}' canonical worktree identity cannot be established at '{}': {error}",
+                    current_path.display()
+                )
+            })?;
+            if !same_directory_object(&metadata, &current_metadata) {
+                return Err(format!(
+                    "env_id '{id}' worktree identity changed since publication: stored '{}', current '{}'",
+                    lease_path.display(),
+                    current_path.display()
+                ));
+            }
+        }
         resolve_env_binding(env_id, cwd, unmanaged_cwd, lease.as_ref())
     }
 
-    /// THE single reclaim path for a lease (#894 S1). Flips `active` ->
-    /// `reclaimed` transactionally and idempotently.
+    /// Re-open and pin the exact managed worktree object recorded at
+    /// publication. The returned descriptor is retained through child spawn;
+    /// callers must use it as cwd authority rather than reopening the path.
+    pub(crate) fn open_dispatch_worktree_authority(
+        &self,
+        resolution: &EnvResolution,
+    ) -> Result<Option<memcore::anchored_fs::AnchoredDirectory>, String> {
+        let EnvResolution::Managed { cwd, env_id } = resolution else {
+            return Ok(None);
+        };
+        #[cfg(not(unix))]
+        {
+            let _ = (cwd, env_id);
+            return Err(
+                "managed dispatch requires descriptor-pinned cwd identity on this platform"
+                    .to_string(),
+            );
+        }
+        #[cfg(unix)]
+        {
+            let expected = self.with_global_store_read(|store| {
+                memcore::get_exec_env_worktree_identity(store.connection(), env_id)
+                    .map_err(|error| error.to_string())
+            })?
+            .ok_or_else(|| {
+                format!(
+                    "env_id '{env_id}' has no persisted worktree device/inode identity; refusing legacy path-only dispatch"
+                )
+            })?;
+            let canonical_cwd = std::fs::canonicalize(cwd).map_err(|error| {
+                format!("resolve descriptor-pinned cwd for env_id '{env_id}': {error}")
+            })?;
+            let authority = memcore::anchored_fs::AnchoredDirectory::open_absolute(&canonical_cwd)
+                .map_err(|error| {
+                    format!("open descriptor-pinned cwd for env_id '{env_id}': {error}")
+                })?;
+            let observed = authority
+                .identity()
+                .map_err(|error| format!("read cwd identity for env_id '{env_id}': {error}"))?;
+            if observed != expected {
+                return Err(format!(
+                    "env_id '{env_id}' worktree object changed since publication: expected device={} inode={}, observed device={} inode={}",
+                    expected.device, expected.inode, observed.device, observed.inode
+                ));
+            }
+            Ok(Some(authority))
+        }
+    }
+
+    /// Ordinary reclaim path for a lease (#894 S1). Flips `active` ->
+    /// `reclaimed` transactionally and idempotently. The external cleaner uses
+    /// memcore's removal-claim protocol so it owns the lease before deleting.
     ///
     /// Wired producers today: only the `safe_merge` completion path
     /// ([`gh_ops::router`], via [`reclaim_exec_env_for_worktree`]). Routing the
@@ -839,6 +1514,42 @@ impl MemoryServer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn seed_dispatchable_env(server: &MemoryServer, env_id: &str, resource_id: &str) {
+        server
+            .with_global_store(|store| {
+                memcore::insert_exec_env(
+                    store.connection_mut(),
+                    &NewExecEnvLease {
+                        env_id: env_id.to_string(),
+                        kind: "worktree".to_string(),
+                        path: format!("/wt/{env_id}"),
+                        repo_root: "/repo".to_string(),
+                        branch: env_id.to_string(),
+                        base_sha: "abc1234".to_string(),
+                        dispatch_id: None,
+                        env_class: EnvClass::EditOnly,
+                        created_at: String::new(),
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+                memcore::insert_resource(
+                    store.connection_mut(),
+                    &NewExecEnvResource {
+                        resource_id: resource_id.to_string(),
+                        kind: ResourceKind::Worktree,
+                        path: format!("/wt/{env_id}"),
+                        bytes: None,
+                        created_at: String::new(),
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+                memcore::bind_resource(store.connection_mut(), env_id, resource_id)
+                    .map_err(|error| error.to_string())?;
+                Ok(())
+            })
+            .expect("seed dispatchable env");
+    }
 
     fn lease(state: ExecEnvState, path: &str) -> ExecEnvLease {
         ExecEnvLease {
@@ -894,6 +1605,223 @@ mod tests {
         let l = lease(ExecEnvState::Reclaimed, "/wt/managed");
         let err = resolve_env_binding(Some("env-x"), None, false, Some(&l)).unwrap_err();
         assert!(err.contains("not active"), "got: {err}");
+    }
+
+    #[test]
+    fn env_id_dispatching_lease_fails_closed() {
+        let l = lease(ExecEnvState::Dispatching, "/wt/managed");
+        let err = resolve_env_binding(Some("env-x"), None, false, Some(&l)).unwrap_err();
+        assert!(err.contains("not active"), "got: {err}");
+    }
+
+    #[test]
+    fn postflight_dispatch_admission_is_exclusive_and_clean_release_reopens() {
+        let temp = tempfile::tempdir().expect("temp server");
+        let server = MemoryServer::new(temp.path().join("global.sqlite"), None).expect("server");
+        seed_dispatchable_env(&server, "env-exclusive", "res-exclusive");
+
+        let mut first =
+            ExecEnvDispatchLeaseGuard::acquire(&server, "env-exclusive").expect("first admission");
+        let conflict = match ExecEnvDispatchLeaseGuard::acquire(&server, "env-exclusive") {
+            Ok(_) => panic!("a second dispatch must not share one lease"),
+            Err(error) => error,
+        };
+        assert!(conflict.contains("dispatching"), "{conflict}");
+
+        first.release_clean().expect("clean release");
+        let mut reopened = ExecEnvDispatchLeaseGuard::acquire(&server, "env-exclusive")
+            .expect("lease reopens only after clean finalization");
+        reopened
+            .release_without_spawn()
+            .expect("unspawned admission release");
+    }
+
+    #[test]
+    fn postflight_publication_state_remains_exclusive_until_completion() {
+        let temp = tempfile::tempdir().expect("temp server");
+        let server = MemoryServer::new(temp.path().join("global.sqlite"), None).expect("server");
+        seed_dispatchable_env(&server, "env-publishing", "res-publishing");
+
+        let mut first = ExecEnvDispatchLeaseGuard::acquire(&server, "env-publishing")
+            .expect("dispatch admission");
+        first.begin_publication().expect("begin publication");
+        let conflict = match ExecEnvDispatchLeaseGuard::acquire(&server, "env-publishing") {
+            Ok(_) => panic!("publishing lease must remain exclusive"),
+            Err(error) => error,
+        };
+        assert!(conflict.contains("publishing"), "{conflict}");
+
+        first.complete_publication().expect("complete publication");
+        let mut reopened = ExecEnvDispatchLeaseGuard::acquire(&server, "env-publishing")
+            .expect("lease reopens after publication completion");
+        reopened
+            .release_without_spawn()
+            .expect("unspawned admission release");
+    }
+
+    #[test]
+    fn abandoned_postflight_dispatch_fences_real_resource_before_reopening_lease() {
+        let temp = tempfile::tempdir().expect("temp server");
+        let server = MemoryServer::new(temp.path().join("global.sqlite"), None).expect("server");
+        seed_dispatchable_env(&server, "env-abort", "res-abort");
+
+        let guard =
+            ExecEnvDispatchLeaseGuard::acquire(&server, "env-abort").expect("dispatch admission");
+        drop(guard);
+
+        let (lease_state, resource_state): (String, String) = server
+            .with_global_store_read(|store| {
+                let lease_state = store
+                    .connection()
+                    .query_row(
+                        "SELECT state FROM exec_envs WHERE env_id = 'env-abort'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .map_err(|error| error.to_string())?;
+                let resource_state = store
+                    .connection()
+                    .query_row(
+                        "SELECT state FROM exec_env_resources WHERE resource_id = 'res-abort'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .map_err(|error| error.to_string())?;
+                Ok((lease_state, resource_state))
+            })
+            .expect("read fenced state");
+        assert_eq!(lease_state, "active");
+        assert_eq!(resource_state, "quarantined");
+        let error = server
+            .resolve_dispatch_env_binding(Some("env-abort"), None, false)
+            .expect_err("fenced resource must block redispatch");
+        assert!(
+            error.contains("quarantined resource 'res-abort'"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn abandoned_dispatch_with_a_failed_fence_stays_exclusively_fail_closed() {
+        let temp = tempfile::tempdir().expect("temp server");
+        let db_path = temp.path().join("global.sqlite");
+        let server = MemoryServer::new(db_path.clone(), None).expect("server");
+        seed_dispatchable_env(&server, "env-fence-fail", "res-fence-fail");
+        let guard = ExecEnvDispatchLeaseGuard::acquire(&server, "env-fence-fail")
+            .expect("dispatch admission");
+
+        let fault_connection = rusqlite::Connection::open(db_path).expect("fault connection");
+        fault_connection
+            .execute_batch(
+                "CREATE TRIGGER fail_abandoned_dispatch_fence
+                 BEFORE UPDATE OF state ON exec_env_resources
+                 WHEN NEW.state = 'quarantined' AND OLD.resource_id = 'res-fence-fail'
+                 BEGIN SELECT RAISE(ABORT, 'injected abandoned fence failure'); END;",
+            )
+            .expect("install fence failure trigger");
+        drop(guard);
+
+        let lease = server
+            .with_global_store_read(|store| {
+                memcore::get_exec_env(store.connection(), "env-fence-fail")
+                    .map_err(|error| error.to_string())
+            })
+            .expect("read lease")
+            .expect("lease exists");
+        assert_eq!(lease.state, ExecEnvState::Dispatching);
+        let error = server
+            .resolve_dispatch_env_binding(Some("env-fence-fail"), None, false)
+            .expect_err("failed fence must not reopen the lease");
+        assert!(error.contains("not active"), "{error}");
+    }
+
+    #[test]
+    fn quarantine_refuses_an_orphan_lease_without_live_resource_bindings() {
+        let temp = tempfile::tempdir().expect("temp server");
+        let server = MemoryServer::new(temp.path().join("global.sqlite"), None).expect("server");
+        server
+            .with_global_store(|store| {
+                memcore::insert_exec_env(
+                    store.connection_mut(),
+                    &NewExecEnvLease {
+                        env_id: "env-orphan".to_string(),
+                        kind: "worktree".to_string(),
+                        path: "/wt/orphan".to_string(),
+                        repo_root: "/repo".to_string(),
+                        branch: "orphan".to_string(),
+                        base_sha: "abc1234".to_string(),
+                        dispatch_id: None,
+                        env_class: EnvClass::EditOnly,
+                        created_at: String::new(),
+                    },
+                )
+                .map_err(|error| error.to_string())
+            })
+            .expect("seed orphan env");
+
+        let error = server
+            .with_global_store(|store| {
+                quarantine_lease_resources(
+                    store.connection_mut(),
+                    "env-orphan",
+                    "postflight rejected",
+                )
+            })
+            .expect_err("an empty binding set must not report quarantine");
+        assert!(error.contains("no live resource bindings"), "{error}");
+    }
+
+    #[test]
+    fn managed_dispatch_rejects_a_lease_with_a_quarantined_bound_resource() {
+        let temp = tempfile::tempdir().expect("temp server");
+        let server = MemoryServer::new(temp.path().join("global.sqlite"), None).expect("server");
+        server
+            .with_global_store(|store| {
+                memcore::insert_exec_env(
+                    store.connection_mut(),
+                    &NewExecEnvLease {
+                        env_id: "env-fenced".to_string(),
+                        kind: "worktree".to_string(),
+                        path: "/wt/fenced".to_string(),
+                        repo_root: "/repo".to_string(),
+                        branch: "fenced".to_string(),
+                        base_sha: "abc1234".to_string(),
+                        dispatch_id: None,
+                        env_class: EnvClass::EditOnly,
+                        created_at: String::new(),
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+                memcore::insert_resource(
+                    store.connection_mut(),
+                    &NewExecEnvResource {
+                        resource_id: "res-fenced".to_string(),
+                        kind: ResourceKind::Worktree,
+                        path: "/wt/fenced".to_string(),
+                        bytes: None,
+                        created_at: String::new(),
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+                memcore::bind_resource(store.connection_mut(), "env-fenced", "res-fenced")
+                    .map_err(|error| error.to_string())?;
+                memcore::quarantine_resource(
+                    store.connection_mut(),
+                    "res-fenced",
+                    "postflight indeterminate",
+                )
+                .map_err(|error| error.to_string())?;
+                Ok(())
+            })
+            .expect("seed fenced managed env");
+
+        let error = server
+            .resolve_dispatch_env_binding(Some("env-fenced"), None, false)
+            .expect_err("a quarantined lease resource must block production admission");
+        assert!(
+            error.contains("quarantined resource 'res-fenced'"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -1162,6 +2090,305 @@ mod tests {
     }
 
     #[test]
+    fn build_private_relative_target_is_refused_before_worktree_open() {
+        let mut opts = provision_opts(EnvClass::BuildPrivate, Some(approval(1_000)));
+        opts.private_target_dir = Some(PathBuf::from("relative-target"));
+
+        let error = validate_provision_request(&opts).unwrap_err();
+        assert!(error.contains("requires an absolute private target dir"));
+    }
+
+    #[test]
+    fn build_private_existing_cargo_config_cannot_publish_unproven_target() {
+        let error = require_private_cargo_target_provision(
+            Path::new("/wt/.cargo"),
+            Path::new("/wt/approved-target"),
+            tachi_clean::wt_open::CargoTargetProvision::SkippedExisting,
+        )
+        .unwrap_err();
+
+        assert!(error.contains("already exists"));
+        assert!(error.contains("was not proven to target the approved path"));
+    }
+
+    #[test]
+    fn build_private_legacy_extensionless_cargo_config_is_rejected() {
+        let root = tempfile::tempdir().unwrap();
+        let cargo_dir = root.path().join(".cargo");
+        std::fs::create_dir_all(&cargo_dir).unwrap();
+        std::fs::write(
+            cargo_dir.join("config"),
+            "[build]\ntarget-dir = \"/other/target\"\n",
+        )
+        .unwrap();
+
+        let error =
+            reject_unproven_cargo_configs(&cargo_dir, Path::new("/approved/target")).unwrap_err();
+        assert!(error.contains(".cargo/config"), "{error}");
+        assert!(error.contains("Cargo may use it instead"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn post_open_symlink_swap_cannot_retarget_config_or_cleanup_outside_managed_root() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let managed_root = root.path().join("managed");
+        let worktree = managed_root.join("opened-worktree");
+        let external = root.path().join("external");
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::create_dir_all(&external).unwrap();
+        std::fs::write(external.join("Cargo.toml"), "[workspace]\nmembers = []\n").unwrap();
+        let worktree = worktree.canonicalize().unwrap();
+        let managed_root = managed_root.canonicalize().unwrap();
+        let authority = memcore::anchored_fs::AnchoredDirectory::open_absolute(&worktree).unwrap();
+        std::fs::remove_dir(&worktree).unwrap();
+        symlink(&external, &worktree).unwrap();
+
+        let mut report = OpenReport {
+            action: "wt-open",
+            dry_run: false,
+            opened: true,
+            registered: true,
+            repo_root: root.path().display().to_string(),
+            path: worktree.display().to_string(),
+            branch: "tachi/swap-test".to_string(),
+            base_ref: "HEAD".to_string(),
+            base_sha: "abc1234".to_string(),
+            managed_root: managed_root.display().to_string(),
+            marker_path: None,
+            worktree_authority: Some(authority),
+            cargo_target_dir: None,
+            warnings: Vec::new(),
+            errors: Vec::new(),
+        };
+        let mut opts = provision_opts(EnvClass::BuildPrivate, Some(approval(1_000)));
+        opts.repo_root = root.path().to_path_buf();
+
+        let error = prepare_opened_worktree_for_publication(&mut report, &opts).unwrap_err();
+        assert!(
+            error.contains("descriptor identity cannot be re-established"),
+            "unexpected error: {error}"
+        );
+        assert!(!external.join(".cargo/config.toml").exists());
+        let cleanup = cleanup_opened_worktree_after_provision_failure(
+            &mut report,
+            None,
+            "injected post-open identity failure",
+        );
+        assert!(cleanup.contains("refused cleanup"), "{cleanup}");
+        assert!(external.join("Cargo.toml").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn build_private_prepublication_rejection_retains_auditable_worktree() {
+        fn contains_worktree_marker(path: &Path) -> bool {
+            let Ok(entries) = std::fs::read_dir(path) else {
+                return false;
+            };
+            entries.filter_map(Result::ok).any(|entry| {
+                entry.file_name() == ".git"
+                    || (entry.file_type().is_ok_and(|kind| kind.is_dir())
+                        && contains_worktree_marker(&entry.path()))
+            })
+        }
+
+        let _environment = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let root = tempfile::tempdir().expect("fixture root");
+        let home = root.path().join("home");
+        let repo = root.path().join("repo");
+        let worktrees = root.path().join("worktrees");
+        std::fs::create_dir_all(repo.join(".cargo")).expect("create tracked cargo config dir");
+        std::fs::write(
+            repo.join(".cargo/config.toml"),
+            "[build]\ntarget-dir = \"/untrusted/shared-target\"\n",
+        )
+        .expect("write tracked conflicting cargo config");
+        std::fs::write(repo.join("README.md"), "fixture\n").expect("write fixture source");
+        assert!(std::process::Command::new("git")
+            .args(["init", repo.to_str().expect("utf8 repo")])
+            .status()
+            .expect("git init")
+            .success());
+        assert!(std::process::Command::new("git")
+            .args(["-C", repo.to_str().expect("utf8 repo"), "add", "."])
+            .status()
+            .expect("git add")
+            .success());
+        assert!(std::process::Command::new("git")
+            .args([
+                "-C",
+                repo.to_str().expect("utf8 repo"),
+                "-c",
+                "user.name=Tachi Test",
+                "-c",
+                "user.email=tachi-test@example.invalid",
+                "commit",
+                "-m",
+                "fixture",
+            ])
+            .status()
+            .expect("git commit")
+            .success());
+
+        let _tachi_home = crate::test_support::EnvRestore::set_path("TACHI_HOME", &home);
+        let _home = crate::test_support::EnvRestore::set_path("HOME", &home);
+        let _worktrees =
+            crate::test_support::EnvRestore::set_path("TACHI_WORKTREES_ROOT", &worktrees);
+        let db = home.join("global").join(memcore::MEMORY_DB_FILENAME);
+        std::fs::create_dir_all(db.parent().expect("global DB parent"))
+            .expect("create global DB parent");
+        let mut store = memcore::MemoryStore::open(db.to_str().expect("utf8 DB")).expect("store");
+        let mut opts = provision_opts(EnvClass::BuildPrivate, Some(approval(1_000)));
+        opts.repo_root = repo;
+        opts.base = Some("HEAD".to_string());
+        opts.name = Some("prepublication-rejection".to_string());
+
+        let error = provision_managed_env(&mut store, &opts)
+            .expect_err("tracked Cargo config must refuse BuildPrivate publication");
+        assert!(error.contains("unproven existing file"), "{error}");
+        assert!(
+            error.contains("retained the registered worktree"),
+            "{error}"
+        );
+        assert!(memcore::list_exec_envs(store.connection(), None)
+            .expect("list leases")
+            .is_empty());
+        assert!(
+            contains_worktree_marker(&worktrees),
+            "prepublication refusal must retain a registered worktree for certified cleanup"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn build_private_publication_failure_rolls_back_owned_config_and_retains_worktree() {
+        fn contains_worktree_marker(path: &Path) -> bool {
+            let Ok(entries) = std::fs::read_dir(path) else {
+                return false;
+            };
+            entries.filter_map(Result::ok).any(|entry| {
+                entry.file_name() == ".git"
+                    || (entry.file_type().is_ok_and(|kind| kind.is_dir())
+                        && contains_worktree_marker(&entry.path()))
+            })
+        }
+
+        let _environment = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let root = tempfile::tempdir().expect("fixture root");
+        let home = root.path().join("home");
+        let repo = root.path().join("repo");
+        let worktrees = root.path().join("worktrees");
+        std::fs::create_dir_all(&repo).expect("create Rust fixture repo");
+        std::fs::write(repo.join("Cargo.toml"), "[workspace]\nmembers = []\n")
+            .expect("write tracked Cargo manifest");
+        assert!(std::process::Command::new("git")
+            .args(["init", repo.to_str().expect("utf8 repo")])
+            .status()
+            .expect("git init")
+            .success());
+        assert!(std::process::Command::new("git")
+            .args(["-C", repo.to_str().expect("utf8 repo"), "add", "."])
+            .status()
+            .expect("git add")
+            .success());
+        assert!(std::process::Command::new("git")
+            .args([
+                "-C",
+                repo.to_str().expect("utf8 repo"),
+                "-c",
+                "user.name=Tachi Test",
+                "-c",
+                "user.email=tachi-test@example.invalid",
+                "commit",
+                "-m",
+                "fixture",
+            ])
+            .status()
+            .expect("git commit")
+            .success());
+
+        let _tachi_home = crate::test_support::EnvRestore::set_path("TACHI_HOME", &home);
+        let _home = crate::test_support::EnvRestore::set_path("HOME", &home);
+        let _worktrees =
+            crate::test_support::EnvRestore::set_path("TACHI_WORKTREES_ROOT", &worktrees);
+        let db = home.join("global").join(memcore::MEMORY_DB_FILENAME);
+        std::fs::create_dir_all(db.parent().expect("global DB parent"))
+            .expect("create global DB parent");
+        let mut store = memcore::MemoryStore::open(db.to_str().expect("utf8 DB")).expect("store");
+        let injector = rusqlite::Connection::open(&db).expect("unrestricted second connection");
+        injector
+            .execute_batch(
+                "CREATE TRIGGER fail_build_private_publication
+                 BEFORE INSERT ON hard_state
+                 WHEN NEW.namespace = 'exec_env_private_target'
+                 BEGIN
+                   SELECT RAISE(ABORT, 'injected BuildPrivate publication failure');
+                 END;",
+            )
+            .expect("install late BuildPrivate publication trigger");
+        let _failure_hook = install_publication_failure_hook(move || {
+            injector
+                .execute_batch("DROP TRIGGER fail_build_private_publication;")
+                .expect("remove BuildPrivate trigger before certified cleanup");
+        });
+        let mut opts = provision_opts(EnvClass::BuildPrivate, Some(approval(1_000)));
+        opts.repo_root = repo;
+        opts.base = Some("HEAD".to_string());
+        opts.name = Some("private-publication-failure".to_string());
+
+        let error = provision_managed_env(&mut store, &opts)
+            .expect_err("late BuildPrivate publication failure must roll back filesystem + DB");
+        assert!(
+            error.contains("injected BuildPrivate publication failure")
+                && error.contains("retained the registered worktree"),
+            "{error}"
+        );
+        assert!(memcore::list_exec_envs(store.connection(), None)
+            .expect("list leases")
+            .is_empty());
+        assert!(memcore::list_resources(store.connection(), None, None)
+            .expect("list resources")
+            .is_empty());
+        assert!(
+            contains_worktree_marker(&worktrees),
+            "late BuildPrivate publication failure must retain a registered worktree"
+        );
+        let retained = std::fs::read_dir(&worktrees)
+            .expect("read managed root")
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .find(|path| path.is_dir())
+            .expect("retained worktree");
+        assert!(
+            !retained.join(".cargo/config.toml").exists(),
+            "only the exact owned private Cargo config is rolled back"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn build_private_target_symlink_component_is_rejected() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let physical = root.path().join("physical");
+        std::fs::create_dir_all(&physical).unwrap();
+        let alias = root.path().join("alias");
+        symlink(&physical, &alias).unwrap();
+
+        let error = reject_private_target_symlink_components(&alias.join("target")).unwrap_err();
+        assert!(error.contains("traverses symlink component"), "{error}");
+        assert!(error.contains(&alias.display().to_string()), "{error}");
+    }
+
+    #[test]
     fn the_default_classes_need_no_approval_and_reject_a_stray_one() {
         validate_provision_request(&provision_opts(EnvClass::EditOnly, None)).unwrap();
         validate_provision_request(&provision_opts(EnvClass::BuildTicketed, None)).unwrap();
@@ -1271,6 +2498,327 @@ mod tests {
         assert_eq!(
             opts.cargo_target_policy("/wt/private").unwrap(),
             CargoTargetPolicy::Private(PathBuf::from("/wt/private/target"))
+        );
+    }
+
+    #[test]
+    fn reclaimed_worktree_resource_revives_for_same_path_reprovision() {
+        let mut store = store_with_lease("env-old", EnvClass::EditOnly, "/wt/churn");
+        let old = register_env_resources(
+            &mut store,
+            "env-old",
+            EnvClass::EditOnly,
+            "/wt/churn",
+            None,
+            None,
+        )
+        .expect("register first incarnation");
+        assert_eq!(
+            memcore::claim_exec_env_removal(store.connection_mut(), "/wt/churn").unwrap(),
+            Some("env-old".to_string())
+        );
+        memcore::complete_exec_env_removal(
+            store.connection_mut(),
+            "env-old",
+            Some("test removal"),
+            123,
+        )
+        .unwrap();
+
+        let new_lease = NewExecEnvLease {
+            env_id: "env-new".to_string(),
+            kind: "worktree".to_string(),
+            path: "/wt/churn".to_string(),
+            repo_root: "/repo".to_string(),
+            branch: "tachi/894/new".to_string(),
+            base_sha: "def5678".to_string(),
+            dispatch_id: None,
+            env_class: EnvClass::EditOnly,
+            created_at: String::new(),
+        };
+        let new =
+            publish_env_resources_atomically(&mut store, &new_lease, "/wt/churn", None, None, None)
+                .expect("revive reclaimed physical path");
+
+        assert_ne!(new.worktree_resource_id, old.worktree_resource_id);
+        assert!(
+            memcore::get_resource(store.connection(), &old.worktree_resource_id)
+                .unwrap()
+                .is_none()
+        );
+        let revived = memcore::get_resource(store.connection(), &new.worktree_resource_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(revived.state, ResourceState::Active);
+        assert_eq!(revived.reclaimed_bytes, None);
+        assert_eq!(
+            memcore::active_binding_count(store.connection(), &new.worktree_resource_id).unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn active_worktree_resource_cannot_bind_a_second_live_lease() {
+        let mut store = memcore::MemoryStore::open_in_memory().unwrap();
+        let first_lease = NewExecEnvLease {
+            env_id: "env-first".to_string(),
+            kind: "worktree".to_string(),
+            path: "/wt/exclusive".to_string(),
+            repo_root: "/repo".to_string(),
+            branch: "tachi/first".to_string(),
+            base_sha: "abc1234".to_string(),
+            dispatch_id: None,
+            env_class: EnvClass::EditOnly,
+            created_at: String::new(),
+        };
+        let first = publish_env_resources_atomically(
+            &mut store,
+            &first_lease,
+            "/wt/exclusive",
+            None,
+            None,
+            None,
+        )
+        .expect("publish first exclusive worktree");
+        let second_lease = NewExecEnvLease {
+            env_id: "env-second".to_string(),
+            branch: "tachi/second".to_string(),
+            ..first_lease
+        };
+
+        let error = publish_env_resources_atomically(
+            &mut store,
+            &second_lease,
+            "/wt/exclusive",
+            None,
+            None,
+            None,
+        )
+        .expect_err("a physical worktree cannot have two live lease owners");
+        assert!(error.contains("already has 1 live binding"), "{error}");
+        assert!(memcore::get_exec_env(store.connection(), "env-second")
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            memcore::active_binding_count(store.connection(), &first.worktree_resource_id).unwrap(),
+            1,
+            "the refused transaction must not disturb the first owner"
+        );
+    }
+
+    #[test]
+    fn resource_registration_failure_exposes_no_active_lease_or_partial_binding() {
+        let mut store = memcore::MemoryStore::open_in_memory().unwrap();
+        let target_id = ensure_resource(
+            store.connection_mut(),
+            ResourceKind::BuildTarget,
+            "/wt/p/target",
+        )
+        .unwrap();
+        memcore::quarantine_resource(store.connection_mut(), &target_id, "poisoned").unwrap();
+
+        let lease = NewExecEnvLease {
+            env_id: "env-p".to_string(),
+            kind: "worktree".to_string(),
+            path: "/wt/p".to_string(),
+            repo_root: "/repo".to_string(),
+            branch: "tachi/894/p".to_string(),
+            base_sha: "abc1234".to_string(),
+            dispatch_id: None,
+            env_class: EnvClass::BuildPrivate,
+            created_at: String::new(),
+        };
+        let error = publish_env_resources_atomically(
+            &mut store,
+            &lease,
+            "/wt/p",
+            Some("/wt/p/target"),
+            Some(&approval(1_000)),
+            None,
+        )
+        .expect_err("quarantined target must fail the whole ledger publication");
+        assert!(error.contains("quarantined"), "{error}");
+        assert!(memcore::get_exec_env(store.connection(), "env-p")
+            .unwrap()
+            .is_none());
+        assert!(
+            memcore::find_resource_by_path(store.connection(), "/wt/p", ResourceKind::Worktree)
+                .unwrap()
+                .is_none(),
+            "the worktree row inserted before the target refusal must roll back"
+        );
+        assert_eq!(
+            memcore::active_binding_count(store.connection(), &target_id).unwrap(),
+            0
+        );
+        assert!(private_target_reservation(store.connection(), "env-p")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn atomic_private_publication_commits_complete_typed_evidence() {
+        let mut store = memcore::MemoryStore::open_in_memory().unwrap();
+        let lease = NewExecEnvLease {
+            env_id: "env-atomic-private".to_string(),
+            kind: "worktree".to_string(),
+            path: "/wt/atomic-private".to_string(),
+            repo_root: "/repo".to_string(),
+            branch: "tachi/894/atomic-private".to_string(),
+            base_sha: "abc1234".to_string(),
+            dispatch_id: None,
+            env_class: EnvClass::BuildPrivate,
+            created_at: String::new(),
+        };
+        let published = publish_env_resources_atomically(
+            &mut store,
+            &lease,
+            "/wt/atomic-private",
+            Some("/wt/atomic-private/target"),
+            Some(&approval(4_000)),
+            None,
+        )
+        .unwrap();
+
+        let persisted = memcore::get_exec_env(store.connection(), "env-atomic-private")
+            .unwrap()
+            .unwrap();
+        assert_eq!(persisted.state, ExecEnvState::Active);
+        assert!(
+            memcore::list_exec_envs(store.connection(), Some(ExecEnvState::Provisioning))
+                .unwrap()
+                .is_empty()
+        );
+        let target_id = published.build_target_resource_id.unwrap();
+        let reservation = private_target_reservation(store.connection(), "env-atomic-private")
+            .unwrap()
+            .unwrap();
+        assert_eq!(reservation.resource_id, target_id);
+        assert_eq!(reservation.reserved_bytes, 4_000);
+        assert_eq!(
+            memcore::active_binding_count(store.connection(), &published.worktree_resource_id)
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            memcore::active_binding_count(store.connection(), &target_id).unwrap(),
+            1
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_publication_canonicalizes_worktree_alias_before_ledger_write() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let real = root.path().join("real-worktree");
+        let alias = root.path().join("alias-worktree");
+        std::fs::create_dir(&real).unwrap();
+        symlink(&real, &alias).unwrap();
+        let canonical = real.canonicalize().unwrap().to_string_lossy().into_owned();
+        let alias = alias.to_string_lossy().into_owned();
+
+        let mut store = memcore::MemoryStore::open_in_memory().unwrap();
+        let lease = NewExecEnvLease {
+            env_id: "env-alias-publication".to_string(),
+            kind: "worktree".to_string(),
+            path: alias.clone(),
+            repo_root: root.path().to_string_lossy().into_owned(),
+            branch: "tachi/alias-publication".to_string(),
+            base_sha: "abc1234".to_string(),
+            dispatch_id: None,
+            env_class: EnvClass::EditOnly,
+            created_at: String::new(),
+        };
+        let published = store
+            .publish_exec_env_atomically(
+                &lease,
+                &[memcore::ExecEnvProvisioningResource {
+                    kind: ResourceKind::Worktree,
+                    path: alias,
+                    bytes: None,
+                }],
+                None,
+            )
+            .unwrap();
+
+        let persisted = memcore::get_exec_env(store.connection(), &lease.env_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(persisted.path, canonical);
+        let resource = memcore::get_resource(store.connection(), &published.worktree.resource_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(resource.path, canonical);
+    }
+
+    #[test]
+    fn late_publication_failure_rolls_back_every_intermediate_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("late-publication.sqlite");
+        let db_path = db.to_string_lossy().into_owned();
+        let mut store = memcore::MemoryStore::open(&db_path).unwrap();
+        let injector = rusqlite::Connection::open(&db).unwrap();
+        injector
+            .execute_batch(
+                "CREATE TRIGGER fail_private_reservation
+                 BEFORE INSERT ON hard_state
+                 WHEN NEW.namespace = 'exec_env_private_target'
+                 BEGIN
+                   SELECT RAISE(ABORT, 'injected reservation publication failure');
+                 END;",
+            )
+            .unwrap();
+        let lease = NewExecEnvLease {
+            env_id: "env-late-fail".to_string(),
+            kind: "worktree".to_string(),
+            path: "/wt/late".to_string(),
+            repo_root: "/repo".to_string(),
+            branch: "tachi/894/late".to_string(),
+            base_sha: "abc1234".to_string(),
+            dispatch_id: None,
+            env_class: EnvClass::BuildPrivate,
+            created_at: String::new(),
+        };
+        let error = store
+            .publish_exec_env_atomically(
+                &lease,
+                &[
+                    memcore::ExecEnvProvisioningResource {
+                        kind: ResourceKind::Worktree,
+                        path: "/wt/late".to_string(),
+                        bytes: None,
+                    },
+                    memcore::ExecEnvProvisioningResource {
+                        kind: ResourceKind::BuildTarget,
+                        path: "/wt/late/target".to_string(),
+                        bytes: Some(1_000),
+                    },
+                ],
+                Some(&memcore::ExecEnvPrivateTargetReservation {
+                    approved_by: "owner".to_string(),
+                    reserved_bytes: 1_000,
+                    target_path: "/wt/late/target".to_string(),
+                }),
+            )
+            .expect_err("late reservation write failure must abort the transaction");
+        assert!(
+            error
+                .to_string()
+                .contains("injected reservation publication failure"),
+            "{error}"
+        );
+        assert!(memcore::get_exec_env(store.connection(), "env-late-fail")
+            .unwrap()
+            .is_none());
+        assert!(memcore::list_resources(store.connection(), None, None)
+            .unwrap()
+            .is_empty());
+        assert!(
+            private_target_reservation(store.connection(), "env-late-fail")
+                .unwrap()
+                .is_none()
         );
     }
 

@@ -146,6 +146,7 @@ async fn typed_prompt_from_pre_projection_snapshot(
         project: params.project.clone(),
         completion_predicate: params.completion_predicate.clone(),
         recommendation_ref: None,
+        declared_file_scope: params.declared_file_scope.clone(),
     };
     let mut resolved_params = params.clone();
     let raw_profile = resolved_params.profile.clone();

@@ -1,5 +1,5 @@
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use tokio::io::{BufReader, Lines};
 use tokio::process::{ChildStdin, ChildStdout};
@@ -13,7 +13,9 @@ mod spec;
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
 pub(super) use runner::run_native_acp_dispatch;
+pub(super) use runner::{publish_native_acp_artifacts, run_native_acp_dispatch_with_liveness};
 pub(super) use spec::{build_native_acp_run_spec, is_native_acp_transport};
 
 const ACP_STREAM_FILE: &str = "acp.stream.ndjson";
@@ -25,6 +27,7 @@ pub(super) struct NativeAcpRunSpec {
     pub command: String,
     pub args: Vec<String>,
     pub cwd: PathBuf,
+    pub cwd_authority: Option<memcore::anchored_fs::AnchoredDirectory>,
     pub prompt: String,
     pub mode: NativeAcpRunMode,
     pub permission_label: String,
@@ -33,6 +36,7 @@ pub(super) struct NativeAcpRunSpec {
     pub session_distill_path: Option<PathBuf>,
     pub metadata: Value,
     pub env: HashMap<String, String>,
+    pub env_remove: HashSet<String>,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -47,8 +51,8 @@ pub(super) struct NativeAcpSession {
     pub source: &'static str,
 }
 
-#[derive(Debug)]
-struct NativeAcpPromptOutcome {
+#[derive(Debug, Clone)]
+pub(in crate::dispatch_ops) struct NativeAcpPromptOutcome {
     output: String,
     session_id: String,
     agent_session_id: Option<String>,
@@ -57,6 +61,29 @@ struct NativeAcpPromptOutcome {
     prompt_result: Value,
     used_existing_session: bool,
     observed_model: Option<String>,
+    staged_events: Vec<NativeAcpStagedEvent>,
+}
+
+#[derive(Debug, Clone)]
+pub(in crate::dispatch_ops) struct NativeAcpStagedEvent {
+    pub target: NativeAcpEventTarget,
+    pub payload: Value,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(in crate::dispatch_ops) enum NativeAcpEventTarget {
+    Progress,
+    Trajectory,
+    /// Server-authored permission metadata that is safe to publish only after
+    /// Required postflight releases the carrier's atomic artifact set.
+    PostflightReceipt,
+}
+
+#[derive(Debug, Clone)]
+pub(in crate::dispatch_ops) struct NativeAcpDeferredArtifacts {
+    pub spec: NativeAcpRunSpec,
+    pub outcome: NativeAcpPromptOutcome,
+    pub process_exit_code: Option<i32>,
 }
 
 struct NativeAcpConnection {
@@ -65,11 +92,12 @@ struct NativeAcpConnection {
     raw_messages: Vec<Value>,
     final_text_parts: Vec<String>,
     mapped_events: usize,
+    staged_events: Vec<NativeAcpStagedEvent>,
     observed_model: Option<String>,
     request_index: u64,
     permission_label: String,
+    defer_worker_text: bool,
     dispatch_id: String,
     agent: String,
-    run_dir: PathBuf,
     trajectory_path: PathBuf,
 }

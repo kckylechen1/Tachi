@@ -79,6 +79,7 @@
 //! all.
 
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+use std::path::Path;
 use uuid::Uuid;
 
 use crate::error::MemoryError;
@@ -134,6 +135,26 @@ impl ResourceKind {
                  worktree/build_target/scratch_dir/project_db)"
             ))),
         }
+    }
+}
+
+pub(crate) fn normalize_resource_path(
+    kind: ResourceKind,
+    path: &str,
+) -> Result<String, MemoryError> {
+    if kind != ResourceKind::Worktree {
+        return Ok(path.to_string());
+    }
+    match std::fs::canonicalize(Path::new(path)) {
+        Ok(canonical) => canonical.into_os_string().into_string().map_err(|_| {
+            MemoryError::InvalidArg(format!(
+                "worktree resource path is not valid UTF-8 after canonicalization: '{path}'"
+            ))
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(path.to_string()),
+        Err(error) => Err(MemoryError::InvalidArg(format!(
+            "cannot establish worktree resource identity for '{path}': {error}"
+        ))),
     }
 }
 
@@ -254,6 +275,70 @@ pub enum BindOutcome {
     /// The binding was already live; nothing changed (idempotent) — refcount
     /// is NOT incremented by a re-bind.
     AlreadyBound { binding_id: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExecEnvCargoTarget {
+    Unallocated,
+    Private(String),
+}
+
+/// Resolve the effective Cargo target contract from the lease and its live
+/// physical-resource bindings. Dispatch uses this value to override inherited
+/// `CARGO_TARGET_DIR`, so Cargo and the resource ledger share one source of
+/// truth.
+pub fn exec_env_cargo_target(
+    conn: &Connection,
+    env_id: &str,
+) -> Result<ExecEnvCargoTarget, MemoryError> {
+    let lease: Option<(String, String)> = conn
+        .query_row(
+            "SELECT env_class, state FROM exec_envs WHERE env_id = ?1",
+            params![env_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let Some((class_raw, state)) = lease else {
+        return Err(MemoryError::NotFound(format!("exec_env '{env_id}'")));
+    };
+    if state != "active" {
+        return Err(MemoryError::InvalidArg(format!(
+            "exec_env '{env_id}' is '{state}'; Cargo target policy is only derived before active dispatch admission"
+        )));
+    }
+    let class = super::exec_env::EnvClass::parse(&class_raw)?;
+    let mut stmt = conn.prepare(
+        "SELECT r.path, r.state FROM exec_env_resource_bindings b
+         JOIN exec_env_resources r ON r.resource_id = b.resource_id
+         WHERE b.env_id = ?1 AND b.released_at IS NULL AND r.kind = 'build_target'
+         ORDER BY r.resource_id",
+    )?;
+    let targets: Vec<(String, String)> = stmt
+        .query_map(params![env_id], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<Result<_, _>>()?;
+
+    if class.allocates_build_target() {
+        let [(path, resource_state)] = targets.as_slice() else {
+            return Err(MemoryError::InvalidArg(format!(
+                "build-private exec_env '{env_id}' must have exactly one live build_target binding, found {}",
+                targets.len()
+            )));
+        };
+        if resource_state != "active" || !std::path::Path::new(path).is_absolute() {
+            return Err(MemoryError::InvalidArg(format!(
+                "build-private exec_env '{env_id}' target '{path}' is '{resource_state}' or non-absolute"
+            )));
+        }
+        Ok(ExecEnvCargoTarget::Private(path.clone()))
+    } else if targets.is_empty() {
+        Ok(ExecEnvCargoTarget::Unallocated)
+    } else {
+        Err(MemoryError::InvalidArg(format!(
+            "exec_env '{env_id}' class '{}' must not hold build_target resources, found {}",
+            class.as_str(),
+            targets.len()
+        )))
+    }
 }
 
 /// Result of [`release_binding`].
@@ -393,6 +478,7 @@ pub fn insert_resource(
     conn: &mut Connection,
     res: &NewExecEnvResource,
 ) -> Result<RegisterOutcome, MemoryError> {
+    let path = normalize_resource_path(res.kind, &res.path)?;
     let now = normalize_utc_iso_or_now(&res.created_at);
     let measured_at = res.bytes.map(|_| now.clone());
 
@@ -401,7 +487,7 @@ pub fn insert_resource(
         .query_row(
             "SELECT resource_id, state, reclaimed_bytes FROM exec_env_resources \
              WHERE path = ?1 AND kind = ?2",
-            params![res.path, res.kind.as_str()],
+            params![path, res.kind.as_str()],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()?;
@@ -416,7 +502,7 @@ pub fn insert_resource(
                 params![
                     res.resource_id,
                     res.kind.as_str(),
-                    res.path,
+                    path,
                     res.bytes,
                     measured_at,
                     now,
@@ -433,7 +519,7 @@ pub fn insert_resource(
                     "exec_env_resource at ('{}', {}) already exists as '{}' \
                      (resource_id '{previous_resource_id}'); only a 'reclaimed' path can be \
                      re-registered",
-                    res.path,
+                    path,
                     res.kind.as_str(),
                     state.as_str(),
                 )));
@@ -486,6 +572,68 @@ pub fn find_resource_by_path(
     Ok(conn
         .query_row(&sql, params![path, kind.as_str()], row_to_resource)
         .optional()?)
+}
+
+/// Return a fail-closed refusal when an ExecEnv's persisted resource ledger
+/// does not prove that its worktree may be removed. Destructive consumers
+/// must consult this in addition to holder evidence: a quarantined or
+/// partially reclaimed resource is evidence to preserve, even after the lease
+/// itself returns to `active`.
+pub fn exec_env_resource_removal_refusal(
+    conn: &Connection,
+    env_id: &str,
+    worktree_path: &str,
+) -> Result<Option<String>, MemoryError> {
+    let mut stmt = conn.prepare(
+        "SELECT b.resource_id, r.kind, r.path, r.state \
+         FROM exec_env_resource_bindings b \
+         LEFT JOIN exec_env_resources r ON r.resource_id = b.resource_id \
+         WHERE b.env_id = ?1 AND b.released_at IS NULL \
+         ORDER BY b.resource_id",
+    )?;
+    let rows = stmt.query_map(params![env_id], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, Option<String>>(1)?,
+            row.get::<_, Option<String>>(2)?,
+            row.get::<_, Option<String>>(3)?,
+        ))
+    })?;
+
+    let mut saw_binding = false;
+    let mut saw_matching_worktree = false;
+    for row in rows {
+        let (resource_id, kind_raw, path, state_raw) = row?;
+        saw_binding = true;
+        let (Some(kind_raw), Some(path), Some(state_raw)) = (kind_raw, path, state_raw) else {
+            return Ok(Some(format!(
+                "ExecEnv {env_id} has a live binding to missing resource {resource_id}"
+            )));
+        };
+        let kind = ResourceKind::parse(&kind_raw)?;
+        let state = ResourceState::parse(&state_raw)?;
+        if state != ResourceState::Active {
+            return Ok(Some(format!(
+                "ExecEnv {env_id} resource {resource_id} is {}; preserving its bytes",
+                state.as_str()
+            )));
+        }
+        if kind == ResourceKind::Worktree && path == worktree_path {
+            saw_matching_worktree = true;
+        }
+    }
+
+    if !saw_binding {
+        return Ok(Some(format!(
+            "ExecEnv {env_id} has no live resource bindings"
+        )));
+    }
+    if !saw_matching_worktree {
+        return Ok(Some(format!(
+            "ExecEnv {env_id} has no active worktree resource bound at {worktree_path}"
+        )));
+    }
+    Ok(None)
 }
 
 /// List resources, optionally filtered by state and/or kind. Newest first.
@@ -676,6 +824,53 @@ pub fn quarantine_resource(
     Ok(outcome)
 }
 
+/// Quarantine a set of resources as one all-or-nothing lease-level fence.
+///
+/// Unlike repeated [`quarantine_resource`] calls, this holds one SQLite write
+/// transaction across every resource. A failure on any resource rolls back
+/// all earlier transitions, so a lease can never be only partly fenced.
+pub fn quarantine_resources_atomically(
+    conn: &mut Connection,
+    resource_ids: &[String],
+    reason: &str,
+) -> Result<Vec<String>, MemoryError> {
+    let tx = write_tx(conn)?;
+    let mut quarantined = Vec::new();
+    for resource_id in resource_ids {
+        let Some(state) = state_in_tx(&tx, resource_id)? else {
+            return Err(MemoryError::NotFound(format!(
+                "exec env resource {resource_id}"
+            )));
+        };
+        match state {
+            ResourceState::Quarantined => quarantined.push(resource_id.clone()),
+            ResourceState::Reclaimed => {
+                return Err(MemoryError::InvalidArg(format!(
+                "exec env resource {resource_id} is already reclaimed; refusing false quarantine"
+            )))
+            }
+            ResourceState::Active | ResourceState::Reclaiming | ResourceState::ReclaimFailed => {
+                let now = normalize_utc_iso_or_now("");
+                let changed = tx.execute(
+                    "UPDATE exec_env_resources \
+                     SET state = 'quarantined', reclaim_reason = ?2, updated_at = ?3 \
+                     WHERE resource_id = ?1 \
+                       AND state IN ('active', 'reclaiming', 'reclaim_failed')",
+                    params![resource_id, reason, now],
+                )?;
+                if changed == 0 {
+                    return Err(MemoryError::Internal(format!(
+                        "exec_env_resource '{resource_id}': atomic quarantine matched 0 rows"
+                    )));
+                }
+                quarantined.push(resource_id.clone());
+            }
+        }
+    }
+    tx.commit()?;
+    Ok(quarantined)
+}
+
 /// Result of [`release_quarantine`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReleaseQuarantineOutcome {
@@ -808,16 +1003,20 @@ pub fn bind_resource(
 ) -> Result<BindOutcome, MemoryError> {
     let tx = write_tx(conn)?;
 
-    let env_exists: bool = tx
+    let env_state: Option<String> = tx
         .query_row(
-            "SELECT 1 FROM exec_envs WHERE env_id = ?1",
+            "SELECT state FROM exec_envs WHERE env_id = ?1",
             params![env_id],
-            |_| Ok(true),
+            |row| row.get(0),
         )
-        .optional()?
-        .unwrap_or(false);
-    if !env_exists {
+        .optional()?;
+    let Some(env_state) = env_state else {
         return Err(MemoryError::NotFound(format!("exec_env '{env_id}'")));
+    };
+    if env_state != "active" {
+        return Err(MemoryError::InvalidArg(format!(
+            "exec_env '{env_id}' is '{env_state}'; only active leases may bind resources"
+        )));
     }
 
     let Some(state) = state_in_tx(&tx, resource_id)? else {
@@ -830,6 +1029,44 @@ pub fn bind_resource(
             "exec_env_resource '{resource_id}' is '{}', only 'active' resources are bindable",
             state.as_str()
         )));
+    }
+
+    let (resource_kind, resource_path): (String, String) = tx.query_row(
+        "SELECT kind, path FROM exec_env_resources WHERE resource_id = ?1",
+        params![resource_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    if ResourceKind::parse(&resource_kind)? == ResourceKind::Worktree {
+        let physical_path = normalize_resource_path(ResourceKind::Worktree, &resource_path)?;
+        let mut statement = tx.prepare(
+            "SELECT r.resource_id, r.path FROM exec_env_resource_bindings b
+             JOIN exec_env_resources r ON r.resource_id = b.resource_id
+             WHERE r.kind = 'worktree' AND r.resource_id <> ?1
+               AND b.env_id <> ?2 AND b.released_at IS NULL",
+        )?;
+        let rows = statement.query_map(params![resource_id, env_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        for row in rows {
+            let (other_resource_id, other_path) = row?;
+            if normalize_resource_path(ResourceKind::Worktree, &other_path)? == physical_path {
+                return Err(MemoryError::Duplicate(format!(
+                    "worktree resource '{resource_id}' aliases live worktree resource '{other_resource_id}' at '{physical_path}'; a physical workspace may belong to only one live exec env"
+                )));
+            }
+        }
+        drop(statement);
+        let other_live_bindings: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM exec_env_resource_bindings
+             WHERE resource_id = ?1 AND env_id <> ?2 AND released_at IS NULL",
+            params![resource_id, env_id],
+            |row| row.get(0),
+        )?;
+        if other_live_bindings != 0 {
+            return Err(MemoryError::Duplicate(format!(
+                "worktree resource '{resource_id}' already has {other_live_bindings} live binding(s) to another exec env; a physical workspace may belong to only one live exec env"
+            )));
+        }
     }
 
     let existing: Option<(String, Option<String>)> = tx
@@ -1114,6 +1351,56 @@ mod tests {
         }
     }
 
+    #[test]
+    fn cargo_target_policy_is_derived_from_class_and_live_binding() {
+        let mut conn = open_conn();
+        insert_exec_env(
+            &conn,
+            &NewExecEnvLease {
+                env_id: "env-private".to_string(),
+                kind: "worktree".to_string(),
+                path: "/wt/private".to_string(),
+                repo_root: "/repo".to_string(),
+                branch: "tachi/private".to_string(),
+                base_sha: "abc123".to_string(),
+                dispatch_id: None,
+                env_class: EnvClass::BuildPrivate,
+                created_at: String::new(),
+            },
+        )
+        .unwrap();
+        insert_resource(
+            &mut conn,
+            &new_resource(
+                "target-private",
+                ResourceKind::BuildTarget,
+                "/wt/private/target",
+            ),
+        )
+        .unwrap();
+        bind_resource(&mut conn, "env-private", "target-private").unwrap();
+        assert_eq!(
+            exec_env_cargo_target(&conn, "env-private").unwrap(),
+            ExecEnvCargoTarget::Private("/wt/private/target".to_string())
+        );
+
+        seed_env(&conn, "env-edit");
+        assert_eq!(
+            exec_env_cargo_target(&conn, "env-edit").unwrap(),
+            ExecEnvCargoTarget::Unallocated
+        );
+        insert_resource(
+            &mut conn,
+            &new_resource("target-forbidden", ResourceKind::BuildTarget, "/shared"),
+        )
+        .unwrap();
+        bind_resource(&mut conn, "env-edit", "target-forbidden").unwrap();
+        assert!(exec_env_cargo_target(&conn, "env-edit")
+            .unwrap_err()
+            .to_string()
+            .contains("must not hold build_target"));
+    }
+
     /// A deleter that reports `freed` bytes and counts how many times it ran —
     /// "was the filesystem actually touched" is the whole point of this ledger.
     fn counting_deleter(
@@ -1233,6 +1520,36 @@ mod tests {
             "only a resource with a LIVE binding counts; a released binding and a \
              never-bound-but-active resource must both be absent"
         );
+    }
+
+    #[test]
+    fn removal_refuses_quarantined_or_missing_worktree_evidence() {
+        let mut conn = open_conn();
+        seed_env(&conn, "env-removal");
+
+        assert!(
+            exec_env_resource_removal_refusal(&conn, "env-removal", "/wt/env-removal")
+                .unwrap()
+                .expect("missing binding must refuse removal")
+                .contains("no live resource bindings")
+        );
+
+        insert_resource(
+            &mut conn,
+            &new_resource("res-removal", ResourceKind::Worktree, "/wt/env-removal"),
+        )
+        .unwrap();
+        bind_resource(&mut conn, "env-removal", "res-removal").unwrap();
+        assert_eq!(
+            exec_env_resource_removal_refusal(&conn, "env-removal", "/wt/env-removal").unwrap(),
+            None
+        );
+
+        quarantine_resource(&mut conn, "res-removal", "postflight rejected").unwrap();
+        let refusal = exec_env_resource_removal_refusal(&conn, "env-removal", "/wt/env-removal")
+            .unwrap()
+            .expect("quarantine must refuse removal");
+        assert!(refusal.contains("is quarantined"), "{refusal}");
     }
 
     // Discriminating test ⑥ (review round 2, item 2) — a RECLAIMED path must be
@@ -1990,6 +2307,29 @@ mod tests {
         );
     }
 
+    #[test]
+    fn atomic_quarantine_rolls_back_when_any_named_resource_is_missing() {
+        let mut conn = open_conn();
+        insert_resource(
+            &mut conn,
+            &new_resource("res-present", ResourceKind::Worktree, "/wt/present"),
+        )
+        .unwrap();
+
+        let error = quarantine_resources_atomically(
+            &mut conn,
+            &["res-present".to_string(), "res-missing".to_string()],
+            "postflight rejected",
+        )
+        .expect_err("one missing resource must roll back the whole fence");
+        assert!(error.to_string().contains("res-missing"), "{error}");
+        assert_eq!(
+            get_resource(&conn, "res-present").unwrap().unwrap().state,
+            ResourceState::Active,
+            "the present resource must not be partly fenced"
+        );
+    }
+
     // A reclaim_failed resource can be fenced off (that is the point: a delete
     // that keeps failing is exactly what a human should look at).
     #[test]
@@ -2134,6 +2474,22 @@ mod tests {
             bind_resource(&mut conn, "env-1", "ghost-res").is_err(),
             "binding an unknown resource must fail closed"
         );
+        for state in ["dispatching", "removing", "reclaimed"] {
+            conn.execute(
+                "UPDATE exec_envs SET state = ?1 WHERE env_id = 'env-1'",
+                params![state],
+            )
+            .unwrap();
+            assert!(
+                bind_resource(&mut conn, "env-1", "res-1").is_err(),
+                "a {state} lease must not acquire a late resource binding"
+            );
+        }
+        conn.execute(
+            "UPDATE exec_envs SET state = 'active' WHERE env_id = 'env-1'",
+            [],
+        )
+        .unwrap();
 
         let calls = Cell::new(0);
         reclaim_resource(&mut conn, "res-1", None, counting_deleter(&calls, 10)).unwrap();
@@ -2152,6 +2508,84 @@ mod tests {
         assert!(
             bind_resource(&mut conn, "env-1", "res-q").is_err(),
             "a fenced-off resource must not be handed to a lease"
+        );
+    }
+
+    #[test]
+    fn worktree_binding_is_globally_exclusive_across_public_bind_entrypoint() {
+        let mut conn = open_conn();
+        seed_env(&conn, "env-1");
+        seed_env(&conn, "env-2");
+        insert_resource(
+            &mut conn,
+            &new_resource("res-worktree", ResourceKind::Worktree, "/wt/exclusive"),
+        )
+        .unwrap();
+
+        assert!(matches!(
+            bind_resource(&mut conn, "env-1", "res-worktree").unwrap(),
+            BindOutcome::Bound { .. }
+        ));
+        let error = bind_resource(&mut conn, "env-2", "res-worktree").unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("may belong to only one live exec env"),
+            "unexpected error: {error}"
+        );
+        assert_eq!(active_binding_count(&conn, "res-worktree").unwrap(), 1);
+
+        release_binding(&conn, "env-1", "res-worktree").unwrap();
+        assert!(matches!(
+            bind_resource(&mut conn, "env-2", "res-worktree").unwrap(),
+            BindOutcome::Bound { .. }
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn worktree_symlink_aliases_converge_at_registration_and_legacy_bind_barrier() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let real = root.path().join("real-worktree");
+        let alias = root.path().join("alias-worktree");
+        std::fs::create_dir(&real).unwrap();
+        symlink(&real, &alias).unwrap();
+        let real = real.to_string_lossy().into_owned();
+        let alias = alias.to_string_lossy().into_owned();
+
+        let mut conn = open_conn();
+        seed_env(&conn, "env-real");
+        seed_env(&conn, "env-alias");
+        insert_resource(
+            &mut conn,
+            &new_resource("res-real", ResourceKind::Worktree, &real),
+        )
+        .unwrap();
+        let duplicate = insert_resource(
+            &mut conn,
+            &new_resource("res-alias", ResourceKind::Worktree, &alias),
+        )
+        .unwrap_err();
+        assert!(duplicate.to_string().contains("already exists"));
+
+        // Simulate a pre-normalization database so the public binding barrier
+        // independently proves that legacy alias rows cannot both go live.
+        conn.execute(
+            "INSERT INTO exec_env_resources
+             (resource_id, kind, path, bytes, measured_at, state, reclaim_reason,
+              reclaimed_at, reclaimed_bytes, created_at, updated_at)
+             VALUES ('res-legacy-alias', 'worktree', ?1, NULL, NULL, 'active',
+                     NULL, NULL, NULL, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+            [&alias],
+        )
+        .unwrap();
+        bind_resource(&mut conn, "env-real", "res-real").unwrap();
+        let error = bind_resource(&mut conn, "env-alias", "res-legacy-alias").unwrap_err();
+        assert!(
+            error.to_string().contains("aliases live worktree resource"),
+            "unexpected error: {error}"
         );
     }
 

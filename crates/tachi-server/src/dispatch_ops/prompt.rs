@@ -436,6 +436,7 @@ pub(crate) async fn assemble_prompt_with_trace(
         project: params.project.clone(),
         completion_predicate: params.completion_predicate.clone(),
         recommendation_ref: None,
+        declared_file_scope: params.declared_file_scope.clone(),
     };
     let mut resolved_params = params.clone();
     let raw_profile = resolved_params.profile.clone();
@@ -564,6 +565,7 @@ mod tests {
             allowed_mcp_servers: Vec::new(),
             verbose: None,
             inject_card: None,
+            declared_file_scope: None,
         }
     }
 
@@ -707,6 +709,7 @@ mod tests {
             allowed_mcp_servers: Vec::new(),
             verbose: None,
             inject_card,
+            declared_file_scope: None,
         }
     }
 
