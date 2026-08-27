@@ -47,6 +47,8 @@ const _: () = assert!(
 
 #[cfg(feature = "admin")]
 pub mod agent_profile;
+#[doc(hidden)]
+pub mod anchored_fs;
 pub mod canonical_digest;
 /// Model-broker catalog row types (tachi#1681). `admin`-gated because all
 /// six catalog tables are `SchemaScope::Product`.

@@ -1009,6 +1009,25 @@ pub fn bind_resource(
         )));
     }
 
+    let resource_kind: String = tx.query_row(
+        "SELECT kind FROM exec_env_resources WHERE resource_id = ?1",
+        params![resource_id],
+        |row| row.get(0),
+    )?;
+    if ResourceKind::parse(&resource_kind)? == ResourceKind::Worktree {
+        let other_live_bindings: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM exec_env_resource_bindings
+             WHERE resource_id = ?1 AND env_id <> ?2 AND released_at IS NULL",
+            params![resource_id, env_id],
+            |row| row.get(0),
+        )?;
+        if other_live_bindings != 0 {
+            return Err(MemoryError::Duplicate(format!(
+                "worktree resource '{resource_id}' already has {other_live_bindings} live binding(s) to another exec env; a physical workspace may belong to only one live exec env"
+            )));
+        }
+    }
+
     let existing: Option<(String, Option<String>)> = tx
         .query_row(
             "SELECT binding_id, released_at FROM exec_env_resource_bindings \
@@ -2449,6 +2468,37 @@ mod tests {
             bind_resource(&mut conn, "env-1", "res-q").is_err(),
             "a fenced-off resource must not be handed to a lease"
         );
+    }
+
+    #[test]
+    fn worktree_binding_is_globally_exclusive_across_public_bind_entrypoint() {
+        let mut conn = open_conn();
+        seed_env(&conn, "env-1");
+        seed_env(&conn, "env-2");
+        insert_resource(
+            &mut conn,
+            &new_resource("res-worktree", ResourceKind::Worktree, "/wt/exclusive"),
+        )
+        .unwrap();
+
+        assert!(matches!(
+            bind_resource(&mut conn, "env-1", "res-worktree").unwrap(),
+            BindOutcome::Bound { .. }
+        ));
+        let error = bind_resource(&mut conn, "env-2", "res-worktree").unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("may belong to only one live exec env"),
+            "unexpected error: {error}"
+        );
+        assert_eq!(active_binding_count(&conn, "res-worktree").unwrap(), 1);
+
+        release_binding(&conn, "env-1", "res-worktree").unwrap();
+        assert!(matches!(
+            bind_resource(&mut conn, "env-2", "res-worktree").unwrap(),
+            BindOutcome::Bound { .. }
+        ));
     }
 
     #[test]

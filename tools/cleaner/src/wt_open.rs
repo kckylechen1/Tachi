@@ -285,9 +285,6 @@ pub fn provision_cargo_target_config(
     }
     let cargo_dir = worktree_path.join(".cargo");
     let config_path = cargo_dir.join("config.toml");
-    if config_path.exists() {
-        return Ok(CargoTargetProvision::SkippedExisting);
-    }
     let (target_dir, provenance) = match policy {
         CargoTargetPolicy::Unallocated => unreachable!("handled above"),
         CargoTargetPolicy::Shared => (
@@ -315,15 +312,47 @@ pub fn provision_cargo_target_config(
             )
         }
     };
-    std::fs::create_dir_all(&cargo_dir)
-        .map_err(|err| format!("create {}: {err}", cargo_dir.display()))?;
     let contents = format!(
         "{provenance}[build]\ntarget-dir = \"{}\"\n",
         escape_toml_string(&target_dir.display().to_string())
     );
-    std::fs::write(&config_path, contents)
-        .map_err(|err| format!("write {}: {err}", config_path.display()))?;
-    Ok(CargoTargetProvision::Written(target_dir))
+    #[cfg(not(unix))]
+    {
+        if matches!(policy, CargoTargetPolicy::Private(_)) {
+            return Err(
+                "private cargo target provisioning requires descriptor-anchored, no-follow filesystem operations on this platform"
+                    .to_string(),
+            );
+        }
+        if config_path.exists() {
+            return Ok(CargoTargetProvision::SkippedExisting);
+        }
+        std::fs::create_dir_all(&cargo_dir)
+            .map_err(|err| format!("create {}: {err}", cargo_dir.display()))?;
+        std::fs::write(&config_path, contents)
+            .map_err(|err| format!("write {}: {err}", config_path.display()))?;
+        return Ok(CargoTargetProvision::Written(target_dir));
+    }
+    #[cfg(unix)]
+    {
+        let anchored_path = canonical_non_symlink_directory(worktree_path)?;
+        let worktree = memcore::anchored_fs::AnchoredDirectory::open_absolute(&anchored_path)
+            .map_err(|err| format!("anchor {} without symlinks: {err}", worktree_path.display()))?;
+        let cargo = worktree
+            .open_or_create_directory(std::ffi::OsStr::new(".cargo"))
+            .map_err(|err| format!("open anchored {}: {err}", cargo_dir.display()))?;
+        match cargo
+            .create_file_exclusive(std::ffi::OsStr::new("config.toml"), contents.as_bytes())
+            .map_err(|err| format!("write anchored {}: {err}", config_path.display()))?
+        {
+            memcore::anchored_fs::CreateFileOutcome::Created => {
+                Ok(CargoTargetProvision::Written(target_dir))
+            }
+            memcore::anchored_fs::CreateFileOutcome::Exists => {
+                Ok(CargoTargetProvision::SkippedExisting)
+            }
+        }
+    }
 }
 
 /// Remove only the exact private Cargo config this provisioning code writes.
@@ -336,35 +365,67 @@ pub fn rollback_private_cargo_target_config(
     worktree_path: &Path,
     target_dir: &Path,
 ) -> Result<bool, String> {
-    if !target_dir.is_absolute() {
-        return Err(format!(
-            "private cargo target-dir rollback requires an absolute target, got '{}'",
-            target_dir.display()
-        ));
-    }
-    let config_path = worktree_path.join(".cargo").join("config.toml");
-    let metadata = match std::fs::symlink_metadata(&config_path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(format!("inspect {}: {error}", config_path.display())),
-    };
-    if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
-        return Ok(false);
-    }
-    let expected = format!(
-        "# Written by tachi wt-open (#894 S2c): PRIVATE cargo target-dir for an\n\
+    #[cfg(not(unix))]
+    return Err(
+        "private cargo target rollback requires descriptor-anchored, no-follow filesystem operations on this platform"
+            .to_string(),
+    );
+    #[cfg(unix)]
+    {
+        if !target_dir.is_absolute() {
+            return Err(format!(
+                "private cargo target-dir rollback requires an absolute target, got '{}'",
+                target_dir.display()
+            ));
+        }
+        let config_path = worktree_path.join(".cargo").join("config.toml");
+        let expected = format!(
+            "# Written by tachi wt-open (#894 S2c): PRIVATE cargo target-dir for an\n\
          # explicitly approved build-private env. Not shared with any other tree.\n\
          [build]\ntarget-dir = \"{}\"\n",
-        escape_toml_string(&target_dir.display().to_string())
-    );
-    let observed = std::fs::read_to_string(&config_path)
-        .map_err(|error| format!("read {} before rollback: {error}", config_path.display()))?;
-    if observed != expected {
-        return Ok(false);
+            escape_toml_string(&target_dir.display().to_string())
+        );
+        let anchored_path = canonical_non_symlink_directory(worktree_path)?;
+        let worktree = memcore::anchored_fs::AnchoredDirectory::open_absolute(&anchored_path)
+            .map_err(|error| {
+                format!(
+                    "anchor {} before rollback: {error}",
+                    worktree_path.display()
+                )
+            })?;
+        let cargo = match worktree.open_directory(std::ffi::OsStr::new(".cargo")) {
+            Ok(cargo) => cargo,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => {
+                return Err(format!(
+                    "anchor {} before rollback: {error}",
+                    config_path.display()
+                ))
+            }
+        };
+        cargo
+            .remove_file_if_exact(std::ffi::OsStr::new("config.toml"), expected.as_bytes())
+            .map_err(|error| {
+                format!(
+                    "remove exact owned config {}: {error}",
+                    config_path.display()
+                )
+            })
     }
-    std::fs::remove_file(&config_path)
-        .map_err(|error| format!("remove owned config {}: {error}", config_path.display()))?;
-    Ok(true)
+}
+
+#[cfg(unix)]
+fn canonical_non_symlink_directory(path: &Path) -> Result<PathBuf, String> {
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|error| format!("inspect directory {}: {error}", path.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(format!(
+            "refusing non-directory or symlink worktree authority: {}",
+            path.display()
+        ));
+    }
+    std::fs::canonicalize(path)
+        .map_err(|error| format!("canonicalize directory {}: {error}", path.display()))
 }
 
 /// Minimal TOML basic-string escaping (backslash + double-quote) — paths on
@@ -1623,6 +1684,60 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(&config).unwrap(),
             "[build]\ntarget-dir = \"/foreign\"\n"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_config_io_refuses_symlinked_cargo_directory_and_never_removes_target() {
+        use std::os::unix::fs::symlink;
+
+        let root = unique_temp("tachi-private-config-symlink-root");
+        let external = unique_temp("tachi-private-config-symlink-external");
+        std::fs::write(root.join("Cargo.toml"), "[workspace]\nmembers = []\n").unwrap();
+        std::fs::remove_dir(root.join(".cargo")).ok();
+        symlink(&external, root.join(".cargo")).unwrap();
+        let target = root.join("private-target");
+
+        let error =
+            provision_cargo_target_config(&root, &CargoTargetPolicy::Private(target.clone()))
+                .unwrap_err();
+        assert!(
+            error.contains("open anchored"),
+            "unexpected provisioning error: {error}"
+        );
+        assert!(!external.join("config.toml").exists());
+
+        let external_config = external.join("config.toml");
+        std::fs::write(&external_config, "external must survive\n").unwrap();
+        assert!(rollback_private_cargo_target_config(&root, &target).is_err());
+        assert_eq!(
+            std::fs::read_to_string(&external_config).unwrap(),
+            "external must survive\n"
+        );
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(external);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_config_rollback_captures_symlink_without_following_its_target() {
+        use std::os::unix::fs::symlink;
+
+        let root = unique_temp("tachi-private-config-final-symlink");
+        let external = root.join("external-config");
+        let cargo = root.join(".cargo");
+        std::fs::create_dir_all(&cargo).unwrap();
+        std::fs::write(&external, "external must survive\n").unwrap();
+        symlink(&external, cargo.join("config.toml")).unwrap();
+        let target = root.join("private-target");
+
+        assert!(!rollback_private_cargo_target_config(&root, &target).unwrap());
+        assert!(cargo.join("config.toml").is_symlink());
+        assert_eq!(
+            std::fs::read_to_string(&external).unwrap(),
+            "external must survive\n"
         );
         let _ = std::fs::remove_dir_all(root);
     }
