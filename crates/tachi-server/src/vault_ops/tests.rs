@@ -1,9 +1,10 @@
 use super::handlers::{
-    handle_vault_init, handle_vault_list, handle_vault_lock, handle_vault_set,
-    handle_vault_set_api_key_pool, handle_vault_unlock,
+    handle_vault_init, handle_vault_lease_api_key, handle_vault_list, handle_vault_lock,
+    handle_vault_set, handle_vault_set_api_key_pool, handle_vault_unlock,
 };
 use super::params::{
-    VaultInitParams, VaultListParams, VaultSetApiKeyPoolParams, VaultSetParams, VaultUnlockParams,
+    VaultInitParams, VaultLeaseApiKeyParams, VaultListParams, VaultSetApiKeyPoolParams,
+    VaultSetParams, VaultUnlockParams,
 };
 use super::session::{read_unlock_password_fifo, with_vault_key};
 use crate::server_state::MemoryServer;
@@ -1407,4 +1408,36 @@ async fn vault_set_infers_config_for_lane_urls_and_refuses_api_key() {
         pool.contains("lane config") && pool.contains("api_key"),
         "{pool}"
     );
+
+    let nested_leak = handle_vault_set(
+        &server,
+        VaultSetParams {
+            name: "EXTRACT_BASE_URL_1_1".to_string(),
+            value: "https://user:pass@api.deepseek.com/chat/completions".to_string(),
+            agent_id: None,
+            secret_type: String::new(),
+            description: "double suffix".to_string(),
+            allowed_agents: None,
+            enable_rotation: false,
+            rotation_strategy: None,
+        },
+    )
+    .await
+    .expect_err("nested rotation suffix must still be a config URL");
+    assert!(
+        nested_leak.contains("userinfo") || nested_leak.contains("credential"),
+        "{nested_leak}"
+    );
+
+    let leased = handle_vault_lease_api_key(
+        &server,
+        VaultLeaseApiKeyParams {
+            name: "EXTRACT_BASE_URL".to_string(),
+            env_name: None,
+            agent_id: None,
+        },
+    )
+    .await
+    .expect_err("config URLs must not lease as API keys");
+    assert!(leased.contains("lane config"), "{leased}");
 }

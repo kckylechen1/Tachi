@@ -224,6 +224,12 @@ pub(crate) async fn handle_vault_lease_api_key(
                 env_name
             ));
         }
+        if memcore::is_lane_config_secret_name(&params.name) {
+            return Err(format!(
+                "Vault name '{}' is lane config, not a credential; refusing to lease it as an API key",
+                params.name
+            ));
+        }
 
         let pool = load_unlocked_api_key_secret_pool(server, &params.name)?;
         let selected = pool.first().ok_or_else(|| {

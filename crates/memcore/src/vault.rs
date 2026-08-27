@@ -59,11 +59,12 @@ pub fn normalize_secret_type(value: &str) -> &'static str {
 }
 
 fn lane_config_stem(name: &str) -> &str {
-    let name = name.trim();
-    if let Some((stem, suffix)) = name.rsplit_once('_') {
-        if !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_digit()) {
-            return stem;
+    let mut name = name.trim();
+    while let Some((stem, suffix)) = name.rsplit_once('_') {
+        if suffix.is_empty() || !suffix.bytes().all(|b| b.is_ascii_digit()) {
+            break;
         }
+        name = stem;
     }
     name
 }
@@ -358,7 +359,14 @@ mod tests {
             SECRET_TYPE_CONFIG
         );
         assert!(is_lane_config_secret_name("EXTRACT_BASE_URL_1"));
+        assert!(is_lane_config_secret_name("EXTRACT_BASE_URL_1_1"));
+        assert!(is_lane_config_url_name("EXTRACT_BASE_URL_1_1"));
+        assert_eq!(
+            infer_vault_secret_type("EXTRACT_BASE_URL_1_1"),
+            SECRET_TYPE_CONFIG
+        );
         assert!(!is_lane_config_secret_name("DEEPSEEK_API_KEY_1"));
+        assert!(!is_lane_config_secret_name("DEEPSEEK_API_KEY_1_1"));
         assert_eq!(
             infer_vault_secret_type("ENABLE_FALLBACK_API_KEY"),
             SECRET_TYPE_CONFIG

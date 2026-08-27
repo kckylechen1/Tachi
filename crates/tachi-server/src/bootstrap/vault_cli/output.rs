@@ -140,6 +140,12 @@ pub(crate) fn lease_api_key_from_store(
     key: &[u8; 32],
     logical_name: &str,
 ) -> Result<(String, String, String), Box<dyn std::error::Error>> {
+    if memcore::is_lane_config_secret_name(logical_name) {
+        return Err(format!(
+            "Vault name '{logical_name}' is lane config, not a credential; refusing to lease it as an API key"
+        )
+        .into());
+    }
     let entries = store
         .vault_list_entries()
         .map_err(|e| format!("vault_list_entries: {e}"))?;
@@ -177,6 +183,9 @@ pub(crate) fn lease_api_key_from_store(
         let Some(entry) = entries.iter().find(|entry| entry.name == candidate) else {
             continue;
         };
+        if memcore::is_lane_config_secret_name(&entry.name) {
+            continue;
+        }
         if entry
             .allowed_agents
             .as_ref()
