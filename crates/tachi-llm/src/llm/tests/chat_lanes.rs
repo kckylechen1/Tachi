@@ -62,6 +62,108 @@ fn foundry_lanes_use_deepseek_defaults_when_only_deepseek_key_is_configured() {
     );
 }
 
+/// #1853 P0: `load_lane` selects the first non-empty key, then only uses
+/// DeepSeek URL/model defaults when that key is `DEEPSEEK_API_KEY`. A
+/// SiliconFlow-only install with empty DISTILL_*/REASONING_* must stay on
+/// SiliconFlow — otherwise a filled DeepSeek URL in `.env.example` would
+/// send `SILICONFLOW_API_KEY` to api.deepseek.com.
+#[test]
+#[allow(clippy::await_holding_lock)]
+fn foundry_lanes_stay_on_siliconflow_when_only_siliconflow_key_is_configured() {
+    let _guard = crate::test_support::global_test_lock().lock();
+    let _env_guards = [
+        EnvRestore::unset("DISTILL_API_KEY"),
+        EnvRestore::unset("REASONING_API_KEY"),
+        EnvRestore::unset("ZAI_API_KEY"),
+        EnvRestore::unset("BIGMODEL_API_KEY"),
+        EnvRestore::unset("EXTRACT_API_KEY"),
+        EnvRestore::unset("DEEPSEEK_API_KEY"),
+        EnvRestore::unset("DISTILL_BASE_URL"),
+        EnvRestore::unset("EXTRACT_BASE_URL"),
+        EnvRestore::unset("REASONING_BASE_URL"),
+        EnvRestore::unset("DEEPSEEK_BASE_URL"),
+        EnvRestore::unset("DEEPSEEK_DISTILL_BASE_URL"),
+        EnvRestore::unset("DEEPSEEK_REASONING_BASE_URL"),
+        EnvRestore::unset("DISTILL_MODEL"),
+        EnvRestore::unset("EXTRACT_MODEL"),
+        EnvRestore::unset("REASONING_MODEL"),
+        EnvRestore::unset("DEEPSEEK_MODEL"),
+        EnvRestore::unset("DEEPSEEK_DISTILL_MODEL"),
+        EnvRestore::unset("DEEPSEEK_REASONING_MODEL"),
+        EnvRestore::unset("TACHI_BACKEND_DISTILL_TIER"),
+        EnvRestore::unset("TACHI_BACKEND_REASONING_TIER"),
+    ];
+    let _sf_key = EnvRestore::set("SILICONFLOW_API_KEY", "siliconflow-test-key");
+    let _sf_base = EnvRestore::set(
+        "SILICONFLOW_BASE_URL",
+        "https://api.siliconflow.cn/v1/chat/completions",
+    );
+    let _sf_model = EnvRestore::set("SILICONFLOW_MODEL", "Qwen/Qwen3.5-27B");
+
+    let client = LlmClient::new().expect("client should initialize");
+    let distill = client.lane(ChatLane::Distill);
+    let reasoning = client.lane(ChatLane::Reasoning);
+
+    assert!(
+        !distill.base_url.contains("deepseek.com"),
+        "SiliconFlow-only distill must not target DeepSeek: {}",
+        distill.base_url
+    );
+    assert!(
+        !reasoning.base_url.contains("deepseek.com"),
+        "SiliconFlow-only reasoning must not target DeepSeek: {}",
+        reasoning.base_url
+    );
+    assert_eq!(
+        distill.base_url,
+        "https://api.siliconflow.cn/v1/chat/completions"
+    );
+    assert_eq!(
+        client.provider_key_id_for_tests(&distill.api_key_envs),
+        Some("SILICONFLOW_API_KEY".to_string())
+    );
+    assert_eq!(
+        client.provider_key_id_for_tests(&reasoning.api_key_envs),
+        Some("SILICONFLOW_API_KEY".to_string())
+    );
+}
+
+/// The example install file must not pre-fill DeepSeek URLs/models onto
+/// DISTILL_*/REASONING_* while SILICONFLOW_API_KEY is the only filled key.
+#[test]
+fn env_example_does_not_prefill_deepseek_lane_urls() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.env.example");
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|err| panic!("read {}: {err}", path.display()));
+    for key in [
+        "DISTILL_BASE_URL",
+        "DISTILL_MODEL",
+        "REASONING_BASE_URL",
+        "REASONING_MODEL",
+    ] {
+        let assigned = text.lines().find_map(|line| {
+            let line = line.trim();
+            if line.starts_with('#') {
+                return None;
+            }
+            line.strip_prefix(key)
+                .and_then(|rest| rest.strip_prefix('='))
+                .map(str::trim)
+        });
+        let Some(value) = assigned else {
+            continue;
+        };
+        assert!(
+            value.is_empty(),
+            ".env.example {key}={value} would pair SILICONFLOW_API_KEY with a foreign provider"
+        );
+        assert!(
+            !value.contains("deepseek.com") && !value.contains("deepseek-v4"),
+            ".env.example {key}={value} pre-fills DeepSeek onto a lane that load_lane() will not bind to DEEPSEEK_API_KEY unless that key is set"
+        );
+    }
+}
+
 #[tokio::test]
 async fn generate_summary_propagates_llm_failures() {
     let config = ProviderRuntimeConfig {

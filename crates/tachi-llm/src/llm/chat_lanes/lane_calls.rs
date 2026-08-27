@@ -97,19 +97,20 @@ impl super::super::LlmClient {
     }
 
     /// Attach the provider-shaped "no thinking" fields for a chat body.
-    /// SiliconFlow reads `enable_thinking`; official DeepSeek V4 reads
-    /// `thinking: {type: disabled}`. Sending both is harmless on SiliconFlow
-    /// and is what makes official Flash probes return content.
+    /// SiliconFlow reads `enable_thinking`. Official DeepSeek V4 documents
+    /// `thinking: {type: disabled}` and does not document `enable_thinking`.
+    /// Generate one family per host — do not send SiliconFlow fields to
+    /// api.deepseek.com, or the reverse.
     pub(super) fn apply_thinking_suppression(body: &mut Value, base_url: &str, model: &str) {
         if !Self::should_disable_thinking(base_url, model) {
             return;
         }
-        body["enable_thinking"] = Value::Bool(false);
         let url = base_url.to_ascii_lowercase();
-        let model = model.to_ascii_lowercase();
-        if url.contains("deepseek.com") || model.contains("deepseek-v4-flash") {
+        if url.contains("deepseek.com") {
             body["thinking"] = serde_json::json!({ "type": "disabled" });
+            return;
         }
+        body["enable_thinking"] = Value::Bool(false);
     }
 
     pub async fn call_extract_llm(
@@ -1085,7 +1086,10 @@ mod failure_class_tests {
             "https://api.deepseek.com/chat/completions",
             "deepseek-v4-flash",
         );
-        assert_eq!(flash["enable_thinking"], false);
+        assert!(
+            flash.get("enable_thinking").is_none(),
+            "official DeepSeek does not document enable_thinking: {flash}"
+        );
         assert_eq!(flash["thinking"]["type"], "disabled");
 
         let mut pro = serde_json::json!({"model": "deepseek-v4-pro"});
@@ -1096,5 +1100,17 @@ mod failure_class_tests {
         );
         assert!(pro.get("enable_thinking").is_none());
         assert!(pro.get("thinking").is_none());
+
+        let mut siliconflow = serde_json::json!({"model": "Qwen/Qwen3.5-27B"});
+        super::super::super::LlmClient::apply_thinking_suppression(
+            &mut siliconflow,
+            "https://api.siliconflow.cn/v1/chat/completions",
+            "Qwen/Qwen3.5-27B",
+        );
+        assert_eq!(siliconflow["enable_thinking"], false);
+        assert!(
+            siliconflow.get("thinking").is_none(),
+            "SiliconFlow does not document official DeepSeek thinking: {siliconflow}"
+        );
     }
 }
