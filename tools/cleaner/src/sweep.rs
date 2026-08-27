@@ -295,12 +295,28 @@ fn execute_sweep(report: &mut SweepReport) {
                 continue;
             }
         };
+        let removal_claim = match work_claim::claim_worktree_removal(&canonical_path) {
+            Ok(claim) => claim,
+            Err(err) => {
+                report.warnings.push(format!(
+                    "skipped {} (could not atomically claim ExecEnv removal: {err})",
+                    candidate.path
+                ));
+                continue;
+            }
+        };
         if let Err(err) = scrap_ledger::record_scrap(&canonical_path, branch) {
             report.warnings.push(format!(
                 "skipped {} (scrap ledger write failed: {err}; fail-closed rather than remove a \
                  tree the re-entry gate cannot remember, tachi#1118)",
                 candidate.path
             ));
+            if let Err(abort_error) = removal_claim.abort() {
+                report.errors.push(format!(
+                    "ExecEnv removal claim abort failed for {}; lease remains fail-closed: {abort_error}",
+                    candidate.path
+                ));
+            }
             continue;
         }
 
@@ -317,6 +333,12 @@ fn execute_sweep(report: &mut SweepReport) {
         {
             Ok(out) if out.status.success() => {
                 report.removed.push(candidate.path.clone());
+                if let Err(err) = removal_claim.complete() {
+                    report.errors.push(format!(
+                        "worktree {} was removed but ExecEnv removal completion failed; lease remains fail-closed: {err}",
+                        candidate.path
+                    ));
+                }
                 let _ = Command::new("git")
                     .args(["-C", repo_root, "worktree", "prune"])
                     .output();
@@ -335,6 +357,12 @@ fn execute_sweep(report: &mut SweepReport) {
                 }
             }
             Ok(out) => {
+                if let Err(abort_error) = removal_claim.abort() {
+                    report.errors.push(format!(
+                        "ExecEnv removal claim abort failed for {}; lease remains fail-closed: {abort_error}",
+                        candidate.path
+                    ));
+                }
                 report.errors.push(format!(
                     "git worktree remove failed for {}: {}",
                     candidate.path,
@@ -348,6 +376,12 @@ fn execute_sweep(report: &mut SweepReport) {
                 ));
             }
             Err(err) => {
+                if let Err(abort_error) = removal_claim.abort() {
+                    report.errors.push(format!(
+                        "ExecEnv removal claim abort failed for {}; lease remains fail-closed: {abort_error}",
+                        candidate.path
+                    ));
+                }
                 report.errors.push(format!(
                     "failed to run git worktree remove for {}: {err}",
                     candidate.path

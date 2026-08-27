@@ -11,18 +11,21 @@
 //!   active ──dispatch admission──▶ dispatching
 //!     ▲                                │
 //!     └── clean / fenced terminal ◀────┘
-//!     │
-//!     └──────────reclaim──────────▶ reclaimed
+//!     ├──removal claim──▶ removing ──success──▶ reclaimed
+//!     │                       │
+//!     │                       └──failure──▶ active
+//!     └──────────reclaim─────────────────▶ reclaimed
 //!
 //! A crash while `dispatching` stays fail-closed. Reclaim refuses that state;
 //! reconciliation must first establish a clean or fenced terminal outcome.
 //! ```
 //!
-//! There is exactly one function that flips a lease to `reclaimed`
-//! ([`reclaim_exec_env`]); `safe_merge` / cancel / terminal-state all route
-//! through it, and the sweep is a backstop, not a second writer.
+//! Normal terminal actions route through [`reclaim_exec_env`]. A destructive
+//! cleaner instead owns the explicit [`claim_exec_env_removal`] →
+//! [`complete_exec_env_removal`] protocol so filesystem deletion and dispatch
+//! admission cannot race.
 
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 
 use crate::error::MemoryError;
 
@@ -37,6 +40,9 @@ pub enum ExecEnvState {
     /// Exclusively admitted to one in-flight dispatch. A daemon crash leaves
     /// this state fail-closed until an operator reconciles the lease.
     Dispatching,
+    /// Exclusively claimed by a destructive cleaner. Dispatch admission
+    /// refuses this state; a crash remains fail-closed until reconciliation.
+    Removing,
     /// Reclaimed — the worktree/branch/target have been (or are being) torn
     /// down; the row is retained for audit and idempotent reclaim.
     Reclaimed,
@@ -47,6 +53,7 @@ impl ExecEnvState {
         match self {
             ExecEnvState::Active => "active",
             ExecEnvState::Dispatching => "dispatching",
+            ExecEnvState::Removing => "removing",
             ExecEnvState::Reclaimed => "reclaimed",
         }
     }
@@ -58,9 +65,10 @@ impl ExecEnvState {
         match raw {
             "active" => Ok(ExecEnvState::Active),
             "dispatching" => Ok(ExecEnvState::Dispatching),
+            "removing" => Ok(ExecEnvState::Removing),
             "reclaimed" => Ok(ExecEnvState::Reclaimed),
             other => Err(MemoryError::InvalidArg(format!(
-                "unknown exec_env state '{other}' (expected 'active', 'dispatching', or 'reclaimed')"
+                "unknown exec_env state '{other}' (expected 'active', 'dispatching', 'removing', or 'reclaimed')"
             ))),
         }
     }
@@ -311,15 +319,15 @@ pub fn find_active_exec_env_by_path(
 }
 
 /// Fetch the newest unreclaimed lease for a workspace path. Destructive
-/// consumers use this broader lookup so the fail-closed `dispatching` state
-/// cannot disappear behind an active-only query.
+/// consumers use this broader lookup so fail-closed exclusive states cannot
+/// disappear behind an active-only query.
 pub fn find_live_exec_env_by_path(
     conn: &Connection,
     path: &str,
 ) -> Result<Option<ExecEnvLease>, MemoryError> {
     let sql = format!(
         "SELECT {SELECT_COLUMNS} FROM exec_envs \
-         WHERE path = ?1 AND state IN ('active', 'dispatching') \
+         WHERE path = ?1 AND state IN ('active', 'dispatching', 'removing') \
          ORDER BY created_at DESC LIMIT 1"
     );
     let lease = conn
@@ -358,12 +366,110 @@ pub fn list_exec_envs(
     Ok(out)
 }
 
-/// THE single reclaim path (#894 S1): transactionally flip an `active` lease to
+/// Atomically claim an active managed worktree for destructive removal.
+/// `None` means no unreclaimed managed lease exists (legacy/not-applicable).
+/// Holder and resource proofs are re-read under the same IMMEDIATE write
+/// transaction as `active -> removing`, making it mutually exclusive with
+/// dispatch admission's guarded `active -> dispatching` update.
+pub fn claim_exec_env_removal(
+    conn: &mut Connection,
+    path: &str,
+) -> Result<Option<String>, MemoryError> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let existing: Option<(String, String)> = tx
+        .query_row(
+            "SELECT env_id, state FROM exec_envs \
+             WHERE path = ?1 AND state != 'reclaimed' \
+             ORDER BY created_at DESC LIMIT 1",
+            params![path],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let Some((env_id, state_raw)) = existing else {
+        tx.commit()?;
+        return Ok(None);
+    };
+    match ExecEnvState::parse(&state_raw)? {
+        ExecEnvState::Active => {}
+        state => {
+            return Err(MemoryError::WorkClaimIncompatibleState(format!(
+                "refusing to remove exec env {env_id}: lease is {}",
+                state.as_str()
+            )))
+        }
+    }
+    match super::session_claims::holder_evidence(&tx, &env_id)? {
+        super::session_claims::HolderEvidence::Clear
+        | super::session_claims::HolderEvidence::NotApplicable => {}
+        evidence => {
+            return Err(MemoryError::WorkClaimIncompatibleState(format!(
+                "refusing to remove exec env {env_id}: holder evidence is {evidence:?}"
+            )))
+        }
+    }
+    if let Some(detail) =
+        super::exec_env_resources::exec_env_resource_removal_refusal(&tx, &env_id, path)?
+    {
+        return Err(MemoryError::WorkClaimIncompatibleState(detail));
+    }
+    let changed = tx.execute(
+        "UPDATE exec_envs SET state = 'removing' WHERE env_id = ?1 AND state = 'active'",
+        params![env_id],
+    )?;
+    if changed != 1 {
+        return Err(MemoryError::WorkClaimIncompatibleState(format!(
+            "exec env {env_id} changed during removal admission"
+        )));
+    }
+    tx.commit()?;
+    Ok(Some(env_id))
+}
+
+/// Complete a persisted removal claim after filesystem deletion succeeds.
+pub fn complete_exec_env_removal(
+    conn: &mut Connection,
+    env_id: &str,
+    reason: Option<&str>,
+) -> Result<(), MemoryError> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let now = normalize_utc_iso_or_now("");
+    let changed = tx.execute(
+        "UPDATE exec_envs SET state = 'reclaimed', reclaimed_at = ?2, \
+             reclaim_reason = ?3 WHERE env_id = ?1 AND state = 'removing'",
+        params![env_id, now, reason],
+    )?;
+    if changed != 1 {
+        return Err(MemoryError::WorkClaimIncompatibleState(format!(
+            "exec env {env_id} lost its removal claim before completion"
+        )));
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+/// Release a persisted removal claim after deletion did not occur.
+pub fn abort_exec_env_removal(conn: &mut Connection, env_id: &str) -> Result<(), MemoryError> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let changed = tx.execute(
+        "UPDATE exec_envs SET state = 'active' WHERE env_id = ?1 AND state = 'removing'",
+        params![env_id],
+    )?;
+    if changed != 1 {
+        return Err(MemoryError::WorkClaimIncompatibleState(format!(
+            "exec env {env_id} lost its removal claim before abort"
+        )));
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+/// The ordinary reclaim path (#894 S1): transactionally flip an `active` lease to
 /// `reclaimed`, stamping `reclaimed_at` and an optional reason. Idempotent — a
 /// lease that is already `reclaimed` returns [`ReclaimOutcome::AlreadyReclaimed`]
 /// without a second write. A missing lease is a typed [`MemoryError::NotFound`]
 /// rather than a successful-looking outcome. safe_merge / cancel / terminal-state must all
-/// call through here; the sweep is a backstop that never owns this transition.
+/// call through here. Destructive cleaners use the separate persisted removal
+/// claim protocol because they must own the lease before touching the filesystem.
 pub fn reclaim_exec_env(
     conn: &mut Connection,
     selector: &ExecEnvSelector,
@@ -414,6 +520,11 @@ pub fn reclaim_exec_env(
                 "refusing to reclaim exec env {env_id}: an admitted dispatch still owns it"
             )))
         }
+        ExecEnvState::Removing => {
+            return Err(MemoryError::WorkClaimIncompatibleState(format!(
+                "refusing to reclaim exec env {env_id}: a destructive cleaner owns it"
+            )))
+        }
         ExecEnvState::Active => {
             let now = normalize_utc_iso_or_now("");
             tx.execute(
@@ -439,6 +550,14 @@ mod tests {
         crate::db::enable_simple_auto_extension().unwrap();
         crate::db::register_sqlite_vec();
         let conn = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&conn).unwrap();
+        conn
+    }
+
+    fn open_file_conn(path: &std::path::Path) -> Connection {
+        crate::db::enable_simple_auto_extension().unwrap();
+        crate::db::register_sqlite_vec();
+        let conn = Connection::open(path).unwrap();
         crate::db::init_schema(&conn).unwrap();
         conn
     }
@@ -633,6 +752,110 @@ mod tests {
     }
 
     #[test]
+    fn removal_claim_and_dispatch_admission_are_mutually_exclusive() {
+        let mut conn = open_conn();
+        insert_exec_env(&conn, &new_lease("env-remove", "/wt/remove")).unwrap();
+        super::super::exec_env_resources::insert_resource(
+            &mut conn,
+            &super::super::exec_env_resources::NewExecEnvResource {
+                resource_id: "res-remove".to_string(),
+                kind: super::super::exec_env_resources::ResourceKind::Worktree,
+                path: "/wt/remove".to_string(),
+                bytes: None,
+                created_at: String::new(),
+            },
+        )
+        .unwrap();
+        super::super::exec_env_resources::bind_resource(&mut conn, "env-remove", "res-remove")
+            .unwrap();
+
+        assert_eq!(
+            claim_exec_env_removal(&mut conn, "/wt/remove").unwrap(),
+            Some("env-remove".to_string())
+        );
+        assert_eq!(
+            get_exec_env(&conn, "env-remove").unwrap().unwrap().state,
+            ExecEnvState::Removing
+        );
+        let dispatch_changed = conn
+            .execute(
+                "UPDATE exec_envs SET state='dispatching' WHERE env_id='env-remove' AND state='active'",
+                [],
+            )
+            .unwrap();
+        assert_eq!(dispatch_changed, 0, "removal ownership must fence dispatch");
+
+        abort_exec_env_removal(&mut conn, "env-remove").unwrap();
+        conn.execute(
+            "UPDATE exec_envs SET state='dispatching' WHERE env_id='env-remove' AND state='active'",
+            [],
+        )
+        .unwrap();
+        let error = claim_exec_env_removal(&mut conn, "/wt/remove")
+            .expect_err("dispatch ownership must fence removal");
+        assert!(
+            error.to_string().contains("lease is dispatching"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn concurrent_removal_and_dispatch_claims_have_exactly_one_winner() {
+        use std::sync::{Arc, Barrier};
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("claims.sqlite");
+        let mut seed = open_file_conn(&db);
+        insert_exec_env(&seed, &new_lease("env-race", "/wt/race")).unwrap();
+        super::super::exec_env_resources::insert_resource(
+            &mut seed,
+            &super::super::exec_env_resources::NewExecEnvResource {
+                resource_id: "res-race".to_string(),
+                kind: super::super::exec_env_resources::ResourceKind::Worktree,
+                path: "/wt/race".to_string(),
+                bytes: None,
+                created_at: String::new(),
+            },
+        )
+        .unwrap();
+        super::super::exec_env_resources::bind_resource(&mut seed, "env-race", "res-race").unwrap();
+        drop(seed);
+
+        let mut removal_conn = open_file_conn(&db);
+        let mut dispatch_conn = open_file_conn(&db);
+        let barrier = Arc::new(Barrier::new(2));
+        let removal_barrier = Arc::clone(&barrier);
+        let removal = std::thread::spawn(move || {
+            removal_barrier.wait();
+            matches!(
+                claim_exec_env_removal(&mut removal_conn, "/wt/race"),
+                Ok(Some(env_id)) if env_id == "env-race"
+            )
+        });
+        let dispatch = std::thread::spawn(move || {
+            barrier.wait();
+            let tx = dispatch_conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .unwrap();
+            let changed = tx
+                .execute(
+                    "UPDATE exec_envs SET state='dispatching' WHERE env_id='env-race' AND state='active'",
+                    [],
+                )
+                .unwrap();
+            tx.commit().unwrap();
+            changed == 1
+        });
+
+        let removal_won = removal.join().unwrap();
+        let dispatch_won = dispatch.join().unwrap();
+        assert_ne!(
+            removal_won, dispatch_won,
+            "the IMMEDIATE transactions and guarded transitions must admit exactly one owner"
+        );
+    }
+
+    #[test]
     fn reclaim_by_path_targets_the_active_lease() {
         let mut conn = open_conn();
         // A stale reclaimed row plus a live active row for the same path.
@@ -690,6 +913,10 @@ mod tests {
         assert_eq!(
             ExecEnvState::parse("dispatching").unwrap(),
             ExecEnvState::Dispatching
+        );
+        assert_eq!(
+            ExecEnvState::parse("removing").unwrap(),
+            ExecEnvState::Removing
         );
         assert_eq!(
             ExecEnvState::parse("reclaimed").unwrap(),

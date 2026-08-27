@@ -4,7 +4,7 @@ use std::process::Command;
 use crate::holder::{self, HolderEvidence, HolderProbeFn};
 use crate::registry;
 use crate::scrap_ledger;
-use crate::work_claim::{self, DbHolderProbeFn};
+use crate::work_claim::{self, DbHolderProbeFn, DbRemovalClaim};
 
 #[derive(Debug, Clone, Copy)]
 pub enum OutputFormat {
@@ -291,9 +291,17 @@ fn current_branch(worktree_root: &Path) -> Result<String, String> {
 }
 
 fn execute_wt_remove(mut report: WtRemoveReport) -> WtRemoveReport {
+    execute_wt_remove_with_claim(&mut report, &work_claim::claim_worktree_removal);
+    report
+}
+
+fn execute_wt_remove_with_claim(
+    report: &mut WtRemoveReport,
+    claim_removal: &dyn Fn(&Path) -> Result<DbRemovalClaim, String>,
+) {
     let Some(path) = report.canonical_path.clone() else {
         report.errors.push("missing canonical path".to_string());
-        return report;
+        return;
     };
     if report.registry_only {
         // #1605 fix round (codex review): re-verify staleness at execute time
@@ -320,7 +328,7 @@ fn execute_wt_remove(mut report: WtRemoveReport) -> WtRemoveReport {
                  (it did not at plan time) — this row may no longer be stale; re-run \
                  `wt-remove` to re-plan against current state before dropping it"
             ));
-            return report;
+            return;
         }
         // Locked precondition + exact-row deletion in one critical section:
         // the other half of the TOCTOU fix. Re-checks "does this path
@@ -332,7 +340,7 @@ fn execute_wt_remove(mut report: WtRemoveReport) -> WtRemoveReport {
             Ok(true) => {
                 report.removed = true;
                 report.dry_run = false;
-                if let Err(err) = append_log(&report) {
+                if let Err(err) = append_log(report) {
                     report
                         .warnings
                         .push(format!("cleanup log write failed: {err}"));
@@ -343,11 +351,11 @@ fn execute_wt_remove(mut report: WtRemoveReport) -> WtRemoveReport {
             )),
             Err(err) => report.errors.push(err),
         }
-        return report;
+        return;
     }
     let Some(repo_root) = report.repo_root.clone() else {
         report.errors.push("missing repo root".to_string());
-        return report;
+        return;
     };
 
     // Fail-closed integrity boundary (tachi#1212 fix-round, codex checkpoint
@@ -363,14 +371,28 @@ fn execute_wt_remove(mut report: WtRemoveReport) -> WtRemoveReport {
              fail-closed integrity boundary)"
                 .to_string(),
         );
-        return report;
+        return;
+    };
+    let removal_claim = match claim_removal(Path::new(&path)) {
+        Ok(claim) => claim,
+        Err(err) => {
+            report.errors.push(format!(
+                "refusing to remove: could not atomically claim ExecEnv removal ({err})"
+            ));
+            return;
+        }
     };
     if let Err(err) = scrap_ledger::record_scrap(Path::new(&path), &branch) {
         report.errors.push(format!(
             "refusing to remove: scrap ledger write failed ({err}); fail-closed rather than \
              remove a tree the re-entry gate cannot remember (tachi#1118)"
         ));
-        return report;
+        if let Err(abort_error) = removal_claim.abort() {
+            report.errors.push(format!(
+                "ExecEnv removal claim abort also failed; lease remains fail-closed: {abort_error}"
+            ));
+        }
+        return;
     }
 
     match Command::new("git")
@@ -380,6 +402,11 @@ fn execute_wt_remove(mut report: WtRemoveReport) -> WtRemoveReport {
         Ok(out) if out.status.success() => {
             report.removed = true;
             report.dry_run = false;
+            if let Err(err) = removal_claim.complete() {
+                report.errors.push(format!(
+                    "worktree was removed but ExecEnv removal completion failed; lease remains fail-closed: {err}"
+                ));
+            }
 
             // 1. Clean up stale worktree registrations
             let _ = Command::new("git")
@@ -451,13 +478,18 @@ fn execute_wt_remove(mut report: WtRemoveReport) -> WtRemoveReport {
                     .warnings
                     .push(format!("registry cleanup failed: {err}")),
             }
-            if let Err(err) = append_log(&report) {
+            if let Err(err) = append_log(report) {
                 report
                     .warnings
                     .push(format!("cleanup log write failed: {err}"));
             }
         }
         Ok(out) => {
+            if let Err(abort_error) = removal_claim.abort() {
+                report.errors.push(format!(
+                    "ExecEnv removal claim abort failed; lease remains fail-closed: {abort_error}"
+                ));
+            }
             report.errors.push(format!(
                 "git worktree remove failed: {}",
                 String::from_utf8_lossy(&out.stderr).trim()
@@ -471,6 +503,11 @@ fn execute_wt_remove(mut report: WtRemoveReport) -> WtRemoveReport {
             );
         }
         Err(err) => {
+            if let Err(abort_error) = removal_claim.abort() {
+                report.errors.push(format!(
+                    "ExecEnv removal claim abort failed; lease remains fail-closed: {abort_error}"
+                ));
+            }
             report
                 .errors
                 .push(format!("failed to run git worktree remove: {err}"));
@@ -483,7 +520,6 @@ fn execute_wt_remove(mut report: WtRemoveReport) -> WtRemoveReport {
             );
         }
     }
-    report
 }
 
 fn emit_report(report: &WtRemoveReport, output: OutputFormat) -> Result<(), String> {
@@ -1302,7 +1338,10 @@ mod tests {
         );
         assert_eq!(report.branch.as_deref(), Some(branch));
 
-        let report = execute_wt_remove(report);
+        let mut report = report;
+        execute_wt_remove_with_claim(&mut report, &|_| {
+            Ok(crate::work_claim::legacy_removal_claim_for_test())
+        });
         assert!(
             report.removed,
             "worktree should be removed: {:?}",
@@ -1330,6 +1369,76 @@ mod tests {
         assert!(
             !String::from_utf8_lossy(&wt_list.stdout).contains(worktree.to_str().unwrap()),
             "git worktree list must not contain the removed worktree"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn managed_execute_claims_before_delete_and_completes_reclaimed() {
+        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let root = unique_temp_dir("wt-clean-managed-removal-claim");
+        let (_home_guard, worktree) = setup_registered_worktree(&root);
+        let canonical = std::fs::canonicalize(&worktree).unwrap();
+        let db = root
+            .join("home")
+            .join(".tachi/global")
+            .join(memcore::MEMORY_DB_FILENAME);
+        std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+        let mut store = memcore::MemoryStore::open(db.to_str().unwrap()).unwrap();
+        memcore::insert_exec_env(
+            store.connection(),
+            &memcore::NewExecEnvLease {
+                env_id: "env-managed-remove".to_string(),
+                kind: "worktree".to_string(),
+                path: canonical.to_string_lossy().into_owned(),
+                repo_root: root.join("repo").to_string_lossy().into_owned(),
+                branch: "feature/holder-test".to_string(),
+                base_sha: "test-base".to_string(),
+                dispatch_id: None,
+                env_class: memcore::EnvClass::EditOnly,
+                created_at: String::new(),
+            },
+        )
+        .unwrap();
+        memcore::insert_resource(
+            store.connection_mut(),
+            &memcore::NewExecEnvResource {
+                resource_id: "res-managed-remove".to_string(),
+                kind: memcore::ResourceKind::Worktree,
+                path: canonical.to_string_lossy().into_owned(),
+                bytes: None,
+                created_at: String::new(),
+            },
+        )
+        .unwrap();
+        memcore::bind_resource(
+            store.connection_mut(),
+            "env-managed-remove",
+            "res-managed-remove",
+        )
+        .unwrap();
+        drop(store);
+
+        let report = plan_wt_remove(
+            &worktree,
+            false,
+            &work_claim::probe_worktree_holder,
+            &|_| HolderEvidence::Clear,
+        );
+        assert!(report.allowed, "{:?}", report.errors);
+        let report = execute_wt_remove(report);
+        assert!(report.removed, "{:?}", report.errors);
+        assert!(!worktree.exists());
+
+        let observed =
+            memcore::MemoryStore::open_existing_read_write(db.to_str().unwrap()).unwrap();
+        assert_eq!(
+            memcore::get_exec_env(observed.connection(), "env-managed-remove")
+                .unwrap()
+                .unwrap()
+                .state,
+            memcore::ExecEnvState::Reclaimed
         );
 
         let _ = std::fs::remove_dir_all(&root);

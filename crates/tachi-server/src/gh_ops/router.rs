@@ -184,10 +184,10 @@ pub(crate) async fn handle_tachi_gh(
             )
             .await?;
             // #894 S1: the exec_envs lease is the single owner of a managed env.
-            // When safe_merge reclaimed the local worktree, flip the lease
-            // through the one reclaim path. A failed transition is surfaced:
-            // discarding it after physical deletion would falsely report a
-            // complete reclaim while the durable lifecycle still says active.
+            // The cleaner's atomic removal claim normally completes the lease
+            // itself; this idempotent reconcile also covers legacy cleaners.
+            // A failed transition is surfaced rather than claiming complete
+            // reclaim while the durable lifecycle disagrees.
             if let Some(worktree) = worktree_for_lease.as_deref() {
                 if safe_merge_reclaimed_worktree(&out) {
                     server
@@ -302,10 +302,11 @@ pub(crate) fn worktree_holder_gate(
         else {
             return Ok(());
         };
-        if lease.state == memcore::ExecEnvState::Dispatching {
+        if lease.state != memcore::ExecEnvState::Active {
             return Err(format!(
-                "refusing external cleaner for {worktree_path}: ExecEnv {} is dispatching",
-                lease.env_id
+                "refusing external cleaner for {worktree_path}: ExecEnv {} is {}",
+                lease.env_id,
+                lease.state.as_str()
             ));
         }
         if let Some(detail) = memcore::exec_env_resource_removal_refusal(
@@ -890,6 +891,22 @@ mod tests {
         let error = worktree_holder_gate(&server, worktree.to_str().expect("UTF-8 path"))
             .expect_err("safe-merge must reject a dispatching lease");
         assert!(error.contains("env-dispatching is dispatching"), "{error}");
+
+        server
+            .with_global_store(|store| {
+                store
+                    .connection_mut()
+                    .execute(
+                        "UPDATE exec_envs SET state='removing' WHERE env_id='env-dispatching'",
+                        [],
+                    )
+                    .map_err(|error| error.to_string())?;
+                Ok(())
+            })
+            .expect("move lease to removing");
+        let error = worktree_holder_gate(&server, worktree.to_str().expect("UTF-8 path"))
+            .expect_err("safe-merge must reject a removal claim");
+        assert!(error.contains("env-dispatching is removing"), "{error}");
     }
 
     #[test]

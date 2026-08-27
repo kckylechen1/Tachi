@@ -1,8 +1,9 @@
 //! Persisted WorkClaim holder evidence for destructive worktree cleanup.
 //!
 //! OS process evidence remains the independent liveness gate in `holder`.
-//! This module only reads the durable ExecEnv/WorkClaim ledger; it never
-//! transitions identity, claim, or ExecEnv lifecycle state.
+//! Planning reads the durable ExecEnv/WorkClaim ledger. Immediately before a
+//! destructive command, execution atomically claims the lease as `removing`
+//! so dispatch admission cannot win a check-then-delete race.
 
 use std::path::{Path, PathBuf};
 
@@ -38,12 +39,81 @@ impl DbHolderEvidence {
 
 pub type DbHolderProbeFn = dyn Fn(&Path) -> DbHolderEvidence;
 
+/// Persisted ownership of a managed worktree removal. A legacy worktree has
+/// no env id and the completion methods are no-ops.
+pub struct DbRemovalClaim {
+    db_path: PathBuf,
+    env_id: Option<String>,
+}
+
+#[cfg(test)]
+pub(crate) fn legacy_removal_claim_for_test() -> DbRemovalClaim {
+    DbRemovalClaim {
+        db_path: PathBuf::new(),
+        env_id: None,
+    }
+}
+
+impl DbRemovalClaim {
+    pub fn complete(self) -> Result<(), String> {
+        let Some(env_id) = self.env_id else {
+            return Ok(());
+        };
+        let mut store = open_maintenance_store(&self.db_path)?;
+        memcore::complete_exec_env_removal(
+            store.connection_mut(),
+            &env_id,
+            Some("worktree removed"),
+        )
+        .map_err(|error| format!("complete ExecEnv removal claim: {error}"))
+    }
+
+    pub fn abort(self) -> Result<(), String> {
+        let Some(env_id) = self.env_id else {
+            return Ok(());
+        };
+        let mut store = open_maintenance_store(&self.db_path)?;
+        memcore::abort_exec_env_removal(store.connection_mut(), &env_id)
+            .map_err(|error| format!("abort ExecEnv removal claim: {error}"))
+    }
+}
+
 /// Read holder evidence from the configured Tachi global DB.  The cleaner
 /// shares the runtime's `TACHI_HOME` layout and canonical database filename,
 /// never creates or migrates a DB while deciding whether deletion is safe.
 pub fn probe_worktree_holder(worktree: &Path) -> DbHolderEvidence {
     let home = resolve_tachi_home();
     probe_worktree_holder_from_home(&home, worktree)
+}
+
+/// Atomically acquire destructive ownership immediately before deletion.
+pub fn claim_worktree_removal(worktree: &Path) -> Result<DbRemovalClaim, String> {
+    let home = resolve_tachi_home();
+    claim_worktree_removal_from_home(&home, worktree)
+}
+
+fn claim_worktree_removal_from_home(
+    home: &Path,
+    worktree: &Path,
+) -> Result<DbRemovalClaim, String> {
+    let canonical = std::fs::canonicalize(worktree)
+        .map_err(|error| format!("canonicalize worktree before removal claim: {error}"))?;
+    let path = canonical
+        .to_str()
+        .ok_or_else(|| "worktree path is not valid UTF-8".to_string())?;
+    let db_path = configured_global_db(home)?;
+    let mut store = open_maintenance_store(&db_path)?;
+    let env_id = memcore::claim_exec_env_removal(store.connection_mut(), path)
+        .map_err(|error| format!("claim ExecEnv removal: {error}"))?;
+    Ok(DbRemovalClaim { db_path, env_id })
+}
+
+fn open_maintenance_store(db_path: &Path) -> Result<memcore::MemoryStore, String> {
+    let path = db_path
+        .to_str()
+        .ok_or_else(|| "configured global DB path is not valid UTF-8".to_string())?;
+    memcore::MemoryStore::open_existing_read_write(path)
+        .map_err(|error| format!("open global DB for removal claim: {error}"))
 }
 
 fn resolve_tachi_home() -> PathBuf {
@@ -135,7 +205,7 @@ fn probe_worktree_holder_at_db(db_path: &Path, worktree: &Path) -> DbHolderEvide
         Ok(None) => return DbHolderEvidence::NotApplicable,
         Err(err) => return DbHolderEvidence::Unavailable(format!("find ExecEnv: {err}")),
     };
-    if lease.state == memcore::ExecEnvState::Dispatching {
+    if lease.state != memcore::ExecEnvState::Active {
         return DbHolderEvidence::Held;
     }
     match memcore::exec_env_resource_removal_refusal(store.connection(), &lease.env_id, path) {
@@ -292,6 +362,18 @@ mod tests {
             DbHolderEvidence::Held,
             "a dispatching lease must block destructive cleanup even before holder evidence exists"
         );
+        dispatching_store
+            .connection()
+            .execute(
+                "UPDATE exec_envs SET state='removing' WHERE env_id='env-1'",
+                [],
+            )
+            .unwrap();
+        assert_eq!(
+            probe_worktree_holder_from_home(&dispatching_home, &worktree),
+            DbHolderEvidence::Held,
+            "a removal claim must remain visible to every destructive cleaner"
+        );
 
         let quarantined_home = root.join("quarantined");
         let mut quarantined_store = store(&quarantined_home);
@@ -359,6 +441,53 @@ mod tests {
         ));
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn removal_claim_fences_dispatch_and_has_explicit_terminal_transitions() {
+        let root = unique_temp_dir("work-claim-removal-admission");
+        let worktree = root.join("worktree");
+        std::fs::create_dir_all(&worktree).unwrap();
+        let home = root.join("home");
+        let mut seeded = store(&home);
+        insert_env(&mut seeded, &worktree);
+        drop(seeded);
+
+        let claim = claim_worktree_removal_from_home(&home, &worktree).unwrap();
+        let db = configured_global_db(&home).unwrap();
+        let mut observed = open_maintenance_store(&db).unwrap();
+        assert_eq!(
+            memcore::get_exec_env(observed.connection(), "env-1")
+                .unwrap()
+                .unwrap()
+                .state,
+            memcore::ExecEnvState::Removing
+        );
+        assert_eq!(
+            observed
+                .connection_mut()
+                .execute(
+                    "UPDATE exec_envs SET state='dispatching' WHERE env_id='env-1' AND state='active'",
+                    [],
+                )
+                .unwrap(),
+            0
+        );
+        drop(observed);
+        claim.abort().unwrap();
+
+        let claim = claim_worktree_removal_from_home(&home, &worktree).unwrap();
+        claim.complete().unwrap();
+        let observed = open_maintenance_store(&db).unwrap();
+        assert_eq!(
+            memcore::get_exec_env(observed.connection(), "env-1")
+                .unwrap()
+                .unwrap()
+                .state,
+            memcore::ExecEnvState::Reclaimed
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[cfg(unix)]

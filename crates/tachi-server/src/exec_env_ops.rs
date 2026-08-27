@@ -58,7 +58,7 @@ use memcore::{
     EnvClass, ExecEnvLease, ExecEnvSelector, ExecEnvState, NewExecEnvLease, NewExecEnvResource,
     ReclaimOutcome, ResourceKind, ResourceState,
 };
-use rusqlite::OptionalExtension;
+use rusqlite::{OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use tachi_clean::wt_clean::OutputFormat;
 use tachi_clean::wt_open::{open_worktree, CargoTargetPolicy, OpenOptions, OpenReport};
@@ -822,7 +822,9 @@ impl ExecEnvDispatchLeaseGuard {
         }
         server.with_global_store(|store| {
             let conn = store.connection_mut();
-            let tx = conn.transaction().map_err(|error| error.to_string())?;
+            let tx = conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|error| error.to_string())?;
             let state: Option<String> = tx
                 .query_row(
                     "SELECT state FROM exec_envs WHERE env_id = ?1",
@@ -1011,8 +1013,9 @@ impl MemoryServer {
         resolve_env_binding(env_id, cwd, unmanaged_cwd, lease.as_ref())
     }
 
-    /// THE single reclaim path for a lease (#894 S1). Flips `active` ->
-    /// `reclaimed` transactionally and idempotently.
+    /// Ordinary reclaim path for a lease (#894 S1). Flips `active` ->
+    /// `reclaimed` transactionally and idempotently. The external cleaner uses
+    /// memcore's removal-claim protocol so it owns the lease before deleting.
     ///
     /// Wired producers today: only the `safe_merge` completion path
     /// ([`gh_ops::router`], via [`reclaim_exec_env_for_worktree`]). Routing the
