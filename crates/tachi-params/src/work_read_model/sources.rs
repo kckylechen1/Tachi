@@ -370,4 +370,38 @@ impl SourceSnapshot {
             facts,
         })
     }
+
+    /// Fail-closed revalidation of an already-constructed snapshot. The
+    /// struct's fields are public (plain-data seam), so a caller can
+    /// bypass `new` and pair one kind's stamp with another kind's facts;
+    /// [`WorkProjectionIndex::apply`] runs this on every apply so a
+    /// mismatched snapshot is rejected, never silently consumed with the
+    /// wrong section availability or provenance.
+    pub fn validate(&self) -> Result<(), SnapshotError> {
+        if self.stamp.revision.is_empty() {
+            return Err(SnapshotError::EmptyRevision(self.stamp.kind.as_token()));
+        }
+        let actual = self.facts.kind();
+        match (&self.stamp.kind, &actual) {
+            (
+                SourceKind::CurrentTruth { repo: stamped },
+                SourceKind::CurrentTruth { repo: view },
+            ) => {
+                if stamped != view {
+                    return Err(SnapshotError::RepoMismatch {
+                        stamp: stamped.clone(),
+                        view: view.clone(),
+                    });
+                }
+            }
+            (declared, actual) if declared == actual => {}
+            (declared, actual) => {
+                return Err(SnapshotError::KindMismatch {
+                    declared: declared.as_token(),
+                    actual: actual.as_token(),
+                });
+            }
+        }
+        Ok(())
+    }
 }

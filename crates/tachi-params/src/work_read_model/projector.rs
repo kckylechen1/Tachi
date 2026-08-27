@@ -130,6 +130,12 @@ impl WorkProjectionIndex {
         &mut self,
         snapshot: SourceSnapshot,
     ) -> Result<ApplyOutcome, super::sources::SnapshotError> {
+        // Revalidate on EVERY apply: `SourceSnapshot`'s fields are public,
+        // so a caller can bypass `SourceSnapshot::new` and stamp one kind
+        // over another's facts. A mismatched snapshot must be rejected
+        // here, not silently consumed with wrong availability/provenance
+        // (codex R2 round-5 finding 4).
+        snapshot.validate()?;
         let ordering_key = snapshot.stamp.ordering_key();
         let seen_key = (snapshot.stamp.kind.clone(), ordering_key.clone());
         if let Some(existing) = self.seen.get(&seen_key) {
@@ -426,13 +432,24 @@ fn claim_work_key(claim: &WorkClaimFactV1) -> WorkKey {
 }
 
 /// A dispatch joins the claim that carries the same dispatch id (issue key
-/// when the claim names one), else stands alone under `Dispatch`.
+/// when the claim names one), else stands alone under `Dispatch`. When
+/// MULTIPLE DISTINCT claim keys carry the same dispatch id, the
+/// association is ambiguous — the dispatch then stands alone under its
+/// own key instead of inheriting whichever claim happened to sort first
+/// (codex R2 round-5 finding 5: first-match is adapter-order-dependent).
 fn dispatch_work_key(dispatch_id: &str, claims: &[WorkClaimFactV1]) -> WorkKey {
-    claims
+    let mut keys: Vec<WorkKey> = claims
         .iter()
-        .find(|claim| claim.dispatch_id.as_deref() == Some(dispatch_id))
+        .filter(|claim| claim.dispatch_id.as_deref() == Some(dispatch_id))
         .map(claim_work_key)
-        .unwrap_or_else(|| WorkKey::Dispatch(dispatch_id.to_string()))
+        .collect();
+    keys.sort();
+    keys.dedup();
+    match keys.len() {
+        1 => keys.pop().expect("single key"),
+        // 0 => standalone; >1 => ambiguous, standalone rather than a guess.
+        _ => WorkKey::Dispatch(dispatch_id.to_string()),
+    }
 }
 
 /// An env joins its claim (by claim id or dispatch id), else anchors to its
@@ -650,6 +667,48 @@ fn project_one(
         .filter(|fact| dispatch_work_key(&fact.dispatch_id, claims) == key)
         .cloned()
         .collect();
+    // Per-dispatch evidence law (codex R2 round-5 finding 6): one
+    // accepted/verified dispatch must never discharge a DIFFERENT
+    // terminal dispatch. Adjudication is evaluated per terminal dispatch
+    // over ITS OWN facts; verification counts per terminal dispatch from
+    // same-dispatch facts or dispatch-less (issue-level) facts. Computed
+    // before the section owns the facts.
+    let bound_runs: Vec<&RunReceiptFactV1> = run_receipts
+        .iter()
+        .filter(|run| dispatch_work_key(&run.dispatch_id, claims) == key)
+        .collect();
+    let terminal_dispatch_ids: Vec<String> = bound_runs
+        .iter()
+        .filter(|run| matches!(execution_state(run), ExecutionStateV1::Finished { .. }))
+        .map(|run| run.dispatch_id.clone())
+        .collect();
+    let unadjudicated_ids: Vec<String> = terminal_dispatch_ids
+        .iter()
+        .filter(|id| {
+            let facts: Vec<crate::taskintent::mapping::adjudication::CanonicalAdjudicationFact> =
+                bound_adjudication
+                    .iter()
+                    .filter(|fact| fact.dispatch_id == **id)
+                    .map(|fact| fact.fact.clone())
+                    .collect();
+            facts.is_empty()
+                || !matches!(
+                    project_adjudication(facts),
+                    AdjudicationState::Accepted | AdjudicationState::NotRequired { .. }
+                )
+        })
+        .cloned()
+        .collect();
+    let unverified_ids: Vec<String> = terminal_dispatch_ids
+        .iter()
+        .filter(|id| {
+            !bound_verification.iter().any(|fact| {
+                (fact.dispatch_id.as_deref() == Some(id.as_str()) || fact.dispatch_id.is_none())
+                    && fact.verification_present
+            })
+        })
+        .cloned()
+        .collect();
     let adjudication_section = if index.has_snapshot(&SourceKind::Adjudication) {
         let state = project_adjudication(bound_adjudication.iter().map(|fact| fact.fact.clone()));
         SectionState::Available(AdjudicationSectionV1 {
@@ -828,32 +887,23 @@ fn project_one(
         });
     }
 
-    let terminal_dispatch_ids: Vec<String> = bound_runs
-        .iter()
-        .filter(|run| matches!(execution_state(run), ExecutionStateV1::Finished { .. }))
-        .map(|run| run.dispatch_id.clone())
-        .collect();
-    let terminal_unadjudicated = !terminal_dispatch_ids.is_empty()
-        && adjudication_state
-            .as_ref()
-            .is_none_or(|state| *state == AdjudicationState::Unreviewed);
+    // Per-dispatch blockers use the vectors computed above the section
+    // construction (see the per-dispatch evidence law note).
+    let terminal_unadjudicated = !unadjudicated_ids.is_empty();
     if terminal_unadjudicated {
         blockers.push(BlockerV1 {
             kind: BlockerKindV1::AwaitingAdjudication,
             owner_class: ActionOwnerClassV1::Owner,
-            evidence_refs: terminal_dispatch_ids.clone(),
+            evidence_refs: unadjudicated_ids.clone(),
         });
     }
 
-    let verification_missing = !terminal_dispatch_ids.is_empty()
-        && bound_verification
-            .iter()
-            .all(|fact| !fact.verification_present);
+    let verification_missing = !unverified_ids.is_empty();
     if verification_missing {
         blockers.push(BlockerV1 {
             kind: BlockerKindV1::VerificationMissing,
             owner_class: ActionOwnerClassV1::Worker,
-            evidence_refs: dispatch_ids.clone(),
+            evidence_refs: unverified_ids.clone(),
         });
     }
 
@@ -934,7 +984,7 @@ fn project_one(
             NextActionKindV1::RunVerification,
             ActionOwnerClassV1::Worker,
             RequiredAuthorityV1::None,
-            dispatch_ids.clone(),
+            unverified_ids.clone(),
             vec!["verification_missing".to_string()],
         );
     }
@@ -943,7 +993,7 @@ fn project_one(
             NextActionKindV1::Adjudicate,
             ActionOwnerClassV1::Owner,
             RequiredAuthorityV1::AdjudicatorSeat,
-            terminal_dispatch_ids.clone(),
+            unadjudicated_ids.clone(),
             vec!["awaiting_adjudication".to_string()],
         );
     }
@@ -1201,8 +1251,16 @@ fn github_section_for(
                 } else if predicate_status(subject, PredicateV1::ImplementationPrLinked)
                     == ReductionStatusV1::Current
                 {
-                    if predicate_status(subject, PredicateV1::PrOpen) == ReductionStatusV1::Current
-                    {
+                    // PR lifecycle predicates live on the LINKED PR
+                    // subjects, not the issue row (codex R2 round-5
+                    // finding 7): under review iff a linked PR subject
+                    // currently reports `pr_open`.
+                    let any_linked_open = linked_pr_numbers(subject).iter().any(|number| {
+                        pr_subject_in_view(view, *number).is_some_and(|pr| {
+                            predicate_status(pr, PredicateV1::PrOpen) == ReductionStatusV1::Current
+                        })
+                    });
+                    if any_linked_open {
                         (
                             ImplementationStatusV1::UnderReview,
                             None,
@@ -1243,6 +1301,13 @@ fn github_section_for(
 /// View-level evidence head with its #1696 ordering key. The key mirrors
 /// `head_order_key` exactly (instant, source revision) — the assertion id
 /// is excluded from causal comparison, matching the reducer's family law.
+///
+/// Ties are deliberately NOT broken by assertion id (codex R2 round-5
+/// finding 2, adjudicated): a clearing observation at the SAME
+/// (instant, revision) as the transition is not causally LATER, so the
+/// debt fails closed and stays outstanding — the same law the
+/// same-instant disposition test pins. Lexical assertion-id order is
+/// identity, not time, and may never manufacture causality.
 type HeadWithKey = (
     (chrono::DateTime<chrono::Utc>, String),
     crate::current_truth::consumer::EvidenceHeadViewV1,
@@ -1305,6 +1370,14 @@ fn pr_subject_in_view(
 /// issue's current link set claims the PR again, the debt moves back to
 /// that issue (where the ruling's causal resolutions — repair PR, owner
 /// disposition — can act on it).
+///
+/// Resolution boundary (codex R2 round-5 finding 3, adjudicated): a
+/// post-unlink repair PR or issue disposition CANNOT clear the orphan
+/// item, because the causal chain "repair <-> reverted PR" runs through
+/// the issue linkage that the unlink removed, and the v1 consumer view
+/// exposes no superseded link lineage to reconstruct it. Closing that
+/// gap needs the #1696 link-lineage consumer follow-up; until then the
+/// orphan honestly stays blocked (fail-closed).
 fn orphan_pr_github_section_for(view: &CurrentTruthViewV1, number: u64) -> GithubSectionV1 {
     let subject = pr_subject_in_view(view, number).cloned();
     let revert_heads = subject
@@ -1439,6 +1512,16 @@ fn transition_debt_for(
             // `pr_merged` is retained contradiction evidence, not a proven
             // merge. The reverted PR's own newer merged re-snapshot is
             // ordinary steady-state evidence and does not count.
+            //
+            // Adapter-contract boundary (codex R2 round-5 finding 1,
+            // adjudicated): the mint stamps `pr_merged.observed_at` from
+            // the SOURCE's `updated_at`, which is stable for an unchanged
+            // object — so a pre-revert merge that is merely re-observed
+            // does NOT advance its key past the revert under a faithful
+            // #1696 adapter. An adapter that stamps refresh time as
+            // `updated_at` violates that contract upstream and can
+            // fabricate repair evidence here; this projection cannot see
+            // superseded merge lineage to defend against it.
             let repair = linked.iter().any(|pr_number| {
                 if reverted_prs.contains(pr_number) {
                     return false;

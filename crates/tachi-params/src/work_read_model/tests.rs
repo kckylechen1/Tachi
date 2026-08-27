@@ -1310,6 +1310,533 @@ fn repaired_state_keeps_repair_merge_sha_behind_newer_original_resnapshot() {
     );
 }
 
+/// Hardening (codex R2 round-5 finding 4): a snapshot built through the
+/// public struct with a mismatched stamp/facts pairing is rejected at
+/// `apply` — the constructor is not the only fail-closed gate.
+#[test]
+fn mismatched_snapshot_struct_is_rejected_at_apply() {
+    let view = ct_view(&[state_v2_merged_open()], &[], true);
+    let mismatched = SourceSnapshot {
+        stamp: SourceStamp {
+            kind: SourceKind::WorkClaims,
+            revision: "claims-1".to_string(),
+            observed_at: READ_AT.to_string(),
+        },
+        facts: SourceFacts::CurrentTruth(Box::new(super::sources::CurrentTruthFactsV1 {
+            view,
+            minted_authorization: CallerAuthorizationV1 { sees_private: true },
+        })),
+    };
+    let mut index = WorkProjectionIndex::new();
+    let err = index.apply(mismatched).expect_err("mismatch rejected");
+    assert!(matches!(err, SnapshotError::KindMismatch { .. }));
+}
+
+/// Hardening (codex R2 round-5 finding 5): when two DISTINCT claim keys
+/// carry the same dispatch id, the association is ambiguous — the
+/// dispatch stands alone under its own key in EVERY claim order, never
+/// inheriting whichever claim happened to arrive first.
+#[test]
+fn ambiguous_dispatch_association_is_deterministic() {
+    let run = runs_snapshot(
+        vec![run_fact("d-shared", true, true, Some(0))],
+        "runs-1",
+        READ_AT,
+    );
+    let claim_a = claim_fact(
+        "c-a",
+        Some(&format!("{REPO}#100")),
+        Some("d-shared"),
+        ClaimStateV1::Released,
+        None,
+        VisibilityClassV1::Public,
+    );
+    let claim_b = claim_fact(
+        "c-b",
+        Some(&format!("{REPO}#101")),
+        Some("d-shared"),
+        ClaimStateV1::Released,
+        None,
+        VisibilityClassV1::Public,
+    );
+    for order in [
+        vec![claim_a.clone(), claim_b.clone()],
+        vec![claim_b.clone(), claim_a.clone()],
+    ] {
+        let mut index = WorkProjectionIndex::new();
+        index.apply_ok(claims_snapshot(order, "claims-1", READ_AT));
+        index.apply_ok(run.clone());
+        // Authorized read: the issue items render (with honestly
+        // unavailable GitHub sections — there is no repo view here).
+        let set = project(&index, &options().with_sees_private(true));
+        let shared = find(&set, "dispatch:d-shared");
+        assert!(
+            matches!(&shared.run, SectionState::Available(section) if !section.runs.is_empty()),
+            "the run joins the standalone dispatch key"
+        );
+        // Neither issue inherits the shared dispatch's run evidence.
+        for token in [ISSUE_TOKEN.to_string(), format!("{REPO}#issue:101")] {
+            let item = set
+                .items
+                .iter()
+                .find(|model| model.work_token() == token)
+                .expect("issue item");
+            assert!(
+                matches!(&item.run, SectionState::Available(section) if section.runs.is_empty()),
+                "ambiguous dispatch evidence must not leak into {token}"
+            );
+        }
+    }
+}
+
+/// Hardening (codex R2 round-5 finding 6): per-dispatch evidence law —
+/// one accepted, verified terminal dispatch never discharges a second
+/// terminal dispatch on the same work item.
+#[test]
+fn one_verified_dispatch_cannot_discharge_another() {
+    let view = ct_view(&[state_v2_merged_open()], &[], true);
+    let claims = vec![
+        claim_fact(
+            "c1",
+            Some(&format!("{REPO}#100")),
+            Some("d1"),
+            ClaimStateV1::Active,
+            None,
+            VisibilityClassV1::Public,
+        ),
+        claim_fact(
+            "c2",
+            Some(&format!("{REPO}#100")),
+            Some("d2"),
+            ClaimStateV1::Released,
+            None,
+            VisibilityClassV1::Public,
+        ),
+    ];
+    let runs = vec![
+        run_fact("d1", true, true, Some(0)),
+        run_fact("d2", true, true, Some(0)),
+    ];
+    let verification = vec![VerificationFactV1 {
+        dispatch_id: Some("d1".to_string()),
+        issue_ref: Some(format!("{REPO}#100")),
+        verification_present: true,
+        diff_present: true,
+        evidence_refs: vec!["e1".to_string()],
+        visibility: VisibilityClassV1::Public,
+    }];
+    let adjudication = vec![AdjudicationFactV1 {
+        dispatch_id: "d1".to_string(),
+        fact: CanonicalAdjudicationFact::Accepted,
+        visibility: VisibilityClassV1::Public,
+    }];
+
+    let mut index = WorkProjectionIndex::new();
+    index.apply_ok(ct_snapshot(view.clone(), "ct-1", READ_AT));
+    index.apply_ok(claims_snapshot(claims.clone(), "claims-1", READ_AT));
+    index.apply_ok(runs_snapshot(runs.clone(), "runs-1", READ_AT));
+    index.apply_ok(verification_snapshot(
+        verification.clone(),
+        "verif-1",
+        READ_AT,
+    ));
+    index.apply_ok(adjudication_snapshot(
+        adjudication.clone(),
+        "adj-1",
+        READ_AT,
+    ));
+    let set = project(&index, &options());
+    let model = find(&set, ISSUE_TOKEN);
+    assert!(
+        !model.success_shaped,
+        "d2 is terminal, unverified, and unadjudicated: no success despite d1 being clean"
+    );
+    assert!(has_blocker(
+        model,
+        super::types::BlockerKindV1::AwaitingAdjudication
+    ));
+    assert!(has_blocker(
+        model,
+        super::types::BlockerKindV1::VerificationMissing
+    ));
+
+    // Control: once d2 carries its own verification and acceptance, the
+    // item may complete.
+    let mut complete_verification = verification;
+    complete_verification.push(VerificationFactV1 {
+        dispatch_id: Some("d2".to_string()),
+        issue_ref: Some(format!("{REPO}#100")),
+        verification_present: true,
+        diff_present: true,
+        evidence_refs: vec!["e2".to_string()],
+        visibility: VisibilityClassV1::Public,
+    });
+    let mut complete_adjudication = adjudication;
+    complete_adjudication.push(AdjudicationFactV1 {
+        dispatch_id: "d2".to_string(),
+        fact: CanonicalAdjudicationFact::Accepted,
+        visibility: VisibilityClassV1::Public,
+    });
+    let mut complete = WorkProjectionIndex::new();
+    complete.apply_ok(ct_snapshot(view, "ct-1", READ_AT));
+    complete.apply_ok(claims_snapshot(claims, "claims-1", READ_AT));
+    complete.apply_ok(runs_snapshot(runs, "runs-1", READ_AT));
+    complete.apply_ok(verification_snapshot(
+        complete_verification,
+        "verif-2",
+        "2026-08-27T12:30:00Z",
+    ));
+    complete.apply_ok(adjudication_snapshot(
+        complete_adjudication,
+        "adj-2",
+        "2026-08-27T12:30:00Z",
+    ));
+    let complete_set = project(&complete, &options());
+    let complete_model = find(&complete_set, ISSUE_TOKEN);
+    assert!(complete_model.success_shaped);
+}
+
+/// Hardening (codex R2 round-5 finding 7): an issue linked to a
+/// currently-OPEN PR projects `UnderReview` — PR lifecycle predicates
+/// live on the linked PR subject, not the issue row.
+#[test]
+fn open_linked_pr_projects_under_review() {
+    let open_pr = repo_state(
+        "r-open",
+        "2026-08-26T11:00:00Z",
+        snap_issue(
+            100,
+            SnapshotIssueStateV1::Open,
+            "2026-08-26T11:00:00Z",
+            "rev-open-iss",
+        ),
+        vec![snap_pr(
+            201,
+            SnapshotPrStateV1::Open,
+            None,
+            "2026-08-26T11:00:00Z",
+            "rev-open-pr",
+            vec![100],
+        )],
+        vec![],
+    );
+    let mut index = WorkProjectionIndex::new();
+    index.apply_ok(ct_snapshot(ct_view(&[open_pr], &[], true), "ct-1", READ_AT));
+    let set = project(&index, &options());
+    let model = find(&set, ISSUE_TOKEN);
+    assert_eq!(
+        github_section(model).implementation_status,
+        ImplementationStatusV1::UnderReview
+    );
+    assert_eq!(super::views::board_view(model).column, "under_review");
+}
+
+/// Hardening (codex R2 round-5 finding 8): outstanding reopen debt with
+/// NO implementation still renders the debt column — board and status
+/// agree everywhere, not only on the Present branch.
+#[test]
+fn reopen_debt_without_implementation_is_not_in_flight() {
+    let reopened_unimplemented = repo_state(
+        "r-nolink",
+        "2026-08-26T13:00:00Z",
+        snap_issue(
+            100,
+            SnapshotIssueStateV1::Open,
+            "2026-08-26T13:00:00Z",
+            "rev-nolink-iss",
+        ),
+        vec![],
+        vec![observation(
+            SnapshotObservationKindV1::IssueReopened { number: 100 },
+            "2026-08-26T13:30:00Z",
+            "rev-nolink-reopen",
+        )],
+    );
+    let mut index = WorkProjectionIndex::new();
+    index.apply_ok(ct_snapshot(
+        ct_view(&[reopened_unimplemented], &[], true),
+        "ct-1",
+        READ_AT,
+    ));
+    let set = project(&index, &options());
+    let model = find(&set, ISSUE_TOKEN);
+    let section = github_section(model);
+    assert!(matches!(
+        &section.transition_debt.reopen,
+        DebtStateV1::Outstanding { .. }
+    ));
+    assert_eq!(
+        section.implementation_status,
+        ImplementationStatusV1::NotLinked
+    );
+    assert_eq!(
+        super::views::board_view(model).column,
+        "transition_debt",
+        "board and status must agree on outstanding debt outside the Present branch"
+    );
+    assert_eq!(
+        super::views::status_view(model).github,
+        format!("{REPO}:not_linked+transition_debt")
+    );
+}
+
+/// R6-2 causal negative (codex R2 round-5 finding 10): a close that is
+/// EARLIER than the reopen never clears the reopen debt.
+#[test]
+fn pre_reopen_close_does_not_clear_reopen_debt() {
+    let closed_early = repo_state(
+        "r-early",
+        "2026-08-26T12:30:00Z",
+        snap_issue(
+            100,
+            SnapshotIssueStateV1::Closed,
+            "2026-08-26T12:30:00Z",
+            "rev-early-iss",
+        ),
+        vec![snap_pr(
+            200,
+            SnapshotPrStateV1::Merged,
+            Some("mergeabc123"),
+            "2026-08-26T12:30:00Z",
+            "rev-early-pr",
+            vec![100],
+        )],
+        vec![],
+    );
+    let view = ct_view(&[closed_early, state_v4_revert_reopen()], &[], true);
+    let mut index = WorkProjectionIndex::new();
+    index.apply_ok(ct_snapshot(view, "ct-1", READ_AT));
+    let set = project(&index, &options());
+    let model = find(&set, ISSUE_TOKEN);
+    assert!(
+        matches!(
+            &github_section(model).transition_debt.reopen,
+            DebtStateV1::Outstanding { .. }
+        ),
+        "a close BEFORE the reopen is not causally later"
+    );
+}
+
+/// R6-2 causal negative (codex R2 round-5 finding 10): a post-revert
+/// merged PR that is NOT linked to the issue is not repair evidence.
+#[test]
+fn unlinked_repair_pr_does_not_clear_revert_debt() {
+    let unlinked_repair = repo_state(
+        "r-unlinked-repair",
+        "2026-08-26T16:00:00Z",
+        snap_issue(
+            100,
+            SnapshotIssueStateV1::Open,
+            "2026-08-26T16:00:00Z",
+            "rev-unlinked-repair-iss",
+        ),
+        vec![
+            snap_pr(
+                200,
+                SnapshotPrStateV1::Merged,
+                Some("mergeabc123"),
+                "2026-08-26T16:00:00Z",
+                "rev-unlinked-repair-pr200",
+                vec![100],
+            ),
+            snap_pr(
+                300,
+                SnapshotPrStateV1::Merged,
+                Some("repairstu789"),
+                "2026-08-26T16:00:00Z",
+                "rev-unlinked-repair-pr300",
+                vec![],
+            ),
+        ],
+        vec![],
+    );
+    let view = ct_view(
+        &[
+            state_v2_merged_open(),
+            state_v4_revert_only(),
+            unlinked_repair,
+        ],
+        &[],
+        true,
+    );
+    let mut index = WorkProjectionIndex::new();
+    index.apply_ok(ct_snapshot(view, "ct-1", READ_AT));
+    let set = project(&index, &options());
+    let model = find(&set, ISSUE_TOKEN);
+    assert!(
+        matches!(
+            &github_section(model).transition_debt.revert,
+            DebtStateV1::Outstanding { .. }
+        ),
+        "an unlinked merged PR is not repair evidence for the issue"
+    );
+}
+
+/// Adapter-contract boundary (codex R2 round-5 finding 1, adjudicated):
+/// under a faithful #1696 adapter, `pr_merged.observed_at` is the
+/// SOURCE's `updated_at` (stable for an unchanged object), so a
+/// pre-revert merge that is merely re-observed does not advance its key
+/// past the revert and never fabricates repair evidence.
+#[test]
+fn pre_revert_merged_pr_refresh_does_not_clear_revert_debt() {
+    let both_merged_pre_revert = repo_state(
+        "r-two",
+        "2026-08-26T12:00:00Z",
+        snap_issue(
+            100,
+            SnapshotIssueStateV1::Open,
+            "2026-08-26T12:00:00Z",
+            "rev-two-iss",
+        ),
+        vec![
+            snap_pr(
+                200,
+                SnapshotPrStateV1::Merged,
+                Some("mergeabc123"),
+                "2026-08-26T12:00:00Z",
+                "rev-two-pr200",
+                vec![100],
+            ),
+            snap_pr(
+                300,
+                SnapshotPrStateV1::Merged,
+                Some("repairstu789"),
+                "2026-08-26T12:00:00Z",
+                "rev-two-pr300",
+                vec![100],
+            ),
+        ],
+        vec![],
+    );
+    // A later refresh re-observes PR 300 with a NEW revision but the
+    // SOURCE's unchanged updated_at (12:00, before the revert at 13:30).
+    let refreshed = repo_state(
+        "r-two-refresh",
+        "2026-08-26T14:00:00Z",
+        snap_issue(
+            100,
+            SnapshotIssueStateV1::Open,
+            "2026-08-26T14:00:00Z",
+            "rev-two-refresh-iss",
+        ),
+        vec![
+            snap_pr(
+                200,
+                SnapshotPrStateV1::Merged,
+                Some("mergeabc123"),
+                "2026-08-26T12:00:00Z",
+                "rev-two-refresh-pr200",
+                vec![100],
+            ),
+            snap_pr(
+                300,
+                SnapshotPrStateV1::Merged,
+                Some("repairstu789"),
+                "2026-08-26T12:00:00Z",
+                "rev-two-refresh-pr300",
+                vec![100],
+            ),
+        ],
+        vec![],
+    );
+    let view = ct_view(
+        &[both_merged_pre_revert, state_v4_revert_only(), refreshed],
+        &[],
+        true,
+    );
+    let mut index = WorkProjectionIndex::new();
+    index.apply_ok(ct_snapshot(view, "ct-1", READ_AT));
+    let set = project(&index, &options());
+    let model = find(&set, ISSUE_TOKEN);
+    assert!(
+        matches!(
+            &github_section(model).transition_debt.revert,
+            DebtStateV1::Outstanding { .. }
+        ),
+        "a pre-revert merge re-observed with its stable source updated_at is not repair evidence"
+    );
+}
+
+/// Orphan attribution round-trip (codex R2 round-5 finding 3): after an
+/// unlink the debt lives on the PR-keyed orphan item; a RE-LINK moves it
+/// back to the issue, where the ruling's causal resolutions can act.
+#[test]
+fn orphan_debt_moves_back_to_the_issue_on_relink() {
+    let v9 = repo_state(
+        "r9",
+        "2026-08-26T17:00:00Z",
+        snap_issue(
+            100,
+            SnapshotIssueStateV1::Open,
+            "2026-08-26T17:00:00Z",
+            "rev9-iss",
+        ),
+        vec![snap_pr(
+            200,
+            SnapshotPrStateV1::Merged,
+            Some("mergeabc123"),
+            "2026-08-26T17:00:00Z",
+            "rev9-pr",
+            vec![],
+        )],
+        vec![],
+    );
+    let unlinked_view = ct_view(
+        &[state_v2_merged_open(), state_v4_revert_reopen(), v9],
+        &[],
+        true,
+    );
+    let mut unlinked_index = WorkProjectionIndex::new();
+    unlinked_index.apply_ok(ct_snapshot(unlinked_view, "ct-1", READ_AT));
+    let unlinked_set = project(&unlinked_index, &options());
+    assert!(unlinked_set
+        .items
+        .iter()
+        .any(|model| model.work_token() == format!("{REPO}#pull_request:200")));
+
+    // v11: the link is restored — the debt re-attributes to the issue.
+    let v11 = repo_state(
+        "r11",
+        "2026-08-26T18:00:00Z",
+        snap_issue(
+            100,
+            SnapshotIssueStateV1::Open,
+            "2026-08-26T18:00:00Z",
+            "rev11-iss",
+        ),
+        vec![snap_pr(
+            200,
+            SnapshotPrStateV1::Merged,
+            Some("mergeabc123"),
+            "2026-08-26T18:00:00Z",
+            "rev11-pr",
+            vec![100],
+        )],
+        vec![],
+    );
+    let relinked_view = ct_view(
+        &[state_v2_merged_open(), state_v4_revert_reopen(), v11],
+        &[],
+        true,
+    );
+    let mut relinked_index = WorkProjectionIndex::new();
+    relinked_index.apply_ok(ct_snapshot(relinked_view, "ct-2", READ_AT));
+    let relinked_set = project(&relinked_index, &options());
+    assert!(
+        !relinked_set
+            .items
+            .iter()
+            .any(|model| model.work_token() == format!("{REPO}#pull_request:200")),
+        "the orphan item disappears once the link is restored"
+    );
+    let model = find(&relinked_set, ISSUE_TOKEN);
+    assert!(matches!(
+        &github_section(model).transition_debt.revert,
+        DebtStateV1::Outstanding { .. }
+    ));
+    assert!(has_action(model, NextActionKindV1::RepairRevertOrReopen));
+}
+
 /// Ruling discriminator 6 + #1693 discrimination 10: full rebuild equals
 /// incremental for every R6-2 case, in ANY arrival order — with each
 /// lifecycle stage arriving as its OWN CurrentTruth snapshot (successive
@@ -1415,6 +1942,35 @@ fn full_rebuild_equals_incremental_across_r6_2_cases_and_arrival_orders() {
                 state_v4_revert_reopen(),
                 state_v6_steady_after_revert(),
             ],
+            vec![],
+        ),
+        // Causal negatives (codex R2 round-5 finding 10) in the same
+        // permutation matrix: a pre-reopen close and a pre-revert merge
+        // refreshed with its stable source updated_at.
+        (
+            "pre-reopen-close-negative",
+            {
+                let closed_early = repo_state(
+                    "r-early",
+                    "2026-08-26T12:30:00Z",
+                    snap_issue(
+                        100,
+                        SnapshotIssueStateV1::Closed,
+                        "2026-08-26T12:30:00Z",
+                        "rev-early-iss",
+                    ),
+                    vec![snap_pr(
+                        200,
+                        SnapshotPrStateV1::Merged,
+                        Some("mergeabc123"),
+                        "2026-08-26T12:30:00Z",
+                        "rev-early-pr",
+                        vec![100],
+                    )],
+                    vec![],
+                );
+                vec![closed_early, state_v4_revert_reopen()]
+            },
             vec![],
         ),
     ];

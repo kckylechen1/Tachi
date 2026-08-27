@@ -164,7 +164,13 @@ fn column_token(model: &WorkReadModelV1) -> String {
                 "stale".to_string()
             } else {
                 match section.implementation_status {
-                    super::types::ImplementationStatusV1::UnderReview => "under_review".to_string(),
+                    super::types::ImplementationStatusV1::UnderReview => {
+                        if transition_debt_outstanding {
+                            "transition_debt".to_string()
+                        } else {
+                            "under_review".to_string()
+                        }
+                    }
                     super::types::ImplementationStatusV1::Present => {
                         if transition_debt_outstanding {
                             "transition_debt".to_string()
@@ -175,6 +181,10 @@ fn column_token(model: &WorkReadModelV1) -> String {
                     // An outstanding revert debt is repair-blocked, never
                     // presented as landed work (R6-2 owner ruling).
                     super::types::ImplementationStatusV1::Reverted => "reverted".to_string(),
+                    // NotLinked/Unknown with outstanding debt stay in the
+                    // debt column too — board and status must agree (the
+                    // status token always carries +transition_debt).
+                    _ if transition_debt_outstanding => "transition_debt".to_string(),
                     _ => "in_flight".to_string(),
                 }
             }
