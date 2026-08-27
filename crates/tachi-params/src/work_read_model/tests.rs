@@ -277,24 +277,10 @@ fn issue_subject(number: u64) -> SubjectRefV1 {
     }
 }
 
-fn owner_acceptance(at: &str, rev: &str) -> AssertionV1 {
-    AssertionV1 {
-        assertion_id: format!("owner-accept-{rev}"),
-        subject: issue_subject(100),
-        predicate: PredicateV1::OwnerAcceptancePresent,
-        value: AssertionValueV1::Unit,
-        issuer: "owner".to_string(),
-        authority_class: AuthorityClassV1::OwnerDecision,
-        source_ref: SourceRefV1 {
-            source: "owner-decision".to_string(),
-            revision: rev.to_string(),
-        },
-        observed_at: at.to_string(),
-        effective_at: at.to_string(),
-        supersedes_assertion_id: None,
-        evidence_refs: vec!["owner-comment-1".to_string()],
-        review_state: ReviewStateV1::Reviewed,
-        visibility: VisibilityClassV1::Public,
+fn pr_subject(number: u64) -> SubjectRefV1 {
+    SubjectRefV1 {
+        repo: REPO.to_string(),
+        object: GithubObjectRefV1::PullRequest(number),
     }
 }
 
@@ -793,66 +779,391 @@ fn stale_pre_revert_disposition_cannot_clear_revert_debt() {
     );
 }
 
-/// Ruling discriminator 6 + #1693 discrimination 10: full rebuild equals
-/// incremental for every R6-2 case, in any arrival order.
+/// Hardening (codex R2 round-3 finding 3): a disposition sharing the
+/// revert's EXACT observation instant is not strictly post-revert — the
+/// debt stays outstanding (fail-closed: absent causal resolution keeps
+/// the transition visible).
 #[test]
-fn full_rebuild_equals_incremental_across_r6_2_cases_and_arrival_orders() {
+fn same_instant_disposition_does_not_clear_revert_debt() {
+    // The revert observation in state_v4 is at 13:30.
+    let view = ct_view(
+        &[state_v2_merged_open(), state_v4_revert_reopen()],
+        &[],
+        true,
+    );
+    let disposition = OwnerDispositionFactV1 {
+        issue_ref: format!("{REPO}#100"),
+        observed_at: "2026-08-26T13:30:00Z".to_string(),
+        disposition: OwnerDispositionV1::NoRepairRequired {
+            note: "same instant as the revert".to_string(),
+        },
+        visibility: VisibilityClassV1::Public,
+    };
+    let mut index = WorkProjectionIndex::new();
+    index.apply_ok(ct_snapshot(view, "ct-1", READ_AT));
+    index.apply_ok(dispositions_snapshot(
+        vec![disposition],
+        "disp-tie",
+        "2026-08-26T13:30:00Z",
+    ));
+    let set = project(&index, &options());
+
+    let model = find(&set, ISSUE_TOKEN);
+    assert!(
+        matches!(
+            &github_section(model).transition_debt.revert,
+            DebtStateV1::Outstanding { .. }
+        ),
+        "a disposition at the revert's exact instant is not strictly post-revert"
+    );
+}
+
+/// Hardening (codex R2 round-3 finding 2): a CONFLICTED repair-merge row
+/// is retained contradiction evidence, never a proven merge — it must not
+/// clear revert debt, and the linked-PR conflict must mark the issue's
+/// GitHub section conflicted (conflicts block success-shaped projection).
+#[test]
+fn conflicted_repair_merge_cannot_clear_revert_debt() {
+    // A second typed-object lineage (different adapter issuer) asserts a
+    // DIFFERENT merge SHA for repair PR 300 after its typed merge: the
+    // (pr300, PrMerged) group keeps two disagreeing lineage heads and is
+    // reduced `Conflicted`.
+    let rival_merge = AssertionV1 {
+        assertion_id: "rival-pr300-merge".to_string(),
+        subject: pr_subject(300),
+        predicate: PredicateV1::PrMerged,
+        value: AssertionValueV1::CommitSha("deadbeef789".to_string()),
+        issuer: "github-events-adapter".to_string(),
+        authority_class: AuthorityClassV1::GitHubTypedObject,
+        source_ref: SourceRefV1 {
+            source: "github-events".to_string(),
+            revision: "events-1".to_string(),
+        },
+        observed_at: "2026-08-26T16:30:00Z".to_string(),
+        effective_at: "2026-08-26T16:30:00Z".to_string(),
+        supersedes_assertion_id: None,
+        evidence_refs: vec!["events-api-1".to_string()],
+        review_state: ReviewStateV1::Observed,
+        visibility: VisibilityClassV1::Public,
+    };
     let view = ct_view(
         &[
             state_v2_merged_open(),
-            state_v4_revert_reopen(),
-            state_v6_steady_after_revert(),
-            state_v7_issue_closed(),
+            state_v4_revert_only(),
             state_v8_repair_pr(),
         ],
-        &[owner_acceptance("2026-08-26T17:00:00Z", "accept-1")],
+        &[rival_merge],
         true,
     );
-    let snapshots = vec![
-        ct_snapshot(view, "ct-1", READ_AT),
-        claims_snapshot(
-            vec![claim_fact(
-                "c1",
-                Some(&format!("{REPO}#100")),
-                Some("d1"),
-                ClaimStateV1::Active,
-                Some("repairstu789"),
-                VisibilityClassV1::Public,
-            )],
-            "claims-1",
-            READ_AT,
+    let mut index = WorkProjectionIndex::new();
+    index.apply_ok(ct_snapshot(view, "ct-1", READ_AT));
+    let set = project(&index, &options());
+
+    let model = find(&set, ISSUE_TOKEN);
+    let section = github_section(model);
+    assert!(
+        matches!(
+            &section.transition_debt.revert,
+            DebtStateV1::Outstanding { .. }
         ),
-        runs_snapshot(vec![run_fact("d1", true, true, Some(0))], "runs-1", READ_AT),
-        adjudication_snapshot(
-            vec![AdjudicationFactV1 {
-                dispatch_id: "d1".to_string(),
-                fact: CanonicalAdjudicationFact::Accepted,
-                visibility: VisibilityClassV1::Public,
-            }],
-            "adj-1",
-            READ_AT,
+        "a conflicted repair merge is contradiction evidence, not a causal repair"
+    );
+    assert!(
+        section.conflicted,
+        "a conflicted row on a LINKED PR propagates to the issue's GitHub section"
+    );
+    assert_eq!(
+        section.implementation_status,
+        ImplementationStatusV1::Conflicted
+    );
+    assert!(!model.success_shaped);
+}
+
+/// Hardening (codex R2 round-3 finding 5): when an owner disposition
+/// clears the projected revert debt, the CurrentTruth open action that
+/// still names repair (an #1696-level resolution that cannot see
+/// #1693-level dispositions) must NOT be forwarded — a cleared debt never
+/// carries a stale repair action.
+#[test]
+fn cleared_debt_drops_forwarded_repair_action() {
+    // Revert-only timeline with the revert as the NEWEST PR-family event:
+    // #1696 alone still resolves the linked PR as MergeReverted, so its
+    // issue open action names repair. The reopen axis is absent so the
+    // derived and forwarded repair actions cannot be confused with
+    // reopen-debt coverage.
+    let states = [state_v2_merged_open(), state_v4_revert_only()];
+    let disposition = OwnerDispositionFactV1 {
+        issue_ref: format!("{REPO}#100"),
+        observed_at: "2026-08-26T14:30:00Z".to_string(),
+        disposition: OwnerDispositionV1::NoRepairRequired {
+            note: "revert was intended".to_string(),
+        },
+        visibility: VisibilityClassV1::Public,
+    };
+
+    // Without the disposition the repair action is present (derived from
+    // the outstanding debt).
+    let mut bare = WorkProjectionIndex::new();
+    bare.apply_ok(ct_snapshot(ct_view(&states, &[], true), "ct-1", READ_AT));
+    let bare_set = project(&bare, &options());
+    assert!(has_action(
+        find(&bare_set, ISSUE_TOKEN),
+        NextActionKindV1::RepairRevertOrReopen
+    ));
+
+    // With the causal disposition the debt clears and NO repair action
+    // remains — neither derived nor the stale CurrentTruth forwarding.
+    let mut index = WorkProjectionIndex::new();
+    index.apply_ok(ct_snapshot(ct_view(&states, &[], true), "ct-1", READ_AT));
+    index.apply_ok(dispositions_snapshot(
+        vec![disposition],
+        "disp-1",
+        "2026-08-26T14:30:00Z",
+    ));
+    let set = project(&index, &options());
+    let model = find(&set, ISSUE_TOKEN);
+    assert!(matches!(
+        &github_section(model).transition_debt.revert,
+        DebtStateV1::Cleared { .. }
+    ));
+    assert!(
+        !has_action(model, NextActionKindV1::RepairRevertOrReopen),
+        "a cleared debt must not carry a stale forwarded repair action"
+    );
+    assert!(!has_blocker(
+        model,
+        super::types::BlockerKindV1::OutstandingTransitionDebt
+    ));
+}
+
+/// Hardening (codex R2 round-3 finding 7): sources that participate in a
+/// derivation stamp the fingerprint — a delivery snapshot (present in
+/// every item's delivery section) and a dispositions snapshot (whose
+/// binding-or-not statement moves the debt) both change the revision when
+/// they change the model.
+#[test]
+fn participating_source_snapshots_stamp_the_fingerprint() {
+    let view = ct_view(
+        &[state_v2_merged_open(), state_v4_revert_reopen()],
+        &[],
+        true,
+    );
+    let base = ct_snapshot(view.clone(), "ct-1", READ_AT);
+
+    // Delivery: applying a delivery snapshot changes the observation the
+    // model carries, so the fingerprint must move.
+    let mut without = WorkProjectionIndex::new();
+    without.apply_ok(base.clone());
+    let mut with = WorkProjectionIndex::new();
+    with.apply_ok(base.clone());
+    with.apply_ok(delivery_snapshot("2026-08-27T11:00:00Z"));
+    let revision_without = find(&project(&without, &options()), ISSUE_TOKEN)
+        .revision
+        .clone();
+    let revision_with = find(&project(&with, &options()), ISSUE_TOKEN)
+        .revision
+        .clone();
+    assert_ne!(
+        revision_without, revision_with,
+        "a delivery snapshot participates in every item's model and must stamp it"
+    );
+
+    // Dispositions: a clearing disposition, then a REPLACEMENT snapshot
+    // with no facts — the debt flips back to Outstanding and the
+    // fingerprint must move with the flip.
+    let clearing = dispositions_snapshot(
+        vec![OwnerDispositionFactV1 {
+            issue_ref: format!("{REPO}#100"),
+            observed_at: "2026-08-26T14:30:00Z".to_string(),
+            disposition: OwnerDispositionV1::NoRepairRequired {
+                note: "revert was intended".to_string(),
+            },
+            visibility: VisibilityClassV1::Public,
+        }],
+        "disp-1",
+        "2026-08-26T14:30:00Z",
+    );
+    let replacement = dispositions_snapshot(vec![], "disp-2", "2026-08-26T15:00:00Z");
+    let mut cleared = WorkProjectionIndex::new();
+    cleared.apply_ok(base.clone());
+    cleared.apply_ok(clearing.clone());
+    let cleared_set = project(&cleared, &options());
+    let cleared_model = find(&cleared_set, ISSUE_TOKEN);
+    assert!(matches!(
+        &github_section(cleared_model).transition_debt.revert,
+        DebtStateV1::Cleared { .. }
+    ));
+
+    let mut flipped = WorkProjectionIndex::new();
+    flipped.apply_ok(base.clone());
+    flipped.apply_ok(clearing);
+    flipped.apply_ok(replacement);
+    let flipped_set = project(&flipped, &options());
+    let flipped_model = find(&flipped_set, ISSUE_TOKEN);
+    assert!(
+        matches!(
+            &github_section(flipped_model).transition_debt.revert,
+            DebtStateV1::Outstanding { .. }
+        ),
+        "a replacement dispositions snapshot removing the clearing fact un-clears the debt"
+    );
+    assert_ne!(
+        cleared_model.revision, flipped_model.revision,
+        "the dispositions snapshot stamps the items it can change"
+    );
+}
+
+/// Ruling discriminator 6 + #1693 discrimination 10: full rebuild equals
+/// incremental for every R6-2 case, in ANY arrival order — with each
+/// lifecycle stage arriving as its OWN CurrentTruth snapshot (successive
+/// repo revisions), the disposition case included. The incremental fold
+/// (causal order) must equal every-permutation rebuild AND the
+/// single-final-view projection the semantics tests use.
+#[test]
+fn full_rebuild_equals_incremental_across_r6_2_cases_and_arrival_orders() {
+    /// Heap's algorithm over distinct snapshots (kinds/revisions differ,
+    /// so every permutation is a distinct arrival order).
+    fn permutations_of(snapshots: &[SourceSnapshot]) -> Vec<Vec<SourceSnapshot>> {
+        let mut current = snapshots.to_vec();
+        let mut out = vec![current.clone()];
+        let n = current.len();
+        let mut c = vec![0usize; n];
+        let mut i = 0;
+        while i < n {
+            if c[i] < i {
+                if i % 2 == 0 {
+                    current.swap(0, i);
+                } else {
+                    current.swap(c[i], i);
+                }
+                out.push(current.clone());
+                c[i] += 1;
+                i = 0;
+            } else {
+                c[i] = 0;
+                i += 1;
+            }
+        }
+        out
+    }
+
+    /// Build the per-stage snapshot list for one case: stage k carries the
+    /// view reduced over states[..=k] (exactly what successive refreshes
+    /// expose), each at its own revision.
+    fn staged_snapshots(
+        states: &[GithubRepositoryStateV1],
+        extra: &[AssertionV1],
+        disposition: Option<(OwnerDispositionFactV1, &'static str, &'static str)>,
+    ) -> Vec<SourceSnapshot> {
+        let mut out = Vec::new();
+        for k in 0..states.len() {
+            let view = ct_view(&states[..=k], extra, true);
+            out.push(ct_snapshot(
+                view,
+                &format!("ct-stage-{}", k + 1),
+                &states[k].refreshed_at,
+            ));
+        }
+        if let Some((fact, revision, at)) = disposition {
+            out.push(dispositions_snapshot(vec![fact], revision, at));
+        }
+        out
+    }
+
+    let clearing_disposition = || OwnerDispositionFactV1 {
+        issue_ref: format!("{REPO}#100"),
+        observed_at: "2026-08-26T14:30:00Z".to_string(),
+        disposition: OwnerDispositionV1::NoRepairRequired {
+            note: "revert was intended".to_string(),
+        },
+        visibility: VisibilityClassV1::Public,
+    };
+
+    // D1/D2: revert+reopen survives the newer steady-state snapshot.
+    // D3: authoritative close clears the reopen axis only.
+    // D4: merged repair PR clears the revert axis.
+    // D5: owner disposition clears the revert axis.
+    let cases: Vec<(&str, Vec<GithubRepositoryStateV1>, Vec<AssertionV1>)> = vec![
+        (
+            "steady-state-after-revert",
+            vec![
+                state_v2_merged_open(),
+                state_v4_revert_reopen(),
+                state_v6_steady_after_revert(),
+            ],
+            vec![],
+        ),
+        (
+            "authoritative-close",
+            vec![
+                state_v2_merged_open(),
+                state_v4_revert_reopen(),
+                state_v7_issue_closed(),
+            ],
+            vec![],
+        ),
+        (
+            "repair-pr",
+            vec![
+                state_v2_merged_open(),
+                state_v4_revert_only(),
+                state_v8_repair_pr(),
+            ],
+            vec![],
+        ),
+        (
+            "owner-disposition",
+            vec![
+                state_v2_merged_open(),
+                state_v4_revert_reopen(),
+                state_v6_steady_after_revert(),
+            ],
+            vec![],
         ),
     ];
 
-    let incremental = {
+    for (label, states, extra) in cases {
+        let disposition = if label == "owner-disposition" {
+            Some((clearing_disposition(), "disp-1", "2026-08-26T14:30:00Z"))
+        } else {
+            None
+        };
+        let snapshots = staged_snapshots(&states, &extra, disposition.clone());
+
+        // Incremental: causal arrival order.
         let mut index = WorkProjectionIndex::new();
         for snapshot in &snapshots {
             index.apply_ok(snapshot.clone());
         }
-        project(&index, &options())
-    };
-    let canonical = project(&rebuild(snapshots.clone()).expect("rebuild"), &options());
-    assert_eq!(incremental, canonical);
+        let incremental = project(&index, &options());
 
-    // Arrival-order independence: every permutation of the same multiset
-    // (5 rotations of a shuffled base) rebuilds the same projection.
-    let mut rotated = snapshots.clone();
-    for _ in 0..5 {
-        rotated.rotate_left(1);
-        let permuted = project(&rebuild(rotated.clone()).expect("rebuild"), &options());
+        // Full rebuild over EVERY permutation of the same multiset.
+        for (permuted_id, permuted) in permutations_of(&snapshots).into_iter().enumerate() {
+            let rebuilt = project(&rebuild(permuted).expect("rebuild"), &options());
+            assert_eq!(
+                incremental, rebuilt,
+                "{label}: arrival order {permuted_id} must never change the projection"
+            );
+        }
+
+        // The incremental fold consumes only the newest CurrentTruth
+        // snapshot, so it must equal the single-final-view projection the
+        // per-case semantics tests assert against.
+        let final_view = ct_view(&states, &extra, true);
+        let final_snapshot = ct_snapshot(
+            final_view,
+            &format!("ct-stage-{}", states.len()),
+            &states.last().expect("states").refreshed_at,
+        );
+        let mut single = WorkProjectionIndex::new();
+        if let Some((fact, revision, at)) = disposition {
+            single.apply_ok(dispositions_snapshot(vec![fact], revision, at));
+        }
+        single.apply_ok(final_snapshot);
         assert_eq!(
-            permuted, canonical,
-            "arrival order must never change the projection"
+            incremental,
+            project(&single, &options()),
+            "{label}: incremental stages must land on the single-final-view projection"
         );
     }
 }
@@ -2140,8 +2451,9 @@ fn unauthorized_missing_repo_view_hides_issue_keyed_work() {
 }
 
 /// A reverted PR that a later authoritative link-set update UNLINKS from
-/// its issue still carries R6-2 debt: it is counted (content-free) so it
-/// cannot disappear silently. Unlinking is not a causal resolution.
+/// its issue still carries R6-2 debt: unlinking is not a causal
+/// resolution, so beyond the content-free health counter the debt now has
+/// its own attributable, blocked work item (codex R2 round-3 finding 4).
 #[test]
 fn unlinked_reverted_pr_counts_as_orphaned_debt() {
     // v9: PR 200 no longer linked to issue 100 (authoritative link
@@ -2178,15 +2490,41 @@ fn unlinked_reverted_pr_counts_as_orphaned_debt() {
         set.health.orphaned_revert_debt_count, 1,
         "the unlinked reverted PR's transition debt stays visible (content-free count)"
     );
-    // What the per-issue projection can still see: the issue no longer
-    // names the reverted PR, so its own debt row is gone — the health
-    // counter is the honest residue until the consumer view exposes
-    // superseded link lineage (#1696 integration-slice follow-up).
-    let model = find(&set, ISSUE_TOKEN);
+
+    // The issue's own debt row is honestly gone — its CURRENT link set no
+    // longer names the reverted PR — but the debt did NOT disappear: it is
+    // attributable to the PR's own work item, blocked and actionable.
+    let issue_model = find(&set, ISSUE_TOKEN);
     assert!(matches!(
-        github_section(model).transition_debt.revert,
+        github_section(issue_model).transition_debt.revert,
         DebtStateV1::None
     ));
+
+    let pr_token = format!("{REPO}#pull_request:200");
+    let pr_model = find(&set, &pr_token);
+    let pr_section = github_section(pr_model);
+    assert!(
+        matches!(
+            &pr_section.transition_debt.revert,
+            DebtStateV1::Outstanding { .. }
+        ),
+        "the orphaned reverted PR keeps its own outstanding revert debt"
+    );
+    assert_eq!(
+        pr_section.implementation_status,
+        ImplementationStatusV1::Reverted
+    );
+    assert!(has_blocker(
+        pr_model,
+        super::types::BlockerKindV1::OutstandingTransitionDebt
+    ));
+    assert!(has_action(pr_model, NextActionKindV1::RepairRevertOrReopen));
+    assert!(!pr_model.success_shaped);
+    assert_eq!(
+        super::views::board_view(pr_model).column,
+        "reverted",
+        "the orphan's board column is repair-blocked, never landed"
+    );
 }
 
 /// A superseding snapshot arriving BETWEEN two equal-key contradictory

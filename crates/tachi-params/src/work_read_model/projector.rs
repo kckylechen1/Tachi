@@ -93,6 +93,18 @@ pub enum ApplyOutcome {
 /// equal-key content contradiction is rejected no matter how many newer
 /// snapshots arrived in between. This is disposable projection state:
 /// dropping it loses nothing an authority owns.
+///
+/// The `seen` map is a **stream-integrity tripwire, not truth**: it never
+/// feeds `project` (only `latest` does) and only rejects corrupted appends
+/// fail-closed. Its sensitivity is per-index-lifetime — after a drop and
+/// rebuild from the snapshots the sources currently return, a contradiction
+/// that only existed between two superseded arrivals is no longer observed.
+/// That is not a rebuild/incremental divergence: `rebuild` folds the SAME
+/// multiset through the same `apply`, so the projected output and the
+/// conflict outcome are identical for equal multisets in every arrival
+/// order. The durable backstop for same-key contradiction is each
+/// authority's own law (e.g. the #1696 `ContradictsExistingRevision`
+/// store gate); no adapter minting from an authority can ever produce one.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WorkProjectionIndex {
     latest: BTreeMap<SourceKind, SourceSnapshot>,
@@ -296,6 +308,18 @@ pub fn project(index: &WorkProjectionIndex, options: &ProjectionOptions) -> Work
                 push_key(WorkKey::Issue { repo, number }, &mut keys);
             }
         }
+        // R6-2: orphaned revert debt stays an attributable work item —
+        // unlinking a reverted PR is not a causal resolution, so it gets
+        // its own blocked `PullRequest` key instead of dissolving.
+        for number in orphaned_reverted_prs(view) {
+            push_key(
+                WorkKey::PullRequest {
+                    repo: view.repo.clone(),
+                    number,
+                },
+                &mut keys,
+            );
+        }
     }
     keys.sort();
 
@@ -344,42 +368,15 @@ pub fn project(index: &WorkProjectionIndex, options: &ProjectionOptions) -> Work
         }
     }
 
-    // Content-free visibility of the unlink-after-revert gap: PRs with
-    // evidenced `merge_reverted` that no issue's CURRENT link set claims
-    // still carry transition debt under the R6-2 ruling (unlinking is not
-    // a causal resolution), but the v1 consumer view exposes no historical
-    // link lineage to attribute them to an issue. They are counted here so
-    // the debt cannot disappear silently; per-issue attribution after an
-    // unlink is the #1696 integration-slice follow-up.
+    // R6-2 visibility of the unlink-after-revert gap: PRs with evidenced
+    // `merge_reverted` that no issue's CURRENT link set claims still carry
+    // transition debt (unlinking is not a causal resolution). Each is an
+    // attributable, blocked `PullRequest` work item (see
+    // `orphaned_reverted_prs`); this content-free counter is the set-level
+    // summary and shares the same detection so the two can never disagree.
     let orphaned_revert_debt_count = repo_views
         .iter()
-        .map(|view| {
-            let claimed: std::collections::BTreeSet<u64> = view
-                .subjects
-                .iter()
-                .filter(|subject| parse_subject_token(&subject.subject_token).is_some())
-                .flat_map(linked_pr_numbers)
-                .collect();
-            view.subjects
-                .iter()
-                .filter(|subject| subject.subject_token.contains("#pull_request:"))
-                .filter(|subject| {
-                    subject.predicates.iter().any(|row| {
-                        row.predicate == PredicateV1::MergeReverted
-                            && !row.evidence_heads.is_empty()
-                    })
-                })
-                .filter(|subject| {
-                    subject
-                        .subject_token
-                        .rsplit_once('#')
-                        .and_then(|(_, object)| object.strip_prefix("pull_request:"))
-                        .and_then(|token| token.parse::<u64>().ok())
-                        .map(|number| !claimed.contains(&number))
-                        .unwrap_or(false)
-                })
-                .count()
-        })
+        .map(|view| orphaned_reverted_prs(view).len())
         .sum();
 
     let health = WorkProjectionHealthV1 {
@@ -530,13 +527,17 @@ fn model_touches_private(model: &WorkReadModelV1) -> bool {
 /// unknown repo, so the item must not leak either (#1693 discrimination
 /// 12, fail-closed).
 fn subject_hidden(model: &WorkReadModelV1, repo_views: &[CurrentTruthViewV1]) -> bool {
-    let WorkKey::Issue { repo, number } = &model.work_id else {
-        return false;
+    let (repo, token) = match &model.work_id {
+        WorkKey::Issue { repo, number } => (repo, format!("{repo}#issue:{number}")),
+        WorkKey::PullRequest { repo, number } => (repo, format!("{repo}#pull_request:{number}")),
+        // Local-scoped keys carry no GitHub subject: nothing to hide on
+        // GitHub grounds (private local facts are handled by
+        // `model_touches_private`).
+        WorkKey::Dispatch(_) | WorkKey::Claim(_) => return false,
     };
     let Some(view) = repo_views.iter().find(|view| &view.repo == repo) else {
         return true;
     };
-    let token = format!("{repo}#issue:{number}");
     !view
         .subjects
         .iter()
@@ -665,8 +666,10 @@ fn project_one(
         observation: delivery_observation.clone(),
     };
 
-    // GitHub section: only issue keys have a subject; dispatch/claim keys
-    // are honestly `NotApplicable` — never a guessed issue.
+    // GitHub section: only issue keys have an issue subject; orphaned
+    // reverted PRs carry their own PR-keyed section (R6-2 attributable
+    // debt); dispatch/claim keys are honestly `NotApplicable` — never a
+    // guessed issue.
     let github_section = match &key {
         WorkKey::Issue { repo, number } => {
             match repo_views.iter().find(|view| &view.repo == repo) {
@@ -676,6 +679,14 @@ fn project_one(
                 Some(view) => {
                     SectionState::Available(github_section_for(view, *number, owner_dispositions))
                 }
+            }
+        }
+        WorkKey::PullRequest { repo, number } => {
+            match repo_views.iter().find(|view| &view.repo == repo) {
+                None => SectionState::Unavailable {
+                    source: SourceKind::CurrentTruth { repo: repo.clone() },
+                },
+                Some(view) => SectionState::Available(orphan_pr_github_section_for(view, *number)),
             }
         }
         WorkKey::Dispatch(_) | WorkKey::Claim(_) => SectionState::NotApplicable,
@@ -701,27 +712,28 @@ fn project_one(
     if adjudication_section.is_available() {
         stamps.extend(index.stamp_for(&SourceKind::Adjudication));
     }
-    if let WorkKey::Issue { repo, .. } = &key {
+    if let WorkKey::Issue { repo, .. } | WorkKey::PullRequest { repo, .. } = &key {
         // The repo view contributes posture + subject presence even when
         // the subject row itself is absent for this key.
         if repo_views.iter().any(|view| &view.repo == repo) {
             stamps.extend(index.stamp_for(&SourceKind::CurrentTruth { repo: repo.clone() }));
         }
     }
-    if let WorkKey::Issue { repo, number } = &key {
-        let bound_dispositions = owner_dispositions
-            .iter()
-            .filter(|fact| {
-                WorkKey::parse_issue_ref(&fact.issue_ref)
-                    == Some(WorkKey::Issue {
-                        repo: repo.clone(),
-                        number: *number,
-                    })
-            })
-            .count();
-        if bound_dispositions > 0 {
+    if matches!(key, WorkKey::Issue { .. }) {
+        // The dispositions snapshot stamps whenever it EXISTS: its
+        // binding-or-not statement is knowledge that participates in the
+        // debt derivation (a replacement snapshot that removes the
+        // clearing fact flips debt back to Outstanding — the fingerprint
+        // must move with it).
+        if index.has_snapshot(&SourceKind::OwnerDispositions) {
             stamps.extend(index.stamp_for(&SourceKind::OwnerDispositions));
         }
+    }
+    // Delivery participates in EVERY item's model (the delivery section
+    // always carries the observation), so a delivery snapshot stamps every
+    // item it can change — no more same-fingerprint/different-model pairs.
+    if index.has_snapshot(&SourceKind::Delivery) {
+        stamps.extend(index.stamp_for(&SourceKind::Delivery));
     }
     stamps.sort_by_key(|stamp| stamp.kind.as_token());
     stamps.dedup_by(|a, b| a.as_token() == b.as_token());
@@ -976,17 +988,27 @@ fn project_one(
     // Forwarded GitHub-domain actions from CurrentTruth's own open action —
     // re-exposed with provenance, never re-derived. The R6-2 lifecycle
     // semantics inside that resolution are the frozen max-key family law.
+    // EXCEPT `RepairRevertOrReopen`: that action is forwarded only while
+    // the DERIVED transition debt is still outstanding — an owner
+    // disposition (an #1693-level fact #1696 cannot see) can clear the
+    // debt while CurrentTruth's own open action still names repair, and a
+    // cleared debt must not carry a stale repair action.
     if let SectionState::Available(section) = &github_section {
         if let Some(subject) = &section.subject {
             if let Some(open_action) = &subject.open_action {
-                if let Some((kind, owner, authority)) = forwarded_action(open_action.kind) {
-                    push_action(
-                        kind,
-                        owner,
-                        authority,
-                        vec![subject.subject_token.clone()],
-                        Vec::new(),
-                    );
+                let suppress_repair = open_action.kind
+                    == crate::current_truth::types::OpenActionKindV1::RepairRevertOrReopen
+                    && !transition_debt_outstanding;
+                if !suppress_repair {
+                    if let Some((kind, owner, authority)) = forwarded_action(open_action.kind) {
+                        push_action(
+                            kind,
+                            owner,
+                            authority,
+                            vec![subject.subject_token.clone()],
+                            Vec::new(),
+                        );
+                    }
                 }
             }
             // Owner-authorized close: acceptance present + issue currently
@@ -1107,10 +1129,21 @@ fn github_section_for(
     let (implementation_status, merge_sha, conflicted) = match &subject {
         None => (ImplementationStatusV1::Unknown, None, false),
         Some(subject) => {
+            // #1696 law consumed here: conflicts block success-shaped
+            // projection — including a conflicted row on a LINKED PR
+            // subject (its merge/revert evidence is retained contradiction,
+            // never resolution for the issue it implements).
             let conflicted = subject
                 .predicates
                 .iter()
-                .any(|row| row.status == ReductionStatusV1::Conflicted);
+                .any(|row| row.status == ReductionStatusV1::Conflicted)
+                || linked_pr_numbers(subject).iter().any(|number| {
+                    pr_subject_in_view(view, *number).is_some_and(|pr| {
+                        pr.predicates
+                            .iter()
+                            .any(|row| row.status == ReductionStatusV1::Conflicted)
+                    })
+                });
             if conflicted {
                 (ImplementationStatusV1::Conflicted, None, true)
             } else if matches!(transition_debt.revert, DebtStateV1::Outstanding { .. }) {
@@ -1176,14 +1209,23 @@ fn head_key(
 /// transition fact's debt survives regardless of its row's group status:
 /// the consumer view's `evidence_heads` are the row's live lineage heads,
 /// and debt is carried by the FACT they evidence.
+///
+/// `admissible_only` restricts the row to **non-conflicted** evidence — the
+/// gate the R6-2 ruling requires for CLEARING: a causal resolution must be
+/// authoritative (`issue_closed` observation, a proven merged repair), and a
+/// `Conflicted` row is retained contradiction evidence, never an
+/// authoritative resolution. DETECTION stays ungated: a conflicted
+/// transition fact still establishes fail-closed outstanding debt.
 fn row_heads(
     subject: &crate::current_truth::consumer::SubjectTruthViewV1,
     predicate: PredicateV1,
+    admissible_only: bool,
 ) -> Vec<HeadWithKey> {
     subject
         .predicates
         .iter()
         .find(|row| row.predicate == predicate)
+        .filter(|row| !admissible_only || row.status != ReductionStatusV1::Conflicted)
         .map(|row| {
             row.evidence_heads
                 .iter()
@@ -1191,6 +1233,68 @@ fn row_heads(
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// The PR subject row for one number, when the view contains it.
+fn pr_subject_in_view(
+    view: &CurrentTruthViewV1,
+    number: u64,
+) -> Option<&crate::current_truth::consumer::SubjectTruthViewV1> {
+    view.subjects
+        .iter()
+        .find(|row| row.subject_token == format!("{}#pull_request:{number}", view.repo))
+}
+
+/// The GitHub section for an ORPHANED reverted PR (R6-2): a PR with
+/// evidenced `merge_reverted` that no issue's current link set claims. The
+/// debt is real and unresolved — unlinking is not a causal resolution — so
+/// it gets its own attributable, blocked work item instead of dissolving
+/// into a health counter. Its debt clears only by re-attribution: once an
+/// issue's current link set claims the PR again, the debt moves back to
+/// that issue (where the ruling's causal resolutions — repair PR, owner
+/// disposition — can act on it).
+fn orphan_pr_github_section_for(view: &CurrentTruthViewV1, number: u64) -> GithubSectionV1 {
+    let subject = pr_subject_in_view(view, number).cloned();
+    let revert_heads = subject
+        .as_ref()
+        .map(|subject| row_heads(subject, PredicateV1::MergeReverted, false))
+        .unwrap_or_default();
+    let transition_debt = TransitionDebtV1 {
+        revert: if revert_heads.is_empty() {
+            DebtStateV1::None
+        } else {
+            DebtStateV1::Outstanding {
+                evidence_heads: revert_heads.into_iter().map(|(_, head)| head).collect(),
+            }
+        },
+        reopen: DebtStateV1::None,
+    };
+    let conflicted = subject.as_ref().is_some_and(|subject| {
+        subject
+            .predicates
+            .iter()
+            .any(|row| row.status == ReductionStatusV1::Conflicted)
+    });
+    // A reverted implementation is never the effective implementation:
+    // no merge SHA is projected while the revert debt is outstanding.
+    let implementation_status = if conflicted {
+        ImplementationStatusV1::Conflicted
+    } else if matches!(transition_debt.revert, DebtStateV1::Outstanding { .. }) {
+        ImplementationStatusV1::Reverted
+    } else {
+        // Totality guard: an orphan key with no revert heads (no longer
+        // emitted by `project`) degrades honestly instead of guessing.
+        ImplementationStatusV1::Unknown
+    };
+    GithubSectionV1 {
+        repo: view.repo.clone(),
+        posture_fresh: view.posture.fresh,
+        subject,
+        implementation_status,
+        merge_sha: None,
+        conflicted,
+        transition_debt,
+    }
 }
 
 /// The R6-2 transition-debt projection for one issue subject (owner-ruled
@@ -1221,12 +1325,15 @@ fn transition_debt_for(
     };
 
     let reopen = {
-        let reopen_heads = row_heads(subject, PredicateV1::IssueReopened);
+        let reopen_heads = row_heads(subject, PredicateV1::IssueReopened, false);
         if reopen_heads.is_empty() {
             DebtStateV1::None
         } else {
             let reopen_max = reopen_heads.iter().map(|(key, _)| key.clone()).max();
-            let closed_heads = row_heads(subject, PredicateV1::IssueClosed);
+            // Clearing evidence must be admissible: a Conflicted close row
+            // is retained contradiction evidence, never an authoritative
+            // `issue_closed` resolution (R6-2 causal resolution law).
+            let closed_heads = row_heads(subject, PredicateV1::IssueClosed, true);
             let closed_max = closed_heads.iter().map(|(key, _)| key.clone()).max();
             match (reopen_max, closed_max) {
                 (Some(reopen_key), Some(closed_key)) if closed_key > reopen_key => {
@@ -1245,20 +1352,15 @@ fn transition_debt_for(
     let revert = {
         // Linked PRs (current typed links only — never title/body similarity).
         let linked = linked_pr_numbers(subject);
-        let pr_subject = |number: u64| {
-            view.subjects
-                .iter()
-                .find(|row| row.subject_token == format!("{}#pull_request:{number}", view.repo))
-        };
 
         let mut reverted_prs: Vec<u64> = Vec::new();
         let mut revert_heads: Vec<crate::current_truth::consumer::EvidenceHeadViewV1> = Vec::new();
         let mut revert_max: Option<(chrono::DateTime<chrono::Utc>, String)> = None;
         for pr_number in &linked {
-            let Some(pr_subject) = pr_subject(*pr_number) else {
+            let Some(pr_subject) = pr_subject_in_view(view, *pr_number) else {
                 continue;
             };
-            let heads = row_heads(pr_subject, PredicateV1::MergeReverted);
+            let heads = row_heads(pr_subject, PredicateV1::MergeReverted, false);
             if heads.is_empty() {
                 continue;
             }
@@ -1273,17 +1375,19 @@ fn transition_debt_for(
             DebtStateV1::None
         } else {
             // Clearing evidence 1: a merged repair PR — a linked PR OTHER
-            // than a reverted one, merged causally after the revert. The
-            // reverted PR's own newer merged re-snapshot is ordinary
-            // steady-state evidence and does not count.
+            // than a reverted one, merged causally after the revert, with
+            // an ADMISSIBLE (non-conflicted) merge row: a conflicted
+            // `pr_merged` is retained contradiction evidence, not a proven
+            // merge. The reverted PR's own newer merged re-snapshot is
+            // ordinary steady-state evidence and does not count.
             let repair = linked.iter().any(|pr_number| {
                 if reverted_prs.contains(pr_number) {
                     return false;
                 }
-                let Some(pr_subject) = pr_subject(*pr_number) else {
+                let Some(pr_subject) = pr_subject_in_view(view, *pr_number) else {
                     return false;
                 };
-                row_heads(pr_subject, PredicateV1::PrMerged)
+                row_heads(pr_subject, PredicateV1::PrMerged, true)
                     .iter()
                     .any(|(key, _)| revert_max.as_ref().is_some_and(|max| *key > *max))
             });
@@ -1295,8 +1399,11 @@ fn transition_debt_for(
             } else {
                 // Clearing evidence 2: an explicit owner-reviewed
                 // `no_repair_required` disposition, bound to this issue and
-                // observed at/after the revert (a stale pre-revert
-                // disposition cannot clear a newer debt).
+                // observed STRICTLY after the revert (a pre-revert
+                // disposition — including one sharing the revert's exact
+                // observation instant — cannot clear a later debt; when
+                // causal resolution evidence is absent the debt stays
+                // visible, fail-closed).
                 let causal_dispositions: Vec<&OwnerDispositionFactV1> = owner_dispositions
                     .iter()
                     .filter(|fact| {
@@ -1308,7 +1415,7 @@ fn transition_debt_for(
                                 .as_ref()
                                 .map(|(instant, _)| {
                                     crate::current_truth::types::ordering_instant(&fact.observed_at)
-                                        >= *instant
+                                        > *instant
                                 })
                                 .unwrap_or(false)
                     })
@@ -1344,15 +1451,10 @@ fn newest_linked_merge_sha(
     view: &CurrentTruthViewV1,
     subject: &crate::current_truth::consumer::SubjectTruthViewV1,
 ) -> Option<String> {
-    let pr_subject = |number: u64| {
-        view.subjects
-            .iter()
-            .find(|row| row.subject_token == format!("{}#pull_request:{number}", view.repo))
-    };
     linked_pr_numbers(subject)
         .into_iter()
         .filter_map(|number| {
-            let pr = pr_subject(number)?;
+            let pr = pr_subject_in_view(view, number)?;
             let row = pr.predicates.iter().find(|row| {
                 row.predicate == PredicateV1::PrMerged
                     && row.status == ReductionStatusV1::Current
@@ -1381,6 +1483,40 @@ fn linked_pr_numbers(subject: &crate::current_truth::consumer::SubjectTruthViewV
             }
         }
     }
+    numbers.sort();
+    numbers.dedup();
+    numbers
+}
+
+/// PRs with evidenced `merge_reverted` that no issue's CURRENT link set
+/// claims (R6-2: unlinking is not a causal resolution, so the debt stays
+/// attributable). Shared by key emission and the health counter so the
+/// attributable items and the content-free count can never disagree.
+fn orphaned_reverted_prs(view: &CurrentTruthViewV1) -> Vec<u64> {
+    let claimed: std::collections::BTreeSet<u64> = view
+        .subjects
+        .iter()
+        .filter(|subject| parse_subject_token(&subject.subject_token).is_some())
+        .flat_map(linked_pr_numbers)
+        .collect();
+    let mut numbers: Vec<u64> = view
+        .subjects
+        .iter()
+        .filter(|subject| subject.subject_token.contains("#pull_request:"))
+        .filter(|subject| {
+            subject.predicates.iter().any(|row| {
+                row.predicate == PredicateV1::MergeReverted && !row.evidence_heads.is_empty()
+            })
+        })
+        .filter_map(|subject| {
+            subject
+                .subject_token
+                .rsplit_once('#')
+                .and_then(|(_, object)| object.strip_prefix("pull_request:"))
+                .and_then(|token| token.parse::<u64>().ok())
+        })
+        .filter(|number| !claimed.contains(number))
+        .collect();
     numbers.sort();
     numbers.dedup();
     numbers

@@ -18,20 +18,27 @@ use super::sources::{
 
 /// The stable identity of one work item. `Issue` keys use the CurrentTruth
 /// subject token shape (`owner/repo#issue:N`) so GitHub-domain joins are
-/// token-equality; `Dispatch` and `Claim` keys exist for work that has not
-/// (yet) resolved to an issue — they are never guessed into one.
+/// token-equality; `PullRequest` keys exist for orphaned revert debt — a
+/// reverted PR no issue's CURRENT link set claims still carries R6-2
+/// transition debt, and that debt must remain an attributable, actionable
+/// work item (unlinking is not a causal resolution); `Dispatch` and `Claim`
+/// keys exist for work that has not (yet) resolved to an issue — they are
+/// never guessed into one.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum WorkKey {
     Issue { repo: String, number: u64 },
+    PullRequest { repo: String, number: u64 },
     Dispatch(String),
     Claim(String),
 }
 
 impl WorkKey {
-    /// Stable token (`owner/repo#issue:N`, `dispatch:<id>`, `claim:<id>`).
+    /// Stable token (`owner/repo#issue:N`, `owner/repo#pull_request:N`,
+    /// `dispatch:<id>`, `claim:<id>`).
     pub fn as_token(&self) -> String {
         match self {
             WorkKey::Issue { repo, number } => format!("{repo}#issue:{number}"),
+            WorkKey::PullRequest { repo, number } => format!("{repo}#pull_request:{number}"),
             WorkKey::Dispatch(id) => format!("dispatch:{id}"),
             WorkKey::Claim(id) => format!("claim:{id}"),
         }

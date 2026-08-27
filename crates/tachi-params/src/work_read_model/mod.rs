@@ -41,9 +41,14 @@
 //! CurrentTruth lifecycle resolution. Debt clears only through the causal
 //! resolutions the ruling names (a later authoritative `issue_closed`; a
 //! post-revert merged repair PR explicitly linked to the issue; an
-//! explicit owner-reviewed `no_repair_required` disposition). See
-//! [`types::TransitionDebtV1`] and `transition_debt_for` in
-//! `projector.rs`. The #1696 assertion history and reducer are untouched.
+//! explicit owner-reviewed `no_repair_required` disposition observed
+//! strictly after the revert). Clearing evidence must be **admissible**:
+//! a `Conflicted` row is retained contradiction evidence and never
+//! discharges debt. A reverted PR that no issue's current link set claims
+//! keeps its debt as its own attributable, blocked work item (unlinking
+//! is not a causal resolution). See [`types::TransitionDebtV1`] and
+//! `transition_debt_for` in `projector.rs`. The #1696 assertion history
+//! and reducer are untouched.
 
 pub mod projector;
 pub mod sources;
