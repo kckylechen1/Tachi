@@ -633,11 +633,6 @@ fn project_one(
         .iter()
         .filter(|run| dispatch_work_key(&run.dispatch_id, claims) == key)
         .collect();
-    let dispatch_ids: Vec<String> = bound_runs
-        .iter()
-        .map(|run| run.dispatch_id.clone())
-        .collect();
-
     // Section availability follows SNAPSHOT EXISTENCE, not row counts: an
     // empty snapshot asserts "no facts at this revision" — knowledge, not
     // unavailability. Only a source with no snapshot at all is
@@ -899,6 +894,28 @@ fn project_one(
                 evidence_refs: active.iter().map(|row| row.fact.claim_id.clone()).collect(),
             });
         }
+        // Ambiguous-dispatch residue (codex R2 round-9 finding 3): when
+        // distinct ACTIVE claim keys share this work item's dispatch id,
+        // the standalone dispatch item carries the collision explicitly —
+        // clean terminal evidence must not complete work whose ownership
+        // is ambiguous.
+        if let WorkKey::Dispatch(dispatch_id) = &key {
+            let colliding: Vec<String> = claims
+                .iter()
+                .filter(|claim| {
+                    claim.state == ClaimStateV1::Active
+                        && claim.dispatch_id.as_deref() == Some(dispatch_id.as_str())
+                })
+                .map(|claim| claim.claim_id.clone())
+                .collect();
+            if colliding.len() > 1 {
+                blockers.push(BlockerV1 {
+                    kind: BlockerKindV1::ClaimCollision,
+                    owner_class: ActionOwnerClassV1::EngineeringAuthority,
+                    evidence_refs: colliding,
+                });
+            }
+        }
         let orphaned_ids: Vec<String> = section
             .claims
             .iter()
@@ -1050,21 +1067,31 @@ fn project_one(
             vec!["awaiting_adjudication".to_string()],
         );
     }
-    let active_claim_running = bound_claims
+    // Await pairs ACTIVE claims with THEIR OWN dispatches' live runs
+    // (codex R2 round-9 finding 2): a released claim's still-running old
+    // run is not evidence that an active worker holds the work.
+    let active_dispatch_ids: Vec<String> = bound_claims
         .iter()
-        .any(|claim| claim.state == ClaimStateV1::Active)
-        && bound_runs.iter().any(|run| {
+        .filter(|claim| claim.state == ClaimStateV1::Active)
+        .filter_map(|claim| claim.dispatch_id.clone())
+        .collect();
+    let awaited_dispatch_ids: Vec<String> = bound_runs
+        .iter()
+        .filter(|run| active_dispatch_ids.contains(&run.dispatch_id))
+        .filter(|run| {
             matches!(
                 execution_state(run),
                 ExecutionStateV1::Running | ExecutionStateV1::Unknown
             )
-        });
-    if active_claim_running {
+        })
+        .map(|run| run.dispatch_id.clone())
+        .collect();
+    if !awaited_dispatch_ids.is_empty() {
         push_action(
             NextActionKindV1::AwaitWorkerResult,
             ActionOwnerClassV1::None,
             RequiredAuthorityV1::None,
-            dispatch_ids.clone(),
+            awaited_dispatch_ids,
             Vec::new(),
         );
     }
@@ -1806,6 +1833,24 @@ fn linked_pr_numbers(subject: &crate::current_truth::consumer::SubjectTruthViewV
 /// attributable). Shared by key emission and the health counter so the
 /// attributable items and the content-free count can never disagree.
 fn orphaned_reverted_prs(view: &CurrentTruthViewV1) -> Vec<u64> {
+    // Fail-closed under UNKNOWN linkage (codex R2 round-9 finding 1): a
+    // conflicted `implementation_pr_linked` row exposes no current link
+    // set, so "no issue claims this PR" is UNKNOWN, not absent — orphan
+    // inference is suppressed for the whole view rather than fabricating
+    // debt from a contradiction.
+    let link_conflict = view
+        .subjects
+        .iter()
+        .filter(|subject| parse_subject_token(&subject.subject_token).is_some())
+        .any(|subject| {
+            subject.predicates.iter().any(|row| {
+                row.predicate == PredicateV1::ImplementationPrLinked
+                    && row.status == ReductionStatusV1::Conflicted
+            })
+        });
+    if link_conflict {
+        return Vec::new();
+    }
     let claimed: std::collections::BTreeSet<u64> = view
         .subjects
         .iter()

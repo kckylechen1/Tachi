@@ -1361,6 +1361,172 @@ fn repaired_state_keeps_repair_merge_sha_behind_newer_original_resnapshot() {
     );
 }
 
+/// Hardening (codex R2 round-9 finding 1): a CONFLICTED link row makes
+/// linkage UNKNOWN, not absent — orphan revert debt is never fabricated
+/// from a link contradiction.
+#[test]
+fn conflicted_link_row_suppresses_orphan_fabrication() {
+    let rival_link = AssertionV1 {
+        assertion_id: "reviewed-rival-link".to_string(),
+        subject: issue_subject(100),
+        predicate: PredicateV1::ImplementationPrLinked,
+        value: AssertionValueV1::ObjectRef(
+            crate::current_truth::types::GithubObjectRefV1::PullRequest(999),
+        ),
+        issuer: "reviewer-1".to_string(),
+        authority_class: AuthorityClassV1::ReviewedDisposition,
+        source_ref: SourceRefV1 {
+            source: "reviewed-mapping".to_string(),
+            revision: "review-9".to_string(),
+        },
+        observed_at: "2026-08-26T12:00:00Z".to_string(),
+        effective_at: "2026-08-26T12:00:00Z".to_string(),
+        supersedes_assertion_id: None,
+        evidence_refs: vec!["review-comment-9".to_string()],
+        review_state: ReviewStateV1::Reviewed,
+        visibility: VisibilityClassV1::Public,
+    };
+    let view = ct_view(
+        &[state_v2_merged_open(), state_v4_revert_only()],
+        &[rival_link],
+        true,
+    );
+    let mut index = WorkProjectionIndex::new();
+    index.apply_ok(ct_snapshot(view, "ct-1", READ_AT));
+    let set = project(&index, &options());
+    assert_eq!(
+        set.health.orphaned_revert_debt_count, 0,
+        "unknown linkage must not fabricate orphan debt"
+    );
+    assert!(
+        !set.items
+            .iter()
+            .any(|model| model.work_token() == format!("{REPO}#pull_request:200")),
+        "no orphan item under a link contradiction"
+    );
+    // The issue itself stays conflict-blocked (the contradiction is
+    // visible through its own surfaces).
+    let model = find(&set, ISSUE_TOKEN);
+    assert!(has_blocker(
+        model,
+        super::types::BlockerKindV1::GithubConflict
+    ));
+}
+
+/// Hardening (codex R2 round-9 finding 2): a RELEASED claim's
+/// still-running old run never yields `AwaitWorkerResult` for an active
+/// claim whose own run already finished.
+#[test]
+fn released_claims_running_run_never_awaits_worker() {
+    let mut index = WorkProjectionIndex::new();
+    index.apply_ok(claims_snapshot(
+        vec![
+            claim_fact(
+                "c-live",
+                Some(&format!("{REPO}#100")),
+                Some("d-live"),
+                ClaimStateV1::Active,
+                None,
+                VisibilityClassV1::Public,
+            ),
+            claim_fact(
+                "c-old",
+                Some(&format!("{REPO}#100")),
+                Some("d-old"),
+                ClaimStateV1::Released,
+                None,
+                VisibilityClassV1::Public,
+            ),
+        ],
+        "claims-1",
+        READ_AT,
+    ));
+    index.apply_ok(runs_snapshot(
+        vec![
+            run_fact("d-live", true, true, Some(0)),
+            run_fact("d-old", true, false, None),
+        ],
+        "runs-1",
+        READ_AT,
+    ));
+    let set = project(&index, &options().with_sees_private(true));
+    let model = find(&set, ISSUE_TOKEN);
+    assert!(
+        !has_action(model, NextActionKindV1::AwaitWorkerResult),
+        "the active claim's dispatch finished; the released claim's stale run is not awaited"
+    );
+}
+
+/// Hardening (codex R2 round-9 finding 3): an ambiguous dispatch shared
+/// by distinct ACTIVE claim keys carries its collision on the standalone
+/// item — clean terminal evidence cannot complete ambiguous work.
+#[test]
+fn ambiguous_active_dispatch_item_is_collision_blocked() {
+    let mut index = WorkProjectionIndex::new();
+    index.apply_ok(claims_snapshot(
+        vec![
+            claim_fact(
+                "c-a",
+                Some(&format!("{REPO}#100")),
+                Some("d-shared"),
+                ClaimStateV1::Active,
+                None,
+                VisibilityClassV1::Public,
+            ),
+            claim_fact(
+                "c-b",
+                Some(&format!("{REPO}#101")),
+                Some("d-shared"),
+                ClaimStateV1::Active,
+                None,
+                VisibilityClassV1::Public,
+            ),
+        ],
+        "claims-1",
+        READ_AT,
+    ));
+    index.apply_ok(runs_snapshot(
+        vec![run_fact("d-shared", true, true, Some(0))],
+        "runs-1",
+        READ_AT,
+    ));
+    index.apply_ok(verification_snapshot(
+        vec![VerificationFactV1 {
+            dispatch_id: Some("d-shared".to_string()),
+            issue_ref: None,
+            verification_present: true,
+            diff_present: true,
+            evidence_refs: vec!["e1".to_string()],
+            visibility: VisibilityClassV1::Public,
+        }],
+        "verif-1",
+        READ_AT,
+    ));
+    index.apply_ok(adjudication_snapshot(
+        vec![AdjudicationFactV1 {
+            dispatch_id: "d-shared".to_string(),
+            fact: CanonicalAdjudicationFact::Accepted,
+            visibility: VisibilityClassV1::Public,
+        }],
+        "adj-1",
+        READ_AT,
+    ));
+    let set = project(&index, &options().with_sees_private(true));
+    let shared = find(&set, "dispatch:d-shared");
+    assert!(
+        has_blocker(shared, super::types::BlockerKindV1::ClaimCollision),
+        "the standalone item names the colliding active claims"
+    );
+    assert!(!shared.success_shaped);
+    let collision = shared
+        .blockers
+        .iter()
+        .find(|b| b.kind == super::types::BlockerKindV1::ClaimCollision)
+        .expect("collision blocker");
+    assert!(collision.evidence_refs.contains(&"c-a".to_string()));
+    assert!(collision.evidence_refs.contains(&"c-b".to_string()));
+}
+
 /// Hardening (codex R2 round-5 finding 4): a snapshot built through the
 /// public struct with a mismatched stamp/facts pairing is rejected at
 /// `apply` — the constructor is not the only fail-closed gate.
@@ -2624,6 +2790,18 @@ fn full_rebuild_equals_incremental_across_r6_2_cases_and_arrival_orders() {
             ],
             vec![],
         ),
+        // The clearing-outcome permutation (codex R2 round-9 finding 4):
+        // the LATEST disposition snapshot carries the clearing fact, so
+        // rebuild/incremental equality is proven for the D5 OUTCOME too.
+        (
+            "owner-disposition-clearing",
+            vec![
+                state_v2_merged_open(),
+                state_v4_revert_reopen(),
+                state_v6_steady_after_revert(),
+            ],
+            vec![],
+        ),
         // Causal negatives (codex R2 round-5 finding 10) in the same
         // permutation matrix: a pre-reopen close and a pre-revert merge
         // refreshed with its stable source updated_at.
@@ -2670,6 +2848,12 @@ fn full_rebuild_equals_incremental_across_r6_2_cases_and_arrival_orders() {
                     ),
                     (None, "disp-empty-replacement", "2026-08-26T15:00:00Z"),
                 ]
+            } else if label == "owner-disposition-clearing" {
+                vec![(
+                    Some(clearing_disposition()),
+                    "disp-1",
+                    "2026-08-26T14:30:00Z",
+                )]
             } else {
                 Vec::new()
             };
@@ -2715,6 +2899,23 @@ fn full_rebuild_equals_incremental_across_r6_2_cases_and_arrival_orders() {
             project(&single, &options()),
             "{label}: incremental stages must land on the single-final-view projection"
         );
+
+        // The clearing case's final debt is CLEARED in every permutation
+        // (the clearing disposition is the latest snapshot).
+        if label == "owner-disposition-clearing" {
+            let model = incremental
+                .items
+                .iter()
+                .find(|model| model.work_token() == ISSUE_TOKEN)
+                .expect("issue item");
+            assert!(
+                matches!(
+                    &github_section(model).transition_debt.revert,
+                    DebtStateV1::Cleared { .. }
+                ),
+                "{label}: the clearing disposition must clear the debt in every permutation"
+            );
+        }
 
         // The replacement case's final debt is OUTSTANDING in every
         // permutation (the newer empty snapshot removed the clearing
