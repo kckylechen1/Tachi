@@ -64,26 +64,28 @@ fn resolve_tachi_home() -> PathBuf {
 
 #[cfg(test)]
 pub(crate) fn probe_worktree_holder_from_home(home: &Path, worktree: &Path) -> DbHolderEvidence {
-    probe_worktree_holder_at_db(&configured_global_db(home), worktree)
+    let db = match configured_global_db(home) {
+        Ok(path) => path,
+        Err(error) => return DbHolderEvidence::Unavailable(error),
+    };
+    probe_worktree_holder_at_db(&db, worktree)
 }
 
 #[cfg(not(test))]
 fn probe_worktree_holder_from_home(home: &Path, worktree: &Path) -> DbHolderEvidence {
-    probe_worktree_holder_at_db(&configured_global_db(home), worktree)
+    let db = match configured_global_db(home) {
+        Ok(path) => path,
+        Err(error) => return DbHolderEvidence::Unavailable(error),
+    };
+    probe_worktree_holder_at_db(&db, worktree)
 }
 
-fn configured_global_db(home: &Path) -> PathBuf {
-    let global = home.join("global");
-    let canonical = global.join(memcore::MEMORY_DB_FILENAME);
-    if canonical.is_file() {
-        canonical
-    } else {
-        // The cleaner is deliberately read-only and cannot run the runtime's
-        // filename migration. Honor the one-release legacy database when the
-        // canonical file is absent so an upgrade cannot strand old managed
-        // worktrees behind permanently Unavailable holder evidence.
-        global.join(memcore::LEGACY_MEMORY_DB_FILENAME)
-    }
+fn configured_global_db(home: &Path) -> Result<PathBuf, String> {
+    // The cleaner cannot run the write-side filename migration. Reuse
+    // memcore's read-only split-brain and compat-link resolver so it may read
+    // a legacy-only DB without silently choosing one of two real databases.
+    memcore::resolve_memory_db_read_path(&home.join("global").join(memcore::MEMORY_DB_FILENAME))
+        .map_err(|error| format!("resolve configured global DB filename: {error}"))
 }
 
 fn probe_worktree_holder_at_db(db_path: &Path, worktree: &Path) -> DbHolderEvidence {
@@ -154,17 +156,19 @@ mod tests {
     use memcore::{EnvClass, NewExecEnvLease};
 
     #[test]
-    fn configured_global_db_prefers_canonical_and_falls_back_to_legacy() {
+    fn configured_global_db_supports_legacy_and_rejects_split_brain() {
         let home = unique_temp_dir("work-claim-db-filename");
         let global = home.join("global");
         std::fs::create_dir_all(&global).unwrap();
         let legacy = global.join(memcore::LEGACY_MEMORY_DB_FILENAME);
         std::fs::write(&legacy, b"legacy").unwrap();
-        assert_eq!(configured_global_db(&home), legacy);
+        assert_eq!(configured_global_db(&home).unwrap(), legacy);
 
         let canonical = global.join(memcore::MEMORY_DB_FILENAME);
         std::fs::write(&canonical, b"canonical").unwrap();
-        assert_eq!(configured_global_db(&home), canonical);
+        let error = configured_global_db(&home)
+            .expect_err("two real memory DB files must fail closed instead of choosing one");
+        assert!(error.contains("both a canonical"), "{error}");
         std::fs::remove_dir_all(home).unwrap();
     }
 

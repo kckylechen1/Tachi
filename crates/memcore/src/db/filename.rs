@@ -11,7 +11,7 @@
 //! migration logic lives in exactly one place instead of being re-derived at
 //! each of the many call sites that construct a `db_path`.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::error::MemoryError;
 
@@ -23,6 +23,42 @@ pub const MEMORY_DB_FILENAME: &str = "tachi-memory.db";
 /// detect and migrate an existing file forward, and left behind as a
 /// one-release-window compat symlink pointing at [`MEMORY_DB_FILENAME`].
 pub const LEGACY_MEMORY_DB_FILENAME: &str = "memory.db";
+
+/// Resolve the database a strictly read-only caller may inspect without
+/// performing the write-side filename migration. The same split-brain and
+/// compat-symlink rules apply, but this function never renames, creates, or
+/// relinks either sibling.
+pub fn resolve_memory_db_read_path(db_path: &Path) -> Result<PathBuf, MemoryError> {
+    let is_canonical_name = db_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name == MEMORY_DB_FILENAME);
+    if !is_canonical_name {
+        return Ok(db_path.to_path_buf());
+    }
+
+    let legacy_path = db_path.with_file_name(LEGACY_MEMORY_DB_FILENAME);
+    let legacy_kind = classify_legacy_sibling(&legacy_path)?;
+    let canonical_present = match std::fs::symlink_metadata(db_path) {
+        Ok(_) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => return Err(stat_error("canonical", db_path, error)),
+    };
+
+    match (canonical_present, legacy_kind) {
+        (false, LegacySibling::RealFile) => Ok(legacy_path),
+        (false, LegacySibling::Symlink) => {
+            validate_compat_symlink(&legacy_path)?;
+            Ok(db_path.to_path_buf())
+        }
+        (false, LegacySibling::Absent) | (true, LegacySibling::Absent) => Ok(db_path.to_path_buf()),
+        (true, LegacySibling::Symlink) => {
+            validate_compat_symlink(&legacy_path)?;
+            Ok(db_path.to_path_buf())
+        }
+        (true, LegacySibling::RealFile) => Err(both_real_files_error(db_path, &legacy_path)),
+    }
+}
 
 /// How the legacy `memory.db` sibling classifies on disk. The three cases are
 /// kept explicit (rather than collapsed to a bool) because each drives a
@@ -565,6 +601,44 @@ mod tests {
         assert!(is_memory_db_filename(LEGACY_MEMORY_DB_FILENAME));
         assert!(!is_memory_db_filename("other.db"));
         assert!(!is_memory_db_filename("tachi-memory.db.bak.20260101"));
+    }
+
+    #[test]
+    fn read_path_uses_legacy_only_without_mutating_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let canonical = dir.path().join(MEMORY_DB_FILENAME);
+        let legacy = dir.path().join(LEGACY_MEMORY_DB_FILENAME);
+        std::fs::write(&legacy, b"legacy data").expect("write legacy");
+
+        assert_eq!(
+            resolve_memory_db_read_path(&canonical).expect("resolve legacy-only read path"),
+            legacy
+        );
+        assert!(!canonical.exists());
+        assert_eq!(
+            std::fs::read(&legacy).expect("legacy unchanged"),
+            b"legacy data"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_path_accepts_only_the_exact_compat_link_and_rejects_two_real_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let canonical = dir.path().join(MEMORY_DB_FILENAME);
+        let legacy = dir.path().join(LEGACY_MEMORY_DB_FILENAME);
+        std::fs::write(&canonical, b"canonical data").expect("write canonical");
+        std::os::unix::fs::symlink(MEMORY_DB_FILENAME, &legacy).expect("compat link");
+        assert_eq!(
+            resolve_memory_db_read_path(&canonical).expect("resolve compat link"),
+            canonical
+        );
+
+        std::fs::remove_file(&legacy).expect("remove compat link");
+        std::fs::write(&legacy, b"other real data").expect("write real legacy");
+        let error =
+            resolve_memory_db_read_path(&canonical).expect_err("two real files must fail closed");
+        assert!(error.to_string().contains("both a canonical"), "{error}");
     }
 
     #[test]
