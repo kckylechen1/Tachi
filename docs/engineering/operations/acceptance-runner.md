@@ -41,26 +41,30 @@ Two structural layers, no racing:
 1. **Label scoping** — only the four in-scope jobs name the runner labels; no
    other workflow in the repository uses `self-hosted`/`tachi-acceptance`.
 2. **Job-level guard** — each of the four jobs carries a fail-closed
-   admission expression:
+   admission expression (bound to `github.triggering_actor`, the *current*
+   operator — on a re-run `github.actor` stays the original actor while
+   `triggering_actor` is whoever re-ran it, so a write-capable collaborator
+   cannot re-run an owner-triggered job onto this runner):
 
    ```yaml
    if: >-
      ((github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
-     github.actor == github.repository_owner) ||
+     github.triggering_actor == github.repository_owner) ||
      (github.event_name == 'pull_request' &&
      github.event.pull_request.head.repo.full_name == github.repository &&
      github.event.pull_request.user.login == github.repository_owner &&
-     github.actor == github.repository_owner)
+     github.triggering_actor == github.repository_owner)
    ```
 
-   Only the enumerated sources run: owner-actor `push`/`workflow_dispatch`,
-   and same-repo `pull_request` whose opener **and** current actor are the
-   repository owner (a collaborator pushing a new head to an owner-opened
-   branch skips the lane). Fork PRs, non-owner actors, and any event type
-   not listed (a future `pull_request_target`, `schedule`, or `merge_group`
-   trigger) evaluate to false and the job is **skipped before any runner
-   claim is made**. This does not depend on `close-external-prs.yml` winning
-   a race against the scheduler.
+   Only the enumerated sources run: owner-triggered `push`/
+   `workflow_dispatch`, and same-repo `pull_request` whose opener **and**
+   triggering actor are the repository owner (a collaborator pushing a new
+   head to an owner-opened branch skips the lane). Fork PRs, non-owner
+   operators, and any event type not listed (a future
+   `pull_request_target`, `schedule`, or `merge_group` trigger) evaluate to
+   false and the job is **skipped before any runner claim is made**. This
+   does not depend on `close-external-prs.yml` winning a race against the
+   scheduler.
 
 The repository is private, so true fork PRs cannot exist today; the guard is
 the standing boundary for any future visibility/collaborator change.

@@ -55,12 +55,16 @@ kill_prior_job_strays() {
     echo "runner-hygiene: WARNING: stray killer not found at ${killer}; process-residue termination skipped" >&2
     return 0
   fi
-  if SCAN_ROOT="${workspace}" bash "${killer}" kill; then
-    return 0
+  # Run the killer directly and capture its status through `|| rc=$?` -- a
+  # completed `if` statement would reset $? to 0 and convert failure into
+  # success (review R4).
+  local rc=0
+  SCAN_ROOT="${workspace}" bash "${killer}" kill || rc=$?
+  if [ "${rc}" -ne 0 ]; then
+    echo "::error::runner-hygiene: processes from a previous job still hold the workspace (killer exit ${rc}); refusing to build beside them (#1865 acceptance 7)." >&2
+    return "${rc}"
   fi
-  local rc=$?
-  echo "::error::runner-hygiene: processes from a previous job still hold the workspace (killer exit ${rc}); refusing to build beside them (#1865 acceptance 7)." >&2
-  return "${rc}"
+  return 0
 }
 
 clean_residue() {
@@ -98,12 +102,14 @@ clean_residue() {
 wipe_workspace() {
   # Remove the entire workspace contents (bash keeps an open fd on this
   # script, so unlinking it mid-run is safe). The next checkout rebuilds
-  # the tree; between jobs the runner holds no per-job disk at all.
+  # the tree; between jobs the runner holds no per-job disk at all. A
+  # partial wipe is a loud failure, never a silent green (review R4).
   echo "runner-hygiene: wiping workspace contents"
   if ! find "${workspace}" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +; then
-    echo "runner-hygiene: WARNING: workspace wipe failed partway; the next preflight re-cleans" >&2
-    return 0
+    echo "::error::runner-hygiene: workspace wipe failed partway; workspace residue may remain (#1865 disk hygiene)." >&2
+    return 7
   fi
+  return 0
 }
 
 case "${1:-}" in
