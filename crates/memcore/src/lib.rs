@@ -150,8 +150,8 @@ pub use db::exec_env::{
 };
 #[cfg(feature = "admin")]
 pub use db::exec_env_resources::{
-    active_binding_count, bind_resource, find_resource_by_path, get_resource, insert_resource,
-    list_bound_resource_paths, list_resources, quarantine_resource,
+    active_binding_count, bind_resource, exec_env_resource_removal_refusal, find_resource_by_path,
+    get_resource, insert_resource, list_bound_resource_paths, list_resources, quarantine_resource,
     quarantine_resources_atomically, reclaim_resource, record_resource_measurement,
     release_binding, release_quarantine, BindOutcome, ExecEnvResource, NewExecEnvResource,
     QuarantineOutcome, RegisterOutcome, ReleaseBindingOutcome, ReleaseQuarantineOutcome,

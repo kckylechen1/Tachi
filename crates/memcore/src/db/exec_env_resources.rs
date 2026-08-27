@@ -488,6 +488,68 @@ pub fn find_resource_by_path(
         .optional()?)
 }
 
+/// Return a fail-closed refusal when an ExecEnv's persisted resource ledger
+/// does not prove that its worktree may be removed. Destructive consumers
+/// must consult this in addition to holder evidence: a quarantined or
+/// partially reclaimed resource is evidence to preserve, even after the lease
+/// itself returns to `active`.
+pub fn exec_env_resource_removal_refusal(
+    conn: &Connection,
+    env_id: &str,
+    worktree_path: &str,
+) -> Result<Option<String>, MemoryError> {
+    let mut stmt = conn.prepare(
+        "SELECT b.resource_id, r.kind, r.path, r.state \
+         FROM exec_env_resource_bindings b \
+         LEFT JOIN exec_env_resources r ON r.resource_id = b.resource_id \
+         WHERE b.env_id = ?1 AND b.released_at IS NULL \
+         ORDER BY b.resource_id",
+    )?;
+    let rows = stmt.query_map(params![env_id], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, Option<String>>(1)?,
+            row.get::<_, Option<String>>(2)?,
+            row.get::<_, Option<String>>(3)?,
+        ))
+    })?;
+
+    let mut saw_binding = false;
+    let mut saw_matching_worktree = false;
+    for row in rows {
+        let (resource_id, kind_raw, path, state_raw) = row?;
+        saw_binding = true;
+        let (Some(kind_raw), Some(path), Some(state_raw)) = (kind_raw, path, state_raw) else {
+            return Ok(Some(format!(
+                "ExecEnv {env_id} has a live binding to missing resource {resource_id}"
+            )));
+        };
+        let kind = ResourceKind::parse(&kind_raw)?;
+        let state = ResourceState::parse(&state_raw)?;
+        if state != ResourceState::Active {
+            return Ok(Some(format!(
+                "ExecEnv {env_id} resource {resource_id} is {}; preserving its bytes",
+                state.as_str()
+            )));
+        }
+        if kind == ResourceKind::Worktree && path == worktree_path {
+            saw_matching_worktree = true;
+        }
+    }
+
+    if !saw_binding {
+        return Ok(Some(format!(
+            "ExecEnv {env_id} has no live resource bindings"
+        )));
+    }
+    if !saw_matching_worktree {
+        return Ok(Some(format!(
+            "ExecEnv {env_id} has no active worktree resource bound at {worktree_path}"
+        )));
+    }
+    Ok(None)
+}
+
 /// List resources, optionally filtered by state and/or kind. Newest first.
 pub fn list_resources(
     conn: &Connection,
@@ -1280,6 +1342,36 @@ mod tests {
             "only a resource with a LIVE binding counts; a released binding and a \
              never-bound-but-active resource must both be absent"
         );
+    }
+
+    #[test]
+    fn removal_refuses_quarantined_or_missing_worktree_evidence() {
+        let mut conn = open_conn();
+        seed_env(&conn, "env-removal");
+
+        assert!(
+            exec_env_resource_removal_refusal(&conn, "env-removal", "/wt/env-removal")
+                .unwrap()
+                .expect("missing binding must refuse removal")
+                .contains("no live resource bindings")
+        );
+
+        insert_resource(
+            &mut conn,
+            &new_resource("res-removal", ResourceKind::Worktree, "/wt/env-removal"),
+        )
+        .unwrap();
+        bind_resource(&mut conn, "env-removal", "res-removal").unwrap();
+        assert_eq!(
+            exec_env_resource_removal_refusal(&conn, "env-removal", "/wt/env-removal").unwrap(),
+            None
+        );
+
+        quarantine_resource(&mut conn, "res-removal", "postflight rejected").unwrap();
+        let refusal = exec_env_resource_removal_refusal(&conn, "env-removal", "/wt/env-removal")
+            .unwrap()
+            .expect("quarantine must refuse removal");
+        assert!(refusal.contains("is quarantined"), "{refusal}");
     }
 
     // Discriminating test ⑥ (review round 2, item 2) — a RECLAIMED path must be

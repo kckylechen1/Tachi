@@ -138,6 +138,13 @@ fn probe_worktree_holder_at_db(db_path: &Path, worktree: &Path) -> DbHolderEvide
     if lease.state == memcore::ExecEnvState::Dispatching {
         return DbHolderEvidence::Held;
     }
+    match memcore::exec_env_resource_removal_refusal(store.connection(), &lease.env_id, path) {
+        Ok(None) => {}
+        Ok(Some(detail)) => return DbHolderEvidence::Unverifiable(detail),
+        Err(err) => {
+            return DbHolderEvidence::Unavailable(format!("read ExecEnv resource evidence: {err}"))
+        }
+    }
     match memcore::holder_evidence(store.connection(), &lease.env_id) {
         Ok(memcore::HolderEvidence::Clear) => DbHolderEvidence::Clear,
         Ok(memcore::HolderEvidence::NotApplicable) => DbHolderEvidence::NotApplicable,
@@ -191,7 +198,7 @@ mod tests {
         memcore::MemoryStore::open(db.to_str().unwrap()).unwrap()
     }
 
-    fn insert_env(store: &memcore::MemoryStore, path: &Path) {
+    fn insert_env(store: &mut memcore::MemoryStore, path: &Path) {
         let canonical_path = std::fs::canonicalize(path).unwrap();
         memcore::insert_exec_env(
             store.connection(),
@@ -208,6 +215,18 @@ mod tests {
             },
         )
         .unwrap();
+        memcore::insert_resource(
+            store.connection_mut(),
+            &memcore::NewExecEnvResource {
+                resource_id: "res-1".to_string(),
+                kind: memcore::ResourceKind::Worktree,
+                path: canonical_path.display().to_string(),
+                bytes: None,
+                created_at: "2026-07-18T00:00:00Z".to_string(),
+            },
+        )
+        .unwrap();
+        memcore::bind_resource(store.connection_mut(), "env-1", "res-1").unwrap();
     }
 
     fn bind_claim(store: &memcore::MemoryStore, state: &str) {
@@ -241,8 +260,8 @@ mod tests {
         );
 
         let clear_home = root.join("clear");
-        let clear_store = store(&clear_home);
-        insert_env(&clear_store, &worktree);
+        let mut clear_store = store(&clear_home);
+        insert_env(&mut clear_store, &worktree);
         bind_claim(&clear_store, "released");
         assert_eq!(
             probe_worktree_holder_from_home(&clear_home, &worktree),
@@ -250,8 +269,8 @@ mod tests {
         );
 
         let held_home = root.join("held");
-        let held_store = store(&held_home);
-        insert_env(&held_store, &worktree);
+        let mut held_store = store(&held_home);
+        insert_env(&mut held_store, &worktree);
         bind_claim(&held_store, "active");
         assert_eq!(
             probe_worktree_holder_from_home(&held_home, &worktree),
@@ -259,8 +278,8 @@ mod tests {
         );
 
         let dispatching_home = root.join("dispatching");
-        let dispatching_store = store(&dispatching_home);
-        insert_env(&dispatching_store, &worktree);
+        let mut dispatching_store = store(&dispatching_home);
+        insert_env(&mut dispatching_store, &worktree);
         dispatching_store
             .connection()
             .execute(
@@ -274,9 +293,23 @@ mod tests {
             "a dispatching lease must block destructive cleanup even before holder evidence exists"
         );
 
+        let quarantined_home = root.join("quarantined");
+        let mut quarantined_store = store(&quarantined_home);
+        insert_env(&mut quarantined_store, &worktree);
+        memcore::quarantine_resource(
+            quarantined_store.connection_mut(),
+            "res-1",
+            "postflight rejected",
+        )
+        .unwrap();
+        assert!(matches!(
+            probe_worktree_holder_from_home(&quarantined_home, &worktree),
+            DbHolderEvidence::Unverifiable(detail) if detail.contains("is quarantined")
+        ));
+
         let unverifiable_home = root.join("unverifiable");
-        let unverifiable_store = store(&unverifiable_home);
-        insert_env(&unverifiable_store, &worktree);
+        let mut unverifiable_store = store(&unverifiable_home);
+        insert_env(&mut unverifiable_store, &worktree);
         unverifiable_store.connection().execute(
             "UPDATE exec_envs SET agent_identity_id='agent-1', claim_id='missing' WHERE env_id='env-1'",
             [],
@@ -290,8 +323,8 @@ mod tests {
         );
 
         let contradictory_home = root.join("contradictory");
-        let contradictory_store = store(&contradictory_home);
-        insert_env(&contradictory_store, &worktree);
+        let mut contradictory_store = store(&contradictory_home);
+        insert_env(&mut contradictory_store, &worktree);
         bind_claim(&contradictory_store, "released");
         contradictory_store
             .connection()
@@ -338,8 +371,8 @@ mod tests {
         std::os::unix::fs::symlink(&worktree, &alias).unwrap();
 
         let home = root.join("held");
-        let store = store(&home);
-        insert_env(&store, &worktree);
+        let mut store = store(&home);
+        insert_env(&mut store, &worktree);
         bind_claim(&store, "active");
 
         assert_eq!(
