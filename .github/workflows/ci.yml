@@ -19,11 +19,26 @@ concurrency:
 jobs:
   build-seat-setup:
     name: Build seat setup policy
-    runs-on: ubuntu-24.04
+    # Trusted acceptance lane (#1865): claims the self-hosted
+    # tachi-acceptance runner only. Fork guard is structural: a
+    # pull_request event whose head repo is not this repository, or whose
+    # author is not the repository owner, skips the job before any runner
+    # claim is made -- it never depends on close-external-prs winning a
+    # race against the scheduler.
+    if: >-
+      github.event_name != 'pull_request' ||
+      (github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.user.login == github.repository_owner)
+    runs-on: [self-hosted, tachi-acceptance]
     timeout-minutes: 5
 
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Runner disk preflight (light lane)
+        # #1865: clear-failure disk gate + prior-job residue cleanup.
+        shell: bash
+        run: bash .github/scripts/runner_hygiene.sh preflight 10
 
       - name: Validate setup and CI supply-chain policy
         run: |
@@ -258,13 +273,31 @@ jobs:
              exit 1
            fi
 
+      - name: Runner workspace cleanup
+        # #1865: no checkout residue survives a failed or cancelled job.
+        if: always()
+        shell: bash
+        run: bash .github/scripts/runner_hygiene.sh cleanup
+
   rust:
     name: Rust workspace
-    runs-on: ubuntu-24.04
+    # Trusted acceptance lane (#1865): fork guard identical to
+    # build-seat-setup -- see there for the rationale.
+    if: >-
+      github.event_name != 'pull_request' ||
+      (github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.user.login == github.repository_owner)
+    runs-on: [self-hosted, tachi-acceptance]
     timeout-minutes: 30
 
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Runner disk preflight (heavy lane)
+        # #1865 frozen watermark: heavy Rust work refuses below 60 GiB free,
+        # loudly, before any toolchain or build work starts.
+        shell: bash
+        run: bash .github/scripts/runner_hygiene.sh preflight 60
 
       - name: Setup Rust
         uses: ./.github/actions/setup-rust
@@ -321,6 +354,14 @@ jobs:
       - name: Run doc tests
         run: cargo test --workspace --locked --doc
 
+      - name: Runner workspace cleanup
+        # #1865: per-job-ephemeral target storage. Runs after the JUnit
+        # artifact upload above so the report survives; if: always() so a
+        # failed or cancelled build still frees the workspace.
+        if: always()
+        shell: bash
+        run: bash .github/scripts/runner_hygiene.sh cleanup
+
   physical-db-identity-windows:
     name: Physical DB identity fallback (Windows)
     runs-on: windows-latest
@@ -340,7 +381,13 @@ jobs:
 
   node:
     name: Node packages
-    runs-on: ubuntu-24.04
+    # Trusted acceptance lane (#1865): fork guard identical to
+    # build-seat-setup -- see there for the rationale.
+    if: >-
+      github.event_name != 'pull_request' ||
+      (github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.user.login == github.repository_owner)
+    runs-on: [self-hosted, tachi-acceptance]
     timeout-minutes: 20
 
     strategy:
@@ -352,6 +399,11 @@ jobs:
 
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Runner disk preflight (light lane)
+        # #1865: clear-failure disk gate + prior-job residue cleanup.
+        shell: bash
+        run: bash .github/scripts/runner_hygiene.sh preflight 10
 
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
@@ -376,15 +428,32 @@ jobs:
         working-directory: ${{ matrix.package }}
         run: npm audit --audit-level=high
 
+      - name: Runner workspace cleanup
+        # #1865: no checkout residue survives a failed or cancelled job.
+        if: always()
+        shell: bash
+        run: bash .github/scripts/runner_hygiene.sh cleanup
+
   gitleaks:
     name: Secret scan (gitleaks)
-    runs-on: ubuntu-24.04
+    # Trusted acceptance lane (#1865): fork guard identical to
+    # build-seat-setup -- see there for the rationale.
+    if: >-
+      github.event_name != 'pull_request' ||
+      (github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.user.login == github.repository_owner)
+    runs-on: [self-hosted, tachi-acceptance]
     timeout-minutes: 10
 
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           fetch-depth: 0
+
+      - name: Runner disk preflight (light lane)
+        # #1865: clear-failure disk gate + prior-job residue cleanup.
+        shell: bash
+        run: bash .github/scripts/runner_hygiene.sh preflight 10
 
       - name: Run gitleaks
         # This CI-side gate is #1578's structural fix: it is a plain, always-
@@ -406,3 +475,10 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITLEAKS_ENABLE_COMMENTS: "false"
+
+      - name: Runner workspace cleanup
+        # #1865: the fetch-depth: 0 checkout is multi-GB; do not leave it
+        # squatting on the runner between jobs.
+        if: always()
+        shell: bash
+        run: bash .github/scripts/runner_hygiene.sh cleanup
