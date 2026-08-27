@@ -515,6 +515,61 @@ fn require_private_cargo_target_provision(
     }
 }
 
+fn reject_unproven_cargo_configs(cargo_dir: &Path, requested_target: &Path) -> Result<(), String> {
+    for name in ["config", "config.toml"] {
+        let config = cargo_dir.join(name);
+        match std::fs::symlink_metadata(&config) {
+            Ok(metadata) => {
+                let kind = if metadata.file_type().is_symlink() {
+                    "symlink"
+                } else {
+                    "existing file"
+                };
+                return Err(format!(
+                    "refusing build-private publication: {} is an unproven {kind}; Cargo may use \
+                     it instead of the approved target '{}', and existing config is never overwritten",
+                    config.display(),
+                    requested_target.display()
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(format!(
+                    "refusing build-private publication: cannot inspect {}: {error}",
+                    config.display()
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn reject_private_target_symlink_components(target: &Path) -> Result<(), String> {
+    let mut current = PathBuf::new();
+    for component in target.components() {
+        current.push(component.as_os_str());
+        match std::fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(format!(
+                    "refusing build-private publication: private target '{}' traverses symlink \
+                     component '{}', so the persisted resource path would not establish physical identity",
+                    target.display(),
+                    current.display()
+                ));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+            Err(error) => {
+                return Err(format!(
+                    "refusing build-private publication: cannot establish target identity at '{}': {error}",
+                    current.display()
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Single provisioning entrypoint (#894 S1, class-aware since S2c): open a
 /// managed worktree via the `tachi_clean` primitive, record a daemon-owned
 /// lease, then register + bind the physical resources the class allocates. This
@@ -561,6 +616,7 @@ pub(crate) fn provision_managed_env(
         let requested_target = opts
             .build_target_dir(&report.path)?
             .expect("BuildPrivate always resolves a target dir");
+        reject_private_target_symlink_components(&requested_target)?;
         let cargo_dir = worktree.join(".cargo");
         if let Ok(metadata) = std::fs::symlink_metadata(&cargo_dir) {
             if metadata.file_type().is_symlink() {
@@ -571,16 +627,7 @@ pub(crate) fn provision_managed_env(
                 ));
             }
         }
-        let cargo_config = cargo_dir.join("config.toml");
-        if let Ok(metadata) = std::fs::symlink_metadata(&cargo_config) {
-            if metadata.file_type().is_symlink() {
-                return Err(format!(
-                    "refusing build-private publication: {} is a symlink and cannot prove the \
-                     approved target path",
-                    cargo_config.display()
-                ));
-            }
-        }
+        reject_unproven_cargo_configs(&cargo_dir, &requested_target)?;
         let outcome = tachi_clean::wt_open::provision_cargo_target_config(
             worktree,
             &CargoTargetPolicy::Private(requested_target.clone()),
@@ -1736,6 +1783,39 @@ mod tests {
 
         assert!(error.contains("already exists"));
         assert!(error.contains("was not proven to target the approved path"));
+    }
+
+    #[test]
+    fn build_private_legacy_extensionless_cargo_config_is_rejected() {
+        let root = tempfile::tempdir().unwrap();
+        let cargo_dir = root.path().join(".cargo");
+        std::fs::create_dir_all(&cargo_dir).unwrap();
+        std::fs::write(
+            cargo_dir.join("config"),
+            "[build]\ntarget-dir = \"/other/target\"\n",
+        )
+        .unwrap();
+
+        let error =
+            reject_unproven_cargo_configs(&cargo_dir, Path::new("/approved/target")).unwrap_err();
+        assert!(error.contains(".cargo/config"), "{error}");
+        assert!(error.contains("Cargo may use it instead"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn build_private_target_symlink_component_is_rejected() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let physical = root.path().join("physical");
+        std::fs::create_dir_all(&physical).unwrap();
+        let alias = root.path().join("alias");
+        symlink(&physical, &alias).unwrap();
+
+        let error = reject_private_target_symlink_components(&alias.join("target")).unwrap_err();
+        assert!(error.contains("traverses symlink component"), "{error}");
+        assert!(error.contains(&alias.display().to_string()), "{error}");
     }
 
     #[test]
