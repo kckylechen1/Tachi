@@ -92,16 +92,28 @@ pub fn is_lane_config_secret_name(name: &str) -> bool {
 /// Lane URLs, models, and flags are not credentials. Storing them as
 /// `api_key` made `tachi vault list` indistinguishable from real keys and
 /// let `EXTRACT_BASE_URL` sit in the same injection class as
-/// `DEEPSEEK_API_KEY`.
+/// `DEEPSEEK_API_KEY`. `ENABLE_*` wins over a trailing `_API_KEY` so a name
+/// like `ENABLE_FALLBACK_API_KEY` infers config instead of being inferred as
+/// a key and then refused.
 pub fn infer_vault_secret_type(name: &str) -> &'static str {
     let name = name.trim();
-    if name.ends_with("_API_KEY") || name.ends_with("_TOKEN") || name.ends_with("_SECRET") {
-        return SECRET_TYPE_API_KEY;
-    }
     if is_lane_config_secret_name(name) {
         return SECRET_TYPE_CONFIG;
     }
+    if name.ends_with("_API_KEY") || name.ends_with("_TOKEN") || name.ends_with("_SECRET") {
+        return SECRET_TYPE_API_KEY;
+    }
     SECRET_TYPE_API_KEY
+}
+
+/// Lane-config names whose values are endpoints. Rotation members such as
+/// `EXTRACT_BASE_URL_1` follow the prefix stem, not the `_1` suffix.
+pub fn is_lane_config_url_name(name: &str) -> bool {
+    if !is_lane_config_secret_name(name) {
+        return false;
+    }
+    let stem = lane_config_stem(name);
+    stem.ends_with("_URL") || stem.ends_with("_BASE_URL")
 }
 
 /// Read-time classifier: existing `other` rows whose names are lane config
@@ -347,6 +359,14 @@ mod tests {
         );
         assert!(is_lane_config_secret_name("EXTRACT_BASE_URL_1"));
         assert!(!is_lane_config_secret_name("DEEPSEEK_API_KEY_1"));
+        assert_eq!(
+            infer_vault_secret_type("ENABLE_FALLBACK_API_KEY"),
+            SECRET_TYPE_CONFIG
+        );
+        assert!(is_lane_config_url_name("EXTRACT_BASE_URL"));
+        assert!(is_lane_config_url_name("EXTRACT_BASE_URL_1"));
+        assert!(!is_lane_config_url_name("DISTILL_MODEL"));
+        assert!(!is_lane_config_url_name("DEEPSEEK_API_KEY"));
         assert!(reject_api_key_type_for_lane_config("EXTRACT_BASE_URL", "api_key").is_err());
         assert!(reject_api_key_type_for_lane_config("DEEPSEEK_API_KEY", "api_key").is_ok());
         assert_eq!(

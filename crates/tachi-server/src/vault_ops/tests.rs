@@ -1,7 +1,10 @@
 use super::handlers::{
-    handle_vault_init, handle_vault_list, handle_vault_lock, handle_vault_set, handle_vault_unlock,
+    handle_vault_init, handle_vault_list, handle_vault_lock, handle_vault_set,
+    handle_vault_set_api_key_pool, handle_vault_unlock,
 };
-use super::params::{VaultInitParams, VaultListParams, VaultSetParams, VaultUnlockParams};
+use super::params::{
+    VaultInitParams, VaultListParams, VaultSetApiKeyPoolParams, VaultSetParams, VaultUnlockParams,
+};
 use super::session::{read_unlock_password_fifo, with_vault_key};
 use crate::server_state::MemoryServer;
 use crate::test_support::EnvRestore;
@@ -1294,4 +1297,114 @@ async fn vault_set_infers_config_for_lane_urls_and_refuses_api_key() {
         "config rows must not enter API-key pools: {pool_names:?}"
     );
     assert!(pools.contains_key("DEEPSEEK_API_KEY"), "{pool_names:?}");
+
+    handle_vault_set(
+        &server,
+        VaultSetParams {
+            name: "SUMMARY_MODEL".to_string(),
+            value: "legacy-other".to_string(),
+            agent_id: None,
+            secret_type: "other".to_string(),
+            description: "leftover other".to_string(),
+            allowed_agents: None,
+            enable_rotation: false,
+            rotation_strategy: None,
+        },
+    )
+    .await
+    .expect("legacy other write");
+    let config_only = handle_vault_list(
+        &server,
+        VaultListParams {
+            secret_type: Some("config".to_string()),
+        },
+    )
+    .await
+    .expect("filter config");
+    let config_body: serde_json::Value = serde_json::from_str(&config_only).expect("json");
+    let config_names: Vec<&str> = config_body["config"]
+        .as_array()
+        .expect("config")
+        .iter()
+        .filter_map(|row| row["name"].as_str())
+        .collect();
+    assert!(
+        config_names.contains(&"SUMMARY_MODEL"),
+        "legacy other lane-config names must list as config: {config_body}"
+    );
+
+    let enable = handle_vault_set(
+        &server,
+        VaultSetParams {
+            name: "ENABLE_FALLBACK_API_KEY".to_string(),
+            value: "1".to_string(),
+            agent_id: None,
+            secret_type: String::new(),
+            description: "flag that also looks like a key".to_string(),
+            allowed_agents: None,
+            enable_rotation: false,
+            rotation_strategy: None,
+        },
+    )
+    .await
+    .expect("ENABLE_* infers config even with _API_KEY suffix");
+    assert!(enable.contains("config"), "{enable}");
+
+    let leak_member = handle_vault_set(
+        &server,
+        VaultSetParams {
+            name: "EXTRACT_BASE_URL_1".to_string(),
+            value: "https://user:pass@api.deepseek.com/chat/completions".to_string(),
+            agent_id: None,
+            secret_type: String::new(),
+            description: "rotated url".to_string(),
+            allowed_agents: None,
+            enable_rotation: false,
+            rotation_strategy: None,
+        },
+    )
+    .await
+    .expect_err("rotation member URL must still run the leak gate");
+    assert!(
+        leak_member.contains("userinfo") || leak_member.contains("credential"),
+        "{leak_member}"
+    );
+
+    let rotation = handle_vault_set(
+        &server,
+        VaultSetParams {
+            name: "EXTRACT_BASE_URL_1".to_string(),
+            value: "https://api.deepseek.com/chat/completions".to_string(),
+            agent_id: None,
+            secret_type: String::new(),
+            description: "no rotation".to_string(),
+            allowed_agents: None,
+            enable_rotation: true,
+            rotation_strategy: Some("round_robin".to_string()),
+        },
+    )
+    .await
+    .expect_err("config members must not attach API-key rotation");
+    assert!(
+        rotation.contains("lane config") && rotation.contains("rotation"),
+        "{rotation}"
+    );
+
+    let pool = handle_vault_set_api_key_pool(
+        &server,
+        VaultSetApiKeyPoolParams {
+            prefix: "EXTRACT_BASE_URL".to_string(),
+            values: vec!["https://api.deepseek.com/chat/completions".to_string()],
+            agent_id: None,
+            strategy: "round_robin".to_string(),
+            description: String::new(),
+            allowed_agents: None,
+        },
+    )
+    .await
+    .expect_err("API-key pool writer must refuse config prefixes");
+    assert!(
+        pool.contains("lane config") && pool.contains("api_key"),
+        "{pool}"
+    );
 }

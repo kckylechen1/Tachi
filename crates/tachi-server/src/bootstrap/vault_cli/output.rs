@@ -1,36 +1,109 @@
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct VaultListRow {
+    pub name: String,
+    pub secret_type: String,
+    pub description: String,
+}
+
+fn json_list_row(entry: &serde_json::Value) -> VaultListRow {
+    VaultListRow {
+        name: entry
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        secret_type: entry
+            .get("secret_type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        description: entry
+            .get("description")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+    }
+}
+
+fn json_rows(value: &serde_json::Value, key: &str) -> Option<Vec<VaultListRow>> {
+    value
+        .get(key)
+        .and_then(|v| v.as_array())
+        .map(|rows| rows.iter().map(json_list_row).collect())
+}
+
+pub(super) fn format_vault_list_groups(
+    config: &[VaultListRow],
+    credentials: &[VaultListRow],
+) -> String {
+    if config.is_empty() && credentials.is_empty() {
+        return "(no secrets stored)\n".to_string();
+    }
+    let mut out = String::new();
+    let mut write_section = |title: &str, rows: &[VaultListRow]| {
+        if rows.is_empty() {
+            return;
+        }
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(title);
+        out.push('\n');
+        out.push_str(&format!("{:<30} {:<12} DESCRIPTION\n", "NAME", "TYPE"));
+        for row in rows {
+            out.push_str(&format!(
+                "{:<30} {:<12} {}\n",
+                row.name, row.secret_type, row.description
+            ));
+        }
+    };
+    write_section("CONFIG", config);
+    write_section("CREDENTIALS", credentials);
+    out.push_str(&format!(
+        "\n{} config, {} credential ({} total).\n",
+        config.len(),
+        credentials.len(),
+        config.len() + credentials.len()
+    ));
+    out
+}
+
 pub(super) fn print_vault_list_output(out: &str) -> Result<(), Box<dyn std::error::Error>> {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(out) else {
         println!("{out}");
         return Ok(());
     };
+    let config = json_rows(&value, "config");
+    let credentials = json_rows(&value, "credentials");
+    if let (Some(config), Some(credentials)) = (config, credentials) {
+        print!("{}", format_vault_list_groups(&config, &credentials));
+        return Ok(());
+    }
     let Some(secrets) = value.get("secrets").and_then(|v| v.as_array()) else {
         println!("{out}");
         return Ok(());
     };
-
-    if secrets.is_empty() {
-        println!("(no secrets stored)");
-        return Ok(());
-    }
-
-    println!("{:<30} {:<12} DESCRIPTION", "NAME", "TYPE");
+    let mut config = Vec::new();
+    let mut credentials = Vec::new();
     for entry in secrets {
-        let name = entry.get("name").and_then(|v| v.as_str()).unwrap_or("");
-        let secret_type = entry
-            .get("secret_type")
+        let row = json_list_row(entry);
+        let group = entry
+            .get("group")
             .and_then(|v| v.as_str())
-            .unwrap_or("");
-        let description = entry
-            .get("description")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        println!("{name:<30} {secret_type:<12} {description}");
+            .unwrap_or_else(|| {
+                if row.secret_type == memcore::SECRET_TYPE_CONFIG {
+                    "config"
+                } else {
+                    "credential"
+                }
+            });
+        if group == "config" {
+            config.push(row);
+        } else {
+            credentials.push(row);
+        }
     }
-    let count = value
-        .get("count")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(secrets.len() as u64);
-    println!("\n{count} secret(s) total.");
+    print!("{}", format_vault_list_groups(&config, &credentials));
     Ok(())
 }
 
@@ -261,4 +334,55 @@ pub(super) fn build_key_health_result(
         chrono::Utc::now(),
     )
     .health)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(name: &str, secret_type: &str, description: &str) -> VaultListRow {
+        VaultListRow {
+            name: name.to_string(),
+            secret_type: secret_type.to_string(),
+            description: description.to_string(),
+        }
+    }
+
+    #[test]
+    fn format_vault_list_groups_separates_config_from_credentials() {
+        let text = format_vault_list_groups(
+            &[row("EXTRACT_BASE_URL", "config", "lane url")],
+            &[row("DEEPSEEK_API_KEY", "api_key", "key")],
+        );
+        assert!(text.contains("CONFIG"), "{text}");
+        assert!(text.contains("CREDENTIALS"), "{text}");
+        assert!(text.contains("EXTRACT_BASE_URL"), "{text}");
+        assert!(text.contains("DEEPSEEK_API_KEY"), "{text}");
+        assert!(text.contains("1 config, 1 credential (2 total)."), "{text}");
+    }
+
+    #[test]
+    fn print_vault_list_output_uses_grouped_json_arrays() {
+        let json = serde_json::json!({
+            "count": 2,
+            "config": [{
+                "name": "EXTRACT_BASE_URL",
+                "secret_type": "config",
+                "group": "config",
+                "description": "lane"
+            }],
+            "credentials": [{
+                "name": "DEEPSEEK_API_KEY",
+                "secret_type": "api_key",
+                "group": "credential",
+                "description": "key"
+            }],
+            "secrets": []
+        });
+        let config = json_rows(&json, "config").expect("config");
+        let credentials = json_rows(&json, "credentials").expect("credentials");
+        let text = format_vault_list_groups(&config, &credentials);
+        assert!(text.starts_with("CONFIG\n"), "{text}");
+        assert!(!text.contains("(no secrets stored)"), "{text}");
+    }
 }

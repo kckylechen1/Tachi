@@ -148,6 +148,10 @@ fn scan_keychain_api_key_entries(
         }
     }
     for entry in entries {
+        if memcore::is_lane_config_secret_name(&entry.name) {
+            record_keychain_listed_drop(&mut dropped, &entry.name, AliasSkipClass::ListedWrongType);
+            continue;
+        }
         if entry.secret_type != SECRET_TYPE_API_KEY {
             record_keychain_listed_drop(&mut dropped, &entry.name, AliasSkipClass::ListedWrongType);
             continue;

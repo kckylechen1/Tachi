@@ -94,9 +94,7 @@ async fn run_secret_action_with_reader(
             if secret_value.trim().is_empty() {
                 return Err("Secret value cannot be empty".into());
             }
-            if memcore::is_lane_config_secret_name(&name)
-                && (name.ends_with("_URL") || name.ends_with("_BASE_URL"))
-            {
+            if memcore::is_lane_config_url_name(&name) {
                 if let Some(leak) =
                     memcore::catalog::endpoint::endpoint_credential_leak(&secret_value)
                 {
@@ -244,6 +242,7 @@ async fn run_secret_action_with_reader(
                 return Err("Use --values-stdin and provide one API key per line.".into());
             }
             crate::vault_crypto::validate_secret_name(&prefix)?;
+            memcore::reject_api_key_type_for_lane_config(&prefix, memcore::SECRET_TYPE_API_KEY)?;
             if !crate::utils::is_shell_env_name(&prefix) {
                 return Err(format!(
                     "API key pool prefix '{prefix}' must be a shell env name such as OPENAI_API_KEY"

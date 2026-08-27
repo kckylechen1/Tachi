@@ -21,9 +21,13 @@ pub(crate) async fn handle_vault_set(
             };
             validate_lane_slot_secret_type(&params.name, secret_type)?;
             memcore::reject_api_key_type_for_lane_config(&params.name, secret_type)?;
-            if memcore::is_lane_config_secret_name(&params.name)
-                && (params.name.ends_with("_URL") || params.name.ends_with("_BASE_URL"))
-            {
+            if params.enable_rotation && memcore::is_lane_config_secret_name(&params.name) {
+                return Err(format!(
+                    "Vault name '{}' is lane config; refusing to attach API-key rotation",
+                    params.name
+                ));
+            }
+            if memcore::is_lane_config_url_name(&params.name) {
                 if let Some(leak) =
                     memcore::catalog::endpoint::endpoint_credential_leak(&params.value)
                 {
