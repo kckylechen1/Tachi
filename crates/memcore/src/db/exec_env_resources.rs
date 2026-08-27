@@ -690,11 +690,17 @@ pub fn quarantine_resources_atomically(
     let mut quarantined = Vec::new();
     for resource_id in resource_ids {
         let Some(state) = state_in_tx(&tx, resource_id)? else {
-            continue;
+            return Err(MemoryError::NotFound(format!(
+                "exec env resource {resource_id}"
+            )));
         };
         match state {
             ResourceState::Quarantined => quarantined.push(resource_id.clone()),
-            ResourceState::Reclaimed => {}
+            ResourceState::Reclaimed => {
+                return Err(MemoryError::InvalidArg(format!(
+                "exec env resource {resource_id} is already reclaimed; refusing false quarantine"
+            )))
+            }
             ResourceState::Active | ResourceState::Reclaiming | ResourceState::ReclaimFailed => {
                 let now = normalize_utc_iso_or_now("");
                 let changed = tx.execute(
@@ -2028,6 +2034,29 @@ mod tests {
         assert_eq!(
             quarantine_resource(&mut conn, "ghost", "nope").unwrap(),
             QuarantineOutcome::NotFound
+        );
+    }
+
+    #[test]
+    fn atomic_quarantine_rolls_back_when_any_named_resource_is_missing() {
+        let mut conn = open_conn();
+        insert_resource(
+            &mut conn,
+            &new_resource("res-present", ResourceKind::Worktree, "/wt/present"),
+        )
+        .unwrap();
+
+        let error = quarantine_resources_atomically(
+            &mut conn,
+            &["res-present".to_string(), "res-missing".to_string()],
+            "postflight rejected",
+        )
+        .expect_err("one missing resource must roll back the whole fence");
+        assert!(error.to_string().contains("res-missing"), "{error}");
+        assert_eq!(
+            get_resource(&conn, "res-present").unwrap().unwrap().state,
+            ResourceState::Active,
+            "the present resource must not be partly fenced"
         );
     }
 

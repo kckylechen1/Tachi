@@ -1492,17 +1492,6 @@ mod issue_1825_non_unix_tests {
     }
 }
 
-#[cfg(test)]
-pub(super) async fn run_opencode_sop_subprocess(
-    cmd: Command,
-    timeout: Duration,
-    sop_label: &str,
-) -> Result<DispatchResult, String> {
-    run_opencode_sop_subprocess_with_liveness(cmd, timeout, sop_label)
-        .await
-        .result
-}
-
 pub(super) async fn run_opencode_sop_subprocess_with_liveness(
     mut cmd: Command,
     timeout: Duration,
@@ -1532,7 +1521,10 @@ async fn run_agent_subprocess_inner(
     // The runner-owned guard terminates and synchronously reaps on unwind. It
     // keeps the leader unreaped until all group signalling is complete, so no
     // signal can target a recycled numeric PID/PGID.
+    #[cfg(unix)]
     cmd.kill_on_drop(false);
+    #[cfg(not(unix))]
+    cmd.kill_on_drop(true);
     configure_process_group(cmd);
 
     let mut child = match cmd.spawn() {
@@ -1590,13 +1582,10 @@ async fn run_agent_subprocess_inner(
             ),
         ),
         Err(_) => {
-            let _ = child.kill().await;
-            let _ = child.wait().await;
+            let liveness = terminate_reap_uncontained_child(&mut child).await;
             return DispatchRunOutcome::failure(
                 format!("Agent process timed out after {}s", timeout.as_secs()),
-                crate::exec_env_postflight::RunnerLivenessEvidence::indeterminate(
-                    "process-group terminal proof is unavailable on this platform",
-                ),
+                liveness,
             );
         }
     };
@@ -1683,6 +1672,27 @@ pub(crate) fn configure_process_group(cmd: &mut Command) {
 
 #[cfg(not(unix))]
 pub(crate) fn configure_process_group(_cmd: &mut Command) {}
+
+#[cfg(not(unix))]
+pub(crate) async fn terminate_reap_uncontained_child(
+    child: &mut tokio::process::Child,
+) -> crate::exec_env_postflight::RunnerLivenessEvidence {
+    let kill = child.kill().await;
+    let reap = child.wait().await;
+    let detail = match (kill, reap) {
+        (_, Ok(_)) => {
+            "root child was killed and reaped; descendant containment is unavailable on this platform"
+                .to_string()
+        }
+        (Err(kill), Err(reap)) => format!(
+            "root child kill failed: {kill}; root child reap failed: {reap}; descendant containment is unavailable on this platform"
+        ),
+        (Ok(()), Err(reap)) => format!(
+            "root child was killed but reap failed: {reap}; descendant containment is unavailable on this platform"
+        ),
+    };
+    crate::exec_env_postflight::RunnerLivenessEvidence::indeterminate(detail)
+}
 
 #[cfg(unix)]
 #[derive(Clone, Copy)]

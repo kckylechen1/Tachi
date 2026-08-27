@@ -1241,7 +1241,7 @@ async fn launch_canonical_dispatch(
         effective_contract.workspace_authority,
         mechanics.declared_file_scope.as_deref(),
     );
-    let postflight_gate = match postflight_applicability {
+    let (postflight_gate, postflight_dispatch_lease) = match postflight_applicability {
         crate::exec_env_postflight::PostflightApplicability::Required(contract) => {
             let lease_path = match required_postflight_workspace(&env_resolution) {
                 Ok(path) => path,
@@ -1266,10 +1266,35 @@ async fn launch_canonical_dispatch(
                 }
             };
             let env_id_str = execution_grant.env_id.as_deref().unwrap_or("");
+            let mut dispatch_lease = match crate::exec_env_ops::ExecEnvDispatchLeaseGuard::acquire(
+                server, env_id_str,
+            ) {
+                Ok(lease) => lease,
+                Err(error) => {
+                    let _ = server.with_global_store(|store| {
+                        cleanup_ephemeral_credential_materializations(store, &workspace_dir, false)
+                    });
+                    release_flow_dispatch_slot(flow_dispatch_slot);
+                    if let Some(guard) = managed_run_guard {
+                        drop(guard);
+                    }
+                    close_kanban_row_on_early_exit(
+                        server,
+                        &dispatch_id,
+                        "postflight lease admission",
+                        request.project.as_deref(),
+                    )
+                    .await;
+                    return Err(format!(
+                            "handle_tachi_dispatch: postflight lease admission failed: {error}; zero worker process was spawned"
+                        ));
+                }
+            };
             let gate =
                 crate::exec_env_postflight::PostflightGate::new(env_id_str, lease_path, contract)
                     .with_build_artifacts_unhashed();
             if let Err(error) = gate.capture_preimage() {
+                let release_error = dispatch_lease.release_without_spawn().err();
                 let _ = server.with_global_store(|store| {
                     cleanup_ephemeral_credential_materializations(store, &workspace_dir, false)
                 });
@@ -1285,12 +1310,15 @@ async fn launch_canonical_dispatch(
                 )
                 .await;
                 return Err(format!(
-                    "handle_tachi_dispatch: postflight preimage capture failed: {error}; zero worker process was spawned"
+                    "handle_tachi_dispatch: postflight preimage capture failed: {error}; zero worker process was spawned{}",
+                    release_error
+                        .map(|release| format!("; lease release failed closed: {release}"))
+                        .unwrap_or_default()
                 ));
             }
-            Some(gate)
+            (Some(gate), Some(dispatch_lease))
         }
-        crate::exec_env_postflight::PostflightApplicability::NotApplicable => None,
+        crate::exec_env_postflight::PostflightApplicability::NotApplicable => (None, None),
     };
 
     // 8. Spawn background task with Watchdog
@@ -1320,6 +1348,7 @@ async fn launch_canonical_dispatch(
         managed_run_guard,
         managed_ephemeral_credential_cleanup,
         postflight_gate,
+        postflight_dispatch_lease,
     });
 
     // 9. Immediately return — main agent is unblocked!

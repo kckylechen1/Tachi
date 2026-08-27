@@ -8,10 +8,14 @@
 //! ## State machine (S1)
 //!
 //! ```text
-//!   active ──reclaim──▶ reclaimed
-//!     ▲                     │
-//!     └── (no transition) ◀─┘   reclaiming an already-reclaimed lease is an
-//!                               idempotent no-op, never an error.
+//!   active ──dispatch admission──▶ dispatching
+//!     ▲                                │
+//!     └── clean / fenced terminal ◀────┘
+//!     │
+//!     └──────────reclaim──────────▶ reclaimed
+//!
+//! A crash while `dispatching` stays fail-closed. Reclaim refuses that state;
+//! reconciliation must first establish a clean or fenced terminal outcome.
 //! ```
 //!
 //! There is exactly one function that flips a lease to `reclaimed`
@@ -24,13 +28,15 @@ use crate::error::MemoryError;
 
 use super::common::normalize_utc_iso_or_now;
 
-/// Lease lifecycle state. S1 persists exactly two states; the fuller
-/// provisioned→leased→terminal ladder from the design doc is deferred to a
-/// later slice and would extend this enum additively.
+/// Lease lifecycle state. `Dispatching` is the exclusive Required-postflight
+/// admission state; it prevents two workers from sharing one preimage/lease.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExecEnvState {
     /// Provisioned and in use — the worktree exists and the lease owns it.
     Active,
+    /// Exclusively admitted to one in-flight dispatch. A daemon crash leaves
+    /// this state fail-closed until an operator reconciles the lease.
+    Dispatching,
     /// Reclaimed — the worktree/branch/target have been (or are being) torn
     /// down; the row is retained for audit and idempotent reclaim.
     Reclaimed,
@@ -40,6 +46,7 @@ impl ExecEnvState {
     pub fn as_str(self) -> &'static str {
         match self {
             ExecEnvState::Active => "active",
+            ExecEnvState::Dispatching => "dispatching",
             ExecEnvState::Reclaimed => "reclaimed",
         }
     }
@@ -50,9 +57,10 @@ impl ExecEnvState {
     pub fn parse(raw: &str) -> Result<Self, MemoryError> {
         match raw {
             "active" => Ok(ExecEnvState::Active),
+            "dispatching" => Ok(ExecEnvState::Dispatching),
             "reclaimed" => Ok(ExecEnvState::Reclaimed),
             other => Err(MemoryError::InvalidArg(format!(
-                "unknown exec_env state '{other}' (expected 'active' or 'reclaimed')"
+                "unknown exec_env state '{other}' (expected 'active', 'dispatching', or 'reclaimed')"
             ))),
         }
     }
@@ -383,6 +391,11 @@ pub fn reclaim_exec_env(
     }
     let outcome = match ExecEnvState::parse(&state_raw)? {
         ExecEnvState::Reclaimed => ReclaimOutcome::AlreadyReclaimed { env_id },
+        ExecEnvState::Dispatching => {
+            return Err(MemoryError::WorkClaimIncompatibleState(format!(
+                "refusing to reclaim exec env {env_id}: an admitted dispatch still owns it"
+            )))
+        }
         ExecEnvState::Active => {
             let now = normalize_utc_iso_or_now("");
             tx.execute(
@@ -632,6 +645,10 @@ mod tests {
     fn state_parse_rejects_unknown() {
         assert!(ExecEnvState::parse("provisioned").is_err());
         assert_eq!(ExecEnvState::parse("active").unwrap(), ExecEnvState::Active);
+        assert_eq!(
+            ExecEnvState::parse("dispatching").unwrap(),
+            ExecEnvState::Dispatching
+        );
         assert_eq!(
             ExecEnvState::parse("reclaimed").unwrap(),
             ExecEnvState::Reclaimed

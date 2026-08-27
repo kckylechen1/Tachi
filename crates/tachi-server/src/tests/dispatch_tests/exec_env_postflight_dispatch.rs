@@ -66,6 +66,16 @@ fn resource_state(
         .state
 }
 
+fn lease_state(server: &crate::server_state::MemoryServer, env_id: &str) -> memcore::ExecEnvState {
+    server
+        .with_global_store_read(|store| {
+            memcore::get_exec_env(store.connection(), env_id).map_err(|error| error.to_string())
+        })
+        .expect("read managed lease")
+        .expect("managed lease exists")
+        .state
+}
+
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn required_postflight_rejects_unmanaged_and_default_bindings_before_spawn() {
@@ -125,7 +135,7 @@ async fn postflight_dispatch_with_declared_scope_accepts_in_scope_write() {
 
     let mut params = dispatch_params(Some("custom"), "declared scope dispatch");
     params.profile = Some("glm_impl".to_string());
-    params.env_id = Some(env_id);
+    params.env_id = Some(env_id.clone());
     params.declared_file_scope = Some(vec!["allowed.txt".to_string()]);
     params.command = vec![
         "python3".to_string(),
@@ -155,6 +165,7 @@ async fn postflight_dispatch_with_declared_scope_accepts_in_scope_write() {
         resource_state(&server, &resource_id),
         memcore::ResourceState::Active
     );
+    assert_eq!(lease_state(&server, &env_id), memcore::ExecEnvState::Active);
 }
 
 #[tokio::test]
@@ -176,12 +187,13 @@ async fn postflight_dispatch_rejects_and_withholds_when_worker_mutates_out_of_sc
 
     let mut params = dispatch_params(Some("custom"), "mutating out of scope dispatch");
     params.profile = Some("glm_impl".to_string());
-    params.env_id = Some(env_id);
+    params.env_id = Some(env_id.clone());
     params.declared_file_scope = Some(vec!["allowed.txt".to_string()]);
     params.command = vec![
         "python3".to_string(),
         "-c".to_string(),
-        "open('forbidden.txt', 'w').write('bad mutation')".to_string(),
+        "open('forbidden.txt', 'w').write('bad mutation'); print('SECRET_POSTFLIGHT_OUTPUT')"
+            .to_string(),
     ];
 
     let result = crate::dispatch_ops::handle_tachi_dispatch(&server, params)
@@ -204,6 +216,12 @@ async fn postflight_dispatch_rejects_and_withholds_when_worker_mutates_out_of_sc
         resource_state(&server, &resource_id),
         memcore::ResourceState::Quarantined
     );
+    assert_eq!(lease_state(&server, &env_id), memcore::ExecEnvState::Active);
+    let trajectory = fs::read_to_string(run_dir.join("trajectory.jsonl")).expect("trajectory");
+    assert!(
+        !trajectory.contains("SECRET_POSTFLIGHT_OUTPUT"),
+        "rejected carrier output must remain parent-staged and unpublished"
+    );
 }
 
 #[tokio::test]
@@ -224,7 +242,7 @@ async fn postflight_dispatch_rejects_and_withholds_when_untracked_file_created_o
 
     let mut params = dispatch_params(Some("custom"), "unauthorized creation dispatch");
     params.profile = Some("glm_impl".to_string());
-    params.env_id = Some(env_id);
+    params.env_id = Some(env_id.clone());
     params.declared_file_scope = Some(vec!["allowed.txt".to_string()]);
     params.command = vec![
         "python3".to_string(),
@@ -252,6 +270,7 @@ async fn postflight_dispatch_rejects_and_withholds_when_untracked_file_created_o
         resource_state(&server, &resource_id),
         memcore::ResourceState::Quarantined
     );
+    assert_eq!(lease_state(&server, &env_id), memcore::ExecEnvState::Active);
 }
 
 #[tokio::test]

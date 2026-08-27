@@ -426,6 +426,10 @@ impl LeaseAction {
 }
 
 impl GateOutcome {
+    pub(crate) fn lease_fenced(&self) -> bool {
+        self.lease_action == LeaseAction::Quarantined
+    }
+
     fn lease_action_statement(&self) -> &'static str {
         match self.lease_action {
             LeaseAction::None => "No lease fence was required.",

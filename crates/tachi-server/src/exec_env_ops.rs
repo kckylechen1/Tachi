@@ -764,7 +764,25 @@ pub(crate) fn quarantine_lease_resources(
     reason: &str,
 ) -> Result<Vec<String>, String> {
     if env_id.trim().is_empty() {
-        return Ok(Vec::new());
+        return Err("cannot quarantine resources for an empty exec env id".to_string());
+    }
+    let lease_state: Option<String> = conn
+        .query_row(
+            "SELECT state FROM exec_envs WHERE env_id = ?1",
+            rusqlite::params![env_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| format!("read exec env {env_id} before quarantine: {error}"))?;
+    let Some(lease_state) = lease_state else {
+        return Err(format!(
+            "exec env {env_id} does not exist; refusing false quarantine"
+        ));
+    };
+    if lease_state != "active" && lease_state != "dispatching" {
+        return Err(format!(
+            "exec env {env_id} is {lease_state}; refusing quarantine without a live lease"
+        ));
     }
     let sql = "SELECT resource_id FROM exec_env_resource_bindings WHERE env_id = ?1 AND released_at IS NULL ORDER BY resource_id";
     let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
@@ -775,8 +793,150 @@ pub(crate) fn quarantine_lease_resources(
         .map_err(|e| format!("read active resources for exec env {env_id}: {e}"))?;
     drop(stmt);
 
+    if resource_ids.is_empty() {
+        return Err(format!(
+            "exec env {env_id} has no live resource bindings; refusing false quarantine"
+        ));
+    }
+
     memcore::quarantine_resources_atomically(conn, &resource_ids, reason)
         .map_err(|err| format!("atomically quarantine resources for exec env {env_id}: {err}"))
+}
+
+/// Parent-owned exclusive admission for a Required postflight dispatch.
+///
+/// The transition is persisted before preimage capture. Concurrent callers can
+/// therefore never both observe an active lease and spawn. A crash leaves the
+/// lease in `dispatching`, which is intentionally unusable until reconciled.
+pub(crate) struct ExecEnvDispatchLeaseGuard {
+    server: MemoryServer,
+    env_id: String,
+    armed: bool,
+}
+
+impl ExecEnvDispatchLeaseGuard {
+    pub(crate) fn acquire(server: &MemoryServer, env_id: &str) -> Result<Self, String> {
+        let env_id = env_id.trim();
+        if env_id.is_empty() {
+            return Err("Required postflight dispatch needs a managed exec env id".to_string());
+        }
+        server.with_global_store(|store| {
+            let conn = store.connection_mut();
+            let tx = conn.transaction().map_err(|error| error.to_string())?;
+            let state: Option<String> = tx
+                .query_row(
+                    "SELECT state FROM exec_envs WHERE env_id = ?1",
+                    rusqlite::params![env_id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|error| error.to_string())?;
+            let Some(state) = state else {
+                return Err(format!("exec env {env_id} does not exist"));
+            };
+            if state != "active" {
+                return Err(format!(
+                    "exec env {env_id} is {state}; another dispatch or terminal action owns it"
+                ));
+            }
+            let live_bindings: i64 = tx
+                .query_row(
+                    "SELECT COUNT(*) FROM exec_env_resource_bindings WHERE env_id = ?1 AND released_at IS NULL",
+                    rusqlite::params![env_id],
+                    |row| row.get(0),
+                )
+                .map_err(|error| error.to_string())?;
+            if live_bindings == 0 {
+                return Err(format!(
+                    "exec env {env_id} has no live resource bindings; refusing orphan admission"
+                ));
+            }
+            let quarantined: i64 = tx
+                .query_row(
+                    "SELECT COUNT(*) FROM exec_env_resource_bindings b JOIN exec_env_resources r ON r.resource_id = b.resource_id WHERE b.env_id = ?1 AND b.released_at IS NULL AND r.state = 'quarantined'",
+                    rusqlite::params![env_id],
+                    |row| row.get(0),
+                )
+                .map_err(|error| error.to_string())?;
+            if quarantined != 0 {
+                return Err(format!(
+                    "exec env {env_id} has quarantined resources; refusing dispatch"
+                ));
+            }
+            let changed = tx
+                .execute(
+                    "UPDATE exec_envs SET state = 'dispatching' WHERE env_id = ?1 AND state = 'active'",
+                    rusqlite::params![env_id],
+                )
+                .map_err(|error| error.to_string())?;
+            if changed != 1 {
+                return Err(format!(
+                    "exec env {env_id} changed during dispatch admission"
+                ));
+            }
+            tx.commit().map_err(|error| error.to_string())
+        })?;
+        Ok(Self {
+            server: server.clone(),
+            env_id: env_id.to_string(),
+            armed: true,
+        })
+    }
+
+    fn release_state(&mut self) -> Result<(), String> {
+        self.server.with_global_store(|store| {
+            let changed = store
+                .connection_mut()
+                .execute(
+                    "UPDATE exec_envs SET state = 'active' WHERE env_id = ?1 AND state = 'dispatching'",
+                    rusqlite::params![self.env_id],
+                )
+                .map_err(|error| error.to_string())?;
+            if changed != 1 {
+                return Err(format!(
+                    "exec env {} lost its dispatch admission state",
+                    self.env_id
+                ));
+            }
+            Ok(())
+        })?;
+        self.armed = false;
+        Ok(())
+    }
+
+    pub(crate) fn release_clean(&mut self) -> Result<(), String> {
+        self.release_state()
+    }
+
+    pub(crate) fn release_after_fence(&mut self) -> Result<(), String> {
+        self.release_state()
+    }
+
+    pub(crate) fn release_without_spawn(&mut self) -> Result<(), String> {
+        self.release_state()
+    }
+
+    fn fence_abandoned(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let fenced = self.server.with_global_store(|store| {
+            quarantine_lease_resources(
+                store.connection_mut(),
+                &self.env_id,
+                "dispatch aborted before postflight ownership completed",
+            )
+        });
+        if fenced.is_ok() {
+            let _ = self.release_state();
+        }
+    }
+}
+
+impl Drop for ExecEnvDispatchLeaseGuard {
+    fn drop(&mut self) {
+        self.fence_abandoned();
+    }
 }
 
 // Compatibility shim for old exec_env_ops::ensure_resource_allow_quarantined
@@ -891,6 +1051,42 @@ impl MemoryServer {
 mod tests {
     use super::*;
 
+    fn seed_dispatchable_env(server: &MemoryServer, env_id: &str, resource_id: &str) {
+        server
+            .with_global_store(|store| {
+                memcore::insert_exec_env(
+                    store.connection_mut(),
+                    &NewExecEnvLease {
+                        env_id: env_id.to_string(),
+                        kind: "worktree".to_string(),
+                        path: format!("/wt/{env_id}"),
+                        repo_root: "/repo".to_string(),
+                        branch: env_id.to_string(),
+                        base_sha: "abc1234".to_string(),
+                        dispatch_id: None,
+                        env_class: EnvClass::EditOnly,
+                        created_at: String::new(),
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+                memcore::insert_resource(
+                    store.connection_mut(),
+                    &NewExecEnvResource {
+                        resource_id: resource_id.to_string(),
+                        kind: ResourceKind::Worktree,
+                        path: format!("/wt/{env_id}"),
+                        bytes: None,
+                        created_at: String::new(),
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+                memcore::bind_resource(store.connection_mut(), env_id, resource_id)
+                    .map_err(|error| error.to_string())?;
+                Ok(())
+            })
+            .expect("seed dispatchable env");
+    }
+
     fn lease(state: ExecEnvState, path: &str) -> ExecEnvLease {
         ExecEnvLease {
             env_id: "env-x".to_string(),
@@ -945,6 +1141,147 @@ mod tests {
         let l = lease(ExecEnvState::Reclaimed, "/wt/managed");
         let err = resolve_env_binding(Some("env-x"), None, false, Some(&l)).unwrap_err();
         assert!(err.contains("not active"), "got: {err}");
+    }
+
+    #[test]
+    fn env_id_dispatching_lease_fails_closed() {
+        let l = lease(ExecEnvState::Dispatching, "/wt/managed");
+        let err = resolve_env_binding(Some("env-x"), None, false, Some(&l)).unwrap_err();
+        assert!(err.contains("not active"), "got: {err}");
+    }
+
+    #[test]
+    fn postflight_dispatch_admission_is_exclusive_and_clean_release_reopens() {
+        let temp = tempfile::tempdir().expect("temp server");
+        let server = MemoryServer::new(temp.path().join("global.sqlite"), None).expect("server");
+        seed_dispatchable_env(&server, "env-exclusive", "res-exclusive");
+
+        let mut first =
+            ExecEnvDispatchLeaseGuard::acquire(&server, "env-exclusive").expect("first admission");
+        let conflict = match ExecEnvDispatchLeaseGuard::acquire(&server, "env-exclusive") {
+            Ok(_) => panic!("a second dispatch must not share one lease"),
+            Err(error) => error,
+        };
+        assert!(conflict.contains("dispatching"), "{conflict}");
+
+        first.release_clean().expect("clean release");
+        let mut reopened = ExecEnvDispatchLeaseGuard::acquire(&server, "env-exclusive")
+            .expect("lease reopens only after clean finalization");
+        reopened
+            .release_without_spawn()
+            .expect("unspawned admission release");
+    }
+
+    #[test]
+    fn abandoned_postflight_dispatch_fences_real_resource_before_reopening_lease() {
+        let temp = tempfile::tempdir().expect("temp server");
+        let server = MemoryServer::new(temp.path().join("global.sqlite"), None).expect("server");
+        seed_dispatchable_env(&server, "env-abort", "res-abort");
+
+        let guard =
+            ExecEnvDispatchLeaseGuard::acquire(&server, "env-abort").expect("dispatch admission");
+        drop(guard);
+
+        let (lease_state, resource_state): (String, String) = server
+            .with_global_store_read(|store| {
+                let lease_state = store
+                    .connection()
+                    .query_row(
+                        "SELECT state FROM exec_envs WHERE env_id = 'env-abort'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .map_err(|error| error.to_string())?;
+                let resource_state = store
+                    .connection()
+                    .query_row(
+                        "SELECT state FROM exec_env_resources WHERE resource_id = 'res-abort'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .map_err(|error| error.to_string())?;
+                Ok((lease_state, resource_state))
+            })
+            .expect("read fenced state");
+        assert_eq!(lease_state, "active");
+        assert_eq!(resource_state, "quarantined");
+        let error = server
+            .resolve_dispatch_env_binding(Some("env-abort"), None, false)
+            .expect_err("fenced resource must block redispatch");
+        assert!(
+            error.contains("quarantined resource 'res-abort'"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn abandoned_dispatch_with_a_failed_fence_stays_exclusively_fail_closed() {
+        let temp = tempfile::tempdir().expect("temp server");
+        let db_path = temp.path().join("global.sqlite");
+        let server = MemoryServer::new(db_path.clone(), None).expect("server");
+        seed_dispatchable_env(&server, "env-fence-fail", "res-fence-fail");
+        let guard = ExecEnvDispatchLeaseGuard::acquire(&server, "env-fence-fail")
+            .expect("dispatch admission");
+
+        let fault_connection = rusqlite::Connection::open(db_path).expect("fault connection");
+        fault_connection
+            .execute_batch(
+                "CREATE TRIGGER fail_abandoned_dispatch_fence
+                 BEFORE UPDATE OF state ON exec_env_resources
+                 WHEN NEW.state = 'quarantined' AND OLD.resource_id = 'res-fence-fail'
+                 BEGIN SELECT RAISE(ABORT, 'injected abandoned fence failure'); END;",
+            )
+            .expect("install fence failure trigger");
+        drop(guard);
+
+        let lease = server
+            .with_global_store_read(|store| {
+                memcore::get_exec_env(store.connection(), "env-fence-fail")
+                    .map_err(|error| error.to_string())
+            })
+            .expect("read lease")
+            .expect("lease exists");
+        assert_eq!(lease.state, ExecEnvState::Dispatching);
+        let error = server
+            .resolve_dispatch_env_binding(Some("env-fence-fail"), None, false)
+            .expect_err("failed fence must not reopen the lease");
+        assert!(error.contains("not active"), "{error}");
+    }
+
+    #[test]
+    fn quarantine_refuses_an_orphan_lease_without_live_resource_bindings() {
+        let temp = tempfile::tempdir().expect("temp server");
+        let server = MemoryServer::new(temp.path().join("global.sqlite"), None).expect("server");
+        server
+            .with_global_store(|store| {
+                memcore::insert_exec_env(
+                    store.connection_mut(),
+                    &NewExecEnvLease {
+                        env_id: "env-orphan".to_string(),
+                        kind: "worktree".to_string(),
+                        path: "/wt/orphan".to_string(),
+                        repo_root: "/repo".to_string(),
+                        branch: "orphan".to_string(),
+                        base_sha: "abc1234".to_string(),
+                        dispatch_id: None,
+                        env_class: EnvClass::EditOnly,
+                        created_at: String::new(),
+                    },
+                )
+                .map_err(|error| error.to_string())
+            })
+            .expect("seed orphan env");
+
+        let error = server
+            .with_global_store(|store| {
+                quarantine_lease_resources(
+                    store.connection_mut(),
+                    "env-orphan",
+                    "postflight rejected",
+                )
+            })
+            .expect_err("an empty binding set must not report quarantine");
+        assert!(error.contains("no live resource bindings"), "{error}");
     }
 
     #[test]

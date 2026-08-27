@@ -59,8 +59,11 @@ async fn run_native_acp_dispatch_inner(
         .current_dir(&spec.cwd)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(false);
+        .stderr(std::process::Stdio::piped());
+    #[cfg(unix)]
+    cmd.kill_on_drop(false);
+    #[cfg(not(unix))]
+    cmd.kill_on_drop(true);
     crate::dispatch_ops::subprocess::configure_process_group(&mut cmd);
     for (name, value) in &spec.env {
         cmd.env(name, value);
@@ -93,9 +96,8 @@ async fn run_native_acp_dispatch_inner(
             )
             .await;
             #[cfg(not(unix))]
-            let liveness = crate::exec_env_postflight::RunnerLivenessEvidence::indeterminate(
-                "native ACP process-group terminal proof is unavailable on this platform",
-            );
+            let liveness =
+                crate::dispatch_ops::subprocess::terminate_reap_uncontained_child(&mut child).await;
             return DispatchRunOutcome::failure(error, liveness);
         }
     };
@@ -113,9 +115,8 @@ async fn run_native_acp_dispatch_inner(
             )
             .await;
             #[cfg(not(unix))]
-            let liveness = crate::exec_env_postflight::RunnerLivenessEvidence::indeterminate(
-                "native ACP process-group terminal proof is unavailable on this platform",
-            );
+            let liveness =
+                crate::dispatch_ops::subprocess::terminate_reap_uncontained_child(&mut child).await;
             return DispatchRunOutcome::failure(error, liveness);
         }
     };
@@ -133,9 +134,8 @@ async fn run_native_acp_dispatch_inner(
             )
             .await;
             #[cfg(not(unix))]
-            let liveness = crate::exec_env_postflight::RunnerLivenessEvidence::indeterminate(
-                "native ACP process-group terminal proof is unavailable on this platform",
-            );
+            let liveness =
+                crate::dispatch_ops::subprocess::terminate_reap_uncontained_child(&mut child).await;
             return DispatchRunOutcome::failure(error, liveness);
         }
     };
@@ -165,9 +165,8 @@ async fn run_native_acp_dispatch_inner(
             )
             .await;
             #[cfg(not(unix))]
-            let liveness = crate::exec_env_postflight::RunnerLivenessEvidence::indeterminate(
-                "native ACP process-group terminal proof is unavailable on this platform",
-            );
+            let liveness =
+                crate::dispatch_ops::subprocess::terminate_reap_uncontained_child(&mut child).await;
             let _ = stderr_task.await;
             append_trajectory_event(
                 trajectory_path,
@@ -238,25 +237,35 @@ async fn run_native_acp_dispatch_inner(
     #[cfg(not(unix))]
     let (process_exit_code, process_exit_error, liveness) = {
         let graceful_exit = tokio::time::timeout(Duration::from_millis(1500), child.wait()).await;
-        let pair = match graceful_exit {
-            Ok(Ok(status)) => (status.code(), None),
-            Ok(Err(err)) => (None, Some(format!("Native ACP adapter wait failed: {err}"))),
+        match graceful_exit {
+            Ok(Ok(status)) => (
+                status.code(),
+                None,
+                crate::exec_env_postflight::RunnerLivenessEvidence::indeterminate(
+                    "native ACP root child was reaped; descendant containment is unavailable on this platform",
+                ),
+            ),
+            Ok(Err(err)) => {
+                let liveness =
+                    crate::dispatch_ops::subprocess::terminate_reap_uncontained_child(&mut child)
+                        .await;
+                (
+                    None,
+                    Some(format!("Native ACP adapter wait failed: {err}")),
+                    liveness,
+                )
+            }
             Err(_) => {
-                let _ = child.kill().await;
-                let _ = child.wait().await;
+                let liveness =
+                    crate::dispatch_ops::subprocess::terminate_reap_uncontained_child(&mut child)
+                        .await;
                 (
                     None,
                     Some("Native ACP adapter did not exit after stdin close".to_string()),
+                    liveness,
                 )
             }
-        };
-        (
-            pair.0,
-            pair.1,
-            crate::exec_env_postflight::RunnerLivenessEvidence::indeterminate(
-                "native ACP process-group terminal proof is unavailable on this platform",
-            ),
-        )
+        }
     };
     let stderr_output = stderr_task.await.unwrap_or_default();
 

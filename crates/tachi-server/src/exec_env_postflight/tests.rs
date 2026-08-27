@@ -1638,6 +1638,11 @@ async fn test_daemon_quarantine_sink_fences_resource() {
         .with_global_store(|store| {
             let conn = store.connection();
             conn.execute(
+                "INSERT INTO exec_envs (env_id, path, state) VALUES (?1, ?2, 'active')",
+                rusqlite::params![env_id, "/path/to/tree"],
+            )
+            .map_err(|e| e.to_string())?;
+            conn.execute(
                 "INSERT INTO exec_env_resources (resource_id, kind, path, bytes, measured_at, state, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, 'active', ?6, ?6)",
                 rusqlite::params![res_id, "worktree", "/path/to/tree", 0, "2026-08-25T00:00:00Z", "2026-08-25T00:00:00Z"],
             ).map_err(|e| e.to_string())?;
@@ -1699,6 +1704,11 @@ async fn daemon_quarantine_sink_propagates_resource_failure_before_receipt() {
     server
         .with_global_store(|store| {
             let conn = store.connection();
+            conn.execute(
+                "INSERT INTO exec_envs (env_id, path, state) VALUES (?1, ?2, 'active')",
+                rusqlite::params![env_id, "/path/to/tree"],
+            )
+            .map_err(|error| error.to_string())?;
             for (resource_id, path, binding_id) in [
                 (first_res_id, "/path/to/tree", "bind_failure_1"),
                 (second_res_id, "/path/to/target", "bind_failure_2"),
