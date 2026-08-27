@@ -1,0 +1,18 @@
+[package]
+name = "tachi-exec-env-reaper"
+version = "1.9.2"
+edition = "2021"
+license = "AGPL-3.0-only"
+publish = false
+description = "Report-only orphan build-artifact reaper for Tachi (#894 S2b), extracted from tachi-server."
+
+[dependencies]
+memcore = { path = "../memcore" }
+rusqlite = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tachi-clean = { path = "../../tools/cleaner" }
+uuid = { workspace = true }
+
+[dev-dependencies]
+libc = "0.2"

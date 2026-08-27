@@ -76,6 +76,7 @@ mod virtual_capability;
 pub use agent_state::{get_agent_known_revisions, update_agent_known_state};
 pub use anchor::{anchor_id, anchor_path, ensure_anchor, AnchorKind};
 pub use audit::{audit_log_insert, audit_log_list};
+pub(crate) use common::normalize_sqlite_as_of;
 pub use common::{normalize_utc_iso, normalize_utc_iso_or_now, now_utc_iso, row_to_entry};
 pub use daily_pipeline::{
     collect_daily_health_snapshot, count_active_memories, count_consolidated_active_memories,
@@ -97,7 +98,7 @@ pub use dispatch_outcomes::{
     DispatchOutcomeRow, NewDispatchOutcome, OutcomeEvidenceClass,
 };
 // The three raw-`Connection` constructors are gated with the accessor pair on
-// `MemoryStore` (#1585 review round 3): a bare connection is a raw-SQL bypass
+// `MemoryStore` (#1585): a bare connection is a raw-SQL bypass
 // of the `store_identity` write-once guards, so the non-test portable surface
 // does not get one. The read-only probes below stay portable.
 pub use doctor_probe::{
@@ -126,8 +127,8 @@ pub use graph::{
     add_component_governance_edge, add_component_governance_edge_with_provenance, avg_importance,
     close_related_to_fog, count_active_observations, count_same_topic, edge_authority,
     get_contradiction_count, get_edges, get_edges_limited, get_superseded_ids, graph_expand,
-    graph_expand_limited, invalidate_observation, list_observations_for_edge, remove_edge,
-    ConfirmedContradictionOutcome, EdgeAuthority, EdgeObservation, EdgeProvenance,
+    graph_expand_as_of, graph_expand_limited, invalidate_observation, list_observations_for_edge,
+    remove_edge, ConfirmedContradictionOutcome, EdgeAuthority, EdgeObservation, EdgeProvenance,
 };
 pub(crate) use graph::{add_edge, add_edge_with_provenance};
 pub(crate) use graph::{row_matches_expected_state, validate_confirmed_contradiction};
@@ -153,7 +154,9 @@ pub(crate) use memory_crud::query_hash;
 pub(crate) use memory_crud::record_access;
 pub(crate) use memory_crud::record_access_with_updates;
 pub use memory_crud::refuse_retired_sticky_row_within_tx;
+#[cfg(test)]
 pub(crate) use memory_crud::search_fts_raw_match;
+pub(crate) use memory_crud::search_fts_with_normalized_as_of;
 pub(crate) use memory_crud::search_symbolic_candidates_with_relevance;
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use memory_crud::supersede_with_metadata_if_expected_state;

@@ -313,7 +313,7 @@ pub(crate) const BLOCKING_DEFECTS: &[&str] = &[
 /// report that reads like a clean run — an `Err` the caller must handle, carrying the
 /// reason back to whoever asked.
 #[derive(Debug, Clone, serde::Serialize)]
-pub(crate) struct DestructiveRefusal {
+pub struct DestructiveRefusal {
     pub(crate) action: &'static str,
     /// Always `true`: nothing was scanned, measured, booked or deleted.
     pub(crate) refused: bool,
@@ -354,7 +354,7 @@ impl std::fmt::Display for DestructiveRefusal {
 /// stayed here rather than being deleted for exactly this reason: the day certification
 /// is revoked, this is the one place that must go back to refusing `force`, and every
 /// caller already asks it instead of reading the constant directly.
-pub(crate) fn certify_destructive(force: bool) -> Result<(), DestructiveRefusal> {
+pub fn certify_destructive(force: bool) -> Result<(), DestructiveRefusal> {
     if force && !DESTRUCTIVE_CERTIFIED {
         return Err(DestructiveRefusal::new());
     }
@@ -370,7 +370,7 @@ pub(crate) fn certify_destructive(force: bool) -> Result<(), DestructiveRefusal>
 /// could not verify is [`Self::Unknown`] and is skipped with its reason —
 /// never silently treated as free.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum HolderCheck {
+pub enum HolderCheck {
     /// Complete check, nothing open under the path.
     None,
     /// At least one process has a file open under the path.
@@ -390,26 +390,23 @@ impl HolderCheck {
     }
 }
 
-/// Injectable holder probe — the real one shells out to `lsof`; tests pass a
-/// closure so the decision logic is exercised without depending on the host's
-/// process table.
-pub(crate) type HolderProbe = dyn Fn(&Path, Option<HolderExclusion>) -> HolderCheck;
+/// Injectable holder probe — the real one shells out to `lsof`; this private
+/// seam lets crate-local tests exercise the decision logic without depending on
+/// the host's process table.
+type HolderProbe = dyn Fn(&Path, Option<HolderExclusion>) -> HolderCheck;
 
 /// The one holder the reaper itself creates while pinning a candidate's inode.
 /// Both fields must match before an `lsof` row is ignored; excluding the whole
 /// process would hide unrelated descriptors and weaken the holder fence.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct HolderExclusion {
+pub struct HolderExclusion {
     pid: u32,
     fd: i32,
 }
 
 /// Real probe: `lsof +D <dir>` (recursive — a live `cargo` holds files deep
 /// inside the target, not just at its root).
-pub(crate) fn lsof_holder_probe(
-    path: &Path,
-    ignored_holder: Option<HolderExclusion>,
-) -> HolderCheck {
+pub fn lsof_holder_probe(path: &Path, ignored_holder: Option<HolderExclusion>) -> HolderCheck {
     match Command::new("lsof").arg("+D").arg(path).output() {
         Ok(out) => {
             let stdout = String::from_utf8_lossy(&out.stdout);
@@ -520,7 +517,7 @@ const CARGO_TARGET_DIR_ENV: &str = "CARGO_TARGET_DIR";
 /// [`reap_exit_status`]. Every push into this vec is a fence the reaper *could not
 /// build*.
 #[derive(Debug, Clone, Default)]
-pub(crate) struct Protection {
+pub struct Protection {
     paths: Vec<PathBuf>,
     /// Protection sources that could not be resolved (`ps` unavailable, `HOME` unset, a
     /// relative target dir). Non-empty ⇒ the protected set is INCOMPLETE ⇒ the run may
@@ -678,11 +675,11 @@ pub(crate) type LiveBuildScan = dyn Fn() -> (Vec<PathBuf>, Vec<String>);
 /// The lock-shaped fixes (`#[serial]`, `--test-threads=1`, widening the old `env_lock` to
 /// every test in the module) all treat the symptom: the shared mutable global is still
 /// there, still implicit, and the next test that forgets to take the lock is bitten
-/// again. So the global is *gone* from the call graph instead. The environment is read
-/// exactly once, at the process edge ([`Self::from_process_env`], called by the CLI), and
-/// from there the protected set is computed from a value that was handed to it. A test
-/// hands it a value with `home: None` and gets fail-closed behaviour in its own thread,
-/// affecting nobody.
+/// again. So the global is *gone* from the reaper body instead. The public production
+/// entry reads it exactly once, after the destructive gate
+/// ([`Self::from_process_env`]), and from there the protected set is computed from a
+/// value that was handed to the private body. A test hands that body a value with
+/// `home: None` and gets fail-closed behaviour in its own thread, affecting nobody.
 ///
 /// ## What is a snapshot and what is live
 ///
@@ -691,7 +688,7 @@ pub(crate) type LiveBuildScan = dyn Fn() -> (Vec<PathBuf>, Vec<String>);
 /// A build that starts after the scan cannot appear in our `HOME`; it appears in the
 /// **process table**, which is why that source stays a live callable (the `live_builds`
 /// field) and is re-run at the delete (see [`run_orphan_reap_uncertified`]).
-pub(crate) struct ProtectionSources<'a> {
+pub struct ProtectionSources<'a> {
     /// `CARGO_TARGET_DIR` — what cargo actually reads, and what every build seat in this
     /// repo exports. `None` = the variable is unset or empty (not a gap: nothing says a
     /// machine must have it).
@@ -714,9 +711,10 @@ pub(crate) struct ProtectionSources<'a> {
 static PROCESS_TABLE: fn() -> (Vec<PathBuf>, Vec<String>) = live_build_target_dirs;
 
 impl ProtectionSources<'static> {
-    /// **The only place the process environment is read.** Called at the process edge (the
-    /// CLI), once per run.
-    pub(crate) fn from_process_env() -> Self {
+    /// **The only constructor that reads the process environment.** The public reaper
+    /// calls it only after its destructive gate; the report-only doctor patrol also uses
+    /// it to build the same protected set.
+    pub fn from_process_env() -> Self {
         let var = |key: &str| {
             std::env::var_os(key)
                 .filter(|value| !value.is_empty())
@@ -727,58 +725,6 @@ impl ProtectionSources<'static> {
             shared_cargo_target_dir: var(SHARED_CARGO_TARGET_DIR_ENV),
             home: var("HOME").or_else(|| var("USERPROFILE")),
             live_builds: &PROCESS_TABLE,
-        }
-    }
-}
-
-/// Test-only stand-in for the process table: no build is running anywhere, on any
-/// machine, ever. Backs [`ProtectionSources::deterministic_for_cli_test`] below.
-#[cfg(test)]
-fn no_live_builds_for_cli_test() -> (Vec<PathBuf>, Vec<String>) {
-    (Vec::new(), Vec::new())
-}
-
-#[cfg(test)]
-static NO_LIVE_BUILDS_FOR_CLI_TEST: fn() -> (Vec<PathBuf>, Vec<String>) =
-    no_live_builds_for_cli_test;
-
-#[cfg(test)]
-impl ProtectionSources<'static> {
-    /// A CLI-level test's alternative to [`Self::from_process_env`] — same shape, but
-    /// every field is a fixed, ambient-free value instead of a real environment/process
-    /// read.
-    ///
-    /// [`Self::from_process_env`] shells out to the real `ps -Awwo command=` (via
-    /// [`live_build_target_dirs`]) and reads the real `CARGO_TARGET_DIR` / `HOME`. That
-    /// is correct for production, but it makes a CLI-level test of `reap_exit_status`'s
-    /// gate ORDER (protected-set-incomplete vs. scan-incomplete) hostage to whatever
-    /// else is running on the test machine at the moment `cargo test` executes it: `ps`
-    /// sees every process's full command line, and a whitespace-tokenizing scan
-    /// (`target_dirs_from_process_line`) cannot tell a live cargo build's
-    /// `CARGO_TARGET_DIR=` assignment from that literal substring appearing in some
-    /// unrelated process's argv — a `grep` for it, a shell wrapper quoting a command
-    /// that mentions it, this very repo's own `AGENTS.md` line 18 being `cat`'d or
-    /// searched by a concurrent agent session. When that happens the value captured is
-    /// the raw, unexpanded text (e.g. the literal `$HOME/.cache/sigil-shared-target`,
-    /// never resolved because nothing shell-expanded it), `protected_paths` reports it
-    /// as a relative-path warning, and `reap_exit_status` refuses on "protected set
-    /// incomplete" — a REAL fail-closed gate, just not the one under test — before the
-    /// scan ever reaches the missing root this test named (#1196).
-    ///
-    /// So this constructor reads nothing ambient at all: `home` is a fixed path (so the
-    /// protected set can still be computed — a `None` home is BUG 3's OWN gap, and
-    /// asserting the DIFFERENT "scan incomplete" gate needs that one closed), and
-    /// `live_builds` is [`NO_LIVE_BUILDS_FOR_CLI_TEST`] rather than the real process
-    /// table. This proves the CLI's actual production code path end-to-end
-    /// (`run_orphan_reap_cli_with_sources`, exercised by the real
-    /// `run_orphan_reap_cli` too) still refuses a scan that cannot see its whole scope
-    /// — deterministically, on every machine, regardless of what else is running on it.
-    pub(crate) fn deterministic_for_cli_test() -> Self {
-        Self {
-            cargo_target_dir: None,
-            shared_cargo_target_dir: None,
-            home: Some(PathBuf::from("/nonexistent-home-for-cli-test")),
-            live_builds: &NO_LIVE_BUILDS_FOR_CLI_TEST,
         }
     }
 }
@@ -803,7 +749,7 @@ impl ProtectionSources<'static> {
 /// transaction — rather than here, so a bound resource still appears in the
 /// report as a visible `skip` carrying its refcount instead of silently vanishing
 /// from the scan.
-pub(crate) fn protected_paths(sources: &ProtectionSources<'_>) -> Protection {
+pub fn protected_paths(sources: &ProtectionSources<'_>) -> Protection {
     let (mut paths, mut warnings) = (sources.live_builds)();
 
     for (var, dir) in [
@@ -1030,7 +976,7 @@ fn target_dirs_from_process_line(line: &str) -> Vec<PathBuf> {
 /// the same discipline as [`HolderCheck::Unknown`] and
 /// [`Staleness::Unprovable`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct FileIdentity {
+struct FileIdentity {
     dev: u64,
     ino: u64,
 }
@@ -1129,7 +1075,7 @@ impl PinnedDirectory {
 /// Three states, for the same reason [`HolderCheck`] has three: a walk that could
 /// not read part of the tree and "found nothing fresh" has proved nothing.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Staleness {
+pub enum Staleness {
     /// Nothing anywhere under the tree has been touched since the cutoff, and the
     /// whole tree was readable. The only state that passes the staleness gate.
     Stale { age_days: u64 },
@@ -1140,7 +1086,7 @@ pub(crate) enum Staleness {
 }
 
 impl Staleness {
-    pub(crate) fn age_days(&self) -> Option<u64> {
+    pub fn age_days(&self) -> Option<u64> {
         match self {
             Staleness::Stale { age_days } | Staleness::Fresh { age_days } => Some(*age_days),
             Staleness::Unprovable(_) => None,
@@ -1152,10 +1098,10 @@ impl Staleness {
 /// candidate says nothing about whether it may be deleted — that is
 /// [`decide_reap`].
 #[derive(Debug)]
-pub(crate) struct OrphanCandidate {
+pub struct OrphanCandidate {
     /// The path as the scan walked it — the caller's spelling, symlinked scan
     /// root and all.
-    pub(crate) path: PathBuf,
+    pub path: PathBuf,
     /// **The resolved SPELLING the verdict is rendered against.**
     ///
     /// `path` is the caller's spelling — `--root` is caller-supplied and may be
@@ -1191,8 +1137,8 @@ pub(crate) struct OrphanCandidate {
     /// prevents the inode from being recycled onto a replacement while the
     /// delete decision is in flight.
     identity_pin: Option<PinnedDirectory>,
-    pub(crate) kind: ResourceKind,
-    pub(crate) staleness: Staleness,
+    pub kind: ResourceKind,
+    pub staleness: Staleness,
     /// Measured *only* for candidates that survived every cheap gate — a
     /// recursive byte walk of a 61 GB tree is not something to spend on a
     /// directory we are about to skip for being two days old.
@@ -1405,8 +1351,8 @@ pub(crate) struct ScanSkip {
 /// What a scan returns: candidates, **and the books**. A bare `Vec<OrphanCandidate>`
 /// is what let every non-candidate unit disappear.
 #[derive(Debug, Default)]
-pub(crate) struct ScanOutcome {
-    pub(crate) candidates: Vec<OrphanCandidate>,
+pub struct ScanOutcome {
+    pub candidates: Vec<OrphanCandidate>,
     pub(crate) accounting: ScanAccounting,
     pub(crate) skips: Vec<ScanSkip>,
     /// Scope oddities worth an operator's eye that are not themselves units — today, a
@@ -1616,7 +1562,7 @@ pub(crate) fn walk_disposition(
 ///
 /// Returns a [`ScanOutcome`], not a bare `Vec`: see [`UnitClass`] for the invariant
 /// that shape exists to enforce.
-pub(crate) fn scan_orphan_candidates(
+pub fn scan_orphan_candidates(
     roots: &[PathBuf],
     protection: &Protection,
     now: SystemTime,
@@ -1770,7 +1716,7 @@ pub(crate) fn scan_orphan_candidates(
 /// not there was never part of the authorized scope. A root the OPERATOR names and
 /// that does not exist is a different animal: it is `RootMissing`, an incomplete
 /// unit, and it costs the run its clean exit.
-pub(crate) fn default_orphan_roots() -> Vec<PathBuf> {
+pub fn default_orphan_roots() -> Vec<PathBuf> {
     let mut roots = Vec::new();
     if let Some(tmpdir) = std::env::var_os("TMPDIR") {
         roots.push(PathBuf::from(tmpdir));
@@ -2007,7 +1953,7 @@ pub(crate) struct ReclaimedReport {
 }
 
 #[derive(Debug, serde::Serialize)]
-pub(crate) struct ReapReport {
+pub struct ReapReport {
     pub(crate) action: &'static str,
     /// **`false` again as of `tachi#1379`** (2026-07-23; was `true` 2026-07-17 through
     /// 2026-07-23 under #1062's receipt — see [`DESTRUCTIVE_CERTIFIED`]). Mirrors
@@ -2075,9 +2021,9 @@ pub(crate) struct ReapReport {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct ReapOptions {
-    pub(crate) roots: Vec<PathBuf>,
-    pub(crate) max_age_days: u64,
+pub struct ReapOptions {
+    pub roots: Vec<PathBuf>,
+    pub max_age_days: u64,
     /// `false` (the default) = preview: decide, report, touch nothing.
     ///
     /// `true` is **refused** — [`certify_destructive`] turns it into a
@@ -2085,7 +2031,7 @@ pub(crate) struct ReapOptions {
     /// request still has to be *rejected*, loudly and with a reason, and because the
     /// sheathed machinery behind it is pinned by tests against the day it is certified.
     /// It is not a switch anyone can currently flip.
-    pub(crate) force: bool,
+    pub force: bool,
 }
 
 // ── Run ─────────────────────────────────────────────────────────────────────
@@ -2100,10 +2046,30 @@ pub(crate) struct ReapOptions {
 /// The gate is duplicated in the CLI on purpose (which refuses before even opening the
 /// ledger). Two fences, one source of truth: both call [`certify_destructive`].
 ///
-/// `sources` is what the run may protect from ([`ProtectionSources`]) — passed in, not
-/// read from the ambient environment, so the protected set is a function of an argument
-/// the caller can see and a test can supply.
-pub(crate) fn run_orphan_reap(
+/// Protection sources and the holder fence are not injectable through this production
+/// entry point. Only after the destructive gate succeeds does it snapshot the real
+/// process environment with [`ProtectionSources::from_process_env`], then it enters the
+/// private body with [`lsof_holder_probe`].
+pub fn run_orphan_reap(
+    conn: &mut rusqlite::Connection,
+    opts: &ReapOptions,
+    now: SystemTime,
+) -> Result<ReapReport, DestructiveRefusal> {
+    certify_destructive(opts.force)?;
+    let sources = ProtectionSources::from_process_env();
+    Ok(run_orphan_reap_uncertified(
+        conn,
+        opts,
+        &sources,
+        now,
+        &lsof_holder_probe,
+    ))
+}
+
+/// Crate-local test seam for the sealed entry point. Production callers cannot replace
+/// either the real protection sources or the real holder fence.
+#[cfg(test)]
+fn run_orphan_reap_with_sources_and_probe(
     conn: &mut rusqlite::Connection,
     opts: &ReapOptions,
     sources: &ProtectionSources<'_>,
@@ -2388,7 +2354,7 @@ fn run_orphan_reap_uncertified(
 /// A reaper that cannot account for its authorized scope must not exit 0 —
 /// "reported success while doing nothing" is the exact failure this module was
 /// audited for, and `--force` waives it no more than it waives any other gate.
-pub(crate) fn reap_exit_status(report: &ReapReport) -> Result<(), String> {
+pub fn reap_exit_status(report: &ReapReport) -> Result<(), String> {
     if !report.errors.is_empty() {
         return Err(report.errors.join("; "));
     }
@@ -2801,9 +2767,7 @@ fn delete_resource_bytes(
 /// (`safe_merge` / `expired` / `orphan` / `unmanaged`) regardless of which
 /// knife did the freeing. Only `reclaimed` rows count: `reclaimed_bytes` is
 /// stamped only after a delete actually happened (#1029's whole point).
-pub(crate) fn reclaimed_bytes_by_reason(
-    conn: &rusqlite::Connection,
-) -> Result<BTreeMap<String, i64>, String> {
+fn reclaimed_bytes_by_reason(conn: &rusqlite::Connection) -> Result<BTreeMap<String, i64>, String> {
     let reclaimed = memcore::list_resources(conn, Some(ResourceState::Reclaimed), None)
         .map_err(|err| err.to_string())?;
     let mut by_reason: BTreeMap<String, i64> = BTreeMap::new();
@@ -2823,11 +2787,12 @@ pub(crate) fn reclaimed_bytes_by_reason(
 /// `tachi_clean::target_clean::dir_size`). Expensive: only ever called on a
 /// candidate that already survived every cheap gate.
 ///
-/// `pub(crate)` (tachi#1184 item 2): the `tachi doctor` build-resource patrol
+/// Public because the `tachi doctor` build-resource patrol
 /// (`doctor::build_resources::scan_orphan_build_resources`) reuses this exact
-/// walk to size its own — narrower, blessed-list-filtered — candidate set,
+/// scan primitive (tachi#1184 item 2) to size its own — narrower,
+/// blessed-list-filtered — candidate set,
 /// rather than growing a second copy of the same metadata-only recursion.
-pub(crate) fn dir_size(path: &Path) -> u64 {
+pub fn dir_size(path: &Path) -> u64 {
     let Ok(metadata) = std::fs::symlink_metadata(path) else {
         return 0;
     };
@@ -2960,7 +2925,7 @@ fn clamp_bytes(bytes: u64) -> i64 {
 /// piping stdout into `jq` must not find prose where a report belongs. JSON mode emits a
 /// well-formed object with `"refused": true`, so a script gets a parseable answer — and,
 /// with the non-zero exit beside it, cannot read a refusal as a clean run.
-pub(crate) fn emit_destructive_refusal(
+pub fn emit_destructive_refusal(
     refusal: &DestructiveRefusal,
     output: OutputFormat,
 ) -> Result<(), String> {
@@ -2982,7 +2947,7 @@ pub(crate) fn emit_destructive_refusal(
     Ok(())
 }
 
-pub(crate) fn emit_reap_report(report: &ReapReport, output: OutputFormat) -> Result<(), String> {
+pub fn emit_reap_report(report: &ReapReport, output: OutputFormat) -> Result<(), String> {
     match output {
         OutputFormat::Json => println!(
             "{}",

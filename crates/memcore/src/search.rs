@@ -611,7 +611,7 @@ fn hybrid_search_inner(
     let as_of_utc = opts
         .as_of
         .as_deref()
-        .map(crate::db::normalize_utc_iso)
+        .map(|instant| crate::db::normalize_sqlite_as_of(conn, instant))
         .transpose()?;
     let include_superseded = opts.include_superseded
         || include_superseded_env_override_active()
@@ -802,7 +802,7 @@ fn hybrid_search_with_attribution(
     let as_of_utc = opts
         .as_of
         .as_deref()
-        .map(crate::db::normalize_utc_iso)
+        .map(|instant| crate::db::normalize_sqlite_as_of(conn, instant))
         .transpose()?;
     let include_superseded = opts.include_superseded
         || include_superseded_env_override_active()

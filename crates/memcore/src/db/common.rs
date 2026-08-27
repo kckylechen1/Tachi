@@ -1,5 +1,5 @@
 use chrono::{DateTime, SecondsFormat, Utc};
-use rusqlite::Result as SqlResult;
+use rusqlite::{Connection, Result as SqlResult};
 
 use crate::error::MemoryError;
 use crate::types::MemoryEntry;
@@ -39,6 +39,19 @@ pub fn normalize_utc_iso(ts: &str) -> Result<String, MemoryError> {
         "invalid timestamp format: {}",
         ts
     )))
+}
+
+pub(crate) fn normalize_sqlite_as_of(conn: &Connection, ts: &str) -> Result<String, MemoryError> {
+    let canonical = normalize_utc_iso(ts)?;
+    let anchored: Option<f64> = conn.query_row("SELECT julianday(?1)", [&canonical], |row| {
+        row.get::<_, Option<f64>>(0)
+    })?;
+    if anchored.is_none() {
+        return Err(MemoryError::InvalidArg(format!(
+            "as_of instant {canonical} is outside the SQLite julianday range"
+        )));
+    }
+    Ok(canonical)
 }
 
 #[inline]
