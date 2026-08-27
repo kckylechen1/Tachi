@@ -190,8 +190,16 @@ pub struct GithubSectionV1 {
     pub implementation_status: ImplementationStatusV1,
     /// Merge SHA of the effective implementation, when evidenced.
     pub merge_sha: Option<String>,
-    /// Any conflicted predicate in the subject row.
+    /// Any conflicted predicate in the subject row (including linked-PR
+    /// rows and lifecycle-family conflicts surfaced by CurrentTruth's
+    /// `ResolveConflict` open action).
     pub conflicted: bool,
+    /// Subject+predicate tokens naming the conflicted rows this section
+    /// knows about, INCLUDING linked-PR rows (which are not carried on
+    /// the issue subject). A conflict blocker must always carry the
+    /// offending object — evidence-free conflict blockers are not
+    /// actionable.
+    pub conflict_refs: Vec<String>,
     /// R6-2 transition debt (owner-ruled semantics).
     pub transition_debt: TransitionDebtV1,
 }

@@ -150,6 +150,14 @@ fn column_token(model: &WorkReadModelV1) -> String {
     {
         return "conflicted".to_string();
     }
+    // R6-2: ANY outstanding transition debt is repair-blocked work — an
+    // unresolved reopen must never render as `landed` even though the
+    // implementation itself is present. The revert axis keeps its more
+    // specific `reverted` column below.
+    let transition_debt_outstanding = model
+        .blockers
+        .iter()
+        .any(|blocker| blocker.kind == super::types::BlockerKindV1::OutstandingTransitionDebt);
     match &model.github {
         SectionState::Available(section) => {
             if !section.posture_fresh {
@@ -157,7 +165,13 @@ fn column_token(model: &WorkReadModelV1) -> String {
             } else {
                 match section.implementation_status {
                     super::types::ImplementationStatusV1::UnderReview => "under_review".to_string(),
-                    super::types::ImplementationStatusV1::Present => "landed".to_string(),
+                    super::types::ImplementationStatusV1::Present => {
+                        if transition_debt_outstanding {
+                            "transition_debt".to_string()
+                        } else {
+                            "landed".to_string()
+                        }
+                    }
                     // An outstanding revert debt is repair-blocked, never
                     // presented as landed work (R6-2 owner ruling).
                     super::types::ImplementationStatusV1::Reverted => "reverted".to_string(),
@@ -182,11 +196,21 @@ fn column_token(model: &WorkReadModelV1) -> String {
 
 fn github_status_token(model: &WorkReadModelV1) -> String {
     match &model.github {
-        SectionState::Available(section) => format!(
-            "{}:{}",
-            section.repo,
-            section.implementation_status.as_str()
-        ),
+        SectionState::Available(section) => {
+            // R6-2: outstanding debt qualifies the token — an unresolved
+            // reopen never renders as an unqualified `present`.
+            let debt = if section.transition_debt.any_outstanding() {
+                "+transition_debt"
+            } else {
+                ""
+            };
+            format!(
+                "{}:{}{}",
+                section.repo,
+                section.implementation_status.as_str(),
+                debt
+            )
+        }
         SectionState::Unavailable { .. } => "unavailable".to_string(),
         SectionState::NotApplicable => "not_applicable".to_string(),
     }

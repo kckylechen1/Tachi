@@ -1011,11 +1011,15 @@ fn project_one(
                     }
                 }
             }
-            // Owner-authorized close: acceptance present + issue currently
-            // open. Data only — the projection never closes anything.
+            // Owner-authorized close: acceptance present + the issue's
+            // RESOLVED lifecycle is open-side. The standalone `IssueOpen`
+            // row stays `Current` as a lineage head long after a newer
+            // close won the family, so the family winner gates the action,
+            // never the row status alone. Data only — the projection never
+            // closes anything.
             if predicate_status(subject, PredicateV1::OwnerAcceptancePresent)
                 == ReductionStatusV1::Current
-                && predicate_status(subject, PredicateV1::IssueOpen) == ReductionStatusV1::Current
+                && issue_lifecycle_open(subject)
                 && !section.conflicted
             {
                 push_action(
@@ -1126,31 +1130,58 @@ fn github_section_for(
             None,
         ),
     };
-    let (implementation_status, merge_sha, conflicted) = match &subject {
-        None => (ImplementationStatusV1::Unknown, None, false),
+    let (implementation_status, merge_sha, conflicted, conflict_refs) = match &subject {
+        None => (ImplementationStatusV1::Unknown, None, false, Vec::new()),
         Some(subject) => {
             // #1696 law consumed here: conflicts block success-shaped
             // projection — including a conflicted row on a LINKED PR
             // subject (its merge/revert evidence is retained contradiction,
-            // never resolution for the issue it implements).
-            let conflicted = subject
+            // never resolution for the issue it implements) AND including
+            // lifecycle-family conflicts: a same-key family tie (e.g.
+            // `issue_open` + `issue_closed` at one immutable revision)
+            // leaves every member row individually `Current`, so the
+            // per-row scan alone cannot see it — CurrentTruth communicates
+            // it as the issue's `ResolveConflict` open action (whose own
+            // blockers name the offending objects).
+            let mut conflict_refs: Vec<String> = subject
                 .predicates
                 .iter()
-                .any(|row| row.status == ReductionStatusV1::Conflicted)
-                || linked_pr_numbers(subject).iter().any(|number| {
-                    pr_subject_in_view(view, *number).is_some_and(|pr| {
+                .filter(|row| row.status == ReductionStatusV1::Conflicted)
+                .map(|row| format!("{}:{}", subject.subject_token, row.predicate.as_str()))
+                .collect();
+            let linked_conflict = linked_pr_numbers(subject).iter().any(|number| {
+                pr_subject_in_view(view, *number).is_some_and(|pr| {
+                    let before = conflict_refs.len();
+                    conflict_refs.extend(
                         pr.predicates
                             .iter()
-                            .any(|row| row.status == ReductionStatusV1::Conflicted)
-                    })
-                });
+                            .filter(|row| row.status == ReductionStatusV1::Conflicted)
+                            .map(|row| format!("{}:{}", pr.subject_token, row.predicate.as_str())),
+                    );
+                    conflict_refs.len() > before
+                })
+            });
+            let family_conflict = subject.open_action.as_ref().is_some_and(|action| {
+                if action.kind == crate::current_truth::types::OpenActionKindV1::ResolveConflict {
+                    conflict_refs.extend(action.blockers.iter().cloned());
+                    true
+                } else {
+                    false
+                }
+            });
+            let conflicted = !conflict_refs.is_empty() || linked_conflict || family_conflict;
             if conflicted {
-                (ImplementationStatusV1::Conflicted, None, true)
+                (
+                    ImplementationStatusV1::Conflicted,
+                    None,
+                    true,
+                    conflict_refs,
+                )
             } else if matches!(transition_debt.revert, DebtStateV1::Outstanding { .. }) {
                 // R6-2 (owner-ruled): a reverted merge is not effective
                 // implementation, and a later steady-state snapshot that
                 // still reports the original PR merged does not repair it.
-                (ImplementationStatusV1::Reverted, None, false)
+                (ImplementationStatusV1::Reverted, None, false, conflict_refs)
             } else {
                 // The mint's `Unit` gap form ("nothing evidenced at this
                 // revision") is Current but NOT evidence — mirror the
@@ -1161,18 +1192,38 @@ fn github_section_for(
                         && predicate_value(subject, PredicateV1::ImplementationPresent)
                             .is_some_and(|token| token != "unit");
                 if evidenced_implementation {
-                    (ImplementationStatusV1::Present, merge_sha, false)
+                    (
+                        ImplementationStatusV1::Present,
+                        merge_sha,
+                        false,
+                        conflict_refs,
+                    )
                 } else if predicate_status(subject, PredicateV1::ImplementationPrLinked)
                     == ReductionStatusV1::Current
                 {
                     if predicate_status(subject, PredicateV1::PrOpen) == ReductionStatusV1::Current
                     {
-                        (ImplementationStatusV1::UnderReview, None, false)
+                        (
+                            ImplementationStatusV1::UnderReview,
+                            None,
+                            false,
+                            conflict_refs,
+                        )
                     } else {
-                        (ImplementationStatusV1::NotLinked, None, false)
+                        (
+                            ImplementationStatusV1::NotLinked,
+                            None,
+                            false,
+                            conflict_refs,
+                        )
                     }
                 } else {
-                    (ImplementationStatusV1::NotLinked, None, false)
+                    (
+                        ImplementationStatusV1::NotLinked,
+                        None,
+                        false,
+                        conflict_refs,
+                    )
                 }
             }
         }
@@ -1184,6 +1235,7 @@ fn github_section_for(
         implementation_status,
         merge_sha,
         conflicted,
+        conflict_refs,
         transition_debt,
     }
 }
@@ -1269,12 +1321,18 @@ fn orphan_pr_github_section_for(view: &CurrentTruthViewV1, number: u64) -> Githu
         },
         reopen: DebtStateV1::None,
     };
-    let conflicted = subject.as_ref().is_some_and(|subject| {
-        subject
-            .predicates
-            .iter()
-            .any(|row| row.status == ReductionStatusV1::Conflicted)
-    });
+    let conflict_refs: Vec<String> = subject
+        .as_ref()
+        .map(|subject| {
+            subject
+                .predicates
+                .iter()
+                .filter(|row| row.status == ReductionStatusV1::Conflicted)
+                .map(|row| format!("{}:{}", subject.subject_token, row.predicate.as_str()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let conflicted = !conflict_refs.is_empty();
     // A reverted implementation is never the effective implementation:
     // no merge SHA is projected while the revert debt is outstanding.
     let implementation_status = if conflicted {
@@ -1293,6 +1351,7 @@ fn orphan_pr_github_section_for(view: &CurrentTruthViewV1, number: u64) -> Githu
         implementation_status,
         merge_sha: None,
         conflicted,
+        conflict_refs,
         transition_debt,
     }
 }
@@ -1447,12 +1506,20 @@ fn transition_debt_for(
 
 /// The newest evidenced merge SHA across the issue's currently linked PRs
 /// (max by evidence head key; `pr_merged` rows live on PR subjects).
+/// Reverted PRs are EXCLUDED: a reverted merge is not the effective
+/// implementation, and the original PR's post-revert merged re-snapshots
+/// are steady-state noise (R6-2) that must not mask the repair PR's SHA
+/// or fabricate head drift.
 fn newest_linked_merge_sha(
     view: &CurrentTruthViewV1,
     subject: &crate::current_truth::consumer::SubjectTruthViewV1,
 ) -> Option<String> {
     linked_pr_numbers(subject)
         .into_iter()
+        .filter(|number| {
+            pr_subject_in_view(view, *number)
+                .is_some_and(|pr| row_heads(pr, PredicateV1::MergeReverted, false).is_empty())
+        })
         .filter_map(|number| {
             let pr = pr_subject_in_view(view, number)?;
             let row = pr.predicates.iter().find(|row| {
@@ -1467,6 +1534,29 @@ fn newest_linked_merge_sha(
         })
         .max_by(|a, b| a.0.cmp(&b.0))
         .map(|(_, sha)| sha)
+}
+
+/// Whether the issue's CURRENT resolved lifecycle is an open-side winner
+/// (`issue_open` or `issue_reopened` holds the family max key over
+/// `issue_closed`). The standalone `IssueOpen` row stays `Current` as a
+/// lineage head long after a newer close won the family, so close
+/// authorization is gated by the family winner, never by row status
+/// alone (#1696 family law, consumed read-only).
+fn issue_lifecycle_open(subject: &crate::current_truth::consumer::SubjectTruthViewV1) -> bool {
+    let open_side = row_heads(subject, PredicateV1::IssueOpen, false)
+        .into_iter()
+        .chain(row_heads(subject, PredicateV1::IssueReopened, false))
+        .map(|(key, _)| key)
+        .max();
+    let closed_side = row_heads(subject, PredicateV1::IssueClosed, false)
+        .into_iter()
+        .map(|(key, _)| key)
+        .max();
+    match (open_side, closed_side) {
+        (Some(open), Some(closed)) => open > closed,
+        (Some(_), None) => true,
+        (None, _) => false,
+    }
 }
 
 /// Linked PR numbers from the issue's CURRENT `implementation_pr_linked`
@@ -1549,18 +1639,19 @@ fn transition_debt_evidence(section: &GithubSectionV1) -> Vec<String> {
 
 /// Conflicted-predicate evidence tokens for the blocker row.
 fn conflict_evidence(section: &GithubSectionV1) -> Vec<String> {
-    section
-        .subject
-        .as_ref()
-        .map(|subject| {
+    let mut refs = section.conflict_refs.clone();
+    if let Some(subject) = &section.subject {
+        refs.extend(
             subject
                 .predicates
                 .iter()
                 .filter(|row| row.status == ReductionStatusV1::Conflicted)
-                .map(|row| row.predicate.as_str().to_string())
-                .collect()
-        })
-        .unwrap_or_default()
+                .map(|row| format!("{}:{}", subject.subject_token, row.predicate.as_str())),
+        );
+    }
+    refs.sort();
+    refs.dedup();
+    refs
 }
 
 /// Head drift between the active claim's pinned expected head and the
@@ -1645,6 +1736,17 @@ fn forwarded_action(
 }
 
 /// Deterministic revision fingerprint over sorted stamp tokens.
+///
+/// Semantics boundary (codex R2 round-4 finding 5, adjudicated): the
+/// fingerprint is WHOLE-SOURCE provenance, not an item-scoped content
+/// hash. Sections consume whole-source snapshots (rebuildability requires
+/// it), so a snapshot whose only change is in private work elsewhere
+/// legitimately moves a public item's fingerprint — the token names the
+/// source revision the projection consumed, nothing about WHICH subject
+/// changed. What a source revision string encodes (counter, content
+/// hash over private rows, ...) is the minting adapter's responsibility
+/// and its disclosure policy, not this projection's: the projection never
+/// decodes or widens it.
 fn revision_fingerprint(stamps: &[SourceStamp]) -> String {
     let mut tokens: Vec<String> = stamps.iter().map(|stamp| stamp.as_token()).collect();
     tokens.sort();

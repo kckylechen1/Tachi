@@ -284,6 +284,27 @@ fn pr_subject(number: u64) -> SubjectRefV1 {
     }
 }
 
+fn owner_acceptance(at: &str, rev: &str) -> AssertionV1 {
+    AssertionV1 {
+        assertion_id: format!("owner-accept-{rev}"),
+        subject: issue_subject(100),
+        predicate: PredicateV1::OwnerAcceptancePresent,
+        value: AssertionValueV1::Unit,
+        issuer: "owner".to_string(),
+        authority_class: AuthorityClassV1::OwnerDecision,
+        source_ref: SourceRefV1 {
+            source: "owner-decision".to_string(),
+            revision: rev.to_string(),
+        },
+        observed_at: at.to_string(),
+        effective_at: at.to_string(),
+        supersedes_assertion_id: None,
+        evidence_refs: vec!["owner-comment-1".to_string()],
+        review_state: ReviewStateV1::Reviewed,
+        visibility: VisibilityClassV1::Public,
+    }
+}
+
 fn ct_view(
     states: &[GithubRepositoryStateV1],
     extra_assertions: &[AssertionV1],
@@ -619,6 +640,92 @@ fn plain_issue_open_refresh_does_not_clear_reopen_debt() {
         ),
         "a plain issue_open refresh must not clear reopen debt"
     );
+    // Debt-aware rendering (codex R2 round-4 finding 3): on this shared
+    // timeline the revert axis also bites, so the column is `reverted`
+    // and the status token still carries the debt marker.
+    assert_eq!(super::views::board_view(model).column, "reverted");
+    assert_eq!(
+        super::views::status_view(model).github,
+        format!("{REPO}:reverted+transition_debt"),
+        "the status token must carry the outstanding debt marker"
+    );
+
+    // Reopen-ONLY debt (implementation present, no revert): the board
+    // must NOT render `landed` and the status token must not be an
+    // unqualified `present`.
+    let reopen_only = repo_state(
+        "r-reopen",
+        "2026-08-26T12:00:00Z",
+        snap_issue(
+            100,
+            SnapshotIssueStateV1::Open,
+            "2026-08-26T12:00:00Z",
+            "rev-reopen-iss",
+        ),
+        vec![snap_pr(
+            200,
+            SnapshotPrStateV1::Merged,
+            Some("mergeabc123"),
+            "2026-08-26T12:00:00Z",
+            "rev-reopen-pr",
+            vec![100],
+        )],
+        vec![observation(
+            SnapshotObservationKindV1::IssueReopened { number: 100 },
+            "2026-08-26T12:30:00Z",
+            "rev-reopen-event",
+        )],
+    );
+    let steady = repo_state(
+        "r-reopen-steady",
+        "2026-08-26T13:00:00Z",
+        snap_issue(
+            100,
+            SnapshotIssueStateV1::Open,
+            "2026-08-26T13:00:00Z",
+            "rev-reopen-steady-iss",
+        ),
+        vec![snap_pr(
+            200,
+            SnapshotPrStateV1::Merged,
+            Some("mergeabc123"),
+            "2026-08-26T13:00:00Z",
+            "rev-reopen-steady-pr",
+            vec![100],
+        )],
+        vec![],
+    );
+    let mut reopen_index = WorkProjectionIndex::new();
+    reopen_index.apply_ok(ct_snapshot(
+        ct_view(&[reopen_only, steady], &[], true),
+        "ct-1",
+        READ_AT,
+    ));
+    let reopen_set = project(&reopen_index, &options());
+    let reopen_model = find(&reopen_set, ISSUE_TOKEN);
+    let reopen_section = github_section(reopen_model);
+    assert!(matches!(
+        &reopen_section.transition_debt.reopen,
+        DebtStateV1::Outstanding { .. }
+    ));
+    assert!(matches!(
+        reopen_section.transition_debt.revert,
+        DebtStateV1::None
+    ));
+    assert_eq!(
+        reopen_section.implementation_status,
+        ImplementationStatusV1::Present
+    );
+    assert_eq!(
+        super::views::board_view(reopen_model).column,
+        "transition_debt",
+        "outstanding reopen debt is repair-blocked, never landed"
+    );
+    assert_eq!(
+        super::views::status_view(reopen_model).github,
+        format!("{REPO}:present+transition_debt"),
+        "the status token must qualify present with the outstanding debt"
+    );
 }
 
 /// Ruling discriminator 3: reopen -> causally later authoritative
@@ -877,6 +984,26 @@ fn conflicted_repair_merge_cannot_clear_revert_debt() {
         ImplementationStatusV1::Conflicted
     );
     assert!(!model.success_shaped);
+    // The conflict blocker names the offending PR/predicate (codex R2
+    // round-4 finding 6): an evidence-free conflict blocker is not
+    // actionable.
+    let conflict_blocker = model
+        .blockers
+        .iter()
+        .find(|b| b.kind == super::types::BlockerKindV1::GithubConflict)
+        .expect("github conflict blocker");
+    assert!(
+        !conflict_blocker.evidence_refs.is_empty(),
+        "linked-PR conflict evidence must name the offending object"
+    );
+    assert!(
+        conflict_blocker
+            .evidence_refs
+            .iter()
+            .any(|r| r.contains("#pull_request:300")),
+        "the conflicted repair PR itself is named in the evidence: {:?}",
+        conflict_blocker.evidence_refs
+    );
 }
 
 /// Hardening (codex R2 round-3 finding 5): when an owner disposition
@@ -1010,6 +1137,176 @@ fn participating_source_snapshots_stamp_the_fingerprint() {
     assert_ne!(
         cleared_model.revision, flipped_model.revision,
         "the dispositions snapshot stamps the items it can change"
+    );
+}
+
+/// Hardening (codex R2 round-4 finding 1): a lifecycle-FAMILY conflict —
+/// `issue_open` and `issue_closed` tying at the same immutable max key —
+/// leaves every member row individually `Current`, so it is invisible to
+/// a per-row scan. CurrentTruth surfaces it as the issue's
+/// `ResolveConflict` open action; the WorkReadModel must consume that as
+/// a conflict (blocker + Conflicted status + never success-shaped).
+#[test]
+fn lifecycle_family_tie_conflict_blocks_success_with_evidence() {
+    // An owner-decision close at EXACTLY the typed open's key (11:00,
+    // rev2-iss): same key, different family member => family tie.
+    let rival_close = AssertionV1 {
+        assertion_id: "rival-close-1".to_string(),
+        subject: issue_subject(100),
+        predicate: PredicateV1::IssueClosed,
+        value: AssertionValueV1::Unit,
+        issuer: "owner".to_string(),
+        authority_class: AuthorityClassV1::OwnerDecision,
+        source_ref: SourceRefV1 {
+            source: "owner-decision".to_string(),
+            revision: "rev2-iss".to_string(),
+        },
+        observed_at: "2026-08-26T11:00:00Z".to_string(),
+        effective_at: "2026-08-26T11:00:00Z".to_string(),
+        supersedes_assertion_id: None,
+        evidence_refs: vec!["owner-comment-9".to_string()],
+        review_state: ReviewStateV1::Reviewed,
+        visibility: VisibilityClassV1::Public,
+    };
+    let view = ct_view(&[state_v2_merged_open()], &[rival_close], true);
+    let mut index = WorkProjectionIndex::new();
+    index.apply_ok(ct_snapshot(view, "ct-1", READ_AT));
+    let set = project(&index, &options());
+
+    let model = find(&set, ISSUE_TOKEN);
+    let section = github_section(model);
+    assert!(
+        section.conflicted,
+        "a lifecycle-family tie must surface as a GitHub conflict"
+    );
+    assert_eq!(
+        section.implementation_status,
+        ImplementationStatusV1::Conflicted
+    );
+    let conflict_blocker = model
+        .blockers
+        .iter()
+        .find(|b| b.kind == super::types::BlockerKindV1::GithubConflict)
+        .expect("github conflict blocker");
+    assert!(
+        !conflict_blocker.evidence_refs.is_empty(),
+        "the family conflict carries its offending-object evidence"
+    );
+    assert!(!model.success_shaped);
+}
+
+/// Hardening (codex R2 round-4 finding 2): an issue that is already
+/// authoritatively closed never receives an `AuthorizedGithubClose`
+/// action, even with owner acceptance present — the standalone
+/// `IssueOpen` row stays `Current` as a lineage head long after the
+/// close won the family, so close authorization follows the FAMILY
+/// winner, not the row status.
+#[test]
+fn closed_issue_with_acceptance_gets_no_authorized_close() {
+    let view = ct_view(
+        &[state_v2_merged_open(), state_v7_issue_closed()],
+        &[owner_acceptance("2026-08-26T16:00:00Z", "accept-1")],
+        true,
+    );
+    let mut index = WorkProjectionIndex::new();
+    index.apply_ok(ct_snapshot(view, "ct-1", READ_AT));
+    let set = project(&index, &options());
+
+    let model = find(&set, ISSUE_TOKEN);
+    assert!(
+        !has_action(model, NextActionKindV1::AuthorizedGithubClose),
+        "the family winner is closed: no credentialed close action even with acceptance"
+    );
+    // Control: the same acceptance on a currently-OPEN issue does
+    // authorize the close (family winner open).
+    let open_view = ct_view(
+        &[state_v2_merged_open()],
+        &[owner_acceptance("2026-08-26T12:00:00Z", "accept-2")],
+        true,
+    );
+    let mut open_index = WorkProjectionIndex::new();
+    open_index.apply_ok(ct_snapshot(open_view, "ct-1", READ_AT));
+    let open_set = project(&open_index, &options());
+    let open_model = find(&open_set, ISSUE_TOKEN);
+    assert!(has_action(
+        open_model,
+        NextActionKindV1::AuthorizedGithubClose
+    ));
+}
+
+/// Hardening (codex R2 round-4 finding 4): after a repair PR clears the
+/// revert debt, the effective merge SHA stays the REPAIR PR's — the
+/// original reverted PR's newer merged re-snapshot (GitHub keeps
+/// reporting it merged) is steady-state noise and must neither mask the
+/// repair SHA nor fabricate head drift.
+#[test]
+fn repaired_state_keeps_repair_merge_sha_behind_newer_original_resnapshot() {
+    // v10: a steady refresh at 17:00 re-snapshots PR 200 as merged (the
+    // newest merged head overall) while the repair PR 300's merge stays
+    // at 16:00.
+    let v10 = repo_state(
+        "r10",
+        "2026-08-26T17:00:00Z",
+        snap_issue(
+            100,
+            SnapshotIssueStateV1::Open,
+            "2026-08-26T17:00:00Z",
+            "rev10-iss",
+        ),
+        vec![
+            snap_pr(
+                200,
+                SnapshotPrStateV1::Merged,
+                Some("mergeabc123"),
+                "2026-08-26T17:00:00Z",
+                "rev10-pr200",
+                vec![100],
+            ),
+            snap_pr(
+                300,
+                SnapshotPrStateV1::Merged,
+                Some("repairstu789"),
+                "2026-08-26T16:00:00Z",
+                "rev8-pr300",
+                vec![100],
+            ),
+        ],
+        vec![],
+    );
+    let view = ct_view(
+        &[
+            state_v2_merged_open(),
+            state_v4_revert_only(),
+            state_v8_repair_pr(),
+            v10,
+        ],
+        &[],
+        true,
+    );
+    let mut index = WorkProjectionIndex::new();
+    index.apply_ok(ct_snapshot(view, "ct-1", READ_AT));
+    let set = project(&index, &options());
+
+    let model = find(&set, ISSUE_TOKEN);
+    let section = github_section(model);
+    assert!(
+        matches!(
+            &section.transition_debt.revert,
+            DebtStateV1::Cleared {
+                by: DebtClearingV1::PostRevertRepairPrMerged,
+                ..
+            }
+        ),
+        "the repair PR merged after the revert clears the debt"
+    );
+    assert_eq!(
+        section.merge_sha.as_deref(),
+        Some("repairstu789"),
+        "the effective merge SHA is the repair PR's, not the reverted original's newer resnapshot"
+    );
+    assert_eq!(
+        section.implementation_status,
+        ImplementationStatusV1::Present
     );
 }
 
