@@ -3227,18 +3227,21 @@ fn assertion_status_supersedes_older_members_of_conflicted_groups() {
 fn duplicate_pr_row_selection_is_permutation_independent() {
     let make_state = |first_is_newer: bool| {
         let mut state = state_v1();
+        // Revision tokens ordered so the MERGED row carries the greater
+        // rank — the retained row must be the content-deterministic max,
+        // not whichever row the adapter happened to list first.
         let older = snapshot_pr(
             200,
             SnapshotPrStateV1::Open,
             "2026-08-26T09:00:00Z",
-            "rev1-pr-older",
+            "rev1-pr-a",
             vec![100],
         );
         let newer = snapshot_pr(
             200,
             SnapshotPrStateV1::Merged,
             "2026-08-26T10:30:00Z",
-            "rev1-pr-newer",
+            "rev1-pr-b",
             vec![100],
         );
         // Both rows linked to the issue; push order varies.
@@ -3266,4 +3269,160 @@ fn duplicate_pr_row_selection_is_permutation_independent() {
         AssertionValueV1::CommitSha("mergeabc123".to_string()),
         "the newer merged duplicate wins deterministically"
     );
+}
+
+// ── Codex R2 round 12 accepted findings ────────────────────────────────────
+
+/// R12-1: duplicate selection is FAIL-CLOSED on visibility — a Private
+/// duplicate row always beats a Public one, so a stale public row can
+/// never expose a private PR through the relation row or the PR assertion.
+#[test]
+fn duplicate_pr_rows_fail_closed_to_private_visibility() {
+    let state = state_v1();
+    let mut public_row = snapshot_pr(
+        200,
+        SnapshotPrStateV1::Merged,
+        "2026-08-26T10:00:00Z",
+        "rev1-pr-b",
+        vec![100],
+    );
+    public_row.visibility = VisibilityClassV1::Public;
+    let mut private_row = public_row.clone();
+    private_row.visibility = VisibilityClassV1::Private;
+    // Both permutations must mint identically.
+    let minted_a = mint_assertions(&{
+        let mut s = state.clone();
+        s.pull_requests = vec![public_row.clone(), private_row.clone()];
+        s
+    });
+    let minted_b = mint_assertions(&{
+        let mut s = state.clone();
+        s.pull_requests = vec![private_row.clone(), public_row.clone()];
+        s
+    });
+    assert_eq!(minted_a, minted_b, "permutation-independent");
+    let link = minted_a
+        .iter()
+        .find(|a| a.predicate == PredicateV1::ImplementationPrLinked)
+        .unwrap();
+    assert_eq!(
+        link.visibility,
+        VisibilityClassV1::Private,
+        "the relation row is fail-closed to the private duplicate"
+    );
+    let pr_state = minted_a
+        .iter()
+        .find(|a| a.predicate == PredicateV1::PrMerged)
+        .unwrap();
+    assert_eq!(
+        pr_state.visibility,
+        VisibilityClassV1::Private,
+        "the PR assertion mints from the retained private row"
+    );
+}
+
+/// R12-2: one PR mints exactly ONE PR-state assertion even with duplicate
+/// snapshot rows — the issue-level and PR-level selections cannot
+/// disagree about the PR's state.
+#[test]
+fn duplicate_pr_rows_mint_exactly_one_pr_assertion() {
+    let mut state = state_v1();
+    state.pull_requests = vec![
+        snapshot_pr(
+            200,
+            SnapshotPrStateV1::Open,
+            "2026-08-26T09:00:00Z",
+            "rev1-pr-a",
+            vec![100],
+        ),
+        snapshot_pr(
+            200,
+            SnapshotPrStateV1::Merged,
+            "2026-08-26T10:30:00Z",
+            "rev1-pr-b",
+            vec![100],
+        ),
+    ];
+    let minted = mint_assertions(&state);
+    let pr_subject = SubjectRefV1 {
+        repo: REPO.to_string(),
+        object: GithubObjectRefV1::PullRequest(200),
+    };
+    let pr_rows: Vec<_> = minted.iter().filter(|a| a.subject == pr_subject).collect();
+    assert_eq!(
+        pr_rows.len(),
+        1,
+        "duplicate PR rows mint exactly one PR-state assertion"
+    );
+    assert_eq!(pr_rows[0].predicate, PredicateV1::PrMerged);
+    // The issue-level presence selection and the PR-level row agree.
+    let present = minted
+        .iter()
+        .find(|a| a.predicate == PredicateV1::ImplementationPresent)
+        .unwrap();
+    assert_eq!(
+        present.value,
+        AssertionValueV1::CommitSha("mergeabc123".to_string())
+    );
+}
+
+/// R12-3: visibility participates in the composite revision identity — a
+/// visibility-only change (same snapshot tokens) mints a NEW revision that
+/// supersedes, never a same-id contradiction that rolls back the batch.
+#[test]
+fn visibility_change_mints_new_composite_revision() {
+    let mut public_state = state_v2();
+    public_state.issues[0].visibility = VisibilityClassV1::Public;
+    let mut private_state = public_state.clone();
+    private_state.issues[0].visibility = VisibilityClassV1::Private;
+
+    // The COMPOSITE-minted rows (ours): a visibility-only change mints a
+    // NEW composite revision that supersedes — no self-contradiction.
+    let composite_rows = |minted: Vec<AssertionV1>| {
+        minted
+            .into_iter()
+            .filter(|a| {
+                matches!(
+                    a.predicate,
+                    PredicateV1::ImplementationPrLinked | PredicateV1::ImplementationPresent
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let store = open_store();
+    store
+        .append_all(&composite_rows(mint_assertions(&public_state)))
+        .expect("append public composite revision");
+    store
+        .append_all(&composite_rows(mint_assertions(&private_state)))
+        .expect("a visibility-only change is a new composite revision, not a contradiction");
+    let reduction = reduce(&store.assertions().unwrap());
+    let link = reduction.get(&issue(100), PredicateV1::ImplementationPrLinked);
+    assert_eq!(link.status, ReductionStatusV1::Current);
+    assert_eq!(
+        link.current_heads.len(),
+        1,
+        "the newer (private) revision supersedes the public one"
+    );
+    assert!(link.current_heads[0]
+        .source_revision
+        .starts_with("composite-"));
+
+    // The ADAPTER-token rows (theirs): a visibility-only flip at an
+    // UNCHANGED snapshot token is the source contradicting its own
+    // immutability claim — the frozen same-revision law rejects it.
+    let state_rows = |minted: Vec<AssertionV1>| {
+        minted
+            .into_iter()
+            .filter(|a| a.predicate == PredicateV1::IssueOpen)
+            .collect::<Vec<_>>()
+    };
+    let store2 = open_store();
+    store2
+        .append_all(&state_rows(mint_assertions(&public_state)))
+        .expect("append public state row");
+    match store2.append_all(&state_rows(mint_assertions(&private_state))) {
+        Err(CurrentTruthStoreError::ContradictsExistingRevision(_)) => {}
+        other => panic!("same snapshot token with changed content must be rejected, got {other:?}"),
+    }
 }
