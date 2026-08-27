@@ -545,7 +545,7 @@ pub fn bootstrap_provider_runtime(server: &MemoryServer) {
                 .collect::<Vec<_>>()
                 .join(", ");
             tracing::warn!(
-                "[provider] {} provider key(s) ready, {} alias(es) skipped ({keys}); see '[provider] skipped alias' warnings for vault_unlock/vault_set remediation",
+                "[provider] {} provider key(s) ready, {} alias(es) skipped ({keys}); see '[provider] skipped alias' warnings for per-alias remediation",
                 report.loaded,
                 report.skipped_aliases.len()
             );
@@ -1498,6 +1498,9 @@ mod tests {
             "{warning}"
         );
         assert!(!warning.contains("vault:"));
-        assert!(warning.contains("vault_set"), "{warning}");
+        assert!(
+            !warning.contains("vault_set") && !warning.contains("vault_unlock"),
+            "listed integrity is not a missing/locked secret: {warning}"
+        );
     }
 }
