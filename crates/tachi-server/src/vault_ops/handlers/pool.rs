@@ -6,6 +6,7 @@ pub(crate) async fn handle_vault_setup_rotation(
 ) -> Result<String, String> {
     let rotation_prefix = params.prefix.clone();
     let result = (|| {
+        memcore::reject_api_key_type_for_lane_config(&params.prefix, memcore::SECRET_TYPE_API_KEY)?;
         authorize_vault_pool_mutation(server, &params.prefix, params.agent_id.as_deref())
             .map_err(|e| e.to_string())?;
 
@@ -90,6 +91,7 @@ pub(crate) async fn handle_vault_set_api_key_pool(
     let logical_name = params.prefix.clone();
     let result = (|| {
         crypto::validate_secret_name(&params.prefix)?;
+        memcore::reject_api_key_type_for_lane_config(&params.prefix, memcore::SECRET_TYPE_API_KEY)?;
         if !crate::utils::is_shell_env_name(&params.prefix) {
             return Err(format!(
                 "API key pool prefix '{}' must be a shell env name such as OPENAI_API_KEY",

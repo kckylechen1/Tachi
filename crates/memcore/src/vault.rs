@@ -58,10 +58,17 @@ pub fn normalize_secret_type(value: &str) -> &'static str {
     }
 }
 
-/// Lane URLs, models, and flags. These are not credentials: they must not
-/// default to `api_key` and must not enter API-key pools.
-pub fn is_lane_config_secret_name(name: &str) -> bool {
+fn lane_config_stem(name: &str) -> &str {
     let name = name.trim();
+    if let Some((stem, suffix)) = name.rsplit_once('_') {
+        if !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_digit()) {
+            return stem;
+        }
+    }
+    name
+}
+
+fn is_lane_config_stem(name: &str) -> bool {
     name.starts_with("ENABLE_")
         || name.ends_with("_BASE_URL")
         || name.ends_with("_URL")
@@ -69,6 +76,14 @@ pub fn is_lane_config_secret_name(name: &str) -> bool {
         || name.ends_with("_BACKEND")
         || name.ends_with("_TIMEOUT")
         || name.ends_with("_ENABLED")
+}
+
+/// Lane URLs, models, and flags. These are not credentials: they must not
+/// default to `api_key` and must not enter API-key pools. Rotation members
+/// (`EXTRACT_BASE_URL_1`) follow the prefix.
+pub fn is_lane_config_secret_name(name: &str) -> bool {
+    let name = name.trim();
+    is_lane_config_stem(name) || is_lane_config_stem(lane_config_stem(name))
 }
 
 /// Infer a vault `secret_type` from an env-style name when the caller omits
@@ -330,6 +345,8 @@ mod tests {
             infer_vault_secret_type("FOUNDRY_DISTILL_BACKEND"),
             SECRET_TYPE_CONFIG
         );
+        assert!(is_lane_config_secret_name("EXTRACT_BASE_URL_1"));
+        assert!(!is_lane_config_secret_name("DEEPSEEK_API_KEY_1"));
         assert!(reject_api_key_type_for_lane_config("EXTRACT_BASE_URL", "api_key").is_err());
         assert!(reject_api_key_type_for_lane_config("DEEPSEEK_API_KEY", "api_key").is_ok());
         assert_eq!(

@@ -274,9 +274,6 @@ fn load_unlocked_vault_secrets_with_key(
         if !include_entry(&entry) {
             continue;
         }
-        if memcore::is_lane_config_secret_name(&entry.name) {
-            continue;
-        }
         if entry
             .allowed_agents
             .as_ref()

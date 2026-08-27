@@ -8,17 +8,15 @@ pub(crate) async fn handle_vault_list(
         return Err("Vault not initialized. Call vault_init first.".into());
     }
 
-    let entries = if let Some(ref secret_type) = params.secret_type {
-        let secret_type = normalize_secret_type(secret_type);
-        server.with_global_store_read(|store| {
-            store
-                .vault_list_entries_by_type(secret_type)
-                .map_err(|e| e.to_string())
-        })
-    } else {
-        server.with_global_store_read(|store| store.vault_list_entries().map_err(|e| e.to_string()))
+    let mut entries = server
+        .with_global_store_read(|store| store.vault_list_entries().map_err(|e| e.to_string()))
+        .map_err(|e| format!("Failed to list secrets: {e}"))?;
+    if let Some(ref secret_type) = params.secret_type {
+        let want = normalize_secret_type(secret_type);
+        entries.retain(|entry| {
+            memcore::effective_vault_secret_type(&entry.name, &entry.secret_type) == want
+        });
     }
-    .map_err(|e| format!("Failed to list secrets: {e}"))?;
 
     let payload: Vec<serde_json::Value> = entries
         .into_iter()
