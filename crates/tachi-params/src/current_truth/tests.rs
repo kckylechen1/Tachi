@@ -1400,20 +1400,22 @@ fn two_merged_linked_prs_presence_is_order_independent() {
         pull_requests: vec![],
         observations: vec![],
     };
-    let newer_pr = snapshot_pr(
+    let mut newer_pr = snapshot_pr(
         300,
         SnapshotPrStateV1::Merged,
         "2026-08-26T12:00:00Z",
         "rev1-pr300",
         vec![100],
     );
-    let older_pr = snapshot_pr(
+    newer_pr.merge_commit_sha = Some("mergeAAA300".to_string());
+    let mut older_pr = snapshot_pr(
         200,
         SnapshotPrStateV1::Merged,
         "2026-08-26T11:00:00Z",
         "rev1-pr200",
         vec![100],
     );
+    older_pr.merge_commit_sha = Some("mergeBBB200".to_string());
 
     let mut order_a = base.clone();
     order_a.pull_requests = vec![older_pr.clone(), newer_pr.clone()];
@@ -1428,10 +1430,12 @@ fn two_merged_linked_prs_presence_is_order_independent() {
 
     let reduction = reduce(&minted_a);
     let presence = reduction.get(&issue(100), PredicateV1::ImplementationPresent);
-    // The newest merge (PR 300 at 12:00) is the evidenced presence SHA.
+    // The newest merge (PR 300 at 12:00, its own SHA) is the evidenced
+    // presence — first-match on an unordered iteration would pick the
+    // wrong one.
     assert_eq!(
         presence.values.first(),
-        Some(&AssertionValueV1::CommitSha("mergeabc123".to_string()))
+        Some(&AssertionValueV1::CommitSha("mergeAAA300".to_string()))
     );
     assert!(reduction.implementation_present(&issue(100)));
 }
@@ -1542,4 +1546,264 @@ fn pr_only_change_moves_composite_revision_not_collision() {
     }
     let reduction = reduce(&store.assertions().unwrap());
     assert!(reduction.implementation_present(&issue(100)));
+}
+
+// ── Review round 3 fixes ───────────────────────────────────────────────────
+
+/// Two DIFFERENT assertions sharing one id but belonging to DIFFERENT
+/// subjects conflict BOTH groups, regardless of input order.
+#[test]
+fn same_id_different_subjects_conflicts_both_groups() {
+    let base = mint_assertions(&state_v1());
+    let open_a = base
+        .iter()
+        .find(|a| a.predicate == PredicateV1::IssueOpen)
+        .unwrap()
+        .clone();
+    let mut open_b = open_a.clone();
+    // Same id, different subject and content.
+    open_b.subject = issue(101);
+    open_b.evidence_refs = vec!["smuggled".to_string()];
+
+    let forward = reduce(&[open_a.clone(), open_b.clone()]);
+    let backward = reduce(&[open_b, open_a]);
+    for reduction in [&forward, &backward] {
+        assert_eq!(
+            reduction.get(&issue(100), PredicateV1::IssueOpen).status,
+            ReductionStatusV1::Conflicted
+        );
+        assert_eq!(
+            reduction.get(&issue(101), PredicateV1::IssueOpen).status,
+            ReductionStatusV1::Conflicted
+        );
+    }
+}
+
+/// A public issue linked to a private PR: the relation rows are private, so
+/// the unauthorized view exposes neither the private PR's identity nor its
+/// merge SHA through the public issue.
+#[test]
+fn public_issue_private_pr_relation_hidden() {
+    let mut state = state_v2();
+    state.pull_requests[0].visibility = VisibilityClassV1::Private;
+    let store = open_store();
+    store.append_all(&mint_assertions(&state)).expect("append");
+    store
+        .record_refresh(
+            REPO,
+            true,
+            Some("r2"),
+            Some("2026-08-26T11:00:00Z"),
+            "2026-08-26T11:00:05Z",
+            None,
+        )
+        .expect("posture");
+    let unauthorized = consumer::read_view(
+        &store,
+        REPO,
+        CallerAuthorizationV1 {
+            sees_private: false,
+        },
+    )
+    .expect("view");
+    let serialized = serde_json::to_string(&unauthorized).unwrap();
+    assert!(
+        !serialized.contains("pull_request:200") && !serialized.contains("mergeabc123"),
+        "private PR identity/SHA must not leak through the public issue: {serialized}"
+    );
+    let authorized =
+        consumer::read_view(&store, REPO, CallerAuthorizationV1 { sees_private: true })
+            .expect("authorized view");
+    let authorized_json = serde_json::to_string(&authorized).unwrap();
+    assert!(authorized_json.contains("pull_request:200"));
+}
+
+/// A lifecycle tie strictly older than the family's newest fact is
+/// superseded history: the newer fact resolves the family.
+#[test]
+fn lifecycle_tie_superseded_by_newer_fact_resolves() {
+    let tied_open = AssertionV1 {
+        assertion_id: "r3-tie-open".to_string(),
+        subject: issue(100),
+        predicate: PredicateV1::IssueOpen,
+        value: AssertionValueV1::Unit,
+        issuer: "adapter".to_string(),
+        authority_class: AuthorityClassV1::GitHubTypedObject,
+        source_ref: SourceRefV1 {
+            source: "github-snapshot-adapter".to_string(),
+            revision: "rev-t1".to_string(),
+        },
+        observed_at: "2026-08-26T10:00:00Z".to_string(),
+        effective_at: "2026-08-26T10:00:00Z".to_string(),
+        supersedes_assertion_id: None,
+        evidence_refs: vec![],
+        review_state: ReviewStateV1::Observed,
+        visibility: VisibilityClassV1::Public,
+    };
+    let mut tied_closed = tied_open.clone();
+    tied_closed.assertion_id = "r3-tie-closed".to_string();
+    tied_closed.predicate = PredicateV1::IssueClosed;
+    tied_closed.issuer = "owner-tool".to_string();
+    tied_closed.authority_class = AuthorityClassV1::OwnerDecision;
+
+    let mut newer_reopened = tied_open.clone();
+    newer_reopened.assertion_id = "r3-newer-reopened".to_string();
+    newer_reopened.predicate = PredicateV1::IssueReopened;
+    newer_reopened.source_ref.revision = "rev-t2".to_string();
+    newer_reopened.observed_at = "2026-08-26T12:00:00Z".to_string();
+    newer_reopened.effective_at = "2026-08-26T12:00:00Z".to_string();
+
+    let reduction = reduce(&[tied_open, tied_closed, newer_reopened]);
+    assert_eq!(
+        reduction.issue_lifecycle(&issue(100)),
+        IssueLifecycleView::Reopened,
+        "a tie at t1 is superseded history once a strictly newer fact exists"
+    );
+    // The pure tie (no newer fact) still conflicts.
+    let reduction = reduce(&store_assertions_pair());
+    assert_eq!(
+        reduction.issue_lifecycle(&issue(100)),
+        IssueLifecycleView::Conflicted
+    );
+}
+
+fn store_assertions_pair() -> Vec<AssertionV1> {
+    let tied_open = AssertionV1 {
+        assertion_id: "r3-tie-open".to_string(),
+        subject: issue(100),
+        predicate: PredicateV1::IssueOpen,
+        value: AssertionValueV1::Unit,
+        issuer: "adapter".to_string(),
+        authority_class: AuthorityClassV1::GitHubTypedObject,
+        source_ref: SourceRefV1 {
+            source: "github-snapshot-adapter".to_string(),
+            revision: "rev-t1".to_string(),
+        },
+        observed_at: "2026-08-26T10:00:00Z".to_string(),
+        effective_at: "2026-08-26T10:00:00Z".to_string(),
+        supersedes_assertion_id: None,
+        evidence_refs: vec![],
+        review_state: ReviewStateV1::Observed,
+        visibility: VisibilityClassV1::Public,
+    };
+    let mut tied_closed = tied_open.clone();
+    tied_closed.assertion_id = "r3-tie-closed".to_string();
+    tied_closed.predicate = PredicateV1::IssueClosed;
+    tied_closed.issuer = "owner-tool".to_string();
+    tied_closed.authority_class = AuthorityClassV1::OwnerDecision;
+    vec![tied_open, tied_closed]
+}
+
+/// An EMPTY merge SHA string is no evidence: same gap posture as a missing
+/// SHA.
+#[test]
+fn empty_merge_sha_is_evidence_gap() {
+    let mut state = state_v2();
+    state.pull_requests[0].merge_commit_sha = Some(String::new());
+    let store = open_store();
+    store.append_all(&mint_assertions(&state)).expect("append");
+    let reduction = reduce(&store.assertions().unwrap());
+    let merged = reduction.get(&pr(200), PredicateV1::PrMerged);
+    assert_eq!(merged.values.first(), Some(&AssertionValueV1::Unit));
+    assert!(!reduction.implementation_present(&issue(100)));
+}
+
+/// The legacy single-ref form and the one-element set form assert the same
+/// fact across lineages — agreement, not conflict.
+#[test]
+fn objectref_and_set_form_agree_across_lineages() {
+    let set_form = AssertionV1 {
+        assertion_id: "set-form".to_string(),
+        subject: issue(100),
+        predicate: PredicateV1::ImplementationPrLinked,
+        value: AssertionValueV1::ObjectRefs(vec![GithubObjectRefV1::PullRequest(200)]),
+        issuer: "github-refresh-v1".to_string(),
+        authority_class: AuthorityClassV1::GitHubTypedObject,
+        source_ref: SourceRefV1 {
+            source: "github-snapshot-adapter".to_string(),
+            revision: "rev1-iss".to_string(),
+        },
+        observed_at: "2026-08-26T10:00:00Z".to_string(),
+        effective_at: "2026-08-26T10:00:00Z".to_string(),
+        supersedes_assertion_id: None,
+        evidence_refs: vec![],
+        review_state: ReviewStateV1::Observed,
+        visibility: VisibilityClassV1::Public,
+    };
+    let mut single_form = set_form.clone();
+    single_form.assertion_id = "single-form".to_string();
+    single_form.value = AssertionValueV1::ObjectRef(GithubObjectRefV1::PullRequest(200));
+    single_form.issuer = "legacy-adapter".to_string();
+
+    let reduction = reduce(&[set_form, single_form]);
+    let linked = reduction.get(&issue(100), PredicateV1::ImplementationPrLinked);
+    assert_eq!(
+        linked.status,
+        ReductionStatusV1::Current,
+        "semantically identical cross-lineage facts agree"
+    );
+    assert_eq!(linked.current_heads.len(), 2);
+}
+
+/// The generation digest binds id AND content — same ids with different
+/// content are different generations.
+#[test]
+fn generation_digest_is_content_sensitive() {
+    let base = mint_assertions(&state_v1());
+    let mut tampered = base.clone();
+    if let Some(assertion) = tampered
+        .iter_mut()
+        .find(|a| a.predicate == PredicateV1::IssueOpen)
+    {
+        assertion.evidence_refs = vec!["different".to_string()];
+    }
+    assert_ne!(
+        generation_digest(&base),
+        generation_digest(&tampered),
+        "same ids with different content must be different generations"
+    );
+}
+
+/// The refresh-posture staleness guard holds across two independent
+/// connections on the same database file.
+#[test]
+fn two_connection_refresh_guard_holds() {
+    let dir = std::env::temp_dir().join(format!("ct-refresh-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("store.db");
+    let _ = std::fs::remove_file(&path);
+    let path = path.to_str().expect("path").to_string();
+
+    let writer_a = CurrentTruthSqliteStore::open(&path).expect("open A");
+    writer_a
+        .record_refresh(
+            REPO,
+            false,
+            None,
+            None,
+            "2026-08-26T12:00:00Z",
+            Some("outage"),
+        )
+        .expect("record outage on A");
+
+    let writer_b = CurrentTruthSqliteStore::open(&path).expect("open B");
+    match writer_b.record_refresh(
+        REPO,
+        true,
+        Some("r1"),
+        Some("2026-08-26T10:00:00Z"),
+        "2026-08-26T11:00:00Z",
+        None,
+    ) {
+        Err(CurrentTruthStoreError::StaleRefreshRecord { .. }) => {}
+        other => panic!("expected StaleRefreshRecord across connections, got {other:?}"),
+    }
+    // The newer-outage posture survived the stale write attempt.
+    let posture = writer_a
+        .refresh_posture_row(REPO)
+        .unwrap()
+        .expect("posture");
+    assert!(!posture.fresh);
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_dir(&dir);
 }

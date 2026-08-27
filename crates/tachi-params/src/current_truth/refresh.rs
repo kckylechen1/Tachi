@@ -2,10 +2,12 @@
 //! through the authoritative adapter, records source revision/evidence, and
 //! reduces without mutating GitHub.
 //!
-//! The adapter trait is the seam: `tachi-github-runtime`'s corpus fixtures
-//! implement it for tests; a future live adapter wraps the bounded `gh`
-//! read path. Refresh only **reads** — the mutation refusal belongs to the
-//! adapter, mirroring `github_corpus_ops::reader::refuse_github_mutation`.
+//! The adapter trait is the seam. Today the only implementations are
+//! **test fakes** (the in-module `FakeGithubAdapter`); the live adapter
+//! over the bounded `gh` read path is a follow-up integration slice, as is
+//! the caller-admission surface (see `store.rs`'s trust-boundary note).
+//! Refresh only **reads** — the mutation refusal belongs to the adapter,
+//! mirroring `github_corpus_ops::reader::refuse_github_mutation`.
 //!
 //! Offline/denied/stale refresh yields [`RefreshOutcomeV1::Unavailable`] —
 //! no assertions are minted, and the projection must surface
@@ -209,6 +211,14 @@ pub fn mint_assertions(state: &GithubRepositoryStateV1) -> Vec<AssertionV1> {
             .collect();
         let composite_revision = composite_issue_revision(issue, &linked_prs_snapshot);
         let composite_observed_at = composite_observed_at(issue, &linked_prs_snapshot);
+        // Fail-closed visibility for relation rows: the row may not be more
+        // visible than ANY object it names — a public issue linked to a
+        // private PR mints a PRIVATE link row, so the private PR's identity
+        // and merge SHA can never surface through the public issue.
+        let relation_visibility = most_restrictive_visibility(
+            issue.visibility,
+            linked_prs_snapshot.iter().map(|pr| pr.visibility),
+        );
         out.push(base_assertion(
             &subject,
             PredicateV1::ImplementationPrLinked,
@@ -216,7 +226,7 @@ pub fn mint_assertions(state: &GithubRepositoryStateV1) -> Vec<AssertionV1> {
             &source.clone(),
             &composite_revision,
             &composite_observed_at,
-            issue.visibility,
+            relation_visibility,
         ));
 
         // Implementation presence, minted for EVERY issue at every revision
@@ -231,13 +241,17 @@ pub fn mint_assertions(state: &GithubRepositoryStateV1) -> Vec<AssertionV1> {
             .iter()
             .filter(|pr| matches!(pr.state, SnapshotPrStateV1::Merged))
             .filter_map(|pr| {
-                pr.merge_commit_sha.clone().map(|sha| {
-                    (
-                        super::types::ordering_instant(&pr.updated_at),
-                        pr.number,
-                        sha,
-                    )
-                })
+                // An empty SHA string is no evidence at all.
+                pr.merge_commit_sha
+                    .clone()
+                    .filter(|sha| !sha.is_empty())
+                    .map(|sha| {
+                        (
+                            super::types::ordering_instant(&pr.updated_at),
+                            pr.number,
+                            sha,
+                        )
+                    })
             })
             .max()
             .map(|(_, _, sha)| AssertionValueV1::CommitSha(sha));
@@ -256,14 +270,16 @@ pub fn mint_assertions(state: &GithubRepositoryStateV1) -> Vec<AssertionV1> {
         let subject = state.pr_subject(pr.number);
         let (predicate, value) = match pr.state {
             SnapshotPrStateV1::Open => (PredicateV1::PrOpen, AssertionValueV1::Unit),
-            SnapshotPrStateV1::Merged => match &pr.merge_commit_sha {
-                Some(sha) => (
+            SnapshotPrStateV1::Merged => match pr.merge_commit_sha.as_deref() {
+                // An empty SHA string is no evidence at all — same gap
+                // posture as a missing SHA.
+                Some(sha) if !sha.is_empty() => (
                     PredicateV1::PrMerged,
-                    AssertionValueV1::CommitSha(sha.clone()),
+                    AssertionValueV1::CommitSha(sha.to_string()),
                 ),
                 // Merged, merge SHA not evidenced: the predicate holds but
                 // the evidence gap stays visible in the value shape.
-                None => (PredicateV1::PrMerged, AssertionValueV1::Unit),
+                _ => (PredicateV1::PrMerged, AssertionValueV1::Unit),
             },
             SnapshotPrStateV1::ClosedUnmerged => {
                 (PredicateV1::PrClosedUnmerged, AssertionValueV1::Unit)
@@ -336,6 +352,23 @@ pub fn mint_assertions(state: &GithubRepositoryStateV1) -> Vec<AssertionV1> {
         );
     }
     out
+}
+
+/// The most restrictive visibility among a base and any number of named
+/// objects: `Private` wins if ANY input is private. Relation rows may not
+/// be more visible than the objects their values name.
+fn most_restrictive_visibility(
+    base: VisibilityClassV1,
+    others: impl Iterator<Item = VisibilityClassV1>,
+) -> VisibilityClassV1 {
+    let mut others = others;
+    if base == VisibilityClassV1::Private
+        || others.any(|visibility| visibility == VisibilityClassV1::Private)
+    {
+        VisibilityClassV1::Private
+    } else {
+        VisibilityClassV1::Public
+    }
 }
 
 /// The composite revision token for issue-owned relation assertions: a

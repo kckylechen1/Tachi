@@ -132,31 +132,32 @@ impl ReductionV1 {
 pub fn reduce(assertions: &[AssertionV1]) -> ReductionV1 {
     // Deduplicate by assertion id so a replayed read cannot double-count.
     // Two DIFFERENT assertions claiming the SAME immutable id is an identity
-    // contradiction: the keeper is chosen deterministically (min content
-    // serialization — never arrival order) and the affected (subject,
-    // predicate) is forced `Conflicted` below.
-    let mut by_id: BTreeMap<&str, &AssertionV1> = BTreeMap::new();
+    // contradiction: EVERY colliding row is retained (each in its own
+    // (subject, predicate) group) and every affected group is forced
+    // `Conflicted` below — nothing is dropped, so the outcome cannot depend
+    // on which group the colliding rows belong to or on arrival order.
+    let mut by_id: BTreeMap<&str, Vec<&AssertionV1>> = BTreeMap::new();
     let mut collided: BTreeMap<(String, PredicateV1), ()> = BTreeMap::new();
     for assertion in assertions {
-        match by_id.get(assertion.assertion_id.as_str()) {
-            Some(existing) if existing != &assertion => {
-                collided.insert((assertion.subject.as_token(), assertion.predicate), ());
-                // Deterministically keep the smaller content — the group is
-                // conflicted either way, so the choice only has to be
-                // order-independent.
-                if content_serialization(assertion) < content_serialization(existing) {
-                    by_id.insert(assertion.assertion_id.as_str(), assertion);
-                }
-            }
-            _ => {
-                by_id.insert(assertion.assertion_id.as_str(), assertion);
+        let bucket = by_id.entry(assertion.assertion_id.as_str()).or_default();
+        if bucket.contains(&assertion) {
+            continue; // byte-identical replay: true duplicate, collapse
+        }
+        if !bucket.is_empty() {
+            // Mark every group involved in this id contradiction.
+            collided.insert((assertion.subject.as_token(), assertion.predicate), ());
+            for existing in bucket.iter() {
+                collided.insert((existing.subject.as_token(), existing.predicate), ());
             }
         }
+        bucket.push(assertion);
     }
 
     // 1. Admission gate.
-    let admitted: Vec<&&AssertionV1> = by_id
+    let admitted: Vec<&AssertionV1> = by_id
         .values()
+        .flatten()
+        .copied()
         .filter(|a| a.review_state.is_admitted())
         .filter(|a| a.authority_class.may_establish(a.predicate))
         .collect();
@@ -168,7 +169,6 @@ pub fn reduce(assertions: &[AssertionV1]) -> ReductionV1 {
     type LineageMap<'a> = BTreeMap<LineageKey, Vec<&'a AssertionV1>>;
     let mut grouped: BTreeMap<(String, PredicateV1), (SubjectRefV1, LineageMap<'_>)> =
         BTreeMap::new();
-    let admitted: Vec<&AssertionV1> = admitted.into_iter().copied().collect();
     for assertion in &admitted {
         grouped
             .entry((assertion.subject.as_token(), assertion.predicate))
@@ -250,12 +250,6 @@ pub fn reduce(assertions: &[AssertionV1]) -> ReductionV1 {
 
 fn sort_heads(heads: &mut [EvidenceHeadV1]) {
     heads.sort_by_key(super::types::head_order_key);
-}
-
-/// Deterministic content serialization for the dedup-collision tiebreak —
-/// the same bytes for the same assertion regardless of arrival.
-fn content_serialization(assertion: &AssertionV1) -> String {
-    serde_json::to_string(assertion).unwrap_or_default()
 }
 
 /// Semantic value agreement for cross-assertion comparison: the legacy
@@ -479,51 +473,63 @@ fn evidence_head_key(head: &EvidenceHeadV1) -> (chrono::DateTime<chrono::Utc>, S
     head_order_key(head)
 }
 
-/// Resolve a mutually-exclusive predicate family to the predicate owning
-/// its **newest** current head, flagging conflicts (a `Conflicted` member,
-/// or two members tying at the same observed instant AND source revision —
-/// i.e. "open and closed at the identical immutable revision"). Newest =
-/// max by instant and revision across ALL current heads of every member —
-/// `current_heads` are sorted ascending, so `.first()` would examine the
-/// oldest corroborating head instead. The tie comparison deliberately
-/// EXCLUDES `assertion_id`: two different predicates tying on (instant,
-/// revision) is a genuine same-revision contradiction that must surface as
-/// `Conflicted`, never resolve by lexicographic id accident.
+/// Resolve a mutually-exclusive predicate family by its **newest head
+/// key** `(UTC instant, source revision)` — the id is deliberately excluded.
+///
+/// The law is max-key based, so enumeration order is irrelevant:
+///
+/// 1. Compute the maximum `(instant, revision)` over the current heads of
+///    every member (`Conflicted` members contribute their lineage heads).
+/// 2. The family is `Conflicted` iff **two or more distinct members** have
+///    a head at that maximum key — a genuine same-immutable-revision
+///    contradiction about the CURRENT state. A tie strictly older than the
+///    family's newest fact is superseded history: it does not block the
+///    newer resolution (a newer fact in the same family is exactly how
+///    contradictions get superseded, matching within-predicate law).
+/// 3. Otherwise the single member owning the max key is the lifecycle.
 fn resolve_family(
     reduction: &ReductionV1,
     subject: &SubjectRefV1,
     family: &[PredicateV1],
 ) -> ResolvedFamily {
     type TieKey = (chrono::DateTime<chrono::Utc>, String);
-    type FullKey = (chrono::DateTime<chrono::Utc>, String, String);
-    let mut conflicted = false;
-    let mut best: Option<(FullKey, PredicateV1)> = None;
+    // (max tie key, member predicates owning a head at that key)
+    let mut winner: Option<(TieKey, Vec<PredicateV1>)> = None;
     for predicate in family {
         let reduced = reduction.get(subject, *predicate);
         match reduced.status {
-            ReductionStatusV1::Current => {
+            ReductionStatusV1::Current | ReductionStatusV1::Conflicted => {
                 for head in &reduced.current_heads {
                     let key = head_order_key(head);
                     let tie: TieKey = (key.0, key.1.clone());
-                    match &best {
-                        None => best = Some((key, *predicate)),
-                        Some((best_key, best_predicate)) => {
-                            let best_tie: TieKey = (best_key.0, best_key.1.clone());
-                            if tie > best_tie {
-                                best = Some((key, *predicate));
-                            } else if tie == best_tie && predicate != best_predicate {
-                                conflicted = true;
+                    match &mut winner {
+                        None => winner = Some((tie, vec![*predicate])),
+                        Some((best_tie, owners)) => {
+                            if tie > *best_tie {
+                                *best_tie = tie;
+                                owners.clear();
+                                owners.push(*predicate);
+                            } else if tie == *best_tie && !owners.contains(predicate) {
+                                owners.push(*predicate);
                             }
                         }
                     }
                 }
             }
-            ReductionStatusV1::Conflicted => conflicted = true,
             ReductionStatusV1::Superseded | ReductionStatusV1::Unknown => {}
         }
     }
-    ResolvedFamily {
-        newest: best.map(|(_, predicate)| predicate),
-        conflicted,
+    match winner {
+        None => ResolvedFamily {
+            newest: None,
+            conflicted: false,
+        },
+        Some((_, owners)) => {
+            let conflicted = owners.len() > 1;
+            ResolvedFamily {
+                newest: owners.first().copied(),
+                conflicted,
+            }
+        }
     }
 }
