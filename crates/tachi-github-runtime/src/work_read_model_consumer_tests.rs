@@ -70,7 +70,12 @@ fn cross_crate_work_read_model_keeps_r6_2_debt_behind_steady_state() {
         repo: REPO.to_string(),
         refresh_revision: "r1".to_string(),
         refreshed_at: "2026-08-26T09:00:00Z".to_string(),
-        issues: vec![issue(42, SnapshotIssueStateV1::Open, "2026-08-26T09:00:00Z", "iss42-a1")],
+        issues: vec![issue(
+            42,
+            SnapshotIssueStateV1::Open,
+            "2026-08-26T09:00:00Z",
+            "iss42-a1",
+        )],
         pull_requests: vec![pr(
             7,
             SnapshotPrStateV1::Merged,
@@ -85,7 +90,12 @@ fn cross_crate_work_read_model_keeps_r6_2_debt_behind_steady_state() {
         repo: REPO.to_string(),
         refresh_revision: "r2".to_string(),
         refreshed_at: "2026-08-26T10:00:00Z".to_string(),
-        issues: vec![issue(42, SnapshotIssueStateV1::Open, "2026-08-26T10:00:00Z", "iss42-a2")],
+        issues: vec![issue(
+            42,
+            SnapshotIssueStateV1::Open,
+            "2026-08-26T10:00:00Z",
+            "iss42-a2",
+        )],
         pull_requests: vec![pr(
             7,
             SnapshotPrStateV1::Merged,
@@ -108,7 +118,12 @@ fn cross_crate_work_read_model_keeps_r6_2_debt_behind_steady_state() {
         repo: REPO.to_string(),
         refresh_revision: "r3".to_string(),
         refreshed_at: "2026-08-26T11:00:00Z".to_string(),
-        issues: vec![issue(42, SnapshotIssueStateV1::Open, "2026-08-26T11:00:00Z", "iss42-a3")],
+        issues: vec![issue(
+            42,
+            SnapshotIssueStateV1::Open,
+            "2026-08-26T11:00:00Z",
+            "iss42-a3",
+        )],
         pull_requests: vec![pr(
             7,
             SnapshotPrStateV1::Merged,
@@ -134,8 +149,14 @@ fn cross_crate_work_read_model_keeps_r6_2_debt_behind_steady_state() {
             None,
         )
         .expect("posture");
-    let view = consumer::read_view(&store, REPO, CallerAuthorizationV1 { sees_private: false })
-        .expect("consumer view");
+    let view = consumer::read_view(
+        &store,
+        REPO,
+        CallerAuthorizationV1 {
+            sees_private: false,
+        },
+    )
+    .expect("consumer view");
 
     let snapshots = vec![
         SourceSnapshot::new(
@@ -211,15 +232,27 @@ fn cross_crate_work_read_model_keeps_r6_2_debt_behind_steady_state() {
         .expect("work item");
 
     assert!(
-        model.next_actions.iter().any(|a| a.kind == NextActionKindV1::RepairRevertOrReopen),
+        model
+            .next_actions
+            .iter()
+            .any(|a| a.kind == NextActionKindV1::RepairRevertOrReopen),
         "the ruled transition debt surfaces as a repair action across the crate boundary"
     );
-    assert!(model.blockers.iter().any(|b| b.kind == BlockerKindV1::OutstandingTransitionDebt));
+    assert!(model
+        .blockers
+        .iter()
+        .any(|b| b.kind == BlockerKindV1::OutstandingTransitionDebt));
     assert!(!model.success_shaped);
     let github = match &model.github {
         tachi_params::work_read_model::SectionState::Available(section) => section,
         other => panic!("github section: {other:?}"),
     };
-    assert!(matches!(&github.transition_debt.revert, DebtStateV1::Outstanding { .. }));
-    assert_eq!(github.implementation_status, ImplementationStatusV1::Reverted);
+    assert!(matches!(
+        &github.transition_debt.revert,
+        DebtStateV1::Outstanding { .. }
+    ));
+    assert_eq!(
+        github.implementation_status,
+        ImplementationStatusV1::Reverted
+    );
 }
