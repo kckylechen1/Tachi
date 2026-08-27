@@ -64,18 +64,26 @@ fn resolve_tachi_home() -> PathBuf {
 
 #[cfg(test)]
 pub(crate) fn probe_worktree_holder_from_home(home: &Path, worktree: &Path) -> DbHolderEvidence {
-    probe_worktree_holder_at_db(
-        &home.join("global").join(memcore::MEMORY_DB_FILENAME),
-        worktree,
-    )
+    probe_worktree_holder_at_db(&configured_global_db(home), worktree)
 }
 
 #[cfg(not(test))]
 fn probe_worktree_holder_from_home(home: &Path, worktree: &Path) -> DbHolderEvidence {
-    probe_worktree_holder_at_db(
-        &home.join("global").join(memcore::MEMORY_DB_FILENAME),
-        worktree,
-    )
+    probe_worktree_holder_at_db(&configured_global_db(home), worktree)
+}
+
+fn configured_global_db(home: &Path) -> PathBuf {
+    let global = home.join("global");
+    let canonical = global.join(memcore::MEMORY_DB_FILENAME);
+    if canonical.is_file() {
+        canonical
+    } else {
+        // The cleaner is deliberately read-only and cannot run the runtime's
+        // filename migration. Honor the one-release legacy database when the
+        // canonical file is absent so an upgrade cannot strand old managed
+        // worktrees behind permanently Unavailable holder evidence.
+        global.join(memcore::LEGACY_MEMORY_DB_FILENAME)
+    }
 }
 
 fn probe_worktree_holder_at_db(db_path: &Path, worktree: &Path) -> DbHolderEvidence {
@@ -144,6 +152,21 @@ fn probe_worktree_holder_at_db(db_path: &Path, worktree: &Path) -> DbHolderEvide
 mod tests {
     use super::*;
     use memcore::{EnvClass, NewExecEnvLease};
+
+    #[test]
+    fn configured_global_db_prefers_canonical_and_falls_back_to_legacy() {
+        let home = unique_temp_dir("work-claim-db-filename");
+        let global = home.join("global");
+        std::fs::create_dir_all(&global).unwrap();
+        let legacy = global.join(memcore::LEGACY_MEMORY_DB_FILENAME);
+        std::fs::write(&legacy, b"legacy").unwrap();
+        assert_eq!(configured_global_db(&home), legacy);
+
+        let canonical = global.join(memcore::MEMORY_DB_FILENAME);
+        std::fs::write(&canonical, b"canonical").unwrap();
+        assert_eq!(configured_global_db(&home), canonical);
+        std::fs::remove_dir_all(home).unwrap();
+    }
 
     fn unique_temp_dir(prefix: &str) -> PathBuf {
         let nanos = std::time::SystemTime::now()
