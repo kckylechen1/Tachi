@@ -2169,8 +2169,10 @@ fn revision_fingerprint_has_no_delimiter_collisions() {
     ));
     let a_set = project(&a, &options().with_sees_private(true));
     let b_set = project(&b, &options().with_sees_private(true));
+    // Set A anchors on the standalone dispatch item; set B's run joins
+    // its claim's issue item (no phantom dispatch item is minted).
     let a_model = find(&a_set, "dispatch:d1");
-    let b_model = find(&b_set, "dispatch:d1");
+    let b_model = find(&b_set, ISSUE_TOKEN);
     assert_ne!(
         a_model.revision, b_model.revision,
         "delimiter-embedded revisions must not collide with separate stamp sets"
@@ -2257,6 +2259,255 @@ fn transition_debt_outranks_staleness_on_the_board() {
         super::views::board_view(model).column,
         "transition_debt",
         "debt outranks staleness; the status token carries both markers' information"
+    );
+}
+
+/// Hardening (codex R2 round-8 finding 1): an issue-bound run mints no
+/// phantom standalone dispatch item — the run joins its claim's issue.
+#[test]
+fn issue_bound_run_mints_no_phantom_dispatch_item() {
+    let mut index = WorkProjectionIndex::new();
+    index.apply_ok(claims_snapshot(
+        vec![claim_fact(
+            "c1",
+            Some(&format!("{REPO}#100")),
+            Some("d1"),
+            ClaimStateV1::Active,
+            None,
+            VisibilityClassV1::Public,
+        )],
+        "claims-1",
+        READ_AT,
+    ));
+    index.apply_ok(runs_snapshot(
+        vec![run_fact("d1", true, true, Some(0))],
+        "runs-1",
+        READ_AT,
+    ));
+    let set = project(&index, &options().with_sees_private(true));
+    assert!(
+        !set.items
+            .iter()
+            .any(|model| model.work_token() == "dispatch:d1"),
+        "the issue-bound run must not mint an empty phantom dispatch item"
+    );
+    let model = find(&set, ISSUE_TOKEN);
+    assert!(matches!(&model.run, SectionState::Available(section) if !section.runs.is_empty()));
+}
+
+/// Hardening (codex R2 round-8 finding 2): a standalone dispatch item
+/// with clean terminal evidence completes — GitHub `NotApplicable` is
+/// not a source gap.
+#[test]
+fn standalone_dispatch_item_can_complete() {
+    let mut index = WorkProjectionIndex::new();
+    index.apply_ok(runs_snapshot(
+        vec![run_fact("d1", true, true, Some(0))],
+        "runs-1",
+        READ_AT,
+    ));
+    index.apply_ok(verification_snapshot(
+        vec![VerificationFactV1 {
+            dispatch_id: Some("d1".to_string()),
+            issue_ref: None,
+            verification_present: true,
+            diff_present: true,
+            evidence_refs: vec!["e1".to_string()],
+            visibility: VisibilityClassV1::Public,
+        }],
+        "verif-1",
+        READ_AT,
+    ));
+    index.apply_ok(adjudication_snapshot(
+        vec![AdjudicationFactV1 {
+            dispatch_id: "d1".to_string(),
+            fact: CanonicalAdjudicationFact::Accepted,
+            visibility: VisibilityClassV1::Public,
+        }],
+        "adj-1",
+        READ_AT,
+    ));
+    let set = project(&index, &options().with_sees_private(true));
+    let model = find(&set, "dispatch:d1");
+    assert!(
+        !has_blocker(model, super::types::BlockerKindV1::SourceUnavailable),
+        "NotApplicable GitHub state is not a source gap"
+    );
+    assert!(model.success_shaped);
+}
+
+/// Hardening (codex R2 round-8 finding 3): an AUTHORIZED read consuming
+/// a narrower public-scoped CurrentTruth snapshot cannot fabricate
+/// orphan revert debt from a public reverted PR whose linked issue is
+/// private (and therefore absent from the view); the same public view
+/// read UNAUTHORIZED derives the orphan honestly (it is the complete
+/// public truth for that caller).
+#[test]
+fn authorized_read_of_public_scoped_view_fabricates_no_orphan() {
+    let private_issue = SnapshotIssueV1 {
+        number: 100,
+        state: SnapshotIssueStateV1::Open,
+        updated_at: "2026-08-26T13:00:00Z".to_string(),
+        snapshot_revision: "rev-priv-iss".to_string(),
+        visibility: VisibilityClassV1::Private,
+    };
+    let state = repo_state(
+        "r-priv",
+        "2026-08-26T13:00:00Z",
+        private_issue,
+        vec![snap_pr(
+            200,
+            SnapshotPrStateV1::Merged,
+            Some("mergeabc123"),
+            "2026-08-26T13:00:00Z",
+            "rev-priv-pr",
+            vec![100],
+        )],
+        vec![observation(
+            SnapshotObservationKindV1::MergeReverted {
+                number: 200,
+                revert_commit_sha: "revertdef456".to_string(),
+                original_merge_sha: "mergeabc123".to_string(),
+            },
+            "2026-08-26T13:30:00Z",
+            "rev-priv-revert",
+        )],
+    );
+    let public_view = ct_view(&[state], &[], false);
+    let orphan_token = format!("{REPO}#pull_request:200");
+
+    // Authorized read of the public-scoped snapshot: no orphan.
+    let mut authorized = WorkProjectionIndex::new();
+    authorized.apply_ok(ct_snapshot_scoped(
+        public_view.clone(),
+        "ct-1",
+        READ_AT,
+        false,
+    ));
+    let authorized_set = project(&authorized, &options().with_sees_private(true));
+    assert!(
+        !authorized_set
+            .items
+            .iter()
+            .any(|model| model.work_token() == orphan_token),
+        "an authorized read of a narrower public-scoped view must not fabricate orphan debt"
+    );
+    assert_eq!(authorized_set.health.orphaned_revert_debt_count, 0);
+
+    // Unauthorized read of the same view: the orphan is honest public
+    // truth.
+    let mut unauthorized = WorkProjectionIndex::new();
+    unauthorized.apply_ok(ct_snapshot_scoped(public_view, "ct-1", READ_AT, false));
+    let unauthorized_set = project(&unauthorized, &options());
+    assert!(unauthorized_set
+        .items
+        .iter()
+        .any(|model| model.work_token() == orphan_token));
+    assert_eq!(unauthorized_set.health.orphaned_revert_debt_count, 1);
+}
+
+/// Hardening (codex R2 round-8 finding 4): a PRIVATE anchorless
+/// verification fact never leaks through unauthorized health counters.
+#[test]
+fn private_unbound_verification_does_not_leak_into_unauthorized_health() {
+    let fact = VerificationFactV1 {
+        dispatch_id: None,
+        issue_ref: None,
+        verification_present: true,
+        diff_present: false,
+        evidence_refs: vec![],
+        visibility: VisibilityClassV1::Private,
+    };
+    let mut index = WorkProjectionIndex::new();
+    index.apply_ok(verification_snapshot(vec![fact], "verif-priv", READ_AT));
+    let unauthorized = project(&index, &options());
+    assert_eq!(
+        unauthorized.health.unbound_verification_count, 0,
+        "private facts never surface in unauthorized health"
+    );
+    let authorized = project(&index, &options().with_sees_private(true));
+    assert_eq!(authorized.health.unbound_verification_count, 1);
+}
+
+/// Hardening (codex R2 round-8 finding 6): head drift is derived only
+/// from a uniquely active claim's own pins — colliding active claims
+/// suppress drift instead of synthesizing it from unrelated maxima.
+#[test]
+fn colliding_claims_suppress_head_drift() {
+    let view = ct_view(&[state_v2_merged_open()], &[], true);
+    let mut index = WorkProjectionIndex::new();
+    index.apply_ok(ct_snapshot(view, "ct-1", READ_AT));
+    index.apply_ok(claims_snapshot(
+        vec![
+            claim_fact(
+                "c1",
+                Some(&format!("{REPO}#100")),
+                None,
+                ClaimStateV1::Active,
+                Some("headAAA111"),
+                VisibilityClassV1::Public,
+            ),
+            claim_fact(
+                "c2",
+                Some(&format!("{REPO}#100")),
+                None,
+                ClaimStateV1::Active,
+                Some("headBBB222"),
+                VisibilityClassV1::Public,
+            ),
+        ],
+        "claims-1",
+        READ_AT,
+    ));
+    let set = project(&index, &options().with_sees_private(true));
+    let model = find(&set, ISSUE_TOKEN);
+    assert!(
+        has_blocker(model, super::types::BlockerKindV1::ClaimCollision),
+        "collision is surfaced through its own blocker"
+    );
+    assert!(
+        !has_blocker(model, super::types::BlockerKindV1::HeadDrift),
+        "ambiguous ownership suppresses synthesized drift"
+    );
+}
+
+/// R6-2 causal negative (codex R2 round-8 finding 7): a post-revert
+/// `no_repair_required` disposition bound to a DIFFERENT issue never
+/// clears this issue's revert debt.
+#[test]
+fn cross_issue_disposition_does_not_clear_revert_debt() {
+    let view = ct_view(
+        &[
+            state_v2_merged_open(),
+            state_v4_revert_reopen(),
+            state_v6_steady_after_revert(),
+        ],
+        &[],
+        true,
+    );
+    let disposition = OwnerDispositionFactV1 {
+        issue_ref: format!("{REPO}#999"),
+        observed_at: "2026-08-26T14:30:00Z".to_string(),
+        disposition: OwnerDispositionV1::NoRepairRequired {
+            note: "for another issue".to_string(),
+        },
+        visibility: VisibilityClassV1::Public,
+    };
+    let mut index = WorkProjectionIndex::new();
+    index.apply_ok(ct_snapshot(view, "ct-1", READ_AT));
+    index.apply_ok(dispositions_snapshot(
+        vec![disposition],
+        "disp-other",
+        "2026-08-26T14:30:00Z",
+    ));
+    let set = project(&index, &options());
+    let model = find(&set, ISSUE_TOKEN);
+    assert!(
+        matches!(
+            &github_section(model).transition_debt.revert,
+            DebtStateV1::Outstanding { .. }
+        ),
+        "another issue's disposition is not causal resolution evidence here"
     );
 }
 

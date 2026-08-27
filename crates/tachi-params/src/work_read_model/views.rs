@@ -18,6 +18,11 @@ use super::types::{SectionState, WorkReadModelV1};
 pub struct WorkBoardRowV1 {
     pub work_token: String,
     pub revision: String,
+    /// The read time the reader-derived state (claim expiry under the
+    /// projection's TTL policy) was evaluated at — the revision alone is
+    /// source provenance and must never be compared across read
+    /// parameters (codex R2 round-7 finding 2).
+    pub read_at: String,
     pub column: String,
     pub blocker_count: usize,
     pub top_action: Option<String>,
@@ -53,6 +58,7 @@ pub fn board_view(model: &WorkReadModelV1) -> WorkBoardRowV1 {
     WorkBoardRowV1 {
         work_token: model.work_token(),
         revision: model.revision.clone(),
+        read_at: model.read_at.clone(),
         column: column_token(model),
         blocker_count: model.blockers.len(),
         top_action: model
@@ -160,7 +166,12 @@ fn column_token(model: &WorkReadModelV1) -> String {
         .any(|blocker| blocker.kind == super::types::BlockerKindV1::OutstandingTransitionDebt);
     match &model.github {
         SectionState::Available(section) => {
-            if !section.posture_fresh {
+            if !section.posture_fresh && !transition_debt_outstanding {
+                // Staleness outranks ordinary columns, but outstanding
+                // transition debt outranks staleness (codex R2 round-7
+                // finding 5): the debt blocker and repair action are the
+                // more specific, actionable signal, and the status token
+                // still carries the debt marker either way.
                 "stale".to_string()
             } else {
                 match section.implementation_status {

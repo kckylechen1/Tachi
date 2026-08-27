@@ -262,17 +262,26 @@ pub fn project(index: &WorkProjectionIndex, options: &ProjectionOptions) -> Work
     // as unusable for that read (section Unavailable, issue items hidden,
     // health counters excluded), never as filtered content. Authorized
     // reads consume any scope.
-    let repo_views: Vec<CurrentTruthViewV1> = index
-        .snapshots()
-        .filter_map(|snapshot| match &snapshot.facts {
-            SourceFacts::CurrentTruth(facts) => {
-                let usable =
-                    options.authorization.sees_private || !facts.minted_authorization.sees_private;
-                usable.then(|| facts.view.clone())
+    let mut repo_views: Vec<CurrentTruthViewV1> = Vec::new();
+    // Repos whose view is COMPLETE for this caller — the only views
+    // orphan-debt derivation may run on (codex R2 round-8 finding 3):
+    // an AUTHORIZED read consuming a narrower public-scoped snapshot
+    // cannot know whether a public reverted PR is linked to a hidden
+    // private issue, so classifying it as orphaned would fabricate debt.
+    // Unauthorized reads see exactly the public truth they may see; a
+    // private-scoped view is complete for everyone.
+    let mut orphan_capable_repos = std::collections::BTreeSet::new();
+    for snapshot in index.snapshots() {
+        if let SourceFacts::CurrentTruth(facts) = &snapshot.facts {
+            let minted_private = facts.minted_authorization.sees_private;
+            if options.authorization.sees_private || !minted_private {
+                if !options.authorization.sees_private || minted_private {
+                    orphan_capable_repos.insert(facts.view.repo.clone());
+                }
+                repo_views.push(facts.view.clone());
             }
-            _ => None,
-        })
-        .collect();
+        }
+    }
     // Delivery degrades honestly: the only minter of delivery truth is
     // #1679, which is not integrated. A delivery snapshot (when one
     // arrives) still names `not_integrated`; no pending-delivery table is
@@ -303,7 +312,10 @@ pub fn project(index: &WorkProjectionIndex, options: &ProjectionOptions) -> Work
         push_key(claim_work_key(claim), &mut keys);
     }
     for run in &run_receipts {
-        push_key(WorkKey::Dispatch(run.dispatch_id.clone()), &mut keys);
+        // Seed through the same join the section uses (codex R2 round-8
+        // finding 1): an issue-bound run must not also mint an empty
+        // phantom dispatch item.
+        push_key(dispatch_work_key(&run.dispatch_id, &work_claims), &mut keys);
     }
     for env in &exec_envs {
         match env_work_key(env, &work_claims) {
@@ -333,15 +345,19 @@ pub fn project(index: &WorkProjectionIndex, options: &ProjectionOptions) -> Work
         }
         // R6-2: orphaned revert debt stays an attributable work item —
         // unlinking a reverted PR is not a causal resolution, so it gets
-        // its own blocked `PullRequest` key instead of dissolving.
-        for number in orphaned_reverted_prs(view) {
-            push_key(
-                WorkKey::PullRequest {
-                    repo: view.repo.clone(),
-                    number,
-                },
-                &mut keys,
-            );
+        // its own blocked `PullRequest` key instead of dissolving. Only
+        // COMPLETE-for-caller views may derive orphans (see
+        // `orphan_capable_repos`).
+        if orphan_capable_repos.contains(&view.repo) {
+            for number in orphaned_reverted_prs(view) {
+                push_key(
+                    WorkKey::PullRequest {
+                        repo: view.repo.clone(),
+                        number,
+                    },
+                    &mut keys,
+                );
+            }
         }
     }
     keys.sort();
@@ -399,25 +415,23 @@ pub fn project(index: &WorkProjectionIndex, options: &ProjectionOptions) -> Work
     // summary and shares the same detection so the two can never disagree.
     let orphaned_revert_debt_count = repo_views
         .iter()
+        .filter(|view| orphan_capable_repos.contains(&view.repo))
         .map(|view| orphaned_reverted_prs(view).len())
         .sum();
 
     // Verification facts that can anchor to NOTHING cannot vanish
     // silently (codex R2 round-7 finding 4): counted content-free like
-    // orphan debt. A dispatch-bound fact never vanishes — the standalone
-    // Dispatch key always exists — so only facts with neither a
-    // parseable issue ref NOR a dispatch id that joins a claim's key
-    // land here.
+    // orphan debt. "Anchors to nothing" is exactly
+    // `verification_work_key` returning None (codex R2 round-8 finding
+    // 5) — a dispatch-bound fact always anchors to the standalone
+    // Dispatch key. The counter covers the CALLER-VISIBLE set only
+    // (codex R2 round-8 finding 4): private facts never leak through
+    // unauthorized health.
     let unbound_verification_count = verification
         .iter()
-        .filter(|fact| match &fact.issue_ref {
-            Some(issue_ref) if WorkKey::parse_issue_ref(issue_ref).is_some() => false,
-            _ => match &fact.dispatch_id {
-                Some(dispatch_id) => {
-                    !claims_have_dispatch(&work_claims, dispatch_id) && fact.issue_ref.is_none()
-                }
-                None => true,
-            },
+        .filter(|fact| {
+            (authorization.sees_private || fact.visibility == VisibilityClassV1::Public)
+                && verification_work_key(fact, &work_claims).is_none()
         })
         .count();
     let health = WorkProjectionHealthV1 {
@@ -465,13 +479,6 @@ fn claim_work_key(claim: &WorkClaimFactV1) -> WorkKey {
         return WorkKey::Dispatch(dispatch_id.clone());
     }
     WorkKey::Claim(claim.claim_id.clone())
-}
-
-/// Whether any claim carries this dispatch id.
-fn claims_have_dispatch(claims: &[WorkClaimFactV1], dispatch_id: &str) -> bool {
-    claims
-        .iter()
-        .any(|claim| claim.dispatch_id.as_deref() == Some(dispatch_id))
 }
 
 /// A dispatch joins the claim that carries the same dispatch id (issue key
@@ -842,7 +849,6 @@ fn project_one(
 
     // ---- blockers ------------------------------------------------------
     let mut blockers: Vec<BlockerV1> = Vec::new();
-    let github_available = matches!(&github_section, SectionState::Available(_));
     if let SectionState::Available(section) = &github_section {
         if section.conflicted {
             blockers.push(BlockerV1 {
@@ -868,7 +874,11 @@ fn project_one(
                 evidence_refs: transition_debt_evidence(section),
             });
         }
-    } else if !github_available {
+    } else if matches!(github_section, SectionState::Unavailable { .. }) {
+        // Only a genuinely UNAVAILABLE source blocks (codex R2 round-8
+        // finding 2): `NotApplicable` (dispatch/claim keys with no issue
+        // binding) is not a source gap, and treating it as one made
+        // standalone completion impossible.
         blockers.push(BlockerV1 {
             kind: BlockerKindV1::SourceUnavailable,
             owner_class: ActionOwnerClassV1::SourceAdapter,
@@ -1876,17 +1886,29 @@ fn head_drift_for(
     github_section: &SectionState<GithubSectionV1>,
     bound_envs: &[&ExecEnvFactV1],
 ) -> Option<HeadDriftV1> {
-    let expected_head = bound_claims
+    // Drift pairs THE uniquely active claim's pinned head with the
+    // GitHub merge evidence (or that same claim's environment base) —
+    // never maxima over unrelated claims/envs (codex R2 round-8 finding
+    // 6): with colliding claims or a released claim's stale environment,
+    // independent maxima synthesize false drift. Ambiguous ownership
+    // suppresses drift (the ClaimCollision/ClaimOrphaned blockers own
+    // that state).
+    let active: Vec<&&WorkClaimFactV1> = bound_claims
         .iter()
         .filter(|claim| claim.state == ClaimStateV1::Active)
-        .filter_map(|claim| claim.expected_head.clone())
-        .max()?;
+        .collect();
+    let unique = (active.len() == 1).then(|| *active[0])?;
+    let expected_head = unique.expected_head.clone()?;
     let github_merge_sha = match github_section {
         SectionState::Available(section) => section.merge_sha.clone(),
         SectionState::Unavailable { .. } | SectionState::NotApplicable => None,
     };
     let env_base_sha = bound_envs
         .iter()
+        .filter(|env| {
+            env.claim_id.as_deref() == Some(unique.claim_id.as_str())
+                || env.dispatch_id.as_deref() == unique.dispatch_id.as_deref()
+        })
         .filter_map(|env| env.base_sha.clone())
         .max();
     let drift = if let Some(merge_sha) = &github_merge_sha {
