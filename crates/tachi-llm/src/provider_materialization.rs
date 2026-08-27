@@ -245,6 +245,31 @@ where
     )
 }
 
+/// One durable Vault read: admitted pools plus the drop reasons recorded
+/// while scanning those same entries (tachi#1854 / #1860). Alias skips must
+/// use `listed_drops` from this object — never a later re-read of health or
+/// entries.
+#[derive(Clone, Default)]
+pub struct DurableVaultLoad {
+    pub pools: HashMap<String, Vec<ProviderSecret>>,
+    pub availability: VaultSourceAvailability,
+    /// Vault secret names listed in this scan but not admitted to `pools`.
+    pub listed_drops: HashMap<String, AliasSkipClass>,
+}
+
+impl DurableVaultLoad {
+    pub fn from_pools(
+        pools: HashMap<String, Vec<ProviderSecret>>,
+        availability: VaultSourceAvailability,
+    ) -> Self {
+        Self {
+            pools,
+            availability,
+            listed_drops: HashMap::new(),
+        }
+    }
+}
+
 /// Materialize provider secrets while holding one transaction boundary across
 /// durable source loading and provider-cache replacement.
 ///
@@ -260,17 +285,18 @@ pub fn materialize_provider_secrets_from_durable_source<I, S, F>(
 where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
-    F: FnOnce() -> Result<
-        (
-            HashMap<String, Vec<ProviderSecret>>,
-            VaultSourceAvailability,
-        ),
-        String,
-    >,
+    F: FnOnce() -> Result<DurableVaultLoad, String>,
 {
     let _materialization_guard = llm.provider_materialization_guard()?;
-    let (vault_pools, availability) = load_vault_pools()?;
-    materialize_provider_secrets_under_guard(llm, &vault_pools, provider_keys, availability, None)
+    let load = load_vault_pools()?;
+    materialize_provider_secrets_under_guard(
+        llm,
+        &load.pools,
+        provider_keys,
+        load.availability,
+        &load.listed_drops,
+        None,
+    )
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -294,6 +320,7 @@ where
         vault_pools,
         provider_keys,
         availability,
+        &HashMap::new(),
         after_missing_alias_snapshot,
     )
 }
@@ -303,6 +330,7 @@ fn materialize_provider_secrets_under_guard<I, S>(
     vault_pools: &HashMap<String, Vec<ProviderSecret>>,
     provider_keys: I,
     availability: VaultSourceAvailability,
+    listed_drops: &HashMap<String, AliasSkipClass>,
     mut after_missing_alias_snapshot: Option<Box<dyn FnOnce() + Send>>,
 ) -> Result<MaterializeReport, String>
 where
@@ -354,11 +382,11 @@ where
                 })
             }) else {
                 resolved_pools.remove(&key);
-                push_skipped_alias(
-                    &mut report,
-                    key.clone(),
-                    AliasSkipClass::from_availability(availability),
-                );
+                let class = listed_drops
+                    .get(vault_name)
+                    .copied()
+                    .unwrap_or_else(|| AliasSkipClass::from_availability(availability));
+                push_skipped_alias(&mut report, key.clone(), class);
                 // Retention is a statement about the SOURCE, not about the key.
                 // A readable Vault that does not contain the alias target has
                 // answered the question: the secret is gone, and continuing to
@@ -1426,7 +1454,10 @@ mod tests {
         assert!(llm.set_provider_secret(key, "revoked-but-still-cached"));
 
         let report = materialize_provider_secrets_from_durable_source(&llm, [key], || {
-            Ok((HashMap::new(), VaultSourceAvailability::Readable))
+            Ok(DurableVaultLoad::from_pools(
+                HashMap::new(),
+                VaultSourceAvailability::Readable,
+            ))
         })
         .expect("a missing alias stays a tolerable skip, not a hard error");
 
@@ -1451,7 +1482,10 @@ mod tests {
         assert!(llm.set_provider_secret(key, "last-known-good"));
 
         let report = materialize_provider_secrets_from_durable_source(&llm, [key], || {
-            Ok((HashMap::new(), VaultSourceAvailability::LockedOrUnavailable))
+            Ok(DurableVaultLoad::from_pools(
+                HashMap::new(),
+                VaultSourceAvailability::LockedOrUnavailable,
+            ))
         })
         .expect("a locked Vault stays a tolerable skip");
 
@@ -1474,11 +1508,17 @@ mod tests {
         let llm = LlmClient::new().expect("llm client");
 
         let readable = materialize_provider_secrets_from_durable_source(&llm, [key], || {
-            Ok((HashMap::new(), VaultSourceAvailability::Readable))
+            Ok(DurableVaultLoad::from_pools(
+                HashMap::new(),
+                VaultSourceAvailability::Readable,
+            ))
         })
         .expect("skip");
         let locked = materialize_provider_secrets_from_durable_source(&llm, [key], || {
-            Ok((HashMap::new(), VaultSourceAvailability::LockedOrUnavailable))
+            Ok(DurableVaultLoad::from_pools(
+                HashMap::new(),
+                VaultSourceAvailability::LockedOrUnavailable,
+            ))
         })
         .expect("skip");
 
@@ -1538,5 +1578,37 @@ mod tests {
         assert!(AliasSkipClass::SecretAbsent
             .operator_reason("SILICONFLOW_API_KEY")
             .contains("absent from a readable Vault"));
+    }
+
+    #[test]
+    fn listed_drop_from_the_same_load_overrides_absent_wording() {
+        let _guard = crate::test_support::global_test_lock().lock();
+        let key = "SILICONFLOW_API_KEY";
+        let _env = EnvGuard::set(key, "vault:SILICONFLOW_API_KEY");
+        let llm = LlmClient::new().expect("llm client");
+        let mut listed_drops = HashMap::new();
+        listed_drops.insert(
+            "SILICONFLOW_API_KEY".to_string(),
+            AliasSkipClass::ListedUnusableAuthFailed,
+        );
+        let report = materialize_provider_secrets_from_durable_source(&llm, [key], || {
+            Ok(DurableVaultLoad {
+                pools: HashMap::new(),
+                availability: VaultSourceAvailability::Readable,
+                listed_drops,
+            })
+        })
+        .expect("skip");
+        assert_eq!(
+            report.skip_class_for(key),
+            AliasSkipClass::ListedUnusableAuthFailed
+        );
+        assert!(
+            !report.skipped_aliases[0]
+                .1
+                .contains("absent from a readable Vault"),
+            "{:?}",
+            report.skipped_aliases
+        );
     }
 }

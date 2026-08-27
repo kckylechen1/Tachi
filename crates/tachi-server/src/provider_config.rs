@@ -8,7 +8,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use crate::vault_ops::load_unlocked_api_key_secret_pools;
 use crate::vault_ops::{classify_vault_read_error, VaultReadState};
 use crate::MemoryServer;
 pub use tachi_llm::{
@@ -77,11 +76,15 @@ pub(crate) fn filter_model_provider_pools(
         .collect()
 }
 
-/// Load API keys from an unlocked in-process Vault session.
-pub fn vault_api_key_pools_from_server(
+fn vault_api_key_pool_load_from_server(
     server: &MemoryServer,
-) -> Result<HashMap<String, Vec<ProviderSecret>>, String> {
-    load_unlocked_api_key_secret_pools(server)
+) -> Result<tachi_llm::DurableVaultLoad, String> {
+    let scan = crate::vault_ops::load_unlocked_api_key_secret_pools_with_drops(server)?;
+    Ok(tachi_llm::DurableVaultLoad {
+        pools: scan.pools,
+        listed_drops: scan.dropped,
+        availability: VaultSourceAvailability::Readable,
+    })
 }
 
 /// Load API keys via macOS Keychain + global DB (daemon/CLI when memory unlock is empty).
@@ -113,19 +116,15 @@ pub fn vault_api_key_pools_from_keychain(
 fn resolve_vault_pools(
     server: Option<&MemoryServer>,
     global_db_path: &Path,
-) -> Result<
-    (
-        HashMap<String, Vec<ProviderSecret>>,
-        VaultSourceAvailability,
-    ),
-    String,
-> {
+) -> Result<tachi_llm::DurableVaultLoad, String> {
     // Starts unavailable and is only promoted by a read that actually
     // succeeded: an unproven source must never license retention.
     let mut availability = VaultSourceAvailability::LockedOrUnavailable;
     if let Some(server) = server {
-        match vault_api_key_pools_from_server(server) {
-            Ok(map) if !map.is_empty() => return Ok((map, VaultSourceAvailability::Readable)),
+        match vault_api_key_pool_load_from_server(server) {
+            Ok(load) if !load.pools.is_empty() || !load.listed_drops.is_empty() => {
+                return Ok(load);
+            }
             // Unlocked and genuinely empty: the Vault answered, it just has
             // nothing. That is a readable source.
             Ok(_) => availability = VaultSourceAvailability::Readable,
@@ -150,15 +149,18 @@ fn resolve_vault_pools(
     }
     let pools = vault_api_key_pools_from_keychain(global_db_path);
     if !pools.is_empty() {
-        return Ok((pools, VaultSourceAvailability::Readable));
+        return Ok(tachi_llm::DurableVaultLoad::from_pools(
+            pools,
+            VaultSourceAvailability::Readable,
+        ));
     }
     if vault_config_exists(global_db_path) {
-        return Ok((pools, availability));
+        return Ok(tachi_llm::DurableVaultLoad::from_pools(pools, availability));
     }
 
     let default_global = default_global_db_path();
     if paths_equal(global_db_path, &default_global) {
-        return Ok((pools, availability));
+        return Ok(tachi_llm::DurableVaultLoad::from_pools(pools, availability));
     }
 
     let fallback = vault_api_key_pools_from_keychain(&default_global);
@@ -168,9 +170,15 @@ fn resolve_vault_pools(
             global_db_path.display(),
             default_global.display()
         );
-        return Ok((fallback, VaultSourceAvailability::Readable));
+        return Ok(tachi_llm::DurableVaultLoad::from_pools(
+            fallback,
+            VaultSourceAvailability::Readable,
+        ));
     }
-    Ok((fallback, availability))
+    Ok(tachi_llm::DurableVaultLoad::from_pools(
+        fallback,
+        availability,
+    ))
 }
 
 pub(crate) fn default_global_db_path() -> std::path::PathBuf {
@@ -316,64 +324,6 @@ pub fn describe_skipped_alias_report(report: &MaterializeReport) -> String {
     )
 }
 
-/// Upgrade `SecretAbsent` skips to listed-row integrity classes when the
-/// readable Vault actually contains the alias target (tachi#1854).
-fn upgrade_skipped_alias_integrity(server: &MemoryServer, report: &mut MaterializeReport) {
-    if report.source_availability != VaultSourceAvailability::Readable {
-        return;
-    }
-    if report.skipped_aliases.is_empty() {
-        return;
-    }
-    let Ok((entries, mut health_rows)) = server.with_global_store_read(|store| {
-        let entries = store.vault_list_entries().map_err(|e| e.to_string())?;
-        let health = store
-            .vault_list_key_health(None)
-            .map_err(|e| e.to_string())?;
-        Ok::<_, String>((entries, health))
-    }) else {
-        return;
-    };
-    // Match pool loading: in-memory health wins when persist is disabled.
-    for (logical_name, members) in server.llm.provider_health_memory_snapshot() {
-        for (key_id, health) in members {
-            if let Some(existing) = health_rows
-                .iter_mut()
-                .find(|row| row.logical_name == logical_name && row.key_id == key_id)
-            {
-                *existing = health;
-            } else {
-                health_rows.push(health);
-            }
-        }
-    }
-    let allowed = provider_env_keys();
-    let now = chrono::Utc::now();
-    let skipped_keys: Vec<String> = report
-        .skipped_aliases
-        .iter()
-        .map(|(key, _)| key.clone())
-        .collect();
-    for key in skipped_keys {
-        let Ok(env_val) = std::env::var(&key) else {
-            continue;
-        };
-        let Some(target) = parse_vault_alias(&env_val) else {
-            continue;
-        };
-        let Some(class) = crate::vault_ops::classify_listed_alias_target(
-            target,
-            &entries,
-            &health_rows,
-            &allowed,
-            now,
-        ) else {
-            continue;
-        };
-        report.set_skip_class(&key, class);
-    }
-}
-
 pub fn materialize_for_server(server: &MemoryServer) -> Result<MaterializeReport, String> {
     materialize_for_server_inner(server, None)
 }
@@ -383,21 +333,36 @@ fn materialize_for_server_inner(
     after_vault_pools_resolved: Option<Box<dyn FnOnce() + Send>>,
 ) -> Result<MaterializeReport, String> {
     let global = server.global_db_path_buf();
-    let mut report = tachi_llm::materialize_provider_secrets_from_durable_source(
+    tachi_llm::materialize_provider_secrets_from_durable_source(
         server.llm.as_ref(),
         provider_env_keys(),
         || {
-            let (pools, availability) = resolve_vault_pools(Some(server), &global)?;
-            let pools = filter_model_provider_pools(pools);
+            let mut load = resolve_vault_pools(Some(server), &global)?;
+            annotate_non_model_drops(&load.pools, &mut load.listed_drops);
+            load.pools = filter_model_provider_pools(load.pools);
             if let Some(hook) = after_vault_pools_resolved {
                 hook();
             }
-            Ok((pools, availability))
+            Ok(load)
         },
     )
-    .map_err(format_provider_materialization_error)?;
-    upgrade_skipped_alias_integrity(server, &mut report);
-    Ok(report)
+    .map_err(format_provider_materialization_error)
+}
+
+fn annotate_non_model_drops(
+    pools: &HashMap<String, Vec<ProviderSecret>>,
+    drops: &mut HashMap<String, tachi_llm::AliasSkipClass>,
+) {
+    let allowed = provider_env_keys();
+    for name in pools.keys() {
+        let admitted = allowed.contains(name)
+            || parse_rotation_member_name(name).is_some_and(|(prefix, _)| allowed.contains(prefix));
+        if !admitted {
+            drops
+                .entry(name.clone())
+                .or_insert(tachi_llm::AliasSkipClass::ListedNotModelProvider);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -413,8 +378,10 @@ pub fn materialize_standalone(
     global_db_path: &Path,
 ) -> Result<MaterializeReport, String> {
     tachi_llm::materialize_provider_secrets_from_durable_source(llm, provider_env_keys(), || {
-        let (pools, availability) = resolve_vault_pools(None, global_db_path)?;
-        Ok((filter_model_provider_pools(pools), availability))
+        let mut load = resolve_vault_pools(None, global_db_path)?;
+        annotate_non_model_drops(&load.pools, &mut load.listed_drops);
+        load.pools = filter_model_provider_pools(load.pools);
+        Ok(load)
     })
     .map_err(format_provider_materialization_error)
 }

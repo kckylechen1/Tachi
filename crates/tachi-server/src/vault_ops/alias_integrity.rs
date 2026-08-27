@@ -8,23 +8,22 @@
 //! This classifier is metadata-only: it never returns secret values, alias
 //! target names, fingerprints, or lengths.
 
-use std::collections::HashSet;
-
 use chrono::{DateTime, Utc};
-use memcore::vault::{VaultEntry, VaultKeyHealth, SECRET_TYPE_API_KEY};
-use tachi_llm::{parse_rotation_member_name, AliasSkipClass};
+use memcore::vault::VaultKeyHealth;
+use tachi_llm::AliasSkipClass;
 
 /// If `target` is a listed Vault row that pool loading would drop, the
 /// integrity class for that drop. `None` means no row — genuine revocation.
+#[cfg(test)]
 pub(crate) fn classify_listed_alias_target(
     target: &str,
-    entries: &[VaultEntry],
+    entries: &[memcore::vault::VaultEntry],
     health_rows: &[VaultKeyHealth],
-    model_provider_names: &HashSet<String>,
+    model_provider_names: &std::collections::HashSet<String>,
     now: DateTime<Utc>,
 ) -> Option<AliasSkipClass> {
     let entry = entries.iter().find(|entry| entry.name == target)?;
-    if entry.secret_type != SECRET_TYPE_API_KEY {
+    if entry.secret_type != memcore::vault::SECRET_TYPE_API_KEY {
         return Some(AliasSkipClass::ListedWrongType);
     }
     if entry
@@ -34,28 +33,29 @@ pub(crate) fn classify_listed_alias_target(
     {
         return Some(AliasSkipClass::ListedFenced);
     }
-    if let Some(class) = health_unusable_class(target, health_rows, now) {
+    if let Some(class) = health_rows
+        .iter()
+        .find(|row| row.key_id == target || (row.logical_name == target && row.key_id == target))
+        .and_then(|health| unusable_skip_class(health, now))
+    {
         return Some(class);
     }
-    if !is_model_provider_name(target, model_provider_names) {
+    if !model_provider_names.contains(target)
+        && tachi_llm::parse_rotation_member_name(target)
+            .is_none_or(|(prefix, _)| !model_provider_names.contains(prefix))
+    {
         return Some(AliasSkipClass::ListedNotModelProvider);
     }
     Some(AliasSkipClass::ListedEmpty)
 }
 
-fn is_model_provider_name(name: &str, allowed: &HashSet<String>) -> bool {
-    allowed.contains(name)
-        || parse_rotation_member_name(name).is_some_and(|(prefix, _)| allowed.contains(prefix))
-}
-
-fn health_unusable_class(
-    target: &str,
-    health_rows: &[VaultKeyHealth],
+/// Same health ladder the pool loader uses when it skips a member. Facts
+/// about unusable keys are produced here, at skip time, not reconstructed
+/// from a later health re-read (tachi#1860).
+pub(crate) fn unusable_skip_class(
+    health: &VaultKeyHealth,
     now: DateTime<Utc>,
 ) -> Option<AliasSkipClass> {
-    let health = health_rows
-        .iter()
-        .find(|row| row.key_id == target || (row.logical_name == target && row.key_id == target))?;
     if health.disabled {
         return Some(AliasSkipClass::ListedUnusableDisabled);
     }
@@ -79,7 +79,8 @@ fn health_unusable_class(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use memcore::vault::SECRET_TYPE_OTHER;
+    use memcore::vault::{VaultEntry, SECRET_TYPE_API_KEY, SECRET_TYPE_OTHER};
+    use std::collections::HashSet;
 
     fn entry(name: &str, secret_type: &str, allowed: Option<Vec<String>>) -> VaultEntry {
         VaultEntry {

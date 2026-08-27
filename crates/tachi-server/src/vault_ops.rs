@@ -14,8 +14,8 @@ pub(crate) use resolver::{classify_vault_read_error, is_env_fallback_eligible, V
 pub(crate) use rotation::collect_rotation_entries;
 
 pub(crate) use access::load_unlocked_api_key_secret_pools;
+pub(crate) use access::load_unlocked_api_key_secret_pools_with_drops;
 pub(crate) use access::read_unlocked_vault_secret;
-pub(crate) use alias_integrity::classify_listed_alias_target;
 pub(crate) use env::{
     load_unlocked_env_secrets_for_child_env, load_unlocked_env_secrets_for_child_env_with_consumer,
 };
