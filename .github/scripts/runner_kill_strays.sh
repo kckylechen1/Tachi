@@ -159,7 +159,8 @@ case "${mode}" in
     snapshot || { echo "::error::kill-strays: lsof discovery failed; live-process state UNKNOWN" >&2; exit 5; }
     snapshot_exe || { echo "::error::kill-strays: lsof executable scan failed; live-process state UNKNOWN" >&2; exit 5; }
     v_out="$(snapshot_cwd_under_root)"
-    if [ -z "${v_out}" ] && ! pgrep -f "${argv_pattern}" >/dev/null 2>&1; then
+    e_early="$(exe_pids_under_root || true)"
+    if [ -z "${v_out}" ] && [ -z "${e_early}" ] && ! pgrep -f "${argv_pattern}" >/dev/null 2>&1; then
       echo "kill-strays: no live processes are rooted in ${scan_root}"
       exit 0
     fi

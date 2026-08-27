@@ -200,11 +200,12 @@ bash ~/Projects/Sigil/.github/scripts/runner_kill_strays.sh list   # inspect fir
 bash ~/Projects/Sigil/.github/scripts/runner_kill_strays.sh kill   # SIGTERM, then SIGKILL survivors
 ```
 
-The kill set is exactly the processes whose working directory sits under
-the runner's `_work` root; processes that merely mention a `_work` path in
-their arguments (editors, indexers) are listed as foreign and left alone.
-If lsof discovery fails the script exits non-zero with UNKNOWN state
-instead of claiming success.
+The kill set is the processes whose working directory sits under the
+runner's `_work` root, plus processes executing a binary mapped from
+under it (chdir-escaped compiled builds); processes that merely mention a
+`_work` path in their arguments (editors, indexers) are listed as foreign
+and left alone. If lsof discovery fails the script exits non-zero with
+UNKNOWN state instead of claiming success.
 
 Automatic `cancel-in-progress` does not invoke this script, but every
 lane's preflight does (with `SCAN_ROOT` narrowed to that job's workspace):
