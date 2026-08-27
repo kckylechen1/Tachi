@@ -155,24 +155,6 @@ pub fn open_action_for(
     posture: &RefreshPostureV1,
     issue: &SubjectRefV1,
 ) -> OpenActionV1 {
-    // STUB (RED commit): no derivation law yet.
-    let _ = (reduction, posture);
-    return OpenActionV1 {
-        kind: OpenActionKindV1::NoOpenAction,
-        subject: issue.clone(),
-        owner_class: ActionOwnerClassV1::None,
-        prerequisite_refs: Vec::new(),
-        evidence_heads: Vec::new(),
-        blockers: Vec::new(),
-    };
-}
-
-#[allow(dead_code)]
-fn __open_action_for_real(
-    reduction: &ReductionV1,
-    posture: &RefreshPostureV1,
-    issue: &SubjectRefV1,
-) -> OpenActionV1 {
     let lifecycle = reduction.issue_lifecycle(issue);
     let chain_conflicted = reduction.chain_conflicted(issue);
     let linked_prs = reduction.linked_prs(issue);

@@ -85,28 +85,6 @@ pub fn evaluate_handoff_staleness(
     packet: &HandoffPacketV1,
     reduction: &ReductionV1,
 ) -> HandoffStalenessReportV1 {
-    // STUB (RED commit): staleness law not implemented; every claim reads fresh.
-    let _ = reduction;
-    return HandoffStalenessReportV1 {
-        handoff_id: packet.handoff_id.clone(),
-        claims: packet
-            .claim_bindings
-            .iter()
-            .map(|binding| HandoffClaimStalenessV1 {
-                binding: binding.clone(),
-                stale: false,
-                reason: None,
-                replacement_head: None,
-            })
-            .collect(),
-    };
-}
-
-#[allow(dead_code)]
-fn __evaluate_handoff_staleness_real(
-    packet: &HandoffPacketV1,
-    reduction: &ReductionV1,
-) -> HandoffStalenessReportV1 {
     let claims = packet
         .claim_bindings
         .iter()

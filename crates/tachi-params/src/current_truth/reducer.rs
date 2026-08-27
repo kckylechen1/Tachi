@@ -130,13 +130,6 @@ impl ReductionV1 {
 /// always yields the equal [`ReductionV1`]. Duplicate assertion ids are
 /// collapsed; arrival order is never an input.
 pub fn reduce(assertions: &[AssertionV1]) -> ReductionV1 {
-    // STUB (RED commit): no reduction law yet.
-    let _ = assertions;
-    ReductionV1::default()
-}
-
-#[allow(dead_code)]
-fn __reduce_real(assertions: &[AssertionV1]) -> ReductionV1 {
     // Deduplicate by assertion id so a replayed read cannot double-count.
     let mut by_id: BTreeMap<&str, &AssertionV1> = BTreeMap::new();
     for assertion in assertions {

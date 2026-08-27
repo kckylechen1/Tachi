@@ -181,10 +181,12 @@ impl CurrentTruthSqliteStore {
             )
             .optional()?;
         if let Some((existing_digest, _)) = existing {
-            // STUB (RED commit): idempotency law not enforced yet.
             if existing_digest == value_digest {
-                let _ = existing_digest;
+                return Ok(AppendOutcome::IdempotentDuplicate);
             }
+            return Err(CurrentTruthStoreError::ContradictsExistingRevision(
+                assertion.ingestion_key(),
+            ));
         }
         let evidence_json = serde_json::to_string(&assertion.evidence_refs)
             .unwrap_or_else(|_| "[]".to_string());

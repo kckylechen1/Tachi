@@ -157,13 +157,6 @@ pub const GITHUB_SNAPSHOT_ISSUER: &str = "github-refresh-v1";
 /// the snapshot's `updated_at` as `observed_at`. Relations come only from
 /// typed adapter data — title/body similarity is never consulted.
 pub fn mint_assertions(state: &GithubRepositoryStateV1) -> Vec<AssertionV1> {
-    // STUB (RED commit): minting law not implemented.
-    let _ = state;
-    Vec::new()
-}
-
-#[allow(dead_code)]
-fn __mint_assertions_real(state: &GithubRepositoryStateV1) -> Vec<AssertionV1> {
     let mut out = Vec::new();
     let source = SourceRefV1 {
         source: GITHUB_SNAPSHOT_SOURCE_ID.to_string(),
