@@ -478,6 +478,27 @@ mod tests {
         let home = root.join("home");
         let mut seeded = store(&home);
         insert_env(&mut seeded, &worktree);
+        let canonical_worktree = std::fs::canonicalize(&worktree).unwrap();
+        for (resource_id, path) in [
+            ("res-target-in", canonical_worktree.join("target")),
+            (
+                "res-target-external",
+                canonical_worktree.parent().unwrap().join("external-target"),
+            ),
+        ] {
+            memcore::insert_resource(
+                seeded.connection_mut(),
+                &memcore::NewExecEnvResource {
+                    resource_id: resource_id.to_string(),
+                    kind: memcore::ResourceKind::BuildTarget,
+                    path: path.display().to_string(),
+                    bytes: Some(50),
+                    created_at: "2026-07-18T00:00:00Z".to_string(),
+                },
+            )
+            .unwrap();
+            memcore::bind_resource(seeded.connection_mut(), "env-1", resource_id).unwrap();
+        }
         drop(seeded);
 
         let claim = claim_worktree_removal_from_home(&home, &worktree).unwrap();
@@ -499,6 +520,22 @@ mod tests {
                 )
                 .unwrap(),
             0
+        );
+        assert_eq!(
+            memcore::get_resource(observed.connection(), "res-target-in")
+                .unwrap()
+                .unwrap()
+                .state,
+            memcore::ResourceState::Reclaiming,
+            "an in-worktree target is covered by the same physical deletion claim"
+        );
+        assert_eq!(
+            memcore::get_resource(observed.connection(), "res-target-external")
+                .unwrap()
+                .unwrap()
+                .state,
+            memcore::ResourceState::Active,
+            "an external target is not physically claimed by worktree deletion"
         );
         drop(observed);
         claim.abort().unwrap();
@@ -522,6 +559,14 @@ mod tests {
             memcore::active_binding_count(observed.connection(), "res-1").unwrap(),
             1
         );
+        assert_eq!(
+            memcore::get_resource(observed.connection(), "res-target-in")
+                .unwrap()
+                .unwrap()
+                .state,
+            memcore::ResourceState::Active,
+            "abort restores every resource covered by the deletion claim"
+        );
         drop(observed);
 
         let claim = claim_worktree_removal_from_home(&home, &worktree).unwrap();
@@ -542,6 +587,29 @@ mod tests {
         assert_eq!(
             memcore::active_binding_count(observed.connection(), "res-1").unwrap(),
             0
+        );
+        let in_tree_target = memcore::get_resource(observed.connection(), "res-target-in")
+            .unwrap()
+            .unwrap();
+        assert_eq!(in_tree_target.state, memcore::ResourceState::Reclaimed);
+        assert_eq!(
+            in_tree_target.reclaimed_bytes,
+            Some(0),
+            "worktree bytes already include its nested target and must not be counted twice"
+        );
+        assert_eq!(
+            memcore::active_binding_count(observed.connection(), "res-target-in").unwrap(),
+            0
+        );
+        let external_target = memcore::get_resource(observed.connection(), "res-target-external")
+            .unwrap()
+            .unwrap();
+        assert_eq!(external_target.state, memcore::ResourceState::Active);
+        assert_eq!(external_target.reclaimed_bytes, None);
+        assert_eq!(
+            memcore::active_binding_count(observed.connection(), "res-target-external").unwrap(),
+            0,
+            "an external target survives physically but must not remain held by a reclaimed lease"
         );
 
         std::fs::remove_dir_all(root).unwrap();

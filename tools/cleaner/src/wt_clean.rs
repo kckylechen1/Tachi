@@ -1419,6 +1419,8 @@ mod tests {
         let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
         let root = unique_temp_dir("wt-clean-managed-removal-claim");
         let (_home_guard, worktree) = setup_registered_worktree(&root);
+        std::fs::create_dir_all(root.join("repo/.git/info")).unwrap();
+        std::fs::write(root.join("repo/.git/info/exclude"), "target/\n").unwrap();
         let canonical = std::fs::canonicalize(&worktree).unwrap();
         let db = root
             .join("home")
@@ -1426,6 +1428,16 @@ mod tests {
             .join(memcore::MEMORY_DB_FILENAME);
         std::fs::create_dir_all(db.parent().unwrap()).unwrap();
         let mut store = memcore::MemoryStore::open(db.to_str().unwrap()).unwrap();
+        let in_tree_target = canonical.join("target");
+        let external_target = root.join("external-target");
+        std::fs::create_dir_all(&in_tree_target).unwrap();
+        std::fs::write(in_tree_target.join("artifact"), b"nested target bytes").unwrap();
+        std::fs::create_dir_all(&external_target).unwrap();
+        std::fs::write(
+            external_target.join("artifact"),
+            b"external target survives",
+        )
+        .unwrap();
         memcore::insert_exec_env(
             store.connection(),
             &memcore::NewExecEnvLease {
@@ -1436,7 +1448,7 @@ mod tests {
                 branch: "feature/holder-test".to_string(),
                 base_sha: "test-base".to_string(),
                 dispatch_id: None,
-                env_class: memcore::EnvClass::EditOnly,
+                env_class: memcore::EnvClass::BuildPrivate,
                 created_at: String::new(),
             },
         )
@@ -1458,6 +1470,24 @@ mod tests {
             "res-managed-remove",
         )
         .unwrap();
+        for (resource_id, path) in [
+            ("res-managed-target-in", &in_tree_target),
+            ("res-managed-target-external", &external_target),
+        ] {
+            memcore::insert_resource(
+                store.connection_mut(),
+                &memcore::NewExecEnvResource {
+                    resource_id: resource_id.to_string(),
+                    kind: memcore::ResourceKind::BuildTarget,
+                    path: path.to_string_lossy().into_owned(),
+                    bytes: Some(100),
+                    created_at: String::new(),
+                },
+            )
+            .unwrap();
+            memcore::bind_resource(store.connection_mut(), "env-managed-remove", resource_id)
+                .unwrap();
+        }
         drop(store);
 
         let report = plan_wt_remove(
@@ -1470,6 +1500,10 @@ mod tests {
         let report = execute_wt_remove(report);
         assert!(report.removed, "{:?}", report.errors);
         assert!(!worktree.exists());
+        assert!(
+            external_target.exists(),
+            "an external BuildPrivate target is not deleted with the worktree"
+        );
 
         let observed =
             memcore::MemoryStore::open_existing_read_write(db.to_str().unwrap()).unwrap();
@@ -1487,6 +1521,25 @@ mod tests {
         assert!(resource.reclaimed_bytes.is_some_and(|bytes| bytes > 0));
         assert_eq!(
             memcore::active_binding_count(observed.connection(), "res-managed-remove").unwrap(),
+            0
+        );
+        let nested = memcore::get_resource(observed.connection(), "res-managed-target-in")
+            .unwrap()
+            .unwrap();
+        assert_eq!(nested.state, memcore::ResourceState::Reclaimed);
+        assert_eq!(nested.reclaimed_bytes, Some(0));
+        assert_eq!(
+            memcore::active_binding_count(observed.connection(), "res-managed-target-in").unwrap(),
+            0
+        );
+        let external = memcore::get_resource(observed.connection(), "res-managed-target-external")
+            .unwrap()
+            .unwrap();
+        assert_eq!(external.state, memcore::ResourceState::Active);
+        assert_eq!(external.reclaimed_bytes, None);
+        assert_eq!(
+            memcore::active_binding_count(observed.connection(), "res-managed-target-external")
+                .unwrap(),
             0
         );
 
