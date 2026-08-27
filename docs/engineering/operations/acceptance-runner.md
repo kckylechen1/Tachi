@@ -20,6 +20,15 @@ exactly the four in-scope lanes of `ci.yml` — `build-seat-setup`, `rust`,
   `physical-db-identity-windows` job is **NOT-COVERED** (its `cfg(not(unix))`
   path is dead on any Unix) and stays on `windows-latest` (out of scope,
   #1865).
+- **Named coverage gap (review round 1, accepted):** Linux-only `cfg` paths —
+  e.g. the seccomp containment in
+  `crates/tachi-server/src/dispatch_ops/subprocess.rs` and the
+  `renameat2`-dependent receipt logic in
+  `crates/tachi-server/src/repair/receipt.rs` — no longer compile or test in
+  the canonical lane while it runs on darwin-arm64. That coverage was last
+  real on 2026-07-05 (the last hosted-ubuntu green run) and has been absent
+  since the queue died; restoring it requires a genuine Linux host (census
+  class A), which is an owner decision outside this lane.
 - **Out of scope by law (#1865):** Windows, macOS release/bottles, native
   release matrix, memcore mirror publication, npm/Homebrew publication, all
   release/provider secrets. Those workflows keep their hosted `runs-on` labels
@@ -31,22 +40,27 @@ Two structural layers, no racing:
 
 1. **Label scoping** — only the four in-scope jobs name the runner labels; no
    other workflow in the repository uses `self-hosted`/`tachi-acceptance`.
-2. **Job-level guard** — each of the four jobs carries:
+2. **Job-level guard** — each of the four jobs carries a fail-closed
+   admission expression:
 
    ```yaml
    if: >-
-     github.event_name != 'pull_request' ||
-     (github.event.pull_request.head.repo.full_name == github.repository &&
-     github.event.pull_request.user.login == github.repository_owner)
+     ((github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
+     github.actor == github.repository_owner) ||
+     (github.event_name == 'pull_request' &&
+     github.event.pull_request.head.repo.full_name == github.repository &&
+     github.event.pull_request.user.login == github.repository_owner &&
+     github.actor == github.repository_owner)
    ```
 
-   A `pull_request` event whose head repo is a fork (or whose author is not
-   the repository owner) evaluates the guard to false and the job is **skipped
-   before any runner claim is made**. This does not depend on
-   `close-external-prs.yml` winning a race against the scheduler. Same-repo
-   branches authored by the owner, `push` to `main`, and owner
-   `workflow_dispatch` (private repo: dispatch requires write access) are the
-   only admitted sources.
+   Only the enumerated sources run: owner-actor `push`/`workflow_dispatch`,
+   and same-repo `pull_request` whose opener **and** current actor are the
+   repository owner (a collaborator pushing a new head to an owner-opened
+   branch skips the lane). Fork PRs, non-owner actors, and any event type
+   not listed (a future `pull_request_target`, `schedule`, or `merge_group`
+   trigger) evaluate to false and the job is **skipped before any runner
+   claim is made**. This does not depend on `close-external-prs.yml` winning
+   a race against the scheduler.
 
 The repository is private, so true fork PRs cannot exist today; the guard is
 the standing boundary for any future visibility/collaborator change.

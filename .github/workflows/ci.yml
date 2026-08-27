@@ -20,15 +20,22 @@ jobs:
   build-seat-setup:
     name: Build seat setup policy
     # Trusted acceptance lane (#1865): claims the self-hosted
-    # tachi-acceptance runner only. Fork guard is structural: a
-    # pull_request event whose head repo is not this repository, or whose
-    # author is not the repository owner, skips the job before any runner
-    # claim is made -- it never depends on close-external-prs winning a
-    # race against the scheduler.
+    # tachi-acceptance runner only. Admitted sources, fail closed:
+    #   * push / workflow_dispatch whose actor is the repository owner, or
+    #   * pull_request whose head repo is this repository AND whose opener
+    #     AND current actor are the repository owner (collaborator-pushed
+    #     heads skip).
+    # Fork PRs, non-owner actors, and any future event type not listed here
+    # (pull_request_target, schedule, merge_group, ...) skip the job before
+    # any runner claim -- this never depends on close-external-prs winning
+    # a race against the scheduler.
     if: >-
-      github.event_name != 'pull_request' ||
-      (github.event.pull_request.head.repo.full_name == github.repository &&
-      github.event.pull_request.user.login == github.repository_owner)
+      ((github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
+      github.actor == github.repository_owner) ||
+      (github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.user.login == github.repository_owner &&
+      github.actor == github.repository_owner)
     runs-on: [self-hosted, tachi-acceptance]
     timeout-minutes: 5
 
@@ -284,9 +291,12 @@ jobs:
     # Trusted acceptance lane (#1865): fork guard identical to
     # build-seat-setup -- see there for the rationale.
     if: >-
-      github.event_name != 'pull_request' ||
-      (github.event.pull_request.head.repo.full_name == github.repository &&
-      github.event.pull_request.user.login == github.repository_owner)
+      ((github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
+      github.actor == github.repository_owner) ||
+      (github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.user.login == github.repository_owner &&
+      github.actor == github.repository_owner)
     runs-on: [self-hosted, tachi-acceptance]
     timeout-minutes: 30
 
@@ -384,9 +394,12 @@ jobs:
     # Trusted acceptance lane (#1865): fork guard identical to
     # build-seat-setup -- see there for the rationale.
     if: >-
-      github.event_name != 'pull_request' ||
-      (github.event.pull_request.head.repo.full_name == github.repository &&
-      github.event.pull_request.user.login == github.repository_owner)
+      ((github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
+      github.actor == github.repository_owner) ||
+      (github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.user.login == github.repository_owner &&
+      github.actor == github.repository_owner)
     runs-on: [self-hosted, tachi-acceptance]
     timeout-minutes: 20
 
@@ -439,9 +452,12 @@ jobs:
     # Trusted acceptance lane (#1865): fork guard identical to
     # build-seat-setup -- see there for the rationale.
     if: >-
-      github.event_name != 'pull_request' ||
-      (github.event.pull_request.head.repo.full_name == github.repository &&
-      github.event.pull_request.user.login == github.repository_owner)
+      ((github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
+      github.actor == github.repository_owner) ||
+      (github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.user.login == github.repository_owner &&
+      github.actor == github.repository_owner)
     runs-on: [self-hosted, tachi-acceptance]
     timeout-minutes: 10
 

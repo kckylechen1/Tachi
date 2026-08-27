@@ -28,8 +28,15 @@ set -euo pipefail
 
 workspace="${GITHUB_WORKSPACE:-$(pwd)}"
 
-free_gib() {
-  df -k "${workspace}" | awk 'NR==2 {printf "%.1f", $4 / 1024 / 1024}'
+free_kib() {
+  # 1-KiB blocks available on the workspace volume, as an integer. The
+  # watermark comparison runs on this integer, never on a rounded GiB
+  # display (review round 1: 59.96 GiB must not round up past a 60 gate).
+  df -k "${workspace}" | awk 'NR==2 {print $4}'
+}
+
+gib_display() {
+  awk -v b="$1" 'BEGIN{printf "%.1f", b / 1024 / 1024}'
 }
 
 report_disk() {
@@ -39,20 +46,23 @@ report_disk() {
 clean_residue() {
   local removed=0
   local path
-  # Large untracked build outputs a previous job may have left behind. The
-  # residue list is deliberately explicit: workspace-local target/ and
-  # node_modules/ trees are per-job ephemeral by policy (#1865), never a
-  # shared unbounded build cache.
+  local list="${TMPDIR:-/tmp}/runner-hygiene.$$"
+  printf '%s\n' "${workspace}/target" > "${list}"
+  # node_modules discovery is best-effort but never silent: a find failure
+  # is printed (and the heavy hitter, target/, does not depend on it).
+  if ! find "${workspace}" -maxdepth 3 -name node_modules -type d -print \
+      >> "${list}" 2> "${list}.err"; then
+    echo "runner-hygiene: WARNING: node_modules residue discovery failed; continuing with target/ only:" >&2
+    sed 's/^/  /' "${list}.err" >&2 || true
+  fi
   while IFS= read -r path; do
     [ -n "${path}" ] || continue
     [ -e "${path}" ] || continue
     rm -rf -- "${path}"
     removed=$((removed + 1))
     echo "runner-hygiene: removed residue ${path}"
-  done <<EOF
-$(printf '%s\n' "${workspace}/target"
-  find "${workspace}" -maxdepth 3 -name node_modules -type d -print 2>/dev/null || true)
-EOF
+  done < "${list}"
+  rm -f -- "${list}" "${list}.err"
   if [ "${removed}" -eq 0 ]; then
     echo "runner-hygiene: no prior-job residue found"
   fi
@@ -65,10 +75,10 @@ case "${1:-}" in
     echo "runner-hygiene: disk before residue cleanup:"
     report_disk
     clean_residue
-    free="$(free_gib)"
-    echo "runner-hygiene: free disk after residue cleanup: ${free} GiB (watermark: ${watermark} GiB)"
-    if awk "BEGIN{exit !(${free} < ${watermark})}"; then
-      echo "::error::runner-hygiene: free disk ${free} GiB is below the ${watermark} GiB start watermark; refusing this job loudly instead of building toward disk exhaustion (#1865 acceptance 6)." >&2
+    free_k="$(free_kib)"
+    echo "runner-hygiene: free disk after residue cleanup: $(gib_display "${free_k}") GiB (watermark: ${watermark} GiB)"
+    if awk -v b="${free_k}" -v w="${watermark}" 'BEGIN{exit !(b < w * 1024 * 1024)}'; then
+      echo "::error::runner-hygiene: free disk $(gib_display "${free_k}") GiB is below the ${watermark} GiB start watermark; refusing this job loudly instead of building toward disk exhaustion (#1865 acceptance 6)." >&2
       exit 3
     fi
     ;;
