@@ -132,7 +132,14 @@ case "${mode}" in
       echo "kill-strays: no kill candidates with cwd under ${scan_root}"
     fi
     f_out="$(foreign_argv_matches)"
-    [ -n "${f_out}" ] && { echo "kill-strays: FOREIGN argv-only matches (NOT signalled; listed for the operator):"; printf '%s\n' "${f_out}"; }
+    if [ -n "${f_out}" ]; then
+      echo "kill-strays: FOREIGN argv-only matches (NOT signalled; listed for the operator):"
+      printf '%s\n' "${f_out}"
+    fi
+    # End with an explicit success: a trailing `[ ... ] && { ... }` would
+    # leave the arm's status at 1 when there is nothing foreign to print
+    # (review R5).
+    exit 0
     ;;
   kill)
     snapshot || { echo "::error::kill-strays: lsof discovery failed; live-process state UNKNOWN, nothing signalled" >&2; exit 5; }

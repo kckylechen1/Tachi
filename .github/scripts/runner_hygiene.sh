@@ -30,6 +30,31 @@ set -euo pipefail
 
 workspace="${GITHUB_WORKSPACE:-$(pwd)}"
 
+# Safety guard (review R5): the wipe and residue removal below are recursive
+# deletions, so the workspace must be a physical path inside the runner's
+# work root before this script will operate on it. A direct invocation from
+# a developer checkout, or a malformed GITHUB_WORKSPACE (e.g. / or $HOME),
+# is refused loudly instead of erasing an arbitrary tree.
+ensure_safe_workspace() {
+  local phys expected
+  if ! phys="$(cd "${workspace}" 2>/dev/null && pwd -P)"; then
+    echo "::error::runner-hygiene: workspace '${workspace}' is not an accessible directory; refusing to operate." >&2
+    exit 8
+  fi
+  expected="$(cd "${RUNNER_ROOT:-$HOME/runner-tachi}/_work" 2>/dev/null && pwd -P)" || expected=""
+  if [ -n "${expected}" ]; then
+    case "${phys}" in
+      "${expected}"|"${expected}"/*)
+        workspace="${phys}"
+        return 0
+        ;;
+    esac
+  fi
+  echo "::error::runner-hygiene: refusing to operate on workspace '${phys}' outside the runner work root '${expected:-<unavailable>}'; set RUNNER_ROOT if the runner is installed elsewhere (#1865 safety guard)." >&2
+  exit 8
+}
+ensure_safe_workspace
+
 free_kib() {
   # 1-KiB blocks available on the workspace volume, as an integer. The
   # watermark comparison runs on this integer, never on a rounded GiB
@@ -48,12 +73,14 @@ report_disk() {
 kill_prior_job_strays() {
   # Processes still holding the workspace after a cancelled predecessor
   # would race the successor's build. Delegation target is the tracked
-  # operator killer, scoped to cwd-under-workspace, self-tree-safe.
+  # operator killer, scoped to cwd-under-workspace, self-tree-safe. The
+  # killer ships in the same checkout; a missing killer is a broken
+  # checkout and fails closed (review R5).
   local killer
   killer="$(cd "$(dirname "$0")" && pwd)/runner_kill_strays.sh"
   if [ ! -f "${killer}" ]; then
-    echo "runner-hygiene: WARNING: stray killer not found at ${killer}; process-residue termination skipped" >&2
-    return 0
+    echo "::error::runner-hygiene: stray killer missing at ${killer} (broken checkout?); refusing to build without the process-hygiene gate (#1865 acceptance 7)." >&2
+    return 9
   fi
   # Run the killer directly and capture its status through `|| rc=$?` -- a
   # completed `if` statement would reset $? to 0 and convert failure into
@@ -63,6 +90,16 @@ kill_prior_job_strays() {
   if [ "${rc}" -ne 0 ]; then
     echo "::error::runner-hygiene: processes from a previous job still hold the workspace (killer exit ${rc}); refusing to build beside them (#1865 acceptance 7)." >&2
     return "${rc}"
+  fi
+  # Visibility (review R5): descendants that changed their cwd away from
+  # the workspace escape the cwd-based kill set; any that still reference
+  # the workspace in argv are listed here as a warning instead of silently
+  # vanishing. The operator decides whether to act on them.
+  local foreign
+  foreign="$(SCAN_ROOT="${workspace}" bash "${killer}" list 2>/dev/null | command sed -n '/FOREIGN/,$p' || true)"
+  if [ -n "${foreign}" ]; then
+    echo "runner-hygiene: WARNING: processes reference the workspace in argv but live outside it (chdir-escaped descendants or foreign tools):" >&2
+    printf '%s\n' "${foreign}" >&2 || true
   fi
   return 0
 }

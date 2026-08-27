@@ -41,33 +41,51 @@ Two structural layers, no racing:
 1. **Label scoping** — only the four in-scope jobs name the runner labels; no
    other workflow in the repository uses `self-hosted`/`tachi-acceptance`.
 2. **Job-level guard** — each of the four jobs carries a fail-closed
-   admission expression (bound to `github.triggering_actor`, the *current*
-   operator — on a re-run `github.actor` stays the original actor while
-   `triggering_actor` is whoever re-ran it, so a write-capable collaborator
-   cannot re-run an owner-triggered job onto this runner):
+   admission expression requiring BOTH `github.actor` (the original event
+   actor) AND `github.triggering_actor` (the current operator — on a re-run
+   these can differ) to be the repository owner:
 
    ```yaml
    if: >-
      ((github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
+     github.actor == github.repository_owner &&
      github.triggering_actor == github.repository_owner) ||
      (github.event_name == 'pull_request' &&
      github.event.pull_request.head.repo.full_name == github.repository &&
      github.event.pull_request.user.login == github.repository_owner &&
+     github.actor == github.repository_owner &&
      github.triggering_actor == github.repository_owner)
    ```
 
-   Only the enumerated sources run: owner-triggered `push`/
-   `workflow_dispatch`, and same-repo `pull_request` whose opener **and**
-   triggering actor are the repository owner (a collaborator pushing a new
-   head to an owner-opened branch skips the lane). Fork PRs, non-owner
-   operators, and any event type not listed (a future
-   `pull_request_target`, `schedule`, or `merge_group` trigger) evaluate to
-   false and the job is **skipped before any runner claim is made**. This
-   does not depend on `close-external-prs.yml` winning a race against the
-   scheduler.
+   Requiring both actor fields closes the two re-run bypasses: a
+   collaborator re-running an owner-triggered job (blocked by
+   `triggering_actor`), and the owner re-running a collaborator-pushed head
+   on an owner-opened PR (blocked by `actor`, which keeps the original
+   pusher). Only the enumerated sources run: owner `push`/`dispatch`, and
+   same-repo `pull_request` whose opener, original actor, and triggering
+   actor are all the repository owner. Fork PRs, non-owner operators, and
+   any event type not listed (a future `pull_request_target`, `schedule`,
+   or `merge_group` trigger) evaluate to false and the job is **skipped
+   before any runner claim is made**. This does not depend on
+   `close-external-prs.yml` winning a race against the scheduler.
 
-The repository is private, so true fork PRs cannot exist today; the guard is
-the standing boundary for any future visibility/collaborator change.
+### Visibility contract (owner rule, review R5)
+
+The guard lives in `ci.yml`, and `pull_request` runs execute the workflow
+from the **merge ref** — the PR's own version of the file. The guard is
+therefore trustworthy only while repository **write access is owner-only**,
+which the private single-owner repo state guarantees today (true fork PRs
+cannot exist, and only the owner can push branches). That is the ticket's
+v1 trust model: same-repository owner-authored PRs are an admitted source
+by definition.
+
+**Before making this repository public, or adding any collaborator with
+write access, stop the runner first** (`cd ~/runner-tachi && ./svc.sh
+stop`) and re-derive the boundary — a modified `ci.yml` in a PR-controlled
+merge ref could otherwise drop the guard and claim the runner. In a public
+future, GitHub's outside-collaborator approval gate and a runner-group
+review policy are the minimum re-work; do not carry this lane over
+unchanged.
 
 ## GITHUB_TOKEN surface
 
@@ -158,7 +176,8 @@ Then install and start the launchd service:
 
 ## Queue hygiene (before first activation)
 
-1. Enumerate: `gh api 'repos/kckylechen1/tachi/actions/runs?status=queued'`.
+1. Enumerate every queued run — paginate (review R5): `gh api --paginate
+   'repos/kckylechen1/tachi/actions/runs?status=queued&per_page=100'`.
 2. Cancel every queued run (the 34-day stale queue, including the
    2026-08-10 memcore-mirror dispatch — cancellation is safe; re-running it is
    the owner's call and it must not execute on the new lane).
@@ -192,6 +211,15 @@ lane's preflight does (with `SCAN_ROOT` narrowed to that job's workspace):
 it terminates leftover workspace-holding processes before building and
 refuses loudly if they survive, then wipes file residue — so a cancelled
 build cannot silently poison its successor.
+
+Known limitation (review R5): the kill set is defined by process working
+directory, so a descendant that changes its own cwd out of the workspace
+escapes termination (cargo/rustc/nextest and their test binaries keep the
+workspace or a `target/` subdir as cwd, so the realistic escape set is
+processes that deliberately chdir elsewhere). Such processes still
+reference the workspace in argv and are surfaced by preflight as a
+WARNING block and by `list` under FOREIGN argv-only matches, where the
+operator can decide to act on them.
 
 ## Rollback / decommission
 
