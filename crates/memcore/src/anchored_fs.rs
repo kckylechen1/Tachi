@@ -224,10 +224,14 @@ mod imp {
     }
 
     fn c_name(name: &OsStr) -> io::Result<CString> {
-        if name.as_bytes().contains(&b'/') {
+        if name.is_empty()
+            || name == OsStr::new(".")
+            || name == OsStr::new("..")
+            || name.as_bytes().contains(&b'/')
+        {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "anchored child name must be one path component",
+                "anchored child name must be one ordinary path component",
             ));
         }
         CString::new(name.as_bytes())
@@ -362,3 +366,23 @@ mod imp {
 }
 
 pub use imp::{AnchoredDirectory, CreateFileOutcome};
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::AnchoredDirectory;
+    use std::ffi::OsStr;
+
+    #[test]
+    fn anchored_children_reject_empty_dot_dotdot_and_slash() {
+        let root = tempfile::tempdir().unwrap();
+        let anchored = AnchoredDirectory::open_absolute(&root.path().canonicalize().unwrap())
+            .expect("anchor temp directory");
+        for invalid in ["", ".", "..", "nested/name"] {
+            let error = anchored
+                .open_directory(OsStr::new(invalid))
+                .err()
+                .expect("invalid component must be refused");
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        }
+    }
+}

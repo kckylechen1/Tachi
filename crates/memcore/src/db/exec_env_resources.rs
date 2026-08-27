@@ -79,6 +79,7 @@
 //! all.
 
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+use std::path::Path;
 use uuid::Uuid;
 
 use crate::error::MemoryError;
@@ -134,6 +135,26 @@ impl ResourceKind {
                  worktree/build_target/scratch_dir/project_db)"
             ))),
         }
+    }
+}
+
+pub(crate) fn normalize_resource_path(
+    kind: ResourceKind,
+    path: &str,
+) -> Result<String, MemoryError> {
+    if kind != ResourceKind::Worktree {
+        return Ok(path.to_string());
+    }
+    match std::fs::canonicalize(Path::new(path)) {
+        Ok(canonical) => canonical.into_os_string().into_string().map_err(|_| {
+            MemoryError::InvalidArg(format!(
+                "worktree resource path is not valid UTF-8 after canonicalization: '{path}'"
+            ))
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(path.to_string()),
+        Err(error) => Err(MemoryError::InvalidArg(format!(
+            "cannot establish worktree resource identity for '{path}': {error}"
+        ))),
     }
 }
 
@@ -457,6 +478,7 @@ pub fn insert_resource(
     conn: &mut Connection,
     res: &NewExecEnvResource,
 ) -> Result<RegisterOutcome, MemoryError> {
+    let path = normalize_resource_path(res.kind, &res.path)?;
     let now = normalize_utc_iso_or_now(&res.created_at);
     let measured_at = res.bytes.map(|_| now.clone());
 
@@ -465,7 +487,7 @@ pub fn insert_resource(
         .query_row(
             "SELECT resource_id, state, reclaimed_bytes FROM exec_env_resources \
              WHERE path = ?1 AND kind = ?2",
-            params![res.path, res.kind.as_str()],
+            params![path, res.kind.as_str()],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()?;
@@ -480,7 +502,7 @@ pub fn insert_resource(
                 params![
                     res.resource_id,
                     res.kind.as_str(),
-                    res.path,
+                    path,
                     res.bytes,
                     measured_at,
                     now,
@@ -497,7 +519,7 @@ pub fn insert_resource(
                     "exec_env_resource at ('{}', {}) already exists as '{}' \
                      (resource_id '{previous_resource_id}'); only a 'reclaimed' path can be \
                      re-registered",
-                    res.path,
+                    path,
                     res.kind.as_str(),
                     state.as_str(),
                 )));
@@ -1009,12 +1031,31 @@ pub fn bind_resource(
         )));
     }
 
-    let resource_kind: String = tx.query_row(
-        "SELECT kind FROM exec_env_resources WHERE resource_id = ?1",
+    let (resource_kind, resource_path): (String, String) = tx.query_row(
+        "SELECT kind, path FROM exec_env_resources WHERE resource_id = ?1",
         params![resource_id],
-        |row| row.get(0),
+        |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
     if ResourceKind::parse(&resource_kind)? == ResourceKind::Worktree {
+        let physical_path = normalize_resource_path(ResourceKind::Worktree, &resource_path)?;
+        let mut statement = tx.prepare(
+            "SELECT r.resource_id, r.path FROM exec_env_resource_bindings b
+             JOIN exec_env_resources r ON r.resource_id = b.resource_id
+             WHERE r.kind = 'worktree' AND r.resource_id <> ?1
+               AND b.env_id <> ?2 AND b.released_at IS NULL",
+        )?;
+        let rows = statement.query_map(params![resource_id, env_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        for row in rows {
+            let (other_resource_id, other_path) = row?;
+            if normalize_resource_path(ResourceKind::Worktree, &other_path)? == physical_path {
+                return Err(MemoryError::Duplicate(format!(
+                    "worktree resource '{resource_id}' aliases live worktree resource '{other_resource_id}' at '{physical_path}'; a physical workspace may belong to only one live exec env"
+                )));
+            }
+        }
+        drop(statement);
         let other_live_bindings: i64 = tx.query_row(
             "SELECT COUNT(*) FROM exec_env_resource_bindings
              WHERE resource_id = ?1 AND env_id <> ?2 AND released_at IS NULL",
@@ -2499,6 +2540,53 @@ mod tests {
             bind_resource(&mut conn, "env-2", "res-worktree").unwrap(),
             BindOutcome::Bound { .. }
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn worktree_symlink_aliases_converge_at_registration_and_legacy_bind_barrier() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let real = root.path().join("real-worktree");
+        let alias = root.path().join("alias-worktree");
+        std::fs::create_dir(&real).unwrap();
+        symlink(&real, &alias).unwrap();
+        let real = real.to_string_lossy().into_owned();
+        let alias = alias.to_string_lossy().into_owned();
+
+        let mut conn = open_conn();
+        seed_env(&conn, "env-real");
+        seed_env(&conn, "env-alias");
+        insert_resource(
+            &mut conn,
+            &new_resource("res-real", ResourceKind::Worktree, &real),
+        )
+        .unwrap();
+        let duplicate = insert_resource(
+            &mut conn,
+            &new_resource("res-alias", ResourceKind::Worktree, &alias),
+        )
+        .unwrap_err();
+        assert!(duplicate.to_string().contains("already exists"));
+
+        // Simulate a pre-normalization database so the public binding barrier
+        // independently proves that legacy alias rows cannot both go live.
+        conn.execute(
+            "INSERT INTO exec_env_resources
+             (resource_id, kind, path, bytes, measured_at, state, reclaim_reason,
+              reclaimed_at, reclaimed_bytes, created_at, updated_at)
+             VALUES ('res-legacy-alias', 'worktree', ?1, NULL, NULL, 'active',
+                     NULL, NULL, NULL, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+            [&alias],
+        )
+        .unwrap();
+        bind_resource(&mut conn, "env-real", "res-real").unwrap();
+        let error = bind_resource(&mut conn, "env-alias", "res-legacy-alias").unwrap_err();
+        assert!(
+            error.to_string().contains("aliases live worktree resource"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]

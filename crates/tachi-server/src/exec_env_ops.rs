@@ -2389,6 +2389,53 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn atomic_publication_canonicalizes_worktree_alias_before_ledger_write() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let real = root.path().join("real-worktree");
+        let alias = root.path().join("alias-worktree");
+        std::fs::create_dir(&real).unwrap();
+        symlink(&real, &alias).unwrap();
+        let canonical = real.canonicalize().unwrap().to_string_lossy().into_owned();
+        let alias = alias.to_string_lossy().into_owned();
+
+        let mut store = memcore::MemoryStore::open_in_memory().unwrap();
+        let lease = NewExecEnvLease {
+            env_id: "env-alias-publication".to_string(),
+            kind: "worktree".to_string(),
+            path: alias.clone(),
+            repo_root: root.path().to_string_lossy().into_owned(),
+            branch: "tachi/alias-publication".to_string(),
+            base_sha: "abc1234".to_string(),
+            dispatch_id: None,
+            env_class: EnvClass::EditOnly,
+            created_at: String::new(),
+        };
+        let published = store
+            .publish_exec_env_atomically(
+                &lease,
+                &[memcore::ExecEnvProvisioningResource {
+                    kind: ResourceKind::Worktree,
+                    path: alias,
+                    bytes: None,
+                }],
+                None,
+            )
+            .unwrap();
+
+        let persisted = memcore::get_exec_env(store.connection(), &lease.env_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(persisted.path, canonical);
+        let resource = memcore::get_resource(store.connection(), &published.worktree.resource_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(resource.path, canonical);
+    }
+
     #[test]
     fn late_publication_failure_rolls_back_every_intermediate_row() {
         let dir = tempfile::tempdir().unwrap();

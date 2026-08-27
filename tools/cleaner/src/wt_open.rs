@@ -318,20 +318,11 @@ pub fn provision_cargo_target_config(
     );
     #[cfg(not(unix))]
     {
-        if matches!(policy, CargoTargetPolicy::Private(_)) {
-            return Err(
-                "private cargo target provisioning requires descriptor-anchored, no-follow filesystem operations on this platform"
-                    .to_string(),
-            );
-        }
-        if config_path.exists() {
-            return Ok(CargoTargetProvision::SkippedExisting);
-        }
-        std::fs::create_dir_all(&cargo_dir)
-            .map_err(|err| format!("create {}: {err}", cargo_dir.display()))?;
-        std::fs::write(&config_path, contents)
-            .map_err(|err| format!("write {}: {err}", config_path.display()))?;
-        return Ok(CargoTargetProvision::Written(target_dir));
+        let _ = (cargo_dir, config_path, contents, target_dir);
+        return Err(
+            "cargo target provisioning requires descriptor-anchored, no-follow filesystem operations on this platform"
+                .to_string(),
+        );
     }
     #[cfg(unix)]
     {
@@ -481,6 +472,13 @@ pub fn run_wt_open(options: OpenOptions) -> Result<(), String> {
 }
 
 pub fn open_worktree(options: OpenOptions) -> Result<OpenReport, String> {
+    #[cfg(not(unix))]
+    if !matches!(&options.cargo_target, CargoTargetPolicy::Unallocated) {
+        return Err(
+            "refusing worktree open: cargo target provisioning requires descriptor-anchored, no-follow filesystem operations on this platform"
+                .to_string(),
+        );
+    }
     let repo_root = canonicalize_existing(&options.repo_root, "repo root")?;
     let base_ref = options
         .base

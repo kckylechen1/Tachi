@@ -69,6 +69,24 @@ impl MemoryStore {
                 lease.env_id
             )));
         }
+        let mut lease = lease.clone();
+        lease.path = db::exec_env_resources::normalize_resource_path(
+            db::exec_env_resources::ResourceKind::Worktree,
+            &lease.path,
+        )?;
+        let resources: Vec<_> = resources
+            .iter()
+            .map(|resource| {
+                Ok(ExecEnvProvisioningResource {
+                    kind: resource.kind,
+                    path: db::exec_env_resources::normalize_resource_path(
+                        resource.kind,
+                        &resource.path,
+                    )?,
+                    bytes: resource.bytes,
+                })
+            })
+            .collect::<Result<_, MemoryError>>()?;
         let worktree_count = resources
             .iter()
             .filter(|resource| {
@@ -151,7 +169,7 @@ impl MemoryStore {
         )?;
 
         let mut published = Vec::with_capacity(resources.len());
-        for resource in resources {
+        for resource in &resources {
             let existing: Option<(String, String)> = tx
                 .query_row(
                     "SELECT resource_id, state FROM exec_env_resources
