@@ -204,6 +204,12 @@ fn command_available(command: &str) -> bool {
 }
 
 fn absolutize_cwd(cwd: &Path) -> PathBuf {
+    if cwd == Path::new(".") {
+        // Managed postflight dispatches deliberately use descriptor-relative
+        // cwd. Resolving this in the daemon would reopen the wrong authority;
+        // the adapter is fchdir-bound before it receives the ACP request.
+        return PathBuf::from(".");
+    }
     if cwd.is_absolute() {
         return cwd.to_path_buf();
     }
@@ -215,6 +221,11 @@ fn absolutize_cwd(cwd: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn descriptor_relative_cwd_is_not_resolved_in_the_daemon() {
+        assert_eq!(absolutize_cwd(Path::new(".")), PathBuf::from("."));
+    }
     fn test_owners(
         sandbox: Option<&str>,
     ) -> (

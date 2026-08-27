@@ -54,6 +54,107 @@ fn model_config_option_uses_only_the_typed_current_model_value() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn descriptor_relative_cwd_reaches_native_acp_new_and_resume_requests() {
+    use std::collections::{HashMap, HashSet};
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::Duration;
+
+    for resume in [false, true] {
+        let root = tempfile::tempdir().expect("native ACP cwd root");
+        let managed = root.path().join("managed");
+        let captured = root.path().join("captured");
+        std::fs::create_dir(&managed).unwrap();
+        let authority = memcore::anchored_fs::AnchoredDirectory::open_absolute(
+            &managed.canonicalize().unwrap(),
+        )
+        .unwrap();
+        std::fs::rename(&managed, &captured).unwrap();
+        std::fs::create_dir(&managed).unwrap();
+
+        let request_log = root.path().join("session-request.json");
+        let adapter = root.path().join("adapter.sh");
+        std::fs::write(
+            &adapter,
+            r#"#!/bin/sh
+IFS= read -r _
+printf '%s\n' '{"jsonrpc":"2.0","id":"tachi-acp-1","result":{"protocolVersion":1}}'
+IFS= read -r session_request
+printf '%s\n' "$session_request" >"$REQUEST_LOG"
+touch adapter-ran-here
+printf '%s\n' '{"jsonrpc":"2.0","id":"tachi-acp-2","result":{"sessionId":"s-1"}}'
+IFS= read -r _
+printf '%s\n' '{"jsonrpc":"2.0","id":"tachi-acp-3","result":{"content":[{"type":"text","text":"done"}]}}'
+"#,
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&adapter).unwrap().permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&adapter, permissions).unwrap();
+
+        let session_record = root.path().join("session.json");
+        if resume {
+            crate::utils::write_owner_only_file_atomic(
+                &session_record,
+                br#"{"acp_session_id":"stored-session","closed":false}"#,
+            )
+            .unwrap();
+        }
+        let mut env = HashMap::new();
+        env.insert(
+            "REQUEST_LOG".to_string(),
+            request_log.to_string_lossy().to_string(),
+        );
+        let outcome = super::run_native_acp_dispatch_with_liveness(
+            super::NativeAcpRunSpec {
+                command: "/bin/sh".to_string(),
+                args: vec![adapter.to_string_lossy().to_string()],
+                cwd: std::path::PathBuf::from("."),
+                cwd_authority: Some(authority),
+                prompt: "cwd test".to_string(),
+                mode: if resume {
+                    super::NativeAcpRunMode::Session
+                } else {
+                    super::NativeAcpRunMode::OneShot
+                },
+                permission_label: "approve-reads".to_string(),
+                session: resume.then(|| super::NativeAcpSession {
+                    name: "resume-test".to_string(),
+                    source: "test",
+                }),
+                session_record_path: resume.then_some(session_record),
+                session_distill_path: None,
+                metadata: json!({}),
+                env,
+                env_remove: HashSet::new(),
+            },
+            root.path(),
+            &root.path().join("trajectory.jsonl"),
+            "cwd-dispatch",
+            "codex",
+            Duration::from_secs(2),
+            false,
+        )
+        .await;
+        assert_eq!(outcome.result.unwrap().output, "done");
+
+        let request: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(request_log).unwrap()).unwrap();
+        assert_eq!(
+            request["method"],
+            json!(if resume {
+                "session/resume"
+            } else {
+                "session/new"
+            })
+        );
+        assert_eq!(request["params"]["cwd"], json!("."));
+        assert!(captured.join("adapter-ran-here").exists());
+        assert!(!managed.join("adapter-ran-here").exists());
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn native_acp_runner_uses_the_latest_reported_model_config() {
     use std::collections::HashMap;
     use std::os::unix::fs::PermissionsExt;
