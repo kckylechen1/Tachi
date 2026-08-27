@@ -55,7 +55,7 @@ pub(crate) fn legacy_removal_claim_for_test() -> DbRemovalClaim {
 }
 
 impl DbRemovalClaim {
-    pub fn complete(self) -> Result<(), String> {
+    pub fn complete(self, reclaimed_bytes: i64) -> Result<(), String> {
         let Some(env_id) = self.env_id else {
             return Ok(());
         };
@@ -64,6 +64,7 @@ impl DbRemovalClaim {
             store.connection_mut(),
             &env_id,
             Some("worktree removed"),
+            reclaimed_bytes,
         )
         .map_err(|error| format!("complete ExecEnv removal claim: {error}"))
     }
@@ -76,6 +77,32 @@ impl DbRemovalClaim {
         memcore::abort_exec_env_removal(store.connection_mut(), &env_id)
             .map_err(|error| format!("abort ExecEnv removal claim: {error}"))
     }
+}
+
+/// Measure bytes before deletion so resource-ledger completion records the
+/// physical amount removed instead of inventing a successful zero.
+pub fn measure_worktree_bytes(path: &Path) -> Result<i64, String> {
+    fn visit(path: &Path) -> Result<u64, String> {
+        let metadata = std::fs::symlink_metadata(path)
+            .map_err(|error| format!("measure {}: {error}", path.display()))?;
+        if !metadata.is_dir() {
+            return Ok(metadata.len());
+        }
+        let mut total = 0_u64;
+        for entry in std::fs::read_dir(path)
+            .map_err(|error| format!("measure directory {}: {error}", path.display()))?
+        {
+            let entry = entry
+                .map_err(|error| format!("measure directory entry {}: {error}", path.display()))?;
+            total = total
+                .checked_add(visit(&entry.path())?)
+                .ok_or_else(|| format!("worktree byte count overflow at {}", path.display()))?;
+        }
+        Ok(total)
+    }
+
+    let bytes = visit(path)?;
+    i64::try_from(bytes).map_err(|_| format!("worktree byte count exceeds i64: {bytes}"))
 }
 
 /// Read holder evidence from the configured Tachi global DB.  The cleaner
@@ -476,8 +503,29 @@ mod tests {
         drop(observed);
         claim.abort().unwrap();
 
+        let observed = open_maintenance_store(&db).unwrap();
+        assert_eq!(
+            memcore::get_exec_env(observed.connection(), "env-1")
+                .unwrap()
+                .unwrap()
+                .state,
+            memcore::ExecEnvState::Active
+        );
+        assert_eq!(
+            memcore::get_resource(observed.connection(), "res-1")
+                .unwrap()
+                .unwrap()
+                .state,
+            memcore::ResourceState::Active
+        );
+        assert_eq!(
+            memcore::active_binding_count(observed.connection(), "res-1").unwrap(),
+            1
+        );
+        drop(observed);
+
         let claim = claim_worktree_removal_from_home(&home, &worktree).unwrap();
-        claim.complete().unwrap();
+        claim.complete(123).unwrap();
         let observed = open_maintenance_store(&db).unwrap();
         assert_eq!(
             memcore::get_exec_env(observed.connection(), "env-1")
@@ -485,6 +533,15 @@ mod tests {
                 .unwrap()
                 .state,
             memcore::ExecEnvState::Reclaimed
+        );
+        let resource = memcore::get_resource(observed.connection(), "res-1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(resource.state, memcore::ResourceState::Reclaimed);
+        assert_eq!(resource.reclaimed_bytes, Some(123));
+        assert_eq!(
+            memcore::active_binding_count(observed.connection(), "res-1").unwrap(),
+            0
         );
 
         std::fs::remove_dir_all(root).unwrap();

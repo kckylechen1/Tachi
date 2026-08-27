@@ -236,7 +236,7 @@ pub(crate) async fn handle_tachi_gh(
                 task_params.allow_umbrella_close,
             )?;
             let client = gh_client_for_server(server)?;
-            handle_github_safe_merge(
+            handle_github_safe_merge_with_holder_gate(
                 &client,
                 &target.repo,
                 target.number,
@@ -248,6 +248,7 @@ pub(crate) async fn handle_tachi_gh(
                 // pr_status is a dry-run preview: reclamation never fires.
                 None,
                 false,
+                &|_| Ok(()),
             )
             .await
         }
@@ -287,7 +288,7 @@ pub(crate) async fn handle_tachi_gh(
 }
 
 /// Read-only WorkClaim gate used immediately before safe-merge invokes the
-/// external cleaner. Missing live leases are legacy/not-applicable; a
+/// in-process cleaner. Missing live leases are legacy/not-applicable; a
 /// dispatching lease and every held or uncertain holder answer are loud
 /// refusals.
 pub(crate) fn worktree_holder_gate(
@@ -304,7 +305,7 @@ pub(crate) fn worktree_holder_gate(
         };
         if lease.state != memcore::ExecEnvState::Active {
             return Err(format!(
-                "refusing external cleaner for {worktree_path}: ExecEnv {} is {}",
+                "refusing worktree cleaner for {worktree_path}: ExecEnv {} is {}",
                 lease.env_id,
                 lease.state.as_str()
             ));
@@ -318,7 +319,7 @@ pub(crate) fn worktree_holder_gate(
             format!("resource evidence unavailable for ExecEnv {}: {err}", lease.env_id)
         })? {
             return Err(format!(
-                "refusing external cleaner for {worktree_path}: {detail}"
+                "refusing worktree cleaner for {worktree_path}: {detail}"
             ));
         }
         match memcore::holder_evidence(store.connection(), &lease.env_id)
@@ -326,7 +327,7 @@ pub(crate) fn worktree_holder_gate(
         {
             memcore::HolderEvidence::Clear | memcore::HolderEvidence::NotApplicable => Ok(()),
             evidence => Err(format!(
-                "refusing external cleaner for {worktree_path}: persisted WorkClaim holder evidence is {evidence:?}"
+                "refusing worktree cleaner for {worktree_path}: persisted WorkClaim holder evidence is {evidence:?}"
             )),
         }
     })

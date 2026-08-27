@@ -8,10 +8,11 @@ use super::*;
 ///    `status.json::github` and append the matching event to `events.jsonl`.
 /// 5. After a successful non-dry-run merge, when `reclaim_worktree` is true
 ///    and `worktree` resolves to a local path, reclaim the worktree + branch +
-///    target via `tachi-clean wt-remove` (best-effort) and record a reclamation
+///    target via the in-process `tachi-clean` removal path (best-effort) and record a reclamation
 ///    event (`github_safe_merge_reclaimed` on success, or
 ///    `github_safe_merge_reclaim_skipped` on any skip/failure).
 /// 6. Return a JSON envelope the agent can render directly.
+#[cfg(test)]
 pub(crate) async fn handle_github_safe_merge<C: GhClient + ?Sized>(
     client: &C,
     repo: &str,
@@ -24,7 +25,7 @@ pub(crate) async fn handle_github_safe_merge<C: GhClient + ?Sized>(
     worktree: Option<&str>,
     reclaim_worktree: bool,
 ) -> Result<String, String> {
-    handle_github_safe_merge_with_holder_gate(
+    handle_github_safe_merge_with_reclaimer(
         client,
         repo,
         pr_number,
@@ -36,8 +37,16 @@ pub(crate) async fn handle_github_safe_merge<C: GhClient + ?Sized>(
         worktree,
         reclaim_worktree,
         &|_| Ok(()),
+        WorktreeReclaimer::ExternalTestOnly,
     )
     .await
+}
+
+#[derive(Clone, Copy)]
+enum WorktreeReclaimer {
+    InProcessClaimed,
+    #[cfg(test)]
+    ExternalTestOnly,
 }
 
 /// Server callers supply the durable holder gate from their live DB binding.
@@ -55,6 +64,37 @@ pub(crate) async fn handle_github_safe_merge_with_holder_gate<C: GhClient + ?Siz
     worktree: Option<&str>,
     reclaim_worktree: bool,
     holder_gate: &(dyn Fn(&str) -> Result<(), String> + Sync),
+) -> Result<String, String> {
+    handle_github_safe_merge_with_reclaimer(
+        client,
+        repo,
+        pr_number,
+        strategy,
+        dry_run,
+        flow_id,
+        tests_run,
+        policy,
+        worktree,
+        reclaim_worktree,
+        holder_gate,
+        WorktreeReclaimer::InProcessClaimed,
+    )
+    .await
+}
+
+async fn handle_github_safe_merge_with_reclaimer<C: GhClient + ?Sized>(
+    client: &C,
+    repo: &str,
+    pr_number: u64,
+    strategy: MergeStrategy,
+    dry_run: bool,
+    flow_id: Option<&str>,
+    tests_run: &[String],
+    policy: MergeGatePolicy,
+    worktree: Option<&str>,
+    reclaim_worktree: bool,
+    holder_gate: &(dyn Fn(&str) -> Result<(), String> + Sync),
+    worktree_reclaimer: WorktreeReclaimer,
 ) -> Result<String, String> {
     let flow_run_dir = match flow_id {
         Some(fid) => Some(run_dir_for_flow_id(fid)?),
@@ -370,6 +410,7 @@ pub(crate) async fn handle_github_safe_merge_with_holder_gate<C: GhClient + ?Siz
         flow_id,
         flow_run_dir.as_deref(),
         holder_gate,
+        worktree_reclaimer,
     )
     .await;
 
@@ -573,6 +614,7 @@ async fn reclaim_worktree_after_merge(
     flow_id: Option<&str>,
     run_dir: Option<&std::path::Path>,
     holder_gate: &(dyn Fn(&str) -> Result<(), String> + Sync),
+    worktree_reclaimer: WorktreeReclaimer,
 ) -> Value {
     // No merge happened (dry-run, blocked, pending, or already-merged): nothing
     // to reclaim, and dry-run MUST NOT reclaim.
@@ -648,8 +690,8 @@ async fn reclaim_worktree_after_merge(
     }
 
     // The durable WorkClaim check is deliberately immediately before the
-    // external cleaner.  A refusal is observable and the cleaner is never
-    // spawned, so a DB failure cannot become a silent destructive no-op.
+    // in-process cleaner. A refusal is observable and removal is never
+    // attempted, so a DB failure cannot become a silent destructive no-op.
     if let Err(err) = holder_gate(worktree_path) {
         let detail = json!({
             "attempted": false,
@@ -662,7 +704,20 @@ async fn reclaim_worktree_after_merge(
         return detail;
     }
 
-    let attempt = tachi_merge_ops::remove_worktree_with_cleaner(worktree_path).await;
+    let attempt: Result<tachi_merge_ops::CleanerRemoveReport, String> = match worktree_reclaimer {
+        WorktreeReclaimer::InProcessClaimed => {
+            let report = tachi_clean::wt_clean::remove_worktree_for_safe_merge(path);
+            Ok(tachi_merge_ops::CleanerRemoveReport {
+                removed: report.removed,
+                warnings: report.warnings,
+                errors: report.errors,
+            })
+        }
+        #[cfg(test)]
+        WorktreeReclaimer::ExternalTestOnly => {
+            tachi_merge_ops::remove_worktree_with_cleaner(worktree_path).await
+        }
+    };
     let detail = match attempt {
         Ok(report) => json!({
             "attempted": true,

@@ -19,6 +19,32 @@ pub struct WtRemoveOptions {
     pub output: OutputFormat,
 }
 
+#[derive(Debug, Clone)]
+#[allow(dead_code)] // consumed by the library dependency; the CLI target compiles this module too
+pub struct WtRemovalOutcome {
+    pub removed: bool,
+    pub warnings: Vec<String>,
+    pub errors: Vec<String>,
+}
+
+/// In-process removal entry point for trusted server callers. This deliberately
+/// bypasses `TACHI_CLEAN_BIN`: the atomic ExecEnv claim in this crate must be
+/// on the production path before any filesystem deletion can occur.
+#[allow(dead_code)] // consumed by the library dependency; the CLI target compiles this module too
+pub fn remove_worktree_for_safe_merge(path: &Path) -> WtRemovalOutcome {
+    let report = plan_wt_remove_default(path, false);
+    let report = if report.allowed {
+        execute_wt_remove(report)
+    } else {
+        report
+    };
+    WtRemovalOutcome {
+        removed: report.removed,
+        warnings: report.warnings,
+        errors: report.errors,
+    }
+}
+
 #[derive(Debug, serde::Serialize)]
 pub(crate) struct WtRemoveReport {
     pub(crate) action: &'static str,
@@ -382,6 +408,20 @@ fn execute_wt_remove_with_claim(
             return;
         }
     };
+    let reclaimed_bytes = match work_claim::measure_worktree_bytes(Path::new(&path)) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            report.errors.push(format!(
+                "refusing to remove: could not measure worktree before deletion ({err})"
+            ));
+            if let Err(abort_error) = removal_claim.abort() {
+                report.errors.push(format!(
+                    "ExecEnv removal claim abort also failed; lease remains fail-closed: {abort_error}"
+                ));
+            }
+            return;
+        }
+    };
     if let Err(err) = scrap_ledger::record_scrap(Path::new(&path), &branch) {
         report.errors.push(format!(
             "refusing to remove: scrap ledger write failed ({err}); fail-closed rather than \
@@ -402,7 +442,7 @@ fn execute_wt_remove_with_claim(
         Ok(out) if out.status.success() => {
             report.removed = true;
             report.dry_run = false;
-            if let Err(err) = removal_claim.complete() {
+            if let Err(err) = removal_claim.complete(reclaimed_bytes) {
                 report.errors.push(format!(
                     "worktree was removed but ExecEnv removal completion failed; lease remains fail-closed: {err}"
                 ));
@@ -1439,6 +1479,15 @@ mod tests {
                 .unwrap()
                 .state,
             memcore::ExecEnvState::Reclaimed
+        );
+        let resource = memcore::get_resource(observed.connection(), "res-managed-remove")
+            .unwrap()
+            .unwrap();
+        assert_eq!(resource.state, memcore::ResourceState::Reclaimed);
+        assert!(resource.reclaimed_bytes.is_some_and(|bytes| bytes > 0));
+        assert_eq!(
+            memcore::active_binding_count(observed.connection(), "res-managed-remove").unwrap(),
+            0
         );
 
         let _ = std::fs::remove_dir_all(&root);

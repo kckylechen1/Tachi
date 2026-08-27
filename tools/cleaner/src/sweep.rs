@@ -305,6 +305,22 @@ fn execute_sweep(report: &mut SweepReport) {
                 continue;
             }
         };
+        let reclaimed_bytes = match work_claim::measure_worktree_bytes(&canonical_path) {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                report.warnings.push(format!(
+                    "skipped {} (could not measure worktree before deletion: {err})",
+                    candidate.path
+                ));
+                if let Err(abort_error) = removal_claim.abort() {
+                    report.errors.push(format!(
+                        "ExecEnv removal claim abort failed for {}; lease remains fail-closed: {abort_error}",
+                        candidate.path
+                    ));
+                }
+                continue;
+            }
+        };
         if let Err(err) = scrap_ledger::record_scrap(&canonical_path, branch) {
             report.warnings.push(format!(
                 "skipped {} (scrap ledger write failed: {err}; fail-closed rather than remove a \
@@ -333,7 +349,7 @@ fn execute_sweep(report: &mut SweepReport) {
         {
             Ok(out) if out.status.success() => {
                 report.removed.push(candidate.path.clone());
-                if let Err(err) = removal_claim.complete() {
+                if let Err(err) = removal_claim.complete(reclaimed_bytes) {
                     report.errors.push(format!(
                         "worktree {} was removed but ExecEnv removal completion failed; lease remains fail-closed: {err}",
                         candidate.path

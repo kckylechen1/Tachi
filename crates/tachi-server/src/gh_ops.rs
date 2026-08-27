@@ -66,4 +66,6 @@ pub(crate) use self::issue_freshness::{
 };
 pub(crate) use self::issues::read_issue_snapshot_bounded;
 pub(crate) use self::router::handle_tachi_gh;
-pub(crate) use self::safe_merge::{gh_client_for_server, handle_github_safe_merge};
+pub(crate) use self::safe_merge::gh_client_for_server;
+#[cfg(test)]
+pub(crate) use self::safe_merge::handle_github_safe_merge;

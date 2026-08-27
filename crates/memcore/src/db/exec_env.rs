@@ -412,6 +412,33 @@ pub fn claim_exec_env_removal(
     {
         return Err(MemoryError::WorkClaimIncompatibleState(detail));
     }
+    let (resource_id, total_live_bindings): (String, i64) = tx.query_row(
+        "SELECT r.resource_id, \
+                (SELECT COUNT(*) FROM exec_env_resource_bindings all_b \
+                 WHERE all_b.resource_id = r.resource_id AND all_b.released_at IS NULL) \
+         FROM exec_env_resource_bindings b \
+         JOIN exec_env_resources r ON r.resource_id = b.resource_id \
+         WHERE b.env_id = ?1 AND b.released_at IS NULL \
+           AND r.kind = 'worktree' AND r.path = ?2 AND r.state = 'active'",
+        params![env_id, path],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    if total_live_bindings != 1 {
+        return Err(MemoryError::WorkClaimIncompatibleState(format!(
+            "refusing to remove exec env {env_id}: worktree resource {resource_id} has {total_live_bindings} live bindings"
+        )));
+    }
+    let resource_changed = tx.execute(
+        "UPDATE exec_env_resources SET state = 'reclaiming', \
+             reclaim_reason = 'worktree removal claim', updated_at = ?2 \
+         WHERE resource_id = ?1 AND state = 'active'",
+        params![resource_id, normalize_utc_iso_or_now("")],
+    )?;
+    if resource_changed != 1 {
+        return Err(MemoryError::WorkClaimIncompatibleState(format!(
+            "worktree resource {resource_id} changed during removal admission"
+        )));
+    }
     let changed = tx.execute(
         "UPDATE exec_envs SET state = 'removing' WHERE env_id = ?1 AND state = 'active'",
         params![env_id],
@@ -430,15 +457,51 @@ pub fn complete_exec_env_removal(
     conn: &mut Connection,
     env_id: &str,
     reason: Option<&str>,
+    reclaimed_bytes: i64,
 ) -> Result<(), MemoryError> {
+    if reclaimed_bytes < 0 {
+        return Err(MemoryError::InvalidArg(
+            "reclaimed worktree bytes must be non-negative".to_string(),
+        ));
+    }
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let now = normalize_utc_iso_or_now("");
-    let changed = tx.execute(
+    let resource_id: String = tx.query_row(
+        "SELECT r.resource_id FROM exec_envs e \
+         JOIN exec_env_resource_bindings b ON b.env_id = e.env_id AND b.released_at IS NULL \
+         JOIN exec_env_resources r ON r.resource_id = b.resource_id \
+         WHERE e.env_id = ?1 AND e.state = 'removing' \
+           AND r.kind = 'worktree' AND r.path = e.path AND r.state = 'reclaiming'",
+        params![env_id],
+        |row| row.get(0),
+    )?;
+    let released = tx.execute(
+        "UPDATE exec_env_resource_bindings SET released_at = ?3 \
+         WHERE env_id = ?1 AND resource_id = ?2 AND released_at IS NULL",
+        params![env_id, resource_id, now],
+    )?;
+    if released != 1 {
+        return Err(MemoryError::WorkClaimIncompatibleState(format!(
+            "exec env {env_id} lost its worktree binding before removal completion"
+        )));
+    }
+    let resource_changed = tx.execute(
+        "UPDATE exec_env_resources SET state = 'reclaimed', reclaimed_at = ?2, \
+             reclaimed_bytes = ?3, updated_at = ?2 \
+         WHERE resource_id = ?1 AND state = 'reclaiming'",
+        params![resource_id, now, reclaimed_bytes],
+    )?;
+    if resource_changed != 1 {
+        return Err(MemoryError::WorkClaimIncompatibleState(format!(
+            "worktree resource {resource_id} lost its removal claim before completion"
+        )));
+    }
+    let lease_changed = tx.execute(
         "UPDATE exec_envs SET state = 'reclaimed', reclaimed_at = ?2, \
              reclaim_reason = ?3 WHERE env_id = ?1 AND state = 'removing'",
         params![env_id, now, reason],
     )?;
-    if changed != 1 {
+    if lease_changed != 1 {
         return Err(MemoryError::WorkClaimIncompatibleState(format!(
             "exec env {env_id} lost its removal claim before completion"
         )));
@@ -450,11 +513,30 @@ pub fn complete_exec_env_removal(
 /// Release a persisted removal claim after deletion did not occur.
 pub fn abort_exec_env_removal(conn: &mut Connection, env_id: &str) -> Result<(), MemoryError> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let changed = tx.execute(
+    let resource_id: String = tx.query_row(
+        "SELECT r.resource_id FROM exec_envs e \
+         JOIN exec_env_resource_bindings b ON b.env_id = e.env_id AND b.released_at IS NULL \
+         JOIN exec_env_resources r ON r.resource_id = b.resource_id \
+         WHERE e.env_id = ?1 AND e.state = 'removing' \
+           AND r.kind = 'worktree' AND r.path = e.path AND r.state = 'reclaiming'",
+        params![env_id],
+        |row| row.get(0),
+    )?;
+    let resource_changed = tx.execute(
+        "UPDATE exec_env_resources SET state = 'active', reclaim_reason = NULL, updated_at = ?2 \
+         WHERE resource_id = ?1 AND state = 'reclaiming'",
+        params![resource_id, normalize_utc_iso_or_now("")],
+    )?;
+    if resource_changed != 1 {
+        return Err(MemoryError::WorkClaimIncompatibleState(format!(
+            "worktree resource {resource_id} lost its removal claim before abort"
+        )));
+    }
+    let lease_changed = tx.execute(
         "UPDATE exec_envs SET state = 'active' WHERE env_id = ?1 AND state = 'removing'",
         params![env_id],
     )?;
-    if changed != 1 {
+    if lease_changed != 1 {
         return Err(MemoryError::WorkClaimIncompatibleState(format!(
             "exec env {env_id} lost its removal claim before abort"
         )));
