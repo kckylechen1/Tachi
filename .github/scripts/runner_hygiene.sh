@@ -43,8 +43,10 @@ ensure_safe_workspace() {
   fi
   expected="$(cd "${RUNNER_ROOT:-$HOME/runner-tachi}/_work" 2>/dev/null && pwd -P)" || expected=""
   if [ -n "${expected}" ]; then
+    # Strict descendant only (review R6): accepting the _work root itself
+    # would let a malformed GITHUB_WORKSPACE wipe every workspace at once.
     case "${phys}" in
-      "${expected}"|"${expected}"/*)
+      "${expected}"/*)
         workspace="${phys}"
         return 0
         ;;

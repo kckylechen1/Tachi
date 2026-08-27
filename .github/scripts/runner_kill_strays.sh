@@ -74,6 +74,27 @@ snapshot() {
   fi
 }
 
+snapshot_exe() {
+  # Second lsof pass: mapped executables. LSOF_EXE_LINES holds
+  # "p<pid>/ftxt/n<path>" records; a failed pass is an error, not empty.
+  if ! LSOF_EXE_LINES="$(lsof -d txt -Fn 2>/dev/null)"; then
+    return 3
+  fi
+}
+
+exe_pids_under_root() {
+  # PIDs executing a binary mapped from under the scan root (review R6):
+  # catches chdir-escaped test/build binaries, which run from
+  # target/debug/... inside the workspace even after changing cwd.
+  local prot
+  prot="$(protected_pids | tr '\n' '|')"
+  prot="${prot%|}"
+  printf '%s\n' "${LSOF_EXE_LINES:-}" | awk -v root="${scan_root}" -v prot="^(${prot})$" '
+    /^p[0-9]+$/ { if (pid && hit && pid !~ prot) print pid; pid = substr($0, 2); hit = 0 }
+    /^n\// { path = substr($0, 2); if (path == root || index(path, root "/") == 1) hit = 1 }
+    END { if (pid && hit && pid !~ prot) print pid }'
+}
+
 snapshot_cwd_under_root() {
   # "<pid> TAB <cwd>" for every snapshot record whose cwd is under the
   # physical work root, excluding protected pids.
@@ -98,13 +119,31 @@ snapshot_cwd_of() {
     END { if (!found) print "-" }'
 }
 
-victims() { snapshot_cwd_under_root | cut -f1; }
+victims() {
+  # cwd-under-root OR executing-a-binary-under-root, deduped (review R6).
+  {
+    snapshot_cwd_under_root | cut -f1 || true
+    exe_pids_under_root || true
+  } | sort -u
+}
 
 foreign_argv_matches() {
   # Processes whose ARGV references _work but whose cwd is elsewhere:
-  # informational only, never signalled.
+  # informational only, never signalled. Protected pids (this script and
+  # its ancestors, including the invoking hygiene step) and exe-signal
+  # victims are excluded so the report is not polluted by the scanner
+  # itself or by pids that ARE signalled (review R6).
+  local prot_list exe_list
+  prot_list="$(protected_pids)"
+  exe_list="$(exe_pids_under_root || true)"
   { pgrep -f "${argv_pattern}" || true; } | while read -r pid; do
     [ -n "${pid}" ] || continue
+    if printf '%s\n' "${prot_list}" | command grep -qx -- "${pid}"; then
+      continue
+    fi
+    if [ -n "${exe_list}" ] && printf '%s\n' "${exe_list}" | command grep -qx -- "${pid}"; then
+      continue # already an exe-signal victim
+    fi
     cwd="$(snapshot_cwd_of "${pid}")"
     case "${cwd}" in
       "${scan_root}"|"${scan_root}"/*) ;; # already a cwd victim
@@ -118,18 +157,24 @@ cmd_of() { ps -o command= -p "$1" 2>/dev/null || echo '<gone>'; }
 case "${mode}" in
   list)
     snapshot || { echo "::error::kill-strays: lsof discovery failed; live-process state UNKNOWN" >&2; exit 5; }
+    snapshot_exe || { echo "::error::kill-strays: lsof executable scan failed; live-process state UNKNOWN" >&2; exit 5; }
     v_out="$(snapshot_cwd_under_root)"
     if [ -z "${v_out}" ] && ! pgrep -f "${argv_pattern}" >/dev/null 2>&1; then
       echo "kill-strays: no live processes are rooted in ${scan_root}"
       exit 0
     fi
     if [ -n "${v_out}" ]; then
-      echo "kill-strays: KILL CANDIDATES (cwd under ${scan_root}; self/ancestors excluded):"
+      echo "kill-strays: KILL CANDIDATES -- cwd under ${scan_root} (self/ancestors excluded):"
       printf '%s\n' "${v_out}" | while IFS="$(printf '\t')" read -r pid cwd; do
         printf '  pid=%s cwd=%s cmd=%s\n' "${pid}" "${cwd}" "$(cmd_of "${pid}")"
       done
     else
-      echo "kill-strays: no kill candidates with cwd under ${scan_root}"
+      echo "kill-strays: no cwd-under-root candidates under ${scan_root}"
+    fi
+    e_out="$(exe_pids_under_root | while read -r pid; do printf '  pid=%s (exe from scan root) cmd=%s\n' "${pid}" "$(cmd_of "${pid}")"; done)"
+    if [ -n "${e_out}" ]; then
+      echo "kill-strays: KILL CANDIDATES -- executing a binary from ${scan_root} (chdir-escaped builds):"
+      printf '%s\n' "${e_out}"
     fi
     f_out="$(foreign_argv_matches)"
     if [ -n "${f_out}" ]; then
@@ -143,6 +188,7 @@ case "${mode}" in
     ;;
   kill)
     snapshot || { echo "::error::kill-strays: lsof discovery failed; live-process state UNKNOWN, nothing signalled" >&2; exit 5; }
+    snapshot_exe || { echo "::error::kill-strays: lsof executable scan failed; nothing signalled" >&2; exit 5; }
     pids="$(victims | tr '\n' ' ')"
     if [ -z "${pids// /}" ]; then
       echo "kill-strays: no kill candidates with cwd under ${scan_root} (run 'list' to inspect argv-only matches)"
@@ -153,6 +199,7 @@ case "${mode}" in
     kill -TERM ${pids} 2>/dev/null || true
     sleep 3
     snapshot || { echo "::error::kill-strays: post-TERM lsof discovery failed; survivor state UNKNOWN" >&2; exit 5; }
+    snapshot_exe || { echo "::error::kill-strays: post-TERM lsof executable scan failed; survivor state UNKNOWN" >&2; exit 5; }
     pids="$(victims | tr '\n' ' ')"
     if [ -n "${pids// /}" ]; then
       echo "kill-strays: SIGTERM survivors, escalating to SIGKILL: ${pids}" >&2
@@ -161,6 +208,7 @@ case "${mode}" in
       sleep 1
     fi
     snapshot || { echo "::error::kill-strays: post-KILL lsof discovery failed; survivor state UNKNOWN" >&2; exit 5; }
+    snapshot_exe || { echo "::error::kill-strays: post-KILL lsof executable scan failed; survivor state UNKNOWN" >&2; exit 5; }
     pids="$(victims | tr '\n' ' ')"
     if [ -n "${pids// /}" ]; then
       echo "::error::kill-strays: processes survived SIGKILL; resolve manually: ${pids}" >&2

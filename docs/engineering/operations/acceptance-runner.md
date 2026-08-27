@@ -212,14 +212,17 @@ it terminates leftover workspace-holding processes before building and
 refuses loudly if they survive, then wipes file residue — so a cancelled
 build cannot silently poison its successor.
 
-Known limitation (review R5): the kill set is defined by process working
-directory, so a descendant that changes its own cwd out of the workspace
-escapes termination (cargo/rustc/nextest and their test binaries keep the
-workspace or a `target/` subdir as cwd, so the realistic escape set is
-processes that deliberately chdir elsewhere). Such processes still
-reference the workspace in argv and are surfaced by preflight as a
-WARNING block and by `list` under FOREIGN argv-only matches, where the
-operator can decide to act on them.
+Known limitation (reviews R5/R6): stray detection uses three signals --
+cwd under the workspace, executable mapped from the workspace (catches
+chdir-escaped compiled test/build binaries via `lsof -d txt`), and argv
+references (reported, not signalled). A descendant that daemonizes,
+changes its cwd, AND executes a binary copied outside the workspace with
+a scrubbed argv is invisible to all three; no post-hoc scanner can catch
+a process that deliberately erases every trace, and the runner's own
+cancellation tree-kill is the first line of defence for that class. The
+realistic cargo/nextest/rustc/test-binary set is covered by the cwd and
+executable signals; argv-only matches are surfaced by preflight as a
+WARNING block and by `list` under FOREIGN for operator judgement.
 
 ## Rollback / decommission
 
