@@ -326,6 +326,47 @@ pub fn provision_cargo_target_config(
     Ok(CargoTargetProvision::Written(target_dir))
 }
 
+/// Remove only the exact private Cargo config this provisioning code writes.
+/// A missing or different file is not ours and is left for the ordinary dirty
+/// worktree fence to adjudicate. This narrow rollback exists so a later atomic
+/// ledger failure can restore the freshly opened worktree to its clean checkout
+/// before certified `wt-remove`; it does not weaken general dirty cleanup.
+#[allow(dead_code)] // library API; the CLI target compiles this module without the server caller
+pub fn rollback_private_cargo_target_config(
+    worktree_path: &Path,
+    target_dir: &Path,
+) -> Result<bool, String> {
+    if !target_dir.is_absolute() {
+        return Err(format!(
+            "private cargo target-dir rollback requires an absolute target, got '{}'",
+            target_dir.display()
+        ));
+    }
+    let config_path = worktree_path.join(".cargo").join("config.toml");
+    let metadata = match std::fs::symlink_metadata(&config_path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(format!("inspect {}: {error}", config_path.display())),
+    };
+    if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+        return Ok(false);
+    }
+    let expected = format!(
+        "# Written by tachi wt-open (#894 S2c): PRIVATE cargo target-dir for an\n\
+         # explicitly approved build-private env. Not shared with any other tree.\n\
+         [build]\ntarget-dir = \"{}\"\n",
+        escape_toml_string(&target_dir.display().to_string())
+    );
+    let observed = std::fs::read_to_string(&config_path)
+        .map_err(|error| format!("read {} before rollback: {error}", config_path.display()))?;
+    if observed != expected {
+        return Ok(false);
+    }
+    std::fs::remove_file(&config_path)
+        .map_err(|error| format!("remove owned config {}: {error}", config_path.display()))?;
+    Ok(true)
+}
+
 /// Minimal TOML basic-string escaping (backslash + double-quote) — paths on
 /// this platform never legitimately need more than that.
 fn escape_toml_string(raw: &str) -> String {
@@ -1560,6 +1601,29 @@ mod tests {
             Some(v) => std::env::set_var(SHARED_CARGO_TARGET_DIR_ENV, v),
             None => std::env::remove_var(SHARED_CARGO_TARGET_DIR_ENV),
         }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn private_config_rollback_removes_only_the_owned_exact_payload() {
+        let root = unique_temp("tachi-private-config-rollback");
+        std::fs::write(root.join("Cargo.toml"), "[workspace]\nmembers = []\n").unwrap();
+        let target = root.join("private-target");
+        assert!(matches!(
+            provision_cargo_target_config(&root, &CargoTargetPolicy::Private(target.clone()))
+                .unwrap(),
+            CargoTargetProvision::Written(ref written) if written == &target
+        ));
+        assert!(rollback_private_cargo_target_config(&root, &target).unwrap());
+        let config = root.join(".cargo/config.toml");
+        assert!(!config.exists());
+
+        std::fs::write(&config, "[build]\ntarget-dir = \"/foreign\"\n").unwrap();
+        assert!(!rollback_private_cargo_target_config(&root, &target).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(&config).unwrap(),
+            "[build]\ntarget-dir = \"/foreign\"\n"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 

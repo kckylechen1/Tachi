@@ -619,8 +619,19 @@ fn reject_private_target_symlink_components(target: &Path) -> Result<(), String>
 
 fn cleanup_opened_worktree_after_provision_failure(
     report: &OpenReport,
+    private_target: Option<&Path>,
     failure: impl std::fmt::Display,
 ) -> String {
+    if let Some(target) = private_target {
+        if let Err(rollback_error) = tachi_clean::wt_open::rollback_private_cargo_target_config(
+            Path::new(&report.path),
+            target,
+        ) {
+            return format!(
+                "{failure}; failed to roll back the owned private Cargo config before certified worktree cleanup: {rollback_error}"
+            );
+        }
+    }
     let cleanup = tachi_clean::wt_clean::run_wt_remove(tachi_clean::wt_clean::WtRemoveOptions {
         path: PathBuf::from(&report.path),
         force: true,
@@ -719,8 +730,10 @@ pub(crate) fn provision_managed_env(
     let build_target = match prepare_opened_worktree_for_publication(&mut report, opts) {
         Ok(build_target) => build_target,
         Err(error) => {
+            let private_target = opts.build_target_dir(&report.path).ok().flatten();
             return Err(cleanup_opened_worktree_after_provision_failure(
                 &report,
+                private_target.as_deref(),
                 format!("exec-env publication preparation failed: {error}"),
             ));
         }
@@ -750,6 +763,7 @@ pub(crate) fn provision_managed_env(
         run_publication_failure_hook();
         return Err(cleanup_opened_worktree_after_provision_failure(
             &report,
+            build_target.as_deref().map(Path::new),
             format!("exec-env ledger publication failed atomically: {error}"),
         ));
     }
@@ -1950,6 +1964,104 @@ mod tests {
         assert!(
             !contains_worktree_marker(&worktrees),
             "prepublication refusal must leave no linked worktree"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn build_private_publication_failure_rolls_back_owned_config_then_worktree() {
+        fn contains_worktree_marker(path: &Path) -> bool {
+            let Ok(entries) = std::fs::read_dir(path) else {
+                return false;
+            };
+            entries.filter_map(Result::ok).any(|entry| {
+                entry.file_name() == ".git"
+                    || (entry.file_type().is_ok_and(|kind| kind.is_dir())
+                        && contains_worktree_marker(&entry.path()))
+            })
+        }
+
+        let _environment = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let root = tempfile::tempdir().expect("fixture root");
+        let home = root.path().join("home");
+        let repo = root.path().join("repo");
+        let worktrees = root.path().join("worktrees");
+        std::fs::create_dir_all(&repo).expect("create Rust fixture repo");
+        std::fs::write(repo.join("Cargo.toml"), "[workspace]\nmembers = []\n")
+            .expect("write tracked Cargo manifest");
+        assert!(std::process::Command::new("git")
+            .args(["init", repo.to_str().expect("utf8 repo")])
+            .status()
+            .expect("git init")
+            .success());
+        assert!(std::process::Command::new("git")
+            .args(["-C", repo.to_str().expect("utf8 repo"), "add", "."])
+            .status()
+            .expect("git add")
+            .success());
+        assert!(std::process::Command::new("git")
+            .args([
+                "-C",
+                repo.to_str().expect("utf8 repo"),
+                "-c",
+                "user.name=Tachi Test",
+                "-c",
+                "user.email=tachi-test@example.invalid",
+                "commit",
+                "-m",
+                "fixture",
+            ])
+            .status()
+            .expect("git commit")
+            .success());
+
+        let _tachi_home = crate::test_support::EnvRestore::set_path("TACHI_HOME", &home);
+        let _home = crate::test_support::EnvRestore::set_path("HOME", &home);
+        let _worktrees =
+            crate::test_support::EnvRestore::set_path("TACHI_WORKTREES_ROOT", &worktrees);
+        let db = home.join("global").join(memcore::MEMORY_DB_FILENAME);
+        std::fs::create_dir_all(db.parent().expect("global DB parent"))
+            .expect("create global DB parent");
+        let mut store = memcore::MemoryStore::open(db.to_str().expect("utf8 DB")).expect("store");
+        let injector = rusqlite::Connection::open(&db).expect("unrestricted second connection");
+        injector
+            .execute_batch(
+                "CREATE TRIGGER fail_build_private_publication
+                 BEFORE INSERT ON hard_state
+                 WHEN NEW.namespace = 'exec_env_private_target'
+                 BEGIN
+                   SELECT RAISE(ABORT, 'injected BuildPrivate publication failure');
+                 END;",
+            )
+            .expect("install late BuildPrivate publication trigger");
+        let _failure_hook = install_publication_failure_hook(move || {
+            injector
+                .execute_batch("DROP TRIGGER fail_build_private_publication;")
+                .expect("remove BuildPrivate trigger before certified cleanup");
+        });
+        let mut opts = provision_opts(EnvClass::BuildPrivate, Some(approval(1_000)));
+        opts.repo_root = repo;
+        opts.base = Some("HEAD".to_string());
+        opts.name = Some("private-publication-failure".to_string());
+
+        let error = provision_managed_env(&mut store, &opts)
+            .expect_err("late BuildPrivate publication failure must roll back filesystem + DB");
+        assert!(
+            error.contains("injected BuildPrivate publication failure")
+                && error.contains("newly opened worktree was removed"),
+            "{error}"
+        );
+        assert!(memcore::list_exec_envs(store.connection(), None)
+            .expect("list leases")
+            .is_empty());
+        assert!(memcore::list_resources(store.connection(), None, None)
+            .expect("list resources")
+            .is_empty());
+        assert!(
+            !contains_worktree_marker(&worktrees),
+            "late BuildPrivate publication failure must leave no linked worktree"
         );
     }
 

@@ -1079,13 +1079,25 @@ const EXEMPTIONS: &[Exemption<'static>] = &[
                 occurrences: 1,
             },
             Site {
+                symbol: "contains_worktree_marker",
+                trigger: "FAIL_BUILD_PRIVATE_PUBLICATION",
+                ddl: "47c83951777b49af",
+                occurrences: 1,
+            },
+            Site {
+                symbol: "contains_worktree_marker",
+                trigger: "FAIL_BUILD_PRIVATE_PUBLICATION",
+                ddl: "73c18ff187218f56",
+                occurrences: 1,
+            },
+            Site {
                 symbol: "late_publication_failure_rolls_back_every_intermediate_row",
                 trigger: "FAIL_PRIVATE_RESERVATION",
                 ddl: "701012d43ab1f566",
                 occurrences: 1,
             },
         ],
-        reason: "the tests open a second direct rusqlite::Connection on a file-backed DB and install failure triggers there, so the real quarantine or atomic publication transaction fails; bodies read 2026-08-27. The file also contains MemoryStore doorways, so these sites are declared rather than assigned an inapplicable machine proof.",
+        reason: "the tests open a second direct rusqlite::Connection on a file-backed DB and install failure triggers there, so the real quarantine or atomic publication transaction fails. The BuildPrivate test drops its persistent trigger through the post-failure hook, rolls back only the exact Tachi-generated Cargo config, then exercises certified worktree cleanup; bodies read 2026-08-27. The file also contains MemoryStore doorways, so these sites are declared rather than assigned an inapplicable machine proof.",
     },
     Exemption {
         path: "crates/tachi-server/src/exec_env_postflight/tests.rs",
