@@ -88,12 +88,15 @@ pub enum ApplyOutcome {
     StaleIgnored,
 }
 
-/// The incremental carrier: latest snapshot per source kind. This is
-/// disposable projection state — dropping it loses nothing an authority
-/// owns.
+/// The incremental carrier: latest snapshot per source kind, plus the
+/// content identity of EVERY immutable ordering key ever applied — so an
+/// equal-key content contradiction is rejected no matter how many newer
+/// snapshots arrived in between. This is disposable projection state:
+/// dropping it loses nothing an authority owns.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WorkProjectionIndex {
     latest: BTreeMap<SourceKind, SourceSnapshot>,
+    seen: BTreeMap<(SourceKind, (chrono::DateTime<chrono::Utc>, String)), SourceFacts>,
 }
 
 impl WorkProjectionIndex {
@@ -106,34 +109,42 @@ impl WorkProjectionIndex {
     /// sharing one immutable `(observed_at, revision)` key with DIFFERENT
     /// content are rejected fail-closed (the #1696
     /// `ContradictsExistingRevision` law — arrival order never picks the
-    /// winner, because neither content wins). On rejection the index is
-    /// left unchanged and the caller must not consume the conflict.
+    /// winner, because neither content wins). The contradiction check runs
+    /// against every previously seen key, not just the currently retained
+    /// latest, so a superseding snapshot in between cannot mask it. On
+    /// rejection the index is left unchanged and the caller must not
+    /// consume the conflict.
     pub fn apply(
         &mut self,
         snapshot: SourceSnapshot,
     ) -> Result<ApplyOutcome, super::sources::SnapshotError> {
-        match self.latest.get(&snapshot.stamp.kind) {
-            None => {
-                self.latest.insert(snapshot.stamp.kind.clone(), snapshot);
-                Ok(ApplyOutcome::Applied)
-            }
-            Some(existing) => {
-                if snapshot.stamp.ordering_key() > existing.stamp.ordering_key() {
-                    self.latest.insert(snapshot.stamp.kind.clone(), snapshot);
-                    Ok(ApplyOutcome::SupersededExisting)
-                } else if snapshot.stamp.ordering_key() == existing.stamp.ordering_key()
-                    && snapshot.facts != existing.facts
-                {
-                    Err(super::sources::SnapshotError::ContentConflict {
-                        kind: snapshot.stamp.kind.as_token(),
-                        observed_at: snapshot.stamp.observed_at.clone(),
-                        revision: snapshot.stamp.revision.clone(),
-                    })
-                } else {
-                    Ok(ApplyOutcome::StaleIgnored)
-                }
+        let ordering_key = snapshot.stamp.ordering_key();
+        let seen_key = (snapshot.stamp.kind.clone(), ordering_key.clone());
+        if let Some(existing) = self.seen.get(&seen_key) {
+            if *existing != snapshot.facts {
+                return Err(super::sources::SnapshotError::ContentConflict {
+                    kind: snapshot.stamp.kind.as_token(),
+                    observed_at: snapshot.stamp.observed_at.clone(),
+                    revision: snapshot.stamp.revision.clone(),
+                });
             }
         }
+        self.seen.insert(seen_key, snapshot.facts.clone());
+
+        let outcome = match self.latest.get(&snapshot.stamp.kind) {
+            None => ApplyOutcome::Applied,
+            Some(existing) => {
+                if ordering_key > existing.stamp.ordering_key() {
+                    ApplyOutcome::SupersededExisting
+                } else {
+                    ApplyOutcome::StaleIgnored
+                }
+            }
+        };
+        if !matches!(outcome, ApplyOutcome::StaleIgnored) {
+            self.latest.insert(snapshot.stamp.kind.clone(), snapshot);
+        }
+        Ok(outcome)
     }
 
     /// The snapshots currently held.
@@ -210,10 +221,20 @@ pub fn project(index: &WorkProjectionIndex, options: &ProjectionOptions) -> Work
             _ => None,
         })
         .unwrap_or_default();
+    // Authorization-scope gate: a view minted under `sees_private=true`
+    // carries private subjects with no per-subject marker, so an
+    // UNAUTHORIZED read cannot consume it at all — the snapshot is treated
+    // as unusable for that read (section Unavailable, issue items hidden,
+    // health counters excluded), never as filtered content. Authorized
+    // reads consume any scope.
     let repo_views: Vec<CurrentTruthViewV1> = index
         .snapshots()
         .filter_map(|snapshot| match &snapshot.facts {
-            SourceFacts::CurrentTruth(view) => Some((**view).clone()),
+            SourceFacts::CurrentTruth(facts) => {
+                let usable =
+                    options.authorization.sees_private || !facts.minted_authorization.sees_private;
+                usable.then(|| facts.view.clone())
+            }
             _ => None,
         })
         .collect();

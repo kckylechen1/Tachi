@@ -251,6 +251,18 @@ impl DeliveryObservationV1 {
     }
 }
 
+/// A CurrentTruth consumer view **bound to the authorization scope it was
+/// minted under**. `read_view` pre-filters private subjects by its caller,
+/// and the view itself carries no scope marker — so the projection records
+/// the minting scope here and refuses to serve an unauthorized read from a
+/// private-scoped snapshot (fail-closed: the scope mismatch is treated as
+/// an unusable view for that read, never as filtered content).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CurrentTruthFactsV1 {
+    pub view: CurrentTruthViewV1,
+    pub minted_authorization: crate::current_truth::consumer::CallerAuthorizationV1,
+}
+
 /// The facts one snapshot observed. The variant must agree with the stamp's
 /// [`SourceKind`]; [`SourceSnapshot::new`] enforces this fail-closed.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -258,7 +270,7 @@ pub enum SourceFacts {
     WorkClaims(Vec<WorkClaimFactV1>),
     RunReceipts(Vec<RunReceiptFactV1>),
     ExecEnvs(Vec<ExecEnvFactV1>),
-    CurrentTruth(Box<CurrentTruthViewV1>),
+    CurrentTruth(Box<CurrentTruthFactsV1>),
     Verification(Vec<VerificationFactV1>),
     Adjudication(Vec<AdjudicationFactV1>),
     OwnerDispositions(Vec<OwnerDispositionFactV1>),
@@ -271,8 +283,8 @@ impl SourceFacts {
             SourceFacts::WorkClaims(_) => SourceKind::WorkClaims,
             SourceFacts::RunReceipts(_) => SourceKind::RunReceipts,
             SourceFacts::ExecEnvs(_) => SourceKind::ExecEnvs,
-            SourceFacts::CurrentTruth(view) => SourceKind::CurrentTruth {
-                repo: view.repo.clone(),
+            SourceFacts::CurrentTruth(facts) => SourceKind::CurrentTruth {
+                repo: facts.view.repo.clone(),
             },
             SourceFacts::Verification(_) => SourceKind::Verification,
             SourceFacts::Adjudication(_) => SourceKind::Adjudication,

@@ -55,9 +55,9 @@ mod tests;
 
 pub use projector::{project, rebuild, ApplyOutcome, WorkProjectionIndex};
 pub use sources::{
-    AdjudicationFactV1, ClaimModeV1, ClaimStateV1, DeliveryObservationV1, ExecEnvFactV1,
-    OwnerDispositionFactV1, OwnerDispositionV1, RunReceiptFactV1, SnapshotError, SourceFacts,
-    SourceKind, SourceSnapshot, SourceStamp, VerificationFactV1, WorkClaimFactV1,
+    AdjudicationFactV1, ClaimModeV1, ClaimStateV1, CurrentTruthFactsV1, DeliveryObservationV1,
+    ExecEnvFactV1, OwnerDispositionFactV1, OwnerDispositionV1, RunReceiptFactV1, SnapshotError,
+    SourceFacts, SourceKind, SourceSnapshot, SourceStamp, VerificationFactV1, WorkClaimFactV1,
 };
 pub use types::{
     AdjudicationSectionV1, BlockerKindV1, BlockerV1, ClaimRowV1, ClaimSectionV1, DebtClearingV1,

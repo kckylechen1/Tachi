@@ -328,13 +328,29 @@ fn ct_view(
 }
 
 fn ct_snapshot(view: CurrentTruthViewV1, revision: &str, observed_at: &str) -> SourceSnapshot {
+    ct_snapshot_scoped(view, revision, observed_at, false)
+}
+
+/// Snapshot with an explicit MINTING authorization scope — the wrapper
+// records the scope the view was actually minted under.
+fn ct_snapshot_scoped(
+    view: CurrentTruthViewV1,
+    revision: &str,
+    observed_at: &str,
+    minted_sees_private: bool,
+) -> SourceSnapshot {
     SourceSnapshot::new(
         SourceKind::CurrentTruth {
             repo: REPO.to_string(),
         },
         revision,
         observed_at,
-        SourceFacts::CurrentTruth(Box::new(view)),
+        SourceFacts::CurrentTruth(Box::new(super::sources::CurrentTruthFactsV1 {
+            view,
+            minted_authorization: CallerAuthorizationV1 {
+                sees_private: minted_sees_private,
+            },
+        })),
     )
     .expect("current truth snapshot")
 }
@@ -507,7 +523,7 @@ fn options() -> ProjectionOptions {
 fn full_snapshot_set() -> Vec<SourceSnapshot> {
     vec![
         ct_snapshot(
-            ct_view(&[state_v2_merged_open()], &[], true),
+            ct_view(&[state_v2_merged_open()], &[], false),
             "ct-1",
             READ_AT,
         ),
@@ -887,7 +903,7 @@ fn issue_open_merged_open_owner_close_states_remain_distinct() {
         ),
     ];
     for (state, extra, expected_action, expected_status) in cases {
-        let view = ct_view(&[state], &extra, true);
+        let view = ct_view(&[state], &extra, false);
         let mut index = WorkProjectionIndex::new();
         index.apply_ok(ct_snapshot(view, "ct-1", READ_AT));
         let set = project(&index, &options());
@@ -925,7 +941,7 @@ fn brief_generated_before_merge_becomes_stale_after_merge() {
     index.apply_ok(ct_snapshot(before_view, "ct-1", "2026-08-26T10:00:05Z"));
     let before_brief = super::views::brief_view(find(&project(&index, &options()), ISSUE_TOKEN));
 
-    let after_view = ct_view(&[state_v2_merged_open()], &[], true);
+    let after_view = ct_view(&[state_v2_merged_open()], &[], false);
     let mut index = WorkProjectionIndex::new();
     index.apply_ok(ct_snapshot(after_view, "ct-2", "2026-08-26T11:00:05Z"));
     let after_brief = super::views::brief_view(find(&project(&index, &options()), ISSUE_TOKEN));
@@ -987,8 +1003,14 @@ fn merged_reverted_reopened_changes_projection_without_rewriting() {
             None,
         )
         .expect("posture v2");
-    let view_v2 = consumer::read_view(&store, REPO, CallerAuthorizationV1 { sees_private: true })
-        .expect("view v2");
+    let view_v2 = consumer::read_view(
+        &store,
+        REPO,
+        CallerAuthorizationV1 {
+            sees_private: false,
+        },
+    )
+    .expect("view v2");
     index.apply_ok(ct_snapshot(view_v2, "ct-1", READ_AT));
     let merged = find(&project(&index, &options()), ISSUE_TOKEN).clone();
     assert_eq!(
@@ -1003,8 +1025,14 @@ fn merged_reverted_reopened_changes_projection_without_rewriting() {
     assert!(count_v4 > count_v2, "authority history only grows");
 
     let mut index = WorkProjectionIndex::new();
-    let view_v4 = consumer::read_view(&store, REPO, CallerAuthorizationV1 { sees_private: true })
-        .expect("view v4");
+    let view_v4 = consumer::read_view(
+        &store,
+        REPO,
+        CallerAuthorizationV1 {
+            sees_private: false,
+        },
+    )
+    .expect("view v4");
     index.apply_ok(ct_snapshot(view_v4, "ct-2", READ_AT));
     let projected = project(&index, &options());
     let reverted = find(&projected, ISSUE_TOKEN);
@@ -1019,7 +1047,7 @@ fn merged_reverted_reopened_changes_projection_without_rewriting() {
 /// without independent adjudication — and can once adjudication accepts.
 #[test]
 fn worker_submit_exit_never_projects_complete_without_adjudication() {
-    let view = ct_view(&[state_v2_merged_open()], &[], true);
+    let view = ct_view(&[state_v2_merged_open()], &[], false);
     let mut index = WorkProjectionIndex::new();
     index.apply_ok(ct_snapshot(view, "ct-1", READ_AT));
     index.apply_ok(claims_snapshot(
@@ -1087,7 +1115,7 @@ fn worker_submit_exit_never_projects_complete_without_adjudication() {
 /// lifecycle owners side by side.
 #[test]
 fn managed_and_attached_modes_preserve_lifecycle_owner() {
-    let view = ct_view(&[state_v2_merged_open()], &[], true);
+    let view = ct_view(&[state_v2_merged_open()], &[], false);
     let mut managed = run_fact("d1", true, false, None);
     managed.lifecycle_owner = LifecycleMode::TachiManagedBatch;
     let mut attached = run_fact("d2", true, false, None);
@@ -1140,7 +1168,7 @@ fn managed_and_attached_modes_preserve_lifecycle_owner() {
 /// and names the repair owner.
 #[test]
 fn head_drift_blocks_and_names_repair_owner() {
-    let view = ct_view(&[state_v2_merged_open()], &[], true);
+    let view = ct_view(&[state_v2_merged_open()], &[], false);
     let mut index = WorkProjectionIndex::new();
     index.apply_ok(ct_snapshot(view, "ct-1", READ_AT));
     index.apply_ok(claims_snapshot(
@@ -1228,7 +1256,7 @@ fn conflicting_inputs_yield_conflicted_never_success() {
         review_state: ReviewStateV1::Reviewed,
         visibility: VisibilityClassV1::Public,
     };
-    let view = ct_view(&[state_v2_merged_open()], &[rival], true);
+    let view = ct_view(&[state_v2_merged_open()], &[rival], false);
     let mut index = WorkProjectionIndex::new();
     index.apply_ok(ct_snapshot(view, "ct-1", READ_AT));
     let set = project(&index, &options());
@@ -1244,7 +1272,7 @@ fn conflicting_inputs_yield_conflicted_never_success() {
     // Adjudication-side conflict: differing verdicts over one outcome.
     let mut index = WorkProjectionIndex::new();
     index.apply_ok(ct_snapshot(
-        ct_view(&[state_v2_merged_open()], &[], true),
+        ct_view(&[state_v2_merged_open()], &[], false),
         "ct-1",
         READ_AT,
     ));
@@ -1380,7 +1408,7 @@ fn consumers_share_work_id_revision_and_state() {
 /// work/result existence through projection counts/refs.
 #[test]
 fn unauthorized_caller_cannot_infer_private_work_existence() {
-    let view = ct_view(&[state_v2_merged_open()], &[], true);
+    let view = ct_view(&[state_v2_merged_open()], &[], false);
     let private_claim = claim_fact(
         "secret-1",
         Some(&format!("{REPO}#100")),
@@ -1580,8 +1608,14 @@ fn projection_never_writes_back_to_sources() {
     let mut index = WorkProjectionIndex::new();
     let snapshots = vec![
         ct_snapshot(
-            consumer::read_view(&store, REPO, CallerAuthorizationV1 { sees_private: true })
-                .expect("view"),
+            consumer::read_view(
+                &store,
+                REPO,
+                CallerAuthorizationV1 {
+                    sees_private: false,
+                },
+            )
+            .expect("view"),
             "ct-1",
             READ_AT,
         ),
@@ -1629,7 +1663,7 @@ fn projection_never_writes_back_to_sources() {
 /// (handoff/release action) without any write to the claim store.
 #[test]
 fn reader_expired_claim_yields_handoff_or_release() {
-    let view = ct_view(&[state_v2_merged_open()], &[], true);
+    let view = ct_view(&[state_v2_merged_open()], &[], false);
     let mut index = WorkProjectionIndex::new();
     index.apply_ok(ct_snapshot(view, "ct-1", READ_AT));
     index.apply_ok(claims_snapshot(
@@ -1667,7 +1701,7 @@ fn reader_expired_claim_yields_handoff_or_release() {
 /// Two active claims on one work item are a typed collision blocker.
 #[test]
 fn claim_collision_is_a_typed_blocker() {
-    let view = ct_view(&[state_v2_merged_open()], &[], true);
+    let view = ct_view(&[state_v2_merged_open()], &[], false);
     let mut index = WorkProjectionIndex::new();
     index.apply_ok(ct_snapshot(view, "ct-1", READ_AT));
     index.apply_ok(claims_snapshot(
@@ -1704,7 +1738,7 @@ fn claim_collision_is_a_typed_blocker() {
 /// A verification-missing terminal run blocks and names run-verification.
 #[test]
 fn terminal_run_without_verification_blocks() {
-    let view = ct_view(&[state_v2_merged_open()], &[], true);
+    let view = ct_view(&[state_v2_merged_open()], &[], false);
     let mut index = WorkProjectionIndex::new();
     index.apply_ok(ct_snapshot(view, "ct-1", READ_AT));
     index.apply_ok(claims_snapshot(
@@ -1774,7 +1808,12 @@ fn snapshot_minting_is_fail_closed() {
             },
             "r1",
             READ_AT,
-            SourceFacts::CurrentTruth(Box::new(wrong_repo_view))
+            SourceFacts::CurrentTruth(Box::new(super::sources::CurrentTruthFactsV1 {
+                view: wrong_repo_view,
+                minted_authorization: CallerAuthorizationV1 {
+                    sees_private: false
+                },
+            }))
         ),
         Err(SnapshotError::RepoMismatch { .. })
     ));
@@ -1934,7 +1973,7 @@ fn equal_key_different_content_is_rejected_in_every_arrival_order() {
 /// not Unavailability — and it stamps the sections it made Available.
 #[test]
 fn empty_snapshot_is_available_knowledge_not_unavailability() {
-    let view = ct_view(&[state_v2_merged_open()], &[], true);
+    let view = ct_view(&[state_v2_merged_open()], &[], false);
     let with_empty = vec![
         ct_snapshot(view.clone(), "ct-1", READ_AT),
         claims_snapshot(vec![], "claims-empty", READ_AT),
@@ -2035,7 +2074,7 @@ fn reverted_board_column_is_not_landed() {
 /// unauthorized caller.
 #[test]
 fn private_verification_fact_hides_the_work_item() {
-    let view = ct_view(&[state_v2_merged_open()], &[], true);
+    let view = ct_view(&[state_v2_merged_open()], &[], false);
     let snapshots = vec![
         ct_snapshot(view, "ct-1", READ_AT),
         verification_snapshot(
@@ -2148,4 +2187,101 @@ fn unlinked_reverted_pr_counts_as_orphaned_debt() {
         github_section(model).transition_debt.revert,
         DebtStateV1::None
     ));
+}
+
+/// A superseding snapshot arriving BETWEEN two equal-key contradictory
+/// snapshots cannot mask the conflict — every arrival order of the multiset
+/// rejects it (codex R2 round-2 finding 1).
+#[test]
+fn superseding_snapshot_cannot_mask_an_equal_key_conflict() {
+    let a = claims_snapshot(
+        vec![claim_fact(
+            "c1",
+            Some(&format!("{REPO}#100")),
+            Some("d1"),
+            ClaimStateV1::Active,
+            None,
+            VisibilityClassV1::Public,
+        )],
+        "claims-key-1",
+        "2026-08-27T09:00:00Z",
+    );
+    let b = claims_snapshot(
+        vec![claim_fact(
+            "c9",
+            Some(&format!("{REPO}#100")),
+            Some("d9"),
+            ClaimStateV1::Active,
+            None,
+            VisibilityClassV1::Public,
+        )],
+        "claims-key-1",
+        "2026-08-27T09:00:00Z",
+    );
+    let newer = claims_snapshot(
+        vec![claim_fact(
+            "c5",
+            Some(&format!("{REPO}#100")),
+            Some("d5"),
+            ClaimStateV1::Active,
+            None,
+            VisibilityClassV1::Public,
+        )],
+        "claims-key-2",
+        "2026-08-27T10:00:00Z",
+    );
+
+    let mut perms: Vec<Vec<SourceSnapshot>> = vec![
+        vec![a.clone(), newer.clone(), b.clone()],
+        vec![a.clone(), b.clone(), newer.clone()],
+        vec![newer.clone(), a.clone(), b.clone()],
+        vec![newer.clone(), b.clone(), a.clone()],
+        vec![b.clone(), a.clone(), newer.clone()],
+        vec![b.clone(), newer.clone(), a.clone()],
+    ];
+    for permutation in perms.drain(..) {
+        let outcome = rebuild(permutation);
+        assert!(
+            matches!(outcome, Err(SnapshotError::ContentConflict { .. })),
+            "every arrival order must reject the equal-key contradiction"
+        );
+    }
+
+    // Without the contradiction the fold succeeds and keeps the newest.
+    let index = rebuild(vec![a, newer]).expect("clean multiset rebuilds");
+    let set = project(&index, &options().with_sees_private(true));
+    let model = find(&set, ISSUE_TOKEN);
+    let claims = match &model.claim {
+        SectionState::Available(section) => &section.claims,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(claims.len(), 1);
+    assert_eq!(claims[0].fact.claim_id, "c5");
+}
+
+/// A CurrentTruth view minted under `sees_private=true` cannot serve an
+/// unauthorized read at all: the snapshot is unusable for that read
+/// (github Unavailable, items hidden, health counters excluded) — never
+/// treated as filtered content (codex R2 round-2 finding 2).
+#[test]
+fn private_scoped_current_truth_view_is_unusable_for_unauthorized_reads() {
+    let view = ct_view(&[state_v2_merged_open()], &[], true);
+    let snapshot = ct_snapshot_scoped(view, "ct-1", READ_AT, true);
+
+    let unauthorized = project(
+        &rebuild(vec![snapshot.clone()]).expect("rebuild"),
+        &ProjectionOptions::new(READ_AT),
+    );
+    assert!(
+        unauthorized.items.is_empty(),
+        "a private-scoped view must not serve an unauthorized read"
+    );
+    assert_eq!(unauthorized.health.visible_work_count, 0);
+
+    let authorized = project(
+        &rebuild(vec![snapshot]).expect("rebuild"),
+        &ProjectionOptions::new(READ_AT).with_sees_private(true),
+    );
+    let model = find(&authorized, ISSUE_TOKEN);
+    assert!(model.github.is_available());
 }

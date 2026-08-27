@@ -165,7 +165,14 @@ fn cross_crate_work_read_model_keeps_r6_2_debt_behind_steady_state() {
             },
             "ct-1",
             "2026-08-27T12:00:00Z",
-            SourceFacts::CurrentTruth(Box::new(view)),
+            SourceFacts::CurrentTruth(Box::new(
+                tachi_params::work_read_model::CurrentTruthFactsV1 {
+                    view,
+                    minted_authorization: CallerAuthorizationV1 {
+                        sees_private: false,
+                    },
+                },
+            )),
         )
         .expect("ct snapshot"),
         SourceSnapshot::new(
