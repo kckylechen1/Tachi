@@ -618,10 +618,31 @@ fn reject_private_target_symlink_components(target: &Path) -> Result<(), String>
 }
 
 fn cleanup_opened_worktree_after_provision_failure(
-    report: &OpenReport,
+    report: &mut OpenReport,
     private_target: Option<&Path>,
     failure: impl std::fmt::Display,
 ) -> String {
+    let Some(authority) = report.worktree_authority.as_ref() else {
+        return format!(
+            "{failure}; refused cleanup because the opened worktree has no descriptor authority"
+        );
+    };
+    match authority.matches_absolute_path(Path::new(&report.path)) {
+        Ok(true) => {}
+        Ok(false) => {
+            return format!(
+                "{failure}; refused cleanup because worktree identity changed after open: {}",
+                report.path
+            )
+        }
+        Err(error) => {
+            return format!(
+                "{failure}; refused cleanup because worktree identity could not be re-established at {}: {error}",
+                report.path
+            )
+        }
+    }
+    drop(report.worktree_authority.take());
     if let Some(target) = private_target {
         if let Err(rollback_error) = tachi_clean::wt_open::rollback_private_cargo_target_config(
             Path::new(&report.path),
@@ -650,7 +671,39 @@ fn prepare_opened_worktree_for_publication(
     report: &mut OpenReport,
     opts: &ProvisionEnvOptions,
 ) -> Result<Option<String>, String> {
-    report.path = canonical_worktree_path(&report.path)?;
+    let managed_root = std::fs::canonicalize(&report.managed_root).map_err(|error| {
+        format!(
+            "cannot re-establish managed worktree root '{}': {error}",
+            report.managed_root
+        )
+    })?;
+    let worktree_path = Path::new(&report.path);
+    if !worktree_path.starts_with(&managed_root) || worktree_path == managed_root {
+        return Err(format!(
+            "refusing post-open worktree outside managed root '{}': {}",
+            managed_root.display(),
+            report.path
+        ));
+    }
+    let authority = report
+        .worktree_authority
+        .as_ref()
+        .ok_or_else(|| "opened worktree is missing descriptor authority".to_string())?;
+    match authority.matches_absolute_path(worktree_path) {
+        Ok(true) => {}
+        Ok(false) => {
+            return Err(format!(
+                "refusing post-open worktree whose identity changed: {}",
+                report.path
+            ))
+        }
+        Err(error) => {
+            return Err(format!(
+                "refusing post-open worktree whose descriptor identity cannot be re-established at '{}': {error}",
+                report.path
+            ))
+        }
+    }
 
     // The worktree path is only known after the open, so the private-target
     // default (`<worktree>/target`) is resolved here and the config written now.
@@ -671,9 +724,10 @@ fn prepare_opened_worktree_for_publication(
             }
         }
         reject_unproven_cargo_configs(&cargo_dir, &requested_target)?;
-        let outcome = tachi_clean::wt_open::provision_cargo_target_config(
+        let outcome = tachi_clean::wt_open::provision_cargo_target_config_with_authority(
             worktree,
             &CargoTargetPolicy::Private(requested_target.clone()),
+            authority,
         )
         .map_err(|err| {
             format!("private cargo target-dir provisioning failed before ledger publication: {err}")
@@ -732,7 +786,7 @@ pub(crate) fn provision_managed_env(
         Err(error) => {
             let private_target = opts.build_target_dir(&report.path).ok().flatten();
             return Err(cleanup_opened_worktree_after_provision_failure(
-                &report,
+                &mut report,
                 private_target.as_deref(),
                 format!("exec-env publication preparation failed: {error}"),
             ));
@@ -762,11 +816,12 @@ pub(crate) fn provision_managed_env(
         #[cfg(test)]
         run_publication_failure_hook();
         return Err(cleanup_opened_worktree_after_provision_failure(
-            &report,
+            &mut report,
             build_target.as_deref().map(Path::new),
             format!("exec-env ledger publication failed atomically: {error}"),
         ));
     }
+    drop(report.worktree_authority.take());
     Ok(ProvisionedEnv {
         env_id: Some(env_id),
         report,
@@ -1882,6 +1937,59 @@ mod tests {
             reject_unproven_cargo_configs(&cargo_dir, Path::new("/approved/target")).unwrap_err();
         assert!(error.contains(".cargo/config"), "{error}");
         assert!(error.contains("Cargo may use it instead"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn post_open_symlink_swap_cannot_retarget_config_or_cleanup_outside_managed_root() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let managed_root = root.path().join("managed");
+        let worktree = managed_root.join("opened-worktree");
+        let external = root.path().join("external");
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::create_dir_all(&external).unwrap();
+        std::fs::write(external.join("Cargo.toml"), "[workspace]\nmembers = []\n").unwrap();
+        let worktree = worktree.canonicalize().unwrap();
+        let managed_root = managed_root.canonicalize().unwrap();
+        let authority = memcore::anchored_fs::AnchoredDirectory::open_absolute(&worktree).unwrap();
+        std::fs::remove_dir(&worktree).unwrap();
+        symlink(&external, &worktree).unwrap();
+
+        let mut report = OpenReport {
+            action: "wt-open",
+            dry_run: false,
+            opened: true,
+            registered: true,
+            repo_root: root.path().display().to_string(),
+            path: worktree.display().to_string(),
+            branch: "tachi/swap-test".to_string(),
+            base_ref: "HEAD".to_string(),
+            base_sha: "abc1234".to_string(),
+            managed_root: managed_root.display().to_string(),
+            marker_path: None,
+            worktree_authority: Some(authority),
+            cargo_target_dir: None,
+            warnings: Vec::new(),
+            errors: Vec::new(),
+        };
+        let mut opts = provision_opts(EnvClass::BuildPrivate, Some(approval(1_000)));
+        opts.repo_root = root.path().to_path_buf();
+
+        let error = prepare_opened_worktree_for_publication(&mut report, &opts).unwrap_err();
+        assert!(
+            error.contains("descriptor identity cannot be re-established"),
+            "unexpected error: {error}"
+        );
+        assert!(!external.join(".cargo/config.toml").exists());
+        let cleanup = cleanup_opened_worktree_after_provision_failure(
+            &mut report,
+            None,
+            "injected post-open identity failure",
+        );
+        assert!(cleanup.contains("refused cleanup"), "{cleanup}");
+        assert!(external.join("Cargo.toml").exists());
     }
 
     #[cfg(unix)]

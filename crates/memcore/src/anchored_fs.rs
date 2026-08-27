@@ -12,9 +12,11 @@ mod imp {
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     use std::os::unix::ffi::OsStrExt;
     use std::path::{Component, Path};
+    use std::sync::Arc;
 
+    #[derive(Debug, Clone)]
     pub struct AnchoredDirectory {
-        fd: OwnedFd,
+        fd: Arc<OwnedFd>,
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,31 +61,39 @@ mod imp {
                     }
                 }
             }
-            Ok(Self { fd: current })
+            Ok(Self {
+                fd: Arc::new(current),
+            })
         }
 
         pub fn open_or_create_directory(&self, name: &OsStr) -> io::Result<Self> {
-            match open_directory_at(&self.fd, name) {
-                Ok(fd) => Ok(Self { fd }),
+            match open_directory_at(self.fd.as_ref(), name) {
+                Ok(fd) => Ok(Self { fd: Arc::new(fd) }),
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {
                     let name = c_name(name)?;
                     // SAFETY: the parent descriptor is live and name is one owned component.
-                    let created =
-                        unsafe { libc::mkdirat(self.fd.as_raw_fd(), name.as_ptr(), 0o700) };
+                    let created = unsafe {
+                        libc::mkdirat(self.fd.as_ref().as_raw_fd(), name.as_ptr(), 0o700)
+                    };
                     if created != 0 {
                         let error = io::Error::last_os_error();
                         if error.kind() != io::ErrorKind::AlreadyExists {
                             return Err(error);
                         }
                     }
-                    open_directory_at_c(&self.fd, &name).map(|fd| Self { fd })
+                    open_directory_at_c(self.fd.as_ref(), &name).map(|fd| Self { fd: Arc::new(fd) })
                 }
                 Err(error) => Err(error),
             }
         }
 
         pub fn open_directory(&self, name: &OsStr) -> io::Result<Self> {
-            open_directory_at(&self.fd, name).map(|fd| Self { fd })
+            open_directory_at(self.fd.as_ref(), name).map(|fd| Self { fd: Arc::new(fd) })
+        }
+
+        pub fn matches_absolute_path(&self, path: &Path) -> io::Result<bool> {
+            let other = Self::open_absolute(path)?;
+            Ok(self.identity()? == other.identity()?)
         }
 
         pub fn create_file_exclusive(
@@ -99,7 +109,7 @@ mod imp {
             // O_CREAT consumes the supplied mode.
             let fd = unsafe {
                 libc::openat(
-                    self.fd.as_raw_fd(),
+                    self.fd.as_ref().as_raw_fd(),
                     temporary.as_ptr(),
                     libc::O_WRONLY
                         | libc::O_CREAT
@@ -120,7 +130,7 @@ mod imp {
                 let _ = self.unlink(&temporary);
                 return Err(error);
             }
-            match rename_noreplace_at(&self.fd, &temporary, &name) {
+            match rename_noreplace_at(self.fd.as_ref(), &temporary, &name) {
                 Ok(()) => {
                     self.sync()?;
                     Ok(CreateFileOutcome::Created)
@@ -143,7 +153,7 @@ mod imp {
                 uuid::Uuid::new_v4().as_simple()
             ))
             .expect("generated rollback name has no interior NUL");
-            match rename_noreplace_at(&self.fd, &name, &captured) {
+            match rename_noreplace_at(self.fd.as_ref(), &name, &captured) {
                 Ok(()) => {}
                 Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
                 Err(error) => return Err(error),
@@ -154,24 +164,28 @@ mod imp {
                 Ok(true) => {
                     // SAFETY: captured is one component under the anchored directory;
                     // unlinkat removes the captured entry and never follows a symlink.
-                    if unsafe { libc::unlinkat(self.fd.as_raw_fd(), captured.as_ptr(), 0) } != 0 {
+                    if unsafe { libc::unlinkat(self.fd.as_ref().as_raw_fd(), captured.as_ptr(), 0) }
+                        != 0
+                    {
                         return Err(io::Error::last_os_error());
                     }
                     self.sync()?;
                     Ok(true)
                 }
                 Ok(false) => {
-                    rename_noreplace_at(&self.fd, &captured, &name)?;
+                    rename_noreplace_at(self.fd.as_ref(), &captured, &name)?;
                     self.sync()?;
                     Ok(false)
                 }
-                Err(inspect_error) => match rename_noreplace_at(&self.fd, &captured, &name) {
+                Err(inspect_error) => {
+                    match rename_noreplace_at(self.fd.as_ref(), &captured, &name) {
                     Ok(()) => Err(inspect_error),
                     Err(restore_error) => Err(io::Error::other(format!(
                         "inspect captured file failed ({inspect_error}); restoring its original name also failed ({restore_error}); preserved as {}",
                         captured.to_string_lossy()
                     ))),
-                },
+                    }
+                }
             }
         }
 
@@ -180,7 +194,7 @@ mod imp {
             // refuses a captured symlink.
             let fd = unsafe {
                 libc::openat(
-                    self.fd.as_raw_fd(),
+                    self.fd.as_ref().as_raw_fd(),
                     name.as_ptr(),
                     libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
                 )
@@ -204,7 +218,7 @@ mod imp {
 
         fn sync(&self) -> io::Result<()> {
             // SAFETY: dup returns a fresh descriptor or -1.
-            let fd = unsafe { libc::dup(self.fd.as_raw_fd()) };
+            let fd = unsafe { libc::dup(self.fd.as_ref().as_raw_fd()) };
             if fd < 0 {
                 return Err(io::Error::last_os_error());
             }
@@ -212,10 +226,21 @@ mod imp {
             File::from(unsafe { OwnedFd::from_raw_fd(fd) }).sync_all()
         }
 
+        fn identity(&self) -> io::Result<(u64, u64)> {
+            let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+            // SAFETY: stat points to writable storage and fd is live.
+            if unsafe { libc::fstat(self.fd.as_ref().as_raw_fd(), stat.as_mut_ptr()) } != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            // SAFETY: fstat succeeded and initialized stat.
+            let stat = unsafe { stat.assume_init() };
+            Ok((stat.st_dev as u64, stat.st_ino))
+        }
+
         fn unlink(&self, name: &CString) -> io::Result<()> {
             // SAFETY: name is one component under the anchored directory and
             // unlinkat never follows its final symlink.
-            if unsafe { libc::unlinkat(self.fd.as_raw_fd(), name.as_ptr(), 0) } == 0 {
+            if unsafe { libc::unlinkat(self.fd.as_ref().as_raw_fd(), name.as_ptr(), 0) } == 0 {
                 Ok(())
             } else {
                 Err(io::Error::last_os_error())
@@ -323,6 +348,7 @@ mod imp {
     use std::io;
     use std::path::Path;
 
+    #[derive(Debug, Clone)]
     pub struct AnchoredDirectory;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -341,6 +367,10 @@ mod imp {
         }
 
         pub fn open_directory(&self, _name: &OsStr) -> io::Result<Self> {
+            unsupported()
+        }
+
+        pub fn matches_absolute_path(&self, _path: &Path) -> io::Result<bool> {
             unsupported()
         }
 
@@ -380,8 +410,7 @@ mod tests {
         for invalid in ["", ".", "..", "nested/name"] {
             let error = anchored
                 .open_directory(OsStr::new(invalid))
-                .err()
-                .expect("invalid component must be refused");
+                .expect_err("invalid component must be refused");
             assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
         }
     }

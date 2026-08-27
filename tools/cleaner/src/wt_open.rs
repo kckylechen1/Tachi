@@ -45,6 +45,8 @@ pub struct OpenReport {
     pub base_sha: String,
     pub managed_root: String,
     pub marker_path: Option<String>,
+    #[serde(skip)]
+    pub worktree_authority: Option<memcore::anchored_fs::AnchoredDirectory>,
     /// Shared `CARGO_TARGET_DIR` written to `<worktree>/.cargo/config.toml`
     /// (#484 slice 2), when this is a Rust repo and provisioning happened.
     /// `None` when the worktree is not a Rust repo (no root `Cargo.toml`) or
@@ -271,9 +273,26 @@ pub enum CargoTargetProvision {
 /// `Cargo.toml` must exist in the worktree already, since `git worktree add`
 /// checks out tracked files before this runs) and never overwrites an existing
 /// `.cargo/config.toml`.
+#[allow(dead_code)] // public library seam; the CLI target uses descriptor-bound provisioning
 pub fn provision_cargo_target_config(
     worktree_path: &Path,
     policy: &CargoTargetPolicy,
+) -> Result<CargoTargetProvision, String> {
+    provision_cargo_target_config_inner(worktree_path, policy, None)
+}
+
+pub fn provision_cargo_target_config_with_authority(
+    worktree_path: &Path,
+    policy: &CargoTargetPolicy,
+    authority: &memcore::anchored_fs::AnchoredDirectory,
+) -> Result<CargoTargetProvision, String> {
+    provision_cargo_target_config_inner(worktree_path, policy, Some(authority))
+}
+
+fn provision_cargo_target_config_inner(
+    worktree_path: &Path,
+    policy: &CargoTargetPolicy,
+    authority: Option<&memcore::anchored_fs::AnchoredDirectory>,
 ) -> Result<CargoTargetProvision, String> {
     // Checked before the Rust-repo probe: "this env gets no target" is a policy
     // statement, not a fact about the repo, and it holds either way.
@@ -318,7 +337,7 @@ pub fn provision_cargo_target_config(
     );
     #[cfg(not(unix))]
     {
-        let _ = (cargo_dir, config_path, contents, target_dir);
+        let _ = (cargo_dir, config_path, contents, target_dir, authority);
         return Err(
             "cargo target provisioning requires descriptor-anchored, no-follow filesystem operations on this platform"
                 .to_string(),
@@ -327,8 +346,34 @@ pub fn provision_cargo_target_config(
     #[cfg(unix)]
     {
         let anchored_path = canonical_non_symlink_directory(worktree_path)?;
-        let worktree = memcore::anchored_fs::AnchoredDirectory::open_absolute(&anchored_path)
-            .map_err(|err| format!("anchor {} without symlinks: {err}", worktree_path.display()))?;
+        let opened_authority;
+        let worktree = match authority {
+            Some(authority) => {
+                let matches = authority
+                    .matches_absolute_path(&anchored_path)
+                    .map_err(|error| {
+                        format!(
+                            "verify descriptor authority for {}: {error}",
+                            worktree_path.display()
+                        )
+                    })?;
+                if !matches {
+                    return Err(format!(
+                        "worktree identity changed after open: {}",
+                        worktree_path.display()
+                    ));
+                }
+                authority
+            }
+            None => {
+                opened_authority =
+                    memcore::anchored_fs::AnchoredDirectory::open_absolute(&anchored_path)
+                        .map_err(|err| {
+                            format!("anchor {} without symlinks: {err}", worktree_path.display())
+                        })?;
+                &opened_authority
+            }
+        };
         let cargo = worktree
             .open_or_create_directory(std::ffi::OsStr::new(".cargo"))
             .map_err(|err| format!("open anchored {}: {err}", cargo_dir.display()))?;
@@ -498,7 +543,7 @@ pub fn open_worktree(options: OpenOptions) -> Result<OpenReport, String> {
 
     let (branch, leaf) = resolve_names(&options)?;
     let managed_root = default_worktrees_root()?;
-    let path = match options.path {
+    let mut path = match options.path {
         Some(p) => p,
         None => plan_managed_worktree_path(&repo_root, &leaf)?,
     };
@@ -515,6 +560,7 @@ pub fn open_worktree(options: OpenOptions) -> Result<OpenReport, String> {
         base_sha: base_sha.clone(),
         managed_root: managed_root.display().to_string(),
         marker_path: None,
+        worktree_authority: None,
         cargo_target_dir: None,
         warnings: Vec::new(),
         errors: Vec::new(),
@@ -687,6 +733,35 @@ pub fn open_worktree(options: OpenOptions) -> Result<OpenReport, String> {
         return Ok(report);
     }
 
+    let opened_path = match canonical_non_symlink_directory(&path) {
+        Ok(opened_path) => opened_path,
+        Err(error) => {
+            report.errors.push(format!(
+                "write-lane entry gate refused: cannot anchor the newly opened worktree: {error}"
+            ));
+            return Ok(report);
+        }
+    };
+    if let Some(reason) = path_outside_managed_root_reason(&opened_path, &managed_root) {
+        report.errors.push(format!(
+            "write-lane entry gate refused after worktree creation: {reason}"
+        ));
+        return Ok(report);
+    }
+    let authority = match memcore::anchored_fs::AnchoredDirectory::open_absolute(&opened_path) {
+        Ok(authority) => authority,
+        Err(error) => {
+            report.errors.push(format!(
+                "write-lane entry gate refused: cannot open descriptor authority for {}: {error}",
+                opened_path.display()
+            ));
+            return Ok(report);
+        }
+    };
+    path = opened_path;
+    report.path = path.display().to_string();
+    report.worktree_authority = Some(authority);
+
     // Write-lane entry gate (tachi#1118 freeze boundary 3, second half):
     // `git status --porcelain` must read empty the moment a freshly
     // created worktree is handed to a write lane. A non-empty status here
@@ -719,7 +794,11 @@ pub fn open_worktree(options: OpenOptions) -> Result<OpenReport, String> {
     // file-based so it survives any child process/lane that forgets to export
     // CARGO_TARGET_DIR. Never fatal — a failure here does not undo the worktree
     // open. An `Unallocated` (edit-only) worktree gets no config at all.
-    match provision_cargo_target_config(&path, &options.cargo_target) {
+    let authority = report
+        .worktree_authority
+        .as_ref()
+        .expect("opened worktree has descriptor authority");
+    match provision_cargo_target_config_with_authority(&path, &options.cargo_target, authority) {
         Ok(CargoTargetProvision::Written(dir)) => {
             report.cargo_target_dir = Some(dir.display().to_string());
         }
@@ -1348,11 +1427,12 @@ mod tests {
         assert!(report.opened);
         assert!(report.registered);
         let path = PathBuf::from(&report.path);
+        let canonical_cache = cache.canonicalize().unwrap();
         assert!(
-            path.starts_with(&cache),
+            path.starts_with(&canonical_cache),
             "path={} cache={}",
             path.display(),
-            cache.display()
+            canonical_cache.display()
         );
         assert!(path.join(".tachi-worktree.json").exists());
         assert!(path.join("README").exists());
