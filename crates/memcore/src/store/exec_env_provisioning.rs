@@ -10,6 +10,7 @@
 use rusqlite::{params, OptionalExtension, TransactionBehavior};
 use serde::Serialize;
 use std::collections::HashSet;
+use std::path::{Component, Path};
 use uuid::Uuid;
 
 use super::super::*;
@@ -63,26 +64,77 @@ impl MemoryStore {
         resources: &[ExecEnvProvisioningResource],
         private_target_reservation: Option<&ExecEnvPrivateTargetReservation>,
     ) -> Result<PublishedExecEnv, MemoryError> {
+        self.publish_exec_env_atomically_inner(lease, resources, private_target_reservation, false)
+    }
+
+    /// Publish paths whose physical worktree identity was already established
+    /// by a retained directory descriptor. Re-canonicalizing such a path here
+    /// would re-open the mutable pathname and let a same-UID process substitute
+    /// a different directory between the descriptor check and this transaction.
+    pub fn publish_exec_env_atomically_anchored(
+        &mut self,
+        lease: &db::exec_env::NewExecEnvLease,
+        resources: &[ExecEnvProvisioningResource],
+        private_target_reservation: Option<&ExecEnvPrivateTargetReservation>,
+        authority: &crate::anchored_fs::AnchoredDirectory,
+    ) -> Result<PublishedExecEnv, MemoryError> {
+        if !authority
+            .matches_absolute_path(Path::new(&lease.path))
+            .map_err(|error| {
+                MemoryError::InvalidArg(format!(
+                    "cannot verify anchored worktree identity for '{}': {error}",
+                    lease.path
+                ))
+            })?
+        {
+            return Err(MemoryError::InvalidArg(format!(
+                "anchored worktree identity changed before publication: '{}'",
+                lease.path
+            )));
+        }
+        self.publish_exec_env_atomically_inner(lease, resources, private_target_reservation, true)
+    }
+
+    fn publish_exec_env_atomically_inner(
+        &mut self,
+        lease: &db::exec_env::NewExecEnvLease,
+        resources: &[ExecEnvProvisioningResource],
+        private_target_reservation: Option<&ExecEnvPrivateTargetReservation>,
+        worktree_paths_prevalidated: bool,
+    ) -> Result<PublishedExecEnv, MemoryError> {
         if resources.is_empty() {
             return Err(MemoryError::InvalidArg(format!(
                 "exec env '{}' cannot be published without a physical resource",
                 lease.env_id
             )));
         }
+        let normalize = |kind, path: &str| {
+            if worktree_paths_prevalidated && kind == db::exec_env_resources::ResourceKind::Worktree
+            {
+                let path = Path::new(path);
+                if !path.is_absolute()
+                    || path.components().any(|component| {
+                        !matches!(component, Component::RootDir | Component::Normal(_))
+                    })
+                {
+                    return Err(MemoryError::InvalidArg(format!(
+                        "prevalidated worktree path is not an absolute normalized path: '{path}'",
+                        path = path.display()
+                    )));
+                }
+                Ok(path.display().to_string())
+            } else {
+                db::exec_env_resources::normalize_resource_path(kind, path)
+            }
+        };
         let mut lease = lease.clone();
-        lease.path = db::exec_env_resources::normalize_resource_path(
-            db::exec_env_resources::ResourceKind::Worktree,
-            &lease.path,
-        )?;
+        lease.path = normalize(db::exec_env_resources::ResourceKind::Worktree, &lease.path)?;
         let resources: Vec<_> = resources
             .iter()
             .map(|resource| {
                 Ok(ExecEnvProvisioningResource {
                     kind: resource.kind,
-                    path: db::exec_env_resources::normalize_resource_path(
-                        resource.kind,
-                        &resource.path,
-                    )?,
+                    path: normalize(resource.kind, &resource.path)?,
                     bytes: resource.bytes,
                 })
             })

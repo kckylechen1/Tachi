@@ -294,6 +294,19 @@ fn provision_cargo_target_config_inner(
     policy: &CargoTargetPolicy,
     authority: Option<&memcore::anchored_fs::AnchoredDirectory>,
 ) -> Result<CargoTargetProvision, String> {
+    #[cfg(unix)]
+    if let Some(authority) = authority {
+        let anchored_path = canonical_non_symlink_directory(worktree_path)?;
+        if !authority
+            .matches_absolute_path(&anchored_path)
+            .map_err(|error| format!("verify descriptor authority: {error}"))?
+        {
+            return Err(format!(
+                "worktree identity changed after open: {}",
+                worktree_path.display()
+            ));
+        }
+    }
     // Checked before the Rust-repo probe: "this env gets no target" is a policy
     // statement, not a fact about the repo, and it holds either way.
     if matches!(policy, CargoTargetPolicy::Unallocated) {
@@ -447,6 +460,48 @@ pub fn rollback_private_cargo_target_config(
                     config_path.display()
                 )
             })
+    }
+}
+
+#[allow(dead_code)] // used by the server library; the cleaner binary compiles this module separately
+pub fn rollback_private_cargo_target_config_with_authority(
+    worktree_path: &Path,
+    target_dir: &Path,
+    authority: &memcore::anchored_fs::AnchoredDirectory,
+) -> Result<bool, String> {
+    #[cfg(not(unix))]
+    return Err(
+        "private cargo target rollback requires descriptor-anchored, no-follow filesystem operations on this platform"
+            .to_string(),
+    );
+    #[cfg(unix)]
+    {
+        if !authority
+            .matches_absolute_path(worktree_path)
+            .map_err(|error| format!("verify rollback descriptor authority: {error}"))?
+        {
+            return Err("worktree identity changed before private Cargo rollback".to_string());
+        }
+        if !target_dir.is_absolute() {
+            return Err(format!(
+                "private cargo target-dir rollback requires an absolute target, got '{}'",
+                target_dir.display()
+            ));
+        }
+        let expected = format!(
+            "# Written by tachi wt-open (#894 S2c): PRIVATE cargo target-dir for an\n\
+             # explicitly approved build-private env. Not shared with any other tree.\n\
+             [build]\ntarget-dir = \"{}\"\n",
+            escape_toml_string(&target_dir.display().to_string())
+        );
+        let cargo = match authority.open_directory(std::ffi::OsStr::new(".cargo")) {
+            Ok(cargo) => cargo,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(format!("open anchored .cargo for rollback: {error}")),
+        };
+        cargo
+            .remove_file_if_exact(std::ffi::OsStr::new("config.toml"), expected.as_bytes())
+            .map_err(|error| format!("remove exact owned private Cargo config: {error}"))
     }
 }
 
@@ -819,22 +874,27 @@ pub fn open_worktree(options: OpenOptions) -> Result<OpenReport, String> {
 
     // Register marker + global registry so wt-remove / sweep can reclaim later.
     let dispatch_id = options.dispatch_id.or_else(|| options.task.clone());
-    match registry::register_worktree(RegisterOptions {
-        path: path.clone(),
-        repo_root: repo_root.clone(),
-        branch: branch.clone(),
-        dispatch_id,
-        pr: None,
-        // Emit suppressed: open report is the single user-facing surface.
-        output: RegisterOutputFormat::Json,
-    }) {
+    match registry::register_worktree_anchored(
+        RegisterOptions {
+            path: path.clone(),
+            repo_root: repo_root.clone(),
+            branch: branch.clone(),
+            dispatch_id,
+            pr: None,
+            // Emit suppressed: open report is the single user-facing surface.
+            output: RegisterOutputFormat::Json,
+        },
+        path.clone(),
+        authority,
+    ) {
         Ok(reg) => {
             report.registered = true;
             report.marker_path = Some(reg.marker_path);
         }
         Err(err) => {
-            report.warnings.push(format!(
-                "worktree opened but registration failed: {err}; run tachi-clean wt-register manually"
+            report.opened = false;
+            report.errors.push(format!(
+                "worktree opened but descriptor-bound registration failed: {err}; refusing handoff because the managed path has no trustworthy cleanup identity"
             ));
         }
     }

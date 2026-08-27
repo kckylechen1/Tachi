@@ -642,29 +642,23 @@ fn cleanup_opened_worktree_after_provision_failure(
             )
         }
     }
-    drop(report.worktree_authority.take());
     if let Some(target) = private_target {
-        if let Err(rollback_error) = tachi_clean::wt_open::rollback_private_cargo_target_config(
-            Path::new(&report.path),
-            target,
-        ) {
+        if let Err(rollback_error) =
+            tachi_clean::wt_open::rollback_private_cargo_target_config_with_authority(
+                Path::new(&report.path),
+                target,
+                authority,
+            )
+        {
             return format!(
-                "{failure}; failed to roll back the owned private Cargo config before certified worktree cleanup: {rollback_error}"
+                "{failure}; failed to roll back the owned private Cargo config through its retained descriptor: {rollback_error}"
             );
         }
     }
-    let cleanup = tachi_clean::wt_clean::run_wt_remove(tachi_clean::wt_clean::WtRemoveOptions {
-        path: PathBuf::from(&report.path),
-        force: true,
-        output: tachi_clean::wt_clean::OutputFormat::Json,
-    });
-    match cleanup {
-        Ok(_) => format!("{failure}; the newly opened worktree was removed"),
-        Err(cleanup_error) => format!(
-            "{failure}; failed to remove newly opened worktree {}: {cleanup_error}",
-            report.path
-        ),
-    }
+    format!(
+        "{failure}; retained the registered worktree at {} for certified cleanup because a pathname-based delete cannot be made identity-safe against same-UID replacement",
+        report.path
+    )
 }
 
 fn prepare_opened_worktree_for_publication(
@@ -806,12 +800,26 @@ pub(crate) fn provision_managed_env(
         created_at: String::new(),
     };
 
+    let authority = report.worktree_authority.as_ref().ok_or_else(|| {
+        "opened worktree lost descriptor authority before publication".to_string()
+    })?;
+    if !authority
+        .matches_absolute_path(Path::new(&report.path))
+        .map_err(|error| format!("verify worktree identity before publication: {error}"))?
+    {
+        return Err(cleanup_opened_worktree_after_provision_failure(
+            &mut report,
+            build_target.as_deref().map(Path::new),
+            "exec-env ledger publication refused because worktree identity changed",
+        ));
+    }
     if let Err(error) = publish_env_resources_atomically(
         store,
         &lease,
         &report.path,
         build_target.as_deref(),
         opts.private_target_approval.as_ref(),
+        Some(authority),
     ) {
         #[cfg(test)]
         run_publication_failure_hook();
@@ -819,6 +827,27 @@ pub(crate) fn provision_managed_env(
             &mut report,
             build_target.as_deref().map(Path::new),
             format!("exec-env ledger publication failed atomically: {error}"),
+        ));
+    }
+    let identity_still_matches = report
+        .worktree_authority
+        .as_ref()
+        .expect("publication retains descriptor authority")
+        .matches_absolute_path(Path::new(&report.path))
+        .unwrap_or(false);
+    if !identity_still_matches {
+        quarantine_lease_resources(
+            store.connection_mut(),
+            &env_id,
+            "worktree path identity changed during atomic publication",
+        )
+        .map_err(|error| {
+            format!(
+                "worktree identity changed during publication and mandatory quarantine failed: {error}"
+            )
+        })?;
+        return Err(format!(
+            "worktree identity changed during publication; env {env_id} was quarantined and will not be dispatched"
         ));
     }
     drop(report.worktree_authority.take());
@@ -834,6 +863,7 @@ fn publish_env_resources_atomically(
     worktree_path: &str,
     build_target: Option<&str>,
     approval: Option<&PrivateTargetApproval>,
+    authority: Option<&memcore::anchored_fs::AnchoredDirectory>,
 ) -> Result<EnvResources, String> {
     if !lease.env_class.allocates_build_target() && build_target.is_some() {
         return Err(format!(
@@ -873,9 +903,16 @@ fn publish_env_resources_atomically(
         _ => return Err("private target and approval must be supplied together".to_string()),
     };
 
-    let published = store
-        .publish_exec_env_atomically(lease, &resources, reservation.as_ref())
-        .map_err(|error| error.to_string())?;
+    let published = match authority {
+        Some(authority) => store.publish_exec_env_atomically_anchored(
+            lease,
+            &resources,
+            reservation.as_ref(),
+            authority,
+        ),
+        None => store.publish_exec_env_atomically(lease, &resources, reservation.as_ref()),
+    }
+    .map_err(|error| error.to_string())?;
     Ok(EnvResources {
         worktree_resource_id: published.worktree.resource_id,
         build_target_resource_id: published.build_target.map(|resource| resource.resource_id),
@@ -1302,6 +1339,35 @@ impl MemoryServer {
                     "env_id '{id}' is bound to quarantined resource '{resource_id}'; refusing \
                      re-dispatch until the canonical resource release path clears the fence \
                      (fail-closed, #1322)"
+                ));
+            }
+            let lease = lease
+                .as_ref()
+                .ok_or_else(|| format!("env_id '{id}' has no exec_envs lease"))?;
+            if lease.state != ExecEnvState::Active {
+                return resolve_env_binding(env_id, cwd, unmanaged_cwd, Some(lease));
+            }
+            let lease_path = Path::new(&lease.path);
+            let metadata = std::fs::symlink_metadata(lease_path).map_err(|error| {
+                format!(
+                    "env_id '{id}' worktree identity cannot be established at '{}': {error}",
+                    lease_path.display()
+                )
+            })?;
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err(format!(
+                    "env_id '{id}' worktree path is no longer the managed directory: '{}'",
+                    lease_path.display()
+                ));
+            }
+            let current_path = std::fs::canonicalize(lease_path).map_err(|error| {
+                format!("env_id '{id}' worktree path cannot be canonicalized at dispatch: {error}")
+            })?;
+            if current_path != lease_path {
+                return Err(format!(
+                    "env_id '{id}' worktree identity changed since publication: stored '{}', current '{}'",
+                    lease_path.display(),
+                    current_path.display()
                 ));
             }
         }
@@ -1994,7 +2060,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn build_private_prepublication_rejection_removes_opened_worktree() {
+    fn build_private_prepublication_rejection_retains_auditable_worktree() {
         fn contains_worktree_marker(path: &Path) -> bool {
             let Ok(entries) = std::fs::read_dir(path) else {
                 return false;
@@ -2063,21 +2129,21 @@ mod tests {
             .expect_err("tracked Cargo config must refuse BuildPrivate publication");
         assert!(error.contains("unproven existing file"), "{error}");
         assert!(
-            error.contains("newly opened worktree was removed"),
+            error.contains("retained the registered worktree"),
             "{error}"
         );
         assert!(memcore::list_exec_envs(store.connection(), None)
             .expect("list leases")
             .is_empty());
         assert!(
-            !contains_worktree_marker(&worktrees),
-            "prepublication refusal must leave no linked worktree"
+            contains_worktree_marker(&worktrees),
+            "prepublication refusal must retain a registered worktree for certified cleanup"
         );
     }
 
     #[cfg(unix)]
     #[test]
-    fn build_private_publication_failure_rolls_back_owned_config_then_worktree() {
+    fn build_private_publication_failure_rolls_back_owned_config_and_retains_worktree() {
         fn contains_worktree_marker(path: &Path) -> bool {
             let Ok(entries) = std::fs::read_dir(path) else {
                 return false;
@@ -2158,7 +2224,7 @@ mod tests {
             .expect_err("late BuildPrivate publication failure must roll back filesystem + DB");
         assert!(
             error.contains("injected BuildPrivate publication failure")
-                && error.contains("newly opened worktree was removed"),
+                && error.contains("retained the registered worktree"),
             "{error}"
         );
         assert!(memcore::list_exec_envs(store.connection(), None)
@@ -2168,8 +2234,18 @@ mod tests {
             .expect("list resources")
             .is_empty());
         assert!(
-            !contains_worktree_marker(&worktrees),
-            "late BuildPrivate publication failure must leave no linked worktree"
+            contains_worktree_marker(&worktrees),
+            "late BuildPrivate publication failure must retain a registered worktree"
+        );
+        let retained = std::fs::read_dir(&worktrees)
+            .expect("read managed root")
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .find(|path| path.is_dir())
+            .expect("retained worktree");
+        assert!(
+            !retained.join(".cargo/config.toml").exists(),
+            "only the exact owned private Cargo config is rolled back"
         );
     }
 
@@ -2337,8 +2413,9 @@ mod tests {
             env_class: EnvClass::EditOnly,
             created_at: String::new(),
         };
-        let new = publish_env_resources_atomically(&mut store, &new_lease, "/wt/churn", None, None)
-            .expect("revive reclaimed physical path");
+        let new =
+            publish_env_resources_atomically(&mut store, &new_lease, "/wt/churn", None, None, None)
+                .expect("revive reclaimed physical path");
 
         assert_ne!(new.worktree_resource_id, old.worktree_resource_id);
         assert!(
@@ -2371,9 +2448,15 @@ mod tests {
             env_class: EnvClass::EditOnly,
             created_at: String::new(),
         };
-        let first =
-            publish_env_resources_atomically(&mut store, &first_lease, "/wt/exclusive", None, None)
-                .expect("publish first exclusive worktree");
+        let first = publish_env_resources_atomically(
+            &mut store,
+            &first_lease,
+            "/wt/exclusive",
+            None,
+            None,
+            None,
+        )
+        .expect("publish first exclusive worktree");
         let second_lease = NewExecEnvLease {
             env_id: "env-second".to_string(),
             branch: "tachi/second".to_string(),
@@ -2384,6 +2467,7 @@ mod tests {
             &mut store,
             &second_lease,
             "/wt/exclusive",
+            None,
             None,
             None,
         )
@@ -2427,6 +2511,7 @@ mod tests {
             "/wt/p",
             Some("/wt/p/target"),
             Some(&approval(1_000)),
+            None,
         )
         .expect_err("quarantined target must fail the whole ledger publication");
         assert!(error.contains("quarantined"), "{error}");
@@ -2468,6 +2553,7 @@ mod tests {
             "/wt/atomic-private",
             Some("/wt/atomic-private/target"),
             Some(&approval(4_000)),
+            None,
         )
         .unwrap();
 

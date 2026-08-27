@@ -56,6 +56,36 @@ pub fn run_wt_register(options: RegisterOptions) -> Result<(), String> {
 /// Register without printing (used by `wt-open` so the open report stays the single surface).
 pub fn register_worktree(options: RegisterOptions) -> Result<RegisterReport, String> {
     let path = canonicalize_existing(&options.path, "worktree path")?;
+    register_worktree_inner(options, path, None)
+}
+
+/// Register a freshly opened worktree without re-opening its mutable pathname.
+/// The caller supplies the canonical path captured at open time and the live
+/// directory descriptor that proves which object the marker is written into.
+pub fn register_worktree_anchored(
+    options: RegisterOptions,
+    canonical_path: PathBuf,
+    authority: &memcore::anchored_fs::AnchoredDirectory,
+) -> Result<RegisterReport, String> {
+    if options.path != canonical_path {
+        return Err(
+            "anchored registration path differs from the captured canonical path".to_string(),
+        );
+    }
+    if !authority
+        .matches_absolute_path(&canonical_path)
+        .map_err(|error| format!("verify anchored registration identity: {error}"))?
+    {
+        return Err("worktree identity changed before anchored registration".to_string());
+    }
+    register_worktree_inner(options, canonical_path, Some(authority))
+}
+
+fn register_worktree_inner(
+    options: RegisterOptions,
+    path: PathBuf,
+    authority: Option<&memcore::anchored_fs::AnchoredDirectory>,
+) -> Result<RegisterReport, String> {
     let repo_root = canonicalize_existing(&options.repo_root, "repo root")?;
     if path == repo_root {
         return Err("refusing to register repository root/main worktree".to_string());
@@ -79,7 +109,21 @@ pub fn register_worktree(options: RegisterOptions) -> Result<RegisterReport, Str
 
     upsert_record(&mut registry, record.clone());
     write_registry(&registry_path, &registry)?;
-    write_marker(&marker_path, &record)?;
+    match authority {
+        Some(authority) => write_marker_anchored(authority, &record)?,
+        None => write_marker(&marker_path, &record)?,
+    }
+
+    if let Some(authority) = authority {
+        if !authority
+            .matches_absolute_path(&path)
+            .map_err(|error| format!("recheck anchored registration identity: {error}"))?
+        {
+            return Err(
+                "worktree identity changed while anchored registration was committed".to_string(),
+            );
+        }
+    }
 
     Ok(RegisterReport {
         action: "wt-register",
@@ -366,6 +410,26 @@ fn write_marker(path: &Path, record: &WorktreeRecord) -> Result<(), String> {
     std::fs::write(path, format!("{raw}\n")).map_err(|err| format!("write marker: {err}"))
 }
 
+fn write_marker_anchored(
+    authority: &memcore::anchored_fs::AnchoredDirectory,
+    record: &WorktreeRecord,
+) -> Result<(), String> {
+    let raw =
+        serde_json::to_string_pretty(record).map_err(|err| format!("serialize marker: {err}"))?;
+    match authority
+        .create_file_exclusive(
+            std::ffi::OsStr::new(".tachi-worktree.json"),
+            format!("{raw}\n").as_bytes(),
+        )
+        .map_err(|err| format!("write anchored marker: {err}"))?
+    {
+        memcore::anchored_fs::CreateFileOutcome::Created => Ok(()),
+        memcore::anchored_fs::CreateFileOutcome::Exists => {
+            Err("refusing to overwrite an existing anchored worktree marker".to_string())
+        }
+    }
+}
+
 fn emit_register_report(
     report: &RegisterReport,
     output: RegisterOutputFormat,
@@ -480,6 +544,53 @@ mod tests {
         assert!(remove_registry_entry_exact(&stored_path).unwrap());
         assert!(!registry_contains(&worktree));
 
+        match old_home {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn anchored_registration_refuses_replacement_without_writing_external_marker() {
+        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let old_home = std::env::var_os("HOME");
+        let root = std::env::temp_dir().join(format!(
+            "tachi-clean-anchored-register-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let home = root.join("home");
+        let repo = root.join("repo");
+        let worktree = root.join("worktree");
+        let captured = root.join("captured-worktree");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::env::set_var("HOME", &home);
+        let canonical = worktree.canonicalize().unwrap();
+        let authority = memcore::anchored_fs::AnchoredDirectory::open_absolute(&canonical).unwrap();
+        std::fs::rename(&worktree, &captured).unwrap();
+        std::fs::create_dir(&worktree).unwrap();
+
+        let error = register_worktree_anchored(
+            RegisterOptions {
+                path: canonical.clone(),
+                repo_root: repo,
+                branch: "feature/replacement".to_string(),
+                dispatch_id: None,
+                pr: None,
+                output: RegisterOutputFormat::Json,
+            },
+            canonical,
+            &authority,
+        )
+        .unwrap_err();
+
+        assert!(error.contains("identity changed"), "{error}");
+        assert!(!worktree.join(".tachi-worktree.json").exists());
+        assert!(!captured.join(".tachi-worktree.json").exists());
         match old_home {
             Some(value) => std::env::set_var("HOME", value),
             None => std::env::remove_var("HOME"),
