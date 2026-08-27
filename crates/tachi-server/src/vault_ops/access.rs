@@ -269,10 +269,12 @@ fn load_unlocked_vault_secrets_with_key(
     let entries = server
         .with_global_store_read(|store| store.vault_list_entries().map_err(|e| e.to_string()))
         .map_err(|e| format!("Failed to list vault secrets: {e}"))?;
-
     let mut secrets = Vec::new();
     for entry in entries {
         if !include_entry(&entry) {
+            continue;
+        }
+        if memcore::is_lane_config_secret_name(&entry.name) {
             continue;
         }
         if entry
@@ -509,6 +511,16 @@ fn load_unlocked_api_key_secret_pools_filtered(
                 // A configured member rejected below must never fall through
                 // to the standalone raw-name pass and bypass prefix health.
                 rotation_members.insert(entry.name.clone());
+                if memcore::is_lane_config_secret_name(&entry.name) {
+                    record_rotation_member_drop(
+                        &mut dropped,
+                        &mut prefix_drop,
+                        member_index,
+                        &entry.name,
+                        AliasSkipClass::ListedWrongType,
+                    );
+                    continue;
+                }
                 if entry.secret_type != SECRET_TYPE_API_KEY {
                     record_rotation_member_drop(
                         &mut dropped,
@@ -574,6 +586,10 @@ fn load_unlocked_api_key_secret_pools_filtered(
 
         for entry in entries {
             if only_logical_name.is_some_and(|logical_name| logical_name != entry.name) {
+                continue;
+            }
+            if memcore::is_lane_config_secret_name(&entry.name) {
+                record_listed_drop(&mut dropped, &entry.name, AliasSkipClass::ListedWrongType);
                 continue;
             }
             if entry.secret_type != SECRET_TYPE_API_KEY {

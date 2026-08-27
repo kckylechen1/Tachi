@@ -20,6 +20,19 @@ pub(crate) async fn handle_vault_set(
                 normalize_secret_type(&params.secret_type)
             };
             validate_lane_slot_secret_type(&params.name, secret_type)?;
+            memcore::reject_api_key_type_for_lane_config(&params.name, secret_type)?;
+            if memcore::is_lane_config_secret_name(&params.name)
+                && (params.name.ends_with("_URL") || params.name.ends_with("_BASE_URL"))
+            {
+                if let Some(leak) =
+                    memcore::catalog::endpoint::endpoint_credential_leak(&params.value)
+                {
+                    return Err(format!(
+                        "Vault name '{}' value embeds a credential in the endpoint ({leak}); refusing write",
+                        params.name
+                    ));
+                }
+            }
             let allowed_agents = normalize_allowed_agents(params.allowed_agents.clone());
             let (encrypted_value, nonce) = crypto::encrypt(key, value.as_bytes())?;
 

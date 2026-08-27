@@ -23,9 +23,16 @@ pub(crate) async fn handle_vault_list(
     let payload: Vec<serde_json::Value> = entries
         .into_iter()
         .map(|e| {
+            let secret_type = memcore::effective_vault_secret_type(&e.name, &e.secret_type);
+            let group = if secret_type == memcore::SECRET_TYPE_CONFIG {
+                "config"
+            } else {
+                "credential"
+            };
             json!({
                 "name": e.name,
-                "secret_type": e.secret_type,
+                "secret_type": secret_type,
+                "group": group,
                 "description": e.description,
                 "allowed_agents": e.allowed_agents,
                 "created_at": e.created_at,
@@ -34,9 +41,21 @@ pub(crate) async fn handle_vault_list(
             })
         })
         .collect();
+    let config: Vec<_> = payload
+        .iter()
+        .filter(|row| row.get("group").and_then(|v| v.as_str()) == Some("config"))
+        .cloned()
+        .collect();
+    let credentials: Vec<_> = payload
+        .iter()
+        .filter(|row| row.get("group").and_then(|v| v.as_str()) != Some("config"))
+        .cloned()
+        .collect();
 
     let resp = json!({
         "count": payload.len(),
+        "credentials": credentials,
+        "config": config,
         "secrets": payload,
     });
     serde_json::to_string(&resp).map_err(|e| format!("serialize: {e}"))

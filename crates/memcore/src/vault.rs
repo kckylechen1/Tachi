@@ -36,12 +36,14 @@ pub const SECRET_TYPE_API_KEY: &str = "api_key";
 pub const SECRET_TYPE_OAUTH_TOKEN: &str = "oauth_token";
 pub const SECRET_TYPE_JSON_BLOB: &str = "json_blob";
 pub const SECRET_TYPE_COOKIE: &str = "cookie";
+pub const SECRET_TYPE_CONFIG: &str = "config";
 pub const SECRET_TYPE_OTHER: &str = "other";
 pub const SECRET_TYPES: &[&str] = &[
     SECRET_TYPE_API_KEY,
     SECRET_TYPE_OAUTH_TOKEN,
     SECRET_TYPE_JSON_BLOB,
     SECRET_TYPE_COOKIE,
+    SECRET_TYPE_CONFIG,
     SECRET_TYPE_OTHER,
 ];
 
@@ -51,8 +53,22 @@ pub fn normalize_secret_type(value: &str) -> &'static str {
         SECRET_TYPE_OAUTH_TOKEN | "oauth" => SECRET_TYPE_OAUTH_TOKEN,
         SECRET_TYPE_JSON_BLOB | "json" => SECRET_TYPE_JSON_BLOB,
         SECRET_TYPE_COOKIE => SECRET_TYPE_COOKIE,
+        SECRET_TYPE_CONFIG => SECRET_TYPE_CONFIG,
         _ => SECRET_TYPE_OTHER,
     }
+}
+
+/// Lane URLs, models, and flags. These are not credentials: they must not
+/// default to `api_key` and must not enter API-key pools.
+pub fn is_lane_config_secret_name(name: &str) -> bool {
+    let name = name.trim();
+    name.starts_with("ENABLE_")
+        || name.ends_with("_BASE_URL")
+        || name.ends_with("_URL")
+        || name.ends_with("_MODEL")
+        || name.ends_with("_BACKEND")
+        || name.ends_with("_TIMEOUT")
+        || name.ends_with("_ENABLED")
 }
 
 /// Infer a vault `secret_type` from an env-style name when the caller omits
@@ -67,17 +83,33 @@ pub fn infer_vault_secret_type(name: &str) -> &'static str {
     if name.ends_with("_API_KEY") || name.ends_with("_TOKEN") || name.ends_with("_SECRET") {
         return SECRET_TYPE_API_KEY;
     }
-    if name.starts_with("ENABLE_")
-        || name.ends_with("_BASE_URL")
-        || name.ends_with("_URL")
-        || name.ends_with("_MODEL")
-        || name.ends_with("_BACKEND")
-        || name.ends_with("_TIMEOUT")
-        || name.ends_with("_ENABLED")
-    {
-        return SECRET_TYPE_OTHER;
+    if is_lane_config_secret_name(name) {
+        return SECRET_TYPE_CONFIG;
     }
     SECRET_TYPE_API_KEY
+}
+
+/// Read-time classifier: existing `other` rows whose names are lane config
+/// are config without a schema bump.
+pub fn effective_vault_secret_type(name: &str, stored: &str) -> &'static str {
+    let stored = normalize_secret_type(stored);
+    if stored == SECRET_TYPE_OTHER && is_lane_config_secret_name(name) {
+        SECRET_TYPE_CONFIG
+    } else {
+        stored
+    }
+}
+
+/// Explicit `api_key` on a lane-config name is refused. Inference already
+/// chooses `config`; this blocks `--secret-type api_key`.
+pub fn reject_api_key_type_for_lane_config(name: &str, secret_type: &str) -> Result<(), String> {
+    if is_lane_config_secret_name(name) && normalize_secret_type(secret_type) == SECRET_TYPE_API_KEY
+    {
+        return Err(format!(
+            "Vault name '{name}' is lane config, not a credential; refusing secret_type=api_key"
+        ));
+    }
+    Ok(())
 }
 
 /// Supported vault ciphers.
@@ -256,6 +288,7 @@ mod tests {
         assert_eq!(normalize_secret_type("oauth"), SECRET_TYPE_OAUTH_TOKEN);
         assert_eq!(normalize_secret_type("json"), SECRET_TYPE_JSON_BLOB);
         assert_eq!(normalize_secret_type("cookie"), SECRET_TYPE_COOKIE);
+        assert_eq!(normalize_secret_type("config"), SECRET_TYPE_CONFIG);
         assert_eq!(normalize_secret_type("weird"), SECRET_TYPE_OTHER);
         assert_eq!(
             SECRET_TYPES,
@@ -264,6 +297,7 @@ mod tests {
                 SECRET_TYPE_OAUTH_TOKEN,
                 SECRET_TYPE_JSON_BLOB,
                 SECRET_TYPE_COOKIE,
+                SECRET_TYPE_CONFIG,
                 SECRET_TYPE_OTHER,
             ]
         );
@@ -285,15 +319,25 @@ mod tests {
         );
         assert_eq!(
             infer_vault_secret_type("EXTRACT_BASE_URL"),
-            SECRET_TYPE_OTHER
+            SECRET_TYPE_CONFIG
         );
-        assert_eq!(infer_vault_secret_type("DISTILL_MODEL"), SECRET_TYPE_OTHER);
+        assert_eq!(infer_vault_secret_type("DISTILL_MODEL"), SECRET_TYPE_CONFIG);
         assert_eq!(
             infer_vault_secret_type("ENABLE_PIPELINE"),
-            SECRET_TYPE_OTHER
+            SECRET_TYPE_CONFIG
         );
         assert_eq!(
             infer_vault_secret_type("FOUNDRY_DISTILL_BACKEND"),
+            SECRET_TYPE_CONFIG
+        );
+        assert!(reject_api_key_type_for_lane_config("EXTRACT_BASE_URL", "api_key").is_err());
+        assert!(reject_api_key_type_for_lane_config("DEEPSEEK_API_KEY", "api_key").is_ok());
+        assert_eq!(
+            effective_vault_secret_type("EXTRACT_BASE_URL", "other"),
+            SECRET_TYPE_CONFIG
+        );
+        assert_eq!(
+            effective_vault_secret_type("DEEPSEEK_API_KEY", "other"),
             SECRET_TYPE_OTHER
         );
     }

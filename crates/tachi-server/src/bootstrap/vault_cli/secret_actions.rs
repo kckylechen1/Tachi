@@ -61,6 +61,7 @@ async fn run_secret_action_with_reader(
                 .unwrap_or_else(|| memcore::infer_vault_secret_type(&name))
                 .to_string();
             crate::vault_ops::validate_lane_slot_secret_type(&name, &secret_type)?;
+            memcore::reject_api_key_type_for_lane_config(&name, &secret_type)?;
 
             let store_ro = open_cli_store_read_only(global_db_path)?;
             let config = store_ro
@@ -92,6 +93,18 @@ async fn run_secret_action_with_reader(
             let secret_value = ZeroizingSecretString(&mut secret_value);
             if secret_value.trim().is_empty() {
                 return Err("Secret value cannot be empty".into());
+            }
+            if memcore::is_lane_config_secret_name(&name)
+                && (name.ends_with("_URL") || name.ends_with("_BASE_URL"))
+            {
+                if let Some(leak) =
+                    memcore::catalog::endpoint::endpoint_credential_leak(&secret_value)
+                {
+                    crate::vault_crypto::zero_string(&mut secret_value);
+                    return Err(format!(
+                        "Vault name '{name}' value embeds a credential in the endpoint ({leak}); refusing write"
+                    ).into());
+                }
             }
 
             let now = chrono::Utc::now().to_rfc3339();

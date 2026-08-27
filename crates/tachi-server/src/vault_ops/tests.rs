@@ -1,7 +1,7 @@
 use super::handlers::{
-    handle_vault_init, handle_vault_lock, handle_vault_set, handle_vault_unlock,
+    handle_vault_init, handle_vault_list, handle_vault_lock, handle_vault_set, handle_vault_unlock,
 };
-use super::params::{VaultInitParams, VaultSetParams, VaultUnlockParams};
+use super::params::{VaultInitParams, VaultListParams, VaultSetParams, VaultUnlockParams};
 use super::session::{read_unlock_password_fifo, with_vault_key};
 use crate::server_state::MemoryServer;
 use crate::test_support::EnvRestore;
@@ -1178,4 +1178,120 @@ async fn keychain_auto_unlock_smoke() {
     let unlocked = crate::provider_config::auto_unlock_vault_from_keychain(&server)
         .expect("auto-unlock attempt should return a Result, not panic");
     eprintln!("keychain_available={available} auto_unlocked={unlocked}");
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn vault_set_infers_config_for_lane_urls_and_refuses_api_key() {
+    let _lock = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let db_path = crate::utils::test_fixture_path(format!(
+        "memory-server-vault-lane-config-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let server = MemoryServer::new(db_path, None).expect("create test server");
+    handle_vault_init(
+        &server,
+        VaultInitParams {
+            password: "lane-config-classifier".to_string(),
+        },
+    )
+    .await
+    .expect("vault init");
+
+    let set = handle_vault_set(
+        &server,
+        VaultSetParams {
+            name: "EXTRACT_BASE_URL".to_string(),
+            value: "https://api.deepseek.com/chat/completions".to_string(),
+            agent_id: None,
+            secret_type: String::new(),
+            description: "lane config".to_string(),
+            allowed_agents: None,
+            enable_rotation: false,
+            rotation_strategy: None,
+        },
+    )
+    .await
+    .expect("inferred config write");
+    assert!(set.contains("config"), "{set}");
+
+    let refused = handle_vault_set(
+        &server,
+        VaultSetParams {
+            name: "DISTILL_MODEL".to_string(),
+            value: "deepseek-v4-flash".to_string(),
+            agent_id: None,
+            secret_type: "api_key".to_string(),
+            description: "must refuse".to_string(),
+            allowed_agents: None,
+            enable_rotation: false,
+            rotation_strategy: None,
+        },
+    )
+    .await
+    .expect_err("explicit api_key on lane config must be refused");
+    assert!(
+        refused.contains("lane config") && refused.contains("api_key"),
+        "{refused}"
+    );
+
+    handle_vault_set(
+        &server,
+        VaultSetParams {
+            name: "DEEPSEEK_API_KEY".to_string(),
+            value: "sk-test-not-a-real-key".to_string(),
+            agent_id: None,
+            secret_type: String::new(),
+            description: "real key".to_string(),
+            allowed_agents: None,
+            enable_rotation: false,
+            rotation_strategy: None,
+        },
+    )
+    .await
+    .expect("key write");
+
+    let listed = handle_vault_list(&server, VaultListParams { secret_type: None })
+        .await
+        .expect("list");
+    let body: serde_json::Value = serde_json::from_str(&listed).expect("list json");
+    assert_eq!(body["config"].as_array().map(Vec::len), Some(1));
+    assert_eq!(body["config"][0]["name"], "EXTRACT_BASE_URL");
+    assert_eq!(body["config"][0]["secret_type"], "config");
+    assert_eq!(body["config"][0]["group"], "config");
+    let creds = body["credentials"].as_array().expect("credentials");
+    assert!(
+        creds.iter().any(|row| row["name"] == "DEEPSEEK_API_KEY"),
+        "{body}"
+    );
+
+    let leak = handle_vault_set(
+        &server,
+        VaultSetParams {
+            name: "REASONING_BASE_URL".to_string(),
+            value: "https://user:pass@api.deepseek.com/chat/completions".to_string(),
+            agent_id: None,
+            secret_type: String::new(),
+            description: "leaky url".to_string(),
+            allowed_agents: None,
+            enable_rotation: false,
+            rotation_strategy: None,
+        },
+    )
+    .await
+    .expect_err("userinfo URL must be refused");
+    assert!(
+        leak.contains("userinfo") || leak.contains("credential"),
+        "{leak}"
+    );
+
+    let pools = crate::vault_ops::load_unlocked_api_key_secret_pools(&server).expect("pools");
+    let pool_names: Vec<&str> = pools.keys().map(String::as_str).collect();
+    assert!(
+        !pools.contains_key("EXTRACT_BASE_URL"),
+        "config rows must not enter API-key pools: {pool_names:?}"
+    );
+    assert!(pools.contains_key("DEEPSEEK_API_KEY"), "{pool_names:?}");
 }
