@@ -46,14 +46,21 @@ report_disk() {
 clean_residue() {
   local removed=0
   local path
-  local list="${TMPDIR:-/tmp}/runner-hygiene.$$"
+  local list err
+  list="$(mktemp "${TMPDIR:-/tmp}/runner-hygiene.XXXXXX")"
+  err="$(mktemp "${TMPDIR:-/tmp}/runner-hygiene.XXXXXX")"
+  # mktemp-created, 0600, unguessable; removed on every exit path. The trap
+  # binds the expanded paths now (double quotes) so it stays valid after the
+  # function's locals go out of scope; mktemp names contain no quote chars.
+  # shellcheck disable=SC2064
+  trap "rm -f -- '${list}' '${err}'" EXIT
   printf '%s\n' "${workspace}/target" > "${list}"
   # node_modules discovery is best-effort but never silent: a find failure
   # is printed (and the heavy hitter, target/, does not depend on it).
   if ! find "${workspace}" -maxdepth 3 -name node_modules -type d -print \
-      >> "${list}" 2> "${list}.err"; then
+      >> "${list}" 2> "${err}"; then
     echo "runner-hygiene: WARNING: node_modules residue discovery failed; continuing with target/ only:" >&2
-    sed 's/^/  /' "${list}.err" >&2 || true
+    sed 's/^/  /' "${err}" >&2 || true
   fi
   while IFS= read -r path; do
     [ -n "${path}" ] || continue
@@ -62,7 +69,7 @@ clean_residue() {
     removed=$((removed + 1))
     echo "runner-hygiene: removed residue ${path}"
   done < "${list}"
-  rm -f -- "${list}" "${list}.err"
+  rm -f -- "${list}" "${err}"
   if [ "${removed}" -eq 0 ]; then
     echo "runner-hygiene: no prior-job residue found"
   fi

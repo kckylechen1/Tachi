@@ -159,12 +159,21 @@ Then install and start the launchd service:
 
 ## Cancellation protocol (acceptance 7)
 
-After cancelling a run from the UI or `gh run cancel`:
+After cancelling a run from the UI or `gh run cancel`, run the tracked
+stray-killer from the developer checkout (any cwd is safe — the script
+moves its own working directory out of the scan domain and never signals
+its own process tree):
 
 ```bash
-.github/scripts/runner_kill_strays.sh list   # inspect; dev builds elsewhere must not appear
-.github/scripts/runner_kill_strays.sh kill   # SIGTERM, then SIGKILL survivors
+bash ~/Projects/Sigil/.github/scripts/runner_kill_strays.sh list   # inspect first
+bash ~/Projects/Sigil/.github/scripts/runner_kill_strays.sh kill   # SIGTERM, then SIGKILL survivors
 ```
+
+The kill set is exactly the processes whose working directory sits under
+the runner's `_work` root; processes that merely mention a `_work` path in
+their arguments (editors, indexers) are listed as foreign and left alone.
+If lsof discovery fails the script exits non-zero with UNKNOWN state
+instead of claiming success.
 
 The next job's preflight removes any partial `target/` residue, so a
 cancelled build cannot poison its successor.
