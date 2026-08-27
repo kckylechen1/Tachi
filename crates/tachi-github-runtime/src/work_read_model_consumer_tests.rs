@@ -218,13 +218,14 @@ fn cross_crate_work_read_model_keeps_r6_2_debt_behind_steady_state() {
                 fact: CanonicalAdjudicationFact::NotRequired {
                     reason: "read-model fixture".to_string(),
                 },
+                visibility: VisibilityClassV1::Public,
             }]),
         )
         .expect("adjudication snapshot"),
     ];
 
     let options = ProjectionOptions::new("2026-08-27T12:00:00Z");
-    let set = project(&rebuild(snapshots), &options);
+    let set = project(&rebuild(snapshots).expect("rebuild"), &options);
     let model = set
         .items
         .iter()

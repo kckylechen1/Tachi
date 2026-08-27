@@ -157,8 +157,10 @@ fn column_token(model: &WorkReadModelV1) -> String {
             } else {
                 match section.implementation_status {
                     super::types::ImplementationStatusV1::UnderReview => "under_review".to_string(),
-                    super::types::ImplementationStatusV1::Present
-                    | super::types::ImplementationStatusV1::Reverted => "landed".to_string(),
+                    super::types::ImplementationStatusV1::Present => "landed".to_string(),
+                    // An outstanding revert debt is repair-blocked, never
+                    // presented as landed work (R6-2 owner ruling).
+                    super::types::ImplementationStatusV1::Reverted => "reverted".to_string(),
                     _ => "in_flight".to_string(),
                 }
             }

@@ -26,6 +26,18 @@ use crate::current_truth::types::{
 use crate::taskintent::mapping::adjudication::CanonicalAdjudicationFact;
 use crate::taskintent::plan::LifecycleMode;
 
+/// Test-local sugar: every incremental apply in these fixtures must
+// succeed; the raw `apply` (with its Result) is exercised where the
+// outcome itself is the discrimination.
+trait ApplyExt {
+    fn apply_ok(&mut self, snapshot: SourceSnapshot);
+}
+impl ApplyExt for WorkProjectionIndex {
+    fn apply_ok(&mut self, snapshot: SourceSnapshot) {
+        self.apply(snapshot).expect("apply snapshot");
+    }
+}
+
 const REPO: &str = "kckylechen1/tachi";
 const ISSUE_TOKEN: &str = "kckylechen1/tachi#issue:100";
 const READ_AT: &str = "2026-08-27T12:00:00Z";
@@ -519,6 +531,7 @@ fn full_snapshot_set() -> Vec<SourceSnapshot> {
                 verification_present: true,
                 diff_present: true,
                 evidence_refs: vec!["e1".to_string()],
+                visibility: VisibilityClassV1::Public,
             }],
             "verif-1",
             READ_AT,
@@ -527,6 +540,7 @@ fn full_snapshot_set() -> Vec<SourceSnapshot> {
             vec![AdjudicationFactV1 {
                 dispatch_id: "d1".to_string(),
                 fact: CanonicalAdjudicationFact::Accepted,
+                visibility: VisibilityClassV1::Public,
             }],
             "adj-1",
             READ_AT,
@@ -551,7 +565,7 @@ fn steady_state_merged_resnapshot_does_not_clear_revert_debt() {
         true,
     );
     let mut index = WorkProjectionIndex::new();
-    index.apply(ct_snapshot(view, "ct-1", READ_AT));
+    index.apply_ok(ct_snapshot(view, "ct-1", READ_AT));
     let set = project(&index, &options());
 
     let model = find(&set, ISSUE_TOKEN);
@@ -592,7 +606,7 @@ fn plain_issue_open_refresh_does_not_clear_reopen_debt() {
         true,
     );
     let mut index = WorkProjectionIndex::new();
-    index.apply(ct_snapshot(view, "ct-1", READ_AT));
+    index.apply_ok(ct_snapshot(view, "ct-1", READ_AT));
     let set = project(&index, &options());
 
     let model = find(&set, ISSUE_TOKEN);
@@ -620,7 +634,7 @@ fn causally_later_issue_closed_clears_reopen_debt_without_acceptance() {
         true,
     );
     let mut index = WorkProjectionIndex::new();
-    index.apply(ct_snapshot(view, "ct-1", READ_AT));
+    index.apply_ok(ct_snapshot(view, "ct-1", READ_AT));
     let set = project(&index, &options());
 
     let model = find(&set, ISSUE_TOKEN);
@@ -666,7 +680,7 @@ fn post_revert_repair_pr_clears_revert_debt() {
         true,
     );
     let mut index = WorkProjectionIndex::new();
-    index.apply(ct_snapshot(view, "ct-1", READ_AT));
+    index.apply_ok(ct_snapshot(view, "ct-1", READ_AT));
     let set = project(&index, &options());
 
     let model = find(&set, ISSUE_TOKEN);
@@ -701,10 +715,11 @@ fn owner_no_repair_required_disposition_clears_revert_debt() {
         disposition: OwnerDispositionV1::NoRepairRequired {
             note: "revert was intended".to_string(),
         },
+        visibility: VisibilityClassV1::Public,
     };
     let mut index = WorkProjectionIndex::new();
-    index.apply(ct_snapshot(view, "ct-1", READ_AT));
-    index.apply(dispositions_snapshot(
+    index.apply_ok(ct_snapshot(view, "ct-1", READ_AT));
+    index.apply_ok(dispositions_snapshot(
         vec![disposition],
         "disp-1",
         "2026-08-26T14:30:00Z",
@@ -741,10 +756,11 @@ fn stale_pre_revert_disposition_cannot_clear_revert_debt() {
         disposition: OwnerDispositionV1::NoRepairRequired {
             note: "made before the revert existed".to_string(),
         },
+        visibility: VisibilityClassV1::Public,
     };
     let mut index = WorkProjectionIndex::new();
-    index.apply(ct_snapshot(view, "ct-1", READ_AT));
-    index.apply(dispositions_snapshot(
+    index.apply_ok(ct_snapshot(view, "ct-1", READ_AT));
+    index.apply_ok(dispositions_snapshot(
         vec![disposition],
         "disp-0",
         "2026-08-26T12:00:00Z",
@@ -795,6 +811,7 @@ fn full_rebuild_equals_incremental_across_r6_2_cases_and_arrival_orders() {
             vec![AdjudicationFactV1 {
                 dispatch_id: "d1".to_string(),
                 fact: CanonicalAdjudicationFact::Accepted,
+                visibility: VisibilityClassV1::Public,
             }],
             "adj-1",
             READ_AT,
@@ -804,11 +821,11 @@ fn full_rebuild_equals_incremental_across_r6_2_cases_and_arrival_orders() {
     let incremental = {
         let mut index = WorkProjectionIndex::new();
         for snapshot in &snapshots {
-            index.apply(snapshot.clone());
+            index.apply_ok(snapshot.clone());
         }
         project(&index, &options())
     };
-    let canonical = project(&rebuild(snapshots.clone()), &options());
+    let canonical = project(&rebuild(snapshots.clone()).expect("rebuild"), &options());
     assert_eq!(incremental, canonical);
 
     // Arrival-order independence: every permutation of the same multiset
@@ -816,7 +833,7 @@ fn full_rebuild_equals_incremental_across_r6_2_cases_and_arrival_orders() {
     let mut rotated = snapshots.clone();
     for _ in 0..5 {
         rotated.rotate_left(1);
-        let permuted = project(&rebuild(rotated.clone()), &options());
+        let permuted = project(&rebuild(rotated.clone()).expect("rebuild"), &options());
         assert_eq!(
             permuted, canonical,
             "arrival order must never change the projection"
@@ -872,7 +889,7 @@ fn issue_open_merged_open_owner_close_states_remain_distinct() {
     for (state, extra, expected_action, expected_status) in cases {
         let view = ct_view(&[state], &extra, true);
         let mut index = WorkProjectionIndex::new();
-        index.apply(ct_snapshot(view, "ct-1", READ_AT));
+        index.apply_ok(ct_snapshot(view, "ct-1", READ_AT));
         let set = project(&index, &options());
         let model = find(&set, ISSUE_TOKEN);
         assert!(
@@ -905,12 +922,12 @@ fn brief_generated_before_merge_becomes_stale_after_merge() {
         true,
     );
     let mut index = WorkProjectionIndex::new();
-    index.apply(ct_snapshot(before_view, "ct-1", "2026-08-26T10:00:05Z"));
+    index.apply_ok(ct_snapshot(before_view, "ct-1", "2026-08-26T10:00:05Z"));
     let before_brief = super::views::brief_view(find(&project(&index, &options()), ISSUE_TOKEN));
 
     let after_view = ct_view(&[state_v2_merged_open()], &[], true);
     let mut index = WorkProjectionIndex::new();
-    index.apply(ct_snapshot(after_view, "ct-2", "2026-08-26T11:00:05Z"));
+    index.apply_ok(ct_snapshot(after_view, "ct-2", "2026-08-26T11:00:05Z"));
     let after_brief = super::views::brief_view(find(&project(&index, &options()), ISSUE_TOKEN));
 
     assert_ne!(
@@ -924,7 +941,7 @@ fn brief_generated_before_merge_becomes_stale_after_merge() {
     // History remains: the old brief is still renderable from the old
     // revision — nothing was rewritten in place.
     let mut replay = WorkProjectionIndex::new();
-    replay.apply(ct_snapshot(
+    replay.apply_ok(ct_snapshot(
         ct_view(
             &[repo_state(
                 "r1",
@@ -972,7 +989,7 @@ fn merged_reverted_reopened_changes_projection_without_rewriting() {
         .expect("posture v2");
     let view_v2 = consumer::read_view(&store, REPO, CallerAuthorizationV1 { sees_private: true })
         .expect("view v2");
-    index.apply(ct_snapshot(view_v2, "ct-1", READ_AT));
+    index.apply_ok(ct_snapshot(view_v2, "ct-1", READ_AT));
     let merged = find(&project(&index, &options()), ISSUE_TOKEN).clone();
     assert_eq!(
         github_section(&merged).implementation_status,
@@ -988,7 +1005,7 @@ fn merged_reverted_reopened_changes_projection_without_rewriting() {
     let mut index = WorkProjectionIndex::new();
     let view_v4 = consumer::read_view(&store, REPO, CallerAuthorizationV1 { sees_private: true })
         .expect("view v4");
-    index.apply(ct_snapshot(view_v4, "ct-2", READ_AT));
+    index.apply_ok(ct_snapshot(view_v4, "ct-2", READ_AT));
     let projected = project(&index, &options());
     let reverted = find(&projected, ISSUE_TOKEN);
     assert_eq!(
@@ -1004,8 +1021,8 @@ fn merged_reverted_reopened_changes_projection_without_rewriting() {
 fn worker_submit_exit_never_projects_complete_without_adjudication() {
     let view = ct_view(&[state_v2_merged_open()], &[], true);
     let mut index = WorkProjectionIndex::new();
-    index.apply(ct_snapshot(view, "ct-1", READ_AT));
-    index.apply(claims_snapshot(
+    index.apply_ok(ct_snapshot(view, "ct-1", READ_AT));
+    index.apply_ok(claims_snapshot(
         vec![claim_fact(
             "c1",
             Some(&format!("{REPO}#100")),
@@ -1017,18 +1034,19 @@ fn worker_submit_exit_never_projects_complete_without_adjudication() {
         "claims-1",
         READ_AT,
     ));
-    index.apply(runs_snapshot(
+    index.apply_ok(runs_snapshot(
         vec![run_fact("d1", true, true, Some(0))],
         "runs-1",
         READ_AT,
     ));
-    index.apply(verification_snapshot(
+    index.apply_ok(verification_snapshot(
         vec![VerificationFactV1 {
             dispatch_id: Some("d1".to_string()),
             issue_ref: Some(format!("{REPO}#100")),
             verification_present: true,
             diff_present: true,
             evidence_refs: vec!["e1".to_string()],
+            visibility: VisibilityClassV1::Public,
         }],
         "verif-1",
         READ_AT,
@@ -1047,10 +1065,11 @@ fn worker_submit_exit_never_projects_complete_without_adjudication() {
     ));
     assert!(has_action(model, NextActionKindV1::Adjudicate));
 
-    index.apply(adjudication_snapshot(
+    index.apply_ok(adjudication_snapshot(
         vec![AdjudicationFactV1 {
             dispatch_id: "d1".to_string(),
             fact: CanonicalAdjudicationFact::Accepted,
+            visibility: VisibilityClassV1::Public,
         }],
         "adj-1",
         READ_AT,
@@ -1075,8 +1094,8 @@ fn managed_and_attached_modes_preserve_lifecycle_owner() {
     attached.lifecycle_owner = LifecycleMode::HarnessNativeAttached;
 
     let mut index = WorkProjectionIndex::new();
-    index.apply(ct_snapshot(view, "ct-1", READ_AT));
-    index.apply(claims_snapshot(
+    index.apply_ok(ct_snapshot(view, "ct-1", READ_AT));
+    index.apply_ok(claims_snapshot(
         vec![
             claim_fact(
                 "c1",
@@ -1098,7 +1117,7 @@ fn managed_and_attached_modes_preserve_lifecycle_owner() {
         "claims-1",
         READ_AT,
     ));
-    index.apply(runs_snapshot(vec![managed, attached], "runs-1", READ_AT));
+    index.apply_ok(runs_snapshot(vec![managed, attached], "runs-1", READ_AT));
     let set = project(&index, &options());
 
     let model = find(&set, ISSUE_TOKEN);
@@ -1123,8 +1142,8 @@ fn managed_and_attached_modes_preserve_lifecycle_owner() {
 fn head_drift_blocks_and_names_repair_owner() {
     let view = ct_view(&[state_v2_merged_open()], &[], true);
     let mut index = WorkProjectionIndex::new();
-    index.apply(ct_snapshot(view, "ct-1", READ_AT));
-    index.apply(claims_snapshot(
+    index.apply_ok(ct_snapshot(view, "ct-1", READ_AT));
+    index.apply_ok(claims_snapshot(
         vec![claim_fact(
             "c1",
             Some(&format!("{REPO}#100")),
@@ -1162,10 +1181,10 @@ fn head_drift_blocks_and_names_repair_owner() {
 #[test]
 fn delivery_unavailable_never_rewrites_execution_or_adjudication() {
     let base = full_snapshot_set();
-    let mut with_delivery = rebuild(base.clone());
-    with_delivery.apply(delivery_snapshot(READ_AT));
+    let mut with_delivery = rebuild(base.clone()).expect("rebuild");
+    with_delivery.apply_ok(delivery_snapshot(READ_AT));
 
-    let without = project(&rebuild(base), &options());
+    let without = project(&rebuild(base).expect("rebuild"), &options());
     let with = project(&with_delivery, &options());
 
     let model_without = find(&without, ISSUE_TOKEN);
@@ -1211,7 +1230,7 @@ fn conflicting_inputs_yield_conflicted_never_success() {
     };
     let view = ct_view(&[state_v2_merged_open()], &[rival], true);
     let mut index = WorkProjectionIndex::new();
-    index.apply(ct_snapshot(view, "ct-1", READ_AT));
+    index.apply_ok(ct_snapshot(view, "ct-1", READ_AT));
     let set = project(&index, &options());
     let model = find(&set, ISSUE_TOKEN);
     assert!(github_section(model).conflicted);
@@ -1224,12 +1243,12 @@ fn conflicting_inputs_yield_conflicted_never_success() {
 
     // Adjudication-side conflict: differing verdicts over one outcome.
     let mut index = WorkProjectionIndex::new();
-    index.apply(ct_snapshot(
+    index.apply_ok(ct_snapshot(
         ct_view(&[state_v2_merged_open()], &[], true),
         "ct-1",
         READ_AT,
     ));
-    index.apply(claims_snapshot(
+    index.apply_ok(claims_snapshot(
         vec![claim_fact(
             "c1",
             Some(&format!("{REPO}#100")),
@@ -1241,15 +1260,17 @@ fn conflicting_inputs_yield_conflicted_never_success() {
         "claims-1",
         READ_AT,
     ));
-    index.apply(adjudication_snapshot(
+    index.apply_ok(adjudication_snapshot(
         vec![
             AdjudicationFactV1 {
                 dispatch_id: "d1".to_string(),
                 fact: CanonicalAdjudicationFact::Accepted,
+                visibility: VisibilityClassV1::Public,
             },
             AdjudicationFactV1 {
                 dispatch_id: "d1".to_string(),
                 fact: CanonicalAdjudicationFact::Rejected,
+                visibility: VisibilityClassV1::Public,
             },
         ],
         "adj-conflict",
@@ -1295,15 +1316,21 @@ fn out_of_order_stale_update_cannot_regress_newer_projection() {
     );
 
     let mut index = WorkProjectionIndex::new();
-    assert_eq!(index.apply(newer.clone()), ApplyOutcome::Applied);
-    assert_eq!(index.apply(older), ApplyOutcome::StaleIgnored);
     assert_eq!(
-        index.apply(newer.clone()),
+        index.apply(newer.clone()).expect("apply newer"),
+        ApplyOutcome::Applied
+    );
+    assert_eq!(
+        index.apply(older).expect("apply older"),
+        ApplyOutcome::StaleIgnored
+    );
+    assert_eq!(
+        index.apply(newer.clone()).expect("re-apply"),
         ApplyOutcome::StaleIgnored,
         "idempotent re-apply"
     );
 
-    let guarded = project(&index, &options());
+    let guarded = project(&index, &options().with_sees_private(true));
     let model = find(&guarded, ISSUE_TOKEN);
     let claims = match &model.claim {
         SectionState::Available(section) => &section.claims,
@@ -1321,11 +1348,11 @@ fn full_rebuild_equals_incremental_projection() {
     let incremental = {
         let mut index = WorkProjectionIndex::new();
         for snapshot in full_snapshot_set() {
-            index.apply(snapshot);
+            index.apply_ok(snapshot);
         }
         project(&index, &options())
     };
-    let rebuilt = project(&rebuild(full_snapshot_set()), &options());
+    let rebuilt = project(&rebuild(full_snapshot_set()).expect("rebuild"), &options());
     assert_eq!(incremental, rebuilt);
 }
 
@@ -1333,7 +1360,7 @@ fn full_rebuild_equals_incremental_projection() {
 /// id/revision/state.
 #[test]
 fn consumers_share_work_id_revision_and_state() {
-    let set = project(&rebuild(full_snapshot_set()), &options());
+    let set = project(&rebuild(full_snapshot_set()).expect("rebuild"), &options());
     let model = find(&set, ISSUE_TOKEN);
 
     let board = super::views::board_view(model);
@@ -1368,7 +1395,7 @@ fn unauthorized_caller_cannot_infer_private_work_existence() {
     ];
 
     let unauthorized = project(
-        &rebuild(snapshots.clone()),
+        &rebuild(snapshots.clone()).expect("rebuild"),
         &ProjectionOptions::new(READ_AT),
     );
     assert!(
@@ -1378,7 +1405,7 @@ fn unauthorized_caller_cannot_infer_private_work_existence() {
     assert_eq!(unauthorized.health.visible_work_count, 0);
 
     let authorized = project(
-        &rebuild(snapshots),
+        &rebuild(snapshots).expect("rebuild"),
         &ProjectionOptions::new(READ_AT).with_sees_private(true),
     );
     assert_eq!(authorized.items.len(), 1);
@@ -1432,8 +1459,8 @@ fn public_claim_over_hidden_subject_does_not_leak() {
     );
 
     let mut index = WorkProjectionIndex::new();
-    index.apply(ct_snapshot(unauthorized_view, "ct-1", READ_AT));
-    index.apply(claims_snapshot(
+    index.apply_ok(ct_snapshot(unauthorized_view, "ct-1", READ_AT));
+    index.apply_ok(claims_snapshot(
         vec![claim_fact(
             "c500",
             Some(&format!("{REPO}#500")),
@@ -1458,8 +1485,8 @@ fn public_claim_over_hidden_subject_does_not_leak() {
 /// source-bound and invokes no LLM.
 #[test]
 fn next_action_is_deterministic_and_source_bound() {
-    let set_a = project(&rebuild(full_snapshot_set()), &options());
-    let set_b = project(&rebuild(full_snapshot_set()), &options());
+    let set_a = project(&rebuild(full_snapshot_set()).expect("rebuild"), &options());
+    let set_b = project(&rebuild(full_snapshot_set()).expect("rebuild"), &options());
     assert_eq!(set_a, set_b, "same sources, same projection");
 
     let model = find(&set_a, ISSUE_TOKEN);
@@ -1488,7 +1515,7 @@ fn next_action_is_deterministic_and_source_bound() {
 #[test]
 fn missing_sources_degrade_honestly() {
     let mut index = WorkProjectionIndex::new();
-    index.apply(claims_snapshot(
+    index.apply_ok(claims_snapshot(
         vec![claim_fact(
             "c1",
             Some(&format!("{REPO}#100")),
@@ -1500,7 +1527,7 @@ fn missing_sources_degrade_honestly() {
         "claims-1",
         READ_AT,
     ));
-    let set = project(&index, &options());
+    let set = project(&index, &options().with_sees_private(true));
     let model = find(&set, ISSUE_TOKEN);
 
     match &model.github {
@@ -1572,7 +1599,7 @@ fn projection_never_writes_back_to_sources() {
         ),
     ];
     for snapshot in &snapshots {
-        index.apply(snapshot.clone());
+        index.apply_ok(snapshot.clone());
     }
     let _ = project(&index, &options());
 
@@ -1589,7 +1616,7 @@ fn projection_never_writes_back_to_sources() {
     // The snapshots themselves are unchanged (the projector consumed refs).
     let mut replay = WorkProjectionIndex::new();
     for snapshot in &snapshots {
-        replay.apply(snapshot.clone());
+        replay.apply_ok(snapshot.clone());
     }
     assert_eq!(
         project(&replay, &options()),
@@ -1604,8 +1631,8 @@ fn projection_never_writes_back_to_sources() {
 fn reader_expired_claim_yields_handoff_or_release() {
     let view = ct_view(&[state_v2_merged_open()], &[], true);
     let mut index = WorkProjectionIndex::new();
-    index.apply(ct_snapshot(view, "ct-1", READ_AT));
-    index.apply(claims_snapshot(
+    index.apply_ok(ct_snapshot(view, "ct-1", READ_AT));
+    index.apply_ok(claims_snapshot(
         vec![claim_fact(
             "c1",
             Some(&format!("{REPO}#100")),
@@ -1642,8 +1669,8 @@ fn reader_expired_claim_yields_handoff_or_release() {
 fn claim_collision_is_a_typed_blocker() {
     let view = ct_view(&[state_v2_merged_open()], &[], true);
     let mut index = WorkProjectionIndex::new();
-    index.apply(ct_snapshot(view, "ct-1", READ_AT));
-    index.apply(claims_snapshot(
+    index.apply_ok(ct_snapshot(view, "ct-1", READ_AT));
+    index.apply_ok(claims_snapshot(
         vec![
             claim_fact(
                 "c1",
@@ -1679,8 +1706,8 @@ fn claim_collision_is_a_typed_blocker() {
 fn terminal_run_without_verification_blocks() {
     let view = ct_view(&[state_v2_merged_open()], &[], true);
     let mut index = WorkProjectionIndex::new();
-    index.apply(ct_snapshot(view, "ct-1", READ_AT));
-    index.apply(claims_snapshot(
+    index.apply_ok(ct_snapshot(view, "ct-1", READ_AT));
+    index.apply_ok(claims_snapshot(
         vec![claim_fact(
             "c1",
             Some(&format!("{REPO}#100")),
@@ -1692,7 +1719,7 @@ fn terminal_run_without_verification_blocks() {
         "claims-1",
         READ_AT,
     ));
-    index.apply(runs_snapshot(
+    index.apply_ok(runs_snapshot(
         vec![run_fact("d1", true, true, Some(0))],
         "runs-1",
         READ_AT,
@@ -1759,7 +1786,7 @@ fn snapshot_minting_is_fail_closed() {
 fn execution_state_derives_from_typed_timestamps() {
     let running = run_fact("d1", true, false, None);
     let mut index = WorkProjectionIndex::new();
-    index.apply(runs_snapshot(vec![running], "runs-1", READ_AT));
+    index.apply_ok(runs_snapshot(vec![running], "runs-1", READ_AT));
     let set = project(&index, &options());
     let model = find(&set, "dispatch:d1");
     let runs = match &model.run {
@@ -1775,7 +1802,7 @@ fn execution_state_derives_from_typed_timestamps() {
 /// deduped.
 #[test]
 fn revision_fingerprint_covers_contributing_sources_only() {
-    let set = project(&rebuild(full_snapshot_set()), &options());
+    let set = project(&rebuild(full_snapshot_set()).expect("rebuild"), &options());
     let model = find(&set, ISSUE_TOKEN);
     let tokens: Vec<String> = model
         .source_stamps
@@ -1813,7 +1840,7 @@ fn env_joins_by_claim_and_detects_drift_without_github() {
         visibility: VisibilityClassV1::Public,
     };
     let mut index = WorkProjectionIndex::new();
-    index.apply(claims_snapshot(
+    index.apply_ok(claims_snapshot(
         vec![claim_fact(
             "c1",
             None,
@@ -1825,7 +1852,7 @@ fn env_joins_by_claim_and_detects_drift_without_github() {
         "claims-1",
         READ_AT,
     ));
-    index.apply(env_snapshot(vec![env], "envs-1", READ_AT));
+    index.apply_ok(env_snapshot(vec![env], "envs-1", READ_AT));
     let set = project(&index, &options());
     let model = find(&set, "claim:c1");
     assert!(model.exec_env.is_available());
@@ -1845,4 +1872,280 @@ fn work_key_parses_issue_refs() {
     assert_eq!(WorkKey::parse_issue_ref("no-slash#1"), None);
     assert_eq!(WorkKey::parse_issue_ref("a/b#notanumber"), None);
     assert_eq!(WorkKey::parse_issue_ref("a/b#"), None);
+}
+
+// ── codex R1 accepted findings: new discriminations ───────────────────────
+
+/// Equal ordering key with DIFFERENT content is rejected fail-closed in
+/// every arrival order (the #1696 `ContradictsExistingRevision` law
+/// mirrored at the snapshot boundary — arrival order never picks a winner).
+#[test]
+fn equal_key_different_content_is_rejected_in_every_arrival_order() {
+    let a = claims_snapshot(
+        vec![claim_fact(
+            "c1",
+            Some(&format!("{REPO}#100")),
+            Some("d1"),
+            ClaimStateV1::Active,
+            None,
+            VisibilityClassV1::Public,
+        )],
+        "claims-same",
+        READ_AT,
+    );
+    let b = claims_snapshot(
+        vec![claim_fact(
+            "c9",
+            Some(&format!("{REPO}#100")),
+            Some("d9"),
+            ClaimStateV1::Active,
+            None,
+            VisibilityClassV1::Public,
+        )],
+        "claims-same",
+        READ_AT,
+    );
+
+    let mut forward = WorkProjectionIndex::new();
+    forward.apply(a.clone()).expect("first applies");
+    let forward_err = forward.apply(b.clone()).expect_err("conflict rejected");
+    let mut reverse = WorkProjectionIndex::new();
+    reverse.apply(b.clone()).expect("first applies");
+    let reverse_err = reverse.apply(a.clone()).expect_err("conflict rejected");
+    assert_eq!(
+        forward_err, reverse_err,
+        "the rejection is order-independent"
+    );
+
+    assert!(matches!(
+        rebuild(vec![a.clone(), b.clone()]),
+        Err(SnapshotError::ContentConflict { .. })
+    ));
+    // An identical same-key duplicate stays idempotent.
+    let mut index = WorkProjectionIndex::new();
+    index.apply(a.clone()).expect("applies");
+    assert_eq!(
+        index.apply(a).expect("re-apply"),
+        ApplyOutcome::StaleIgnored
+    );
+}
+
+/// An empty snapshot is Available knowledge ("no facts at this revision"),
+/// not Unavailability — and it stamps the sections it made Available.
+#[test]
+fn empty_snapshot_is_available_knowledge_not_unavailability() {
+    let view = ct_view(&[state_v2_merged_open()], &[], true);
+    let with_empty = vec![
+        ct_snapshot(view.clone(), "ct-1", READ_AT),
+        claims_snapshot(vec![], "claims-empty", READ_AT),
+    ];
+    let set = project(&rebuild(with_empty).expect("rebuild"), &options());
+    let model = find(&set, ISSUE_TOKEN);
+    assert!(
+        model.claim.is_available(),
+        "an empty claims snapshot asserts 'no claims bind', it is not unavailability"
+    );
+    assert!(model.revision.contains("work_claims@claims-empty"));
+
+    let without = vec![ct_snapshot(view, "ct-1", READ_AT)];
+    let set = project(&rebuild(without).expect("rebuild"), &options());
+    let model = find(&set, ISSUE_TOKEN);
+    assert!(!model.claim.is_available());
+    assert!(!model.revision.contains("work_claims@"));
+}
+
+/// An issue with no implementation link never projects success-shaped,
+/// even with an accepted adjudication bound through a claim.
+#[test]
+fn not_linked_never_success_shaped_even_with_accepted_adjudication() {
+    let view = ct_view(
+        &[repo_state(
+            "r1",
+            "2026-08-26T10:00:00Z",
+            snap_issue(
+                100,
+                SnapshotIssueStateV1::Open,
+                "2026-08-26T10:00:00Z",
+                "rev1-iss",
+            ),
+            vec![],
+            vec![],
+        )],
+        &[],
+        true,
+    );
+    let mut index = WorkProjectionIndex::new();
+    index.apply_ok(ct_snapshot(view, "ct-1", READ_AT));
+    index.apply_ok(claims_snapshot(
+        vec![claim_fact(
+            "c1",
+            Some(&format!("{REPO}#100")),
+            Some("d1"),
+            ClaimStateV1::Active,
+            None,
+            VisibilityClassV1::Public,
+        )],
+        "claims-1",
+        READ_AT,
+    ));
+    index.apply_ok(adjudication_snapshot(
+        vec![AdjudicationFactV1 {
+            dispatch_id: "d1".to_string(),
+            fact: CanonicalAdjudicationFact::Accepted,
+            visibility: VisibilityClassV1::Public,
+        }],
+        "adj-1",
+        READ_AT,
+    ));
+    let set = project(&index, &options());
+    let model = find(&set, ISSUE_TOKEN);
+    assert!(
+        !model.success_shaped,
+        "positive implementation evidence is required"
+    );
+    assert_eq!(
+        github_section(model).implementation_status,
+        ImplementationStatusV1::NotLinked
+    );
+}
+
+/// The board never presents an outstanding reverted implementation as
+/// `landed` (R6-2 owner ruling).
+#[test]
+fn reverted_board_column_is_not_landed() {
+    let view = ct_view(
+        &[
+            state_v2_merged_open(),
+            state_v4_revert_reopen(),
+            state_v6_steady_after_revert(),
+        ],
+        &[],
+        true,
+    );
+    let mut index = WorkProjectionIndex::new();
+    index.apply_ok(ct_snapshot(view, "ct-1", READ_AT));
+    let set = project(&index, &options());
+    let model = find(&set, ISSUE_TOKEN);
+    let board = super::views::board_view(model);
+    assert_eq!(board.column, "reverted");
+    assert_ne!(board.column, "landed");
+}
+
+/// A private verification fact hides the whole work item from an
+/// unauthorized caller.
+#[test]
+fn private_verification_fact_hides_the_work_item() {
+    let view = ct_view(&[state_v2_merged_open()], &[], true);
+    let snapshots = vec![
+        ct_snapshot(view, "ct-1", READ_AT),
+        verification_snapshot(
+            vec![VerificationFactV1 {
+                dispatch_id: Some("d1".to_string()),
+                issue_ref: Some(format!("{REPO}#100")),
+                verification_present: true,
+                diff_present: true,
+                evidence_refs: vec!["e1".to_string()],
+                visibility: VisibilityClassV1::Private,
+            }],
+            "verif-1",
+            READ_AT,
+        ),
+    ];
+    let unauthorized = project(
+        &rebuild(snapshots.clone()).expect("rebuild"),
+        &ProjectionOptions::new(READ_AT),
+    );
+    assert!(
+        unauthorized.items.is_empty(),
+        "private verification evidence hides the item"
+    );
+    let authorized = project(
+        &rebuild(snapshots).expect("rebuild"),
+        &ProjectionOptions::new(READ_AT).with_sees_private(true),
+    );
+    assert_eq!(authorized.items.len(), 1);
+}
+
+/// With no CurrentTruth view at all, an unauthorized caller cannot see an
+/// issue-keyed item (fail-closed: hidden subject and unknown repo are
+/// indistinguishable).
+#[test]
+fn unauthorized_missing_repo_view_hides_issue_keyed_work() {
+    let mut index = WorkProjectionIndex::new();
+    index.apply_ok(claims_snapshot(
+        vec![claim_fact(
+            "c1",
+            Some(&format!("{REPO}#100")),
+            Some("d1"),
+            ClaimStateV1::Active,
+            None,
+            VisibilityClassV1::Public,
+        )],
+        "claims-1",
+        READ_AT,
+    ));
+    let unauthorized = project(&index, &ProjectionOptions::new(READ_AT));
+    assert!(
+        unauthorized.items.is_empty(),
+        "no repo view + unauthorized = no issue-keyed leakage"
+    );
+    let authorized = project(
+        &index,
+        &ProjectionOptions::new(READ_AT).with_sees_private(true),
+    );
+    let model = find(&authorized, ISSUE_TOKEN);
+    assert!(
+        !model.github.is_available(),
+        "authorized sees the item with an honestly unknown github section"
+    );
+}
+
+/// A reverted PR that a later authoritative link-set update UNLINKS from
+/// its issue still carries R6-2 debt: it is counted (content-free) so it
+/// cannot disappear silently. Unlinking is not a causal resolution.
+#[test]
+fn unlinked_reverted_pr_counts_as_orphaned_debt() {
+    // v9: PR 200 no longer linked to issue 100 (authoritative link
+    // removal), but the revert observation remains in history and the PR
+    // subject still reports merged.
+    let v9 = repo_state(
+        "r9",
+        "2026-08-26T17:00:00Z",
+        snap_issue(
+            100,
+            SnapshotIssueStateV1::Open,
+            "2026-08-26T17:00:00Z",
+            "rev9-iss",
+        ),
+        vec![snap_pr(
+            200,
+            SnapshotPrStateV1::Merged,
+            Some("mergeabc123"),
+            "2026-08-26T17:00:00Z",
+            "rev9-pr",
+            vec![],
+        )],
+        vec![],
+    );
+    let view = ct_view(
+        &[state_v2_merged_open(), state_v4_revert_reopen(), v9],
+        &[],
+        true,
+    );
+    let mut index = WorkProjectionIndex::new();
+    index.apply_ok(ct_snapshot(view, "ct-1", READ_AT));
+    let set = project(&index, &options());
+    assert_eq!(
+        set.health.orphaned_revert_debt_count, 1,
+        "the unlinked reverted PR's transition debt stays visible (content-free count)"
+    );
+    // What the per-issue projection can still see: the issue no longer
+    // names the reverted PR, so its own debt row is gone — the health
+    // counter is the honest residue until the consumer view exposes
+    // superseded link lineage (#1696 integration-slice follow-up).
+    let model = find(&set, ISSUE_TOKEN);
+    assert!(matches!(
+        github_section(model).transition_debt.revert,
+        DebtStateV1::None
+    ));
 }

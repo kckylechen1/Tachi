@@ -519,6 +519,12 @@ impl WorkReadModelV1 {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WorkProjectionHealthV1 {
     pub visible_work_count: usize,
+    /// PRs with evidenced `merge_reverted` that no issue's CURRENT link
+    /// set claims (R6-2 debt that the v1 consumer view cannot attribute
+    /// per-issue after an unlink — counted so it cannot disappear
+    /// silently; per-issue attribution is the #1696 integration-slice
+    /// follow-up).
+    pub orphaned_revert_debt_count: usize,
     pub conflicted_count: usize,
     pub blocked_count: usize,
     pub refresh_debt_count: usize,

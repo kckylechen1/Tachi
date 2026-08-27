@@ -35,8 +35,9 @@
 //! 3. `RepairHeadDrift` — the claim's pinned expected head disagrees with
 //!    the evidenced GitHub merge SHA (or the env base, when only that pair
 //!    exists).
-//! 4. `RepairRevertOrReopen` — forwarded from CurrentTruth's resolved
-//!    lifecycle (DECISION (OPEN): R6-2, see [`github_section_for`]).
+//! 4. `RepairRevertOrReopen` — outstanding R6-2 transition debt (the
+//!    owner-ruled law, including debt the CurrentTruth family resolution
+//!    has left behind a newer steady-state snapshot).
 //! 5. `RunVerification` — a terminal run lacks verification evidence.
 //! 6. `Adjudicate` — a terminal run awaits adjudication (worker
 //!    submit/exit is never acceptance).
@@ -81,8 +82,9 @@ pub enum ApplyOutcome {
     Applied,
     /// Newer ordering key: replaced the previous snapshot.
     SupersededExisting,
-    /// Older-or-equal key: ignored deterministically (out-of-order/stale
-    /// arrivals cannot regress a newer source revision).
+    /// Older key, or an identical same-key duplicate: ignored
+    /// deterministically (out-of-order/stale arrivals cannot regress a
+    /// newer source revision; idempotent re-application changes nothing).
     StaleIgnored,
 }
 
@@ -99,20 +101,36 @@ impl WorkProjectionIndex {
         Self::default()
     }
 
-    /// Apply one snapshot. Same-key duplicates are ignored (idempotent
-    /// writes); older keys are ignored (no regression).
-    pub fn apply(&mut self, snapshot: SourceSnapshot) -> ApplyOutcome {
+    /// Apply one snapshot. Older keys are ignored (no regression); an
+    /// identical same-key duplicate is idempotently ignored; two snapshots
+    /// sharing one immutable `(observed_at, revision)` key with DIFFERENT
+    /// content are rejected fail-closed (the #1696
+    /// `ContradictsExistingRevision` law — arrival order never picks the
+    /// winner, because neither content wins). On rejection the index is
+    /// left unchanged and the caller must not consume the conflict.
+    pub fn apply(
+        &mut self,
+        snapshot: SourceSnapshot,
+    ) -> Result<ApplyOutcome, super::sources::SnapshotError> {
         match self.latest.get(&snapshot.stamp.kind) {
             None => {
                 self.latest.insert(snapshot.stamp.kind.clone(), snapshot);
-                ApplyOutcome::Applied
+                Ok(ApplyOutcome::Applied)
             }
             Some(existing) => {
                 if snapshot.stamp.ordering_key() > existing.stamp.ordering_key() {
                     self.latest.insert(snapshot.stamp.kind.clone(), snapshot);
-                    ApplyOutcome::SupersededExisting
+                    Ok(ApplyOutcome::SupersededExisting)
+                } else if snapshot.stamp.ordering_key() == existing.stamp.ordering_key()
+                    && snapshot.facts != existing.facts
+                {
+                    Err(super::sources::SnapshotError::ContentConflict {
+                        kind: snapshot.stamp.kind.as_token(),
+                        observed_at: snapshot.stamp.observed_at.clone(),
+                        revision: snapshot.stamp.revision.clone(),
+                    })
                 } else {
-                    ApplyOutcome::StaleIgnored
+                    Ok(ApplyOutcome::StaleIgnored)
                 }
             }
         }
@@ -126,20 +144,26 @@ impl WorkProjectionIndex {
     fn stamp_for(&self, kind: &SourceKind) -> Option<SourceStamp> {
         self.latest.get(kind).map(|snapshot| snapshot.stamp.clone())
     }
+
+    fn has_snapshot(&self, kind: &SourceKind) -> bool {
+        self.latest.contains_key(kind)
+    }
 }
 
 /// Full rebuild: fold every snapshot through the same `apply` the
 /// incremental path uses, in any order. Canonically equivalent to
-/// incrementally applying the same multiset.
-pub fn rebuild<I>(snapshots: I) -> WorkProjectionIndex
+/// incrementally applying the same multiset. A multiset containing an
+/// equal-key content conflict fails in every arrival order — the failure
+/// itself is the deterministic outcome.
+pub fn rebuild<I>(snapshots: I) -> Result<WorkProjectionIndex, super::sources::SnapshotError>
 where
     I: IntoIterator<Item = SourceSnapshot>,
 {
     let mut index = WorkProjectionIndex::new();
     for snapshot in snapshots {
-        index.apply(snapshot);
+        index.apply(snapshot)?;
     }
-    index
+    Ok(index)
 }
 
 /// Project the whole set for one read.
@@ -255,6 +279,18 @@ pub fn project(index: &WorkProjectionIndex, options: &ProjectionOptions) -> Work
     keys.sort();
 
     let authorization = options.authorization;
+    // Private dispositions never enter an unauthorized projection: their
+    // EFFECT (a cleared debt) would be a visibility signal, so they are
+    // filtered before the fold and the debt stays outstanding.
+    let visible_dispositions: Vec<OwnerDispositionFactV1> = if authorization.sees_private {
+        owner_dispositions.clone()
+    } else {
+        owner_dispositions
+            .iter()
+            .filter(|fact| fact.visibility == VisibilityClassV1::Public)
+            .cloned()
+            .collect()
+    };
     let mut items = Vec::new();
     for key in keys {
         if let Some(model) = project_one(
@@ -264,7 +300,7 @@ pub fn project(index: &WorkProjectionIndex, options: &ProjectionOptions) -> Work
             &exec_envs,
             &verification,
             &adjudication,
-            &owner_dispositions,
+            &visible_dispositions,
             &repo_views,
             &delivery_observation,
             index,
@@ -272,10 +308,11 @@ pub fn project(index: &WorkProjectionIndex, options: &ProjectionOptions) -> Work
         ) {
             // Fail-closed visibility: ANY private fact hides the whole work
             // item from an UNAUTHORIZED caller (mirror of the #1696
-            // consumer law); an authorized caller sees private work. A
-            // public claim whose issue subject is absent from an
-            // unauthorized view hides it too (the projection cannot
-            // distinguish private from nonexistent).
+            // consumer law); an authorized caller sees private work. An
+            // issue-keyed item whose subject is not positively visible in
+            // an unauthorized CurrentTruth view is hidden too — with no
+            // repo view at all, the projection cannot distinguish a hidden
+            // subject from an unknown repo, so it must not leak either.
             let has_private_fact = !authorization.sees_private && model_touches_private(&model);
             let leaks_hidden_subject =
                 !authorization.sees_private && subject_hidden(&model, &repo_views);
@@ -286,8 +323,47 @@ pub fn project(index: &WorkProjectionIndex, options: &ProjectionOptions) -> Work
         }
     }
 
+    // Content-free visibility of the unlink-after-revert gap: PRs with
+    // evidenced `merge_reverted` that no issue's CURRENT link set claims
+    // still carry transition debt under the R6-2 ruling (unlinking is not
+    // a causal resolution), but the v1 consumer view exposes no historical
+    // link lineage to attribute them to an issue. They are counted here so
+    // the debt cannot disappear silently; per-issue attribution after an
+    // unlink is the #1696 integration-slice follow-up.
+    let orphaned_revert_debt_count = repo_views
+        .iter()
+        .map(|view| {
+            let claimed: std::collections::BTreeSet<u64> = view
+                .subjects
+                .iter()
+                .filter(|subject| parse_subject_token(&subject.subject_token).is_some())
+                .flat_map(linked_pr_numbers)
+                .collect();
+            view.subjects
+                .iter()
+                .filter(|subject| subject.subject_token.contains("#pull_request:"))
+                .filter(|subject| {
+                    subject.predicates.iter().any(|row| {
+                        row.predicate == PredicateV1::MergeReverted
+                            && !row.evidence_heads.is_empty()
+                    })
+                })
+                .filter(|subject| {
+                    subject
+                        .subject_token
+                        .rsplit_once('#')
+                        .and_then(|(_, object)| object.strip_prefix("pull_request:"))
+                        .and_then(|token| token.parse::<u64>().ok())
+                        .map(|number| !claimed.contains(&number))
+                        .unwrap_or(false)
+                })
+                .count()
+        })
+        .sum();
+
     let health = WorkProjectionHealthV1 {
         visible_work_count: items.len(),
+        orphaned_revert_debt_count,
         conflicted_count: items
             .iter()
             .filter(|item| {
@@ -376,7 +452,8 @@ fn parse_subject_token(token: &str) -> Option<(String, u64)> {
     Some((repo.to_string(), number))
 }
 
-/// Whether the work item carries any private fact.
+/// Whether the work item carries any private fact (claims, runs, envs,
+/// verification observations, or adjudication rows).
 fn model_touches_private(model: &WorkReadModelV1) -> bool {
     if let SectionState::Available(claim) = &model.claim {
         if claim
@@ -405,19 +482,38 @@ fn model_touches_private(model: &WorkReadModelV1) -> bool {
             return true;
         }
     }
+    if let SectionState::Available(verification) = &model.verification {
+        if verification
+            .observations
+            .iter()
+            .any(|row| row.fact.visibility == VisibilityClassV1::Private)
+        {
+            return true;
+        }
+    }
+    if let SectionState::Available(adjudication) = &model.adjudication {
+        if adjudication
+            .facts
+            .iter()
+            .any(|fact| fact.visibility == VisibilityClassV1::Private)
+        {
+            return true;
+        }
+    }
     false
 }
 
-/// Whether an issue-keyed item's subject is absent from the (possibly
-/// unauthorized) CurrentTruth view for its repo while that view exists —
-/// the caller cannot distinguish private from nonexistent, so the item must
-/// not leak.
+/// Whether an issue-keyed item's subject is not positively visible in the
+/// (possibly unauthorized) CurrentTruth view — including when no repo view
+/// exists at all: the caller cannot distinguish a hidden subject from an
+/// unknown repo, so the item must not leak either (#1693 discrimination
+/// 12, fail-closed).
 fn subject_hidden(model: &WorkReadModelV1, repo_views: &[CurrentTruthViewV1]) -> bool {
     let WorkKey::Issue { repo, number } = &model.work_id else {
         return false;
     };
     let Some(view) = repo_views.iter().find(|view| &view.repo == repo) else {
-        return false;
+        return true;
     };
     let token = format!("{repo}#issue:{number}");
     !view
@@ -453,11 +549,11 @@ fn project_one(
         .map(|run| run.dispatch_id.clone())
         .collect();
 
-    let claim_section = if claims.is_empty() {
-        SectionState::Unavailable {
-            source: SourceKind::WorkClaims,
-        }
-    } else {
+    // Section availability follows SNAPSHOT EXISTENCE, not row counts: an
+    // empty snapshot asserts "no facts at this revision" — knowledge, not
+    // unavailability. Only a source with no snapshot at all is
+    // `Unavailable`, naming itself.
+    let claim_section = if index.has_snapshot(&SourceKind::WorkClaims) {
         SectionState::Available(ClaimSectionV1 {
             claims: bound_claims
                 .iter()
@@ -467,13 +563,13 @@ fn project_one(
                 })
                 .collect(),
         })
+    } else {
+        SectionState::Unavailable {
+            source: SourceKind::WorkClaims,
+        }
     };
 
-    let run_section = if run_receipts.is_empty() {
-        SectionState::Unavailable {
-            source: SourceKind::RunReceipts,
-        }
-    } else {
+    let run_section = if index.has_snapshot(&SourceKind::RunReceipts) {
         SectionState::Available(RunSectionV1 {
             runs: bound_runs
                 .iter()
@@ -483,17 +579,17 @@ fn project_one(
                 })
                 .collect(),
         })
+    } else {
+        SectionState::Unavailable {
+            source: SourceKind::RunReceipts,
+        }
     };
 
     let bound_envs: Vec<&ExecEnvFactV1> = exec_envs
         .iter()
         .filter(|env| env_work_key(env, claims) == Some(key.clone()))
         .collect();
-    let exec_env_section = if exec_envs.is_empty() {
-        SectionState::Unavailable {
-            source: SourceKind::ExecEnvs,
-        }
-    } else {
+    let exec_env_section = if index.has_snapshot(&SourceKind::ExecEnvs) {
         SectionState::Available(ExecEnvSectionV1 {
             envs: bound_envs
                 .iter()
@@ -502,17 +598,17 @@ fn project_one(
                 })
                 .collect(),
         })
+    } else {
+        SectionState::Unavailable {
+            source: SourceKind::ExecEnvs,
+        }
     };
 
     let bound_verification: Vec<&VerificationFactV1> = verification
         .iter()
         .filter(|fact| verification_work_key(fact, claims) == Some(key.clone()))
         .collect();
-    let verification_section = if verification.is_empty() {
-        SectionState::Unavailable {
-            source: SourceKind::Verification,
-        }
-    } else {
+    let verification_section = if index.has_snapshot(&SourceKind::Verification) {
         SectionState::Available(VerificationSectionV1 {
             observations: bound_verification
                 .iter()
@@ -521,6 +617,10 @@ fn project_one(
                 })
                 .collect(),
         })
+    } else {
+        SectionState::Unavailable {
+            source: SourceKind::Verification,
+        }
     };
 
     let bound_adjudication: Vec<AdjudicationFactV1> = adjudication
@@ -528,16 +628,16 @@ fn project_one(
         .filter(|fact| dispatch_work_key(&fact.dispatch_id, claims) == key)
         .cloned()
         .collect();
-    let adjudication_section = if adjudication.is_empty() {
-        SectionState::Unavailable {
-            source: SourceKind::Adjudication,
-        }
-    } else {
+    let adjudication_section = if index.has_snapshot(&SourceKind::Adjudication) {
         let state = project_adjudication(bound_adjudication.iter().map(|fact| fact.fact.clone()));
         SectionState::Available(AdjudicationSectionV1 {
             facts: bound_adjudication,
             state,
         })
+    } else {
+        SectionState::Unavailable {
+            source: SourceKind::Adjudication,
+        }
     };
 
     let delivery_section = DeliverySectionV1 {
@@ -561,31 +661,24 @@ fn project_one(
     };
 
     // ---- contributing source stamps -----------------------------------
+    // A source stamps every item whose section it made Available — an
+    // empty-but-present snapshot contributed the "no facts bind" statement,
+    // so its revision belongs in the fingerprint.
     let mut stamps: Vec<SourceStamp> = Vec::new();
-    if let SectionState::Available(section) = &claim_section {
-        if !section.claims.is_empty() {
-            stamps.extend(index.stamp_for(&SourceKind::WorkClaims));
-        }
+    if claim_section.is_available() {
+        stamps.extend(index.stamp_for(&SourceKind::WorkClaims));
     }
-    if let SectionState::Available(section) = &run_section {
-        if !section.runs.is_empty() {
-            stamps.extend(index.stamp_for(&SourceKind::RunReceipts));
-        }
+    if run_section.is_available() {
+        stamps.extend(index.stamp_for(&SourceKind::RunReceipts));
     }
-    if let SectionState::Available(section) = &exec_env_section {
-        if !section.envs.is_empty() {
-            stamps.extend(index.stamp_for(&SourceKind::ExecEnvs));
-        }
+    if exec_env_section.is_available() {
+        stamps.extend(index.stamp_for(&SourceKind::ExecEnvs));
     }
-    if let SectionState::Available(section) = &verification_section {
-        if !section.observations.is_empty() {
-            stamps.extend(index.stamp_for(&SourceKind::Verification));
-        }
+    if verification_section.is_available() {
+        stamps.extend(index.stamp_for(&SourceKind::Verification));
     }
-    if let SectionState::Available(section) = &adjudication_section {
-        if !section.facts.is_empty() {
-            stamps.extend(index.stamp_for(&SourceKind::Adjudication));
-        }
+    if adjudication_section.is_available() {
+        stamps.extend(index.stamp_for(&SourceKind::Adjudication));
     }
     if let WorkKey::Issue { repo, .. } = &key {
         // The repo view contributes posture + subject presence even when
@@ -897,17 +990,21 @@ fn project_one(
     actions.dedup_by(|a, b| a.kind == b.kind && a.prerequisite_refs == b.prerequisite_refs);
 
     // ---- success-shaped gate --------------------------------------------
-    // Unknown GitHub is never success-shaped; NotApplicable (dispatch/claim
-    // keys with no issue binding) can be, when adjudication accepted and no
-    // blocker stands. Outstanding R6-2 transition debt additionally blocks
-    // success even behind a fresh, unconflicted family resolution.
+    // Issue-keyed completion requires POSITIVE evidence: an available,
+    // unconflicted, debt-free GitHub section whose implementation status is
+    // `Present` (NotLinked/UnderReview/Unknown/Reverted are never
+    // success-shaped), plus accepted/not-required adjudication and no
+    // blockers. Dispatch/claim keys (no issue binding) complete on the
+    // adjudication law alone: blockers empty + accepted adjudication.
     let adjudication_ok = matches!(
         adjudication_state,
         Some(AdjudicationState::Accepted | AdjudicationState::NotRequired { .. })
     );
     let github_ok = match &github_section {
         SectionState::Available(section) => {
-            !section.conflicted && !section.transition_debt.any_outstanding()
+            !section.conflicted
+                && !section.transition_debt.any_outstanding()
+                && section.implementation_status == ImplementationStatusV1::Present
         }
         SectionState::NotApplicable => true,
         SectionState::Unavailable { .. } => false,

@@ -190,6 +190,9 @@ pub struct VerificationFactV1 {
     pub verification_present: bool,
     pub diff_present: bool,
     pub evidence_refs: Vec<String>,
+    /// Private verification/result evidence is representable and hides the
+    /// whole work item for unauthorized callers (#1693 discrimination 12).
+    pub visibility: VisibilityClassV1,
 }
 
 /// One adjudication-spine fact bound to a dispatch (#1636 law: a worker
@@ -198,6 +201,9 @@ pub struct VerificationFactV1 {
 pub struct AdjudicationFactV1 {
     pub dispatch_id: String,
     pub fact: CanonicalAdjudicationFact,
+    /// Adjudication rows can name private work; visibility is fail-closed
+    /// at projection time.
+    pub visibility: VisibilityClassV1,
 }
 
 /// One issue-scoped owner disposition. The R6-2 owner ruling names an
@@ -214,6 +220,9 @@ pub struct OwnerDispositionFactV1 {
     /// RFC 3339 observation time of the disposition itself.
     pub observed_at: String,
     pub disposition: OwnerDispositionV1,
+    /// Private dispositions hide the whole work item for unauthorized
+    /// callers.
+    pub visibility: VisibilityClassV1,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -282,7 +291,11 @@ pub struct SourceSnapshot {
 
 /// The stamp/facts pairing is wrong — a caller tried to mint a snapshot
 /// whose declared kind does not match its facts (fail-closed, never a
-/// coerced default).
+/// coerced default) — or two snapshots share one immutable
+/// `(observed_at, revision)` key while carrying different facts. The
+/// latter mirrors the #1696 `ContradictsExistingRevision` law: the same
+/// immutable revision may not contradict itself, so arrival order never
+/// decides which content wins — neither does.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SnapshotError {
     #[error("snapshot declared {declared} but facts are {actual}")]
@@ -291,6 +304,14 @@ pub enum SnapshotError {
     EmptyRevision(String),
     #[error("CurrentTruth view carries repo `{view}` but stamp declares `{stamp}`")]
     RepoMismatch { stamp: String, view: String },
+    #[error(
+        "two snapshots for {kind} share ordering key ({observed_at}, {revision}) with different content"
+    )]
+    ContentConflict {
+        kind: String,
+        observed_at: String,
+        revision: String,
+    },
 }
 
 impl SourceSnapshot {
