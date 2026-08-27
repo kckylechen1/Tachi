@@ -88,6 +88,11 @@ pub enum ApplyOutcome {
     StaleIgnored,
 }
 
+/// The retained pairing behind one immutable ordering key: the facts and
+/// the RAW `observed_at` text they were stamped with (the text
+/// participates in conflict detection — see `apply`).
+type SeenEntry = (SourceFacts, String);
+
 /// The incremental carrier: latest snapshot per source kind, plus the
 /// content identity of EVERY immutable ordering key ever applied — so an
 /// equal-key content contradiction is rejected no matter how many newer
@@ -108,7 +113,7 @@ pub enum ApplyOutcome {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WorkProjectionIndex {
     latest: BTreeMap<SourceKind, SourceSnapshot>,
-    seen: BTreeMap<(SourceKind, (chrono::DateTime<chrono::Utc>, String)), SourceFacts>,
+    seen: BTreeMap<(SourceKind, (chrono::DateTime<chrono::Utc>, String)), SeenEntry>,
 }
 
 impl WorkProjectionIndex {
@@ -138,8 +143,17 @@ impl WorkProjectionIndex {
         snapshot.validate()?;
         let ordering_key = snapshot.stamp.ordering_key();
         let seen_key = (snapshot.stamp.kind.clone(), ordering_key.clone());
-        if let Some(existing) = self.seen.get(&seen_key) {
-            if *existing != snapshot.facts {
+        if let Some((existing_facts, existing_observed_at)) = self.seen.get(&seen_key) {
+            // The stored pairing includes the RAW observed_at text: two
+            // RFC 3339 aliases of one instant (`12:00Z` vs `20:00+08:00`)
+            // normalize to the same ordering key, and if their texts
+            // differ the retained snapshot's exposed `source_stamps`
+            // would depend on arrival order — so an alias-text difference
+            // at one immutable key is a content conflict, never
+            // first-arrival-wins (codex R2 round-6 finding 3).
+            if *existing_facts != snapshot.facts
+                || existing_observed_at != &snapshot.stamp.observed_at
+            {
                 return Err(super::sources::SnapshotError::ContentConflict {
                     kind: snapshot.stamp.kind.as_token(),
                     observed_at: snapshot.stamp.observed_at.clone(),
@@ -147,7 +161,10 @@ impl WorkProjectionIndex {
                 });
             }
         }
-        self.seen.insert(seen_key, snapshot.facts.clone());
+        self.seen.insert(
+            seen_key,
+            (snapshot.facts.clone(), snapshot.stamp.observed_at.clone()),
+        );
 
         let outcome = match self.latest.get(&snapshot.stamp.kind) {
             None => ApplyOutcome::Applied,
@@ -1394,7 +1411,7 @@ fn orphan_pr_github_section_for(view: &CurrentTruthViewV1, number: u64) -> Githu
         },
         reopen: DebtStateV1::None,
     };
-    let conflict_refs: Vec<String> = subject
+    let mut conflict_refs: Vec<String> = subject
         .as_ref()
         .map(|subject| {
             subject
@@ -1405,7 +1422,46 @@ fn orphan_pr_github_section_for(view: &CurrentTruthViewV1, number: u64) -> Githu
                 .collect()
         })
         .unwrap_or_default();
-    let conflicted = !conflict_refs.is_empty();
+    // Lifecycle-family tie on the orphan PR itself (codex R2 round-6
+    // finding 2): tied `pr_merged`/`merge_reverted` heads are a family
+    // conflict, not ordinary revert debt — the item reports
+    // `GithubConflict`, never a plain `reverted` column.
+    let lifecycle_max_tie = subject.as_ref().is_some_and(|subject| {
+        let family = [
+            PredicateV1::PrOpen,
+            PredicateV1::PrMerged,
+            PredicateV1::PrClosedUnmerged,
+            PredicateV1::MergeReverted,
+        ];
+        let mut max_key: Option<(chrono::DateTime<chrono::Utc>, String)> = None;
+        let mut owners = 0usize;
+        for predicate in family {
+            for (key, _) in row_heads(subject, predicate, false) {
+                match &max_key {
+                    None => {
+                        max_key = Some(key);
+                        owners = 1;
+                    }
+                    Some(best) if key > *best => {
+                        max_key = Some(key);
+                        owners = 1;
+                    }
+                    Some(best) if key == *best => owners += 1,
+                    _ => {}
+                }
+            }
+        }
+        if owners > 1 {
+            conflict_refs.push(format!(
+                "{}#lifecycle_conflict",
+                subject.subject_token.clone()
+            ));
+            true
+        } else {
+            false
+        }
+    });
+    let conflicted = !conflict_refs.is_empty() || lifecycle_max_tie;
     // A reverted implementation is never the effective implementation:
     // no merge SHA is projected while the revert debt is outstanding.
     let implementation_status = if conflicted {
@@ -1427,6 +1483,39 @@ fn orphan_pr_github_section_for(view: &CurrentTruthViewV1, number: u64) -> Githu
         conflict_refs,
         transition_debt,
     }
+}
+
+/// Whether the subject's lifecycle FAMILY has a tie at the given key:
+/// another family member's head sits at exactly the same
+/// (instant, revision) as the would-be clearing evidence. A tied row is
+/// individually `Current` yet NOT an authoritative family winner
+/// (#1696 communicates family ties as `ResolveConflict`), so it may
+/// never discharge transition debt (codex R2 round-6 finding 1).
+fn lifecycle_family_tied_at(
+    subject: &crate::current_truth::consumer::SubjectTruthViewV1,
+    issue_subject_row: bool,
+    winning: PredicateV1,
+    key: &(chrono::DateTime<chrono::Utc>, String),
+) -> bool {
+    let family: &[PredicateV1] = if issue_subject_row {
+        &[
+            PredicateV1::IssueOpen,
+            PredicateV1::IssueClosed,
+            PredicateV1::IssueReopened,
+        ]
+    } else {
+        &[
+            PredicateV1::PrOpen,
+            PredicateV1::PrMerged,
+            PredicateV1::PrClosedUnmerged,
+            PredicateV1::MergeReverted,
+        ]
+    };
+    family
+        .iter()
+        .filter(|predicate| **predicate != winning)
+        .flat_map(|predicate| row_heads(subject, *predicate, false))
+        .any(|(head_key, _)| head_key == *key)
 }
 
 /// The R6-2 transition-debt projection for one issue subject (owner-ruled
@@ -1468,7 +1557,15 @@ fn transition_debt_for(
             let closed_heads = row_heads(subject, PredicateV1::IssueClosed, true);
             let closed_max = closed_heads.iter().map(|(key, _)| key.clone()).max();
             match (reopen_max, closed_max) {
-                (Some(reopen_key), Some(closed_key)) if closed_key > reopen_key => {
+                (Some(reopen_key), Some(closed_key))
+                    if closed_key > reopen_key
+                        && !lifecycle_family_tied_at(
+                            subject,
+                            true,
+                            PredicateV1::IssueClosed,
+                            &closed_key,
+                        ) =>
+                {
                     DebtStateV1::Cleared {
                         by: DebtClearingV1::LaterAuthoritativeIssueClosed,
                         evidence_heads: closed_heads.into_iter().map(|(_, head)| head).collect(),
@@ -1522,21 +1619,28 @@ fn transition_debt_for(
             // `updated_at` violates that contract upstream and can
             // fabricate repair evidence here; this projection cannot see
             // superseded merge lineage to defend against it.
-            let repair = linked.iter().any(|pr_number| {
+            let mut repair_heads: Vec<crate::current_truth::consumer::EvidenceHeadViewV1> =
+                Vec::new();
+            for pr_number in &linked {
                 if reverted_prs.contains(pr_number) {
-                    return false;
+                    continue;
                 }
                 let Some(pr_subject) = pr_subject_in_view(view, *pr_number) else {
-                    return false;
+                    continue;
                 };
-                row_heads(pr_subject, PredicateV1::PrMerged, true)
-                    .iter()
-                    .any(|(key, _)| revert_max.as_ref().is_some_and(|max| *key > *max))
-            });
+                for (key, head) in row_heads(pr_subject, PredicateV1::PrMerged, true) {
+                    if revert_max.as_ref().is_some_and(|max| key > *max)
+                        && !lifecycle_family_tied_at(pr_subject, false, PredicateV1::PrMerged, &key)
+                    {
+                        repair_heads.push(head);
+                    }
+                }
+            }
+            let repair = !repair_heads.is_empty();
             if repair {
                 DebtStateV1::Cleared {
                     by: DebtClearingV1::PostRevertRepairPrMerged,
-                    evidence_heads: Vec::new(),
+                    evidence_heads: repair_heads,
                 }
             } else {
                 // Clearing evidence 2: an explicit owner-reviewed

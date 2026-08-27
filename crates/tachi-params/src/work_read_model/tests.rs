@@ -794,8 +794,16 @@ fn post_revert_repair_pr_clears_revert_debt() {
 
     let model = find(&set, ISSUE_TOKEN);
     match &github_section(model).transition_debt.revert {
-        DebtStateV1::Cleared { by, .. } => {
-            assert_eq!(*by, DebtClearingV1::PostRevertRepairPrMerged)
+        DebtStateV1::Cleared { by, evidence_heads } => {
+            assert_eq!(*by, DebtClearingV1::PostRevertRepairPrMerged);
+            // The clearing carries its causal evidence (codex R2 round-6
+            // finding 4): the qualifying repair PR's merge head.
+            assert!(
+                evidence_heads
+                    .iter()
+                    .any(|head| head.assertion_id.contains("pull_request:300")),
+                "the repair PR's merge head is the clearing evidence: {evidence_heads:?}"
+            );
         }
         other => panic!("revert debt should be cleared by repair PR, got {other:?}"),
     }
@@ -1837,6 +1845,259 @@ fn orphan_debt_moves_back_to_the_issue_on_relink() {
     assert!(has_action(model, NextActionKindV1::RepairRevertOrReopen));
 }
 
+/// Hardening (codex R2 round-6 finding 1 + finding 5): a close TIED with
+/// a rival open at the lifecycle family's max key is not an authoritative
+/// `issue_closed` — the family conflict is unresolved authority, so the
+/// reopen debt stays outstanding even though the close row itself is
+/// individually `Current` and its key is newer than the reopen.
+#[test]
+fn family_tied_close_cannot_clear_reopen_debt() {
+    // Rival open at EXACTLY the typed close's key (15:00, rev7-iss), from
+    // a second typed-object lineage (OwnerDecision may not establish
+    // `issue_open`).
+    let rival_open = AssertionV1 {
+        assertion_id: "rival-open-1".to_string(),
+        subject: issue_subject(100),
+        predicate: PredicateV1::IssueOpen,
+        value: AssertionValueV1::Unit,
+        issuer: "github-events-adapter".to_string(),
+        authority_class: AuthorityClassV1::GitHubTypedObject,
+        source_ref: SourceRefV1 {
+            source: "github-events".to_string(),
+            revision: "rev7-iss".to_string(),
+        },
+        observed_at: "2026-08-26T15:00:00Z".to_string(),
+        effective_at: "2026-08-26T15:00:00Z".to_string(),
+        supersedes_assertion_id: None,
+        evidence_refs: vec!["events-api-4".to_string()],
+        review_state: ReviewStateV1::Observed,
+        visibility: VisibilityClassV1::Public,
+    };
+    let view = ct_view(
+        &[
+            state_v2_merged_open(),
+            state_v4_revert_reopen(),
+            state_v7_issue_closed(),
+        ],
+        &[rival_open],
+        true,
+    );
+    let mut index = WorkProjectionIndex::new();
+    index.apply_ok(ct_snapshot(view, "ct-1", READ_AT));
+    let set = project(&index, &options());
+
+    let model = find(&set, ISSUE_TOKEN);
+    assert!(
+        matches!(
+            &github_section(model).transition_debt.reopen,
+            DebtStateV1::Outstanding { .. }
+        ),
+        "a family-tied close is not an authoritative resolution"
+    );
+    assert!(has_blocker(
+        model,
+        super::types::BlockerKindV1::GithubConflict
+    ));
+    assert!(!model.success_shaped);
+}
+
+/// Hardening (codex R2 round-6 finding 1): a repair merge TIED with a
+/// rival open at the repair PR's lifecycle max key is not a proven merge
+/// — the revert debt stays outstanding.
+#[test]
+fn family_tied_repair_merge_cannot_clear_revert_debt() {
+    // Rival open at exactly PR 300's typed merge key (16:00, rev8-pr300).
+    let rival_pr_open = AssertionV1 {
+        assertion_id: "rival-pr300-open".to_string(),
+        subject: pr_subject(300),
+        predicate: PredicateV1::PrOpen,
+        value: AssertionValueV1::Unit,
+        issuer: "github-events-adapter".to_string(),
+        authority_class: AuthorityClassV1::GitHubTypedObject,
+        source_ref: SourceRefV1 {
+            source: "github-events".to_string(),
+            revision: "rev8-pr300".to_string(),
+        },
+        observed_at: "2026-08-26T16:00:00Z".to_string(),
+        effective_at: "2026-08-26T16:00:00Z".to_string(),
+        supersedes_assertion_id: None,
+        evidence_refs: vec!["events-api-2".to_string()],
+        review_state: ReviewStateV1::Observed,
+        visibility: VisibilityClassV1::Public,
+    };
+    let view = ct_view(
+        &[
+            state_v2_merged_open(),
+            state_v4_revert_only(),
+            state_v8_repair_pr(),
+        ],
+        &[rival_pr_open],
+        true,
+    );
+    let mut index = WorkProjectionIndex::new();
+    index.apply_ok(ct_snapshot(view, "ct-1", READ_AT));
+    let set = project(&index, &options());
+
+    let model = find(&set, ISSUE_TOKEN);
+    assert!(
+        matches!(
+            &github_section(model).transition_debt.revert,
+            DebtStateV1::Outstanding { .. }
+        ),
+        "a family-tied repair merge is contradiction, not a proven repair"
+    );
+    assert!(has_blocker(
+        model,
+        super::types::BlockerKindV1::GithubConflict
+    ));
+}
+
+/// Hardening (codex R2 round-6 finding 2): an orphaned PR whose
+/// merged/reverted heads TIE at the family max key reports a lifecycle
+/// CONFLICT — GithubConflict blocker, ResolveConflict action, and a
+/// `conflicted` column — never ordinary revert debt.
+#[test]
+fn orphan_family_tie_reports_conflict_not_plain_revert() {
+    let v9 = repo_state(
+        "r9",
+        "2026-08-26T17:00:00Z",
+        snap_issue(
+            100,
+            SnapshotIssueStateV1::Open,
+            "2026-08-26T17:00:00Z",
+            "rev9-iss",
+        ),
+        vec![snap_pr(
+            200,
+            SnapshotPrStateV1::Merged,
+            Some("mergeabc123"),
+            "2026-08-26T17:00:00Z",
+            "rev9-pr",
+            vec![],
+        )],
+        vec![],
+    );
+    // Rival revert at exactly the orphan's merged head key (17:00, rev9-pr).
+    let rival_revert = AssertionV1 {
+        assertion_id: "rival-pr200-revert".to_string(),
+        subject: pr_subject(200),
+        predicate: PredicateV1::MergeReverted,
+        value: AssertionValueV1::CommitSha("revertdef456".to_string()),
+        issuer: "github-events-adapter".to_string(),
+        authority_class: AuthorityClassV1::GitHubTypedObject,
+        source_ref: SourceRefV1 {
+            source: "github-events".to_string(),
+            revision: "rev9-pr".to_string(),
+        },
+        observed_at: "2026-08-26T17:00:00Z".to_string(),
+        effective_at: "2026-08-26T17:00:00Z".to_string(),
+        supersedes_assertion_id: None,
+        evidence_refs: vec!["events-api-3".to_string()],
+        review_state: ReviewStateV1::Observed,
+        visibility: VisibilityClassV1::Public,
+    };
+    let view = ct_view(&[v9], &[rival_revert], true);
+    let mut index = WorkProjectionIndex::new();
+    index.apply_ok(ct_snapshot(view, "ct-1", READ_AT));
+    let set = project(&index, &options());
+
+    let pr_model = find(&set, &format!("{REPO}#pull_request:200"));
+    assert!(github_section(pr_model).conflicted);
+    assert!(has_blocker(
+        pr_model,
+        super::types::BlockerKindV1::GithubConflict
+    ));
+    assert!(has_action(pr_model, NextActionKindV1::ResolveConflict));
+    assert_eq!(super::views::board_view(pr_model).column, "conflicted");
+    assert!(!pr_model.success_shaped);
+}
+
+/// Hardening (codex R2 round-6 finding 3): two RFC 3339 aliases of one
+/// instant stamped on otherwise identical snapshots are a content
+/// conflict in EVERY arrival order — the retained snapshot's exposed
+/// `source_stamps` must never depend on which alias arrived first.
+#[test]
+fn rfc3339_alias_stamps_conflict_in_both_orders() {
+    let claim = || {
+        claim_fact(
+            "c1",
+            Some(&format!("{REPO}#100")),
+            Some("d1"),
+            ClaimStateV1::Active,
+            None,
+            VisibilityClassV1::Public,
+        )
+    };
+    let utc = claims_snapshot(vec![claim()], "claims-1", "2026-08-27T12:00:00Z");
+    let offset = claims_snapshot(vec![claim()], "claims-1", "2026-08-27T20:00:00+08:00");
+    for (first, second) in [(utc.clone(), offset.clone()), (offset, utc)] {
+        let mut index = WorkProjectionIndex::new();
+        index.apply_ok(first);
+        let err = index.apply(second).expect_err("alias conflict rejected");
+        assert!(
+            matches!(err, SnapshotError::ContentConflict { .. }),
+            "alias-text difference at one immutable key is a conflict"
+        );
+    }
+}
+
+/// Hardening (codex R2 round-6 finding 5): a repair merge whose key
+/// EQUALS the revert key (different subjects, so no family tie) is not
+/// strictly later — the revert debt stays outstanding.
+#[test]
+fn equal_key_repair_merge_does_not_clear_revert_debt() {
+    // PR 300 merged at exactly the revert's (instant, revision).
+    let equal_key_repair = repo_state(
+        "r-equal",
+        "2026-08-26T14:00:00Z",
+        snap_issue(
+            100,
+            SnapshotIssueStateV1::Open,
+            "2026-08-26T14:00:00Z",
+            "rev-equal-iss",
+        ),
+        vec![
+            snap_pr(
+                200,
+                SnapshotPrStateV1::Merged,
+                Some("mergeabc123"),
+                "2026-08-26T14:00:00Z",
+                "rev-equal-pr200",
+                vec![100],
+            ),
+            snap_pr(
+                300,
+                SnapshotPrStateV1::Merged,
+                Some("repairstu789"),
+                "2026-08-26T13:30:00Z",
+                "rev4-revert",
+                vec![100],
+            ),
+        ],
+        vec![],
+    );
+    let view = ct_view(
+        &[
+            state_v2_merged_open(),
+            state_v4_revert_only(),
+            equal_key_repair,
+        ],
+        &[],
+        true,
+    );
+    let mut index = WorkProjectionIndex::new();
+    index.apply_ok(ct_snapshot(view, "ct-1", READ_AT));
+    let set = project(&index, &options());
+    let model = find(&set, ISSUE_TOKEN);
+    assert!(
+        matches!(
+            &github_section(model).transition_debt.revert,
+            DebtStateV1::Outstanding { .. }
+        ),
+        "an equal-key repair merge is not causally later than the revert"
+    );
+}
+
 /// Ruling discriminator 6 + #1693 discrimination 10: full rebuild equals
 /// incremental for every R6-2 case, in ANY arrival order — with each
 /// lifecycle stage arriving as its OWN CurrentTruth snapshot (successive
@@ -1873,11 +2134,13 @@ fn full_rebuild_equals_incremental_across_r6_2_cases_and_arrival_orders() {
 
     /// Build the per-stage snapshot list for one case: stage k carries the
     /// view reduced over states[..=k] (exactly what successive refreshes
-    /// expose), each at its own revision.
+    /// expose), each at its own revision. Disposition snapshots ride
+    /// along in their causal order (a clearing disposition and, for the
+    /// replacement case, a newer empty replacement).
     fn staged_snapshots(
         states: &[GithubRepositoryStateV1],
         extra: &[AssertionV1],
-        disposition: Option<(OwnerDispositionFactV1, &'static str, &'static str)>,
+        dispositions: Vec<(Option<OwnerDispositionFactV1>, &'static str, &'static str)>,
     ) -> Vec<SourceSnapshot> {
         let mut out = Vec::new();
         for k in 0..states.len() {
@@ -1888,8 +2151,12 @@ fn full_rebuild_equals_incremental_across_r6_2_cases_and_arrival_orders() {
                 &states[k].refreshed_at,
             ));
         }
-        if let Some((fact, revision, at)) = disposition {
-            out.push(dispositions_snapshot(vec![fact], revision, at));
+        for (fact, revision, at) in dispositions {
+            out.push(dispositions_snapshot(
+                fact.into_iter().collect(),
+                revision,
+                at,
+            ));
         }
         out
     }
@@ -1976,12 +2243,24 @@ fn full_rebuild_equals_incremental_across_r6_2_cases_and_arrival_orders() {
     ];
 
     for (label, states, extra) in cases {
-        let disposition = if label == "owner-disposition" {
-            Some((clearing_disposition(), "disp-1", "2026-08-26T14:30:00Z"))
-        } else {
-            None
-        };
-        let snapshots = staged_snapshots(&states, &extra, disposition.clone());
+        // The owner-disposition case also rides a NEWER EMPTY replacement
+        // (codex R2 round-6 finding 6): source-specific last-arrival must
+        // never let the stale clearing disposition win — the final debt is
+        // Outstanding in every permutation.
+        let dispositions: Vec<(Option<OwnerDispositionFactV1>, &'static str, &'static str)> =
+            if label == "owner-disposition" {
+                vec![
+                    (
+                        Some(clearing_disposition()),
+                        "disp-1",
+                        "2026-08-26T14:30:00Z",
+                    ),
+                    (None, "disp-empty-replacement", "2026-08-26T15:00:00Z"),
+                ]
+            } else {
+                Vec::new()
+            };
+        let snapshots = staged_snapshots(&states, &extra, dispositions.clone());
 
         // Incremental: causal arrival order.
         let mut index = WorkProjectionIndex::new();
@@ -2000,8 +2279,9 @@ fn full_rebuild_equals_incremental_across_r6_2_cases_and_arrival_orders() {
         }
 
         // The incremental fold consumes only the newest CurrentTruth
-        // snapshot, so it must equal the single-final-view projection the
-        // per-case semantics tests assert against.
+        // snapshot (and the newest disposition snapshot), so it must equal
+        // the single-final-view projection the per-case semantics tests
+        // assert against.
         let final_view = ct_view(&states, &extra, true);
         let final_snapshot = ct_snapshot(
             final_view,
@@ -2009,8 +2289,12 @@ fn full_rebuild_equals_incremental_across_r6_2_cases_and_arrival_orders() {
             &states.last().expect("states").refreshed_at,
         );
         let mut single = WorkProjectionIndex::new();
-        if let Some((fact, revision, at)) = disposition {
-            single.apply_ok(dispositions_snapshot(vec![fact], revision, at));
+        if let Some((fact, revision, at)) = dispositions.last() {
+            single.apply_ok(dispositions_snapshot(
+                fact.clone().into_iter().collect(),
+                revision,
+                at,
+            ));
         }
         single.apply_ok(final_snapshot);
         assert_eq!(
@@ -2018,6 +2302,24 @@ fn full_rebuild_equals_incremental_across_r6_2_cases_and_arrival_orders() {
             project(&single, &options()),
             "{label}: incremental stages must land on the single-final-view projection"
         );
+
+        // The replacement case's final debt is OUTSTANDING in every
+        // permutation (the newer empty snapshot removed the clearing
+        // fact).
+        if label == "owner-disposition" {
+            let model = incremental
+                .items
+                .iter()
+                .find(|model| model.work_token() == ISSUE_TOKEN)
+                .expect("issue item");
+            assert!(
+                matches!(
+                    &github_section(model).transition_debt.revert,
+                    DebtStateV1::Outstanding { .. }
+                ),
+                "{label}: the newer empty replacement must leave the debt outstanding"
+            );
+        }
     }
 }
 
