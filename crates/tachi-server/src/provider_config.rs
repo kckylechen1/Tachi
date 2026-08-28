@@ -196,6 +196,12 @@ fn resolve_vault_pools(
         );
         return Ok(fallback);
     }
+    if vault_config_exists(&default_global)? {
+        return Ok(tachi_llm::DurableVaultLoad::from_pools(
+            fallback.pools,
+            VaultSourceAvailability::LockedOrUnavailable,
+        ));
+    }
     Ok(tachi_llm::DurableVaultLoad::from_pools(
         fallback.pools,
         availability,
@@ -1024,6 +1030,30 @@ mod tests {
         assert!(
             err.contains("Failed to open Vault DB for provider refresh")
                 || err.contains("Failed to read Vault config for provider refresh"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn default_vault_fallback_fails_closed_for_corrupt_database() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let home = tempfile::tempdir().expect("tempdir");
+        let _env = EnvRestore::set_path("TACHI_HOME", home.path());
+        let default_db = default_global_db_path();
+        std::fs::create_dir_all(default_db.parent().expect("default DB parent"))
+            .expect("create default DB parent");
+        std::fs::write(&default_db, b"not a sqlite database").expect("write corrupt database");
+        let custom_db = home.path().join("custom").join(memcore::MEMORY_DB_FILENAME);
+
+        let err = match resolve_vault_pools(None, &custom_db) {
+            Ok(_) => panic!("corrupt fallback Vault DB must stay loud"),
+            Err(err) => err,
+        };
+
+        assert!(
+            err.contains("provider read failed") || err.contains("Vault DB"),
             "{err}"
         );
     }
