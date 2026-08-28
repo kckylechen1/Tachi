@@ -262,7 +262,7 @@ pub(super) fn load_unlocked_vault_secrets(
 
             let decrypted = crypto::decrypt(key, &entry.encrypted_value, &entry.nonce)?;
             let value = String::from_utf8(decrypted)
-                .map_err(|e| format!("Vault secret '{}' is not valid UTF-8: {e}", entry.name))?;
+                .map_err(|_| super::VAULT_MATERIALIZATION_INVALID_UTF8.to_string())?;
             if !value.trim().is_empty() {
                 secrets.push((entry.name, value));
             }
@@ -438,9 +438,8 @@ fn load_unlocked_api_key_secret_pools_filtered(
                     continue;
                 }
                 let decrypted = crypto::decrypt(key, &entry.encrypted_value, &entry.nonce)?;
-                let value = String::from_utf8(decrypted).map_err(|e| {
-                    format!("Vault secret '{}' is not valid UTF-8: {e}", entry.name)
-                })?;
+                let value = String::from_utf8(decrypted)
+                    .map_err(|_| super::VAULT_MATERIALIZATION_INVALID_UTF8.to_string())?;
                 if value.trim().is_empty() {
                     record_rotation_listed_drop(
                         &mut dropped,
@@ -496,7 +495,7 @@ fn load_unlocked_api_key_secret_pools_filtered(
             }
             let decrypted = crypto::decrypt(key, &entry.encrypted_value, &entry.nonce)?;
             let value = String::from_utf8(decrypted)
-                .map_err(|e| format!("Vault secret '{}' is not valid UTF-8: {e}", entry.name))?;
+                .map_err(|_| super::VAULT_MATERIALIZATION_INVALID_UTF8.to_string())?;
             if value.trim().is_empty() {
                 record_listed_drop(&mut dropped, &entry.name, AliasSkipClass::ListedEmpty);
                 continue;

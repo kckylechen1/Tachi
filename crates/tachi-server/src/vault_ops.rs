@@ -16,6 +16,12 @@ pub(crate) use rotation::collect_rotation_entries;
 
 pub(crate) use access::load_unlocked_api_key_secret_pools;
 pub(crate) use access::load_unlocked_api_key_secret_pools_with_drops;
+
+/// Public-safe failure for background Vault materialization. The raw UTF-8
+/// decoder error carries byte offsets/lengths, and the scanned entry name may
+/// be an alias target rather than the operator-visible config key (#1854).
+pub(crate) const VAULT_MATERIALIZATION_INVALID_UTF8: &str =
+    "A listed Vault payload is not valid UTF-8; refusing materialization";
 pub(crate) use access::read_unlocked_vault_secret;
 pub(crate) use env::{
     load_unlocked_env_secrets_for_child_env, load_unlocked_env_secrets_for_child_env_with_consumer,

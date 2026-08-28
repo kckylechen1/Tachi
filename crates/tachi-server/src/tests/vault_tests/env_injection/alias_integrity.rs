@@ -336,3 +336,72 @@ async fn empty_rotation_members_classify_the_prefix_as_listed_empty() {
     assert!(reason.contains("empty value"), "{reason}");
     assert!(!reason.contains("absent from a readable Vault"), "{reason}");
 }
+
+/// Corrupt listed payloads fail the real refresh seam without exposing the
+/// alias target or the decoder's byte-position/length details (#1854).
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn invalid_utf8_alias_payload_fails_closed_with_public_safe_error() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let unlock_input = "alias-integrity-invalid-utf8";
+    let alias_target = "HIDDEN_TARGET_API_KEY";
+    let alias = format!("vault:{alias_target}");
+    let _env = crate::test_support::EnvRestore::set("ANTHROPIC_API_KEY", &alias);
+    let server = make_server();
+
+    server
+        .vault_init(Parameters(VaultInitParams {
+            password: unlock_input.to_string(),
+        }))
+        .await
+        .expect("vault_init");
+    server
+        .vault_set(Parameters(VaultSetParams {
+            name: alias_target.to_string(),
+            value: "initial-valid-value".to_string(),
+            agent_id: None,
+            secret_type: "api_key".to_string(),
+            description: "invalid UTF-8 redaction discriminator".to_string(),
+            allowed_agents: None,
+            enable_rotation: false,
+            rotation_strategy: None,
+        }))
+        .await
+        .expect("vault_set");
+
+    let config = server
+        .with_global_store_read(|store| store.vault_get_config().map_err(|e| e.to_string()))
+        .expect("read vault config")
+        .expect("vault config");
+    let key = crate::vault_crypto::derive_verified_key_from_stored_config(&config, unlock_input)
+        .expect("derive fixture key");
+    let (encrypted_value, nonce) =
+        crate::vault_crypto::encrypt(key.bytes(), &[0xff, 0xfe]).expect("encrypt raw bytes");
+    server
+        .with_global_store(|store| {
+            let mut entry = store
+                .vault_get_entry(alias_target)
+                .map_err(|e| e.to_string())?
+                .expect("fixture entry");
+            entry.encrypted_value = encrypted_value;
+            entry.nonce = nonce;
+            store.vault_upsert_entry(&entry).map_err(|e| e.to_string())
+        })
+        .expect("install invalid UTF-8 payload");
+
+    let error = server
+        .refresh_llm_provider_secrets_from_vault()
+        .expect_err("invalid UTF-8 must fail the provider refresh");
+    assert!(
+        error.ends_with(crate::vault_ops::VAULT_MATERIALIZATION_INVALID_UTF8),
+        "unexpected public-safe refusal: {error}"
+    );
+    assert!(
+        !error.contains(alias_target),
+        "alias target leaked: {error}"
+    );
+    assert!(!error.contains("byte"), "decoder length leaked: {error}");
+    assert!(!error.contains("0xff"), "payload detail leaked: {error}");
+}
