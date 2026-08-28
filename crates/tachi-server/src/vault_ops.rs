@@ -10,6 +10,7 @@ mod resolver;
 mod rotation;
 mod session;
 
+pub(crate) use alias_integrity::unusable_skip_class;
 pub(crate) use resolver::{classify_vault_read_error, is_env_fallback_eligible, VaultReadState};
 pub(crate) use rotation::collect_rotation_entries;
 

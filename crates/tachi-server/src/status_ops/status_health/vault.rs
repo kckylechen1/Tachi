@@ -1,5 +1,8 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
+
+use chrono::{DateTime, Utc};
+use memcore::vault::{VaultEntry, VaultKeyHealth, SECRET_TYPE_API_KEY};
 use tachi_llm::AliasSkipClass;
 
 fn derive_status_vault_key(
@@ -92,9 +95,32 @@ pub(crate) fn load_keychain_vault_api_key_scan(
         }
     };
 
+    let entries = store.vault_list_entries()?;
+    let rotation_prefixes = store
+        .vault_list_rotations()?
+        .into_iter()
+        .map(|rotation| rotation.prefix)
+        .collect::<HashSet<_>>();
+    let key_health_rows = store.vault_list_key_health(None)?;
+    scan_keychain_api_key_entries(
+        entries,
+        &key,
+        &rotation_prefixes,
+        &key_health_rows,
+        Utc::now(),
+    )
+}
+
+fn scan_keychain_api_key_entries(
+    entries: Vec<VaultEntry>,
+    key: &crate::vault_crypto::DerivedVaultKey,
+    rotation_prefixes: &HashSet<String>,
+    key_health_rows: &[VaultKeyHealth],
+    now: DateTime<Utc>,
+) -> Result<KeychainApiKeyScan, Box<dyn std::error::Error>> {
     let mut values = Vec::new();
     let mut dropped = HashMap::new();
-    for entry in store.vault_list_entries()? {
+    for entry in entries {
         let is_provider_key = entry.name.ends_with("_API_KEY")
             || crate::provider_config::parse_rotation_member_name(&entry.name)
                 .is_some_and(|(prefix, _)| prefix.ends_with("_API_KEY"));
@@ -106,7 +132,7 @@ pub(crate) fn load_keychain_vault_api_key_scan(
             );
             continue;
         }
-        if entry.secret_type != "api_key" {
+        if entry.secret_type != SECRET_TYPE_API_KEY {
             record_keychain_listed_drop(&mut dropped, &entry.name, AliasSkipClass::ListedWrongType);
             continue;
         }
@@ -116,6 +142,12 @@ pub(crate) fn load_keychain_vault_api_key_scan(
             .is_some_and(|agents| !agents.is_empty())
         {
             record_keychain_listed_drop(&mut dropped, &entry.name, AliasSkipClass::ListedFenced);
+            continue;
+        }
+        if let Some(class) =
+            keychain_unusable_skip_class(&entry.name, rotation_prefixes, key_health_rows, now)
+        {
+            record_keychain_listed_drop(&mut dropped, &entry.name, class);
             continue;
         }
         let decrypted =
@@ -130,10 +162,31 @@ pub(crate) fn load_keychain_vault_api_key_scan(
     Ok(KeychainApiKeyScan { values, dropped })
 }
 
+/// Resolve health under the same identity used by unlocked pool admission:
+/// configured rotation members belong to the prefix pool, while standalone
+/// entries use their own name as both logical name and key id. The rows and
+/// `now` come from one scan so the returned drop class cannot be rewritten by
+/// a later health read.
+fn keychain_unusable_skip_class(
+    entry_name: &str,
+    rotation_prefixes: &HashSet<String>,
+    key_health_rows: &[VaultKeyHealth],
+    now: DateTime<Utc>,
+) -> Option<AliasSkipClass> {
+    let logical_name = crate::provider_config::parse_rotation_member_name(entry_name)
+        .and_then(|(prefix, _)| rotation_prefixes.contains(prefix).then_some(prefix))
+        .unwrap_or(entry_name);
+    key_health_rows
+        .iter()
+        .find(|health| health.logical_name == logical_name && health.key_id == entry_name)
+        .and_then(|health| crate::vault_ops::unusable_skip_class(health, now))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use base64::{engine::general_purpose::STANDARD as B64, Engine};
+    use chrono::Duration;
     use memcore::vault::{VaultCipher, VaultConfig};
 
     fn stored_config(password: &str) -> VaultConfig {
@@ -149,6 +202,154 @@ mod tests {
             created_at: "2026-01-01T00:00:00Z".to_string(),
             updated_at: "2026-01-01T00:00:00Z".to_string(),
         }
+    }
+
+    fn test_key() -> crate::vault_crypto::DerivedVaultKey {
+        crate::vault_crypto::DerivedVaultKey::derive("keychain-scan-test", &[7_u8; 32])
+            .expect("derive test key")
+    }
+
+    fn encrypted_entry(
+        name: &str,
+        value: &str,
+        key: &crate::vault_crypto::DerivedVaultKey,
+    ) -> VaultEntry {
+        let (encrypted_value, nonce) =
+            crate::vault_crypto::encrypt(key.bytes(), value.as_bytes()).expect("encrypt entry");
+        VaultEntry {
+            name: name.to_string(),
+            encrypted_value,
+            nonce,
+            secret_type: SECRET_TYPE_API_KEY.to_string(),
+            ..VaultEntry::default()
+        }
+    }
+
+    fn health_row(
+        logical_name: &str,
+        key_id: &str,
+        status: &str,
+        now: DateTime<Utc>,
+    ) -> VaultKeyHealth {
+        VaultKeyHealth {
+            logical_name: logical_name.to_string(),
+            key_id: key_id.to_string(),
+            status: status.to_string(),
+            updated_at: now.to_rfc3339(),
+            ..VaultKeyHealth::default()
+        }
+    }
+
+    #[test]
+    fn keychain_scan_drops_persisted_unusable_health() {
+        let key = test_key();
+        let now = Utc::now();
+        let entries = [
+            "AUTH_FAILED_API_KEY",
+            "DISABLED_API_KEY",
+            "EXHAUSTED_API_KEY",
+            "COOLING_API_KEY",
+            "EXPIRED_COOLDOWN_API_KEY",
+            "HEALTHY_API_KEY",
+        ]
+        .into_iter()
+        .map(|name| encrypted_entry(name, "fixture-value", &key))
+        .collect();
+
+        let mut auth_failed = health_row(
+            "AUTH_FAILED_API_KEY",
+            "AUTH_FAILED_API_KEY",
+            "auth_failed",
+            now,
+        );
+        auth_failed.auth_failed = true;
+        let mut disabled = health_row("DISABLED_API_KEY", "DISABLED_API_KEY", "ok", now);
+        disabled.disabled = true;
+        let exhausted = health_row("EXHAUSTED_API_KEY", "EXHAUSTED_API_KEY", "exhausted", now);
+        let mut cooling = health_row("COOLING_API_KEY", "COOLING_API_KEY", "rate_limited", now);
+        cooling.cooldown_until = Some((now + Duration::minutes(5)).to_rfc3339());
+        let mut expired = health_row(
+            "EXPIRED_COOLDOWN_API_KEY",
+            "EXPIRED_COOLDOWN_API_KEY",
+            "rate_limited",
+            now,
+        );
+        expired.cooldown_until = Some((now - Duration::minutes(5)).to_rfc3339());
+
+        let scan = scan_keychain_api_key_entries(
+            entries,
+            &key,
+            &HashSet::new(),
+            &[auth_failed, disabled, exhausted, cooling, expired],
+            now,
+        )
+        .expect("scan");
+
+        let admitted = scan
+            .values
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect::<HashSet<_>>();
+        assert_eq!(
+            admitted,
+            HashSet::from([
+                "EXPIRED_COOLDOWN_API_KEY".to_string(),
+                "HEALTHY_API_KEY".to_string(),
+            ])
+        );
+        assert_eq!(
+            scan.dropped.get("AUTH_FAILED_API_KEY"),
+            Some(&AliasSkipClass::ListedUnusableAuthFailed)
+        );
+        assert_eq!(
+            scan.dropped.get("DISABLED_API_KEY"),
+            Some(&AliasSkipClass::ListedUnusableDisabled)
+        );
+        assert_eq!(
+            scan.dropped.get("EXHAUSTED_API_KEY"),
+            Some(&AliasSkipClass::ListedUnusableExhausted)
+        );
+        assert_eq!(
+            scan.dropped.get("COOLING_API_KEY"),
+            Some(&AliasSkipClass::ListedUnusableCooldown)
+        );
+    }
+
+    #[test]
+    fn keychain_scan_drops_all_unusable_configured_rotation_members() {
+        let key = test_key();
+        let now = Utc::now();
+        let prefix = "ROTATION_API_KEY";
+        let entries = vec![
+            encrypted_entry("ROTATION_API_KEY_1", "fixture-one", &key),
+            encrypted_entry("ROTATION_API_KEY_2", "fixture-two", &key),
+        ];
+        let mut member_one = health_row(prefix, "ROTATION_API_KEY_1", "auth_failed", now);
+        member_one.auth_failed = true;
+        let mut member_two = health_row(prefix, "ROTATION_API_KEY_2", "ok", now);
+        member_two.disabled = true;
+
+        let scan = scan_keychain_api_key_entries(
+            entries,
+            &key,
+            &HashSet::from([prefix.to_string()]),
+            &[member_one, member_two],
+            now,
+        )
+        .expect("scan");
+
+        assert!(
+            scan.values.is_empty(),
+            "unusable rotation members must not enter a pool"
+        );
+        assert_eq!(
+            scan.dropped.get("ROTATION_API_KEY_1"),
+            Some(&AliasSkipClass::ListedUnusableAuthFailed)
+        );
+        assert_eq!(
+            scan.dropped.get("ROTATION_API_KEY_2"),
+            Some(&AliasSkipClass::ListedUnusableDisabled)
+        );
     }
 
     #[test]
