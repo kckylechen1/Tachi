@@ -740,24 +740,32 @@ pub(crate) mod tests {
         );
     }
 
-    /// A Staff-owned worktree must not become an untracked orphan when the
-    /// all-or-nothing lease/resource publication fails after `git worktree
-    /// add`. Inject through the unrestricted second connection required by
-    /// the store failure-injection contract; the guarded MemoryStore doorway
-    /// intentionally refuses trigger DDL.
+    /// A Staff-owned worktree whose atomic lease/resource publication fails
+    /// must remain available to the certified cleanup path. The provisioning
+    /// caller cannot safely remove it by pathname after another same-UID
+    /// process could replace that path. Inject through the unrestricted second
+    /// connection required by the store failure-injection contract; the
+    /// guarded MemoryStore doorway intentionally refuses trigger DDL.
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[allow(clippy::await_holding_lock)] // serializes process-global Staff roots through cleanup
-    async fn staff_publication_failure_removes_the_unmanaged_worktree() {
-        fn contains_worktree_marker(path: &std::path::Path) -> bool {
+    async fn staff_publication_failure_retains_worktree_for_certified_cleanup() {
+        fn find_worktree(path: &std::path::Path) -> Option<std::path::PathBuf> {
             let Ok(entries) = std::fs::read_dir(path) else {
-                return false;
+                return None;
             };
-            entries.filter_map(Result::ok).any(|entry| {
-                entry.file_name() == ".git"
-                    || (entry.file_type().is_ok_and(|kind| kind.is_dir())
-                        && contains_worktree_marker(&entry.path()))
-            })
+            for entry in entries.filter_map(Result::ok) {
+                if entry.file_name() == ".git" {
+                    return entry.path().parent().map(std::path::Path::to_path_buf);
+                }
+                if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                    continue;
+                }
+                if let Some(worktree) = find_worktree(&entry.path()) {
+                    return Some(worktree);
+                }
+            }
+            None
         }
 
         let _environment = crate::utils::global_test_lock()
@@ -795,7 +803,8 @@ pub(crate) mod tests {
             .expect_err("atomic publication failure must refuse Staff before spawn");
         assert!(
             error.contains("injected Staff exec-env publication failure")
-                && error.contains("newly opened worktree was removed"),
+                && error.contains("retained the registered worktree")
+                && error.contains("certified cleanup"),
             "truthful publication and cleanup error: {error}"
         );
         assert!(
@@ -808,17 +817,29 @@ pub(crate) mod tests {
                 .is_empty(),
             "the failed transaction must publish no lease"
         );
-        assert!(
-            !contains_worktree_marker(temp_worktrees.path()),
-            "failed Staff publication must leave no worktree under {}",
-            temp_worktrees.path().display()
-        );
+        let retained = find_worktree(temp_worktrees.path()).unwrap_or_else(|| {
+            panic!(
+                "failed Staff publication must retain the registered worktree under {}",
+                temp_worktrees.path().display()
+            )
+        });
         assert!(
             std::fs::read_dir(temp_runs.path())
                 .expect("read canonical run root")
                 .next()
                 .is_none(),
             "publication fails before a worker receipt/run directory exists"
+        );
+
+        let cleanup = tachi_clean::wt_clean::remove_worktree_for_safe_merge(&retained);
+        assert!(
+            cleanup.removed,
+            "certified cleanup must remove the retained fixture worktree: warnings={:?}, errors={:?}",
+            cleanup.warnings, cleanup.errors
+        );
+        assert!(
+            find_worktree(temp_worktrees.path()).is_none(),
+            "certified cleanup must not leave a registered fixture worktree"
         );
     }
 
