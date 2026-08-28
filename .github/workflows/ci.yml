@@ -453,6 +453,8 @@ jobs:
 
       - name: Run npm audit
         working-directory: ${{ matrix.package }}
+        env:
+          NPM_CONFIG_REGISTRY: https://registry.npmjs.org
         run: npm audit --audit-level=high
 
       - name: Runner workspace cleanup
@@ -463,6 +465,9 @@ jobs:
 
   gitleaks:
     name: Secret scan (gitleaks)
+    permissions:
+      contents: read
+      pull-requests: read
     # Trusted acceptance lane (#1865): fork guard identical to
     # build-seat-setup -- see there for the rationale.
     if: >-

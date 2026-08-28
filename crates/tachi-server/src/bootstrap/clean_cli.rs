@@ -818,10 +818,40 @@ mod tests {
     }
 
     #[cfg(unix)]
+    struct UnreadableDirGuard {
+        path: PathBuf,
+        original: std::fs::Permissions,
+    }
+
+    #[cfg(unix)]
+    impl UnreadableDirGuard {
+        fn lock(path: &std::path::Path) -> Self {
+            use std::os::unix::fs::PermissionsExt;
+
+            let original = std::fs::metadata(path).unwrap().permissions();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o000)).unwrap();
+            Self {
+                path: path.to_path_buf(),
+                original,
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for UnreadableDirGuard {
+        fn drop(&mut self) {
+            if let Err(error) = std::fs::set_permissions(&self.path, self.original.clone()) {
+                eprintln!(
+                    "failed to restore permissions for '{}': {error}",
+                    self.path.display()
+                );
+            }
+        }
+    }
+
+    #[cfg(unix)]
     #[test]
     fn sweep_leaves_lease_whose_stat_is_inconclusive_and_logs_why() {
-        use std::os::unix::fs::PermissionsExt;
-
         // SAFETY: `geteuid()` reads the caller's effective uid; no pointers, no
         // aliasing. Running as root would defeat the chmod (root's stat still
         // succeeds through a 0o000 parent), so skip there — same idiom as
@@ -839,23 +869,23 @@ mod tests {
         let locked_parent = dir.join("locked-parent");
         std::fs::create_dir_all(&locked_parent).unwrap();
         let blocked_path = locked_parent.join("wt");
-        std::fs::set_permissions(&locked_parent, std::fs::Permissions::from_mode(0o000)).unwrap();
-
         insert_active_lease(&store, "env-unknown", blocked_path.to_str().unwrap());
 
+        // Publish the lease before making its parent unreadable. Lease insertion
+        // now inspects worktree identity and correctly rejects an inconclusive
+        // path; this test is specifically about the later sweep read, not about
+        // bypassing that insertion guard.
         let buf = BufWriter::default();
-        let subscriber = tracing_subscriber::fmt()
-            .with_writer(buf.clone())
-            .with_ansi(false)
-            .finish();
-
-        let stale = tracing::subscriber::with_default(subscriber, || {
-            list_stale_exec_env_leases(store.connection()).unwrap()
-        });
-
-        // Restore permissions immediately so temp-dir cleanup can walk it,
-        // regardless of what the assertions below find.
-        std::fs::set_permissions(&locked_parent, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let stale = {
+            let _permissions = UnreadableDirGuard::lock(&locked_parent);
+            let subscriber = tracing_subscriber::fmt()
+                .with_writer(buf.clone())
+                .with_ansi(false)
+                .finish();
+            tracing::subscriber::with_default(subscriber, || {
+                list_stale_exec_env_leases(store.connection()).unwrap()
+            })
+        };
 
         assert!(
             stale.is_empty(),
@@ -888,8 +918,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn reclaim_toctou_recheck_leaves_lease_whose_stat_is_inconclusive_and_logs_why() {
-        use std::os::unix::fs::PermissionsExt;
-
         // SAFETY: see `sweep_leaves_lease_whose_stat_is_inconclusive_and_logs_why`
         // above — root's stat still succeeds through a 0o000 parent, defeating
         // the chmod, so skip there.
@@ -914,21 +942,18 @@ mod tests {
         // (the TOCTOU window this re-check exists to guard).
         let lease = lease_state(&store, "env-reclaim-unknown");
 
-        std::fs::set_permissions(&locked_parent, std::fs::Permissions::from_mode(0o000)).unwrap();
-
         let buf = BufWriter::default();
-        let subscriber = tracing_subscriber::fmt()
-            .with_writer(buf.clone())
-            .with_ansi(false)
-            .finish();
-
-        let reclaimed = tracing::subscriber::with_default(subscriber, || {
-            reclaim_stale_exec_env_leases(store.connection_mut(), std::slice::from_ref(&lease))
-                .unwrap()
-        });
-
-        // Restore permissions immediately so temp-dir cleanup can walk it.
-        std::fs::set_permissions(&locked_parent, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let reclaimed = {
+            let _permissions = UnreadableDirGuard::lock(&locked_parent);
+            let subscriber = tracing_subscriber::fmt()
+                .with_writer(buf.clone())
+                .with_ansi(false)
+                .finish();
+            tracing::subscriber::with_default(subscriber, || {
+                reclaim_stale_exec_env_leases(store.connection_mut(), std::slice::from_ref(&lease))
+                    .unwrap()
+            })
+        };
 
         assert_eq!(
             reclaimed, 0,

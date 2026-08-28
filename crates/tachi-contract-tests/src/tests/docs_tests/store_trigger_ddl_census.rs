@@ -1218,19 +1218,19 @@ const EXEMPTIONS: &[Exemption<'static>] = &[
         },
         sites: &[
             Site {
-                symbol: "contains_worktree_marker",
+                symbol: "find_worktree",
                 trigger: "FAIL_STAFF_EXEC_ENV_PUBLICATION",
                 ddl: "08b602143fb001c8",
                 occurrences: 1,
             },
             Site {
-                symbol: "contains_worktree_marker",
+                symbol: "find_worktree",
                 trigger: "FAIL_STAFF_EXEC_ENV_PUBLICATION",
                 ddl: "7e17e51fe7d94067",
                 occurrences: 1,
             },
         ],
-        reason: "staff_publication_failure_removes_the_unmanaged_worktree opens an unrestricted second connection to inject a real atomic publication failure, then a test-only post-failure hook drops that persistent trigger before the production certified worktree cleanup reopens the DB. Both CREATE and DROP sites are pinned; body read 2026-08-27. The file also contains MemoryStore doorways, so this is declared rather than assigned an inapplicable machine proof.",
+        reason: "staff_publication_failure_retains_worktree_for_certified_cleanup opens an unrestricted second connection to inject a real atomic publication failure, then a test-only post-failure hook drops that persistent trigger before the production certified worktree cleanup reopens the DB. Both CREATE and DROP sites are pinned; body read 2026-08-28. The file also contains MemoryStore doorways, so this is declared rather than assigned an inapplicable machine proof.",
     },
     Exemption {
         path: "crates/tachi-server/src/tests/memory_tests/save_policy/recall_cache_invalidation.rs",

@@ -1373,7 +1373,13 @@ async fn launch_canonical_dispatch(
         opencode_sop_label: opencode_sop_label(&resolved_assignment.selected_worker, &request),
         execution_backend_metadata: execution_backend_metadata.clone(),
         execution,
-        cwd_authority: managed_worktree_authority.clone(),
+        // MOVE, not clone: the foreground frame must not retain this
+        // descriptor past handoff. The context is the sole owner, and the
+        // background terminal path drops it before certified cleanup probes
+        // for live OS-view holders — a clone here would keep the foreground
+        // pinning the worktree open until handle_tachi_dispatch returns, so
+        // a fast worker's terminal cleanup would race (and lose to) that pin.
+        cwd_authority: managed_worktree_authority,
         flow_dispatch_slot,
         mcp_config_path,
         managed_run_guard,
