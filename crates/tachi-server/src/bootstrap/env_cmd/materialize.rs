@@ -1,5 +1,7 @@
 use std::path::{Path, PathBuf};
 
+use memcore::vault::VaultEntry;
+
 use super::super::{open_cli_store, vault_cli};
 use super::bindings::{
     default_project_env_output_path, load_project_env_bindings, project_root_from_bindings_path,
@@ -98,6 +100,71 @@ pub(super) fn filter_project_exports(
             true
         })
         .collect())
+}
+
+#[cfg(test)]
+pub(super) fn follow_lane_slot_plain(
+    name: &str,
+    plain: String,
+    entries: &[VaultEntry],
+    store: &memcore::MemoryStore,
+    key: &[u8; 32],
+) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    if !crate::vault_ops::is_lane_slot_secret_name(name) {
+        return Ok(Some(plain));
+    }
+    let Some(target) = crate::provider_config::parse_vault_alias(&plain) else {
+        return Ok(None);
+    };
+    if crate::vault_ops::is_lane_slot_secret_name(target) {
+        return Ok(None);
+    }
+    let Some(target_entry) = entries.iter().find(|entry| entry.name == target) else {
+        return Ok(None);
+    };
+    let target_plain = decrypt_entry_value(target_entry, key)?;
+    let slot_health = store
+        .vault_get_key_health(name, &target_entry.name)
+        .map_err(|e| format!("vault_get_key_health: {e}"))?;
+    let target_health = store
+        .vault_get_key_health(&target_entry.name, &target_entry.name)
+        .map_err(|e| format!("vault_get_key_health: {e}"))?;
+    if crate::vault_ops::account_bind::refuse_unusable_account_target(
+        name,
+        target_entry,
+        &target_plain,
+        None,
+        crate::vault_ops::account_bind::slot_target_health_unusable(
+            slot_health.as_ref(),
+            target_health.as_ref(),
+        ),
+    )
+    .is_err()
+    {
+        return Ok(None);
+    }
+    Ok(Some(target_plain))
+}
+
+#[cfg(test)]
+pub(super) fn decrypt_entry_value(
+    entry: &VaultEntry,
+    key: &[u8; 32],
+) -> Result<String, Box<dyn std::error::Error>> {
+    if entry
+        .allowed_agents
+        .as_ref()
+        .is_some_and(|agents| !agents.is_empty())
+    {
+        return Err(format!("Vault secret '{}' is agent-restricted", entry.name).into());
+    }
+    let decrypted = crate::vault_crypto::decrypt(key, &entry.encrypted_value, &entry.nonce)?;
+    let value = String::from_utf8(decrypted)
+        .map_err(|e| format!("Vault secret '{}' is not valid UTF-8: {e}", entry.name))?;
+    if value.trim().is_empty() {
+        return Err(format!("Vault secret '{}' is empty", entry.name).into());
+    }
+    Ok(value)
 }
 
 pub(super) fn sync_project_env(

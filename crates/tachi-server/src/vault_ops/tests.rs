@@ -3086,4 +3086,25 @@ async fn read_unlocked_vault_secret_resolves_lane_slot_pointer() {
     .expect("inventory get");
     let got_json: serde_json::Value = serde_json::from_str(&got).expect("json");
     assert_eq!(got_json["value"], "vault:DEEPSEEK_API_KEY");
+
+    server
+        .with_global_store(|store| {
+            store
+                .vault_upsert_key_health(&memcore::vault::VaultKeyHealth {
+                    logical_name: "DEEPSEEK_API_KEY".to_string(),
+                    key_id: "DEEPSEEK_API_KEY".to_string(),
+                    status: "disabled".to_string(),
+                    disabled: true,
+                    updated_at: chrono::Utc::now().to_rfc3339(),
+                    ..Default::default()
+                })
+                .map_err(|e| e.to_string())
+        })
+        .expect("disable target");
+    let err = crate::vault_ops::read_unlocked_vault_secret(&server, "EXTRACT_API_KEY", None, false)
+        .expect_err("disabled target must not be a usable slot secret");
+    assert!(
+        err.contains("unusable") || err.contains("Lane slot"),
+        "{err}"
+    );
 }

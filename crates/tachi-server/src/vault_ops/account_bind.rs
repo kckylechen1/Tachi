@@ -9,7 +9,7 @@
 use crate::vault_crypto as crypto;
 use chrono::Utc;
 use memcore::vault::fingerprint::FingerprintKey;
-use memcore::vault::{VaultEntry, SECRET_TYPE_API_KEY};
+use memcore::vault::{VaultEntry, VaultKeyHealth, SECRET_TYPE_API_KEY};
 use memcore::MemoryStore;
 use tachi_llm::parse_vault_alias;
 
@@ -22,6 +22,87 @@ pub(crate) const LANE_SLOT_SECRET_NAMES: &[&str] = &[
 
 pub(crate) fn is_lane_slot_secret_name(name: &str) -> bool {
     LANE_SLOT_SECRET_NAMES.contains(&name.trim())
+}
+
+pub(crate) fn health_row_unusable(health: &VaultKeyHealth) -> bool {
+    if health.disabled || health.auth_failed {
+        return true;
+    }
+    match health.status.as_str() {
+        "exhausted" => true,
+        "rate_limited" | "cooldown" => health
+            .cooldown_until
+            .as_deref()
+            .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+            .is_some_and(|until| until.with_timezone(&chrono::Utc) > chrono::Utc::now()),
+        _ => false,
+    }
+}
+
+pub(crate) fn slot_target_health_unusable(
+    slot_health: Option<&VaultKeyHealth>,
+    target_health: Option<&VaultKeyHealth>,
+) -> bool {
+    [slot_health, target_health]
+        .into_iter()
+        .flatten()
+        .any(health_row_unusable)
+}
+
+/// Shared usable-secret policy for a pointed-to account.
+pub(crate) fn refuse_unusable_account_target(
+    slot: &str,
+    target: &VaultEntry,
+    target_plain: &str,
+    agent_id: Option<&str>,
+    health_unusable: bool,
+) -> Result<(), String> {
+    if is_lane_slot_secret_name(&target.name) {
+        return Err(format!(
+            "Lane slot '{slot}' cannot resolve through another slot '{}'",
+            target.name
+        ));
+    }
+    if memcore::effective_vault_secret_type(&target.name, &target.secret_type)
+        != SECRET_TYPE_API_KEY
+    {
+        return Err(format!(
+            "Lane slot '{slot}' points at '{}' which is not an API key",
+            target.name
+        ));
+    }
+    if target_plain.trim().is_empty() || parse_vault_alias(target_plain).is_some() {
+        return Err(format!(
+            "Lane slot '{slot}' points at an unusable account '{}'",
+            target.name
+        ));
+    }
+    if let Some(allowed) = target.allowed_agents.as_ref() {
+        if !allowed.is_empty() {
+            match agent_id.map(str::trim).filter(|agent| !agent.is_empty()) {
+                None => {
+                    return Err(format!(
+                        "Lane slot '{slot}' points at a restricted account '{}'",
+                        target.name
+                    ));
+                }
+                Some(agent) if !allowed.iter().any(|allowed_agent| allowed_agent == agent) => {
+                    return Err(format!(
+                        "Lane slot '{slot}' points at an account '{}' this agent cannot use",
+                        target.name
+                    ));
+                }
+                Some(_) => {}
+            }
+        }
+    }
+    if health_unusable {
+        return Err(format!(
+            "Lane slot '{slot}' points at an unusable account '{}'",
+            target.name
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) fn refuse_lane_slot_pool_prefix(prefix: &str) -> Result<(), String> {

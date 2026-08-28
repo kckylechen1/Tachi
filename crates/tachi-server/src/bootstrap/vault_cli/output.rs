@@ -115,17 +115,6 @@ pub(super) fn normalize_rotation_strategy_cli(value: &str) -> String {
     }
 }
 
-fn cli_key_health_blocks(
-    store: &memcore::MemoryStore,
-    logical_name: &str,
-    key_id: &str,
-) -> Result<bool, Box<dyn std::error::Error>> {
-    Ok(store
-        .vault_get_key_health(logical_name, key_id)
-        .map_err(|e| format!("vault_get_key_health: {e}"))?
-        .is_some_and(|health| key_health_blocks_cli(&health)))
-}
-
 fn key_health_blocks_cli(health: &memcore::vault::VaultKeyHealth) -> bool {
     if health.disabled || health.auth_failed {
         return true;

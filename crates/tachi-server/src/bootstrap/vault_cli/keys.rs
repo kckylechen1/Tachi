@@ -368,11 +368,22 @@ pub(super) fn decrypt_named_secret_value(
         crate::vault_crypto::decrypt(key, &target_entry.encrypted_value, &target_entry.nonce)?;
     let target_value = String::from_utf8(decrypted)
         .map_err(|e| format!("Vault secret '{target}' is not valid UTF-8: {e}"))?;
-    if target_value.trim().is_empty()
-        || crate::provider_config::parse_vault_alias(&target_value).is_some()
-    {
-        return Err(format!("Lane slot '{name}' points at an unusable account '{target}'").into());
-    }
+    let slot_health = store
+        .vault_get_key_health(name, &target_entry.name)
+        .map_err(|e| format!("vault_get_key_health: {e}"))?;
+    let target_health = store
+        .vault_get_key_health(&target_entry.name, &target_entry.name)
+        .map_err(|e| format!("vault_get_key_health: {e}"))?;
+    crate::vault_ops::account_bind::refuse_unusable_account_target(
+        name,
+        &target_entry,
+        &target_value,
+        None,
+        crate::vault_ops::account_bind::slot_target_health_unusable(
+            slot_health.as_ref(),
+            target_health.as_ref(),
+        ),
+    )?;
     Ok(target_value)
 }
 

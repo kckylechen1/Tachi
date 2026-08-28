@@ -1,5 +1,5 @@
 use super::bindings::{build_project_env_plan, parse_project_vault_env_bindings_detailed};
-use super::materialize::{resolve_project_env_values, sync_project_env};
+use super::materialize::{follow_lane_slot_plain, resolve_project_env_values, sync_project_env};
 use super::shell::shell_export_line;
 use super::types::UnlockedVaultStore;
 
@@ -85,6 +85,7 @@ fn follow_lane_slot_plain_resolves_pointer_and_drops_leftover() {
         "EXTRACT_API_KEY",
         "vault:DEEPSEEK_API_KEY".to_string(),
         &entries,
+        &store,
         key.bytes(),
     )
     .expect("follow")
@@ -94,6 +95,7 @@ fn follow_lane_slot_plain_resolves_pointer_and_drops_leftover() {
         "SUMMARY_API_KEY",
         "leftover-slot-bytes".to_string(),
         &entries,
+        &store,
         key.bytes(),
     )
     .expect("leftover");

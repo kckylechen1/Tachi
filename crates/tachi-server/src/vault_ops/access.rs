@@ -383,12 +383,22 @@ fn read_usable_vault_secret_from_store(
             decrypted,
             format!("Vault secret '{}' is not valid UTF-8", target_entry.name),
         )?;
-        if target_value.trim().is_empty() || tachi_llm::parse_vault_alias(&target_value).is_some() {
-            return Err(format!(
-                "Lane slot '{}' points at an unusable account '{}'",
-                selected.entry.name, target_entry.name
-            ));
-        }
+        let slot_health = transaction
+            .vault_get_key_health(&selected.entry.name, &target_entry.name)
+            .map_err(|e| format!("Failed to read lane slot health: {e}"))?;
+        let target_health = transaction
+            .vault_get_key_health(&target_entry.name, &target_entry.name)
+            .map_err(|e| format!("Failed to read target account health: {e}"))?;
+        super::account_bind::refuse_unusable_account_target(
+            &selected.entry.name,
+            &target_entry,
+            &target_value,
+            effective_agent_id,
+            super::account_bind::slot_target_health_unusable(
+                slot_health.as_ref(),
+                target_health.as_ref(),
+            ),
+        )?;
         (target_entry.name, target_value)
     } else {
         (selected.target_name.clone(), value)
@@ -497,8 +507,23 @@ fn materialize_unrestricted_vault_entries_from_store_with_hook(
                 decrypted,
                 format!("Vault secret '{}' is not valid UTF-8", target_entry.name),
             )?;
-            if target_value.trim().is_empty()
-                || tachi_llm::parse_vault_alias(&target_value).is_some()
+            let slot_health = transaction
+                .vault_get_key_health(&entry.name, &target_entry.name)
+                .map_err(|e| format!("Failed to read lane slot health: {e}"))?;
+            let target_health = transaction
+                .vault_get_key_health(&target_entry.name, &target_entry.name)
+                .map_err(|e| format!("Failed to read target account health: {e}"))?;
+            if super::account_bind::refuse_unusable_account_target(
+                &entry.name,
+                target_entry,
+                &target_value,
+                None,
+                super::account_bind::slot_target_health_unusable(
+                    slot_health.as_ref(),
+                    target_health.as_ref(),
+                ),
+            )
+            .is_err()
             {
                 continue;
             }
