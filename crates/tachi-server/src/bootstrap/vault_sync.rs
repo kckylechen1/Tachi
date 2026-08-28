@@ -252,9 +252,20 @@ pub(super) fn import_validated_vault_bundle(
     config: &VaultConfig,
     entries: &[VaultEntry],
     rotations: &[VaultKeyRotation],
-    verification_key: Option<&[u8; 32]>,
+    vault_key: Option<&[u8; 32]>,
 ) -> Result<bool, Box<dyn std::error::Error>> {
     ensure_importable_kdf(config)?;
+    let has_slots = entries
+        .iter()
+        .any(|entry| crate::vault_ops::is_lane_slot_secret_name(&entry.name));
+    let entries = if has_slots {
+        let key = vault_key.ok_or(
+            "Lane slots in a sync bundle require a vault password so leftover ciphertext can be bound or refused",
+        )?;
+        crate::vault_ops::account_bind::rewrite_imported_lane_slots(key, entries)?
+    } else {
+        entries.to_vec()
+    };
 
     let mut store = open_cli_store(global_db_path)?;
     let transaction = store
@@ -272,13 +283,13 @@ pub(super) fn import_validated_vault_bundle(
     let local_entries = transaction
         .vault_list_entries()
         .map_err(|e| format!("vault_list_entries: {e}"))?;
-    validate_imported_lane_slots(entries, &local_entries, verification_key)?;
-    validate_new_imported_lane_urls(entries, &local_entries, verification_key)?;
+    validate_imported_lane_slots(&entries, &local_entries, vault_key)?;
+    validate_new_imported_lane_urls(&entries, &local_entries, vault_key)?;
 
     transaction
         .vault_set_config(config)
         .map_err(|e| format!("vault_set_config: {e}"))?;
-    for entry in entries {
+    for entry in &entries {
         transaction
             .vault_upsert_entry(entry)
             .map_err(|e| format!("vault_upsert_entry '{}': {e}", entry.name))?;
@@ -1433,6 +1444,73 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(source_db);
+        let _ = std::fs::remove_file(target_db);
+    }
+
+    fn encrypted_entry(key: &[u8; 32], name: &str, value: &str) -> VaultEntry {
+        let (encrypted_value, nonce) =
+            crate::vault_crypto::encrypt(key, value.as_bytes()).expect("encrypt");
+        VaultEntry {
+            name: name.to_string(),
+            encrypted_value,
+            nonce,
+            secret_type: "api_key".to_string(),
+            description: String::new(),
+            allowed_agents: None,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+            accessed_at: String::new(),
+            access_count: 0,
+        }
+    }
+
+    #[test]
+    fn import_validated_vault_bundle_refuses_slots_without_vault_key() {
+        let target_db = temp_db_path();
+        let err = import_validated_vault_bundle(
+            &target_db,
+            &sample_config(),
+            &[encrypted_entry(&[7u8; 32], "EXTRACT_API_KEY", "leftover")],
+            &[],
+            None,
+        )
+        .expect_err("slots without a vault key must not persist");
+        assert!(
+            err.to_string().contains("Lane slots") || err.to_string().contains("password"),
+            "{err}"
+        );
+        assert!(
+            !target_db.exists(),
+            "refused slot import must not create the target DB"
+        );
+    }
+
+    #[test]
+    fn import_validated_vault_bundle_rewrites_leftover_slot_copy() {
+        let target_db = temp_db_path();
+        let key = [7u8; 32];
+        import_validated_vault_bundle(
+            &target_db,
+            &sample_config(),
+            &[
+                encrypted_entry(&key, "DEEPSEEK_API_KEY", "deepseek-secret"),
+                encrypted_entry(&key, "EXTRACT_API_KEY", "deepseek-secret"),
+            ],
+            &[],
+            Some(&key),
+        )
+        .expect("import leftover copy");
+        let store = open_cli_store_read_only(&target_db).expect("open");
+        let slot = store
+            .vault_get_entry("EXTRACT_API_KEY")
+            .expect("get")
+            .expect("slot");
+        let plain = crate::vault_crypto::decrypt(&key, &slot.encrypted_value, &slot.nonce)
+            .expect("decrypt");
+        assert_eq!(
+            String::from_utf8(plain).expect("utf8"),
+            "vault:DEEPSEEK_API_KEY"
+        );
         let _ = std::fs::remove_file(target_db);
     }
 }

@@ -2814,3 +2814,51 @@ async fn lane_slot_pool_skips_restricted_or_unhealthy_target() {
         pools.keys().collect::<Vec<_>>()
     );
 }
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn leftover_slot_ciphertext_is_not_materialized() {
+    let _lock = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let db_path = crate::utils::test_fixture_path(format!(
+        "memory-server-vault-slot-leftover-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let server = MemoryServer::new(db_path, None).expect("create test server");
+    handle_vault_init(
+        &server,
+        VaultInitParams {
+            password: "slot-leftover".to_string(),
+        },
+    )
+    .await
+    .expect("vault init");
+    with_vault_key(&server, |key| {
+        let (encrypted_value, nonce) = crate::vault_crypto::encrypt(key, b"leftover-slot-bytes")?;
+        let now = chrono::Utc::now().to_rfc3339();
+        server.with_global_store(|store| {
+            store
+                .vault_upsert_entry(&memcore::vault::VaultEntry {
+                    name: "EXTRACT_API_KEY".to_string(),
+                    encrypted_value,
+                    nonce,
+                    secret_type: memcore::SECRET_TYPE_API_KEY.to_string(),
+                    description: String::new(),
+                    allowed_agents: None,
+                    created_at: now.clone(),
+                    updated_at: now,
+                    accessed_at: String::new(),
+                    access_count: 0,
+                })
+                .map_err(|e| e.to_string())
+        })
+    })
+    .expect("seed leftover ciphertext");
+    let pools = crate::vault_ops::load_unlocked_api_key_secret_pools(&server).expect("pools");
+    assert!(
+        !pools.contains_key("EXTRACT_API_KEY"),
+        "leftover slot ciphertext must not enter the API-key pool: {:?}",
+        pools.keys().collect::<Vec<_>>()
+    );
+}

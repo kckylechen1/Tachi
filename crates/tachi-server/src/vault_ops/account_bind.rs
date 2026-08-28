@@ -51,6 +51,53 @@ pub(crate) fn follow_lane_slot_pointers(values: Vec<(String, String)>) -> Vec<(S
         .collect()
 }
 
+/// Rewrite leftover slot ciphertext in a sync bundle to `vault:ACCOUNT`
+/// pointers. Already-bound pointers are kept. Unmatched raw slot bytes refuse
+/// the import instead of recreating a second copy.
+pub(crate) fn rewrite_imported_lane_slots(
+    master_key: &[u8; 32],
+    entries: &[VaultEntry],
+) -> Result<Vec<VaultEntry>, String> {
+    let mut slot_plain = Vec::new();
+    let mut account_rows = Vec::new();
+    for (idx, entry) in entries.iter().enumerate() {
+        let decrypted = crypto::decrypt(master_key, &entry.encrypted_value, &entry.nonce)
+            .map_err(|e| format!("decrypt imported {}: {e}", entry.name))?;
+        let value = String::from_utf8(decrypted).map_err(|e| {
+            format!(
+                "Imported vault secret '{}' is not valid UTF-8: {e}",
+                entry.name
+            )
+        })?;
+        if is_lane_slot_secret_name(&entry.name) {
+            slot_plain.push((idx, value));
+        } else {
+            account_rows.push((entry.name.clone(), value));
+        }
+    }
+    let accounts = bindable_accounts(account_rows);
+    let mut out = entries.to_vec();
+    for (idx, plain) in slot_plain {
+        let decided = decide_lane_slot_write(
+            master_key,
+            &out[idx].name,
+            &plain,
+            Some(plain.as_str()),
+            &accounts,
+            false,
+        )?;
+        if decided.store_value != plain {
+            let (encrypted_value, nonce) =
+                crypto::encrypt(master_key, decided.store_value.as_bytes())
+                    .map_err(|e| format!("encrypt imported slot pointer: {e}"))?;
+            out[idx].encrypted_value = encrypted_value;
+            out[idx].nonce = nonce;
+            out[idx].secret_type = SECRET_TYPE_API_KEY.to_string();
+        }
+    }
+    Ok(out)
+}
+
 pub(crate) fn write_lane_slot_binding(
     store: &mut MemoryStore,
     master_key: &[u8; 32],
@@ -592,5 +639,84 @@ mod tests {
             stored == "vault:DEEPSEEK_API_KEY" || stored == "vault:SILICONFLOW_API_KEY",
             "{stored}"
         );
+    }
+
+    fn encrypted_entry(name: &str, value: &str) -> VaultEntry {
+        let (encrypted_value, nonce) = crypto::encrypt(&MASTER, value.as_bytes()).expect("encrypt");
+        let now = Utc::now().to_rfc3339();
+        VaultEntry {
+            name: name.to_string(),
+            encrypted_value,
+            nonce,
+            secret_type: SECRET_TYPE_API_KEY.to_string(),
+            description: String::new(),
+            allowed_agents: None,
+            created_at: now.clone(),
+            updated_at: now,
+            accessed_at: String::new(),
+            access_count: 0,
+        }
+    }
+
+    fn decrypt_entry(entry: &VaultEntry) -> String {
+        let decrypted =
+            crypto::decrypt(&MASTER, &entry.encrypted_value, &entry.nonce).expect("decrypt");
+        String::from_utf8(decrypted).expect("utf8")
+    }
+
+    #[test]
+    fn rewrite_imported_lane_slots_upgrades_leftover_copy_to_pointer() {
+        let rewritten = rewrite_imported_lane_slots(
+            &MASTER,
+            &[
+                encrypted_entry("DEEPSEEK_API_KEY", "deepseek-secret"),
+                encrypted_entry("EXTRACT_API_KEY", "deepseek-secret"),
+            ],
+        )
+        .expect("rewrite");
+        let slot = rewritten
+            .iter()
+            .find(|entry| entry.name == "EXTRACT_API_KEY")
+            .expect("slot");
+        assert_eq!(decrypt_entry(slot), "vault:DEEPSEEK_API_KEY");
+        let account = rewritten
+            .iter()
+            .find(|entry| entry.name == "DEEPSEEK_API_KEY")
+            .expect("account");
+        assert_eq!(decrypt_entry(account), "deepseek-secret");
+    }
+
+    #[test]
+    fn rewrite_imported_lane_slots_refuses_unmatched_raw_bytes() {
+        let err = rewrite_imported_lane_slots(
+            &MASTER,
+            &[
+                encrypted_entry("DEEPSEEK_API_KEY", "deepseek-secret"),
+                encrypted_entry("EXTRACT_API_KEY", "orphan-slot-secret"),
+            ],
+        )
+        .expect_err("unmatched leftover copy");
+        assert!(
+            err.contains("second copy") || err.contains("provider account"),
+            "{err}"
+        );
+        assert!(!err.contains("orphan-slot-secret"), "{err}");
+    }
+
+    #[test]
+    fn rewrite_imported_lane_slots_keeps_existing_pointer() {
+        let rewritten = rewrite_imported_lane_slots(
+            &MASTER,
+            &[
+                encrypted_entry("DEEPSEEK_API_KEY", "deepseek-secret"),
+                encrypted_entry("EXTRACT_API_KEY", "vault:DEEPSEEK_API_KEY"),
+            ],
+        )
+        .expect("keep pointer");
+        let slot = rewritten
+            .iter()
+            .find(|entry| entry.name == "EXTRACT_API_KEY")
+            .expect("slot");
+        assert_eq!(decrypt_entry(slot), "vault:DEEPSEEK_API_KEY");
     }
 }
