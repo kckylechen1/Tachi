@@ -111,6 +111,38 @@ async fn run_secret_action_with_reader(
             if secret_value.trim().is_empty() {
                 return Err("Secret value cannot be empty".into());
             }
+            if crate::vault_ops::is_lane_slot_secret_name(&name) {
+                if secret_type != memcore::SECRET_TYPE_API_KEY {
+                    return Err(format!(
+                        "Lane slot '{name}' must bind as {} (got {secret_type})",
+                        memcore::SECRET_TYPE_API_KEY
+                    )
+                    .into());
+                }
+                let mut store = open_cli_store(global_db_path)?;
+                if let Some(existing) = store
+                    .vault_get_entry(&name)
+                    .map_err(|e| format!("vault_get_entry: {e}"))?
+                {
+                    ensure_direct_cli_entry_unrestricted(&existing)?;
+                }
+                let (decided, _) = crate::vault_ops::account_bind::write_lane_slot_binding(
+                    &mut store,
+                    key.bytes(),
+                    &name,
+                    &secret_value,
+                    rebind,
+                    description.as_deref().unwrap_or(""),
+                    None,
+                )?;
+                println!(
+                    "Secret '{name}' bound to {} ({}){}.",
+                    decided.account,
+                    decided.fingerprint,
+                    if decided.rebound { " [rebind]" } else { "" }
+                );
+                return Ok(());
+            }
             let now = chrono::Utc::now().to_rfc3339();
             let mut store = open_cli_store(global_db_path)?;
             let transaction = store
@@ -123,40 +155,6 @@ async fn run_secret_action_with_reader(
                 ensure_direct_cli_entry_unrestricted(existing)?;
             }
             let is_new = existing_entry.is_none();
-            if crate::vault_ops::is_lane_slot_secret_name(&name)
-                && secret_type == memcore::SECRET_TYPE_API_KEY
-            {
-                let entries = transaction
-                    .vault_list_entries()
-                    .map_err(|e| format!("vault_list_entries: {e}"))?;
-                let mut existing_slot = None;
-                let mut account_rows = Vec::new();
-                for entry in entries {
-                    let decrypted = crate::vault_crypto::decrypt(
-                        key.bytes(),
-                        &entry.encrypted_value,
-                        &entry.nonce,
-                    )?;
-                    let value = String::from_utf8(decrypted).map_err(|e| {
-                        format!("Vault secret '{}' is not valid UTF-8: {e}", entry.name)
-                    })?;
-                    if entry.name == name {
-                        existing_slot = Some(value);
-                    } else {
-                        account_rows.push((entry.name, value));
-                    }
-                }
-                let accounts = crate::vault_ops::account_bind::bindable_accounts(account_rows);
-                let decided = crate::vault_ops::decide_lane_slot_write(
-                    key.bytes(),
-                    &name,
-                    &secret_value,
-                    existing_slot.as_deref(),
-                    &accounts,
-                    rebind,
-                )?;
-                *secret_value.0 = decided.store_value;
-            }
             if is_new && memcore::is_lane_config_url_name(&name) {
                 if let Some(leak) =
                     memcore::catalog::endpoint::endpoint_credential_leak(&secret_value)

@@ -119,14 +119,44 @@ pub(in crate::bootstrap) fn vault_upsert_secret_with_key(
     if secret_value.trim().is_empty() {
         return Err("Secret value cannot be empty".into());
     }
-    if crate::vault_ops::is_lane_slot_secret_name(name) {
-        return Err(format!(
-            "Legacy vault upsert cannot write lane slot '{name}'; use `tachi vault set {name} --rebind`"
-        )
-        .into());
-    }
     let secret_type = memcore::vault::normalize_secret_type(secret_type);
     memcore::reject_api_key_type_for_lane_config(name, secret_type)?;
+    if crate::vault_ops::is_lane_slot_secret_name(name) {
+        if secret_type != memcore::SECRET_TYPE_API_KEY {
+            return Err(format!(
+                "Lane slot '{name}' must bind as {} (got {secret_type})",
+                memcore::SECRET_TYPE_API_KEY
+            )
+            .into());
+        }
+        let mut store = open_cli_store(global_db_path)?;
+        if store
+            .vault_get_entry(name)
+            .map_err(|e| format!("vault_get_entry: {e}"))?
+            .as_ref()
+            .is_some_and(|entry| {
+                entry
+                    .allowed_agents
+                    .as_ref()
+                    .is_some_and(|agents| !agents.is_empty())
+            })
+        {
+            return Err(format!(
+                "Access denied: direct CLI cannot overwrite agent-restricted secret '{name}'"
+            )
+            .into());
+        }
+        let (_decided, created) = crate::vault_ops::account_bind::write_lane_slot_binding(
+            &mut store,
+            key.bytes(),
+            name,
+            &secret_value,
+            false,
+            description,
+            None,
+        )?;
+        return Ok(created);
+    }
 
     let encrypt_result = crate::vault_crypto::encrypt(key.bytes(), secret_value.as_bytes());
     let (encrypted_value, nonce) = encrypt_result?;
@@ -204,6 +234,9 @@ pub(super) fn canonical_provider_key_defs(
     let mut out = Vec::new();
     for def in crate::status_ops::status_health::API_KEY_DEFS {
         if def.deprecated && !include_deprecated {
+            continue;
+        }
+        if crate::vault_ops::is_lane_slot_secret_name(def.key) {
             continue;
         }
         if seen.insert(def.key) {

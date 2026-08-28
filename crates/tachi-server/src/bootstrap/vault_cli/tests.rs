@@ -404,8 +404,65 @@ fn canonical_provider_keys_dedup_and_exclude_deprecated() {
     assert_eq!(sorted.len(), names.len(), "keys must be deduped");
     // Deprecated keys (e.g. MINIMAX_API_KEY) excluded by default.
     assert!(!names.contains(&"MINIMAX_API_KEY"));
+    // Lane slots are not provider accounts; setup-keys must not mint them.
+    assert!(!names.contains(&"EXTRACT_API_KEY"));
+    assert!(!names.contains(&"SUMMARY_API_KEY"));
+    assert!(!names.contains(&"DISTILL_API_KEY"));
+    assert!(!names.contains(&"REASONING_API_KEY"));
     let with_dep = canonical_provider_key_defs(true);
     assert!(with_dep.len() >= defs.len());
+}
+
+#[test]
+fn vault_upsert_secret_with_key_binds_lane_slot_instead_of_copying() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("memory.db");
+    let key = vault_init_with_password(&db_path, "correct horse battery staple".to_string())
+        .expect("init vault");
+    vault_upsert_secret_with_key(
+        &db_path,
+        &key,
+        "DEEPSEEK_API_KEY",
+        "api_key",
+        "",
+        "deepseek-secret".to_string(),
+    )
+    .expect("account");
+    let created = vault_upsert_secret_with_key(
+        &db_path,
+        &key,
+        "EXTRACT_API_KEY",
+        "api_key",
+        "",
+        "deepseek-secret".to_string(),
+    )
+    .expect("slot bind");
+    assert!(created);
+    let store = open_cli_store_read_only(&db_path).expect("open store");
+    let entry = store
+        .vault_get_entry("EXTRACT_API_KEY")
+        .expect("get")
+        .expect("row");
+    let decrypted = crate::vault_crypto::decrypt(key.bytes(), &entry.encrypted_value, &entry.nonce)
+        .expect("decrypt");
+    assert_eq!(
+        String::from_utf8(decrypted).expect("utf8"),
+        "vault:DEEPSEEK_API_KEY"
+    );
+    let unmatched = vault_upsert_secret_with_key(
+        &db_path,
+        &key,
+        "DISTILL_API_KEY",
+        "api_key",
+        "",
+        "orphan-secret".to_string(),
+    )
+    .expect_err("unmatched slot bytes must not copy");
+    assert!(
+        unmatched.to_string().contains("second copy")
+            || unmatched.to_string().contains("provider account"),
+        "{unmatched}"
+    );
 }
 
 #[test]

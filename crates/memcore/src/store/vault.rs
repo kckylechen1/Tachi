@@ -203,6 +203,41 @@ impl MemoryStore {
         db::vault_upsert_entry(&self.conn, entry)
     }
 
+    /// Compare-and-swap upsert for lane-slot pointer writes.
+    ///
+    /// `expected = None` means the row must not exist (first bind).
+    /// `expected = Some((encrypted_value, nonce))` means the current ciphertext
+    /// must still match. Returns `false` on conflict so the caller can refuse a
+    /// silent family change instead of last-write-wins.
+    pub fn vault_cas_upsert_entry(
+        &mut self,
+        entry: &VaultEntry,
+        expected: Option<(&str, &str)>,
+    ) -> Result<bool, MemoryError> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let current = db::vault_get_entry(&tx, &entry.name)?;
+        let matches = match (expected, current.as_ref()) {
+            (None, None) => true,
+            (Some((encrypted, nonce)), Some(row)) => {
+                row.encrypted_value == encrypted && row.nonce == nonce
+            }
+            _ => false,
+        };
+        if !matches {
+            tx.rollback()?;
+            return Ok(false);
+        }
+        let mut entry = entry.clone();
+        if current.is_some() {
+            entry.created_at.clear();
+        }
+        db::vault_upsert_entry(&tx, &entry)?;
+        tx.commit()?;
+        Ok(true)
+    }
+
     /// Replace a logical API-key pool and its rotation row in one transaction.
     pub fn vault_replace_api_key_pool(
         &mut self,
@@ -507,6 +542,71 @@ mod tests {
         let from_full: Vec<(String, String)> =
             full.into_iter().map(|e| (e.name, e.updated_at)).collect();
         assert_eq!(timestamps, from_full);
+    }
+
+    #[test]
+    fn vault_cas_upsert_entry_refuses_conflicting_first_write() {
+        let mut store = MemoryStore::open_in_memory().expect("open cas store");
+        let first = test_entry("EXTRACT_API_KEY");
+        assert!(
+            store
+                .vault_cas_upsert_entry(&first, None)
+                .expect("first cas"),
+            "absent slot must accept the first bind"
+        );
+        let mut second = test_entry("EXTRACT_API_KEY");
+        second.encrypted_value = "other-ciphertext".to_string();
+        assert!(
+            !store
+                .vault_cas_upsert_entry(&second, None)
+                .expect("conflicting first-write"),
+            "a second first-write must not last-write-wins"
+        );
+        let kept = store
+            .vault_get_entry("EXTRACT_API_KEY")
+            .expect("get")
+            .expect("row");
+        assert_eq!(kept.encrypted_value, first.encrypted_value);
+    }
+
+    #[test]
+    fn vault_cas_upsert_entry_refuses_stale_ciphertext_expected() {
+        let mut store = MemoryStore::open_in_memory().expect("open cas store");
+        let first = test_entry("EXTRACT_API_KEY");
+        assert!(store
+            .vault_cas_upsert_entry(&first, None)
+            .expect("first cas"));
+        let mut stale = test_entry("EXTRACT_API_KEY");
+        stale.encrypted_value = "attacker-ciphertext".to_string();
+        stale.nonce = "attacker-nonce".to_string();
+        assert!(
+            !store
+                .vault_cas_upsert_entry(&stale, Some(("wrong-cipher", "wrong-nonce")))
+                .expect("stale expected"),
+            "CAS must refuse when the current ciphertext is not the expected one"
+        );
+        let kept = store
+            .vault_get_entry("EXTRACT_API_KEY")
+            .expect("get")
+            .expect("row");
+        assert_eq!(kept.encrypted_value, first.encrypted_value);
+        let mut next = test_entry("EXTRACT_API_KEY");
+        next.encrypted_value = "rebind-ciphertext".to_string();
+        next.nonce = "rebind-nonce".to_string();
+        assert!(
+            store
+                .vault_cas_upsert_entry(
+                    &next,
+                    Some((first.encrypted_value.as_str(), first.nonce.as_str()))
+                )
+                .expect("matching expected"),
+            "matching ciphertext must accept the swap"
+        );
+        let updated = store
+            .vault_get_entry("EXTRACT_API_KEY")
+            .expect("get")
+            .expect("row");
+        assert_eq!(updated.encrypted_value, "rebind-ciphertext");
     }
 
     /// tachi#1110: `vault_import_bundle_unchecked` is a storage-leaf

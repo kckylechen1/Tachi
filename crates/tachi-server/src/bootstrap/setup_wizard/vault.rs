@@ -112,24 +112,36 @@ pub(super) fn upsert_keys_and_rewrite_aliases(
     new_entries: &mut [(String, String)],
 ) -> Result<usize, Box<dyn Error>> {
     let mut stored = 0usize;
-    for (name, value) in new_entries.iter_mut() {
+    let mut accounts = Vec::new();
+    let mut slots = Vec::new();
+    for (idx, (name, _)) in new_entries.iter().enumerate() {
         if !key_names.iter().any(|k| k == name) {
             continue;
         }
+        if crate::vault_ops::is_lane_slot_secret_name(name) {
+            slots.push(idx);
+        } else {
+            accounts.push(idx);
+        }
+    }
+    // Accounts first so a later slot in the same batch can bind by fingerprint
+    // instead of minting a second ciphertext copy.
+    for idx in accounts.into_iter().chain(slots) {
+        let name = new_entries[idx].0.clone();
         // Frozen recovery contract: if persistence fails, keep the caller's
         // entry intact so the wizard can report/retry without losing input.
         // The helper owns and zeroes this working copy on every path.
-        let secret_value = value.clone();
+        let secret_value = new_entries[idx].1.clone();
         vault_cli::vault_upsert_secret_with_key(
             global_db_path,
             key,
-            name,
-            "api_key",
+            &name,
+            memcore::SECRET_TYPE_API_KEY,
             "",
             secret_value,
         )?;
-        crate::vault_crypto::zero_string(value);
-        *value = format!("{}{}", crate::provider_config::VAULT_ALIAS_PREFIX, name);
+        crate::vault_crypto::zero_string(&mut new_entries[idx].1);
+        new_entries[idx].1 = format!("{}{}", crate::provider_config::VAULT_ALIAS_PREFIX, name);
         stored += 1;
     }
     Ok(stored)

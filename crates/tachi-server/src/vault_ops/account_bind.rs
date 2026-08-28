@@ -6,7 +6,11 @@
 //! `vault:ACCOUNT` or refuses. `--rebind` changes the pointer, never copies
 //! a new family into the slot row. Account names still rotate in place.
 
+use crate::vault_crypto as crypto;
+use chrono::Utc;
 use memcore::vault::fingerprint::FingerprintKey;
+use memcore::vault::{VaultEntry, SECRET_TYPE_API_KEY};
+use memcore::MemoryStore;
 use tachi_llm::parse_vault_alias;
 
 pub(crate) const LANE_SLOT_SECRET_NAMES: &[&str] = &[
@@ -18,6 +22,99 @@ pub(crate) const LANE_SLOT_SECRET_NAMES: &[&str] = &[
 
 pub(crate) fn is_lane_slot_secret_name(name: &str) -> bool {
     LANE_SLOT_SECRET_NAMES.contains(&name.trim())
+}
+
+pub(crate) fn follow_lane_slot_pointers(values: Vec<(String, String)>) -> Vec<(String, String)> {
+    let by_name: std::collections::HashMap<&str, &str> = values
+        .iter()
+        .map(|(name, value)| (name.as_str(), value.as_str()))
+        .collect();
+    values
+        .iter()
+        .filter_map(|(name, value)| {
+            if !is_lane_slot_secret_name(name) {
+                if parse_vault_alias(value).is_some() {
+                    return None;
+                }
+                return Some((name.clone(), value.clone()));
+            }
+            let target = parse_vault_alias(value)?;
+            if is_lane_slot_secret_name(target) {
+                return None;
+            }
+            let target_value = by_name.get(target)?;
+            if parse_vault_alias(target_value).is_some() {
+                return None;
+            }
+            Some((name.clone(), (*target_value).to_string()))
+        })
+        .collect()
+}
+
+pub(crate) fn write_lane_slot_binding(
+    store: &mut MemoryStore,
+    master_key: &[u8; 32],
+    name: &str,
+    new_value: &str,
+    rebind: bool,
+    description: &str,
+    allowed_agents: Option<Vec<String>>,
+) -> Result<(LaneSlotDecision, bool), String> {
+    let entries = store
+        .vault_list_entries()
+        .map_err(|e| format!("vault_list_entries: {e}"))?;
+    let mut existing_plain = None;
+    let mut expected_cipher: Option<(String, String)> = None;
+    let mut account_rows = Vec::new();
+    for entry in entries {
+        let decrypted = crypto::decrypt(master_key, &entry.encrypted_value, &entry.nonce)
+            .map_err(|e| format!("decrypt {}: {e}", entry.name))?;
+        let value = String::from_utf8(decrypted)
+            .map_err(|e| format!("Vault secret '{}' is not valid UTF-8: {e}", entry.name))?;
+        if entry.name == name {
+            expected_cipher = Some((entry.encrypted_value, entry.nonce));
+            existing_plain = Some(value);
+        } else {
+            account_rows.push((entry.name, value));
+        }
+    }
+    let accounts = bindable_accounts(account_rows);
+    let decided = decide_lane_slot_write(
+        master_key,
+        name,
+        new_value,
+        existing_plain.as_deref(),
+        &accounts,
+        rebind,
+    )?;
+    let (encrypted_value, nonce) = crypto::encrypt(master_key, decided.store_value.as_bytes())
+        .map_err(|e| format!("encrypt slot pointer: {e}"))?;
+    let created = expected_cipher.is_none();
+    let now = Utc::now().to_rfc3339();
+    let entry = VaultEntry {
+        name: name.to_string(),
+        encrypted_value,
+        nonce,
+        secret_type: SECRET_TYPE_API_KEY.to_string(),
+        description: description.to_string(),
+        allowed_agents,
+        created_at: if created { now.clone() } else { String::new() },
+        updated_at: now,
+        accessed_at: String::new(),
+        access_count: 0,
+    };
+    let expected = expected_cipher
+        .as_ref()
+        .map(|(encrypted, nonce)| (encrypted.as_str(), nonce.as_str()));
+    let wrote = store
+        .vault_cas_upsert_entry(&entry, expected)
+        .map_err(|e| format!("vault_cas_upsert_entry: {e}"))?;
+    if !wrote {
+        return Err(format!(
+            "Lane slot '{name}' changed concurrently; pass rebind=true / --rebind to change account family"
+        ));
+    }
+    Ok((decided, created))
 }
 
 pub(crate) fn bindable_accounts(
@@ -309,5 +406,191 @@ mod tests {
         .expect("upgrade");
         assert_eq!(decided.store_value, "vault:DEEPSEEK_API_KEY");
         assert!(!decided.noop);
+    }
+
+    #[test]
+    fn follow_lane_slot_pointers_resolves_vault_account_alias() {
+        let followed = follow_lane_slot_pointers(vec![
+            (
+                "DEEPSEEK_API_KEY".to_string(),
+                "deepseek-secret".to_string(),
+            ),
+            (
+                "EXTRACT_API_KEY".to_string(),
+                "vault:DEEPSEEK_API_KEY".to_string(),
+            ),
+        ]);
+        let extract = followed
+            .iter()
+            .find(|(name, _)| name == "EXTRACT_API_KEY")
+            .expect("slot must resolve");
+        assert_eq!(extract.1, "deepseek-secret");
+        assert!(followed
+            .iter()
+            .any(|(name, value)| name == "DEEPSEEK_API_KEY" && value == "deepseek-secret"));
+    }
+
+    #[test]
+    fn follow_lane_slot_pointers_drops_slot_to_slot_and_account_aliases() {
+        let followed = follow_lane_slot_pointers(vec![
+            (
+                "DEEPSEEK_API_KEY".to_string(),
+                "vault:SILICONFLOW_API_KEY".to_string(),
+            ),
+            (
+                "SILICONFLOW_API_KEY".to_string(),
+                "siliconflow-secret".to_string(),
+            ),
+            (
+                "EXTRACT_API_KEY".to_string(),
+                "vault:SUMMARY_API_KEY".to_string(),
+            ),
+            (
+                "SUMMARY_API_KEY".to_string(),
+                "vault:SILICONFLOW_API_KEY".to_string(),
+            ),
+        ]);
+        assert!(
+            followed
+                .iter()
+                .all(|(name, _)| name != "EXTRACT_API_KEY" && name != "DEEPSEEK_API_KEY"),
+            "{followed:?}"
+        );
+        assert!(followed
+            .iter()
+            .any(|(name, value)| name == "SILICONFLOW_API_KEY" && value == "siliconflow-secret"));
+    }
+
+    fn seed_account(store: &MemoryStore, name: &str, value: &str) {
+        let (encrypted_value, nonce) =
+            crypto::encrypt(&MASTER, value.as_bytes()).expect("encrypt account");
+        let now = Utc::now().to_rfc3339();
+        store
+            .vault_upsert_entry(&VaultEntry {
+                name: name.to_string(),
+                encrypted_value,
+                nonce,
+                secret_type: SECRET_TYPE_API_KEY.to_string(),
+                description: String::new(),
+                allowed_agents: None,
+                created_at: now.clone(),
+                updated_at: now,
+                accessed_at: String::new(),
+                access_count: 0,
+            })
+            .expect("seed account");
+    }
+
+    fn decrypt_named(store: &MemoryStore, name: &str) -> String {
+        let entry = store
+            .vault_get_entry(name)
+            .expect("get")
+            .unwrap_or_else(|| panic!("{name} missing"));
+        let decrypted =
+            crypto::decrypt(&MASTER, &entry.encrypted_value, &entry.nonce).expect("decrypt");
+        String::from_utf8(decrypted).expect("utf8")
+    }
+
+    #[test]
+    fn write_lane_slot_binding_persists_metadata_on_same_pointer() {
+        let mut store = MemoryStore::open_in_memory().expect("open");
+        seed_account(&store, "DEEPSEEK_API_KEY", "deepseek-secret");
+        write_lane_slot_binding(
+            &mut store,
+            &MASTER,
+            "EXTRACT_API_KEY",
+            "deepseek-secret",
+            false,
+            "first",
+            None,
+        )
+        .expect("first bind");
+        let (decided, created) = write_lane_slot_binding(
+            &mut store,
+            &MASTER,
+            "EXTRACT_API_KEY",
+            "vault:DEEPSEEK_API_KEY",
+            false,
+            "lane extract",
+            Some(vec!["lane-bot".to_string()]),
+        )
+        .expect("metadata write");
+        assert!(decided.noop);
+        assert!(!created);
+        let entry = store
+            .vault_get_entry("EXTRACT_API_KEY")
+            .expect("get")
+            .expect("row");
+        assert_eq!(entry.description, "lane extract");
+        assert_eq!(
+            entry.allowed_agents.as_deref(),
+            Some(["lane-bot".to_string()].as_slice())
+        );
+        assert_eq!(
+            decrypt_named(&store, "EXTRACT_API_KEY"),
+            "vault:DEEPSEEK_API_KEY"
+        );
+    }
+
+    #[test]
+    fn write_lane_slot_binding_refuses_concurrent_first_write() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("memory.db");
+        let db_str = db_path.to_str().expect("utf8");
+        {
+            let store = MemoryStore::open(db_str).expect("seed open");
+            seed_account(&store, "DEEPSEEK_API_KEY", "deepseek-secret");
+            seed_account(&store, "SILICONFLOW_API_KEY", "siliconflow-secret");
+        }
+        let mut store_a = MemoryStore::open(db_str).expect("open a");
+        let mut store_b = MemoryStore::open(db_str).expect("open b");
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let barrier_a = std::sync::Arc::clone(&barrier);
+        let handle_a = std::thread::spawn(move || {
+            barrier_a.wait();
+            write_lane_slot_binding(
+                &mut store_a,
+                &MASTER,
+                "EXTRACT_API_KEY",
+                "deepseek-secret",
+                false,
+                "",
+                None,
+            )
+        });
+        let handle_b = std::thread::spawn(move || {
+            barrier.wait();
+            write_lane_slot_binding(
+                &mut store_b,
+                &MASTER,
+                "EXTRACT_API_KEY",
+                "siliconflow-secret",
+                false,
+                "",
+                None,
+            )
+        });
+        let result_a = handle_a.join().expect("thread a");
+        let result_b = handle_b.join().expect("thread b");
+        let ok_count = result_a.is_ok() as u8 + result_b.is_ok() as u8;
+        assert_eq!(
+            ok_count, 1,
+            "exactly one first-write may commit: {result_a:?} {result_b:?}"
+        );
+        let err = if result_a.is_err() {
+            result_a.expect_err("a")
+        } else {
+            result_b.expect_err("b")
+        };
+        assert!(
+            err.contains("concurrently") || err.contains("rebind"),
+            "{err}"
+        );
+        let store = MemoryStore::open(db_str).expect("reopen");
+        let stored = decrypt_named(&store, "EXTRACT_API_KEY");
+        assert!(
+            stored == "vault:DEEPSEEK_API_KEY" || stored == "vault:SILICONFLOW_API_KEY",
+            "{stored}"
+        );
     }
 }

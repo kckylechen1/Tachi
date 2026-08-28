@@ -12,7 +12,7 @@ mod rotation;
 mod session;
 mod slot_rebind;
 
-pub(crate) use account_bind::{decide_lane_slot_write, is_lane_slot_secret_name};
+pub(crate) use account_bind::is_lane_slot_secret_name;
 pub(crate) use alias_integrity::unusable_skip_class;
 pub(crate) use resolver::{classify_vault_read_error, is_env_fallback_eligible, VaultReadState};
 pub(crate) use rotation::collect_rotation_entries;
@@ -50,8 +50,7 @@ pub(crate) use params::{
 };
 pub(crate) use slot_rebind::{
     copy_existing_account_message, evaluate_lane_slot_overwrite, fingerprint_secret,
-    is_lane_slot_secret_name, validate_existing_lane_slot_secret_type,
-    validate_lane_slot_secret_type,
+    validate_existing_lane_slot_secret_type, validate_lane_slot_secret_type,
 };
 
 #[cfg(test)]

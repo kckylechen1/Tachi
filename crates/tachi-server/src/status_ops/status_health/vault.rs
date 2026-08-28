@@ -206,6 +206,7 @@ fn scan_keychain_api_key_entries(
         }
         values.push((entry.name, value));
     }
+    let values = crate::vault_ops::account_bind::follow_lane_slot_pointers(values);
     Ok(KeychainApiKeyScan {
         values,
         lane_config_values,
