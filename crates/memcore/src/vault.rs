@@ -55,6 +55,31 @@ pub fn normalize_secret_type(value: &str) -> &'static str {
     }
 }
 
+/// Infer a vault `secret_type` from an env-style name when the caller omits
+/// `--secret-type`.
+///
+/// Lane URLs, models, and flags are not credentials. Storing them as
+/// `api_key` made `tachi vault list` indistinguishable from real keys and
+/// let `EXTRACT_BASE_URL` sit in the same injection class as
+/// `DEEPSEEK_API_KEY`.
+pub fn infer_vault_secret_type(name: &str) -> &'static str {
+    let name = name.trim();
+    if name.ends_with("_API_KEY") || name.ends_with("_TOKEN") || name.ends_with("_SECRET") {
+        return SECRET_TYPE_API_KEY;
+    }
+    if name.starts_with("ENABLE_")
+        || name.ends_with("_BASE_URL")
+        || name.ends_with("_URL")
+        || name.ends_with("_MODEL")
+        || name.ends_with("_BACKEND")
+        || name.ends_with("_TIMEOUT")
+        || name.ends_with("_ENABLED")
+    {
+        return SECRET_TYPE_OTHER;
+    }
+    SECRET_TYPE_API_KEY
+}
+
 /// Supported vault ciphers.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
 pub enum VaultCipher {
@@ -241,6 +266,35 @@ mod tests {
                 SECRET_TYPE_COOKIE,
                 SECRET_TYPE_OTHER,
             ]
+        );
+    }
+
+    #[test]
+    fn infer_vault_secret_type_keeps_keys_and_demotes_lane_config() {
+        assert_eq!(
+            infer_vault_secret_type("DEEPSEEK_API_KEY"),
+            SECRET_TYPE_API_KEY
+        );
+        assert_eq!(
+            infer_vault_secret_type("LONGBRIDGE_APP_SECRET"),
+            SECRET_TYPE_API_KEY
+        );
+        assert_eq!(
+            infer_vault_secret_type("TUSHARE_TOKEN"),
+            SECRET_TYPE_API_KEY
+        );
+        assert_eq!(
+            infer_vault_secret_type("EXTRACT_BASE_URL"),
+            SECRET_TYPE_OTHER
+        );
+        assert_eq!(infer_vault_secret_type("DISTILL_MODEL"), SECRET_TYPE_OTHER);
+        assert_eq!(
+            infer_vault_secret_type("ENABLE_PIPELINE"),
+            SECRET_TYPE_OTHER
+        );
+        assert_eq!(
+            infer_vault_secret_type("FOUNDRY_DISTILL_BACKEND"),
+            SECRET_TYPE_OTHER
         );
     }
 }

@@ -167,9 +167,11 @@ pub enum VaultAction {
     Set {
         /// Secret name (e.g. GH_TOKEN, OPENAI_API_KEY).
         name: String,
-        /// Secret type (default: api_key).
-        #[arg(long, default_value = "api_key")]
-        secret_type: String,
+        /// Secret type. Omitted: inferred from the name (`*_API_KEY` stays
+        /// `api_key`; `*_BASE_URL` / `*_MODEL` / `ENABLE_*` become `other`
+        /// so lane config is not stored as a credential).
+        #[arg(long)]
+        secret_type: Option<String>,
         /// Optional description.
         #[arg(long)]
         description: Option<String>,
