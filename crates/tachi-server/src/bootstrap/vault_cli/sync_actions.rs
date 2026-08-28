@@ -83,12 +83,27 @@ pub(super) fn run_sync_action(
             insecure_password_file,
         } => {
             let input = vault_sync::resolve_vault_sync_path(input)?;
-            let key = if allow_unsigned && !vault_sync::bundle_has_signature(&input)? {
-                None
+            let unsigned_without_signature =
+                allow_unsigned && !vault_sync::bundle_has_signature(&input)?;
+            let bundle_config = vault_sync::read_bundle_vault_config(&input)?;
+            let key = if unsigned_without_signature {
+                bundle_config
+                    .as_ref()
+                    .map(|config| {
+                        read_verified_vault_key(
+                            config,
+                            stdin_password,
+                            keychain,
+                            password_file.as_deref(),
+                            insecure_password_file,
+                        )
+                    })
+                    .transpose()?
             } else {
-                let config = vault_sync::read_bundle_vault_config(&input)?
-                    .ok_or("Cannot verify an entries-only bundle without a local Vault password: \
-                            this bundle has no vault_config. Initialize the Vault on this machine first.")?;
+                let config = bundle_config.ok_or(
+                    "Cannot verify an entries-only bundle without a local Vault password: \
+                            this bundle has no vault_config. Initialize the Vault on this machine first.",
+                )?;
                 Some(read_verified_vault_key(
                     &config,
                     stdin_password,

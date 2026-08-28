@@ -228,28 +228,29 @@ fn lease_api_key_from_store_with_hook(
     after_snapshot();
     let configured_member_request = health_logical_name != logical_name;
 
-    let candidate_names = if configured_member_request {
-        vec![logical_name.to_string()]
-    } else if let Some(rotation) = rotation.as_ref() {
-        let total = rotation.total_keys.max(0);
-        if total == 0 {
-            Vec::new()
-        } else {
-            let start = if rotation.current_index <= 0 {
-                1
+    let candidate_names =
+        if crate::vault_ops::is_lane_slot_secret_name(logical_name) || configured_member_request {
+            vec![logical_name.to_string()]
+        } else if let Some(rotation) = rotation.as_ref() {
+            let total = rotation.total_keys.max(0);
+            if total == 0 {
+                Vec::new()
             } else {
-                rotation.current_index
-            };
-            (0..total)
-                .map(|offset| {
-                    let idx = ((start - 1 + offset) % total) + 1;
-                    rotation_member_name(logical_name, idx)
-                })
-                .collect::<Vec<_>>()
-        }
-    } else {
-        vec![logical_name.to_string()]
-    };
+                let start = if rotation.current_index <= 0 {
+                    1
+                } else {
+                    rotation.current_index
+                };
+                (0..total)
+                    .map(|offset| {
+                        let idx = ((start - 1 + offset) % total) + 1;
+                        rotation_member_name(logical_name, idx)
+                    })
+                    .collect::<Vec<_>>()
+            }
+        } else {
+            vec![logical_name.to_string()]
+        };
 
     for candidate in candidate_names {
         let Some(entry) = entries.iter().find(|entry| entry.name == candidate) else {

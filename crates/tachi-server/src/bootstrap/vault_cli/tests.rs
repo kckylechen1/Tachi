@@ -491,6 +491,64 @@ fn vault_upsert_secret_with_key_binds_lane_slot_instead_of_copying() {
 }
 
 #[test]
+fn lease_api_key_from_store_ignores_legacy_slot_rotation() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("memory.db");
+    let key = vault_init_with_password(&db_path, "correct horse battery staple".to_string())
+        .expect("init vault");
+    vault_upsert_secret_with_key(
+        &db_path,
+        &key,
+        "DEEPSEEK_API_KEY",
+        "api_key",
+        "",
+        "deepseek-secret".to_string(),
+    )
+    .expect("account");
+    vault_upsert_secret_with_key(
+        &db_path,
+        &key,
+        "EXTRACT_API_KEY",
+        "api_key",
+        "",
+        "deepseek-secret".to_string(),
+    )
+    .expect("bind");
+    let store = open_cli_store(&db_path).expect("open rw");
+    let (encrypted_value, nonce) =
+        crate::vault_crypto::encrypt(key.bytes(), b"leftover-rotation-member").expect("encrypt");
+    let now = chrono::Utc::now().to_rfc3339();
+    store
+        .vault_upsert_entry(&memcore::vault::VaultEntry {
+            name: "EXTRACT_API_KEY_1".to_string(),
+            encrypted_value,
+            nonce,
+            secret_type: "api_key".to_string(),
+            description: String::new(),
+            allowed_agents: None,
+            created_at: now.clone(),
+            updated_at: now.clone(),
+            accessed_at: String::new(),
+            access_count: 0,
+        })
+        .expect("member");
+    store
+        .vault_set_rotation(&memcore::vault::VaultKeyRotation {
+            prefix: "EXTRACT_API_KEY".to_string(),
+            current_index: 1,
+            total_keys: 1,
+            rotation_strategy: "round_robin".to_string(),
+            created_at: now.clone(),
+            updated_at: now,
+        })
+        .expect("rotation");
+    let (key_id, value) =
+        lease_api_key_from_store(&store, key.bytes(), "EXTRACT_API_KEY").expect("lease");
+    assert_eq!(key_id, "DEEPSEEK_API_KEY");
+    assert_eq!(value, "deepseek-secret");
+}
+
+#[test]
 fn vault_get_output_redacts_by_default() {
     let out =
         vault_get_output("GH_TOKEN", "ghp_secret_value", false, false).expect("format output");

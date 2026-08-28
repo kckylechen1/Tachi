@@ -107,6 +107,9 @@ fn load_keychain_vault_api_key_scan_with_password(
     let acl_revision =
         crate::vault_ops::vault_materialization_acl_revision_from_rows(&entries, &rotations);
     for rotation in &rotations {
+        if crate::vault_ops::is_lane_slot_secret_name(&rotation.prefix) {
+            continue;
+        }
         memcore::validate_api_key_rotation(&entries, rotation).map_err(|error| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -116,6 +119,7 @@ fn load_keychain_vault_api_key_scan_with_password(
     }
     let rotation_prefixes = rotations
         .into_iter()
+        .filter(|rotation| !crate::vault_ops::is_lane_slot_secret_name(&rotation.prefix))
         .map(|rotation| rotation.prefix)
         .collect::<HashSet<_>>();
     let key_health_rows = transaction.vault_list_key_health(None)?;
@@ -163,6 +167,11 @@ fn scan_keychain_api_key_entries(
         }
     }
     for entry in entries {
+        if crate::provider_config::parse_rotation_member_name(&entry.name)
+            .is_some_and(|(prefix, _)| crate::vault_ops::is_lane_slot_secret_name(prefix))
+        {
+            continue;
+        }
         if memcore::is_lane_config_secret_name(&entry.name) {
             record_keychain_listed_drop(&mut dropped, &entry.name, AliasSkipClass::ListedWrongType);
             continue;
@@ -206,6 +215,21 @@ fn scan_keychain_api_key_entries(
         }
         values.push((entry.name, value));
     }
+    values.retain(|(name, value)| {
+        if !crate::vault_ops::is_lane_slot_secret_name(name) {
+            return true;
+        }
+        let Some(target) = crate::provider_config::parse_vault_alias(value) else {
+            return false;
+        };
+        let slot_health = key_health_rows
+            .iter()
+            .find(|health| health.logical_name == *name && health.key_id == target);
+        let target_health = key_health_rows
+            .iter()
+            .find(|health| health.logical_name == target && health.key_id == target);
+        !crate::vault_ops::account_bind::slot_target_health_unusable(slot_health, target_health)
+    });
     let values = crate::vault_ops::account_bind::follow_lane_slot_pointers(values);
     Ok(KeychainApiKeyScan {
         values,

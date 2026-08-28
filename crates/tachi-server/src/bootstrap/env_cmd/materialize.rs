@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 
+#[cfg(test)]
 use memcore::vault::VaultEntry;
 
 use super::super::{open_cli_store, vault_cli};
