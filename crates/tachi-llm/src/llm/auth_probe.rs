@@ -176,12 +176,9 @@ pub fn auth_probe_descriptor_for_host(host: &str) -> Option<&'static ProviderPro
 pub(super) fn provider_descriptor_for_logical_key(
     logical_name: &str,
 ) -> Option<&'static ProviderProbeDescriptor> {
-    AUTH_PROBE_DESCRIPTORS.iter().find(|descriptor| {
-        descriptor
-            .logical_key_names
-            .iter()
-            .any(|candidate| *candidate == logical_name)
-    })
+    AUTH_PROBE_DESCRIPTORS
+        .iter()
+        .find(|descriptor| descriptor.logical_key_names.contains(&logical_name))
 }
 
 /// Resolve the exact provider descriptor for a configured chat URL. Unknown
