@@ -1,5 +1,13 @@
 mod agent;
 mod coerce;
+/// CurrentTruth v1 (#1696, first executable slice of #1297): the
+/// append-only assertion authority for typed GitHub-object facts, the
+/// deterministic `current | superseded | conflicted | unknown` reducer,
+/// stale-handoff evaluation, the derived open-action projection, and the
+/// #1693 consumer read surface. Exposed as a named module for the same
+/// reason as `taskintent` — its item names (`AssertionV1`, `PredicateV1`,
+/// …) are truth-shaped, not param-shaped.
+pub mod current_truth;
 mod dlq;
 mod facade;
 mod foundry;
@@ -30,6 +38,13 @@ mod status;
 /// qualified).
 pub mod taskintent;
 pub mod util;
+/// Unified Work Read Model (#1693): the rebuildable projection over
+/// CurrentTruth consumer views, WorkClaim leases, staffing run receipts,
+/// ExecEnv identity, verification/adjudication facts, and (once #1679
+/// lands) delivery. Exposed as a named module for the same reason as
+/// `current_truth` — its item names (`WorkReadModelV1`, `WorkKey`, …) are
+/// projection-shaped, not param-shaped.
+pub mod work_read_model;
 
 pub use agent::*;
 pub use dlq::*;

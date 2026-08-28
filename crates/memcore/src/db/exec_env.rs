@@ -8,29 +8,68 @@
 //! ## State machine (S1)
 //!
 //! ```text
-//!   active ──reclaim──▶ reclaimed
-//!     ▲                     │
-//!     └── (no transition) ◀─┘   reclaiming an already-reclaimed lease is an
-//!                               idempotent no-op, never an error.
+//!   provisioning ──complete resource ledger──▶ active
+//!                                                ├──dispatch──▶ dispatching
+//!                                                │                 │
+//!                                                ◀──── terminal ───┘
+//!                                                ├──removal──▶ removing
+//!                                                │               ├──success──▶ reclaimed
+//!                                                ◀────failure─────┘
+//!                                                └──reclaim──▶ reclaimed
+//!
+//! A crash while `provisioning` or `dispatching` stays fail-closed. Reclaim
+//! refuses either state; reconciliation must establish a complete ledger or a
+//! clean/fenced terminal outcome.
 //! ```
 //!
-//! There is exactly one function that flips a lease to `reclaimed`
-//! ([`reclaim_exec_env`]); `safe_merge` / cancel / terminal-state all route
-//! through it, and the sweep is a backstop, not a second writer.
+//! Normal terminal actions route through [`reclaim_exec_env`]. A destructive
+//! cleaner instead owns the explicit [`claim_exec_env_removal`] →
+//! [`complete_exec_env_removal`] protocol so filesystem deletion and dispatch
+//! admission cannot race.
 
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+use std::path::{Component, Path, PathBuf};
 
 use crate::error::MemoryError;
 
 use super::common::normalize_utc_iso_or_now;
 
-/// Lease lifecycle state. S1 persists exactly two states; the fuller
-/// provisioned→leased→terminal ladder from the design doc is deferred to a
-/// later slice and would extend this enum additively.
+fn lexically_normalized(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    normalized
+}
+
+fn path_is_within(candidate: &str, root: &str) -> bool {
+    lexically_normalized(Path::new(candidate)).starts_with(lexically_normalized(Path::new(root)))
+}
+
+/// Lease lifecycle state. `Dispatching` is the exclusive Required-postflight
+/// admission state; it prevents two workers from sharing one preimage/lease.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExecEnvState {
+    /// Lease identity is reserved while its complete resource ledger is being
+    /// published. Dispatch and destructive cleanup both reject this state.
+    Provisioning,
     /// Provisioned and in use — the worktree exists and the lease owns it.
     Active,
+    /// Exclusively admitted to one in-flight dispatch. A daemon crash leaves
+    /// this state fail-closed until an operator reconciles the lease.
+    Dispatching,
+    /// The gate certified the dispatch and carrier artifacts are being
+    /// published. This remains exclusive until publication completes.
+    Publishing,
+    /// Exclusively claimed by a destructive cleaner. Dispatch admission
+    /// refuses this state; a crash remains fail-closed until reconciliation.
+    Removing,
     /// Reclaimed — the worktree/branch/target have been (or are being) torn
     /// down; the row is retained for audit and idempotent reclaim.
     Reclaimed,
@@ -39,7 +78,11 @@ pub enum ExecEnvState {
 impl ExecEnvState {
     pub fn as_str(self) -> &'static str {
         match self {
+            ExecEnvState::Provisioning => "provisioning",
             ExecEnvState::Active => "active",
+            ExecEnvState::Dispatching => "dispatching",
+            ExecEnvState::Publishing => "publishing",
+            ExecEnvState::Removing => "removing",
             ExecEnvState::Reclaimed => "reclaimed",
         }
     }
@@ -49,10 +92,14 @@ impl ExecEnvState {
     /// masquerade as `active` (usable) or `reclaimed` (torn down).
     pub fn parse(raw: &str) -> Result<Self, MemoryError> {
         match raw {
+            "provisioning" => Ok(ExecEnvState::Provisioning),
             "active" => Ok(ExecEnvState::Active),
+            "dispatching" => Ok(ExecEnvState::Dispatching),
+            "publishing" => Ok(ExecEnvState::Publishing),
+            "removing" => Ok(ExecEnvState::Removing),
             "reclaimed" => Ok(ExecEnvState::Reclaimed),
             other => Err(MemoryError::InvalidArg(format!(
-                "unknown exec_env state '{other}' (expected 'active' or 'reclaimed')"
+                "unknown exec_env state '{other}' (expected 'provisioning', 'active', 'dispatching', 'publishing', 'removing', or 'reclaimed')"
             ))),
         }
     }
@@ -250,16 +297,81 @@ fn row_to_lease(row: &rusqlite::Row<'_>) -> Result<ExecEnvLease, rusqlite::Error
 /// Insert a new lease. Fails if `env_id` already exists — a lease id collision
 /// is a bug, never a silent overwrite that could orphan the prior worktree.
 pub fn insert_exec_env(conn: &Connection, lease: &NewExecEnvLease) -> Result<(), MemoryError> {
+    insert_exec_env_in_state(conn, lease, ExecEnvState::Active)
+}
+
+fn insert_exec_env_in_state(
+    conn: &Connection,
+    lease: &NewExecEnvLease,
+    state: ExecEnvState,
+) -> Result<(), MemoryError> {
     let created_at = if lease.created_at.trim().is_empty() {
         normalize_utc_iso_or_now("")
     } else {
         normalize_utc_iso_or_now(&lease.created_at)
     };
-    conn.execute(
+    let worktree_identity = if lease.kind == "worktree" {
+        match std::fs::symlink_metadata(&lease.path) {
+            Ok(_) => {
+                let canonical_path = std::fs::canonicalize(&lease.path).map_err(|error| {
+                    MemoryError::InvalidArg(format!(
+                        "cannot resolve existing worktree '{}': {error}",
+                        lease.path
+                    ))
+                })?;
+                let authority =
+                    crate::anchored_fs::AnchoredDirectory::open_absolute(canonical_path.as_path())
+                        .map_err(|error| {
+                            MemoryError::InvalidArg(format!(
+                                "cannot anchor existing worktree '{}': {error}",
+                                lease.path
+                            ))
+                        })?;
+                Some(authority.identity().map_err(|error| {
+                    MemoryError::InvalidArg(format!(
+                        "cannot read existing worktree identity '{}': {error}",
+                        lease.path
+                    ))
+                })?)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                return Err(MemoryError::InvalidArg(format!(
+                    "cannot inspect worktree '{}': {error}",
+                    lease.path
+                )));
+            }
+        }
+    } else {
+        None
+    };
+    let worktree_identity = if let Some(identity) = worktree_identity {
+        Some((
+            i64::try_from(identity.device).map_err(|_| {
+                MemoryError::InvalidArg(
+                    "worktree device identity exceeds SQLite INTEGER".to_string(),
+                )
+            })?,
+            i64::try_from(identity.inode).map_err(|_| {
+                MemoryError::InvalidArg(
+                    "worktree inode identity exceeds SQLite INTEGER".to_string(),
+                )
+            })?,
+        ))
+    } else {
+        None
+    };
+
+    // Publish the compatibility lease and any physical identity as one unit.
+    // Existing paths must be descriptor-anchorable; only genuinely absent
+    // legacy fixture paths may remain without an identity and dispatch will
+    // continue to reject those fail-closed.
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
         "INSERT INTO exec_envs
          (env_id, kind, path, repo_root, branch, base_sha, dispatch_id, agent_identity_id, claim_id,
           env_class, state, reclaim_reason, schema_version, created_at, reclaimed_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, NULL, ?8, 'active', NULL, 1, ?9, NULL)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, NULL, ?8, ?9, NULL, 1, ?10, NULL)",
         params![
             lease.env_id,
             lease.kind,
@@ -269,9 +381,18 @@ pub fn insert_exec_env(conn: &Connection, lease: &NewExecEnvLease) -> Result<(),
             lease.base_sha,
             lease.dispatch_id,
             lease.env_class.as_str(),
+            state.as_str(),
             created_at,
         ],
     )?;
+    if let Some((device, inode)) = worktree_identity {
+        tx.execute(
+            "INSERT INTO exec_env_worktree_identities (env_id, device, inode, captured_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![lease.env_id, device, inode, created_at],
+        )?;
+    }
+    tx.commit()?;
     Ok(())
 }
 
@@ -284,6 +405,30 @@ pub fn get_exec_env(conn: &Connection, env_id: &str) -> Result<Option<ExecEnvLea
     Ok(lease)
 }
 
+pub fn get_exec_env_worktree_identity(
+    conn: &Connection,
+    env_id: &str,
+) -> Result<Option<crate::anchored_fs::DirectoryIdentity>, MemoryError> {
+    let identity = conn
+        .query_row(
+            "SELECT device, inode FROM exec_env_worktree_identities WHERE env_id = ?1",
+            params![env_id],
+            |row| {
+                let device: i64 = row.get(0)?;
+                let inode: i64 = row.get(1)?;
+                if device < 0 || inode < 0 {
+                    return Err(rusqlite::Error::IntegralValueOutOfRange(0, device));
+                }
+                Ok(crate::anchored_fs::DirectoryIdentity {
+                    device: device as u64,
+                    inode: inode as u64,
+                })
+            },
+        )
+        .optional()?;
+    Ok(identity)
+}
+
 /// Fetch the single *active* lease for a workspace path, if any. Reclaimed rows
 /// for the same path are ignored so a re-provisioned path resolves to the live
 /// lease.
@@ -294,6 +439,24 @@ pub fn find_active_exec_env_by_path(
     let sql = format!(
         "SELECT {SELECT_COLUMNS} FROM exec_envs \
          WHERE path = ?1 AND state = 'active' \
+         ORDER BY created_at DESC LIMIT 1"
+    );
+    let lease = conn
+        .query_row(&sql, params![path], row_to_lease)
+        .optional()?;
+    Ok(lease)
+}
+
+/// Fetch the newest unreclaimed lease for a workspace path. Destructive
+/// consumers use this broader lookup so fail-closed exclusive states cannot
+/// disappear behind an active-only query.
+pub fn find_live_exec_env_by_path(
+    conn: &Connection,
+    path: &str,
+) -> Result<Option<ExecEnvLease>, MemoryError> {
+    let sql = format!(
+        "SELECT {SELECT_COLUMNS} FROM exec_envs \
+         WHERE path = ?1 AND state != 'reclaimed' \
          ORDER BY created_at DESC LIMIT 1"
     );
     let lease = conn
@@ -332,12 +495,254 @@ pub fn list_exec_envs(
     Ok(out)
 }
 
-/// THE single reclaim path (#894 S1): transactionally flip an `active` lease to
+/// Atomically claim an active managed worktree for destructive removal.
+/// `None` means no unreclaimed managed lease exists (legacy/not-applicable).
+/// Holder and resource proofs are re-read under the same IMMEDIATE write
+/// transaction as `active -> removing`, making it mutually exclusive with
+/// dispatch admission's guarded `active -> dispatching` update.
+pub fn claim_exec_env_removal(
+    conn: &mut Connection,
+    path: &str,
+) -> Result<Option<String>, MemoryError> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let existing: Option<(String, String)> = tx
+        .query_row(
+            "SELECT env_id, state FROM exec_envs \
+             WHERE path = ?1 AND state != 'reclaimed' \
+             ORDER BY created_at DESC LIMIT 1",
+            params![path],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let Some((env_id, state_raw)) = existing else {
+        tx.commit()?;
+        return Ok(None);
+    };
+    match ExecEnvState::parse(&state_raw)? {
+        ExecEnvState::Active => {}
+        state => {
+            return Err(MemoryError::WorkClaimIncompatibleState(format!(
+                "refusing to remove exec env {env_id}: lease is {}",
+                state.as_str()
+            )))
+        }
+    }
+    match super::session_claims::holder_evidence(&tx, &env_id)? {
+        super::session_claims::HolderEvidence::Clear
+        | super::session_claims::HolderEvidence::NotApplicable => {}
+        evidence => {
+            return Err(MemoryError::WorkClaimIncompatibleState(format!(
+                "refusing to remove exec env {env_id}: holder evidence is {evidence:?}"
+            )))
+        }
+    }
+    if let Some(detail) =
+        super::exec_env_resources::exec_env_resource_removal_refusal(&tx, &env_id, path)?
+    {
+        return Err(MemoryError::WorkClaimIncompatibleState(detail));
+    }
+    let (resource_id, total_live_bindings): (String, i64) = tx.query_row(
+        "SELECT r.resource_id, \
+                (SELECT COUNT(*) FROM exec_env_resource_bindings all_b \
+                 WHERE all_b.resource_id = r.resource_id AND all_b.released_at IS NULL) \
+         FROM exec_env_resource_bindings b \
+         JOIN exec_env_resources r ON r.resource_id = b.resource_id \
+         WHERE b.env_id = ?1 AND b.released_at IS NULL \
+           AND r.kind = 'worktree' AND r.path = ?2 AND r.state = 'active'",
+        params![env_id, path],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    if total_live_bindings != 1 {
+        return Err(MemoryError::WorkClaimIncompatibleState(format!(
+            "refusing to remove exec env {env_id}: worktree resource {resource_id} has {total_live_bindings} live bindings"
+        )));
+    }
+    let resource_changed = tx.execute(
+        "UPDATE exec_env_resources SET state = 'reclaiming', \
+             reclaim_reason = 'worktree removal claim', updated_at = ?2 \
+         WHERE resource_id = ?1 AND state = 'active'",
+        params![resource_id, normalize_utc_iso_or_now("")],
+    )?;
+    if resource_changed != 1 {
+        return Err(MemoryError::WorkClaimIncompatibleState(format!(
+            "worktree resource {resource_id} changed during removal admission"
+        )));
+    }
+    let mut stmt = tx.prepare(
+        "SELECT r.resource_id, r.path, r.state, \
+                (SELECT COUNT(*) FROM exec_env_resource_bindings all_b \
+                 WHERE all_b.resource_id = r.resource_id AND all_b.released_at IS NULL) \
+         FROM exec_env_resource_bindings b \
+         JOIN exec_env_resources r ON r.resource_id = b.resource_id \
+         WHERE b.env_id = ?1 AND b.released_at IS NULL AND r.kind = 'build_target'",
+    )?;
+    let build_targets: Vec<(String, String, String, i64)> = stmt
+        .query_map(params![env_id], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })?
+        .collect::<Result<_, _>>()?;
+    drop(stmt);
+    for (target_id, target_path, target_state, target_bindings) in build_targets {
+        if !path_is_within(&target_path, path) {
+            continue;
+        }
+        if target_state != "active" || target_bindings != 1 {
+            return Err(MemoryError::WorkClaimIncompatibleState(format!(
+                "refusing to remove exec env {env_id}: in-worktree build target {target_id} is {target_state} with {target_bindings} live bindings"
+            )));
+        }
+        let changed = tx.execute(
+            "UPDATE exec_env_resources SET state = 'reclaiming', \
+                 reclaim_reason = 'worktree removal claim', updated_at = ?2 \
+             WHERE resource_id = ?1 AND state = 'active'",
+            params![target_id, normalize_utc_iso_or_now("")],
+        )?;
+        if changed != 1 {
+            return Err(MemoryError::WorkClaimIncompatibleState(format!(
+                "in-worktree build target {target_id} changed during removal admission"
+            )));
+        }
+    }
+    let changed = tx.execute(
+        "UPDATE exec_envs SET state = 'removing' WHERE env_id = ?1 AND state = 'active'",
+        params![env_id],
+    )?;
+    if changed != 1 {
+        return Err(MemoryError::WorkClaimIncompatibleState(format!(
+            "exec env {env_id} changed during removal admission"
+        )));
+    }
+    tx.commit()?;
+    Ok(Some(env_id))
+}
+
+/// Complete a persisted removal claim after filesystem deletion succeeds.
+pub fn complete_exec_env_removal(
+    conn: &mut Connection,
+    env_id: &str,
+    reason: Option<&str>,
+    reclaimed_bytes: i64,
+) -> Result<(), MemoryError> {
+    if reclaimed_bytes < 0 {
+        return Err(MemoryError::InvalidArg(
+            "reclaimed worktree bytes must be non-negative".to_string(),
+        ));
+    }
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let now = normalize_utc_iso_or_now("");
+    let (lease_path, lease_state): (String, String) = tx.query_row(
+        "SELECT path, state FROM exec_envs WHERE env_id = ?1",
+        params![env_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    if lease_state != "removing" {
+        return Err(MemoryError::WorkClaimIncompatibleState(format!(
+            "exec env {env_id} lost its removal claim before completion"
+        )));
+    }
+    let mut stmt = tx.prepare(
+        "SELECT r.resource_id, r.kind, r.path, r.state \
+         FROM exec_env_resource_bindings b \
+         JOIN exec_env_resources r ON r.resource_id = b.resource_id \
+         WHERE b.env_id = ?1 AND b.released_at IS NULL ORDER BY r.resource_id",
+    )?;
+    let resources: Vec<(String, String, String, String)> = stmt
+        .query_map(params![env_id], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })?
+        .collect::<Result<_, _>>()?;
+    drop(stmt);
+    if resources.is_empty() {
+        return Err(MemoryError::WorkClaimIncompatibleState(format!(
+            "exec env {env_id} has no live resource bindings at removal completion"
+        )));
+    }
+    for (resource_id, kind, resource_path, state) in resources {
+        let removed_with_worktree = kind == "worktree"
+            || (kind == "build_target" && path_is_within(&resource_path, &lease_path));
+        if removed_with_worktree && state != "reclaiming" {
+            return Err(MemoryError::WorkClaimIncompatibleState(format!(
+                "removed resource {resource_id} lost its removal claim before completion"
+            )));
+        }
+        let released = tx.execute(
+            "UPDATE exec_env_resource_bindings SET released_at = ?3 \
+             WHERE env_id = ?1 AND resource_id = ?2 AND released_at IS NULL",
+            params![env_id, resource_id, now],
+        )?;
+        if released != 1 {
+            return Err(MemoryError::WorkClaimIncompatibleState(format!(
+                "exec env {env_id} lost resource binding {resource_id} before removal completion"
+            )));
+        }
+        if removed_with_worktree {
+            let bytes = if kind == "worktree" {
+                reclaimed_bytes
+            } else {
+                0
+            };
+            let changed = tx.execute(
+                "UPDATE exec_env_resources SET state = 'reclaimed', reclaimed_at = ?2, \
+                     reclaimed_bytes = ?3, updated_at = ?2 \
+                 WHERE resource_id = ?1 AND state = 'reclaiming'",
+                params![resource_id, now, bytes],
+            )?;
+            if changed != 1 {
+                return Err(MemoryError::WorkClaimIncompatibleState(format!(
+                    "removed resource {resource_id} lost its removal claim before completion"
+                )));
+            }
+        }
+    }
+    let lease_changed = tx.execute(
+        "UPDATE exec_envs SET state = 'reclaimed', reclaimed_at = ?2, \
+             reclaim_reason = ?3 WHERE env_id = ?1 AND state = 'removing'",
+        params![env_id, now, reason],
+    )?;
+    if lease_changed != 1 {
+        return Err(MemoryError::WorkClaimIncompatibleState(format!(
+            "exec env {env_id} lost its removal claim before completion"
+        )));
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+/// Release a persisted removal claim after deletion did not occur.
+pub fn abort_exec_env_removal(conn: &mut Connection, env_id: &str) -> Result<(), MemoryError> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let resource_changed = tx.execute(
+        "UPDATE exec_env_resources SET state = 'active', reclaim_reason = NULL, updated_at = ?2 \
+         WHERE resource_id IN (SELECT resource_id FROM exec_env_resource_bindings \
+                               WHERE env_id = ?1 AND released_at IS NULL) \
+           AND state = 'reclaiming'",
+        params![env_id, normalize_utc_iso_or_now("")],
+    )?;
+    if resource_changed == 0 {
+        return Err(MemoryError::WorkClaimIncompatibleState(format!(
+            "exec env {env_id} lost all resource removal claims before abort"
+        )));
+    }
+    let lease_changed = tx.execute(
+        "UPDATE exec_envs SET state = 'active' WHERE env_id = ?1 AND state = 'removing'",
+        params![env_id],
+    )?;
+    if lease_changed != 1 {
+        return Err(MemoryError::WorkClaimIncompatibleState(format!(
+            "exec env {env_id} lost its removal claim before abort"
+        )));
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+/// The ordinary reclaim path (#894 S1): transactionally flip an `active` lease to
 /// `reclaimed`, stamping `reclaimed_at` and an optional reason. Idempotent — a
 /// lease that is already `reclaimed` returns [`ReclaimOutcome::AlreadyReclaimed`]
 /// without a second write. A missing lease is a typed [`MemoryError::NotFound`]
 /// rather than a successful-looking outcome. safe_merge / cancel / terminal-state must all
-/// call through here; the sweep is a backstop that never owns this transition.
+/// call through here. Destructive cleaners use the separate persisted removal
+/// claim protocol because they must own the lease before touching the filesystem.
 pub fn reclaim_exec_env(
     conn: &mut Connection,
     selector: &ExecEnvSelector,
@@ -383,6 +788,26 @@ pub fn reclaim_exec_env(
     }
     let outcome = match ExecEnvState::parse(&state_raw)? {
         ExecEnvState::Reclaimed => ReclaimOutcome::AlreadyReclaimed { env_id },
+        ExecEnvState::Provisioning => {
+            return Err(MemoryError::WorkClaimIncompatibleState(format!(
+                "refusing to reclaim exec env {env_id}: provisioning has not published its resource ledger"
+            )))
+        }
+        ExecEnvState::Dispatching => {
+            return Err(MemoryError::WorkClaimIncompatibleState(format!(
+                "refusing to reclaim exec env {env_id}: an admitted dispatch still owns it"
+            )))
+        }
+        ExecEnvState::Publishing => {
+            return Err(MemoryError::WorkClaimIncompatibleState(format!(
+                "refusing to reclaim exec env {env_id}: certified dispatch artifacts are still publishing"
+            )))
+        }
+        ExecEnvState::Removing => {
+            return Err(MemoryError::WorkClaimIncompatibleState(format!(
+                "refusing to reclaim exec env {env_id}: a destructive cleaner owns it"
+            )))
+        }
         ExecEnvState::Active => {
             let now = normalize_utc_iso_or_now("");
             tx.execute(
@@ -408,6 +833,14 @@ mod tests {
         crate::db::enable_simple_auto_extension().unwrap();
         crate::db::register_sqlite_vec();
         let conn = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&conn).unwrap();
+        conn
+    }
+
+    fn open_file_conn(path: &std::path::Path) -> Connection {
+        crate::db::enable_simple_auto_extension().unwrap();
+        crate::db::register_sqlite_vec();
+        let conn = Connection::open(path).unwrap();
         crate::db::init_schema(&conn).unwrap();
         conn
     }
@@ -440,6 +873,25 @@ mod tests {
         assert_eq!(got.dispatch_id.as_deref(), Some("dispatch-1"));
         assert!(got.reclaimed_at.is_none());
         assert!(!got.created_at.is_empty(), "created_at defaults to now");
+    }
+
+    #[test]
+    fn insert_existing_worktree_captures_physical_identity_atomically() {
+        let conn = open_conn();
+        let worktree = tempfile::tempdir().unwrap();
+        let lease = new_lease("env-identity", worktree.path().to_str().unwrap());
+
+        insert_exec_env(&conn, &lease).unwrap();
+
+        let canonical_path = std::fs::canonicalize(worktree.path()).unwrap();
+        let expected = crate::anchored_fs::AnchoredDirectory::open_absolute(&canonical_path)
+            .unwrap()
+            .identity()
+            .unwrap();
+        assert_eq!(
+            get_exec_env_worktree_identity(&conn, "env-identity").unwrap(),
+            Some(expected)
+        );
     }
 
     #[test]
@@ -578,6 +1030,149 @@ mod tests {
     }
 
     #[test]
+    fn find_live_by_path_includes_dispatching_and_ignores_reclaimed_rows() {
+        let conn = open_conn();
+        insert_exec_env(&conn, &new_lease("env-live", "/wt/live")).unwrap();
+        conn.execute(
+            "UPDATE exec_envs SET state='dispatching' WHERE env_id='env-live'",
+            [],
+        )
+        .unwrap();
+        let live = find_live_exec_env_by_path(&conn, "/wt/live")
+            .unwrap()
+            .expect("dispatching lease remains visible to destructive consumers");
+        assert_eq!(live.state, ExecEnvState::Dispatching);
+
+        conn.execute(
+            "UPDATE exec_envs SET state='reclaimed' WHERE env_id='env-live'",
+            [],
+        )
+        .unwrap();
+        assert!(find_live_exec_env_by_path(&conn, "/wt/live")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn find_live_by_path_fails_closed_on_unknown_persisted_state() {
+        let conn = open_conn();
+        insert_exec_env(&conn, &new_lease("env-unknown", "/wt/unknown")).unwrap();
+        conn.execute(
+            "UPDATE exec_envs SET state='future_state' WHERE env_id='env-unknown'",
+            [],
+        )
+        .unwrap();
+
+        let error = find_live_exec_env_by_path(&conn, "/wt/unknown")
+            .expect_err("unknown unreclaimed state must remain visible as an error");
+        assert!(error.to_string().contains("unknown exec_env state"));
+    }
+
+    #[test]
+    fn removal_claim_and_dispatch_admission_are_mutually_exclusive() {
+        let mut conn = open_conn();
+        insert_exec_env(&conn, &new_lease("env-remove", "/wt/remove")).unwrap();
+        super::super::exec_env_resources::insert_resource(
+            &mut conn,
+            &super::super::exec_env_resources::NewExecEnvResource {
+                resource_id: "res-remove".to_string(),
+                kind: super::super::exec_env_resources::ResourceKind::Worktree,
+                path: "/wt/remove".to_string(),
+                bytes: None,
+                created_at: String::new(),
+            },
+        )
+        .unwrap();
+        super::super::exec_env_resources::bind_resource(&mut conn, "env-remove", "res-remove")
+            .unwrap();
+
+        assert_eq!(
+            claim_exec_env_removal(&mut conn, "/wt/remove").unwrap(),
+            Some("env-remove".to_string())
+        );
+        assert_eq!(
+            get_exec_env(&conn, "env-remove").unwrap().unwrap().state,
+            ExecEnvState::Removing
+        );
+        let dispatch_changed = conn
+            .execute(
+                "UPDATE exec_envs SET state='dispatching' WHERE env_id='env-remove' AND state='active'",
+                [],
+            )
+            .unwrap();
+        assert_eq!(dispatch_changed, 0, "removal ownership must fence dispatch");
+
+        abort_exec_env_removal(&mut conn, "env-remove").unwrap();
+        conn.execute(
+            "UPDATE exec_envs SET state='dispatching' WHERE env_id='env-remove' AND state='active'",
+            [],
+        )
+        .unwrap();
+        let error = claim_exec_env_removal(&mut conn, "/wt/remove")
+            .expect_err("dispatch ownership must fence removal");
+        assert!(
+            error.to_string().contains("lease is dispatching"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn concurrent_removal_and_dispatch_claims_have_exactly_one_winner() {
+        use std::sync::{Arc, Barrier};
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("claims.sqlite");
+        let mut seed = open_file_conn(&db);
+        insert_exec_env(&seed, &new_lease("env-race", "/wt/race")).unwrap();
+        super::super::exec_env_resources::insert_resource(
+            &mut seed,
+            &super::super::exec_env_resources::NewExecEnvResource {
+                resource_id: "res-race".to_string(),
+                kind: super::super::exec_env_resources::ResourceKind::Worktree,
+                path: "/wt/race".to_string(),
+                bytes: None,
+                created_at: String::new(),
+            },
+        )
+        .unwrap();
+        super::super::exec_env_resources::bind_resource(&mut seed, "env-race", "res-race").unwrap();
+        drop(seed);
+
+        let mut removal_conn = open_file_conn(&db);
+        let mut dispatch_conn = open_file_conn(&db);
+        let barrier = Arc::new(Barrier::new(2));
+        let removal_barrier = Arc::clone(&barrier);
+        let removal = std::thread::spawn(move || {
+            removal_barrier.wait();
+            matches!(
+                claim_exec_env_removal(&mut removal_conn, "/wt/race"),
+                Ok(Some(env_id)) if env_id == "env-race"
+            )
+        });
+        let dispatch = std::thread::spawn(move || {
+            barrier.wait();
+            let tx = dispatch_conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .unwrap();
+            let changed = tx
+                .execute(
+                    "UPDATE exec_envs SET state='dispatching' WHERE env_id='env-race' AND state='active'",
+                    [],
+                )
+                .unwrap();
+            tx.commit().unwrap();
+            changed == 1
+        });
+
+        let removal_won = removal.join().unwrap();
+        let dispatch_won = dispatch.join().unwrap();
+        assert_ne!(
+            removal_won, dispatch_won,
+            "the IMMEDIATE transactions and guarded transitions must admit exactly one owner"
+        );
+    }
+
+    #[test]
     fn reclaim_by_path_targets_the_active_lease() {
         let mut conn = open_conn();
         // A stale reclaimed row plus a live active row for the same path.
@@ -632,6 +1227,18 @@ mod tests {
     fn state_parse_rejects_unknown() {
         assert!(ExecEnvState::parse("provisioned").is_err());
         assert_eq!(ExecEnvState::parse("active").unwrap(), ExecEnvState::Active);
+        assert_eq!(
+            ExecEnvState::parse("dispatching").unwrap(),
+            ExecEnvState::Dispatching
+        );
+        assert_eq!(
+            ExecEnvState::parse("publishing").unwrap(),
+            ExecEnvState::Publishing
+        );
+        assert_eq!(
+            ExecEnvState::parse("removing").unwrap(),
+            ExecEnvState::Removing
+        );
         assert_eq!(
             ExecEnvState::parse("reclaimed").unwrap(),
             ExecEnvState::Reclaimed

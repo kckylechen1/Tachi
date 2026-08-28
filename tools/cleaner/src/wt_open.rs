@@ -45,6 +45,8 @@ pub struct OpenReport {
     pub base_sha: String,
     pub managed_root: String,
     pub marker_path: Option<String>,
+    #[serde(skip)]
+    pub worktree_authority: Option<memcore::anchored_fs::AnchoredDirectory>,
     /// Shared `CARGO_TARGET_DIR` written to `<worktree>/.cargo/config.toml`
     /// (#484 slice 2), when this is a Rust repo and provisioning happened.
     /// `None` when the worktree is not a Rust repo (no root `Cargo.toml`) or
@@ -271,10 +273,40 @@ pub enum CargoTargetProvision {
 /// `Cargo.toml` must exist in the worktree already, since `git worktree add`
 /// checks out tracked files before this runs) and never overwrites an existing
 /// `.cargo/config.toml`.
+#[allow(dead_code)] // public library seam; the CLI target uses descriptor-bound provisioning
 pub fn provision_cargo_target_config(
     worktree_path: &Path,
     policy: &CargoTargetPolicy,
 ) -> Result<CargoTargetProvision, String> {
+    provision_cargo_target_config_inner(worktree_path, policy, None)
+}
+
+pub fn provision_cargo_target_config_with_authority(
+    worktree_path: &Path,
+    policy: &CargoTargetPolicy,
+    authority: &memcore::anchored_fs::AnchoredDirectory,
+) -> Result<CargoTargetProvision, String> {
+    provision_cargo_target_config_inner(worktree_path, policy, Some(authority))
+}
+
+fn provision_cargo_target_config_inner(
+    worktree_path: &Path,
+    policy: &CargoTargetPolicy,
+    authority: Option<&memcore::anchored_fs::AnchoredDirectory>,
+) -> Result<CargoTargetProvision, String> {
+    #[cfg(unix)]
+    if let Some(authority) = authority {
+        let anchored_path = canonical_non_symlink_directory(worktree_path)?;
+        if !authority
+            .matches_absolute_path(&anchored_path)
+            .map_err(|error| format!("verify descriptor authority: {error}"))?
+        {
+            return Err(format!(
+                "worktree identity changed after open: {}",
+                worktree_path.display()
+            ));
+        }
+    }
     // Checked before the Rust-repo probe: "this env gets no target" is a policy
     // statement, not a fact about the repo, and it holds either way.
     if matches!(policy, CargoTargetPolicy::Unallocated) {
@@ -285,9 +317,6 @@ pub fn provision_cargo_target_config(
     }
     let cargo_dir = worktree_path.join(".cargo");
     let config_path = cargo_dir.join("config.toml");
-    if config_path.exists() {
-        return Ok(CargoTargetProvision::SkippedExisting);
-    }
     let (target_dir, provenance) = match policy {
         CargoTargetPolicy::Unallocated => unreachable!("handled above"),
         CargoTargetPolicy::Shared => (
@@ -315,15 +344,179 @@ pub fn provision_cargo_target_config(
             )
         }
     };
-    std::fs::create_dir_all(&cargo_dir)
-        .map_err(|err| format!("create {}: {err}", cargo_dir.display()))?;
     let contents = format!(
         "{provenance}[build]\ntarget-dir = \"{}\"\n",
         escape_toml_string(&target_dir.display().to_string())
     );
-    std::fs::write(&config_path, contents)
-        .map_err(|err| format!("write {}: {err}", config_path.display()))?;
-    Ok(CargoTargetProvision::Written(target_dir))
+    #[cfg(not(unix))]
+    {
+        let _ = (cargo_dir, config_path, contents, target_dir, authority);
+        return Err(
+            "cargo target provisioning requires descriptor-anchored, no-follow filesystem operations on this platform"
+                .to_string(),
+        );
+    }
+    #[cfg(unix)]
+    {
+        let anchored_path = canonical_non_symlink_directory(worktree_path)?;
+        let opened_authority;
+        let worktree = match authority {
+            Some(authority) => {
+                let matches = authority
+                    .matches_absolute_path(&anchored_path)
+                    .map_err(|error| {
+                        format!(
+                            "verify descriptor authority for {}: {error}",
+                            worktree_path.display()
+                        )
+                    })?;
+                if !matches {
+                    return Err(format!(
+                        "worktree identity changed after open: {}",
+                        worktree_path.display()
+                    ));
+                }
+                authority
+            }
+            None => {
+                opened_authority =
+                    memcore::anchored_fs::AnchoredDirectory::open_absolute(&anchored_path)
+                        .map_err(|err| {
+                            format!("anchor {} without symlinks: {err}", worktree_path.display())
+                        })?;
+                &opened_authority
+            }
+        };
+        let cargo = worktree
+            .open_or_create_directory(std::ffi::OsStr::new(".cargo"))
+            .map_err(|err| format!("open anchored {}: {err}", cargo_dir.display()))?;
+        match cargo
+            .create_file_exclusive(std::ffi::OsStr::new("config.toml"), contents.as_bytes())
+            .map_err(|err| format!("write anchored {}: {err}", config_path.display()))?
+        {
+            memcore::anchored_fs::CreateFileOutcome::Created => {
+                Ok(CargoTargetProvision::Written(target_dir))
+            }
+            memcore::anchored_fs::CreateFileOutcome::Exists => {
+                Ok(CargoTargetProvision::SkippedExisting)
+            }
+        }
+    }
+}
+
+/// Remove only the exact private Cargo config this provisioning code writes.
+/// A missing or different file is not ours and is left for the ordinary dirty
+/// worktree fence to adjudicate. This narrow rollback exists so a later atomic
+/// ledger failure can restore the freshly opened worktree to its clean checkout
+/// before certified `wt-remove`; it does not weaken general dirty cleanup.
+#[allow(dead_code)] // library API; the CLI target compiles this module without the server caller
+pub fn rollback_private_cargo_target_config(
+    worktree_path: &Path,
+    target_dir: &Path,
+) -> Result<bool, String> {
+    #[cfg(not(unix))]
+    return Err(
+        "private cargo target rollback requires descriptor-anchored, no-follow filesystem operations on this platform"
+            .to_string(),
+    );
+    #[cfg(unix)]
+    {
+        if !target_dir.is_absolute() {
+            return Err(format!(
+                "private cargo target-dir rollback requires an absolute target, got '{}'",
+                target_dir.display()
+            ));
+        }
+        let config_path = worktree_path.join(".cargo").join("config.toml");
+        let expected = format!(
+            "# Written by tachi wt-open (#894 S2c): PRIVATE cargo target-dir for an\n\
+         # explicitly approved build-private env. Not shared with any other tree.\n\
+         [build]\ntarget-dir = \"{}\"\n",
+            escape_toml_string(&target_dir.display().to_string())
+        );
+        let anchored_path = canonical_non_symlink_directory(worktree_path)?;
+        let worktree = memcore::anchored_fs::AnchoredDirectory::open_absolute(&anchored_path)
+            .map_err(|error| {
+                format!(
+                    "anchor {} before rollback: {error}",
+                    worktree_path.display()
+                )
+            })?;
+        let cargo = match worktree.open_directory(std::ffi::OsStr::new(".cargo")) {
+            Ok(cargo) => cargo,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => {
+                return Err(format!(
+                    "anchor {} before rollback: {error}",
+                    config_path.display()
+                ))
+            }
+        };
+        cargo
+            .remove_file_if_exact(std::ffi::OsStr::new("config.toml"), expected.as_bytes())
+            .map_err(|error| {
+                format!(
+                    "remove exact owned config {}: {error}",
+                    config_path.display()
+                )
+            })
+    }
+}
+
+#[allow(dead_code)] // used by the server library; the cleaner binary compiles this module separately
+pub fn rollback_private_cargo_target_config_with_authority(
+    worktree_path: &Path,
+    target_dir: &Path,
+    authority: &memcore::anchored_fs::AnchoredDirectory,
+) -> Result<bool, String> {
+    #[cfg(not(unix))]
+    return Err(
+        "private cargo target rollback requires descriptor-anchored, no-follow filesystem operations on this platform"
+            .to_string(),
+    );
+    #[cfg(unix)]
+    {
+        if !authority
+            .matches_absolute_path(worktree_path)
+            .map_err(|error| format!("verify rollback descriptor authority: {error}"))?
+        {
+            return Err("worktree identity changed before private Cargo rollback".to_string());
+        }
+        if !target_dir.is_absolute() {
+            return Err(format!(
+                "private cargo target-dir rollback requires an absolute target, got '{}'",
+                target_dir.display()
+            ));
+        }
+        let expected = format!(
+            "# Written by tachi wt-open (#894 S2c): PRIVATE cargo target-dir for an\n\
+             # explicitly approved build-private env. Not shared with any other tree.\n\
+             [build]\ntarget-dir = \"{}\"\n",
+            escape_toml_string(&target_dir.display().to_string())
+        );
+        let cargo = match authority.open_directory(std::ffi::OsStr::new(".cargo")) {
+            Ok(cargo) => cargo,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(format!("open anchored .cargo for rollback: {error}")),
+        };
+        cargo
+            .remove_file_if_exact(std::ffi::OsStr::new("config.toml"), expected.as_bytes())
+            .map_err(|error| format!("remove exact owned private Cargo config: {error}"))
+    }
+}
+
+#[cfg(unix)]
+fn canonical_non_symlink_directory(path: &Path) -> Result<PathBuf, String> {
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|error| format!("inspect directory {}: {error}", path.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(format!(
+            "refusing non-directory or symlink worktree authority: {}",
+            path.display()
+        ));
+    }
+    std::fs::canonicalize(path)
+        .map_err(|error| format!("canonicalize directory {}: {error}", path.display()))
 }
 
 /// Minimal TOML basic-string escaping (backslash + double-quote) — paths on
@@ -379,6 +572,13 @@ pub fn run_wt_open(options: OpenOptions) -> Result<(), String> {
 }
 
 pub fn open_worktree(options: OpenOptions) -> Result<OpenReport, String> {
+    #[cfg(not(unix))]
+    if !matches!(&options.cargo_target, CargoTargetPolicy::Unallocated) {
+        return Err(
+            "refusing worktree open: cargo target provisioning requires descriptor-anchored, no-follow filesystem operations on this platform"
+                .to_string(),
+        );
+    }
     let repo_root = canonicalize_existing(&options.repo_root, "repo root")?;
     let base_ref = options
         .base
@@ -398,7 +598,7 @@ pub fn open_worktree(options: OpenOptions) -> Result<OpenReport, String> {
 
     let (branch, leaf) = resolve_names(&options)?;
     let managed_root = default_worktrees_root()?;
-    let path = match options.path {
+    let mut path = match options.path {
         Some(p) => p,
         None => plan_managed_worktree_path(&repo_root, &leaf)?,
     };
@@ -415,6 +615,7 @@ pub fn open_worktree(options: OpenOptions) -> Result<OpenReport, String> {
         base_sha: base_sha.clone(),
         managed_root: managed_root.display().to_string(),
         marker_path: None,
+        worktree_authority: None,
         cargo_target_dir: None,
         warnings: Vec::new(),
         errors: Vec::new(),
@@ -587,6 +788,35 @@ pub fn open_worktree(options: OpenOptions) -> Result<OpenReport, String> {
         return Ok(report);
     }
 
+    let opened_path = match canonical_non_symlink_directory(&path) {
+        Ok(opened_path) => opened_path,
+        Err(error) => {
+            report.errors.push(format!(
+                "write-lane entry gate refused: cannot anchor the newly opened worktree: {error}"
+            ));
+            return Ok(report);
+        }
+    };
+    if let Some(reason) = path_outside_managed_root_reason(&opened_path, &managed_root) {
+        report.errors.push(format!(
+            "write-lane entry gate refused after worktree creation: {reason}"
+        ));
+        return Ok(report);
+    }
+    let authority = match memcore::anchored_fs::AnchoredDirectory::open_absolute(&opened_path) {
+        Ok(authority) => authority,
+        Err(error) => {
+            report.errors.push(format!(
+                "write-lane entry gate refused: cannot open descriptor authority for {}: {error}",
+                opened_path.display()
+            ));
+            return Ok(report);
+        }
+    };
+    path = opened_path;
+    report.path = path.display().to_string();
+    report.worktree_authority = Some(authority);
+
     // Write-lane entry gate (tachi#1118 freeze boundary 3, second half):
     // `git status --porcelain` must read empty the moment a freshly
     // created worktree is handed to a write lane. A non-empty status here
@@ -619,7 +849,11 @@ pub fn open_worktree(options: OpenOptions) -> Result<OpenReport, String> {
     // file-based so it survives any child process/lane that forgets to export
     // CARGO_TARGET_DIR. Never fatal — a failure here does not undo the worktree
     // open. An `Unallocated` (edit-only) worktree gets no config at all.
-    match provision_cargo_target_config(&path, &options.cargo_target) {
+    let authority = report
+        .worktree_authority
+        .as_ref()
+        .expect("opened worktree has descriptor authority");
+    match provision_cargo_target_config_with_authority(&path, &options.cargo_target, authority) {
         Ok(CargoTargetProvision::Written(dir)) => {
             report.cargo_target_dir = Some(dir.display().to_string());
         }
@@ -640,22 +874,27 @@ pub fn open_worktree(options: OpenOptions) -> Result<OpenReport, String> {
 
     // Register marker + global registry so wt-remove / sweep can reclaim later.
     let dispatch_id = options.dispatch_id.or_else(|| options.task.clone());
-    match registry::register_worktree(RegisterOptions {
-        path: path.clone(),
-        repo_root: repo_root.clone(),
-        branch: branch.clone(),
-        dispatch_id,
-        pr: None,
-        // Emit suppressed: open report is the single user-facing surface.
-        output: RegisterOutputFormat::Json,
-    }) {
+    match registry::register_worktree_anchored(
+        RegisterOptions {
+            path: path.clone(),
+            repo_root: repo_root.clone(),
+            branch: branch.clone(),
+            dispatch_id,
+            pr: None,
+            // Emit suppressed: open report is the single user-facing surface.
+            output: RegisterOutputFormat::Json,
+        },
+        path.clone(),
+        authority,
+    ) {
         Ok(reg) => {
             report.registered = true;
             report.marker_path = Some(reg.marker_path);
         }
         Err(err) => {
-            report.warnings.push(format!(
-                "worktree opened but registration failed: {err}; run tachi-clean wt-register manually"
+            report.opened = false;
+            report.errors.push(format!(
+                "worktree opened but descriptor-bound registration failed: {err}; refusing handoff because the managed path has no trustworthy cleanup identity"
             ));
         }
     }
@@ -1248,11 +1487,12 @@ mod tests {
         assert!(report.opened);
         assert!(report.registered);
         let path = PathBuf::from(&report.path);
+        let canonical_cache = cache.canonicalize().unwrap();
         assert!(
-            path.starts_with(&cache),
+            path.starts_with(&canonical_cache),
             "path={} cache={}",
             path.display(),
-            cache.display()
+            canonical_cache.display()
         );
         assert!(path.join(".tachi-worktree.json").exists());
         assert!(path.join("README").exists());
@@ -1560,6 +1800,83 @@ mod tests {
             Some(v) => std::env::set_var(SHARED_CARGO_TARGET_DIR_ENV, v),
             None => std::env::remove_var(SHARED_CARGO_TARGET_DIR_ENV),
         }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn private_config_rollback_removes_only_the_owned_exact_payload() {
+        let root = unique_temp("tachi-private-config-rollback");
+        std::fs::write(root.join("Cargo.toml"), "[workspace]\nmembers = []\n").unwrap();
+        let target = root.join("private-target");
+        assert!(matches!(
+            provision_cargo_target_config(&root, &CargoTargetPolicy::Private(target.clone()))
+                .unwrap(),
+            CargoTargetProvision::Written(ref written) if written == &target
+        ));
+        assert!(rollback_private_cargo_target_config(&root, &target).unwrap());
+        let config = root.join(".cargo/config.toml");
+        assert!(!config.exists());
+
+        std::fs::write(&config, "[build]\ntarget-dir = \"/foreign\"\n").unwrap();
+        assert!(!rollback_private_cargo_target_config(&root, &target).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(&config).unwrap(),
+            "[build]\ntarget-dir = \"/foreign\"\n"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_config_io_refuses_symlinked_cargo_directory_and_never_removes_target() {
+        use std::os::unix::fs::symlink;
+
+        let root = unique_temp("tachi-private-config-symlink-root");
+        let external = unique_temp("tachi-private-config-symlink-external");
+        std::fs::write(root.join("Cargo.toml"), "[workspace]\nmembers = []\n").unwrap();
+        std::fs::remove_dir(root.join(".cargo")).ok();
+        symlink(&external, root.join(".cargo")).unwrap();
+        let target = root.join("private-target");
+
+        let error =
+            provision_cargo_target_config(&root, &CargoTargetPolicy::Private(target.clone()))
+                .unwrap_err();
+        assert!(
+            error.contains("open anchored"),
+            "unexpected provisioning error: {error}"
+        );
+        assert!(!external.join("config.toml").exists());
+
+        let external_config = external.join("config.toml");
+        std::fs::write(&external_config, "external must survive\n").unwrap();
+        assert!(rollback_private_cargo_target_config(&root, &target).is_err());
+        assert_eq!(
+            std::fs::read_to_string(&external_config).unwrap(),
+            "external must survive\n"
+        );
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(external);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_config_rollback_captures_symlink_without_following_its_target() {
+        use std::os::unix::fs::symlink;
+
+        let root = unique_temp("tachi-private-config-final-symlink");
+        let external = root.join("external-config");
+        let cargo = root.join(".cargo");
+        std::fs::create_dir_all(&cargo).unwrap();
+        std::fs::write(&external, "external must survive\n").unwrap();
+        symlink(&external, cargo.join("config.toml")).unwrap();
+        let target = root.join("private-target");
+
+        assert!(!rollback_private_cargo_target_config(&root, &target).unwrap());
+        assert!(cargo.join("config.toml").is_symlink());
+        assert_eq!(
+            std::fs::read_to_string(&external).unwrap(),
+            "external must survive\n"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 

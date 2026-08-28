@@ -4,7 +4,7 @@ use std::process::Command;
 use crate::holder::{self, HolderEvidence, HolderProbeFn};
 use crate::registry;
 use crate::scrap_ledger;
-use crate::work_claim::{self, DbHolderProbeFn};
+use crate::work_claim::{self, DbHolderProbeFn, DbRemovalClaim};
 
 #[derive(Debug, Clone, Copy)]
 pub enum OutputFormat {
@@ -17,6 +17,32 @@ pub struct WtRemoveOptions {
     pub path: PathBuf,
     pub force: bool,
     pub output: OutputFormat,
+}
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)] // consumed by the library dependency; the CLI target compiles this module too
+pub struct WtRemovalOutcome {
+    pub removed: bool,
+    pub warnings: Vec<String>,
+    pub errors: Vec<String>,
+}
+
+/// In-process removal entry point for trusted server callers. This deliberately
+/// bypasses `TACHI_CLEAN_BIN`: the atomic ExecEnv claim in this crate must be
+/// on the production path before any filesystem deletion can occur.
+#[allow(dead_code)] // consumed by the library dependency; the CLI target compiles this module too
+pub fn remove_worktree_for_safe_merge(path: &Path) -> WtRemovalOutcome {
+    let report = plan_wt_remove_default(path, false);
+    let report = if report.allowed {
+        execute_wt_remove(report)
+    } else {
+        report
+    };
+    WtRemovalOutcome {
+        removed: report.removed,
+        warnings: report.warnings,
+        errors: report.errors,
+    }
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -145,15 +171,24 @@ fn plan_wt_remove(
         return report;
     }
 
-    if !is_registered_or_marked(&worktree_root) {
-        report.warnings.push(
-            "worktree is not registered in ~/.tachi/worktrees.json and has no .tachi-worktree.json marker; allowing dry-run only until dispatch registry integration lands"
-                .to_string(),
-        );
-        if !dry_run {
+    match registry::verify_worktree_ownership(&worktree_root) {
+        Ok(true) => {}
+        Ok(false) => {
+            report.warnings.push(
+                "worktree is not registered in ~/.tachi/worktrees.json and has no valid .tachi-worktree.json marker; allowing dry-run only until dispatch registry integration lands"
+                    .to_string(),
+            );
+            if !dry_run {
+                report
+                    .errors
+                    .push("refusing to remove unregistered worktree with --force".to_string());
+                return report;
+            }
+        }
+        Err(error) => {
             report
                 .errors
-                .push("refusing to remove unregistered worktree with --force".to_string());
+                .push(format!("refusing to remove worktree: {error}"));
             return report;
         }
     }
@@ -291,9 +326,17 @@ fn current_branch(worktree_root: &Path) -> Result<String, String> {
 }
 
 fn execute_wt_remove(mut report: WtRemoveReport) -> WtRemoveReport {
+    execute_wt_remove_with_claim(&mut report, &work_claim::claim_worktree_removal);
+    report
+}
+
+fn execute_wt_remove_with_claim(
+    report: &mut WtRemoveReport,
+    claim_removal: &dyn Fn(&Path) -> Result<DbRemovalClaim, String>,
+) {
     let Some(path) = report.canonical_path.clone() else {
         report.errors.push("missing canonical path".to_string());
-        return report;
+        return;
     };
     if report.registry_only {
         // #1605 fix round (codex review): re-verify staleness at execute time
@@ -320,7 +363,7 @@ fn execute_wt_remove(mut report: WtRemoveReport) -> WtRemoveReport {
                  (it did not at plan time) — this row may no longer be stale; re-run \
                  `wt-remove` to re-plan against current state before dropping it"
             ));
-            return report;
+            return;
         }
         // Locked precondition + exact-row deletion in one critical section:
         // the other half of the TOCTOU fix. Re-checks "does this path
@@ -332,7 +375,7 @@ fn execute_wt_remove(mut report: WtRemoveReport) -> WtRemoveReport {
             Ok(true) => {
                 report.removed = true;
                 report.dry_run = false;
-                if let Err(err) = append_log(&report) {
+                if let Err(err) = append_log(report) {
                     report
                         .warnings
                         .push(format!("cleanup log write failed: {err}"));
@@ -343,11 +386,11 @@ fn execute_wt_remove(mut report: WtRemoveReport) -> WtRemoveReport {
             )),
             Err(err) => report.errors.push(err),
         }
-        return report;
+        return;
     }
     let Some(repo_root) = report.repo_root.clone() else {
         report.errors.push("missing repo root".to_string());
-        return report;
+        return;
     };
 
     // Fail-closed integrity boundary (tachi#1212 fix-round, codex checkpoint
@@ -363,14 +406,104 @@ fn execute_wt_remove(mut report: WtRemoveReport) -> WtRemoveReport {
              fail-closed integrity boundary)"
                 .to_string(),
         );
-        return report;
+        return;
+    };
+    let removal_claim = match claim_removal(Path::new(&path)) {
+        Ok(claim) => claim,
+        Err(err) => {
+            report.errors.push(format!(
+                "refusing to remove: could not atomically claim ExecEnv removal ({err})"
+            ));
+            return;
+        }
+    };
+    // Revalidate the physical ownership records after the destructive lease
+    // claim.  Planning is deliberately earlier than execution, so a same-
+    // path replacement can have happened after the plan was admitted.  The
+    // removal claim serializes dispatch against deletion, but it does not
+    // pin the pathname's directory object; only this fresh registry/marker/
+    // device+inode check can prove that the object about to be removed is
+    // still the one that was planned.  Abort the claim before measuring,
+    // recording, or invoking `git worktree remove` on any ambiguity.
+    match registry::verify_worktree_ownership(Path::new(&path)) {
+        Ok(true) => {}
+        Ok(false) => {
+            report.errors.push(
+                "refusing to remove: worktree ownership could not be revalidated after the ExecEnv removal claim (registry and marker records are missing)".to_string(),
+            );
+            if let Err(abort_error) = removal_claim.abort() {
+                report.errors.push(format!(
+                    "ExecEnv removal claim abort also failed; lease remains fail-closed: {abort_error}"
+                ));
+            }
+            return;
+        }
+        Err(error) => {
+            report.errors.push(format!(
+                "refusing to remove: worktree ownership could not be revalidated after the ExecEnv removal claim ({error})"
+            ));
+            if let Err(abort_error) = removal_claim.abort() {
+                report.errors.push(format!(
+                    "ExecEnv removal claim abort also failed; lease remains fail-closed: {abort_error}"
+                ));
+            }
+            return;
+        }
+    }
+    let reclaimed_bytes = match work_claim::measure_worktree_bytes(Path::new(&path)) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            report.errors.push(format!(
+                "refusing to remove: could not measure worktree before deletion ({err})"
+            ));
+            if let Err(abort_error) = removal_claim.abort() {
+                report.errors.push(format!(
+                    "ExecEnv removal claim abort also failed; lease remains fail-closed: {abort_error}"
+                ));
+            }
+            return;
+        }
     };
     if let Err(err) = scrap_ledger::record_scrap(Path::new(&path), &branch) {
         report.errors.push(format!(
             "refusing to remove: scrap ledger write failed ({err}); fail-closed rather than \
              remove a tree the re-entry gate cannot remember (tachi#1118)"
         ));
-        return report;
+        if let Err(abort_error) = removal_claim.abort() {
+            report.errors.push(format!(
+                "ExecEnv removal claim abort also failed; lease remains fail-closed: {abort_error}"
+            ));
+        }
+        return;
+    }
+
+    // The scrap write above can block long enough for the pathname to be
+    // replaced after the post-claim check.  Revalidate immediately before
+    // the path-based Git deletion as the final execution-boundary guard.
+    match registry::verify_worktree_ownership(Path::new(&path)) {
+        Ok(true) => {}
+        Ok(false) => {
+            report.errors.push(
+                "refusing to remove: worktree ownership changed before git worktree remove (registry and marker records are missing)".to_string(),
+            );
+            if let Err(abort_error) = removal_claim.abort() {
+                report.errors.push(format!(
+                    "ExecEnv removal claim abort also failed; lease remains fail-closed: {abort_error}"
+                ));
+            }
+            return;
+        }
+        Err(error) => {
+            report.errors.push(format!(
+                "refusing to remove: worktree ownership changed before git worktree remove ({error})"
+            ));
+            if let Err(abort_error) = removal_claim.abort() {
+                report.errors.push(format!(
+                    "ExecEnv removal claim abort also failed; lease remains fail-closed: {abort_error}"
+                ));
+            }
+            return;
+        }
     }
 
     match Command::new("git")
@@ -380,6 +513,11 @@ fn execute_wt_remove(mut report: WtRemoveReport) -> WtRemoveReport {
         Ok(out) if out.status.success() => {
             report.removed = true;
             report.dry_run = false;
+            if let Err(err) = removal_claim.complete(reclaimed_bytes) {
+                report.errors.push(format!(
+                    "worktree was removed but ExecEnv removal completion failed; lease remains fail-closed: {err}"
+                ));
+            }
 
             // 1. Clean up stale worktree registrations
             let _ = Command::new("git")
@@ -451,13 +589,18 @@ fn execute_wt_remove(mut report: WtRemoveReport) -> WtRemoveReport {
                     .warnings
                     .push(format!("registry cleanup failed: {err}")),
             }
-            if let Err(err) = append_log(&report) {
+            if let Err(err) = append_log(report) {
                 report
                     .warnings
                     .push(format!("cleanup log write failed: {err}"));
             }
         }
         Ok(out) => {
+            if let Err(abort_error) = removal_claim.abort() {
+                report.errors.push(format!(
+                    "ExecEnv removal claim abort failed; lease remains fail-closed: {abort_error}"
+                ));
+            }
             report.errors.push(format!(
                 "git worktree remove failed: {}",
                 String::from_utf8_lossy(&out.stderr).trim()
@@ -471,6 +614,11 @@ fn execute_wt_remove(mut report: WtRemoveReport) -> WtRemoveReport {
             );
         }
         Err(err) => {
+            if let Err(abort_error) = removal_claim.abort() {
+                report.errors.push(format!(
+                    "ExecEnv removal claim abort failed; lease remains fail-closed: {abort_error}"
+                ));
+            }
             report
                 .errors
                 .push(format!("failed to run git worktree remove: {err}"));
@@ -483,7 +631,6 @@ fn execute_wt_remove(mut report: WtRemoveReport) -> WtRemoveReport {
             );
         }
     }
-    report
 }
 
 fn emit_report(report: &WtRemoveReport, output: OutputFormat) -> Result<(), String> {
@@ -535,11 +682,6 @@ fn repo_root_from_worktree(worktree_root: &Path) -> Result<PathBuf, String> {
         .parent()
         .ok_or_else(|| "git common dir has no parent".to_string())?;
     std::fs::canonicalize(repo_root).map_err(|err| format!("cannot canonicalize repo root: {err}"))
-}
-
-fn is_registered_or_marked(worktree_root: &Path) -> bool {
-    worktree_root.join(".tachi-worktree.json").exists()
-        || registry::registry_contains(worktree_root)
 }
 
 /// `git status --porcelain` entries for `worktree_root`, excluding the
@@ -708,6 +850,98 @@ mod tests {
         .unwrap();
 
         (HomeGuard(old_home), worktree)
+    }
+
+    #[test]
+    fn force_remove_refuses_registry_row_without_marker_evidence() {
+        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let root = unique_temp_dir("wt-clean-missing-marker");
+        let (_home_guard, worktree) = setup_registered_worktree(&root);
+        std::fs::remove_file(worktree.join(".tachi-worktree.json")).unwrap();
+
+        let report = plan_wt_remove(
+            &worktree,
+            false,
+            &|_| crate::work_claim::DbHolderEvidence::Clear,
+            &|_| HolderEvidence::Clear,
+        );
+        assert!(!report.allowed);
+        assert!(
+            report.errors.join(" | ").contains("marker"),
+            "registry row alone must not authorize force removal: {:?}",
+            report.errors
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn force_remove_refuses_legacy_registry_and_marker_without_identity() {
+        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let root = unique_temp_dir("wt-clean-legacy-identity");
+        let (_home_guard, worktree) = setup_registered_worktree(&root);
+        let registry_path = root.join("home/.tachi/worktrees.json");
+        for path in [registry_path, worktree.join(".tachi-worktree.json")] {
+            let mut value: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            if let Some(records) = value
+                .get_mut("worktrees")
+                .and_then(serde_json::Value::as_array_mut)
+            {
+                let record = records.first_mut().unwrap();
+                record.as_object_mut().unwrap().remove("device");
+                record.as_object_mut().unwrap().remove("inode");
+            } else {
+                let record = value.as_object_mut().unwrap();
+                record.remove("device");
+                record.remove("inode");
+            }
+            std::fs::write(
+                &path,
+                format!("{}\n", serde_json::to_string_pretty(&value).unwrap()),
+            )
+            .unwrap();
+        }
+
+        let report = plan_wt_remove(
+            &worktree,
+            false,
+            &|_| crate::work_claim::DbHolderEvidence::Clear,
+            &|_| HolderEvidence::Clear,
+        );
+        assert!(!report.allowed);
+        assert!(
+            report.errors.join(" | ").contains("device/inode identity"),
+            "legacy records must fail closed: {:?}",
+            report.errors
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ownership_verification_refuses_same_path_replacement_with_stale_marker() {
+        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let root = unique_temp_dir("wt-clean-identity-replacement");
+        let (_home_guard, worktree) = setup_registered_worktree(&root);
+        let marker = std::fs::read(worktree.join(".tachi-worktree.json")).unwrap();
+        let captured = root.join("captured-worktree");
+        std::fs::rename(&worktree, &captured).unwrap();
+        std::fs::create_dir(&worktree).unwrap();
+        std::fs::write(worktree.join(".tachi-worktree.json"), marker).unwrap();
+
+        let error = registry::verify_worktree_ownership(&worktree).unwrap_err();
+        assert!(
+            error.contains("identity changed"),
+            "same-path replacement must fail closed: {error}"
+        );
+        assert!(
+            captured.exists(),
+            "the original registered directory must remain untouched"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -1081,6 +1315,129 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// The ordinary destructive close must revalidate ownership after it has
+    /// claimed the ExecEnv lease.  This test performs the replacement inside
+    /// the injected claim callback, so a check that only runs before the claim
+    /// cannot pass: the old worktree is moved aside, a different Git worktree
+    /// is created at the same pathname, and the old marker is copied onto it.
+    #[test]
+    fn execute_refuses_same_path_replacement_after_removal_claim() {
+        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let root = unique_temp_dir("wt-clean-execute-identity");
+        let (_home_guard, worktree) = setup_registered_worktree(&root);
+        let repo = root.join("repo");
+        let captured = root.join("captured-original");
+        let marker = std::fs::read(worktree.join(".tachi-worktree.json")).unwrap();
+        let registered_path = registered_path_string(&worktree);
+
+        let report = plan_wt_remove(
+            &worktree,
+            false,
+            &|_| crate::work_claim::DbHolderEvidence::Clear,
+            &|_| HolderEvidence::Clear,
+        );
+        assert!(
+            report.allowed,
+            "the original registered worktree must be removable before the swap: {:?}",
+            report.errors
+        );
+
+        let claim_called = std::cell::Cell::new(false);
+        let mut report = report;
+        execute_wt_remove_with_claim(&mut report, &|_| {
+            claim_called.set(true);
+            assert!(Command::new("git")
+                .args([
+                    "worktree",
+                    "move",
+                    worktree.to_str().unwrap(),
+                    captured.to_str().unwrap(),
+                ])
+                .current_dir(&repo)
+                .status()
+                .unwrap()
+                .success());
+            assert!(Command::new("git")
+                .args([
+                    "worktree",
+                    "add",
+                    "-b",
+                    "feature/execute-replacement",
+                    worktree.to_str().unwrap(),
+                ])
+                .current_dir(&repo)
+                .status()
+                .unwrap()
+                .success());
+            std::fs::write(worktree.join(".tachi-worktree.json"), &marker).unwrap();
+            Ok(crate::work_claim::legacy_removal_claim_for_test())
+        });
+
+        assert!(
+            claim_called.get(),
+            "the replacement must be installed after the removal claim callback is entered"
+        );
+        assert!(
+            !report.removed,
+            "same-path replacement must not be deleted: {report:?}"
+        );
+        let joined = report.errors.join(" | ");
+        assert!(
+            joined.contains("could not be revalidated") && joined.contains("identity changed"),
+            "the execution-boundary refusal must name the ownership identity failure: {joined}"
+        );
+        assert!(
+            worktree.exists(),
+            "the replacement worktree must remain on disk after refusal"
+        );
+        assert!(
+            captured.exists(),
+            "the original worktree must remain on disk after refusal"
+        );
+        let worktree_list = Command::new("git")
+            .args(["-C", repo.to_str().unwrap(), "worktree", "list"])
+            .output()
+            .unwrap();
+        let worktree_list = String::from_utf8_lossy(&worktree_list.stdout);
+        assert!(
+            worktree_list.contains("feature/execute-replacement"),
+            "the replacement Git worktree must remain registered: {worktree_list}"
+        );
+
+        let listed = registry::list_registered_worktrees().expect("read registry");
+        assert_eq!(
+            listed.len(),
+            1,
+            "the original registry row must remain after the refused removal: {listed:?}"
+        );
+        assert_eq!(
+            listed[0].path, registered_path,
+            "the registry must not be rewritten to authorize the replacement"
+        );
+
+        let _ = Command::new("git")
+            .args([
+                "-C",
+                repo.to_str().unwrap(),
+                "worktree",
+                "remove",
+                "--force",
+                worktree.to_str().unwrap(),
+            ])
+            .status();
+        let _ = Command::new("git")
+            .args([
+                "-C",
+                repo.to_str().unwrap(),
+                "worktree",
+                "remove",
+                "--force",
+                captured.to_str().unwrap(),
+            ])
+            .status();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// The fallback is a registry reconciliation, not a blanket relaxation: a
     /// path that neither exists nor is registered still refuses.
     #[test]
@@ -1302,7 +1659,10 @@ mod tests {
         );
         assert_eq!(report.branch.as_deref(), Some(branch));
 
-        let report = execute_wt_remove(report);
+        let mut report = report;
+        execute_wt_remove_with_claim(&mut report, &|_| {
+            Ok(crate::work_claim::legacy_removal_claim_for_test())
+        });
         assert!(
             report.removed,
             "worktree should be removed: {:?}",
@@ -1330,6 +1690,138 @@ mod tests {
         assert!(
             !String::from_utf8_lossy(&wt_list.stdout).contains(worktree.to_str().unwrap()),
             "git worktree list must not contain the removed worktree"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn managed_execute_claims_before_delete_and_completes_reclaimed() {
+        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let root = unique_temp_dir("wt-clean-managed-removal-claim");
+        let (_home_guard, worktree) = setup_registered_worktree(&root);
+        std::fs::create_dir_all(root.join("repo/.git/info")).unwrap();
+        std::fs::write(root.join("repo/.git/info/exclude"), "target/\n").unwrap();
+        let canonical = std::fs::canonicalize(&worktree).unwrap();
+        let db = root
+            .join("home")
+            .join(".tachi/global")
+            .join(memcore::MEMORY_DB_FILENAME);
+        std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+        let mut store = memcore::MemoryStore::open(db.to_str().unwrap()).unwrap();
+        let in_tree_target = canonical.join("target");
+        let external_target = root.join("external-target");
+        std::fs::create_dir_all(&in_tree_target).unwrap();
+        std::fs::write(in_tree_target.join("artifact"), b"nested target bytes").unwrap();
+        std::fs::create_dir_all(&external_target).unwrap();
+        std::fs::write(
+            external_target.join("artifact"),
+            b"external target survives",
+        )
+        .unwrap();
+        memcore::insert_exec_env(
+            store.connection(),
+            &memcore::NewExecEnvLease {
+                env_id: "env-managed-remove".to_string(),
+                kind: "worktree".to_string(),
+                path: canonical.to_string_lossy().into_owned(),
+                repo_root: root.join("repo").to_string_lossy().into_owned(),
+                branch: "feature/holder-test".to_string(),
+                base_sha: "test-base".to_string(),
+                dispatch_id: None,
+                env_class: memcore::EnvClass::BuildPrivate,
+                created_at: String::new(),
+            },
+        )
+        .unwrap();
+        memcore::insert_resource(
+            store.connection_mut(),
+            &memcore::NewExecEnvResource {
+                resource_id: "res-managed-remove".to_string(),
+                kind: memcore::ResourceKind::Worktree,
+                path: canonical.to_string_lossy().into_owned(),
+                bytes: None,
+                created_at: String::new(),
+            },
+        )
+        .unwrap();
+        memcore::bind_resource(
+            store.connection_mut(),
+            "env-managed-remove",
+            "res-managed-remove",
+        )
+        .unwrap();
+        for (resource_id, path) in [
+            ("res-managed-target-in", &in_tree_target),
+            ("res-managed-target-external", &external_target),
+        ] {
+            memcore::insert_resource(
+                store.connection_mut(),
+                &memcore::NewExecEnvResource {
+                    resource_id: resource_id.to_string(),
+                    kind: memcore::ResourceKind::BuildTarget,
+                    path: path.to_string_lossy().into_owned(),
+                    bytes: Some(100),
+                    created_at: String::new(),
+                },
+            )
+            .unwrap();
+            memcore::bind_resource(store.connection_mut(), "env-managed-remove", resource_id)
+                .unwrap();
+        }
+        drop(store);
+
+        let report = plan_wt_remove(
+            &worktree,
+            false,
+            &work_claim::probe_worktree_holder,
+            &|_| HolderEvidence::Clear,
+        );
+        assert!(report.allowed, "{:?}", report.errors);
+        let report = execute_wt_remove(report);
+        assert!(report.removed, "{:?}", report.errors);
+        assert!(!worktree.exists());
+        assert!(
+            external_target.exists(),
+            "an external BuildPrivate target is not deleted with the worktree"
+        );
+
+        let observed =
+            memcore::MemoryStore::open_existing_read_write(db.to_str().unwrap()).unwrap();
+        assert_eq!(
+            memcore::get_exec_env(observed.connection(), "env-managed-remove")
+                .unwrap()
+                .unwrap()
+                .state,
+            memcore::ExecEnvState::Reclaimed
+        );
+        let resource = memcore::get_resource(observed.connection(), "res-managed-remove")
+            .unwrap()
+            .unwrap();
+        assert_eq!(resource.state, memcore::ResourceState::Reclaimed);
+        assert!(resource.reclaimed_bytes.is_some_and(|bytes| bytes > 0));
+        assert_eq!(
+            memcore::active_binding_count(observed.connection(), "res-managed-remove").unwrap(),
+            0
+        );
+        let nested = memcore::get_resource(observed.connection(), "res-managed-target-in")
+            .unwrap()
+            .unwrap();
+        assert_eq!(nested.state, memcore::ResourceState::Reclaimed);
+        assert_eq!(nested.reclaimed_bytes, Some(0));
+        assert_eq!(
+            memcore::active_binding_count(observed.connection(), "res-managed-target-in").unwrap(),
+            0
+        );
+        let external = memcore::get_resource(observed.connection(), "res-managed-target-external")
+            .unwrap()
+            .unwrap();
+        assert_eq!(external.state, memcore::ResourceState::Active);
+        assert_eq!(external.reclaimed_bytes, None);
+        assert_eq!(
+            memcore::active_binding_count(observed.connection(), "res-managed-target-external")
+                .unwrap(),
+            0
         );
 
         let _ = std::fs::remove_dir_all(&root);

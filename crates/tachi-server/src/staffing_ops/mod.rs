@@ -593,6 +593,7 @@ pub(crate) mod tests {
             flow_id: Some("flow_1814_staff_e2e".to_string()),
             completion_predicate: None,
             recommendation_ref: None,
+            declared_file_scope: None,
         }
     }
 
@@ -648,6 +649,18 @@ pub(crate) mod tests {
         let run_dir = dispatch_runs_root().join(dispatch_id);
         let (status, result) = wait_for_staff_terminal(&run_dir).await;
         wait_for_staff_cleanup(dispatch_id).await;
+        let env_id = status["env_id"].as_str().expect("managed Staff env_id");
+        let lease = server
+            .with_global_store_read(|store| {
+                memcore::get_exec_env(store.connection(), env_id).map_err(|error| error.to_string())
+            })
+            .expect("read automatic Staff lease")
+            .expect("automatic Staff lease remains auditable after cleanup");
+        assert_eq!(lease.state, memcore::ExecEnvState::Reclaimed);
+        assert!(
+            !std::path::Path::new(&lease.path).exists(),
+            "clean automatic Staff worktree must be removed"
+        );
 
         assert_eq!(
             terminal_staff_state(&status),
@@ -724,6 +737,88 @@ pub(crate) mod tests {
             status["route_decision_id"].as_str(),
             Some(decision.route_decision_id.as_str()),
             "the evidence stamp must retain the fast child's terminal receipt"
+        );
+    }
+
+    /// A Staff-owned worktree must not become an untracked orphan when the
+    /// all-or-nothing lease/resource publication fails after `git worktree
+    /// add`. Inject through the unrestricted second connection required by
+    /// the store failure-injection contract; the guarded MemoryStore doorway
+    /// intentionally refuses trigger DDL.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[allow(clippy::await_holding_lock)] // serializes process-global Staff roots through cleanup
+    async fn staff_publication_failure_removes_the_unmanaged_worktree() {
+        fn contains_worktree_marker(path: &std::path::Path) -> bool {
+            let Ok(entries) = std::fs::read_dir(path) else {
+                return false;
+            };
+            entries.filter_map(Result::ok).any(|entry| {
+                entry.file_name() == ".git"
+                    || (entry.file_type().is_ok_and(|kind| kind.is_dir())
+                        && contains_worktree_marker(&entry.path()))
+            })
+        }
+
+        let _environment = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let temp_home = tempfile::tempdir().expect("temp tachi home");
+        let temp_runs = tempfile::tempdir().expect("temp canonical run root");
+        let temp_worktrees = tempfile::tempdir().expect("temp Staff worktree root");
+        let _home = crate::test_support::EnvRestore::set_path("TACHI_HOME", temp_home.path());
+        let _runs = crate::test_support::EnvRestore::set_path("TACHI_RUN_ROOT", temp_runs.path());
+        let _worktrees = crate::test_support::EnvRestore::set_path(
+            "TACHI_WORKTREES_ROOT",
+            temp_worktrees.path(),
+        );
+        let server = test_server();
+        let injector = rusqlite::Connection::open(server.global_db_path_buf())
+            .expect("unrestricted second global DB connection");
+        injector
+            .execute_batch(
+                "CREATE TRIGGER fail_staff_exec_env_publication
+                 BEFORE INSERT ON exec_envs
+                 BEGIN
+                   SELECT RAISE(ABORT, 'injected Staff exec-env publication failure');
+                 END;",
+            )
+            .expect("install Staff publication failure trigger");
+        let _failure_hook = crate::exec_env_ops::install_publication_failure_hook(move || {
+            injector
+                .execute_batch("DROP TRIGGER fail_staff_exec_env_publication;")
+                .expect("remove injected trigger before certified worktree cleanup");
+        });
+
+        let error = staff_start(&server, staff_request("tachi"))
+            .await
+            .expect_err("atomic publication failure must refuse Staff before spawn");
+        assert!(
+            error.contains("injected Staff exec-env publication failure")
+                && error.contains("newly opened worktree was removed"),
+            "truthful publication and cleanup error: {error}"
+        );
+        assert!(
+            server
+                .with_global_store_read(|store| {
+                    memcore::list_exec_envs(store.connection(), None)
+                        .map_err(|error| error.to_string())
+                })
+                .expect("read leases after failed Staff publication")
+                .is_empty(),
+            "the failed transaction must publish no lease"
+        );
+        assert!(
+            !contains_worktree_marker(temp_worktrees.path()),
+            "failed Staff publication must leave no worktree under {}",
+            temp_worktrees.path().display()
+        );
+        assert!(
+            std::fs::read_dir(temp_runs.path())
+                .expect("read canonical run root")
+                .next()
+                .is_none(),
+            "publication fails before a worker receipt/run directory exists"
         );
     }
 
@@ -1657,6 +1752,8 @@ pub(crate) mod tests {
         wait_for_staff_cleanup(result_failure_id).await;
         result_failure_guard.disarm();
         drop(_result_persist_failure);
+        let _ = std::fs::remove_file(&root_pid);
+        let _ = std::fs::remove_file(&descendant_pid);
 
         let mut request = staff_request("tachi");
         request.profile = Some("glm_impl".to_string());
@@ -2175,6 +2272,7 @@ pub(crate) mod tests {
             flow_id: Some("flow_xyz".to_string()),
             completion_predicate: None,
             recommendation_ref: Some("rec-xyz".to_string()),
+            declared_file_scope: None,
         };
         assert_eq!(
             request.staffing_reason,
@@ -2382,10 +2480,19 @@ pub(crate) mod tests {
     // ─── tachi#1675 PR1 Seam B: record_route_decision_best_effort ──────────
 
     pub(crate) fn test_server() -> MemoryServer {
-        let db_path = crate::utils::test_fixture_path(format!(
-            "staffing-seam-b-{}.sqlite",
-            uuid::Uuid::new_v4()
-        ));
+        let db_path = std::env::var_os("TACHI_HOME")
+            .filter(|home| !home.is_empty())
+            .map(std::path::PathBuf::from)
+            .map(|home| home.join("global").join(memcore::MEMORY_DB_FILENAME))
+            .unwrap_or_else(|| {
+                crate::utils::test_fixture_path(format!(
+                    "staffing-seam-b-{}.sqlite",
+                    uuid::Uuid::new_v4()
+                ))
+            });
+        if let Some(parent) = db_path.parent() {
+            std::fs::create_dir_all(parent).expect("create Staff test global DB parent");
+        }
         MemoryServer::new(db_path, None).expect("test memory server")
     }
 
@@ -2720,6 +2827,7 @@ pub(crate) mod tests {
                 flow_id: None,
                 completion_predicate: None,
                 recommendation_ref: Some("missing-recommendation".to_string()),
+                declared_file_scope: None,
             },
         )
         .await

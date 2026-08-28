@@ -13,3 +13,15 @@
 //! crate consumes it like any other caller.
 
 pub mod github_corpus_ops;
+
+/// #1693 consumer fixture over the CurrentTruth v1 read surface (#1696
+/// discrimination 11): proves the consumer boundary from outside the
+/// defining crate. Test-only module — no production surface here.
+#[cfg(test)]
+mod current_truth_consumer_tests;
+
+/// #1693 cross-crate consumer fixture for the Unified Work Read Model:
+/// proves the projection boundary (and the owner-ruled R6-2 transition-debt
+/// semantics) from outside the defining crate. Test-only module.
+#[cfg(test)]
+mod work_read_model_consumer_tests;
