@@ -68,12 +68,17 @@ pub(crate) fn load_keychain_vault_api_key_scan(
         return Ok(empty_keychain_scan());
     }
 
-    let password = String::from_utf8(output.stdout)?.trim().to_string();
+    let mut raw_password = crate::vault_crypto::decode_keychain_password_output(output.stdout)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    let mut password = raw_password.trim().to_string();
+    crate::vault_crypto::zero_string(&mut raw_password);
     if password.is_empty() {
         return Ok(empty_keychain_scan());
     }
 
-    load_keychain_vault_api_key_scan_with_password(vault_db_path, &password)
+    let result = load_keychain_vault_api_key_scan_with_password(vault_db_path, &password);
+    crate::vault_crypto::zero_string(&mut password);
+    result
 }
 
 fn load_keychain_vault_api_key_scan_with_password(
