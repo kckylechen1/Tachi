@@ -38,22 +38,32 @@ async fn rem_wiki_evolver_writes_pending_drafts_to_wiki_project() {
         axum::serve(listener, app).await.unwrap();
     });
 
-    let original_home = std::env::var_os("HOME");
-    let original_tachi_home = std::env::var_os("TACHI_HOME");
-    let original_siliconflow_base = std::env::var_os("SILICONFLOW_BASE_URL");
-    let original_reasoning_base = std::env::var_os("REASONING_BASE_URL");
-    let original_siliconflow_key = std::env::var_os("SILICONFLOW_API_KEY");
-    let original_voyage_key = std::env::var_os("VOYAGE_API_KEY");
     let temp_home =
         crate::utils::test_fixture_path(format!("tachi-rem-test-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(temp_home.join(".tachi/projects/wiki")).expect("create wiki project");
-    std::env::set_var("HOME", &temp_home);
-    std::env::set_var("TACHI_HOME", temp_home.join(".tachi"));
     let mock_url = format!("http://127.0.0.1:{port}/chat/completions");
-    std::env::set_var("SILICONFLOW_BASE_URL", &mock_url);
-    std::env::set_var("REASONING_BASE_URL", &mock_url);
-    std::env::set_var("SILICONFLOW_API_KEY", "test-mock-key");
-    std::env::set_var("VOYAGE_API_KEY", "test-mock-key");
+    // The loopback endpoint is caller-owned, so pair it with lane-scoped
+    // aliases and isolate every higher-priority provider-branded key.
+    // Provider-branded keys are intentionally refused on unknown hosts by the
+    // production request guard.
+    let _env = [
+        crate::test_support::EnvRestore::set_path("HOME", &temp_home),
+        crate::test_support::EnvRestore::set_path("TACHI_HOME", &temp_home.join(".tachi")),
+        crate::test_support::EnvRestore::set("EXTRACT_BASE_URL", &mock_url),
+        crate::test_support::EnvRestore::set("SUMMARY_BASE_URL", &mock_url),
+        crate::test_support::EnvRestore::set("DISTILL_BASE_URL", &mock_url),
+        crate::test_support::EnvRestore::set("REASONING_BASE_URL", &mock_url),
+        crate::test_support::EnvRestore::set("EXTRACT_API_KEY", "test-mock-key"),
+        crate::test_support::EnvRestore::set("SUMMARY_API_KEY", "test-mock-key"),
+        crate::test_support::EnvRestore::set("DISTILL_API_KEY", "test-mock-key"),
+        crate::test_support::EnvRestore::set("REASONING_API_KEY", "test-mock-key"),
+        crate::test_support::EnvRestore::set("VOYAGE_API_KEY", "test-mock-key"),
+        crate::test_support::EnvRestore::remove("DEEPSEEK_API_KEY"),
+        crate::test_support::EnvRestore::remove("SILICONFLOW_API_KEY"),
+        crate::test_support::EnvRestore::remove("ZAI_API_KEY"),
+        crate::test_support::EnvRestore::remove("BIGMODEL_API_KEY"),
+        crate::test_support::EnvRestore::remove("MINIMAX_API_KEY"),
+    ];
 
     let wiki_db = temp_home.join(".tachi/projects/wiki/memory.db");
     MemoryStore::open(wiki_db.to_str().expect("wiki db utf8")).expect("init wiki db");
@@ -228,36 +238,6 @@ async fn rem_wiki_evolver_writes_pending_drafts_to_wiki_project() {
     assert_eq!(draft_count, 1);
 
     server_task.abort();
-    if let Some(value) = original_home {
-        std::env::set_var("HOME", value);
-    } else {
-        std::env::remove_var("HOME");
-    }
-    if let Some(value) = original_tachi_home {
-        std::env::set_var("TACHI_HOME", value);
-    } else {
-        std::env::remove_var("TACHI_HOME");
-    }
-    if let Some(value) = original_siliconflow_base {
-        std::env::set_var("SILICONFLOW_BASE_URL", value);
-    } else {
-        std::env::remove_var("SILICONFLOW_BASE_URL");
-    }
-    if let Some(value) = original_reasoning_base {
-        std::env::set_var("REASONING_BASE_URL", value);
-    } else {
-        std::env::remove_var("REASONING_BASE_URL");
-    }
-    if let Some(value) = original_siliconflow_key {
-        std::env::set_var("SILICONFLOW_API_KEY", value);
-    } else {
-        std::env::remove_var("SILICONFLOW_API_KEY");
-    }
-    if let Some(value) = original_voyage_key {
-        std::env::set_var("VOYAGE_API_KEY", value);
-    } else {
-        std::env::remove_var("VOYAGE_API_KEY");
-    }
     let _ = std::fs::remove_dir_all(temp_home);
 }
 
