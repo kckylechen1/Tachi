@@ -893,9 +893,10 @@ impl super::super::LlmClient {
 /// lane may still carry SiliconFlow defaults when a later selected key belongs
 /// to DeepSeek, Z.AI, or BigModel. Known provider hosts are a closed set: a
 /// mismatched known host is rebound only when the construction-time endpoint
-/// was a non-explicit default; explicit endpoints are refused. Unknown,
-/// well-formed custom hosts retain the caller's config because there is no
-/// safe provider policy to invent.
+/// was a non-explicit default; explicit endpoints are refused. A known
+/// provider-branded credential is also refused on an unknown host. The four
+/// lane-scoped aliases remain valid for caller-owned custom endpoints; their
+/// descriptor only supplies a default when no endpoint was configured.
 pub(crate) fn bind_lane_config_to_selected_key(
     lane: ChatLane,
     cfg: &ChatLaneConfig,
@@ -921,7 +922,18 @@ pub(crate) fn bind_lane_config_to_selected_key(
     }
 
     let Some(current_provider) = provider_descriptor_for_base_url(&cfg.base_url) else {
-        return Ok(cfg.clone());
+        if matches!(
+            logical_name,
+            "EXTRACT_API_KEY" | "SUMMARY_API_KEY" | "DISTILL_API_KEY" | "REASONING_API_KEY"
+        ) {
+            return Ok(cfg.clone());
+        }
+        return Err(format!(
+            "logical provider key '{}' targets known provider '{}', but lane '{}' endpoint is not a recognized provider host; refusing credential-bearing request",
+            logical_name,
+            selected.host,
+            lane.as_str(),
+        ));
     };
     if current_provider.host == selected.host {
         return Ok(cfg.clone());

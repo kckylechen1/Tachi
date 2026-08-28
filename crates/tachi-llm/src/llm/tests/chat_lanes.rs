@@ -342,6 +342,88 @@ async fn injected_known_provider_mismatch_fails_closed_before_chat_request() {
     );
 }
 
+/// A known provider credential must never be sent to an unrecognized host,
+/// including a hostname that merely contains the provider's documented host.
+#[tokio::test]
+async fn injected_provider_lookalike_fails_closed_without_dispatch() {
+    use axum::{routing::any, Json, Router};
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
+    let requests = Arc::new(AtomicUsize::new(0));
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        any({
+            let requests = Arc::clone(&requests);
+            move || {
+                let requests = Arc::clone(&requests);
+                async move {
+                    requests.fetch_add(1, Ordering::SeqCst);
+                    Json(serde_json::json!({
+                        "choices": [{
+                            "message": {"role": "assistant", "content": "unexpected"},
+                            "finish_reason": "stop"
+                        }]
+                    }))
+                }
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind lookalike provider");
+    let addr = listener.local_addr().expect("lookalike provider addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .await
+            .expect("serve lookalike provider");
+    });
+
+    let host = "api.deepseek.com.attacker.invalid";
+    let unused = ChatLaneConfig {
+        base_url: "https://unused.test/v1/chat/completions".to_string(),
+        model: "unused".to_string(),
+        api_key_envs: vec!["UNUSED_API_KEY"],
+    };
+    let config = ProviderRuntimeConfig {
+        extract: unused.clone(),
+        summary: unused.clone(),
+        reasoning: ChatLaneConfig {
+            base_url: format!("http://{host}/v1/chat/completions"),
+            model: "deepseek-v4-pro".to_string(),
+            api_key_envs: vec!["DEEPSEEK_API_KEY"],
+        },
+        distill: unused,
+        rerank: RerankConfig {
+            provider: RerankProviderKind::Voyage,
+            local_endpoint: None,
+        },
+    };
+    let client = LlmClient::new_with_config(config, None).expect("client should initialize");
+    client.replace_http_client_for_tests(
+        LlmClient::http_client_with_host_resolved_for_tests(host, addr)
+            .expect("resolved lookalike test client"),
+    );
+    assert!(client.set_provider_secret("DEEPSEEK_API_KEY", "deepseek-test-key"));
+
+    let error = client
+        .call_reasoning_llm_provider_only("system", "user", None, 0.0, 16)
+        .await
+        .expect_err("known provider key on a lookalike host must fail closed");
+    assert!(
+        error.contains("refusing credential-bearing request"),
+        "unexpected fail-closed error: {error}"
+    );
+    assert_eq!(
+        requests.load(Ordering::SeqCst),
+        0,
+        "lookalike host must receive no request or Authorization header"
+    );
+    server.abort();
+}
+
 /// Production-path discriminator: construct the client from the real env
 /// resolver, then send a reasoning request through the configured lane. Both
 /// the endpoint path and the request body must stay on SiliconFlow when the
@@ -423,10 +505,13 @@ async fn foundry_request_does_not_cross_bind_siliconflow_key_to_deepseek() {
     });
 
     let siliconflow_base = format!(
-        "http://127.0.0.1:{}/siliconflow/chat/completions",
-        addr.port()
+        "http://{}/siliconflow/chat/completions",
+        SILICONFLOW_AUTH_PROBE.host
     );
-    let deepseek_base = format!("http://127.0.0.1:{}/deepseek/chat/completions", addr.port());
+    let deepseek_base = format!(
+        "http://{}/deepseek/chat/completions",
+        DEEPSEEK_AUTH_PROBE.host
+    );
     let _sf_key = EnvRestore::set("SILICONFLOW_API_KEY", "siliconflow-test-key");
     let _sf_base = EnvRestore::set("SILICONFLOW_BASE_URL", &siliconflow_base);
     let _sf_model = EnvRestore::set("SILICONFLOW_MODEL", "siliconflow-test-model");
@@ -445,6 +530,10 @@ async fn foundry_request_does_not_cross_bind_siliconflow_key_to_deepseek() {
     let _empty_distill_model = EnvRestore::set("DISTILL_MODEL", "   ");
 
     let client = LlmClient::new().expect("client should initialize");
+    client.replace_http_client_for_tests(
+        LlmClient::http_client_with_host_resolved_for_tests(SILICONFLOW_AUTH_PROBE.host, addr)
+            .expect("resolved SiliconFlow test client"),
+    );
     let reasoning = client.lane(ChatLane::Reasoning);
     assert_eq!(reasoning.base_url, siliconflow_base);
     assert_eq!(reasoning.model, "siliconflow-test-model");
