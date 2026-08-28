@@ -3038,3 +3038,52 @@ async fn project_binding_resolves_lane_slot_pointer() {
     assert_ne!(injected.1, "vault:DEEPSEEK_API_KEY");
     assert_ne!(injected.1, "vault:EXTRACT_API_KEY");
 }
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn read_unlocked_vault_secret_resolves_lane_slot_pointer() {
+    let _lock = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let db_path = crate::utils::test_fixture_path(format!(
+        "memory-server-vault-slot-usable-read-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let server = MemoryServer::new(db_path, None).expect("create test server");
+    handle_vault_init(
+        &server,
+        VaultInitParams {
+            password: "slot-usable-read".to_string(),
+        },
+    )
+    .await
+    .expect("vault init");
+    handle_vault_set(
+        &server,
+        vault_set_params("DEEPSEEK_API_KEY", "deepseek-secret-bytes", false),
+    )
+    .await
+    .expect("account");
+    handle_vault_set(
+        &server,
+        vault_set_params("EXTRACT_API_KEY", "deepseek-secret-bytes", false),
+    )
+    .await
+    .expect("bind");
+    let usable =
+        crate::vault_ops::read_unlocked_vault_secret(&server, "EXTRACT_API_KEY", None, false)
+            .expect("usable slot");
+    assert_eq!(usable, "deepseek-secret-bytes");
+    let got = handle_vault_get(
+        &server,
+        VaultGetParams {
+            name: "EXTRACT_API_KEY".to_string(),
+            agent_id: None,
+            auto_rotate: false,
+        },
+    )
+    .await
+    .expect("inventory get");
+    let got_json: serde_json::Value = serde_json::from_str(&got).expect("json");
+    assert_eq!(got_json["value"], "vault:DEEPSEEK_API_KEY");
+}

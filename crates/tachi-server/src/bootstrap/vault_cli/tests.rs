@@ -1,7 +1,8 @@
 use super::super::{open_cli_store, open_cli_store_read_only};
 use super::daemon::daemon_matches_vault_db;
 use super::keys::{
-    canonical_provider_key_defs, derive_verified_vault_key_from_password, vault_init_with_password,
+    canonical_provider_key_defs, decrypt_named_secret_value,
+    derive_verified_vault_key_from_password, vault_init_with_password,
     vault_upsert_secret_with_key,
 };
 use super::output::{lease_api_key_from_store, vault_get_output};
@@ -470,6 +471,9 @@ fn vault_upsert_secret_with_key_binds_lane_slot_instead_of_copying() {
     assert_eq!(key_id, "DEEPSEEK_API_KEY");
     assert_eq!(value, "deepseek-secret");
     assert_ne!(value, "vault:DEEPSEEK_API_KEY");
+    let profile_value =
+        decrypt_named_secret_value(&store, key.bytes(), "EXTRACT_API_KEY").expect("profile");
+    assert_eq!(profile_value, "deepseek-secret");
 }
 
 #[test]

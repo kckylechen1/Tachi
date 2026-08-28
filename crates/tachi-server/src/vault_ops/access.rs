@@ -335,6 +335,76 @@ pub(crate) fn read_vault_secret_from_store(
     Ok(value)
 }
 
+fn read_usable_vault_secret_from_store(
+    store: &mut MemoryStore,
+    key: &[u8; 32],
+    params: &VaultGetParams,
+    effective_agent_id: Option<&str>,
+) -> Result<String, String> {
+    let transaction = store
+        .begin_vault_transaction()
+        .map_err(|e| format!("Failed to begin usable Vault read transaction: {e}"))?;
+    let selected = select_vault_entry_from_transaction(&transaction, params)?;
+    ensure_agent_allowed(&selected.entry, effective_agent_id).map_err(|e| e.to_string())?;
+    let decrypted = crypto::decrypt(key, &selected.entry.encrypted_value, &selected.entry.nonce)?;
+    let value = crypto::decode_utf8_zeroizing(
+        decrypted,
+        format!("Vault secret '{}' is not valid UTF-8", selected.entry.name),
+    )?;
+
+    let (touch_name, value) = if super::is_lane_slot_secret_name(&selected.entry.name) {
+        let target = tachi_llm::parse_vault_alias(&value).ok_or_else(|| {
+            format!(
+                "Lane slot '{}' is not bound to a usable account",
+                selected.entry.name
+            )
+        })?;
+        if super::is_lane_slot_secret_name(target) {
+            return Err(format!(
+                "Lane slot '{}' cannot resolve through another slot '{target}'",
+                selected.entry.name
+            ));
+        }
+        let target_entry = transaction
+            .vault_get_entry(target)
+            .map_err(|e| format!("Failed to read lane slot target: {e}"))?
+            .ok_or_else(|| format!("Lane slot target '{target}' is missing"))?;
+        ensure_agent_allowed(&target_entry, effective_agent_id).map_err(|e| e.to_string())?;
+        if memcore::effective_vault_secret_type(&target_entry.name, &target_entry.secret_type)
+            != SECRET_TYPE_API_KEY
+        {
+            return Err(format!(
+                "Lane slot '{}' points at '{}' which is not an API key",
+                selected.entry.name, target_entry.name
+            ));
+        }
+        let decrypted = crypto::decrypt(key, &target_entry.encrypted_value, &target_entry.nonce)?;
+        let target_value = crypto::decode_utf8_zeroizing(
+            decrypted,
+            format!("Vault secret '{}' is not valid UTF-8", target_entry.name),
+        )?;
+        if target_value.trim().is_empty() || tachi_llm::parse_vault_alias(&target_value).is_some() {
+            return Err(format!(
+                "Lane slot '{}' points at an unusable account '{}'",
+                selected.entry.name, target_entry.name
+            ));
+        }
+        (target_entry.name, target_value)
+    } else {
+        (selected.target_name.clone(), value)
+    };
+
+    record_successful_vault_access_in_transaction(
+        &transaction,
+        &touch_name,
+        selected.pending_rotation.as_ref(),
+    )?;
+    transaction
+        .commit()
+        .map_err(|e| format!("Failed to commit usable Vault read transaction: {e}"))?;
+    Ok(value)
+}
+
 /// Materialize unrestricted entries for an identity-less CLI consumer in one
 /// transaction. Rotation validation, ACL filtering, decrypt, and access
 /// accounting all observe the same database state.
@@ -1050,16 +1120,9 @@ pub(crate) fn read_unlocked_vault_secret(
             agent_id: agent_id.map(str::to_string),
             auto_rotate,
         };
-        let (_selected, value, _access_count) = server.with_global_store(|store| {
-            select_authorized_vault_entry_and_record_access(
-                store,
-                &params,
-                effective_agent_id.as_deref(),
-                key,
-            )
-        })?;
-
-        Ok(value)
+        server.with_global_store(|store| {
+            read_usable_vault_secret_from_store(store, key, &params, effective_agent_id.as_deref())
+        })
     })
 }
 
