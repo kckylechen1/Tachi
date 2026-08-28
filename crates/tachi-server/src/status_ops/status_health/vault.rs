@@ -22,6 +22,7 @@ fn derive_status_vault_key(
 pub(crate) struct KeychainApiKeyScan {
     pub values: Vec<(String, String)>,
     pub dropped: HashMap<String, AliasSkipClass>,
+    pub rotation_prefixes: HashSet<String>,
 }
 
 pub(crate) fn load_keychain_vault_api_key_values(
@@ -42,6 +43,7 @@ fn empty_keychain_scan() -> KeychainApiKeyScan {
     KeychainApiKeyScan {
         values: Vec::new(),
         dropped: HashMap::new(),
+        rotation_prefixes: HashSet::new(),
     }
 }
 
@@ -71,6 +73,13 @@ pub(crate) fn load_keychain_vault_api_key_scan(
         return Ok(empty_keychain_scan());
     }
 
+    load_keychain_vault_api_key_scan_with_password(vault_db_path, &password)
+}
+
+fn load_keychain_vault_api_key_scan_with_password(
+    vault_db_path: &Path,
+    password: &str,
+) -> Result<KeychainApiKeyScan, Box<dyn std::error::Error>> {
     let vault_db_str = vault_db_path.to_str().ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -88,11 +97,8 @@ pub(crate) fn load_keychain_vault_api_key_scan(
     // tachi#1080: a wrong Keychain password is the sole benign miss. Invalid
     // salt, KDF format/parameters, derivation failure, and verifier corruption
     // are stored-config integrity failures and must stay loud.
-    let key = match derive_status_vault_key(&config, &password)? {
-        Some(key) => key,
-        None => {
-            return Ok(empty_keychain_scan());
-        }
+    let Some(key) = derive_status_vault_key(&config, password)? else {
+        return Ok(empty_keychain_scan());
     };
 
     let entries = store.vault_list_entries()?;
@@ -102,13 +108,15 @@ pub(crate) fn load_keychain_vault_api_key_scan(
         .map(|rotation| rotation.prefix)
         .collect::<HashSet<_>>();
     let key_health_rows = store.vault_list_key_health(None)?;
-    scan_keychain_api_key_entries(
+    let mut scan = scan_keychain_api_key_entries(
         entries,
         &key,
         &rotation_prefixes,
         &key_health_rows,
         Utc::now(),
-    )
+    )?;
+    scan.rotation_prefixes = rotation_prefixes;
+    Ok(scan)
 }
 
 fn scan_keychain_api_key_entries(
@@ -159,7 +167,11 @@ fn scan_keychain_api_key_entries(
         }
         values.push((entry.name, value));
     }
-    Ok(KeychainApiKeyScan { values, dropped })
+    Ok(KeychainApiKeyScan {
+        values,
+        dropped,
+        rotation_prefixes: rotation_prefixes.clone(),
+    })
 }
 
 /// Resolve health under the same identity used by unlocked pool admission:
@@ -388,5 +400,31 @@ mod tests {
             ),
             "corrupt verifier must not degrade to empty status"
         );
+    }
+
+    #[test]
+    fn keychain_health_store_failure_stays_loud() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dir.path().join("memory.db");
+        let password = "keychain-health-failure";
+        {
+            let store = memcore::MemoryStore::open(db.to_str().expect("UTF-8 db path"))
+                .expect("create store");
+            store
+                .vault_set_config(&stored_config(password))
+                .expect("seed vault config");
+        }
+
+        // MemoryStore connections deny trigger DDL. Use the unrestricted
+        // second connection required by the repository failure-injection rule.
+        let raw = rusqlite::Connection::open(&db).expect("open unrestricted connection");
+        raw.execute_batch("DROP TABLE vault_key_health;")
+            .expect("remove health table");
+
+        let err = match load_keychain_vault_api_key_scan_with_password(&db, password) {
+            Ok(_) => panic!("health-store failure must not become a locked miss"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("vault_key_health"), "{err}");
     }
 }

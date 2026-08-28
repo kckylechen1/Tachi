@@ -87,30 +87,19 @@ fn vault_api_key_pool_load_from_server(
     })
 }
 
-fn vault_api_key_load_from_keychain(global_db_path: &Path) -> tachi_llm::DurableVaultLoad {
-    let rotation_prefixes = rotation_prefixes_from_global_db(global_db_path);
-    let scan =
-        match crate::status_ops::status_health::load_keychain_vault_api_key_scan(global_db_path) {
-            Ok(scan) => scan,
-            Err(err) => {
-                tracing::warn!(
-                    "[vault] keychain vault read failed during provider key resolution: {err}"
-                );
-                return tachi_llm::DurableVaultLoad {
-                    pools: HashMap::new(),
-                    listed_drops: HashMap::new(),
-                    availability: VaultSourceAvailability::LockedOrUnavailable,
-                };
-            }
-        };
-    let pools = group_api_key_values_by_configured_rotations(scan.values, &rotation_prefixes);
+fn vault_api_key_load_from_keychain(
+    global_db_path: &Path,
+) -> Result<tachi_llm::DurableVaultLoad, String> {
+    let scan = crate::status_ops::status_health::load_keychain_vault_api_key_scan(global_db_path)
+        .map_err(|err| format!("Keychain Vault provider read failed: {err}"))?;
+    let pools = group_api_key_values_by_configured_rotations(scan.values, &scan.rotation_prefixes);
     let mut listed_drops = scan.dropped;
-    promote_configured_rotation_prefix_drops(&mut listed_drops, &pools, &rotation_prefixes);
-    tachi_llm::DurableVaultLoad {
+    promote_configured_rotation_prefix_drops(&mut listed_drops, &pools, &scan.rotation_prefixes);
+    Ok(tachi_llm::DurableVaultLoad {
         pools,
         listed_drops,
         availability: VaultSourceAvailability::Readable,
-    }
+    })
 }
 
 /// Prefix aliases resolve `VOYAGE_API_KEY`, not `VOYAGE_API_KEY_1`. Copy a
@@ -179,7 +168,7 @@ fn resolve_vault_pools(
             Err(err) => return Err(format!("Failed to unlock Vault provider secrets: {err}")),
         }
     }
-    let keychain = vault_api_key_load_from_keychain(global_db_path);
+    let keychain = vault_api_key_load_from_keychain(global_db_path)?;
     if !keychain.pools.is_empty() || !keychain.listed_drops.is_empty() {
         return Ok(keychain);
     }
@@ -198,7 +187,7 @@ fn resolve_vault_pools(
         ));
     }
 
-    let fallback = vault_api_key_load_from_keychain(&default_global);
+    let fallback = vault_api_key_load_from_keychain(&default_global)?;
     if !fallback.pools.is_empty() || !fallback.listed_drops.is_empty() {
         tracing::warn!(
             "[provider] global DB {} has no initialized Vault; using default Vault DB {} for provider key materialization",
@@ -238,21 +227,6 @@ fn paths_equal(left: &Path, right: &Path) -> bool {
         .zip(std::fs::canonicalize(right).ok())
         .map(|(left, right)| left == right)
         .unwrap_or(false)
-}
-
-fn rotation_prefixes_from_global_db(global_db_path: &Path) -> HashSet<String> {
-    let Some(path) = global_db_path.to_str() else {
-        return HashSet::new();
-    };
-    let Ok(store) = memcore::MemoryStore::open_read_only(path) else {
-        return HashSet::new();
-    };
-    store
-        .vault_list_rotations()
-        .unwrap_or_default()
-        .into_iter()
-        .map(|rotation| rotation.prefix)
-        .collect()
 }
 
 /// Apply Vault + config.env aliases into `LlmClient` without mutating process env.
@@ -336,12 +310,14 @@ pub fn describe_skipped_aliases(skipped: &[(String, String)]) -> String {
 }
 
 /// Metadata-only aggregate for health/probe output. Reconstruct each entry
-/// from the logical key and retained disposition; never forward raw reasons.
+/// from the typed skip class, logical key, and retained disposition; never
+/// forward raw reasons or alias targets.
 pub fn describe_skipped_alias_report(report: &MaterializeReport) -> String {
     let details = report
         .skipped_aliases
         .iter()
         .map(|(key, _reason)| {
+            let reason = report.skip_class_for(key).operator_reason(key);
             let disposition = if report
                 .retained_from_last_known_good
                 .iter()
@@ -351,7 +327,7 @@ pub fn describe_skipped_alias_report(report: &MaterializeReport) -> String {
             } else {
                 "no last-known-good provider pool retained"
             };
-            format!("{key}: {disposition}")
+            format!("{key}: {disposition}; {reason}")
         })
         .collect::<Vec<_>>()
         .join("; ");

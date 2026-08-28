@@ -377,6 +377,34 @@ fn skipped_alias_probe_aggregate_distinguishes_retained_without_raw_reasons() {
 }
 
 #[test]
+fn skipped_alias_probe_preserves_typed_integrity_class() {
+    let mut report = tachi_llm::MaterializeReport {
+        skipped_aliases: vec![(
+            "SILICONFLOW_API_KEY".to_string(),
+            "RAW_ALIAS_TARGET VALUE_SENTINEL".to_string(),
+        )],
+        ..Default::default()
+    };
+    report.set_skip_class(
+        "SILICONFLOW_API_KEY",
+        tachi_llm::AliasSkipClass::ListedUnusableAuthFailed,
+    );
+
+    let probe = super::probes::skipped_alias_probe_result(&report)
+        .expect("listed integrity skip must produce a degraded probe");
+    let message = probe.message.expect("probe message present");
+
+    assert!(message.contains("SILICONFLOW_API_KEY"), "{message}");
+    assert!(message.contains("auth_failed"), "{message}");
+    assert!(
+        !message.contains("absent from a readable Vault"),
+        "{message}"
+    );
+    assert!(!message.contains("RAW_ALIAS_TARGET"), "{message}");
+    assert!(!message.contains("VALUE_SENTINEL"), "{message}");
+}
+
+#[test]
 fn no_skipped_aliases_yields_no_probe_result() {
     let report = tachi_llm::MaterializeReport::default();
     assert!(super::probes::skipped_alias_probe_result(&report).is_none());
