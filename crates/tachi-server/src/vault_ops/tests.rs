@@ -2862,3 +2862,128 @@ async fn leftover_slot_ciphertext_is_not_materialized() {
         pools.keys().collect::<Vec<_>>()
     );
 }
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn lane_slot_cannot_be_a_rotation_pool() {
+    let _lock = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let db_path = crate::utils::test_fixture_path(format!(
+        "memory-server-vault-slot-pool-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let server = MemoryServer::new(db_path, None).expect("create test server");
+    handle_vault_init(
+        &server,
+        VaultInitParams {
+            password: "slot-pool".to_string(),
+        },
+    )
+    .await
+    .expect("vault init");
+    let pool_err = handle_vault_set_api_key_pool(
+        &server,
+        VaultSetApiKeyPoolParams {
+            prefix: "EXTRACT_API_KEY".to_string(),
+            values: vec!["k1".to_string(), "k2".to_string()],
+            agent_id: None,
+            strategy: "round_robin".to_string(),
+            description: String::new(),
+            allowed_agents: None,
+        },
+    )
+    .await
+    .expect_err("slot prefix must not become a pool");
+    assert!(
+        pool_err.contains("Lane slot") || pool_err.contains("rotation pool"),
+        "{pool_err}"
+    );
+    let rotation_err = handle_vault_setup_rotation(
+        &server,
+        VaultSetupRotationParams {
+            prefix: "DISTILL_API_KEY".to_string(),
+            total_keys: 2,
+            agent_id: None,
+            strategy: "round_robin".to_string(),
+        },
+    )
+    .await
+    .expect_err("slot prefix must not attach rotation");
+    assert!(
+        rotation_err.contains("Lane slot") || rotation_err.contains("rotation pool"),
+        "{rotation_err}"
+    );
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn child_env_all_mode_does_not_inject_leftover_slot_bytes() {
+    let _lock = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _child_env = EnvRestore::set("TACHI_VAULT_CHILD_ENV", "all");
+    let db_path = crate::utils::test_fixture_path(format!(
+        "memory-server-vault-slot-child-env-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let server = MemoryServer::new(db_path, None).expect("create test server");
+    handle_vault_init(
+        &server,
+        VaultInitParams {
+            password: "slot-child-env".to_string(),
+        },
+    )
+    .await
+    .expect("vault init");
+    with_vault_key(&server, |key| {
+        let (encrypted_value, nonce) = crate::vault_crypto::encrypt(key, b"leftover-slot-bytes")?;
+        let now = chrono::Utc::now().to_rfc3339();
+        server.with_global_store(|store| {
+            store
+                .vault_upsert_entry(&memcore::vault::VaultEntry {
+                    name: "EXTRACT_API_KEY".to_string(),
+                    encrypted_value,
+                    nonce,
+                    secret_type: memcore::SECRET_TYPE_API_KEY.to_string(),
+                    description: String::new(),
+                    allowed_agents: None,
+                    created_at: now.clone(),
+                    updated_at: now,
+                    accessed_at: String::new(),
+                    access_count: 0,
+                })
+                .map_err(|e| e.to_string())
+        })
+    })
+    .expect("seed leftover ciphertext");
+    let secrets = crate::vault_ops::load_unlocked_env_secrets_for_child_env(&server, None)
+        .expect("child env");
+    assert!(
+        secrets
+            .iter()
+            .all(|(name, value)| name != "EXTRACT_API_KEY" && value != "leftover-slot-bytes"),
+        "{secrets:?}"
+    );
+
+    handle_vault_set(
+        &server,
+        vault_set_params("DEEPSEEK_API_KEY", "deepseek-secret-bytes", false),
+    )
+    .await
+    .expect("account");
+    handle_vault_set(
+        &server,
+        vault_set_params("EXTRACT_API_KEY", "deepseek-secret-bytes", true),
+    )
+    .await
+    .expect("bind leftover to account");
+    let secrets = crate::vault_ops::load_unlocked_env_secrets_for_child_env(&server, None)
+        .expect("child env");
+    let extract = secrets
+        .iter()
+        .find(|(name, _)| name == "EXTRACT_API_KEY")
+        .expect("bound slot must enter child env through the resolved pool");
+    assert_eq!(extract.1, "deepseek-secret-bytes");
+    assert_ne!(extract.1, "vault:DEEPSEEK_API_KEY");
+}

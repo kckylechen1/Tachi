@@ -24,6 +24,16 @@ pub(crate) fn is_lane_slot_secret_name(name: &str) -> bool {
     LANE_SLOT_SECRET_NAMES.contains(&name.trim())
 }
 
+pub(crate) fn refuse_lane_slot_pool_prefix(prefix: &str) -> Result<(), String> {
+    if is_lane_slot_secret_name(prefix) {
+        Err(format!(
+            "Lane slot '{prefix}' binds to an account; it cannot be an API-key rotation pool"
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 pub(crate) fn follow_lane_slot_pointers(values: Vec<(String, String)>) -> Vec<(String, String)> {
     let by_name: std::collections::HashMap<&str, &str> = values
         .iter()

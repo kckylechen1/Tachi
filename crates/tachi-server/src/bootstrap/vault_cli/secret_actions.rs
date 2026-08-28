@@ -218,6 +218,7 @@ async fn run_secret_action_with_reader(
             }
             crate::vault_crypto::validate_secret_name(&prefix)?;
             memcore::reject_api_key_type_for_lane_config(&prefix, memcore::SECRET_TYPE_API_KEY)?;
+            crate::vault_ops::account_bind::refuse_lane_slot_pool_prefix(&prefix)?;
             if !crate::utils::is_shell_env_name(&prefix) {
                 return Err(format!(
                     "API key pool prefix '{prefix}' must be a shell env name such as OPENAI_API_KEY"

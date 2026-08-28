@@ -743,12 +743,18 @@ fn load_unlocked_api_key_secret_pools_filtered(
             // filter. A concrete-member lease must not fall through to raw-name
             // health identity merely because its prefix pass was filtered out.
             for rotation in &rotations {
+                if super::is_lane_slot_secret_name(&rotation.prefix) {
+                    continue;
+                }
                 for (_, entry) in collect_rotation_entries(entries.clone(), &rotation.prefix) {
                     rotation_members.insert(entry.name);
                 }
             }
 
             for rotation in rotations {
+                if super::is_lane_slot_secret_name(&rotation.prefix) {
+                    continue;
+                }
                 if only_logical_name.is_some_and(|logical_name| logical_name != rotation.prefix) {
                     continue;
                 }
