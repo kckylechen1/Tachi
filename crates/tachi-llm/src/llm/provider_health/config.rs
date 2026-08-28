@@ -606,15 +606,16 @@ impl super::super::LlmClient {
         let base_url = if let Some(default) = selected_provider_default {
             Self::first_env(default.base_url_envs).unwrap_or_else(|| default.base_url.to_string())
         } else {
-            Self::first_env(base_url_envs).unwrap_or_else(|| DEFAULT_CHAT_BASE_URL.to_string())
+            Self::first_non_deepseek_env(base_url_envs)
+                .unwrap_or_else(|| DEFAULT_CHAT_BASE_URL.to_string())
         };
         let explicit = if let Some(default) = selected_provider_default {
             Self::first_env(default.model_envs)
         } else {
-            model_envs.first().and_then(|&key| Self::env_value(key))
+            Self::first_non_deepseek_env(model_envs)
         };
         let fallback = if selected_provider_default.is_none() && model_envs.len() > 1 {
-            Self::first_env(&model_envs[1..])
+            Self::first_non_deepseek_env(&model_envs[1..])
         } else {
             None
         };
@@ -647,6 +648,16 @@ impl super::super::LlmClient {
             .ok()
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty())
+    }
+
+    /// A provider key and its endpoint/model must come from the same provider
+    /// family. DeepSeek variables are valid for a DeepSeek-selected lane only;
+    /// otherwise a stale `DEEPSEEK_*` value could outrank the selected
+    /// provider's URL/model while its key remains in the lane's key chain.
+    fn first_non_deepseek_env(keys: &[&str]) -> Option<String> {
+        keys.iter()
+            .filter(|key| !key.starts_with("DEEPSEEK_"))
+            .find_map(|key| Self::env_value(key))
     }
 
     pub(super) fn first_env(keys: &[&str]) -> Option<String> {
