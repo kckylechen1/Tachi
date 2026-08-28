@@ -491,6 +491,7 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                 ),
                 DispatchExecution::ManagedCustom(cmd, receiver) => {
                     let managed_run_dir = workspace_dir_for_spawn.clone();
+                    let managed_cwd_authority = cwd_authority_for_spawn.clone();
                     let outcome = match tokio::spawn(async move {
                         run_managed_custom_subprocess_outcome(
                             cmd,
@@ -498,7 +499,7 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                             receiver,
                             &managed_run_dir,
                             require_postflight_containment,
-                            cwd_authority_for_spawn.clone(),
+                            managed_cwd_authority,
                         )
                         .await
                     })
@@ -1501,6 +1502,13 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                 );
             }
         }
+        // The gate and runner cwd authority pin the exact worktree directory
+        // with open descriptors so pathname replacement cannot fool either
+        // boundary. Release those parent-held pins before certified cleanup
+        // probes for live holders; otherwise the daemon blocks removal on its
+        // own safety descriptors.
+        drop(postflight_gate_for_spawn);
+        drop(cwd_authority_for_spawn);
         if postflight_outcome
             .as_ref()
             .is_some_and(crate::exec_env_postflight::GateOutcome::artifacts_released)
