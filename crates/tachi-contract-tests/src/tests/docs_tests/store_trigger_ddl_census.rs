@@ -1067,6 +1067,52 @@ const EXEMPTIONS: &[Exemption<'static>] = &[
                  through guarded MemoryStore::connection. Bodies read 2026-08-01.",
     },
     Exemption {
+        path: "crates/tachi-server/src/exec_env_ops.rs",
+        basis: ExemptionBasis::DeclaredByReviewerNotProven {
+            signed_by: "Codex Sol, body read 2026-08-27",
+        },
+        sites: &[
+            Site {
+                symbol: "abandoned_dispatch_with_a_failed_fence_stays_exclusively_fail_closed",
+                trigger: "FAIL_ABANDONED_DISPATCH_FENCE",
+                ddl: "efee4311eb6310e3",
+                occurrences: 1,
+            },
+            Site {
+                symbol: "contains_worktree_marker",
+                trigger: "FAIL_BUILD_PRIVATE_PUBLICATION",
+                ddl: "47c83951777b49af",
+                occurrences: 1,
+            },
+            Site {
+                symbol: "contains_worktree_marker",
+                trigger: "FAIL_BUILD_PRIVATE_PUBLICATION",
+                ddl: "73c18ff187218f56",
+                occurrences: 1,
+            },
+            Site {
+                symbol: "late_publication_failure_rolls_back_every_intermediate_row",
+                trigger: "FAIL_PRIVATE_RESERVATION",
+                ddl: "701012d43ab1f566",
+                occurrences: 1,
+            },
+        ],
+        reason: "the tests open a second direct rusqlite::Connection on a file-backed DB and install failure triggers there, so the real quarantine or atomic publication transaction fails. The BuildPrivate test drops its persistent trigger through the post-failure hook, rolls back only the exact Tachi-generated Cargo config, then exercises certified worktree cleanup; bodies read 2026-08-27. The file also contains MemoryStore doorways, so these sites are declared rather than assigned an inapplicable machine proof.",
+    },
+    Exemption {
+        path: "crates/tachi-server/src/exec_env_postflight/tests.rs",
+        basis: ExemptionBasis::DeclaredByReviewerNotProven {
+            signed_by: "Codex Sol, body read 2026-08-27",
+        },
+        sites: &[Site {
+            symbol: "daemon_quarantine_sink_propagates_resource_failure_before_receipt",
+            trigger: "FAIL_POSTFLIGHT_RESOURCE_QUARANTINE",
+            ddl: "6f65485c4aa9fc08",
+            occurrences: 1,
+        }],
+        reason: "the test opens a second direct rusqlite::Connection on the file-backed server DB and installs the trigger before exercising DaemonQuarantineSink; body read 2026-08-27. The file also uses guarded store connections for setup/assertions, so no machine proof applies.",
+    },
+    Exemption {
         path: "crates/tachi-server/src/mcp_pool/proxy.rs",
         basis: ExemptionBasis::DeclaredByReviewerNotProven {
             signed_by: "tachi#1443 census lane (agent), bodies read 2026-07-26",
@@ -1164,6 +1210,27 @@ const EXEMPTIONS: &[Exemption<'static>] = &[
         reason: "installs the quarantine default-deny guard on an unguarded \
                  fixture connection. Re-derived: this file names no store \
                  doorway. Body NOT read.",
+    },
+    Exemption {
+        path: "crates/tachi-server/src/staffing_ops/mod.rs",
+        basis: ExemptionBasis::DeclaredByReviewerNotProven {
+            signed_by: "Codex Sol, body read 2026-08-27",
+        },
+        sites: &[
+            Site {
+                symbol: "contains_worktree_marker",
+                trigger: "FAIL_STAFF_EXEC_ENV_PUBLICATION",
+                ddl: "08b602143fb001c8",
+                occurrences: 1,
+            },
+            Site {
+                symbol: "contains_worktree_marker",
+                trigger: "FAIL_STAFF_EXEC_ENV_PUBLICATION",
+                ddl: "7e17e51fe7d94067",
+                occurrences: 1,
+            },
+        ],
+        reason: "staff_publication_failure_removes_the_unmanaged_worktree opens an unrestricted second connection to inject a real atomic publication failure, then a test-only post-failure hook drops that persistent trigger before the production certified worktree cleanup reopens the DB. Both CREATE and DROP sites are pinned; body read 2026-08-27. The file also contains MemoryStore doorways, so this is declared rather than assigned an inapplicable machine proof.",
     },
     Exemption {
         path: "crates/tachi-server/src/tests/memory_tests/save_policy/recall_cache_invalidation.rs",

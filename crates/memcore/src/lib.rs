@@ -47,6 +47,8 @@ const _: () = assert!(
 
 #[cfg(feature = "admin")]
 pub mod agent_profile;
+#[doc(hidden)]
+pub mod anchored_fs;
 pub mod canonical_digest;
 /// Model-broker catalog row types (tachi#1681). `admin`-gated because all
 /// six catalog tables are `SchemaScope::Product`.
@@ -144,16 +146,20 @@ pub use db::eval_replay::{
 };
 #[cfg(feature = "admin")]
 pub use db::exec_env::{
-    find_active_exec_env_by_path, get_exec_env, insert_exec_env, list_exec_envs, reclaim_exec_env,
-    EnvClass, ExecEnvLease, ExecEnvSelector, ExecEnvState, NewExecEnvLease, ReclaimOutcome,
+    abort_exec_env_removal, claim_exec_env_removal, complete_exec_env_removal,
+    find_active_exec_env_by_path, find_live_exec_env_by_path, get_exec_env,
+    get_exec_env_worktree_identity, insert_exec_env, list_exec_envs, reclaim_exec_env, EnvClass,
+    ExecEnvLease, ExecEnvSelector, ExecEnvState, NewExecEnvLease, ReclaimOutcome,
 };
 #[cfg(feature = "admin")]
 pub use db::exec_env_resources::{
-    active_binding_count, bind_resource, find_resource_by_path, get_resource, insert_resource,
-    list_bound_resource_paths, list_resources, quarantine_resource, reclaim_resource,
-    record_resource_measurement, release_binding, release_quarantine, BindOutcome, ExecEnvResource,
-    NewExecEnvResource, QuarantineOutcome, RegisterOutcome, ReleaseBindingOutcome,
-    ReleaseQuarantineOutcome, ResourceKind, ResourceReclaimOutcome, ResourceState,
+    active_binding_count, bind_resource, exec_env_cargo_target, exec_env_resource_removal_refusal,
+    find_resource_by_path, get_resource, insert_resource, list_bound_resource_paths,
+    list_resources, quarantine_resource, quarantine_resources_atomically, reclaim_resource,
+    record_resource_measurement, release_binding, release_quarantine, BindOutcome,
+    ExecEnvCargoTarget, ExecEnvResource, NewExecEnvResource, QuarantineOutcome, RegisterOutcome,
+    ReleaseBindingOutcome, ReleaseQuarantineOutcome, ResourceKind, ResourceReclaimOutcome,
+    ResourceState,
 };
 #[cfg(feature = "admin")]
 pub use db::foundry_config::{get_foundry_config, set_foundry_config, PerDbConfig};
@@ -211,8 +217,8 @@ pub use db::session_claims::{
 };
 pub use db::{anchor_id, anchor_path, AnchorKind};
 pub use db::{
-    is_memory_db_filename, migrate_legacy_filename_if_present, LEGACY_MEMORY_DB_FILENAME,
-    MEMORY_DB_FILENAME,
+    is_memory_db_filename, migrate_legacy_filename_if_present, resolve_memory_db_read_path,
+    LEGACY_MEMORY_DB_FILENAME, MEMORY_DB_FILENAME,
 };
 pub use db::{normalize_utc_iso, normalize_utc_iso_or_now, now_utc_iso};
 pub use db::{
@@ -276,6 +282,11 @@ pub use private_partition::{
     AdmittedPartition, CapabilityReceipt, PartitionCapability, PartitionKeyProvider,
     PrivatePartition, PrivatePartitionOpenContext, StaticKeyProvider, SubjectId, TrustDomainId,
     STORE_PRIVATE_PARTITION_KEY,
+};
+#[cfg(feature = "admin")]
+pub use store::exec_env_provisioning::{
+    ExecEnvPrivateTargetReservation, ExecEnvProvisioningResource, PublishedExecEnv,
+    PublishedExecEnvResource,
 };
 pub use store::immutable_supersession::{
     SupersessionClaimOutcome, SupersessionCommitResult, SupersessionError, SupersessionErrorKind,

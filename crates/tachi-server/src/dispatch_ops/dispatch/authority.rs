@@ -185,6 +185,7 @@ fn test_mechanics(params: &TachiDispatchParams) -> DispatchLaunchMechanics {
         inject_hub_mcps: params.inject_hub_mcps,
         allowed_mcp_servers: params.allowed_mcp_servers.clone(),
         timeout_secs: params.timeout_secs,
+        declared_file_scope: params.declared_file_scope.clone(),
     }
 }
 

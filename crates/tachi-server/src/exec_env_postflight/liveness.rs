@@ -11,13 +11,14 @@
 //! so `pgid == worker pid`), which makes "any descendant alive?" a single
 //! `kill(-pgid, 0)` probe rather than a `ps` table walk.
 //!
-//! **Stated blind spot:** a descendant that calls `setsid()` leaves the group
-//! and becomes invisible to this probe. That is a real hole and it is named
-//! here rather than papered over — it is one more reason this posture is
-//! `detect-and-reject` and never a claim of prevention.
+//! A descendant that calls `setsid()` leaves the group and becomes invisible
+//! to this probe. Therefore process-group absence alone is never promoted to
+//! `ConfirmedReaped`; production runners report it as `Indeterminate` and a
+//! required postflight gate fences the lease without scanning or releasing
+//! worker-authored artifacts.
 
 /// Can the parent still see a live process from this worker's tree?
-pub trait DescendantLiveness {
+pub trait DescendantLiveness: Send + Sync {
     /// `Ok(true)` = at least one process of the worker's tree is still alive.
     /// `Err` = the probe could not answer, which callers MUST treat as
     /// fail-closed (never as "nothing alive").
@@ -25,6 +26,58 @@ pub trait DescendantLiveness {
 
     /// Short description for receipts/logs.
     fn describe(&self) -> String;
+}
+
+/// Terminal liveness evidence produced by the runner that owned the worker.
+///
+/// This type deliberately carries no PID. Once a runner has reaped its group
+/// leader, the numeric PID/PGID may be reused and no downstream postflight
+/// code may reconstruct ownership or signal through that number.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RunnerLivenessEvidence {
+    /// The runner failed or was cancelled before spawning a worker.
+    NoWorkerSpawned,
+    /// The runner terminated and reaped the worker tree, then proved the
+    /// process group absent while it still owned the lifecycle transition.
+    ConfirmedReaped { proof: &'static str },
+    /// The runner could not prove terminal descendant state. Postflight must
+    /// fail closed before scanning the workspace or releasing artifacts.
+    Indeterminate { detail: String },
+}
+
+impl RunnerLivenessEvidence {
+    pub(crate) fn confirmed_contained_reaped() -> Self {
+        Self::ConfirmedReaped {
+            proof: "kernel_denied_process_group_escape_and_owned_group_absent",
+        }
+    }
+
+    pub(crate) fn indeterminate(detail: impl Into<String>) -> Self {
+        Self::Indeterminate {
+            detail: detail.into(),
+        }
+    }
+}
+
+impl DescendantLiveness for RunnerLivenessEvidence {
+    fn any_alive(&self) -> Result<bool, String> {
+        match self {
+            Self::NoWorkerSpawned | Self::ConfirmedReaped { .. } => Ok(false),
+            Self::Indeterminate { detail } => Err(format!(
+                "runner could not establish terminal descendant liveness: {detail}"
+            )),
+        }
+    }
+
+    fn describe(&self) -> String {
+        match self {
+            Self::NoWorkerSpawned => "no worker spawned".to_string(),
+            Self::ConfirmedReaped { proof } => format!("worker tree reaped ({proof})"),
+            Self::Indeterminate { detail } => {
+                format!("indeterminate runner liveness ({detail})")
+            }
+        }
+    }
 }
 
 /// Liveness of the worker's process group.
@@ -94,5 +147,48 @@ impl DescendantLiveness for ProcessGroupLiveness {
 
     fn describe(&self) -> String {
         format!("process group {}", self.pgid)
+    }
+}
+
+/// A runner failure without a captured worker identity is not evidence that
+/// the worker tree was reaped. This probe makes that missing evidence an
+/// explicit fail-closed error before the gate can scan or release anything.
+#[derive(Debug, Clone)]
+pub struct MissingLivenessEvidence {
+    reason: String,
+}
+
+impl MissingLivenessEvidence {
+    pub fn new(reason: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+        }
+    }
+}
+
+impl DescendantLiveness for MissingLivenessEvidence {
+    fn any_alive(&self) -> Result<bool, String> {
+        Err(format!(
+            "descendant liveness evidence is unavailable: {}",
+            self.reason
+        ))
+    }
+
+    fn describe(&self) -> String {
+        format!("missing descendant liveness evidence ({})", self.reason)
+    }
+}
+
+/// A probe that reports all descendants reaped (used when the runner has reaped the child process).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ReapedLiveness;
+
+impl DescendantLiveness for ReapedLiveness {
+    fn any_alive(&self) -> Result<bool, String> {
+        Ok(false)
+    }
+
+    fn describe(&self) -> String {
+        "worker tree reaped".to_string()
     }
 }

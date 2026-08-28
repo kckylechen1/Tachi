@@ -44,6 +44,7 @@ fn typed_staff_server_resolver_matches_flat_profile_semantics_table() {
             project: None,
             completion_predicate: None,
             recommendation_ref: None,
+            declared_file_scope: None,
         };
         let typed = crate::dispatch_profile::resolve_and_apply_staff_assignment_profile_for_server(
             &server, &mut staff,
@@ -108,6 +109,7 @@ fn typed_staff_server_resolver_matches_flat_profile_semantics_table() {
         project: None,
         completion_predicate: None,
         recommendation_ref: None,
+        declared_file_scope: None,
     };
     let error = crate::dispatch_profile::resolve_and_apply_staff_assignment_profile_for_server(
         &server,

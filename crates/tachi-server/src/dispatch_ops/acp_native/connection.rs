@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use chrono::Utc;
 use serde_json::{json, Value};
@@ -15,8 +15,8 @@ use super::protocol::{
 };
 use super::session::read_stored_acp_session_id;
 use super::{
-    NativeAcpConnection, NativeAcpPromptOutcome, NativeAcpRunMode, NativeAcpRunSpec,
-    ACP_PROTOCOL_VERSION, ACP_STREAM_FILE,
+    NativeAcpConnection, NativeAcpEventTarget, NativeAcpPromptOutcome, NativeAcpRunMode,
+    NativeAcpRunSpec, NativeAcpStagedEvent, ACP_PROTOCOL_VERSION,
 };
 
 impl NativeAcpConnection {
@@ -26,8 +26,9 @@ impl NativeAcpConnection {
         spec: &NativeAcpRunSpec,
         dispatch_id: &str,
         agent: &str,
-        run_dir: &Path,
+        _run_dir: &Path,
         trajectory_path: &Path,
+        defer_worker_text: bool,
     ) -> Self {
         Self {
             stdin: Some(stdin),
@@ -35,12 +36,13 @@ impl NativeAcpConnection {
             raw_messages: Vec::new(),
             final_text_parts: Vec::new(),
             mapped_events: 0,
+            staged_events: Vec::new(),
             observed_model: None,
             request_index: 0,
             permission_label: spec.permission_label.clone(),
+            defer_worker_text,
             dispatch_id: dispatch_id.to_string(),
             agent: agent.to_string(),
-            run_dir: run_dir.to_path_buf(),
             trajectory_path: trajectory_path.to_path_buf(),
         }
     }
@@ -85,9 +87,9 @@ impl NativeAcpConnection {
                     result
                 }
                 Err(err) => {
-                    append_trajectory_event(
-                        &self.trajectory_path,
-                        json!({
+                    self.staged_events.push(NativeAcpStagedEvent {
+                        target: NativeAcpEventTarget::Trajectory,
+                        payload: json!({
                             "event": "acp_native_session_reconnect_failed",
                             "dispatch_id": self.dispatch_id,
                             "agent": self.agent,
@@ -96,7 +98,7 @@ impl NativeAcpConnection {
                             "fallback": "session/new",
                             "timestamp": Utc::now().to_rfc3339(),
                         }),
-                    );
+                    });
                     self.new_session(&spec.cwd).await?
                 }
             }
@@ -149,6 +151,7 @@ impl NativeAcpConnection {
             prompt_result,
             used_existing_session,
             observed_model: self.observed_model.clone(),
+            staged_events: self.staged_events.clone(),
         })
     }
 
@@ -291,7 +294,7 @@ impl NativeAcpConnection {
     /// substring authorizer it described. `authorizer` stays in the receipt
     /// schema as a fixed constant so existing consumers don't need a schema
     /// migration for this field.
-    fn append_permission_receipt(&self, decision: &AcpPermissionDecision) {
+    fn append_permission_receipt(&mut self, decision: &AcpPermissionDecision) {
         let verdict = if decision.allowed { "allow" } else { "deny" };
         const AUTHORIZER: &str = "typed_taxonomy";
         // `raw_kind` is attacker-influenced (it comes straight off the child
@@ -299,21 +302,30 @@ impl NativeAcpConnection {
         // in the trajectory log or the tracing log line, so a hostile agent
         // can't inject control characters / newlines or blow up the log with
         // an oversized field.
-        let raw_kind = sanitize_receipt_field(&decision.raw_kind);
-        append_trajectory_event(
-            &self.trajectory_path,
-            json!({
-                "event": "acp_native_permission_receipt",
-                "dispatch_id": self.dispatch_id,
-                "agent": self.agent,
-                "permission_profile": self.permission_label,
-                "request_kind": decision.kind.as_str(),
-                "raw_tool_kind": raw_kind,
-                "verdict": verdict,
-                "authorizer": AUTHORIZER,
-                "timestamp": Utc::now().to_rfc3339(),
-            }),
-        );
+        let raw_kind = if self.defer_worker_text {
+            "[withheld pending exec_env_postflight]".to_string()
+        } else {
+            sanitize_receipt_field(&decision.raw_kind)
+        };
+        let event = json!({
+            "event": "acp_native_permission_receipt",
+            "dispatch_id": self.dispatch_id,
+            "agent": self.agent,
+            "permission_profile": self.permission_label,
+            "request_kind": decision.kind.as_str(),
+            "raw_tool_kind": raw_kind,
+            "verdict": verdict,
+            "authorizer": AUTHORIZER,
+            "timestamp": Utc::now().to_rfc3339(),
+        });
+        if self.defer_worker_text {
+            self.staged_events.push(NativeAcpStagedEvent {
+                target: NativeAcpEventTarget::PostflightReceipt,
+                payload: event,
+            });
+        } else {
+            append_trajectory_event(&self.trajectory_path, event);
+        }
         if !decision.allowed {
             tracing::warn!(
                 target: "tachi::acp::permission",
@@ -386,11 +398,14 @@ impl NativeAcpConnection {
             "timestamp": Utc::now().to_rfc3339(),
         });
         let target = if event == "acp_native_message" {
-            self.run_dir.join("progress.jsonl")
+            NativeAcpEventTarget::Progress
         } else {
-            self.trajectory_path.clone()
+            NativeAcpEventTarget::Trajectory
         };
-        append_trajectory_event(&target, mapped);
+        self.staged_events.push(NativeAcpStagedEvent {
+            target,
+            payload: mapped,
+        });
         self.mapped_events += 1;
     }
 
@@ -402,37 +417,6 @@ impl NativeAcpConnection {
                 .map_err(|err| format!("shutdown ACP stdin: {err}"))?;
         }
         Ok(())
-    }
-
-    pub(super) fn persist_raw_stream(&self, run_dir: &Path) -> Result<PathBuf, String> {
-        let stream_path = run_dir.join(ACP_STREAM_FILE);
-        let mut lines = Vec::with_capacity(self.raw_messages.len());
-        for message in &self.raw_messages {
-            lines.push(
-                serde_json::to_string(message)
-                    .map_err(|err| format!("serialize ACP stream message: {err}"))?,
-            );
-        }
-        let payload = if lines.is_empty() {
-            String::new()
-        } else {
-            format!("{}\n", lines.join("\n"))
-        };
-        crate::utils::write_owner_only_file_atomic(&stream_path, payload.as_bytes())
-            .map_err(|err| format!("write {ACP_STREAM_FILE}: {err}"))?;
-        append_trajectory_event(
-            &self.trajectory_path,
-            json!({
-                "event": "acp_native_stream_persisted",
-                "dispatch_id": self.dispatch_id,
-                "agent": self.agent,
-                "raw_stream": stream_path.to_string_lossy(),
-                "raw_message_count": self.raw_messages.len(),
-                "mapped_events": self.mapped_events,
-                "timestamp": Utc::now().to_rfc3339(),
-            }),
-        );
-        Ok(stream_path)
     }
 }
 
