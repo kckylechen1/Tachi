@@ -30,7 +30,55 @@ pub(crate) async fn handle_vault_set(
                 ));
             }
             let allowed_agents = normalize_allowed_agents(params.allowed_agents.clone());
-            let (encrypted_value, nonce) = crypto::encrypt(key, value.as_bytes())?;
+            let mut store_value = value.to_string();
+            let mut bind_meta: Option<crate::vault_ops::account_bind::LaneSlotDecision> = None;
+            if crate::vault_ops::is_lane_slot_secret_name(&params.name)
+                && secret_type == SECRET_TYPE_API_KEY
+            {
+                let entries = server
+                    .with_global_store_read(|store| {
+                        store.vault_list_entries().map_err(|e| e.to_string())
+                    })
+                    .map_err(|e| format!("Failed to list entries: {e}"))?;
+                let mut existing_slot = None;
+                let mut account_rows = Vec::new();
+                for entry in entries {
+                    let decrypted = crypto::decrypt(key, &entry.encrypted_value, &entry.nonce)?;
+                    let value = String::from_utf8(decrypted).map_err(|e| {
+                        format!("Vault secret '{}' is not valid UTF-8: {e}", entry.name)
+                    })?;
+                    if entry.name == params.name {
+                        existing_slot = Some(value);
+                    } else {
+                        account_rows.push((entry.name, value));
+                    }
+                }
+                let accounts = crate::vault_ops::account_bind::bindable_accounts(account_rows);
+                let decided = crate::vault_ops::decide_lane_slot_write(
+                    key,
+                    &params.name,
+                    &params.value,
+                    existing_slot.as_deref(),
+                    &accounts,
+                    params.rebind,
+                )?;
+                if decided.noop {
+                    let body = json!({
+                        "stored": true,
+                        "name": params.name,
+                        "secret_type": secret_type,
+                        "created": false,
+                        "bound_account": decided.account,
+                        "rebind": false,
+                        "noop": true,
+                        "fingerprint": decided.fingerprint,
+                    });
+                    return serde_json::to_string(&body).map_err(|e| format!("serialize: {e}"));
+                }
+                store_value = decided.store_value.clone();
+                bind_meta = Some(decided);
+            }
+            let (encrypted_value, nonce) = crypto::encrypt(key, store_value.as_bytes())?;
 
             server.with_global_store(|store| {
                 // Keep the old-value decision and the resulting write in one
@@ -59,7 +107,10 @@ pub(crate) async fn handle_vault_set(
                 }
 
                 let mut rebind_meta: Option<(bool, String, String)> = None;
-                if is_lane_slot_secret_name(&params.name) && secret_type == SECRET_TYPE_API_KEY {
+                if bind_meta.is_none()
+                    && is_lane_slot_secret_name(&params.name)
+                    && secret_type == SECRET_TYPE_API_KEY
+                {
                     let entries = transaction
                         .vault_list_entries()
                         .map_err(|e| format!("Failed to list entries: {e}"))?;
@@ -196,6 +247,12 @@ pub(crate) async fn handle_vault_set(
                     body["rebind"] = json!(rebound);
                     body["old_fingerprint"] = json!(old_fp);
                     body["new_fingerprint"] = json!(new_fp);
+                }
+                if let Some(bind) = bind_meta {
+                    body["bound_account"] = json!(bind.account);
+                    body["rebind"] = json!(bind.rebound);
+                    body["noop"] = json!(bind.noop);
+                    body["fingerprint"] = json!(bind.fingerprint);
                 }
                 serde_json::to_string(&body).map_err(|e| format!("serialize: {e}"))
             })

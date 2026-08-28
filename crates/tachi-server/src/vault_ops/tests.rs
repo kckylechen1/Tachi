@@ -2469,3 +2469,136 @@ async fn leftover_api_key_lane_config_lists_as_config_and_config_rows_do_not_lea
         pools.keys().collect::<Vec<_>>()
     );
 }
+
+fn vault_set_params(name: &str, value: &str, rebind: bool) -> VaultSetParams {
+    VaultSetParams {
+        name: name.to_string(),
+        value: value.to_string(),
+        agent_id: None,
+        secret_type: String::new(),
+        description: String::new(),
+        allowed_agents: None,
+        enable_rotation: false,
+        rotation_strategy: None,
+        rebind,
+    }
+}
+
+/// Slot set stores `vault:ACCOUNT`, never a second copy of the account secret.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn lane_slot_set_binds_account_instead_of_copying_ciphertext() {
+    let _lock = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let db_path = crate::utils::test_fixture_path(format!(
+        "memory-server-vault-account-bind-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let server = MemoryServer::new(db_path, None).expect("create test server");
+    handle_vault_init(
+        &server,
+        VaultInitParams {
+            password: "account-bind".to_string(),
+        },
+    )
+    .await
+    .expect("vault init");
+
+    handle_vault_set(
+        &server,
+        vault_set_params("DEEPSEEK_API_KEY", "deepseek-secret-bytes", false),
+    )
+    .await
+    .expect("account write");
+
+    let bound = handle_vault_set(
+        &server,
+        vault_set_params("EXTRACT_API_KEY", "deepseek-secret-bytes", false),
+    )
+    .await
+    .expect("slot bind");
+    let bound_json: serde_json::Value = serde_json::from_str(&bound).expect("json");
+    assert_eq!(bound_json["bound_account"], "DEEPSEEK_API_KEY");
+    assert_ne!(bound_json["fingerprint"], "");
+
+    let got = handle_vault_get(
+        &server,
+        VaultGetParams {
+            name: "EXTRACT_API_KEY".to_string(),
+            agent_id: None,
+            auto_rotate: false,
+        },
+    )
+    .await
+    .expect("get slot");
+    let got_json: serde_json::Value = serde_json::from_str(&got).expect("json");
+    assert_eq!(got_json["value"], "vault:DEEPSEEK_API_KEY");
+    assert_ne!(got_json["value"], "deepseek-secret-bytes");
+
+    let pools = crate::vault_ops::load_unlocked_api_key_secret_pools(&server).expect("pools");
+    let extract = pools
+        .get("EXTRACT_API_KEY")
+        .expect("slot pool must resolve through the account");
+    assert_eq!(extract[0].value, "deepseek-secret-bytes");
+    assert_eq!(extract[0].key_id, "DEEPSEEK_API_KEY");
+
+    let orphan = handle_vault_set(
+        &server,
+        vault_set_params("DISTILL_API_KEY", "glm-orphan-secret", true),
+    )
+    .await
+    .expect_err("unmatched bytes must not copy into a slot even with rebind");
+    assert!(
+        orphan.contains("second copy") || orphan.contains("provider account"),
+        "{orphan}"
+    );
+    assert!(!orphan.contains("glm-orphan-secret"), "{orphan}");
+
+    handle_vault_set(
+        &server,
+        vault_set_params("SILICONFLOW_API_KEY", "siliconflow-secret-bytes", false),
+    )
+    .await
+    .expect("second account");
+    let refused = handle_vault_set(
+        &server,
+        vault_set_params("EXTRACT_API_KEY", "siliconflow-secret-bytes", false),
+    )
+    .await
+    .expect_err("family change needs rebind");
+    assert!(
+        refused.contains("--rebind") || refused.contains("rebind=true"),
+        "{refused}"
+    );
+
+    let rebound = handle_vault_set(
+        &server,
+        vault_set_params("EXTRACT_API_KEY", "siliconflow-secret-bytes", true),
+    )
+    .await
+    .expect("rebind pointer");
+    let rebound_json: serde_json::Value = serde_json::from_str(&rebound).expect("json");
+    assert_eq!(rebound_json["bound_account"], "SILICONFLOW_API_KEY");
+    assert_eq!(rebound_json["rebind"], true);
+
+    let got_rebind = handle_vault_get(
+        &server,
+        VaultGetParams {
+            name: "EXTRACT_API_KEY".to_string(),
+            agent_id: None,
+            auto_rotate: false,
+        },
+    )
+    .await
+    .expect("get rebound slot");
+    let rebind_json: serde_json::Value = serde_json::from_str(&got_rebind).expect("json");
+    assert_eq!(rebind_json["value"], "vault:SILICONFLOW_API_KEY");
+
+    handle_vault_set(
+        &server,
+        vault_set_params("DEEPSEEK_API_KEY", "deepseek-rotated-bytes", false),
+    )
+    .await
+    .expect("account rotation does not need rebind");
+}

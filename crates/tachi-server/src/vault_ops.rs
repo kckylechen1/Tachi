@@ -1,6 +1,7 @@
 // vault_ops.rs — MCP tool handlers for Tachi Vault
 
 mod access;
+pub(crate) mod account_bind;
 mod alias_integrity;
 mod audit;
 mod env;
@@ -11,6 +12,7 @@ mod rotation;
 mod session;
 mod slot_rebind;
 
+pub(crate) use account_bind::{decide_lane_slot_write, is_lane_slot_secret_name};
 pub(crate) use alias_integrity::unusable_skip_class;
 pub(crate) use resolver::{classify_vault_read_error, is_env_fallback_eligible, VaultReadState};
 pub(crate) use rotation::collect_rotation_entries;

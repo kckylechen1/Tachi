@@ -123,6 +123,40 @@ async fn run_secret_action_with_reader(
                 ensure_direct_cli_entry_unrestricted(existing)?;
             }
             let is_new = existing_entry.is_none();
+            if crate::vault_ops::is_lane_slot_secret_name(&name)
+                && secret_type == memcore::SECRET_TYPE_API_KEY
+            {
+                let entries = transaction
+                    .vault_list_entries()
+                    .map_err(|e| format!("vault_list_entries: {e}"))?;
+                let mut existing_slot = None;
+                let mut account_rows = Vec::new();
+                for entry in entries {
+                    let decrypted = crate::vault_crypto::decrypt(
+                        key.bytes(),
+                        &entry.encrypted_value,
+                        &entry.nonce,
+                    )?;
+                    let value = String::from_utf8(decrypted).map_err(|e| {
+                        format!("Vault secret '{}' is not valid UTF-8: {e}", entry.name)
+                    })?;
+                    if entry.name == name {
+                        existing_slot = Some(value);
+                    } else {
+                        account_rows.push((entry.name, value));
+                    }
+                }
+                let accounts = crate::vault_ops::account_bind::bindable_accounts(account_rows);
+                let decided = crate::vault_ops::decide_lane_slot_write(
+                    key.bytes(),
+                    &name,
+                    &secret_value,
+                    existing_slot.as_deref(),
+                    &accounts,
+                    rebind,
+                )?;
+                *secret_value.0 = decided.store_value;
+            }
             if is_new && memcore::is_lane_config_url_name(&name) {
                 if let Some(leak) =
                     memcore::catalog::endpoint::endpoint_credential_leak(&secret_value)
@@ -130,91 +164,6 @@ async fn run_secret_action_with_reader(
                     return Err(format!(
                         "Vault name '{name}' value embeds a credential in the endpoint ({leak}); refusing write"
                     ).into());
-                }
-            }
-
-            if crate::vault_ops::is_lane_slot_secret_name(&name)
-                && secret_type == memcore::vault::SECRET_TYPE_API_KEY
-            {
-                // This scan and the slot decision are deliberately inside the
-                // same IMMEDIATE transaction as the upsert. It prevents both
-                // concurrent first writers from observing an empty slot, and
-                // applies copy protection to existing slots as well.
-                let entries = transaction
-                    .vault_list_entries()
-                    .map_err(|e| format!("vault_list_entries: {e}"))?;
-                for other in entries {
-                    if other.name == name
-                        || other.secret_type != memcore::vault::SECRET_TYPE_API_KEY
-                        || crate::vault_ops::is_lane_slot_secret_name(&other.name)
-                    {
-                        continue;
-                    }
-                    let provider_kind =
-                        crate::status_ops::status_health::provider_kind_for_env_name(&other.name)
-                            .unwrap_or("unregistered");
-                    let Ok(plain) = crate::vault_crypto::decrypt(
-                        key.bytes(),
-                        &other.encrypted_value,
-                        &other.nonce,
-                    ) else {
-                        continue;
-                    };
-                    let Ok(mut other_value) = crate::vault_crypto::decode_utf8_zeroizing(
-                        plain,
-                        "Vault account secret is not valid UTF-8",
-                    ) else {
-                        continue;
-                    };
-                    let other_fingerprint = crate::vault_ops::fingerprint_secret(
-                        key.bytes(),
-                        provider_kind,
-                        &other_value,
-                    );
-                    crate::vault_crypto::zero_string(&mut other_value);
-                    if other_fingerprint
-                        == crate::vault_ops::fingerprint_secret(
-                            key.bytes(),
-                            provider_kind,
-                            &secret_value,
-                        )
-                    {
-                        return Err(crate::vault_ops::copy_existing_account_message(
-                            &name,
-                            &other.name,
-                        )
-                        .into());
-                    }
-                }
-
-                if let Some(existing) = existing_entry.as_ref() {
-                    crate::vault_ops::validate_existing_lane_slot_secret_type(
-                        &name,
-                        &existing.secret_type,
-                    )?;
-                    let old_bytes = crate::vault_crypto::decrypt(
-                        key.bytes(),
-                        &existing.encrypted_value,
-                        &existing.nonce,
-                    )?;
-                    let mut old_value = crate::vault_crypto::decode_utf8_zeroizing(
-                        old_bytes,
-                        format!("Existing slot '{name}' is not valid UTF-8"),
-                    )?;
-                    let provider_kind =
-                        crate::status_ops::status_health::provider_kind_for_env_name(&name)
-                            .unwrap_or("unknown");
-                    let overwrite = crate::vault_ops::evaluate_lane_slot_overwrite(
-                        &old_value,
-                        &secret_value,
-                        provider_kind,
-                        key.bytes(),
-                        rebind,
-                    );
-                    crate::vault_crypto::zero_string(&mut old_value);
-                    if let Err(err) = overwrite {
-                        return Err(err.operator_message(&name).into());
-                    }
                 }
             }
 

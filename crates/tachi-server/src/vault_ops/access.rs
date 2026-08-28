@@ -861,7 +861,7 @@ fn load_unlocked_api_key_secret_pools_filtered(
                 }
             }
 
-            for entry in entries {
+            for entry in &entries {
                 if only_logical_name.is_some_and(|logical_name| logical_name != entry.name) {
                     continue;
                 }
@@ -907,8 +907,48 @@ fn load_unlocked_api_key_secret_pools_filtered(
                     record_listed_drop(&mut dropped, &entry.name, AliasSkipClass::ListedEmpty);
                     continue;
                 }
-                let key_id = entry.name.clone();
-                if let std::collections::hash_map::Entry::Vacant(slot) = pools.entry(key_id.clone())
+                let (key_id, value) = if let Some(target) = tachi_llm::parse_vault_alias(&value) {
+                    if !super::is_lane_slot_secret_name(&entry.name) {
+                        continue;
+                    }
+                    let Some(target_entry) =
+                        entries.iter().find(|candidate| candidate.name == target)
+                    else {
+                        continue;
+                    };
+                    if super::is_lane_slot_secret_name(&target_entry.name)
+                        || memcore::effective_vault_secret_type(
+                            &target_entry.name,
+                            &target_entry.secret_type,
+                        ) != SECRET_TYPE_API_KEY
+                        || target_entry
+                            .allowed_agents
+                            .as_ref()
+                            .is_some_and(|agents| !agents.is_empty())
+                    {
+                        continue;
+                    }
+                    if let Some(class) = unusable_class(&entry.name, &target_entry.name) {
+                        record_listed_drop(&mut dropped, &entry.name, class);
+                        continue;
+                    }
+                    let decrypted =
+                        crypto::decrypt(key, &target_entry.encrypted_value, &target_entry.nonce)?;
+                    let target_value = crypto::decode_utf8_zeroizing(
+                        decrypted,
+                        super::VAULT_MATERIALIZATION_INVALID_UTF8,
+                    )?;
+                    if target_value.trim().is_empty()
+                        || tachi_llm::parse_vault_alias(&target_value).is_some()
+                    {
+                        continue;
+                    }
+                    (target_entry.name.clone(), target_value)
+                } else {
+                    (entry.name.clone(), value)
+                };
+                if let std::collections::hash_map::Entry::Vacant(slot) =
+                    pools.entry(entry.name.clone())
                 {
                     slot.insert(vec![tachi_llm::ProviderSecret {
                         key_id: key_id.clone(),
