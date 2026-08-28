@@ -26,7 +26,7 @@ Read only the canon relevant to the task. Current typed issue, ref, test, deploy
 
 ## Delivery red lines
 
-- One bounded contract produces one reviewable delivery. Finish owner-directed work operationally, but merge, deploy, close, and other externally visible actions still require the authority assigned by the owner and canon.
+- One bounded contract produces one reviewable delivery. Keep owner-directed delivery operational: when the owner has granted the corresponding authority, finish through merge, deploy, and live-service verification. Without that authority, stop at the boundary; merge, deploy, close, and other externally visible actions are never implied.
 - Every non-trivial delivery receives a fresh, independent, read-only reviewer using a different model from the implementer at the actual candidate head. Same-vendor different-model review qualifies; unavailable diversity is `incomplete`. Record each numbered finding and its accepted/rejected/downgraded disposition in the PR body. Any candidate-changing repair, rebase, or merge makes the prior verdict stale.
 - Freeze the candidate before paying canonical acceptance gates. Run narrow discriminators while the candidate changes; after exact-head review, run and quote the complete acceptance surface defined by [`dispatch-lifecycle.md` §2.5 and §3](docs/engineering/architecture/dispatch-lifecycle.md#25-candidate-freeze-and-maintainability-budget). Name every platform or matrix gap and every narrowed target.
 - Never weaken a frozen assertion, golden, content-atomicity rule, or guard to make a change pass. A guard names the invariant it protects and proves that the blocked operation threatens it on both sides of any read/write asymmetry. Stop and report a deviation for adjudication.
