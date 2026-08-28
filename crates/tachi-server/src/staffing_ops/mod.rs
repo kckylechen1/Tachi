@@ -525,6 +525,52 @@ pub(crate) mod tests {
         }
     }
 
+    /// Panic-safe cleanup for a test-owned Staff worktree root. The callback
+    /// is scoped to a fresh temporary root, and every removal still passes
+    /// through the production certified cleanup path.
+    struct CertifiedWorktreeCleanupGuard {
+        root: std::path::PathBuf,
+        find_worktree: fn(&std::path::Path) -> Option<std::path::PathBuf>,
+        armed: bool,
+    }
+
+    impl CertifiedWorktreeCleanupGuard {
+        fn arm(
+            root: &std::path::Path,
+            find_worktree: fn(&std::path::Path) -> Option<std::path::PathBuf>,
+        ) -> Self {
+            Self {
+                root: root.to_path_buf(),
+                find_worktree,
+                armed: true,
+            }
+        }
+
+        fn disarm(&mut self) {
+            self.armed = false;
+        }
+    }
+
+    impl Drop for CertifiedWorktreeCleanupGuard {
+        fn drop(&mut self) {
+            if !self.armed {
+                return;
+            }
+            while let Some(worktree) = (self.find_worktree)(&self.root) {
+                let cleanup = tachi_clean::wt_clean::remove_worktree_for_safe_merge(&worktree);
+                if !cleanup.removed {
+                    eprintln!(
+                        "certified fixture cleanup failed for {}: warnings={:?}, errors={:?}",
+                        worktree.display(),
+                        cleanup.warnings,
+                        cleanup.errors
+                    );
+                    break;
+                }
+            }
+        }
+    }
+
     struct CurrentDirGuard(std::path::PathBuf);
 
     impl CurrentDirGuard {
@@ -774,12 +820,15 @@ pub(crate) mod tests {
         let temp_home = tempfile::tempdir().expect("temp tachi home");
         let temp_runs = tempfile::tempdir().expect("temp canonical run root");
         let temp_worktrees = tempfile::tempdir().expect("temp Staff worktree root");
-        let _home = crate::test_support::EnvRestore::set_path("TACHI_HOME", temp_home.path());
+        let _tachi_home = crate::test_support::EnvRestore::set_path("TACHI_HOME", temp_home.path());
+        let _user_home = crate::test_support::EnvRestore::set_path("HOME", temp_home.path());
         let _runs = crate::test_support::EnvRestore::set_path("TACHI_RUN_ROOT", temp_runs.path());
         let _worktrees = crate::test_support::EnvRestore::set_path(
             "TACHI_WORKTREES_ROOT",
             temp_worktrees.path(),
         );
+        let mut fixture_cleanup =
+            CertifiedWorktreeCleanupGuard::arm(temp_worktrees.path(), find_worktree);
         let server = test_server();
         let injector = rusqlite::Connection::open(server.global_db_path_buf())
             .expect("unrestricted second global DB connection");
@@ -823,6 +872,11 @@ pub(crate) mod tests {
                 temp_worktrees.path().display()
             )
         });
+        let isolated_registry = temp_home.path().join(".tachi/worktrees.json");
+        assert!(
+            isolated_registry.is_file(),
+            "the certified-cleaner registry must be isolated under the fixture HOME"
+        );
         assert!(
             std::fs::read_dir(temp_runs.path())
                 .expect("read canonical run root")
@@ -841,6 +895,13 @@ pub(crate) mod tests {
             find_worktree(temp_worktrees.path()).is_none(),
             "certified cleanup must not leave a registered fixture worktree"
         );
+        let registry = std::fs::read_to_string(&isolated_registry)
+            .expect("read isolated certified-cleaner registry after cleanup");
+        assert!(
+            !registry.contains(retained.to_string_lossy().as_ref()),
+            "certified cleanup must remove the fixture's isolated registry entry"
+        );
+        fixture_cleanup.disarm();
     }
 
     /// The facade must install the in-memory cancellation owner before its
