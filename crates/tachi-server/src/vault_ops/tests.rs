@@ -3108,3 +3108,73 @@ async fn read_unlocked_vault_secret_resolves_lane_slot_pointer() {
         "{err}"
     );
 }
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn lane_slot_read_ignores_legacy_rotation_members() {
+    let _lock = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let db_path = crate::utils::test_fixture_path(format!(
+        "memory-server-vault-slot-legacy-rotation-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let server = MemoryServer::new(db_path, None).expect("create test server");
+    handle_vault_init(
+        &server,
+        VaultInitParams {
+            password: "slot-legacy-rotation".to_string(),
+        },
+    )
+    .await
+    .expect("vault init");
+    handle_vault_set(
+        &server,
+        vault_set_params("DEEPSEEK_API_KEY", "deepseek-secret-bytes", false),
+    )
+    .await
+    .expect("account");
+    handle_vault_set(
+        &server,
+        vault_set_params("EXTRACT_API_KEY", "deepseek-secret-bytes", false),
+    )
+    .await
+    .expect("bind");
+    with_vault_key(&server, |key| {
+        let (encrypted_value, nonce) =
+            crate::vault_crypto::encrypt(key, b"leftover-rotation-member")?;
+        let now = chrono::Utc::now().to_rfc3339();
+        server.with_global_store(|store| {
+            store
+                .vault_upsert_entry(&memcore::vault::VaultEntry {
+                    name: "EXTRACT_API_KEY_1".to_string(),
+                    encrypted_value,
+                    nonce,
+                    secret_type: memcore::SECRET_TYPE_API_KEY.to_string(),
+                    description: String::new(),
+                    allowed_agents: None,
+                    created_at: now.clone(),
+                    updated_at: now.clone(),
+                    accessed_at: String::new(),
+                    access_count: 0,
+                })
+                .map_err(|e| e.to_string())?;
+            store
+                .vault_set_rotation(&memcore::vault::VaultKeyRotation {
+                    prefix: "EXTRACT_API_KEY".to_string(),
+                    current_index: 1,
+                    total_keys: 1,
+                    rotation_strategy: "round_robin".to_string(),
+                    created_at: now.clone(),
+                    updated_at: now,
+                })
+                .map_err(|e| e.to_string())
+        })
+    })
+    .expect("seed leftover slot rotation");
+    let usable =
+        crate::vault_ops::read_unlocked_vault_secret(&server, "EXTRACT_API_KEY", None, true)
+            .expect("slot must ignore leftover rotation");
+    assert_eq!(usable, "deepseek-secret-bytes");
+    assert_ne!(usable, "leftover-rotation-member");
+}

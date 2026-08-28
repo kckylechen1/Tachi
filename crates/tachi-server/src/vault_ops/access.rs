@@ -169,6 +169,15 @@ fn select_vault_entry_from_transaction(
         .vault_get_rotation(&params.name)
         .map_err(|e| format!("Failed to check rotation: {e}"))?;
 
+    if super::is_lane_slot_secret_name(&params.name) {
+        let entry = exact_entry.ok_or_else(|| format!("Secret not found: {}", params.name))?;
+        return Ok(SelectedVaultEntry {
+            target_name: entry.name.clone(),
+            entry,
+            pending_rotation: None,
+        });
+    }
+
     if let Some(rotation) = rotation {
         if params.auto_rotate || exact_entry.is_none() {
             let all_entries = store
