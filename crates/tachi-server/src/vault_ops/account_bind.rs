@@ -82,7 +82,7 @@ pub(crate) fn rewrite_imported_lane_slots(
         if is_lane_slot_secret_name(&entry.name) {
             slot_plain.push((idx, value));
         } else {
-            account_rows.push((entry.name.clone(), value));
+            account_rows.push((entry.name.clone(), value, entry.secret_type.clone()));
         }
     }
     let accounts = bindable_accounts(account_rows);
@@ -132,7 +132,7 @@ pub(crate) fn write_lane_slot_binding(
             expected_cipher = Some((entry.encrypted_value, entry.nonce));
             existing_plain = Some(value);
         } else {
-            account_rows.push((entry.name, value));
+            account_rows.push((entry.name, value, entry.secret_type));
         }
     }
     let accounts = bindable_accounts(account_rows);
@@ -175,11 +175,17 @@ pub(crate) fn write_lane_slot_binding(
 }
 
 pub(crate) fn bindable_accounts(
-    rows: impl IntoIterator<Item = (String, String)>,
+    rows: impl IntoIterator<Item = (String, String, String)>,
 ) -> Vec<(String, String, &'static str)> {
     rows.into_iter()
-        .filter_map(|(name, value)| {
+        .filter_map(|(name, value, secret_type)| {
             if is_lane_slot_secret_name(&name) {
+                return None;
+            }
+            if parse_vault_alias(&value).is_some() {
+                return None;
+            }
+            if memcore::effective_vault_secret_type(&name, &secret_type) != SECRET_TYPE_API_KEY {
                 return None;
             }
             let kind = crate::status_ops::status_health::provider_kind_for_env_name(&name)?;
@@ -258,22 +264,17 @@ pub(crate) fn decide_lane_slot_write(
         if account == slot {
             return Err(format!("Lane slot '{slot}' cannot bind to itself"));
         }
-        let Some((_, _, kind)) = accounts.iter().find(|(name, _, _)| name == account) else {
+        let Some((_, value, kind)) = accounts.iter().find(|(name, _, _)| name == account) else {
             return Err(format!(
-                "Lane slot '{slot}' cannot bind to missing account '{account}'"
+                "Lane slot '{slot}' cannot bind to missing or unusable account '{account}'"
             ));
         };
-        let fp = accounts
-            .iter()
-            .find(|(name, _, _)| name == account)
-            .and_then(|(_, value, _)| {
-                if parse_vault_alias(value).is_some() {
-                    None
-                } else {
-                    Some(fingerprint_secret(master_key, kind, value))
-                }
-            })
-            .unwrap_or_else(|| "fp1:unresolved".to_string());
+        if parse_vault_alias(value).is_some() {
+            return Err(format!(
+                "Lane slot '{slot}' cannot bind to account '{account}' whose value is itself a vault alias"
+            ));
+        }
+        let fp = fingerprint_secret(master_key, kind, value);
         AccountMatch {
             name: account.to_string(),
             fingerprint: fp,
@@ -448,6 +449,51 @@ mod tests {
         .expect("noop");
         assert!(decided.noop);
         assert_eq!(decided.store_value, "vault:DEEPSEEK_API_KEY");
+    }
+
+    #[test]
+    fn bindable_accounts_skip_alias_and_non_api_key_rows() {
+        let accounts = bindable_accounts(vec![
+            (
+                "DEEPSEEK_API_KEY".to_string(),
+                "vault:SILICONFLOW_API_KEY".to_string(),
+                SECRET_TYPE_API_KEY.to_string(),
+            ),
+            (
+                "SILICONFLOW_API_KEY".to_string(),
+                "siliconflow-secret".to_string(),
+                "password".to_string(),
+            ),
+            (
+                "ZAI_API_KEY".to_string(),
+                "zai-secret".to_string(),
+                SECRET_TYPE_API_KEY.to_string(),
+            ),
+        ]);
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0].0, "ZAI_API_KEY");
+    }
+
+    #[test]
+    fn alias_valued_account_is_not_a_bind_target() {
+        let accounts = vec![(
+            "DEEPSEEK_API_KEY".to_string(),
+            "vault:SILICONFLOW_API_KEY".to_string(),
+            "deepseek",
+        )];
+        let err = decide_lane_slot_write(
+            &MASTER,
+            "EXTRACT_API_KEY",
+            "vault:DEEPSEEK_API_KEY",
+            None,
+            &accounts,
+            false,
+        )
+        .expect_err("alias-valued account");
+        assert!(
+            err.contains("vault alias") || err.contains("unusable"),
+            "{err}"
+        );
     }
 
     #[test]

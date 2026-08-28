@@ -4,7 +4,7 @@ use super::keys::{
     canonical_provider_key_defs, derive_verified_vault_key_from_password, vault_init_with_password,
     vault_upsert_secret_with_key,
 };
-use super::output::vault_get_output;
+use super::output::{lease_api_key_from_store, vault_get_output};
 use super::password::{
     read_password_file, read_vault_init_password, read_vault_init_password_stdin_lines,
     read_vault_password,
@@ -463,6 +463,13 @@ fn vault_upsert_secret_with_key_binds_lane_slot_instead_of_copying() {
             || unmatched.to_string().contains("provider account"),
         "{unmatched}"
     );
+
+    let store = open_cli_store(&db_path).expect("open rw");
+    let (key_id, value) =
+        lease_api_key_from_store(&store, key.bytes(), "EXTRACT_API_KEY").expect("lease slot");
+    assert_eq!(key_id, "DEEPSEEK_API_KEY");
+    assert_eq!(value, "deepseek-secret");
+    assert_ne!(value, "vault:DEEPSEEK_API_KEY");
 }
 
 #[test]

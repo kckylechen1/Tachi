@@ -286,6 +286,61 @@ fn lease_api_key_from_store_with_hook(
             crate::vault_crypto::zero_string(&mut value);
             continue;
         }
+        if crate::vault_ops::is_lane_slot_secret_name(&entry.name) {
+            let Some(target) =
+                crate::provider_config::parse_vault_alias(&value).map(str::to_string)
+            else {
+                crate::vault_crypto::zero_string(&mut value);
+                continue;
+            };
+            crate::vault_crypto::zero_string(&mut value);
+            if crate::vault_ops::is_lane_slot_secret_name(&target) {
+                continue;
+            }
+            let Some(target_entry) = entries.iter().find(|candidate| candidate.name == target)
+            else {
+                continue;
+            };
+            if crate::vault_ops::is_lane_slot_secret_name(&target_entry.name)
+                || memcore::effective_vault_secret_type(
+                    &target_entry.name,
+                    &target_entry.secret_type,
+                ) != memcore::SECRET_TYPE_API_KEY
+                || target_entry
+                    .allowed_agents
+                    .as_ref()
+                    .is_some_and(|agents| !agents.is_empty())
+            {
+                continue;
+            }
+            if let Some(health) = store
+                .vault_get_key_health(logical_name, &target_entry.name)
+                .map_err(|e| format!("vault_get_key_health: {e}"))?
+            {
+                if key_health_blocks_cli(&health) {
+                    continue;
+                }
+            }
+            let decrypted = crate::vault_crypto::decrypt(
+                key,
+                &target_entry.encrypted_value,
+                &target_entry.nonce,
+            )?;
+            let mut target_value = String::from_utf8(decrypted).map_err(|e| {
+                format!(
+                    "Vault secret '{}' is not valid UTF-8: {e}",
+                    target_entry.name
+                )
+            })?;
+            if target_value.trim().is_empty()
+                || crate::provider_config::parse_vault_alias(&target_value).is_some()
+            {
+                crate::vault_crypto::zero_string(&mut target_value);
+                continue;
+            }
+            let _ = store.vault_touch_entry(&target_entry.name);
+            return Ok((target_entry.name.clone(), target_value));
+        }
 
         if let Some(rotation) = rotation.as_ref() {
             if let Some((prefix, idx)) =

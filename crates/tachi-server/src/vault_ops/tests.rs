@@ -2987,3 +2987,54 @@ async fn child_env_all_mode_does_not_inject_leftover_slot_bytes() {
     assert_eq!(extract.1, "deepseek-secret-bytes");
     assert_ne!(extract.1, "vault:DEEPSEEK_API_KEY");
 }
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn project_binding_resolves_lane_slot_pointer() {
+    let _lock = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = crate::utils::test_fixture_path(format!(
+        "memory-server-vault-slot-project-bind-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let server = MemoryServer::new(db_path, None).expect("create test server");
+    handle_vault_init(
+        &server,
+        VaultInitParams {
+            password: "slot-project-bind".to_string(),
+        },
+    )
+    .await
+    .expect("vault init");
+    handle_vault_set(
+        &server,
+        vault_set_params("DEEPSEEK_API_KEY", "deepseek-secret-bytes", false),
+    )
+    .await
+    .expect("account");
+    handle_vault_set(
+        &server,
+        vault_set_params("EXTRACT_API_KEY", "deepseek-secret-bytes", false),
+    )
+    .await
+    .expect("bind");
+    let tachi_dir = dir.path().join(".tachi");
+    std::fs::create_dir_all(&tachi_dir).expect("mkdir");
+    std::fs::write(
+        tachi_dir.join("vault.env"),
+        "MY_KEY=vault:EXTRACT_API_KEY\n",
+    )
+    .expect("write bindings");
+    let secrets =
+        crate::vault_ops::load_unlocked_env_secrets_for_child_env(&server, Some(dir.path()))
+            .expect("child env");
+    let injected = secrets
+        .iter()
+        .find(|(name, _)| name == "MY_KEY")
+        .expect("project binding");
+    assert_eq!(injected.1, "deepseek-secret-bytes");
+    assert_ne!(injected.1, "vault:DEEPSEEK_API_KEY");
+    assert_ne!(injected.1, "vault:EXTRACT_API_KEY");
+}

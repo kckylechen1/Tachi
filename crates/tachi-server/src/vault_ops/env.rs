@@ -126,6 +126,42 @@ pub(crate) fn load_unlocked_env_secrets_for_child_env_with_consumer(
                 continue;
             }
         };
+        let value = if crate::vault_ops::is_lane_slot_secret_name(&secret_name) {
+            match crate::provider_config::parse_vault_alias(&value) {
+                Some(target) if !crate::vault_ops::is_lane_slot_secret_name(target) => {
+                    match read_unlocked_vault_secret(server, target, consumer, false) {
+                        Ok(target_value)
+                            if crate::provider_config::parse_vault_alias(&target_value)
+                                .is_none() =>
+                        {
+                            target_value
+                        }
+                        Ok(_) => {
+                            unavailable.insert(
+                                env_name.clone(),
+                                format!(
+                                    "Lane slot '{secret_name}' points at '{target}' which is itself a vault alias"
+                                ),
+                            );
+                            continue;
+                        }
+                        Err(err) => {
+                            unavailable.insert(env_name, err);
+                            continue;
+                        }
+                    }
+                }
+                _ => {
+                    unavailable.insert(
+                        env_name.clone(),
+                        format!("Lane slot '{secret_name}' is not bound to a usable account"),
+                    );
+                    continue;
+                }
+            }
+        } else {
+            value
+        };
         upsert_env_secret(&mut secrets, env_name, value);
     }
 
