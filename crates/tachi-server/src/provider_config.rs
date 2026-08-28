@@ -172,7 +172,7 @@ fn resolve_vault_pools(
     if !keychain.pools.is_empty() || !keychain.listed_drops.is_empty() {
         return Ok(keychain);
     }
-    if vault_config_exists(global_db_path) {
+    if vault_config_exists(global_db_path)? {
         return Ok(tachi_llm::DurableVaultLoad::from_pools(
             keychain.pools,
             availability,
@@ -208,14 +208,19 @@ pub(crate) fn default_global_db_path() -> std::path::PathBuf {
         .join(memcore::MEMORY_DB_FILENAME)
 }
 
-fn vault_config_exists(global_db_path: &Path) -> bool {
-    let Some(path) = global_db_path.to_str() else {
-        return false;
-    };
-    let Ok(store) = memcore::MemoryStore::open_read_only(path) else {
-        return false;
-    };
-    store.vault_get_config().ok().flatten().is_some()
+fn vault_config_exists(global_db_path: &Path) -> Result<bool, String> {
+    if !global_db_path.exists() {
+        return Ok(false);
+    }
+    let path = global_db_path
+        .to_str()
+        .ok_or_else(|| "Vault DB path is not valid UTF-8".to_string())?;
+    let store = memcore::MemoryStore::open_read_only(path)
+        .map_err(|err| format!("Failed to open Vault DB for provider refresh: {err}"))?;
+    store
+        .vault_get_config()
+        .map(|config| config.is_some())
+        .map_err(|err| format!("Failed to read Vault config for provider refresh: {err}"))
 }
 
 fn paths_equal(left: &Path, right: &Path) -> bool {
@@ -1007,6 +1012,21 @@ mod catalog_import_tests {
 mod tests {
     use super::*;
     use crate::test_support::EnvRestore;
+
+    #[test]
+    fn vault_config_exists_fails_closed_for_corrupt_database() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("memory.db");
+        std::fs::write(&path, b"not a sqlite database").expect("write corrupt database");
+
+        let err = vault_config_exists(&path).expect_err("corrupt Vault DB must stay loud");
+
+        assert!(
+            err.contains("Failed to open Vault DB for provider refresh")
+                || err.contains("Failed to read Vault config for provider refresh"),
+            "{err}"
+        );
+    }
 
     /// #1680/D3 (codex finding 1, the sharpest catch of the cross-vendor
     /// review): a Vault-stored search key must never reach the LLM provider
