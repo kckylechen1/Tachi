@@ -16,7 +16,7 @@
 
 pub use vault_kit::{
     active_kdf_params_json, create_verifier, decrypt, encrypt, generate_salt, verify_password,
-    zero_key, zero_string, DerivedVaultKey, KdfParams, AES_GCM_NONCE_LEN,
+    zero_bytes, zero_key, zero_string, DerivedVaultKey, KdfParams, AES_GCM_NONCE_LEN,
 };
 #[cfg(test)]
 pub use vault_kit::{cheap_kdf_params_json, derive_cheap};
@@ -267,7 +267,7 @@ pub(crate) const KEYCHAIN_PASSWORD_INVALID_UTF8: &str =
 pub(crate) fn decode_keychain_password_output(bytes: Vec<u8>) -> Result<String, String> {
     String::from_utf8(bytes).map_err(|error| {
         let mut bytes = error.into_bytes();
-        bytes.fill(0);
+        zero_bytes(&mut bytes);
         KEYCHAIN_PASSWORD_INVALID_UTF8.to_string()
     })
 }
