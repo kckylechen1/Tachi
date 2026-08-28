@@ -322,11 +322,13 @@ impl LlmClient {
         // Resolved before the request as it always was: the lane's currently
         // usable credential, chosen without advancing the round-robin cursor.
         let selected = self.selected_secret_readonly(&lane.api_key_envs);
+        let authority = self.lane_authority(ChatLane::Reasoning);
         let (base_url, model, selected) = match selected {
             Some(selected) => {
                 let bound = match bind_lane_config_to_selected_key(
                     ChatLane::Reasoning,
                     lane,
+                    authority,
                     &selected.logical_name,
                     self.rebind_selected_provider,
                 ) {

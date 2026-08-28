@@ -11,7 +11,7 @@ use super::super::auth_probe_descriptor_for_host;
 use super::super::catalog_import::DeploymentAttribution;
 use super::super::provider_health::{
     bind_lane_config_to_selected_key, ChatLane, ChatLaneConfig, CompletionStatusV1, Generated,
-    ModelInvocationLaneV1, ProviderAuthProbeFamily, ProviderInvocationFailure,
+    LaneAuthority, ModelInvocationLaneV1, ProviderAuthProbeFamily, ProviderInvocationFailure,
     ProviderInvocationFailureClass, ProviderInvocationOutcome, ProviderInvocationReceipt,
     SelectedProviderSecret,
 };
@@ -246,6 +246,7 @@ impl super::super::LlmClient {
     ) -> Result<ProviderInvocationOutcome, ProviderInvocationFailure> {
         let lane = ChatLane::Reasoning;
         let cfg = self.lane(lane).clone();
+        let authority = self.lane_authority(lane);
 
         let breaker_key = format!("chat:{}", lane.as_str());
         if !self.circuit_breakers.allow(&breaker_key) {
@@ -259,6 +260,7 @@ impl super::super::LlmClient {
             .call_provider_tier(
                 lane,
                 &cfg,
+                authority,
                 &breaker_key,
                 1,
                 system,
@@ -348,11 +350,12 @@ impl super::super::LlmClient {
         max_tokens: u32,
     ) -> Result<ProviderInvocationOutcome, String> {
         let primary_cfg = self.lane(lane).clone();
+        let primary_authority = self.lane_authority(lane);
         let primary_breaker_key = format!("chat:{}", lane.as_str());
 
-        let mut tiers: Vec<(ChatLaneConfig, String)> =
-            vec![(primary_cfg.clone(), primary_breaker_key)];
-        if let Some(fallback_cfg) = self.fallback_lane(lane) {
+        let mut tiers: Vec<(ChatLaneConfig, LaneAuthority, String)> =
+            vec![(primary_cfg.clone(), primary_authority, primary_breaker_key)];
+        if let Some((fallback_cfg, fallback_authority)) = self.fallback_lane_with_authority(lane) {
             // A fallback that resolves to the exact same provider config as
             // primary (e.g. no `*_FALLBACK_*` env configured and the
             // convenience default happens to match) carries no resilience
@@ -360,13 +363,13 @@ impl super::super::LlmClient {
             // twice under a different breaker key.
             if fallback_cfg != primary_cfg {
                 let fallback_breaker_key = format!("chat:{}:fallback", lane.as_str());
-                tiers.push((fallback_cfg, fallback_breaker_key));
+                tiers.push((fallback_cfg, fallback_authority, fallback_breaker_key));
             }
         }
         let tier_count = tiers.len();
 
         let mut last_err = String::new();
-        for (tier_index, (cfg, breaker_key)) in tiers.into_iter().enumerate() {
+        for (tier_index, (cfg, authority, breaker_key)) in tiers.into_iter().enumerate() {
             if !self.circuit_breakers.allow(&breaker_key) {
                 last_err = format!(
                     "Circuit breaker open for {} (lane {}, tier {tier_index}/{tier_count}) — provider is failing, fast-rejecting. Retry in ~30s.",
@@ -380,6 +383,7 @@ impl super::super::LlmClient {
                 .call_provider_tier(
                     lane,
                     &cfg,
+                    authority,
                     &breaker_key,
                     Self::MAX_ATTEMPTS,
                     system,
@@ -430,6 +434,7 @@ impl super::super::LlmClient {
         &self,
         lane: ChatLane,
         cfg: &ChatLaneConfig,
+        authority: LaneAuthority,
         breaker_key: &str,
         max_attempts: usize,
         system: &str,
@@ -460,6 +465,7 @@ impl super::super::LlmClient {
             let bound = bind_lane_config_to_selected_key(
                 lane,
                 cfg,
+                authority,
                 &selected.logical_name,
                 self.rebind_selected_provider,
             )

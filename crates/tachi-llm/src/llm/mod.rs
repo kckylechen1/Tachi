@@ -41,7 +41,7 @@ pub use provider_health::{
     LLM_OUTPUT_TRUNCATED, MODEL_INVOCATION_SCHEMA_V1,
 };
 use provider_health::{
-    ClaudeCliFailure, DeploymentHealthCounters, ProviderHealthPersistState,
+    ClaudeCliFailure, DeploymentHealthCounters, LaneAuthority, ProviderHealthPersistState,
     ProviderHealthReloadState, ProviderState,
 };
 pub use rerank::{
@@ -82,6 +82,10 @@ pub struct LlmClient {
     distill_fallback: Option<ChatLaneConfig>,
     reasoning_fallback: Option<ChatLaneConfig>,
     summary_fallback: Option<ChatLaneConfig>,
+    /// Frozen at construction: only non-explicit endpoint/model fields may be
+    /// rebound after Vault materializes a different logical provider key.
+    lane_authority: [LaneAuthority; 4],
+    fallback_authority: [Option<LaneAuthority>; 4],
     /// Rerank provider config resolved at construction (eager fail-closed).
     rerank_config: RerankConfig,
     vault_db_path: Option<PathBuf>,

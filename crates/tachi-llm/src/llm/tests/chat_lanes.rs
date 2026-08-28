@@ -32,11 +32,6 @@ fn foundry_lanes_use_deepseek_defaults_when_only_deepseek_key_is_configured() {
         EnvRestore::unset("TACHI_BACKEND_REASONING_TIER"),
     ];
     let _deepseek = EnvRestore::set("DEEPSEEK_API_KEY", "deepseek-test-key");
-    let _stale_reasoning_base = EnvRestore::set(
-        "REASONING_BASE_URL",
-        "https://api.siliconflow.cn/v1/chat/completions",
-    );
-    let _stale_reasoning_model = EnvRestore::set("REASONING_MODEL", "Qwen/Qwen3.5-27B");
 
     let client = LlmClient::new().expect("client should initialize");
     let distill = client.lane(ChatLane::Distill);
@@ -60,6 +55,95 @@ fn foundry_lanes_use_deepseek_defaults_when_only_deepseek_key_is_configured() {
     assert_eq!(
         client.provider_key_id_for_tests(&reasoning.api_key_envs),
         Some("DEEPSEEK_API_KEY".to_string())
+    );
+}
+
+#[test]
+#[allow(clippy::await_holding_lock)]
+fn explicit_distill_lane_fields_override_deepseek_provider_defaults() {
+    let _guard = crate::test_support::global_test_lock().lock();
+    let _env_guards = [
+        EnvRestore::unset("DISTILL_API_KEY"),
+        EnvRestore::unset("REASONING_API_KEY"),
+        EnvRestore::unset("ZAI_API_KEY"),
+        EnvRestore::unset("BIGMODEL_API_KEY"),
+        EnvRestore::unset("EXTRACT_API_KEY"),
+        EnvRestore::unset("SILICONFLOW_API_KEY"),
+        EnvRestore::unset("DISTILL_BASE_URL"),
+        EnvRestore::unset("REASONING_BASE_URL"),
+        EnvRestore::unset("EXTRACT_BASE_URL"),
+        EnvRestore::unset("SILICONFLOW_BASE_URL"),
+        EnvRestore::unset("DEEPSEEK_BASE_URL"),
+        EnvRestore::unset("DEEPSEEK_DISTILL_BASE_URL"),
+        EnvRestore::unset("DEEPSEEK_REASONING_BASE_URL"),
+        EnvRestore::unset("DISTILL_MODEL"),
+        EnvRestore::unset("REASONING_MODEL"),
+        EnvRestore::unset("EXTRACT_MODEL"),
+        EnvRestore::unset("SILICONFLOW_MODEL"),
+        EnvRestore::unset("DEEPSEEK_MODEL"),
+        EnvRestore::unset("DEEPSEEK_DISTILL_MODEL"),
+        EnvRestore::unset("DEEPSEEK_REASONING_MODEL"),
+        EnvRestore::unset("TACHI_BACKEND_DISTILL_TIER"),
+        EnvRestore::unset("TACHI_BACKEND_REASONING_TIER"),
+        EnvRestore::unset(RERANK_PROVIDER_ENV),
+        EnvRestore::unset(RERANK_LOCAL_ENDPOINT_ENV),
+    ];
+    let _deepseek = EnvRestore::set("DEEPSEEK_API_KEY", "deepseek-test-key");
+    let _distill_base = EnvRestore::set(
+        "DISTILL_BASE_URL",
+        "https://api.deepseek.com/custom/chat/completions",
+    );
+    let _distill_model = EnvRestore::set("DISTILL_MODEL", "distill-explicit-model");
+
+    let config = ProviderRuntimeConfig::from_env().expect("explicit lane config should resolve");
+    assert_eq!(
+        config.distill.base_url,
+        "https://api.deepseek.com/custom/chat/completions"
+    );
+    assert_eq!(config.distill.model, "distill-explicit-model");
+}
+
+#[test]
+#[allow(clippy::await_holding_lock)]
+fn explicit_known_distill_host_conflict_with_deepseek_key_fails_closed() {
+    let _guard = crate::test_support::global_test_lock().lock();
+    let _env_guards = [
+        EnvRestore::unset("DISTILL_API_KEY"),
+        EnvRestore::unset("REASONING_API_KEY"),
+        EnvRestore::unset("ZAI_API_KEY"),
+        EnvRestore::unset("BIGMODEL_API_KEY"),
+        EnvRestore::unset("EXTRACT_API_KEY"),
+        EnvRestore::unset("SILICONFLOW_API_KEY"),
+        EnvRestore::unset("DISTILL_BASE_URL"),
+        EnvRestore::unset("REASONING_BASE_URL"),
+        EnvRestore::unset("EXTRACT_BASE_URL"),
+        EnvRestore::unset("SILICONFLOW_BASE_URL"),
+        EnvRestore::unset("DEEPSEEK_BASE_URL"),
+        EnvRestore::unset("DEEPSEEK_DISTILL_BASE_URL"),
+        EnvRestore::unset("DEEPSEEK_REASONING_BASE_URL"),
+        EnvRestore::unset("DISTILL_MODEL"),
+        EnvRestore::unset("REASONING_MODEL"),
+        EnvRestore::unset("EXTRACT_MODEL"),
+        EnvRestore::unset("SILICONFLOW_MODEL"),
+        EnvRestore::unset("DEEPSEEK_MODEL"),
+        EnvRestore::unset("DEEPSEEK_DISTILL_MODEL"),
+        EnvRestore::unset("DEEPSEEK_REASONING_MODEL"),
+        EnvRestore::unset("TACHI_BACKEND_DISTILL_TIER"),
+        EnvRestore::unset("TACHI_BACKEND_REASONING_TIER"),
+        EnvRestore::unset(RERANK_PROVIDER_ENV),
+        EnvRestore::unset(RERANK_LOCAL_ENDPOINT_ENV),
+    ];
+    let _deepseek = EnvRestore::set("DEEPSEEK_API_KEY", "deepseek-test-key");
+    let _distill_base = EnvRestore::set(
+        "DISTILL_BASE_URL",
+        "https://api.siliconflow.cn/v1/chat/completions",
+    );
+
+    let error = ProviderRuntimeConfig::from_env()
+        .expect_err("known host conflict must fail closed during env resolution");
+    assert!(
+        error.contains("lane 'distill'") && error.contains("refusing credential-bearing request"),
+        "unexpected conflict error: {error}"
     );
 }
 
@@ -430,6 +514,7 @@ fn env_example_does_not_prefill_deepseek_lane_urls() {
 }
 
 async fn capture_extract_outbound_body(
+    logical_key: &'static str,
     documented_host: Option<&str>,
     path: &str,
     model: &str,
@@ -483,7 +568,7 @@ async fn capture_extract_outbound_body(
         extract: ChatLaneConfig {
             base_url,
             model: model.to_string(),
-            api_key_envs: vec!["EXTRACT_API_KEY"],
+            api_key_envs: vec![logical_key],
         },
         summary: unused.clone(),
         reasoning: unused.clone(),
@@ -498,9 +583,9 @@ async fn capture_extract_outbound_body(
         client.replace_http_client_for_tests(http);
     }
     client.set_provider_secret_pool(
-        "EXTRACT_API_KEY",
+        logical_key,
         vec![ProviderSecret {
-            key_id: "EXTRACT_API_KEY".to_string(),
+            key_id: logical_key.to_string(),
             value: "test-key".to_string(),
         }],
     );
@@ -526,6 +611,7 @@ async fn outbound_extract_request_uses_host_specific_thinking_fields() {
     let _env = EnvRestore::unset("TACHI_DISABLE_THINKING_MODELS");
 
     let official = capture_extract_outbound_body(
+        "DEEPSEEK_API_KEY",
         Some(DEEPSEEK_AUTH_PROBE.host),
         "/chat/completions",
         "deepseek-v4-flash",
@@ -542,6 +628,7 @@ async fn outbound_extract_request_uses_host_specific_thinking_fields() {
     );
 
     let siliconflow = capture_extract_outbound_body(
+        "SILICONFLOW_API_KEY",
         Some(SILICONFLOW_AUTH_PROBE.host),
         "/v1/chat/completions",
         "deepseek-v4-flash",
@@ -553,8 +640,13 @@ async fn outbound_extract_request_uses_host_specific_thinking_fields() {
         "SiliconFlow outbound body must not carry official DeepSeek keys: {siliconflow}"
     );
 
-    let custom =
-        capture_extract_outbound_body(None, "/chat/completions", "deepseek-v4-flash").await;
+    let custom = capture_extract_outbound_body(
+        "CUSTOM_API_KEY",
+        None,
+        "/chat/completions",
+        "deepseek-v4-flash",
+    )
+    .await;
     assert!(
         custom.get("enable_thinking").is_none() && custom.get("thinking").is_none(),
         "custom OpenAI-compatible host must send neither suppression field: {custom}"
