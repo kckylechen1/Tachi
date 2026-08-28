@@ -109,6 +109,10 @@ pub struct LlmClient {
     /// Full-chain (all tiers) outage streak per lane (#1197) — feeds
     /// `provider_health_status().lane_outages`.
     pub(crate) lane_outage: LaneOutageTracker,
+    /// Env-derived construction may safely rebind a materialized provider
+    /// key to its canonical known host. Directly injected configuration keeps
+    /// its env-free contract and fails closed on a known-host mismatch.
+    rebind_selected_provider: bool,
     /// Test-only: last provider arm entered by `rerank()` (dispatch seam probe).
     #[cfg(test)]
     last_rerank_dispatch: Arc<std::sync::Mutex<Option<RerankProviderKind>>>,

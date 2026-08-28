@@ -1,36 +1,30 @@
 use super::*;
+use crate::llm::auth_probe::{
+    provider_descriptor_for_base_url, provider_descriptor_for_logical_key, ProviderProbeDescriptor,
+    DEEPSEEK_AUTH_PROBE, SILICONFLOW_AUTH_PROBE, ZAI_AUTH_PROBE, ZAI_BIGMODEL_AUTH_PROBE,
+};
 
 const DEFAULT_CHAT_BASE_URL: &str = "https://api.siliconflow.cn/v1/chat/completions";
-const DEFAULT_DEEPSEEK_BASE_URL: &str = "https://api.deepseek.com/chat/completions";
 const DEFAULT_EXTRACT_MODEL: &str = "Qwen/Qwen3.5-27B";
 const DEFAULT_REASONING_MODEL: &str = "Qwen/Qwen3.5-27B";
-/// Official DeepSeek V4 IDs (`deepseek-chat` / `deepseek-reasoner` retired
-/// 2026-07-24). Flash is the cheap distill/extract default; Pro is reasoning.
-const DEFAULT_DEEPSEEK_DISTILL_MODEL: &str = "deepseek-v4-flash";
-const DEFAULT_DEEPSEEK_REASONING_MODEL: &str = "deepseek-v4-pro";
 
+#[derive(Clone, Copy)]
 struct ProviderLaneDefault {
-    api_key_env: &'static str,
+    descriptor: &'static ProviderProbeDescriptor,
     base_url_envs: &'static [&'static str],
     model_envs: &'static [&'static str],
-    base_url: &'static str,
-    model: &'static str,
 }
 
 const DEEPSEEK_DISTILL_DEFAULT: ProviderLaneDefault = ProviderLaneDefault {
-    api_key_env: "DEEPSEEK_API_KEY",
+    descriptor: &DEEPSEEK_AUTH_PROBE,
     base_url_envs: &["DEEPSEEK_DISTILL_BASE_URL", "DEEPSEEK_BASE_URL"],
     model_envs: &["DEEPSEEK_DISTILL_MODEL", "DEEPSEEK_MODEL"],
-    base_url: DEFAULT_DEEPSEEK_BASE_URL,
-    model: DEFAULT_DEEPSEEK_DISTILL_MODEL,
 };
 
 const DEEPSEEK_REASONING_DEFAULT: ProviderLaneDefault = ProviderLaneDefault {
-    api_key_env: "DEEPSEEK_API_KEY",
+    descriptor: &DEEPSEEK_AUTH_PROBE,
     base_url_envs: &["DEEPSEEK_REASONING_BASE_URL", "DEEPSEEK_BASE_URL"],
     model_envs: &["DEEPSEEK_REASONING_MODEL", "DEEPSEEK_MODEL"],
-    base_url: DEFAULT_DEEPSEEK_BASE_URL,
-    model: DEFAULT_DEEPSEEK_REASONING_MODEL,
 };
 
 /// Cross-provider fallback defaults (#1197). These mirror the concrete
@@ -39,20 +33,42 @@ const DEEPSEEK_REASONING_DEFAULT: ProviderLaneDefault = ProviderLaneDefault {
 /// `DEEPSEEK_API_KEY` is set, so their natural fallback is the SiliconFlow
 /// front-line provider instead).
 const DEEPSEEK_FALLBACK_DEFAULT: ProviderLaneDefault = ProviderLaneDefault {
-    api_key_env: "DEEPSEEK_API_KEY",
+    descriptor: &DEEPSEEK_AUTH_PROBE,
     base_url_envs: &["DEEPSEEK_BASE_URL"],
     model_envs: &["DEEPSEEK_MODEL"],
-    base_url: DEFAULT_DEEPSEEK_BASE_URL,
-    model: DEFAULT_DEEPSEEK_DISTILL_MODEL,
 };
 
 const SILICONFLOW_FALLBACK_DEFAULT: ProviderLaneDefault = ProviderLaneDefault {
-    api_key_env: "SILICONFLOW_API_KEY",
+    descriptor: &SILICONFLOW_AUTH_PROBE,
     base_url_envs: &["SILICONFLOW_BASE_URL"],
     model_envs: &["SILICONFLOW_MODEL"],
-    base_url: DEFAULT_CHAT_BASE_URL,
-    model: DEFAULT_EXTRACT_MODEL,
 };
+
+const ZAI_LANE_DEFAULT: ProviderLaneDefault = ProviderLaneDefault {
+    descriptor: &ZAI_AUTH_PROBE,
+    base_url_envs: &["ZAI_BASE_URL"],
+    model_envs: &["ZAI_MODEL"],
+};
+
+const BIGMODEL_LANE_DEFAULT: ProviderLaneDefault = ProviderLaneDefault {
+    descriptor: &ZAI_BIGMODEL_AUTH_PROBE,
+    base_url_envs: &["BIGMODEL_BASE_URL"],
+    model_envs: &["BIGMODEL_MODEL"],
+};
+
+const NO_PROVIDER_DEFAULTS: &[&ProviderLaneDefault] = &[];
+const FOUNDRY_REASONING_DEFAULTS: &[&ProviderLaneDefault] = &[
+    &DEEPSEEK_REASONING_DEFAULT,
+    &ZAI_LANE_DEFAULT,
+    &BIGMODEL_LANE_DEFAULT,
+    &SILICONFLOW_FALLBACK_DEFAULT,
+];
+const FOUNDRY_DISTILL_DEFAULTS: &[&ProviderLaneDefault] = &[
+    &DEEPSEEK_DISTILL_DEFAULT,
+    &ZAI_LANE_DEFAULT,
+    &BIGMODEL_LANE_DEFAULT,
+    &SILICONFLOW_FALLBACK_DEFAULT,
+];
 
 /// Construction-time provider/rerank configuration, separable from env reads.
 ///
@@ -81,7 +97,7 @@ impl ProviderRuntimeConfig {
         // ── Front-line LLM layer (Extract + Summary) ──
         // Extract: EXTRACT_* → SILICONFLOW_*
         let extract = super::super::LlmClient::load_lane(
-            "extract",
+            ChatLane::Extract,
             &["EXTRACT_API_KEY", "SILICONFLOW_API_KEY"],
             &[
                 "EXTRACT_BASE_URL",
@@ -91,12 +107,12 @@ impl ProviderRuntimeConfig {
             &["EXTRACT_MODEL", "SILICONFLOW_MODEL", "EXTRACTOR_MODEL"],
             "TACHI_BACKEND_EXTRACT_TIER",
             DEFAULT_EXTRACT_MODEL,
-            None,
+            NO_PROVIDER_DEFAULTS,
         )?;
 
         // Summary: SUMMARY_* → EXTRACT_* → SILICONFLOW_*  (front-line default)
         let summary = super::super::LlmClient::load_lane(
-            "summary",
+            ChatLane::Summary,
             &["SUMMARY_API_KEY", "EXTRACT_API_KEY", "SILICONFLOW_API_KEY"],
             &[
                 "SUMMARY_BASE_URL",
@@ -112,7 +128,7 @@ impl ProviderRuntimeConfig {
             ],
             "TACHI_BACKEND_SUMMARY_TIER",
             &extract.model,
-            None,
+            NO_PROVIDER_DEFAULTS,
         )?;
 
         // ── Foundry LLM layer (Distill + Reasoning) ──
@@ -120,7 +136,7 @@ impl ProviderRuntimeConfig {
         // fall back through the legacy reasoning/ZAI/extract/SiliconFlow chain.
         // Dedicated DISTILL_* env vars remain the explicit distill override.
         let reasoning = super::super::LlmClient::load_lane(
-            "reasoning",
+            ChatLane::Reasoning,
             &[
                 "DEEPSEEK_API_KEY",
                 "REASONING_API_KEY",
@@ -148,11 +164,11 @@ impl ProviderRuntimeConfig {
             ],
             "TACHI_BACKEND_REASONING_TIER",
             DEFAULT_REASONING_MODEL,
-            Some(&DEEPSEEK_REASONING_DEFAULT),
+            FOUNDRY_REASONING_DEFAULTS,
         )?;
 
         let distill = super::super::LlmClient::load_lane(
-            "distill",
+            ChatLane::Distill,
             &[
                 "DISTILL_API_KEY",
                 "DEEPSEEK_API_KEY",
@@ -180,7 +196,7 @@ impl ProviderRuntimeConfig {
             ],
             "TACHI_BACKEND_DISTILL_TIER",
             &reasoning.model,
-            Some(&DEEPSEEK_DISTILL_DEFAULT),
+            FOUNDRY_DISTILL_DEFAULTS,
         )?;
 
         // Eager rerank-config validation: unknown provider / local without
@@ -225,12 +241,14 @@ impl LaneFallbackConfig {
     /// convenience default) — never invents a fallback out of thin air.
     pub fn from_env() -> Self {
         let extract = Self::load_fallback(
+            ChatLane::Extract,
             &["EXTRACT_FALLBACK_API_KEY", "DEEPSEEK_API_KEY"],
             &["EXTRACT_FALLBACK_BASE_URL", "DEEPSEEK_BASE_URL"],
             &["EXTRACT_FALLBACK_MODEL", "DEEPSEEK_MODEL"],
             &DEEPSEEK_FALLBACK_DEFAULT,
         );
         let summary = Self::load_fallback(
+            ChatLane::Summary,
             &[
                 "SUMMARY_FALLBACK_API_KEY",
                 "EXTRACT_FALLBACK_API_KEY",
@@ -249,12 +267,14 @@ impl LaneFallbackConfig {
             &DEEPSEEK_FALLBACK_DEFAULT,
         );
         let reasoning = Self::load_fallback(
+            ChatLane::Reasoning,
             &["REASONING_FALLBACK_API_KEY", "SILICONFLOW_API_KEY"],
             &["REASONING_FALLBACK_BASE_URL", "SILICONFLOW_BASE_URL"],
             &["REASONING_FALLBACK_MODEL", "SILICONFLOW_MODEL"],
             &SILICONFLOW_FALLBACK_DEFAULT,
         );
         let distill = Self::load_fallback(
+            ChatLane::Distill,
             &["DISTILL_FALLBACK_API_KEY", "SILICONFLOW_API_KEY"],
             &["DISTILL_FALLBACK_BASE_URL", "SILICONFLOW_BASE_URL"],
             &["DISTILL_FALLBACK_MODEL", "SILICONFLOW_MODEL"],
@@ -272,6 +292,7 @@ impl LaneFallbackConfig {
     /// configured secondary provider and falls through to primary-only
     /// behavior identical to pre-#1197.
     fn load_fallback(
+        lane: ChatLane,
         api_key_envs: &[&'static str],
         base_url_envs: &[&str],
         model_envs: &[&str],
@@ -279,9 +300,9 @@ impl LaneFallbackConfig {
     ) -> Option<ChatLaneConfig> {
         super::super::LlmClient::first_env_key(api_key_envs)?;
         let base_url = super::super::LlmClient::first_env(base_url_envs)
-            .unwrap_or_else(|| default.base_url.to_string());
+            .unwrap_or_else(|| default.descriptor.chat.base_url.to_string());
         let model = super::super::LlmClient::first_env(model_envs)
-            .unwrap_or_else(|| default.model.to_string());
+            .unwrap_or_else(|| default.descriptor.chat_model_for_lane(lane).to_string());
         Some(ChatLaneConfig {
             base_url,
             model,
@@ -463,6 +484,7 @@ impl super::super::LlmClient {
             LaneFallbackConfig::from_env(),
             vault_db_path,
             vault_db_migration,
+            true,
         )
     }
 
@@ -495,6 +517,7 @@ impl super::super::LlmClient {
             fallbacks,
             vault_db_path,
             memcore::MigrationAuthority::Deny,
+            false,
         )
     }
 
@@ -503,6 +526,7 @@ impl super::super::LlmClient {
         fallbacks: LaneFallbackConfig,
         vault_db_path: Option<&Path>,
         vault_db_migration: memcore::MigrationAuthority,
+        rebind_selected_provider: bool,
     ) -> Result<Self, String> {
         let vault_db_path = vault_db_path.map(|path| path.to_path_buf());
 
@@ -586,25 +610,39 @@ impl super::super::LlmClient {
             claude_cli_failure: Arc::new(RwLock::new(None)),
             circuit_breakers: super::super::CircuitBreakerRegistry::new(),
             lane_outage: super::super::LaneOutageTracker::new(),
+            rebind_selected_provider,
             #[cfg(test)]
             last_rerank_dispatch: Arc::new(std::sync::Mutex::new(None)),
         })
     }
 
     fn load_lane(
-        lane: &str,
+        lane: ChatLane,
         api_key_envs: &[&'static str],
         base_url_envs: &[&str],
         model_envs: &[&str],
         tier_env: &str,
         default_model: &str,
-        provider_default: Option<&ProviderLaneDefault>,
+        provider_defaults: &[&ProviderLaneDefault],
     ) -> Result<ChatLaneConfig, String> {
         let selected_api_key = Self::first_env_key(api_key_envs);
-        let selected_provider_default =
-            provider_default.filter(|default| selected_api_key == Some(default.api_key_env));
-        let base_url = if let Some(default) = selected_provider_default {
-            Self::first_env(default.base_url_envs).unwrap_or_else(|| default.base_url.to_string())
+        let selected_descriptor = selected_api_key.and_then(provider_descriptor_for_logical_key);
+        let selected_provider_default = selected_descriptor.and_then(|descriptor| {
+            provider_defaults
+                .iter()
+                .copied()
+                .find(|default| default.descriptor.host == descriptor.host)
+        });
+        let base_url = if let Some(descriptor) = selected_descriptor {
+            let provider_base_url_envs = selected_provider_default
+                .map(|default| default.base_url_envs)
+                .unwrap_or(&[]);
+            let lane_base_url_envs = selected_provider_default
+                .map(|_| base_url_envs.get(..1).unwrap_or(&[]))
+                .unwrap_or(base_url_envs);
+            Self::first_compatible_provider_env(provider_base_url_envs, descriptor)
+                .or_else(|| Self::first_compatible_provider_env(lane_base_url_envs, descriptor))
+                .unwrap_or_else(|| descriptor.chat.base_url.to_string())
         } else {
             Self::first_non_deepseek_env(base_url_envs)
                 .unwrap_or_else(|| DEFAULT_CHAT_BASE_URL.to_string())
@@ -619,21 +657,42 @@ impl super::super::LlmClient {
         } else {
             None
         };
-        let default_model = selected_provider_default
-            .map(|default| default.model)
+        let default_model = selected_descriptor
+            .map(|descriptor| descriptor.chat_model_for_lane(lane))
             .unwrap_or(default_model);
         let model = crate::backend_tier::resolve_lane_model(
-            lane,
+            lane.as_str(),
             tier_env,
             explicit,
             fallback,
             default_model,
         );
 
-        Ok(ChatLaneConfig {
+        let config = ChatLaneConfig {
             base_url,
             model,
             api_key_envs: api_key_envs.to_vec(),
+        };
+        match selected_api_key {
+            Some(logical_name) => {
+                bind_lane_config_to_selected_key(lane, &config, logical_name, true)
+            }
+            None => Ok(config),
+        }
+    }
+
+    fn first_compatible_provider_env(
+        keys: &[&str],
+        selected: &ProviderProbeDescriptor,
+    ) -> Option<String> {
+        keys.iter().find_map(|key| {
+            let value = Self::env_value(key)?;
+            let url = reqwest::Url::parse(&value).ok()?;
+            url.host_str()?;
+            match provider_descriptor_for_base_url(&value) {
+                Some(candidate) if candidate.host != selected.host => None,
+                _ => Some(value),
+            }
         })
     }
 
@@ -690,4 +749,59 @@ impl super::super::LlmClient {
             ChatLane::Summary => self.summary_fallback.clone(),
         }
     }
+}
+
+/// Bind a lane's endpoint and default model to the logical provider key that
+/// was actually selected from env or Vault.
+///
+/// Env resolution happens before Vault materialization, so the construction
+/// lane may still carry SiliconFlow defaults when a later selected key belongs
+/// to DeepSeek, Z.AI, or BigModel. Known provider hosts are a closed set: a
+/// mismatched known host is canonicalized for env-derived clients and refused
+/// for env-free injected clients. Unknown, well-formed custom hosts retain the
+/// caller's config because there is no safe provider policy to invent.
+pub(crate) fn bind_lane_config_to_selected_key(
+    lane: ChatLane,
+    cfg: &ChatLaneConfig,
+    logical_name: &str,
+    allow_rebind: bool,
+) -> Result<ChatLaneConfig, String> {
+    let Some(selected) = provider_descriptor_for_logical_key(logical_name) else {
+        return Ok(cfg.clone());
+    };
+
+    let current = reqwest::Url::parse(&cfg.base_url).map_err(|_| {
+        format!(
+            "lane '{}' has a malformed endpoint; refusing credential-bearing request",
+            lane.as_str()
+        )
+    })?;
+    if current.host_str().is_none() {
+        return Err(format!(
+            "lane '{}' endpoint has no host; refusing credential-bearing request",
+            lane.as_str()
+        ));
+    }
+
+    let Some(current_provider) = provider_descriptor_for_base_url(&cfg.base_url) else {
+        return Ok(cfg.clone());
+    };
+    if current_provider.host == selected.host {
+        return Ok(cfg.clone());
+    }
+    if !allow_rebind {
+        return Err(format!(
+            "logical provider key '{}' targets known provider '{}', but lane '{}' is configured for known provider '{}'; refusing credential-bearing request",
+            logical_name,
+            selected.host,
+            lane.as_str(),
+            current_provider.host,
+        ));
+    }
+
+    Ok(ChatLaneConfig {
+        base_url: selected.chat.base_url.to_string(),
+        model: selected.chat_model_for_lane(lane).to_string(),
+        api_key_envs: cfg.api_key_envs.clone(),
+    })
 }

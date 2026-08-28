@@ -153,6 +153,111 @@ fn foundry_lanes_stay_on_siliconflow_when_only_siliconflow_key_is_configured() {
     );
 }
 
+#[test]
+#[allow(clippy::await_holding_lock)]
+fn foundry_lanes_bind_zai_and_bigmodel_env_keys_to_their_canonical_defaults() {
+    let _guard = crate::test_support::global_test_lock().lock();
+    let _env_guards = [
+        EnvRestore::unset("DISTILL_API_KEY"),
+        EnvRestore::unset("REASONING_API_KEY"),
+        EnvRestore::unset("DEEPSEEK_API_KEY"),
+        EnvRestore::unset("ZAI_API_KEY"),
+        EnvRestore::unset("BIGMODEL_API_KEY"),
+        EnvRestore::unset("EXTRACT_API_KEY"),
+        EnvRestore::unset("SILICONFLOW_API_KEY"),
+        EnvRestore::unset("DISTILL_BASE_URL"),
+        EnvRestore::unset("REASONING_BASE_URL"),
+        EnvRestore::unset("DEEPSEEK_BASE_URL"),
+        EnvRestore::unset("DEEPSEEK_DISTILL_BASE_URL"),
+        EnvRestore::unset("DEEPSEEK_REASONING_BASE_URL"),
+        EnvRestore::unset("ZAI_BASE_URL"),
+        EnvRestore::unset("BIGMODEL_BASE_URL"),
+        EnvRestore::unset("EXTRACT_BASE_URL"),
+        EnvRestore::unset("SILICONFLOW_BASE_URL"),
+        EnvRestore::unset("DISTILL_MODEL"),
+        EnvRestore::unset("REASONING_MODEL"),
+        EnvRestore::unset("DEEPSEEK_MODEL"),
+        EnvRestore::unset("DEEPSEEK_DISTILL_MODEL"),
+        EnvRestore::unset("DEEPSEEK_REASONING_MODEL"),
+        EnvRestore::unset("ZAI_MODEL"),
+        EnvRestore::unset("BIGMODEL_MODEL"),
+        EnvRestore::unset("EXTRACT_MODEL"),
+        EnvRestore::unset("SILICONFLOW_MODEL"),
+        EnvRestore::unset("TACHI_BACKEND_DISTILL_TIER"),
+        EnvRestore::unset("TACHI_BACKEND_REASONING_TIER"),
+    ];
+
+    {
+        let _zai = EnvRestore::set("ZAI_API_KEY", "zai-test-key");
+        let config = ProviderRuntimeConfig::from_env().expect("Z.AI env config should resolve");
+        for lane in [&config.reasoning, &config.distill] {
+            assert_eq!(
+                lane.base_url,
+                "https://api.z.ai/api/paas/v4/chat/completions"
+            );
+            assert_eq!(lane.model, "glm-4.5");
+        }
+    }
+
+    {
+        let _bigmodel = EnvRestore::set("BIGMODEL_API_KEY", "bigmodel-test-key");
+        let config = ProviderRuntimeConfig::from_env().expect("BigModel env config should resolve");
+        for lane in [&config.reasoning, &config.distill] {
+            assert_eq!(
+                lane.base_url,
+                "https://open.bigmodel.cn/api/paas/v4/chat/completions"
+            );
+            assert_eq!(lane.model, "glm-4.5");
+        }
+    }
+
+    let _empty_zai = EnvRestore::set("ZAI_API_KEY", "   ");
+    let _siliconflow = EnvRestore::set("SILICONFLOW_API_KEY", "siliconflow-test-key");
+    let config = ProviderRuntimeConfig::from_env().expect("empty Z.AI key should be skipped");
+    assert_eq!(
+        config.reasoning.base_url,
+        "https://api.siliconflow.cn/v1/chat/completions"
+    );
+    assert_eq!(config.reasoning.model, "Qwen/Qwen3.5-27B");
+}
+
+/// Production chat boundary: an env-free injected client must not let a
+/// materialized DeepSeek key cross into a known SiliconFlow endpoint. The
+/// refusal happens after key selection and before the HTTP client is used.
+#[tokio::test]
+async fn injected_known_provider_mismatch_fails_closed_before_chat_request() {
+    let unused = ChatLaneConfig {
+        base_url: "https://unused.test/v1/chat/completions".to_string(),
+        model: "unused".to_string(),
+        api_key_envs: vec!["UNUSED_API_KEY"],
+    };
+    let config = ProviderRuntimeConfig {
+        extract: unused.clone(),
+        summary: unused.clone(),
+        reasoning: ChatLaneConfig {
+            base_url: "http://api.siliconflow.cn/v1/chat/completions".to_string(),
+            model: "siliconflow-model".to_string(),
+            api_key_envs: vec!["DEEPSEEK_API_KEY"],
+        },
+        distill: unused,
+        rerank: RerankConfig {
+            provider: RerankProviderKind::Voyage,
+            local_endpoint: None,
+        },
+    };
+    let client = LlmClient::new_with_config(config, None).expect("injected config should build");
+    assert!(client.set_provider_secret("DEEPSEEK_API_KEY", "deepseek-test-key"));
+
+    let error = client
+        .call_reasoning_llm_provider_only("system", "user", None, 0.0, 16)
+        .await
+        .expect_err("known cross-provider chat must fail closed");
+    assert!(
+        error.contains("refusing credential-bearing request"),
+        "unexpected fail-closed error: {error}"
+    );
+}
+
 /// Production-path discriminator: construct the client from the real env
 /// resolver, then send a reasoning request through the configured lane. Both
 /// the endpoint path and the request body must stay on SiliconFlow when the

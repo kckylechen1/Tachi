@@ -1,5 +1,5 @@
 use super::catalog_import::DeploymentAttribution;
-use super::provider_health::SelectedProviderSecret;
+use super::provider_health::{bind_lane_config_to_selected_key, ChatLane, SelectedProviderSecret};
 use super::{LlmClient, ProviderAuthProbeClass, ProviderAuthProbeFamily, ProviderAuthProbeResult};
 use memcore::vault::health::{EvidenceKind, TypedOutcome};
 use memcore::vault::VaultKeyHealth;
@@ -40,6 +40,15 @@ const ZAI_BIGMODEL_HOST: &str = "open.bigmodel.cn";
 /// (the crate graph only runs that way — `tachi-llm` must not depend on
 /// `tachi-server`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ProviderChatDefaults {
+    pub(crate) base_url: &'static str,
+    pub(crate) extract_model: &'static str,
+    pub(crate) summary_model: &'static str,
+    pub(crate) reasoning_model: &'static str,
+    pub(crate) distill_model: &'static str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProviderProbeDescriptor {
     /// Public-safe family label carried on the probe receipt.
     pub family: ProviderAuthProbeFamily,
@@ -51,13 +60,66 @@ pub struct ProviderProbeDescriptor {
     /// The exact documented non-generating GET endpoint, or `None` when the
     /// family has none.
     pub endpoint: Option<&'static str>,
+    /// Canonical OpenAI-compatible chat endpoint for this exact provider
+    /// host. This is kept beside the probe descriptor so credential binding
+    /// and anti-SSRF host recognition cannot drift into separate tables.
+    pub(crate) chat: ProviderChatDefaults,
+    /// Logical key names that are owned by this exact provider host. The
+    /// selected *logical* name, rather than a pool member id, drives runtime
+    /// binding after Vault materialization.
+    pub(crate) logical_key_names: &'static [&'static str],
 }
+
+impl ProviderProbeDescriptor {
+    pub(in crate::llm) fn chat_model_for_lane(self, lane: ChatLane) -> &'static str {
+        match lane {
+            ChatLane::Extract => self.chat.extract_model,
+            ChatLane::Summary => self.chat.summary_model,
+            ChatLane::Reasoning => self.chat.reasoning_model,
+            ChatLane::Distill => self.chat.distill_model,
+        }
+    }
+}
+
+const DEEPSEEK_CHAT_DEFAULTS: ProviderChatDefaults = ProviderChatDefaults {
+    base_url: "https://api.deepseek.com/chat/completions",
+    extract_model: "deepseek-v4-flash",
+    summary_model: "deepseek-v4-flash",
+    reasoning_model: "deepseek-v4-pro",
+    distill_model: "deepseek-v4-flash",
+};
+
+const SILICONFLOW_CHAT_DEFAULTS: ProviderChatDefaults = ProviderChatDefaults {
+    base_url: "https://api.siliconflow.cn/v1/chat/completions",
+    extract_model: "Qwen/Qwen3.5-27B",
+    summary_model: "Qwen/Qwen3.5-27B",
+    reasoning_model: "Qwen/Qwen3.5-27B",
+    distill_model: "Qwen/Qwen3.5-27B",
+};
+
+const ZAI_CHAT_DEFAULTS: ProviderChatDefaults = ProviderChatDefaults {
+    base_url: "https://api.z.ai/api/paas/v4/chat/completions",
+    extract_model: "glm-4.5",
+    summary_model: "glm-4.5",
+    reasoning_model: "glm-4.5",
+    distill_model: "glm-4.5",
+};
+
+const BIGMODEL_CHAT_DEFAULTS: ProviderChatDefaults = ProviderChatDefaults {
+    base_url: "https://open.bigmodel.cn/api/paas/v4/chat/completions",
+    extract_model: "glm-4.5",
+    summary_model: "glm-4.5",
+    reasoning_model: "glm-4.5",
+    distill_model: "glm-4.5",
+};
 
 pub const DEEPSEEK_AUTH_PROBE: ProviderProbeDescriptor = ProviderProbeDescriptor {
     family: ProviderAuthProbeFamily::DeepSeek,
     provider_kind: "deepseek",
     host: DEEPSEEK_HOST,
     endpoint: Some(DEEPSEEK_MODELS_URL),
+    chat: DEEPSEEK_CHAT_DEFAULTS,
+    logical_key_names: &["DEEPSEEK_API_KEY", "DISTILL_API_KEY", "MINIMAX_API_KEY"],
 };
 
 pub const SILICONFLOW_AUTH_PROBE: ProviderProbeDescriptor = ProviderProbeDescriptor {
@@ -65,6 +127,8 @@ pub const SILICONFLOW_AUTH_PROBE: ProviderProbeDescriptor = ProviderProbeDescrip
     provider_kind: "siliconflow",
     host: SILICONFLOW_HOST,
     endpoint: Some(SILICONFLOW_MODELS_URL),
+    chat: SILICONFLOW_CHAT_DEFAULTS,
+    logical_key_names: &["SILICONFLOW_API_KEY", "EXTRACT_API_KEY", "SUMMARY_API_KEY"],
 };
 
 /// Z.AI's current primary domain. No documented non-generating GET endpoint,
@@ -74,6 +138,8 @@ pub const ZAI_AUTH_PROBE: ProviderProbeDescriptor = ProviderProbeDescriptor {
     provider_kind: "zai",
     host: ZAI_HOST,
     endpoint: None,
+    chat: ZAI_CHAT_DEFAULTS,
+    logical_key_names: &["ZAI_API_KEY", "REASONING_API_KEY"],
 };
 
 /// The same family's older BigModel domain — a second recognized host, not a
@@ -83,6 +149,8 @@ pub const ZAI_BIGMODEL_AUTH_PROBE: ProviderProbeDescriptor = ProviderProbeDescri
     provider_kind: "zai",
     host: ZAI_BIGMODEL_HOST,
     endpoint: None,
+    chat: BIGMODEL_CHAT_DEFAULTS,
+    logical_key_names: &["BIGMODEL_API_KEY"],
 };
 
 /// Every host an auth probe may ever contact. Adding one is a code change.
@@ -99,6 +167,32 @@ pub fn auth_probe_descriptor_for_host(host: &str) -> Option<&'static ProviderPro
     AUTH_PROBE_DESCRIPTORS
         .iter()
         .find(|descriptor| descriptor.host == host)
+}
+
+/// Resolve a selected logical provider key to the one exact provider
+/// descriptor that owns it. This is intentionally a closed set: a custom
+/// logical name returns `None` and callers retain their caller-supplied
+/// configuration instead of guessing a provider.
+pub(super) fn provider_descriptor_for_logical_key(
+    logical_name: &str,
+) -> Option<&'static ProviderProbeDescriptor> {
+    AUTH_PROBE_DESCRIPTORS.iter().find(|descriptor| {
+        descriptor
+            .logical_key_names
+            .iter()
+            .any(|candidate| *candidate == logical_name)
+    })
+}
+
+/// Resolve the exact provider descriptor for a configured chat URL. Unknown
+/// or malformed URLs are deliberately left unclassified so custom injected
+/// clients can keep their own endpoint without inheriting a known provider's
+/// defaults.
+pub(super) fn provider_descriptor_for_base_url(
+    base_url: &str,
+) -> Option<&'static ProviderProbeDescriptor> {
+    let url = reqwest::Url::parse(base_url).ok()?;
+    auth_probe_descriptor_for_host(url.host_str()?)
 }
 
 /// The probe target for a canonical registry family id, preferring the host
@@ -231,10 +325,35 @@ impl LlmClient {
         // Resolved before the request as it always was: the lane's currently
         // usable credential, chosen without advancing the round-robin cursor.
         let selected = self.selected_secret_readonly(&lane.api_key_envs);
+        let (base_url, model, selected) = match selected {
+            Some(selected) => {
+                let bound = match bind_lane_config_to_selected_key(
+                    ChatLane::Reasoning,
+                    lane,
+                    &selected.logical_name,
+                    self.rebind_selected_provider,
+                ) {
+                    Ok(bound) => bound,
+                    Err(_) => {
+                        return ProviderAuthProbeResult {
+                            provider_family: ProviderAuthProbeFamily::Unsupported,
+                            provider_host: "unrecognized".to_string(),
+                            effective_model: lane.model.clone(),
+                            auth_class: ProviderAuthProbeClass::MalformedConfiguration,
+                            selected_model_present: None,
+                            model_count: None,
+                            latency_ms: 0,
+                        }
+                    }
+                };
+                (bound.base_url, bound.model, Some(selected))
+            }
+            None => (lane.base_url.clone(), lane.model.clone(), None),
+        };
         self.probe_target_inner(
-            ProbeTarget::from_base_url(&lane.base_url),
-            lane.model.clone(),
-            Some(lane.model.as_str()),
+            ProbeTarget::from_base_url(&base_url),
+            model.clone(),
+            Some(model.as_str()),
             selected,
             endpoint_override,
             resolution_override,

@@ -10,9 +10,10 @@ use std::time::{Duration, Instant};
 use super::super::auth_probe_descriptor_for_host;
 use super::super::catalog_import::DeploymentAttribution;
 use super::super::provider_health::{
-    ChatLane, ChatLaneConfig, CompletionStatusV1, Generated, ModelInvocationLaneV1,
-    ProviderAuthProbeFamily, ProviderInvocationFailure, ProviderInvocationFailureClass,
-    ProviderInvocationOutcome, ProviderInvocationReceipt, SelectedProviderSecret,
+    bind_lane_config_to_selected_key, ChatLane, ChatLaneConfig, CompletionStatusV1, Generated,
+    ModelInvocationLaneV1, ProviderAuthProbeFamily, ProviderInvocationFailure,
+    ProviderInvocationFailureClass, ProviderInvocationOutcome, ProviderInvocationReceipt,
+    SelectedProviderSecret,
 };
 
 /// Exact-host family for thinking-suppression fields. Lookalikes and custom
@@ -439,29 +440,6 @@ impl super::super::LlmClient {
     ) -> Result<ProviderInvocationOutcome, ProviderTierFailure> {
         debug_assert!(max_attempts > 0);
         let tier_started = Instant::now();
-        let model = model_override.unwrap_or(&cfg.model);
-        // Which catalog deployment this tier's requests are attributable to
-        // (#1681 D4, PR-C). Identity only — the store checks the endpoint and
-        // model against the stored row, so a #1197 fallback tier or a
-        // `model_override` lands as a counted skip rather than as health for a
-        // deployment that never served this request.
-        let attribution = DeploymentAttribution::EnvLane {
-            lane: lane.as_str(),
-            endpoint: &cfg.base_url,
-            model,
-        };
-
-        let mut body = serde_json::json!({
-            "model": model,
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user}
-            ],
-            "temperature": temperature,
-            "max_tokens": max_tokens
-        });
-        Self::apply_thinking_suppression(&mut body, &cfg.base_url, model);
-
         let mut last_err = String::new();
         let mut last_class = ProviderInvocationFailureClass::LaneOutage;
         let mut provider_attempts = 0;
@@ -479,11 +457,46 @@ impl super::super::LlmClient {
             else {
                 continue;
             };
+            let bound = bind_lane_config_to_selected_key(
+                lane,
+                cfg,
+                &selected.logical_name,
+                self.rebind_selected_provider,
+            )
+            .map_err(|safe_detail| ProviderTierFailure {
+                class: ProviderInvocationFailureClass::LaneOutage,
+                provider_attempts,
+                latency_ms: tier_started.elapsed().as_millis(),
+                safe_detail,
+            })?;
+            let model = model_override.unwrap_or(bound.model.as_str());
+            // Which catalog deployment this tier's requests are attributable to
+            // (#1681 D4, PR-C). Identity only — the store checks the endpoint and
+            // model against the stored row, so a #1197 fallback tier or a
+            // `model_override` lands as a counted skip rather than as health for a
+            // deployment that never served this request.
+            let attribution = DeploymentAttribution::EnvLane {
+                lane: lane.as_str(),
+                endpoint: &bound.base_url,
+                model,
+            };
+
+            let mut body = serde_json::json!({
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user}
+                ],
+                "temperature": temperature,
+                "max_tokens": max_tokens
+            });
+            Self::apply_thinking_suppression(&mut body, &bound.base_url, model);
+
             let attempt_started = Instant::now();
             provider_attempts += 1;
             let resp = self
                 .http_client()
-                .post(&cfg.base_url)
+                .post(&bound.base_url)
                 .header(CONTENT_TYPE, "application/json")
                 .header(AUTHORIZATION, format!("Bearer {}", selected.value))
                 .json(&body)
@@ -769,7 +782,7 @@ impl super::super::LlmClient {
                 self.record_successful_llm_usage(
                     lane,
                     &bounded_reference(model),
-                    &cfg.base_url,
+                    &bound.base_url,
                     &selected,
                     usage,
                     max_tokens,
@@ -782,7 +795,7 @@ impl super::super::LlmClient {
                     truncated: completion_status == CompletionStatusV1::Truncated,
                     completion_status,
                     receipt: ProviderInvocationReceipt {
-                        effective_provider: provider_host(&cfg.base_url),
+                        effective_provider: provider_host(&bound.base_url),
                         effective_model: json
                             .get("model")
                             .and_then(Value::as_str)

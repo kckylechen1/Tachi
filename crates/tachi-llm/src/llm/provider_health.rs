@@ -17,6 +17,7 @@ mod selection;
 mod state;
 mod types;
 
+pub(super) use self::config::bind_lane_config_to_selected_key;
 pub use self::config::{LaneFallbackConfig, ProviderRuntimeConfig};
 pub use self::state::DeploymentHealthRecordCounts;
 pub(super) use self::state::{
