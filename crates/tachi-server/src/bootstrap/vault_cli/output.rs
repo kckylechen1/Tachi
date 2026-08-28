@@ -115,6 +115,17 @@ pub(super) fn normalize_rotation_strategy_cli(value: &str) -> String {
     }
 }
 
+fn cli_key_health_blocks(
+    store: &memcore::MemoryStore,
+    logical_name: &str,
+    key_id: &str,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    Ok(store
+        .vault_get_key_health(logical_name, key_id)
+        .map_err(|e| format!("vault_get_key_health: {e}"))?
+        .is_some_and(|health| key_health_blocks_cli(&health)))
+}
+
 fn key_health_blocks_cli(health: &memcore::vault::VaultKeyHealth) -> bool {
     if health.disabled || health.auth_failed {
         return true;
@@ -313,13 +324,16 @@ fn lease_api_key_from_store_with_hook(
             {
                 continue;
             }
-            if let Some(health) = transaction
-                .vault_get_key_health(&health_logical_name, &target_entry.name)
+            let slot_health_blocked = transaction
+                .vault_get_key_health(logical_name, &target_entry.name)
                 .map_err(|e| format!("vault_get_key_health: {e}"))?
-            {
-                if key_health_blocks_cli(&health) {
-                    continue;
-                }
+                .is_some_and(|health| key_health_blocks_cli(&health));
+            let target_health_blocked = transaction
+                .vault_get_key_health(&target_entry.name, &target_entry.name)
+                .map_err(|e| format!("vault_get_key_health: {e}"))?
+                .is_some_and(|health| key_health_blocks_cli(&health));
+            if slot_health_blocked || target_health_blocked {
+                continue;
             }
             let decrypted = crate::vault_crypto::decrypt(
                 key,

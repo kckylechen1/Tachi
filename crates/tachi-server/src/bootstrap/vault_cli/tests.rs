@@ -474,6 +474,20 @@ fn vault_upsert_secret_with_key_binds_lane_slot_instead_of_copying() {
     let profile_value =
         decrypt_named_secret_value(&store, key.bytes(), "EXTRACT_API_KEY").expect("profile");
     assert_eq!(profile_value, "deepseek-secret");
+
+    store
+        .vault_upsert_key_health(&memcore::vault::VaultKeyHealth {
+            logical_name: "DEEPSEEK_API_KEY".to_string(),
+            key_id: "DEEPSEEK_API_KEY".to_string(),
+            status: "disabled".to_string(),
+            disabled: true,
+            updated_at: chrono::Utc::now().to_rfc3339(),
+            ..Default::default()
+        })
+        .expect("disable account");
+    let err = lease_api_key_from_store(&store, key.bytes(), "EXTRACT_API_KEY")
+        .expect_err("disabled target must not lease through the slot");
+    assert!(err.to_string().contains("No usable API key"), "{err}");
 }
 
 #[test]
