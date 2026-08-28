@@ -163,6 +163,126 @@ async fn deepseek_probe_is_one_exact_bodyless_get_and_finds_model() {
     );
 }
 
+/// Production-boundary regression: the process env contains no DeepSeek key,
+/// so construction starts the reasoning lane on its SiliconFlow defaults.
+/// Vault materialization then selects DeepSeek; the probe must bind the
+/// selected logical key before it chooses the provider family/model.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn vault_only_deepseek_binds_reasoning_auth_probe_before_request() {
+    let _guard = crate::test_support::global_test_lock().lock();
+    let _env_guards = [
+        EnvRestore::unset("DISTILL_API_KEY"),
+        EnvRestore::unset("REASONING_API_KEY"),
+        EnvRestore::unset("DEEPSEEK_API_KEY"),
+        EnvRestore::unset("ZAI_API_KEY"),
+        EnvRestore::unset("BIGMODEL_API_KEY"),
+        EnvRestore::unset("EXTRACT_API_KEY"),
+        EnvRestore::unset("SILICONFLOW_API_KEY"),
+        EnvRestore::unset("DISTILL_BASE_URL"),
+        EnvRestore::unset("REASONING_BASE_URL"),
+        EnvRestore::unset("DEEPSEEK_BASE_URL"),
+        EnvRestore::unset("DEEPSEEK_DISTILL_BASE_URL"),
+        EnvRestore::unset("DEEPSEEK_REASONING_BASE_URL"),
+        EnvRestore::unset("ZAI_BASE_URL"),
+        EnvRestore::unset("BIGMODEL_BASE_URL"),
+        EnvRestore::unset("EXTRACT_BASE_URL"),
+        EnvRestore::unset("SILICONFLOW_BASE_URL"),
+        EnvRestore::unset("DISTILL_MODEL"),
+        EnvRestore::unset("REASONING_MODEL"),
+        EnvRestore::unset("DEEPSEEK_MODEL"),
+        EnvRestore::unset("DEEPSEEK_DISTILL_MODEL"),
+        EnvRestore::unset("DEEPSEEK_REASONING_MODEL"),
+        EnvRestore::unset("ZAI_MODEL"),
+        EnvRestore::unset("BIGMODEL_MODEL"),
+        EnvRestore::unset("EXTRACT_MODEL"),
+        EnvRestore::unset("SILICONFLOW_MODEL"),
+        EnvRestore::unset("TACHI_BACKEND_DISTILL_TIER"),
+        EnvRestore::unset("TACHI_BACKEND_REASONING_TIER"),
+        EnvRestore::unset(RERANK_PROVIDER_ENV),
+        EnvRestore::unset(RERANK_LOCAL_ENDPOINT_ENV),
+    ];
+    let (server, observations, _mock) = start_mock(
+        StatusCode::OK,
+        r#"{"data":[{"id":"deepseek-v4-pro"}]}"#,
+        None,
+    )
+    .await;
+    let client = LlmClient::new().expect("env-derived client should initialize");
+    assert!(client.set_provider_secret("DEEPSEEK_API_KEY", "synthetic-probe-key"));
+
+    let result = client
+        .probe_reasoning_auth_with_endpoint_for_tests(&format!("{server}/models"))
+        .await;
+
+    assert_eq!(result.provider_family, ProviderAuthProbeFamily::DeepSeek);
+    assert_eq!(result.provider_host, "api.deepseek.com");
+    assert_eq!(result.effective_model, "deepseek-v4-pro");
+    assert_eq!(result.auth_class, ProviderAuthProbeClass::AuthOk);
+    assert_eq!(result.selected_model_present, Some(true));
+    assert_eq!(observations.lock().expect("observations").len(), 1);
+    assert_eq!(observations.lock().expect("observations")[0].1, "/models");
+}
+
+/// A materialized Z.AI or BigModel key must not inherit SiliconFlow's
+/// documented probe target. Neither recognized foundry host currently has a
+/// safe non-generating GET endpoint, so both cases must stop before network.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn vault_only_zai_and_bigmodel_are_recognized_without_a_probe_request() {
+    let _guard = crate::test_support::global_test_lock().lock();
+    let _env_guards = [
+        EnvRestore::unset("DISTILL_API_KEY"),
+        EnvRestore::unset("REASONING_API_KEY"),
+        EnvRestore::unset("DEEPSEEK_API_KEY"),
+        EnvRestore::unset("ZAI_API_KEY"),
+        EnvRestore::unset("BIGMODEL_API_KEY"),
+        EnvRestore::unset("EXTRACT_API_KEY"),
+        EnvRestore::unset("SILICONFLOW_API_KEY"),
+        EnvRestore::unset("DISTILL_BASE_URL"),
+        EnvRestore::unset("REASONING_BASE_URL"),
+        EnvRestore::unset("DEEPSEEK_BASE_URL"),
+        EnvRestore::unset("DEEPSEEK_DISTILL_BASE_URL"),
+        EnvRestore::unset("DEEPSEEK_REASONING_BASE_URL"),
+        EnvRestore::unset("ZAI_BASE_URL"),
+        EnvRestore::unset("BIGMODEL_BASE_URL"),
+        EnvRestore::unset("EXTRACT_BASE_URL"),
+        EnvRestore::unset("SILICONFLOW_BASE_URL"),
+        EnvRestore::unset("DISTILL_MODEL"),
+        EnvRestore::unset("REASONING_MODEL"),
+        EnvRestore::unset("DEEPSEEK_MODEL"),
+        EnvRestore::unset("DEEPSEEK_DISTILL_MODEL"),
+        EnvRestore::unset("DEEPSEEK_REASONING_MODEL"),
+        EnvRestore::unset("ZAI_MODEL"),
+        EnvRestore::unset("BIGMODEL_MODEL"),
+        EnvRestore::unset("EXTRACT_MODEL"),
+        EnvRestore::unset("SILICONFLOW_MODEL"),
+        EnvRestore::unset("TACHI_BACKEND_DISTILL_TIER"),
+        EnvRestore::unset("TACHI_BACKEND_REASONING_TIER"),
+        EnvRestore::unset(RERANK_PROVIDER_ENV),
+        EnvRestore::unset(RERANK_LOCAL_ENDPOINT_ENV),
+    ];
+    let (server, observations, _mock) = start_mock(StatusCode::OK, r#"{"data":[]}"#, None).await;
+
+    for logical_name in ["ZAI_API_KEY", "BIGMODEL_API_KEY"] {
+        let client = LlmClient::new().expect("env-derived client should initialize");
+        assert!(client.set_provider_secret(logical_name, "synthetic-probe-key"));
+        let result = client
+            .probe_reasoning_auth_with_endpoint_for_tests(&format!("{server}/must-not-be-called"))
+            .await;
+        assert_eq!(result.provider_family, ProviderAuthProbeFamily::ZaiBigModel);
+        assert_eq!(
+            result.auth_class,
+            ProviderAuthProbeClass::UnsupportedNoDocumentedProbe
+        );
+    }
+
+    assert!(
+        observations.lock().expect("observations").is_empty(),
+        "recognized Z.AI/BigModel probes must not fall through to SiliconFlow"
+    );
+}
+
 #[tokio::test]
 async fn siliconflow_probe_reports_absent_model_without_dumping_ids() {
     let (server, observations, _mock) = start_mock(

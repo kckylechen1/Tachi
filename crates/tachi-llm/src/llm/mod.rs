@@ -41,7 +41,7 @@ pub use provider_health::{
     LLM_OUTPUT_TRUNCATED, MODEL_INVOCATION_SCHEMA_V1,
 };
 use provider_health::{
-    ClaudeCliFailure, DeploymentHealthCounters, ProviderHealthPersistState,
+    ClaudeCliFailure, DeploymentHealthCounters, LaneAuthority, ProviderHealthPersistState,
     ProviderHealthReloadState, ProviderState,
 };
 pub use rerank::{
@@ -82,6 +82,10 @@ pub struct LlmClient {
     distill_fallback: Option<ChatLaneConfig>,
     reasoning_fallback: Option<ChatLaneConfig>,
     summary_fallback: Option<ChatLaneConfig>,
+    /// Frozen at construction: only non-explicit endpoint/model fields may be
+    /// rebound after Vault materializes a different logical provider key.
+    lane_authority: [LaneAuthority; 4],
+    fallback_authority: [Option<LaneAuthority>; 4],
     /// Rerank provider config resolved at construction (eager fail-closed).
     rerank_config: RerankConfig,
     vault_db_path: Option<PathBuf>,
@@ -109,6 +113,10 @@ pub struct LlmClient {
     /// Full-chain (all tiers) outage streak per lane (#1197) — feeds
     /// `provider_health_status().lane_outages`.
     pub(crate) lane_outage: LaneOutageTracker,
+    /// Env-derived construction may safely rebind a materialized provider
+    /// key to its canonical known host. Directly injected configuration keeps
+    /// its env-free contract and fails closed on a known-host mismatch.
+    rebind_selected_provider: bool,
     /// Test-only: last provider arm entered by `rerank()` (dispatch seam probe).
     #[cfg(test)]
     last_rerank_dispatch: Arc<std::sync::Mutex<Option<RerankProviderKind>>>,

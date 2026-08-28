@@ -1,6 +1,7 @@
 use super::super::{
     ChatLaneConfig, CompletionStatusV1, LaneFallbackConfig, ModelEngineKindV1,
     ModelInvocationLaneV1, ProviderInvocationFailureClass, ProviderRuntimeConfig,
+    DEEPSEEK_AUTH_PROBE, SILICONFLOW_AUTH_PROBE,
 };
 use super::*;
 
@@ -31,11 +32,6 @@ fn foundry_lanes_use_deepseek_defaults_when_only_deepseek_key_is_configured() {
         EnvRestore::unset("TACHI_BACKEND_REASONING_TIER"),
     ];
     let _deepseek = EnvRestore::set("DEEPSEEK_API_KEY", "deepseek-test-key");
-    let _stale_reasoning_base = EnvRestore::set(
-        "REASONING_BASE_URL",
-        "https://api.siliconflow.cn/v1/chat/completions",
-    );
-    let _stale_reasoning_model = EnvRestore::set("REASONING_MODEL", "Qwen/Qwen3.5-27B");
 
     let client = LlmClient::new().expect("client should initialize");
     let distill = client.lane(ChatLane::Distill);
@@ -45,7 +41,7 @@ fn foundry_lanes_use_deepseek_defaults_when_only_deepseek_key_is_configured() {
         distill.base_url,
         "https://api.deepseek.com/chat/completions"
     );
-    assert_eq!(distill.model, "deepseek-chat");
+    assert_eq!(distill.model, "deepseek-v4-flash");
     assert_eq!(
         client.provider_key_id_for_tests(&distill.api_key_envs),
         Some("DEEPSEEK_API_KEY".to_string())
@@ -55,10 +51,694 @@ fn foundry_lanes_use_deepseek_defaults_when_only_deepseek_key_is_configured() {
         reasoning.base_url,
         "https://api.deepseek.com/chat/completions"
     );
-    assert_eq!(reasoning.model, "deepseek-reasoner");
+    assert_eq!(reasoning.model, "deepseek-v4-pro");
     assert_eq!(
         client.provider_key_id_for_tests(&reasoning.api_key_envs),
         Some("DEEPSEEK_API_KEY".to_string())
+    );
+}
+
+#[test]
+#[allow(clippy::await_holding_lock)]
+fn explicit_distill_lane_fields_override_deepseek_provider_defaults() {
+    let _guard = crate::test_support::global_test_lock().lock();
+    let _env_guards = [
+        EnvRestore::unset("DISTILL_API_KEY"),
+        EnvRestore::unset("REASONING_API_KEY"),
+        EnvRestore::unset("ZAI_API_KEY"),
+        EnvRestore::unset("BIGMODEL_API_KEY"),
+        EnvRestore::unset("EXTRACT_API_KEY"),
+        EnvRestore::unset("SILICONFLOW_API_KEY"),
+        EnvRestore::unset("DISTILL_BASE_URL"),
+        EnvRestore::unset("REASONING_BASE_URL"),
+        EnvRestore::unset("EXTRACT_BASE_URL"),
+        EnvRestore::unset("SILICONFLOW_BASE_URL"),
+        EnvRestore::unset("DEEPSEEK_BASE_URL"),
+        EnvRestore::unset("DEEPSEEK_DISTILL_BASE_URL"),
+        EnvRestore::unset("DEEPSEEK_REASONING_BASE_URL"),
+        EnvRestore::unset("DISTILL_MODEL"),
+        EnvRestore::unset("REASONING_MODEL"),
+        EnvRestore::unset("EXTRACT_MODEL"),
+        EnvRestore::unset("SILICONFLOW_MODEL"),
+        EnvRestore::unset("DEEPSEEK_MODEL"),
+        EnvRestore::unset("DEEPSEEK_DISTILL_MODEL"),
+        EnvRestore::unset("DEEPSEEK_REASONING_MODEL"),
+        EnvRestore::unset("TACHI_BACKEND_DISTILL_TIER"),
+        EnvRestore::unset("TACHI_BACKEND_REASONING_TIER"),
+        EnvRestore::unset(RERANK_PROVIDER_ENV),
+        EnvRestore::unset(RERANK_LOCAL_ENDPOINT_ENV),
+    ];
+    let _deepseek = EnvRestore::set("DEEPSEEK_API_KEY", "deepseek-test-key");
+    let _distill_base = EnvRestore::set(
+        "DISTILL_BASE_URL",
+        "https://api.deepseek.com/custom/chat/completions",
+    );
+    let _distill_model = EnvRestore::set("DISTILL_MODEL", "distill-explicit-model");
+
+    let config = ProviderRuntimeConfig::from_env().expect("explicit lane config should resolve");
+    assert_eq!(
+        config.distill.base_url,
+        "https://api.deepseek.com/custom/chat/completions"
+    );
+    assert_eq!(config.distill.model, "distill-explicit-model");
+}
+
+#[test]
+#[allow(clippy::await_holding_lock)]
+fn explicit_known_distill_host_conflict_with_deepseek_key_fails_closed() {
+    let _guard = crate::test_support::global_test_lock().lock();
+    let _env_guards = [
+        EnvRestore::unset("DISTILL_API_KEY"),
+        EnvRestore::unset("REASONING_API_KEY"),
+        EnvRestore::unset("ZAI_API_KEY"),
+        EnvRestore::unset("BIGMODEL_API_KEY"),
+        EnvRestore::unset("EXTRACT_API_KEY"),
+        EnvRestore::unset("SILICONFLOW_API_KEY"),
+        EnvRestore::unset("DISTILL_BASE_URL"),
+        EnvRestore::unset("REASONING_BASE_URL"),
+        EnvRestore::unset("EXTRACT_BASE_URL"),
+        EnvRestore::unset("SILICONFLOW_BASE_URL"),
+        EnvRestore::unset("DEEPSEEK_BASE_URL"),
+        EnvRestore::unset("DEEPSEEK_DISTILL_BASE_URL"),
+        EnvRestore::unset("DEEPSEEK_REASONING_BASE_URL"),
+        EnvRestore::unset("DISTILL_MODEL"),
+        EnvRestore::unset("REASONING_MODEL"),
+        EnvRestore::unset("EXTRACT_MODEL"),
+        EnvRestore::unset("SILICONFLOW_MODEL"),
+        EnvRestore::unset("DEEPSEEK_MODEL"),
+        EnvRestore::unset("DEEPSEEK_DISTILL_MODEL"),
+        EnvRestore::unset("DEEPSEEK_REASONING_MODEL"),
+        EnvRestore::unset("TACHI_BACKEND_DISTILL_TIER"),
+        EnvRestore::unset("TACHI_BACKEND_REASONING_TIER"),
+        EnvRestore::unset(RERANK_PROVIDER_ENV),
+        EnvRestore::unset(RERANK_LOCAL_ENDPOINT_ENV),
+    ];
+    let _deepseek = EnvRestore::set("DEEPSEEK_API_KEY", "deepseek-test-key");
+    let _distill_base = EnvRestore::set(
+        "DISTILL_BASE_URL",
+        "https://api.siliconflow.cn/v1/chat/completions",
+    );
+
+    let error = ProviderRuntimeConfig::from_env()
+        .expect_err("known host conflict must fail closed during env resolution");
+    assert!(
+        error.contains("lane 'distill'") && error.contains("refusing credential-bearing request"),
+        "unexpected conflict error: {error}"
+    );
+}
+
+/// `load_lane` selects the first non-empty key, then only uses DeepSeek
+/// URL/model defaults when that key is `DEEPSEEK_API_KEY`. A SiliconFlow-only
+/// install with missing or empty DISTILL_*/REASONING_* overrides must stay on
+/// SiliconFlow even when stale DeepSeek URL/model variables remain present.
+#[test]
+#[allow(clippy::await_holding_lock)]
+fn foundry_lanes_stay_on_siliconflow_when_only_siliconflow_key_is_configured() {
+    let _guard = crate::test_support::global_test_lock().lock();
+    let _env_guards = [
+        EnvRestore::unset("DISTILL_API_KEY"),
+        EnvRestore::unset("REASONING_API_KEY"),
+        EnvRestore::unset("ZAI_API_KEY"),
+        EnvRestore::unset("BIGMODEL_API_KEY"),
+        EnvRestore::unset("EXTRACT_API_KEY"),
+        EnvRestore::unset("DEEPSEEK_API_KEY"),
+        EnvRestore::unset("DISTILL_BASE_URL"),
+        EnvRestore::unset("EXTRACT_BASE_URL"),
+        EnvRestore::unset("REASONING_BASE_URL"),
+        EnvRestore::unset("DEEPSEEK_BASE_URL"),
+        EnvRestore::unset("DEEPSEEK_DISTILL_BASE_URL"),
+        EnvRestore::unset("DEEPSEEK_REASONING_BASE_URL"),
+        EnvRestore::unset("DISTILL_MODEL"),
+        EnvRestore::unset("EXTRACT_MODEL"),
+        EnvRestore::unset("REASONING_MODEL"),
+        EnvRestore::unset("DEEPSEEK_MODEL"),
+        EnvRestore::unset("DEEPSEEK_DISTILL_MODEL"),
+        EnvRestore::unset("DEEPSEEK_REASONING_MODEL"),
+        EnvRestore::unset("TACHI_BACKEND_DISTILL_TIER"),
+        EnvRestore::unset("TACHI_BACKEND_REASONING_TIER"),
+    ];
+    let _sf_key = EnvRestore::set("SILICONFLOW_API_KEY", "siliconflow-test-key");
+    let _sf_base = EnvRestore::set(
+        "SILICONFLOW_BASE_URL",
+        "https://api.siliconflow.cn/v1/chat/completions",
+    );
+    let _sf_model = EnvRestore::set("SILICONFLOW_MODEL", "Qwen/Qwen3.5-27B");
+    let _stale_deepseek_base = EnvRestore::set(
+        "DEEPSEEK_BASE_URL",
+        "https://api.deepseek.com/chat/completions",
+    );
+    let _stale_deepseek_reasoning_base = EnvRestore::set(
+        "DEEPSEEK_REASONING_BASE_URL",
+        "https://api.deepseek.com/chat/completions",
+    );
+    let _stale_deepseek_distill_base = EnvRestore::set(
+        "DEEPSEEK_DISTILL_BASE_URL",
+        "https://api.deepseek.com/chat/completions",
+    );
+    let _stale_deepseek_model = EnvRestore::set("DEEPSEEK_MODEL", "deepseek-v4-stale");
+    let _stale_deepseek_reasoning_model =
+        EnvRestore::set("DEEPSEEK_REASONING_MODEL", "deepseek-v4-stale-reasoning");
+    let _stale_deepseek_distill_model =
+        EnvRestore::set("DEEPSEEK_DISTILL_MODEL", "deepseek-v4-stale-distill");
+    let _empty_reasoning_base = EnvRestore::set("REASONING_BASE_URL", "   ");
+    let _empty_reasoning_model = EnvRestore::set("REASONING_MODEL", "   ");
+
+    let client = LlmClient::new().expect("client should initialize");
+    let distill = client.lane(ChatLane::Distill);
+    let reasoning = client.lane(ChatLane::Reasoning);
+
+    assert!(
+        !distill.base_url.contains("deepseek.com"),
+        "SiliconFlow-only distill must not target DeepSeek: {}",
+        distill.base_url
+    );
+    assert!(
+        !reasoning.base_url.contains("deepseek.com"),
+        "SiliconFlow-only reasoning must not target DeepSeek: {}",
+        reasoning.base_url
+    );
+    assert_eq!(
+        distill.base_url,
+        "https://api.siliconflow.cn/v1/chat/completions"
+    );
+    assert_eq!(distill.model, "Qwen/Qwen3.5-27B");
+    assert_eq!(
+        reasoning.base_url,
+        "https://api.siliconflow.cn/v1/chat/completions"
+    );
+    assert_eq!(reasoning.model, "Qwen/Qwen3.5-27B");
+    assert_eq!(
+        client.provider_key_id_for_tests(&distill.api_key_envs),
+        Some("SILICONFLOW_API_KEY".to_string())
+    );
+    assert_eq!(
+        client.provider_key_id_for_tests(&reasoning.api_key_envs),
+        Some("SILICONFLOW_API_KEY".to_string())
+    );
+}
+
+#[test]
+#[allow(clippy::await_holding_lock)]
+fn foundry_lanes_bind_zai_and_bigmodel_env_keys_to_their_canonical_defaults() {
+    let _guard = crate::test_support::global_test_lock().lock();
+    let _env_guards = [
+        EnvRestore::unset("DISTILL_API_KEY"),
+        EnvRestore::unset("REASONING_API_KEY"),
+        EnvRestore::unset("DEEPSEEK_API_KEY"),
+        EnvRestore::unset("ZAI_API_KEY"),
+        EnvRestore::unset("BIGMODEL_API_KEY"),
+        EnvRestore::unset("EXTRACT_API_KEY"),
+        EnvRestore::unset("SILICONFLOW_API_KEY"),
+        EnvRestore::unset("DISTILL_BASE_URL"),
+        EnvRestore::unset("REASONING_BASE_URL"),
+        EnvRestore::unset("DEEPSEEK_BASE_URL"),
+        EnvRestore::unset("DEEPSEEK_DISTILL_BASE_URL"),
+        EnvRestore::unset("DEEPSEEK_REASONING_BASE_URL"),
+        EnvRestore::unset("ZAI_BASE_URL"),
+        EnvRestore::unset("BIGMODEL_BASE_URL"),
+        EnvRestore::unset("EXTRACT_BASE_URL"),
+        EnvRestore::unset("SILICONFLOW_BASE_URL"),
+        EnvRestore::unset("DISTILL_MODEL"),
+        EnvRestore::unset("REASONING_MODEL"),
+        EnvRestore::unset("DEEPSEEK_MODEL"),
+        EnvRestore::unset("DEEPSEEK_DISTILL_MODEL"),
+        EnvRestore::unset("DEEPSEEK_REASONING_MODEL"),
+        EnvRestore::unset("ZAI_MODEL"),
+        EnvRestore::unset("BIGMODEL_MODEL"),
+        EnvRestore::unset("EXTRACT_MODEL"),
+        EnvRestore::unset("SILICONFLOW_MODEL"),
+        EnvRestore::unset("TACHI_BACKEND_DISTILL_TIER"),
+        EnvRestore::unset("TACHI_BACKEND_REASONING_TIER"),
+    ];
+
+    {
+        let _zai = EnvRestore::set("ZAI_API_KEY", "zai-test-key");
+        let config = ProviderRuntimeConfig::from_env().expect("Z.AI env config should resolve");
+        for lane in [&config.reasoning, &config.distill] {
+            assert_eq!(
+                lane.base_url,
+                "https://api.z.ai/api/paas/v4/chat/completions"
+            );
+            assert_eq!(lane.model, "glm-4.5");
+        }
+    }
+
+    {
+        let _bigmodel = EnvRestore::set("BIGMODEL_API_KEY", "bigmodel-test-key");
+        let config = ProviderRuntimeConfig::from_env().expect("BigModel env config should resolve");
+        for lane in [&config.reasoning, &config.distill] {
+            assert_eq!(
+                lane.base_url,
+                "https://open.bigmodel.cn/api/paas/v4/chat/completions"
+            );
+            assert_eq!(lane.model, "glm-4.5");
+        }
+    }
+
+    let _empty_zai = EnvRestore::set("ZAI_API_KEY", "   ");
+    let _siliconflow = EnvRestore::set("SILICONFLOW_API_KEY", "siliconflow-test-key");
+    let config = ProviderRuntimeConfig::from_env().expect("empty Z.AI key should be skipped");
+    assert_eq!(
+        config.reasoning.base_url,
+        "https://api.siliconflow.cn/v1/chat/completions"
+    );
+    assert_eq!(config.reasoning.model, "Qwen/Qwen3.5-27B");
+}
+
+/// Production chat boundary: an env-free injected client must not let a
+/// materialized DeepSeek key cross into a known SiliconFlow endpoint. The
+/// refusal happens after key selection and before the HTTP client is used.
+#[tokio::test]
+async fn injected_known_provider_mismatch_fails_closed_before_chat_request() {
+    let unused = ChatLaneConfig {
+        base_url: "https://unused.test/v1/chat/completions".to_string(),
+        model: "unused".to_string(),
+        api_key_envs: vec!["UNUSED_API_KEY"],
+    };
+    let config = ProviderRuntimeConfig {
+        extract: unused.clone(),
+        summary: unused.clone(),
+        reasoning: ChatLaneConfig {
+            base_url: "http://api.siliconflow.cn/v1/chat/completions".to_string(),
+            model: "siliconflow-model".to_string(),
+            api_key_envs: vec!["DEEPSEEK_API_KEY"],
+        },
+        distill: unused,
+        rerank: RerankConfig {
+            provider: RerankProviderKind::Voyage,
+            local_endpoint: None,
+        },
+    };
+    let client = LlmClient::new_with_config(config, None).expect("injected config should build");
+    assert!(client.set_provider_secret("DEEPSEEK_API_KEY", "deepseek-test-key"));
+
+    let error = client
+        .call_reasoning_llm_provider_only("system", "user", None, 0.0, 16)
+        .await
+        .expect_err("known cross-provider chat must fail closed");
+    assert!(
+        error.contains("refusing credential-bearing request"),
+        "unexpected fail-closed error: {error}"
+    );
+}
+
+/// A known provider credential must never be sent to an unrecognized host,
+/// including a hostname that merely contains the provider's documented host.
+#[tokio::test]
+async fn injected_provider_lookalike_fails_closed_without_dispatch() {
+    use axum::{routing::any, Json, Router};
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
+    let requests = Arc::new(AtomicUsize::new(0));
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        any({
+            let requests = Arc::clone(&requests);
+            move || {
+                let requests = Arc::clone(&requests);
+                async move {
+                    requests.fetch_add(1, Ordering::SeqCst);
+                    Json(serde_json::json!({
+                        "choices": [{
+                            "message": {"role": "assistant", "content": "unexpected"},
+                            "finish_reason": "stop"
+                        }]
+                    }))
+                }
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind lookalike provider");
+    let addr = listener.local_addr().expect("lookalike provider addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .await
+            .expect("serve lookalike provider");
+    });
+
+    let host = "api.deepseek.com.attacker.invalid";
+    let unused = ChatLaneConfig {
+        base_url: "https://unused.test/v1/chat/completions".to_string(),
+        model: "unused".to_string(),
+        api_key_envs: vec!["UNUSED_API_KEY"],
+    };
+    let config = ProviderRuntimeConfig {
+        extract: unused.clone(),
+        summary: unused.clone(),
+        reasoning: ChatLaneConfig {
+            base_url: format!("http://{host}/v1/chat/completions"),
+            model: "deepseek-v4-pro".to_string(),
+            api_key_envs: vec!["DEEPSEEK_API_KEY"],
+        },
+        distill: unused,
+        rerank: RerankConfig {
+            provider: RerankProviderKind::Voyage,
+            local_endpoint: None,
+        },
+    };
+    let client = LlmClient::new_with_config(config, None).expect("client should initialize");
+    client.replace_http_client_for_tests(
+        LlmClient::http_client_with_host_resolved_for_tests(host, addr)
+            .expect("resolved lookalike test client"),
+    );
+    assert!(client.set_provider_secret("DEEPSEEK_API_KEY", "deepseek-test-key"));
+
+    let error = client
+        .call_reasoning_llm_provider_only("system", "user", None, 0.0, 16)
+        .await
+        .expect_err("known provider key on a lookalike host must fail closed");
+    assert!(
+        error.contains("refusing credential-bearing request"),
+        "unexpected fail-closed error: {error}"
+    );
+    assert_eq!(
+        requests.load(Ordering::SeqCst),
+        0,
+        "lookalike host must receive no request or Authorization header"
+    );
+    server.abort();
+}
+
+/// Production-path discriminator: construct the client from the real env
+/// resolver, then send a reasoning request through the configured lane. Both
+/// the endpoint path and the request body must stay on SiliconFlow when the
+/// selected key is SiliconFlow and stale DeepSeek variables coexist.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn foundry_request_does_not_cross_bind_siliconflow_key_to_deepseek() {
+    use axum::{
+        body::{to_bytes, Body},
+        extract::Request,
+        http::header::AUTHORIZATION,
+        response::Response,
+        routing::any,
+        Router,
+    };
+    use std::sync::{Arc, Mutex};
+
+    let _guard = crate::test_support::global_test_lock().lock();
+    let _env_guards = [
+        EnvRestore::unset("DISTILL_API_KEY"),
+        EnvRestore::unset("REASONING_API_KEY"),
+        EnvRestore::unset("ZAI_API_KEY"),
+        EnvRestore::unset("BIGMODEL_API_KEY"),
+        EnvRestore::unset("EXTRACT_API_KEY"),
+        EnvRestore::unset("DEEPSEEK_API_KEY"),
+        EnvRestore::unset("SILICONFLOW_API_KEY"),
+        EnvRestore::unset("DISTILL_BASE_URL"),
+        EnvRestore::unset("EXTRACT_BASE_URL"),
+        EnvRestore::unset("REASONING_BASE_URL"),
+        EnvRestore::unset("DEEPSEEK_BASE_URL"),
+        EnvRestore::unset("DEEPSEEK_DISTILL_BASE_URL"),
+        EnvRestore::unset("DEEPSEEK_REASONING_BASE_URL"),
+        EnvRestore::unset("SILICONFLOW_BASE_URL"),
+        EnvRestore::unset("DISTILL_MODEL"),
+        EnvRestore::unset("EXTRACT_MODEL"),
+        EnvRestore::unset("REASONING_MODEL"),
+        EnvRestore::unset("DEEPSEEK_MODEL"),
+        EnvRestore::unset("DEEPSEEK_DISTILL_MODEL"),
+        EnvRestore::unset("DEEPSEEK_REASONING_MODEL"),
+        EnvRestore::unset("SILICONFLOW_MODEL"),
+        EnvRestore::unset("TACHI_BACKEND_DISTILL_TIER"),
+        EnvRestore::unset("TACHI_BACKEND_REASONING_TIER"),
+        EnvRestore::unset(RERANK_PROVIDER_ENV),
+        EnvRestore::unset(RERANK_LOCAL_ENDPOINT_ENV),
+    ];
+
+    let seen = Arc::new(Mutex::new(Vec::<(String, String, serde_json::Value)>::new()));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind capture provider");
+    let addr = listener.local_addr().expect("capture provider address");
+    let app = Router::new().fallback(any({
+        let seen = Arc::clone(&seen);
+        move |request: Request| {
+            let seen = Arc::clone(&seen);
+            async move {
+                let path = request.uri().path().to_string();
+                let authorization = request
+                    .headers()
+                    .get(AUTHORIZATION)
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or_default()
+                    .to_string();
+                let body = to_bytes(request.into_body(), 64 * 1024)
+                    .await
+                    .expect("bounded request body");
+                let body = serde_json::from_slice(&body).expect("JSON request body");
+                seen.lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push((path, authorization, body));
+                Response::new(Body::from(
+                    r#"{"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}"#,
+                ))
+            }
+        }
+    }));
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("capture provider");
+    });
+
+    let siliconflow_base = format!(
+        "http://{}/siliconflow/chat/completions",
+        SILICONFLOW_AUTH_PROBE.host
+    );
+    let deepseek_base = format!(
+        "http://{}/deepseek/chat/completions",
+        DEEPSEEK_AUTH_PROBE.host
+    );
+    let _sf_key = EnvRestore::set("SILICONFLOW_API_KEY", "siliconflow-test-key");
+    let _sf_base = EnvRestore::set("SILICONFLOW_BASE_URL", &siliconflow_base);
+    let _sf_model = EnvRestore::set("SILICONFLOW_MODEL", "siliconflow-test-model");
+    let _stale_deepseek_base = EnvRestore::set("DEEPSEEK_BASE_URL", &deepseek_base);
+    let _stale_deepseek_reasoning_base =
+        EnvRestore::set("DEEPSEEK_REASONING_BASE_URL", &deepseek_base);
+    let _stale_deepseek_distill_base = EnvRestore::set("DEEPSEEK_DISTILL_BASE_URL", &deepseek_base);
+    let _stale_deepseek_model = EnvRestore::set("DEEPSEEK_MODEL", "deepseek-stale-model");
+    let _stale_deepseek_reasoning_model =
+        EnvRestore::set("DEEPSEEK_REASONING_MODEL", "deepseek-stale-reasoning-model");
+    let _stale_deepseek_distill_model =
+        EnvRestore::set("DEEPSEEK_DISTILL_MODEL", "deepseek-stale-distill-model");
+    let _empty_reasoning_base = EnvRestore::set("REASONING_BASE_URL", "   ");
+    let _empty_reasoning_model = EnvRestore::set("REASONING_MODEL", "   ");
+    let _empty_distill_base = EnvRestore::set("DISTILL_BASE_URL", "   ");
+    let _empty_distill_model = EnvRestore::set("DISTILL_MODEL", "   ");
+
+    let client = LlmClient::new().expect("client should initialize");
+    client.replace_http_client_for_tests(
+        LlmClient::http_client_with_host_resolved_for_tests(SILICONFLOW_AUTH_PROBE.host, addr)
+            .expect("resolved SiliconFlow test client"),
+    );
+    let reasoning = client.lane(ChatLane::Reasoning);
+    assert_eq!(reasoning.base_url, siliconflow_base);
+    assert_eq!(reasoning.model, "siliconflow-test-model");
+    assert_eq!(
+        client.provider_key_id_for_tests(&reasoning.api_key_envs),
+        Some("SILICONFLOW_API_KEY".to_string())
+    );
+
+    client
+        .call_reasoning_llm_provider_only("system", "user", None, 0.0, 16)
+        .await
+        .expect("SiliconFlow capture provider should answer");
+
+    let requests = seen
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone();
+    assert_eq!(
+        requests.len(),
+        1,
+        "expected one provider request: {requests:?}"
+    );
+    let (path, authorization, body) = &requests[0];
+    assert_eq!(path, "/siliconflow/chat/completions");
+    assert_eq!(authorization, "Bearer siliconflow-test-key");
+    assert_eq!(body["model"], "siliconflow-test-model");
+    assert!(!path.contains("deepseek"));
+    assert!(!body.to_string().contains("deepseek"));
+
+    server.abort();
+}
+
+/// The example install file must not pre-fill DeepSeek URLs/models onto
+/// DISTILL_*/REASONING_* while SILICONFLOW_API_KEY is the only filled key.
+#[test]
+fn env_example_does_not_prefill_deepseek_lane_urls() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.env.example");
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|err| panic!("read {}: {err}", path.display()));
+    for key in [
+        "DISTILL_BASE_URL",
+        "DISTILL_MODEL",
+        "REASONING_BASE_URL",
+        "REASONING_MODEL",
+    ] {
+        let assigned = text.lines().find_map(|line| {
+            let line = line.trim();
+            if line.starts_with('#') {
+                return None;
+            }
+            line.strip_prefix(key)
+                .and_then(|rest| rest.strip_prefix('='))
+                .map(str::trim)
+        });
+        let Some(value) = assigned else {
+            continue;
+        };
+        assert!(
+            value.is_empty(),
+            ".env.example {key}={value} would pair SILICONFLOW_API_KEY with a foreign provider"
+        );
+        assert!(
+            !value.contains("deepseek.com") && !value.contains("deepseek-v4"),
+            ".env.example {key}={value} pre-fills DeepSeek onto a lane that load_lane() will not bind to DEEPSEEK_API_KEY unless that key is set"
+        );
+    }
+}
+
+async fn capture_extract_outbound_body(
+    logical_key: &'static str,
+    documented_host: Option<&str>,
+    path: &str,
+    model: &str,
+) -> serde_json::Value {
+    use axum::{extract::Json as IncomingJson, routing::post, Json, Router};
+    use std::sync::{Arc, Mutex};
+
+    let captured = Arc::new(Mutex::new(None::<serde_json::Value>));
+    let app = Router::new().route(
+        path,
+        post({
+            let captured = Arc::clone(&captured);
+            move |IncomingJson(body): IncomingJson<serde_json::Value>| {
+                let captured = Arc::clone(&captured);
+                async move {
+                    *captured.lock().unwrap_or_else(|e| e.into_inner()) = Some(body);
+                    Json(serde_json::json!({
+                        "choices": [{
+                            "message": {"role": "assistant", "content": "ok"},
+                            "finish_reason": "stop"
+                        }]
+                    }))
+                }
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind capture provider");
+    let addr = listener.local_addr().expect("capture provider addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("capture provider");
+    });
+
+    let (base_url, resolved) = match documented_host {
+        Some(host) => (
+            format!("http://{host}{path}"),
+            Some(
+                LlmClient::http_client_with_host_resolved_for_tests(host, addr)
+                    .expect("resolved test client"),
+            ),
+        ),
+        None => (format!("http://127.0.0.1:{}{path}", addr.port()), None),
+    };
+    let unused = ChatLaneConfig {
+        base_url: "https://unused.test/v1/chat/completions".to_string(),
+        model: "unused".to_string(),
+        api_key_envs: vec!["UNUSED_API_KEY"],
+    };
+    let config = ProviderRuntimeConfig {
+        extract: ChatLaneConfig {
+            base_url,
+            model: model.to_string(),
+            api_key_envs: vec![logical_key],
+        },
+        summary: unused.clone(),
+        reasoning: unused.clone(),
+        distill: unused,
+        rerank: RerankConfig {
+            provider: RerankProviderKind::Voyage,
+            local_endpoint: None,
+        },
+    };
+    let client = LlmClient::new_with_config(config, None).expect("client should initialize");
+    if let Some(http) = resolved {
+        client.replace_http_client_for_tests(http);
+    }
+    client.set_provider_secret_pool(
+        logical_key,
+        vec![ProviderSecret {
+            key_id: logical_key.to_string(),
+            value: "test-key".to_string(),
+        }],
+    );
+    client
+        .call_extract_llm("system", "user", None, 0.0, 16)
+        .await
+        .expect("capture provider should answer");
+    server.abort();
+    let body = captured
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+        .expect("call_provider_tier must send a JSON body");
+    body
+}
+
+/// Production-path discriminator: `call_extract_llm` → `call_provider_tier`
+/// must emit the host-specific suppression fields on the wire. A unit test of
+/// `apply_thinking_suppression` alone stays green if that call site is dropped.
+#[tokio::test]
+async fn outbound_extract_request_uses_host_specific_thinking_fields() {
+    let _guard = crate::test_support::global_test_lock().lock();
+    let _env = EnvRestore::unset("TACHI_DISABLE_THINKING_MODELS");
+
+    let official = capture_extract_outbound_body(
+        "DEEPSEEK_API_KEY",
+        Some(DEEPSEEK_AUTH_PROBE.host),
+        "/chat/completions",
+        "deepseek-v4-flash",
+    )
+    .await;
+    assert_eq!(official["model"], "deepseek-v4-flash");
+    assert!(
+        official.get("enable_thinking").is_none(),
+        "official DeepSeek outbound body must not carry SiliconFlow keys: {official}"
+    );
+    assert_eq!(
+        official["thinking"]["type"], "disabled",
+        "official Flash must send thinking.disabled on the wire: {official}"
+    );
+
+    let siliconflow = capture_extract_outbound_body(
+        "SILICONFLOW_API_KEY",
+        Some(SILICONFLOW_AUTH_PROBE.host),
+        "/v1/chat/completions",
+        "deepseek-v4-flash",
+    )
+    .await;
+    assert_eq!(siliconflow["enable_thinking"], false);
+    assert!(
+        siliconflow.get("thinking").is_none(),
+        "SiliconFlow outbound body must not carry official DeepSeek keys: {siliconflow}"
+    );
+
+    let custom = capture_extract_outbound_body(
+        "CUSTOM_API_KEY",
+        None,
+        "/chat/completions",
+        "deepseek-v4-flash",
+    )
+    .await;
+    assert!(
+        custom.get("enable_thinking").is_none() && custom.get("thinking").is_none(),
+        "custom OpenAI-compatible host must send neither suppression field: {custom}"
     );
 }
 
@@ -1413,7 +2093,7 @@ fn from_env_golden_values() {
     assert_eq!(config.summary.model, "golden-extract-model");
 
     // ── Reasoning: DEEPSEEK_API_KEY triggers DeepSeek provider default.
-    //    No explicit base/model → default URL + deepseek-reasoner. ──
+    //    No explicit base/model → default URL + deepseek-v4-pro. ──
     assert_eq!(
         config.reasoning.api_key_envs,
         vec![
@@ -1430,9 +2110,9 @@ fn from_env_golden_values() {
         config.reasoning.base_url,
         "https://api.deepseek.com/chat/completions"
     );
-    assert_eq!(config.reasoning.model, "deepseek-reasoner");
+    assert_eq!(config.reasoning.model, "deepseek-v4-pro");
 
-    // ── Distill: same DeepSeek provider default path, deepseek-chat model. ──
+    // ── Distill: same DeepSeek provider default path, deepseek-v4-flash. ──
     assert_eq!(
         config.distill.api_key_envs,
         vec![
@@ -1449,7 +2129,7 @@ fn from_env_golden_values() {
         config.distill.base_url,
         "https://api.deepseek.com/chat/completions"
     );
-    assert_eq!(config.distill.model, "deepseek-chat");
+    assert_eq!(config.distill.model, "deepseek-v4-flash");
 
     // ── Rerank: local provider with explicit endpoint. ──
     assert_eq!(config.rerank.provider, RerankProviderKind::Local);
@@ -2535,7 +3215,7 @@ fn lane_fallback_config_from_env_resolves_deepseek_default_for_extract() {
         extract.base_url,
         "https://api.deepseek.com/chat/completions"
     );
-    assert_eq!(extract.model, "deepseek-chat");
+    assert_eq!(extract.model, "deepseek-v4-flash");
     assert_eq!(
         extract.api_key_envs,
         vec!["EXTRACT_FALLBACK_API_KEY", "DEEPSEEK_API_KEY"]
