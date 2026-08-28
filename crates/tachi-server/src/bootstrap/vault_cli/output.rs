@@ -313,8 +313,8 @@ fn lease_api_key_from_store_with_hook(
             {
                 continue;
             }
-            if let Some(health) = store
-                .vault_get_key_health(logical_name, &target_entry.name)
+            if let Some(health) = transaction
+                .vault_get_key_health(&health_logical_name, &target_entry.name)
                 .map_err(|e| format!("vault_get_key_health: {e}"))?
             {
                 if key_health_blocks_cli(&health) {
@@ -338,8 +338,17 @@ fn lease_api_key_from_store_with_hook(
                 crate::vault_crypto::zero_string(&mut target_value);
                 continue;
             }
-            let _ = store.vault_touch_entry(&target_entry.name);
-            return Ok((target_entry.name.clone(), target_value));
+            transaction
+                .vault_touch_entry(&target_entry.name)
+                .map_err(|e| format!("vault_touch_entry: {e}"))?;
+            transaction
+                .commit()
+                .map_err(|e| format!("commit lease transaction: {e}"))?;
+            return Ok((
+                health_logical_name.to_string(),
+                target_entry.name.clone(),
+                target_value,
+            ));
         }
 
         if let Some(rotation) = rotation.as_ref() {

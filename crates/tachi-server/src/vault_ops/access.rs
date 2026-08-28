@@ -132,7 +132,7 @@ pub(super) fn authorize_vault_pool_mutation(
     let entries = server
         .with_global_store_read(|store| store.vault_list_entries().map_err(|e| e.to_string()))
         .map_err(|e| VaultOpsError::Internal(format!("Failed to list entries: {e}")))?;
-    for entry in entries {
+    for entry in &entries {
         if api_key_pool_member_index(&entry.name, prefix).is_some() {
             ensure_agent_allowed(&entry, effective_agent_id.as_deref())?;
         }
@@ -368,7 +368,7 @@ fn materialize_unrestricted_vault_entries_from_store_with_hook(
     after_snapshot();
 
     let mut secrets = Vec::new();
-    for entry in entries {
+    for entry in &entries {
         if !include_entry(&entry)
             || entry
                 .allowed_agents
@@ -401,10 +401,48 @@ fn materialize_unrestricted_vault_entries_from_store_with_hook(
             );
             continue;
         }
+        let (touched_name, value) = if let Some(target) = tachi_llm::parse_vault_alias(&value) {
+            if !super::is_lane_slot_secret_name(&entry.name) {
+                continue;
+            }
+            let Some(target_entry) = entries.iter().find(|candidate| candidate.name == target)
+            else {
+                continue;
+            };
+            if super::is_lane_slot_secret_name(&target_entry.name)
+                || memcore::effective_vault_secret_type(
+                    &target_entry.name,
+                    &target_entry.secret_type,
+                ) != SECRET_TYPE_API_KEY
+                || target_entry
+                    .allowed_agents
+                    .as_ref()
+                    .is_some_and(|agents| !agents.is_empty())
+            {
+                continue;
+            }
+            let decrypted =
+                crypto::decrypt(key, &target_entry.encrypted_value, &target_entry.nonce)?;
+            let target_value = crypto::decode_utf8_zeroizing(
+                decrypted,
+                format!("Vault secret '{}' is not valid UTF-8", target_entry.name),
+            )?;
+            if target_value.trim().is_empty()
+                || tachi_llm::parse_vault_alias(&target_value).is_some()
+            {
+                continue;
+            }
+            (target_entry.name.clone(), target_value)
+        } else {
+            if super::is_lane_slot_secret_name(&entry.name) {
+                continue;
+            }
+            (entry.name.clone(), value)
+        };
         transaction
-            .vault_touch_entry(&entry.name)
+            .vault_touch_entry(&touched_name)
             .map_err(|e| format!("Failed to record Vault access: {e}"))?;
-        secrets.push((entry.name, value));
+        secrets.push((entry.name.clone(), value));
     }
     transaction
         .commit()
