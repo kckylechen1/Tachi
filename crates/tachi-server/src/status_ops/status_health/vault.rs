@@ -80,6 +80,9 @@ fn load_keychain_vault_api_key_scan_with_password(
     vault_db_path: &Path,
     password: &str,
 ) -> Result<KeychainApiKeyScan, Box<dyn std::error::Error>> {
+    if !vault_db_path.exists() {
+        return Ok(empty_keychain_scan());
+    }
     let vault_db_str = vault_db_path.to_str().ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -426,5 +429,18 @@ mod tests {
             Err(err) => err,
         };
         assert!(err.to_string().contains("vault_key_health"), "{err}");
+    }
+
+    #[test]
+    fn keychain_password_with_missing_database_is_a_benign_miss() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dir.path().join("missing.db");
+
+        let scan = load_keychain_vault_api_key_scan_with_password(&db, "unused-password")
+            .expect("missing DB must allow the caller's fallback path");
+
+        assert!(scan.values.is_empty());
+        assert!(scan.dropped.is_empty());
+        assert!(scan.rotation_prefixes.is_empty());
     }
 }

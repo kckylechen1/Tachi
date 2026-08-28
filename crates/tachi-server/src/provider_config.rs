@@ -378,13 +378,18 @@ fn annotate_non_model_drops(
     drops: &mut HashMap<String, tachi_llm::AliasSkipClass>,
 ) {
     let allowed = provider_env_keys();
-    for name in pools.keys() {
+    for (name, members) in pools {
         let admitted = allowed.contains(name)
             || parse_rotation_member_name(name).is_some_and(|(prefix, _)| allowed.contains(prefix));
         if !admitted {
             drops
                 .entry(name.clone())
                 .or_insert(tachi_llm::AliasSkipClass::ListedNotModelProvider);
+            for member in members {
+                drops
+                    .entry(member.key_id.clone())
+                    .or_insert(tachi_llm::AliasSkipClass::ListedNotModelProvider);
+            }
         }
     }
 }
@@ -1031,6 +1036,74 @@ mod tests {
             err.contains("Failed to open Vault DB for provider refresh")
                 || err.contains("Failed to read Vault config for provider refresh"),
             "{err}"
+        );
+    }
+
+    #[test]
+    fn non_model_rotation_members_keep_typed_drop_class() {
+        let mut drops = HashMap::new();
+        let pools = HashMap::from([(
+            "TAVILY_API_KEY".to_string(),
+            vec![ProviderSecret {
+                key_id: "TAVILY_API_KEY_1".to_string(),
+                value: "not-materialized".to_string(),
+            }],
+        )]);
+
+        annotate_non_model_drops(&pools, &mut drops);
+
+        assert_eq!(
+            drops.get("TAVILY_API_KEY"),
+            Some(&tachi_llm::AliasSkipClass::ListedNotModelProvider)
+        );
+        assert_eq!(
+            drops.get("TAVILY_API_KEY_1"),
+            Some(&tachi_llm::AliasSkipClass::ListedNotModelProvider)
+        );
+    }
+
+    #[test]
+    fn non_model_rotation_member_alias_surfaces_typed_drop_at_materialization_boundary() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _env = EnvRestore::set("VOYAGE_API_KEY", "vault:TAVILY_API_KEY_1");
+        let llm = LlmClient::new().expect("llm client");
+        let mut pools = HashMap::from([(
+            "TAVILY_API_KEY".to_string(),
+            vec![ProviderSecret {
+                key_id: "TAVILY_API_KEY_1".to_string(),
+                value: "not-materialized".to_string(),
+            }],
+        )]);
+        let mut drops = HashMap::new();
+        annotate_non_model_drops(&pools, &mut drops);
+        pools = filter_model_provider_pools(pools);
+
+        let report = tachi_llm::materialize_provider_secrets_from_durable_source(
+            &llm,
+            ["VOYAGE_API_KEY"],
+            || {
+                Ok(tachi_llm::DurableVaultLoad {
+                    pools,
+                    availability: VaultSourceAvailability::Readable,
+                    listed_drops: drops,
+                })
+            },
+        )
+        .expect("typed non-model drop must remain a non-fatal alias skip");
+
+        assert_eq!(
+            report.skipped_alias_classes,
+            vec![(
+                "VOYAGE_API_KEY".to_string(),
+                tachi_llm::AliasSkipClass::ListedNotModelProvider,
+            )]
+        );
+        assert!(
+            !report.skipped_aliases[0].1.contains("absent"),
+            "{}",
+            report.skipped_aliases[0].1
         );
     }
 
