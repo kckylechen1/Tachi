@@ -387,6 +387,10 @@ jobs:
   physical-db-identity-windows:
     name: Physical DB identity fallback (Windows)
     runs-on: windows-latest
+    # Skipped while this repository has no hosted capacity: the acceptance
+    # lane is self-hosted macOS only, so a hosted-Windows job would fail
+    # every run with no runner. Re-enable when a Windows runner returns.
+    if: false
     timeout-minutes: 15
 
     steps:
@@ -453,6 +457,8 @@ jobs:
 
       - name: Run npm audit
         working-directory: ${{ matrix.package }}
+        env:
+          NPM_CONFIG_REGISTRY: https://registry.npmjs.org
         run: npm audit --audit-level=high
 
       - name: Runner workspace cleanup
