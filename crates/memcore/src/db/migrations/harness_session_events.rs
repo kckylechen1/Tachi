@@ -7,7 +7,7 @@
 //! spine stays receipts-only: no table here can spawn, signal, or reap a
 //! host-owned session, and no column stores a transcript.
 
-use rusqlite::Connection;
+use rusqlite::{params, Connection};
 
 use crate::error::MemoryError;
 
@@ -22,9 +22,9 @@ pub(super) fn migrate_v34_harness_session_spine(conn: &Connection) -> Result<usi
 
 /// Upgrade the shipped v34 intervention and capability-advertisement tables
 /// without rewriting the v34 sentinel's meaning. The rebuild preserves row
-/// identities, derives the capability source from the advertisements that
-/// existed when each request was recorded, and canonicalizes the previously
-/// open JSON payload into the closed eight-boolean vocabulary.
+/// identities and AUTOINCREMENT high-water marks, marks unrecoverable v34
+/// capability provenance as unknown, and canonicalizes the previously open
+/// JSON payload into the closed eight-boolean vocabulary.
 pub(super) fn migrate_v35_harness_session_spine_receipts(
     conn: &Connection,
 ) -> Result<usize, MemoryError> {
@@ -41,6 +41,17 @@ pub(super) fn migrate_v35_harness_session_spine_receipts(
         return Ok(0);
     }
 
+    let intervention_sequence: i64 = conn.query_row(
+        "SELECT COALESCE((SELECT seq FROM sqlite_sequence WHERE name = 'harness_session_interventions'), 0)",
+        [],
+        |row| row.get(0),
+    )?;
+    let advertisement_sequence: i64 = conn.query_row(
+        "SELECT COALESCE((SELECT seq FROM sqlite_sequence WHERE name = 'harness_session_capability_advertisements'), 0)",
+        [],
+        |row| row.get(0),
+    )?;
+
     conn.execute_batch(
         "DROP INDEX IF EXISTS idx_harness_session_interventions_attachment;
          ALTER TABLE harness_session_interventions
@@ -56,12 +67,7 @@ pub(super) fn migrate_v35_harness_session_spine_receipts(
          )
          SELECT intervention_row_id, attachment_id, request_id, kind, reason,
                 expected_session_revision,
-                CASE WHEN EXISTS (
-                    SELECT 1
-                    FROM harness_session_capability_advertisements_v34 AS advertisement
-                    WHERE advertisement.attachment_id = intervention.attachment_id
-                      AND advertisement.advertised_at <= intervention.requested_at
-                ) THEN 'advertised' ELSE 'declared' END,
+                'legacy_unknown',
                 requested_by, requested_at
          FROM harness_session_interventions_v34 AS intervention;
 
@@ -84,6 +90,38 @@ pub(super) fn migrate_v35_harness_session_spine_receipts(
          DROP TABLE harness_session_interventions_v34;
          DROP TABLE harness_session_capability_advertisements_v34;",
     )?;
+    let intervention_max: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(intervention_row_id), 0) FROM harness_session_interventions",
+        [],
+        |row| row.get(0),
+    )?;
+    let advertisement_max: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(advertisement_row_id), 0) FROM harness_session_capability_advertisements",
+        [],
+        |row| row.get(0),
+    )?;
+    conn.execute(
+        "DELETE FROM sqlite_sequence WHERE name = 'harness_session_interventions'",
+        [],
+    )?;
+    let intervention_high_water = intervention_sequence.max(intervention_max);
+    if intervention_high_water > 0 {
+        conn.execute(
+            "INSERT INTO sqlite_sequence(name, seq) VALUES ('harness_session_interventions', ?1)",
+            params![intervention_high_water],
+        )?;
+    }
+    conn.execute(
+        "DELETE FROM sqlite_sequence WHERE name = 'harness_session_capability_advertisements'",
+        [],
+    )?;
+    let advertisement_high_water = advertisement_sequence.max(advertisement_max);
+    if advertisement_high_water > 0 {
+        conn.execute(
+            "INSERT INTO sqlite_sequence(name, seq) VALUES ('harness_session_capability_advertisements', ?1)",
+            params![advertisement_high_water],
+        )?;
+    }
     crate::db::schema::validate_harness_session_spine_schema(conn)?;
     Ok(2)
 }
@@ -147,7 +185,9 @@ mod tests {
              VALUES (11, 'attachment-old', 1, '{\"observe\":true,\"foreign\":\"discard\"}', 'host-old', '2026-08-29T00:00:00Z');
              INSERT INTO harness_session_interventions
                 (intervention_row_id, attachment_id, request_id, kind, reason, expected_session_revision, requested_by, requested_at)
-             VALUES (12, 'attachment-old', 'request-old', 'request_status', 'observe', 3, 'host-old', '2026-08-29T00:00:01Z');",
+             VALUES (12, 'attachment-old', 'request-old', 'request_status', 'observe', 3, 'host-old', '2026-08-29T00:00:01Z');
+             UPDATE sqlite_sequence SET seq = 120 WHERE name = 'harness_session_interventions';
+             UPDATE sqlite_sequence SET seq = 110 WHERE name = 'harness_session_capability_advertisements';",
         )
         .unwrap();
 
@@ -155,7 +195,6 @@ mod tests {
             migrate_v35_harness_session_spine_receipts(&conn).unwrap(),
             2
         );
-        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
         crate::db::schema::validate_harness_session_spine_schema(&conn).unwrap();
         let capability_source: String = conn
             .query_row(
@@ -164,7 +203,44 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(capability_source, "advertised");
+        assert_eq!(capability_source, "legacy_unknown");
+        let intervention_sequence: i64 = conn
+            .query_row(
+                "SELECT seq FROM sqlite_sequence WHERE name = 'harness_session_interventions'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let advertisement_sequence: i64 = conn
+            .query_row(
+                "SELECT seq FROM sqlite_sequence WHERE name = 'harness_session_capability_advertisements'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(intervention_sequence, 120);
+        assert_eq!(advertisement_sequence, 110);
+        conn.execute(
+            "INSERT INTO harness_session_interventions
+             (attachment_id, request_id, kind, reason, expected_session_revision,
+              capability_source, requested_by, requested_at)
+             VALUES ('attachment-old', 'request-new', 'request_status', 'observe', 4,
+                     'declared', 'host-old', '2026-08-29T00:00:02Z')",
+            [],
+        )
+        .unwrap();
+        assert_eq!(conn.last_insert_rowid(), 121);
+        conn.execute(
+            "INSERT INTO harness_session_capability_advertisements
+             (attachment_id, advertisement_seq, capabilities_json, source_host_identity, advertised_at)
+             VALUES ('attachment-old', 2,
+                     '{\"observe\":true,\"wait\":false,\"prompt\":false,\"cancel\":false,\"resume\":false,\"load\":false,\"events\":false,\"artifacts\":false}',
+                     'host-old', '2026-08-29T00:00:02Z')",
+            [],
+        )
+        .unwrap();
+        assert_eq!(conn.last_insert_rowid(), 111);
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
         let capabilities_json: String = conn
             .query_row(
                 "SELECT capabilities_json FROM harness_session_capability_advertisements WHERE advertisement_row_id = 11",
@@ -226,7 +302,7 @@ mod tests {
             ("harness_session_interventions", "length(reason) > 0 AND "),
             (
                 "harness_session_interventions",
-                "capability_source IN ('declared', 'advertised')",
+                "capability_source IN ('declared', 'advertised', 'legacy_unknown')",
             ),
             (
                 "harness_session_intervention_results",

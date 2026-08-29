@@ -192,8 +192,9 @@ pub enum HarnessSessionInterventionAdmission {
 pub struct HarnessSessionInterventionRequestReceipt {
     pub intervention: HarnessSessionIntervention,
     pub admission: HarnessSessionInterventionAdmission,
-    /// The capability fact the gate consulted: the latest host advertisement
-    /// when one exists, otherwise the attachment's declared set.
+    /// The capability fact the gate consulted: latest advertisement, declared
+    /// attachment set, or explicit unknown for a migrated v34 receipt whose
+    /// historical provenance was never persisted.
     pub capability_source: CapabilitySource,
     pub state: HarnessSessionStateProjection,
 }
@@ -204,6 +205,9 @@ pub enum CapabilitySource {
     Advertised,
     /// No advertisement exists; the attachment's declared set decided.
     Declared,
+    /// A shipped v34 receipt predates persisted provenance. The historical
+    /// gate source cannot be reconstructed without guessing.
+    LegacyUnknown,
 }
 
 impl CapabilitySource {
@@ -211,6 +215,7 @@ impl CapabilitySource {
         match self {
             Self::Advertised => "advertised",
             Self::Declared => "declared",
+            Self::LegacyUnknown => "legacy_unknown",
         }
     }
 
@@ -218,6 +223,7 @@ impl CapabilitySource {
         match raw {
             "advertised" => Ok(Self::Advertised),
             "declared" => Ok(Self::Declared),
+            "legacy_unknown" => Ok(Self::LegacyUnknown),
             other => Err(MemoryError::InvalidArg(format!(
                 "unknown harness session capability source '{other}'"
             ))),
