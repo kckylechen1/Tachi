@@ -954,8 +954,8 @@ fn same_epoch_replacement_is_never_orphaned_by_a_raced_scan() {
 
     let appended = append_reconciliation_observation(&run_dir, VERDICT_ORPHANED, "ctrl-epoch-b")
         .expect("typed refusal, not a write");
-    assert_eq!(
-        appended, false,
+    assert!(
+        !appended,
         "a same-epoch run is not this epoch's orphan: no transition appended"
     );
     let after = read_status(&run_dir);
