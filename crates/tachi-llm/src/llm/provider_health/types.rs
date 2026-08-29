@@ -7,6 +7,46 @@ pub struct ChatLaneConfig {
     pub api_key_envs: Vec<&'static str>,
 }
 
+/// Vault-sourced URL/model overlay applied after construction. Empty fields
+/// leave the construction-time environment/default values in place.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LaneFieldOverlay {
+    pub base_url: Option<String>,
+    pub model: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LaneConfigOverlay {
+    pub extract: LaneFieldOverlay,
+    pub summary: LaneFieldOverlay,
+    pub distill: LaneFieldOverlay,
+    pub reasoning: LaneFieldOverlay,
+}
+
+impl LaneFieldOverlay {
+    pub(crate) fn apply_to(&self, cfg: &mut ChatLaneConfig) {
+        if let Some(url) = &self.base_url {
+            cfg.base_url = url.clone();
+        }
+        if let Some(model) = &self.model {
+            cfg.model = model.clone();
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.base_url.is_none() && self.model.is_none()
+    }
+}
+
+impl LaneConfigOverlay {
+    pub fn is_empty(&self) -> bool {
+        self.extract.is_empty()
+            && self.summary.is_empty()
+            && self.distill.is_empty()
+            && self.reasoning.is_empty()
+    }
+}
+
 #[derive(Clone)]
 pub struct ProviderSecret {
     pub key_id: String,

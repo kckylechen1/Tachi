@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use crate::provider_names::{
     parse_rotation_member_name, parse_vault_alias, validate_vault_alias_name,
 };
-use crate::{LlmClient, ProviderSecret};
+use crate::{LaneConfigOverlay, LlmClient, ProviderSecret};
 
 #[derive(Debug, Clone, Default)]
 pub struct MaterializeReport {
@@ -74,6 +74,37 @@ fn push_skipped_alias(report: &mut MaterializeReport, key: String, class: AliasS
     report.skipped_alias_classes.push((key, class));
 }
 
+/// Validated, unpublished provider materialization state.
+///
+/// The resolved pools stay private so callers cannot publish part of the
+/// snapshot. A durable-source caller may validate its companion runtime
+/// projection (for example, a Vault lane overlay and catalog rows) while this
+/// value is still transient; publication happens only after that callback
+/// succeeds.
+pub struct ProviderMaterializationSnapshot {
+    resolved_pools: HashMap<String, Vec<ProviderSecret>>,
+    retained_logical_names: HashSet<String>,
+    report: MaterializeReport,
+}
+
+impl ProviderMaterializationSnapshot {
+    pub fn report(&self) -> &MaterializeReport {
+        &self.report
+    }
+
+    fn publish(self, llm: &LlmClient, lane_config_overlay: Option<LaneConfigOverlay>) {
+        let Self {
+            resolved_pools,
+            retained_logical_names,
+            report: _,
+        } = self;
+        llm.publish_provider_secret_pools(
+            resolved_pools,
+            &retained_logical_names,
+            lane_config_overlay,
+        );
+    }
+}
 fn flatten_pools(pools: &HashMap<String, Vec<ProviderSecret>>) -> HashMap<String, String> {
     pools
         .iter()
@@ -287,16 +318,50 @@ where
     S: AsRef<str>,
     F: FnOnce() -> Result<DurableVaultLoad, String>,
 {
+    materialize_provider_secrets_from_durable_source_with_snapshot(
+        llm,
+        provider_keys,
+        load_vault_pools,
+        |snapshot| Ok((snapshot, None)),
+    )
+}
+
+/// Materialize provider secrets and a caller-owned runtime projection as one
+/// transaction. The durable source is read and the provider pools are fully
+/// validated first. `prepare_runtime_snapshot` consumes that provider snapshot,
+/// may then read/validate the companion runtime inputs and commit an external
+/// durable projection, and returns the provider snapshot together with its
+/// candidate overlay. It must return `Err` before any provider state is
+/// published. The final provider pool/overlay publication is one provider-state
+/// write and cannot partially succeed.
+pub fn materialize_provider_secrets_from_durable_source_with_snapshot<I, S, F, C>(
+    llm: &LlmClient,
+    provider_keys: I,
+    load_vault_pools: F,
+    prepare_runtime_snapshot: C,
+) -> Result<MaterializeReport, String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+    F: FnOnce() -> Result<DurableVaultLoad, String>,
+    C: FnOnce(
+        ProviderMaterializationSnapshot,
+    ) -> Result<(ProviderMaterializationSnapshot, Option<LaneConfigOverlay>), String>,
+{
     let _materialization_guard = llm.provider_materialization_guard()?;
     let load = load_vault_pools()?;
-    materialize_provider_secrets_under_guard(
+    let snapshot = prepare_provider_materialization_under_guard(
         llm,
         &load.pools,
         provider_keys,
         load.availability,
         &load.listed_drops,
         None,
-    )
+    )?;
+    let (snapshot, lane_config_overlay) = prepare_runtime_snapshot(snapshot)?;
+    let report = snapshot.report.clone();
+    snapshot.publish(llm, lane_config_overlay);
+    Ok(report)
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -315,24 +380,27 @@ where
     // one transaction across every LlmClient clone. This mutex is independent
     // from provider_state, so env/Vault work never nests under its lock.
     let _materialization_guard = llm.provider_materialization_guard()?;
-    materialize_provider_secrets_under_guard(
+    let snapshot = prepare_provider_materialization_under_guard(
         llm,
         vault_pools,
         provider_keys,
         availability,
         &HashMap::new(),
         after_missing_alias_snapshot,
-    )
+    )?;
+    let report = snapshot.report.clone();
+    snapshot.publish(llm, None);
+    Ok(report)
 }
 
-fn materialize_provider_secrets_under_guard<I, S>(
+fn prepare_provider_materialization_under_guard<I, S>(
     llm: &LlmClient,
     vault_pools: &HashMap<String, Vec<ProviderSecret>>,
     provider_keys: I,
     availability: VaultSourceAvailability,
     listed_drops: &HashMap<String, AliasSkipClass>,
     mut after_missing_alias_snapshot: Option<Box<dyn FnOnce() + Send>>,
-) -> Result<MaterializeReport, String>
+) -> Result<ProviderMaterializationSnapshot, String>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
@@ -437,8 +505,13 @@ where
         .iter()
         .cloned()
         .collect::<HashSet<_>>();
-    report.loaded = llm.replace_provider_secret_pools(resolved_pools, &retained_logical_names)?;
-    Ok(report)
+    let resolved_pools = llm.prepare_provider_secret_pools(resolved_pools)?;
+    report.loaded = resolved_pools.len();
+    Ok(ProviderMaterializationSnapshot {
+        resolved_pools,
+        retained_logical_names,
+        report,
+    })
 }
 
 #[cfg(test)]

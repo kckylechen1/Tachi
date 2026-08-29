@@ -30,11 +30,11 @@ pub(super) use self::types::{
     KeyRetryStatus, SelectedProviderSecret,
 };
 pub use self::types::{
-    ChatLaneConfig, CompletionStatusV1, Generated, ModelEngineKindV1, ModelInvocationLaneV1,
-    PersistedModelInvocationReceiptV1, ProviderAuthProbeClass, ProviderAuthProbeFamily,
-    ProviderAuthProbeResult, ProviderInvocationFailure, ProviderInvocationFailureClass,
-    ProviderInvocationOutcome, ProviderInvocationReceipt, LLM_OUTPUT_TRUNCATED,
-    MODEL_INVOCATION_SCHEMA_V1,
+    ChatLaneConfig, CompletionStatusV1, Generated, LaneConfigOverlay, LaneFieldOverlay,
+    ModelEngineKindV1, ModelInvocationLaneV1, PersistedModelInvocationReceiptV1,
+    ProviderAuthProbeClass, ProviderAuthProbeFamily, ProviderAuthProbeResult,
+    ProviderInvocationFailure, ProviderInvocationFailureClass, ProviderInvocationOutcome,
+    ProviderInvocationReceipt, LLM_OUTPUT_TRUNCATED, MODEL_INVOCATION_SCHEMA_V1,
 };
 pub use self::types::{
     LaneOutageStatus, ProviderHealthStatus, ProviderKeyCooldownStatus, ProviderPoolStatus,

@@ -14,7 +14,10 @@ pub use tachi_llm::{
     group_api_key_values_by_configured_rotations, is_vault_alias, parse_rotation_member_name,
     parse_vault_alias, vault_alias_line, MaterializeReport, VAULT_ALIAS_PREFIX,
 };
-use tachi_llm::{AliasSkipClass, LlmClient, ProviderSecret, VaultSourceAvailability};
+use tachi_llm::{
+    AliasSkipClass, LaneConfigOverlay, LaneFieldOverlay, LlmClient, ProviderSecret,
+    VaultSourceAvailability,
+};
 
 /// #1680/D3: the LLM materialization allowlist — `ModelApi`-class names only.
 /// This is the compile-time allowlist consulted by
@@ -400,7 +403,7 @@ fn materialize_for_server_inner(
     after_vault_pools_resolved: Option<Box<dyn FnOnce() + Send>>,
 ) -> Result<MaterializeReport, String> {
     let global = server.global_db_path_buf();
-    tachi_llm::materialize_provider_secrets_from_durable_source(
+    tachi_llm::materialize_provider_secrets_from_durable_source_with_snapshot(
         server.llm.as_ref(),
         provider_env_keys(),
         || {
@@ -411,6 +414,17 @@ fn materialize_for_server_inner(
                 hook();
             }
             Ok(load)
+        },
+        |provider_snapshot| {
+            let snapshot = prepare_vault_runtime_snapshot(server, provider_snapshot)?;
+            if snapshot.source_availability != snapshot.provider.report().source_availability {
+                return Err(
+                    "Vault runtime snapshot source availability changed during preparation"
+                        .to_string(),
+                );
+            }
+            commit_env_catalog_projection(server, &snapshot.catalog)?;
+            Ok(snapshot.into_provider_publication())
         },
     )
     .map_err(format_provider_materialization_error)
@@ -437,6 +451,175 @@ fn annotate_non_model_drops(
     }
 }
 
+/// One complete, validated runtime projection held between provider-pool
+/// preparation and publication. The provider snapshot owns the resolved pools;
+/// this companion owns the source availability, lane overlay, and catalog
+/// projection derived from the same effective runtime config.
+struct VaultRuntimeSnapshot {
+    provider: tachi_llm::ProviderMaterializationSnapshot,
+    source_availability: VaultSourceAvailability,
+    lane_config_overlay: Option<LaneConfigOverlay>,
+    catalog: EnvCatalogProjection,
+}
+
+impl VaultRuntimeSnapshot {
+    fn into_provider_publication(
+        self,
+    ) -> (
+        tachi_llm::ProviderMaterializationSnapshot,
+        Option<LaneConfigOverlay>,
+    ) {
+        (self.provider, self.lane_config_overlay)
+    }
+}
+
+fn prepare_vault_runtime_snapshot(
+    server: &MemoryServer,
+    provider: tachi_llm::ProviderMaterializationSnapshot,
+) -> Result<VaultRuntimeSnapshot, String> {
+    let source_availability = provider.report().source_availability;
+    let lane_config_overlay = if source_availability == VaultSourceAvailability::Readable {
+        Some(load_vault_lane_config_overlay(
+            server,
+            &server.global_db_path_buf(),
+        )?)
+    } else {
+        // An unreadable source cannot prove revocation or a replacement. `None`
+        // tells the publisher to retain the already-published overlay.
+        None
+    };
+    let effective_config = match lane_config_overlay.as_ref() {
+        Some(overlay) => server.llm.runtime_config_with_lane_config_overlay(overlay),
+        None => server.llm.runtime_config(),
+    };
+    let catalog = prepare_env_catalog_projection(&effective_config)?;
+    Ok(VaultRuntimeSnapshot {
+        provider,
+        source_availability,
+        lane_config_overlay,
+        catalog,
+    })
+}
+
+fn load_vault_lane_config_overlay(
+    server: &MemoryServer,
+    global_db_path: &Path,
+) -> Result<LaneConfigOverlay, String> {
+    let in_process_vault_is_readable = {
+        let vault = server.vault_read();
+        vault.key.is_some() && vault.unlock_time.is_some() && !vault.auto_lock_expired()
+    };
+    let values = if in_process_vault_is_readable {
+        crate::vault_ops::load_unlocked_lane_config_values(server)?
+    } else {
+        load_keychain_lane_config_values(global_db_path)?
+    };
+    lane_config_overlay_from_values(values)
+}
+
+fn lane_config_overlay_from_values(
+    values: Vec<(String, String)>,
+) -> Result<LaneConfigOverlay, String> {
+    let map: std::collections::HashMap<String, String> = values.into_iter().collect();
+    let mut overlay = LaneConfigOverlay::default();
+    fill_lane_overlay(&mut overlay.extract, "EXTRACT", &map)?;
+    fill_lane_overlay(&mut overlay.summary, "SUMMARY", &map)?;
+    fill_lane_overlay(&mut overlay.distill, "DISTILL", &map)?;
+    fill_lane_overlay(&mut overlay.reasoning, "REASONING", &map)?;
+    Ok(overlay)
+}
+
+fn load_keychain_lane_config_values(
+    global_db_path: &Path,
+) -> Result<Vec<(String, String)>, String> {
+    let Some(path) = keychain_vault_path(global_db_path)? else {
+        return Ok(Vec::new());
+    };
+    crate::status_ops::status_health::load_keychain_vault_lane_config_values(&path)
+        .map_err(|err| format!("Keychain Vault lane-config read failed: {err}"))
+}
+
+fn keychain_vault_path(global_db_path: &Path) -> Result<Option<std::path::PathBuf>, String> {
+    let default_global = default_global_db_path();
+    for path in [Some(global_db_path), Some(default_global.as_path())] {
+        let Some(path) = path else {
+            continue;
+        };
+        if path != global_db_path && paths_equal(path, global_db_path) {
+            continue;
+        }
+        let readable = crate::status_ops::status_health::keychain_vault_source_readable(path)
+            .map_err(|err| format!("Keychain Vault source read failed: {err}"))?;
+        if readable {
+            return Ok(Some(path.to_path_buf()));
+        }
+    }
+    Ok(None)
+}
+
+fn fill_lane_overlay(
+    fields: &mut LaneFieldOverlay,
+    prefix: &str,
+    vault: &std::collections::HashMap<String, String>,
+) -> Result<(), String> {
+    let url_name = format!("{prefix}_BASE_URL");
+    let model_name = format!("{prefix}_MODEL");
+    if let Some(url) = vault.get(&url_name) {
+        warn_if_env_conflicts(&url_name, url);
+        fields.base_url = Some(validate_vault_lane_url(&url_name, url)?);
+    }
+    if let Some(model) = vault.get(&model_name) {
+        warn_if_env_conflicts(&model_name, model);
+        fields.model = Some(validate_vault_lane_model(&model_name, model)?);
+    }
+    Ok(())
+}
+
+fn validate_vault_lane_url(name: &str, value: &str) -> Result<String, String> {
+    let value = value.trim();
+    let url = reqwest::Url::parse(value).map_err(|_| {
+        format!(
+            "Vault lane config '{name}' has a malformed URL; provider refresh refused and prior runtime state left unchanged"
+        )
+    })?;
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+        return Err(format!(
+            "Vault lane config '{name}' must use an HTTP(S) URL with a host; provider refresh refused and prior runtime state left unchanged"
+        ));
+    }
+    if let Some(leak) = memcore::catalog::endpoint::endpoint_credential_leak(value) {
+        return Err(format!(
+            "Vault lane config '{name}' refused before publication: {leak}; prior runtime state left unchanged"
+        ));
+    }
+    Ok(value.to_string())
+}
+
+fn validate_vault_lane_model(name: &str, value: &str) -> Result<String, String> {
+    let value = value.trim();
+    if value.is_empty() || value.chars().any(char::is_control) {
+        return Err(format!(
+            "Vault lane config '{name}' has an invalid model; provider refresh refused and prior runtime state left unchanged"
+        ));
+    }
+    Ok(value.to_string())
+}
+
+fn warn_if_env_conflicts(name: &str, vault_value: &str) {
+    let Ok(env_val) = std::env::var(name) else {
+        return;
+    };
+    let trimmed = env_val.trim();
+    if trimmed.is_empty() || is_vault_alias(trimmed) {
+        return;
+    }
+    if trimmed != vault_value {
+        tracing::warn!(
+            "[provider] env/config.env value ignored for {name} — vault wins; if your env value is fresher: tachi vault set {name}"
+        );
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn materialize_for_server_with_hook_for_tests(
     server: &MemoryServer,
@@ -449,12 +632,24 @@ pub fn materialize_standalone(
     llm: &LlmClient,
     global_db_path: &Path,
 ) -> Result<MaterializeReport, String> {
-    tachi_llm::materialize_provider_secrets_from_durable_source(llm, provider_env_keys(), || {
-        let mut load = resolve_vault_pools(None, global_db_path)?;
-        annotate_non_model_drops(&load.pools, &mut load.listed_drops);
-        load.pools = filter_model_provider_pools(load.pools);
-        Ok(load)
-    })
+    tachi_llm::materialize_provider_secrets_from_durable_source_with_snapshot(
+        llm,
+        provider_env_keys(),
+        || {
+            let mut load = resolve_vault_pools(None, global_db_path)?;
+            annotate_non_model_drops(&load.pools, &mut load.listed_drops);
+            load.pools = filter_model_provider_pools(load.pools);
+            Ok(load)
+        },
+        |provider_snapshot| {
+            if provider_snapshot.report().source_availability != VaultSourceAvailability::Readable {
+                return Ok((provider_snapshot, None));
+            }
+            let values = load_keychain_lane_config_values(global_db_path)?;
+            let overlay = lane_config_overlay_from_values(values)?;
+            Ok((provider_snapshot, Some(overlay)))
+        },
+    )
     .map_err(format_provider_materialization_error)
 }
 
@@ -616,6 +811,15 @@ pub(crate) struct EnvCatalogImport {
     pub embedding_refused: Option<String>,
 }
 
+/// Pure, prevalidated env-catalog state. The writer below accepts only this
+/// projection, so no URL/model refusal can occur after the first row write.
+#[derive(Debug, Clone)]
+struct EnvCatalogProjection {
+    chat_deployments: Vec<tachi_llm::EnvLaneDeployment>,
+    embedding_deployment: Option<tachi_llm::EnvLaneDeployment>,
+    embedding_refused: Option<String>,
+}
+
 /// Import the live provider resolution into the catalog as
 /// `catalog_source='env'` deployment rows (#1681 D7 PR-B).
 ///
@@ -663,26 +867,42 @@ pub(crate) struct EnvCatalogImport {
 pub(crate) fn import_env_catalog_deployments(
     server: &MemoryServer,
 ) -> Result<EnvCatalogImport, String> {
-    use memcore::db::model_catalog::{upsert_model_deployment, DeploymentWrite};
+    let projection = prepare_env_catalog_projection(&server.llm.runtime_config())?;
+    commit_env_catalog_projection(server, &projection)
+}
 
-    let config = server.llm.runtime_config();
+fn prepare_env_catalog_projection(
+    config: &tachi_llm::ProviderRuntimeConfig,
+) -> Result<EnvCatalogProjection, String> {
     let embedding = tachi_llm::EmbeddingConfig::from_env();
     let embeddings_endpoint = tachi_llm::voyage_embeddings_endpoint();
     let observed_at = memcore::db::now_utc_iso();
 
-    let chat_deployments = tachi_llm::env_chat_lane_deployments(&config, &observed_at)
+    let chat_deployments = tachi_llm::env_chat_lane_deployments(config, &observed_at)
         .map_err(|err| err.to_string())?;
-    let mut embedding_deployment = None;
-    let mut embedding_refused = None;
-    match &embedding {
-        Ok(resolved) => {
-            embedding_deployment = Some(
+    let (embedding_deployment, embedding_refused) = match &embedding {
+        Ok(resolved) => (
+            Some(
                 tachi_llm::env_embedding_deployment(resolved, &embeddings_endpoint, &observed_at)
                     .map_err(|err| err.to_string())?,
-            );
-        }
-        Err(err) => embedding_refused = Some(err.clone()),
-    }
+            ),
+            None,
+        ),
+        Err(err) => (None, Some(err.clone())),
+    };
+
+    Ok(EnvCatalogProjection {
+        chat_deployments,
+        embedding_deployment,
+        embedding_refused,
+    })
+}
+
+fn commit_env_catalog_projection(
+    server: &MemoryServer,
+    projection: &EnvCatalogProjection,
+) -> Result<EnvCatalogImport, String> {
+    use memcore::db::model_catalog::{upsert_model_deployment, DeploymentWrite};
 
     server.with_global_store(|store| {
         let conn = store.connection();
@@ -691,11 +911,11 @@ pub(crate) fn import_env_catalog_deployments(
             .map_err(|e| format!("open catalog import transaction: {e}"))?;
 
         let mut summary = EnvCatalogImport {
-            embedding_refused,
+            embedding_refused: projection.embedding_refused.clone(),
             ..EnvCatalogImport::default()
         };
 
-        for lane in &chat_deployments {
+        for lane in &projection.chat_deployments {
             let write = upsert_model_deployment(&transaction, &lane.deployment)
                 .map_err(|e| e.to_string())?;
             summary.rows += 1;
@@ -704,7 +924,7 @@ pub(crate) fn import_env_catalog_deployments(
             }
         }
 
-        if let Some(row) = &embedding_deployment {
+        if let Some(row) = &projection.embedding_deployment {
             let write = upsert_model_deployment(&transaction, &row.deployment)
                 .map_err(|e| e.to_string())?;
             summary.rows += 1;

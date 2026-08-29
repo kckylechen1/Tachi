@@ -846,13 +846,42 @@ impl super::super::LlmClient {
         })
     }
 
-    pub(in crate::llm) fn lane(&self, lane: ChatLane) -> &ChatLaneConfig {
-        match lane {
-            ChatLane::Extract => &self.extract,
-            ChatLane::Distill => &self.distill,
-            ChatLane::Reasoning => &self.reasoning,
-            ChatLane::Summary => &self.summary,
-        }
+    pub(in crate::llm) fn lane(&self, lane: ChatLane) -> ChatLaneConfig {
+        let state = self
+            .provider_state
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.lane_with_overlay(lane, &state.lane_config_overlay)
+    }
+
+    pub(in crate::llm) fn lane_with_overlay(
+        &self,
+        lane: ChatLane,
+        overlay: &LaneConfigOverlay,
+    ) -> ChatLaneConfig {
+        let mut cfg = match lane {
+            ChatLane::Extract => self.extract.clone(),
+            ChatLane::Distill => self.distill.clone(),
+            ChatLane::Reasoning => self.reasoning.clone(),
+            ChatLane::Summary => self.summary.clone(),
+        };
+        let fields = match lane {
+            ChatLane::Extract => &overlay.extract,
+            ChatLane::Distill => &overlay.distill,
+            ChatLane::Reasoning => &overlay.reasoning,
+            ChatLane::Summary => &overlay.summary,
+        };
+        fields.apply_to(&mut cfg);
+        cfg
+    }
+
+    /// Replace the Vault-wins URL/model overlay. Empty overlay restores the
+    /// construction-time env/default baseline (tachi#1856).
+    pub fn apply_lane_config_overlay(&self, overlay: LaneConfigOverlay) {
+        self.provider_state
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .lane_config_overlay = overlay;
     }
 
     pub(in crate::llm) fn lane_authority(&self, lane: ChatLane) -> LaneAuthority {

@@ -238,40 +238,73 @@ pub(super) fn record_successful_vault_access(
         .map_err(|e| e.to_string())
 }
 
+/// Decrypt listed Vault rows used as lane URL/model config (tachi#1856).
+/// Any secret type is admitted because operators historically stored these as
+/// `api_key`. Empty and agent-fenced values are skipped.
+pub(crate) fn load_unlocked_lane_config_values(
+    server: &MemoryServer,
+) -> Result<Vec<(String, String)>, String> {
+    // Provider materialization already owns the transaction lock. Use the
+    // caller-owned key path to avoid recursively starting another refresh.
+    with_vault_key_for_provider_refresh(server, |key| {
+        load_unlocked_vault_secrets_with_key(server, key, |entry| is_lane_config_name(&entry.name))
+    })
+}
+
+pub(crate) fn is_lane_config_name(name: &str) -> bool {
+    matches!(
+        name,
+        "EXTRACT_BASE_URL"
+            | "EXTRACT_MODEL"
+            | "SUMMARY_BASE_URL"
+            | "SUMMARY_MODEL"
+            | "DISTILL_BASE_URL"
+            | "DISTILL_MODEL"
+            | "REASONING_BASE_URL"
+            | "REASONING_MODEL"
+    )
+}
+
 pub(super) fn load_unlocked_vault_secrets(
     server: &MemoryServer,
     include_entry: impl Fn(&VaultEntry) -> bool,
 ) -> Result<Vec<(String, String)>, String> {
     with_vault_key(server, |key| {
-        let entries = server
-            .with_global_store_read(|store| store.vault_list_entries().map_err(|e| e.to_string()))
-            .map_err(|e| format!("Failed to list vault secrets: {e}"))?;
+        load_unlocked_vault_secrets_with_key(server, key, include_entry)
+    })
+}
 
-        let mut secrets = Vec::new();
-        for entry in entries {
-            if !include_entry(&entry) {
-                continue;
-            }
-            if entry
-                .allowed_agents
-                .as_ref()
-                .is_some_and(|agents| !agents.is_empty())
-            {
-                continue;
-            }
+fn load_unlocked_vault_secrets_with_key(
+    server: &MemoryServer,
+    key: &[u8; 32],
+    include_entry: impl Fn(&VaultEntry) -> bool,
+) -> Result<Vec<(String, String)>, String> {
+    let entries = server
+        .with_global_store_read(|store| store.vault_list_entries().map_err(|e| e.to_string()))
+        .map_err(|e| format!("Failed to list vault secrets: {e}"))?;
 
-            let decrypted = crypto::decrypt(key, &entry.encrypted_value, &entry.nonce)?;
-            let value = crypto::decode_utf8_zeroizing(
-                decrypted,
-                super::VAULT_MATERIALIZATION_INVALID_UTF8,
-            )?;
-            if !value.trim().is_empty() {
-                secrets.push((entry.name, value));
-            }
+    let mut secrets = Vec::new();
+    for entry in entries {
+        if !include_entry(&entry) {
+            continue;
+        }
+        if entry
+            .allowed_agents
+            .as_ref()
+            .is_some_and(|agents| !agents.is_empty())
+        {
+            continue;
         }
 
-        Ok(secrets)
-    })
+        let decrypted = crypto::decrypt(key, &entry.encrypted_value, &entry.nonce)?;
+        let value =
+            crypto::decode_utf8_zeroizing(decrypted, super::VAULT_MATERIALIZATION_INVALID_UTF8)?;
+        if !value.trim().is_empty() {
+            secrets.push((entry.name, value));
+        }
+    }
+
+    Ok(secrets)
 }
 
 pub(crate) fn load_unlocked_api_key_secret_pools(

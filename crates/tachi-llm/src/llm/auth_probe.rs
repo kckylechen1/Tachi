@@ -327,7 +327,7 @@ impl LlmClient {
             Some(selected) => {
                 let bound = match bind_lane_config_to_selected_key(
                     ChatLane::Reasoning,
-                    lane,
+                    &lane,
                     authority,
                     &selected.logical_name,
                     self.rebind_selected_provider,
