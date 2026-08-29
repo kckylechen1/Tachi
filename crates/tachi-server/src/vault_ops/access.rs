@@ -413,6 +413,10 @@ fn load_unlocked_api_key_secret_pools_filtered(
             matching.rotate_left(selected_idx);
             let mut pool = Vec::new();
             for (_, entry) in matching {
+                // Membership is structural, not conditional on admission.
+                // A configured member rejected below must never fall through
+                // to the standalone raw-name pass and bypass prefix health.
+                rotation_members.insert(entry.name.clone());
                 if entry.secret_type != SECRET_TYPE_API_KEY {
                     record_rotation_listed_drop(
                         &mut dropped,
@@ -454,7 +458,6 @@ fn load_unlocked_api_key_secret_pools_filtered(
                     continue;
                 }
                 let key_id = entry.name.clone();
-                rotation_members.insert(key_id.clone());
                 pool.push(tachi_llm::ProviderSecret {
                     key_id: key_id.clone(),
                     value,

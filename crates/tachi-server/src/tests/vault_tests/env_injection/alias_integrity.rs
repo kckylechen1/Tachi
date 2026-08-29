@@ -367,7 +367,6 @@ async fn unconfigured_rotation_member_alias_materializes_from_unlocked_server() 
         }))
         .await
         .expect("vault_set member");
-
     let report = crate::provider_config::materialize_for_server(&server).expect("refresh");
     assert_eq!(
         report.from_alias, 1,
@@ -380,6 +379,77 @@ async fn unconfigured_rotation_member_alias_materializes_from_unlocked_server() 
             .all(|(name, _)| name != "VOYAGE_API_KEY"),
         "resolved member alias must not be reported as skipped: {:?}",
         report.skipped_aliases
+    );
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn unhealthy_configured_rotation_member_cannot_fall_back_as_standalone() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _env = crate::test_support::EnvRestore::set("VOYAGE_API_KEY", "vault:VOYAGE_API_KEY_1");
+    let server = make_server();
+
+    server
+        .vault_init(Parameters(VaultInitParams {
+            password: "alias-integrity-configured-unhealthy".to_string(),
+        }))
+        .await
+        .expect("vault_init");
+    server
+        .vault_set(Parameters(VaultSetParams {
+            name: "VOYAGE_API_KEY_1".to_string(),
+            value: "unhealthy-member-fixture".to_string(),
+            agent_id: None,
+            secret_type: "api_key".to_string(),
+            description: "configured unhealthy member".to_string(),
+            allowed_agents: None,
+            enable_rotation: false,
+            rotation_strategy: None,
+        }))
+        .await
+        .expect("vault_set member");
+    server
+        .vault_set(Parameters(VaultSetParams {
+            name: "VOYAGE_API_KEY_2".to_string(),
+            value: "healthy-member-fixture".to_string(),
+            agent_id: None,
+            secret_type: "api_key".to_string(),
+            description: "configured healthy control member".to_string(),
+            allowed_agents: None,
+            enable_rotation: false,
+            rotation_strategy: None,
+        }))
+        .await
+        .expect("vault_set control member");
+    server
+        .vault_setup_rotation(Parameters(VaultSetupRotationParams {
+            prefix: "VOYAGE_API_KEY".to_string(),
+            agent_id: None,
+            total_keys: 2,
+            strategy: "round_robin".to_string(),
+        }))
+        .await
+        .expect("vault_setup_rotation");
+    server
+        .vault_record_key_result(Parameters(VaultRecordKeyResultParams {
+            logical_name: "VOYAGE_API_KEY".to_string(),
+            key_id: "VOYAGE_API_KEY_1".to_string(),
+            status_code: Some(401),
+            outcome: None,
+            retry_after_secs: None,
+            reason: Some("provider auth failed".to_string()),
+        }))
+        .await
+        .expect("record 401");
+
+    let report = crate::provider_config::materialize_for_server(&server)
+        .expect("refresh must classify, not abort");
+    assert_eq!(report.from_alias, 0);
+    assert_eq!(
+        report.skip_class_for("VOYAGE_API_KEY"),
+        AliasSkipClass::ListedUnusableAuthFailed
     );
 }
 
