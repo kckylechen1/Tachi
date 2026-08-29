@@ -77,9 +77,12 @@ async fn restart_orphans_nonterminal_managed_run_exactly_once() {
     let run_dir = crate::dispatch_ops::dispatch_runs_root().join(dispatch_id);
     std::fs::write(run_dir.join("result.md"), b"evidence").expect("durably published artifact");
 
-    // Epoch B incarnation: startup reconciliation runs inside construction.
+    // Epoch B incarnation: the daemon serve startup runs reconciliation
+    // beside orphan recovery (fenced by the daemon singleton, never from a
+    // bare constructor).
     let epoch_b_server =
         crate::MemoryServer::new(home.path().join("server.sqlite"), None).expect("epoch B server");
+    record_startup_reconciliation(&epoch_b_server);
     let outcome_b = epoch_b_server
         .startup_reconciliation
         .get()
@@ -128,6 +131,7 @@ async fn restart_orphans_nonterminal_managed_run_exactly_once() {
     let before_epoch_c = std::fs::read_dir(&run_dir).expect("list run dir").count();
     let epoch_c_server =
         crate::MemoryServer::new(home.path().join("server2.sqlite"), None).expect("epoch C server");
+    record_startup_reconciliation(&epoch_c_server);
     let outcome_c = epoch_c_server
         .startup_reconciliation
         .get()
@@ -178,6 +182,7 @@ async fn terminal_run_before_restart_is_never_reconciled() {
 
     let server =
         crate::MemoryServer::new(home.path().join("server.sqlite"), None).expect("epoch B server");
+    record_startup_reconciliation(&server);
     let outcome = server
         .startup_reconciliation
         .get()
@@ -211,6 +216,7 @@ async fn cancel_after_restart_is_unavailable_with_zero_side_effect() {
     stage_managed_run(dispatch_id, "ctrl-epoch-a", "TASK_STATE_WORKING");
     let server =
         crate::MemoryServer::new(home.path().join("server.sqlite"), None).expect("epoch B server");
+    record_startup_reconciliation(&server);
     let run_dir = crate::dispatch_ops::dispatch_runs_root().join(dispatch_id);
     let before = std::fs::read(run_dir.join("status.json")).expect("read before cancel");
     let revision = read_status(&run_dir)["status_revision"]
@@ -274,6 +280,7 @@ async fn restart_never_redispatches_or_cleans() {
 
     let server =
         crate::MemoryServer::new(home.path().join("server.sqlite"), None).expect("epoch B server");
+    record_startup_reconciliation(&server);
     let outcome = server
         .startup_reconciliation
         .get()
@@ -331,13 +338,11 @@ async fn read_projection_after_restart_separates_execution_control_and_artifacts
     std::fs::write(run_dir.join("result.md"), b"evidence").expect("artifact");
     let server =
         crate::MemoryServer::new(home.path().join("server.sqlite"), None).expect("epoch B server");
+    record_startup_reconciliation(&server);
 
-    let projection = crate::staffing_ops::staff_status_projection(&server, dispatch_id)
-        .await
-        .expect("staff status projection")
-        .expect("identity-bearing run has a projection");
     // The canonical receipt read stays verbatim — no projection key is
-    // written into the durable bytes.
+    // written into the durable bytes — and the projection is computed from
+    // that SAME snapshot, never from a second read.
     let raw = crate::staffing_ops::staff_status(
         &server,
         crate::staffing_ops::StaffStatusRequest {
@@ -351,7 +356,9 @@ async fn read_projection_after_restart_separates_execution_control_and_artifacts
         status.get("read_projection").is_none(),
         "staff_status must return the canonical receipt verbatim"
     );
-    let projection = &projection;
+    let projection =
+        crate::staffing_ops::staff_status_projection_from_receipt(&server, dispatch_id, &status);
+    let projection = projection.expect("identity-bearing run has a projection");
     assert_eq!(
         projection["execution_state"], "orphaned",
         "a reconciled nonterminal run projects orphaned, never failed/cancelled/completed/running"
@@ -399,6 +406,7 @@ async fn stale_post_reconciliation_receipt_cannot_regress_state() {
     let run_dir = stage_managed_run(dispatch_id, "ctrl-epoch-a", "TASK_STATE_WORKING");
     let server =
         crate::MemoryServer::new(home.path().join("server.sqlite"), None).expect("epoch B server");
+    record_startup_reconciliation(&server);
     assert_eq!(
         server
             .startup_reconciliation
@@ -488,6 +496,7 @@ async fn unreadable_and_inconsistent_records_fail_closed() {
 
     let server =
         crate::MemoryServer::new(home.path().join("server.sqlite"), None).expect("epoch B server");
+    record_startup_reconciliation(&server);
     let outcome = server
         .startup_reconciliation
         .get()
@@ -536,6 +545,7 @@ async fn unreadable_storage_surfaces_reconciliation_unavailable() {
     std::fs::write(home.path().join("runs"), b"not a directory").expect("runs root as file");
     let _unused_runs_dir = runs;
     let server = crate::MemoryServer::new(home.path().join("server.sqlite"), None).expect("server");
+    record_startup_reconciliation(&server);
     let outcome = server
         .startup_reconciliation
         .get()
@@ -813,5 +823,162 @@ fn read_projection_running_and_unknown_for_same_epoch() {
     assert!(
         read_projection(&bare, &run_dir, "ctrl-epoch-current", true).is_none(),
         "no projection for receipts without a durable identity record"
+    );
+}
+
+/// Codex R2 finding 5 (fixed): a receipt whose reconciliation observation is
+/// typed `inconsistent` must project `unknown`, never a guessed orphan.
+#[test]
+fn inconsistent_record_projects_unknown_not_orphaned() {
+    let _serial = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (home, _runs) = test_env();
+    let _home = crate::test_support::EnvRestore::set_path("TACHI_HOME", home.path());
+    let dispatch_id = "20260829T120013Z-s1-inconsistent-projection";
+    let run_dir = stage_managed_run(dispatch_id, "ctrl-epoch-a", "TASK_STATE_WORKING");
+    // Corrupt the record's identity so reconciliation types it inconsistent.
+    let mut status = read_status(&run_dir);
+    status["managed_run_identity"]["managed_run_id"] = json!("some-other-run");
+    std::fs::write(
+        run_dir.join("status.json"),
+        serde_json::to_vec_pretty(&status).expect("serialize"),
+    )
+    .expect("write contradictory receipt");
+    let server = crate::MemoryServer::new(home.path().join("server.sqlite"), None).expect("server");
+    record_startup_reconciliation(&server);
+    let outcome = server
+        .startup_reconciliation
+        .get()
+        .expect("outcome")
+        .clone();
+    assert_eq!(outcome.inconsistent.len(), 1, "typed inconsistent");
+
+    let receipt = read_status(&run_dir);
+    let projection =
+        read_projection(&receipt, &run_dir, &server.controller_epoch, false).expect("projection");
+    assert_eq!(
+        projection["execution_state"], "unknown",
+        "an inconsistent record projects unknown, never a guessed orphan"
+    );
+    assert_eq!(projection["control_state"], "unavailable");
+}
+
+/// Codex R2 finding 6 (fixed): artifact-ref consumption is confined to the
+/// closed allowlist — a tampered traversal ref is never probed on disk.
+#[test]
+fn artifact_ref_consumption_is_confined_to_allowlist() {
+    let runs = tempfile::tempdir().expect("runs");
+    let dispatch_id = "20260829T120014Z-s1-allowlist";
+    let run_dir = runs.path().join(dispatch_id);
+    std::fs::create_dir_all(&run_dir).expect("run dir");
+    let mut status = json!({
+        "dispatch_id": dispatch_id,
+        "state": "TASK_STATE_WORKING",
+        "status_revision": 1,
+        "managed_run_identity": {
+            "managed_run_id": dispatch_id,
+            "controller_epoch_id": "ctrl-epoch-current",
+            "artifact_refs": ["result.md", "../../escaped-secret", "/etc/passwd", "subdir/plan.md"],
+        },
+    });
+    let _ = &mut status;
+    // Tampered refs must not be probed; only the allowlisted name is.
+    let projection =
+        read_projection(&status, &run_dir, "ctrl-epoch-current", false).expect("projection");
+    let artifacts = projection["artifacts_available"]
+        .as_object()
+        .expect("artifacts");
+    assert_eq!(
+        artifacts.len(),
+        1,
+        "only allowlisted refs are probed: {artifacts:?}"
+    );
+    assert!(artifacts.contains_key("result.md"));
+    assert!(
+        !artifacts.contains_key("../../escaped-secret")
+            && !artifacts.contains_key("/etc/passwd")
+            && !artifacts.contains_key("subdir/plan.md"),
+        "tampered or foreign refs are never probed"
+    );
+}
+
+/// Codex R2 finding 4 (fixed): the pre-existing daemon-restart recovery must
+/// never failed-ify a managed run carrying a durable identity record; its
+/// posture after a lost controller belongs to S1 reconciliation. Ordinary
+/// receipts keep the pre-existing recovery semantics unchanged.
+#[test]
+fn legacy_restart_recovery_skips_identity_bearing_managed_runs() {
+    let _serial = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (home, _runs) = test_env();
+    let _home = crate::test_support::EnvRestore::set_path("TACHI_HOME", home.path());
+    let runs_root = crate::dispatch_ops::dispatch_runs_root();
+
+    // (a) Managed identity-bearing WORKING receipt without exit_code:
+    // recovery must leave it byte-identical (S1 owns its posture).
+    let managed_id = "20260829T120015Z-s1-recovery-skip";
+    let managed_dir = stage_managed_run(managed_id, "ctrl-epoch-a", "TASK_STATE_WORKING");
+    assert!(
+        !read_status(&managed_dir).get("exit_code").is_some(),
+        "fixture must exercise the missing-exit_code eligibility path"
+    );
+    let managed_before =
+        std::fs::read(managed_dir.join("status.json")).expect("read managed receipt");
+
+    // (b) Ordinary WORKING receipt without exit_code: pre-existing recovery
+    // failed-ifies it (behavior unchanged by this leaf).
+    let ordinary_id = "20260829T120016Z-s1-recovery-ordinary";
+    let ordinary_dir = runs_root.join(ordinary_id);
+    std::fs::create_dir_all(&ordinary_dir).expect("ordinary run dir");
+    std::fs::write(
+        ordinary_dir.join("status.json"),
+        json!({
+            "dispatch_id": ordinary_id,
+            "state": "TASK_STATE_WORKING",
+        })
+        .to_string(),
+    )
+    .expect("write ordinary receipt");
+
+    let server = crate::MemoryServer::new(home.path().join("server.sqlite"), None).expect("server");
+    let recovered = crate::dispatch_ops::recover_orphaned_dispatch_runs(&server);
+    assert_eq!(
+        recovered,
+        vec![ordinary_id.to_string()],
+        "only the ordinary receipt is recovered"
+    );
+    assert_eq!(
+        std::fs::read(managed_dir.join("status.json")).expect("read managed after recovery"),
+        managed_before,
+        "the managed run is never failed-ified by legacy recovery"
+    );
+    let ordinary_status = read_status(&ordinary_dir);
+    assert_eq!(
+        ordinary_status["state"], "TASK_STATE_FAILED",
+        "ordinary receipts keep the pre-existing recovery outcome"
+    );
+}
+
+/// Structural: startup reconciliation is wired at the daemon serve startup,
+/// beside the pre-existing orphan recovery — never in a bare constructor.
+#[test]
+fn serve_startup_wires_reconciliation_beside_recovery() {
+    let serve = include_str!("../bootstrap/serve.rs");
+    let reconciliation_pos = serve
+        .find("record_startup_reconciliation(&server)")
+        .unwrap_or_else(|| panic!("serve startup must call record_startup_reconciliation"));
+    let recovery_pos = serve
+        .find("recover_orphaned_dispatch_runs(&server)")
+        .unwrap_or_else(|| panic!("serve startup must keep orphan recovery"));
+    assert!(
+        reconciliation_pos < recovery_pos,
+        "reconciliation runs before legacy recovery touches any receipt"
+    );
+    let init = include_str!("../server_state/init.rs");
+    assert!(
+        !init.contains("reconcile_interrupted_managed_runs"),
+        "bare MemoryServer construction must never scan or mutate run receipts"
     );
 }

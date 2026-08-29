@@ -266,23 +266,22 @@ pub(crate) async fn staff_status(
 /// identity and its read shape is unchanged. A lost controller never makes
 /// this surface fabricate failed/cancelled/completed/running from stale
 /// nonterminal data.
-pub(crate) async fn staff_status_projection(
+/// Compute the read projection from an ALREADY-READ receipt snapshot so the
+/// facade response decorates exactly the bytes it carries — the response can
+/// never stitch a top-level state from one receipt revision onto a
+/// projection from another. This function performs no filesystem read.
+pub(crate) fn staff_status_projection_from_receipt(
     server: &MemoryServer,
     dispatch_id: &str,
-) -> Result<Option<serde_json::Value>, String> {
-    let status = staff_status_impl(&StaffStatusRequest {
-        dispatch_id: dispatch_id.to_string(),
-    })
-    .await?;
-    let status: serde_json::Value = serde_json::from_str(&status)
-        .map_err(|err| format!("staff_status_projection: parse receipt: {err}"))?;
+    receipt: &serde_json::Value,
+) -> Option<serde_json::Value> {
     let run_dir = dispatch_runs_root().join(dispatch_id);
-    Ok(crate::managed_run_epoch::read_projection(
-        &status,
+    crate::managed_run_epoch::read_projection(
+        receipt,
         &run_dir,
         &server.controller_epoch,
         server.managed_run_controls.contains(dispatch_id),
-    ))
+    )
 }
 
 /// Synchronous core of [`staff_status`], split out so tests can exercise the

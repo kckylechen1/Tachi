@@ -103,18 +103,29 @@ impl MemoryServer {
                 // durable identity record, expose execution state, control
                 // state, controller epoch, reconciliation state, and artifact
                 // availability as SEPARATE response facts. Response-only: the
-                // canonical receipt bytes are never rewritten by a read.
-                match crate::staffing_ops::staff_status_projection(self, &dispatch_id).await? {
-                    Some(projection) => {
-                        let mut enriched = serde_json::from_str::<serde_json::Value>(&raw)
-                            .map_err(|err| format!("tachi_staff: parse status receipt: {err}"))?;
-                        if let Some(object) = enriched.as_object_mut() {
-                            object.insert("read_projection".to_string(), projection);
+                // canonical receipt bytes are never rewritten by a read, and
+                // the projection is computed from THIS response's own parsed
+                // snapshot — the reply can never mix two receipt revisions.
+                match serde_json::from_str::<serde_json::Value>(&raw) {
+                    Ok(receipt) => {
+                        match crate::staffing_ops::staff_status_projection_from_receipt(
+                            self,
+                            &dispatch_id,
+                            &receipt,
+                        ) {
+                            Some(projection) => {
+                                let mut enriched = receipt;
+                                if let Some(object) = enriched.as_object_mut() {
+                                    object.insert("read_projection".to_string(), projection);
+                                }
+                                serde_json::to_string_pretty(&enriched).map_err(|err| {
+                                    format!("tachi_staff: serialize status: {err}")
+                                })?
+                            }
+                            None => raw,
                         }
-                        serde_json::to_string_pretty(&enriched)
-                            .map_err(|err| format!("tachi_staff: serialize status: {err}"))?
                     }
-                    None => raw,
+                    Err(_) => raw,
                 }
             }
             "cancel" => {

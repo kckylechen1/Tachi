@@ -392,9 +392,25 @@ fn append_reconciliation_observation(
         .map_err(|error| format!("write_failed:{error}"))
 }
 
+/// The closed set of run-relative artifact names this lifecycle publishes.
+/// Consumption is confined to this allowlist: a tampered or foreign ref in a
+/// persisted record is ignored rather than probed, so the projection can
+/// never become a filesystem-existence oracle for arbitrary paths.
+const ARTIFACT_REF_ALLOWLIST: &[&str] = &["plan.md", "prompt.md", "trajectory.jsonl", "result.md"];
+
+fn confined_artifact_ref(name: &str) -> bool {
+    ARTIFACT_REF_ALLOWLIST.contains(&name)
+        && !name.contains('/')
+        && !name.contains('\\')
+        && name != ".."
+}
+
 /// Read-time projection exposing execution state, control state, controller
 /// epoch, reconciliation state, and artifact availability as SEPARATE facts.
-/// Response-only: the durable receipt is never rewritten by a read.
+/// Response-only: the durable receipt is never rewritten by a read. The
+/// projection is computed from the ONE receipt snapshot the caller passes;
+/// callers must decorate that same snapshot (no second read) so the response
+/// can never stitch two different receipt revisions together.
 ///
 /// Returns `None` for receipts without a durable identity record — their
 /// read shape is unchanged.
@@ -408,14 +424,27 @@ pub(crate) fn read_projection(
     let accepted_epoch = accepted_controller_epoch(status);
     let state = status.get("state").and_then(Value::as_str);
     let terminal = is_terminal_state(status);
-    let reconciled = already_reconciled(status);
+    let transitions = status
+        .get(RECONCILIATION_KEY)
+        .and_then(|reconciliation| reconciliation.get("transitions"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let orphaned = transitions.iter().any(|transition| {
+        transition.get("verdict").and_then(Value::as_str) == Some("orphaned_control_unavailable")
+    });
+    let inconsistent = !transitions.is_empty() && !orphaned;
 
     let execution_state = if terminal {
         // Terminal wins over everything; a stale pre-restart receipt can
         // never regress a newer terminal state, and reconciliation never
         // fabricates a terminal classification for a nonterminal run.
         Value::String(state.unwrap_or_default().to_string())
-    } else if reconciled {
+    } else if inconsistent {
+        // A contradictory record projects honestly as unknown — never as a
+        // guessed orphan or a fabricated classification.
+        json!("unknown")
+    } else if orphaned {
         json!("orphaned")
     } else if accepted_epoch.is_some() && accepted_epoch != Some(current_epoch) {
         json!("orphaned")
@@ -438,6 +467,7 @@ pub(crate) fn read_projection(
         .into_iter()
         .flatten()
         .filter_map(Value::as_str)
+        .filter(|name| confined_artifact_ref(name))
     {
         artifacts.insert(name.to_string(), Value::Bool(run_dir.join(name).is_file()));
     }
@@ -449,6 +479,57 @@ pub(crate) fn read_projection(
         "reconciliation": status.get(RECONCILIATION_KEY).cloned().unwrap_or(Value::Null),
         "artifacts_available": Value::Object(artifacts),
     }))
+}
+
+/// Run the startup reconciliation scan for this daemon incarnation and
+/// record its outcome on the server. Called ONLY from the daemon serve
+/// startup path, beside `recover_orphaned_dispatch_runs`: a controller
+/// incarnation reconciles the runs root it is about to own, while transient
+/// CLI constructions of `MemoryServer` never scan or mutate run receipts.
+/// Cross-process serialization of the runs root is the daemon singleton
+/// lock's job — the same single-writer trust base every canonical receipt
+/// writer already relies on.
+pub(crate) fn record_startup_reconciliation(server: &crate::MemoryServer) {
+    let reconciliation = reconcile_interrupted_managed_runs(
+        &crate::dispatch_ops::dispatch_runs_root(),
+        &server.controller_epoch,
+    );
+    if reconciliation.is_unavailable() {
+        tracing::warn!(
+            reason = reconciliation
+                .unavailable_reason
+                .as_deref()
+                .unwrap_or("unknown"),
+            "managed-run startup reconciliation unavailable; claiming no clean state"
+        );
+    } else {
+        if !reconciliation.orphaned.is_empty() {
+            tracing::warn!(
+                count = reconciliation.orphaned.len(),
+                dispatch_ids = ?reconciliation.orphaned,
+                "managed-run startup reconciliation: orphaned/control_unavailable"
+            );
+        }
+        if !reconciliation.inconsistent.is_empty() {
+            tracing::warn!(
+                count = reconciliation.inconsistent.len(),
+                "managed-run startup reconciliation: inconsistent identity records"
+            );
+        }
+        if !reconciliation.append_failures.is_empty() {
+            tracing::warn!(
+                count = reconciliation.append_failures.len(),
+                failures = ?reconciliation.append_failures,
+                "managed-run startup reconciliation: append failures"
+            );
+        }
+        tracing::debug!(
+            scanned = reconciliation.scanned,
+            orphaned = reconciliation.orphaned.len(),
+            "managed-run startup reconciliation complete"
+        );
+    }
+    let _ = server.startup_reconciliation.set(reconciliation);
 }
 
 #[cfg(test)]
