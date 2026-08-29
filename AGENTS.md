@@ -2,6 +2,8 @@
 
 > This is Sigil's carrier-neutral, always-loaded contract. Keep stable repository red lines and routing here; mechanisms, incidents, model assignments, exact commands, and worked cases belong in the owning canon or harness-private adapter.
 
+The current owner instruction outranks remembered material and stale summaries; repository red lines still apply.
+
 ## Read the owning canon
 
 - Dispatch, review, evidence, candidate freeze, acceptance commands, and lane lifecycle: [`dispatch-lifecycle.md`](docs/engineering/architecture/dispatch-lifecycle.md).
