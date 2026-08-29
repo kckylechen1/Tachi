@@ -335,8 +335,24 @@ pub(crate) fn validate_harness_session_spine_schema(conn: &Connection) -> Result
             "length(event_id) <= 128",
         ),
         (
+            "harness_session_events",
+            "instr(CAST(event_id AS BLOB), CAST(x'00' AS BLOB)) = 0",
+        ),
+        (
+            "harness_session_events",
+            "instr(CAST(occurred_at AS BLOB), CAST(x'00' AS BLOB)) = 0",
+        ),
+        (
+            "harness_session_events",
+            "length(occurred_at) <= 64",
+        ),
+        (
             "harness_session_interventions",
             "length(request_id) <= 128",
+        ),
+        (
+            "harness_session_interventions",
+            "instr(CAST(request_id AS BLOB), CAST(x'00' AS BLOB)) = 0",
         ),
         (
             "harness_session_intervention_results",

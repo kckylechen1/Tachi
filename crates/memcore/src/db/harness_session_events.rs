@@ -2257,6 +2257,21 @@ mod tests {
         .unwrap_err();
         assert!(error.to_string().contains("RFC 3339"), "{error}");
 
+        // Control characters in the occurrence timestamp are refused too:
+        // removing only the occurred_at control guard must turn this test
+        // red (codex R8).
+        let mut control_time = event("ev-time-ctl", HarnessSessionEventKind::Progress, 1);
+        control_time.occurred_at = "2026-08-29T00:00:00Z\u{0000}tail".to_string();
+        let error = ingest_harness_session_event(
+            &mut conn,
+            &selector,
+            &control_time,
+            &host(),
+            "admission-1",
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("control characters"), "{error}");
+
         assert_eq!(event_row_count(&conn), 0, "refusals never journal");
     }
 
