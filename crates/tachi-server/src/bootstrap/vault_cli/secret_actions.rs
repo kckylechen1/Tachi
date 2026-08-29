@@ -326,10 +326,11 @@ pub(super) async fn run_secret_action(
                 insecure_password_file,
             )?;
 
-            let (key_id, mut value) = lease_api_key_from_store(&store, key.bytes(), &name)?;
+            let (logical_name, key_id, mut value) =
+                lease_api_key_from_store(&store, key.bytes(), &name)?;
             let body = serde_json::json!({
                 "leased": true,
-                "logical_name": name,
+                "logical_name": logical_name,
                 "key_id": key_id,
                 "env_name": env_name,
                 "env": { env_name: value.clone() },
@@ -353,6 +354,8 @@ pub(super) async fn run_secret_action(
                 .vault_get_config()
                 .map_err(|e| format!("vault_get_config: {e}"))?
                 .ok_or("Vault not initialized. Run `tachi vault init` first.")?;
+            let logical_name =
+                crate::vault_ops::canonical_api_key_health_logical_name(&store, &logical_name)?;
             let health = build_key_health_result(
                 &store,
                 &logical_name,
@@ -409,8 +412,8 @@ pub(super) async fn run_secret_action(
 
             let decrypted =
                 crate::vault_crypto::decrypt(key.bytes(), &entry.encrypted_value, &entry.nonce)?;
-            let mut value = String::from_utf8(decrypted)
-                .map_err(|e| format!("Secret is not valid UTF-8: {e}"))?;
+            let mut value =
+                crate::vault_crypto::decode_utf8_zeroizing(decrypted, "Secret is not valid UTF-8")?;
 
             let output = vault_get_output(&name, &value, reveal, json)?;
             crate::vault_crypto::zero_string(&mut value);

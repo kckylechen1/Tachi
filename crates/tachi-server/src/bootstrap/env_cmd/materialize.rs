@@ -112,7 +112,7 @@ fn resolve_bound_secret_value(
     if let Some(entry) = entries.get(secret_name).copied() {
         return decrypt_entry_value(entry, unlocked.key.bytes());
     }
-    let (_, value) =
+    let (_, _, value) =
         vault_cli::lease_api_key_from_store(&unlocked.store, unlocked.key.bytes(), secret_name)?;
     Ok(value)
 }
@@ -129,8 +129,10 @@ pub(super) fn decrypt_entry_value(
         return Err(format!("Vault secret '{}' is agent-restricted", entry.name).into());
     }
     let decrypted = crate::vault_crypto::decrypt(key, &entry.encrypted_value, &entry.nonce)?;
-    let value = String::from_utf8(decrypted)
-        .map_err(|e| format!("Vault secret '{}' is not valid UTF-8: {e}", entry.name))?;
+    let value = crate::vault_crypto::decode_utf8_zeroizing(
+        decrypted,
+        format!("Vault secret '{}' is not valid UTF-8", entry.name),
+    )?;
     if value.trim().is_empty() {
         return Err(format!("Vault secret '{}' is empty", entry.name).into());
     }

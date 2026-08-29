@@ -102,7 +102,7 @@ impl MemoryServer {
                 crate::provider_config::format_skipped_alias_warning(
                     key,
                     retained,
-                    report.source_availability,
+                    report.skip_class_for(key),
                 )
             );
         }
