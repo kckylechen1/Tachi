@@ -189,8 +189,9 @@ pub(super) async fn run_mcp_command(
             insecure_password_file,
             json,
         } => {
+            let raw_key = key.map(crate::vault_crypto::ZeroizingString::new);
             let normalized_name = normalize_mcp_name(&name)?;
-            let vault_key_name = if key.is_some() {
+            let vault_key_name = if raw_key.is_some() {
                 Some(select_mcp_vault_key_name(&normalized_name, &headers)?)
             } else {
                 None
@@ -203,7 +204,7 @@ pub(super) async fn run_mcp_command(
                 vault_key_name.as_deref(),
             )?;
             let hub_db = memory_server_hub_cli::resolve_hub_db(None, app_home);
-            let vault_key_created = if let Some(raw_key) = key {
+            let vault_key_created = if let Some(raw_key) = raw_key.as_deref() {
                 Some(store_mcp_key_in_vault(
                     &hub_db,
                     vault_key_name.as_deref().expect("vault key name"),
@@ -354,7 +355,13 @@ fn select_mcp_vault_key_name(
             }
         }
     }
-    Ok(explicit_key_name.unwrap_or_else(|| default_mcp_vault_key_name(normalized_name)))
+    let key_name = explicit_key_name.unwrap_or_else(|| default_mcp_vault_key_name(normalized_name));
+    if crate::vault_ops::is_lane_slot_secret_name(&key_name) {
+        return Err(std::io::Error::other(format!(
+            "MCP --key cannot write lane slot '{key_name}'; use `tachi vault set {key_name} --rebind` for an explicit lane rebind"
+        )));
+    }
+    Ok(key_name)
 }
 
 fn default_mcp_vault_key_name(normalized_name: &str) -> String {
@@ -389,7 +396,7 @@ fn store_mcp_key_in_vault(
     hub_db: &PathBuf,
     vault_key_name: &str,
     normalized_name: &str,
-    raw_key: String,
+    raw_key: &str,
     stdin_password: bool,
     keychain: bool,
     password_file: Option<&Path>,
@@ -585,6 +592,19 @@ mod tests {
             "${vault:CONTEXT7_API_KEY}"
         );
         assert!(definition["headers"]["Authorization"].is_null());
+    }
+
+    #[test]
+    fn mcp_key_flag_rejects_lane_slot_vault_header_name() {
+        let error = select_mcp_vault_key_name(
+            "context7",
+            &["Authorization: Bearer ${vault:EXTRACT_API_KEY}".to_string()],
+        )
+        .expect_err("MCP key storage must not bypass lane rebind")
+        .to_string();
+
+        assert!(error.contains("EXTRACT_API_KEY"), "{error}");
+        assert!(error.contains("--rebind"), "{error}");
     }
 
     #[test]

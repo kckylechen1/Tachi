@@ -214,6 +214,28 @@ fn vault_upsert_rejects_empty_value() {
 }
 
 #[test]
+fn legacy_vault_upsert_rejects_lane_slot_bypass() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("memory.db");
+    let key = vault_init_with_password(&db_path, "correct horse battery staple".to_string())
+        .expect("init vault");
+    let error = vault_upsert_secret_with_key(
+        &db_path,
+        &key,
+        "EXTRACT_API_KEY",
+        "api_key",
+        "",
+        "must-not-bypass-rebind".to_string(),
+    )
+    .expect_err("legacy helper must not write lane slots")
+    .to_string();
+
+    assert!(error.contains("EXTRACT_API_KEY"), "{error}");
+    assert!(error.contains("--rebind"), "{error}");
+    assert!(!error.contains("must-not-bypass-rebind"), "{error}");
+}
+
+#[test]
 fn canonical_provider_keys_dedup_and_exclude_deprecated() {
     let defs = canonical_provider_key_defs(false);
     let names: Vec<&str> = defs.iter().map(|(k, _)| *k).collect();

@@ -8,7 +8,7 @@ pub(crate) async fn handle_vault_set(
     let value = crypto::ZeroizingString::new(std::mem::take(&mut params.value));
     let result = (|| {
         crypto::validate_secret_name(&params.name)?;
-        if value.trim().is_empty() {
+        if is_lane_slot_secret_name(&params.name) && value.trim().is_empty() {
             return Err("Secret value cannot be empty".to_string());
         }
         authorize_vault_mutation(server, &params.name, params.agent_id.as_deref())

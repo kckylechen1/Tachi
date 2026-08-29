@@ -111,18 +111,28 @@ pub(in crate::bootstrap) fn vault_upsert_secret_with_key(
     name: &str,
     secret_type: &str,
     description: &str,
-    mut secret_value: String,
+    secret_value: String,
 ) -> Result<bool, Box<dyn std::error::Error>> {
+    let secret_value = crate::vault_crypto::ZeroizingString::new(secret_value);
     crate::vault_crypto::validate_secret_name(name)?;
-    if secret_value.is_empty() {
+    if secret_value.trim().is_empty() {
         return Err("Secret value cannot be empty".into());
+    }
+    if crate::vault_ops::is_lane_slot_secret_name(name) {
+        return Err(format!(
+            "Legacy vault upsert cannot write lane slot '{name}'; use `tachi vault set {name} --rebind`"
+        )
+        .into());
     }
 
     let encrypt_result = crate::vault_crypto::encrypt(key.bytes(), secret_value.as_bytes());
-    crate::vault_crypto::zero_string(&mut secret_value);
     let (encrypted_value, nonce) = encrypt_result?;
 
-    let is_new = !open_cli_store_read_only(global_db_path)?
+    let mut store = open_cli_store(global_db_path)?;
+    let transaction = store
+        .begin_vault_transaction()
+        .map_err(|e| format!("begin vault transaction: {e}"))?;
+    let is_new = !transaction
         .vault_entry_exists(name)
         .map_err(|e| format!("vault_entry_exists: {e}"))?;
 
@@ -140,10 +150,12 @@ pub(in crate::bootstrap) fn vault_upsert_secret_with_key(
         access_count: 0,
     };
 
-    let store = open_cli_store(global_db_path)?;
-    store
+    transaction
         .vault_upsert_entry(&entry)
         .map_err(|e| format!("vault_upsert_entry: {e}"))?;
+    transaction
+        .commit()
+        .map_err(|e| format!("commit vault transaction: {e}"))?;
     Ok(is_new)
 }
 
@@ -282,7 +294,7 @@ pub(in crate::bootstrap) fn unlock_and_upsert_api_key_secret(
     global_db_path: &PathBuf,
     secret_name: &str,
     description: &str,
-    raw_value: String,
+    raw_value: &str,
     stdin_password: bool,
     keychain: bool,
     password_file: Option<&Path>,
@@ -302,6 +314,6 @@ pub(in crate::bootstrap) fn unlock_and_upsert_api_key_secret(
         secret_name,
         "api_key",
         description,
-        raw_value,
+        raw_value.to_string(),
     )
 }
