@@ -217,6 +217,9 @@ impl CapabilitySource {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HarnessSessionInterventionResultReceipt {
     pub result: HarnessSessionInterventionResult,
+    /// Request metadata captured in the same transaction as the result. This
+    /// keeps acknowledgements independent of a later attachment rebind.
+    pub request_kind: HarnessSessionInterventionKind,
     pub admission: HarnessSessionInterventionAdmission,
     pub state: HarnessSessionStateProjection,
 }
@@ -672,6 +675,7 @@ pub fn record_harness_session_intervention_result(
         tx.commit()?;
         return Ok(HarnessSessionInterventionResultReceipt {
             result: existing,
+            request_kind: request.kind,
             admission: HarnessSessionInterventionAdmission::Replayed,
             state: projection,
         });
@@ -707,6 +711,7 @@ pub fn record_harness_session_intervention_result(
             recorded_at: now,
             source_host_identity: attachment.host_identity,
         },
+        request_kind: request.kind,
         admission: HarnessSessionInterventionAdmission::Created,
         state: projection,
     })
@@ -1397,6 +1402,10 @@ mod tests {
             receipt.admission,
             HarnessSessionInterventionAdmission::Created
         );
+        assert_eq!(
+            receipt.request_kind,
+            HarnessSessionInterventionKind::RequestCancel
+        );
         assert_ne!(
             receipt.state.canonical_state,
             Some(HarnessSessionCanonicalState::Cancelled),
@@ -1436,6 +1445,10 @@ mod tests {
         assert_eq!(
             replay.admission,
             HarnessSessionInterventionAdmission::Replayed
+        );
+        assert_eq!(
+            replay.request_kind,
+            HarnessSessionInterventionKind::RequestCancel
         );
         let conflict = record_harness_session_intervention_result(
             &mut conn,

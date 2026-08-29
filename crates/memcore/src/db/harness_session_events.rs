@@ -32,9 +32,8 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::db::harness_session_attachments::{
-    find_attachment_for_reconnect, verify_attachment_rebind, verify_existing_attachment,
-    HarnessSessionAttachment, HarnessSessionAttachmentSelector, HarnessSessionAttachmentState,
-    HarnessSessionHostAdmission,
+    find_attachment_for_reconnect, verify_attachment_rebind, HarnessSessionAttachment,
+    HarnessSessionAttachmentSelector, HarnessSessionAttachmentState, HarnessSessionHostAdmission,
 };
 use crate::db::normalize_utc_iso_or_now;
 use crate::error::MemoryError;
@@ -958,8 +957,12 @@ pub fn ingest_harness_session_event(
         .as_ref()
         .map(|row| row.pre_disconnect_rank)
         .unwrap_or(-1);
-    if current_rank < 0
-        && (input.source_revision < canonical_revision || input.kind.rank() < pre_disconnect_rank)
+    if (current_rank < 0
+        && (input.source_revision < canonical_revision || input.kind.rank() < pre_disconnect_rank))
+        || (current_rank >= 0
+            && input.kind == HarnessSessionEventKind::Terminal
+            && terminal_digest_to_store.is_none()
+            && input.source_revision < canonical_revision)
     {
         let now = normalize_utc_iso_or_now("");
         insert_event(&tx, &attachment_id, input, &now, &source_host_identity)?;
@@ -2054,6 +2057,73 @@ mod tests {
             fresh.state.canonical_state,
             Some(HarnessSessionCanonicalState::Completed)
         );
+    }
+
+    #[test]
+    fn stale_terminal_cannot_overwrite_fresher_active_progress() {
+        let (mut conn, selector) = seeded();
+        ingest(
+            &mut conn,
+            &selector,
+            &event("ev-progress-5", HarnessSessionEventKind::Progress, 5),
+        );
+
+        let stale = ingest(
+            &mut conn,
+            &selector,
+            &terminal(
+                "ev-terminal-4",
+                HarnessSessionTerminalOutcome::Completed,
+                4,
+                None,
+            ),
+        );
+        assert_eq!(
+            stale.disposition,
+            HarnessSessionEventDisposition::JournaledStale
+        );
+        assert_eq!(
+            stale.state.canonical_state,
+            Some(HarnessSessionCanonicalState::Progressing),
+            "a delayed terminal must not overwrite fresher active progress"
+        );
+        assert_eq!(stale.state.canonical_revision, 5);
+    }
+
+    #[test]
+    fn stale_conflicting_terminal_still_forces_reconciliation() {
+        let (mut conn, selector) = seeded();
+        ingest(
+            &mut conn,
+            &selector,
+            &terminal(
+                "ev-completed-5",
+                HarnessSessionTerminalOutcome::Completed,
+                5,
+                None,
+            ),
+        );
+
+        let conflict = ingest(
+            &mut conn,
+            &selector,
+            &terminal(
+                "ev-failed-4",
+                HarnessSessionTerminalOutcome::Failed,
+                4,
+                None,
+            ),
+        );
+        assert_eq!(
+            conflict.disposition,
+            HarnessSessionEventDisposition::JournaledTerminalConflict
+        );
+        assert_eq!(
+            conflict.state.canonical_state,
+            Some(HarnessSessionCanonicalState::InconsistentReconciling),
+            "a delayed conflicting authoritative terminal must never be hidden as stale"
+        );
+        assert_eq!(conflict.state.canonical_revision, 5);
     }
 
     #[test]
