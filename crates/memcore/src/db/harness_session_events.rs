@@ -569,6 +569,14 @@ fn validate_new_event(input: &NewHarnessSessionEvent) -> Result<(), MemoryError>
                     .to_string(),
             ));
         }
+        // Control characters (including NUL, which SQLite text functions
+        // silently truncate at) are refused so the bounded public-safe text
+        // stays exactly what every reader sees.
+        if summary.chars().any(|c| c.is_control()) {
+            return Err(MemoryError::InvalidArg(
+                "summary must not contain control characters".to_string(),
+            ));
+        }
     }
     if let Some(digest) = &input.payload_digest {
         require_non_empty(digest, "payload_digest")?;
@@ -1122,10 +1130,14 @@ pub fn mark_harness_session_connection(
                         cleanup_recorded: row.cleanup_recorded,
                         // Retain the lifecycle rank the session had reached
                         // so a post-disconnect fact cannot walk it backward.
+                        // A duplicate disconnect must not clobber the first
+                        // one's rank with the marker's own rank (-1).
                         pre_disconnect_rank: row
                             .canonical_state
+                            .filter(|state| *state != HarnessSessionCanonicalState::UnknownOrphaned)
                             .map(HarnessSessionCanonicalState::rank)
-                            .unwrap_or(-1),
+                            .unwrap_or(-1)
+                            .max(row.pre_disconnect_rank),
                     },
                     row.last_event_id.as_deref().unwrap_or(""),
                     &now,
@@ -1811,6 +1823,17 @@ mod tests {
         // A FRESH fact below the retained lifecycle rank also cannot lift
         // the marker: the Progressing@5 -> disconnect -> Started@6 path
         // must journal stale instead of regressing to started (codex R3).
+        // A duplicate disconnect must not clobber the retained rank with the
+        // marker's own rank (codex R4).
+        mark_harness_session_connection(
+            &mut conn,
+            &selector,
+            HarnessSessionConnectionFact::Disconnected,
+            &host(),
+            "admission-1",
+        )
+        .unwrap();
+
         let fresh_low = ingest(
             &mut conn,
             &selector,
@@ -1970,6 +1993,42 @@ mod tests {
             rusqlite::params![attachment_id],
         )
         .expect("prefixed hex digest is digest-safe");
+    }
+
+    #[test]
+    fn writer_rejects_nul_and_control_characters_in_summary_and_digest() {
+        let (mut conn, selector) = seeded();
+        let mut nul_summary = event("ev-nul", HarnessSessionEventKind::Progress, 1);
+        nul_summary.summary = Some("visible\u{0000}smuggled tail".to_string());
+        let error = ingest_harness_session_event(
+            &mut conn,
+            &selector,
+            &nul_summary,
+            &host(),
+            "admission-1",
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("control characters"), "{error}");
+
+        let mut control_summary = event("ev-ctl", HarnessSessionEventKind::Progress, 1);
+        control_summary.summary = Some("line one\nline two".to_string());
+        let error = ingest_harness_session_event(
+            &mut conn,
+            &selector,
+            &control_summary,
+            &host(),
+            "admission-1",
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("control characters"), "{error}");
+
+        let mut nul_digest = event("ev-nul-digest", HarnessSessionEventKind::Progress, 1);
+        nul_digest.payload_digest = Some("sha256:abc\u{0000} free text".to_string());
+        let error =
+            ingest_harness_session_event(&mut conn, &selector, &nul_digest, &host(), "admission-1")
+                .unwrap_err();
+        assert!(error.to_string().contains("digest-safe ASCII"), "{error}");
+        assert_eq!(event_row_count(&conn), 0, "refusals never journal");
     }
 
     #[test]
