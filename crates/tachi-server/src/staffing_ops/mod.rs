@@ -259,13 +259,37 @@ pub(crate) async fn staff_status(
     staff_status_impl(&request).await
 }
 
+/// Read-time projection for managed runs carrying a durable identity record:
+/// execution state, control state, controller epoch, reconciliation state,
+/// and artifact availability surfaced as SEPARATE facts. The durable receipt
+/// is never rewritten by a read; `None` means the receipt has no durable
+/// identity and its read shape is unchanged. A lost controller never makes
+/// this surface fabricate failed/cancelled/completed/running from stale
+/// nonterminal data.
+pub(crate) async fn staff_status_projection(
+    server: &MemoryServer,
+    dispatch_id: &str,
+) -> Result<Option<serde_json::Value>, String> {
+    let status = staff_status_impl(&StaffStatusRequest {
+        dispatch_id: dispatch_id.to_string(),
+    })
+    .await?;
+    let status: serde_json::Value = serde_json::from_str(&status)
+        .map_err(|err| format!("staff_status_projection: parse receipt: {err}"))?;
+    let run_dir = dispatch_runs_root().join(dispatch_id);
+    Ok(crate::managed_run_epoch::read_projection(
+        &status,
+        &run_dir,
+        &server.controller_epoch,
+        server.managed_run_controls.contains(dispatch_id),
+    ))
+}
+
 /// Synchronous core of [`staff_status`], split out so tests can exercise the
 /// canonical-receipt read without constructing a full `MemoryServer` (the
-/// status read touches only the filesystem, never the server). The public
-/// `staff_status` keeps the `&MemoryServer` parameter for facade-call
-/// symmetry with `staff_start`, even though the status path does not use it
-/// today — a future slice that projects status through server-held policy
-/// will need it.
+/// status read touches only the filesystem, never the server). Returns the
+/// canonical receipt VERBATIM: projections layer on top at the facade
+/// surface, they never mutate the canonical bytes.
 async fn staff_status_impl(request: &StaffStatusRequest) -> Result<String, String> {
     if !is_valid_dispatch_id(&request.dispatch_id) {
         return Err(format!(
@@ -2172,6 +2196,34 @@ pub(crate) mod tests {
             !server.managed_run_controls.contains(dispatch_id),
             "terminal cleanup must remove managed cancellation authority"
         );
+        // Durable managed-run identity (additive S1 assertion): the real
+        // managed-custom start path stamps a closed identity record carrying
+        // the owning controller epoch, and the terminal rewrite carries it
+        // forward without any process-control or secret material.
+        let identity = terminal["managed_run_identity"]
+            .as_object()
+            .expect("durable managed-run identity on the terminal receipt");
+        assert_eq!(
+            identity["controller_epoch_id"], server.controller_epoch,
+            "the accepting controller epoch is recorded"
+        );
+        assert_eq!(identity["lifecycle_mode"], "TachiManagedBatch");
+        assert_eq!(identity["managed_run_id"], dispatch_id);
+        assert_eq!(identity["work_claim_ref"], Value::Null);
+        let identity_serialized =
+            serde_json::to_string(&terminal["managed_run_identity"]).expect("serialize identity");
+        for forbidden in [
+            "\"pid\"",
+            "\"pgid\"",
+            "\"signal\"",
+            "\"credential\"",
+            "\"token\"",
+        ] {
+            assert!(
+                !identity_serialized.contains(forbidden),
+                "durable identity must not carry process-control/secret key {forbidden}"
+            );
+        }
         let terminal_revision = terminal["status_revision"]
             .as_u64()
             .expect("completed terminal revision");
