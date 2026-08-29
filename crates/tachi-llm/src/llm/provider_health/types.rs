@@ -600,6 +600,15 @@ pub(in crate::llm) enum ChatLane {
 }
 
 impl ChatLane {
+    pub(in crate::llm) fn index(self) -> usize {
+        match self {
+            Self::Extract => 0,
+            Self::Distill => 1,
+            Self::Reasoning => 2,
+            Self::Summary => 3,
+        }
+    }
+
     pub(in crate::llm) fn as_str(self) -> &'static str {
         match self {
             Self::Extract => "extract",

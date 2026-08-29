@@ -2,15 +2,15 @@
   "schema_version": 1,
   "issue": 1317,
   "observation": {
-    "date": "2026-08-16",
-    "revision": "c3fc6e6e467a955cf1855f80765ffb88cda15ae7",
-    "scope": "native composed MemoryServer router after production profile, A2A, sticky-retirement action-schema, bound-project, and annotation transforms plus the #1733 trusted-local ACP attachment fields (tachi_agent_eval attach_session/get_attachment, merged via #1738); environment exposure override unset"
+    "date": "2026-08-28",
+    "revision": "99df839a9a95787e649ecd4cbd3ebb63451c128c",
+    "scope": "native composed MemoryServer router after production profile, A2A, sticky-retirement action-schema, bound-project, and annotation transforms plus the #1733 trusted-local ACP attachment fields (tachi_agent_eval attach_session/get_attachment, merged via #1738); #1853 omitted vault secret types use name-based inference; environment exposure override unset"
   },
   "provisional_budgets": {
     "profiles": {
       "admin": {
-        "max_total_input_schema_bytes": 137296,
-        "max_total_tool_definition_bytes": 168229,
+        "max_total_input_schema_bytes": 137289,
+        "max_total_tool_definition_bytes": 168222,
         "max_visible_tools": 82,
         "rationale": "Exact live observed #1691 census for admin after profile-specific tools/list narrowing; any regrowth requires explicit adjudication.; #1454 server-run tachi_verify surface (action=run, +check_kind/+timeout_secs props; +1131 schema bytes / +1365 tool-definition bytes per profile) re-pinned after the rebase onto 53939b5b5 (main #1690/#1691 retirements); #1322 declared_file_scope on tachi_staff, including its exact serialized schema bytes; any further regrowth requires explicit adjudication."
       },
@@ -190,8 +190,8 @@
     },
     "profiles": {
       "admin": {
-        "total_input_schema_bytes": 137296,
-        "total_tool_definition_bytes": 168229,
+        "total_input_schema_bytes": 137289,
+        "total_tool_definition_bytes": 168222,
         "visible_tool_count": 82,
         "visible_tools": [
           "archive_memory",

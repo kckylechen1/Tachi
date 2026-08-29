@@ -314,6 +314,8 @@ impl MemoryServer {
             managed_run_controls: Arc::new(
                 crate::managed_run_control::ManagedRunControlRegistry::default(),
             ),
+            controller_epoch: crate::managed_run_epoch::mint_controller_epoch(),
+            startup_reconciliation: Arc::new(std::sync::OnceLock::new()),
             db,
             llm,
             llm_recorder,

@@ -148,6 +148,20 @@ fn open_close_list_round_trip() {
     let path = PathBuf::from(&open_report.path);
     assert!(path.exists(), "worktree path should exist after open");
 
+    // Hermetic setup (tachi#1865 acceptance-lane finding): `OpenReport`
+    // carries `worktree_authority`, an `AnchoredDirectory` that pins an
+    // open descriptor (`Arc<OwnedFd>`) on the freshly opened worktree
+    // directory (memcore anchored_fs). While that descriptor is open, THIS
+    // TEST PROCESS is itself a live OS-view holder of the worktree, and the
+    // close predicate's holder probe (`lsof +D` + `ps` attribution, the
+    // #1212/#1220/#1258 lineage) correctly refuses — the exact deliberate
+    // product behavior `direct_close_refuses_a_live_holder_...` exercises
+    // on purpose. A real closing agent does not hold the tree it wants
+    // removed open; mirror that here: release the authority descriptor,
+    // THEN close. Setup-side exemption only — the holder detection itself
+    // is deliberately untouched (same discipline as c029d3d8e).
+    drop(open_report);
+
     // list: registry must reflect the freshly opened worktree.
     let listed = registry::list_registered_worktrees().expect("list should succeed");
     assert!(
@@ -394,6 +408,12 @@ fn reopen_refuses_the_exact_path_of_a_scrapped_worktree() {
     assert!(first_open.opened, "setup: first open should succeed");
     let scrapped_path = PathBuf::from(&first_open.path);
 
+    // Hermetic setup (same mechanism as open_close_list_round_trip above):
+    // release the OpenReport's `worktree_authority` descriptor so this test
+    // process is not itself the live OS-view holder the close predicate
+    // would (correctly) refuse. Setup-side only; holder detection untouched.
+    drop(first_open);
+
     wt_clean::run_wt_remove(WtRemoveOptions {
         path: scrapped_path.clone(),
         force: true,
@@ -507,6 +527,12 @@ fn reopen_refuses_an_old_branch_name_reused_at_a_new_path() {
     .unwrap();
     assert!(first_open.opened, "setup: first open should succeed");
     let first_path = PathBuf::from(&first_open.path);
+
+    // Hermetic setup (same mechanism as open_close_list_round_trip above):
+    // release the OpenReport's `worktree_authority` descriptor so this test
+    // process is not itself the live OS-view holder the close predicate
+    // would (correctly) refuse. Setup-side only; holder detection untouched.
+    drop(first_open);
 
     wt_clean::run_wt_remove(WtRemoveOptions {
         path: first_path.clone(),
@@ -807,12 +833,57 @@ fn sweep_records_a_canonical_path_matching_wt_open_reentry_lookup() {
         open_report.errors
     );
     let path = PathBuf::from(&open_report.path);
+
+    // tachi#1865 acceptance-lane finding: `open_worktree` canonicalizes
+    // before reporting (`report.path` is the symlink-resolved spelling), so
+    // on macOS — where `/tmp` is a symlink to `/private/tmp` — the reported
+    // path is `/private/tmp/...` even though this test deliberately anchored
+    // the managed root at a LITERAL `/tmp/...` path. The old guard asserted
+    // the literal `path.starts_with("/tmp")` prefix and therefore misfired
+    // exactly when the divergence it guards is real. Guard the precondition
+    // that actually matters instead: the reported worktree path and the
+    // literal anchor must denote the same directory.
+    let canonical_root = std::fs::canonicalize(&root).unwrap_or_else(|_| root.clone());
     assert!(
-        path.starts_with("/tmp"),
-        "test setup must place the worktree under a literal /tmp path to exercise the macOS \
-         symlink divergence, got {}",
-        path.display()
+        path.starts_with(&canonical_root),
+        "test setup bug: the opened worktree must live under the literal /tmp-anchored root, \
+         got {} (canonical root {})",
+        path.display(),
+        canonical_root.display()
     );
+    // The raw /tmp-spelled twin of the reported path: the spelling a caller
+    // outside the canonicalization boundary still holds (and the spelling
+    // this test's literal-root sweep walk produces). This is the re-entry
+    // query below, so the lookup must canonicalize it to match whatever
+    // form sweep recorded — the divergence under test.
+    let literal_path = root.join(path.strip_prefix(&canonical_root).unwrap_or_else(|_| {
+        panic!(
+            "worktree path {} is not under canonical root {}",
+            path.display(),
+            canonical_root.display()
+        )
+    }));
+    if canonical_root != root {
+        // macOS-style divergence is real in this environment: prove the two
+        // spellings genuinely differ, i.e. the re-entry lookup below really
+        // has to reconcile /tmp/... against /private/tmp/... rather than
+        // degenerating into a same-string comparison.
+        assert_ne!(
+            path,
+            literal_path,
+            "with a diverging /tmp<->/private/tmp environment the literal and canonical \
+             spellings must differ: literal={} canonical={}",
+            literal_path.display(),
+            path.display()
+        );
+    }
+
+    // Hermetic setup (same mechanism as open_close_list_round_trip above):
+    // release the OpenReport's `worktree_authority` descriptor so this test
+    // process is not itself the live OS-view holder the sweep's fail-closed
+    // candidate probe would (correctly) skip the worktree for. Setup-side
+    // only; holder detection untouched.
+    drop(open_report);
 
     // max_age_days = 0 makes every marked worktree an immediate sweep
     // candidate regardless of real elapsed time.
@@ -830,10 +901,12 @@ fn sweep_records_a_canonical_path_matching_wt_open_reentry_lookup() {
 
     // Reopening at the exact same path must be refused. This only proves
     // the fix if sweep recorded the CANONICAL form of the path — the same
-    // form wt_open's lookup canonicalizes the query to.
+    // form wt_open's lookup canonicalizes the query to. Feed the RAW
+    // /tmp-spelled twin (the spelling a surviving caller would hold), so
+    // the lookup really has to canonicalize it to match the record.
     let reentry = wt_open::open_worktree(OpenOptions {
         repo_root: repo.clone(),
-        path: Some(path.clone()),
+        path: Some(literal_path.clone()),
         branch: Some("tachi/sweep-canon/second".into()),
         base: Some("HEAD".into()),
         task: Some("sweep-canon".into()),

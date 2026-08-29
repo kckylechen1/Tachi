@@ -202,7 +202,7 @@ fn packaged_doctor_joins_blocked_provider_writer_and_emits_one_terminal_json_doc
     let (release_lock, release_lock_rx) = std::sync::mpsc::sync_channel(0);
     let lock_owner_thread = std::thread::spawn(move || {
         release_lock_rx
-            .recv_timeout(Duration::from_secs(30))
+            .recv_timeout(Duration::from_secs(60))
             .expect("parent releases external lock owner");
         lock_owner
             .execute_batch("ROLLBACK")
@@ -230,16 +230,22 @@ fn packaged_doctor_joins_blocked_provider_writer_and_emits_one_terminal_json_doc
         .env("VOYAGE_BASE_URL", &provider.endpoint)
         .env("TACHI_RERANK_VOYAGE_ENDPOINT", &rerank_endpoint)
         .env("EXTRACT_API_KEY", "test-only-extract-key")
-        .env("DEEPSEEK_API_KEY", "test-only-deepseek-key")
+        .env("SUMMARY_API_KEY", "test-only-summary-key")
+        .env("DISTILL_API_KEY", "test-only-distill-key")
+        .env("REASONING_API_KEY", "test-only-reasoning-key")
         .env("EXTRACT_BASE_URL", &chat_endpoint)
         .env("SUMMARY_BASE_URL", &chat_endpoint)
-        .env("DEEPSEEK_BASE_URL", &chat_endpoint)
+        .env("DISTILL_BASE_URL", &chat_endpoint)
+        .env("REASONING_BASE_URL", &chat_endpoint)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn packaged doctor");
 
-    let request_deadline = Instant::now() + Duration::from_secs(10);
+    // Starting the packaged binary while another connection owns the writer
+    // lock can exceed 15 seconds on a loaded host. Keep the same real HTTP
+    // probe discriminator as the cancellation test, with its 30-second latch.
+    let request_deadline = Instant::now() + Duration::from_secs(30);
     while provider.request_count() == 0 {
         assert!(
             Instant::now() < request_deadline,
@@ -364,10 +370,13 @@ fn spawn_packaged_doctor(
         .env("VOYAGE_BASE_URL", &provider.endpoint)
         .env("TACHI_RERANK_VOYAGE_ENDPOINT", &rerank_endpoint)
         .env("EXTRACT_API_KEY", "test-only-extract-key")
-        .env("DEEPSEEK_API_KEY", "test-only-deepseek-key")
+        .env("SUMMARY_API_KEY", "test-only-summary-key")
+        .env("DISTILL_API_KEY", "test-only-distill-key")
+        .env("REASONING_API_KEY", "test-only-reasoning-key")
         .env("EXTRACT_BASE_URL", &chat_endpoint)
         .env("SUMMARY_BASE_URL", &chat_endpoint)
-        .env("DEEPSEEK_BASE_URL", &chat_endpoint)
+        .env("DISTILL_BASE_URL", &chat_endpoint)
+        .env("REASONING_BASE_URL", &chat_endpoint)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
