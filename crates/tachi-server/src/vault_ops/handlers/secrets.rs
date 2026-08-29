@@ -124,8 +124,7 @@ pub(crate) async fn handle_vault_get(
 
         let decrypted =
             crypto::decrypt(key, &selected.entry.encrypted_value, &selected.entry.nonce)?;
-        let value = String::from_utf8(decrypted)
-            .map_err(|e| format!("Decrypted value is not valid UTF-8: {e}"))?;
+        let value = crypto::decode_utf8_zeroizing(decrypted, "Decrypted value is not valid UTF-8")?;
 
         let new_access_count = server
             .with_global_store(|store| {

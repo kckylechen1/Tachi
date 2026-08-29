@@ -15,6 +15,11 @@ pub struct MaterializeReport {
     /// Vault won. Names only — never secret values.
     pub bypassed_names: Vec<String>,
     pub skipped_aliases: Vec<(String, String)>,
+    /// Typed skip class parallel to [`Self::skipped_aliases`]. Same length and
+    /// key order after a durable-source refresh that classified listed rows
+    /// (tachi#1854). Empty on the pre-resolved test entry, which infers class
+    /// from [`Self::source_availability`].
+    pub skipped_alias_classes: Vec<(String, AliasSkipClass)>,
     /// Logical config key names whose missing/locked alias kept an existing
     /// provider pool. Names only; retained pools are included in `loaded`.
     pub retained_from_last_known_good: Vec<String>,
@@ -22,6 +27,51 @@ pub struct MaterializeReport {
     /// output derives its wording from this instead of re-deriving intent from
     /// a message string.
     pub source_availability: VaultSourceAvailability,
+}
+
+impl MaterializeReport {
+    /// Class for a skipped config key. Prefers an explicit classified entry;
+    /// otherwise infers revocation-vs-locked from source availability so
+    /// pre-resolved test pools keep the #1279 wording.
+    pub fn skip_class_for(&self, key: &str) -> AliasSkipClass {
+        self.skipped_alias_classes
+            .iter()
+            .find(|(skipped, _)| skipped == key)
+            .map(|(_, class)| *class)
+            .unwrap_or_else(|| AliasSkipClass::from_availability(self.source_availability))
+    }
+
+    /// Upgrade a skip from "absent" to a listed-row integrity class. Rewrites
+    /// both the reason string and the class so operator surfaces cannot disagree.
+    /// Does not insert a skip that materialization did not record.
+    pub fn set_skip_class(&mut self, key: &str, class: AliasSkipClass) {
+        if let Some((_, reason)) = self
+            .skipped_aliases
+            .iter_mut()
+            .find(|(skipped, _)| skipped == key)
+        {
+            *reason = class.operator_reason(key);
+        }
+        if let Some((_, existing)) = self
+            .skipped_alias_classes
+            .iter_mut()
+            .find(|(skipped, _)| skipped == key)
+        {
+            *existing = class;
+        } else if self
+            .skipped_aliases
+            .iter()
+            .any(|(skipped, _)| skipped == key)
+        {
+            self.skipped_alias_classes.push((key.to_string(), class));
+        }
+    }
+}
+
+fn push_skipped_alias(report: &mut MaterializeReport, key: String, class: AliasSkipClass) {
+    let reason = class.operator_reason(&key);
+    report.skipped_aliases.push((key.clone(), reason));
+    report.skipped_alias_classes.push((key, class));
 }
 
 fn flatten_pools(pools: &HashMap<String, Vec<ProviderSecret>>) -> HashMap<String, String> {
@@ -94,6 +144,76 @@ pub enum VaultSourceAvailability {
     LockedOrUnavailable,
 }
 
+/// Why a `vault:` alias did not resolve. Metadata-only: never carries the
+/// alias target name, secret value, fingerprint, or length (tachi#1854).
+///
+/// `SecretAbsent` is revocation on a readable Vault (no row). The `Listed*`
+/// variants mean `vault_list` has that name and pool loading dropped it —
+/// operator surfaces must not print `absent from a readable Vault` for those.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AliasSkipClass {
+    VaultUnreadable,
+    SecretAbsent,
+    ListedEmpty,
+    ListedWrongType,
+    ListedFenced,
+    ListedUnusableAuthFailed,
+    ListedUnusableDisabled,
+    ListedUnusableExhausted,
+    ListedUnusableCooldown,
+    ListedNotModelProvider,
+}
+
+impl AliasSkipClass {
+    pub fn from_availability(availability: VaultSourceAvailability) -> Self {
+        match availability {
+            VaultSourceAvailability::Readable => Self::SecretAbsent,
+            VaultSourceAvailability::LockedOrUnavailable => Self::VaultUnreadable,
+        }
+    }
+
+    /// Stable operator sentence for this class. `{key}` is the config/env
+    /// name, never the alias target.
+    pub fn operator_reason(self, key: &str) -> String {
+        match self {
+            Self::VaultUnreadable => format!(
+                "Config key '{key}' references a Vault alias, but the Vault could not be read."
+            ),
+            Self::SecretAbsent => format!(
+                "Config key '{key}' references a Vault alias whose secret is absent from a readable Vault."
+            ),
+            Self::ListedEmpty => format!(
+                "Config key '{key}' references a Vault alias whose listed secret has an empty value."
+            ),
+            Self::ListedWrongType => format!(
+                "Config key '{key}' references a Vault alias whose listed secret is not an api_key."
+            ),
+            Self::ListedFenced => format!(
+                "Config key '{key}' references a Vault alias whose listed secret is fenced by allowed_agents."
+            ),
+            Self::ListedUnusableAuthFailed => format!(
+                "Config key '{key}' references a Vault alias whose listed secret is unusable (auth_failed)."
+            ),
+            Self::ListedUnusableDisabled => format!(
+                "Config key '{key}' references a Vault alias whose listed secret is unusable (disabled)."
+            ),
+            Self::ListedUnusableExhausted => format!(
+                "Config key '{key}' references a Vault alias whose listed secret is unusable (exhausted)."
+            ),
+            Self::ListedUnusableCooldown => format!(
+                "Config key '{key}' references a Vault alias whose listed secret is unusable (cooldown)."
+            ),
+            Self::ListedNotModelProvider => format!(
+                "Config key '{key}' references a Vault alias whose listed secret is not a model provider key."
+            ),
+        }
+    }
+
+    pub fn is_listed_integrity(self) -> bool {
+        !matches!(self, Self::VaultUnreadable | Self::SecretAbsent)
+    }
+}
+
 /// Apply caller-owned, already-resolved pools plus config.env aliases into
 /// `LlmClient` without mutating process env.
 ///
@@ -125,6 +245,31 @@ where
     )
 }
 
+/// One durable Vault read: admitted pools plus the drop reasons recorded
+/// while scanning those same entries (tachi#1854 / #1860). Alias skips must
+/// use `listed_drops` from this object — never a later re-read of health or
+/// entries.
+#[derive(Clone, Default)]
+pub struct DurableVaultLoad {
+    pub pools: HashMap<String, Vec<ProviderSecret>>,
+    pub availability: VaultSourceAvailability,
+    /// Vault secret names listed in this scan but not admitted to `pools`.
+    pub listed_drops: HashMap<String, AliasSkipClass>,
+}
+
+impl DurableVaultLoad {
+    pub fn from_pools(
+        pools: HashMap<String, Vec<ProviderSecret>>,
+        availability: VaultSourceAvailability,
+    ) -> Self {
+        Self {
+            pools,
+            availability,
+            listed_drops: HashMap::new(),
+        }
+    }
+}
+
 /// Materialize provider secrets while holding one transaction boundary across
 /// durable source loading and provider-cache replacement.
 ///
@@ -140,17 +285,18 @@ pub fn materialize_provider_secrets_from_durable_source<I, S, F>(
 where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
-    F: FnOnce() -> Result<
-        (
-            HashMap<String, Vec<ProviderSecret>>,
-            VaultSourceAvailability,
-        ),
-        String,
-    >,
+    F: FnOnce() -> Result<DurableVaultLoad, String>,
 {
     let _materialization_guard = llm.provider_materialization_guard()?;
-    let (vault_pools, availability) = load_vault_pools()?;
-    materialize_provider_secrets_under_guard(llm, &vault_pools, provider_keys, availability, None)
+    let load = load_vault_pools()?;
+    materialize_provider_secrets_under_guard(
+        llm,
+        &load.pools,
+        provider_keys,
+        load.availability,
+        &load.listed_drops,
+        None,
+    )
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -174,6 +320,7 @@ where
         vault_pools,
         provider_keys,
         availability,
+        &HashMap::new(),
         after_missing_alias_snapshot,
     )
 }
@@ -183,6 +330,7 @@ fn materialize_provider_secrets_under_guard<I, S>(
     vault_pools: &HashMap<String, Vec<ProviderSecret>>,
     provider_keys: I,
     availability: VaultSourceAvailability,
+    listed_drops: &HashMap<String, AliasSkipClass>,
     mut after_missing_alias_snapshot: Option<Box<dyn FnOnce() + Send>>,
 ) -> Result<MaterializeReport, String>
 where
@@ -234,17 +382,11 @@ where
                 })
             }) else {
                 resolved_pools.remove(&key);
-                report.skipped_aliases.push((
-                    key.clone(),
-                    match availability {
-                        VaultSourceAvailability::Readable => format!(
-                            "Config key '{key}' references a Vault alias whose secret is absent from a readable Vault."
-                        ),
-                        VaultSourceAvailability::LockedOrUnavailable => format!(
-                            "Config key '{key}' references a Vault alias, but the Vault could not be read."
-                        ),
-                    },
-                ));
+                let class = listed_drops
+                    .get(vault_name)
+                    .copied()
+                    .unwrap_or_else(|| AliasSkipClass::from_availability(availability));
+                push_skipped_alias(&mut report, key.clone(), class);
                 // Retention is a statement about the SOURCE, not about the key.
                 // A readable Vault that does not contain the alias target has
                 // answered the question: the secret is gone, and continuing to
@@ -1312,7 +1454,10 @@ mod tests {
         assert!(llm.set_provider_secret(key, "revoked-but-still-cached"));
 
         let report = materialize_provider_secrets_from_durable_source(&llm, [key], || {
-            Ok((HashMap::new(), VaultSourceAvailability::Readable))
+            Ok(DurableVaultLoad::from_pools(
+                HashMap::new(),
+                VaultSourceAvailability::Readable,
+            ))
         })
         .expect("a missing alias stays a tolerable skip, not a hard error");
 
@@ -1337,7 +1482,10 @@ mod tests {
         assert!(llm.set_provider_secret(key, "last-known-good"));
 
         let report = materialize_provider_secrets_from_durable_source(&llm, [key], || {
-            Ok((HashMap::new(), VaultSourceAvailability::LockedOrUnavailable))
+            Ok(DurableVaultLoad::from_pools(
+                HashMap::new(),
+                VaultSourceAvailability::LockedOrUnavailable,
+            ))
         })
         .expect("a locked Vault stays a tolerable skip");
 
@@ -1360,11 +1508,17 @@ mod tests {
         let llm = LlmClient::new().expect("llm client");
 
         let readable = materialize_provider_secrets_from_durable_source(&llm, [key], || {
-            Ok((HashMap::new(), VaultSourceAvailability::Readable))
+            Ok(DurableVaultLoad::from_pools(
+                HashMap::new(),
+                VaultSourceAvailability::Readable,
+            ))
         })
         .expect("skip");
         let locked = materialize_provider_secrets_from_durable_source(&llm, [key], || {
-            Ok((HashMap::new(), VaultSourceAvailability::LockedOrUnavailable))
+            Ok(DurableVaultLoad::from_pools(
+                HashMap::new(),
+                VaultSourceAvailability::LockedOrUnavailable,
+            ))
         })
         .expect("skip");
 
@@ -1389,5 +1543,72 @@ mod tests {
                 report.skipped_aliases
             );
         }
+    }
+
+    #[test]
+    fn listed_integrity_classes_never_use_absent_wording() {
+        for class in [
+            AliasSkipClass::ListedEmpty,
+            AliasSkipClass::ListedWrongType,
+            AliasSkipClass::ListedFenced,
+            AliasSkipClass::ListedUnusableAuthFailed,
+            AliasSkipClass::ListedUnusableDisabled,
+            AliasSkipClass::ListedUnusableExhausted,
+            AliasSkipClass::ListedUnusableCooldown,
+            AliasSkipClass::ListedNotModelProvider,
+        ] {
+            let reason = class.operator_reason("SILICONFLOW_API_KEY");
+            assert!(
+                class.is_listed_integrity(),
+                "{class:?} should count as listed integrity"
+            );
+            assert!(
+                !reason.contains("absent from a readable Vault"),
+                "{class:?} leaked revocation wording: {reason}"
+            );
+            assert!(
+                reason.contains("listed secret"),
+                "{class:?} must say the row exists: {reason}"
+            );
+            assert!(
+                !reason.contains("vault:"),
+                "{class:?} must not echo an alias target: {reason}"
+            );
+        }
+        assert!(AliasSkipClass::SecretAbsent
+            .operator_reason("SILICONFLOW_API_KEY")
+            .contains("absent from a readable Vault"));
+    }
+
+    #[test]
+    fn listed_drop_from_the_same_load_overrides_absent_wording() {
+        let _guard = crate::test_support::global_test_lock().lock();
+        let key = "SILICONFLOW_API_KEY";
+        let _env = EnvGuard::set(key, "vault:SILICONFLOW_API_KEY");
+        let llm = LlmClient::new().expect("llm client");
+        let mut listed_drops = HashMap::new();
+        listed_drops.insert(
+            "SILICONFLOW_API_KEY".to_string(),
+            AliasSkipClass::ListedUnusableAuthFailed,
+        );
+        let report = materialize_provider_secrets_from_durable_source(&llm, [key], || {
+            Ok(DurableVaultLoad {
+                pools: HashMap::new(),
+                availability: VaultSourceAvailability::Readable,
+                listed_drops,
+            })
+        })
+        .expect("skip");
+        assert_eq!(
+            report.skip_class_for(key),
+            AliasSkipClass::ListedUnusableAuthFailed
+        );
+        assert!(
+            !report.skipped_aliases[0]
+                .1
+                .contains("absent from a readable Vault"),
+            "{:?}",
+            report.skipped_aliases
+        );
     }
 }

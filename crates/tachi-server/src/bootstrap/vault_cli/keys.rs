@@ -265,8 +265,10 @@ pub(super) fn decrypt_profile_secret_values(
             .ok_or_else(|| format!("Vault secret '{name}' is missing"))?;
         let decrypted =
             crate::vault_crypto::decrypt(key.bytes(), &entry.encrypted_value, &entry.nonce)?;
-        let value = String::from_utf8(decrypted)
-            .map_err(|e| format!("Vault secret '{name}' is not valid UTF-8: {e}"))?;
+        let value = crate::vault_crypto::decode_utf8_zeroizing(
+            decrypted,
+            format!("Vault secret '{name}' is not valid UTF-8"),
+        )?;
         values.insert(name, value);
     }
     Ok(values)

@@ -173,7 +173,8 @@ pub fn zero_string(value: &mut String) {
     zero_bytes(bytes);
 }
 
-fn zero_bytes(bytes: &mut [u8]) {
+/// Overwrite arbitrary sensitive bytes using non-elidable stores.
+pub fn zero_bytes(bytes: &mut [u8]) {
     for byte in bytes.iter_mut() {
         // SAFETY: `byte` is a unique `&mut u8` within a validly-initialized
         // slice; `write_volatile(byte, 0)` writes a single fully-initialized
@@ -232,6 +233,15 @@ mod tests {
 
         assert_eq!(value.len(), len);
         assert!(value.as_bytes().iter().all(|byte| *byte == 0));
+    }
+
+    #[test]
+    fn zero_bytes_overwrites_non_utf8_contents_in_place() {
+        let mut value = [b'p', 0xff, 0xfe];
+
+        zero_bytes(&mut value);
+
+        assert_eq!(value, [0; 3]);
     }
 
     #[test]
