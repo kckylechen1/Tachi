@@ -139,16 +139,16 @@ fn scan_keychain_api_key_entries(
     let mut values = Vec::new();
     let mut dropped = HashMap::new();
     for entry in entries {
+        if entry.secret_type != SECRET_TYPE_API_KEY {
+            record_keychain_listed_drop(&mut dropped, &entry.name, AliasSkipClass::ListedWrongType);
+            continue;
+        }
         if !crate::provider_config::is_provider_api_key_name(&entry.name) {
             record_keychain_listed_drop(
                 &mut dropped,
                 &entry.name,
                 AliasSkipClass::ListedNotModelProvider,
             );
-            continue;
-        }
-        if entry.secret_type != SECRET_TYPE_API_KEY {
-            record_keychain_listed_drop(&mut dropped, &entry.name, AliasSkipClass::ListedWrongType);
             continue;
         }
         if entry
@@ -336,6 +336,23 @@ mod tests {
         assert_eq!(
             scan.dropped.get("COOLING_API_KEY"),
             Some(&AliasSkipClass::ListedUnusableCooldown)
+        );
+    }
+
+    #[test]
+    fn keychain_scan_classifies_wrong_type_before_provider_name_shape() {
+        let key = test_key();
+        let mut entry = encrypted_entry("NOT_A_PROVIDER_SECRET", "fixture-value", &key);
+        entry.secret_type = "other".to_string();
+
+        let scan =
+            scan_keychain_api_key_entries(vec![entry], &key, &HashSet::new(), &[], Utc::now())
+                .expect("scan");
+
+        assert_eq!(
+            scan.dropped.get("NOT_A_PROVIDER_SECRET"),
+            Some(&AliasSkipClass::ListedWrongType),
+            "Keychain and unlocked scans must classify a wrong-type secret identically"
         );
     }
 

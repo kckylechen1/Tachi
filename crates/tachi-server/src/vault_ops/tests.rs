@@ -885,6 +885,45 @@ fn read_unlock_password_fifo_reads_secure_runtime_fifo() {
 
 #[cfg(unix)]
 #[test]
+fn read_unlock_password_fifo_rejects_invalid_utf8_without_echoing_payload() {
+    use std::ffi::CString;
+    use std::io::Write;
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().expect("temp tachi home");
+    let unlock_dir = temp.path().join("runtime").join("vault-unlock");
+    std::fs::create_dir_all(&unlock_dir).expect("unlock dir");
+    std::fs::set_permissions(&unlock_dir, std::fs::Permissions::from_mode(0o700))
+        .expect("unlock dir perms");
+    let fifo_path = unlock_dir.join("invalid-utf8.fifo");
+    let c_path = CString::new(fifo_path.as_os_str().as_bytes()).expect("fifo path");
+    let rc = unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) };
+    assert_eq!(rc, 0, "mkfifo failed: {}", std::io::Error::last_os_error());
+
+    let writer_path = fifo_path.clone();
+    let writer = std::thread::spawn(move || {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(writer_path)
+            .expect("open fifo writer");
+        file.write_all(&[0xff, 0xfe, b's', b'e', b'c', b'r', b'e', b't'])
+            .expect("write fifo");
+    });
+
+    let err = read_unlock_password_fifo(temp.path(), fifo_path.to_str().unwrap())
+        .expect_err("invalid UTF-8 must fail");
+    writer.join().expect("writer thread");
+    assert_eq!(err, "unlock FIFO password is not valid UTF-8");
+    assert!(
+        !err.contains("secret"),
+        "error must not expose FIFO payload: {err}"
+    );
+    assert!(!fifo_path.exists(), "daemon reader should remove FIFO");
+}
+
+#[cfg(unix)]
+#[test]
 fn read_unlock_password_fifo_rejects_regular_file_without_removing_it() {
     use std::os::unix::fs::PermissionsExt;
 

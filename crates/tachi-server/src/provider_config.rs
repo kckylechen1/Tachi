@@ -135,19 +135,19 @@ fn promote_configured_rotation_prefix_drops(
     pools: &HashMap<String, Vec<ProviderSecret>>,
     rotation_prefixes: &HashSet<String>,
 ) {
-    let mut extra: Vec<(String, u32, AliasSkipClass)> = dropped
+    let mut extra: Vec<(String, u32, String, AliasSkipClass)> = dropped
         .iter()
         .filter_map(|(name, class)| {
             let (prefix, member_index) = parse_rotation_member_name(name)?;
             if rotation_prefixes.contains(prefix) && !pools.contains_key(prefix) {
-                Some((prefix.to_string(), member_index, *class))
+                Some((prefix.to_string(), member_index, name.clone(), *class))
             } else {
                 None
             }
         })
         .collect();
-    extra.sort_by(|left, right| (&left.0, &left.1).cmp(&(&right.0, &right.1)));
-    for (prefix, _, class) in extra {
+    extra.sort_by(|left, right| (&left.0, &left.1, &left.2).cmp(&(&right.0, &right.1, &right.2)));
+    for (prefix, _, _, class) in extra {
         dropped.entry(prefix).or_insert(class);
     }
 }
@@ -1244,7 +1244,7 @@ mod tests {
     fn filter_model_provider_pools_admits_model_rotation_member_rejects_search_rotation_member() {
         let vault_pools = HashMap::from([
             (
-                "VOYAGE_API_KEY_10".to_string(),
+                "VOYAGE_API_KEY_2".to_string(),
                 vec![ProviderSecret {
                     key_id: "VOYAGE_API_KEY_2".to_string(),
                     value: "voyage-member".to_string(),
@@ -1533,6 +1533,30 @@ mod tests {
         assert_eq!(
             drops.get("VOYAGE_API_KEY"),
             Some(&tachi_llm::AliasSkipClass::ListedWrongType)
+        );
+    }
+
+    #[test]
+    fn configured_rotation_prefix_drop_ties_break_by_member_name() {
+        let mut drops = HashMap::from([
+            (
+                "VOYAGE_API_KEY_1".to_string(),
+                tachi_llm::AliasSkipClass::ListedFenced,
+            ),
+            (
+                "VOYAGE_API_KEY_01".to_string(),
+                tachi_llm::AliasSkipClass::ListedWrongType,
+            ),
+        ]);
+        promote_configured_rotation_prefix_drops(
+            &mut drops,
+            &HashMap::new(),
+            &HashSet::from(["VOYAGE_API_KEY".to_string()]),
+        );
+        assert_eq!(
+            drops.get("VOYAGE_API_KEY"),
+            Some(&tachi_llm::AliasSkipClass::ListedWrongType),
+            "equal numeric indices must use the lexical member name as a stable tie-break"
         );
     }
 
