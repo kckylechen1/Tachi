@@ -116,8 +116,10 @@ pub(in crate::bootstrap) fn lease_api_key_from_store(
         }
 
         let decrypted = crate::vault_crypto::decrypt(key, &entry.encrypted_value, &entry.nonce)?;
-        let mut value = String::from_utf8(decrypted)
-            .map_err(|e| format!("Vault secret '{}' is not valid UTF-8: {e}", entry.name))?;
+        let mut value = crate::vault_crypto::decode_utf8_zeroizing(
+            decrypted,
+            format!("Vault secret '{}' is not valid UTF-8", entry.name),
+        )?;
         if value.trim().is_empty() {
             crate::vault_crypto::zero_string(&mut value);
             continue;

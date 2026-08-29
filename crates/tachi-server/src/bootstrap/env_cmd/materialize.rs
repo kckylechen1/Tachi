@@ -129,8 +129,10 @@ pub(super) fn decrypt_entry_value(
         return Err(format!("Vault secret '{}' is agent-restricted", entry.name).into());
     }
     let decrypted = crate::vault_crypto::decrypt(key, &entry.encrypted_value, &entry.nonce)?;
-    let value = String::from_utf8(decrypted)
-        .map_err(|e| format!("Vault secret '{}' is not valid UTF-8: {e}", entry.name))?;
+    let value = crate::vault_crypto::decode_utf8_zeroizing(
+        decrypted,
+        format!("Vault secret '{}' is not valid UTF-8", entry.name),
+    )?;
     if value.trim().is_empty() {
         return Err(format!("Vault secret '{}' is empty", entry.name).into());
     }

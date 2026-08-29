@@ -312,8 +312,8 @@ pub(super) async fn run_secret_action(
 
             let decrypted =
                 crate::vault_crypto::decrypt(key.bytes(), &entry.encrypted_value, &entry.nonce)?;
-            let mut value = String::from_utf8(decrypted)
-                .map_err(|e| format!("Secret is not valid UTF-8: {e}"))?;
+            let mut value =
+                crate::vault_crypto::decode_utf8_zeroizing(decrypted, "Secret is not valid UTF-8")?;
 
             let output = vault_get_output(&name, &value, reveal, json)?;
             crate::vault_crypto::zero_string(&mut value);

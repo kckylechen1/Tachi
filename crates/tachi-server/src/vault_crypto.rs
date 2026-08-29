@@ -272,12 +272,13 @@ pub(crate) fn decode_keychain_password_output(bytes: Vec<u8>) -> Result<String, 
 /// owned by `FromUtf8Error` to be freed without first being scrubbed.
 pub(crate) fn decode_utf8_zeroizing(
     bytes: Vec<u8>,
-    invalid_utf8_error: &'static str,
+    invalid_utf8_error: impl Into<String>,
 ) -> Result<String, String> {
+    let invalid_utf8_error = invalid_utf8_error.into();
     String::from_utf8(bytes).map_err(|error| {
         let mut bytes = error.into_bytes();
         zero_bytes(&mut bytes);
-        invalid_utf8_error.to_string()
+        invalid_utf8_error
     })
 }
 

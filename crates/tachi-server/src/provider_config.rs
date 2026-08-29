@@ -76,6 +76,13 @@ pub(crate) fn filter_model_provider_pools(
         .collect()
 }
 
+/// Syntactic API-key names admitted by both unlocked-server and Keychain
+/// Vault scans. Registration/class filtering happens after this scan.
+pub(crate) fn is_provider_api_key_name(name: &str) -> bool {
+    name.ends_with("_API_KEY")
+        || parse_rotation_member_name(name).is_some_and(|(prefix, _)| prefix.ends_with("_API_KEY"))
+}
+
 fn vault_api_key_pool_load_from_server(
     server: &MemoryServer,
 ) -> Result<tachi_llm::DurableVaultLoad, String> {

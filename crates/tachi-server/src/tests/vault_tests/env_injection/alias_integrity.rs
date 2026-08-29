@@ -337,6 +337,52 @@ async fn empty_rotation_members_classify_the_prefix_as_listed_empty() {
     assert!(!reason.contains("absent from a readable Vault"), "{reason}");
 }
 
+/// An unconfigured rotation-member-shaped alias must materialize identically
+/// through the unlocked-server and Keychain/standalone scan classifiers.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn unconfigured_rotation_member_alias_materializes_from_unlocked_server() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _env = crate::test_support::EnvRestore::set("VOYAGE_API_KEY", "vault:VOYAGE_API_KEY_1");
+    let server = make_server();
+
+    server
+        .vault_init(Parameters(VaultInitParams {
+            password: "alias-integrity-unconfigured-member".to_string(),
+        }))
+        .await
+        .expect("vault_init");
+    server
+        .vault_set(Parameters(VaultSetParams {
+            name: "VOYAGE_API_KEY_1".to_string(),
+            value: "voyage-member-fixture".to_string(),
+            agent_id: None,
+            secret_type: "api_key".to_string(),
+            description: "unconfigured rotation member".to_string(),
+            allowed_agents: None,
+            enable_rotation: false,
+            rotation_strategy: None,
+        }))
+        .await
+        .expect("vault_set member");
+
+    let report = crate::provider_config::materialize_for_server(&server).expect("refresh");
+    assert_eq!(
+        report.from_alias, 1,
+        "alias must resolve from the raw member pool"
+    );
+    assert!(
+        report
+            .skipped_aliases
+            .iter()
+            .all(|(name, _)| name != "VOYAGE_API_KEY"),
+        "resolved member alias must not be reported as skipped: {:?}",
+        report.skipped_aliases
+    );
+}
+
 /// Corrupt listed payloads fail the real refresh seam without exposing the
 /// alias target or the decoder's byte-position/length details (#1854).
 #[tokio::test]

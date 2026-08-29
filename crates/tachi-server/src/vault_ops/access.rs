@@ -474,7 +474,7 @@ fn load_unlocked_api_key_secret_pools_filtered(
                 record_listed_drop(&mut dropped, &entry.name, AliasSkipClass::ListedWrongType);
                 continue;
             }
-            if !entry.name.ends_with("_API_KEY") {
+            if !crate::provider_config::is_provider_api_key_name(&entry.name) {
                 record_listed_drop(
                     &mut dropped,
                     &entry.name,
@@ -554,12 +554,10 @@ pub(crate) fn read_unlocked_vault_secret(
 
         let decrypted =
             crypto::decrypt(key, &selected.entry.encrypted_value, &selected.entry.nonce)?;
-        let value = String::from_utf8(decrypted).map_err(|e| {
-            format!(
-                "Vault secret '{}' is not valid UTF-8: {e}",
-                selected.entry.name
-            )
-        })?;
+        let value = crypto::decode_utf8_zeroizing(
+            decrypted,
+            format!("Vault secret '{}' is not valid UTF-8", selected.entry.name),
+        )?;
 
         server
             .with_global_store(|store| {

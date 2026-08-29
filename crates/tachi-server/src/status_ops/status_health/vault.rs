@@ -137,10 +137,7 @@ fn scan_keychain_api_key_entries(
     let mut values = Vec::new();
     let mut dropped = HashMap::new();
     for entry in entries {
-        let is_provider_key = entry.name.ends_with("_API_KEY")
-            || crate::provider_config::parse_rotation_member_name(&entry.name)
-                .is_some_and(|(prefix, _)| prefix.ends_with("_API_KEY"));
-        if !is_provider_key {
+        if !crate::provider_config::is_provider_api_key_name(&entry.name) {
             record_keychain_listed_drop(
                 &mut dropped,
                 &entry.name,
