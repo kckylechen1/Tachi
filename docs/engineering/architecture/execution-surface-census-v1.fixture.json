@@ -15,10 +15,10 @@
         "rationale": "Exact live observed #1691 census for admin after profile-specific tools/list narrowing; any regrowth requires explicit adjudication.; #1454 server-run tachi_verify surface (action=run, +check_kind/+timeout_secs props; +1131 schema bytes / +1365 tool-definition bytes per profile) re-pinned after the rebase onto 53939b5b5 (main #1690/#1691 retirements); #1322 declared_file_scope on tachi_staff, including its exact serialized schema bytes; any further regrowth requires explicit adjudication."
       },
       "coordinate": {
-        "max_total_input_schema_bytes": 94998,
-        "max_total_tool_definition_bytes": 108488,
+        "max_total_input_schema_bytes": 94701,
+        "max_total_tool_definition_bytes": 108191,
         "max_visible_tools": 29,
-        "rationale": "Exact live observed #1691 census for coordinate after profile-specific tools/list narrowing; any regrowth requires explicit adjudication.; #1454 server-run tachi_verify surface (action=run, +check_kind/+timeout_secs props; +1131 schema bytes / +1365 tool-definition bytes per profile) re-pinned after the rebase onto 53939b5b5 (main #1690/#1691 retirements); #1322 declared_file_scope on tachi_staff, including its exact serialized schema bytes; any further regrowth requires explicit adjudication."
+        "rationale": "Exact live observed #1691 census for coordinate after profile-specific tools/list narrowing; any regrowth requires explicit adjudication.; #1454 server-run tachi_verify surface (action=run, +check_kind/+timeout_secs props; +1131 schema bytes / +1365 tool-definition bytes per profile) re-pinned after the rebase onto 53939b5b5 (main #1690/#1691 retirements); #1322 declared_file_scope on tachi_staff, including its exact serialized schema bytes; #1678 session-spine mutation policy narrows coordinate tachi_agent_eval schema; any further regrowth requires explicit adjudication."
       },
       "delegate": {
         "max_total_input_schema_bytes": 38713,
@@ -27,10 +27,10 @@
         "rationale": "Exact live observed #1691 census for delegate after profile-specific tools/list narrowing; any regrowth requires explicit adjudication."
       },
       "operate": {
-        "max_total_input_schema_bytes": 88328,
-        "max_total_tool_definition_bytes": 102049,
+        "max_total_input_schema_bytes": 87843,
+        "max_total_tool_definition_bytes": 101564,
         "max_visible_tools": 39,
-        "rationale": "Exact live observed #1691 census for operate after profile-specific tools/list narrowing; any regrowth requires explicit adjudication."
+        "rationale": "Exact live observed #1691 census for operate after profile-specific tools/list narrowing; #1678 session-spine mutation policy narrows the operate action surface; any regrowth requires explicit adjudication."
       },
       "standard": {
         "max_total_input_schema_bytes": 56795,
@@ -279,8 +279,8 @@
         ]
       },
       "coordinate": {
-        "total_input_schema_bytes": 94998,
-        "total_tool_definition_bytes": 108488,
+        "total_input_schema_bytes": 94701,
+        "total_tool_definition_bytes": 108191,
         "visible_tool_count": 29,
         "visible_tools": [
           "extract_facts",
@@ -332,8 +332,8 @@
         ]
       },
       "operate": {
-        "total_input_schema_bytes": 88328,
-        "total_tool_definition_bytes": 102049,
+        "total_input_schema_bytes": 87843,
+        "total_tool_definition_bytes": 101564,
         "visible_tool_count": 39,
         "visible_tools": [
           "archive_memory",
@@ -628,7 +628,7 @@
         },
         "coordinate": {
           "tachi_agent_eval": {
-            "input_schema_bytes": 16738,
+            "input_schema_bytes": 16441,
             "property_count": 37,
             "property_names": [
               "action",
