@@ -109,11 +109,9 @@ pub(super) async fn run_secret_action(
                     {
                         continue;
                     }
-                    let Some(provider_kind) =
+                    let provider_kind =
                         crate::status_ops::status_health::provider_kind_for_env_name(&other.name)
-                    else {
-                        continue;
-                    };
+                            .unwrap_or("unregistered");
                     let Ok(plain) = crate::vault_crypto::decrypt(
                         key.bytes(),
                         &other.encrypted_value,

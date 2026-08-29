@@ -225,8 +225,9 @@ pub(super) fn run_vault_setup_keys(
         defs.len()
     );
     for (name, label) in defs {
-        let value = rpassword::prompt_password(format!("{name} ({label}) [blank=skip]: "))?;
-        let value = value.trim().to_string();
+        let mut raw_value = rpassword::prompt_password(format!("{name} ({label}) [blank=skip]: "))?;
+        let value = raw_value.trim().to_string();
+        crate::vault_crypto::zero_string(&mut raw_value);
         if value.is_empty() {
             skipped += 1;
             continue;

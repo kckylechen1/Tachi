@@ -114,6 +114,9 @@ pub(super) fn upsert_keys_and_rewrite_aliases(
         if !key_names.iter().any(|k| k == name) {
             continue;
         }
+        // Frozen recovery contract: if persistence fails, keep the caller's
+        // entry intact so the wizard can report/retry without losing input.
+        // The helper owns and zeroes this working copy on every path.
         let secret_value = value.clone();
         vault_cli::vault_upsert_secret_with_key(
             global_db_path,

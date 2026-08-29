@@ -46,9 +46,8 @@ pub(crate) async fn handle_vault_set(
                         {
                             continue;
                         }
-                        let Some(kind) = provider_kind_for_env_name(&other.name) else {
-                            continue;
-                        };
+                        let kind =
+                            provider_kind_for_env_name(&other.name).unwrap_or("unregistered");
                         let Ok(plain) = crypto::decrypt(key, &other.encrypted_value, &other.nonce)
                         else {
                             continue;

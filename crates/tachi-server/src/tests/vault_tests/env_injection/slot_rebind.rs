@@ -306,6 +306,36 @@ async fn existing_lane_slot_refuses_account_copy_even_with_rebind() {
     );
 }
 
+#[tokio::test]
+async fn lane_slot_refuses_copy_from_unregistered_mcp_account() {
+    let server = make_server();
+    server
+        .vault_init(Parameters(VaultInitParams {
+            password: "slot-rebind-unregistered-account".to_string(),
+        }))
+        .await
+        .expect("init");
+    server
+        .vault_set(Parameters(slot_params(
+            "MCP_CONTEXT7_API_KEY",
+            "shared-mcp-account-bytes",
+            false,
+        )))
+        .await
+        .expect("seed unregistered MCP account");
+
+    let error = server
+        .vault_set(Parameters(slot_params(
+            "EXTRACT_API_KEY",
+            "shared-mcp-account-bytes",
+            true,
+        )))
+        .await
+        .expect_err("lane slot must reject a copied unregistered account");
+    assert!(error.contains("MCP_CONTEXT7_API_KEY"), "{error}");
+    assert!(!error.contains("shared-mcp-account-bytes"), "{error}");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn concurrent_first_writers_cannot_bypass_lane_slot_rebind() {
     let server = make_server();

@@ -76,7 +76,7 @@ pub(crate) async fn handle_vault_setup_rotation(
 
 pub(crate) async fn handle_vault_set_api_key_pool(
     server: &MemoryServer,
-    params: VaultSetApiKeyPoolParams,
+    mut params: VaultSetApiKeyPoolParams,
 ) -> Result<String, String> {
     let logical_name = params.prefix.clone();
     let result = (|| {
@@ -89,10 +89,13 @@ pub(crate) async fn handle_vault_set_api_key_pool(
         }
         authorize_vault_pool_mutation(server, &params.prefix, params.agent_id.as_deref())
             .map_err(|e| e.to_string())?;
-        let values = params
-            .values
-            .iter()
-            .map(|value| value.trim().to_string())
+        let values = std::mem::take(&mut params.values)
+            .into_iter()
+            .map(|mut value| {
+                let trimmed = value.trim().to_string();
+                crypto::zero_string(&mut value);
+                crypto::ZeroizingString::new(trimmed)
+            })
             .filter(|value| !value.is_empty())
             .collect::<Vec<_>>();
         if values.is_empty() {
