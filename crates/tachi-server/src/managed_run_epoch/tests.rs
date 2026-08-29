@@ -197,6 +197,13 @@ async fn terminal_run_before_restart_is_never_reconciled() {
         before,
         "terminal receipt remains byte-terminal"
     );
+    let status = read_status(&run_dir);
+    let projection =
+        read_projection(&status, &run_dir, &server.controller_epoch, false).expect("projection");
+    assert_eq!(
+        projection["outcome_state"], "known",
+        "a terminal receipt's outcome is durably known"
+    );
 }
 
 /// Required discrimination 4: cancellation of a nonterminal foreign-epoch run
@@ -871,12 +878,20 @@ fn read_projection_running_and_unknown_for_same_epoch() {
     let live = read_projection(&status, &run_dir, "ctrl-epoch-current", true).expect("projection");
     assert_eq!(live["execution_state"], "running");
     assert_eq!(live["control_state"], "available");
+    assert_eq!(
+        live["outcome_state"], "pending",
+        "a run honestly projecting running has its outcome pending, not known"
+    );
 
     // Same epoch but the live handle is gone (e.g. the owning task died
     // without reaching a terminal receipt): honest unknown/unavailable.
     let lost = read_projection(&status, &run_dir, "ctrl-epoch-current", false).expect("projection");
     assert_eq!(lost["execution_state"], "unknown");
     assert_eq!(lost["control_state"], "unavailable");
+    assert_eq!(
+        lost["outcome_state"], "unknown",
+        "outcome_state couples to execution_state: never pending behind an unknown execution fact"
+    );
 
     // Runs without a durable identity keep the historical read shape.
     let bare = json!({ "dispatch_id": dispatch_id, "state": "TASK_STATE_WORKING" });

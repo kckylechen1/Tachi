@@ -564,13 +564,14 @@ pub(crate) fn read_projection(
     } else {
         json!("unavailable")
     };
-    // The third honest fact: the run's OUTCOME. Terminal receipts know it;
-    // a run under live same-epoch control has it pending; anything else —
-    // foreign epoch, orphan verdict, inconsistent identity — owes an
-    // outcome it cannot know, and must say so rather than guess.
+    // The third honest fact: the run's OUTCOME, coupled to the first fact
+    // so the two can never disagree — terminal receipts know it; a run
+    // honestly projecting running under live same-epoch control has it
+    // pending; every other posture (foreign epoch, orphan verdict,
+    // inconsistent identity) owes an outcome it cannot know.
     let outcome_state = if terminal {
         json!("known")
-    } else if has_live_same_daemon_control && accepted_epoch == Some(current_epoch) {
+    } else if execution_state == json!("running") {
         json!("pending")
     } else {
         json!("unknown")
