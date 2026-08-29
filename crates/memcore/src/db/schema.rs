@@ -201,7 +201,7 @@ pub(crate) fn install_harness_session_spine_schema(conn: &Connection) -> Result<
             source_revision INTEGER NOT NULL CHECK (source_revision >= 0),
             authority_confirmation_ref TEXT CHECK (authority_confirmation_ref IS NULL OR length(trim(authority_confirmation_ref)) > 0),
             summary TEXT CHECK (summary IS NULL OR (length(summary) > 0 AND length(summary) <= 2000)),
-            payload_digest TEXT CHECK (payload_digest IS NULL OR length(trim(payload_digest)) > 0),
+            payload_digest TEXT CHECK (payload_digest IS NULL OR (length(payload_digest) <= 128 AND length(trim(payload_digest)) > 0 AND payload_digest NOT GLOB '*[^A-Za-z0-9+=/_:-]*')),
             occurred_at TEXT NOT NULL,
             ingested_at TEXT NOT NULL,
             source_host_identity TEXT NOT NULL CHECK (length(trim(source_host_identity)) > 0),
@@ -304,6 +304,10 @@ pub(crate) fn validate_harness_session_spine_schema(conn: &Connection) -> Result
         (
             "harness_session_events",
             "CHECK (kind != 'terminal' OR outcome IS NOT NULL)",
+        ),
+        (
+            "harness_session_events",
+            "payload_digest NOT GLOB '*[^A-Za-z0-9+=/_:-]*'",
         ),
         (
             "harness_session_interventions",

@@ -20,8 +20,11 @@
 //!   guessed success;
 //! - session disappearance without a terminal receipt yields
 //!   `unknown_orphaned`, not failed/completed;
-//! - `cancelled` is never minted without an authoritative harness
-//!   confirmation reference.
+//! - `cancelled` is never minted from an arbitrary string: the terminal
+//!   fact's confirmation reference must match a RECORDED accepted
+//!   `request_cancel` intervention result for the same attachment (the
+//!   issue's receipt chain: request accepted -> real harness confirmation
+//!   received -> terminal+cleanup receipts).
 
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
@@ -564,6 +567,19 @@ fn validate_new_event(input: &NewHarnessSessionEvent) -> Result<(), MemoryError>
     }
     if let Some(digest) = &input.payload_digest {
         require_non_empty(digest, "payload_digest")?;
+        // A digest is a fixed-width opaque fingerprint, never a content
+        // channel: cap its width and forbid free text so a transcript
+        // cannot be smuggled through this field.
+        if digest.chars().count() > 128
+            || !digest.chars().all(|c| {
+                c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '=' | '+' | '/' | ':')
+            })
+        {
+            return Err(MemoryError::InvalidArg(
+                "payload_digest must be at most 128 digest-safe ASCII characters (no whitespace or free text)"
+                    .to_string(),
+            ));
+        }
     }
     if let Some(confirmation) = &input.authority_confirmation_ref {
         require_non_empty(confirmation, "authority_confirmation_ref")?;
@@ -767,6 +783,42 @@ fn same_material(event: &HarnessSessionEvent, input: &NewHarnessSessionEvent) ->
         && event.occurred_at == input.occurred_at
 }
 
+/// The cancelled-mint hard line: a terminal `cancelled` fact's confirmation
+/// reference must match a RECORDED accepted `request_cancel` intervention
+/// result for this attachment. A caller-provided arbitrary string never
+/// mints `cancelled` — neither on journaling nor on replay.
+fn require_bound_cancel_confirmation(
+    tx: &Connection,
+    attachment_id: &str,
+    input: &NewHarnessSessionEvent,
+) -> Result<(), MemoryError> {
+    let bound: Option<i64> = tx
+        .query_row(
+            "SELECT 1 FROM harness_session_intervention_results r
+             JOIN harness_session_interventions i
+               ON i.attachment_id = r.attachment_id
+              AND i.request_id = r.request_id
+             WHERE r.attachment_id = ?1
+               AND i.kind = 'request_cancel'
+               AND r.disposition = 'accepted'
+               AND r.authority_confirmation_ref = ?2
+             LIMIT 1",
+            params![
+                attachment_id,
+                input.authority_confirmation_ref.as_deref().unwrap_or("")
+            ],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if bound.is_none() {
+        return Err(MemoryError::WorkClaimIncompatibleState(
+            "terminal 'cancelled' confirmation reference does not match a recorded accepted request_cancel intervention result; refusing to mint 'cancelled'"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// Ingest one authoritative host fact. Append-only, replay-idempotent on
 /// `(attachment_id, event_id)`, and never regressive: everything runs in one
 /// IMMEDIATE transaction so out-of-order arrivals journal without moving
@@ -787,6 +839,15 @@ pub fn ingest_harness_session_event(
     let attachment = require_attachment(&tx, selector, host, admission_receipt_ref)?;
     let attachment_id = attachment.attachment_id.clone();
     let source_host_identity = attachment.host_identity.clone();
+
+    // The cancelled-binding law runs BEFORE the replay fast-path, so even an
+    // exact replay of an unbound `cancelled` fact (e.g. journaled by an
+    // older kernel) refuses instead of re-confirming a minted outcome.
+    if input.kind == HarnessSessionEventKind::Terminal
+        && input.outcome == Some(HarnessSessionTerminalOutcome::Cancelled)
+    {
+        require_bound_cancel_confirmation(&tx, &attachment_id, input)?;
+    }
 
     if let Some(existing) = find_event(&tx, &attachment_id, &input.event_id)? {
         if !same_material(&existing, input) {
@@ -826,6 +887,23 @@ pub fn ingest_harness_session_event(
     let mut cleanup_recorded = existing_row
         .as_ref()
         .is_some_and(|row| row.cleanup_recorded);
+
+    // A disappearance receipt keeps the revision high-water; only a fact at
+    // least as fresh may lift unknown_orphaned, and this guard sits ABOVE
+    // the terminal branch so a stale terminal cannot resurrect state either.
+    if current_rank < 0 && input.source_revision < canonical_revision {
+        let now = normalize_utc_iso_or_now("");
+        insert_event(&tx, &attachment_id, input, &now, &source_host_identity)?;
+        let projection = projection_of(&attachment_id, load_state_row(&tx, &attachment_id)?);
+        tx.commit()?;
+        return Ok(HarnessSessionEventReceipt {
+            attachment_id,
+            event_id: input.event_id.clone(),
+            admission: HarnessSessionEventAdmission::Journaled,
+            disposition: HarnessSessionEventDisposition::JournaledStale,
+            state: projection,
+        });
+    }
 
     let disposition = if input.kind == HarnessSessionEventKind::Terminal {
         let outcome = input
@@ -1592,6 +1670,258 @@ mod tests {
             reconnect_harness_session(&mut conn, &selector, &host(), "admission-1", 30 * 60)
                 .unwrap_err();
         assert!(error.to_string().contains("not active"), "{error}");
+    }
+
+    #[test]
+    fn cancelled_terminal_binds_to_a_recorded_accepted_cancel_result() {
+        let (mut conn, selector) = seeded();
+        ingest(
+            &mut conn,
+            &selector,
+            &event("ev-1", HarnessSessionEventKind::Started, 1),
+        );
+
+        // An arbitrary confirmation string with no recorded result behind it
+        // can never mint `cancelled` (codex R2 finding 1).
+        let error = ingest_harness_session_event(
+            &mut conn,
+            &selector,
+            &terminal(
+                "ev-2",
+                HarnessSessionTerminalOutcome::Cancelled,
+                2,
+                Some("x"),
+            ),
+            &host(),
+            "admission-1",
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("does not match a recorded accepted request_cancel"),
+            "{error}"
+        );
+        assert_eq!(event_row_count(&conn), 1);
+
+        // Record the receipt chain: issued request_cancel + accepted result
+        // carrying the harness confirmation.
+        conn.execute(
+            "INSERT INTO harness_session_interventions (
+                attachment_id, request_id, kind, reason, expected_session_revision,
+                requested_by, requested_at
+             ) SELECT attachment_id, 'req-cancel', 'request_cancel', 'operator stop', 1,
+                'host-1', '2026-08-29T00:00:00Z' FROM harness_session_attachments",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO harness_session_intervention_results (
+                attachment_id, request_id, disposition, authority_confirmation_ref,
+                recorded_at, source_host_identity
+             ) SELECT attachment_id, 'req-cancel', 'accepted', 'x',
+                '2026-08-29T00:01:00Z', 'host-1' FROM harness_session_attachments",
+            [],
+        )
+        .unwrap();
+
+        let done = ingest(
+            &mut conn,
+            &selector,
+            &terminal(
+                "ev-3",
+                HarnessSessionTerminalOutcome::Cancelled,
+                3,
+                Some("x"),
+            ),
+        );
+        assert_eq!(
+            done.state.canonical_state,
+            Some(HarnessSessionCanonicalState::Cancelled)
+        );
+        assert_eq!(event_row_count(&conn), 2);
+    }
+
+    #[test]
+    fn stale_fact_after_disconnection_cannot_lift_unknown_orphaned() {
+        let (mut conn, selector) = seeded();
+        ingest(
+            &mut conn,
+            &selector,
+            &event("ev-5", HarnessSessionEventKind::Progress, 5),
+        );
+        mark_harness_session_connection(
+            &mut conn,
+            &selector,
+            HarnessSessionConnectionFact::Disconnected,
+            &host(),
+            "admission-1",
+        )
+        .unwrap();
+
+        // Codex R2 finding 2: a stale replay from before the disappearance
+        // must not clear unknown_orphaned, even though its rank is higher
+        // than the disappearance marker.
+        let stale = ingest(
+            &mut conn,
+            &selector,
+            &event("ev-1", HarnessSessionEventKind::Accepted, 1),
+        );
+        assert_eq!(
+            stale.disposition,
+            HarnessSessionEventDisposition::JournaledStale
+        );
+        assert_eq!(
+            stale.state.canonical_state,
+            Some(HarnessSessionCanonicalState::UnknownOrphaned),
+            "unknown_orphaned must survive a stale replay"
+        );
+
+        // Only a fact at least as fresh as the retained high-water lifts it.
+        reconnect_harness_session(&mut conn, &selector, &host(), "admission-1", 30 * 60).unwrap();
+        let fresh = ingest(
+            &mut conn,
+            &selector,
+            &event("ev-6", HarnessSessionEventKind::Started, 6),
+        );
+        assert_eq!(fresh.disposition, HarnessSessionEventDisposition::Advanced);
+        assert_eq!(
+            fresh.state.canonical_state,
+            Some(HarnessSessionCanonicalState::Started)
+        );
+    }
+
+    #[test]
+    fn replay_of_an_unbound_cancelled_fact_refuses_instead_of_reconfirming() {
+        let (mut conn, selector) = seeded();
+        ingest(
+            &mut conn,
+            &selector,
+            &event("ev-1", HarnessSessionEventKind::Started, 1),
+        );
+        // Simulate a pre-binding-law row (as an older kernel could have
+        // journaled): the unbound cancelled fact is already in the ledger.
+        conn.execute(
+            "INSERT INTO harness_session_events (
+                attachment_id, event_id, kind, outcome, source_revision,
+                authority_confirmation_ref, occurred_at, ingested_at, source_host_identity
+             ) SELECT attachment_id, 'ev-cancel-old', 'terminal', 'cancelled', 2, 'x',
+                '2026-08-29T00:01:00Z', '2026-08-29T00:01:00Z', 'host-1'
+             FROM harness_session_attachments",
+            [],
+        )
+        .unwrap();
+
+        // An exact replay must hit the cancelled-binding law BEFORE the
+        // replay fast-path: typed refusal, never a Replayed receipt.
+        let error = ingest_harness_session_event(
+            &mut conn,
+            &selector,
+            &terminal(
+                "ev-cancel-old",
+                HarnessSessionTerminalOutcome::Cancelled,
+                2,
+                Some("x"),
+            ),
+            &host(),
+            "admission-1",
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("does not match a recorded accepted request_cancel"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn stale_terminal_after_disconnection_cannot_lift_unknown_orphaned() {
+        let (mut conn, selector) = seeded();
+        ingest(
+            &mut conn,
+            &selector,
+            &event("ev-5", HarnessSessionEventKind::Progress, 5),
+        );
+        mark_harness_session_connection(
+            &mut conn,
+            &selector,
+            HarnessSessionConnectionFact::Disconnected,
+            &host(),
+            "admission-1",
+        )
+        .unwrap();
+
+        // A stale TERMINAL replay from before the disappearance must not
+        // resurrect a completed outcome (codex R2 finding 2).
+        let stale = ingest(
+            &mut conn,
+            &selector,
+            &terminal("ev-1", HarnessSessionTerminalOutcome::Completed, 1, None),
+        );
+        assert_eq!(
+            stale.disposition,
+            HarnessSessionEventDisposition::JournaledStale
+        );
+        assert_eq!(
+            stale.state.canonical_state,
+            Some(HarnessSessionCanonicalState::UnknownOrphaned),
+            "unknown_orphaned must survive a stale terminal replay"
+        );
+
+        // A fresh terminal still lifts it.
+        let fresh = ingest(
+            &mut conn,
+            &selector,
+            &terminal("ev-6", HarnessSessionTerminalOutcome::Completed, 6, None),
+        );
+        assert_eq!(fresh.disposition, HarnessSessionEventDisposition::Advanced);
+        assert_eq!(
+            fresh.state.canonical_state,
+            Some(HarnessSessionCanonicalState::Completed)
+        );
+    }
+
+    #[test]
+    fn digest_check_constraint_rejects_free_text_from_foreign_writers() {
+        let (conn, _selector) = seeded();
+        let attachment_id: String = conn
+            .query_row(
+                "SELECT attachment_id FROM harness_session_attachments LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        for smuggled in [
+            "free text with spaces",
+            "quotes \" inside",
+            "unicode \u{00e9}",
+        ] {
+            let error = conn
+                .execute(
+                    "INSERT INTO harness_session_events (
+                        attachment_id, event_id, kind, source_revision,
+                        payload_digest, occurred_at, ingested_at, source_host_identity
+                     ) VALUES (?1, 'ev-smuggled', 'progress', 1, ?2,
+                               '2026-08-29T00:00:00Z', '2026-08-29T00:00:00Z', 'host-1')",
+                    rusqlite::params![attachment_id, smuggled],
+                )
+                .expect_err("free text must violate the digest CHECK");
+            assert!(
+                matches!(error, rusqlite::Error::SqliteFailure(_, _)),
+                "{smuggled}: {error}"
+            );
+        }
+        // A legitimate digest shape passes the same CHECK.
+        conn.execute(
+            "INSERT INTO harness_session_events (
+                attachment_id, event_id, kind, source_revision,
+                payload_digest, occurred_at, ingested_at, source_host_identity
+             ) VALUES (?1, 'ev-digest-ok', 'progress', 1, 'sha256:abcdef0123456789',
+                       '2026-08-29T00:00:00Z', '2026-08-29T00:00:00Z', 'host-1')",
+            rusqlite::params![attachment_id],
+        )
+        .expect("prefixed hex digest is digest-safe");
     }
 
     #[test]

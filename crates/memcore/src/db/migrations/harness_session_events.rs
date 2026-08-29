@@ -14,10 +14,10 @@ use crate::error::MemoryError;
 pub(super) fn migrate_v34_harness_session_spine(conn: &Connection) -> Result<usize, MemoryError> {
     crate::db::schema::install_harness_session_spine_schema(conn)?;
     crate::db::schema::validate_harness_session_spine_schema(conn)?;
-    // Four tables plus two indexes; the receipt count stays stable on replay
+    // Five tables plus two indexes; the receipt count stays stable on replay
     // because CREATE IF NOT EXISTS is idempotent and the sentinel gate runs
     // before this function.
-    Ok(6)
+    Ok(7)
 }
 
 #[cfg(test)]
@@ -29,7 +29,7 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         assert_eq!(
             migrate_v34_harness_session_spine(&conn).unwrap(),
-            6,
+            7,
             "migration receipt count is stable on replay"
         );
         crate::db::schema::validate_harness_session_spine_schema(&conn).unwrap();

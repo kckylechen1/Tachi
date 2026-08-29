@@ -1745,7 +1745,7 @@ mod tests {
         let report = run_data_migrations(&mut conn, "global", tmp.path())
             .expect("a stamped v33 database must receive v34");
 
-        assert_eq!(report.harness_session_spine_schema_objects_created, 6);
+        assert_eq!(report.harness_session_spine_schema_objects_created, 7);
         assert_eq!(read_schema_version(&conn).unwrap(), EXPECTED_SCHEMA_VERSION);
         for table in [
             "harness_session_events",
