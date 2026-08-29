@@ -200,8 +200,8 @@ pub(crate) fn install_harness_session_spine_schema(conn: &Connection) -> Result<
             outcome TEXT CHECK (outcome IS NULL OR outcome IN ('completed', 'failed', 'cancelled')),
             source_revision INTEGER NOT NULL CHECK (source_revision >= 0),
             authority_confirmation_ref TEXT CHECK (authority_confirmation_ref IS NULL OR length(trim(authority_confirmation_ref)) > 0),
-            summary TEXT CHECK (summary IS NULL OR (length(summary) > 0 AND length(summary) <= 2000)),
-            payload_digest TEXT CHECK (payload_digest IS NULL OR (length(payload_digest) <= 128 AND length(trim(payload_digest)) > 0 AND payload_digest NOT GLOB '*[^A-Za-z0-9+=/_:-]*')),
+            summary TEXT CHECK (summary IS NULL OR (length(summary) > 0 AND length(summary) <= 2000 AND instr(CAST(summary AS BLOB), CAST(x'00' AS BLOB)) = 0)),
+            payload_digest TEXT CHECK (payload_digest IS NULL OR (length(payload_digest) <= 128 AND length(trim(payload_digest)) > 0 AND payload_digest NOT GLOB '*[^A-Za-z0-9+=/_:-]*' AND length(CAST(payload_digest AS BLOB)) = length(payload_digest))),
             occurred_at TEXT NOT NULL,
             ingested_at TEXT NOT NULL,
             source_host_identity TEXT NOT NULL CHECK (length(trim(source_host_identity)) > 0),
@@ -224,6 +224,7 @@ pub(crate) fn install_harness_session_spine_schema(conn: &Connection) -> Result<
             conflicting_terminal_digest TEXT CHECK (conflicting_terminal_digest IS NULL OR length(trim(conflicting_terminal_digest)) > 0),
             cleanup_recorded INTEGER NOT NULL DEFAULT 0 CHECK (cleanup_recorded IN (0, 1)),
             last_event_id TEXT CHECK (last_event_id IS NULL OR length(trim(last_event_id)) > 0),
+            pre_disconnect_rank INTEGER NOT NULL DEFAULT -1 CHECK (pre_disconnect_rank >= -1),
             updated_at TEXT NOT NULL
         );
 
@@ -308,6 +309,14 @@ pub(crate) fn validate_harness_session_spine_schema(conn: &Connection) -> Result
         (
             "harness_session_events",
             "payload_digest NOT GLOB '*[^A-Za-z0-9+=/_:-]*'",
+        ),
+        (
+            "harness_session_events",
+            "length(CAST(payload_digest AS BLOB)) = length(payload_digest)",
+        ),
+        (
+            "harness_session_events",
+            "instr(CAST(summary AS BLOB), CAST(x'00' AS BLOB)) = 0",
         ),
         (
             "harness_session_interventions",

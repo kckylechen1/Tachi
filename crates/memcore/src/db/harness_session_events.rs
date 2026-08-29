@@ -390,6 +390,7 @@ pub(crate) struct CanonicalStateRow {
     pub(crate) conflicting_terminal_digest: Option<String>,
     pub(crate) cleanup_recorded: bool,
     pub(crate) last_event_id: Option<String>,
+    pub(crate) pre_disconnect_rank: i64,
     pub(crate) updated_at: Option<String>,
 }
 
@@ -425,7 +426,8 @@ fn load_state_row(
     let row = tx
         .query_row(
             "SELECT canonical_state, canonical_revision, terminal_digest,
-                    conflicting_terminal_digest, cleanup_recorded, last_event_id, updated_at
+                    conflicting_terminal_digest, cleanup_recorded, last_event_id,
+                    pre_disconnect_rank, updated_at
              FROM harness_session_state WHERE attachment_id = ?1",
             params![attachment_id],
             |row| {
@@ -436,7 +438,8 @@ fn load_state_row(
                     row.get::<_, Option<String>>(3)?,
                     row.get::<_, i64>(4)?,
                     row.get::<_, Option<String>>(5)?,
-                    row.get::<_, Option<String>>(6)?,
+                    row.get::<_, i64>(6)?,
+                    row.get::<_, Option<String>>(7)?,
                 ))
             },
         )
@@ -448,6 +451,7 @@ fn load_state_row(
         conflicting_terminal_digest,
         cleanup_recorded,
         last_event_id,
+        pre_disconnect_rank,
         updated_at,
     )) = row
     else {
@@ -462,6 +466,7 @@ fn load_state_row(
         conflicting_terminal_digest,
         cleanup_recorded: cleanup_recorded != 0,
         last_event_id,
+        pre_disconnect_rank,
         updated_at,
     }))
 }
@@ -716,6 +721,10 @@ struct StateUpsert {
     terminal_digest: Option<String>,
     conflicting_terminal_digest: Option<String>,
     cleanup_recorded: bool,
+    /// Lifecycle rank retained across a disappearance marker: a
+    /// post-disconnect fact may only advance at or beyond this rank, so a
+    /// fresh replay cannot walk the lifecycle backward.
+    pre_disconnect_rank: i64,
 }
 
 fn upsert_state_row(
@@ -728,8 +737,9 @@ fn upsert_state_row(
     tx.execute(
         "INSERT INTO harness_session_state (
             attachment_id, canonical_state, canonical_revision, terminal_digest,
-            conflicting_terminal_digest, cleanup_recorded, last_event_id, updated_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            conflicting_terminal_digest, cleanup_recorded, last_event_id,
+            pre_disconnect_rank, updated_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
          ON CONFLICT(attachment_id) DO UPDATE SET
             canonical_state = excluded.canonical_state,
             canonical_revision = excluded.canonical_revision,
@@ -737,6 +747,7 @@ fn upsert_state_row(
             conflicting_terminal_digest = excluded.conflicting_terminal_digest,
             cleanup_recorded = excluded.cleanup_recorded,
             last_event_id = excluded.last_event_id,
+            pre_disconnect_rank = excluded.pre_disconnect_rank,
             updated_at = excluded.updated_at",
         params![
             attachment_id,
@@ -750,6 +761,7 @@ fn upsert_state_row(
             } else {
                 Some(last_event_id)
             },
+            upsert.pre_disconnect_rank,
             now,
         ],
     )?;
@@ -888,10 +900,18 @@ pub fn ingest_harness_session_event(
         .as_ref()
         .is_some_and(|row| row.cleanup_recorded);
 
-    // A disappearance receipt keeps the revision high-water; only a fact at
-    // least as fresh may lift unknown_orphaned, and this guard sits ABOVE
-    // the terminal branch so a stale terminal cannot resurrect state either.
-    if current_rank < 0 && input.source_revision < canonical_revision {
+    // A disappearance receipt keeps the revision high-water AND the
+    // lifecycle rank the session had reached. Only a fact at least as fresh
+    // AND at least as advanced may lift unknown_orphaned; this guard sits
+    // ABOVE the terminal branch so a stale terminal cannot resurrect state
+    // either.
+    let pre_disconnect_rank = existing_row
+        .as_ref()
+        .map(|row| row.pre_disconnect_rank)
+        .unwrap_or(-1);
+    if current_rank < 0
+        && (input.source_revision < canonical_revision || input.kind.rank() < pre_disconnect_rank)
+    {
         let now = normalize_utc_iso_or_now("");
         insert_event(&tx, &attachment_id, input, &now, &source_host_identity)?;
         let projection = projection_of(&attachment_id, load_state_row(&tx, &attachment_id)?);
@@ -1007,6 +1027,10 @@ pub fn ingest_harness_session_event(
                 terminal_digest: terminal_digest_to_store,
                 conflicting_terminal_digest: conflicting_to_store,
                 cleanup_recorded,
+                pre_disconnect_rank: existing_row
+                    .as_ref()
+                    .map(|row| row.pre_disconnect_rank)
+                    .unwrap_or(-1),
             },
             &input.event_id,
             &now,
@@ -1096,6 +1120,12 @@ pub fn mark_harness_session_connection(
                         terminal_digest: row.terminal_digest.clone(),
                         conflicting_terminal_digest: row.conflicting_terminal_digest.clone(),
                         cleanup_recorded: row.cleanup_recorded,
+                        // Retain the lifecycle rank the session had reached
+                        // so a post-disconnect fact cannot walk it backward.
+                        pre_disconnect_rank: row
+                            .canonical_state
+                            .map(HarnessSessionCanonicalState::rank)
+                            .unwrap_or(-1),
                     },
                     row.last_event_id.as_deref().unwrap_or(""),
                     &now,
@@ -1112,6 +1142,7 @@ pub fn mark_harness_session_connection(
                     terminal_digest: None,
                     conflicting_terminal_digest: None,
                     cleanup_recorded: false,
+                    pre_disconnect_rank: -1,
                 },
                 "",
                 &now,
@@ -1777,17 +1808,34 @@ mod tests {
             "unknown_orphaned must survive a stale replay"
         );
 
-        // Only a fact at least as fresh as the retained high-water lifts it.
-        reconnect_harness_session(&mut conn, &selector, &host(), "admission-1", 30 * 60).unwrap();
-        let fresh = ingest(
+        // A FRESH fact below the retained lifecycle rank also cannot lift
+        // the marker: the Progressing@5 -> disconnect -> Started@6 path
+        // must journal stale instead of regressing to started (codex R3).
+        let fresh_low = ingest(
             &mut conn,
             &selector,
             &event("ev-6", HarnessSessionEventKind::Started, 6),
         );
+        assert_eq!(
+            fresh_low.disposition,
+            HarnessSessionEventDisposition::JournaledStale
+        );
+        assert_eq!(
+            fresh_low.state.canonical_state,
+            Some(HarnessSessionCanonicalState::UnknownOrphaned)
+        );
+
+        // Only a fact at least as fresh AND at least as advanced lifts it.
+        reconnect_harness_session(&mut conn, &selector, &host(), "admission-1", 30 * 60).unwrap();
+        let fresh = ingest(
+            &mut conn,
+            &selector,
+            &event("ev-7", HarnessSessionEventKind::Progress, 7),
+        );
         assert_eq!(fresh.disposition, HarnessSessionEventDisposition::Advanced);
         assert_eq!(
             fresh.state.canonical_state,
-            Some(HarnessSessionCanonicalState::Started)
+            Some(HarnessSessionCanonicalState::Progressing)
         );
     }
 
