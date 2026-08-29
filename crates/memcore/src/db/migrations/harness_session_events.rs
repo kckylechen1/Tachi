@@ -85,6 +85,18 @@ mod tests {
                 "harness_session_intervention_results",
                 "length(detail) > 0 AND ",
             ),
+            (
+                "harness_session_capability_advertisements",
+                "length(CAST(capabilities_json AS BLOB)) <= 256",
+            ),
+            (
+                "harness_session_capability_advertisements",
+                "json_remove(capabilities_json, '$.observe', '$.wait', '$.prompt', '$.cancel', '$.resume', '$.load', '$.events', '$.artifacts') = '{}'",
+            ),
+            (
+                "harness_session_capability_advertisements",
+                "json_type(capabilities_json, '$.observe') IN ('true', 'false')",
+            ),
         ] {
             let conn = Connection::open_in_memory().unwrap();
             migrate_v34_harness_session_spine(&conn).unwrap();

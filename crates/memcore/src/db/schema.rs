@@ -259,7 +259,19 @@ pub(crate) fn install_harness_session_spine_schema(conn: &Connection) -> Result<
             advertisement_row_id INTEGER PRIMARY KEY AUTOINCREMENT,
             attachment_id TEXT NOT NULL REFERENCES harness_session_attachments(attachment_id),
             advertisement_seq INTEGER NOT NULL CHECK (advertisement_seq >= 1),
-            capabilities_json TEXT NOT NULL CHECK (json_valid(capabilities_json)),
+            capabilities_json TEXT NOT NULL CHECK (
+                json_valid(capabilities_json)
+                AND length(CAST(capabilities_json AS BLOB)) <= 256
+                AND json_remove(capabilities_json, '$.observe', '$.wait', '$.prompt', '$.cancel', '$.resume', '$.load', '$.events', '$.artifacts') = '{}'
+                AND json_type(capabilities_json, '$.observe') IN ('true', 'false')
+                AND json_type(capabilities_json, '$.wait') IN ('true', 'false')
+                AND json_type(capabilities_json, '$.prompt') IN ('true', 'false')
+                AND json_type(capabilities_json, '$.cancel') IN ('true', 'false')
+                AND json_type(capabilities_json, '$.resume') IN ('true', 'false')
+                AND json_type(capabilities_json, '$.load') IN ('true', 'false')
+                AND json_type(capabilities_json, '$.events') IN ('true', 'false')
+                AND json_type(capabilities_json, '$.artifacts') IN ('true', 'false')
+            ),
             source_host_identity TEXT NOT NULL CHECK (length(trim(source_host_identity)) > 0),
             advertised_at TEXT NOT NULL,
             UNIQUE (attachment_id, advertisement_seq)
@@ -646,6 +658,46 @@ pub(crate) fn validate_harness_session_spine_schema(conn: &Connection) -> Result
         (
             "harness_session_capability_advertisements",
             "json_valid(capabilities_json)",
+        ),
+        (
+            "harness_session_capability_advertisements",
+            "length(CAST(capabilities_json AS BLOB)) <= 256",
+        ),
+        (
+            "harness_session_capability_advertisements",
+            "json_remove(capabilities_json, '$.observe', '$.wait', '$.prompt', '$.cancel', '$.resume', '$.load', '$.events', '$.artifacts') = '{}'",
+        ),
+        (
+            "harness_session_capability_advertisements",
+            "json_type(capabilities_json, '$.observe') IN ('true', 'false')",
+        ),
+        (
+            "harness_session_capability_advertisements",
+            "json_type(capabilities_json, '$.wait') IN ('true', 'false')",
+        ),
+        (
+            "harness_session_capability_advertisements",
+            "json_type(capabilities_json, '$.prompt') IN ('true', 'false')",
+        ),
+        (
+            "harness_session_capability_advertisements",
+            "json_type(capabilities_json, '$.cancel') IN ('true', 'false')",
+        ),
+        (
+            "harness_session_capability_advertisements",
+            "json_type(capabilities_json, '$.resume') IN ('true', 'false')",
+        ),
+        (
+            "harness_session_capability_advertisements",
+            "json_type(capabilities_json, '$.load') IN ('true', 'false')",
+        ),
+        (
+            "harness_session_capability_advertisements",
+            "json_type(capabilities_json, '$.events') IN ('true', 'false')",
+        ),
+        (
+            "harness_session_capability_advertisements",
+            "json_type(capabilities_json, '$.artifacts') IN ('true', 'false')",
         ),
         (
             "harness_session_capability_advertisements",

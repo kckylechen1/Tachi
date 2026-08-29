@@ -337,14 +337,29 @@ fn latest_advertised_capabilities(
     conn: &Connection,
     attachment_id: &str,
 ) -> Result<Option<String>, MemoryError> {
-    Ok(conn
+    let raw: Option<String> = conn
         .query_row(
             "SELECT capabilities_json FROM harness_session_capability_advertisements
              WHERE attachment_id = ?1 ORDER BY advertisement_seq DESC LIMIT 1",
             params![attachment_id],
             |row| row.get(0),
         )
-        .optional()?)
+        .optional()?;
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let parsed: HarnessSessionAttachmentCapabilities =
+        serde_json::from_str(&raw).map_err(|error| {
+            MemoryError::WorkClaimIncompatibleState(format!(
+                "capability advertisement is not the closed canonical shape: {error}"
+            ))
+        })?;
+    if parsed.canonical_json()? != raw {
+        return Err(MemoryError::WorkClaimIncompatibleState(
+            "capability advertisement is not canonical JSON".to_string(),
+        ));
+    }
+    Ok(Some(raw))
 }
 
 /// Record a host-owned capability advertisement for the attachment. The
@@ -1637,5 +1652,46 @@ mod tests {
             CapabilitySource::Advertised,
             "idempotent replay must preserve the original authorization provenance"
         );
+    }
+
+    #[test]
+    fn foreign_capability_advertisements_are_closed_bounded_and_canonical() {
+        let (mut conn, selector) = seeded_with_grant(GRANT_DELEGATE, "foreign-capability-json");
+        let HarnessSessionAttachmentSelector::AttachmentId(attachment_id) = &selector else {
+            panic!("attachment-id selector")
+        };
+        let with_unknown = r#"{"observe":true,"wait":true,"prompt":true,"cancel":true,"resume":true,"load":true,"events":true,"artifacts":true,"transcript":"unbounded"}"#;
+        let error = conn
+            .execute(
+                "INSERT INTO harness_session_capability_advertisements
+                 (attachment_id, advertisement_seq, capabilities_json, source_host_identity, advertised_at)
+                 VALUES (?1, 1, ?2, 'host-1', '2026-08-30T00:00:00Z')",
+                params![attachment_id, with_unknown],
+            )
+            .expect_err("unknown capability content must fail at storage");
+        assert!(error.to_string().contains("CHECK constraint"), "{error}");
+
+        let non_canonical = r#"{ "artifacts":true,"events":true,"load":true,"resume":true,"cancel":true,"prompt":true,"wait":true,"observe":true }"#;
+        conn.execute(
+            "INSERT INTO harness_session_capability_advertisements
+             (attachment_id, advertisement_seq, capabilities_json, source_host_identity, advertised_at)
+             VALUES (?1, 1, ?2, 'host-1', '2026-08-30T00:00:00Z')",
+            params![attachment_id, non_canonical],
+        )
+        .expect("closed bounded foreign JSON reaches the read-side canonical gate");
+        let error = request_harness_session_intervention(
+            &mut conn,
+            &selector,
+            &request(
+                "req-foreign-json",
+                HarnessSessionInterventionKind::RequestStatus,
+                0,
+            ),
+            &host(),
+            "admission-1",
+        )
+        .expect_err("non-canonical advertisement must not authorize a request");
+        assert!(error.to_string().contains("not canonical JSON"), "{error}");
+        assert_eq!(intervention_rows(&conn), 0);
     }
 }

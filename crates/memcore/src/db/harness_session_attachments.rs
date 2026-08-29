@@ -81,6 +81,7 @@ impl HarnessSessionAttachmentState {
 /// Closed capability set copied into the receipt. The JSON representation is
 /// canonicalized by [`NewHarnessSessionAttachment::new`] before persistence.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HarnessSessionAttachmentCapabilities {
     pub observe: bool,
     pub wait: bool,
