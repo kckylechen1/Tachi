@@ -27,10 +27,12 @@ pub(super) fn init_vault_inline(
         drop(store);
     }
 
-    let password = Password::with_theme(theme)
-        .with_prompt("    New vault password")
-        .with_confirmation("    Confirm password", "    Passwords do not match")
-        .interact()?;
+    let password = crate::vault_crypto::ZeroizingString::new(
+        Password::with_theme(theme)
+            .with_prompt("    New vault password")
+            .with_confirmation("    Confirm password", "    Passwords do not match")
+            .interact()?,
+    );
     if password.is_empty() {
         return Err("password cannot be empty".into());
     }

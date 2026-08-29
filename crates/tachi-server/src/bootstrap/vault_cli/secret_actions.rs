@@ -227,15 +227,14 @@ pub(super) async fn run_secret_action(
                 .into());
             }
 
-            let mut raw_values = String::new();
-            std::io::stdin().read_to_string(&mut raw_values)?;
-            let mut values = raw_values
+            let mut raw_values = crate::vault_crypto::ZeroizingString::new(String::new());
+            std::io::stdin().read_to_string(raw_values.as_mut_string())?;
+            let values = raw_values
                 .lines()
                 .map(str::trim)
                 .filter(|line| !line.is_empty())
-                .map(str::to_string)
+                .map(|line| crate::vault_crypto::ZeroizingString::new(line.to_string()))
                 .collect::<Vec<_>>();
-            crate::vault_crypto::zero_string(&mut raw_values);
             if values.is_empty() {
                 return Err("No API key values received on stdin.".into());
             }
@@ -277,9 +276,6 @@ pub(super) async fn run_secret_action(
                 }
                 Ok(())
             })();
-            for value in &mut values {
-                crate::vault_crypto::zero_string(value);
-            }
             build_entries?;
 
             let strategy = normalize_rotation_strategy_cli(&strategy);

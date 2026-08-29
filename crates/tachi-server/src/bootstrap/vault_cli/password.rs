@@ -78,8 +78,8 @@ pub(in crate::bootstrap) fn read_vault_password(
     } else if let Some(path) = password_file {
         read_password_file(path, insecure_password_file)?
     } else if stdin_password {
-        let mut buf = String::new();
-        std::io::stdin().read_line(&mut buf)?;
+        let mut buf = crate::vault_crypto::ZeroizingString::new(String::new());
+        std::io::stdin().read_line(buf.as_mut_string())?;
         buf.trim().to_string()
     } else if !can_prompt_interactively() {
         return Err(NO_TTY_HINT.into());

@@ -321,6 +321,10 @@ fn validate_imported_lane_slots(
             )?);
 
         if let Some(existing) = local.iter().find(|entry| entry.name == lane.name) {
+            crate::vault_ops::validate_existing_lane_slot_secret_type(
+                &existing.name,
+                &existing.secret_type,
+            )?;
             let old_plain =
                 crate::vault_crypto::decrypt(key, &existing.encrypted_value, &existing.nonce)?;
             let old_value = crate::vault_crypto::ZeroizingString::new(
@@ -711,6 +715,43 @@ mod tests {
             .vault_get_entry("EXTRACT_API_KEY")
             .expect("read lane")
             .is_none());
+        let _ = std::fs::remove_file(target_db);
+    }
+
+    #[test]
+    fn signed_vault_sync_import_refuses_legacy_lane_slot_type() {
+        let target_db = temp_db_path();
+        let key = [7u8; 32];
+        let target = open_cli_store(&target_db).expect("target store");
+        target
+            .vault_set_config(&sample_config())
+            .expect("set target config");
+        let mut legacy = encrypted_entry("EXTRACT_API_KEY", "same-family", &key);
+        legacy.secret_type = "other".to_string();
+        target
+            .vault_upsert_entry(&legacy)
+            .expect("seed legacy lane slot");
+        drop(target);
+
+        let incoming = encrypted_entry("EXTRACT_API_KEY", "same-family", &key);
+        let error = import_validated_vault_bundle(
+            &target_db,
+            &sample_config(),
+            &[incoming],
+            &[],
+            Some(&key),
+        )
+        .expect_err("signed import must not silently migrate a legacy lane slot")
+        .to_string();
+        assert!(error.contains("legacy secret_type 'other'"), "{error}");
+        assert!(error.contains("Remove or migrate"), "{error}");
+
+        let target = open_cli_store_read_only(&target_db).expect("target read store");
+        let retained = target
+            .vault_get_entry("EXTRACT_API_KEY")
+            .expect("read lane")
+            .expect("legacy lane remains");
+        assert_eq!(retained.secret_type, "other");
         let _ = std::fs::remove_file(target_db);
     }
 
