@@ -23,6 +23,7 @@ pub(crate) struct KeychainApiKeyScan {
     pub values: Vec<(String, String)>,
     pub dropped: HashMap<String, AliasSkipClass>,
     pub rotation_prefixes: HashSet<String>,
+    pub source_readable: bool,
 }
 
 pub(crate) fn load_keychain_vault_api_key_values(
@@ -44,6 +45,7 @@ fn empty_keychain_scan() -> KeychainApiKeyScan {
         values: Vec::new(),
         dropped: HashMap::new(),
         rotation_prefixes: HashSet::new(),
+        source_readable: false,
     }
 }
 
@@ -180,6 +182,7 @@ fn scan_keychain_api_key_entries(
         values,
         dropped,
         rotation_prefixes: rotation_prefixes.clone(),
+        source_readable: true,
     })
 }
 

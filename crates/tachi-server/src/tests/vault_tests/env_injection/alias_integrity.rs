@@ -444,6 +444,28 @@ async fn unhealthy_configured_rotation_member_cannot_fall_back_as_standalone() {
         .await
         .expect("record 401");
 
+    let lease_error = server
+        .vault_lease_api_key(Parameters(VaultLeaseApiKeyParams {
+            name: "VOYAGE_API_KEY_1".to_string(),
+            env_name: None,
+            agent_id: None,
+        }))
+        .await
+        .expect_err("raw configured member lease must honor prefix health");
+    assert!(lease_error.contains("No usable API key"), "{lease_error}");
+
+    let key = {
+        let vault = server.vault_read();
+        *vault.key.as_ref().expect("unlocked key").bytes()
+    };
+    let cli_error = server
+        .with_global_store_read(|store| {
+            crate::bootstrap::lease_api_key_from_store(store, &key, "VOYAGE_API_KEY_1")
+                .map_err(|error| error.to_string())
+        })
+        .expect_err("CLI raw configured member lease must honor prefix health");
+    assert!(cli_error.contains("No usable API key"), "{cli_error}");
+
     let report = crate::provider_config::materialize_for_server(&server)
         .expect("refresh must classify, not abort");
     assert_eq!(report.from_alias, 0);

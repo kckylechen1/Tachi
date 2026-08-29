@@ -99,14 +99,25 @@ fn vault_api_key_load_from_keychain(
 ) -> Result<tachi_llm::DurableVaultLoad, String> {
     let scan = crate::status_ops::status_health::load_keychain_vault_api_key_scan(global_db_path)
         .map_err(|err| format!("Keychain Vault provider read failed: {err}"))?;
+    Ok(durable_load_from_keychain_scan(scan))
+}
+
+fn durable_load_from_keychain_scan(
+    scan: crate::status_ops::status_health::KeychainApiKeyScan,
+) -> tachi_llm::DurableVaultLoad {
+    let availability = if scan.source_readable {
+        VaultSourceAvailability::Readable
+    } else {
+        VaultSourceAvailability::LockedOrUnavailable
+    };
     let pools = group_api_key_values_by_configured_rotations(scan.values, &scan.rotation_prefixes);
     let mut listed_drops = scan.dropped;
     promote_configured_rotation_prefix_drops(&mut listed_drops, &pools, &scan.rotation_prefixes);
-    Ok(tachi_llm::DurableVaultLoad {
+    tachi_llm::DurableVaultLoad {
         pools,
         listed_drops,
-        availability: VaultSourceAvailability::Readable,
-    })
+        availability,
+    }
 }
 
 /// Prefix aliases resolve `VOYAGE_API_KEY`, not `VOYAGE_API_KEY_1`. Copy a
@@ -118,18 +129,19 @@ fn promote_configured_rotation_prefix_drops(
     pools: &HashMap<String, Vec<ProviderSecret>>,
     rotation_prefixes: &HashSet<String>,
 ) {
-    let extra: Vec<(String, AliasSkipClass)> = dropped
+    let mut extra: Vec<(String, u32, AliasSkipClass)> = dropped
         .iter()
         .filter_map(|(name, class)| {
-            let (prefix, _) = parse_rotation_member_name(name)?;
+            let (prefix, member_index) = parse_rotation_member_name(name)?;
             if rotation_prefixes.contains(prefix) && !pools.contains_key(prefix) {
-                Some((prefix.to_string(), *class))
+                Some((prefix.to_string(), member_index, *class))
             } else {
                 None
             }
         })
         .collect();
-    for (prefix, class) in extra {
+    extra.sort_by(|left, right| (&left.0, &left.1).cmp(&(&right.0, &right.1)));
+    for (prefix, _, class) in extra {
         dropped.entry(prefix).or_insert(class);
     }
 }
@@ -176,6 +188,9 @@ fn resolve_vault_pools(
         }
     }
     let keychain = vault_api_key_load_from_keychain(global_db_path)?;
+    if keychain.availability == VaultSourceAvailability::Readable {
+        return Ok(keychain);
+    }
     if !keychain.pools.is_empty() || !keychain.listed_drops.is_empty() {
         return Ok(keychain);
     }
@@ -1208,7 +1223,7 @@ mod tests {
     fn filter_model_provider_pools_admits_model_rotation_member_rejects_search_rotation_member() {
         let vault_pools = HashMap::from([
             (
-                "VOYAGE_API_KEY_2".to_string(),
+                "VOYAGE_API_KEY_10".to_string(),
                 vec![ProviderSecret {
                     key_id: "VOYAGE_API_KEY_2".to_string(),
                     value: "voyage-member".to_string(),
@@ -1430,6 +1445,43 @@ mod tests {
                 .and_then(|entries| entries.first())
                 .map(|entry| entry.value.as_str()),
             Some("standalone")
+        );
+    }
+
+    #[test]
+    fn readable_empty_keychain_scan_stays_readable() {
+        let load =
+            durable_load_from_keychain_scan(crate::status_ops::status_health::KeychainApiKeyScan {
+                values: Vec::new(),
+                dropped: HashMap::new(),
+                rotation_prefixes: HashSet::new(),
+                source_readable: true,
+            });
+        assert!(load.pools.is_empty());
+        assert!(load.listed_drops.is_empty());
+        assert_eq!(load.availability, VaultSourceAvailability::Readable);
+    }
+
+    #[test]
+    fn configured_rotation_prefix_drop_uses_lowest_member_deterministically() {
+        let mut drops = HashMap::from([
+            (
+                "VOYAGE_API_KEY_2".to_string(),
+                tachi_llm::AliasSkipClass::ListedFenced,
+            ),
+            (
+                "VOYAGE_API_KEY_1".to_string(),
+                tachi_llm::AliasSkipClass::ListedWrongType,
+            ),
+        ]);
+        promote_configured_rotation_prefix_drops(
+            &mut drops,
+            &HashMap::new(),
+            &HashSet::from(["VOYAGE_API_KEY".to_string()]),
+        );
+        assert_eq!(
+            drops.get("VOYAGE_API_KEY"),
+            Some(&tachi_llm::AliasSkipClass::ListedWrongType)
         );
     }
 

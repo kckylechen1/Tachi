@@ -298,8 +298,22 @@ pub(super) fn load_unlocked_api_key_secret_pool(
     server: &MemoryServer,
     logical_name: &str,
 ) -> Result<Vec<tachi_llm::ProviderSecret>, String> {
-    load_unlocked_api_key_secret_pools_filtered(server, Some(logical_name))
-        .map(|mut scan| scan.pools.remove(logical_name).unwrap_or_default())
+    let mut direct = load_unlocked_api_key_secret_pools_filtered(server, Some(logical_name))?;
+    if let Some(pool) = direct.pools.remove(logical_name) {
+        return Ok(pool);
+    }
+    let Some((prefix, _)) = crate::provider_config::parse_rotation_member_name(logical_name) else {
+        return Ok(Vec::new());
+    };
+    let grouped = load_unlocked_api_key_secret_pools_filtered(server, Some(prefix))?;
+    Ok(grouped
+        .pools
+        .get(prefix)
+        .into_iter()
+        .flatten()
+        .filter(|secret| secret.key_id == logical_name)
+        .cloned()
+        .collect())
 }
 
 fn record_listed_drop(
@@ -381,6 +395,15 @@ fn load_unlocked_api_key_secret_pools_filtered(
             let health = key_health_by_logical.get(logical_name)?.get(key_id)?;
             unusable_skip_class(health, now)
         };
+
+        // Record configured membership before applying the optional pool
+        // filter. A concrete-member lease must not fall through to raw-name
+        // health identity merely because its prefix pass was filtered out.
+        for rotation in &rotations {
+            for (_, entry) in collect_rotation_entries(entries.clone(), &rotation.prefix) {
+                rotation_members.insert(entry.name);
+            }
+        }
 
         for rotation in rotations {
             if only_logical_name.is_some_and(|logical_name| logical_name != rotation.prefix) {
