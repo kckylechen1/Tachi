@@ -280,6 +280,31 @@ pub(crate) fn load_unlocked_api_key_secret_pools(
     load_unlocked_api_key_secret_pools_with_drops(server).map(|scan| scan.pools)
 }
 
+pub(crate) fn canonical_api_key_health_logical_name(
+    store: &MemoryStore,
+    logical_name: &str,
+) -> Result<String, String> {
+    if store
+        .vault_get_rotation(logical_name)
+        .map_err(|error| error.to_string())?
+        .is_some()
+    {
+        return Ok(logical_name.to_string());
+    }
+    let Some((prefix, _)) = crate::provider_config::parse_rotation_member_name(logical_name) else {
+        return Ok(logical_name.to_string());
+    };
+    if store
+        .vault_get_rotation(prefix)
+        .map_err(|error| error.to_string())?
+        .is_some()
+    {
+        Ok(prefix.to_string())
+    } else {
+        Ok(logical_name.to_string())
+    }
+}
+
 /// Admitted pools plus drop reasons from the same scan (tachi#1860).
 pub(crate) struct ProviderSecretScan {
     pub pools: HashMap<String, Vec<tachi_llm::ProviderSecret>>,

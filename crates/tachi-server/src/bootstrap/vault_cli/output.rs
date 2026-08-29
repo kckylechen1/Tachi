@@ -66,7 +66,7 @@ pub(crate) fn lease_api_key_from_store(
     store: &memcore::MemoryStore,
     key: &[u8; 32],
     logical_name: &str,
-) -> Result<(String, String), Box<dyn std::error::Error>> {
+) -> Result<(String, String, String), Box<dyn std::error::Error>> {
     let entries = store
         .vault_list_entries()
         .map_err(|e| format!("vault_list_entries: {e}"))?;
@@ -149,7 +149,7 @@ pub(crate) fn lease_api_key_from_store(
             }
         }
         let _ = store.vault_touch_entry(&entry.name);
-        return Ok((entry.name.clone(), value));
+        return Ok((health_logical_name.to_string(), entry.name.clone(), value));
     }
 
     Err(format!(

@@ -432,17 +432,45 @@ async fn unhealthy_configured_rotation_member_cannot_fall_back_as_standalone() {
         }))
         .await
         .expect("vault_setup_rotation");
+    let leased: serde_json::Value = serde_json::from_str(
+        &server
+            .vault_lease_api_key(Parameters(VaultLeaseApiKeyParams {
+                name: "VOYAGE_API_KEY_1".to_string(),
+                env_name: None,
+                agent_id: None,
+            }))
+            .await
+            .expect("first raw-member lease"),
+    )
+    .expect("lease json");
+    assert_eq!(leased["logical_name"], "VOYAGE_API_KEY");
+    assert_eq!(leased["key_id"], "VOYAGE_API_KEY_1");
+
+    let key = {
+        let vault = server.vault_read();
+        *vault.key.as_ref().expect("unlocked key").bytes()
+    };
+    let (cli_logical_name, cli_key_id, mut cli_value) = server
+        .with_global_store_read(|store| {
+            crate::bootstrap::lease_api_key_from_store(store, &key, "VOYAGE_API_KEY_1")
+                .map_err(|error| error.to_string())
+        })
+        .expect("first CLI raw-member lease");
+    assert_eq!(cli_logical_name, "VOYAGE_API_KEY");
+    assert_eq!(cli_key_id, "VOYAGE_API_KEY_1");
+    crate::vault_crypto::zero_string(&mut cli_value);
+
     server
         .vault_record_key_result(Parameters(VaultRecordKeyResultParams {
-            logical_name: "VOYAGE_API_KEY".to_string(),
-            key_id: "VOYAGE_API_KEY_1".to_string(),
+            logical_name: leased["logical_name"].as_str().unwrap().to_string(),
+            key_id: leased["key_id"].as_str().unwrap().to_string(),
             status_code: Some(401),
             outcome: None,
             retry_after_secs: None,
             reason: Some("provider auth failed".to_string()),
         }))
         .await
-        .expect("record 401");
+        .expect("record returned lease identity");
 
     let lease_error = server
         .vault_lease_api_key(Parameters(VaultLeaseApiKeyParams {
@@ -454,10 +482,6 @@ async fn unhealthy_configured_rotation_member_cannot_fall_back_as_standalone() {
         .expect_err("raw configured member lease must honor prefix health");
     assert!(lease_error.contains("No usable API key"), "{lease_error}");
 
-    let key = {
-        let vault = server.vault_read();
-        *vault.key.as_ref().expect("unlocked key").bytes()
-    };
     let cli_error = server
         .with_global_store_read(|store| {
             crate::bootstrap::lease_api_key_from_store(store, &key, "VOYAGE_API_KEY_1")

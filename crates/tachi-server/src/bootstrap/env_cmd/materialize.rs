@@ -112,7 +112,7 @@ fn resolve_bound_secret_value(
     if let Some(entry) = entries.get(secret_name).copied() {
         return decrypt_entry_value(entry, unlocked.key.bytes());
     }
-    let (_, value) =
+    let (_, _, value) =
         vault_cli::lease_api_key_from_store(&unlocked.store, unlocked.key.bytes(), secret_name)?;
     Ok(value)
 }

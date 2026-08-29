@@ -206,6 +206,9 @@ pub(crate) async fn handle_vault_lease_api_key(
     let requested_name = params.name.clone();
     let mut success_audit_detail = None;
     let result = (|| {
+        let logical_name = server.with_global_store_read(|store| {
+            crate::vault_ops::canonical_api_key_health_logical_name(store, &params.name)
+        })?;
         let env_name = params
             .env_name
             .clone()
@@ -225,7 +228,7 @@ pub(crate) async fn handle_vault_lease_api_key(
             )
         })?;
 
-        advance_rotation_after_key(server, &params.name, &selected.key_id)?;
+        advance_rotation_after_key(server, &logical_name, &selected.key_id)?;
         let selected_key_id = selected.key_id.clone();
         let access_count = server
             .with_global_store_read(|store| {
@@ -241,7 +244,7 @@ pub(crate) async fn handle_vault_lease_api_key(
 
         success_audit_detail = Some(
             json!({
-                "logical_name": params.name.clone(),
+                "logical_name": logical_name.clone(),
                 "key_id": selected.key_id.clone(),
                 "env_name": env_name.clone(),
                 "agent_id": params.agent_id.clone(),
@@ -251,7 +254,7 @@ pub(crate) async fn handle_vault_lease_api_key(
 
         serde_json::to_string(&json!({
             "leased": true,
-            "logical_name": params.name,
+            "logical_name": logical_name,
             "key_id": selected.key_id,
             "env_name": env_name,
             "agent_id": params.agent_id,
