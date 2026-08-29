@@ -184,6 +184,159 @@ pub(crate) fn validate_harness_session_attachments_schema(
     Ok(())
 }
 
+/// Canonical v34 installers for the #1678 attached-session receipt spine: the
+/// append-only event ledger, the materialized canonical session-state
+/// projection, the typed intervention request/result receipts, and the
+/// host-owned capability advertisements. Every table is additive,
+/// provider-neutral, and keyed to an existing attachment row.
+pub(crate) fn install_harness_session_spine_schema(conn: &Connection) -> Result<(), MemoryError> {
+    execute_batch_retry(
+        conn,
+        "CREATE TABLE IF NOT EXISTS harness_session_events (
+            event_row_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            attachment_id TEXT NOT NULL REFERENCES harness_session_attachments(attachment_id),
+            event_id TEXT NOT NULL CHECK (length(trim(event_id)) > 0),
+            kind TEXT NOT NULL CHECK (kind IN ('accepted', 'started', 'progress', 'input_required', 'terminal', 'cleanup')),
+            outcome TEXT CHECK (outcome IS NULL OR outcome IN ('completed', 'failed', 'cancelled')),
+            source_revision INTEGER NOT NULL CHECK (source_revision >= 0),
+            authority_confirmation_ref TEXT CHECK (authority_confirmation_ref IS NULL OR length(trim(authority_confirmation_ref)) > 0),
+            summary TEXT CHECK (summary IS NULL OR (length(summary) > 0 AND length(summary) <= 2000)),
+            payload_digest TEXT CHECK (payload_digest IS NULL OR length(trim(payload_digest)) > 0),
+            occurred_at TEXT NOT NULL,
+            ingested_at TEXT NOT NULL,
+            source_host_identity TEXT NOT NULL CHECK (length(trim(source_host_identity)) > 0),
+            UNIQUE (attachment_id, event_id),
+            CHECK (kind != 'terminal' OR outcome IS NOT NULL),
+            CHECK (outcome IS NULL OR kind = 'terminal'),
+            CHECK (kind = 'terminal' OR outcome IS NULL),
+            CHECK (outcome != 'cancelled' OR (authority_confirmation_ref IS NOT NULL AND length(trim(authority_confirmation_ref)) > 0))
+        );
+        CREATE INDEX IF NOT EXISTS idx_harness_session_events_revision
+            ON harness_session_events(attachment_id, source_revision);
+
+        CREATE TABLE IF NOT EXISTS harness_session_state (
+            attachment_id TEXT PRIMARY KEY NOT NULL REFERENCES harness_session_attachments(attachment_id),
+            canonical_state TEXT NOT NULL CHECK (canonical_state IN
+                ('accepted', 'started', 'progressing', 'input_required', 'completed', 'failed',
+                 'cancelled', 'inconsistent_reconciling', 'unknown_orphaned')),
+            canonical_revision INTEGER NOT NULL CHECK (canonical_revision >= 0),
+            terminal_digest TEXT CHECK (terminal_digest IS NULL OR length(trim(terminal_digest)) > 0),
+            conflicting_terminal_digest TEXT CHECK (conflicting_terminal_digest IS NULL OR length(trim(conflicting_terminal_digest)) > 0),
+            cleanup_recorded INTEGER NOT NULL DEFAULT 0 CHECK (cleanup_recorded IN (0, 1)),
+            last_event_id TEXT CHECK (last_event_id IS NULL OR length(trim(last_event_id)) > 0),
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS harness_session_interventions (
+            intervention_row_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            attachment_id TEXT NOT NULL REFERENCES harness_session_attachments(attachment_id),
+            request_id TEXT NOT NULL CHECK (length(trim(request_id)) > 0),
+            kind TEXT NOT NULL CHECK (kind IN ('request_status', 'prompt_or_correct', 'request_pause', 'request_cancel', 'request_resume')),
+            reason TEXT NOT NULL CHECK (length(reason) > 0 AND length(reason) <= 1000),
+            expected_session_revision INTEGER NOT NULL CHECK (expected_session_revision >= 0),
+            requested_by TEXT NOT NULL CHECK (length(trim(requested_by)) > 0),
+            requested_at TEXT NOT NULL,
+            UNIQUE (attachment_id, request_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_harness_session_interventions_attachment
+            ON harness_session_interventions(attachment_id, requested_at);
+
+        CREATE TABLE IF NOT EXISTS harness_session_intervention_results (
+            result_row_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            attachment_id TEXT NOT NULL REFERENCES harness_session_attachments(attachment_id),
+            request_id TEXT NOT NULL,
+            disposition TEXT NOT NULL CHECK (disposition IN ('accepted', 'refused', 'unsupported', 'failed')),
+            authority_confirmation_ref TEXT CHECK (authority_confirmation_ref IS NULL OR length(trim(authority_confirmation_ref)) > 0),
+            detail TEXT CHECK (detail IS NULL OR (length(detail) > 0 AND length(detail) <= 2000)),
+            recorded_at TEXT NOT NULL,
+            source_host_identity TEXT NOT NULL CHECK (length(trim(source_host_identity)) > 0),
+            UNIQUE (attachment_id, request_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS harness_session_capability_advertisements (
+            advertisement_row_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            attachment_id TEXT NOT NULL REFERENCES harness_session_attachments(attachment_id),
+            advertisement_seq INTEGER NOT NULL CHECK (advertisement_seq >= 1),
+            capabilities_json TEXT NOT NULL CHECK (json_valid(capabilities_json)),
+            source_host_identity TEXT NOT NULL CHECK (length(trim(source_host_identity)) > 0),
+            advertised_at TEXT NOT NULL,
+            UNIQUE (attachment_id, advertisement_seq)
+        );",
+    )
+}
+
+/// Refuse a drifted v34 spine shape. Required objects and per-table column
+/// shape are checked structurally; lifecycle CHECK clauses that SQLite does
+/// not expose through `pragma_table_info` are matched against the stored DDL.
+pub(crate) fn validate_harness_session_spine_schema(conn: &Connection) -> Result<(), MemoryError> {
+    const REQUIRED_OBJECTS: &[(&str, &str)] = &[
+        ("table", "harness_session_events"),
+        ("index", "idx_harness_session_events_revision"),
+        ("table", "harness_session_state"),
+        ("table", "harness_session_interventions"),
+        ("index", "idx_harness_session_interventions_attachment"),
+        ("table", "harness_session_intervention_results"),
+        ("table", "harness_session_capability_advertisements"),
+    ];
+    for (object_type, name) in REQUIRED_OBJECTS {
+        let present = match conn.query_row(
+            "SELECT 1 FROM main.sqlite_schema
+             WHERE type = ?1 AND name = ?2
+               AND (type = 'table' OR tbl_name IN ('harness_session_events', 'harness_session_interventions'))",
+            params![object_type, name],
+            |_| Ok(()),
+        ) {
+            Ok(()) => true,
+            Err(rusqlite::Error::QueryReturnedNoRows) => false,
+            Err(error) => return Err(error.into()),
+        };
+        if !present {
+            return Err(MemoryError::InvalidArg(format!(
+                "incomplete v34 harness session spine: required {object_type} '{name}' is missing"
+            )));
+        }
+    }
+    for (table, clause) in [
+        (
+            "harness_session_events",
+            "CHECK (outcome != 'cancelled' OR (authority_confirmation_ref IS NOT NULL AND length(trim(authority_confirmation_ref)) > 0))",
+        ),
+        (
+            "harness_session_events",
+            "CHECK (kind != 'terminal' OR outcome IS NOT NULL)",
+        ),
+        (
+            "harness_session_interventions",
+            "CHECK (kind IN ('request_status', 'prompt_or_correct', 'request_pause', 'request_cancel', 'request_resume'))",
+        ),
+        (
+            "harness_session_state",
+            "'inconsistent_reconciling', 'unknown_orphaned'",
+        ),
+        (
+            "harness_session_intervention_results",
+            "CHECK (disposition IN ('accepted', 'refused', 'unsupported', 'failed'))",
+        ),
+        (
+            "harness_session_capability_advertisements",
+            "UNIQUE (attachment_id, advertisement_seq)",
+        ),
+    ] {
+        let table_sql: String = conn.query_row(
+            "SELECT COALESCE(sql, '') FROM main.sqlite_schema
+             WHERE type = 'table' AND name = ?1",
+            params![table],
+            |row| row.get(0),
+        )?;
+        if !normalize_schema_sql(&table_sql).contains(&normalize_schema_sql(clause)) {
+            return Err(MemoryError::InvalidArg(format!(
+                "incomplete v34 harness session spine: {table} is missing canonical clause {clause:?}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 pub(crate) fn init_unversioned_schema_for_migration_tests(
     conn: &Connection,
@@ -294,6 +447,7 @@ fn init_schema_with_label_mut_inner(
     validate_memory_outbox_schema(&tx)?;
     validate_memory_outbox_destination_apply_schema(&tx)?;
     validate_harness_session_attachments_schema(&tx)?;
+    validate_harness_session_spine_schema(&tx)?;
     if identity.profile.includes_product() {
         validate_a2a_mailbox_schema(&tx)?;
     }

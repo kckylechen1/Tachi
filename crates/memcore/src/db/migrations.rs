@@ -63,6 +63,7 @@
 //!   be scrubbed after their bounded retention window while immutable digests
 //!   and delivery receipts remain (#1751).
 //! - v33: host-owned ACP session attachment admission receipts (#1733).
+//! - v34: attached-session receipt spine: events, canonical state, interventions, capability advertisements (#1678).
 //!   Renumbered from the PR's original v31 slot in the 2026-08-16 merge
 //!   resolution: main had already taken v31/v32 for the A2A mailbox pair.
 //!
@@ -108,7 +109,7 @@ use super::common::now_utc_iso;
 ///
 /// See the module doc comment ("Schema version stamp (#984)") for what this
 /// counts and when to bump it.
-pub const EXPECTED_SCHEMA_VERSION: u32 = 33;
+pub const EXPECTED_SCHEMA_VERSION: u32 = 34;
 
 mod a2a_body_retention;
 mod basic;
@@ -121,6 +122,7 @@ mod domain_retire;
 mod exec_env_class;
 mod hard_state_index;
 mod harness_session_attachments;
+mod harness_session_events;
 mod identity_workclaim_spine;
 mod idless_identity;
 mod legacy_columns;
@@ -141,6 +143,7 @@ use domain_retire::*;
 use exec_env_class::*;
 use hard_state_index::*;
 use harness_session_attachments::*;
+use harness_session_events::*;
 use identity_workclaim_spine::*;
 use idless_identity::*;
 use legacy_columns::*;
@@ -196,6 +199,7 @@ pub(crate) const MIGRATION_SENTINEL_KEYS: &[&str] = &[
     "v31_a2a_mailbox",
     "v32_a2a_body_retention",
     "v33_harness_session_attachments",
+    "v34_harness_session_spine",
 ];
 
 #[derive(Debug, Default, Clone, serde::Serialize)]
@@ -235,6 +239,7 @@ pub struct MigrationReport {
     pub a2a_mailbox_schema_objects_created: usize,
     pub a2a_body_retention_schema_objects_rebuilt: usize,
     pub harness_session_attachments_schema_objects_created: usize,
+    pub harness_session_spine_schema_objects_created: usize,
 }
 
 #[cfg(test)]
@@ -338,6 +343,7 @@ pub(crate) fn validate_current_schema_integrity(conn: &Connection) -> Result<(),
     crate::db::schema::validate_memory_outbox_schema(conn)?;
     crate::db::schema::validate_memory_outbox_destination_apply_schema(conn)?;
     crate::db::schema::validate_harness_session_attachments_schema(conn)?;
+    crate::db::schema::validate_harness_session_spine_schema(conn)?;
     let product_schema: i64 = conn.query_row(
         "SELECT COUNT(*) FROM main.sqlite_schema WHERE type='table' AND name='identity_admissions'",
         [],
@@ -748,6 +754,12 @@ pub(crate) fn run_data_migrations_in_tx(
         conn,
         "v33_harness_session_attachments",
         migrate_v33_harness_session_attachments,
+    )?
+    .unwrap_or(0);
+    report.harness_session_spine_schema_objects_created = apply_versioned_migration(
+        conn,
+        "v34_harness_session_spine",
+        migrate_v34_harness_session_spine,
     )?
     .unwrap_or(0);
 
@@ -1622,7 +1634,7 @@ mod tests {
     }
 
     #[test]
-    fn private_fresh_init_installs_v25_through_v33_migrations_once() {
+    fn private_fresh_init_installs_v25_through_v34_migrations_once() {
         let _ = crate::db::enable_simple_auto_extension();
         register_sqlite_vec();
         let conn = Connection::open_in_memory().expect("open in-memory");
@@ -1647,6 +1659,7 @@ mod tests {
         assert_eq!(sentinel_version("v31_a2a_mailbox"), 1);
         assert_eq!(sentinel_version("v32_a2a_body_retention"), 1);
         assert_eq!(sentinel_version("v33_harness_session_attachments"), 1);
+        assert_eq!(sentinel_version("v34_harness_session_spine"), 1);
         crate::db::schema::validate_recall_impression_ledger_schema(&conn).unwrap();
         crate::db::schema::validate_typo_fallback_attribution_schema(&conn).unwrap();
         crate::db::schema::validate_wiki_recovery_ledgers_schema(&conn).unwrap();
@@ -1722,6 +1735,29 @@ mod tests {
         assert!(table_exists(&conn, "harness_session_attachments").unwrap());
         assert!(was_run(&conn, "v33_harness_session_attachments").unwrap());
         validate_current_schema_integrity(&conn).expect("the completed v33 shape is valid");
+    }
+
+    #[test]
+    fn stamped_v33_db_receives_the_v34_spine_before_restamping() {
+        let (mut conn, tmp) = open_test_db();
+        write_schema_version(&conn, 33).unwrap();
+
+        let report = run_data_migrations(&mut conn, "global", tmp.path())
+            .expect("a stamped v33 database must receive v34");
+
+        assert_eq!(report.harness_session_spine_schema_objects_created, 6);
+        assert_eq!(read_schema_version(&conn).unwrap(), EXPECTED_SCHEMA_VERSION);
+        for table in [
+            "harness_session_events",
+            "harness_session_state",
+            "harness_session_interventions",
+            "harness_session_intervention_results",
+            "harness_session_capability_advertisements",
+        ] {
+            assert!(table_exists(&conn, table).unwrap(), "{table} missing");
+        }
+        assert!(was_run(&conn, "v34_harness_session_spine").unwrap());
+        validate_current_schema_integrity(&conn).expect("the completed v34 shape is valid");
     }
 
     #[test]
