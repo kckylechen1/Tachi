@@ -10,6 +10,18 @@ use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock};
 pub(crate) struct MemoryServer {
     // Daemon-local managed-custom cancellation authority.
     pub(crate) managed_run_controls: Arc<crate::managed_run_control::ManagedRunControlRegistry>,
+    /// Opaque identity of THIS daemon/controller incarnation. Minted fresh
+    /// per construction and never persisted as global state; it appears only
+    /// in per-run durable identity records and here. A later epoch reads the
+    /// durable identity and receipts of runs accepted under an earlier epoch
+    /// but does not inherit that epoch's process handle or cancellation
+    /// authority.
+    pub(crate) controller_epoch: String,
+    /// Volatile outcome of the startup reconciliation scan this incarnation
+    /// performed. `reconciliation_unavailable` is surfaced from here; the
+    /// durable per-run evidence lives in each run's `status.json` spine.
+    pub(crate) startup_reconciliation:
+        Arc<std::sync::OnceLock<crate::managed_run_epoch::StartupReconciliation>>,
     pub(crate) db: DbRuntime,
     pub(crate) llm: Arc<tachi_llm::LlmClient>,
     /// Bounded LLM-call recorder for foundry runs. Writes the `prompt.md` /

@@ -527,6 +527,9 @@ struct ReadyDispatch {
     plan_duration_ms: Option<u64>,
     plan_generated_at: Option<String>,
     flow_dispatch_slot: Option<PathBuf>,
+    /// Refs/digests of the authority surfaces minted inside the post-init
+    /// block, carried out for the durable managed-run identity record.
+    managed_authority_refs: Option<crate::managed_run_epoch::ManagedAuthorityRefs>,
 }
 
 pub(crate) async fn handle_tachi_dispatch(
@@ -1028,6 +1031,15 @@ async fn launch_canonical_dispatch(
         if let Some(spec) = custom_launch_spec.as_ref() {
             validate_custom_launch_spec_timeout(spec, timeout_secs_for_status)?;
         }
+        let managed_authority_refs = custom_launch_spec.as_ref().map(|spec| {
+            crate::managed_run_epoch::ManagedAuthorityRefs {
+                execution_grant_ref: carrier_execution_grant.grant_id.clone(),
+                exec_env_ref: carrier_execution_grant.env_id.clone(),
+                launch_spec_digest: serde_json::to_vec(spec)
+                    .ok()
+                    .map(|bytes| crate::managed_run_epoch::sha256_ref(&bytes)),
+            }
+        });
 
         // 5. Build execution backend
         let PreparedDispatchBackend {
@@ -1131,6 +1143,7 @@ async fn launch_canonical_dispatch(
             plan_duration_ms,
             plan_generated_at,
             flow_dispatch_slot,
+            managed_authority_refs,
         })))
     }
     .await;
@@ -1146,6 +1159,7 @@ async fn launch_canonical_dispatch(
         plan_duration_ms,
         plan_generated_at,
         flow_dispatch_slot,
+        managed_authority_refs,
     } = match post_init {
         Ok(PostInitDispatchOutcome::EarlyResponse(early_response)) => {
             return Ok(early_response);
@@ -1193,9 +1207,38 @@ async fn launch_canonical_dispatch(
         }
     };
     let (mut execution, managed_run_guard) = if let Some((receiver, guard)) = managed_registration {
-        if let Err(error) =
-            crate::managed_run_control::mark_managed_custom_start(&workspace_dir, &dispatch_id)
-        {
+        // Durable identity refs for the run about to be launched. Refs and
+        // one-way digests only; the LaunchSpec/identity-receipt payloads
+        // themselves are never persisted into the receipt spine.
+        let identity_input = crate::managed_run_epoch::ManagedRunIdentityInput {
+            controller_epoch_id: server.controller_epoch.clone(),
+            assignment_ref: resolved_assignment.assignment_id.clone(),
+            assignment_identity_digest: serde_json::to_vec(&resolved_assignment.identity_receipt)
+                .ok()
+                .map(|bytes| crate::managed_run_epoch::sha256_ref(&bytes)),
+            execution_grant_ref: managed_authority_refs
+                .as_ref()
+                .map(|refs| refs.execution_grant_ref.clone())
+                .unwrap_or_default(),
+            exec_env_ref: managed_authority_refs
+                .as_ref()
+                .and_then(|refs| refs.exec_env_ref.clone()),
+            launch_spec_digest: managed_authority_refs
+                .as_ref()
+                .and_then(|refs| refs.launch_spec_digest.clone()),
+            backend_name: execution_backend_name
+                .unwrap_or("unknown_backend")
+                .to_string(),
+            backend_metadata_digest: execution_backend_metadata
+                .as_ref()
+                .and_then(|metadata| serde_json::to_vec(metadata).ok())
+                .map(|bytes| crate::managed_run_epoch::sha256_ref(&bytes)),
+        };
+        if let Err(error) = crate::managed_run_control::mark_managed_custom_start(
+            &workspace_dir,
+            &dispatch_id,
+            &identity_input,
+        ) {
             let result = format!("managed custom classification failed: {error}");
             let result_persist_error = persist_dispatch_result_artifact(
                 &workspace_dir.join("result.md"),

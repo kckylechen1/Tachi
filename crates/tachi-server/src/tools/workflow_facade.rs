@@ -92,11 +92,30 @@ impl MemoryServer {
                 let dispatch_id = params.dispatch_id.ok_or_else(|| {
                     "tachi_staff: action='status' requires a `dispatch_id`".to_string()
                 })?;
-                crate::staffing_ops::staff_status(
+                let raw = crate::staffing_ops::staff_status(
                     self,
-                    crate::staffing_ops::StaffStatusRequest { dispatch_id },
+                    crate::staffing_ops::StaffStatusRequest {
+                        dispatch_id: dispatch_id.clone(),
+                    },
                 )
-                .await?
+                .await?;
+                // Read-surface projection (S1): for managed runs carrying a
+                // durable identity record, expose execution state, control
+                // state, controller epoch, reconciliation state, and artifact
+                // availability as SEPARATE response facts. Response-only: the
+                // canonical receipt bytes are never rewritten by a read.
+                match crate::staffing_ops::staff_status_projection(self, &dispatch_id).await? {
+                    Some(projection) => {
+                        let mut enriched = serde_json::from_str::<serde_json::Value>(&raw)
+                            .map_err(|err| format!("tachi_staff: parse status receipt: {err}"))?;
+                        if let Some(object) = enriched.as_object_mut() {
+                            object.insert("read_projection".to_string(), projection);
+                        }
+                        serde_json::to_string_pretty(&enriched)
+                            .map_err(|err| format!("tachi_staff: serialize status: {err}"))?
+                    }
+                    None => raw,
+                }
             }
             "cancel" => {
                 let (dispatch_id, expected_status_revision) = params.cancel_request()?;

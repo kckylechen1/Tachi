@@ -314,6 +314,8 @@ impl MemoryServer {
             managed_run_controls: Arc::new(
                 crate::managed_run_control::ManagedRunControlRegistry::default(),
             ),
+            controller_epoch: crate::managed_run_epoch::mint_controller_epoch(),
+            startup_reconciliation: Arc::new(std::sync::OnceLock::new()),
             db,
             llm,
             llm_recorder,
@@ -488,6 +490,55 @@ impl MemoryServer {
 
         seed_builtin_capabilities(&server)
             .map_err(|e| std::io::Error::other(format!("seed builtin capabilities: {e}")))?;
+
+        // Startup reconciliation: every controller incarnation scans the
+        // runs root once. Terminal managed runs stay terminal; nonterminal
+        // runs accepted under an earlier epoch receive exactly one typed
+        // orphan/control-unavailable observation appended to their existing
+        // canonical receipt. No launch, signal, cleanup, retry, or
+        // redispatch happens here; if the storage cannot be read the
+        // outcome records `reconciliation_unavailable` instead of a clean
+        // state.
+        let reconciliation = crate::managed_run_epoch::reconcile_interrupted_managed_runs(
+            &crate::dispatch_ops::dispatch_runs_root(),
+            &server.controller_epoch,
+        );
+        if reconciliation.is_unavailable() {
+            tracing::warn!(
+                reason = reconciliation
+                    .unavailable_reason
+                    .as_deref()
+                    .unwrap_or("unknown"),
+                "managed-run startup reconciliation unavailable; claiming no clean state"
+            );
+        } else {
+            if !reconciliation.orphaned.is_empty() {
+                tracing::warn!(
+                    count = reconciliation.orphaned.len(),
+                    dispatch_ids = ?reconciliation.orphaned,
+                    "managed-run startup reconciliation: orphaned/control_unavailable"
+                );
+            }
+            if !reconciliation.inconsistent.is_empty() {
+                tracing::warn!(
+                    count = reconciliation.inconsistent.len(),
+                    "managed-run startup reconciliation: inconsistent identity records"
+                );
+            }
+            if !reconciliation.append_failures.is_empty() {
+                tracing::warn!(
+                    count = reconciliation.append_failures.len(),
+                    failures = ?reconciliation.append_failures,
+                    "managed-run startup reconciliation: append failures"
+                );
+            }
+            tracing::debug!(
+                scanned = reconciliation.scanned,
+                orphaned = reconciliation.orphaned.len(),
+                "managed-run startup reconciliation complete"
+            );
+        }
+        let _ = server.startup_reconciliation.set(reconciliation);
 
         Ok(server)
     }

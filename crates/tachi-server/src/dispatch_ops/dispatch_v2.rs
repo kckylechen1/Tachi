@@ -808,6 +808,13 @@ fn write_status_json_inner(
                 "execution_classification",
                 "lifecycle_owner",
                 "cancellation",
+                // Durable managed-run identity and the append-only
+                // reconciliation observation are stamped once and carried
+                // forward by every later canonical writer (completion,
+                // watchdog, cancellation finalization). No writer may erase
+                // or rewrite them; reconciliation only appends.
+                "managed_run_identity",
+                "managed_run_reconciliation",
             ] {
                 if key == "completion_recovery" && proposed_terminal && completion_admitted {
                     // A terminal background owner supersedes a short-lived
