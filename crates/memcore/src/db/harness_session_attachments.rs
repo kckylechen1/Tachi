@@ -668,10 +668,23 @@ pub(crate) fn find_attachment_for_host(
             .optional()?
         }
     };
-    Ok(attachment.filter(|attachment| {
+    let Some(attachment) = attachment.filter(|attachment| {
         attachment.host_identity == host.host_identity
             && attachment.admission_receipt_ref == admission_receipt_ref
-    }))
+    }) else {
+        return Ok(None);
+    };
+    // Receipt-spine writes may outlive the WorkClaim, but they must still be
+    // bound to the host's current admission connection. Otherwise an old
+    // admission row can continue authorizing facts after the host reconnects.
+    verify_host_admission(
+        conn,
+        host,
+        &attachment.admission_receipt_ref,
+        &attachment.work_claim_id,
+        &attachment.agent_identity_id,
+    )?;
+    Ok(Some(attachment))
 }
 
 fn verify_host_admission(

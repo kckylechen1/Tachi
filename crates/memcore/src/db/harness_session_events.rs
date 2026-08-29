@@ -2157,4 +2157,41 @@ mod tests {
         assert!(matches!(wrong_receipt, Err(MemoryError::NotFound(_))));
         assert_eq!(event_row_count(&conn), 0);
     }
+
+    #[test]
+    fn stale_host_admission_is_refused_without_journaling() {
+        let (mut conn, selector) = seeded();
+        crate::db::session_claims::release_work_claim(
+            &mut conn,
+            "claim-1",
+            "agent-1",
+            0,
+            "session_terminal",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO identity_admissions
+             (admission_id, agent_identity_id, connection_id, state, created_at)
+             VALUES ('admission-2', 'host-1', 'connection-2', 'self_asserted', '2026-01-01T00:00:01Z')",
+            [],
+        )
+        .unwrap();
+
+        let error = ingest_harness_session_event(
+            &mut conn,
+            &selector,
+            &event("ev-stale-admission", HarnessSessionEventKind::Progress, 1),
+            &HarnessSessionHostAdmission {
+                host_identity: "host-1".into(),
+                connection_id: "connection-2".into(),
+            },
+            "admission-1",
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error, MemoryError::WorkClaimTransitionRefused { .. }),
+            "{error}"
+        );
+        assert_eq!(event_row_count(&conn), 0);
+    }
 }

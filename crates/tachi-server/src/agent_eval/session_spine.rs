@@ -45,8 +45,12 @@ fn event_kind(raw: Option<String>) -> Result<HarnessSessionEventKind, String> {
 }
 
 fn terminal_outcome(raw: Option<String>) -> Result<Option<HarnessSessionTerminalOutcome>, String> {
-    match raw.filter(|value| !value.trim().is_empty()) {
+    match raw {
         None => Ok(None),
+        Some(raw) if raw.is_empty() => Ok(None),
+        Some(raw) if raw.chars().any(char::is_control) => {
+            Err("session_event_outcome must not contain control characters".to_string())
+        }
         Some(raw) => match raw.trim() {
             "completed" => Ok(Some(HarnessSessionTerminalOutcome::Completed)),
             "failed" => Ok(Some(HarnessSessionTerminalOutcome::Failed)),
@@ -912,6 +916,17 @@ mod tests {
         // The whitespace-only digest hits the non-empty gate first; either
         // typed refusal is a zero-journal rejection.
         assert!(error.contains("non-empty"), "{error}");
+
+        let error = crate::agent_eval::handle_agent_eval(
+            &server,
+            TachiAgentEvalParams {
+                session_event_outcome: Some("\n".to_string()),
+                ..event_params(&attachment_id, "ev-ctl-outcome", "progress", 1)
+            },
+        )
+        .await
+        .expect_err("control-only outcome must refuse");
+        assert!(error.contains("control characters"), "{error}");
 
         // A genuinely empty string still means "absent" and is accepted.
         let accepted = eval(
