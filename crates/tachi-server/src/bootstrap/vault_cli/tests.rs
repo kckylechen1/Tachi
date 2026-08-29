@@ -148,6 +148,21 @@ fn derive_verified_vault_key_zeroes_password_on_wrong_password() {
 }
 
 #[test]
+fn derive_verified_vault_key_zeroes_password_on_invalid_salt() {
+    let mut config = config_for_password("correct horse battery staple");
+    config.salt = "not-valid-base64%%%".to_string();
+    let mut password = "correct horse battery staple".to_string();
+
+    let err = derive_verified_vault_key_from_password(&config, &mut password)
+        .expect_err("invalid salt must fail");
+    assert!(err.to_string().contains("Invalid vault salt"), "{err}");
+    assert!(
+        string_is_zeroed(&password),
+        "password buffer was not zeroed after invalid salt"
+    );
+}
+
+#[test]
 fn setup_keys_init_and_upsert_roundtrip() {
     // `tachi vault setup-keys` (and the wizard funnel) rely on
     // vault_init_with_password + vault_upsert_secret_with_key. Verify the

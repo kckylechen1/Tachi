@@ -123,6 +123,8 @@ pub(super) async fn run_session_action(
                 return Ok(());
             }
 
+            let password = crate::vault_crypto::ZeroizingStringRef::new(&mut password);
+
             let store = open_cli_store_read_only(global_db_path)?;
             let config = store
                 .vault_get_config()
@@ -145,14 +147,7 @@ pub(super) async fn run_session_action(
                 .map_err(|e| e.to_string()),
                 Err(err) => Err(err.to_string()),
             };
-            let key = match key_result {
-                Ok(key) => key,
-                Err(err) => {
-                    crate::vault_crypto::zero_string(&mut password);
-                    return Err(err.into());
-                }
-            };
-            crate::vault_crypto::zero_string(&mut password);
+            let key = key_result?;
 
             if !crate::vault_crypto::verify_password(key.bytes(), &config.verifier)? {
                 return Err("Wrong password".into());

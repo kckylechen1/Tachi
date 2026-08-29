@@ -73,7 +73,7 @@ pub(in crate::bootstrap) fn read_vault_password(
     password_file: Option<&Path>,
     insecure_password_file: bool,
 ) -> Result<String, Box<dyn std::error::Error>> {
-    let password = if keychain {
+    let mut password = if keychain {
         crate::vault_crypto::read_password_from_macos_keychain()?
     } else if let Some(path) = password_file {
         read_password_file(path, insecure_password_file)?
@@ -88,6 +88,7 @@ pub(in crate::bootstrap) fn read_vault_password(
     };
 
     if password.is_empty() {
+        crate::vault_crypto::zero_string(&mut password);
         return Err("Password cannot be empty".into());
     }
     Ok(password)
@@ -109,20 +110,24 @@ pub(super) fn read_vault_init_password(
             insecure_password_file,
         )?
     } else if keychain || password_file.is_some() {
-        let password = read_vault_password(false, keychain, password_file, insecure_password_file)?;
+        let mut password =
+            read_vault_password(false, keychain, password_file, insecure_password_file)?;
+        let password_guard = crate::vault_crypto::ZeroizingStringRef::new(&mut password);
         let Some(path) = confirm_password_file else {
             return Err(
                 "Non-interactive vault init requires --confirm-password-file. Use interactive `tachi vault init` or provide a separate confirmation file."
                     .into(),
             );
         };
-        (password, read_password_file(path, insecure_password_file)?)
+        let confirm = read_password_file(path, insecure_password_file)?;
+        (password_guard.to_string(), confirm)
     } else if !can_prompt_interactively() {
         return Err(no_tty_hint_for_init().into());
     } else {
-        let password = rpassword::prompt_password("New vault password: ")?;
+        let mut password = rpassword::prompt_password("New vault password: ")?;
+        let password_guard = crate::vault_crypto::ZeroizingStringRef::new(&mut password);
         let confirm = rpassword::prompt_password("Confirm password: ")?;
-        (password, confirm)
+        (password_guard.to_string(), confirm)
     };
 
     if password.is_empty() {
@@ -144,15 +149,15 @@ pub(super) fn read_vault_init_password_stdin_lines(
     confirm_password_file: Option<&Path>,
     insecure_password_file: bool,
 ) -> Result<(String, String), Box<dyn std::error::Error>> {
-    let mut password = String::new();
-    reader.read_line(&mut password)?;
-    let password = password.trim().to_string();
+    let mut password_raw = crate::vault_crypto::ZeroizingString::new(String::new());
+    reader.read_line(password_raw.as_mut_string())?;
+    let password = password_raw.trim().to_string();
     let confirm = if let Some(path) = confirm_password_file {
         read_password_file(path, insecure_password_file)?
     } else {
-        let mut confirm = String::new();
-        reader.read_line(&mut confirm)?;
-        confirm.trim().to_string()
+        let mut confirm_raw = crate::vault_crypto::ZeroizingString::new(String::new());
+        reader.read_line(confirm_raw.as_mut_string())?;
+        confirm_raw.trim().to_string()
     };
     Ok((password, confirm))
 }
@@ -215,17 +220,17 @@ pub(super) fn read_password_file(
                 .into());
             }
         }
-        let mut raw = String::new();
-        file.read_to_string(&mut raw)
+        let mut raw = crate::vault_crypto::ZeroizingString::new(String::new());
+        file.read_to_string(raw.as_mut_string())
             .map_err(|e| format!("Failed to read password file {}: {e}", path.display()))?;
         Ok(raw.lines().next().unwrap_or_default().trim().to_string())
     }
 
     #[cfg(not(unix))]
     {
-        let mut raw = String::new();
+        let mut raw = crate::vault_crypto::ZeroizingString::new(String::new());
         std::fs::File::open(path)
-            .and_then(|mut file| file.read_to_string(&mut raw))
+            .and_then(|mut file| file.read_to_string(raw.as_mut_string()))
             .map_err(|e| format!("Failed to read password file {}: {e}", path.display()))?;
         Ok(raw.lines().next().unwrap_or_default().trim().to_string())
     }

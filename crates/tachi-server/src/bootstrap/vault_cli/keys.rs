@@ -47,6 +47,8 @@ pub(super) fn derive_verified_vault_key_from_password(
 ) -> Result<crate::vault_crypto::DerivedVaultKey, Box<dyn std::error::Error>> {
     use base64::{engine::general_purpose::STANDARD as B64, Engine};
 
+    let password = crate::vault_crypto::ZeroizingStringRef::new(password);
+
     let salt = B64
         .decode(&config.salt)
         .map_err(|e| format!("Invalid vault salt: {e}"))?;
@@ -55,12 +57,11 @@ pub(super) fn derive_verified_vault_key_from_password(
     // password — a stored-format error is never a "wrong password".
     let key_result = match crate::vault_crypto::parse_stored_kdf_params(&config.kdf_params) {
         Ok(params) => {
-            crate::vault_crypto::DerivedVaultKey::derive_with_params(password, &salt, &params)
+            crate::vault_crypto::DerivedVaultKey::derive_with_params(&password, &salt, &params)
                 .map_err(|e| e.to_string())
         }
         Err(err) => Err(err.to_string()),
     };
-    crate::vault_crypto::zero_string(password);
     let key = key_result?;
     if !crate::vault_crypto::verify_password(key.bytes(), &config.verifier)? {
         return Err("Wrong password".into());
