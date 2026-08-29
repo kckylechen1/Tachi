@@ -413,33 +413,24 @@ fn append_reconciliation_observation(
     accepted_epoch: Option<&str>,
     prior_state: Option<&str>,
 ) -> Result<bool, String> {
-    let status_path = run_dir.join("status.json");
-    let lock = crate::dispatch_ops::status_json_lock_for(run_dir);
+    // The whole read-modify-write runs through the anchored receipt
+    // discipline: the run directory is opened WITHOUT following aliases,
+    // the lock is keyed by the opened directory's identity (a swapped
+    // replacement directory cannot inherit it), the receipt is read via
+    // openat(O_NOFOLLOW) with the regular-file check made on the OPENED
+    // descriptor (no validation-to-read window), and the atomic
+    // replacement is descriptor-relative. A symlinked run directory is
+    // refused at open; a symlinked status leaf is refused at read.
+    let anchored = crate::managed_run_control::AnchoredRunStatus::open(run_dir)
+        .map_err(|error| format!("run_dir_anchor_failed:{error:?}"))?;
+    let lock = anchored.lock();
     let _guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    // Revalidate the run directory WITHOUT following symlinks: a directory
-    // swapped for a symlink between the scan and this append must not let
-    // the atomic write land outside the runs root.
-    let still_real_directory = std::fs::symlink_metadata(run_dir)
-        .map(|metadata| metadata.is_dir())
-        .unwrap_or(false);
-    if !still_real_directory {
-        return Err("run_dir_not_a_real_directory".to_string());
-    }
-    // Leaf discipline: the receipt itself must be a regular file. A
-    // symlinked status.json would be read THROUGH (importing another run's
-    // or an outside receipt into this reconciliation) and then replaced —
-    // refuse the leaf, exactly like a swapped directory.
-    let leaf_is_regular = std::fs::symlink_metadata(&status_path)
-        .map(|metadata| metadata.is_file())
-        .unwrap_or(false);
-    if !leaf_is_regular {
-        return Err("status_leaf_not_a_regular_file".to_string());
-    }
     // Re-read under the lock: a completion that landed between the scan and
     // this append must win; a run that turned terminal is never appended to.
-    let bytes = std::fs::read(&status_path).map_err(|error| format!("read_failed:{error}"))?;
-    let mut status: Value = serde_json::from_slice(&bytes)
-        .map_err(|error| format!("receipt_unparsable_at_append:{error}"))?;
+    let mut status = anchored
+        .read_json()
+        .map_err(|error| format!("receipt_read_failed:{error}"))?
+        .ok_or_else(|| "receipt_absent_at_append".to_string())?;
     // Exactly-once is per verdict: a recorded orphan transition suppresses
     // another orphan append; a recorded inconsistent observation suppresses
     // another inconsistent append. Malformed or unrelated prior content
@@ -490,7 +481,8 @@ fn append_reconciliation_observation(
     crate::managed_run_control::advance_status_revision(object)?;
     let body =
         serde_json::to_vec_pretty(&status).map_err(|error| format!("serialize_failed:{error}"))?;
-    crate::utils::write_owner_only_file_atomic(&status_path, &body)
+    anchored
+        .write_atomic(&body)
         .map(|()| true)
         .map_err(|error| format!("write_failed:{error}"))
 }

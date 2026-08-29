@@ -980,9 +980,10 @@ fn symlinked_status_leaf_is_never_read_through() {
         Some("TASK_STATE_WORKING"),
     )
     .expect_err("symlinked leaf must be refused");
-    assert_eq!(
-        refusal, "status_leaf_not_a_regular_file",
-        "the refusal is typed and names the leaf discipline"
+    assert!(
+        refusal.starts_with("receipt_read_failed:")
+            && refusal.contains("refusing symlinked managed status"),
+        "the refusal comes from the anchored no-follow read: {refusal}"
     );
 
     // The scanner also skips the symlinked-leaf run: it is never a
@@ -1521,10 +1522,10 @@ fn append_refuses_when_run_dir_is_swapped_for_a_symlink() {
         Some("ctrl-epoch-a"),
         Some("TASK_STATE_WORKING"),
     );
-    assert_eq!(
-        outcome.unwrap_err(),
-        "run_dir_not_a_real_directory",
-        "the append must refuse a symlinked run directory"
+    let refusal = outcome.unwrap_err();
+    assert!(
+        refusal.starts_with("run_dir_anchor_failed:"),
+        "the append must refuse a symlinked run directory at the anchored open: {refusal}"
     );
     assert!(
         !outside.path().join("status.json").exists(),
