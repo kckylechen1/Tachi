@@ -4,11 +4,14 @@ pub(crate) async fn handle_vault_record_key_result(
     server: &MemoryServer,
     params: VaultRecordKeyResultParams,
 ) -> Result<String, String> {
-    let logical_name = params.logical_name.trim().to_string();
+    let requested_logical_name = params.logical_name.trim().to_string();
     let key_id = params.key_id.trim().to_string();
-    if logical_name.is_empty() || key_id.is_empty() {
+    if requested_logical_name.is_empty() || key_id.is_empty() {
         return Err("logical_name and key_id are required".to_string());
     }
+    let logical_name = server.with_global_store_read(|store| {
+        crate::vault_ops::canonical_api_key_health_logical_name(store, &requested_logical_name)
+    })?;
     let llm = Arc::clone(&server.llm);
     let record_logical_name = logical_name.clone();
     let record_key_id = key_id.clone();

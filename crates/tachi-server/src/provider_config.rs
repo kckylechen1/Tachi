@@ -8,14 +8,13 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use crate::vault_ops::load_unlocked_api_key_secret_pools;
 use crate::vault_ops::{classify_vault_read_error, VaultReadState};
 use crate::MemoryServer;
 pub use tachi_llm::{
     group_api_key_values_by_configured_rotations, is_vault_alias, parse_rotation_member_name,
     parse_vault_alias, vault_alias_line, MaterializeReport, VAULT_ALIAS_PREFIX,
 };
-use tachi_llm::{LlmClient, ProviderSecret, VaultSourceAvailability};
+use tachi_llm::{AliasSkipClass, LlmClient, ProviderSecret, VaultSourceAvailability};
 
 /// #1680/D3: the LLM materialization allowlist — `ModelApi`-class names only.
 /// This is the compile-time allowlist consulted by
@@ -77,30 +76,80 @@ pub(crate) fn filter_model_provider_pools(
         .collect()
 }
 
-/// Load API keys from an unlocked in-process Vault session.
-pub fn vault_api_key_pools_from_server(
-    server: &MemoryServer,
-) -> Result<HashMap<String, Vec<ProviderSecret>>, String> {
-    load_unlocked_api_key_secret_pools(server)
+/// Syntactic API-key names admitted by both unlocked-server and Keychain
+/// Vault scans. Registration/class filtering happens after this scan.
+pub(crate) fn is_provider_api_key_name(name: &str) -> bool {
+    name.ends_with("_API_KEY")
+        || parse_rotation_member_name(name).is_some_and(|(prefix, _)| prefix.ends_with("_API_KEY"))
 }
 
-/// Load API keys via macOS Keychain + global DB (daemon/CLI when memory unlock is empty).
-pub fn vault_api_key_pools_from_keychain(
+fn vault_api_key_pool_load_from_server(
+    server: &MemoryServer,
+) -> Result<tachi_llm::DurableVaultLoad, String> {
+    let scan = crate::vault_ops::load_unlocked_api_key_secret_pools_with_drops(server)?;
+    Ok(tachi_llm::DurableVaultLoad {
+        pools: scan.pools,
+        listed_drops: scan.dropped,
+        availability: VaultSourceAvailability::Readable,
+    })
+}
+
+fn vault_api_key_load_from_keychain(
     global_db_path: &Path,
-) -> HashMap<String, Vec<ProviderSecret>> {
-    let rotation_prefixes = rotation_prefixes_from_global_db(global_db_path);
-    let values = match crate::status_ops::status_health::load_keychain_vault_api_key_values(
-        global_db_path,
-    ) {
-        Ok(values) => values,
-        Err(err) => {
-            tracing::warn!(
-                "[vault] keychain vault read failed during provider key resolution: {err}"
-            );
-            Vec::new()
-        }
+) -> Result<tachi_llm::DurableVaultLoad, String> {
+    let scan = crate::status_ops::status_health::load_keychain_vault_api_key_scan(global_db_path)
+        .map_err(|err| format!("Keychain Vault provider read failed: {err}"))?;
+    Ok(durable_load_from_keychain_scan(scan))
+}
+
+fn durable_load_from_keychain_scan(
+    scan: crate::status_ops::status_health::KeychainApiKeyScan,
+) -> tachi_llm::DurableVaultLoad {
+    let availability = if scan.source_readable {
+        VaultSourceAvailability::Readable
+    } else {
+        VaultSourceAvailability::LockedOrUnavailable
     };
-    group_api_key_values_by_configured_rotations(values, &rotation_prefixes)
+    let pools = group_api_key_values_by_configured_rotations(scan.values, &scan.rotation_prefixes);
+    let mut listed_drops = scan.dropped;
+    promote_configured_rotation_prefix_drops(&mut listed_drops, &pools, &scan.rotation_prefixes);
+    tachi_llm::DurableVaultLoad {
+        pools,
+        listed_drops,
+        availability,
+    }
+}
+
+fn should_use_default_vault_fallback(load: &tachi_llm::DurableVaultLoad) -> bool {
+    load.availability == VaultSourceAvailability::Readable
+        || !load.pools.is_empty()
+        || !load.listed_drops.is_empty()
+}
+
+/// Prefix aliases resolve `VOYAGE_API_KEY`, not `VOYAGE_API_KEY_1`. Copy a
+/// member drop onto a configured rotation prefix only when that prefix has
+/// no admitted pool — unconfigured member names must not invent prefix
+/// integrity.
+fn promote_configured_rotation_prefix_drops(
+    dropped: &mut HashMap<String, AliasSkipClass>,
+    pools: &HashMap<String, Vec<ProviderSecret>>,
+    rotation_prefixes: &HashSet<String>,
+) {
+    let mut extra: Vec<(String, u32, String, AliasSkipClass)> = dropped
+        .iter()
+        .filter_map(|(name, class)| {
+            let (prefix, member_index) = parse_rotation_member_name(name)?;
+            if rotation_prefixes.contains(prefix) && !pools.contains_key(prefix) {
+                Some((prefix.to_string(), member_index, name.clone(), *class))
+            } else {
+                None
+            }
+        })
+        .collect();
+    extra.sort_by(|left, right| (&left.0, &left.1, &left.2).cmp(&(&right.0, &right.1, &right.2)));
+    for (prefix, _, _, class) in extra {
+        dropped.entry(prefix).or_insert(class);
+    }
 }
 
 /// Resolve the Vault-backed provider pools, and report whether the source was
@@ -113,19 +162,30 @@ pub fn vault_api_key_pools_from_keychain(
 fn resolve_vault_pools(
     server: Option<&MemoryServer>,
     global_db_path: &Path,
-) -> Result<
-    (
-        HashMap<String, Vec<ProviderSecret>>,
-        VaultSourceAvailability,
-    ),
-    String,
-> {
+) -> Result<tachi_llm::DurableVaultLoad, String> {
+    resolve_vault_pools_with_keychain_loader(
+        server,
+        global_db_path,
+        &vault_api_key_load_from_keychain,
+    )
+}
+
+fn resolve_vault_pools_with_keychain_loader<F>(
+    server: Option<&MemoryServer>,
+    global_db_path: &Path,
+    keychain_loader: &F,
+) -> Result<tachi_llm::DurableVaultLoad, String>
+where
+    F: Fn(&Path) -> Result<tachi_llm::DurableVaultLoad, String>,
+{
     // Starts unavailable and is only promoted by a read that actually
     // succeeded: an unproven source must never license retention.
     let mut availability = VaultSourceAvailability::LockedOrUnavailable;
     if let Some(server) = server {
-        match vault_api_key_pools_from_server(server) {
-            Ok(map) if !map.is_empty() => return Ok((map, VaultSourceAvailability::Readable)),
+        match vault_api_key_pool_load_from_server(server) {
+            Ok(load) if !load.pools.is_empty() || !load.listed_drops.is_empty() => {
+                return Ok(load);
+            }
             // Unlocked and genuinely empty: the Vault answered, it just has
             // nothing. That is a readable source.
             Ok(_) => availability = VaultSourceAvailability::Readable,
@@ -148,29 +208,47 @@ fn resolve_vault_pools(
             Err(err) => return Err(format!("Failed to unlock Vault provider secrets: {err}")),
         }
     }
-    let pools = vault_api_key_pools_from_keychain(global_db_path);
-    if !pools.is_empty() {
-        return Ok((pools, VaultSourceAvailability::Readable));
+    let keychain = keychain_loader(global_db_path)?;
+    if keychain.availability == VaultSourceAvailability::Readable {
+        return Ok(keychain);
     }
-    if vault_config_exists(global_db_path) {
-        return Ok((pools, availability));
+    if !keychain.pools.is_empty() || !keychain.listed_drops.is_empty() {
+        return Ok(keychain);
+    }
+    if vault_config_exists(global_db_path)? {
+        return Ok(tachi_llm::DurableVaultLoad::from_pools(
+            keychain.pools,
+            availability,
+        ));
     }
 
     let default_global = default_global_db_path();
     if paths_equal(global_db_path, &default_global) {
-        return Ok((pools, availability));
+        return Ok(tachi_llm::DurableVaultLoad::from_pools(
+            keychain.pools,
+            availability,
+        ));
     }
 
-    let fallback = vault_api_key_pools_from_keychain(&default_global);
-    if !fallback.is_empty() {
+    let fallback = keychain_loader(&default_global)?;
+    if should_use_default_vault_fallback(&fallback) {
         tracing::warn!(
             "[provider] global DB {} has no initialized Vault; using default Vault DB {} for provider key materialization",
             global_db_path.display(),
             default_global.display()
         );
-        return Ok((fallback, VaultSourceAvailability::Readable));
+        return Ok(fallback);
     }
-    Ok((fallback, availability))
+    if vault_config_exists(&default_global)? {
+        return Ok(tachi_llm::DurableVaultLoad::from_pools(
+            fallback.pools,
+            VaultSourceAvailability::LockedOrUnavailable,
+        ));
+    }
+    Ok(tachi_llm::DurableVaultLoad::from_pools(
+        fallback.pools,
+        availability,
+    ))
 }
 
 pub(crate) fn default_global_db_path() -> std::path::PathBuf {
@@ -179,14 +257,19 @@ pub(crate) fn default_global_db_path() -> std::path::PathBuf {
         .join(memcore::MEMORY_DB_FILENAME)
 }
 
-fn vault_config_exists(global_db_path: &Path) -> bool {
-    let Some(path) = global_db_path.to_str() else {
-        return false;
-    };
-    let Ok(store) = memcore::MemoryStore::open_read_only(path) else {
-        return false;
-    };
-    store.vault_get_config().ok().flatten().is_some()
+fn vault_config_exists(global_db_path: &Path) -> Result<bool, String> {
+    if !global_db_path.exists() {
+        return Ok(false);
+    }
+    let path = global_db_path
+        .to_str()
+        .ok_or_else(|| "Vault DB path is not valid UTF-8".to_string())?;
+    let store = memcore::MemoryStore::open_read_only(path)
+        .map_err(|err| format!("Failed to open Vault DB for provider refresh: {err}"))?;
+    store
+        .vault_get_config()
+        .map(|config| config.is_some())
+        .map_err(|err| format!("Failed to read Vault config for provider refresh: {err}"))
 }
 
 fn paths_equal(left: &Path, right: &Path) -> bool {
@@ -198,21 +281,6 @@ fn paths_equal(left: &Path, right: &Path) -> bool {
         .zip(std::fs::canonicalize(right).ok())
         .map(|(left, right)| left == right)
         .unwrap_or(false)
-}
-
-fn rotation_prefixes_from_global_db(global_db_path: &Path) -> HashSet<String> {
-    let Some(path) = global_db_path.to_str() else {
-        return HashSet::new();
-    };
-    let Ok(store) = memcore::MemoryStore::open_read_only(path) else {
-        return HashSet::new();
-    };
-    store
-        .vault_list_rotations()
-        .unwrap_or_default()
-        .into_iter()
-        .map(|rotation| rotation.prefix)
-        .collect()
 }
 
 /// Apply Vault + config.env aliases into `LlmClient` without mutating process env.
@@ -232,9 +300,13 @@ fn format_provider_materialization_error(err: String) -> String {
     // stop attaching remediation to both.
     let unresolved_alias = err.starts_with("Config key ")
         && err.contains("references a Vault alias")
-        && (err.contains("absent from a readable Vault") || err.contains("could not be read"));
-    if (err.starts_with("provider alias ") && err.contains(" could not be resolved from secret "))
-        || unresolved_alias
+        && !err.contains("not a valid Vault secret name");
+    let missing_or_unreadable = err.contains("could not be read")
+        || err.contains("absent from a readable Vault")
+        || err.contains("could not be resolved from secret");
+    if ((err.starts_with("provider alias ") && err.contains(" could not be resolved from secret "))
+        || unresolved_alias)
+        && missing_or_unreadable
     {
         format!(
             "{err} The alias came from config.env or process env. \
@@ -259,32 +331,19 @@ pub fn format_skipped_alias_reason(reason: &str) -> String {
 }
 
 /// Render one skipped alias with its cache disposition. Inputs are metadata
-/// only: the logical key name and whether that key's prior pool was retained.
-/// The warning deliberately rebuilds a constant reason instead of forwarding
-/// report text, so even a contaminated caller cannot inject an alias target.
-pub fn format_skipped_alias_warning(
-    key: &str,
-    retained: bool,
-    availability: VaultSourceAvailability,
-) -> String {
+/// only: the logical key name, whether that key's prior pool was retained, and
+/// the typed skip class. The warning rebuilds from [`AliasSkipClass`] instead
+/// of forwarding report text, so a contaminated caller cannot inject an alias
+/// target (tachi#1854: listed-row classes must not print revocation wording).
+pub fn format_skipped_alias_warning(key: &str, retained: bool, class: AliasSkipClass) -> String {
     let cache_disposition = if retained {
         "retained last-known-good provider pool"
     } else {
         "no last-known-good provider pool retained"
     };
-    // Derived from the same value materialization decided on, so the operator
-    // line cannot disagree with what actually happened to the cache.
-    let safe_reason = match availability {
-        VaultSourceAvailability::Readable => format!(
-            "Config key '{key}' references a Vault alias whose secret is absent from a readable Vault."
-        ),
-        VaultSourceAvailability::LockedOrUnavailable => format!(
-            "Config key '{key}' references a Vault alias, but the Vault could not be read."
-        ),
-    };
     format!(
         "[provider] skipped alias for '{key}'; {cache_disposition}: {}",
-        format_skipped_alias_reason(&safe_reason)
+        format_skipped_alias_reason(&class.operator_reason(key))
     )
 }
 
@@ -305,12 +364,14 @@ pub fn describe_skipped_aliases(skipped: &[(String, String)]) -> String {
 }
 
 /// Metadata-only aggregate for health/probe output. Reconstruct each entry
-/// from the logical key and retained disposition; never forward raw reasons.
+/// from the typed skip class, logical key, and retained disposition; never
+/// forward raw reasons or alias targets.
 pub fn describe_skipped_alias_report(report: &MaterializeReport) -> String {
     let details = report
         .skipped_aliases
         .iter()
         .map(|(key, _reason)| {
+            let reason = report.skip_class_for(key).operator_reason(key);
             let disposition = if report
                 .retained_from_last_known_good
                 .iter()
@@ -320,7 +381,7 @@ pub fn describe_skipped_alias_report(report: &MaterializeReport) -> String {
             } else {
                 "no last-known-good provider pool retained"
             };
-            format!("{key}: {disposition}")
+            format!("{key}: {disposition}; {reason}")
         })
         .collect::<Vec<_>>()
         .join("; ");
@@ -343,15 +404,37 @@ fn materialize_for_server_inner(
         server.llm.as_ref(),
         provider_env_keys(),
         || {
-            let (pools, availability) = resolve_vault_pools(Some(server), &global)?;
-            let pools = filter_model_provider_pools(pools);
+            let mut load = resolve_vault_pools(Some(server), &global)?;
+            annotate_non_model_drops(&load.pools, &mut load.listed_drops);
+            load.pools = filter_model_provider_pools(load.pools);
             if let Some(hook) = after_vault_pools_resolved {
                 hook();
             }
-            Ok((pools, availability))
+            Ok(load)
         },
     )
     .map_err(format_provider_materialization_error)
+}
+
+fn annotate_non_model_drops(
+    pools: &HashMap<String, Vec<ProviderSecret>>,
+    drops: &mut HashMap<String, tachi_llm::AliasSkipClass>,
+) {
+    let allowed = provider_env_keys();
+    for (name, members) in pools {
+        let admitted = allowed.contains(name)
+            || parse_rotation_member_name(name).is_some_and(|(prefix, _)| allowed.contains(prefix));
+        if !admitted {
+            drops
+                .entry(name.clone())
+                .or_insert(tachi_llm::AliasSkipClass::ListedNotModelProvider);
+            for member in members {
+                drops
+                    .entry(member.key_id.clone())
+                    .or_insert(tachi_llm::AliasSkipClass::ListedNotModelProvider);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -367,8 +450,10 @@ pub fn materialize_standalone(
     global_db_path: &Path,
 ) -> Result<MaterializeReport, String> {
     tachi_llm::materialize_provider_secrets_from_durable_source(llm, provider_env_keys(), || {
-        let (pools, availability) = resolve_vault_pools(None, global_db_path)?;
-        Ok((filter_model_provider_pools(pools), availability))
+        let mut load = resolve_vault_pools(None, global_db_path)?;
+        annotate_non_model_drops(&load.pools, &mut load.listed_drops);
+        load.pools = filter_model_provider_pools(load.pools);
+        Ok(load)
     })
     .map_err(format_provider_materialization_error)
 }
@@ -495,7 +580,7 @@ pub fn bootstrap_provider_runtime(server: &MemoryServer) {
                 .collect::<Vec<_>>()
                 .join(", ");
             tracing::warn!(
-                "[provider] {} provider key(s) ready, {} alias(es) skipped ({keys}); see '[provider] skipped alias' warnings for vault_unlock/vault_set remediation",
+                "[provider] {} provider key(s) ready, {} alias(es) skipped ({keys}); see '[provider] skipped alias' warnings for per-alias remediation",
                 report.loaded,
                 report.skipped_aliases.len()
             );
@@ -982,6 +1067,113 @@ mod tests {
     use super::*;
     use crate::test_support::EnvRestore;
 
+    #[test]
+    fn vault_config_exists_fails_closed_for_corrupt_database() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("memory.db");
+        std::fs::write(&path, b"not a sqlite database").expect("write corrupt database");
+
+        let err = vault_config_exists(&path).expect_err("corrupt Vault DB must stay loud");
+
+        assert!(
+            err.contains("Failed to open Vault DB for provider refresh")
+                || err.contains("Failed to read Vault config for provider refresh"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn non_model_rotation_members_keep_typed_drop_class() {
+        let mut drops = HashMap::new();
+        let pools = HashMap::from([(
+            "TAVILY_API_KEY".to_string(),
+            vec![ProviderSecret {
+                key_id: "TAVILY_API_KEY_1".to_string(),
+                value: "not-materialized".to_string(),
+            }],
+        )]);
+
+        annotate_non_model_drops(&pools, &mut drops);
+
+        assert_eq!(
+            drops.get("TAVILY_API_KEY"),
+            Some(&tachi_llm::AliasSkipClass::ListedNotModelProvider)
+        );
+        assert_eq!(
+            drops.get("TAVILY_API_KEY_1"),
+            Some(&tachi_llm::AliasSkipClass::ListedNotModelProvider)
+        );
+    }
+
+    #[test]
+    fn non_model_rotation_member_alias_surfaces_typed_drop_at_materialization_boundary() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _env = EnvRestore::set("VOYAGE_API_KEY", "vault:TAVILY_API_KEY_1");
+        let llm = LlmClient::new().expect("llm client");
+        let mut pools = HashMap::from([(
+            "TAVILY_API_KEY".to_string(),
+            vec![ProviderSecret {
+                key_id: "TAVILY_API_KEY_1".to_string(),
+                value: "not-materialized".to_string(),
+            }],
+        )]);
+        let mut drops = HashMap::new();
+        annotate_non_model_drops(&pools, &mut drops);
+        pools = filter_model_provider_pools(pools);
+
+        let report = tachi_llm::materialize_provider_secrets_from_durable_source(
+            &llm,
+            ["VOYAGE_API_KEY"],
+            || {
+                Ok(tachi_llm::DurableVaultLoad {
+                    pools,
+                    availability: VaultSourceAvailability::Readable,
+                    listed_drops: drops,
+                })
+            },
+        )
+        .expect("typed non-model drop must remain a non-fatal alias skip");
+
+        assert_eq!(
+            report.skipped_alias_classes,
+            vec![(
+                "VOYAGE_API_KEY".to_string(),
+                tachi_llm::AliasSkipClass::ListedNotModelProvider,
+            )]
+        );
+        assert!(
+            !report.skipped_aliases[0].1.contains("absent"),
+            "{}",
+            report.skipped_aliases[0].1
+        );
+    }
+
+    #[test]
+    fn default_vault_fallback_fails_closed_for_corrupt_database() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let home = tempfile::tempdir().expect("tempdir");
+        let _env = EnvRestore::set_path("TACHI_HOME", home.path());
+        let default_db = default_global_db_path();
+        std::fs::create_dir_all(default_db.parent().expect("default DB parent"))
+            .expect("create default DB parent");
+        std::fs::write(&default_db, b"not a sqlite database").expect("write corrupt database");
+        let custom_db = home.path().join("custom").join(memcore::MEMORY_DB_FILENAME);
+
+        let err = match resolve_vault_pools(None, &custom_db) {
+            Ok(_) => panic!("corrupt fallback Vault DB must stay loud"),
+            Err(err) => err,
+        };
+
+        assert!(
+            err.contains("provider read failed") || err.contains("Vault DB"),
+            "{err}"
+        );
+    }
+
     /// #1680/D3 (codex finding 1, the sharpest catch of the cross-vendor
     /// review): a Vault-stored search key must never reach the LLM provider
     /// cache, even though Vault pool loading is class-blind and admits any
@@ -1278,6 +1470,97 @@ mod tests {
     }
 
     #[test]
+    fn readable_empty_keychain_scan_stays_readable() {
+        let load =
+            durable_load_from_keychain_scan(crate::status_ops::status_health::KeychainApiKeyScan {
+                values: Vec::new(),
+                dropped: HashMap::new(),
+                rotation_prefixes: HashSet::new(),
+                source_readable: true,
+            });
+        assert!(load.pools.is_empty());
+        assert!(load.listed_drops.is_empty());
+        assert_eq!(load.availability, VaultSourceAvailability::Readable);
+    }
+
+    #[test]
+    fn readable_empty_default_vault_fallback_stays_readable() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let home = tempfile::tempdir().expect("tempdir");
+        let _env = EnvRestore::set_path("TACHI_HOME", home.path());
+        let default_db = default_global_db_path();
+        let custom_db = home.path().join("custom").join(memcore::MEMORY_DB_FILENAME);
+        let loader = |path: &Path| {
+            Ok(tachi_llm::DurableVaultLoad {
+                pools: HashMap::new(),
+                listed_drops: HashMap::new(),
+                availability: if paths_equal(path, &default_db) {
+                    VaultSourceAvailability::Readable
+                } else {
+                    VaultSourceAvailability::LockedOrUnavailable
+                },
+            })
+        };
+        let load = resolve_vault_pools_with_keychain_loader(None, &custom_db, &loader)
+            .expect("resolve default fallback");
+        assert!(load.pools.is_empty());
+        assert_eq!(
+            load.availability,
+            VaultSourceAvailability::Readable,
+            "the actual resolver must preserve readable-empty fallback authority"
+        );
+    }
+
+    #[test]
+    fn configured_rotation_prefix_drop_uses_lowest_member_deterministically() {
+        let mut drops = HashMap::from([
+            (
+                "VOYAGE_API_KEY_10".to_string(),
+                tachi_llm::AliasSkipClass::ListedFenced,
+            ),
+            (
+                "VOYAGE_API_KEY_1".to_string(),
+                tachi_llm::AliasSkipClass::ListedWrongType,
+            ),
+        ]);
+        promote_configured_rotation_prefix_drops(
+            &mut drops,
+            &HashMap::new(),
+            &HashSet::from(["VOYAGE_API_KEY".to_string()]),
+        );
+        assert_eq!(
+            drops.get("VOYAGE_API_KEY"),
+            Some(&tachi_llm::AliasSkipClass::ListedWrongType)
+        );
+    }
+
+    #[test]
+    fn configured_rotation_prefix_drop_ties_break_by_member_name() {
+        let mut drops = HashMap::from([
+            (
+                "VOYAGE_API_KEY_1".to_string(),
+                tachi_llm::AliasSkipClass::ListedFenced,
+            ),
+            (
+                "VOYAGE_API_KEY_01".to_string(),
+                tachi_llm::AliasSkipClass::ListedWrongType,
+            ),
+        ]);
+        promote_configured_rotation_prefix_drops(
+            &mut drops,
+            &HashMap::new(),
+            &HashSet::from(["VOYAGE_API_KEY".to_string()]),
+        );
+        assert_eq!(
+            drops.get("VOYAGE_API_KEY"),
+            Some(&tachi_llm::AliasSkipClass::ListedWrongType),
+            "equal numeric indices must use the lexical member name as a stable tie-break"
+        );
+    }
+
+    #[test]
     fn materialize_provider_secrets_preserves_vault_alias_env() {
         let _guard = crate::utils::global_test_lock()
             .lock()
@@ -1374,6 +1657,32 @@ mod tests {
     }
 
     #[test]
+    fn malformed_alias_error_does_not_advise_vault_unlock_or_set() {
+        let err = format_provider_materialization_error(
+            "Config key 'ANTHROPIC_API_KEY' references a Vault alias that is not a valid Vault secret name; provider refresh refused and prior provider cache left unchanged"
+                .to_string(),
+        );
+        assert!(err.contains("not a valid Vault secret name"), "{err}");
+        assert!(
+            !err.contains("vault_unlock") && !err.contains("vault_set"),
+            "malformed alias names are config typos: {err}"
+        );
+    }
+
+    #[test]
+    fn listed_integrity_error_does_not_advise_vault_unlock_or_set() {
+        let err = format_provider_materialization_error(
+            "Config key 'SILICONFLOW_API_KEY' references a Vault alias whose listed secret is unusable (auth_failed)."
+                .to_string(),
+        );
+        assert!(err.contains("unusable (auth_failed)"), "{err}");
+        assert!(
+            !err.contains("vault_unlock") && !err.contains("vault_set"),
+            "listed integrity is not a missing/locked secret: {err}"
+        );
+    }
+
+    #[test]
     fn skipped_alias_warning_distinguishes_retained_pool_from_no_cache() {
         let alias_sentinel = "MISSING_VOYAGE_MUST_NOT_LEAK";
         let value_sentinel = "VOYAGE_SECRET_MUST_NOT_LEAK";
@@ -1381,12 +1690,12 @@ mod tests {
         let retained = format_skipped_alias_warning(
             "VOYAGE_API_KEY",
             true,
-            VaultSourceAvailability::LockedOrUnavailable,
+            AliasSkipClass::from_availability(VaultSourceAvailability::LockedOrUnavailable),
         );
         let no_cache = format_skipped_alias_warning(
             "VOYAGE_API_KEY",
             false,
-            VaultSourceAvailability::Readable,
+            AliasSkipClass::from_availability(VaultSourceAvailability::Readable),
         );
 
         assert!(retained.contains("retained last-known-good provider pool"));
@@ -1404,5 +1713,27 @@ mod tests {
             assert!(!warning.contains(alias_sentinel));
             assert!(!warning.contains(value_sentinel));
         }
+    }
+
+    #[test]
+    fn skipped_alias_warning_listed_unusable_does_not_say_absent() {
+        let warning = format_skipped_alias_warning(
+            "SILICONFLOW_API_KEY",
+            false,
+            AliasSkipClass::ListedUnusableAuthFailed,
+        );
+        assert!(
+            warning.contains("listed secret is unusable (auth_failed)"),
+            "{warning}"
+        );
+        assert!(
+            !warning.contains("absent from a readable Vault"),
+            "{warning}"
+        );
+        assert!(!warning.contains("vault:"));
+        assert!(
+            !warning.contains("vault_set") && !warning.contains("vault_unlock"),
+            "listed integrity is not a missing/locked secret: {warning}"
+        );
     }
 }

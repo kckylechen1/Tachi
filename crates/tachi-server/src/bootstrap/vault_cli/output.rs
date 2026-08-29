@@ -62,19 +62,24 @@ fn rotation_member_name(prefix: &str, idx: i64) -> String {
     format!("{prefix}_{idx}")
 }
 
-pub(in crate::bootstrap) fn lease_api_key_from_store(
+pub(crate) fn lease_api_key_from_store(
     store: &memcore::MemoryStore,
     key: &[u8; 32],
     logical_name: &str,
-) -> Result<(String, String), Box<dyn std::error::Error>> {
+) -> Result<(String, String, String), Box<dyn std::error::Error>> {
     let entries = store
         .vault_list_entries()
         .map_err(|e| format!("vault_list_entries: {e}"))?;
+    let health_logical_name =
+        crate::vault_ops::canonical_api_key_health_logical_name(store, logical_name)?;
     let rotation = store
-        .vault_get_rotation(logical_name)
+        .vault_get_rotation(&health_logical_name)
         .map_err(|e| format!("vault_get_rotation: {e}"))?;
+    let configured_member_request = health_logical_name != logical_name;
 
-    let candidate_names = if let Some(rotation) = rotation.as_ref() {
+    let candidate_names = if configured_member_request {
+        vec![logical_name.to_string()]
+    } else if let Some(rotation) = rotation.as_ref() {
         let total = rotation.total_keys.max(0);
         if total == 0 {
             Vec::new()
@@ -107,7 +112,7 @@ pub(in crate::bootstrap) fn lease_api_key_from_store(
             continue;
         }
         if let Some(health) = store
-            .vault_get_key_health(logical_name, &candidate)
+            .vault_get_key_health(&health_logical_name, &candidate)
             .map_err(|e| format!("vault_get_key_health: {e}"))?
         {
             if key_health_blocks_cli(&health) {
@@ -116,8 +121,10 @@ pub(in crate::bootstrap) fn lease_api_key_from_store(
         }
 
         let decrypted = crate::vault_crypto::decrypt(key, &entry.encrypted_value, &entry.nonce)?;
-        let mut value = String::from_utf8(decrypted)
-            .map_err(|e| format!("Vault secret '{}' is not valid UTF-8: {e}", entry.name))?;
+        let mut value = crate::vault_crypto::decode_utf8_zeroizing(
+            decrypted,
+            format!("Vault secret '{}' is not valid UTF-8", entry.name),
+        )?;
         if value.trim().is_empty() {
             crate::vault_crypto::zero_string(&mut value);
             continue;
@@ -127,7 +134,7 @@ pub(in crate::bootstrap) fn lease_api_key_from_store(
             if let Some((prefix, idx)) =
                 crate::provider_config::parse_rotation_member_name(&entry.name)
             {
-                if prefix == logical_name && rotation.total_keys > 0 {
+                if prefix == health_logical_name && rotation.total_keys > 0 {
                     store
                         .vault_set_rotation(&memcore::vault::VaultKeyRotation {
                             current_index: (idx as i64 % rotation.total_keys) + 1,
@@ -139,7 +146,7 @@ pub(in crate::bootstrap) fn lease_api_key_from_store(
             }
         }
         let _ = store.vault_touch_entry(&entry.name);
-        return Ok((entry.name.clone(), value));
+        return Ok((health_logical_name.to_string(), entry.name.clone(), value));
     }
 
     Err(format!(

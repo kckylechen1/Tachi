@@ -3,9 +3,8 @@ use serde_json::json;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use super::access::{
-    load_unlocked_api_key_secret_pools, load_unlocked_vault_secrets, read_unlocked_vault_secret,
-};
+use super::access::{load_unlocked_vault_secrets, read_unlocked_vault_secret};
+use super::load_unlocked_api_key_secret_pools;
 
 pub(super) fn load_unlocked_env_secrets(
     server: &MemoryServer,

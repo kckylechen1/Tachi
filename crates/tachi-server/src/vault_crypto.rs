@@ -16,7 +16,7 @@
 
 pub use vault_kit::{
     active_kdf_params_json, create_verifier, decrypt, encrypt, generate_salt, verify_password,
-    zero_key, zero_string, DerivedVaultKey, KdfParams, AES_GCM_NONCE_LEN,
+    zero_bytes, zero_key, zero_string, DerivedVaultKey, KdfParams, AES_GCM_NONCE_LEN,
 };
 #[cfg(test)]
 pub use vault_kit::{cheap_kdf_params_json, derive_cheap};
@@ -261,6 +261,27 @@ pub fn derive_verified_key_from_stored_config(
 /// Background auto-unlock wraps this primitive and explicitly downgrades only
 /// missing/empty entries to a benign miss; explicit unlock callers surface
 /// every failure loudly.
+pub(crate) const KEYCHAIN_PASSWORD_INVALID_UTF8: &str =
+    "Keychain password output is not valid UTF-8";
+
+pub(crate) fn decode_keychain_password_output(bytes: Vec<u8>) -> Result<String, String> {
+    decode_utf8_zeroizing(bytes, KEYCHAIN_PASSWORD_INVALID_UTF8)
+}
+
+/// Decode decrypted secret material without leaving an invalid UTF-8 payload
+/// owned by `FromUtf8Error` to be freed without first being scrubbed.
+pub(crate) fn decode_utf8_zeroizing(
+    bytes: Vec<u8>,
+    invalid_utf8_error: impl Into<String>,
+) -> Result<String, String> {
+    let invalid_utf8_error = invalid_utf8_error.into();
+    String::from_utf8(bytes).map_err(|error| {
+        let mut bytes = error.into_bytes();
+        zero_bytes(&mut bytes);
+        invalid_utf8_error
+    })
+}
+
 pub fn read_password_from_macos_keychain() -> Result<String, String> {
     // Test builds only: never shell out to the real `security` binary from a
     // unit test (that would read/depend on whatever `tachi-vault`/`default`
@@ -305,8 +326,7 @@ pub fn read_password_from_macos_keychain() -> Result<String, String> {
     // can be zeroed with the same `zero_string` primitive `password.rs`
     // already uses for its own password buffers, after the trimmed copy is
     // taken.
-    let mut raw = String::from_utf8(output.stdout)
-        .map_err(|e| format!("Keychain password is not valid UTF-8: {e}"))?;
+    let mut raw = decode_keychain_password_output(output.stdout)?;
     let password = raw.trim().to_string();
     zero_string(&mut raw);
     if password.is_empty() {
@@ -414,6 +434,24 @@ pub fn validate_secret_name(name: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn invalid_keychain_password_output_is_public_safe() {
+        let error = decode_keychain_password_output(vec![b'p', 0xff, 0xfe])
+            .expect_err("invalid UTF-8 Keychain output must be refused");
+        assert_eq!(error, KEYCHAIN_PASSWORD_INVALID_UTF8);
+        assert!(!error.contains("byte"), "decoder length leaked: {error}");
+        assert!(!error.contains("0xff"), "payload detail leaked: {error}");
+    }
+
+    #[test]
+    fn invalid_decrypted_utf8_uses_the_caller_owned_public_error() {
+        let error = decode_utf8_zeroizing(vec![b's', 0xff, b'!'], "safe failure")
+            .expect_err("invalid decrypted UTF-8 must be refused");
+        assert_eq!(error, "safe failure");
+        assert!(!error.contains("byte"), "decoder detail leaked: {error}");
+        assert!(!error.contains("0xff"), "payload detail leaked: {error}");
+    }
 
     #[test]
     fn test_authentication_detects_tampered_aad() {

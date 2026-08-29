@@ -470,17 +470,18 @@ fn fingerprint_entries<'a>(
             });
             continue;
         };
-        let mut value = match String::from_utf8(plaintext) {
-            Ok(value) => value,
-            Err(_) => {
-                advisories.push(Advisory {
-                    code: "non_utf8_secret".to_string(),
-                    subject: entry.name.clone(),
-                    detail: "value is not UTF-8; no fingerprint is computed".to_string(),
-                });
-                continue;
-            }
-        };
+        let mut value =
+            match crate::vault_crypto::decode_utf8_zeroizing(plaintext, "value is not UTF-8") {
+                Ok(value) => value,
+                Err(_) => {
+                    advisories.push(Advisory {
+                        code: "non_utf8_secret".to_string(),
+                        subject: entry.name.clone(),
+                        detail: "value is not UTF-8; no fingerprint is computed".to_string(),
+                    });
+                    continue;
+                }
+            };
         let fingerprint = fp_key.key_fingerprint(provider_kind, normalize_value(&value));
         crate::vault_crypto::zero_string(&mut value);
         fingerprints.push(fingerprint);

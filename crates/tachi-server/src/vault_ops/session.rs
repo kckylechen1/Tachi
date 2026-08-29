@@ -318,7 +318,7 @@ pub(super) fn read_unlock_password_fifo(home: &Path, path: &str) -> Result<Strin
                 Err(err) => return Err(format!("read unlock FIFO failed: {err}")),
             }
         }
-        String::from_utf8(bytes).map_err(|e| format!("unlock FIFO password is not UTF-8: {e}"))
+        crypto::decode_utf8_zeroizing(bytes, "unlock FIFO password is not valid UTF-8")
     })();
     if should_remove_fifo {
         let _ = std::fs::remove_file(&path);
