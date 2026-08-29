@@ -60,4 +60,36 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn v34_validator_refuses_missing_confirmation_reference_bounds() {
+        for (table, removed_clause) in [
+            (
+                "harness_session_events",
+                "AND instr(CAST(authority_confirmation_ref AS BLOB), CAST(x'00' AS BLOB)) = 0",
+            ),
+            (
+                "harness_session_intervention_results",
+                "length(authority_confirmation_ref) <= 128 AND ",
+            ),
+        ] {
+            let conn = Connection::open_in_memory().unwrap();
+            migrate_v34_harness_session_spine(&conn).unwrap();
+            conn.execute_batch("PRAGMA writable_schema = ON;").unwrap();
+            let changed = conn
+                .execute(
+                    "UPDATE sqlite_schema
+                     SET sql = replace(sql, ?1, '')
+                     WHERE type = 'table' AND name = ?2",
+                    rusqlite::params![removed_clause, table],
+                )
+                .unwrap();
+            assert_eq!(changed, 1, "must mutate the {table} fixture");
+            conn.execute_batch("PRAGMA writable_schema = OFF;").unwrap();
+
+            let error = crate::db::schema::validate_harness_session_spine_schema(&conn)
+                .expect_err("drifted confirmation-reference constraint must fail closed");
+            assert!(error.to_string().contains(table), "{table}: {error}");
+        }
+    }
 }

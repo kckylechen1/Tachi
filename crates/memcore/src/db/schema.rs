@@ -327,6 +327,14 @@ pub(crate) fn validate_harness_session_spine_schema(conn: &Connection) -> Result
             "length(authority_confirmation_ref) <= 128",
         ),
         (
+            "harness_session_events",
+            "instr(CAST(authority_confirmation_ref AS BLOB), CAST(x'00' AS BLOB)) = 0",
+        ),
+        (
+            "harness_session_intervention_results",
+            "length(authority_confirmation_ref) <= 128",
+        ),
+        (
             "harness_session_intervention_results",
             "instr(CAST(authority_confirmation_ref AS BLOB), CAST(x'00' AS BLOB)) = 0",
         ),
