@@ -541,7 +541,7 @@ pub use orchestration::{
     EvalRubricParams, MirrorEvalAdjudicateParams, MirrorEvalGetParams, MirrorEvalObserveParams,
     MirrorEvalRegisterParams, RouteProjectionParams, TachiAgentEvalParams, TachiAgentsParams,
     TachiBoardParams, TachiOrchestratorParams, TachiStaffParams, TachiVerifyCheckItem,
-    TachiVerifyParams,
+    TachiVerifyParams, TACHI_AGENT_EVAL_ACTIONS,
 };
 
 #[cfg(test)]

@@ -16,7 +16,7 @@ use memcore::{
     HarnessSessionInterventionDisposition, HarnessSessionInterventionKind,
     NewHarnessSessionIntervention, NewHarnessSessionInterventionResult,
 };
-use serde_json::{json, Value};
+use serde_json::json;
 
 fn intervention_kind(raw: Option<String>) -> Result<HarnessSessionInterventionKind, String> {
     let raw = required(raw, "intervention_kind")?;
@@ -156,18 +156,6 @@ pub(crate) fn handle_record_intervention_result(
         )
         .map_err(|error| error.to_string())
     })?;
-    let request_kind: Value = server.with_global_store_read(|store| {
-        let (request, _) = memcore::get_harness_session_intervention(
-            store.connection(),
-            &selector,
-            &input.request_id,
-            &host,
-            &admission_receipt_ref,
-        )
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| "intervention request vanished".to_string())?;
-        Ok(json!(request.kind.as_str()))
-    })?;
     serde_json::to_string(&json!({
         "status": "completed",
         "action": "record_intervention_result",
@@ -178,7 +166,7 @@ pub(crate) fn handle_record_intervention_result(
         "result": {
             "attachment_id": receipt.result.attachment_id,
             "request_id": receipt.result.request_id,
-            "request_kind": request_kind,
+            "request_kind": receipt.request_kind.as_str(),
             "disposition": receipt.result.disposition.as_str(),
             "authority_confirmation_ref": receipt.result.authority_confirmation_ref,
             "detail": receipt.result.detail,

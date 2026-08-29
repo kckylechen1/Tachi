@@ -311,6 +311,57 @@ async fn delegate_tachi_task_handoff_is_denied_end_to_end() {
 }
 
 #[tokio::test]
+async fn session_spine_mutation_profile_gate_runs_at_real_tools_call_boundary() {
+    let call = |profile: &'static str| async move {
+        let server = make_server();
+        server.set_tool_profile(Some(
+            tachi_hub::parse_tool_profile(profile).expect("profile should parse"),
+        ));
+        let mut args = serde_json::Map::new();
+        args.insert(
+            "action".to_string(),
+            serde_json::json!("request_intervention"),
+        );
+        call_tool_via_server(server, "tachi_agent_eval", Some(args))
+            .await
+            .expect("routed tool call must return a tool result")
+    };
+
+    let denied = call("observe").await;
+    let denied_message = denied
+        .content
+        .first()
+        .and_then(|content| content.as_text())
+        .map(|text| text.text.as_str())
+        .unwrap_or("");
+    assert_eq!(denied.is_error, Some(true));
+    assert!(denied_message.contains("not allowed"), "{denied_message}");
+
+    let admitted = call("coordinate").await;
+    let admitted_message = admitted
+        .content
+        .first()
+        .and_then(|content| content.as_text())
+        .map(|text| text.text.as_str())
+        .unwrap_or("");
+    assert_eq!(
+        admitted.is_error,
+        Some(true),
+        "missing action payload should fail after authorization"
+    );
+    assert!(
+        !admitted_message.contains("not allowed")
+            && !admitted_message.contains("not available")
+            && !admitted_message.contains("tool not found"),
+        "coordinate call must reach parameter validation: {admitted_message}"
+    );
+    assert_eq!(
+        admitted_message, "current host admission is unavailable",
+        "coordinate call must reach the production host-admission gate"
+    );
+}
+
+#[tokio::test]
 async fn tachi_tune_routes_through_composed_router_for_admin() {
     // #1426 dead-facade regression discriminator: tachi_tune was once
     // registered but never summed into the composed tool router, so a real

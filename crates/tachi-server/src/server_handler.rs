@@ -311,6 +311,25 @@ fn narrow_gated_action_schemas(
                     hide_a2a_respond_properties(tool);
                 }
             }
+            "tachi_agent_eval" => {
+                seed_action_enum_property(tool, tachi_params::TACHI_AGENT_EVAL_ACTIONS);
+                let allowed: Vec<&str> = tachi_params::TACHI_AGENT_EVAL_ACTIONS
+                    .iter()
+                    .copied()
+                    .filter(|action| {
+                        tachi_hub::facade_action_allowed(
+                            "tachi_agent_eval",
+                            Some(action),
+                            Some(profile),
+                        )
+                    })
+                    .collect();
+                narrow_action_enum_property(
+                    tool,
+                    &allowed,
+                    "Required agent-eval action allowed by the active profile.",
+                );
+            }
             "tachi_wiki" => {
                 let allowed: Vec<&str> = tachi_params::TACHI_WIKI_ACTIONS
                     .iter()
@@ -499,6 +518,20 @@ fn hide_operator_dispatch_properties(tool: &mut rmcp::model::Tool) {
         for definition in OPERATOR_LAUNCH_DEFINITIONS {
             definitions.remove(*definition);
         }
+    }
+    tool.input_schema = std::sync::Arc::new(schema);
+}
+
+fn seed_action_enum_property(tool: &mut rmcp::model::Tool, actions: &[&str]) {
+    let mut schema = (*tool.input_schema).clone();
+    if let Some(action) = schema
+        .get_mut("properties")
+        .and_then(serde_json::Value::as_object_mut)
+        .and_then(|properties| properties.get_mut("action"))
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        action.insert("type".to_string(), serde_json::json!("string"));
+        action.insert("enum".to_string(), serde_json::json!(actions));
     }
     tool.input_schema = std::sync::Arc::new(schema);
 }
@@ -1433,6 +1466,55 @@ mod tests {
             assert!(
                 remember_properties.contains_key(respond_field),
                 "remember schema lost respond field {respond_field}"
+            );
+        }
+    }
+
+    #[test]
+    fn projected_agent_eval_schema_matches_session_spine_action_gate() {
+        let agent_eval_tool = || {
+            native_tools()
+                .into_iter()
+                .find(|tool| tool.name.as_ref() == "tachi_agent_eval")
+                .expect("native tachi_agent_eval tool")
+        };
+
+        let mut observe = vec![agent_eval_tool()];
+        narrow_gated_action_schemas(&mut observe, Some(tachi_hub::ToolProfile::observe()));
+        let observe_actions = observe[0].input_schema["properties"]["action"]["enum"]
+            .as_array()
+            .expect("observe agent-eval action enum");
+        assert!(observe_actions.contains(&json!("get_session_state")));
+        for denied in [
+            "attach_session",
+            "get_attachment",
+            "ingest_session_event",
+            "mark_session_connection",
+            "reconnect_session",
+            "advertise_session_capabilities",
+            "request_intervention",
+            "record_intervention_result",
+        ] {
+            assert!(
+                !observe_actions.contains(&json!(denied)),
+                "observe schema must hide denied action {denied}"
+            );
+        }
+
+        let mut coordinate = vec![agent_eval_tool()];
+        narrow_gated_action_schemas(&mut coordinate, Some(tachi_hub::ToolProfile::coordinate()));
+        let coordinate_actions = coordinate[0].input_schema["properties"]["action"]["enum"]
+            .as_array()
+            .expect("coordinate agent-eval action enum");
+        for allowed in [
+            "attach_session",
+            "ingest_session_event",
+            "request_intervention",
+            "record_intervention_result",
+        ] {
+            assert!(
+                coordinate_actions.contains(&json!(allowed)),
+                "coordinate schema must retain action {allowed}"
             );
         }
     }
