@@ -529,6 +529,14 @@ pub(crate) fn read_projection(
         .filter_map(|transition| transition.get("verdict").and_then(Value::as_str))
         .find(|verdict| *verdict == VERDICT_ORPHANED || *verdict == VERDICT_INCONSISTENT);
 
+    // A contradictory identity record projects as unknown even when its
+    // INCONSISTENT observation failed to persist (unwritable storage,
+    // malformed reconciliation shape): the read path never converts a
+    // detectable inconsistency into a guessed orphan.
+    let identity_consistent = identity
+        .as_object()
+        .map(|map| identity_record_is_consistent(status, map))
+        .unwrap_or(false);
     let execution_state = if terminal {
         // Terminal wins over everything; a stale pre-restart receipt can
         // never regress a newer terminal state, and reconciliation never
@@ -540,6 +548,8 @@ pub(crate) fn read_projection(
         json!("unknown")
     } else if last_verdict == Some(VERDICT_ORPHANED) {
         json!("orphaned")
+    } else if !identity_consistent {
+        json!("unknown")
     } else if accepted_epoch.is_some() && accepted_epoch != Some(current_epoch) {
         json!("orphaned")
     } else if has_live_same_daemon_control {
@@ -553,6 +563,17 @@ pub(crate) fn read_projection(
         json!("available")
     } else {
         json!("unavailable")
+    };
+    // The third honest fact: the run's OUTCOME. Terminal receipts know it;
+    // a run under live same-epoch control has it pending; anything else —
+    // foreign epoch, orphan verdict, inconsistent identity — owes an
+    // outcome it cannot know, and must say so rather than guess.
+    let outcome_state = if terminal {
+        json!("known")
+    } else if has_live_same_daemon_control && accepted_epoch == Some(current_epoch) {
+        json!("pending")
+    } else {
+        json!("unknown")
     };
     let mut artifacts = serde_json::Map::new();
     for name in identity
@@ -568,6 +589,7 @@ pub(crate) fn read_projection(
     Some(json!({
         "execution_state": execution_state,
         "control_state": control_state,
+        "outcome_state": outcome_state,
         "controller_epoch_id": accepted_epoch,
         "current_controller_epoch_id": current_epoch,
         "reconciliation": status.get(RECONCILIATION_KEY).cloned().unwrap_or(Value::Null),

@@ -247,6 +247,62 @@ async fn cancel_after_restart_is_unavailable_with_zero_side_effect() {
     );
 }
 
+/// Required discrimination 12 widened: the epoch non-inheritance guard must
+/// refuse BEFORE a populated same-daemon control channel is ever consulted —
+/// a registered live handle plus a foreign-epoch receipt yields the typed
+/// unavailable response with ZERO signal to the child. The earlier
+/// zero-side-effect test ran with an empty registry; this one proves the
+/// guard's ordering against a live handle.
+#[cfg(unix)]
+#[tokio::test]
+#[allow(clippy::await_holding_lock)] // serializes process-global env through the env-restore guards
+async fn cancel_after_restart_never_signals_a_populated_control_channel() {
+    let _serial = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (home, runs) = test_env();
+    let _home = crate::test_support::EnvRestore::set_path("TACHI_HOME", home.path());
+    let _runs_env = crate::test_support::EnvRestore::set_path("TACHI_RUN_ROOT", runs.path());
+    let dispatch_id = "20260829T120016Z-s1-cancel-populated-channel";
+    stage_managed_run(dispatch_id, "ctrl-epoch-a", "TASK_STATE_WORKING");
+    let server =
+        crate::MemoryServer::new(home.path().join("server.sqlite"), None).expect("epoch B server");
+    record_startup_reconciliation(&server);
+    let run_dir = crate::dispatch_ops::dispatch_runs_root().join(dispatch_id);
+    let before = std::fs::read(run_dir.join("status.json")).expect("read before cancel");
+    let revision = read_status(&run_dir)["status_revision"]
+        .as_u64()
+        .expect("revision");
+
+    // Register a LIVE control handle for this run on the current daemon —
+    // the epoch guard must refuse without ever delivering to it.
+    let (mut receiver, _run_guard) = server
+        .managed_run_controls
+        .register(dispatch_id)
+        .expect("register live control handle");
+
+    let response =
+        crate::managed_run_control::request_managed_custom_cancel(&server, dispatch_id, revision)
+            .await
+            .expect("typed unavailable response");
+    let receipt: Value =
+        serde_json::from_str(&response).expect("response is canonical receipt JSON");
+    assert_eq!(receipt["receipt"], "cancellation_unavailable");
+    assert_eq!(
+        receipt["reason"], "controller_epoch_mismatch",
+        "a populated channel cannot buy back post-restart control authority"
+    );
+    assert!(
+        receiver.try_recv().is_err(),
+        "the epoch guard must refuse BEFORE the registered live handle is signaled"
+    );
+    assert_eq!(
+        std::fs::read(run_dir.join("status.json")).expect("read after cancel"),
+        before,
+        "the refused cancellation must not write anything to the receipt"
+    );
+}
+
 /// Required discrimination 5 + 7: no retry/redispatch and no ExecEnv/worktree
 /// cleanup happen merely because the controller epoch changed — the runs root
 /// grows no new dispatch directories and existing run artifacts are
@@ -366,6 +422,10 @@ async fn read_projection_after_restart_separates_execution_control_and_artifacts
     assert_eq!(
         projection["control_state"], "unavailable",
         "control state is a separate fact from execution state"
+    );
+    assert_eq!(
+        projection["outcome_state"], "unknown",
+        "outcome is the third separate fact: a nonterminal run with no live control owes an outcome it cannot know"
     );
     assert_eq!(projection["controller_epoch_id"], "ctrl-epoch-a");
     assert_eq!(
@@ -862,6 +922,45 @@ fn inconsistent_record_projects_unknown_not_orphaned() {
         "an inconsistent record projects unknown, never a guessed orphan"
     );
     assert_eq!(projection["control_state"], "unavailable");
+}
+
+/// Failed-append discrimination: a contradictory identity whose INCONSISTENT
+/// observation FAILED to persist (malformed reconciliation shape blocks the
+/// append) still projects unknown on the read path — the read never converts
+/// a detectable inconsistency into a guessed orphan.
+#[test]
+fn inconsistent_identity_with_failed_append_still_projects_unknown() {
+    let runs = tempfile::tempdir().expect("runs");
+    let dispatch_id = "20260829T120015Z-s1-inconsistent-append-failed";
+    let run_dir = runs.path().join(dispatch_id);
+    std::fs::create_dir_all(&run_dir).expect("run dir");
+    // Foreign epoch AND contradictory identity; the reconciliation key is
+    // malformed (not an object) so appending the INCONSISTENT observation
+    // fails deterministically at reconciliation_shape_not_an_object.
+    let status = json!({
+        "dispatch_id": "another-run",
+        "state": "TASK_STATE_WORKING",
+        "status_revision": 1,
+        "managed_run_reconciliation": "not-an-object",
+        "managed_run_identity": {
+            "managed_run_id": dispatch_id,
+            "controller_epoch_id": "ctrl-epoch-a",
+        },
+    });
+    std::fs::write(
+        run_dir.join("status.json"),
+        serde_json::to_vec_pretty(&status).expect("serialize"),
+    )
+    .expect("write receipt");
+    let projection = read_projection(&status, &run_dir, "ctrl-epoch-b", false).expect("projection");
+    assert_eq!(
+        projection["execution_state"], "unknown",
+        "a detectable inconsistency projects unknown even when its durable observation failed to persist — never a guessed orphan"
+    );
+    assert_eq!(
+        projection["outcome_state"], "unknown",
+        "the outcome fact stays unknown alongside the honest execution fact"
+    );
 }
 
 /// Codex R2 finding 6 (fixed): artifact-ref consumption is confined to the
