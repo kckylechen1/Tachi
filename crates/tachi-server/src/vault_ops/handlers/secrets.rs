@@ -2,12 +2,13 @@ use super::*;
 
 pub(crate) async fn handle_vault_set(
     server: &MemoryServer,
-    params: VaultSetParams,
+    mut params: VaultSetParams,
 ) -> Result<String, String> {
     let secret_name = params.name.clone();
+    let value = crypto::ZeroizingString::new(std::mem::take(&mut params.value));
     let result = (|| {
         crypto::validate_secret_name(&params.name)?;
-        if params.value.trim().is_empty() {
+        if value.trim().is_empty() {
             return Err("Secret value cannot be empty".to_string());
         }
         authorize_vault_mutation(server, &params.name, params.agent_id.as_deref())
@@ -18,8 +19,9 @@ pub(crate) async fn handle_vault_set(
             } else {
                 normalize_secret_type(&params.secret_type)
             };
+            validate_lane_slot_secret_type(&params.name, secret_type)?;
             let allowed_agents = normalize_allowed_agents(params.allowed_agents.clone());
-            let (encrypted_value, nonce) = crypto::encrypt(key, params.value.as_bytes())?;
+            let (encrypted_value, nonce) = crypto::encrypt(key, value.as_bytes())?;
 
             server.with_global_store(|store| {
                 // Keep the old-value decision and the resulting write in one
@@ -59,7 +61,7 @@ pub(crate) async fn handle_vault_set(
                         };
                         let other_fingerprint = fingerprint_secret(key, kind, &other_value);
                         crypto::zero_string(&mut other_value);
-                        if other_fingerprint == fingerprint_secret(key, kind, &params.value) {
+                        if other_fingerprint == fingerprint_secret(key, kind, &value) {
                             return Err(copy_existing_account_message(&params.name, &other.name));
                         }
                     }
@@ -83,7 +85,7 @@ pub(crate) async fn handle_vault_set(
                                     provider_kind_for_env_name(&params.name).unwrap_or("unknown");
                                 let overwrite = evaluate_lane_slot_overwrite(
                                     &old_value,
-                                    &params.value,
+                                    &value,
                                     provider_kind,
                                     key,
                                     params.rebind,

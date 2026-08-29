@@ -49,6 +49,7 @@ pub(super) async fn run_secret_action(
                 .map(memcore::normalize_secret_type)
                 .unwrap_or_else(|| memcore::infer_vault_secret_type(&name))
                 .to_string();
+            crate::vault_ops::validate_lane_slot_secret_type(&name, &secret_type)?;
 
             let store_ro = open_cli_store_read_only(global_db_path)?;
             let config = store_ro

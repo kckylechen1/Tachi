@@ -21,6 +21,15 @@ pub(crate) fn is_lane_slot_secret_name(name: &str) -> bool {
     LANE_SLOT_SECRET_NAMES.contains(&name)
 }
 
+pub(crate) fn validate_lane_slot_secret_type(name: &str, secret_type: &str) -> Result<(), String> {
+    if is_lane_slot_secret_name(name) && secret_type != memcore::vault::SECRET_TYPE_API_KEY {
+        return Err(format!(
+            "Lane slot '{name}' must use secret_type 'api_key'; refusing a type override that would bypass rebind protection."
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum LaneSlotOverwrite {
     Identical { fingerprint: String },
@@ -91,6 +100,15 @@ mod tests {
         assert!(!is_lane_slot_secret_name("DEEPSEEK_API_KEY"));
         assert!(!is_lane_slot_secret_name("SILICONFLOW_API_KEY"));
         assert!(!is_lane_slot_secret_name("ZAI_API_KEY"));
+    }
+
+    #[test]
+    fn lane_slots_refuse_non_api_key_type_overrides() {
+        let error = validate_lane_slot_secret_type("EXTRACT_API_KEY", "other")
+            .expect_err("lane slot type override must fail closed");
+        assert!(error.contains("EXTRACT_API_KEY"), "{error}");
+        assert!(error.contains("api_key"), "{error}");
+        assert!(validate_lane_slot_secret_type("SILICONFLOW_API_KEY", "other").is_ok());
     }
 
     #[test]

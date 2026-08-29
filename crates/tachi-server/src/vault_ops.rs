@@ -41,7 +41,7 @@ pub(crate) use params::{
 };
 pub(crate) use slot_rebind::{
     copy_existing_account_message, evaluate_lane_slot_overwrite, fingerprint_secret,
-    is_lane_slot_secret_name,
+    is_lane_slot_secret_name, validate_lane_slot_secret_type,
 };
 
 #[cfg(test)]

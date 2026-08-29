@@ -169,6 +169,38 @@ async fn lane_slot_rebind_rejects_empty_and_whitespace_values() {
 }
 
 #[tokio::test]
+async fn lane_slot_rebind_rejects_secret_type_override_bypass() {
+    let server = make_server();
+    server
+        .vault_init(Parameters(VaultInitParams {
+            password: "slot-rebind-type-override".to_string(),
+        }))
+        .await
+        .expect("init");
+    server
+        .vault_set(Parameters(slot_params(
+            "EXTRACT_API_KEY",
+            "original-family",
+            false,
+        )))
+        .await
+        .expect("seed slot");
+
+    let mut bypass = slot_params("EXTRACT_API_KEY", "replacement-family", false);
+    bypass.secret_type = "other".to_string();
+    let error = server
+        .vault_set(Parameters(bypass))
+        .await
+        .expect_err("type override must not bypass rebind");
+    assert!(error.contains("must use secret_type 'api_key'"), "{error}");
+    assert!(!error.contains("replacement-family"), "{error}");
+    assert_eq!(
+        slot_value(&server, "EXTRACT_API_KEY").await,
+        "original-family"
+    );
+}
+
+#[tokio::test]
 async fn account_name_rotation_does_not_require_rebind() {
     let server = make_server();
     server
