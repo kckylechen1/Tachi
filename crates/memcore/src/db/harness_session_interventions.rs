@@ -1671,6 +1671,18 @@ mod tests {
             .expect_err("unknown capability content must fail at storage");
         assert!(error.to_string().contains("CHECK constraint"), "{error}");
 
+        for incomplete in ["{}", r#"{"observe":true}"#] {
+            let error = conn
+                .execute(
+                    "INSERT INTO harness_session_capability_advertisements
+                     (attachment_id, advertisement_seq, capabilities_json, source_host_identity, advertised_at)
+                     VALUES (?1, 1, ?2, 'host-1', '2026-08-30T00:00:00Z')",
+                    params![attachment_id, incomplete],
+                )
+                .expect_err("missing capability fields must fail at storage");
+            assert!(error.to_string().contains("CHECK constraint"), "{error}");
+        }
+
         let non_canonical = r#"{ "artifacts":true,"events":true,"load":true,"resume":true,"cancel":true,"prompt":true,"wait":true,"observe":true }"#;
         conn.execute(
             "INSERT INTO harness_session_capability_advertisements

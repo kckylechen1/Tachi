@@ -20,6 +20,106 @@ pub(super) fn migrate_v34_harness_session_spine(conn: &Connection) -> Result<usi
     Ok(7)
 }
 
+/// Upgrade the shipped v34 intervention and capability-advertisement tables
+/// without rewriting the v34 sentinel's meaning. The rebuild preserves row
+/// identities, derives the capability source from the advertisements that
+/// existed when each request was recorded, and canonicalizes the previously
+/// open JSON payload into the closed eight-boolean vocabulary.
+pub(super) fn migrate_v35_harness_session_spine_receipts(
+    conn: &Connection,
+) -> Result<usize, MemoryError> {
+    let has_capability_source: bool = conn.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM pragma_table_info('harness_session_interventions')
+            WHERE name = 'capability_source'
+         )",
+        [],
+        |row| row.get(0),
+    )?;
+    if has_capability_source {
+        crate::db::schema::validate_harness_session_spine_schema(conn)?;
+        return Ok(0);
+    }
+
+    conn.execute_batch(
+        "DROP INDEX IF EXISTS idx_harness_session_interventions_attachment;
+         ALTER TABLE harness_session_interventions
+             RENAME TO harness_session_interventions_v34;
+         ALTER TABLE harness_session_capability_advertisements
+             RENAME TO harness_session_capability_advertisements_v34;",
+    )?;
+    crate::db::schema::install_harness_session_spine_schema(conn)?;
+    conn.execute_batch(
+        "INSERT INTO harness_session_interventions (
+            intervention_row_id, attachment_id, request_id, kind, reason,
+            expected_session_revision, capability_source, requested_by, requested_at
+         )
+         SELECT intervention_row_id, attachment_id, request_id, kind, reason,
+                expected_session_revision,
+                CASE WHEN EXISTS (
+                    SELECT 1
+                    FROM harness_session_capability_advertisements_v34 AS advertisement
+                    WHERE advertisement.attachment_id = intervention.attachment_id
+                      AND advertisement.advertised_at <= intervention.requested_at
+                ) THEN 'advertised' ELSE 'declared' END,
+                requested_by, requested_at
+         FROM harness_session_interventions_v34 AS intervention;
+
+         INSERT INTO harness_session_capability_advertisements (
+            advertisement_row_id, attachment_id, advertisement_seq,
+            capabilities_json, source_host_identity, advertised_at
+         )
+         SELECT advertisement_row_id, attachment_id, advertisement_seq,
+                '{\"observe\":' || CASE WHEN json_type(capabilities_json, '$.observe') = 'true' THEN 'true' ELSE 'false' END ||
+                ',\"wait\":' || CASE WHEN json_type(capabilities_json, '$.wait') = 'true' THEN 'true' ELSE 'false' END ||
+                ',\"prompt\":' || CASE WHEN json_type(capabilities_json, '$.prompt') = 'true' THEN 'true' ELSE 'false' END ||
+                ',\"cancel\":' || CASE WHEN json_type(capabilities_json, '$.cancel') = 'true' THEN 'true' ELSE 'false' END ||
+                ',\"resume\":' || CASE WHEN json_type(capabilities_json, '$.resume') = 'true' THEN 'true' ELSE 'false' END ||
+                ',\"load\":' || CASE WHEN json_type(capabilities_json, '$.load') = 'true' THEN 'true' ELSE 'false' END ||
+                ',\"events\":' || CASE WHEN json_type(capabilities_json, '$.events') = 'true' THEN 'true' ELSE 'false' END ||
+                ',\"artifacts\":' || CASE WHEN json_type(capabilities_json, '$.artifacts') = 'true' THEN 'true' ELSE 'false' END || '}',
+                source_host_identity, advertised_at
+         FROM harness_session_capability_advertisements_v34;
+
+         DROP TABLE harness_session_interventions_v34;
+         DROP TABLE harness_session_capability_advertisements_v34;",
+    )?;
+    crate::db::schema::validate_harness_session_spine_schema(conn)?;
+    Ok(2)
+}
+
+#[cfg(test)]
+pub(super) fn install_shipped_v34_receipt_tables_for_test(conn: &Connection) {
+    conn.execute_batch(
+        "DROP INDEX idx_harness_session_interventions_attachment;
+         DROP TABLE harness_session_interventions;
+         DROP TABLE harness_session_capability_advertisements;
+         CREATE TABLE harness_session_interventions (
+            intervention_row_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            attachment_id TEXT NOT NULL REFERENCES harness_session_attachments(attachment_id),
+            request_id TEXT NOT NULL CHECK (length(request_id) <= 128 AND length(trim(request_id)) > 0 AND instr(CAST(request_id AS BLOB), CAST(x'00' AS BLOB)) = 0),
+            kind TEXT NOT NULL CHECK (kind IN ('request_status', 'prompt_or_correct', 'request_pause', 'request_cancel', 'request_resume')),
+            reason TEXT NOT NULL CHECK (length(reason) > 0 AND length(reason) <= 1000 AND instr(CAST(reason AS BLOB), CAST(x'00' AS BLOB)) = 0),
+            expected_session_revision INTEGER NOT NULL CHECK (expected_session_revision >= 0),
+            requested_by TEXT NOT NULL CHECK (length(trim(requested_by)) > 0),
+            requested_at TEXT NOT NULL,
+            UNIQUE (attachment_id, request_id)
+         );
+         CREATE INDEX idx_harness_session_interventions_attachment
+            ON harness_session_interventions(attachment_id, requested_at);
+         CREATE TABLE harness_session_capability_advertisements (
+            advertisement_row_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            attachment_id TEXT NOT NULL REFERENCES harness_session_attachments(attachment_id),
+            advertisement_seq INTEGER NOT NULL CHECK (advertisement_seq >= 1),
+            capabilities_json TEXT NOT NULL CHECK (json_valid(capabilities_json)),
+            source_host_identity TEXT NOT NULL CHECK (length(trim(source_host_identity)) > 0),
+            advertised_at TEXT NOT NULL,
+            UNIQUE (attachment_id, advertisement_seq)
+         );",
+    )
+    .unwrap();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -33,6 +133,53 @@ mod tests {
             "migration receipt count is stable on replay"
         );
         crate::db::schema::validate_harness_session_spine_schema(&conn).unwrap();
+    }
+
+    #[test]
+    fn v35_rebuilds_shipped_v34_receipts_and_preserves_rows() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = OFF;").unwrap();
+        migrate_v34_harness_session_spine(&conn).unwrap();
+        install_shipped_v34_receipt_tables_for_test(&conn);
+        conn.execute_batch(
+            "INSERT INTO harness_session_capability_advertisements
+                (advertisement_row_id, attachment_id, advertisement_seq, capabilities_json, source_host_identity, advertised_at)
+             VALUES (11, 'attachment-old', 1, '{\"observe\":true,\"foreign\":\"discard\"}', 'host-old', '2026-08-29T00:00:00Z');
+             INSERT INTO harness_session_interventions
+                (intervention_row_id, attachment_id, request_id, kind, reason, expected_session_revision, requested_by, requested_at)
+             VALUES (12, 'attachment-old', 'request-old', 'request_status', 'observe', 3, 'host-old', '2026-08-29T00:00:01Z');",
+        )
+        .unwrap();
+
+        assert_eq!(
+            migrate_v35_harness_session_spine_receipts(&conn).unwrap(),
+            2
+        );
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        crate::db::schema::validate_harness_session_spine_schema(&conn).unwrap();
+        let capability_source: String = conn
+            .query_row(
+                "SELECT capability_source FROM harness_session_interventions WHERE intervention_row_id = 12",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(capability_source, "advertised");
+        let capabilities_json: String = conn
+            .query_row(
+                "SELECT capabilities_json FROM harness_session_capability_advertisements WHERE advertisement_row_id = 11",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            capabilities_json,
+            r#"{"observe":true,"wait":false,"prompt":false,"cancel":false,"resume":false,"load":false,"events":false,"artifacts":false}"#
+        );
+        assert_eq!(
+            migrate_v35_harness_session_spine_receipts(&conn).unwrap(),
+            0
+        );
     }
 
     #[test]
@@ -95,7 +242,7 @@ mod tests {
             ),
             (
                 "harness_session_capability_advertisements",
-                "json_type(capabilities_json, '$.observe') IN ('true', 'false')",
+                "COALESCE(json_type(capabilities_json, '$.observe'), '') IN ('true', 'false')",
             ),
         ] {
             let conn = Connection::open_in_memory().unwrap();
