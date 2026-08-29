@@ -164,13 +164,18 @@ fn is_terminal_state(status: &Value) -> bool {
     )
 }
 
-/// A durable identity record is consistent only when every field the
-/// epoch discriminator depends on is present and agrees with the receipt:
-/// `managed_run_id` and the record's own `dispatch_id` must equal the
-/// top-level `dispatch_id`, `controller_epoch_id` must be present, and
-/// `lifecycle_mode` must be the managed batch mode. Anything missing or
-/// contradictory is typed `inconsistent` — never a best-effort guessed
-/// owner or a foreign-epoch orphan claim built on an unusable identity.
+/// A durable identity record is consistent only when every field the epoch
+/// discriminator and the revision linkage depend on is present, non-empty,
+/// type-correct, and agrees with the receipt: `managed_run_id` and the
+/// record's own `dispatch_id` must equal the top-level `dispatch_id`,
+/// `controller_epoch_id` must be a non-empty string, `lifecycle_mode` must
+/// be the managed batch mode, and `receipt_revision_at_acceptance` must be
+/// a u64. Anything missing, empty, wrongly typed, or contradictory is typed
+/// `inconsistent` — never a best-effort guessed owner or a foreign-epoch
+/// orphan claim built on an unusable identity. (The record's REMAINING keys
+/// are deliberately not re-validated here: the builder owns the closed
+/// shape, and rejecting well-formed records over future additive fields
+/// would make every legitimate evolution read as a contradiction.)
 fn identity_record_is_consistent(
     status: &Value,
     identity: &serde_json::Map<String, Value>,
@@ -180,11 +185,16 @@ fn identity_record_is_consistent(
     let identity_dispatch = identity.get("dispatch_id").and_then(Value::as_str);
     let identity_epoch = identity.get("controller_epoch_id").and_then(Value::as_str);
     let lifecycle_mode = identity.get("lifecycle_mode").and_then(Value::as_str);
+    let revision = identity
+        .get("receipt_revision_at_acceptance")
+        .and_then(Value::as_u64);
     dispatch_id.is_some_and(|dispatch_id| {
-        dispatch_id == identity_run_id.unwrap_or_default()
+        !dispatch_id.is_empty()
+            && Some(dispatch_id) == identity_run_id
             && identity_dispatch == Some(dispatch_id)
-            && identity_epoch.is_some()
+            && identity_epoch.is_some_and(|epoch| !epoch.is_empty())
             && lifecycle_mode == Some("TachiManagedBatch")
+            && revision.is_some()
     })
 }
 
@@ -273,11 +283,41 @@ pub(crate) fn reconcile_interrupted_managed_runs(
                 continue;
             }
         };
-        let Some(identity) = status.get(IDENTITY_KEY).and_then(Value::as_object) else {
+        let Some(identity) = status.get(IDENTITY_KEY) else {
             // No durable identity record: this receipt predates durable
             // identity or is not a managed run. Reconciliation makes no
             // claim about it.
             continue;
+        };
+        // Terminal wins over everything: a terminal receipt is never
+        // rewritten, never reopened, and never appended to — not even to
+        // record that its identity is malformed.
+        if is_terminal_state(&status) {
+            continue;
+        }
+        let identity = match identity.as_object() {
+            Some(identity) => identity,
+            None => {
+                // A present-but-non-object identity record is itself a
+                // contradiction: typed inconsistent, never guessed about.
+                let label = status
+                    .get("dispatch_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| run_dir.display().to_string());
+                match append_reconciliation_observation(
+                    &run_dir,
+                    "inconsistent",
+                    current_epoch,
+                    None,
+                    status.get("state").and_then(Value::as_str),
+                ) {
+                    Ok(true) => outcome.inconsistent.push(label),
+                    Ok(false) => {}
+                    Err(failure) => outcome.append_failures.push(format!("{label}:{failure}")),
+                }
+                continue;
+            }
         };
         if !identity_record_is_consistent(&status, identity) {
             let label = status
@@ -303,11 +343,6 @@ pub(crate) fn reconcile_interrupted_managed_runs(
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string();
-        if is_terminal_state(&status) {
-            // Terminal stays terminal — byte/semantically terminal, never
-            // reopened, no orphan observation.
-            continue;
-        }
         if accepted_controller_epoch(&status) == Some(current_epoch) {
             // This incarnation accepted the run itself; its lifecycle is
             // same-daemon and not reconciled here.
@@ -340,16 +375,7 @@ pub(crate) fn reconcile_interrupted_managed_runs(
 /// transition. Idempotency is keyed on the transition's existence, not on
 /// which epoch recorded it.
 fn already_reconciled(status: &Value) -> bool {
-    status
-        .get(RECONCILIATION_KEY)
-        .and_then(|reconciliation| reconciliation.get("transitions"))
-        .and_then(Value::as_array)
-        .is_some_and(|transitions| {
-            transitions.iter().any(|transition| {
-                transition.get("verdict").and_then(Value::as_str)
-                    == Some("orphaned_control_unavailable")
-            })
-        })
+    has_verdict(status, VERDICT_ORPHANED)
 }
 
 /// Append one typed reconciliation observation to the run's existing
@@ -357,6 +383,24 @@ fn already_reconciled(status: &Value) -> bool {
 /// revision (the append is revision-bound like every canonical write).
 /// Prior receipt content is preserved byte-semantically: only
 /// `managed_run_reconciliation` and `status_revision` change.
+const VERDICT_ORPHANED: &str = "orphaned_control_unavailable";
+const VERDICT_INCONSISTENT: &str = "inconsistent";
+
+fn transitions_of(status: &Value) -> &[Value] {
+    status
+        .get(RECONCILIATION_KEY)
+        .and_then(|reconciliation| reconciliation.get("transitions"))
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
+}
+
+fn has_verdict(status: &Value, verdict: &str) -> bool {
+    transitions_of(status)
+        .iter()
+        .any(|transition| transition.get("verdict").and_then(Value::as_str) == Some(verdict))
+}
+
 fn append_reconciliation_observation(
     run_dir: &Path,
     verdict: &str,
@@ -367,24 +411,30 @@ fn append_reconciliation_observation(
     let status_path = run_dir.join("status.json");
     let lock = crate::dispatch_ops::status_json_lock_for(run_dir);
     let _guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    // Revalidate the run directory WITHOUT following symlinks: a directory
+    // swapped for a symlink between the scan and this append must not let
+    // the atomic write land outside the runs root.
+    let still_real_directory = std::fs::symlink_metadata(run_dir)
+        .map(|metadata| metadata.is_dir())
+        .unwrap_or(false);
+    if !still_real_directory {
+        return Err("run_dir_not_a_real_directory".to_string());
+    }
     // Re-read under the lock: a completion that landed between the scan and
     // this append must win; a run that turned terminal is never appended to.
     let bytes = std::fs::read(&status_path).map_err(|error| format!("read_failed:{error}"))?;
     let mut status: Value = serde_json::from_slice(&bytes)
         .map_err(|error| format!("receipt_unparsable_at_append:{error}"))?;
-    if let Some(existing) = status
-        .get(RECONCILIATION_KEY)
-        .and_then(|reconciliation| reconciliation.get("transitions"))
-        .and_then(Value::as_array)
-    {
-        if !existing.is_empty() {
-            // Exactly-once: any prior reconciliation observation (orphan or
-            // inconsistent) already exists. Never duplicate.
+    // Exactly-once is per verdict: a recorded orphan transition suppresses
+    // another orphan append; a recorded inconsistent observation suppresses
+    // another inconsistent append. Malformed or unrelated prior content
+    // must NEVER suppress the fact this run still owes.
+    if verdict == VERDICT_ORPHANED {
+        if is_terminal_state(&status) || has_verdict(&status, VERDICT_ORPHANED) {
+            // Terminal now, or the orphan fact already exists.
             return Ok(false);
         }
-    }
-    if verdict == "orphaned_control_unavailable" && is_terminal_state(&status) {
-        // Lost the race honestly; nothing to append.
+    } else if verdict == VERDICT_INCONSISTENT && has_verdict(&status, VERDICT_INCONSISTENT) {
         return Ok(false);
     }
     let transition = json!({
@@ -393,7 +443,7 @@ fn append_reconciliation_observation(
         "reconciling_controller_epoch_id": reconciling_epoch,
         "accepted_controller_epoch_id": accepted_epoch,
         "prior_state": prior_state,
-        "execution_state": if verdict == "inconsistent" {
+        "execution_state": if verdict == VERDICT_INCONSISTENT {
             Value::String("unknown".to_string())
         } else {
             Value::String("orphaned".to_string())

@@ -1131,3 +1131,243 @@ fn malformed_identity_variants_become_inconsistent_not_orphaned() {
         assert_eq!(transitions[0]["execution_state"], "unknown");
     }
 }
+
+/// Codex R4 finding 3 (fixed): a TERMINAL receipt with a malformed identity
+/// is never rewritten — terminal wins before any identity validation, so the
+/// receipt stays byte/semantically terminal.
+#[test]
+fn terminal_receipt_with_malformed_identity_is_never_touched() {
+    let _serial = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (home, _runs) = test_env();
+    let _home = crate::test_support::EnvRestore::set_path("TACHI_HOME", home.path());
+    let runs_root = crate::dispatch_ops::dispatch_runs_root();
+    let dispatch_id = "20260829T120021Z-s1-terminal-malformed";
+    let run_dir = runs_root.join(dispatch_id);
+    std::fs::create_dir_all(&run_dir).expect("run dir");
+    let receipt = json!({
+        "dispatch_id": dispatch_id,
+        "state": "TASK_STATE_COMPLETED",
+        "status_revision": 9,
+        "managed_run_identity": {
+            "managed_run_id": "different-run",
+        },
+    });
+    std::fs::write(
+        run_dir.join("status.json"),
+        serde_json::to_vec_pretty(&receipt).expect("serialize"),
+    )
+    .expect("write terminal malformed receipt");
+    let before = std::fs::read(run_dir.join("status.json")).expect("read before");
+
+    let server = crate::MemoryServer::new(home.path().join("server.sqlite"), None).expect("server");
+    record_startup_reconciliation(&server);
+    let outcome = server
+        .startup_reconciliation
+        .get()
+        .expect("outcome")
+        .clone();
+    assert!(
+        outcome.orphaned.is_empty() && outcome.inconsistent.is_empty(),
+        "terminal receipts are never appended to: {outcome:?}"
+    );
+    assert_eq!(
+        std::fs::read(run_dir.join("status.json")).expect("read after"),
+        before,
+        "terminal stays byte-terminal even with a malformed identity"
+    );
+}
+
+/// Codex R4 finding 2 (fixed): the remaining identity-validation holes —
+/// non-object identity records, empty epoch strings, and non-u64
+/// `receipt_revision_at_acceptance` — are typed inconsistent, never orphaned
+/// and never silently skipped.
+#[test]
+fn additional_malformed_identity_variants_fail_closed() {
+    let _serial = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (home, _runs) = test_env();
+    let _home = crate::test_support::EnvRestore::set_path("TACHI_HOME", home.path());
+    let runs_root = crate::dispatch_ops::dispatch_runs_root();
+
+    let mutants: [(&str, Value); 3] = [
+        (
+            // Non-object identity: present key, unusable record.
+            "20260829T120022Z-s1-nonobject-identity",
+            json!([]),
+        ),
+        (
+            // Empty epoch string.
+            "20260829T120023Z-s1-empty-epoch",
+            json!({
+                "managed_run_id": "20260829T120023Z-s1-empty-epoch",
+                "dispatch_id": "20260829T120023Z-s1-empty-epoch",
+                "controller_epoch_id": "",
+                "lifecycle_mode": "TachiManagedBatch",
+                "receipt_revision_at_acceptance": 2,
+            }),
+        ),
+        (
+            // Revision linkage present but wrongly typed.
+            "20260829T120024Z-s1-bad-revision",
+            json!({
+                "managed_run_id": "20260829T120024Z-s1-bad-revision",
+                "dispatch_id": "20260829T120024Z-s1-bad-revision",
+                "controller_epoch_id": "ctrl-epoch-a",
+                "lifecycle_mode": "TachiManagedBatch",
+                "receipt_revision_at_acceptance": "invalid",
+            }),
+        ),
+    ];
+    for (dispatch_id, identity) in &mutants {
+        let run_dir = runs_root.join(dispatch_id);
+        std::fs::create_dir_all(&run_dir).expect("run dir");
+        std::fs::write(
+            run_dir.join("status.json"),
+            json!({
+                "dispatch_id": dispatch_id,
+                "state": "TASK_STATE_WORKING",
+                "status_revision": 2,
+                "managed_run_identity": identity,
+            })
+            .to_string(),
+        )
+        .expect("write mutant receipt");
+    }
+
+    let server = crate::MemoryServer::new(home.path().join("server.sqlite"), None).expect("server");
+    record_startup_reconciliation(&server);
+    let outcome = server
+        .startup_reconciliation
+        .get()
+        .expect("outcome")
+        .clone();
+    assert!(
+        outcome.orphaned.is_empty(),
+        "none of the malformed variants may claim a foreign-epoch orphan"
+    );
+    assert_eq!(
+        outcome.inconsistent.len(),
+        3,
+        "every variant is typed inconsistent: {:?}",
+        outcome.inconsistent
+    );
+}
+
+/// Codex R4 finding 4 (fixed): malformed or unrelated prior reconciliation
+/// content must never suppress the orphan fact — a foreign-epoch nonterminal
+/// run whose transitions hold junk still receives its orphan observation.
+#[test]
+fn malformed_prior_reconciliation_never_suppresses_the_orphan_fact() {
+    let _serial = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (home, _runs) = test_env();
+    let _home = crate::test_support::EnvRestore::set_path("TACHI_HOME", home.path());
+    let dispatch_id = "20260829T120025Z-s1-junk-transitions";
+    let run_dir = stage_managed_run(dispatch_id, "ctrl-epoch-a", "TASK_STATE_WORKING");
+    let mut status = read_status(&run_dir);
+    status["managed_run_reconciliation"] = json!({ "transitions": [null] });
+    std::fs::write(
+        run_dir.join("status.json"),
+        serde_json::to_vec_pretty(&status).expect("serialize"),
+    )
+    .expect("write junk-transition receipt");
+
+    let server = crate::MemoryServer::new(home.path().join("server.sqlite"), None).expect("server");
+    record_startup_reconciliation(&server);
+    let outcome = server
+        .startup_reconciliation
+        .get()
+        .expect("outcome")
+        .clone();
+    assert_eq!(
+        outcome.orphaned,
+        vec![dispatch_id.to_string()],
+        "the owed orphan fact is written despite junk prior content"
+    );
+    let transitions = read_status(&run_dir)["managed_run_reconciliation"]["transitions"]
+        .as_array()
+        .expect("transitions")
+        .clone();
+    assert_eq!(
+        transitions.len(),
+        2,
+        "junk entry retained + orphan appended"
+    );
+    assert_eq!(
+        transitions[1]["verdict"], "orphaned_control_unavailable",
+        "the orphan fact is present"
+    );
+}
+
+/// Codex R4 finding 1 (hardened): if the run directory is swapped for a
+/// symlink between the scan and the append, the append refuses instead of
+/// writing through the symlink.
+#[cfg(unix)]
+#[test]
+fn append_refuses_when_run_dir_is_swapped_for_a_symlink() {
+    use std::os::unix::fs::symlink;
+    let runs = tempfile::tempdir().expect("runs");
+    let dispatch_id = "20260829T120026Z-s1-append-swap";
+    let run_dir = stage_managed_run_at(runs.path(), dispatch_id, "ctrl-epoch-a");
+    let outside = tempfile::tempdir().expect("outside");
+    std::fs::remove_dir_all(&run_dir).expect("remove real dir");
+    symlink(outside.path(), &run_dir).expect("swap for symlink");
+
+    let outcome = append_reconciliation_observation(
+        &run_dir,
+        VERDICT_ORPHANED,
+        "ctrl-epoch-b",
+        Some("ctrl-epoch-a"),
+        Some("TASK_STATE_WORKING"),
+    );
+    assert_eq!(
+        outcome.unwrap_err(),
+        "run_dir_not_a_real_directory",
+        "the append must refuse a symlinked run directory"
+    );
+    assert!(
+        !outside.path().join("status.json").exists(),
+        "nothing may be written through the symlink"
+    );
+}
+
+/// Minimal stager used by the append-swap test: same receipt shape as
+/// [`stage_managed_run`] but at an explicit parent.
+fn stage_managed_run_at(
+    runs_root: &std::path::Path,
+    dispatch_id: &str,
+    accepted_epoch: &str,
+) -> std::path::PathBuf {
+    let run_dir = runs_root.join(dispatch_id);
+    std::fs::create_dir_all(&run_dir).expect("run directory");
+    let identity = build_managed_run_identity(
+        dispatch_id,
+        &ManagedRunIdentityInput {
+            controller_epoch_id: accepted_epoch.to_string(),
+            assignment_ref: "assign-s1".to_string(),
+            assignment_identity_digest: None,
+            execution_grant_ref: "grant-s1".to_string(),
+            exec_env_ref: None,
+            launch_spec_digest: None,
+            backend_name: "custom".to_string(),
+            backend_metadata_digest: None,
+        },
+        3,
+    );
+    std::fs::write(
+        run_dir.join("status.json"),
+        json!({
+            "dispatch_id": dispatch_id,
+            "state": "TASK_STATE_WORKING",
+            "status_revision": 3,
+            "managed_run_identity": identity,
+        })
+        .to_string(),
+    )
+    .expect("write staged receipt");
+    run_dir
+}
