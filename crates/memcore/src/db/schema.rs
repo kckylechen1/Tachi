@@ -496,6 +496,14 @@ pub(crate) fn validate_harness_session_spine_schema(conn: &Connection) -> Result
         ),
         (
             "harness_session_interventions",
+            "length(reason) > 0",
+        ),
+        (
+            "harness_session_interventions",
+            "length(reason) <= 1000",
+        ),
+        (
+            "harness_session_interventions",
             "length(trim(request_id)) > 0",
         ),
         (
@@ -542,7 +550,15 @@ pub(crate) fn validate_harness_session_spine_schema(conn: &Connection) -> Result
         ),
         (
             "harness_session_intervention_results",
+            "length(detail) > 0",
+        ),
+        (
+            "harness_session_intervention_results",
             "length(detail) <= 2000",
+        ),
+        (
+            "harness_session_intervention_results",
+            "length(authority_confirmation_ref) <= 128",
         ),
         (
             "harness_session_intervention_results",
