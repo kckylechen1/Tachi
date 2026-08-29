@@ -73,14 +73,8 @@ pub(crate) fn lease_api_key_from_store(
     let rotation = store
         .vault_get_rotation(logical_name)
         .map_err(|e| format!("vault_get_rotation: {e}"))?;
-    let configured_member_prefix = if rotation.is_none() {
-        crate::provider_config::parse_rotation_member_name(logical_name)
-            .map(|(prefix, _)| prefix.to_string())
-            .filter(|prefix| store.vault_get_rotation(prefix).ok().flatten().is_some())
-    } else {
-        None
-    };
-    let health_logical_name = configured_member_prefix.as_deref().unwrap_or(logical_name);
+    let health_logical_name =
+        crate::vault_ops::canonical_api_key_health_logical_name(store, logical_name)?;
 
     let candidate_names = if let Some(rotation) = rotation.as_ref() {
         let total = rotation.total_keys.max(0);
@@ -115,7 +109,7 @@ pub(crate) fn lease_api_key_from_store(
             continue;
         }
         if let Some(health) = store
-            .vault_get_key_health(health_logical_name, &candidate)
+            .vault_get_key_health(&health_logical_name, &candidate)
             .map_err(|e| format!("vault_get_key_health: {e}"))?
         {
             if key_health_blocks_cli(&health) {
