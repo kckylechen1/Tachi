@@ -198,6 +198,51 @@ async fn lane_slot_refuses_copying_existing_account_ciphertext() {
     assert!(!err.contains("shared-siliconflow-bytes"), "{err}");
 }
 
+/// Copy protection remains in force when the lane slot already exists and the
+/// caller explicitly requests a rebind. Rebind changes an account family; it
+/// must not create a second ciphertext for the same account credential.
+#[tokio::test]
+async fn existing_lane_slot_refuses_account_copy_even_with_rebind() {
+    let server = make_server();
+    server
+        .vault_init(Parameters(VaultInitParams {
+            password: "slot-rebind-existing-copy".to_string(),
+        }))
+        .await
+        .expect("init");
+    server
+        .vault_set(Parameters(slot_params(
+            "EXTRACT_API_KEY",
+            "old-slot-family",
+            false,
+        )))
+        .await
+        .expect("initial slot write");
+    server
+        .vault_set(Parameters(slot_params(
+            "SILICONFLOW_API_KEY",
+            "shared-account-bytes",
+            false,
+        )))
+        .await
+        .expect("account write");
+
+    let err = server
+        .vault_set(Parameters(slot_params(
+            "EXTRACT_API_KEY",
+            "shared-account-bytes",
+            true,
+        )))
+        .await
+        .expect_err("existing slot must reject account copy");
+    assert!(err.contains("vault:SILICONFLOW_API_KEY"), "{err}");
+    assert!(!err.contains("shared-account-bytes"), "{err}");
+    assert_eq!(
+        slot_value(&server, "EXTRACT_API_KEY").await,
+        "old-slot-family"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn concurrent_first_writers_cannot_bypass_lane_slot_rebind() {
     let server = make_server();

@@ -59,16 +59,66 @@ pub(super) async fn run_secret_action(
                 return Err("Secret value cannot be empty".into());
             }
 
-            let is_new = !open_cli_store_read_only(global_db_path)?
+            let now = chrono::Utc::now().to_rfc3339();
+            let mut store = open_cli_store(global_db_path)?;
+            let transaction = store
+                .begin_vault_transaction()
+                .map_err(|e| format!("begin vault transaction: {e}"))?;
+            let is_new = !transaction
                 .vault_entry_exists(&name)
                 .map_err(|e| format!("vault_entry_exists: {e}"))?;
 
             if crate::vault_ops::is_lane_slot_secret_name(&name)
                 && secret_type == memcore::vault::SECRET_TYPE_API_KEY
-                && !is_new
             {
-                let store_ro = open_cli_store_read_only(global_db_path)?;
-                if let Some(existing) = store_ro
+                // This scan and the slot decision are deliberately inside the
+                // same IMMEDIATE transaction as the upsert. It prevents both
+                // concurrent first writers from observing an empty slot, and
+                // applies copy protection to existing slots as well.
+                let entries = transaction
+                    .vault_list_entries()
+                    .map_err(|e| format!("vault_list_entries: {e}"))?;
+                for other in entries {
+                    if other.name == name
+                        || other.secret_type != memcore::vault::SECRET_TYPE_API_KEY
+                        || crate::vault_ops::is_lane_slot_secret_name(&other.name)
+                    {
+                        continue;
+                    }
+                    let Some(provider_kind) =
+                        crate::status_ops::status_health::provider_kind_for_env_name(&other.name)
+                    else {
+                        continue;
+                    };
+                    let Ok(plain) = crate::vault_crypto::decrypt(
+                        key.bytes(),
+                        &other.encrypted_value,
+                        &other.nonce,
+                    ) else {
+                        continue;
+                    };
+                    let Ok(other_value) = String::from_utf8(plain) else {
+                        continue;
+                    };
+                    if crate::vault_ops::fingerprint_secret(
+                        key.bytes(),
+                        provider_kind,
+                        &other_value,
+                    ) == crate::vault_ops::fingerprint_secret(
+                        key.bytes(),
+                        provider_kind,
+                        &secret_value,
+                    ) {
+                        crate::vault_crypto::zero_string(&mut secret_value);
+                        return Err(crate::vault_ops::copy_existing_account_message(
+                            &name,
+                            &other.name,
+                        )
+                        .into());
+                    }
+                }
+
+                if let Some(existing) = transaction
                     .vault_get_entry(&name)
                     .map_err(|e| format!("vault_get_entry: {e}"))?
                 {
@@ -102,7 +152,6 @@ pub(super) async fn run_secret_action(
             crate::vault_crypto::zero_string(&mut secret_value);
             let (encrypted_value, nonce) = encrypt_result?;
 
-            let now = chrono::Utc::now().to_rfc3339();
             let entry = memcore::vault::VaultEntry {
                 name: name.clone(),
                 encrypted_value,
@@ -116,10 +165,12 @@ pub(super) async fn run_secret_action(
                 access_count: 0,
             };
 
-            let store = open_cli_store(global_db_path)?;
-            store
+            transaction
                 .vault_upsert_entry(&entry)
                 .map_err(|e| format!("vault_upsert_entry: {e}"))?;
+            transaction
+                .commit()
+                .map_err(|e| format!("commit vault transaction: {e}"))?;
 
             println!("Secret '{name}' saved (type: {secret_type}).");
             Ok(())

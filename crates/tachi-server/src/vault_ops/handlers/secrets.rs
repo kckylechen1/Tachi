@@ -29,38 +29,34 @@ pub(crate) async fn handle_vault_set(
 
                 let mut rebind_meta: Option<(bool, String, String)> = None;
                 if is_lane_slot_secret_name(&params.name) && secret_type == SECRET_TYPE_API_KEY {
-                    if is_new {
-                        let entries = store
-                            .vault_list_entries()
-                            .map_err(|e| format!("Failed to list entries: {e}"))?;
-                        for other in entries {
-                            if other.name == params.name
-                                || other.secret_type != SECRET_TYPE_API_KEY
-                                || is_lane_slot_secret_name(&other.name)
-                            {
-                                continue;
-                            }
-                            let Some(kind) = provider_kind_for_env_name(&other.name) else {
-                                continue;
-                            };
-                            let Ok(plain) =
-                                crypto::decrypt(key, &other.encrypted_value, &other.nonce)
-                            else {
-                                continue;
-                            };
-                            let Ok(other_value) = String::from_utf8(plain) else {
-                                continue;
-                            };
-                            if fingerprint_secret(key, kind, &other_value)
-                                == fingerprint_secret(key, kind, &params.value)
-                            {
-                                return Err(copy_existing_account_message(
-                                    &params.name,
-                                    &other.name,
-                                ));
-                            }
+                    let entries = store
+                        .vault_list_entries()
+                        .map_err(|e| format!("Failed to list entries: {e}"))?;
+                    for other in entries {
+                        if other.name == params.name
+                            || other.secret_type != SECRET_TYPE_API_KEY
+                            || is_lane_slot_secret_name(&other.name)
+                        {
+                            continue;
                         }
-                    } else {
+                        let Some(kind) = provider_kind_for_env_name(&other.name) else {
+                            continue;
+                        };
+                        let Ok(plain) = crypto::decrypt(key, &other.encrypted_value, &other.nonce)
+                        else {
+                            continue;
+                        };
+                        let Ok(other_value) = String::from_utf8(plain) else {
+                            continue;
+                        };
+                        if fingerprint_secret(key, kind, &other_value)
+                            == fingerprint_secret(key, kind, &params.value)
+                        {
+                            return Err(copy_existing_account_message(&params.name, &other.name));
+                        }
+                    }
+
+                    if !is_new {
                         let existing = store
                             .vault_get_entry(&params.name)
                             .map_err(|e| format!("Failed to read existing slot: {e}"))?;

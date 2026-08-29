@@ -29,7 +29,10 @@ pub(crate) use params::{
     VaultRecordKeyResultParams, VaultRemoveParams, VaultSetApiKeyPoolParams, VaultSetParams,
     VaultSetupRotationParams, VaultUnlockParams,
 };
-pub(crate) use slot_rebind::{evaluate_lane_slot_overwrite, is_lane_slot_secret_name};
+pub(crate) use slot_rebind::{
+    copy_existing_account_message, evaluate_lane_slot_overwrite, fingerprint_secret,
+    is_lane_slot_secret_name,
+};
 
 #[cfg(test)]
 mod tests;
