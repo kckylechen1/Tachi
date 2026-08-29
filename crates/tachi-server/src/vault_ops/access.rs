@@ -261,8 +261,10 @@ pub(super) fn load_unlocked_vault_secrets(
             }
 
             let decrypted = crypto::decrypt(key, &entry.encrypted_value, &entry.nonce)?;
-            let value = String::from_utf8(decrypted)
-                .map_err(|_| super::VAULT_MATERIALIZATION_INVALID_UTF8.to_string())?;
+            let value = crypto::decode_utf8_zeroizing(
+                decrypted,
+                super::VAULT_MATERIALIZATION_INVALID_UTF8,
+            )?;
             if !value.trim().is_empty() {
                 secrets.push((entry.name, value));
             }
@@ -438,8 +440,10 @@ fn load_unlocked_api_key_secret_pools_filtered(
                     continue;
                 }
                 let decrypted = crypto::decrypt(key, &entry.encrypted_value, &entry.nonce)?;
-                let value = String::from_utf8(decrypted)
-                    .map_err(|_| super::VAULT_MATERIALIZATION_INVALID_UTF8.to_string())?;
+                let value = crypto::decode_utf8_zeroizing(
+                    decrypted,
+                    super::VAULT_MATERIALIZATION_INVALID_UTF8,
+                )?;
                 if value.trim().is_empty() {
                     record_rotation_listed_drop(
                         &mut dropped,
@@ -494,8 +498,10 @@ fn load_unlocked_api_key_secret_pools_filtered(
                 continue;
             }
             let decrypted = crypto::decrypt(key, &entry.encrypted_value, &entry.nonce)?;
-            let value = String::from_utf8(decrypted)
-                .map_err(|_| super::VAULT_MATERIALIZATION_INVALID_UTF8.to_string())?;
+            let value = crypto::decode_utf8_zeroizing(
+                decrypted,
+                super::VAULT_MATERIALIZATION_INVALID_UTF8,
+            )?;
             if value.trim().is_empty() {
                 record_listed_drop(&mut dropped, &entry.name, AliasSkipClass::ListedEmpty);
                 continue;

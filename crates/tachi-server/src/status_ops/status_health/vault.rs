@@ -168,12 +168,11 @@ fn scan_keychain_api_key_entries(
         }
         let decrypted =
             crate::vault_crypto::decrypt(key.bytes(), &entry.encrypted_value, &entry.nonce)?;
-        let value = String::from_utf8(decrypted).map_err(|_| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                crate::vault_ops::VAULT_MATERIALIZATION_INVALID_UTF8,
-            )
-        })?;
+        let value = crate::vault_crypto::decode_utf8_zeroizing(
+            decrypted,
+            crate::vault_ops::VAULT_MATERIALIZATION_INVALID_UTF8,
+        )
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
         if value.trim().is_empty() {
             record_keychain_listed_drop(&mut dropped, &entry.name, AliasSkipClass::ListedEmpty);
             continue;

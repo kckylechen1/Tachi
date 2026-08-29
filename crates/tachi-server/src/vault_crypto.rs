@@ -265,10 +265,19 @@ pub(crate) const KEYCHAIN_PASSWORD_INVALID_UTF8: &str =
     "Keychain password output is not valid UTF-8";
 
 pub(crate) fn decode_keychain_password_output(bytes: Vec<u8>) -> Result<String, String> {
+    decode_utf8_zeroizing(bytes, KEYCHAIN_PASSWORD_INVALID_UTF8)
+}
+
+/// Decode decrypted secret material without leaving an invalid UTF-8 payload
+/// owned by `FromUtf8Error` to be freed without first being scrubbed.
+pub(crate) fn decode_utf8_zeroizing(
+    bytes: Vec<u8>,
+    invalid_utf8_error: &'static str,
+) -> Result<String, String> {
     String::from_utf8(bytes).map_err(|error| {
         let mut bytes = error.into_bytes();
         zero_bytes(&mut bytes);
-        KEYCHAIN_PASSWORD_INVALID_UTF8.to_string()
+        invalid_utf8_error.to_string()
     })
 }
 
@@ -431,6 +440,15 @@ mod tests {
             .expect_err("invalid UTF-8 Keychain output must be refused");
         assert_eq!(error, KEYCHAIN_PASSWORD_INVALID_UTF8);
         assert!(!error.contains("byte"), "decoder length leaked: {error}");
+        assert!(!error.contains("0xff"), "payload detail leaked: {error}");
+    }
+
+    #[test]
+    fn invalid_decrypted_utf8_uses_the_caller_owned_public_error() {
+        let error = decode_utf8_zeroizing(vec![b's', 0xff, b'!'], "safe failure")
+            .expect_err("invalid decrypted UTF-8 must be refused");
+        assert_eq!(error, "safe failure");
+        assert!(!error.contains("byte"), "decoder detail leaked: {error}");
         assert!(!error.contains("0xff"), "payload detail leaked: {error}");
     }
 
