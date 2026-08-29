@@ -295,6 +295,18 @@ fn require_non_empty(value: &str, field: &str) -> Result<(), MemoryError> {
     Ok(())
 }
 
+/// Public-safe free text must be exactly what every reader sees: control
+/// characters (including NUL, which SQLite text functions truncate at) are
+/// refused rather than stored.
+fn require_no_control(value: &str, field: &str) -> Result<(), MemoryError> {
+    if value.chars().any(|c| c.is_control()) {
+        return Err(MemoryError::InvalidArg(format!(
+            "{field} must not contain control characters"
+        )));
+    }
+    Ok(())
+}
+
 fn latest_advertised_capabilities(
     conn: &Connection,
     attachment_id: &str,
@@ -364,6 +376,7 @@ pub fn request_harness_session_intervention(
 ) -> Result<HarnessSessionInterventionRequestReceipt, MemoryError> {
     require_non_empty(&input.request_id, "request_id")?;
     require_non_empty(&input.reason, "reason")?;
+    require_no_control(&input.reason, "reason")?;
     if input.reason.chars().count() > 1000 {
         return Err(MemoryError::InvalidArg(
             "reason must be at most 1000 characters".to_string(),
@@ -580,6 +593,7 @@ pub fn record_harness_session_intervention_result(
                 "detail must be non-empty and at most 2000 characters".to_string(),
             ));
         }
+        require_no_control(detail, "detail")?;
     }
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let attachment = crate::db::harness_session_events::require_attachment_for_interventions(
@@ -999,6 +1013,57 @@ mod tests {
             HarnessSessionInterventionAdmission::Created
         );
         assert_eq!(intervention_rows(&conn), 1);
+    }
+
+    #[test]
+    fn reason_and_detail_reject_control_characters_with_zero_mutation() {
+        let (mut conn, selector) = seeded_with_grant(GRANT_DELEGATE, "nul-attach");
+        let mut nul_reason = request("req-nul", HarnessSessionInterventionKind::RequestCancel, 0);
+        nul_reason.reason = "visible\u{0000}smuggled tail".to_string();
+        let error = request_harness_session_intervention(
+            &mut conn,
+            &selector,
+            &nul_reason,
+            &host(),
+            "admission-1",
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("control characters"), "{error}");
+        assert_eq!(intervention_rows(&conn), 0);
+
+        request_harness_session_intervention(
+            &mut conn,
+            &selector,
+            &request("req-ok", HarnessSessionInterventionKind::RequestCancel, 0),
+            &host(),
+            "admission-1",
+        )
+        .unwrap();
+
+        let mut newline_detail = NewHarnessSessionInterventionResult {
+            request_id: "req-ok".into(),
+            disposition: HarnessSessionInterventionDisposition::Accepted,
+            authority_confirmation_ref: Some("conf-1".into()),
+            detail: Some("line one\nline two".into()),
+        };
+        newline_detail.disposition = HarnessSessionInterventionDisposition::Accepted;
+        let error = record_harness_session_intervention_result(
+            &mut conn,
+            &selector,
+            &newline_detail,
+            &host(),
+            "admission-1",
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("control characters"), "{error}");
+        let results: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM harness_session_intervention_results",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(results, 0, "refusals never journal");
     }
 
     #[test]

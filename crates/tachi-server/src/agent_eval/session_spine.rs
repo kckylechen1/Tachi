@@ -75,18 +75,21 @@ pub(crate) fn handle_ingest_session_event(
         source_revision: params
             .source_revision
             .ok_or_else(|| "source_revision is required".to_string())?,
+        // Present-but-invalid text (control characters, embedded NUL)
+        // must reach the typed writer validation, not vanish into an
+        // absent field: only an EXACTLY empty string means "absent".
         authority_confirmation_ref: params
             .authority_confirmation_ref
             .clone()
-            .filter(|value| !value.trim().is_empty()),
+            .filter(|value| !value.is_empty()),
         summary: params
             .event_summary
             .clone()
-            .filter(|value| !value.trim().is_empty()),
+            .filter(|value| !value.is_empty()),
         payload_digest: params
             .payload_digest
             .clone()
-            .filter(|value| !value.trim().is_empty()),
+            .filter(|value| !value.is_empty()),
         occurred_at: required(params.event_occurred_at.clone(), "event_occurred_at")?,
     };
     let receipt = server.with_global_store(|store| {
@@ -778,6 +781,61 @@ mod tests {
             })
             .unwrap();
         assert_eq!(stored_events, 5);
+    }
+
+    #[tokio::test]
+    async fn control_only_summary_and_digest_refuse_instead_of_vanishing() {
+        let server = test_server();
+        seed_valid_admission(&server, GRANT_DELEGATE);
+        let attachment_id = attach(&server, "ctl-idem", &["observe", "events"]).await;
+
+        // A present-but-control-only summary must be REFUSED by the typed
+        // writer, not silently converted to an absent field (codex R5).
+        let error = crate::agent_eval::handle_agent_eval(
+            &server,
+            TachiAgentEvalParams {
+                event_summary: Some("\n".to_string()),
+                ..event_params(&attachment_id, "ev-ctl", "progress", 1)
+            },
+        )
+        .await
+        .expect_err("control-only summary must refuse");
+        assert!(error.contains("control characters"), "{error}");
+
+        let error = crate::agent_eval::handle_agent_eval(
+            &server,
+            TachiAgentEvalParams {
+                payload_digest: Some("\t".to_string()),
+                ..event_params(&attachment_id, "ev-ctl2", "progress", 1)
+            },
+        )
+        .await
+        .expect_err("control-only digest must refuse");
+        // The whitespace-only digest hits the non-empty gate first; either
+        // typed refusal is a zero-journal rejection.
+        assert!(error.contains("non-empty"), "{error}");
+
+        // A genuinely empty string still means "absent" and is accepted.
+        let accepted = eval(
+            &server,
+            TachiAgentEvalParams {
+                event_summary: Some("".to_string()),
+                ..event_params(&attachment_id, "ev-empty-summary", "progress", 1)
+            },
+        )
+        .await;
+        assert_eq!(accepted["status"], "completed");
+        let stored: i64 = server
+            .with_global_store_read(|store| {
+                store
+                    .connection()
+                    .query_row("SELECT COUNT(*) FROM harness_session_events", [], |row| {
+                        row.get(0)
+                    })
+                    .map_err(|error| error.to_string())
+            })
+            .unwrap();
+        assert_eq!(stored, 1);
     }
 
     #[tokio::test]

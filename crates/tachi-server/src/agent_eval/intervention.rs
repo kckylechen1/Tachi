@@ -135,14 +135,16 @@ pub(crate) fn handle_record_intervention_result(
             "intervention_request_id",
         )?,
         disposition: intervention_disposition(params.intervention_disposition.clone())?,
+        // Exact-empty means absent; present-but-invalid text must reach
+        // the typed writer validation.
         authority_confirmation_ref: params
             .authority_confirmation_ref
             .clone()
-            .filter(|value| !value.trim().is_empty()),
+            .filter(|value| !value.is_empty()),
         detail: params
             .intervention_detail
             .clone()
-            .filter(|value| !value.trim().is_empty()),
+            .filter(|value| !value.is_empty()),
     };
     let receipt = server.with_global_store(|store| {
         record_harness_session_intervention_result(

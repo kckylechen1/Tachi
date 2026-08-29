@@ -233,7 +233,7 @@ pub(crate) fn install_harness_session_spine_schema(conn: &Connection) -> Result<
             attachment_id TEXT NOT NULL REFERENCES harness_session_attachments(attachment_id),
             request_id TEXT NOT NULL CHECK (length(trim(request_id)) > 0),
             kind TEXT NOT NULL CHECK (kind IN ('request_status', 'prompt_or_correct', 'request_pause', 'request_cancel', 'request_resume')),
-            reason TEXT NOT NULL CHECK (length(reason) > 0 AND length(reason) <= 1000),
+            reason TEXT NOT NULL CHECK (length(reason) > 0 AND length(reason) <= 1000 AND instr(CAST(reason AS BLOB), CAST(x'00' AS BLOB)) = 0),
             expected_session_revision INTEGER NOT NULL CHECK (expected_session_revision >= 0),
             requested_by TEXT NOT NULL CHECK (length(trim(requested_by)) > 0),
             requested_at TEXT NOT NULL,
@@ -248,7 +248,7 @@ pub(crate) fn install_harness_session_spine_schema(conn: &Connection) -> Result<
             request_id TEXT NOT NULL,
             disposition TEXT NOT NULL CHECK (disposition IN ('accepted', 'refused', 'unsupported', 'failed')),
             authority_confirmation_ref TEXT CHECK (authority_confirmation_ref IS NULL OR length(trim(authority_confirmation_ref)) > 0),
-            detail TEXT CHECK (detail IS NULL OR (length(detail) > 0 AND length(detail) <= 2000)),
+            detail TEXT CHECK (detail IS NULL OR (length(detail) > 0 AND length(detail) <= 2000 AND instr(CAST(detail AS BLOB), CAST(x'00' AS BLOB)) = 0)),
             recorded_at TEXT NOT NULL,
             source_host_identity TEXT NOT NULL CHECK (length(trim(source_host_identity)) > 0),
             UNIQUE (attachment_id, request_id)
@@ -317,6 +317,14 @@ pub(crate) fn validate_harness_session_spine_schema(conn: &Connection) -> Result
         (
             "harness_session_events",
             "instr(CAST(summary AS BLOB), CAST(x'00' AS BLOB)) = 0",
+        ),
+        (
+            "harness_session_interventions",
+            "instr(CAST(reason AS BLOB), CAST(x'00' AS BLOB)) = 0",
+        ),
+        (
+            "harness_session_intervention_results",
+            "instr(CAST(detail AS BLOB), CAST(x'00' AS BLOB)) = 0",
         ),
         (
             "harness_session_interventions",
