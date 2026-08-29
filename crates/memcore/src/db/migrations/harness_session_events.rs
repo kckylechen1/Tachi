@@ -72,6 +72,15 @@ mod tests {
                 "harness_session_intervention_results",
                 "length(authority_confirmation_ref) <= 128 AND ",
             ),
+            (
+                "harness_session_events",
+                "length(payload_digest) <= 128 AND ",
+            ),
+            ("harness_session_interventions", "length(reason) > 0 AND "),
+            (
+                "harness_session_intervention_results",
+                "length(detail) > 0 AND ",
+            ),
         ] {
             let conn = Connection::open_in_memory().unwrap();
             migrate_v34_harness_session_spine(&conn).unwrap();
@@ -91,5 +100,32 @@ mod tests {
                 .expect_err("drifted confirmation-reference constraint must fail closed");
             assert!(error.to_string().contains(table), "{table}: {error}");
         }
+    }
+
+    #[test]
+    fn v34_validator_refuses_state_table_without_primary_key() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate_v34_harness_session_spine(&conn).unwrap();
+        conn.execute_batch(
+            "DROP TABLE harness_session_state;
+             CREATE TABLE harness_session_state (
+                 attachment_id TEXT NOT NULL REFERENCES harness_session_attachments(attachment_id),
+                 canonical_state TEXT NOT NULL,
+                 canonical_revision INTEGER NOT NULL,
+                 terminal_digest TEXT,
+                 conflicting_terminal_digest TEXT,
+                 cleanup_recorded INTEGER NOT NULL DEFAULT 0,
+                 last_event_id TEXT,
+                 pre_disconnect_rank INTEGER NOT NULL DEFAULT -1,
+                 updated_at TEXT NOT NULL
+             );",
+        )
+        .unwrap();
+        let error = crate::db::schema::validate_harness_session_spine_schema(&conn)
+            .expect_err("state table without its primary key must fail closed");
+        assert!(
+            error.to_string().contains("harness_session_state"),
+            "{error}"
+        );
     }
 }

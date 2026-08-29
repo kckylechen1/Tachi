@@ -297,7 +297,133 @@ pub(crate) fn validate_harness_session_spine_schema(conn: &Connection) -> Result
             )));
         }
     }
+    const REQUIRED_COLUMNS: &[(&str, &[(&str, &str, bool, i64)])] = &[
+        (
+            "harness_session_events",
+            &[
+                ("event_row_id", "INTEGER", false, 1),
+                ("attachment_id", "TEXT", true, 0),
+                ("event_id", "TEXT", true, 0),
+                ("kind", "TEXT", true, 0),
+                ("outcome", "TEXT", false, 0),
+                ("source_revision", "INTEGER", true, 0),
+                ("authority_confirmation_ref", "TEXT", false, 0),
+                ("summary", "TEXT", false, 0),
+                ("payload_digest", "TEXT", false, 0),
+                ("occurred_at", "TEXT", true, 0),
+                ("ingested_at", "TEXT", true, 0),
+                ("source_host_identity", "TEXT", true, 0),
+            ],
+        ),
+        (
+            "harness_session_state",
+            &[
+                ("attachment_id", "TEXT", true, 1),
+                ("canonical_state", "TEXT", true, 0),
+                ("canonical_revision", "INTEGER", true, 0),
+                ("terminal_digest", "TEXT", false, 0),
+                ("conflicting_terminal_digest", "TEXT", false, 0),
+                ("cleanup_recorded", "INTEGER", true, 0),
+                ("last_event_id", "TEXT", false, 0),
+                ("pre_disconnect_rank", "INTEGER", true, 0),
+                ("updated_at", "TEXT", true, 0),
+            ],
+        ),
+        (
+            "harness_session_interventions",
+            &[
+                ("intervention_row_id", "INTEGER", false, 1),
+                ("attachment_id", "TEXT", true, 0),
+                ("request_id", "TEXT", true, 0),
+                ("kind", "TEXT", true, 0),
+                ("reason", "TEXT", true, 0),
+                ("expected_session_revision", "INTEGER", true, 0),
+                ("requested_by", "TEXT", true, 0),
+                ("requested_at", "TEXT", true, 0),
+            ],
+        ),
+        (
+            "harness_session_intervention_results",
+            &[
+                ("result_row_id", "INTEGER", false, 1),
+                ("attachment_id", "TEXT", true, 0),
+                ("request_id", "TEXT", true, 0),
+                ("disposition", "TEXT", true, 0),
+                ("authority_confirmation_ref", "TEXT", false, 0),
+                ("detail", "TEXT", false, 0),
+                ("recorded_at", "TEXT", true, 0),
+                ("source_host_identity", "TEXT", true, 0),
+            ],
+        ),
+        (
+            "harness_session_capability_advertisements",
+            &[
+                ("advertisement_row_id", "INTEGER", false, 1),
+                ("attachment_id", "TEXT", true, 0),
+                ("advertisement_seq", "INTEGER", true, 0),
+                ("capabilities_json", "TEXT", true, 0),
+                ("source_host_identity", "TEXT", true, 0),
+                ("advertised_at", "TEXT", true, 0),
+            ],
+        ),
+    ];
+    for (table, expected) in REQUIRED_COLUMNS {
+        let mut stmt = conn.prepare(&format!(
+            "SELECT name, upper(type), [notnull] != 0, pk
+             FROM pragma_table_info('{table}') ORDER BY cid"
+        ))?;
+        let actual = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, bool>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        let expected = expected
+            .iter()
+            .map(|(name, ty, not_null, pk)| {
+                ((*name).to_string(), (*ty).to_string(), *not_null, *pk)
+            })
+            .collect::<Vec<_>>();
+        if actual != expected {
+            return Err(MemoryError::InvalidArg(format!(
+                "incomplete v34 harness session spine: {table} has non-canonical column shape"
+            )));
+        }
+    }
+    for (index, clause) in [
+        (
+            "idx_harness_session_events_revision",
+            "ON harness_session_events(attachment_id, source_revision)",
+        ),
+        (
+            "idx_harness_session_interventions_attachment",
+            "ON harness_session_interventions(attachment_id, requested_at)",
+        ),
+    ] {
+        let sql: String = conn.query_row(
+            "SELECT COALESCE(sql, '') FROM main.sqlite_schema WHERE type = 'index' AND name = ?1",
+            params![index],
+            |row| row.get(0),
+        )?;
+        if !normalize_schema_sql(&sql).contains(&normalize_schema_sql(clause)) {
+            return Err(MemoryError::InvalidArg(format!(
+                "incomplete v34 harness session spine: index '{index}' has non-canonical shape"
+            )));
+        }
+    }
     for (table, clause) in [
+        (
+            "harness_session_events",
+            "event_row_id INTEGER PRIMARY KEY AUTOINCREMENT",
+        ),
+        (
+            "harness_session_events",
+            "REFERENCES harness_session_attachments(attachment_id)",
+        ),
         (
             "harness_session_events",
             "CHECK (outcome != 'cancelled' OR (authority_confirmation_ref IS NOT NULL AND length(trim(authority_confirmation_ref)) > 0))",
@@ -350,6 +476,16 @@ pub(crate) fn validate_harness_session_spine_schema(conn: &Connection) -> Result
             "harness_session_events",
             "length(summary) <= 2000",
         ),
+        ("harness_session_events", "length(summary) > 0"),
+        ("harness_session_events", "length(payload_digest) <= 128"),
+        (
+            "harness_session_events",
+            "length(trim(authority_confirmation_ref)) > 0",
+        ),
+        (
+            "harness_session_events",
+            "CHECK (kind = 'terminal' OR outcome IS NULL)",
+        ),
         (
             "harness_session_events",
             "length(trim(payload_digest)) > 0",
@@ -374,6 +510,16 @@ pub(crate) fn validate_harness_session_spine_schema(conn: &Connection) -> Result
             "harness_session_interventions",
             "UNIQUE (attachment_id, request_id)",
         ),
+        (
+            "harness_session_interventions",
+            "intervention_row_id INTEGER PRIMARY KEY AUTOINCREMENT",
+        ),
+        (
+            "harness_session_interventions",
+            "REFERENCES harness_session_attachments(attachment_id)",
+        ),
+        ("harness_session_interventions", "length(reason) > 0"),
+        ("harness_session_interventions", "length(reason) <= 1000"),
         (
             "harness_session_events",
             "length(authority_confirmation_ref) <= 128",
@@ -406,6 +552,15 @@ pub(crate) fn validate_harness_session_spine_schema(conn: &Connection) -> Result
             "harness_session_intervention_results",
             "UNIQUE (attachment_id, request_id)",
         ),
+        (
+            "harness_session_intervention_results",
+            "result_row_id INTEGER PRIMARY KEY AUTOINCREMENT",
+        ),
+        (
+            "harness_session_intervention_results",
+            "REFERENCES harness_session_attachments(attachment_id)",
+        ),
+        ("harness_session_intervention_results", "length(detail) > 0"),
         (
             "harness_session_events",
             "length(event_id) <= 128",
@@ -462,6 +617,24 @@ pub(crate) fn validate_harness_session_spine_schema(conn: &Connection) -> Result
             "harness_session_capability_advertisements",
             "length(trim(source_host_identity)) > 0",
         ),
+        (
+            "harness_session_capability_advertisements",
+            "advertisement_row_id INTEGER PRIMARY KEY AUTOINCREMENT",
+        ),
+        (
+            "harness_session_capability_advertisements",
+            "REFERENCES harness_session_attachments(attachment_id)",
+        ),
+        (
+            "harness_session_state",
+            "attachment_id TEXT PRIMARY KEY NOT NULL REFERENCES harness_session_attachments(attachment_id)",
+        ),
+        (
+            "harness_session_state",
+            "canonical_state IN ('accepted', 'started', 'progressing', 'input_required', 'completed', 'failed', 'cancelled', 'inconsistent_reconciling', 'unknown_orphaned')",
+        ),
+        ("harness_session_state", "DEFAULT 0"),
+        ("harness_session_state", "DEFAULT -1"),
         (
             "harness_session_state",
             "canonical_revision >= 0",
