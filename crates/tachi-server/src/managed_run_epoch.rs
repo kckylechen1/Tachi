@@ -428,13 +428,17 @@ fn append_reconciliation_observation(
     // Exactly-once is per verdict: a recorded orphan transition suppresses
     // another orphan append; a recorded inconsistent observation suppresses
     // another inconsistent append. Malformed or unrelated prior content
-    // must NEVER suppress the fact this run still owes.
-    if verdict == VERDICT_ORPHANED {
-        if is_terminal_state(&status) || has_verdict(&status, VERDICT_ORPHANED) {
-            // Terminal now, or the orphan fact already exists.
-            return Ok(false);
-        }
-    } else if verdict == VERDICT_INCONSISTENT && has_verdict(&status, VERDICT_INCONSISTENT) {
+    // must NEVER suppress the fact this run still owes. And a receipt that
+    // turned terminal — before the scan or between the scan and this
+    // append — is never appended to, for ANY verdict: terminal receipts
+    // are never rewritten.
+    if is_terminal_state(&status) {
+        return Ok(false);
+    }
+    if verdict == VERDICT_ORPHANED && has_verdict(&status, VERDICT_ORPHANED) {
+        return Ok(false);
+    }
+    if verdict == VERDICT_INCONSISTENT && has_verdict(&status, VERDICT_INCONSISTENT) {
         return Ok(false);
     }
     let transition = json!({
@@ -514,21 +518,27 @@ pub(crate) fn read_projection(
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    let orphaned = transitions.iter().any(|transition| {
-        transition.get("verdict").and_then(Value::as_str) == Some("orphaned_control_unavailable")
-    });
-    let inconsistent = !transitions.is_empty() && !orphaned;
+    // Reconciliation evidence is read LAST-VERDICT-WINS: the most recent
+    // well-formed transition decides the projected reconciliation posture,
+    // and junk entries are not evidence. With per-verdict exactly-once, an
+    // orphan and a later inconsistent observation can legitimately coexist;
+    // the newer fact is the truth.
+    let last_verdict = transitions
+        .iter()
+        .rev()
+        .filter_map(|transition| transition.get("verdict").and_then(Value::as_str))
+        .find(|verdict| *verdict == VERDICT_ORPHANED || *verdict == VERDICT_INCONSISTENT);
 
     let execution_state = if terminal {
         // Terminal wins over everything; a stale pre-restart receipt can
         // never regress a newer terminal state, and reconciliation never
         // fabricates a terminal classification for a nonterminal run.
         Value::String(state.unwrap_or_default().to_string())
-    } else if inconsistent {
+    } else if last_verdict == Some(VERDICT_INCONSISTENT) {
         // A contradictory record projects honestly as unknown — never as a
         // guessed orphan or a fabricated classification.
         json!("unknown")
-    } else if orphaned {
+    } else if last_verdict == Some(VERDICT_ORPHANED) {
         json!("orphaned")
     } else if accepted_epoch.is_some() && accepted_epoch != Some(current_epoch) {
         json!("orphaned")

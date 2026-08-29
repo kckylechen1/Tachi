@@ -1371,3 +1371,81 @@ fn stage_managed_run_at(
     .expect("write staged receipt");
     run_dir
 }
+
+/// Codex R5 finding 1 (fixed): the terminal guard in the append covers EVERY
+/// verdict — a receipt that turned terminal between the scan and the append
+/// is refused even for an inconsistent observation.
+#[test]
+fn append_refuses_inconsistent_observation_on_terminal_receipt() {
+    let _serial = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let runs = tempfile::tempdir().expect("runs");
+    let dispatch_id = "20260829T120027Z-s1-append-terminal";
+    let run_dir = stage_managed_run_at(runs.path(), dispatch_id, "ctrl-epoch-a");
+    // The receipt turned terminal (e.g. a completion landed after the scan).
+    let mut status = read_status(&run_dir);
+    status["state"] = json!("TASK_STATE_COMPLETED");
+    std::fs::write(
+        run_dir.join("status.json"),
+        serde_json::to_vec_pretty(&status).expect("serialize"),
+    )
+    .expect("write terminal receipt");
+    let before = std::fs::read(run_dir.join("status.json")).expect("read before");
+
+    let outcome = append_reconciliation_observation(
+        &run_dir,
+        VERDICT_INCONSISTENT,
+        "ctrl-epoch-b",
+        None,
+        Some("TASK_STATE_WORKING"),
+    );
+    assert_eq!(outcome, Ok(false), "terminal refuses every verdict append");
+    assert_eq!(
+        std::fs::read(run_dir.join("status.json")).expect("read after"),
+        before,
+        "a terminal receipt is never rewritten, for any verdict"
+    );
+}
+
+/// Codex R5 finding 2 (fixed): reconciliation evidence is projected
+/// LAST-VERDICT-WINS — an orphan followed by a later inconsistent
+/// observation projects unknown; inconsistent followed by orphan projects
+/// orphaned.
+#[test]
+fn projection_reads_reconciliation_evidence_last_verdict_wins() {
+    let runs = tempfile::tempdir().expect("runs");
+    let dispatch_id = "20260829T120028Z-s1-last-verdict-wins";
+    let run_dir = stage_managed_run_at(runs.path(), dispatch_id, "ctrl-epoch-a");
+    let mut status = read_status(&run_dir);
+
+    let orphan = json!({
+        "verdict": "orphaned_control_unavailable",
+        "execution_state": "orphaned",
+        "control_state": "unavailable",
+    });
+    let inconsistent = json!({
+        "verdict": "inconsistent",
+        "execution_state": "unknown",
+        "control_state": "unavailable",
+    });
+
+    status["managed_run_reconciliation"] = json!({ "transitions": [orphan.clone()] });
+    let projection = read_projection(&status, &run_dir, "ctrl-epoch-b", false).expect("projection");
+    assert_eq!(projection["execution_state"], "orphaned");
+
+    status["managed_run_reconciliation"] = json!({ "transitions": [orphan, inconsistent] });
+    let projection = read_projection(&status, &run_dir, "ctrl-epoch-b", false).expect("projection");
+    assert_eq!(
+        projection["execution_state"], "unknown",
+        "the newer inconsistent fact wins over the older orphan"
+    );
+
+    // Junk entries are not evidence: they never select a posture.
+    status["managed_run_reconciliation"] = json!({ "transitions": [null] });
+    let projection = read_projection(&status, &run_dir, "ctrl-epoch-b", false).expect("projection");
+    assert_eq!(
+        projection["execution_state"], "orphaned",
+        "junk falls through to the epoch-derived posture (foreign epoch)"
+    );
+}
