@@ -310,7 +310,8 @@ pub(crate) fn validate_harness_session_spine_schema(conn: &Connection) -> Result
             )));
         }
     }
-    const REQUIRED_COLUMNS: &[(&str, &[(&str, &str, bool, i64)])] = &[
+    type RequiredColumn = (&'static str, &'static str, bool, i64);
+    const REQUIRED_COLUMNS: &[(&str, &[RequiredColumn])] = &[
         (
             "harness_session_events",
             &[
