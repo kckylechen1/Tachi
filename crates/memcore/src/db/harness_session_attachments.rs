@@ -640,6 +640,30 @@ pub(crate) fn find_attachment_for_host(
     host: &HarnessSessionHostAdmission,
     admission_receipt_ref: &str,
 ) -> Result<Option<HarnessSessionAttachment>, MemoryError> {
+    let attachment = find_attachment_by_selector(conn, selector)?;
+    let Some(attachment) = attachment.filter(|attachment| {
+        attachment.host_identity == host.host_identity
+            && attachment.admission_receipt_ref == admission_receipt_ref
+    }) else {
+        return Ok(None);
+    };
+    // Receipt-spine writes may outlive the WorkClaim, but they must still be
+    // bound to the host's current admission connection. Otherwise an old
+    // admission row can continue authorizing facts after the host reconnects.
+    verify_host_admission(
+        conn,
+        host,
+        &attachment.admission_receipt_ref,
+        &attachment.work_claim_id,
+        &attachment.agent_identity_id,
+    )?;
+    Ok(Some(attachment))
+}
+
+fn find_attachment_by_selector(
+    conn: &Connection,
+    selector: &HarnessSessionAttachmentSelector,
+) -> Result<Option<HarnessSessionAttachment>, MemoryError> {
     let attachment = match selector {
         HarnessSessionAttachmentSelector::AttachmentId(attachment_id) => {
             find_attachment_by_id(conn, attachment_id)?
@@ -668,23 +692,31 @@ pub(crate) fn find_attachment_for_host(
             .optional()?
         }
     };
-    let Some(attachment) = attachment.filter(|attachment| {
-        attachment.host_identity == host.host_identity
-            && attachment.admission_receipt_ref == admission_receipt_ref
-    }) else {
-        return Ok(None);
-    };
-    // Receipt-spine writes may outlive the WorkClaim, but they must still be
-    // bound to the host's current admission connection. Otherwise an old
-    // admission row can continue authorizing facts after the host reconnects.
-    verify_host_admission(
-        conn,
-        host,
-        &attachment.admission_receipt_ref,
-        &attachment.work_claim_id,
-        &attachment.agent_identity_id,
-    )?;
-    Ok(Some(attachment))
+    Ok(attachment)
+}
+
+/// Reconnect lookup deliberately does not require the attachment's old
+/// admission receipt to equal the current one. The reconnect transaction is
+/// the sole boundary allowed to verify a fresh host admission and atomically
+/// replace that binding; every ordinary receipt path remains exact-bound.
+pub(crate) fn find_attachment_for_reconnect(
+    conn: &Connection,
+    selector: &HarnessSessionAttachmentSelector,
+    host_identity: &str,
+) -> Result<Option<HarnessSessionAttachment>, MemoryError> {
+    if matches!(
+        selector,
+        HarnessSessionAttachmentSelector::NaturalKey {
+            protocol_version,
+            ..
+        } if protocol_version != "1"
+    ) {
+        return Err(MemoryError::InvalidArg(
+            "ACP negotiated protocol_version must be exactly 1".to_string(),
+        ));
+    }
+    Ok(find_attachment_by_selector(conn, selector)?
+        .filter(|attachment| attachment.host_identity == host_identity))
 }
 
 fn verify_host_admission(
@@ -858,10 +890,55 @@ pub(crate) fn verify_existing_attachment(
             "ACP attachment is not bound to the current host admission".to_string(),
         ));
     }
+    verify_attachment_reauthorization(
+        conn,
+        attachment,
+        host,
+        &attachment.admission_receipt_ref,
+        ttl_seconds,
+        "projection",
+    )
+}
+
+/// Verify a fresh host admission for an existing attachment without requiring
+/// it to equal the recorded pre-reconnect receipt. The caller must replace the
+/// recorded receipt in the same transaction after this succeeds.
+pub(crate) fn verify_attachment_rebind(
+    conn: &Connection,
+    attachment: &HarnessSessionAttachment,
+    host: &HarnessSessionHostAdmission,
+    admission_receipt_ref: &str,
+    ttl_seconds: i64,
+) -> Result<(), MemoryError> {
+    if attachment.identity_attribution_basis != TRUSTED_LOCAL_HOST_DECLARED_BASIS
+        || attachment.host_identity != host.host_identity
+    {
+        return Err(MemoryError::WorkClaimIncompatibleState(
+            "ACP attachment is not attributable to the current host".to_string(),
+        ));
+    }
+    verify_attachment_reauthorization(
+        conn,
+        attachment,
+        host,
+        admission_receipt_ref,
+        ttl_seconds,
+        "reconnect",
+    )
+}
+
+fn verify_attachment_reauthorization(
+    conn: &Connection,
+    attachment: &HarnessSessionAttachment,
+    host: &HarnessSessionHostAdmission,
+    admission_receipt_ref: &str,
+    ttl_seconds: i64,
+    operation: &str,
+) -> Result<(), MemoryError> {
     verify_host_admission(
         conn,
         host,
-        &attachment.admission_receipt_ref,
+        admission_receipt_ref,
         &attachment.work_claim_id,
         &attachment.agent_identity_id,
     )?;
@@ -879,9 +956,9 @@ pub(crate) fn verify_existing_attachment(
         &attachment.capability_class,
     )?;
     if authorization.policy_digest != attachment.policy_digest {
-        return Err(MemoryError::WorkClaimConflict(
-            "ACP attachment descriptor policy drifted; refusing projection".to_string(),
-        ));
+        return Err(MemoryError::WorkClaimConflict(format!(
+            "ACP attachment descriptor policy drifted; refusing {operation}"
+        )));
     }
     Ok(())
 }

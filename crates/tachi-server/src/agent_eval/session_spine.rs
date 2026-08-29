@@ -613,7 +613,31 @@ mod tests {
             "unknown_orphaned"
         );
 
-        let back = eval(&server, spine_params("reconnect_session", &attachment_id)).await;
+        server
+            .with_global_store(|store| {
+                record_unverified_admission(
+                    store.connection(),
+                    "admission-2",
+                    "host-1",
+                    "connection-2",
+                    UnverifiedAdmissionState::SelfAsserted,
+                )
+                .map_err(|error| error.to_string())
+            })
+            .expect("fresh reconnect admission");
+        server.set_work_claim_connection(
+            Some("host-1".to_string()),
+            "connection-2".to_string(),
+            "self_asserted".to_string(),
+        );
+        let back = eval(
+            &server,
+            TachiAgentEvalParams {
+                admission_receipt_ref: Some("admission-2".to_string()),
+                ..spine_params("reconnect_session", &attachment_id)
+            },
+        )
+        .await;
         assert_eq!(back["attachment_state"], "attached");
         assert_eq!(back["resume_from_revision"], 4);
         assert_eq!(
@@ -621,10 +645,19 @@ mod tests {
             "unknown_orphaned"
         );
 
+        let stale = crate::agent_eval::handle_agent_eval(
+            &server,
+            event_params(&attachment_id, "ev-stale-admission", "progress", 5),
+        )
+        .await
+        .expect_err("pre-reconnect admission must no longer write facts");
+        assert!(stale.contains("not found"), "{stale}");
+
         let done = eval(
             &server,
             TachiAgentEvalParams {
                 session_event_outcome: Some("completed".to_string()),
+                admission_receipt_ref: Some("admission-2".to_string()),
                 ..event_params(&attachment_id, "ev-2", "terminal", 5)
             },
         )
@@ -974,6 +1007,16 @@ mod tests {
             error.contains("unknown harness session event kind"),
             "{error}"
         );
+        let error = crate::agent_eval::handle_agent_eval(
+            &server,
+            TachiAgentEvalParams {
+                event_occurred_at: Some("not-a-time".to_string()),
+                ..event_params(&attachment_id, "ev-time", "progress", 1)
+            },
+        )
+        .await
+        .expect_err("malformed event timestamp must refuse");
+        assert!(error.contains("RFC 3339"), "{error}");
         let stored: i64 = server
             .with_global_store_read(|store| {
                 store
