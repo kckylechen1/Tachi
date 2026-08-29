@@ -1,0 +1,188 @@
+name: Linux platform conformance (C2)
+
+# C2 platform-conformance lanes (#1852 runner classes; #1877 readiness):
+# the darwin-vs-linux conformance gap closes only by running the canonical
+# Rust gate and the Linux-only cfg paths on a real Linux x86_64 host. This
+# workflow claims ONLY the `tachi-conformance` runner class and never the C1
+# acceptance runner (`tachi-acceptance`).
+#
+# Trust boundary: identical fail-closed admission guard as ci.yml (owner
+# push/dispatch, or same-repo owner-authored PR; both actor fields required --
+# see the build-seat-setup guard rationale in ci.yml and the visibility
+# contract in docs/engineering/operations/acceptance-runner.md). No
+# release/publish/provider secrets: GITHUB_TOKEN only, contents: read.
+#
+# Cargo audit is deliberately NOT duplicated here: it audits Cargo.lock
+# (platform-independent) and the audited supply-chain policy
+# (.github/scripts/validate_action_pins.rb) pins its install count at exactly
+# one occurrence across all workflows. The RustSec audit continues to run in
+# the ci.yml canonical lane.
+#
+# Runner host prerequisites (docs/engineering/operations/conformance-runner.md):
+# Linux x86_64 host/VM with rustup, pwsh (the setup-rust composite), lsof,
+# python3, git; the runner's `.env` must set RUNNER_ROOT to the runner install
+# directory so runner_hygiene.sh will operate (it refuses otherwise).
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+concurrency:
+  group: conformance-linux-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust-gate:
+    name: Rust workspace (Linux x86_64)
+    # Fork guard identical to ci.yml build-seat-setup -- see there for the
+    # rationale (both actor fields; enumerated sources only; skip before any
+    # runner claim).
+    if: >-
+      ((github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
+      github.actor == github.repository_owner &&
+      github.triggering_actor == github.repository_owner) ||
+      (github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.user.login == github.repository_owner &&
+      github.actor == github.repository_owner &&
+      github.triggering_actor == github.repository_owner)
+    runs-on: [self-hosted, Linux, X64, tachi-conformance]
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Runner disk preflight (heavy lane)
+        # #1865 frozen watermark: heavy Rust work refuses below 60 GiB free,
+        # loudly, before any toolchain or build work starts. The watermark is
+        # measured on the volume backing the workspace -- for the C2 VM that
+        # is the VM disk, which is also the build's real backing store.
+        shell: bash
+        run: bash .github/scripts/runner_hygiene.sh preflight 60
+
+      - name: Verify runner platform
+        # Label-drift guard: this lane only proves anything on real Linux
+        # x86_64. A mislabeled host must fail loudly, never fake green.
+        run: |
+          set -euo pipefail
+          [ "$(uname -s)" = "Linux" ] || { echo "::error::C2 lane must run on Linux (uname -s: $(uname -s))" >&2; exit 4; }
+          [ "$(uname -m)" = "x86_64" ] || { echo "::error::C2 lane must run on x86_64 (uname -m: $(uname -m))" >&2; exit 4; }
+
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust
+
+      - name: Check release version sync
+        run: python3 scripts/check_release_versions.py
+
+      - name: Test nextest census contracts
+        run: python3 -m unittest scripts.test_nextest_census scripts.test_nextest_known_reds scripts.test_nextest_slow_diff
+
+      - name: Run clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Install cargo-nextest
+        # Same taiki-e pinned snapshot as ci.yml (get.nextest.rs may be
+        # DNS-blocked; taiki-e pulls a prebuilt binary from GitHub Releases).
+        uses: taiki-e/install-action@c295c25a8d3df7288fa86db860a4f8062bf76ad8 # releases/nextest snapshot 2026-07-25
+
+      - name: Run workspace tests
+        # The canonical acceptance surface on real Linux: every cfg(linux)
+        # test leg that the darwin-arm64 C1 lane compiles out runs here,
+        # including the renameat2 and seccomp paths from the #1877 inventory.
+        run: cargo nextest run --workspace --locked --profile ci
+
+      - name: Archive nextest JUnit timing report
+        # Same archival contract as the ci.yml rust job (Refs #1095); the
+        # artifact name is lane-suffixed so the two lanes' reports never
+        # collide in telemetry.
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: nextest-junit-report-linux-c2
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: error
+
+      - name: Verify portable-kernel feature boundary
+        run: cargo test -p portable-kernel --features portable-contract-test --locked
+
+      - name: Run doc tests
+        run: cargo test --workspace --locked --doc
+
+      - name: Runner workspace cleanup
+        # #1865: per-job-ephemeral target storage; runs on every exit path.
+        if: always()
+        shell: bash
+        run: bash .github/scripts/runner_hygiene.sh cleanup
+
+  linux-platform:
+    name: Linux-only platform conformance
+    # Fork guard identical to rust-gate above (and to ci.yml build-seat-setup).
+    if: >-
+      ((github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
+      github.actor == github.repository_owner &&
+      github.triggering_actor == github.repository_owner) ||
+      (github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.user.login == github.repository_owner &&
+      github.actor == github.repository_owner &&
+      github.triggering_actor == github.repository_owner)
+    runs-on: [self-hosted, Linux, X64, tachi-conformance]
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Runner disk preflight (heavy lane)
+        shell: bash
+        run: bash .github/scripts/runner_hygiene.sh preflight 60
+
+      - name: Verify runner platform
+        run: |
+          set -euo pipefail
+          [ "$(uname -s)" = "Linux" ] || { echo "::error::C2 lane must run on Linux (uname -s: $(uname -s))" >&2; exit 4; }
+          [ "$(uname -m)" = "x86_64" ] || { echo "::error::C2 lane must run on x86_64 (uname -m: $(uname -m))" >&2; exit 4; }
+
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@c295c25a8d3df7288fa86db860a4f8062bf76ad8 # releases/nextest snapshot 2026-07-25
+
+      - name: Seccomp containment escape probe
+        # #1877 gap closure: the setsid-EPERM probe and its parent
+        # discrimination test previously existed only as cfg(macos). On Linux
+        # the parent installs the seccomp escape filter through
+        # run_agent_subprocess_with_liveness and the re-exec'd child must get
+        # EPERM from setsid under SECCOMP_RET_ERRNO while the runner proves
+        # owned-group absence.
+        run: cargo nextest run -p tachi-server --locked 'dispatch_ops::subprocess::tests::required_postflight'
+
+      - name: renameat2 no-clobber and anchored-rename legs (memcore)
+        # filename.rs atomic rename (RENAME_NOREPLACE) and anchored_fs.rs
+        # anchored directory replacement -- cfg(unix) legs that run for real
+        # on Linux here.
+        run: cargo nextest run -p memcore --locked 'db::filename::tests::atomic_rename' 'anchored_fs::tests'
+
+      - name: renameat2 receipt and atomic-exchange legs (tachi-server)
+        # repair/receipt.rs receipt paths and sticky_cutover_cli.rs
+        # SYS_renameat2-backed atomic exchange. (bootstrap/wiki_corpus/fs.rs
+        # renameat2 legs have no module-local tests; they are compiled and
+        # exercised by the workspace gate above and by the sticky_cutover
+        # exchange path.)
+        run: cargo nextest run -p tachi-server --locked 'repair::receipt::tests' 'sticky_cutover'
+
+      - name: Runner workspace cleanup
+        if: always()
+        shell: bash
+        run: bash .github/scripts/runner_hygiene.sh cleanup
