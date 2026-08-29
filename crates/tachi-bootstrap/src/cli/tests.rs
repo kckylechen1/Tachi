@@ -378,6 +378,42 @@ fn vault_exec_cli_parses_allow_unauthenticated_opt_in() {
 }
 
 #[test]
+fn vault_set_cli_rebind_is_explicit_and_fail_closed_by_default() {
+    let omitted = Cli::try_parse_from([
+        "tachi",
+        "vault",
+        "set",
+        "EXTRACT_API_KEY",
+        "--keychain",
+        "--value-stdin",
+    ])
+    .expect("vault set without --rebind should parse");
+    assert!(matches!(
+        omitted.command,
+        Some(Commands::Vault {
+            action: VaultAction::Set { rebind: false, .. }
+        })
+    ));
+
+    let explicit = Cli::try_parse_from([
+        "tachi",
+        "vault",
+        "set",
+        "EXTRACT_API_KEY",
+        "--keychain",
+        "--value-stdin",
+        "--rebind",
+    ])
+    .expect("vault set with --rebind should parse");
+    assert!(matches!(
+        explicit.command,
+        Some(Commands::Vault {
+            action: VaultAction::Set { rebind: true, .. }
+        })
+    ));
+}
+
+#[test]
 fn vault_providers_doctor_parses_explicit_report_only_password_source() {
     let parsed = Cli::try_parse_from([
         "tachi",

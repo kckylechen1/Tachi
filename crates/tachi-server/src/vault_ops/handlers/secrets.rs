@@ -7,6 +7,9 @@ pub(crate) async fn handle_vault_set(
     let secret_name = params.name.clone();
     let result = (|| {
         crypto::validate_secret_name(&params.name)?;
+        if params.value.trim().is_empty() {
+            return Err("Secret value cannot be empty".to_string());
+        }
         authorize_vault_mutation(server, &params.name, params.agent_id.as_deref())
             .map_err(|e| e.to_string())?;
         with_vault_key(server, |key| {

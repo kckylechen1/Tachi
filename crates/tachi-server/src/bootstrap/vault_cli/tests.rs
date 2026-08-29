@@ -9,6 +9,7 @@ use super::password::{
     read_password_file, read_vault_init_password, read_vault_init_password_stdin_lines,
     read_vault_password,
 };
+use super::secret_actions::ZeroizingSecretString;
 use crate::test_support::EnvRestore;
 use std::io::{Cursor, Read};
 use std::path::Path;
@@ -50,6 +51,21 @@ fn config_for_password(password: &str) -> memcore::vault::VaultConfig {
 
 fn string_is_zeroed(value: &str) -> bool {
     value.as_bytes().iter().all(|byte| *byte == 0)
+}
+
+#[test]
+fn cli_secret_guard_zeroes_plaintext_on_early_error() {
+    let mut secret = "entered-secret-that-must-not-survive".to_string();
+    let result: Result<(), &str> = (|| {
+        let _secret = ZeroizingSecretString(&mut secret);
+        Err("simulated store failure")
+    })();
+
+    assert_eq!(result, Err("simulated store failure"));
+    assert!(
+        string_is_zeroed(&secret),
+        "CLI secret buffer was not zeroed on early return"
+    );
 }
 
 fn daemon_info(global_db: Option<&Path>) -> crate::cli_client::DaemonInfo {

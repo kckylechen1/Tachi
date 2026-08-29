@@ -3,16 +3,16 @@
   "issue": 1317,
   "observation": {
     "date": "2026-08-30",
-    "revision": "44d9c4276b91c657c253ecfc3e1efe8a29a5ccc4",
-    "scope": "native composed MemoryServer router after production profile, A2A, sticky-retirement action-schema, bound-project, and annotation transforms plus the #1733 trusted-local ACP attachment fields (tachi_agent_eval attach_session/get_attachment, merged via #1738), the #1678 attached-session receipt-spine fields (ingest_session_event, get_session_state, mark_session_connection, reconnect_session, advertise_session_capabilities, request_intervention, record_intervention_result), and the #1678 coordinate/operate mutation-action projection; #1853 omitted vault secret types use name-based inference; environment exposure override unset"
+    "revision": "b2f9d86f8",
+    "scope": "native composed MemoryServer router after production profile, A2A, sticky-retirement action-schema, bound-project, and annotation transforms plus the #1733 trusted-local ACP attachment fields (tachi_agent_eval attach_session/get_attachment, merged via #1738), the #1678 attached-session receipt-spine fields (ingest_session_event, get_session_state, mark_session_connection, reconnect_session, advertise_session_capabilities, request_intervention, record_intervention_result), and the #1678 coordinate/operate mutation-action projection; #1853 omitted vault secret types use name-based inference; environment exposure override unset; #1861 vault_set exposes an explicit fail-closed rebind boolean"
   },
   "provisional_budgets": {
     "profiles": {
       "admin": {
-        "max_total_input_schema_bytes": 140106,
-        "max_total_tool_definition_bytes": 171039,
+        "max_total_input_schema_bytes": 140301,
+        "max_total_tool_definition_bytes": 171234,
         "max_visible_tools": 82,
-        "rationale": "Exact live observed #1691 census for admin after profile-specific tools/list narrowing; any regrowth requires explicit adjudication.; #1454 server-run tachi_verify surface (action=run, +check_kind/+timeout_secs props; +1131 schema bytes / +1365 tool-definition bytes per profile) re-pinned after the rebase onto 53939b5b5 (main #1690/#1691 retirements); #1322 declared_file_scope on tachi_staff, including its exact serialized schema bytes; any further regrowth requires explicit adjudication."
+        "rationale": "Exact live observed #1691 census for admin after profile-specific tools/list narrowing; any regrowth requires explicit adjudication.; #1454 server-run tachi_verify surface (action=run, +check_kind/+timeout_secs props; +1131 schema bytes / +1365 tool-definition bytes per profile) re-pinned after the rebase onto 53939b5b5 (main #1690/#1691 retirements); #1322 declared_file_scope on tachi_staff, including its exact serialized schema bytes; any further regrowth requires explicit adjudication.; #1861 vault_set explicit rebind property re-pinned to the exact live admin surface"
       },
       "coordinate": {
         "max_total_input_schema_bytes": 94701,
@@ -190,8 +190,8 @@
     },
     "profiles": {
       "admin": {
-        "total_input_schema_bytes": 140106,
-        "total_tool_definition_bytes": 171039,
+        "total_input_schema_bytes": 140301,
+        "total_tool_definition_bytes": 171234,
         "visible_tool_count": 82,
         "visible_tools": [
           "archive_memory",

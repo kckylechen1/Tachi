@@ -6,8 +6,25 @@ use super::output::{
 };
 use crate::bootstrap::{open_cli_store, open_cli_store_read_only};
 use std::io::Read;
+use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use tachi_bootstrap::cli::VaultAction;
+
+pub(super) struct ZeroizingSecretString<'a>(pub(super) &'a mut String);
+
+impl Deref for ZeroizingSecretString<'_> {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        self.0
+    }
+}
+
+impl Drop for ZeroizingSecretString<'_> {
+    fn drop(&mut self) {
+        crate::vault_crypto::zero_string(self.0);
+    }
+}
 
 pub(super) async fn run_secret_action(
     global_db_path: &PathBuf,
@@ -49,13 +66,19 @@ pub(super) async fn run_secret_action(
             )?;
 
             let mut secret_value = if value_stdin {
-                let mut buf = String::new();
-                std::io::stdin().read_line(&mut buf)?;
-                buf.trim().to_string()
+                let mut input = String::new();
+                if let Err(error) = std::io::stdin().read_line(&mut input) {
+                    crate::vault_crypto::zero_string(&mut input);
+                    return Err(error.into());
+                }
+                let value = input.trim().to_string();
+                crate::vault_crypto::zero_string(&mut input);
+                value
             } else {
                 rpassword::prompt_password(format!("Value for {name}: "))?
             };
-            if secret_value.is_empty() {
+            let secret_value = ZeroizingSecretString(&mut secret_value);
+            if secret_value.trim().is_empty() {
                 return Err("Secret value cannot be empty".into());
             }
 
@@ -116,7 +139,6 @@ pub(super) async fn run_secret_action(
                             &secret_value,
                         )
                     {
-                        crate::vault_crypto::zero_string(&mut secret_value);
                         return Err(crate::vault_ops::copy_existing_account_message(
                             &name,
                             &other.name,
@@ -151,7 +173,6 @@ pub(super) async fn run_secret_action(
                         );
                         crate::vault_crypto::zero_string(&mut old_value);
                         if let Err(err) = overwrite {
-                            crate::vault_crypto::zero_string(&mut secret_value);
                             return Err(err.operator_message(&name).into());
                         }
                     }
@@ -159,7 +180,6 @@ pub(super) async fn run_secret_action(
             }
 
             let encrypt_result = crate::vault_crypto::encrypt(key.bytes(), secret_value.as_bytes());
-            crate::vault_crypto::zero_string(&mut secret_value);
             let (encrypted_value, nonce) = encrypt_result?;
 
             let entry = memcore::vault::VaultEntry {

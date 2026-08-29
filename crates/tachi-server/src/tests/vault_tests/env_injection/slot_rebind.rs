@@ -138,6 +138,37 @@ async fn lane_slot_rebind_updates_and_returns_fingerprints() {
 }
 
 #[tokio::test]
+async fn lane_slot_rebind_rejects_empty_and_whitespace_values() {
+    let server = make_server();
+    server
+        .vault_init(Parameters(VaultInitParams {
+            password: "slot-rebind-empty".to_string(),
+        }))
+        .await
+        .expect("init");
+    server
+        .vault_set(Parameters(slot_params(
+            "EXTRACT_API_KEY",
+            "original-family",
+            false,
+        )))
+        .await
+        .expect("seed slot");
+
+    for invalid in ["", " \t\n"] {
+        let error = server
+            .vault_set(Parameters(slot_params("EXTRACT_API_KEY", invalid, true)))
+            .await
+            .expect_err("empty-family rebind must be refused");
+        assert!(error.contains("cannot be empty"), "{error}");
+    }
+    assert_eq!(
+        slot_value(&server, "EXTRACT_API_KEY").await,
+        "original-family"
+    );
+}
+
+#[tokio::test]
 async fn account_name_rotation_does_not_require_rebind() {
     let server = make_server();
     server
