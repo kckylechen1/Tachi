@@ -504,6 +504,35 @@ pub(crate) fn test_attachment_input(idempotency_key: &str) -> NewHarnessSessionA
 }
 
 fn validate_new_attachment(input: &NewHarnessSessionAttachment) -> Result<(), MemoryError> {
+    // Opaque identifiers are receipt pointers, not content channels: every
+    // persistent string is bounded and control-free (NUL included, which
+    // SQLite text functions truncate at).
+    for (field, value) in [
+        ("host_identity", input.host_identity.as_str()),
+        ("agent_identity_id", input.agent_identity_id.as_str()),
+        ("contract_digest", input.contract_digest.as_str()),
+        ("idempotency_key", input.idempotency_key.as_str()),
+        (
+            "admission_receipt_ref",
+            input.admission_receipt_ref.as_str(),
+        ),
+        (
+            "adapter_connection_identity",
+            input.adapter_connection_identity.as_str(),
+        ),
+        ("remote_session_id", input.remote_session_id.as_str()),
+    ] {
+        if value.chars().any(|c| c.is_control()) {
+            return Err(MemoryError::InvalidArg(format!(
+                "{field} must not contain control characters"
+            )));
+        }
+        if value.chars().count() > 256 {
+            return Err(MemoryError::InvalidArg(format!(
+                "{field} must be at most 256 characters"
+            )));
+        }
+    }
     for (field, value) in [
         ("host_identity", input.host_identity.as_str()),
         (
@@ -1412,6 +1441,42 @@ mod tests {
                 0
             );
         }
+    }
+
+    #[test]
+    fn opaque_attachment_identifiers_are_bounded_and_control_free() {
+        let mut conn = setup();
+        let mut input = seed(&mut conn);
+        input.adapter_connection_identity = "adapter\u{0000}hidden".to_string();
+        let error = attach(&mut conn, &input).unwrap_err();
+        assert!(error.to_string().contains("control characters"), "{error}");
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM harness_session_attachments",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            0
+        );
+
+        let mut conn = setup();
+        let mut input = seed(&mut conn);
+        input.remote_session_id = "x".repeat(257);
+        let error = attach(&mut conn, &input).unwrap_err();
+        assert!(
+            error.to_string().contains("at most 256 characters"),
+            "{error}"
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM harness_session_attachments",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            0
+        );
     }
 
     #[test]
