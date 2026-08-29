@@ -870,14 +870,6 @@ fn build_server_state(
             "[components] governance record seed failed (edges dropped, will re-seed next boot; boot continues): {err}"
         ),
     }
-    // S1 startup reconciliation: this server incarnation scans the runs
-    // root it is about to own, at the same placement (and pre-singleton
-    // window) as the legacy orphan recovery directly below. Terminal
-    // managed runs stay terminal; nonterminal foreign-epoch runs get
-    // exactly one typed orphan/control-unavailable observation. No launch,
-    // signal, cleanup, retry, or redispatch; legacy recovery leaves
-    // managed-run receipts to this posture.
-    crate::managed_run_epoch::record_startup_reconciliation(&server);
     let recovered = crate::dispatch_ops::recover_orphaned_dispatch_runs(&server);
     if !recovered.is_empty() {
         eprintln!(

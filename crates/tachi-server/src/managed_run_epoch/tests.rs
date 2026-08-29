@@ -961,20 +961,26 @@ fn legacy_restart_recovery_skips_identity_bearing_managed_runs() {
     );
 }
 
-/// Structural: startup reconciliation is wired at the daemon serve startup,
-/// beside the pre-existing orphan recovery — never in a bare constructor.
+/// Structural: startup reconciliation is wired ONLY after the daemon
+/// singleton lock is acquired — a losing second daemon must never mutate
+/// receipts — and never from a bare constructor.
 #[test]
-fn serve_startup_wires_reconciliation_beside_recovery() {
-    let serve = include_str!("../bootstrap/serve.rs");
-    let reconciliation_pos = serve
+fn serve_startup_wires_reconciliation_after_singleton_ownership() {
+    let daemon = include_str!("../bootstrap/serve/daemon.rs");
+    let lock_pos = daemon
+        .find("DaemonLock::acquire")
+        .unwrap_or_else(|| panic!("daemon path must acquire the singleton lock"));
+    let reconciliation_pos = daemon
         .find("record_startup_reconciliation(&server)")
-        .unwrap_or_else(|| panic!("serve startup must call record_startup_reconciliation"));
-    let recovery_pos = serve
-        .find("recover_orphaned_dispatch_runs(&server)")
-        .unwrap_or_else(|| panic!("serve startup must keep orphan recovery"));
+        .unwrap_or_else(|| panic!("daemon path must run startup reconciliation"));
     assert!(
-        reconciliation_pos < recovery_pos,
-        "reconciliation runs before legacy recovery touches any receipt"
+        lock_pos < reconciliation_pos,
+        "reconciliation must run only after singleton ownership is proven"
+    );
+    let serve = include_str!("../bootstrap/serve.rs");
+    assert!(
+        !serve.contains("record_startup_reconciliation"),
+        "server-state build precedes singleton acquisition and must not reconcile"
     );
     let init = include_str!("../server_state/init.rs");
     assert!(
