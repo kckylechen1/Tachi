@@ -939,6 +939,36 @@ fn inconsistent_record_projects_unknown_not_orphaned() {
     assert_eq!(projection["control_state"], "unavailable");
 }
 
+/// R12 discrimination: a raced scan classification must not orphan a
+/// same-epoch replacement — the append re-derives orphan eligibility from
+/// the anchored locked snapshot and appends nothing.
+#[test]
+fn same_epoch_replacement_is_never_orphaned_by_a_raced_scan() {
+    let (home, runs) = test_env();
+    let _home = crate::test_support::EnvRestore::set_path("TACHI_HOME", home.path());
+    let _runs_env = crate::test_support::EnvRestore::set_path("TACHI_RUN_ROOT", runs.path());
+    let dispatch_id = "20260829T120018Z-s1-raced-scan-same-epoch";
+    // The ANCHORED truth: identity accepted under the SAME epoch that is
+    // now reconciling — whatever the scan thought it saw.
+    let run_dir = stage_managed_run(dispatch_id, "ctrl-epoch-b", "TASK_STATE_WORKING");
+
+    let appended = append_reconciliation_observation(&run_dir, VERDICT_ORPHANED, "ctrl-epoch-b")
+        .expect("typed refusal, not a write");
+    assert_eq!(
+        appended, false,
+        "a same-epoch run is not this epoch's orphan: no transition appended"
+    );
+    let after = read_status(&run_dir);
+    assert!(
+        !after
+            .get(RECONCILIATION_KEY)
+            .and_then(|r| r.get("transitions"))
+            .and_then(Value::as_array)
+            .is_some_and(|t| !t.is_empty()),
+        "the receipt carries no reconciliation transition"
+    );
+}
+
 /// R9 leaf-discipline discrimination: a symlinked status.json is foreign
 /// content — the scan skips it and the append refuses it; neither ever
 /// reads through the link.
@@ -972,14 +1002,8 @@ fn symlinked_status_leaf_is_never_read_through() {
     .expect("plant symlinked leaf");
 
     // Append refuses the leaf outright.
-    let refusal = append_reconciliation_observation(
-        &run_dir,
-        "orphaned",
-        "ctrl-epoch-b",
-        Some("ctrl-epoch-a"),
-        Some("TASK_STATE_WORKING"),
-    )
-    .expect_err("symlinked leaf must be refused");
+    let refusal = append_reconciliation_observation(&run_dir, "orphaned", "ctrl-epoch-b")
+        .expect_err("symlinked leaf must be refused");
     assert!(
         refusal.starts_with("receipt_read_failed:")
             && refusal.contains("refusing symlinked managed status"),
@@ -1515,13 +1539,7 @@ fn append_refuses_when_run_dir_is_swapped_for_a_symlink() {
     std::fs::remove_dir_all(&run_dir).expect("remove real dir");
     symlink(outside.path(), &run_dir).expect("swap for symlink");
 
-    let outcome = append_reconciliation_observation(
-        &run_dir,
-        VERDICT_ORPHANED,
-        "ctrl-epoch-b",
-        Some("ctrl-epoch-a"),
-        Some("TASK_STATE_WORKING"),
-    );
+    let outcome = append_reconciliation_observation(&run_dir, VERDICT_ORPHANED, "ctrl-epoch-b");
     let refusal = outcome.unwrap_err();
     assert!(
         refusal.starts_with("run_dir_anchor_failed:"),
@@ -1591,13 +1609,7 @@ fn append_refuses_inconsistent_observation_on_terminal_receipt() {
     .expect("write terminal receipt");
     let before = std::fs::read(run_dir.join("status.json")).expect("read before");
 
-    let outcome = append_reconciliation_observation(
-        &run_dir,
-        VERDICT_INCONSISTENT,
-        "ctrl-epoch-b",
-        None,
-        Some("TASK_STATE_WORKING"),
-    );
+    let outcome = append_reconciliation_observation(&run_dir, VERDICT_INCONSISTENT, "ctrl-epoch-b");
     assert_eq!(outcome, Ok(false), "terminal refuses every verdict append");
     assert_eq!(
         std::fs::read(run_dir.join("status.json")).expect("read after"),

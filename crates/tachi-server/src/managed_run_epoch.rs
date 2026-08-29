@@ -310,13 +310,7 @@ pub(crate) fn reconcile_interrupted_managed_runs(
                     .and_then(Value::as_str)
                     .map(str::to_string)
                     .unwrap_or_else(|| run_dir.display().to_string());
-                match append_reconciliation_observation(
-                    &run_dir,
-                    "inconsistent",
-                    current_epoch,
-                    None,
-                    status.get("state").and_then(Value::as_str),
-                ) {
+                match append_reconciliation_observation(&run_dir, "inconsistent", current_epoch) {
                     Ok(true) => outcome.inconsistent.push(label),
                     Ok(false) => {}
                     Err(failure) => outcome.append_failures.push(format!("{label}:{failure}")),
@@ -330,13 +324,7 @@ pub(crate) fn reconcile_interrupted_managed_runs(
                 .and_then(Value::as_str)
                 .map(str::to_string)
                 .unwrap_or_else(|| run_dir.display().to_string());
-            match append_reconciliation_observation(
-                &run_dir,
-                "inconsistent",
-                current_epoch,
-                accepted_controller_epoch(&status),
-                status.get("state").and_then(Value::as_str),
-            ) {
+            match append_reconciliation_observation(&run_dir, "inconsistent", current_epoch) {
                 Ok(true) => outcome.inconsistent.push(label),
                 Ok(false) => {}
                 Err(failure) => outcome.append_failures.push(format!("{label}:{failure}")),
@@ -363,8 +351,6 @@ pub(crate) fn reconcile_interrupted_managed_runs(
             &run_dir,
             "orphaned_control_unavailable",
             current_epoch,
-            accepted_controller_epoch(&status),
-            status.get("state").and_then(Value::as_str),
         ) {
             Ok(true) => outcome.orphaned.push(dispatch_id),
             Ok(false) => {}
@@ -408,10 +394,8 @@ fn has_verdict(status: &Value, verdict: &str) -> bool {
 
 fn append_reconciliation_observation(
     run_dir: &Path,
-    verdict: &str,
+    intended_verdict: &str,
     reconciling_epoch: &str,
-    accepted_epoch: Option<&str>,
-    prior_state: Option<&str>,
 ) -> Result<bool, String> {
     // The whole read-modify-write runs through the anchored receipt
     // discipline: the run directory is opened WITHOUT following aliases,
@@ -431,6 +415,29 @@ fn append_reconciliation_observation(
         .read_json()
         .map_err(|error| format!("receipt_read_failed:{error}"))?
         .ok_or_else(|| "receipt_absent_at_append".to_string())?;
+    // Classification and transition facts derive from THIS anchored, locked
+    // snapshot — never from the scan's pathname read, which can be raced.
+    // A contradictory identity forces the inconsistent verdict; every
+    // accepted-epoch/prior-state fact below is read from this status.
+    let identity_consistent = status
+        .get(IDENTITY_KEY)
+        .and_then(Value::as_object)
+        .map(|identity| identity_record_is_consistent(&status, identity))
+        .unwrap_or(false);
+    let verdict = if !identity_consistent {
+        VERDICT_INCONSISTENT
+    } else {
+        intended_verdict
+    };
+    // Orphan eligibility also derives from this snapshot: a receipt whose
+    // accepted epoch IS the reconciling epoch is not this epoch's orphan
+    // to declare — a raced scan classification must not orphan a
+    // same-epoch replacement.
+    if verdict == VERDICT_ORPHANED
+        && accepted_controller_epoch(&status).is_some_and(|epoch| epoch == reconciling_epoch)
+    {
+        return Ok(false);
+    }
     // Exactly-once is per verdict: a recorded orphan transition suppresses
     // another orphan append; a recorded inconsistent observation suppresses
     // another inconsistent append. Malformed or unrelated prior content
@@ -451,8 +458,8 @@ fn append_reconciliation_observation(
         "verdict": verdict,
         "observed_at": chrono::Utc::now().to_rfc3339(),
         "reconciling_controller_epoch_id": reconciling_epoch,
-        "accepted_controller_epoch_id": accepted_epoch,
-        "prior_state": prior_state,
+        "accepted_controller_epoch_id": accepted_controller_epoch(&status),
+        "prior_state": status.get("state").and_then(Value::as_str),
         "execution_state": if verdict == VERDICT_INCONSISTENT {
             Value::String("unknown".to_string())
         } else {
