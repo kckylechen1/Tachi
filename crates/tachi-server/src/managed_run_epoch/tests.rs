@@ -984,6 +984,36 @@ fn symlinked_status_leaf_is_never_read_through() {
         refusal, "status_leaf_not_a_regular_file",
         "the refusal is typed and names the leaf discipline"
     );
+
+    // The scanner also skips the symlinked-leaf run: it is never a
+    // scannable fact, so the run does not appear in scanned/unreadable.
+    let (home, runs_env) = test_env();
+    let _home = crate::test_support::EnvRestore::set_path("TACHI_HOME", home.path());
+    let _runs_env = crate::test_support::EnvRestore::set_path("TACHI_RUN_ROOT", runs_env.path());
+    let scan_root = crate::dispatch_ops::dispatch_runs_root();
+    let scan_dir = scan_root.join(dispatch_id);
+    std::fs::create_dir_all(&scan_dir).expect("scan run dir");
+    std::os::unix::fs::symlink(
+        outside.path().join("status.json"),
+        scan_dir.join("status.json"),
+    )
+    .expect("plant scan symlink");
+    let server =
+        crate::MemoryServer::new(home.path().join("scan.sqlite"), None).expect("scan server");
+    record_startup_reconciliation(&server);
+    let outcome = server
+        .startup_reconciliation
+        .get()
+        .expect("scan outcome")
+        .clone();
+    assert_eq!(
+        outcome.scanned, 0,
+        "the scanner skips a symlinked-leaf run entirely"
+    );
+    assert!(
+        outcome.inconsistent.is_empty() && outcome.orphaned.is_empty(),
+        "the foreign receipt behind the link is never read or classified: {outcome:?}"
+    );
 }
 
 /// Failed-append discrimination: a contradictory identity whose INCONSISTENT

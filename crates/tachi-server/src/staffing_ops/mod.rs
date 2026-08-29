@@ -305,6 +305,18 @@ async fn staff_status_impl(request: &StaffStatusRequest) -> Result<String, Strin
         ));
     }
     let status_path = run_dir.join("status.json");
+    // Leaf discipline: a symlinked receipt is foreign content — refuse it
+    // with the same typed unknown as an absent one rather than read
+    // through the link and disclose whatever it points at.
+    let leaf_is_regular = std::fs::symlink_metadata(&status_path)
+        .map(|metadata| metadata.is_file())
+        .unwrap_or(false);
+    if !leaf_is_regular {
+        return Err(format!(
+            "staff_status: unknown dispatch_id {:?}",
+            request.dispatch_id
+        ));
+    }
     let Some(status) = crate::task_lifecycle::read_json_file(&status_path)
         .map_err(|err| format!("staff_status: read {}: {err}", status_path.display()))?
     else {

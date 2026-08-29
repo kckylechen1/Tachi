@@ -600,7 +600,14 @@ pub(crate) fn read_projection(
         .filter_map(Value::as_str)
         .filter(|name| confined_artifact_ref(name))
     {
-        artifacts.insert(name.to_string(), Value::Bool(run_dir.join(name).is_file()));
+        // No-follow artifact probe: a symlinked artifact answers false
+        // without resolving its target (no existence oracle through links).
+        let artifact_is_regular = run_dir
+            .join(name)
+            .symlink_metadata()
+            .map(|metadata| metadata.is_file())
+            .unwrap_or(false);
+        artifacts.insert(name.to_string(), Value::Bool(artifact_is_regular));
     }
     Some(json!({
         "execution_state": execution_state,
