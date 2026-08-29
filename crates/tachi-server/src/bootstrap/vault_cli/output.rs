@@ -70,13 +70,16 @@ pub(crate) fn lease_api_key_from_store(
     let entries = store
         .vault_list_entries()
         .map_err(|e| format!("vault_list_entries: {e}"))?;
-    let rotation = store
-        .vault_get_rotation(logical_name)
-        .map_err(|e| format!("vault_get_rotation: {e}"))?;
     let health_logical_name =
         crate::vault_ops::canonical_api_key_health_logical_name(store, logical_name)?;
+    let rotation = store
+        .vault_get_rotation(&health_logical_name)
+        .map_err(|e| format!("vault_get_rotation: {e}"))?;
+    let configured_member_request = health_logical_name != logical_name;
 
-    let candidate_names = if let Some(rotation) = rotation.as_ref() {
+    let candidate_names = if configured_member_request {
+        vec![logical_name.to_string()]
+    } else if let Some(rotation) = rotation.as_ref() {
         let total = rotation.total_keys.max(0);
         if total == 0 {
             Vec::new()
@@ -131,7 +134,7 @@ pub(crate) fn lease_api_key_from_store(
             if let Some((prefix, idx)) =
                 crate::provider_config::parse_rotation_member_name(&entry.name)
             {
-                if prefix == logical_name && rotation.total_keys > 0 {
+                if prefix == health_logical_name && rotation.total_keys > 0 {
                     store
                         .vault_set_rotation(&memcore::vault::VaultKeyRotation {
                             current_index: (idx as i64 % rotation.total_keys) + 1,

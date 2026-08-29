@@ -94,14 +94,9 @@ pub(super) async fn run_provider_probe_report_with_migration_authority(
             };
         }
     };
-    let skipped_alias_probe =
-        match crate::provider_config::materialize_standalone(&llm, global_db_path) {
-            Ok(report) => skipped_alias_probe_result(&report),
-            Err(err) => {
-                tracing::warn!("[provider] probe secret materialization failed: {err}");
-                None
-            }
-        };
+    let skipped_alias_probe = materialization_probe_result(
+        crate::provider_config::materialize_standalone(&llm, global_db_path),
+    );
 
     // Run probes concurrently so adding chat lanes does not make status
     // probes serially accumulate their timeout budgets.
@@ -275,6 +270,22 @@ pub(super) fn skipped_alias_probe_result(
             report,
         )),
     })
+}
+
+pub(super) fn materialization_probe_result(
+    result: Result<tachi_llm::MaterializeReport, String>,
+) -> Option<ProviderProbeResult> {
+    match result {
+        Ok(report) => skipped_alias_probe_result(&report),
+        Err(error) => {
+            tracing::warn!("[provider] probe secret materialization failed: {error}");
+            Some(ProviderProbeResult {
+                name: "provider_secret_materialization".to_string(),
+                status: "failed".to_string(),
+                message: Some(format!("provider secret materialization failed: {error}")),
+            })
+        }
+    }
 }
 
 fn probe_llm_client_with_migration_authority(

@@ -450,14 +450,39 @@ async fn unhealthy_configured_rotation_member_cannot_fall_back_as_standalone() {
         let vault = server.vault_read();
         *vault.key.as_ref().expect("unlocked key").bytes()
     };
+    server
+        .with_global_store(|store| {
+            let mut rotation = store
+                .vault_get_rotation("VOYAGE_API_KEY")
+                .map_err(|error| error.to_string())?
+                .expect("configured rotation");
+            rotation.current_index = 1;
+            store
+                .vault_set_rotation(&rotation)
+                .map_err(|error| error.to_string())
+        })
+        .expect("reset rotation before CLI lease");
     let (cli_logical_name, cli_key_id, mut cli_value) = server
-        .with_global_store_read(|store| {
+        .with_global_store(|store| {
             crate::bootstrap::lease_api_key_from_store(store, &key, "VOYAGE_API_KEY_1")
                 .map_err(|error| error.to_string())
         })
         .expect("first CLI raw-member lease");
     assert_eq!(cli_logical_name, "VOYAGE_API_KEY");
     assert_eq!(cli_key_id, "VOYAGE_API_KEY_1");
+    assert_eq!(
+        server
+            .with_global_store_read(|store| {
+                store
+                    .vault_get_rotation("VOYAGE_API_KEY")
+                    .map_err(|error| error.to_string())
+            })
+            .expect("read rotation")
+            .expect("configured rotation")
+            .current_index,
+        2,
+        "CLI raw-member lease must advance the canonical prefix rotation"
+    );
     crate::vault_crypto::zero_string(&mut cli_value);
 
     server

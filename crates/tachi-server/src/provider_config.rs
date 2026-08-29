@@ -163,6 +163,21 @@ fn resolve_vault_pools(
     server: Option<&MemoryServer>,
     global_db_path: &Path,
 ) -> Result<tachi_llm::DurableVaultLoad, String> {
+    resolve_vault_pools_with_keychain_loader(
+        server,
+        global_db_path,
+        &vault_api_key_load_from_keychain,
+    )
+}
+
+fn resolve_vault_pools_with_keychain_loader<F>(
+    server: Option<&MemoryServer>,
+    global_db_path: &Path,
+    keychain_loader: &F,
+) -> Result<tachi_llm::DurableVaultLoad, String>
+where
+    F: Fn(&Path) -> Result<tachi_llm::DurableVaultLoad, String>,
+{
     // Starts unavailable and is only promoted by a read that actually
     // succeeded: an unproven source must never license retention.
     let mut availability = VaultSourceAvailability::LockedOrUnavailable;
@@ -193,7 +208,7 @@ fn resolve_vault_pools(
             Err(err) => return Err(format!("Failed to unlock Vault provider secrets: {err}")),
         }
     }
-    let keychain = vault_api_key_load_from_keychain(global_db_path)?;
+    let keychain = keychain_loader(global_db_path)?;
     if keychain.availability == VaultSourceAvailability::Readable {
         return Ok(keychain);
     }
@@ -215,7 +230,7 @@ fn resolve_vault_pools(
         ));
     }
 
-    let fallback = vault_api_key_load_from_keychain(&default_global)?;
+    let fallback = keychain_loader(&default_global)?;
     if should_use_default_vault_fallback(&fallback) {
         tracing::warn!(
             "[provider] global DB {} has no initialized Vault; using default Vault DB {} for provider key materialization",
@@ -1470,14 +1485,31 @@ mod tests {
 
     #[test]
     fn readable_empty_default_vault_fallback_stays_readable() {
-        let fallback = tachi_llm::DurableVaultLoad {
-            pools: HashMap::new(),
-            listed_drops: HashMap::new(),
-            availability: VaultSourceAvailability::Readable,
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let home = tempfile::tempdir().expect("tempdir");
+        let _env = EnvRestore::set_path("TACHI_HOME", home.path());
+        let default_db = default_global_db_path();
+        let custom_db = home.path().join("custom").join(memcore::MEMORY_DB_FILENAME);
+        let loader = |path: &Path| {
+            Ok(tachi_llm::DurableVaultLoad {
+                pools: HashMap::new(),
+                listed_drops: HashMap::new(),
+                availability: if paths_equal(path, &default_db) {
+                    VaultSourceAvailability::Readable
+                } else {
+                    VaultSourceAvailability::LockedOrUnavailable
+                },
+            })
         };
-        assert!(
-            should_use_default_vault_fallback(&fallback),
-            "a readable empty fallback must take the production return branch"
+        let load = resolve_vault_pools_with_keychain_loader(None, &custom_db, &loader)
+            .expect("resolve default fallback");
+        assert!(load.pools.is_empty());
+        assert_eq!(
+            load.availability,
+            VaultSourceAvailability::Readable,
+            "the actual resolver must preserve readable-empty fallback authority"
         );
     }
 

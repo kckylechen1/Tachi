@@ -341,6 +341,20 @@ fn skipped_alias_surfaces_as_a_probe_result_not_only_a_log_line() {
 }
 
 #[test]
+fn materialization_failure_surfaces_in_the_persisted_probe_report() {
+    let probe =
+        super::probes::materialization_probe_result(Err("Vault DB schema is corrupt".to_string()))
+            .expect("materialization errors must surface as a probe result");
+    assert_eq!(probe.name, "provider_secret_materialization");
+    assert_eq!(probe.status, "failed");
+    assert!(probe
+        .message
+        .as_deref()
+        .unwrap_or_default()
+        .contains("Vault DB schema is corrupt"));
+}
+
+#[test]
 fn skipped_alias_probe_aggregate_distinguishes_retained_without_raw_reasons() {
     let report = tachi_llm::MaterializeReport {
         skipped_aliases: vec![
