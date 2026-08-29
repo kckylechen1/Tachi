@@ -319,10 +319,62 @@ pub(crate) fn validate_harness_session_spine_schema(conn: &Connection) -> Result
             "instr(CAST(summary AS BLOB), CAST(x'00' AS BLOB)) = 0",
         ),
         (
+            "harness_session_events",
+            "length(trim(event_id)) > 0",
+        ),
+        (
+            "harness_session_events",
+            "kind IN ('accepted', 'started', 'progress', 'input_required', 'terminal', 'cleanup')",
+        ),
+        (
+            "harness_session_events",
+            "outcome IN ('completed', 'failed', 'cancelled')",
+        ),
+        (
+            "harness_session_events",
+            "source_revision >= 0",
+        ),
+        (
+            "harness_session_events",
+            "length(trim(source_host_identity)) > 0",
+        ),
+        (
+            "harness_session_events",
+            "UNIQUE (attachment_id, event_id)",
+        ),
+        (
+            "harness_session_events",
+            "outcome IS NULL OR kind = 'terminal'",
+        ),
+        (
+            "harness_session_events",
+            "length(summary) <= 2000",
+        ),
+        (
+            "harness_session_events",
+            "length(trim(payload_digest)) > 0",
+        ),
+        (
             "harness_session_interventions",
             "instr(CAST(reason AS BLOB), CAST(x'00' AS BLOB)) = 0",
         ),
         (
+            "harness_session_interventions",
+            "length(trim(request_id)) > 0",
+        ),
+        (
+            "harness_session_interventions",
+            "expected_session_revision >= 0",
+        ),
+        (
+            "harness_session_interventions",
+            "length(trim(requested_by)) > 0",
+        ),
+        (
+            "harness_session_interventions",
+            "UNIQUE (attachment_id, request_id)",
+        ),
+        (
             "harness_session_events",
             "length(authority_confirmation_ref) <= 128",
         ),
@@ -337,6 +389,22 @@ pub(crate) fn validate_harness_session_spine_schema(conn: &Connection) -> Result
         (
             "harness_session_intervention_results",
             "instr(CAST(authority_confirmation_ref AS BLOB), CAST(x'00' AS BLOB)) = 0",
+        ),
+        (
+            "harness_session_intervention_results",
+            "length(trim(authority_confirmation_ref)) > 0",
+        ),
+        (
+            "harness_session_intervention_results",
+            "length(detail) <= 2000",
+        ),
+        (
+            "harness_session_intervention_results",
+            "length(trim(source_host_identity)) > 0",
+        ),
+        (
+            "harness_session_intervention_results",
+            "UNIQUE (attachment_id, request_id)",
         ),
         (
             "harness_session_events",
@@ -381,6 +449,42 @@ pub(crate) fn validate_harness_session_spine_schema(conn: &Connection) -> Result
         (
             "harness_session_capability_advertisements",
             "UNIQUE (attachment_id, advertisement_seq)",
+        ),
+        (
+            "harness_session_capability_advertisements",
+            "advertisement_seq >= 1",
+        ),
+        (
+            "harness_session_capability_advertisements",
+            "json_valid(capabilities_json)",
+        ),
+        (
+            "harness_session_capability_advertisements",
+            "length(trim(source_host_identity)) > 0",
+        ),
+        (
+            "harness_session_state",
+            "canonical_revision >= 0",
+        ),
+        (
+            "harness_session_state",
+            "cleanup_recorded IN (0, 1)",
+        ),
+        (
+            "harness_session_state",
+            "pre_disconnect_rank >= -1",
+        ),
+        (
+            "harness_session_state",
+            "length(trim(terminal_digest)) > 0",
+        ),
+        (
+            "harness_session_state",
+            "length(trim(conflicting_terminal_digest)) > 0",
+        ),
+        (
+            "harness_session_state",
+            "length(trim(last_event_id)) > 0",
         ),
     ] {
         let table_sql: String = conn.query_row(
