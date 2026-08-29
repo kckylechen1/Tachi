@@ -283,9 +283,12 @@ pub(super) fn import_validated_vault_bundle(
             .map_err(|e| format!("vault_upsert_entry '{}': {e}", entry.name))?;
     }
     for rotation in rotations {
-        transaction
-            .vault_set_rotation(rotation)
-            .map_err(|e| format!("vault_set_rotation '{}': {e}", rotation.prefix))?;
+        transaction.vault_set_rotation(rotation).map_err(|e| {
+            format!(
+                "vault_import_bundle: vault_set_rotation '{}': {e}",
+                rotation.prefix
+            )
+        })?;
     }
     transaction
         .commit()

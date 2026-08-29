@@ -201,6 +201,51 @@ async fn lane_slot_rebind_rejects_secret_type_override_bypass() {
 }
 
 #[tokio::test]
+async fn legacy_non_api_key_lane_slot_fails_closed_before_api_overwrite() {
+    let server = make_server();
+    server
+        .vault_init(Parameters(VaultInitParams {
+            password: "slot-rebind-legacy-type".to_string(),
+        }))
+        .await
+        .expect("init");
+    server
+        .vault_set(Parameters(slot_params(
+            "EXTRACT_API_KEY",
+            "legacy-family",
+            false,
+        )))
+        .await
+        .expect("seed slot");
+    server
+        .with_global_store(|store| {
+            let mut entry = store
+                .vault_get_entry("EXTRACT_API_KEY")
+                .map_err(|e| e.to_string())?
+                .expect("seeded lane slot");
+            entry.secret_type = "other".to_string();
+            store.vault_upsert_entry(&entry).map_err(|e| e.to_string())
+        })
+        .expect("install legacy lane-slot type");
+
+    let error = server
+        .vault_set(Parameters(slot_params(
+            "EXTRACT_API_KEY",
+            "replacement-family",
+            false,
+        )))
+        .await
+        .expect_err("legacy lane slot must fail closed");
+    assert!(error.contains("legacy secret_type 'other'"), "{error}");
+    assert!(error.contains("Remove or migrate"), "{error}");
+    assert!(!error.contains("replacement-family"), "{error}");
+    assert_eq!(
+        slot_value(&server, "EXTRACT_API_KEY").await,
+        "legacy-family"
+    );
+}
+
+#[tokio::test]
 async fn account_name_rotation_does_not_require_rebind() {
     let server = make_server();
     server

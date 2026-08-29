@@ -70,36 +70,34 @@ pub(crate) async fn handle_vault_set(
                             .vault_get_entry(&params.name)
                             .map_err(|e| format!("Failed to read existing slot: {e}"))?;
                         if let Some(existing) = existing {
-                            if existing.secret_type == SECRET_TYPE_API_KEY {
-                                let old_bytes = crypto::decrypt(
-                                    key,
-                                    &existing.encrypted_value,
-                                    &existing.nonce,
-                                )?;
-                                let mut old_value = crypto::decode_utf8_zeroizing(
-                                    old_bytes,
-                                    format!("Existing slot '{}' is not valid UTF-8", params.name),
-                                )?;
-                                let provider_kind =
-                                    provider_kind_for_env_name(&params.name).unwrap_or("unknown");
-                                let overwrite = evaluate_lane_slot_overwrite(
-                                    &old_value,
-                                    &value,
-                                    provider_kind,
-                                    key,
-                                    params.rebind,
-                                );
-                                crypto::zero_string(&mut old_value);
-                                match overwrite {
-                                    Ok(LaneSlotOverwrite::Identical { fingerprint }) => {
-                                        rebind_meta =
-                                            Some((false, fingerprint.clone(), fingerprint));
-                                    }
-                                    Ok(LaneSlotOverwrite::Rebound { old_fp, new_fp }) => {
-                                        rebind_meta = Some((true, old_fp, new_fp));
-                                    }
-                                    Err(err) => return Err(err.operator_message(&params.name)),
+                            validate_existing_lane_slot_secret_type(
+                                &params.name,
+                                &existing.secret_type,
+                            )?;
+                            let old_bytes =
+                                crypto::decrypt(key, &existing.encrypted_value, &existing.nonce)?;
+                            let mut old_value = crypto::decode_utf8_zeroizing(
+                                old_bytes,
+                                format!("Existing slot '{}' is not valid UTF-8", params.name),
+                            )?;
+                            let provider_kind =
+                                provider_kind_for_env_name(&params.name).unwrap_or("unknown");
+                            let overwrite = evaluate_lane_slot_overwrite(
+                                &old_value,
+                                &value,
+                                provider_kind,
+                                key,
+                                params.rebind,
+                            );
+                            crypto::zero_string(&mut old_value);
+                            match overwrite {
+                                Ok(LaneSlotOverwrite::Identical { fingerprint }) => {
+                                    rebind_meta = Some((false, fingerprint.clone(), fingerprint));
                                 }
+                                Ok(LaneSlotOverwrite::Rebound { old_fp, new_fp }) => {
+                                    rebind_meta = Some((true, old_fp, new_fp));
+                                }
+                                Err(err) => return Err(err.operator_message(&params.name)),
                             }
                         }
                     }

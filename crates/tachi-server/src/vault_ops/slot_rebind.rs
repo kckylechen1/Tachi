@@ -30,6 +30,18 @@ pub(crate) fn validate_lane_slot_secret_type(name: &str, secret_type: &str) -> R
     Ok(())
 }
 
+pub(crate) fn validate_existing_lane_slot_secret_type(
+    name: &str,
+    secret_type: &str,
+) -> Result<(), String> {
+    if is_lane_slot_secret_name(name) && secret_type != memcore::vault::SECRET_TYPE_API_KEY {
+        return Err(format!(
+            "Lane slot '{name}' has legacy secret_type '{secret_type}'; refusing to overwrite it because its prior account binding cannot be validated. Remove or migrate the legacy record explicitly before setting this slot."
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum LaneSlotOverwrite {
     Identical { fingerprint: String },
@@ -109,6 +121,16 @@ mod tests {
         assert!(error.contains("EXTRACT_API_KEY"), "{error}");
         assert!(error.contains("api_key"), "{error}");
         assert!(validate_lane_slot_secret_type("SILICONFLOW_API_KEY", "other").is_ok());
+    }
+
+    #[test]
+    fn legacy_lane_slot_types_fail_closed_before_overwrite() {
+        let error = validate_existing_lane_slot_secret_type("EXTRACT_API_KEY", "other")
+            .expect_err("legacy lane slot type must fail closed");
+        assert!(error.contains("EXTRACT_API_KEY"), "{error}");
+        assert!(error.contains("legacy secret_type 'other'"), "{error}");
+        assert!(error.contains("Remove or migrate"), "{error}");
+        assert!(validate_existing_lane_slot_secret_type("SILICONFLOW_API_KEY", "other").is_ok());
     }
 
     #[test]
