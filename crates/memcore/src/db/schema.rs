@@ -387,6 +387,22 @@ pub(crate) fn validate_harness_session_spine_schema(conn: &Connection) -> Result
             "length(authority_confirmation_ref) <= 128",
         ),
         (
+            "harness_session_events",
+            "length(trim(authority_confirmation_ref)) > 0",
+        ),
+        (
+            "harness_session_events",
+            "instr(CAST(authority_confirmation_ref AS BLOB), CAST(x'00' AS BLOB)) = 0",
+        ),
+        (
+            "harness_session_events",
+            "length(summary) > 0",
+        ),
+        (
+            "harness_session_events",
+            "length(payload_digest) <= 128",
+        ),
+        (
             "harness_session_intervention_results",
             "instr(CAST(authority_confirmation_ref AS BLOB), CAST(x'00' AS BLOB)) = 0",
         ),
@@ -448,7 +464,7 @@ pub(crate) fn validate_harness_session_spine_schema(conn: &Connection) -> Result
         ),
         (
             "harness_session_state",
-            "'inconsistent_reconciling', 'unknown_orphaned'",
+            "'accepted', 'started', 'progressing', 'input_required', 'completed', 'failed', 'cancelled', 'inconsistent_reconciling', 'unknown_orphaned'",
         ),
         (
             "harness_session_intervention_results",

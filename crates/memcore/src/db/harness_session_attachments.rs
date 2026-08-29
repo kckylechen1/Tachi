@@ -510,6 +510,7 @@ fn validate_new_attachment(input: &NewHarnessSessionAttachment) -> Result<(), Me
     for (field, value) in [
         ("host_identity", input.host_identity.as_str()),
         ("agent_identity_id", input.agent_identity_id.as_str()),
+        ("work_claim_id", input.work_claim_id.as_str()),
         ("contract_digest", input.contract_digest.as_str()),
         ("idempotency_key", input.idempotency_key.as_str()),
         (

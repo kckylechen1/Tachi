@@ -112,14 +112,23 @@ pub fn facade_action_allowed(
         && action.is_some_and(|action| {
             matches!(
                 action.to_ascii_lowercase().as_str(),
-                "attach_session" | "get_attachment"
+                "attach_session"
+                    | "get_attachment"
+                    | "ingest_session_event"
+                    | "get_session_state"
+                    | "mark_session_connection"
+                    | "reconnect_session"
+                    | "advertise_session_capabilities"
+                    | "request_intervention"
+                    | "record_intervention_result"
             )
         })
     {
-        // Attachment admission/projection is a host-coordination surface.
-        // Keep the existing eval actions unchanged, while requiring the
-        // explicit coordinate/admin profile before the attachment handler can
-        // run (the server handler repeats this gate for direct callers).
+        // Attachment admission/projection and the #1678 receipt-spine
+        // surfaces are host-coordination surfaces. Keep the existing eval
+        // actions unchanged, while requiring the explicit coordinate/admin
+        // profile before the handlers can run (the server handler repeats
+        // this gate for direct callers).
         return profile.is_admin() || profile == ToolProfile::coordinate();
     }
     if tool_name == "tachi_task"
@@ -832,6 +841,37 @@ mod tests {
     #[test]
     fn f1733_attachment_actions_are_coordinate_or_admin_only() {
         for action in ["attach_session", "get_attachment"] {
+            assert!(facade_action_allowed(
+                "tachi_agent_eval",
+                Some(action),
+                Some(ToolProfile::coordinate())
+            ));
+            assert!(facade_action_allowed(
+                "tachi_agent_eval",
+                Some(action),
+                Some(ToolProfile::admin())
+            ));
+            for profile in [ToolProfile::observe(), ToolProfile::delegate()] {
+                assert!(
+                    !facade_action_allowed("tachi_agent_eval", Some(action), Some(profile)),
+                    "{action} must be denied for {}",
+                    profile.as_str()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn f1678_spine_actions_are_coordinate_or_admin_only() {
+        for action in [
+            "ingest_session_event",
+            "get_session_state",
+            "mark_session_connection",
+            "reconnect_session",
+            "advertise_session_capabilities",
+            "request_intervention",
+            "record_intervention_result",
+        ] {
             assert!(facade_action_allowed(
                 "tachi_agent_eval",
                 Some(action),
