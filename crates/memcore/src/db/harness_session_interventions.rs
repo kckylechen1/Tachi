@@ -129,6 +129,7 @@ pub struct HarnessSessionIntervention {
     pub kind: HarnessSessionInterventionKind,
     pub reason: String,
     pub expected_session_revision: i64,
+    pub capability_source: CapabilitySource,
     /// The live host connection the request was issued through; derived
     /// server-side, never caller-claimed.
     pub requested_by: String,
@@ -191,8 +192,9 @@ pub enum HarnessSessionInterventionAdmission {
 pub struct HarnessSessionInterventionRequestReceipt {
     pub intervention: HarnessSessionIntervention,
     pub admission: HarnessSessionInterventionAdmission,
-    /// The capability fact the gate consulted: the latest host advertisement
-    /// when one exists, otherwise the attachment's declared set.
+    /// The capability fact the gate consulted: latest advertisement, declared
+    /// attachment set, or explicit unknown for a migrated v34 receipt whose
+    /// historical provenance was never persisted.
     pub capability_source: CapabilitySource,
     pub state: HarnessSessionStateProjection,
 }
@@ -203,6 +205,9 @@ pub enum CapabilitySource {
     Advertised,
     /// No advertisement exists; the attachment's declared set decided.
     Declared,
+    /// A shipped v34 receipt predates persisted provenance. The historical
+    /// gate source cannot be reconstructed without guessing.
+    LegacyUnknown,
 }
 
 impl CapabilitySource {
@@ -210,6 +215,18 @@ impl CapabilitySource {
         match self {
             Self::Advertised => "advertised",
             Self::Declared => "declared",
+            Self::LegacyUnknown => "legacy_unknown",
+        }
+    }
+
+    fn parse(raw: &str) -> Result<Self, MemoryError> {
+        match raw {
+            "advertised" => Ok(Self::Advertised),
+            "declared" => Ok(Self::Declared),
+            "legacy_unknown" => Ok(Self::LegacyUnknown),
+            other => Err(MemoryError::InvalidArg(format!(
+                "unknown harness session capability source '{other}'"
+            ))),
         }
     }
 }
@@ -217,6 +234,9 @@ impl CapabilitySource {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HarnessSessionInterventionResultReceipt {
     pub result: HarnessSessionInterventionResult,
+    /// Request metadata captured in the same transaction as the result. This
+    /// keeps acknowledgements independent of a later attachment rebind.
+    pub request_kind: HarnessSessionInterventionKind,
     pub admission: HarnessSessionInterventionAdmission,
     pub state: HarnessSessionStateProjection,
 }
@@ -231,7 +251,7 @@ pub struct NewHarnessSessionInterventionResult {
 }
 
 const INTERVENTION_COLUMNS: &str = "intervention_row_id, attachment_id, request_id, kind, reason, \
-    expected_session_revision, requested_by, requested_at";
+    expected_session_revision, capability_source, requested_by, requested_at";
 
 fn row_to_intervention(
     row: &rusqlite::Row<'_>,
@@ -247,6 +267,17 @@ fn row_to_intervention(
             )),
         )
     })?;
+    let capability_source_raw: String = row.get(6)?;
+    let capability_source = CapabilitySource::parse(&capability_source_raw).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            6,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                error.to_string(),
+            )),
+        )
+    })?;
     Ok(HarnessSessionIntervention {
         intervention_row_id: row.get(0)?,
         attachment_id: row.get(1)?,
@@ -254,8 +285,9 @@ fn row_to_intervention(
         kind,
         reason: row.get(4)?,
         expected_session_revision: row.get(5)?,
-        requested_by: row.get(6)?,
-        requested_at: row.get(7)?,
+        capability_source,
+        requested_by: row.get(7)?,
+        requested_at: row.get(8)?,
     })
 }
 
@@ -311,14 +343,29 @@ fn latest_advertised_capabilities(
     conn: &Connection,
     attachment_id: &str,
 ) -> Result<Option<String>, MemoryError> {
-    Ok(conn
+    let raw: Option<String> = conn
         .query_row(
             "SELECT capabilities_json FROM harness_session_capability_advertisements
              WHERE attachment_id = ?1 ORDER BY advertisement_seq DESC LIMIT 1",
             params![attachment_id],
             |row| row.get(0),
         )
-        .optional()?)
+        .optional()?;
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let parsed: HarnessSessionAttachmentCapabilities =
+        serde_json::from_str(&raw).map_err(|error| {
+            MemoryError::WorkClaimIncompatibleState(format!(
+                "capability advertisement is not the closed canonical shape: {error}"
+            ))
+        })?;
+    if parsed.canonical_json()? != raw {
+        return Err(MemoryError::WorkClaimIncompatibleState(
+            "capability advertisement is not canonical JSON".to_string(),
+        ));
+    }
+    Ok(Some(raw))
 }
 
 /// Record a host-owned capability advertisement for the attachment. The
@@ -425,11 +472,12 @@ pub fn request_harness_session_intervention(
             )));
         }
         let state = projection_from_row(&tx, &attachment_id);
+        let capability_source = existing.capability_source;
         tx.commit()?;
         return Ok(HarnessSessionInterventionRequestReceipt {
             intervention: existing,
             admission: HarnessSessionInterventionAdmission::Replayed,
-            capability_source: CapabilitySource::Declared,
+            capability_source,
             state,
         });
     }
@@ -506,14 +554,15 @@ pub fn request_harness_session_intervention(
     tx.execute(
         "INSERT INTO harness_session_interventions (
             attachment_id, request_id, kind, reason, expected_session_revision,
-            requested_by, requested_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            capability_source, requested_by, requested_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         params![
             attachment_id,
             input.request_id,
             input.kind.as_str(),
             input.reason,
             input.expected_session_revision,
+            capability_source.as_str(),
             host.host_identity,
             now,
         ],
@@ -529,6 +578,7 @@ pub fn request_harness_session_intervention(
             kind: input.kind,
             reason: input.reason.clone(),
             expected_session_revision: input.expected_session_revision,
+            capability_source,
             requested_by: host.host_identity.clone(),
             requested_at: now,
         },
@@ -672,6 +722,7 @@ pub fn record_harness_session_intervention_result(
         tx.commit()?;
         return Ok(HarnessSessionInterventionResultReceipt {
             result: existing,
+            request_kind: request.kind,
             admission: HarnessSessionInterventionAdmission::Replayed,
             state: projection,
         });
@@ -707,6 +758,7 @@ pub fn record_harness_session_intervention_result(
             recorded_at: now,
             source_host_identity: attachment.host_identity,
         },
+        request_kind: request.kind,
         admission: HarnessSessionInterventionAdmission::Created,
         state: projection,
     })
@@ -1397,6 +1449,10 @@ mod tests {
             receipt.admission,
             HarnessSessionInterventionAdmission::Created
         );
+        assert_eq!(
+            receipt.request_kind,
+            HarnessSessionInterventionKind::RequestCancel
+        );
         assert_ne!(
             receipt.state.canonical_state,
             Some(HarnessSessionCanonicalState::Cancelled),
@@ -1436,6 +1492,10 @@ mod tests {
         assert_eq!(
             replay.admission,
             HarnessSessionInterventionAdmission::Replayed
+        );
+        assert_eq!(
+            replay.request_kind,
+            HarnessSessionInterventionKind::RequestCancel
         );
         let conflict = record_harness_session_intervention_result(
             &mut conn,
@@ -1577,5 +1637,79 @@ mod tests {
             HarnessSessionInterventionAdmission::Created
         );
         assert_eq!(status.capability_source, CapabilitySource::Advertised);
+        let replay = request_harness_session_intervention(
+            &mut conn,
+            &selector,
+            &request(
+                "req-cap-status",
+                HarnessSessionInterventionKind::RequestStatus,
+                0,
+            ),
+            &host(),
+            "admission-1",
+        )
+        .unwrap();
+        assert_eq!(
+            replay.admission,
+            HarnessSessionInterventionAdmission::Replayed
+        );
+        assert_eq!(
+            replay.capability_source,
+            CapabilitySource::Advertised,
+            "idempotent replay must preserve the original authorization provenance"
+        );
+    }
+
+    #[test]
+    fn foreign_capability_advertisements_are_closed_bounded_and_canonical() {
+        let (mut conn, selector) = seeded_with_grant(GRANT_DELEGATE, "foreign-capability-json");
+        let HarnessSessionAttachmentSelector::AttachmentId(attachment_id) = &selector else {
+            panic!("attachment-id selector")
+        };
+        let with_unknown = r#"{"observe":true,"wait":true,"prompt":true,"cancel":true,"resume":true,"load":true,"events":true,"artifacts":true,"transcript":"unbounded"}"#;
+        let error = conn
+            .execute(
+                "INSERT INTO harness_session_capability_advertisements
+                 (attachment_id, advertisement_seq, capabilities_json, source_host_identity, advertised_at)
+                 VALUES (?1, 1, ?2, 'host-1', '2026-08-30T00:00:00Z')",
+                params![attachment_id, with_unknown],
+            )
+            .expect_err("unknown capability content must fail at storage");
+        assert!(error.to_string().contains("CHECK constraint"), "{error}");
+
+        for incomplete in ["{}", r#"{"observe":true}"#] {
+            let error = conn
+                .execute(
+                    "INSERT INTO harness_session_capability_advertisements
+                     (attachment_id, advertisement_seq, capabilities_json, source_host_identity, advertised_at)
+                     VALUES (?1, 1, ?2, 'host-1', '2026-08-30T00:00:00Z')",
+                    params![attachment_id, incomplete],
+                )
+                .expect_err("missing capability fields must fail at storage");
+            assert!(error.to_string().contains("CHECK constraint"), "{error}");
+        }
+
+        let non_canonical = r#"{ "artifacts":true,"events":true,"load":true,"resume":true,"cancel":true,"prompt":true,"wait":true,"observe":true }"#;
+        conn.execute(
+            "INSERT INTO harness_session_capability_advertisements
+             (attachment_id, advertisement_seq, capabilities_json, source_host_identity, advertised_at)
+             VALUES (?1, 1, ?2, 'host-1', '2026-08-30T00:00:00Z')",
+            params![attachment_id, non_canonical],
+        )
+        .expect("closed bounded foreign JSON reaches the read-side canonical gate");
+        let error = request_harness_session_intervention(
+            &mut conn,
+            &selector,
+            &request(
+                "req-foreign-json",
+                HarnessSessionInterventionKind::RequestStatus,
+                0,
+            ),
+            &host(),
+            "admission-1",
+        )
+        .expect_err("non-canonical advertisement must not authorize a request");
+        assert!(error.to_string().contains("not canonical JSON"), "{error}");
+        assert_eq!(intervention_rows(&conn), 0);
     }
 }

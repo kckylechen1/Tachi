@@ -379,6 +379,27 @@ pub struct TachiOrchestratorParams {
 
 // ─── Facade: agent eval harness ──────────────────────────────────────────────
 
+pub const TACHI_AGENT_EVAL_ACTIONS: &[&str] = &[
+    "aggregate",
+    "aggregate_live",
+    "telemetry",
+    "perf",
+    "register",
+    "observe",
+    "adjudicate",
+    "get",
+    "route_projection",
+    "attach_session",
+    "get_attachment",
+    "ingest_session_event",
+    "get_session_state",
+    "mark_session_connection",
+    "reconnect_session",
+    "advertise_session_capabilities",
+    "request_intervention",
+    "record_intervention_result",
+];
+
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
 pub struct TachiAgentEvalParams {
     /// aggregate | aggregate_live | telemetry | perf | register | observe |

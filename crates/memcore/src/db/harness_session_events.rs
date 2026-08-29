@@ -32,8 +32,8 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::db::harness_session_attachments::{
-    verify_existing_attachment, HarnessSessionAttachment, HarnessSessionAttachmentSelector,
-    HarnessSessionAttachmentState, HarnessSessionHostAdmission,
+    find_attachment_for_reconnect, verify_attachment_rebind, HarnessSessionAttachment,
+    HarnessSessionAttachmentSelector, HarnessSessionAttachmentState, HarnessSessionHostAdmission,
 };
 use crate::db::normalize_utc_iso_or_now;
 use crate::error::MemoryError;
@@ -581,6 +581,9 @@ fn validate_new_event(input: &NewHarnessSessionEvent) -> Result<(), MemoryError>
             "occurred_at must be at most 64 characters".to_string(),
         ));
     }
+    chrono::DateTime::parse_from_rfc3339(&input.occurred_at).map_err(|_| {
+        MemoryError::InvalidArg("occurred_at must be a valid RFC 3339 timestamp".to_string())
+    })?;
     if input.source_revision < 0 {
         return Err(MemoryError::InvalidArg(
             "source_revision must be non-negative".to_string(),
@@ -954,8 +957,12 @@ pub fn ingest_harness_session_event(
         .as_ref()
         .map(|row| row.pre_disconnect_rank)
         .unwrap_or(-1);
-    if current_rank < 0
-        && (input.source_revision < canonical_revision || input.kind.rank() < pre_disconnect_rank)
+    if (current_rank < 0
+        && (input.source_revision < canonical_revision || input.kind.rank() < pre_disconnect_rank))
+        || (current_rank >= 0
+            && input.kind == HarnessSessionEventKind::Terminal
+            && terminal_digest_to_store.is_none()
+            && input.source_revision < canonical_revision)
     {
         let now = normalize_utc_iso_or_now("");
         insert_event(&tx, &attachment_id, input, &now, &source_host_identity)?;
@@ -1230,20 +1237,31 @@ pub fn reconnect_harness_session(
         ));
     }
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let attachment = require_attachment(&tx, selector, host, admission_receipt_ref)?;
+    let attachment = find_attachment_for_reconnect(&tx, selector, &host.host_identity)?
+        .ok_or_else(|| {
+            MemoryError::NotFound(
+                "harness session spine was not found for the current host connection".to_string(),
+            )
+        })?;
     let attachment_id = attachment.attachment_id.clone();
     // Re-admission: same verification bar as attach replay — current host
-    // admission, fresh active WorkClaim, unchanged policy digest.
-    verify_existing_attachment(&tx, &attachment, host, admission_receipt_ref, ttl_seconds)?;
+    // admission, fresh active WorkClaim, unchanged policy digest. Reconnect is
+    // the sole path allowed to replace the old admission receipt.
+    verify_attachment_rebind(&tx, &attachment, host, admission_receipt_ref, ttl_seconds)?;
     let previous = attachment.state;
-    let mut reconnected = false;
-    if previous != HarnessSessionAttachmentState::Attached {
+    let binding_changed = attachment.admission_receipt_ref != admission_receipt_ref;
+    let reconnected = previous != HarnessSessionAttachmentState::Attached || binding_changed;
+    if reconnected {
         tx.execute(
             "UPDATE harness_session_attachments
-             SET state = 'attached', updated_at = ?1 WHERE attachment_id = ?2",
-            params![normalize_utc_iso_or_now(""), attachment_id],
+             SET state = 'attached', admission_receipt_ref = ?1, updated_at = ?2
+             WHERE attachment_id = ?3",
+            params![
+                admission_receipt_ref,
+                normalize_utc_iso_or_now(""),
+                attachment_id
+            ],
         )?;
-        reconnected = true;
     }
     tx.commit()?;
 
@@ -1789,9 +1807,9 @@ mod tests {
         conn.execute(
             "INSERT INTO harness_session_interventions (
                 attachment_id, request_id, kind, reason, expected_session_revision,
-                requested_by, requested_at
+                capability_source, requested_by, requested_at
              ) SELECT attachment_id, 'req-cancel', 'request_cancel', 'operator stop', 1,
-                'host-1', '2026-08-29T00:00:00Z' FROM harness_session_attachments",
+                'declared', 'host-1', '2026-08-29T00:00:00Z' FROM harness_session_attachments",
             [],
         )
         .unwrap();
@@ -1900,6 +1918,57 @@ mod tests {
     }
 
     #[test]
+    fn reconnect_atomically_rebinds_to_the_fresh_host_admission() {
+        let (mut conn, selector) = seeded();
+        mark_harness_session_connection(
+            &mut conn,
+            &selector,
+            HarnessSessionConnectionFact::Disconnected,
+            &host(),
+            "admission-1",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO identity_admissions
+             (admission_id, agent_identity_id, connection_id, state, created_at)
+             VALUES ('admission-2', 'host-1', 'connection-2', 'self_asserted', '2026-01-01T00:00:01Z')",
+            [],
+        )
+        .unwrap();
+        let fresh_host = HarnessSessionHostAdmission {
+            host_identity: "host-1".into(),
+            connection_id: "connection-2".into(),
+        };
+
+        let receipt =
+            reconnect_harness_session(&mut conn, &selector, &fresh_host, "admission-2", 30 * 60)
+                .unwrap();
+        assert!(receipt.reconnected);
+        assert_eq!(receipt.attachment.admission_receipt_ref, "admission-2");
+        assert_eq!(
+            receipt.attachment.state,
+            HarnessSessionAttachmentState::Attached
+        );
+
+        let old = ingest_harness_session_event(
+            &mut conn,
+            &selector,
+            &event("ev-old", HarnessSessionEventKind::Progress, 1),
+            &host(),
+            "admission-1",
+        );
+        assert!(matches!(old, Err(MemoryError::NotFound(_))), "{old:?}");
+        ingest_harness_session_event(
+            &mut conn,
+            &selector,
+            &event("ev-fresh", HarnessSessionEventKind::Progress, 1),
+            &fresh_host,
+            "admission-2",
+        )
+        .expect("fresh admission owns subsequent facts");
+    }
+
+    #[test]
     fn replay_of_an_unbound_cancelled_fact_refuses_instead_of_reconfirming() {
         let (mut conn, selector) = seeded();
         ingest(
@@ -1988,6 +2057,73 @@ mod tests {
             fresh.state.canonical_state,
             Some(HarnessSessionCanonicalState::Completed)
         );
+    }
+
+    #[test]
+    fn stale_terminal_cannot_overwrite_fresher_active_progress() {
+        let (mut conn, selector) = seeded();
+        ingest(
+            &mut conn,
+            &selector,
+            &event("ev-progress-5", HarnessSessionEventKind::Progress, 5),
+        );
+
+        let stale = ingest(
+            &mut conn,
+            &selector,
+            &terminal(
+                "ev-terminal-4",
+                HarnessSessionTerminalOutcome::Completed,
+                4,
+                None,
+            ),
+        );
+        assert_eq!(
+            stale.disposition,
+            HarnessSessionEventDisposition::JournaledStale
+        );
+        assert_eq!(
+            stale.state.canonical_state,
+            Some(HarnessSessionCanonicalState::Progressing),
+            "a delayed terminal must not overwrite fresher active progress"
+        );
+        assert_eq!(stale.state.canonical_revision, 5);
+    }
+
+    #[test]
+    fn stale_conflicting_terminal_still_forces_reconciliation() {
+        let (mut conn, selector) = seeded();
+        ingest(
+            &mut conn,
+            &selector,
+            &terminal(
+                "ev-completed-5",
+                HarnessSessionTerminalOutcome::Completed,
+                5,
+                None,
+            ),
+        );
+
+        let conflict = ingest(
+            &mut conn,
+            &selector,
+            &terminal(
+                "ev-failed-4",
+                HarnessSessionTerminalOutcome::Failed,
+                4,
+                None,
+            ),
+        );
+        assert_eq!(
+            conflict.disposition,
+            HarnessSessionEventDisposition::JournaledTerminalConflict
+        );
+        assert_eq!(
+            conflict.state.canonical_state,
+            Some(HarnessSessionCanonicalState::InconsistentReconciling),
+            "a delayed conflicting authoritative terminal must never be hidden as stale"
+        );
+        assert_eq!(conflict.state.canonical_revision, 5);
     }
 
     #[test]
@@ -2109,6 +2245,18 @@ mod tests {
             "{error}"
         );
 
+        let mut malformed_time = event("ev-bad-time", HarnessSessionEventKind::Progress, 1);
+        malformed_time.occurred_at = "not-a-time".to_string();
+        let error = ingest_harness_session_event(
+            &mut conn,
+            &selector,
+            &malformed_time,
+            &host(),
+            "admission-1",
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("RFC 3339"), "{error}");
+
         // Control characters in the occurrence timestamp are refused too:
         // removing only the occurred_at control guard must turn this test
         // red (codex R8).
@@ -2170,6 +2318,43 @@ mod tests {
             "admission-other",
         );
         assert!(matches!(wrong_receipt, Err(MemoryError::NotFound(_))));
+        assert_eq!(event_row_count(&conn), 0);
+    }
+
+    #[test]
+    fn stale_host_admission_is_refused_without_journaling() {
+        let (mut conn, selector) = seeded();
+        crate::db::session_claims::release_work_claim(
+            &mut conn,
+            "claim-1",
+            "agent-1",
+            0,
+            "session_terminal",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO identity_admissions
+             (admission_id, agent_identity_id, connection_id, state, created_at)
+             VALUES ('admission-2', 'host-1', 'connection-2', 'self_asserted', '2026-01-01T00:00:01Z')",
+            [],
+        )
+        .unwrap();
+
+        let error = ingest_harness_session_event(
+            &mut conn,
+            &selector,
+            &event("ev-stale-admission", HarnessSessionEventKind::Progress, 1),
+            &HarnessSessionHostAdmission {
+                host_identity: "host-1".into(),
+                connection_id: "connection-2".into(),
+            },
+            "admission-1",
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error, MemoryError::WorkClaimTransitionRefused { .. }),
+            "{error}"
+        );
         assert_eq!(event_row_count(&conn), 0);
     }
 }
