@@ -459,6 +459,104 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn observe_profile_cannot_reach_session_spine_mutations_over_facade() {
+        let server = test_server();
+        seed_valid_admission(&server, GRANT_DELEGATE);
+        let attachment_id = attach(&server, "policy-idem", &["observe", "events"]).await;
+        server.set_tool_profile(Some(tachi_hub::ToolProfile::observe()));
+
+        for action in [
+            "ingest_session_event",
+            "mark_session_connection",
+            "reconnect_session",
+            "advertise_session_capabilities",
+            "request_intervention",
+            "record_intervention_result",
+        ] {
+            let error = crate::agent_eval::handle_agent_eval(
+                &server,
+                TachiAgentEvalParams {
+                    action: action.to_string(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect_err("observe must be refused before a mutating handler runs");
+            assert_eq!(
+                error,
+                format!("tool action '{action}' is not allowed for the active Tachi profile")
+            );
+        }
+
+        // The read-only projection remains reachable under observe after the
+        // policy gate is applied, using the already-admitted host binding.
+        let state = eval(&server, spine_params("get_session_state", &attachment_id)).await;
+        assert_eq!(state["status"], "completed");
+        assert_eq!(state["canonical_state"]["canonical_state"], Value::Null);
+    }
+
+    #[tokio::test]
+    async fn terminal_and_cleanup_facts_flow_after_work_claim_release_over_facade() {
+        let server = test_server();
+        seed_valid_admission(&server, GRANT_DELEGATE);
+        let attachment_id = attach(&server, "released-claim-idem", &["observe", "events"]).await;
+
+        let transition_version = server
+            .with_global_store(|store| {
+                memcore::release_work_claim(
+                    store.connection_mut(),
+                    "claim-1",
+                    "agent-1",
+                    0,
+                    "session_terminal",
+                )
+                .map_err(|error| error.to_string())
+            })
+            .expect("release WorkClaim");
+        assert_eq!(transition_version, 1);
+        let (_, connection_id, admission) = server
+            .work_claim_connection()
+            .expect("host binding survives WorkClaim release");
+        assert_eq!(connection_id, "connection-1");
+        assert_eq!(admission, "self_asserted");
+
+        let terminal: Value = serde_json::from_str(
+            &crate::agent_eval::handle_agent_eval(
+                &server,
+                TachiAgentEvalParams {
+                    session_event_outcome: Some("completed".to_string()),
+                    ..event_params(&attachment_id, "released-terminal", "terminal", 1)
+                },
+            )
+            .await
+            .expect("terminal fact after WorkClaim release"),
+        )
+        .expect("terminal JSON");
+        assert_eq!(terminal["canonical_state"]["canonical_state"], "completed");
+        assert_eq!(terminal["canonical_state"]["canonical_revision"], 1);
+
+        let cleanup: Value = serde_json::from_str(
+            &crate::agent_eval::handle_agent_eval(
+                &server,
+                TachiAgentEvalParams {
+                    session_event_kind: Some("cleanup".to_string()),
+                    ..event_params(&attachment_id, "released-cleanup", "cleanup", 2)
+                },
+            )
+            .await
+            .expect("cleanup fact after WorkClaim release"),
+        )
+        .expect("cleanup JSON");
+        assert_eq!(cleanup["disposition"], "advanced");
+        assert_eq!(cleanup["canonical_state"]["cleanup_recorded"], true);
+
+        let state = eval(&server, spine_params("get_session_state", &attachment_id)).await;
+        assert_eq!(state["canonical_state"]["canonical_state"], "completed");
+        assert_eq!(state["canonical_state"]["canonical_revision"], 2);
+        assert_eq!(state["canonical_state"]["cleanup_recorded"], true);
+    }
+
+    #[tokio::test]
     async fn conflicting_terminal_facts_reconcile_over_the_facade() {
         let server = test_server();
         seed_valid_admission(&server, GRANT_DELEGATE);

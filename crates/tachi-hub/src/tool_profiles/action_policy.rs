@@ -112,14 +112,23 @@ pub fn facade_action_allowed(
         && action.is_some_and(|action| {
             matches!(
                 action.to_ascii_lowercase().as_str(),
-                "attach_session" | "get_attachment"
+                "attach_session"
+                    | "get_attachment"
+                    | "ingest_session_event"
+                    | "mark_session_connection"
+                    | "reconnect_session"
+                    | "advertise_session_capabilities"
+                    | "request_intervention"
+                    | "record_intervention_result"
             )
         })
     {
-        // Attachment admission/projection is a host-coordination surface.
-        // Keep the existing eval actions unchanged, while requiring the
-        // explicit coordinate/admin profile before the attachment handler can
-        // run (the server handler repeats this gate for direct callers).
+        // Host-owned attachment admission/projection and attached-session
+        // receipt writes are coordination surfaces. Keep the existing eval
+        // actions, including read-only get_session_state, on their current
+        // policy path while requiring the explicit coordinate/admin profile
+        // before these handlers can run (the server handler repeats this gate
+        // for direct callers).
         return profile.is_admin() || profile == ToolProfile::coordinate();
     }
     if tool_name == "tachi_task"
@@ -866,5 +875,52 @@ mod tests {
                 Some(ToolProfile::delegate())
             ));
         }
+    }
+
+    #[test]
+    fn f1878_session_spine_mutations_are_coordinate_or_admin_only() {
+        for action in [
+            "ingest_session_event",
+            "mark_session_connection",
+            "reconnect_session",
+            "advertise_session_capabilities",
+            "request_intervention",
+            "record_intervention_result",
+        ] {
+            assert!(
+                facade_action_allowed(
+                    "tachi_agent_eval",
+                    Some(action),
+                    Some(ToolProfile::coordinate())
+                ),
+                "coordinate must call session-spine action {action}"
+            );
+            assert!(
+                facade_action_allowed("tachi_agent_eval", Some(action), Some(ToolProfile::admin())),
+                "admin must call session-spine action {action}"
+            );
+            for profile in [
+                ToolProfile::observe(),
+                ToolProfile::remember(),
+                ToolProfile::operate(),
+                ToolProfile::standard(),
+                ToolProfile::delegate(),
+            ] {
+                assert!(
+                    !facade_action_allowed("tachi_agent_eval", Some(action), Some(profile)),
+                    "session-spine action {action} must be denied for {}",
+                    profile.as_str()
+                );
+            }
+        }
+
+        // This existing read-only projection remains on the ordinary eval
+        // policy path: observe can read state, while the host-owned
+        // get_attachment action remains covered by f1733 above.
+        assert!(facade_action_allowed(
+            "tachi_agent_eval",
+            Some("get_session_state"),
+            Some(ToolProfile::observe())
+        ));
     }
 }
