@@ -199,7 +199,7 @@ pub(crate) fn install_harness_session_spine_schema(conn: &Connection) -> Result<
             kind TEXT NOT NULL CHECK (kind IN ('accepted', 'started', 'progress', 'input_required', 'terminal', 'cleanup')),
             outcome TEXT CHECK (outcome IS NULL OR outcome IN ('completed', 'failed', 'cancelled')),
             source_revision INTEGER NOT NULL CHECK (source_revision >= 0),
-            authority_confirmation_ref TEXT CHECK (authority_confirmation_ref IS NULL OR length(trim(authority_confirmation_ref)) > 0),
+            authority_confirmation_ref TEXT CHECK (authority_confirmation_ref IS NULL OR (length(authority_confirmation_ref) <= 128 AND length(trim(authority_confirmation_ref)) > 0 AND instr(CAST(authority_confirmation_ref AS BLOB), CAST(x'00' AS BLOB)) = 0)),
             summary TEXT CHECK (summary IS NULL OR (length(summary) > 0 AND length(summary) <= 2000 AND instr(CAST(summary AS BLOB), CAST(x'00' AS BLOB)) = 0)),
             payload_digest TEXT CHECK (payload_digest IS NULL OR (length(payload_digest) <= 128 AND length(trim(payload_digest)) > 0 AND payload_digest NOT GLOB '*[^A-Za-z0-9+=/_:-]*' AND length(CAST(payload_digest AS BLOB)) = length(payload_digest))),
             occurred_at TEXT NOT NULL,
@@ -247,7 +247,7 @@ pub(crate) fn install_harness_session_spine_schema(conn: &Connection) -> Result<
             attachment_id TEXT NOT NULL REFERENCES harness_session_attachments(attachment_id),
             request_id TEXT NOT NULL,
             disposition TEXT NOT NULL CHECK (disposition IN ('accepted', 'refused', 'unsupported', 'failed')),
-            authority_confirmation_ref TEXT CHECK (authority_confirmation_ref IS NULL OR length(trim(authority_confirmation_ref)) > 0),
+            authority_confirmation_ref TEXT CHECK (authority_confirmation_ref IS NULL OR (length(authority_confirmation_ref) <= 128 AND length(trim(authority_confirmation_ref)) > 0 AND instr(CAST(authority_confirmation_ref AS BLOB), CAST(x'00' AS BLOB)) = 0)),
             detail TEXT CHECK (detail IS NULL OR (length(detail) > 0 AND length(detail) <= 2000 AND instr(CAST(detail AS BLOB), CAST(x'00' AS BLOB)) = 0)),
             recorded_at TEXT NOT NULL,
             source_host_identity TEXT NOT NULL CHECK (length(trim(source_host_identity)) > 0),
@@ -321,6 +321,14 @@ pub(crate) fn validate_harness_session_spine_schema(conn: &Connection) -> Result
         (
             "harness_session_interventions",
             "instr(CAST(reason AS BLOB), CAST(x'00' AS BLOB)) = 0",
+        ),
+        (
+            "harness_session_events",
+            "length(authority_confirmation_ref) <= 128",
+        ),
+        (
+            "harness_session_intervention_results",
+            "instr(CAST(authority_confirmation_ref AS BLOB), CAST(x'00' AS BLOB)) = 0",
         ),
         (
             "harness_session_intervention_results",

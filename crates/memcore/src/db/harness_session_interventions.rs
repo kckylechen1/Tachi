@@ -586,6 +586,12 @@ pub fn record_harness_session_intervention_result(
     require_non_empty(&input.request_id, "request_id")?;
     if let Some(confirmation) = &input.authority_confirmation_ref {
         require_non_empty(confirmation, "authority_confirmation_ref")?;
+        require_no_control(confirmation, "authority_confirmation_ref")?;
+        if confirmation.chars().count() > 128 {
+            return Err(MemoryError::InvalidArg(
+                "authority_confirmation_ref must be at most 128 characters".to_string(),
+            ));
+        }
     }
     if let Some(detail) = &input.detail {
         if detail.is_empty() || detail.chars().count() > 2000 {
@@ -1056,6 +1062,67 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("control characters"), "{error}");
+        let results: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM harness_session_intervention_results",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(results, 0, "refusals never journal");
+    }
+
+    #[test]
+    fn confirmation_reference_rejects_control_and_oversize_text() {
+        let (mut conn, selector) = seeded_with_grant(GRANT_DELEGATE, "conf-attach");
+        request_harness_session_intervention(
+            &mut conn,
+            &selector,
+            &request(
+                "req-cancel",
+                HarnessSessionInterventionKind::RequestCancel,
+                0,
+            ),
+            &host(),
+            "admission-1",
+        )
+        .unwrap();
+
+        // NUL in the confirmation reference is refused, never stored.
+        let error = record_harness_session_intervention_result(
+            &mut conn,
+            &selector,
+            &NewHarnessSessionInterventionResult {
+                request_id: "req-cancel".into(),
+                disposition: HarnessSessionInterventionDisposition::Accepted,
+                authority_confirmation_ref: Some("conf\u{0000}hidden".into()),
+                detail: None,
+            },
+            &host(),
+            "admission-1",
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("control characters"), "{error}");
+
+        // Oversize references are refused too.
+        let error = record_harness_session_intervention_result(
+            &mut conn,
+            &selector,
+            &NewHarnessSessionInterventionResult {
+                request_id: "req-cancel".into(),
+                disposition: HarnessSessionInterventionDisposition::Accepted,
+                authority_confirmation_ref: Some("x".repeat(129)),
+                detail: None,
+            },
+            &host(),
+            "admission-1",
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("at most 128 characters"),
+            "{error}"
+        );
+
         let results: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM harness_session_intervention_results",

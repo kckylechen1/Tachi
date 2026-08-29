@@ -596,6 +596,19 @@ fn validate_new_event(input: &NewHarnessSessionEvent) -> Result<(), MemoryError>
     }
     if let Some(confirmation) = &input.authority_confirmation_ref {
         require_non_empty(confirmation, "authority_confirmation_ref")?;
+        // A confirmation reference is a bounded receipt pointer, never a
+        // content channel: no control characters (NUL included), no
+        // oversize text.
+        if confirmation.chars().any(|c| c.is_control()) {
+            return Err(MemoryError::InvalidArg(
+                "authority_confirmation_ref must not contain control characters".to_string(),
+            ));
+        }
+        if confirmation.chars().count() > 128 {
+            return Err(MemoryError::InvalidArg(
+                "authority_confirmation_ref must be at most 128 characters".to_string(),
+            ));
+        }
     }
     match input.kind {
         HarnessSessionEventKind::Terminal => {
