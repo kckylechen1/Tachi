@@ -197,3 +197,50 @@ async fn lane_slot_refuses_copying_existing_account_ciphertext() {
     assert!(err.contains("vault:SILICONFLOW_API_KEY"), "{err}");
     assert!(!err.contains("shared-siliconflow-bytes"), "{err}");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn concurrent_first_writers_cannot_bypass_lane_slot_rebind() {
+    let server = make_server();
+    server
+        .vault_init(Parameters(VaultInitParams {
+            password: "slot-rebind-race".to_string(),
+        }))
+        .await
+        .expect("init");
+
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(16));
+    let mut writers = Vec::new();
+    for index in 0..16 {
+        let server = std::ops::Deref::deref(&server).clone();
+        let barrier = barrier.clone();
+        writers.push(tokio::spawn(async move {
+            let value = format!("concurrent-family-{index}");
+            barrier.wait().await;
+            let result = server
+                .vault_set(Parameters(slot_params("EXTRACT_API_KEY", &value, false)))
+                .await;
+            (value, result)
+        }));
+    }
+
+    let mut winner = None;
+    let mut refusals = 0;
+    for writer in writers {
+        let (value, result) = writer.await.expect("writer task");
+        match result {
+            Ok(_) => {
+                assert!(
+                    winner.replace(value).is_none(),
+                    "only one first writer may win"
+                );
+            }
+            Err(error) => {
+                assert!(error.contains("rebind"), "{error}");
+                refusals += 1;
+            }
+        }
+    }
+    let winner = winner.expect("one first writer succeeds");
+    assert_eq!(refusals, 15);
+    assert_eq!(slot_value(&server, "EXTRACT_API_KEY").await, winner);
+}
