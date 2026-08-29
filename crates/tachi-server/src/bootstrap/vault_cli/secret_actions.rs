@@ -97,18 +97,25 @@ pub(super) async fn run_secret_action(
                     ) else {
                         continue;
                     };
-                    let Ok(other_value) = String::from_utf8(plain) else {
+                    let Ok(mut other_value) = crate::vault_crypto::decode_utf8_zeroizing(
+                        plain,
+                        "Vault account secret is not valid UTF-8",
+                    ) else {
                         continue;
                     };
-                    if crate::vault_ops::fingerprint_secret(
+                    let other_fingerprint = crate::vault_ops::fingerprint_secret(
                         key.bytes(),
                         provider_kind,
                         &other_value,
-                    ) == crate::vault_ops::fingerprint_secret(
-                        key.bytes(),
-                        provider_kind,
-                        &secret_value,
-                    ) {
+                    );
+                    crate::vault_crypto::zero_string(&mut other_value);
+                    if other_fingerprint
+                        == crate::vault_ops::fingerprint_secret(
+                            key.bytes(),
+                            provider_kind,
+                            &secret_value,
+                        )
+                    {
                         crate::vault_crypto::zero_string(&mut secret_value);
                         return Err(crate::vault_ops::copy_existing_account_message(
                             &name,
@@ -128,19 +135,22 @@ pub(super) async fn run_secret_action(
                             &existing.encrypted_value,
                             &existing.nonce,
                         )?;
-                        let old_value = String::from_utf8(old_bytes).map_err(|e| {
-                            format!("Existing slot '{name}' is not valid UTF-8: {e}")
-                        })?;
+                        let mut old_value = crate::vault_crypto::decode_utf8_zeroizing(
+                            old_bytes,
+                            format!("Existing slot '{name}' is not valid UTF-8"),
+                        )?;
                         let provider_kind =
                             crate::status_ops::status_health::provider_kind_for_env_name(&name)
                                 .unwrap_or("unknown");
-                        if let Err(err) = crate::vault_ops::evaluate_lane_slot_overwrite(
+                        let overwrite = crate::vault_ops::evaluate_lane_slot_overwrite(
                             &old_value,
                             &secret_value,
                             provider_kind,
                             key.bytes(),
                             rebind,
-                        ) {
+                        );
+                        crate::vault_crypto::zero_string(&mut old_value);
+                        if let Err(err) = overwrite {
                             crate::vault_crypto::zero_string(&mut secret_value);
                             return Err(err.operator_message(&name).into());
                         }
