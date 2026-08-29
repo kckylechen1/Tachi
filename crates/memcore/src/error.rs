@@ -481,6 +481,20 @@ pub enum MemoryError {
     /// hash, or existence. Every denied caller sees this same variant.
     #[error("private partition refused")]
     PrivatePartitionRefused,
+
+    /// tachi#1678: the attached session's advertised lifecycle capability and
+    /// admitted AgentIdentity policy do not cover the requested intervention.
+    /// **Nothing was written** — the refusal is raised before any insert in
+    /// the request transaction, which is the whole point: an unsupported
+    /// lifecycle owner must produce a typed refusal, never a fake
+    /// `cancelled`/`resumed` state and never a partially-issued receipt.
+    #[error(
+        "unsupported_by_lifecycle_owner: intervention '{intervention_kind}' is not admitted for attachment {attachment_id}"
+    )]
+    UnsupportedByLifecycleOwner {
+        attachment_id: String,
+        intervention_kind: String,
+    },
 }
 
 /// Remediation sentence for [`MemoryError::SchemaMigrationOptInRequired`],

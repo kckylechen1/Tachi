@@ -227,6 +227,7 @@ const TEMPLATE_IDENTITY_SOURCE_BLOBS: &[&[u8]] = &[
     embedded_template_source!("/../memcore/src/db/migrations/exec_env_class.rs"),
     embedded_template_source!("/../memcore/src/db/migrations/hard_state_index.rs"),
     embedded_template_source!("/../memcore/src/db/migrations/harness_session_attachments.rs"),
+    embedded_template_source!("/../memcore/src/db/migrations/harness_session_events.rs"),
     embedded_template_source!("/../memcore/src/db/migrations/identity_workclaim_spine.rs"),
     embedded_template_source!("/../memcore/src/db/migrations/idless_identity.rs"),
     embedded_template_source!("/../memcore/src/db/migrations/legacy_columns.rs"),

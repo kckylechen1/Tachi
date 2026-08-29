@@ -13,7 +13,7 @@ use memcore::{
 };
 use serde_json::{json, Value};
 
-fn required(value: Option<String>, field: &str) -> Result<String, String> {
+pub(crate) fn required(value: Option<String>, field: &str) -> Result<String, String> {
     value
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| format!("{field} is required"))
@@ -71,7 +71,7 @@ fn capabilities(params: &TachiAgentEvalParams) -> Result<String, String> {
         .map_err(|error| error.to_string())
 }
 
-fn current_host_admission(
+pub(crate) fn current_host_admission(
     server: &MemoryServer,
     requested_host_identity: Option<String>,
     requested_receipt_ref: Option<String>,

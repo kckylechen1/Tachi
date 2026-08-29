@@ -32,7 +32,12 @@ pub mod foundry_jobs;
 mod gc_candidates;
 mod graph;
 #[cfg(feature = "admin")]
+#[cfg(feature = "admin")]
 pub mod harness_session_attachments;
+#[cfg(feature = "admin")]
+pub mod harness_session_events;
+#[cfg(feature = "admin")]
+pub mod harness_session_interventions;
 #[cfg(feature = "admin")]
 mod hub_db;
 mod memory_crud;
@@ -141,6 +146,25 @@ pub use harness_session_attachments::{
     HarnessSessionAttachmentState, HarnessSessionHostAdmission, NewHarnessSessionAttachment,
     ACP_CAPABILITY_CLASSES, ACP_SESSION_CAPABILITIES, ACP_TOOL_PROFILES,
     TRUSTED_LOCAL_HOST_DECLARED_BASIS,
+};
+#[cfg(feature = "admin")]
+pub use harness_session_events::{
+    get_harness_session_state, ingest_harness_session_event, mark_harness_session_connection,
+    reconnect_harness_session, HarnessSessionCanonicalState, HarnessSessionConnectionFact,
+    HarnessSessionConnectionReceipt, HarnessSessionEvent, HarnessSessionEventAdmission,
+    HarnessSessionEventDisposition, HarnessSessionEventKind, HarnessSessionEventReceipt,
+    HarnessSessionReconnectReceipt, HarnessSessionStateProjection, HarnessSessionTerminalOutcome,
+    NewHarnessSessionEvent,
+};
+#[cfg(feature = "admin")]
+pub use harness_session_interventions::{
+    advertise_harness_session_capabilities, get_harness_session_intervention,
+    record_harness_session_intervention_result, request_harness_session_intervention,
+    CapabilitySource, HarnessSessionIntervention, HarnessSessionInterventionAdmission,
+    HarnessSessionInterventionDisposition, HarnessSessionInterventionKind,
+    HarnessSessionInterventionRequestReceipt, HarnessSessionInterventionResult,
+    HarnessSessionInterventionResultReceipt, NewHarnessSessionIntervention,
+    NewHarnessSessionInterventionResult,
 };
 #[cfg(feature = "admin")]
 pub use hub_db::{

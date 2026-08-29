@@ -457,7 +457,83 @@ pub fn authorize_harness_session_attachment(
     )
 }
 
+#[cfg(test)]
+pub(crate) fn authorization_digest_for_test(
+    capability_json: &str,
+    tool_profile: &str,
+    capability_class: &str,
+) -> String {
+    authorization_from_capability_json(
+        Some(capability_json),
+        "test-agent",
+        tool_profile,
+        capability_class,
+    )
+    .expect("test grant parses")
+    .policy_digest
+}
+
+#[cfg(test)]
+pub(crate) fn test_attachment_input(idempotency_key: &str) -> NewHarnessSessionAttachment {
+    let capabilities = HarnessSessionAttachmentCapabilities {
+        observe: true,
+        prompt: true,
+        cancel: true,
+        resume: true,
+        events: true,
+        ..Default::default()
+    };
+    NewHarnessSessionAttachment {
+        host_identity: "host-1".into(),
+        identity_attribution_basis: TRUSTED_LOCAL_HOST_DECLARED_BASIS.into(),
+        protocol_version: "1".into(),
+        adapter_connection_identity: "adapter-1".into(),
+        remote_session_id: "remote-1".into(),
+        work_claim_id: "claim-1".into(),
+        expected_transition_version: 0,
+        agent_identity_id: "agent-1".into(),
+        contract_digest: "contract-digest".into(),
+        capabilities_json: serde_json::to_string(&capabilities).expect("canonical capability JSON"),
+        tool_profile: "delegate".into(),
+        capability_class: "tachi".into(),
+        policy_digest: String::new(),
+        descriptor_digest: "descriptor-digest".into(),
+        idempotency_key: idempotency_key.into(),
+        admission_receipt_ref: "admission-1".into(),
+    }
+}
+
 fn validate_new_attachment(input: &NewHarnessSessionAttachment) -> Result<(), MemoryError> {
+    // Opaque identifiers are receipt pointers, not content channels: every
+    // persistent string is bounded and control-free (NUL included, which
+    // SQLite text functions truncate at).
+    for (field, value) in [
+        ("host_identity", input.host_identity.as_str()),
+        ("agent_identity_id", input.agent_identity_id.as_str()),
+        ("work_claim_id", input.work_claim_id.as_str()),
+        ("contract_digest", input.contract_digest.as_str()),
+        ("idempotency_key", input.idempotency_key.as_str()),
+        (
+            "admission_receipt_ref",
+            input.admission_receipt_ref.as_str(),
+        ),
+        (
+            "adapter_connection_identity",
+            input.adapter_connection_identity.as_str(),
+        ),
+        ("remote_session_id", input.remote_session_id.as_str()),
+    ] {
+        if value.chars().any(|c| c.is_control()) {
+            return Err(MemoryError::InvalidArg(format!(
+                "{field} must not contain control characters"
+            )));
+        }
+        if value.chars().count() > 256 {
+            return Err(MemoryError::InvalidArg(format!(
+                "{field} must be at most 256 characters"
+            )));
+        }
+    }
     for (field, value) in [
         ("host_identity", input.host_identity.as_str()),
         (
@@ -566,6 +642,66 @@ fn find_by_natural_key(
             row_to_attachment,
         )
         .optional()?)
+}
+
+/// Raw attachment lookup by durable id, for modules that already hold a
+/// verified binding (the #1678 event/intervention spine re-reads the row
+/// after its own write transaction commits).
+pub(crate) fn find_attachment_by_id(
+    conn: &Connection,
+    attachment_id: &str,
+) -> Result<Option<HarnessSessionAttachment>, MemoryError> {
+    let sql = format!(
+        "SELECT {SELECT_COLUMNS} FROM harness_session_attachments WHERE attachment_id = ?1"
+    );
+    Ok(conn
+        .query_row(&sql, params![attachment_id], row_to_attachment)
+        .optional()?)
+}
+
+/// Existence + binding-only lookup shared by the #1678 spine surfaces: the
+/// row must exist AND name the current host identity/admission receipt. A
+/// foreign host receives `Ok(None)` — the same not-found shape as an absent
+/// row — without any claim-freshness or policy re-verification, because
+/// session facts must keep flowing after work ownership ends.
+pub(crate) fn find_attachment_for_host(
+    conn: &Connection,
+    selector: &HarnessSessionAttachmentSelector,
+    host: &HarnessSessionHostAdmission,
+    admission_receipt_ref: &str,
+) -> Result<Option<HarnessSessionAttachment>, MemoryError> {
+    let attachment = match selector {
+        HarnessSessionAttachmentSelector::AttachmentId(attachment_id) => {
+            find_attachment_by_id(conn, attachment_id)?
+        }
+        HarnessSessionAttachmentSelector::NaturalKey {
+            host_identity,
+            protocol_version,
+            adapter_connection_identity,
+            remote_session_id,
+        } => {
+            let sql = format!(
+                "SELECT {SELECT_COLUMNS} FROM harness_session_attachments
+                 WHERE host_identity = ?1 AND protocol_version = ?2
+                   AND adapter_connection_identity = ?3 AND remote_session_id = ?4"
+            );
+            conn.query_row(
+                &sql,
+                params![
+                    host_identity,
+                    protocol_version,
+                    adapter_connection_identity,
+                    remote_session_id,
+                ],
+                row_to_attachment,
+            )
+            .optional()?
+        }
+    };
+    Ok(attachment.filter(|attachment| {
+        attachment.host_identity == host.host_identity
+            && attachment.admission_receipt_ref == admission_receipt_ref
+    }))
 }
 
 fn verify_host_admission(
@@ -721,7 +857,10 @@ fn verify_admission_and_claim(
     Ok(authorization)
 }
 
-fn verify_existing_attachment(
+/// Re-admission verification for a recorded attachment: the current host
+/// admission binding, a fresh active WorkClaim, and an unchanged policy
+/// digest. Shared with the #1678 reconnect receipt.
+pub(crate) fn verify_existing_attachment(
     conn: &Connection,
     attachment: &HarnessSessionAttachment,
     host: &HarnessSessionHostAdmission,
@@ -1303,6 +1442,92 @@ mod tests {
                 0
             );
         }
+    }
+
+    #[test]
+    fn opaque_attachment_identifiers_are_bounded_and_control_free() {
+        let mut conn = setup();
+        let mut input = seed(&mut conn);
+        input.adapter_connection_identity = "adapter\u{0000}hidden".to_string();
+        let error = attach(&mut conn, &input).unwrap_err();
+        assert!(error.to_string().contains("control characters"), "{error}");
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM harness_session_attachments",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            0
+        );
+
+        let mut conn = setup();
+        let mut input = seed(&mut conn);
+        input.remote_session_id = "x".repeat(257);
+        let error = attach(&mut conn, &input).unwrap_err();
+        assert!(
+            error.to_string().contains("at most 256 characters"),
+            "{error}"
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM harness_session_attachments",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn duplicate_attach_of_the_same_session_conflicts_on_the_natural_key() {
+        let mut conn = setup();
+        let mut first = seed(&mut conn);
+        first.idempotency_key = "idem-first".into();
+        attach(&mut conn, &first).unwrap();
+        // A second attach of the SAME host/session binding under a fresh
+        // idempotency key must conflict, not fork a second receipt.
+        let mut second = first.clone();
+        second.idempotency_key = "idem-second".into();
+        let error = attach(&mut conn, &second).unwrap_err();
+        assert!(
+            matches!(error, MemoryError::WorkClaimConflict(_)),
+            "{error}"
+        );
+        assert!(error.to_string().contains("already attached"), "{error}");
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM harness_session_attachments",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn attach_under_an_already_terminal_claim_refuses_before_insert() {
+        let mut conn = setup();
+        let input = seed(&mut conn);
+        conn.execute(
+            "UPDATE session_claims SET state = 'released' WHERE claim_id = 'claim-1'",
+            [],
+        )
+        .unwrap();
+        // Attach-time admission requires a fresh ACTIVE claim; a released
+        // (terminal) claim cannot underwrite a new attachment regardless of
+        // the expected revision matching.
+        let error = attach(&mut conn, &input).unwrap_err();
+        assert!(error.to_string().contains("not active"), "{error}");
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM harness_session_attachments",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0);
     }
 
     #[test]
