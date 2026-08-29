@@ -666,6 +666,7 @@ impl ManagedRunControlRegistry {
 pub(crate) fn mark_managed_custom_start(
     run_dir: &std::path::Path,
     dispatch_id: &str,
+    identity: &crate::managed_run_epoch::ManagedRunIdentityInput,
 ) -> Result<(), String> {
     let lock = crate::dispatch_ops::status_json_lock_for(run_dir);
     let _guard = lock.lock().unwrap_or_else(|p| p.into_inner());
@@ -686,6 +687,22 @@ pub(crate) fn mark_managed_custom_start(
     object.insert(
         "lifecycle_owner".to_string(),
         Value::String("memory_server_managed_custom".to_string()),
+    );
+    // Durable managed-run identity: stamped ONCE here, in the same atomic
+    // write as the lifecycle classification, before the child is spawned.
+    // Refs/digests only — no command, cwd, env, credential, or process
+    // locator is persisted; a persisted OS locator is never authority.
+    let identity_value = crate::managed_run_epoch::build_managed_run_identity(
+        dispatch_id,
+        identity,
+        object
+            .get("status_revision")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
+    );
+    object.insert(
+        crate::managed_run_epoch::IDENTITY_KEY.to_string(),
+        identity_value,
     );
     crate::managed_run_control::advance_status_revision(object)?;
     let body = serde_json::to_vec_pretty(&status)
@@ -817,6 +834,27 @@ pub(crate) async fn request_managed_custom_cancel(
                     Some(observed),
                     "non_managed_custom_owner",
                 ));
+            }
+            // Epoch non-inheritance: a run accepted under an earlier
+            // controller epoch is read-only truth for this incarnation. Its
+            // durable identity does not grant this epoch a process handle or
+            // cancellation authority; cancellation is unavailable with zero
+            // OS side effect (no probe, no signal, and no receipt write).
+            // Receipts without a durable identity keep the historical
+            // registry-absence behavior below.
+            let accepted_epoch = object
+                .get(crate::managed_run_epoch::IDENTITY_KEY)
+                .and_then(|identity| identity.get("controller_epoch_id"))
+                .and_then(Value::as_str);
+            if let Some(accepted_epoch) = accepted_epoch {
+                if accepted_epoch != server.controller_epoch {
+                    return Ok(unavailable(
+                        dispatch_id,
+                        expected,
+                        Some(observed),
+                        "controller_epoch_mismatch",
+                    ));
+                }
             }
             if object.get("cancellation").is_some() {
                 return Ok(unavailable(
@@ -1882,7 +1920,21 @@ mod issue_1825_status_revision_writer_regression_tests {
 
         let start = temp.path().join("start");
         write_status(&start, "20260823T182501Z-revision-start", None);
-        mark_managed_custom_start(&start, "20260823T182501Z-revision-start").expect("start");
+        mark_managed_custom_start(
+            &start,
+            "20260823T182501Z-revision-start",
+            &crate::managed_run_epoch::ManagedRunIdentityInput {
+                controller_epoch_id: "ctrl-revision-writer".to_string(),
+                assignment_ref: "assign-revision".to_string(),
+                assignment_identity_digest: None,
+                execution_grant_ref: "grant-revision".to_string(),
+                exec_env_ref: None,
+                launch_spec_digest: None,
+                backend_name: "custom".to_string(),
+                backend_metadata_digest: None,
+            },
+        )
+        .expect("start");
         assert_eq!(revision(&start), 1, "start writer must advance revision");
 
         let confirmed = temp.path().join("confirmed");
