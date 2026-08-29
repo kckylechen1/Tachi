@@ -129,6 +129,7 @@ pub struct HarnessSessionIntervention {
     pub kind: HarnessSessionInterventionKind,
     pub reason: String,
     pub expected_session_revision: i64,
+    pub capability_source: CapabilitySource,
     /// The live host connection the request was issued through; derived
     /// server-side, never caller-claimed.
     pub requested_by: String,
@@ -212,6 +213,16 @@ impl CapabilitySource {
             Self::Declared => "declared",
         }
     }
+
+    fn parse(raw: &str) -> Result<Self, MemoryError> {
+        match raw {
+            "advertised" => Ok(Self::Advertised),
+            "declared" => Ok(Self::Declared),
+            other => Err(MemoryError::InvalidArg(format!(
+                "unknown harness session capability source '{other}'"
+            ))),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -234,7 +245,7 @@ pub struct NewHarnessSessionInterventionResult {
 }
 
 const INTERVENTION_COLUMNS: &str = "intervention_row_id, attachment_id, request_id, kind, reason, \
-    expected_session_revision, requested_by, requested_at";
+    expected_session_revision, capability_source, requested_by, requested_at";
 
 fn row_to_intervention(
     row: &rusqlite::Row<'_>,
@@ -250,6 +261,17 @@ fn row_to_intervention(
             )),
         )
     })?;
+    let capability_source_raw: String = row.get(6)?;
+    let capability_source = CapabilitySource::parse(&capability_source_raw).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            6,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                error.to_string(),
+            )),
+        )
+    })?;
     Ok(HarnessSessionIntervention {
         intervention_row_id: row.get(0)?,
         attachment_id: row.get(1)?,
@@ -257,8 +279,9 @@ fn row_to_intervention(
         kind,
         reason: row.get(4)?,
         expected_session_revision: row.get(5)?,
-        requested_by: row.get(6)?,
-        requested_at: row.get(7)?,
+        capability_source,
+        requested_by: row.get(7)?,
+        requested_at: row.get(8)?,
     })
 }
 
@@ -428,11 +451,12 @@ pub fn request_harness_session_intervention(
             )));
         }
         let state = projection_from_row(&tx, &attachment_id);
+        let capability_source = existing.capability_source;
         tx.commit()?;
         return Ok(HarnessSessionInterventionRequestReceipt {
             intervention: existing,
             admission: HarnessSessionInterventionAdmission::Replayed,
-            capability_source: CapabilitySource::Declared,
+            capability_source,
             state,
         });
     }
@@ -509,14 +533,15 @@ pub fn request_harness_session_intervention(
     tx.execute(
         "INSERT INTO harness_session_interventions (
             attachment_id, request_id, kind, reason, expected_session_revision,
-            requested_by, requested_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            capability_source, requested_by, requested_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         params![
             attachment_id,
             input.request_id,
             input.kind.as_str(),
             input.reason,
             input.expected_session_revision,
+            capability_source.as_str(),
             host.host_identity,
             now,
         ],
@@ -532,6 +557,7 @@ pub fn request_harness_session_intervention(
             kind: input.kind,
             reason: input.reason.clone(),
             expected_session_revision: input.expected_session_revision,
+            capability_source,
             requested_by: host.host_identity.clone(),
             requested_at: now,
         },
@@ -1590,5 +1616,26 @@ mod tests {
             HarnessSessionInterventionAdmission::Created
         );
         assert_eq!(status.capability_source, CapabilitySource::Advertised);
+        let replay = request_harness_session_intervention(
+            &mut conn,
+            &selector,
+            &request(
+                "req-cap-status",
+                HarnessSessionInterventionKind::RequestStatus,
+                0,
+            ),
+            &host(),
+            "admission-1",
+        )
+        .unwrap();
+        assert_eq!(
+            replay.admission,
+            HarnessSessionInterventionAdmission::Replayed
+        );
+        assert_eq!(
+            replay.capability_source,
+            CapabilitySource::Advertised,
+            "idempotent replay must preserve the original authorization provenance"
+        );
     }
 }

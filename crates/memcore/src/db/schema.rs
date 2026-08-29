@@ -235,6 +235,7 @@ pub(crate) fn install_harness_session_spine_schema(conn: &Connection) -> Result<
             kind TEXT NOT NULL CHECK (kind IN ('request_status', 'prompt_or_correct', 'request_pause', 'request_cancel', 'request_resume')),
             reason TEXT NOT NULL CHECK (length(reason) > 0 AND length(reason) <= 1000 AND instr(CAST(reason AS BLOB), CAST(x'00' AS BLOB)) = 0),
             expected_session_revision INTEGER NOT NULL CHECK (expected_session_revision >= 0),
+            capability_source TEXT NOT NULL CHECK (capability_source IN ('declared', 'advertised')),
             requested_by TEXT NOT NULL CHECK (length(trim(requested_by)) > 0),
             requested_at TEXT NOT NULL,
             UNIQUE (attachment_id, request_id)
@@ -338,6 +339,7 @@ pub(crate) fn validate_harness_session_spine_schema(conn: &Connection) -> Result
                 ("kind", "TEXT", true, 0),
                 ("reason", "TEXT", true, 0),
                 ("expected_session_revision", "INTEGER", true, 0),
+                ("capability_source", "TEXT", true, 0),
                 ("requested_by", "TEXT", true, 0),
                 ("requested_at", "TEXT", true, 0),
             ],
@@ -509,6 +511,10 @@ pub(crate) fn validate_harness_session_spine_schema(conn: &Connection) -> Result
         (
             "harness_session_interventions",
             "expected_session_revision >= 0",
+        ),
+        (
+            "harness_session_interventions",
+            "capability_source IN ('declared', 'advertised')",
         ),
         (
             "harness_session_interventions",

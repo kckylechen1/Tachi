@@ -78,6 +78,10 @@ mod tests {
             ),
             ("harness_session_interventions", "length(reason) > 0 AND "),
             (
+                "harness_session_interventions",
+                "capability_source IN ('declared', 'advertised')",
+            ),
+            (
                 "harness_session_intervention_results",
                 "length(detail) > 0 AND ",
             ),
