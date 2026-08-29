@@ -7,9 +7,11 @@ use std::path::Path;
 
 mod attachment;
 mod fixture;
+mod intervention;
 mod live;
 mod mirror;
 pub(crate) mod projection;
+mod session_spine;
 
 pub(crate) use self::fixture::*;
 pub(crate) use self::live::*;
@@ -92,6 +94,22 @@ pub(crate) async fn handle_agent_eval(
         ),
         "attach_session" => self::attachment::handle_attach_session(server, params),
         "get_attachment" => self::attachment::handle_get_attachment(server, params),
+        // tachi#1678 attached-session receipt spine: events, connection
+        // facts, capability advertisements, and typed interventions. Every
+        // route records receipts only; none owns a lifecycle operation.
+        "ingest_session_event" => self::session_spine::handle_ingest_session_event(server, params),
+        "get_session_state" => self::session_spine::handle_get_session_state(server, params),
+        "mark_session_connection" => {
+            self::session_spine::handle_mark_session_connection(server, params)
+        }
+        "reconnect_session" => self::session_spine::handle_reconnect_session(server, params),
+        "advertise_session_capabilities" => {
+            self::session_spine::handle_advertise_session_capabilities(server, params)
+        }
+        "request_intervention" => self::intervention::handle_request_intervention(server, params),
+        "record_intervention_result" => {
+            self::intervention::handle_record_intervention_result(server, params)
+        }
         "aggregate" => {
             if !eval_fixture_replay_allowed() {
                 return Err(format!(
@@ -175,8 +193,10 @@ pub(crate) async fn handle_agent_eval(
         }
         _ => Err(format!(
             "Invalid eval action '{}'. Use aggregate, aggregate_live, telemetry, perf, \
-             register, observe, adjudicate, get, route_projection, attach_session, or \
-             get_attachment.",
+             register, observe, adjudicate, get, route_projection, attach_session, \
+             get_attachment, ingest_session_event, get_session_state, mark_session_connection, \
+             reconnect_session, advertise_session_capabilities, request_intervention, or \
+             record_intervention_result.",
             params.action
         )),
     }

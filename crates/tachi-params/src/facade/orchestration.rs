@@ -382,7 +382,10 @@ pub struct TachiOrchestratorParams {
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
 pub struct TachiAgentEvalParams {
     /// aggregate | aggregate_live | telemetry | perf | register | observe |
-    /// adjudicate | get | route_projection | attach_session | get_attachment.
+    /// adjudicate | get | route_projection | attach_session | get_attachment |
+    /// ingest_session_event | get_session_state | mark_session_connection |
+    /// reconnect_session | advertise_session_capabilities |
+    /// request_intervention | record_intervention_result.
     /// aggregate replays a local JSONL
     /// fixture only when TACHI_AGENT_EVAL_ALLOW_FIXTURE=1 is set.
     /// register/observe/adjudicate/get (#1066) are the mirror eval intake for
@@ -482,6 +485,85 @@ pub struct TachiAgentEvalParams {
     #[serde(default)]
     #[schemars(description = "[action=get_attachment] Stable attachment id.")]
     pub attachment_id: Option<String>,
+
+    // tachi#1678 attached-session receipt spine. Fields stay flat for the
+    // single-facade parameter contract; action-specific presence is enforced
+    // by the server handlers.
+    #[serde(default)]
+    #[schemars(
+        description = "[action=ingest_session_event] Source event id from the authoritative harness stream."
+    )]
+    pub session_event_id: Option<String>,
+    #[serde(default)]
+    #[schemars(
+        description = "[action=ingest_session_event] Closed kind: accepted, started, progress, input_required, terminal, cleanup."
+    )]
+    pub session_event_kind: Option<String>,
+    #[serde(default)]
+    #[schemars(
+        description = "[action=ingest_session_event] Terminal outcome: completed, failed, cancelled."
+    )]
+    pub session_event_outcome: Option<String>,
+    #[serde(default)]
+    #[schemars(
+        description = "[action=ingest_session_event] Host-side monotone source revision (non-negative)."
+    )]
+    pub source_revision: Option<i64>,
+    #[serde(default)]
+    #[schemars(
+        description = "[action=ingest_session_event] When the fact occurred on the host (RFC 3339)."
+    )]
+    pub event_occurred_at: Option<String>,
+    #[serde(default)]
+    #[schemars(
+        description = "[action=ingest_session_event] Bounded public-safe summary (max 2000 chars); never a transcript."
+    )]
+    pub event_summary: Option<String>,
+    #[serde(default)]
+    #[schemars(
+        description = "[action=ingest_session_event] Host-side artifact digest; the artifact itself never enters Tachi."
+    )]
+    pub payload_digest: Option<String>,
+    #[serde(default)]
+    #[schemars(
+        description = "[action=ingest_session_event|record_intervention_result] Authoritative harness confirmation reference (mandatory for terminal cancelled)."
+    )]
+    pub authority_confirmation_ref: Option<String>,
+    #[serde(default)]
+    #[schemars(
+        description = "[action=mark_session_connection] Closed connection fact: disconnected or reconnect_failed."
+    )]
+    pub connection_fact: Option<String>,
+    #[serde(default)]
+    #[schemars(
+        description = "[action=request_intervention] Closed kind: request_status, prompt_or_correct, request_pause, request_cancel, request_resume."
+    )]
+    pub intervention_kind: Option<String>,
+    #[serde(default)]
+    #[schemars(
+        description = "[action=request_intervention|record_intervention_result] Stable request id (idempotency key)."
+    )]
+    pub intervention_request_id: Option<String>,
+    #[serde(default)]
+    #[schemars(
+        description = "[action=request_intervention] Bounded public-safe reason (max 1000 chars)."
+    )]
+    pub intervention_reason: Option<String>,
+    #[serde(default)]
+    #[schemars(
+        description = "[action=request_intervention] Expected canonical session revision (compare-and-swap)."
+    )]
+    pub expected_session_revision: Option<i64>,
+    #[serde(default)]
+    #[schemars(
+        description = "[action=record_intervention_result] Closed disposition: accepted, refused, unsupported, failed."
+    )]
+    pub intervention_disposition: Option<String>,
+    #[serde(default)]
+    #[schemars(
+        description = "[action=record_intervention_result] Bounded public-safe detail (max 2000 chars)."
+    )]
+    pub intervention_detail: Option<String>,
 }
 
 /// tachi#1675 PR2 `route_projection`: what task the projection is being

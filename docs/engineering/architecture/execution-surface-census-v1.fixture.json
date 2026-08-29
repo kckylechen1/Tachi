@@ -2,21 +2,21 @@
   "schema_version": 1,
   "issue": 1317,
   "observation": {
-    "date": "2026-08-28",
-    "revision": "99df839a9a95787e649ecd4cbd3ebb63451c128c",
-    "scope": "native composed MemoryServer router after production profile, A2A, sticky-retirement action-schema, bound-project, and annotation transforms plus the #1733 trusted-local ACP attachment fields (tachi_agent_eval attach_session/get_attachment, merged via #1738); #1853 omitted vault secret types use name-based inference; environment exposure override unset"
+    "date": "2026-08-29",
+    "revision": "17e22fe84e63cddbef079ba559507b9f0a29399f",
+    "scope": "native composed MemoryServer router after production profile, A2A, sticky-retirement action-schema, bound-project, and annotation transforms plus the #1733 trusted-local ACP attachment fields (tachi_agent_eval attach_session/get_attachment, merged via #1738) and the #1678 attached-session receipt-spine fields (ingest_session_event, get_session_state, mark_session_connection, reconnect_session, advertise_session_capabilities, request_intervention, record_intervention_result); #1853 omitted vault secret types use name-based inference; environment exposure override unset"
   },
   "provisional_budgets": {
     "profiles": {
       "admin": {
-        "max_total_input_schema_bytes": 137289,
-        "max_total_tool_definition_bytes": 168222,
+        "max_total_input_schema_bytes": 140106,
+        "max_total_tool_definition_bytes": 171039,
         "max_visible_tools": 82,
         "rationale": "Exact live observed #1691 census for admin after profile-specific tools/list narrowing; any regrowth requires explicit adjudication.; #1454 server-run tachi_verify surface (action=run, +check_kind/+timeout_secs props; +1131 schema bytes / +1365 tool-definition bytes per profile) re-pinned after the rebase onto 53939b5b5 (main #1690/#1691 retirements); #1322 declared_file_scope on tachi_staff, including its exact serialized schema bytes; any further regrowth requires explicit adjudication."
       },
       "coordinate": {
-        "max_total_input_schema_bytes": 92181,
-        "max_total_tool_definition_bytes": 105671,
+        "max_total_input_schema_bytes": 94998,
+        "max_total_tool_definition_bytes": 108488,
         "max_visible_tools": 29,
         "rationale": "Exact live observed #1691 census for coordinate after profile-specific tools/list narrowing; any regrowth requires explicit adjudication.; #1454 server-run tachi_verify surface (action=run, +check_kind/+timeout_secs props; +1131 schema bytes / +1365 tool-definition bytes per profile) re-pinned after the rebase onto 53939b5b5 (main #1690/#1691 retirements); #1322 declared_file_scope on tachi_staff, including its exact serialized schema bytes; any further regrowth requires explicit adjudication."
       },
@@ -27,8 +27,8 @@
         "rationale": "Exact live observed #1691 census for delegate after profile-specific tools/list narrowing; any regrowth requires explicit adjudication."
       },
       "operate": {
-        "max_total_input_schema_bytes": 85511,
-        "max_total_tool_definition_bytes": 99232,
+        "max_total_input_schema_bytes": 88328,
+        "max_total_tool_definition_bytes": 102049,
         "max_visible_tools": 39,
         "rationale": "Exact live observed #1691 census for operate after profile-specific tools/list narrowing; any regrowth requires explicit adjudication."
       },
@@ -190,8 +190,8 @@
     },
     "profiles": {
       "admin": {
-        "total_input_schema_bytes": 137289,
-        "total_tool_definition_bytes": 168222,
+        "total_input_schema_bytes": 140106,
+        "total_tool_definition_bytes": 171039,
         "visible_tool_count": 82,
         "visible_tools": [
           "archive_memory",
@@ -279,8 +279,8 @@
         ]
       },
       "coordinate": {
-        "total_input_schema_bytes": 92181,
-        "total_tool_definition_bytes": 105671,
+        "total_input_schema_bytes": 94998,
+        "total_tool_definition_bytes": 108488,
         "visible_tool_count": 29,
         "visible_tools": [
           "extract_facts",
@@ -332,8 +332,8 @@
         ]
       },
       "operate": {
-        "total_input_schema_bytes": 85511,
-        "total_tool_definition_bytes": 99232,
+        "total_input_schema_bytes": 88328,
+        "total_tool_definition_bytes": 102049,
         "visible_tool_count": 39,
         "visible_tools": [
           "archive_memory",
@@ -491,8 +491,8 @@
       "comparisons": {
         "admin": {
           "tachi_agent_eval": {
-            "input_schema_bytes": 13921,
-            "property_count": 22,
+            "input_schema_bytes": 16738,
+            "property_count": 37,
             "property_names": [
               "action",
               "adapter_connection_identity",
@@ -500,20 +500,35 @@
               "admission_receipt_ref",
               "agent_identity_id",
               "attachment_id",
+              "authority_confirmation_ref",
               "capability_class",
+              "connection_fact",
               "contract_digest",
+              "event_occurred_at",
+              "event_summary",
+              "expected_session_revision",
               "expected_transition_revision",
               "fixture_path",
               "get",
               "host_identity",
               "idempotency_key",
+              "intervention_detail",
+              "intervention_disposition",
+              "intervention_kind",
+              "intervention_reason",
+              "intervention_request_id",
               "limit",
               "observe",
+              "payload_digest",
               "projection",
               "protocol_version",
               "register",
               "remote_session_id",
               "session_capabilities",
+              "session_event_id",
+              "session_event_kind",
+              "session_event_outcome",
+              "source_revision",
               "tool_profile",
               "work_claim_id"
             ]
@@ -613,8 +628,8 @@
         },
         "coordinate": {
           "tachi_agent_eval": {
-            "input_schema_bytes": 13921,
-            "property_count": 22,
+            "input_schema_bytes": 16738,
+            "property_count": 37,
             "property_names": [
               "action",
               "adapter_connection_identity",
@@ -622,20 +637,35 @@
               "admission_receipt_ref",
               "agent_identity_id",
               "attachment_id",
+              "authority_confirmation_ref",
               "capability_class",
+              "connection_fact",
               "contract_digest",
+              "event_occurred_at",
+              "event_summary",
+              "expected_session_revision",
               "expected_transition_revision",
               "fixture_path",
               "get",
               "host_identity",
               "idempotency_key",
+              "intervention_detail",
+              "intervention_disposition",
+              "intervention_kind",
+              "intervention_reason",
+              "intervention_request_id",
               "limit",
               "observe",
+              "payload_digest",
               "projection",
               "protocol_version",
               "register",
               "remote_session_id",
               "session_capabilities",
+              "session_event_id",
+              "session_event_kind",
+              "session_event_outcome",
+              "source_revision",
               "tool_profile",
               "work_claim_id"
             ]
