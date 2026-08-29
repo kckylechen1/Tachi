@@ -56,10 +56,10 @@ fn string_is_zeroed(value: &str) -> bool {
 #[test]
 fn cli_secret_guard_zeroes_plaintext_on_early_error() {
     let mut secret = "entered-secret-that-must-not-survive".to_string();
-    let result: Result<(), &str> = (|| {
+    let result: Result<(), &str> = {
         let _secret = ZeroizingSecretString(&mut secret);
         Err("simulated store failure")
-    })();
+    };
 
     assert_eq!(result, Err("simulated store failure"));
     assert!(
