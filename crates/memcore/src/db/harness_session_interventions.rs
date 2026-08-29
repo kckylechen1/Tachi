@@ -375,6 +375,12 @@ pub fn request_harness_session_intervention(
     admission_receipt_ref: &str,
 ) -> Result<HarnessSessionInterventionRequestReceipt, MemoryError> {
     require_non_empty(&input.request_id, "request_id")?;
+    require_no_control(&input.request_id, "request_id")?;
+    if input.request_id.chars().count() > 128 {
+        return Err(MemoryError::InvalidArg(
+            "request_id must be at most 128 characters".to_string(),
+        ));
+    }
     require_non_empty(&input.reason, "reason")?;
     require_no_control(&input.reason, "reason")?;
     if input.reason.chars().count() > 1000 {
@@ -1131,6 +1137,45 @@ mod tests {
             )
             .unwrap();
         assert_eq!(results, 0, "refusals never journal");
+    }
+
+    #[test]
+    fn request_ids_are_bounded_and_control_free() {
+        let (mut conn, selector) = seeded_with_grant(GRANT_DELEGATE, "reqid-attach");
+        let nul_request = request(
+            "req\u{0000}hidden",
+            HarnessSessionInterventionKind::RequestCancel,
+            0,
+        );
+        let error = request_harness_session_intervention(
+            &mut conn,
+            &selector,
+            &nul_request,
+            &host(),
+            "admission-1",
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("control characters"), "{error}");
+
+        let oversize_request = request(
+            &"x".repeat(129),
+            HarnessSessionInterventionKind::RequestCancel,
+            0,
+        );
+        let error = request_harness_session_intervention(
+            &mut conn,
+            &selector,
+            &oversize_request,
+            &host(),
+            "admission-1",
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("at most 128 characters"),
+            "{error}"
+        );
+
+        assert_eq!(intervention_rows(&conn), 0, "refusals never mint receipts");
     }
 
     #[test]

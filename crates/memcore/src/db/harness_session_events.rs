@@ -554,9 +554,33 @@ fn require_non_empty(value: &str, field: &str) -> Result<(), MemoryError> {
     Ok(())
 }
 
+/// Public-safe persistent text must be exactly what every reader sees:
+/// control characters (NUL included, which SQLite text functions truncate
+/// at) are refused rather than stored.
+fn require_no_control(value: &str, field: &str) -> Result<(), MemoryError> {
+    if value.chars().any(|c| c.is_control()) {
+        return Err(MemoryError::InvalidArg(format!(
+            "{field} must not contain control characters"
+        )));
+    }
+    Ok(())
+}
+
 fn validate_new_event(input: &NewHarnessSessionEvent) -> Result<(), MemoryError> {
     require_non_empty(&input.event_id, "event_id")?;
+    require_no_control(&input.event_id, "event_id")?;
+    if input.event_id.chars().count() > 128 {
+        return Err(MemoryError::InvalidArg(
+            "event_id must be at most 128 characters".to_string(),
+        ));
+    }
     require_non_empty(&input.occurred_at, "occurred_at")?;
+    require_no_control(&input.occurred_at, "occurred_at")?;
+    if input.occurred_at.chars().count() > 64 {
+        return Err(MemoryError::InvalidArg(
+            "occurred_at must be at most 64 characters".to_string(),
+        ));
+    }
     if input.source_revision < 0 {
         return Err(MemoryError::InvalidArg(
             "source_revision must be non-negative".to_string(),
@@ -2041,6 +2065,50 @@ mod tests {
             ingest_harness_session_event(&mut conn, &selector, &nul_digest, &host(), "admission-1")
                 .unwrap_err();
         assert!(error.to_string().contains("digest-safe ASCII"), "{error}");
+        assert_eq!(event_row_count(&conn), 0, "refusals never journal");
+    }
+
+    #[test]
+    fn event_ids_and_occurred_at_are_bounded_and_control_free() {
+        let (mut conn, selector) = seeded();
+
+        let mut control_id = event("ev-ctl", HarnessSessionEventKind::Progress, 1);
+        control_id.event_id = "id\u{0000}hidden".to_string();
+        let error =
+            ingest_harness_session_event(&mut conn, &selector, &control_id, &host(), "admission-1")
+                .unwrap_err();
+        assert!(error.to_string().contains("control characters"), "{error}");
+
+        let mut oversize_id = event("ev-long", HarnessSessionEventKind::Progress, 1);
+        oversize_id.event_id = "x".repeat(129);
+        let error = ingest_harness_session_event(
+            &mut conn,
+            &selector,
+            &oversize_id,
+            &host(),
+            "admission-1",
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("at most 128 characters"),
+            "{error}"
+        );
+
+        let mut oversize_time = event("ev-time", HarnessSessionEventKind::Progress, 1);
+        oversize_time.occurred_at = "x".repeat(65);
+        let error = ingest_harness_session_event(
+            &mut conn,
+            &selector,
+            &oversize_time,
+            &host(),
+            "admission-1",
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("at most 64 characters"),
+            "{error}"
+        );
+
         assert_eq!(event_row_count(&conn), 0, "refusals never journal");
     }
 

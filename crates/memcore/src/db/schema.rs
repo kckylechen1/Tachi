@@ -195,14 +195,14 @@ pub(crate) fn install_harness_session_spine_schema(conn: &Connection) -> Result<
         "CREATE TABLE IF NOT EXISTS harness_session_events (
             event_row_id INTEGER PRIMARY KEY AUTOINCREMENT,
             attachment_id TEXT NOT NULL REFERENCES harness_session_attachments(attachment_id),
-            event_id TEXT NOT NULL CHECK (length(trim(event_id)) > 0),
+            event_id TEXT NOT NULL CHECK (length(event_id) <= 128 AND length(trim(event_id)) > 0 AND instr(CAST(event_id AS BLOB), CAST(x'00' AS BLOB)) = 0),
             kind TEXT NOT NULL CHECK (kind IN ('accepted', 'started', 'progress', 'input_required', 'terminal', 'cleanup')),
             outcome TEXT CHECK (outcome IS NULL OR outcome IN ('completed', 'failed', 'cancelled')),
             source_revision INTEGER NOT NULL CHECK (source_revision >= 0),
             authority_confirmation_ref TEXT CHECK (authority_confirmation_ref IS NULL OR (length(authority_confirmation_ref) <= 128 AND length(trim(authority_confirmation_ref)) > 0 AND instr(CAST(authority_confirmation_ref AS BLOB), CAST(x'00' AS BLOB)) = 0)),
             summary TEXT CHECK (summary IS NULL OR (length(summary) > 0 AND length(summary) <= 2000 AND instr(CAST(summary AS BLOB), CAST(x'00' AS BLOB)) = 0)),
             payload_digest TEXT CHECK (payload_digest IS NULL OR (length(payload_digest) <= 128 AND length(trim(payload_digest)) > 0 AND payload_digest NOT GLOB '*[^A-Za-z0-9+=/_:-]*' AND length(CAST(payload_digest AS BLOB)) = length(payload_digest))),
-            occurred_at TEXT NOT NULL,
+            occurred_at TEXT NOT NULL CHECK (length(occurred_at) <= 64 AND instr(CAST(occurred_at AS BLOB), CAST(x'00' AS BLOB)) = 0),
             ingested_at TEXT NOT NULL,
             source_host_identity TEXT NOT NULL CHECK (length(trim(source_host_identity)) > 0),
             UNIQUE (attachment_id, event_id),
@@ -231,7 +231,7 @@ pub(crate) fn install_harness_session_spine_schema(conn: &Connection) -> Result<
         CREATE TABLE IF NOT EXISTS harness_session_interventions (
             intervention_row_id INTEGER PRIMARY KEY AUTOINCREMENT,
             attachment_id TEXT NOT NULL REFERENCES harness_session_attachments(attachment_id),
-            request_id TEXT NOT NULL CHECK (length(trim(request_id)) > 0),
+            request_id TEXT NOT NULL CHECK (length(request_id) <= 128 AND length(trim(request_id)) > 0 AND instr(CAST(request_id AS BLOB), CAST(x'00' AS BLOB)) = 0),
             kind TEXT NOT NULL CHECK (kind IN ('request_status', 'prompt_or_correct', 'request_pause', 'request_cancel', 'request_resume')),
             reason TEXT NOT NULL CHECK (length(reason) > 0 AND length(reason) <= 1000 AND instr(CAST(reason AS BLOB), CAST(x'00' AS BLOB)) = 0),
             expected_session_revision INTEGER NOT NULL CHECK (expected_session_revision >= 0),
@@ -329,6 +329,14 @@ pub(crate) fn validate_harness_session_spine_schema(conn: &Connection) -> Result
         (
             "harness_session_intervention_results",
             "instr(CAST(authority_confirmation_ref AS BLOB), CAST(x'00' AS BLOB)) = 0",
+        ),
+        (
+            "harness_session_events",
+            "length(event_id) <= 128",
+        ),
+        (
+            "harness_session_interventions",
+            "length(request_id) <= 128",
         ),
         (
             "harness_session_intervention_results",
