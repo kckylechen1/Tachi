@@ -1807,9 +1807,9 @@ mod tests {
         conn.execute(
             "INSERT INTO harness_session_interventions (
                 attachment_id, request_id, kind, reason, expected_session_revision,
-                requested_by, requested_at
+                capability_source, requested_by, requested_at
              ) SELECT attachment_id, 'req-cancel', 'request_cancel', 'operator stop', 1,
-                'host-1', '2026-08-29T00:00:00Z' FROM harness_session_attachments",
+                'declared', 'host-1', '2026-08-29T00:00:00Z' FROM harness_session_attachments",
             [],
         )
         .unwrap();
