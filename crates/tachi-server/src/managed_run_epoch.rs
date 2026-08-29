@@ -164,6 +164,30 @@ fn is_terminal_state(status: &Value) -> bool {
     )
 }
 
+/// A durable identity record is consistent only when every field the
+/// epoch discriminator depends on is present and agrees with the receipt:
+/// `managed_run_id` and the record's own `dispatch_id` must equal the
+/// top-level `dispatch_id`, `controller_epoch_id` must be present, and
+/// `lifecycle_mode` must be the managed batch mode. Anything missing or
+/// contradictory is typed `inconsistent` — never a best-effort guessed
+/// owner or a foreign-epoch orphan claim built on an unusable identity.
+fn identity_record_is_consistent(
+    status: &Value,
+    identity: &serde_json::Map<String, Value>,
+) -> bool {
+    let dispatch_id = status.get("dispatch_id").and_then(Value::as_str);
+    let identity_run_id = identity.get("managed_run_id").and_then(Value::as_str);
+    let identity_dispatch = identity.get("dispatch_id").and_then(Value::as_str);
+    let identity_epoch = identity.get("controller_epoch_id").and_then(Value::as_str);
+    let lifecycle_mode = identity.get("lifecycle_mode").and_then(Value::as_str);
+    dispatch_id.is_some_and(|dispatch_id| {
+        dispatch_id == identity_run_id.unwrap_or_default()
+            && identity_dispatch == Some(dispatch_id)
+            && identity_epoch.is_some()
+            && lifecycle_mode == Some("TachiManagedBatch")
+    })
+}
+
 /// Volatile outcome of the startup reconciliation scan, recorded on the
 /// owning server incarnation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -223,10 +247,16 @@ pub(crate) fn reconcile_interrupted_managed_runs(
         }
     };
     for entry in entries.flatten() {
-        let run_dir = entry.path();
-        if !run_dir.is_dir() {
+        // `DirEntry::file_type` does not follow symlinks: a directory
+        // symlink under the runs root must never be scanned or written
+        // through, or a planted `runs/link -> /outside/run` would make
+        // reconciliation append outside the runs root (same discipline as
+        // the legacy orphan recovery scan).
+        let is_real_directory = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+        if !is_real_directory {
             continue;
         }
+        let run_dir = entry.path();
         let status_path = run_dir.join("status.json");
         if !status_path.exists() {
             continue;
@@ -249,10 +279,10 @@ pub(crate) fn reconcile_interrupted_managed_runs(
             // claim about it.
             continue;
         };
-        let dispatch_id = status.get("dispatch_id").and_then(Value::as_str);
-        let identity_run_id = identity.get("managed_run_id").and_then(Value::as_str);
-        if dispatch_id.is_none() || dispatch_id != identity_run_id {
-            let label = dispatch_id
+        if !identity_record_is_consistent(&status, identity) {
+            let label = status
+                .get("dispatch_id")
+                .and_then(Value::as_str)
                 .map(str::to_string)
                 .unwrap_or_else(|| run_dir.display().to_string());
             match append_reconciliation_observation(
@@ -268,7 +298,11 @@ pub(crate) fn reconcile_interrupted_managed_runs(
             }
             continue;
         }
-        let dispatch_id = dispatch_id.unwrap_or_default().to_string();
+        let dispatch_id = status
+            .get("dispatch_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
         if is_terminal_state(&status) {
             // Terminal stays terminal — byte/semantically terminal, never
             // reopened, no orphan observation.
@@ -482,13 +516,17 @@ pub(crate) fn read_projection(
 }
 
 /// Run the startup reconciliation scan for this daemon incarnation and
-/// record its outcome on the server. Called ONLY from the daemon serve
-/// startup path, beside `recover_orphaned_dispatch_runs`: a controller
-/// incarnation reconciles the runs root it is about to own, while transient
-/// CLI constructions of `MemoryServer` never scan or mutate run receipts.
-/// Cross-process serialization of the runs root is the daemon singleton
-/// lock's job — the same single-writer trust base every canonical receipt
-/// writer already relies on.
+/// record its outcome on the server. Called ONLY from the serve
+/// server-state build, at the exact placement (and therefore the exact
+/// pre-singleton window) the pre-existing `recover_orphaned_dispatch_runs`
+/// has always had — reconciliation is strictly gentler there than that
+/// legacy path, because it only appends evidence to identity-bearing
+/// receipts instead of fabricating terminal states. Transient CLI
+/// constructions of `MemoryServer` never scan or mutate run receipts. The
+/// per-run receipt lock is process-local: this code base serializes the
+/// runs root across processes by running one daemon per home, not by an
+/// interprocess file lock, and that trust base is inherited unchanged from
+/// the existing canonical writers.
 pub(crate) fn record_startup_reconciliation(server: &crate::MemoryServer) {
     let reconciliation = reconcile_interrupted_managed_runs(
         &crate::dispatch_ops::dispatch_runs_root(),

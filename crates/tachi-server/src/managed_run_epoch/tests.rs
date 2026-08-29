@@ -982,3 +982,152 @@ fn serve_startup_wires_reconciliation_beside_recovery() {
         "bare MemoryServer construction must never scan or mutate run receipts"
     );
 }
+
+/// Codex R3 finding 1 (fixed): a directory symlink under the runs root is
+/// never scanned or written through — reconciliation cannot escape the runs
+/// root onto a planted outside target.
+#[cfg(unix)]
+#[test]
+fn reconciliation_never_follows_directory_symlinks_out_of_the_runs_root() {
+    use std::os::unix::fs::symlink;
+    let _serial = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (home, _runs) = test_env();
+    let _home = crate::test_support::EnvRestore::set_path("TACHI_HOME", home.path());
+    let runs_root = crate::dispatch_ops::dispatch_runs_root();
+    std::fs::create_dir_all(&runs_root).expect("runs root");
+
+    // Planted escape target OUTSIDE the runs root with a foreign-epoch
+    // nonterminal managed receipt.
+    let outside = tempfile::tempdir().expect("outside dir");
+    let outside_run = outside.path().join("run");
+    std::fs::create_dir_all(&outside_run).expect("outside run dir");
+    let outside_receipt = json!({
+        "dispatch_id": "20260829T120017Z-s1-symlink-escape",
+        "state": "TASK_STATE_WORKING",
+        "status_revision": 3,
+        "managed_run_identity": {
+            "managed_run_id": "20260829T120017Z-s1-symlink-escape",
+            "dispatch_id": "20260829T120017Z-s1-symlink-escape",
+            "controller_epoch_id": "ctrl-epoch-a",
+            "lifecycle_mode": "TachiManagedBatch",
+        },
+    });
+    std::fs::write(
+        outside_run.join("status.json"),
+        serde_json::to_vec_pretty(&outside_receipt).expect("serialize"),
+    )
+    .expect("write outside receipt");
+    let outside_before =
+        std::fs::read(outside_run.join("status.json")).expect("read outside receipt");
+
+    // Directory symlink inside the runs root pointing at the outside run.
+    symlink(&outside_run, runs_root.join("planted-link")).expect("plant symlink");
+
+    let server = crate::MemoryServer::new(home.path().join("server.sqlite"), None).expect("server");
+    record_startup_reconciliation(&server);
+    let outcome = server
+        .startup_reconciliation
+        .get()
+        .expect("outcome")
+        .clone();
+    assert!(
+        outcome.orphaned.is_empty() && outcome.inconsistent.is_empty(),
+        "a symlinked directory must not be reconciled: {outcome:?}"
+    );
+    assert_eq!(
+        std::fs::read(outside_run.join("status.json")).expect("read outside after"),
+        outside_before,
+        "reconciliation must never write outside the runs root"
+    );
+}
+
+/// Codex R3 finding 3 (fixed): internally contradictory identity records —
+/// missing epoch, mismatched record dispatch_id, wrong lifecycle mode — are
+/// typed `inconsistent`, never falsely claimed as foreign-epoch orphans.
+#[test]
+fn malformed_identity_variants_become_inconsistent_not_orphaned() {
+    let _serial = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (home, _runs) = test_env();
+    let _home = crate::test_support::EnvRestore::set_path("TACHI_HOME", home.path());
+    let runs_root = crate::dispatch_ops::dispatch_runs_root();
+
+    let mutants = [
+        (
+            "20260829T120018Z-s1-no-epoch",
+            json!({
+                "managed_run_id": "20260829T120018Z-s1-no-epoch",
+                "dispatch_id": "20260829T120018Z-s1-no-epoch",
+                "lifecycle_mode": "TachiManagedBatch",
+            }),
+        ),
+        (
+            "20260829T120019Z-s1-bad-dispatch",
+            json!({
+                "managed_run_id": "20260829T120019Z-s1-bad-dispatch",
+                "dispatch_id": "some-other-dispatch",
+                "controller_epoch_id": "ctrl-epoch-a",
+                "lifecycle_mode": "TachiManagedBatch",
+            }),
+        ),
+        (
+            "20260829T120020Z-s1-bad-mode",
+            json!({
+                "managed_run_id": "20260829T120020Z-s1-bad-mode",
+                "dispatch_id": "20260829T120020Z-s1-bad-mode",
+                "controller_epoch_id": "ctrl-epoch-a",
+                "lifecycle_mode": "AttachedSession",
+            }),
+        ),
+    ];
+    for (dispatch_id, identity) in &mutants {
+        let run_dir = runs_root.join(dispatch_id);
+        std::fs::create_dir_all(&run_dir).expect("run dir");
+        std::fs::write(
+            run_dir.join("status.json"),
+            json!({
+                "dispatch_id": dispatch_id,
+                "state": "TASK_STATE_WORKING",
+                "status_revision": 2,
+                "managed_run_identity": identity,
+            })
+            .to_string(),
+        )
+        .expect("write mutant receipt");
+    }
+
+    let server = crate::MemoryServer::new(home.path().join("server.sqlite"), None).expect("server");
+    record_startup_reconciliation(&server);
+    let outcome = server
+        .startup_reconciliation
+        .get()
+        .expect("outcome")
+        .clone();
+    assert!(
+        outcome.orphaned.is_empty(),
+        "a malformed identity must never be claimed as a foreign-epoch orphan"
+    );
+    assert_eq!(
+        outcome.inconsistent.len(),
+        3,
+        "every malformed identity variant is typed inconsistent: {:?}",
+        outcome.inconsistent
+    );
+    for (dispatch_id, _) in &mutants {
+        let transitions = read_status(&runs_root.join(dispatch_id))["managed_run_reconciliation"]
+            ["transitions"]
+            .as_array()
+            .expect("transitions")
+            .clone();
+        assert_eq!(
+            transitions.len(),
+            1,
+            "{dispatch_id}: exactly one observation"
+        );
+        assert_eq!(transitions[0]["verdict"], "inconsistent");
+        assert_eq!(transitions[0]["execution_state"], "unknown");
+    }
+}
