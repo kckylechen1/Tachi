@@ -30,6 +30,7 @@ async fn listed_auth_failed_alias_is_unusable_not_absent() {
             allowed_agents: None,
             enable_rotation: false,
             rotation_strategy: None,
+            rebind: false,
         }))
         .await
         .expect("vault_set");
@@ -105,6 +106,7 @@ async fn listed_wrong_type_alias_is_not_absent() {
             allowed_agents: None,
             enable_rotation: false,
             rotation_strategy: None,
+            rebind: false,
         }))
         .await
         .expect("vault_set");
@@ -190,6 +192,7 @@ async fn listed_empty_alias_is_not_absent() {
             allowed_agents: None,
             enable_rotation: false,
             rotation_strategy: None,
+            rebind: false,
         }))
         .await
         .expect("vault_set whitespace");
@@ -239,6 +242,7 @@ async fn skip_class_is_the_pool_load_snapshot_not_a_later_reread() {
             allowed_agents: None,
             enable_rotation: false,
             rotation_strategy: None,
+            rebind: false,
         }))
         .await
         .expect("vault_set");
@@ -305,6 +309,7 @@ async fn empty_rotation_members_classify_the_prefix_as_listed_empty() {
                 allowed_agents: None,
                 enable_rotation: false,
                 rotation_strategy: None,
+                rebind: false,
             }))
             .await
             .expect("vault_set empty member");
@@ -364,6 +369,7 @@ async fn unconfigured_rotation_member_alias_materializes_from_unlocked_server() 
             allowed_agents: None,
             enable_rotation: false,
             rotation_strategy: None,
+            rebind: false,
         }))
         .await
         .expect("vault_set member");
@@ -407,6 +413,7 @@ async fn unhealthy_configured_rotation_member_cannot_fall_back_as_standalone() {
             allowed_agents: None,
             enable_rotation: false,
             rotation_strategy: None,
+            rebind: false,
         }))
         .await
         .expect("vault_set member");
@@ -420,6 +427,7 @@ async fn unhealthy_configured_rotation_member_cannot_fall_back_as_standalone() {
             allowed_agents: None,
             enable_rotation: false,
             rotation_strategy: None,
+            rebind: false,
         }))
         .await
         .expect("vault_set control member");
@@ -549,6 +557,7 @@ async fn unlocked_rotation_prefix_drop_uses_lowest_member_across_current_index()
                 allowed_agents: None,
                 enable_rotation: false,
                 rotation_strategy: None,
+                rebind: false,
             }))
             .await
             .expect("vault_set member");
@@ -572,6 +581,7 @@ async fn unlocked_rotation_prefix_drop_uses_lowest_member_across_current_index()
             allowed_agents: None,
             enable_rotation: false,
             rotation_strategy: None,
+            rebind: false,
         }))
         .await
         .expect("replace member one");
@@ -585,6 +595,7 @@ async fn unlocked_rotation_prefix_drop_uses_lowest_member_across_current_index()
             allowed_agents: Some(vec!["agent-a".to_string()]),
             enable_rotation: false,
             rotation_strategy: None,
+            rebind: false,
         }))
         .await
         .expect("replace member two");
@@ -642,6 +653,7 @@ async fn invalid_utf8_alias_payload_fails_closed_with_public_safe_error() {
             allowed_agents: None,
             enable_rotation: false,
             rotation_strategy: None,
+            rebind: false,
         }))
         .await
         .expect("vault_set");
