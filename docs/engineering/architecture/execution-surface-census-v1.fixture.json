@@ -3,7 +3,7 @@
   "issue": 1317,
   "observation": {
     "date": "2026-08-30",
-    "revision": "475db7b40273324289f9cac7f2cd96df31ee8fe5",
+    "revision": "a3cd4d29780bfae86ea623a9f49304643fd8a7be",
     "scope": "native composed MemoryServer router after production profile, A2A, sticky-retirement action-schema, bound-project, and annotation transforms plus the #1733 trusted-local ACP attachment fields (tachi_agent_eval attach_session/get_attachment, merged via #1738), the #1678 attached-session receipt-spine fields (ingest_session_event, get_session_state, mark_session_connection, reconnect_session, advertise_session_capabilities, request_intervention, record_intervention_result), and the #1678 coordinate/operate mutation-action projection; #1853 omitted vault secret types use name-based inference; environment exposure override unset; #1861 vault_set exposes an explicit fail-closed rebind boolean"
   },
   "provisional_budgets": {
