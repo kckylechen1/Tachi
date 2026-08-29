@@ -268,7 +268,12 @@ pub(crate) fn reconcile_interrupted_managed_runs(
         }
         let run_dir = entry.path();
         let status_path = run_dir.join("status.json");
-        if !status_path.exists() {
+        // Leaf discipline mirrors append: a symlinked receipt is foreign
+        // content, never a scannable fact about this run.
+        let leaf_is_regular = std::fs::symlink_metadata(&status_path)
+            .map(|metadata| metadata.is_file())
+            .unwrap_or(false);
+        if !leaf_is_regular {
             continue;
         }
         outcome.scanned += 1;
@@ -419,6 +424,16 @@ fn append_reconciliation_observation(
         .unwrap_or(false);
     if !still_real_directory {
         return Err("run_dir_not_a_real_directory".to_string());
+    }
+    // Leaf discipline: the receipt itself must be a regular file. A
+    // symlinked status.json would be read THROUGH (importing another run's
+    // or an outside receipt into this reconciliation) and then replaced —
+    // refuse the leaf, exactly like a swapped directory.
+    let leaf_is_regular = std::fs::symlink_metadata(&status_path)
+        .map(|metadata| metadata.is_file())
+        .unwrap_or(false);
+    if !leaf_is_regular {
+        return Err("status_leaf_not_a_regular_file".to_string());
     }
     // Re-read under the lock: a completion that landed between the scan and
     // this append must win; a run that turned terminal is never appended to.

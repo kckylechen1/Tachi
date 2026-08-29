@@ -939,6 +939,53 @@ fn inconsistent_record_projects_unknown_not_orphaned() {
     assert_eq!(projection["control_state"], "unavailable");
 }
 
+/// R9 leaf-discipline discrimination: a symlinked status.json is foreign
+/// content — the scan skips it and the append refuses it; neither ever
+/// reads through the link.
+#[cfg(unix)]
+#[test]
+fn symlinked_status_leaf_is_never_read_through() {
+    let runs = tempfile::tempdir().expect("runs");
+    let dispatch_id = "20260829T120017Z-s1-symlinked-leaf";
+    let run_dir = runs.path().join(dispatch_id);
+    std::fs::create_dir_all(&run_dir).expect("run dir");
+    // A foreign receipt with a DIFFERENT identity, placed outside the run.
+    let outside = tempfile::tempdir().expect("outside");
+    let foreign = json!({
+        "dispatch_id": "foreign-run",
+        "state": "TASK_STATE_WORKING",
+        "status_revision": 1,
+        "managed_run_identity": {
+            "managed_run_id": "foreign-run",
+            "controller_epoch_id": "ctrl-epoch-a",
+        },
+    });
+    std::fs::write(
+        outside.path().join("status.json"),
+        serde_json::to_vec_pretty(&foreign).expect("serialize"),
+    )
+    .expect("write foreign receipt");
+    std::os::unix::fs::symlink(
+        outside.path().join("status.json"),
+        run_dir.join("status.json"),
+    )
+    .expect("plant symlinked leaf");
+
+    // Append refuses the leaf outright.
+    let refusal = append_reconciliation_observation(
+        &run_dir,
+        "orphaned",
+        "ctrl-epoch-b",
+        Some("ctrl-epoch-a"),
+        Some("TASK_STATE_WORKING"),
+    )
+    .expect_err("symlinked leaf must be refused");
+    assert_eq!(
+        refusal, "status_leaf_not_a_regular_file",
+        "the refusal is typed and names the leaf discipline"
+    );
+}
+
 /// Failed-append discrimination: a contradictory identity whose INCONSISTENT
 /// observation FAILED to persist (malformed reconciliation shape blocks the
 /// append) still projects unknown on the read path — the read never converts
