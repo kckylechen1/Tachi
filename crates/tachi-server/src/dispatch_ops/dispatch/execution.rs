@@ -1,7 +1,5 @@
-use super::super::acp_native::{
-    is_native_acp_transport, run_native_acp_dispatch, NativeAcpRunSpec,
-};
-use super::super::acpx::{is_acpx_transport, persist_acpx_events_and_map};
+use super::super::acp_native::{is_native_acp_transport, NativeAcpRunSpec};
+use super::super::acpx::{is_acpx_transport, persist_acpx_events_and_map, AcpxReleaseMode};
 #[cfg(test)]
 use super::super::dispatch_v2::stamp_route_decision_id;
 #[cfg(test)]
@@ -12,8 +10,8 @@ use super::super::dispatch_v2::{
 };
 use super::super::kanban_helpers::{get_kanban_state, should_cleanup_run, update_kanban_state};
 use super::super::subprocess::{
-    run_agent_subprocess, run_managed_custom_subprocess_outcome, run_opencode_sop_subprocess,
-    tail_chars,
+    run_agent_subprocess_with_liveness, run_managed_custom_subprocess_outcome,
+    run_opencode_sop_subprocess_with_liveness, tail_chars,
 };
 use super::dedupe::release_flow_dispatch_slot;
 use super::response_helpers::McpCleanup;
@@ -100,6 +98,24 @@ pub(super) enum DispatchExecution {
     NativeAcp(NativeAcpRunSpec),
 }
 
+impl DispatchExecution {
+    pub(super) fn anchor_managed_cwd(
+        &mut self,
+        authority: &memcore::anchored_fs::AnchoredDirectory,
+    ) -> Result<(), String> {
+        match self {
+            DispatchExecution::Subprocess(command)
+            | DispatchExecution::ManagedCustom(command, _) => authority
+                .anchor_command_cwd(command.as_std_mut())
+                .map_err(|error| format!("pin managed child cwd: {error}")),
+            DispatchExecution::NativeAcp(spec) => {
+                spec.cwd_authority = Some(authority.clone());
+                Ok(())
+            }
+        }
+    }
+}
+
 /// Private lifecycle evidence that this registered Staff-managed run owns only
 /// its own run-scoped ephemeral materializations. It is established before
 /// background handoff and is independent of process exit or completion state.
@@ -107,10 +123,83 @@ pub(super) enum ManagedEphemeralCredentialCleanupObligation {
     Required,
 }
 
+/// A Staff-created read-only worktree that exists only to give Required
+/// postflight a real lease boundary. The pending form removes an untouched
+/// tree if launch fails before background ownership; after handoff, cleanup is
+/// explicit and happens only after a clean postflight verdict. A quarantined
+/// tree is intentionally preserved for inspection.
+pub(super) struct PendingAutoStaffExecEnv {
+    owned: Option<AutoStaffExecEnv>,
+}
+
+pub(super) struct AutoStaffExecEnv {
+    server: MemoryServer,
+    env_id: String,
+    path: PathBuf,
+}
+
+impl PendingAutoStaffExecEnv {
+    pub(super) fn new(server: MemoryServer, env_id: String, path: PathBuf) -> Self {
+        Self {
+            owned: Some(AutoStaffExecEnv {
+                server,
+                env_id,
+                path,
+            }),
+        }
+    }
+
+    pub(super) fn handoff(mut self) -> AutoStaffExecEnv {
+        self.owned.take().expect("pending Staff env owns one lease")
+    }
+}
+
+impl Drop for PendingAutoStaffExecEnv {
+    fn drop(&mut self) {
+        if let Some(owned) = self.owned.take() {
+            owned.cleanup("Staff launch failed before worker spawn");
+        }
+    }
+}
+
+impl AutoStaffExecEnv {
+    fn cleanup(self, reason: &str) {
+        let remove = tachi_clean::wt_clean::run_wt_remove(tachi_clean::wt_clean::WtRemoveOptions {
+            path: self.path.clone(),
+            force: true,
+            output: tachi_clean::wt_clean::OutputFormat::Json,
+        });
+        if let Err(error) = remove {
+            tracing::warn!(
+                env_id = %self.env_id,
+                path = %self.path.display(),
+                error = %error,
+                "automatic Staff exec env cleanup failed; preserving lease and worktree"
+            );
+            return;
+        }
+        if let Err(error) = self.server.reclaim_exec_env(
+            &memcore::ExecEnvSelector::EnvId(self.env_id.clone()),
+            Some(reason),
+        ) {
+            tracing::warn!(
+                env_id = %self.env_id,
+                path = %self.path.display(),
+                error = %error,
+                "automatic Staff worktree was removed but lease reclaim failed"
+            );
+        }
+    }
+}
+
 pub(super) struct BackgroundDispatchContext {
     pub(super) server: MemoryServer,
     pub(super) dispatch_id: String,
     pub(super) agent: String,
+    /// Server-admitted lease identity. Terminal status is rebuilt rather than
+    /// merged, so carry this immutable receipt field through the background
+    /// owner instead of trusting a later filesystem read to recover it.
+    pub(super) env_id: Option<String>,
     pub(super) stage: Option<String>,
     /// The dispatch's `TachiDispatchParams::project`, threaded through so a
     /// watchdog-recorded terminal outcome row lands in the same DB a
@@ -131,11 +220,15 @@ pub(super) struct BackgroundDispatchContext {
     pub(super) opencode_sop_label: Option<String>,
     pub(super) execution_backend_metadata: Option<Value>,
     pub(super) execution: DispatchExecution,
+    pub(super) cwd_authority: Option<memcore::anchored_fs::AnchoredDirectory>,
     pub(super) flow_dispatch_slot: Option<PathBuf>,
     pub(super) mcp_config_path: Option<PathBuf>,
     pub(super) managed_run_guard: Option<crate::managed_run_control::ManagedRunGuard>,
     pub(super) managed_ephemeral_credential_cleanup:
         Option<ManagedEphemeralCredentialCleanupObligation>,
+    pub(super) postflight_gate: Option<crate::exec_env_postflight::PostflightGate>,
+    pub(super) postflight_dispatch_lease: Option<crate::exec_env_ops::ExecEnvDispatchLeaseGuard>,
+    pub(super) auto_staff_exec_env: Option<AutoStaffExecEnv>,
 }
 
 /// Covers an unwind before the ordinary background terminal path reaches its
@@ -145,6 +238,7 @@ struct BackgroundEarlyExitCleanup {
     server: MemoryServer,
     workspace_dir: PathBuf,
     flow_dispatch_slot: Option<PathBuf>,
+    postflight_dispatch_lease: Option<crate::exec_env_ops::ExecEnvDispatchLeaseGuard>,
     armed: bool,
 }
 
@@ -153,11 +247,13 @@ impl BackgroundEarlyExitCleanup {
         server: MemoryServer,
         workspace_dir: PathBuf,
         flow_dispatch_slot: Option<PathBuf>,
+        postflight_dispatch_lease: Option<crate::exec_env_ops::ExecEnvDispatchLeaseGuard>,
     ) -> Self {
         Self {
             server,
             workspace_dir,
             flow_dispatch_slot,
+            postflight_dispatch_lease,
             armed: true,
         }
     }
@@ -165,6 +261,12 @@ impl BackgroundEarlyExitCleanup {
     fn complete(&mut self) {
         release_flow_dispatch_slot(self.flow_dispatch_slot.take());
         self.armed = false;
+    }
+
+    fn postflight_dispatch_lease_mut(
+        &mut self,
+    ) -> Option<&mut crate::exec_env_ops::ExecEnvDispatchLeaseGuard> {
+        self.postflight_dispatch_lease.as_mut()
     }
 }
 
@@ -290,6 +392,7 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
     let server_clone = ctx.server;
     let d_id = ctx.dispatch_id;
     let agent_for_watchdog = ctx.agent;
+    let env_id_for_watchdog = ctx.env_id;
     let project_for_watchdog = ctx.project;
     let stage_for_traj = ctx.stage;
     let traj_path_for_spawn = ctx.trajectory_path;
@@ -317,10 +420,14 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
     let opencode_sop_label_for_spawn = ctx.opencode_sop_label;
     let execution_backend_metadata_for_spawn = ctx.execution_backend_metadata;
     let execution_for_spawn = ctx.execution;
+    let cwd_authority_for_spawn = ctx.cwd_authority;
     let flow_dispatch_slot_for_spawn = ctx.flow_dispatch_slot;
     let mcp_config_path = ctx.mcp_config_path;
     let managed_run_guard = ctx.managed_run_guard;
     let managed_ephemeral_credential_cleanup = ctx.managed_ephemeral_credential_cleanup;
+    let postflight_gate_for_spawn = ctx.postflight_gate;
+    let postflight_dispatch_lease = ctx.postflight_dispatch_lease;
+    let auto_staff_exec_env = ctx.auto_staff_exec_env;
 
     tokio::task::spawn(async move {
         // Keep the registry entry and its sender alive for the entire
@@ -333,6 +440,7 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
             server_clone.clone(),
             workspace_dir_for_spawn.clone(),
             flow_dispatch_slot_for_spawn,
+            postflight_dispatch_lease,
         );
 
         // execute_started — Stage 2 (or, in V1, the only stage).
@@ -353,61 +461,87 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
             }),
         );
 
-        let (result, mut managed_cancellation, managed_termination_proof) =
+        let require_postflight_containment = postflight_gate_for_spawn.is_some();
+        let (runner_outcome, mut managed_cancellation, managed_termination_proof) =
             match execution_for_spawn {
                 DispatchExecution::Subprocess(cmd) if agent_for_watchdog == "opencode" => (
-                    run_opencode_sop_subprocess(
+                    run_opencode_sop_subprocess_with_liveness(
                         cmd,
                         timeout,
                         opencode_sop_label_for_spawn
                             .as_deref()
                             .unwrap_or("opencode_sop"),
+                        require_postflight_containment,
+                        cwd_authority_for_spawn.clone(),
                     )
                     .await,
                     None,
                     None,
                 ),
-                DispatchExecution::Subprocess(cmd) => {
-                    (run_agent_subprocess(cmd, timeout).await, None, None)
-                }
+                DispatchExecution::Subprocess(cmd) => (
+                    run_agent_subprocess_with_liveness(
+                        cmd,
+                        timeout,
+                        require_postflight_containment,
+                        cwd_authority_for_spawn.clone(),
+                    )
+                    .await,
+                    None,
+                    None,
+                ),
                 DispatchExecution::ManagedCustom(cmd, receiver) => {
                     let managed_run_dir = workspace_dir_for_spawn.clone();
+                    let managed_cwd_authority = cwd_authority_for_spawn.clone();
                     let outcome = match tokio::spawn(async move {
                         run_managed_custom_subprocess_outcome(
                             cmd,
                             timeout,
                             receiver,
                             &managed_run_dir,
+                            require_postflight_containment,
+                            managed_cwd_authority,
                         )
                         .await
                     })
                     .await
                     {
                         Ok(outcome) => outcome,
-                        Err(error) => super::super::subprocess::ManagedSubprocessOutcome::plain(
-                            Err(format!("managed subprocess panicked: {error}")),
-                        ),
+                        Err(error) => {
+                            super::super::subprocess::ManagedSubprocessOutcome::indeterminate(
+                                Err(format!("managed subprocess panicked: {error}")),
+                                "managed runner task panicked after spawn state became unknown"
+                                    .to_string(),
+                            )
+                        }
                     };
                     (
-                        outcome.result,
+                        crate::dispatch_ops::dispatch::DispatchRunOutcome {
+                            result: outcome.result,
+                            liveness: outcome.liveness,
+                            deferred_native_acp: None,
+                        },
                         outcome.cancellation,
                         outcome.termination_proof,
                     )
                 }
                 DispatchExecution::NativeAcp(spec) => (
-                    run_native_acp_dispatch(
+                    super::super::acp_native::run_native_acp_dispatch_with_liveness(
                         spec,
                         &workspace_dir_for_spawn,
                         &traj_path_for_spawn,
                         &d_id,
                         &agent_for_watchdog,
                         timeout,
+                        require_postflight_containment,
                     )
                     .await,
                     None,
                     None,
                 ),
             };
+        let runner_liveness = runner_outcome.liveness;
+        let mut pending_native_acp_artifacts = runner_outcome.deferred_native_acp;
+        let result = runner_outcome.result;
         let execute_duration_ms = execute_started_instant.elapsed().as_millis() as u64;
 
         // CLI subprocesses intentionally never acknowledge a receipt: they
@@ -440,23 +574,38 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
             Err(e) => e.clone(),
         };
         let mut acpx_event_summary_json: Option<serde_json::Value> = None;
+        let mut pending_acpx_output: Option<String> = None;
         if is_acpx_transport(&harness_transport_for_spawn) {
+            let release_now = postflight_gate_for_spawn.is_none();
+            let release_mode = if release_now {
+                AcpxReleaseMode::ImmediateMapped
+            } else {
+                AcpxReleaseMode::ParseOnly
+            };
             match persist_acpx_events_and_map(
                 &workspace_dir_for_spawn,
                 &traj_path_for_spawn,
                 &d_id,
                 &agent_for_watchdog,
                 &full_output,
+                release_mode,
             ) {
                 Ok(summary) => {
                     if let Some(final_response) = summary.final_response.clone() {
                         full_output = final_response;
                     }
-                    acpx_event_summary_json = Some(json!({
-                        "events_file": summary.events_file.to_string_lossy(),
-                        "mapped_events": summary.mapped_events,
-                        "final_response_extracted": summary.final_response.is_some(),
-                    }));
+                    if release_now {
+                        acpx_event_summary_json = Some(json!({
+                            "events_file": summary.events_file.to_string_lossy(),
+                            "mapped_events": summary.mapped_events,
+                            "final_response_extracted": summary.final_response.is_some(),
+                        }));
+                    } else {
+                        pending_acpx_output = Some(match &result {
+                            Ok(outcome) => outcome.output.clone(),
+                            Err(error) => error.clone(),
+                        });
+                    }
                 }
                 Err(err) => {
                     append_trajectory_event(
@@ -473,9 +622,17 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
             }
         }
         {
-            let (exit_code, output_tail) = match &result {
-                Err(e) => (None, e.chars().take(200).collect::<String>()),
-                Ok(r) => (r.exit_code, tail_chars(&r.output, 500)),
+            let exit_code = match &result {
+                Err(_) => None,
+                Ok(r) => r.exit_code,
+            };
+            let output_tail = if postflight_gate_for_spawn.is_some() {
+                "[withheld pending exec_env_postflight]".to_string()
+            } else {
+                match &result {
+                    Err(e) => e.chars().take(200).collect::<String>(),
+                    Ok(r) => tail_chars(&r.output, 500),
+                }
             };
             let finished_event = json!({
                 "event": "subprocess_finished",
@@ -505,8 +662,226 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
             }
         }
 
-        // Save full output to result.md for orchestrator eval
-        let result_persist_error = {
+        // --- POSTFLIGHT GATE: verify write-contract and liveness (#894 S2e, #1322) ---
+        let mut postflight_outcome = if let Some(gate) = &postflight_gate_for_spawn {
+            // The runner owns termination and reap. Postflight receives typed
+            // terminal evidence only; no numeric PID crosses this handoff and
+            // this layer has no signalling capability.
+            let outcome = gate.run(&runner_liveness);
+            match outcome {
+                Ok(mut outcome) => {
+                    let quarantine_sink = crate::exec_env_postflight::DaemonQuarantineSink {
+                        server: server_clone.clone(),
+                    };
+                    match crate::exec_env_postflight::apply_verdict(&mut outcome, &quarantine_sink)
+                    {
+                        Ok(_) => {
+                            append_trajectory_event(
+                                &traj_path_for_spawn,
+                                outcome.trajectory_event(),
+                            );
+                            Some(outcome)
+                        }
+                        Err(error) => {
+                            outcome.verdict = crate::exec_env_postflight::GateVerdict::Error {
+                                detail: format!("resource fence persistence failed: {error}"),
+                            };
+                            append_trajectory_event(
+                                &traj_path_for_spawn,
+                                outcome.trajectory_event(),
+                            );
+                            Some(outcome)
+                        }
+                    }
+                }
+                Err(err) => {
+                    tracing::error!(
+                        dispatch_id = %d_id,
+                        error = %err,
+                        "postflight gate execution failed"
+                    );
+                    let mut error_outcome = gate.execution_error(
+                        &runner_liveness,
+                        format!("required gate execution failed: {err}"),
+                    );
+                    let quarantine_sink = crate::exec_env_postflight::DaemonQuarantineSink {
+                        server: server_clone.clone(),
+                    };
+                    if let Err(fence_error) = crate::exec_env_postflight::apply_verdict(
+                        &mut error_outcome,
+                        &quarantine_sink,
+                    ) {
+                        error_outcome.verdict = crate::exec_env_postflight::GateVerdict::Error {
+                            detail: format!(
+                                "required gate execution failed: {err}; resource fence persistence failed: {fence_error}"
+                            ),
+                        };
+                    }
+                    append_trajectory_event(&traj_path_for_spawn, error_outcome.trajectory_event());
+                    Some(error_outcome)
+                }
+            }
+        } else {
+            None
+        };
+
+        if let Some(outcome) = postflight_outcome.as_mut() {
+            // Persist the certified outcome before publishing any carrier
+            // artifact. Clean dispatches move into an exclusive `publishing`
+            // state; they do not become reusable until publication succeeds.
+            let lease_release = match early_exit_cleanup.postflight_dispatch_lease_mut() {
+                Some(lease) if outcome.artifacts_released() => lease.begin_publication(),
+                Some(lease) if outcome.lease_fenced() => lease.release_after_fence(),
+                Some(_) => Err(
+                    "postflight lease remains exclusively admitted because its resource fence was not persisted"
+                        .to_string(),
+                ),
+                None => Err("required postflight gate lost its dispatch lease guard".to_string()),
+            };
+            let publication_admission_held = match lease_release {
+                Ok(()) => outcome.artifacts_released(),
+                Err(error) => {
+                    outcome.verdict = crate::exec_env_postflight::GateVerdict::Error {
+                        detail: format!("postflight lease finalization failed closed: {error}"),
+                    };
+                    append_trajectory_event(&traj_path_for_spawn, outcome.trajectory_event());
+                    false
+                }
+            };
+
+            if publication_admission_held {
+                let mut publication_error = None;
+                if let Some(raw_output) = pending_acpx_output.take() {
+                    match persist_acpx_events_and_map(
+                        &workspace_dir_for_spawn,
+                        &traj_path_for_spawn,
+                        &d_id,
+                        &agent_for_watchdog,
+                        &raw_output,
+                        AcpxReleaseMode::PostflightAtomic,
+                    ) {
+                        Ok(summary) => {
+                            acpx_event_summary_json = Some(json!({
+                                "events_file": summary.events_file.to_string_lossy(),
+                                "mapped_events": summary.mapped_events,
+                                "final_response_extracted": summary.final_response.is_some(),
+                            }));
+                        }
+                        Err(error) => {
+                            publication_error = Some(format!(
+                                "postflight approved output but ACPX artifact publication failed: {error}"
+                            ));
+                        }
+                    }
+                }
+                if publication_error.is_none() {
+                    if let Some(deferred) = pending_native_acp_artifacts.take() {
+                        if let Err(error) =
+                            crate::dispatch_ops::acp_native::publish_native_acp_artifacts(
+                                deferred,
+                                &workspace_dir_for_spawn,
+                                &traj_path_for_spawn,
+                                &d_id,
+                                &agent_for_watchdog,
+                                false,
+                            )
+                        {
+                            publication_error = Some(format!(
+                                "postflight approved output but native ACP artifact publication failed: {error}"
+                            ));
+                        }
+                    }
+                }
+                if let Some(error) = publication_error {
+                    outcome.verdict =
+                        crate::exec_env_postflight::GateVerdict::Error { detail: error };
+                    let quarantine_sink = crate::exec_env_postflight::DaemonQuarantineSink {
+                        server: server_clone.clone(),
+                    };
+                    if let Err(fence_error) =
+                        crate::exec_env_postflight::apply_verdict(outcome, &quarantine_sink)
+                    {
+                        outcome.verdict = crate::exec_env_postflight::GateVerdict::Error {
+                            detail: format!(
+                                "carrier artifact publication failed and resource fence persistence failed: {fence_error}"
+                            ),
+                        };
+                    }
+                    append_trajectory_event(&traj_path_for_spawn, outcome.trajectory_event());
+                }
+            }
+
+            if publication_admission_held {
+                let publication_release = match early_exit_cleanup
+                    .postflight_dispatch_lease_mut()
+                {
+                    Some(lease) if outcome.artifacts_released() => lease.complete_publication(),
+                    Some(lease) if outcome.lease_fenced() => lease.release_after_fence(),
+                    Some(_) => Err(
+                        "postflight publication failed without a persisted resource fence; keeping the lease exclusive"
+                            .to_string(),
+                    ),
+                    None => Err(
+                        "required postflight publication lost its dispatch lease guard".to_string(),
+                    ),
+                };
+                if let Err(error) = publication_release {
+                    outcome.verdict = crate::exec_env_postflight::GateVerdict::Error {
+                        detail: format!(
+                            "postflight publication finalization failed closed: {error}"
+                        ),
+                    };
+                    append_trajectory_event(&traj_path_for_spawn, outcome.trajectory_event());
+                }
+            }
+
+            if outcome.artifacts_released() {
+                append_trajectory_event(
+                    &traj_path_for_spawn,
+                    json!({
+                        "event": "subprocess_output_released",
+                        "dispatch_id": d_id,
+                        "agent": agent_for_watchdog,
+                        "output_tail": tail_chars(&full_output, 500),
+                        "timestamp": Utc::now().to_rfc3339(),
+                    }),
+                );
+            }
+        }
+
+        let postflight_withheld_error = if postflight_gate_for_spawn.is_some() {
+            match &postflight_outcome {
+                Some(outcome) if !outcome.artifacts_released() => {
+                    Some(outcome.failure_message().unwrap_or_else(|| {
+                        "postflight gate withheld dispatch artifacts".to_string()
+                    }))
+                }
+                None => Some("postflight gate execution failed to resolve".to_string()),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        let postflight_artifacts_withheld = postflight_withheld_error.is_some();
+
+        // Save full output to result.md for orchestrator eval (only if postflight permitted release)
+        let result_persist_error = if let Some(err) = postflight_withheld_error {
+            tracing::warn!(
+                dispatch_id = %d_id,
+                reason = %err,
+                "postflight gate withheld result artifact"
+            );
+            append_trajectory_event(
+                &traj_path_for_spawn,
+                json!({
+                    "event": "result_withheld_by_postflight",
+                    "dispatch_id": d_id,
+                    "timestamp": Utc::now().to_rfc3339(),
+                    "reason": err,
+                }),
+            );
+            Some(err)
+        } else {
             let result_path = workspace_dir.join("result.md");
             let error = super::persist_dispatch_result_artifact(
                 &result_path,
@@ -688,7 +1063,11 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                 // FALSE SUCCESS and must land FAILED, not COMPLETED. When no
                 // predicate is declared, keep the conservative unreviewed
                 // COMPLETED (no synthesized success eval for routing stats).
-                let tail = tail_chars(&full_output, 500);
+                let tail = if postflight_artifacts_withheld {
+                    "[withheld by exec_env_postflight]".to_string()
+                } else {
+                    tail_chars(&full_output, 500)
+                };
                 let verdict = match crate::dispatch_ops::evaluate_completion_predicate_for_dispatch(
                     &server_clone.tachi_home_dir(),
                     &d_id,
@@ -1035,6 +1414,8 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                 "artifact_read_error": artifact_read_error,
                 "completion_predicate": preserved_predicate,
                 "cwd": preserved_cwd,
+                "env_id": env_id_for_watchdog,
+                "project": project_for_watchdog.clone(),
                 "authority": preserved_authority,
                 "harness_transport": harness_transport_for_spawn.clone(),
                 "harness_server_url": harness_server_url_for_spawn.clone(),
@@ -1059,6 +1440,15 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                 "feedback_rules": feedback_rules_trace_for_spawn,
                 "timeout_secs": timeout_secs_for_spawn,
                 "managed_cancellation_finalization": managed_finalization,
+                "exec_env_postflight": postflight_outcome
+                    .as_ref()
+                    .map(|o| o.receipt())
+                    .unwrap_or_else(|| {
+                        json!({
+                            "gate": "exec_env_postflight",
+                            "status": "not_applicable"
+                        })
+                    }),
             })),
             managed_terminal_anchor,
         );
@@ -1110,6 +1500,21 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                     Some(agent_for_watchdog.as_str()),
                     project_for_watchdog.as_deref(),
                 );
+            }
+        }
+        // The gate and runner cwd authority pin the exact worktree directory
+        // with open descriptors so pathname replacement cannot fool either
+        // boundary. Release those parent-held pins before certified cleanup
+        // probes for live holders; otherwise the daemon blocks removal on its
+        // own safety descriptors.
+        drop(postflight_gate_for_spawn);
+        drop(cwd_authority_for_spawn);
+        if postflight_outcome
+            .as_ref()
+            .is_some_and(crate::exec_env_postflight::GateOutcome::artifacts_released)
+        {
+            if let Some(owned) = auto_staff_exec_env {
+                owned.cleanup("clean automatic Staff postflight completion");
             }
         }
         early_exit_cleanup.complete();

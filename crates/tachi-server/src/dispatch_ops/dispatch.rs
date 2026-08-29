@@ -121,6 +121,39 @@ pub(crate) struct DispatchResult {
     pub observed_model: Option<String>,
 }
 
+/// Runner output carries only terminal liveness evidence. Numeric worker IDs
+/// never cross this handoff because a PID may be reused after the runner reaps
+/// its group leader.
+pub(crate) struct DispatchRunOutcome {
+    pub result: Result<DispatchResult, String>,
+    pub liveness: crate::exec_env_postflight::RunnerLivenessEvidence,
+    pub deferred_native_acp: Option<crate::dispatch_ops::acp_native::NativeAcpDeferredArtifacts>,
+}
+
+impl DispatchRunOutcome {
+    pub(crate) fn success(
+        result: DispatchResult,
+        liveness: crate::exec_env_postflight::RunnerLivenessEvidence,
+    ) -> Self {
+        Self {
+            result: Ok(result),
+            liveness,
+            deferred_native_acp: None,
+        }
+    }
+
+    pub(crate) fn failure(
+        error: impl Into<String>,
+        liveness: crate::exec_env_postflight::RunnerLivenessEvidence,
+    ) -> Self {
+        Self {
+            result: Err(error.into()),
+            liveness,
+            deferred_native_acp: None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ManagedControlOrigin {
     DirectHandle,
@@ -326,14 +359,14 @@ use self::authority::{
 use self::backend::{prepare_dispatch_backend, DispatchBackendContext, PreparedDispatchBackend};
 use self::backend_failure::*;
 use self::credential_apply::{
-    apply_materialized_credentials, inject_legacy_vault_env, CredentialApplyInputs,
-    CredentialApplyOutcome,
+    apply_materialized_credentials, enforce_exec_env_cargo_target, inject_legacy_vault_env,
+    CredentialApplyInputs, CredentialApplyOutcome,
 };
 use self::credentials::*;
 use self::dedupe::*;
 use self::execution::{
     spawn_background_dispatch, BackgroundDispatchContext, DispatchExecution,
-    ManagedEphemeralCredentialCleanupObligation,
+    ManagedEphemeralCredentialCleanupObligation, PendingAutoStaffExecEnv,
 };
 use self::flow_setup::{init_kanban_and_flow, FlowSetupInputs};
 use self::harness_preflight::{run_harness_preflight, HarnessPreflightInputs};
@@ -372,6 +405,54 @@ fn effective_harness_transport(
             "cli".to_string()
         }
     })
+}
+
+/// Resolve the workspace that a required postflight gate must inspect from
+/// the already-admitted environment binding. A missing default cwd is not a
+/// reason to omit the gate: it means there is no real lease workspace to
+/// inspect, so the dispatch must fail closed before a worker is spawned.
+fn required_postflight_workspace(
+    env_resolution: &crate::exec_env_ops::EnvResolution,
+) -> Result<PathBuf, String> {
+    match env_resolution {
+        crate::exec_env_ops::EnvResolution::Managed { cwd, env_id } => {
+            if env_id.trim().is_empty() {
+                return Err(
+                    "required postflight gate resolved an empty managed env_id; refusing to spawn"
+                        .to_string(),
+                );
+            }
+            let path = PathBuf::from(cwd);
+            if path.as_os_str().is_empty() {
+                return Err(
+                    "required postflight gate resolved an empty lease workspace; refusing to spawn"
+                        .to_string(),
+                );
+            }
+            Ok(path)
+        }
+        crate::exec_env_ops::EnvResolution::Unmanaged { .. } => Err(
+            "required postflight gate requires a managed env_id and lease workspace; an unmanaged cwd cannot be fenced; refusing to spawn"
+                .to_string(),
+        ),
+        crate::exec_env_ops::EnvResolution::Default => Err(
+            "required postflight gate requires a managed env_id and lease workspace; default env has no lease to fence; refusing to spawn"
+                .to_string(),
+        ),
+    }
+}
+
+/// Carrier protocols must resolve their cwd from the descriptor-bound process
+/// cwd, not reopen the mutable lease pathname after dispatch admission.
+fn carrier_execution_grant(
+    grant: &tachi_params::ExecutionGrant,
+    descriptor_bound: bool,
+) -> tachi_params::ExecutionGrant {
+    let mut carrier_grant = grant.clone();
+    if descriptor_bound {
+        carrier_grant.allowed_cwd = Some(PathBuf::from("."));
+    }
+    carrier_grant
 }
 
 /// Mints the adapter-only custom subprocess contract after the server has
@@ -446,6 +527,9 @@ struct ReadyDispatch {
     plan_duration_ms: Option<u64>,
     plan_generated_at: Option<String>,
     flow_dispatch_slot: Option<PathBuf>,
+    /// Refs/digests of the authority surfaces minted inside the post-init
+    /// block, carried out for the durable managed-run identity record.
+    managed_authority_refs: Option<crate::managed_run_epoch::ManagedAuthorityRefs>,
 }
 
 pub(crate) async fn handle_tachi_dispatch(
@@ -516,6 +600,7 @@ async fn launch_canonical_dispatch(
         inject_card,
         verbose,
         mut mechanics,
+        auto_staff_exec_env,
     } = start;
 
     // 0a. Resolve the execution-environment binding through the fail-safe gate
@@ -529,6 +614,7 @@ async fn launch_canonical_dispatch(
         raw_cwd.as_deref(),
         mechanics.unmanaged_cwd,
     )?;
+    let managed_worktree_authority = server.open_dispatch_worktree_authority(&env_resolution)?;
     let status_cwd = env_resolution
         .cwd()
         .map(|cwd| cwd.to_string())
@@ -606,7 +692,7 @@ async fn launch_canonical_dispatch(
             flow_id: request.flow_id.clone(),
             dispatch_id: Some(dispatch_id.clone()),
             branch: None,
-            declared_file_scope: None,
+            declared_file_scope: mechanics.declared_file_scope.clone(),
         },
     );
     let mcp_access = execution_grant.mcp_access.as_ref();
@@ -928,11 +1014,13 @@ async fn launch_canonical_dispatch(
         let prompt = plan_stage_outcome.prompt;
         let plan_duration_ms = plan_stage_outcome.plan_duration_ms;
         let plan_generated_at = plan_stage_outcome.plan_generated_at;
+        let carrier_execution_grant =
+            carrier_execution_grant(&execution_grant, managed_worktree_authority.is_some());
         let custom_launch_spec = (resolved_assignment.selected_backend == "custom")
             .then(|| {
                 mint_custom_launch_spec(
                     &resolved_assignment,
-                    &execution_grant,
+                    &carrier_execution_grant,
                     &command,
                     &prompt,
                     &harness_transport,
@@ -943,6 +1031,15 @@ async fn launch_canonical_dispatch(
         if let Some(spec) = custom_launch_spec.as_ref() {
             validate_custom_launch_spec_timeout(spec, timeout_secs_for_status)?;
         }
+        let managed_authority_refs = custom_launch_spec.as_ref().map(|spec| {
+            crate::managed_run_epoch::ManagedAuthorityRefs {
+                execution_grant_ref: carrier_execution_grant.grant_id.clone(),
+                exec_env_ref: carrier_execution_grant.env_id.clone(),
+                launch_spec_digest: serde_json::to_vec(spec)
+                    .ok()
+                    .map(|bytes| crate::managed_run_epoch::sha256_ref(&bytes)),
+            }
+        });
 
         // 5. Build execution backend
         let PreparedDispatchBackend {
@@ -959,7 +1056,7 @@ async fn launch_canonical_dispatch(
             dispatch_id: &dispatch_id,
             request: &request,
             assignment: &resolved_assignment,
-            grant: &execution_grant,
+            grant: &carrier_execution_grant,
             command: &command,
             prompt: &prompt,
             custom_launch_spec: custom_launch_spec.as_ref(),
@@ -1007,6 +1104,8 @@ async fn launch_canonical_dispatch(
             &mut execution,
         )?;
 
+        enforce_exec_env_cargo_target(server, &execution_grant, &mut execution)?;
+
         // 7. Harness preflight (opencode_serve only)
         run_harness_preflight(HarnessPreflightInputs {
             server,
@@ -1044,6 +1143,7 @@ async fn launch_canonical_dispatch(
             plan_duration_ms,
             plan_generated_at,
             flow_dispatch_slot,
+            managed_authority_refs,
         })))
     }
     .await;
@@ -1059,6 +1159,7 @@ async fn launch_canonical_dispatch(
         plan_duration_ms,
         plan_generated_at,
         flow_dispatch_slot,
+        managed_authority_refs,
     } = match post_init {
         Ok(PostInitDispatchOutcome::EarlyResponse(early_response)) => {
             return Ok(early_response);
@@ -1105,10 +1206,39 @@ async fn launch_canonical_dispatch(
             return Err(error);
         }
     };
-    let (execution, managed_run_guard) = if let Some((receiver, guard)) = managed_registration {
-        if let Err(error) =
-            crate::managed_run_control::mark_managed_custom_start(&workspace_dir, &dispatch_id)
-        {
+    let (mut execution, managed_run_guard) = if let Some((receiver, guard)) = managed_registration {
+        // Durable identity refs for the run about to be launched. Refs and
+        // one-way digests only; the LaunchSpec/identity-receipt payloads
+        // themselves are never persisted into the receipt spine.
+        let identity_input = crate::managed_run_epoch::ManagedRunIdentityInput {
+            controller_epoch_id: server.controller_epoch.clone(),
+            assignment_ref: resolved_assignment.assignment_id.clone(),
+            assignment_identity_digest: serde_json::to_vec(&resolved_assignment.identity_receipt)
+                .ok()
+                .map(|bytes| crate::managed_run_epoch::sha256_ref(&bytes)),
+            execution_grant_ref: managed_authority_refs
+                .as_ref()
+                .map(|refs| refs.execution_grant_ref.clone())
+                .unwrap_or_default(),
+            exec_env_ref: managed_authority_refs
+                .as_ref()
+                .and_then(|refs| refs.exec_env_ref.clone()),
+            launch_spec_digest: managed_authority_refs
+                .as_ref()
+                .and_then(|refs| refs.launch_spec_digest.clone()),
+            backend_name: execution_backend_name
+                .unwrap_or("unknown_backend")
+                .to_string(),
+            backend_metadata_digest: execution_backend_metadata
+                .as_ref()
+                .and_then(|metadata| serde_json::to_vec(metadata).ok())
+                .map(|bytes| crate::managed_run_epoch::sha256_ref(&bytes)),
+        };
+        if let Err(error) = crate::managed_run_control::mark_managed_custom_start(
+            &workspace_dir,
+            &dispatch_id,
+            &identity_input,
+        ) {
             let result = format!("managed custom classification failed: {error}");
             let result_persist_error = persist_dispatch_result_artifact(
                 &workspace_dir.join("result.md"),
@@ -1168,12 +1298,108 @@ async fn launch_canonical_dispatch(
         (execution, None)
     };
 
+    if let Some(authority) = managed_worktree_authority.as_ref() {
+        execution.anchor_managed_cwd(authority)?;
+    }
+
+    // 7b. Compile and initialize the ExecEnv postflight gate (#894 S2e, #1322).
+    // Pre-spawn preimage is retained in parent-owned memory and never exposed
+    // through a same-UID worker-writable filesystem path.
+    // A required preimage failure fails closed immediately BEFORE spawning the worker.
+    let postflight_applicability = crate::exec_env_postflight::compile_postflight_applicability(
+        effective_contract.workspace_authority,
+        mechanics.declared_file_scope.as_deref(),
+    );
+    let (postflight_gate, postflight_dispatch_lease) = match postflight_applicability {
+        crate::exec_env_postflight::PostflightApplicability::Required(contract) => {
+            let lease_path = match required_postflight_workspace(&env_resolution) {
+                Ok(path) => path,
+                Err(error) => {
+                    let _ = server.with_global_store(|store| {
+                        cleanup_ephemeral_credential_materializations(store, &workspace_dir, false)
+                    });
+                    release_flow_dispatch_slot(flow_dispatch_slot);
+                    if let Some(guard) = managed_run_guard {
+                        drop(guard);
+                    }
+                    close_kanban_row_on_early_exit(
+                        server,
+                        &dispatch_id,
+                        "required postflight workspace resolution",
+                        request.project.as_deref(),
+                    )
+                    .await;
+                    return Err(format!(
+                        "handle_tachi_dispatch: {error}; zero worker process was spawned"
+                    ));
+                }
+            };
+            let env_id_str = execution_grant.env_id.as_deref().unwrap_or("");
+            let mut dispatch_lease = match crate::exec_env_ops::ExecEnvDispatchLeaseGuard::acquire(
+                server, env_id_str,
+            ) {
+                Ok(lease) => lease,
+                Err(error) => {
+                    let _ = server.with_global_store(|store| {
+                        cleanup_ephemeral_credential_materializations(store, &workspace_dir, false)
+                    });
+                    release_flow_dispatch_slot(flow_dispatch_slot);
+                    if let Some(guard) = managed_run_guard {
+                        drop(guard);
+                    }
+                    close_kanban_row_on_early_exit(
+                        server,
+                        &dispatch_id,
+                        "postflight lease admission",
+                        request.project.as_deref(),
+                    )
+                    .await;
+                    return Err(format!(
+                            "handle_tachi_dispatch: postflight lease admission failed: {error}; zero worker process was spawned"
+                        ));
+                }
+            };
+            let mut gate =
+                crate::exec_env_postflight::PostflightGate::new(env_id_str, lease_path, contract)
+                    .with_build_artifacts_unhashed();
+            if let Some(authority) = managed_worktree_authority.as_ref() {
+                gate = gate.with_worktree_authority(authority.clone());
+            }
+            if let Err(error) = gate.capture_preimage() {
+                let release_error = dispatch_lease.release_without_spawn().err();
+                let _ = server.with_global_store(|store| {
+                    cleanup_ephemeral_credential_materializations(store, &workspace_dir, false)
+                });
+                release_flow_dispatch_slot(flow_dispatch_slot);
+                if let Some(guard) = managed_run_guard {
+                    drop(guard);
+                }
+                close_kanban_row_on_early_exit(
+                    server,
+                    &dispatch_id,
+                    "postflight preimage capture",
+                    request.project.as_deref(),
+                )
+                .await;
+                return Err(format!(
+                    "handle_tachi_dispatch: postflight preimage capture failed: {error}; zero worker process was spawned{}",
+                    release_error
+                        .map(|release| format!("; lease release failed closed: {release}"))
+                        .unwrap_or_default()
+                ));
+            }
+            (Some(gate), Some(dispatch_lease))
+        }
+        crate::exec_env_postflight::PostflightApplicability::NotApplicable => (None, None),
+    };
+
     // 8. Spawn background task with Watchdog
     let workspace_dir_for_response = workspace_dir.clone();
     spawn_background_dispatch(BackgroundDispatchContext {
         server: server.clone(),
         dispatch_id: dispatch_id.clone(),
         agent: resolved_assignment.selected_worker.clone(),
+        env_id: execution_grant.env_id.clone(),
         project: request.project.clone(),
         stage: request.stage.clone(),
         trajectory_path: trajectory_path.clone(),
@@ -1190,10 +1416,20 @@ async fn launch_canonical_dispatch(
         opencode_sop_label: opencode_sop_label(&resolved_assignment.selected_worker, &request),
         execution_backend_metadata: execution_backend_metadata.clone(),
         execution,
+        // MOVE, not clone: the foreground frame must not retain this
+        // descriptor past handoff. The context is the sole owner, and the
+        // background terminal path drops it before certified cleanup probes
+        // for live OS-view holders — a clone here would keep the foreground
+        // pinning the worktree open until handle_tachi_dispatch returns, so
+        // a fast worker's terminal cleanup would race (and lose to) that pin.
+        cwd_authority: managed_worktree_authority,
         flow_dispatch_slot,
         mcp_config_path,
         managed_run_guard,
         managed_ephemeral_credential_cleanup,
+        postflight_gate,
+        postflight_dispatch_lease,
+        auto_staff_exec_env: auto_staff_exec_env.map(PendingAutoStaffExecEnv::handoff),
     });
 
     // 9. Immediately return — main agent is unblocked!
@@ -1240,9 +1476,127 @@ pub(crate) async fn launch_staff_assignment(
 > {
     enforce_dispatch_depth(server)?;
     let (_, execution_level) = crate::host_profile::authorize_dispatch(request.execution_level)?;
-    let start = resolve_staff_dispatch_start(server, request, Utc::now(), execution_level)?;
+    let mut start = resolve_staff_dispatch_start(server, request, Utc::now(), execution_level)?;
+    provision_required_staff_exec_env(server, &mut start)?;
     let assignment = start.resolved_assignment.clone();
     let recommendation = start.resolved_recommendation.clone();
     let raw = launch_canonical_dispatch(server, start, ManagedControlOrigin::StaffFacade).await?;
     Ok((raw, assignment, recommendation))
+}
+
+/// Staff intentionally exposes no cwd/env knobs. For a profile whose authority
+/// ceiling is read-only, the server therefore owns provisioning the isolated
+/// lease that Required postflight needs; otherwise every valid Staff review
+/// would resolve to the unfenceable daemon-default cwd and fail before spawn.
+fn provision_required_staff_exec_env(
+    server: &MemoryServer,
+    start: &mut DispatchStart,
+) -> Result<(), String> {
+    let requires_postflight = start
+        .resolved_profile
+        .selected_profile
+        .as_deref()
+        .and_then(tachi_dispatch::resolve_dispatch_profile)
+        .is_some_and(|profile| !profile.write_actions && profile.role != "executor");
+    if !requires_postflight {
+        return Ok(());
+    }
+
+    let repo_root = match start.request.project.as_deref() {
+        Some(project) => server
+            .resolve_server_named_project_db_path(project)
+            .ok()
+            .and_then(|db| {
+                crate::path_utils::plan_c_project_root_from_local_db_in_home(
+                    &db,
+                    &server.tachi_home_dir(),
+                )
+            })
+            .or_else(test_staff_repo_root_fallback)
+            .ok_or_else(|| {
+                format!(
+                    "Staff project '{project}' has no resolvable repository root for a managed postflight lease"
+                )
+            })?,
+        None => crate::utils::find_project_git_root().ok_or_else(|| {
+            "Staff review has no project and the daemon cwd is not a git repository; cannot provision a managed postflight lease".to_string()
+        })?,
+    };
+    let provisioned = server.with_global_store(|store| {
+        crate::exec_env_ops::provision_managed_env(
+            store,
+            &crate::exec_env_ops::ProvisionEnvOptions {
+                repo_root,
+                path: None,
+                branch: None,
+                base: Some("HEAD".to_string()),
+                task: Some(start.request.task.clone()),
+                role: start.resolved_profile.role.clone(),
+                dispatch_id: Some(start.dispatch_id.clone()),
+                name: Some(format!("{}-postflight", start.dispatch_id)),
+                env_class: memcore::EnvClass::EditOnly,
+                private_target_approval: None,
+                private_target_dir: None,
+                dry_run: false,
+            },
+        )
+    })?;
+    if !provisioned.report.errors.is_empty() {
+        cleanup_failed_staff_provision(server, &provisioned);
+        return Err(format!(
+            "Staff managed postflight env provisioning failed: {}",
+            provisioned.report.errors.join("; ")
+        ));
+    }
+    let env_id = match provisioned.env_id {
+        Some(env_id) => env_id,
+        None => {
+            cleanup_failed_staff_provision(server, &provisioned);
+            return Err(format!(
+                "Staff worktree {} was opened without a managed lease; refusing to dispatch",
+                provisioned.report.path
+            ));
+        }
+    };
+    let path = PathBuf::from(&provisioned.report.path);
+    start.mechanics.env_id = Some(env_id.clone());
+    start.auto_staff_exec_env = Some(PendingAutoStaffExecEnv::new(server.clone(), env_id, path));
+    Ok(())
+}
+
+fn cleanup_failed_staff_provision(
+    server: &MemoryServer,
+    provisioned: &crate::exec_env_ops::ProvisionedEnv,
+) {
+    if !provisioned.report.opened {
+        return;
+    }
+    let path = PathBuf::from(&provisioned.report.path);
+    if let Some(env_id) = provisioned.env_id.clone() {
+        drop(PendingAutoStaffExecEnv::new(server.clone(), env_id, path));
+        return;
+    }
+    if let Err(error) =
+        tachi_clean::wt_clean::run_wt_remove(tachi_clean::wt_clean::WtRemoveOptions {
+            path,
+            force: true,
+            output: tachi_clean::wt_clean::OutputFormat::Json,
+        })
+    {
+        tracing::warn!(
+            path = %provisioned.report.path,
+            error = %error,
+            "failed to remove Staff worktree whose lease provisioning failed"
+        );
+    }
+}
+
+#[cfg(test)]
+fn test_staff_repo_root_fallback() -> Option<PathBuf> {
+    crate::utils::find_project_git_root()
+}
+
+#[cfg(not(test))]
+fn test_staff_repo_root_fallback() -> Option<PathBuf> {
+    None
 }

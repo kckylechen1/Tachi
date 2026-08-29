@@ -23,7 +23,7 @@ use super::manifest::{CtimeWitness, DeltaKind, FsTime};
 use super::{
     apply_verdict, manifest, naming, rejection_log_message, BlockReason, ClockBarrierEvidence,
     FileQuarantineSink, GateOutcome, GateVerdict, PostflightGate, QuarantineSink, RejectReason,
-    WriteContract,
+    WriteContract, PREIMAGE_CUSTODY,
 };
 
 // ─── fakes ──────────────────────────────────────────────────────────────────
@@ -64,8 +64,7 @@ impl DescendantLiveness for ProbeBroken {
 
 // ─── fixture ────────────────────────────────────────────────────────────────
 
-/// A lease workspace plus a PARENT-side dir for the pre-image (outside anything
-/// the "worker" can write).
+/// A lease workspace plus a PARENT-side dir for decoy/quarantine artifacts.
 struct Fixture {
     workspace: TempDir,
     parent: TempDir,
@@ -125,16 +124,12 @@ impl Fixture {
         self.parent.path().join("worktrees/lane-a")
     }
 
-    fn preimage_path(&self) -> PathBuf {
-        self.parent.path().join("preimages/env-test.json")
-    }
-
     fn quarantine_dir(&self) -> PathBuf {
         self.parent.path().join("quarantine")
     }
 
     fn gate(&self, contract: WriteContract) -> PostflightGate {
-        PostflightGate::new("env-test", self.ws(), self.preimage_path(), contract)
+        PostflightGate::new("env-test", self.ws(), contract)
     }
 
     /// Capture the pre-image, let the "worker" run `mutate`, then gate it.
@@ -197,6 +192,53 @@ fn clean_run_passes_and_releases_the_patch() {
     );
     assert!(!outcome.lease_quarantine_required());
     assert!(outcome.failure_message().is_none());
+}
+
+#[cfg(unix)]
+#[test]
+fn descriptor_bound_gate_refuses_same_path_directory_replacement() {
+    let fx = Fixture::new();
+    let workspace = fx.ws().canonicalize().unwrap();
+    let captured = workspace.with_extension("captured-worktree");
+    let authority = memcore::anchored_fs::AnchoredDirectory::open_absolute(&workspace).unwrap();
+    let gate = PostflightGate::new(
+        "env-test",
+        workspace.clone(),
+        WriteContract::DetectAndReject,
+    )
+    .with_worktree_authority(authority);
+    gate.capture_preimage().expect("capture original object");
+
+    fs::rename(&workspace, &captured).unwrap();
+    fs::create_dir(&workspace).unwrap();
+    fs::write(workspace.join("external.txt"), b"replacement\n").unwrap();
+
+    let error = gate
+        .run(&Reaped)
+        .expect_err("same-path replacement must fail before post-image certification");
+    assert!(error.contains("managed worktree object changed"), "{error}");
+    assert!(workspace.join("external.txt").exists());
+    fs::remove_dir_all(&workspace).unwrap();
+    fs::rename(&captured, &workspace).unwrap();
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn descriptor_bound_gate_accepts_var_alias_for_the_same_directory() {
+    let fx = Fixture::new();
+    let alias = fx.ws().to_path_buf();
+    assert!(
+        alias.starts_with("/var"),
+        "fixture should exercise /var alias"
+    );
+    let canonical = alias.canonicalize().unwrap();
+    assert!(canonical.starts_with("/private/var"));
+    let authority = memcore::anchored_fs::AnchoredDirectory::open_absolute(&canonical).unwrap();
+    let gate = PostflightGate::new("env-alias", alias, WriteContract::DetectAndReject)
+        .with_worktree_authority(authority);
+
+    gate.capture_preimage()
+        .expect("the /var alias must resolve to the descriptor-bound object");
 }
 
 // ─── the eight mutation surfaces ────────────────────────────────────────────
@@ -523,7 +565,7 @@ fn a_live_descendant_blocks_the_gate_without_quarantine_or_release() {
     gate.capture_preimage().expect("pre-image");
     fs::write(fx.ws().join("src/tracked.rs"), b"still writing\n").expect("mid-run write");
 
-    let outcome = gate.run(&StillRunning).expect("gate run");
+    let mut outcome = gate.run(&StillRunning).expect("gate run");
     let GateVerdict::Blocked { reason, .. } = &outcome.verdict else {
         panic!(
             "the gate must not decide while a descendant lives: {:?}",
@@ -534,12 +576,13 @@ fn a_live_descendant_blocks_the_gate_without_quarantine_or_release() {
     // Nothing is released...
     assert!(!outcome.artifacts_released());
     assert!(outcome.release("patch").is_err());
-    // ...and the lease is NOT quarantined/reclaimed while a process could still
-    // be writing into it (that would race the writer).
-    assert!(!outcome.lease_quarantine_required());
+    // The gate did not scan while the descendant was alive, but the managed
+    // lease is fenced against reuse because terminal liveness is unresolved.
+    assert!(outcome.lease_quarantine_required());
     let sink = RecordingSink::default();
-    assert!(!apply_verdict(&outcome, &sink).expect("apply"));
-    assert_eq!(sink.count(), 0);
+    assert!(apply_verdict(&mut outcome, &sink).expect("apply"));
+    assert_eq!(sink.count(), 1);
+    assert_eq!(outcome.receipt()["lease_action"], "quarantined");
 }
 
 #[test]
@@ -551,6 +594,53 @@ fn a_broken_liveness_probe_fails_closed() {
         .run(&ProbeBroken)
         .expect_err("an unanswerable liveness probe must never produce a clean verdict");
     assert!(err.contains("probe exploded"), "got: {err}");
+}
+
+#[test]
+fn missing_liveness_evidence_fails_before_workspace_scan() {
+    let fx = Fixture::new();
+    let gate = fx.gate(WriteContract::DetectAndReject);
+    gate.capture_preimage().expect("pre-image");
+    fs::write(fx.ws().join("src/tracked.rs"), b"worker mutation\n").expect("mutate workspace");
+
+    let probe = super::liveness::MissingLivenessEvidence::new("runner timeout had no pid");
+    let err = gate
+        .run(&probe)
+        .expect_err("missing runner identity must not be interpreted as a reaped tree");
+    assert!(err.contains("runner timeout had no pid"), "got: {err}");
+}
+
+#[test]
+fn no_worker_spawned_is_explicit_terminal_evidence_for_required_postflight() {
+    let fx = Fixture::new();
+    let gate = fx.gate(WriteContract::DetectAndReject);
+    gate.capture_preimage().expect("pre-image");
+    let outcome = gate
+        .run(&super::RunnerLivenessEvidence::NoWorkerSpawned)
+        .expect("pre-spawn cancellation has explicit terminal evidence");
+    assert!(matches!(outcome.verdict, GateVerdict::Clean { .. }));
+    assert_eq!(outcome.receipt()["liveness_probe"], "no worker spawned");
+    assert_eq!(outcome.receipt()["lease_action"], "none");
+}
+
+#[test]
+fn required_gate_execution_error_has_an_error_receipt() {
+    let fx = Fixture::new();
+    let gate = fx.gate(WriteContract::DetectAndReject);
+    gate.capture_preimage().expect("pre-image");
+    let mut outcome = gate.execution_error(&Reaped, "synthetic gate execution failure");
+
+    assert_eq!(outcome.verdict_label(), "error");
+    assert!(!outcome.artifacts_released());
+    assert!(outcome.lease_quarantine_required());
+    assert_eq!(outcome.receipt()["verdict"], "error");
+    assert_eq!(
+        outcome.receipt()["error"],
+        "synthetic gate execution failure"
+    );
+    assert_eq!(outcome.receipt()["lease_action"], "pending_fence");
+    assert!(apply_verdict(&mut outcome, &RecordingSink::default()).is_ok());
+    assert_eq!(outcome.receipt()["lease_action"], "quarantined");
 }
 
 #[cfg(unix)]
@@ -600,44 +690,28 @@ fn process_group_liveness_refuses_the_daemons_own_group() {
 // ─── pre-image custody ──────────────────────────────────────────────────────
 
 #[test]
-fn a_preimage_inside_the_workspace_is_refused() {
+fn a_same_uid_worker_cannot_replace_the_parent_memory_preimage() {
     let fx = Fixture::new();
-    let gate = PostflightGate::new(
-        "env-test",
-        fx.ws(),
-        // The worker could rewrite this to match whatever it did.
-        fx.ws().join(".tachi-preimage.json"),
-        WriteContract::DetectAndReject,
-    );
-    let err = gate
-        .capture_preimage()
-        .expect_err("a worker-writable pre-image proves nothing");
-    assert!(err.contains("inside the lease workspace"), "got: {err}");
-}
+    let gate = fx.gate(WriteContract::DetectAndReject);
+    let pre = gate.capture_preimage().expect("parent captures pre-image");
 
-#[test]
-fn a_preimage_inside_the_external_gitdir_is_refused() {
-    // The workspace is not the only root a same-UID worker can write: this module
-    // declares TWO (the workspace and, for a linked worktree, the external
-    // gitdir). A custody guard that only knows about the first one lets the
-    // pre-image land in the second — where the worker can rewrite it to match
-    // whatever it did, and the whole gate becomes the worker's own testimony.
-    let fx = Fixture::linked_worktree();
-    let gate = PostflightGate::new(
-        "env-test",
-        fx.ws(),
-        fx.gitdir().join("tachi-preimage.json"),
-        WriteContract::DetectAndReject,
-    );
-    let err = gate
-        .capture_preimage()
-        .expect_err("a pre-image inside the gitdir is as worker-writable as one inside the tree");
-    assert!(err.contains("gitdir"), "got: {err}");
-    assert!(
-        err.contains("EVERY root the worker can write"),
-        "got: {err}"
-    );
-    assert!(!fx.gitdir().join("tachi-preimage.json").exists());
+    // This is the public-temp attack the old path-backed implementation
+    // allowed: the same-UID worker replaces the serialized snapshot after
+    // capture. The gate never consults this pathname; it keeps the sealed
+    // manifest in the parent process instead.
+    let public_temp = fx.parent().join("public-temp/preimage.json");
+    fs::create_dir_all(public_temp.parent().expect("public-temp parent")).expect("mkdir");
+    fs::write(
+        &public_temp,
+        serde_json::to_vec(&pre).expect("serialize forged pre-image"),
+    )
+    .expect("replace public-temp pre-image");
+    fs::write(fx.ws().join("src/tracked.rs"), b"worker mutation\n").expect("mutate workspace");
+
+    let outcome = gate.run(&Reaped).expect("gate run");
+    assert!(matches!(outcome.verdict, GateVerdict::Rejected { .. }));
+    assert_eq!(outcome.receipt()["preimage_custody"], PREIMAGE_CUSTODY);
+    assert!(gate.has_preimage_for_test());
 }
 
 // ─── capture cost: unhashed build dirs are disclosed, never assumed unchanged ──
@@ -762,7 +836,7 @@ fn an_unreadable_entry_makes_the_preimage_fail_closed() {
         .expect_err("a workspace the parent cannot fully read cannot be proven unchanged");
     assert!(err.contains("INCOMPLETE"), "got: {err}");
     // And nothing was written that could later be mistaken for a valid pre-image.
-    assert!(!fx.preimage_path().exists());
+    assert!(!gate.has_preimage_for_test());
 
     fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).expect("restore");
 }
@@ -808,14 +882,14 @@ impl QuarantineSink for RecordingSink {
 #[test]
 fn rejection_quarantines_the_lease_and_writes_a_forensic_receipt() {
     let fx = Fixture::new();
-    let outcome = fx.run_worker(WriteContract::DetectAndReject, |ws| {
+    let mut outcome = fx.run_worker(WriteContract::DetectAndReject, |ws| {
         fs::write(ws.join("src/tracked.rs"), b"tampered\n").expect("edit");
     });
 
     let sink = FileQuarantineSink {
         dir: fx.quarantine_dir(),
     };
-    assert!(apply_verdict(&outcome, &sink).expect("quarantine"));
+    assert!(apply_verdict(&mut outcome, &sink).expect("quarantine"));
 
     let receipts: Vec<_> = fs::read_dir(fx.quarantine_dir())
         .expect("quarantine dir")
@@ -846,9 +920,9 @@ fn rejection_quarantines_the_lease_and_writes_a_forensic_receipt() {
 #[test]
 fn a_clean_verdict_quarantines_nothing() {
     let fx = Fixture::new();
-    let outcome = fx.run_worker(WriteContract::DetectAndReject, |_ws| {});
+    let mut outcome = fx.run_worker(WriteContract::DetectAndReject, |_ws| {});
     let sink = RecordingSink::default();
-    assert!(!apply_verdict(&outcome, &sink).expect("apply"));
+    assert!(!apply_verdict(&mut outcome, &sink).expect("apply"));
     assert_eq!(sink.count(), 0);
 }
 
@@ -930,22 +1004,19 @@ fn naming_rule_detector_actually_detects() {
 // barrier is really established (and really dominates), and an image WITHOUT a
 // dominating barrier is refused instead of passed.
 
-/// Rewrite the on-disk pre-image. Used to put the gate in the exact state a
-/// coarse clock — or an older binary — would leave it in, without touching the
-/// workspace at all, so the only thing under test is what the gate does with an
-/// image it cannot trust.
+/// Rewrite the parent-held pre-image for a synthetic negative test. This test
+/// hook models an older/corrupt image without introducing a worker-writable
+/// filesystem custody path into production.
 fn rewrite_preimage(
-    path: &Path,
+    gate: &PostflightGate,
     edit: impl FnOnce(&mut serde_json::Map<String, serde_json::Value>),
 ) {
-    let bytes = fs::read(path).expect("read pre-image");
-    let mut value: serde_json::Value = serde_json::from_slice(&bytes).expect("parse pre-image");
+    let preimage = gate.load_preimage().expect("read parent-held pre-image");
+    let mut value = serde_json::to_value(preimage).expect("serialize pre-image");
     edit(value.as_object_mut().expect("pre-image is a JSON object"));
-    fs::write(
-        path,
-        serde_json::to_vec(&value).expect("serialize pre-image"),
-    )
-    .expect("write pre-image");
+    gate.replace_preimage_for_test(
+        serde_json::from_value(value).expect("parse rewritten pre-image"),
+    );
 }
 
 /// Keep the gate-level no-witness tests runnable on a target where the runtime
@@ -968,11 +1039,7 @@ fn capture_preimage_or_write_none_image(fx: &Fixture, gate: &PostflightGate) {
                 CtimeWitness::None,
                 "the fallback image must carry the pessimistic witness"
             );
-            fs::write(
-                fx.preimage_path(),
-                serde_json::to_vec(&image).expect("serialize fallback pre-image"),
-            )
-            .expect("write fallback pre-image");
+            gate.replace_preimage_for_test(image);
         }
     }
 }
@@ -1047,7 +1114,7 @@ fn a_preimage_with_no_clock_barrier_is_not_a_pass() {
     let gate = fx.gate(WriteContract::DetectAndReject);
     gate.capture_preimage().expect("pre-image");
 
-    rewrite_preimage(&fx.preimage_path(), |obj| {
+    rewrite_preimage(&gate, |obj| {
         obj.remove("clock_barriers");
     });
 
@@ -1081,7 +1148,7 @@ fn a_clock_barrier_that_does_not_outrank_the_recorded_ctimes_is_not_a_pass() {
     let gate = fx.gate(WriteContract::DetectAndReject);
     gate.capture_preimage().expect("pre-image");
 
-    rewrite_preimage(&fx.preimage_path(), |obj| {
+    rewrite_preimage(&gate, |obj| {
         obj.insert(
             "clock_barriers".to_string(),
             serde_json::json!({ "workspace": { "sec": 0, "nsec": 0 } }),
@@ -1120,7 +1187,7 @@ fn a_linked_worktrees_gitdir_gets_its_own_barrier() {
     pre.verify_clock_barriers().expect("both roots are sealed");
 
     // And a barrier for one root does not vouch for the other.
-    rewrite_preimage(&fx.preimage_path(), |obj| {
+    rewrite_preimage(&gate, |obj| {
         if let Some(barriers) = obj
             .get_mut("clock_barriers")
             .and_then(|b| b.as_object_mut())
@@ -1292,7 +1359,7 @@ fn an_image_with_no_ctime_witness_is_not_a_pass() {
     let gate = fx.gate(WriteContract::DetectAndReject);
     capture_preimage_or_write_none_image(&fx, &gate);
 
-    rewrite_preimage(&fx.preimage_path(), |obj| {
+    rewrite_preimage(&gate, |obj| {
         obj.insert(
             "ctime_witness".to_string(),
             serde_json::Value::String("none".to_string()),
@@ -1324,7 +1391,7 @@ fn an_absent_ctime_witness_field_reads_as_none_not_as_a_guarantee() {
     let gate = fx.gate(WriteContract::DetectAndReject);
     capture_preimage_or_write_none_image(&fx, &gate);
 
-    rewrite_preimage(&fx.preimage_path(), |obj| {
+    rewrite_preimage(&gate, |obj| {
         obj.remove("ctime_witness");
     });
 
@@ -1358,7 +1425,7 @@ fn a_walk_root_spanning_two_filesystems_is_not_a_pass() {
     let gate = fx.gate(WriteContract::DetectAndReject);
     gate.capture_preimage().expect("pre-image");
 
-    rewrite_preimage(&fx.preimage_path(), |obj| {
+    rewrite_preimage(&gate, |obj| {
         obj.insert(
             "foreign_device_paths".to_string(),
             serde_json::json!(["workspace/src (device 42; walk root workspace is device 7)"]),
@@ -1552,4 +1619,259 @@ unsafe fn set_xattr_raw(
     size: usize,
 ) -> libc::c_int {
     libc::lsetxattr(path, name, value, size, 0)
+}
+
+// ─── #1322 wiring unit tests ───────────────────────────────────────────────────
+
+#[test]
+fn test_compile_postflight_applicability() {
+    use crate::exec_env_postflight::{compile_postflight_applicability, PostflightApplicability};
+    use tachi_dispatch::authority::WorkspaceAuthority;
+
+    assert_eq!(
+        compile_postflight_applicability(WorkspaceAuthority::ReadOnly, None),
+        PostflightApplicability::Required(WriteContract::DetectAndReject)
+    );
+    assert_eq!(
+        compile_postflight_applicability(
+            WorkspaceAuthority::ReadOnly,
+            Some(&["crates/foo.rs".into()])
+        ),
+        PostflightApplicability::Required(WriteContract::DetectAndReject)
+    );
+
+    assert_eq!(
+        compile_postflight_applicability(
+            WorkspaceAuthority::WorkspaceWrite,
+            Some(&["src/main.rs".into(), "Cargo.toml".into()])
+        ),
+        PostflightApplicability::Required(WriteContract::DeclaredScope {
+            paths: vec!["src/main.rs".to_string(), "Cargo.toml".to_string()],
+        })
+    );
+    assert_eq!(
+        compile_postflight_applicability(WorkspaceAuthority::WorkspaceWrite, None),
+        PostflightApplicability::NotApplicable
+    );
+    let empty_scope: Vec<String> = vec![];
+    assert_eq!(
+        compile_postflight_applicability(WorkspaceAuthority::WorkspaceWrite, Some(&empty_scope)),
+        PostflightApplicability::NotApplicable
+    );
+
+    assert_eq!(
+        compile_postflight_applicability(
+            WorkspaceAuthority::DangerFullAccess,
+            Some(&["anything".into()])
+        ),
+        PostflightApplicability::NotApplicable
+    );
+}
+
+#[tokio::test]
+async fn test_daemon_quarantine_sink_fences_resource() {
+    use crate::exec_env_postflight::DaemonQuarantineSink;
+    use crate::server_state::MemoryServer;
+
+    let temp = TempDir::new().expect("tempdir");
+    let db_path = temp.path().join("test_global.sqlite");
+    let server = MemoryServer::new(db_path, None).expect("server");
+
+    let env_id = "env_test_1322";
+    let res_id = "res_test_1322";
+
+    // Setup exec_env resource and binding in db
+    server
+        .with_global_store(|store| {
+            let conn = store.connection();
+            conn.execute(
+                "INSERT INTO exec_envs (env_id, path, state) VALUES (?1, ?2, 'active')",
+                rusqlite::params![env_id, "/path/to/tree"],
+            )
+            .map_err(|e| e.to_string())?;
+            conn.execute(
+                "INSERT INTO exec_env_resources (resource_id, kind, path, bytes, measured_at, state, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, 'active', ?6, ?6)",
+                rusqlite::params![res_id, "worktree", "/path/to/tree", 0, "2026-08-25T00:00:00Z", "2026-08-25T00:00:00Z"],
+            ).map_err(|e| e.to_string())?;
+            conn.execute(
+                "INSERT INTO exec_env_resource_bindings (binding_id, env_id, resource_id, created_at) VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params!["bind_1", env_id, res_id, "2026-08-25T00:00:00Z"],
+            ).map_err(|e| e.to_string())?;
+            Ok(())
+        })
+        .expect("setup db");
+
+    let lease = TempDir::new().expect("tempdir");
+    let lease_path = lease.path();
+    let file = lease_path.join("test.rs");
+    fs::write(&file, b"fn initial() {}\n").expect("write initial");
+
+    let gate = PostflightGate::new(env_id, lease_path, WriteContract::DetectAndReject);
+    gate.capture_preimage().expect("preimage");
+
+    fs::write(&file, b"fn mutated() {}\n").expect("mutate");
+    let outcome = gate.run(&Reaped).expect("gate run");
+    assert!(outcome.lease_quarantine_required());
+
+    let sink = DaemonQuarantineSink {
+        server: server.clone(),
+    };
+    sink.quarantine(&outcome)
+        .expect("quarantine should succeed");
+
+    // Verify resource state in db is now 'quarantined'
+    server
+        .with_global_store(|store| {
+            let conn = store.connection();
+            let state: String = conn
+                .query_row(
+                    "SELECT state FROM exec_env_resources WHERE resource_id = ?1",
+                    rusqlite::params![res_id],
+                    |row| row.get(0),
+                )
+                .map_err(|e| e.to_string())?;
+            assert_eq!(state, "quarantined");
+            Ok(())
+        })
+        .expect("check db resource state");
+}
+
+#[tokio::test]
+async fn daemon_quarantine_sink_propagates_resource_failure_before_receipt() {
+    use crate::exec_env_postflight::DaemonQuarantineSink;
+    use crate::server_state::MemoryServer;
+
+    let temp = TempDir::new().expect("tempdir");
+    let db_path = temp.path().join("test_global.sqlite");
+    let server = MemoryServer::new(db_path.clone(), None).expect("server");
+    let env_id = "env_test_1322_failure";
+    let first_res_id = "res_test_1322_failure_a";
+    let second_res_id = "res_test_1322_failure_b";
+
+    server
+        .with_global_store(|store| {
+            let conn = store.connection();
+            conn.execute(
+                "INSERT INTO exec_envs (env_id, path, state) VALUES (?1, ?2, 'active')",
+                rusqlite::params![env_id, "/path/to/tree"],
+            )
+            .map_err(|error| error.to_string())?;
+            for (resource_id, path, binding_id) in [
+                (first_res_id, "/path/to/tree", "bind_failure_1"),
+                (second_res_id, "/path/to/target", "bind_failure_2"),
+            ] {
+                conn.execute(
+                    "INSERT INTO exec_env_resources (resource_id, kind, path, bytes, measured_at, state, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, 'active', ?6, ?6)",
+                    rusqlite::params![resource_id, "worktree", path, 0, "2026-08-25T00:00:00Z", "2026-08-25T00:00:00Z"],
+                )
+                .map_err(|error| error.to_string())?;
+                conn.execute(
+                    "INSERT INTO exec_env_resource_bindings (binding_id, env_id, resource_id, created_at) VALUES (?1, ?2, ?3, ?4)",
+                    rusqlite::params![binding_id, env_id, resource_id, "2026-08-25T00:00:00Z"],
+                )
+                .map_err(|error| error.to_string())?;
+            }
+            Ok(())
+        })
+        .expect("setup db");
+
+    // MemoryStore connections reject trigger DDL by policy. Install the
+    // failure through the unrestricted second connection, which exercises the
+    // real SQLite persistence error at the resource transition.
+    let fault_connection = rusqlite::Connection::open(&db_path).expect("fault connection");
+    fault_connection
+        .execute_batch(
+            "CREATE TRIGGER fail_postflight_resource_quarantine
+             BEFORE UPDATE OF state ON exec_env_resources
+             WHEN NEW.state = 'quarantined' AND OLD.resource_id = 'res_test_1322_failure_b'
+             BEGIN SELECT RAISE(ABORT, 'injected resource quarantine failure'); END;",
+        )
+        .expect("install quarantine failure trigger");
+
+    let mut outcome = GateOutcome {
+        env_id: env_id.to_string(),
+        workspace_root: "/path/to/tree".to_string(),
+        contract_label: "detect_and_reject",
+        declared_scope: Vec::new(),
+        liveness_probe: "test probe".to_string(),
+        content_unhashed_paths: Vec::new(),
+        clock_barrier: ClockBarrierEvidence::NotEstablished,
+        verdict: GateVerdict::Rejected {
+            reason: RejectReason::ProhibitedDelta,
+            deltas: Vec::new(),
+            entries_checked: 1,
+        },
+        checked_at: "2026-08-25T00:00:00Z".to_string(),
+        lease_action: super::LeaseAction::PendingFence,
+    };
+    let sink = DaemonQuarantineSink {
+        server: server.clone(),
+    };
+
+    let error = apply_verdict(&mut outcome, &sink)
+        .expect_err("resource persistence failure must propagate");
+    assert!(
+        error.contains("injected resource quarantine failure"),
+        "{error}"
+    );
+    assert_eq!(outcome.receipt()["lease_action"], "fence_failed");
+    server
+        .with_global_store(|store| {
+            for resource_id in [first_res_id, second_res_id] {
+                let state: String = store
+                    .connection()
+                    .query_row(
+                        "SELECT state FROM exec_env_resources WHERE resource_id = ?1",
+                        rusqlite::params![resource_id],
+                        |row| row.get(0),
+                    )
+                    .map_err(|error| error.to_string())?;
+                assert_eq!(
+                    state, "active",
+                    "atomic rollback must restore {resource_id}"
+                );
+            }
+            Ok(())
+        })
+        .expect("check failed resource state");
+}
+
+#[test]
+fn test_declared_scope_permits_in_scope_and_rejects_out_of_scope() {
+    let lease = TempDir::new().expect("tempdir");
+    let lease_path = lease.path();
+
+    let in_scope_file = lease_path.join("in_scope.rs");
+    let out_of_scope_file = lease_path.join("out_of_scope.rs");
+    fs::write(&in_scope_file, b"fn in_scope() {}\n").expect("write in_scope");
+    fs::write(&out_of_scope_file, b"fn out_of_scope() {}\n").expect("write out_of_scope");
+
+    let gate = PostflightGate::new(
+        "env_scope_test",
+        lease_path,
+        WriteContract::DeclaredScope {
+            paths: vec!["in_scope.rs".to_string()],
+        },
+    );
+
+    gate.capture_preimage().expect("capture preimage");
+
+    // 1. Mutating in-scope file passes
+    fs::write(
+        &in_scope_file,
+        b"fn in_scope() { println!(\"mutated\"); }\n",
+    )
+    .expect("mutate in_scope");
+    let outcome = gate.run(&Reaped).expect("gate run");
+    assert!(matches!(outcome.verdict, GateVerdict::Clean { .. }));
+    assert!(outcome.artifacts_released());
+    assert!(!outcome.lease_quarantine_required());
+
+    // 2. Mutating out-of-scope file rejects
+    fs::write(&out_of_scope_file, b"fn out_of_scope() { mutated!(); }\n")
+        .expect("mutate out_of_scope");
+    let outcome_rej = gate.run(&Reaped).expect("gate run");
+    assert!(matches!(outcome_rej.verdict, GateVerdict::Rejected { .. }));
+    assert!(!outcome_rej.artifacts_released());
+    assert!(outcome_rej.lease_quarantine_required());
 }

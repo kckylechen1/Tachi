@@ -44,6 +44,17 @@ pub(super) async fn serve_http_daemon(
         }
     };
 
+    // S1 startup reconciliation: singleton ownership is PROVEN, so this
+    // controller incarnation now scans the runs root it owns. Terminal
+    // managed runs stay terminal; nonterminal foreign-epoch runs get
+    // exactly one typed orphan/control-unavailable observation appended to
+    // their existing canonical receipt. No launch, signal, cleanup, retry,
+    // or redispatch. A process that LOSES the singleton race exited above
+    // and never mutates receipts. (The legacy non-managed orphan recovery
+    // in `build_server_state` predates this fence; managed-run receipts
+    // are excluded from it and owned entirely by this reconciliation.)
+    crate::managed_run_epoch::record_startup_reconciliation(&server);
+
     // PR-4 multi-DB scheduler: periodically scan ~/.tachi/manifest.json
     // and run a per-DB safety-net poll against foundry_jobs. Re-injects
     // pending jobs into the existing foundry_tx mpsc channel for

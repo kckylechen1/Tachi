@@ -4,7 +4,7 @@ mod spec;
 mod types;
 
 pub(crate) use control::run_acpx_control_from_status;
-pub(super) use events::persist_acpx_events_and_map;
+pub(super) use events::{persist_acpx_events_and_map, AcpxReleaseMode};
 pub(super) use spec::{
     build_acpx_command, build_acpx_command_spec, is_acpx_transport, prepare_acpx_prompt,
 };
@@ -399,9 +399,15 @@ mod tests {
 {"event":"tool_call_start","tool_name":"bash"}
 {"event":"end_turn","final_response":"done"}
 "#;
-        let summary =
-            persist_acpx_events_and_map(dir.path(), &trajectory, "dispatch-1", "codex", output)
-                .expect("events should persist");
+        let summary = persist_acpx_events_and_map(
+            dir.path(),
+            &trajectory,
+            "dispatch-1",
+            "codex",
+            output,
+            AcpxReleaseMode::ImmediateMapped,
+        )
+        .expect("events should persist");
         assert_eq!(summary.mapped_events, 3);
         assert_eq!(summary.final_response.as_deref(), Some("done"));
         assert!(summary.events_file.ends_with(ACPX_EVENTS_FILE));
@@ -413,5 +419,56 @@ mod tests {
         let trajectory = std::fs::read_to_string(trajectory).expect("trajectory events");
         assert!(trajectory.contains("acpx_tool_event"));
         assert!(trajectory.contains("acpx_final_event"));
+    }
+
+    #[test]
+    fn acpx_event_mapping_can_parse_without_releasing_carrier_artifacts() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let trajectory = dir.path().join("trajectory.jsonl");
+        crate::utils::write_owner_only_file_atomic(&trajectory, b"").expect("trajectory");
+        let output = r#"{"event":"end_turn","final_response":"sensitive"}"#;
+
+        let summary = persist_acpx_events_and_map(
+            dir.path(),
+            &trajectory,
+            "dispatch-withheld",
+            "codex",
+            output,
+            AcpxReleaseMode::ParseOnly,
+        )
+        .expect("events should parse in parent memory");
+
+        assert_eq!(summary.final_response.as_deref(), Some("sensitive"));
+        assert!(!summary.events_file.exists());
+        assert!(!dir.path().join("progress.jsonl").exists());
+        assert_eq!(std::fs::read_to_string(trajectory).unwrap(), "");
+    }
+
+    #[test]
+    fn postflight_acpx_release_is_one_atomic_raw_artifact_without_worker_text_appends() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let trajectory = dir.path().join("trajectory.jsonl");
+        crate::utils::write_owner_only_file_atomic(&trajectory, b"").expect("trajectory");
+        let output = r#"{"event":"end_turn","final_response":"sensitive-postflight"}"#;
+
+        let summary = persist_acpx_events_and_map(
+            dir.path(),
+            &trajectory,
+            "dispatch-postflight-release",
+            "codex",
+            output,
+            AcpxReleaseMode::PostflightAtomic,
+        )
+        .expect("postflight raw artifact should publish atomically");
+
+        assert!(std::fs::read_to_string(summary.events_file)
+            .expect("raw events")
+            .contains("sensitive-postflight"));
+        let trajectory = std::fs::read_to_string(&trajectory).expect("trajectory");
+        assert!(!trajectory.contains("sensitive-postflight"));
+        assert!(trajectory.contains("\"mapped_events_published\":false"));
+        let progress =
+            std::fs::read_to_string(dir.path().join("progress.jsonl")).expect("progress");
+        assert!(!progress.contains("sensitive-postflight"));
     }
 }

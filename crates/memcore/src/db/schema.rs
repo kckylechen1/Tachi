@@ -681,6 +681,14 @@ fn init_product_schema_columns(conn: &Connection) -> Result<(), MemoryError> {
     // `column_exists` guard.
     ensure_column(conn, "exec_envs", "agent_identity_id", "TEXT")?;
     ensure_column(conn, "exec_envs", "claim_id", "TEXT")?;
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS exec_env_worktree_identities (
+            env_id      TEXT PRIMARY KEY,
+            device      INTEGER NOT NULL,
+            inode       INTEGER NOT NULL,
+            captured_at TEXT NOT NULL DEFAULT ''
+        );",
+    )?;
     ensure_column(conn, "session_claims", "mode", "TEXT")?;
 
     // #1289: collapse any pre-existing duplicate *modeless* active claims for

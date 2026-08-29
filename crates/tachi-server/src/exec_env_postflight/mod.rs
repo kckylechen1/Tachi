@@ -1,17 +1,6 @@
-//! `detect-and-reject` postflight gate (#894 S2e) — ordered enforcement points
+//! `detect-and-reject` postflight gate (#894 S2e, wired under #1322) — ordered enforcement points
 //! 4 (parent-owned postflight manifest/diff gate) and 5 (quarantine/reclaim
 //! only after descendants terminate).
-//!
-//! # ⚠ NOT WIRED YET — see #894 S2 wiring slice
-//!
-//! **This gate is a mechanism with no callers.** Nothing in the dispatch path
-//! calls [`PostflightGate::capture_preimage`], [`PostflightGate::run`] or
-//! [`apply_verdict`] today, so **zero dispatches are currently gated by it** —
-//! landing this module changed the enforcement posture of exactly nothing.
-//! Wiring it into lease provisioning / teardown (capture before spawn, run after
-//! the worker is reaped, release artifacts only on a clean verdict) is the S2c /
-//! dispatch-surface slice. Do not read the tests below as evidence that any live
-//! dispatch is protected.
 //!
 //! # The name is the contract
 //!
@@ -38,15 +27,14 @@
 //! # Why a `git diff` is not the mechanism
 //!
 //! `git diff` is blind to ignored files, git metadata, xattrs, and
-//! mutate-then-restore. This gate walks the workspace itself — see
-//! [`manifest`], which fingerprints content (BLAKE2s-256), symlink targets,
-//! xattrs, mode/size/nlink, inode, mtime **and ctime**.
+//! mutate-then-restore. This gate uses a complete recursive manifest with
+//! SHA-256 content hashes, POSIX ctime tracking, symlink targets, and extended
+//! attributes.
 //!
-//! Two of those classes (mutate-then-restore; a same-size overwrite under an
-//! unhashed root) have **no witness except a timestamp**, so the pre-image is
-//! additionally **sealed with an observed capture-time clock barrier** before a
-//! worker is spawned, and [`PostflightGate::run`] refuses any pre-image that
-//! does not carry one. Without that, a write landing inside the capture's own
+//! # Clock barrier (#1440)
+//!
+//! The pre-image is sealed with an observed clock barrier strictly past every
+//! recorded ctime. Without that barrier, a mutate-then-restore within the same
 //! clock tick leaves every field equal and the gate certifies a mutated tree as
 //! clean — see the `manifest` module docs and #1440.
 //!
@@ -71,14 +59,52 @@ pub mod manifest;
 mod tests;
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Value};
 
-pub use liveness::{DescendantLiveness, ProcessGroupLiveness};
+pub use liveness::{
+    DescendantLiveness, MissingLivenessEvidence, ProcessGroupLiveness, ReapedLiveness,
+    RunnerLivenessEvidence,
+};
 pub use manifest::{
     CaptureSpec, CtimeWitness, DeltaKind, FsTime, WorkspaceDelta, WorkspaceManifest,
 };
+
+/// The compile-time applicability of the postflight gate (#1322 / #894 S2e).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PostflightApplicability {
+    /// Postflight is not required (e.g. unbounded workspace-write or full danger access).
+    NotApplicable,
+    /// Postflight is required with the compiled [`WriteContract`].
+    Required(WriteContract),
+}
+
+/// Compile postflight applicability from the effective workspace authority and optional declared scope.
+pub fn compile_postflight_applicability(
+    authority: tachi_dispatch::WorkspaceAuthority,
+    declared_scope: Option<&[String]>,
+) -> PostflightApplicability {
+    match authority {
+        tachi_dispatch::WorkspaceAuthority::ReadOnly => {
+            PostflightApplicability::Required(WriteContract::DetectAndReject)
+        }
+        tachi_dispatch::WorkspaceAuthority::WorkspaceWrite => {
+            if let Some(scope) = declared_scope {
+                if !scope.is_empty() {
+                    return PostflightApplicability::Required(WriteContract::DeclaredScope {
+                        paths: scope.to_vec(),
+                    });
+                }
+            }
+            PostflightApplicability::NotApplicable
+        }
+        tachi_dispatch::WorkspaceAuthority::DangerFullAccess => {
+            PostflightApplicability::NotApplicable
+        }
+    }
+}
 
 /// The vocabulary this gate is allowed (and forbidden) to describe itself with.
 pub mod naming {
@@ -268,9 +294,12 @@ pub enum GateVerdict {
         deltas: Vec<WorkspaceDelta>,
         entries_checked: usize,
     },
-    /// The gate could not decide. Artifacts are withheld; the lease is NOT
-    /// quarantined (that would race a live writer).
+    /// The gate could not decide. Artifacts are withheld and the managed lease
+    /// is fenced against reuse without scanning the live workspace.
     Blocked { reason: BlockReason, detail: String },
+    /// The gate could not execute to a decision. Artifacts are withheld and
+    /// the managed lease is fenced against reuse.
+    Error { detail: String },
 }
 
 /// What THIS RUN established about the capture-time clock — not what is true of
@@ -374,9 +403,44 @@ pub struct GateOutcome {
     pub clock_barrier: ClockBarrierEvidence,
     pub verdict: GateVerdict,
     pub checked_at: String,
+    lease_action: LeaseAction,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LeaseAction {
+    None,
+    PendingFence,
+    Quarantined,
+    FenceFailed,
+}
+
+impl LeaseAction {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::PendingFence => "pending_fence",
+            Self::Quarantined => "quarantined",
+            Self::FenceFailed => "fence_failed",
+        }
+    }
 }
 
 impl GateOutcome {
+    pub(crate) fn lease_fenced(&self) -> bool {
+        self.lease_action == LeaseAction::Quarantined
+    }
+
+    fn lease_action_statement(&self) -> &'static str {
+        match self.lease_action {
+            LeaseAction::None => "No lease fence was required.",
+            LeaseAction::PendingFence => "The managed lease must be fenced before reuse.",
+            LeaseAction::Quarantined => "The managed lease resources were quarantined.",
+            LeaseAction::FenceFailed => {
+                "The managed lease resource fence failed to persist; reuse remains refused."
+            }
+        }
+    }
+
     /// The honest caveat for a run with unhashed subtrees (`None` when the whole
     /// image was hashed).
     ///
@@ -410,11 +474,11 @@ impl GateOutcome {
         matches!(self.verdict, GateVerdict::Clean { .. })
     }
 
-    /// Must the lease be quarantined? Only for a terminal rejection — never
-    /// while the gate is blocked on live descendants (enforcement point 5:
-    /// quarantine/reclaim happen only after the process tree is gone).
+    /// Must the lease be fenced? Every non-clean required gate outcome is
+    /// indeterminate for reuse and must fence the actual managed lease before
+    /// a canonical terminal receipt can claim quarantine.
     pub fn lease_quarantine_required(&self) -> bool {
-        matches!(self.verdict, GateVerdict::Rejected { .. })
+        !matches!(self.verdict, GateVerdict::Clean { .. })
     }
 
     /// The prohibited deltas, for the receipt.
@@ -430,6 +494,7 @@ impl GateOutcome {
             GateVerdict::Clean { .. } => "clean",
             GateVerdict::Rejected { .. } => "rejected",
             GateVerdict::Blocked { .. } => "blocked",
+            GateVerdict::Error { .. } => "error",
         }
     }
 
@@ -454,13 +519,14 @@ impl GateOutcome {
                 let mut lines = vec![format!(
                     "{} postflight gate REJECTED lease {} ({}): the workspace at {} changed in \
                      {} way(s) the contract ({}) does not accept. No patch and no result are \
-                     emitted; the lease is quarantined. This gate proves {}; it does not prove {}.",
+                     emitted. {} This gate proves {}; it does not prove {}.",
                     naming::POSTURE,
                     self.env_id,
                     reason.as_str(),
                     self.workspace_root,
                     deltas.len(),
                     self.contract_label,
+                    self.lease_action_statement(),
                     naming::PROVES,
                     naming::DOES_NOT_PROVE,
                 )];
@@ -485,12 +551,20 @@ impl GateOutcome {
             }
             GateVerdict::Blocked { reason, detail } => Some(format!(
                 "{} postflight gate could not decide for lease {} ({}): {}. Artifacts are \
-                 withheld and the lease is left alone — quarantine and reclaim run only after \
-                 every descendant process has terminated.",
+                withheld. {}",
                 naming::POSTURE,
                 self.env_id,
                 reason.as_str(),
-                detail
+                detail,
+                self.lease_action_statement()
+            )),
+            GateVerdict::Error { detail } => Some(format!(
+                "{} postflight gate could not execute for lease {}: {}. Artifacts are \
+                withheld. {}",
+                naming::POSTURE,
+                self.env_id,
+                detail,
+                self.lease_action_statement()
             )),
         }
     }
@@ -503,7 +577,7 @@ impl GateOutcome {
             GateVerdict::Rejected {
                 entries_checked, ..
             } => Some(*entries_checked),
-            GateVerdict::Blocked { .. } => None,
+            GateVerdict::Blocked { .. } | GateVerdict::Error { .. } => None,
         };
         let reject_reason = match &self.verdict {
             GateVerdict::Rejected { reason, .. } => Some(reason.as_str()),
@@ -513,18 +587,19 @@ impl GateOutcome {
             GateVerdict::Blocked { reason, .. } => Some(reason.as_str()),
             _ => None,
         };
+        let error = match &self.verdict {
+            GateVerdict::Error { detail } => Some(detail),
+            _ => None,
+        };
         let artifacts = if self.artifacts_released() {
             "released"
         } else {
             "withheld"
         };
-        let lease_action = if self.lease_quarantine_required() {
-            "quarantined"
-        } else {
-            "none"
-        };
+        let lease_action = self.lease_action.as_str();
         json!({
             "gate": "exec_env_postflight",
+            "preimage_custody": PREIMAGE_CUSTODY,
             "posture": naming::POSTURE,
             "proves": naming::PROVES,
             "does_not_prove": naming::DOES_NOT_PROVE,
@@ -536,6 +611,7 @@ impl GateOutcome {
             "verdict": self.verdict_label(),
             "reject_reason": reject_reason,
             "block_reason": block_reason,
+            "error": error,
             "entries_checked": entries_checked,
             "content_unhashed_paths": self.content_unhashed_paths,
             "content_unhashed_note": self.unhashed_caveat(),
@@ -570,6 +646,10 @@ impl GateOutcome {
 
 const MAX_DELTAS_IN_MESSAGE: usize = 20;
 
+/// The pre-image is held in the daemon's address space, not in a pathname the
+/// same-UID worker can open, replace, or unlink.
+pub const PREIMAGE_CUSTODY: &str = "parent_process_memory";
+
 /// The gate itself: parent-side pre-image capture, then the postflight compare.
 #[derive(Debug, Clone)]
 pub struct PostflightGate {
@@ -577,10 +657,13 @@ pub struct PostflightGate {
     pub env_id: String,
     /// The lease workspace the worker runs in.
     pub workspace_root: PathBuf,
-    /// Where the parent keeps the pre-image. MUST be outside **every**
-    /// worker-writable root (enforced) — a pre-image the worker can rewrite
-    /// proves nothing.
-    pub preimage_path: PathBuf,
+    /// The sealed pre-image stays in the daemon's address space. A same-UID
+    /// worker is a separate process and cannot modify this value through a
+    /// filesystem pathname.
+    preimage: Arc<Mutex<Option<WorkspaceManifest>>>,
+    /// Descriptor pin for the exact published worktree object. Pathname
+    /// replacement before or after the worker run makes the gate fail closed.
+    worktree_authority: Option<memcore::anchored_fs::AnchoredDirectory>,
     pub contract: WriteContract,
     /// Directory names (e.g. [`manifest::BUILD_ARTIFACT_DIR_NAMES`]) whose
     /// subtrees are walked and fingerprinted but **not content-hashed**.
@@ -605,13 +688,13 @@ impl PostflightGate {
     pub fn new(
         env_id: impl Into<String>,
         workspace_root: impl Into<PathBuf>,
-        preimage_path: impl Into<PathBuf>,
         contract: WriteContract,
     ) -> PostflightGate {
         PostflightGate {
             env_id: env_id.into(),
             workspace_root: workspace_root.into(),
-            preimage_path: preimage_path.into(),
+            preimage: Arc::new(Mutex::new(None)),
+            worktree_authority: None,
             contract,
             unhashed_dir_names: Vec::new(),
         }
@@ -627,18 +710,35 @@ impl PostflightGate {
         self
     }
 
-    /// The worker-writable roots this gate covers: the lease workspace, plus a
-    /// linked worktree's external git metadata dir. Both are writable by a
-    /// same-UID worker, so both constrain where the pre-image may live.
-    fn worker_writable_roots(&self, gitdir: Option<&Path>) -> Vec<(&'static str, PathBuf)> {
-        let mut roots = vec![("the lease workspace", self.workspace_root.clone())];
-        if let Some(gitdir) = gitdir {
-            roots.push((
-                "the lease's external git metadata dir (gitdir)",
-                gitdir.to_path_buf(),
-            ));
+    pub fn with_worktree_authority(
+        mut self,
+        authority: memcore::anchored_fs::AnchoredDirectory,
+    ) -> PostflightGate {
+        self.worktree_authority = Some(authority);
+        self
+    }
+
+    fn verify_workspace_identity(&self, phase: &str) -> Result<(), String> {
+        let Some(authority) = self.worktree_authority.as_ref() else {
+            return Ok(());
+        };
+        let canonical_root = std::fs::canonicalize(&self.workspace_root).map_err(|error| {
+            format!(
+                "{phase}: cannot resolve managed worktree object at '{}': {error}",
+                self.workspace_root.display()
+            )
+        })?;
+        match authority.matches_absolute_path(&canonical_root) {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(format!(
+                "{phase}: managed worktree object changed at '{}'",
+                self.workspace_root.display()
+            )),
+            Err(error) => Err(format!(
+                "{phase}: cannot re-establish managed worktree object at '{}': {error}",
+                self.workspace_root.display()
+            )),
         }
-        roots
     }
 
     /// Capture the pre-image. Call this **before the worker is spawned** — a
@@ -655,11 +755,8 @@ impl PostflightGate {
     /// not start under this contract rather than run and be un-provable at the
     /// end. No pre-image file is written in that case.
     pub fn capture_preimage(&self) -> Result<WorkspaceManifest, String> {
+        self.verify_workspace_identity("before pre-image capture")?;
         let gitdir = manifest::resolve_external_git_dir(&self.workspace_root);
-        ensure_preimage_outside_worker_writable_roots(
-            &self.worker_writable_roots(gitdir.as_deref()),
-            &self.preimage_path,
-        )?;
         let mut manifest = manifest::capture(&CaptureSpec {
             workspace_root: &self.workspace_root,
             gitdir_root: gitdir.as_deref(),
@@ -696,18 +793,20 @@ impl PostflightGate {
                 self.workspace_root.display()
             )
         })?;
-        let bytes = serde_json::to_vec(&manifest)
-            .map_err(|e| format!("serialize workspace pre-image: {e}"))?;
-        crate::utils::write_owner_only_file_atomic(&self.preimage_path, &bytes)
-            .map_err(|e| format!("write workspace pre-image: {e}"))?;
+        self.verify_workspace_identity("after pre-image capture")?;
+        let mut preimage = self
+            .preimage
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *preimage = Some(manifest.clone());
         Ok(manifest)
     }
 
     /// Run the gate after the worker has terminated.
     ///
     /// Order is load-bearing:
-    /// 1. **descendants first** — a live process means no decision, no
-    ///    quarantine, no reclaim (enforcement point 5);
+    /// 1. **descendants first** — a live process means no workspace scan or
+    ///    artifact release; the managed lease may still be fenced against reuse;
     /// 2. then load the parent-held pre-image (which carries the **pinned** walk
     ///    roots);
     /// 3. then re-scan **those roots** and compare;
@@ -728,6 +827,11 @@ impl PostflightGate {
         // established, and the only value it can name before step 3b is
         // `NotEstablished`.
         let base = |verdict: GateVerdict, unhashed: Vec<String>, barrier: ClockBarrierEvidence| {
+            let lease_action = if matches!(&verdict, GateVerdict::Clean { .. }) {
+                LeaseAction::None
+            } else {
+                LeaseAction::PendingFence
+            };
             GateOutcome {
                 env_id: self.env_id.clone(),
                 workspace_root: self.workspace_root.to_string_lossy().to_string(),
@@ -738,6 +842,7 @@ impl PostflightGate {
                 clock_barrier: barrier,
                 verdict,
                 checked_at: checked_at.clone(),
+                lease_action,
             }
         };
 
@@ -766,7 +871,7 @@ impl PostflightGate {
                     GateVerdict::Rejected {
                         reason: RejectReason::UnusableImage,
                         deltas: vec![WorkspaceDelta {
-                            path: self.preimage_path.to_string_lossy().to_string(),
+                            path: format!("<{PREIMAGE_CUSTODY} pre-image>"),
                             kind: DeltaKind::Unreadable,
                             detail: format!("pre-image unusable: {e}"),
                             facets: Vec::new(),
@@ -780,6 +885,7 @@ impl PostflightGate {
             }
         };
 
+        self.verify_workspace_identity("before post-image capture")?;
         // (3) Re-scan — against the roots the PARENT pinned before the spawn.
         // A pinned gitdir the worker deleted or moved fails closed as an
         // unreadable (and therefore unprovable) root, not as a clean run.
@@ -808,6 +914,7 @@ impl PostflightGate {
                 ))
             }
         };
+        self.verify_workspace_identity("after post-image capture")?;
 
         let entries_checked = pre.len().max(post.len());
         let unhashed = merge_unhashed(&pre, &post);
@@ -863,7 +970,7 @@ impl PostflightGate {
         // between capture and gate.
         let barrier_check = pre
             .verify_clock_barriers()
-            .map_err(|why| (self.preimage_path.to_string_lossy().to_string(), why))
+            .map_err(|why| (format!("<{PREIMAGE_CUSTODY} pre-image>"), why))
             .and_then(|()| {
                 post.verify_timestamp_preconditions()
                     .map_err(|why| (self.workspace_root.to_string_lossy().to_string(), why))
@@ -918,13 +1025,51 @@ impl PostflightGate {
     }
 
     fn load_preimage(&self) -> Result<WorkspaceManifest, String> {
-        let bytes = std::fs::read(&self.preimage_path).map_err(|e| {
-            format!(
-                "read pre-image {}: {e}",
-                self.preimage_path.to_string_lossy()
-            )
-        })?;
-        serde_json::from_slice(&bytes).map_err(|e| format!("parse pre-image: {e}"))
+        self.preimage
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+            .ok_or_else(|| format!("{PREIMAGE_CUSTODY} pre-image is missing"))
+    }
+
+    /// Construct a canonical receipt when a required gate could not execute.
+    /// This is intentionally distinct from [`GateVerdict::Blocked`]: the
+    /// liveness probe may have answered, but some other gate operation failed.
+    pub fn execution_error(
+        &self,
+        liveness: &dyn DescendantLiveness,
+        detail: impl Into<String>,
+    ) -> GateOutcome {
+        GateOutcome {
+            env_id: self.env_id.clone(),
+            workspace_root: self.workspace_root.to_string_lossy().to_string(),
+            contract_label: self.contract.label(),
+            declared_scope: self.contract.declared_paths(),
+            liveness_probe: liveness.describe(),
+            content_unhashed_paths: Vec::new(),
+            clock_barrier: ClockBarrierEvidence::NotEstablished,
+            verdict: GateVerdict::Error {
+                detail: detail.into(),
+            },
+            checked_at: chrono::Utc::now().to_rfc3339(),
+            lease_action: LeaseAction::PendingFence,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn replace_preimage_for_test(&self, manifest: WorkspaceManifest) {
+        *self
+            .preimage
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(manifest);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_preimage_for_test(&self) -> bool {
+        self.preimage
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_some()
     }
 }
 
@@ -943,53 +1088,6 @@ fn merge_unhashed(pre: &WorkspaceManifest, post: &WorkspaceManifest) -> Vec<Stri
     all
 }
 
-/// The pre-image must live where the worker cannot reach it — and this module
-/// declares **two** worker-writable roots, not one: the lease workspace *and* a
-/// linked worktree's external git metadata dir (`gitdir`). A pre-image inside
-/// either could be rewritten by the very worker it is meant to convict (the gate
-/// would then compare the worker's own story against itself), so this is a hard
-/// fail, not a warning.
-///
-/// `roots` is `(human label, path)`; every root the caller can name as
-/// worker-writable must be in it.
-pub fn ensure_preimage_outside_worker_writable_roots(
-    roots: &[(&str, PathBuf)],
-    preimage_path: &Path,
-) -> Result<(), String> {
-    let preimage = canonical_or_literal(preimage_path);
-    for (label, root) in roots {
-        let root = canonical_or_literal(root);
-        if preimage.starts_with(&root) {
-            return Err(format!(
-                "pre-image {} is inside {label} {} — the worker could rewrite it; the pre-image \
-                 must be held by the parent, outside EVERY root the worker can write",
-                preimage.display(),
-                root.display()
-            ));
-        }
-    }
-    Ok(())
-}
-
-/// Canonicalize when possible (resolves `..`, symlinked temp dirs such as
-/// macOS `/var` → `/private/var`), otherwise fall back to the literal path — a
-/// not-yet-created pre-image file has no canonical form.
-fn canonical_or_literal(path: &Path) -> PathBuf {
-    if let Ok(canonical) = path.canonicalize() {
-        return canonical;
-    }
-    match path.parent() {
-        Some(parent) => match parent.canonicalize() {
-            Ok(canonical_parent) => match path.file_name() {
-                Some(name) => canonical_parent.join(name),
-                None => canonical_parent,
-            },
-            Err(_) => path.to_path_buf(),
-        },
-        None => path.to_path_buf(),
-    }
-}
-
 /// Where a rejected lease's evidence goes.
 ///
 /// Quarantine is deliberately NOT reclaim: the bytes are preserved for
@@ -999,8 +1097,9 @@ pub trait QuarantineSink {
     fn quarantine(&self, outcome: &GateOutcome) -> Result<(), String>;
 }
 
-/// Parent-side forensic sink: writes the receipt to an owner-only file outside
-/// the workspace and logs the failure loudly.
+/// Explicit forensic sink for callers that supply an owner-controlled
+/// directory. Production dispatch relies on the canonical DB fence and
+/// terminal receipt instead of this optional file.
 #[derive(Debug, Clone)]
 pub struct FileQuarantineSink {
     pub dir: PathBuf,
@@ -1025,6 +1124,38 @@ impl QuarantineSink for FileQuarantineSink {
             "{}",
             rejection_log_message(outcome)
         );
+        Ok(())
+    }
+}
+
+/// Server-side quarantine sink: atomically fences the physical lease resources
+/// in the canonical database (`exec_env_resources.state = 'quarantined'`).
+#[derive(Clone)]
+pub(crate) struct DaemonQuarantineSink {
+    pub(crate) server: crate::server_state::MemoryServer,
+}
+
+impl QuarantineSink for DaemonQuarantineSink {
+    fn quarantine(&self, outcome: &GateOutcome) -> Result<(), String> {
+        if !outcome.env_id.is_empty() {
+            let reason = outcome
+                .failure_message()
+                .unwrap_or_else(|| format!("{} postflight rejection", naming::POSTURE));
+            self.server
+                .with_global_store(|store| {
+                    crate::exec_env_ops::quarantine_lease_resources(
+                        store.connection_mut(),
+                        &outcome.env_id,
+                        &reason,
+                    )
+                })
+                .map_err(|error| {
+                    format!(
+                        "persist quarantine for exec env {}: {error}",
+                        outcome.env_id
+                    )
+                })?;
+        }
         Ok(())
     }
 }
@@ -1056,10 +1187,14 @@ pub fn rejection_log_message(outcome: &GateOutcome) -> String {
 /// second [`QuarantineSink`] over the same call: state transitions stay
 /// single-writer inside the ledger's own reclaim function, and this gate never
 /// writes lease state directly.
-pub fn apply_verdict(outcome: &GateOutcome, sink: &dyn QuarantineSink) -> Result<bool, String> {
+pub fn apply_verdict(outcome: &mut GateOutcome, sink: &dyn QuarantineSink) -> Result<bool, String> {
     if !outcome.lease_quarantine_required() {
         return Ok(false);
     }
-    sink.quarantine(outcome)?;
+    outcome.lease_action = LeaseAction::Quarantined;
+    if let Err(error) = sink.quarantine(outcome) {
+        outcome.lease_action = LeaseAction::FenceFailed;
+        return Err(error);
+    }
     Ok(true)
 }

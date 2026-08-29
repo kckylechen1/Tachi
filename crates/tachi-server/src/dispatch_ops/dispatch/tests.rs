@@ -39,6 +39,7 @@ fn test_dispatch_params(agent: Option<&str>, task: &str) -> TachiDispatchParams 
         allowed_mcp_servers: Vec::new(),
         verbose: None,
         inject_card: None,
+        declared_file_scope: None,
     }
 }
 
@@ -1480,4 +1481,100 @@ fn flow_dispatch_slot_reclaims_stale_lock_when_run_status_is_missing() {
     } else {
         std::env::remove_var("TACHI_RUN_ROOT");
     }
+}
+
+#[test]
+fn required_postflight_workspace_uses_the_resolved_lease_or_fails_closed() {
+    let managed = crate::exec_env_ops::EnvResolution::Managed {
+        cwd: "/leased/workspace".to_string(),
+        env_id: "env-1322".to_string(),
+    };
+    assert_eq!(
+        required_postflight_workspace(&managed).expect("managed lease workspace"),
+        std::path::PathBuf::from("/leased/workspace")
+    );
+
+    let unmanaged = crate::exec_env_ops::EnvResolution::Unmanaged {
+        cwd: "/unmanaged/workspace".to_string(),
+    };
+    let error = required_postflight_workspace(&unmanaged)
+        .expect_err("required postflight needs a fenceable managed lease");
+    assert!(error.contains("requires a managed env_id"), "{error}");
+
+    let default = crate::exec_env_ops::EnvResolution::Default;
+    let error = required_postflight_workspace(&default)
+        .expect_err("a required gate must not disappear when default cwd is absent");
+    assert!(error.contains("requires a managed env_id"), "{error}");
+}
+
+#[test]
+fn postflight_handoff_has_no_pid_reconstruction_or_signal_capability() {
+    let execution_source = include_str!("execution.rs");
+    for forbidden in [
+        "child_pid_for_postflight",
+        "ProcessGroupLiveness::for_worker_pid",
+        "terminate_process_group(",
+    ] {
+        assert!(
+            !execution_source.contains(forbidden),
+            "postflight execution must consume typed runner evidence, not `{forbidden}`"
+        );
+    }
+    assert!(
+        execution_source.contains("gate.run(&runner_liveness)"),
+        "the production postflight handoff must consume typed runner liveness"
+    );
+}
+
+#[test]
+fn required_postflight_finalizes_lease_before_carrier_artifact_publication() {
+    let source = include_str!("execution.rs");
+    let finalization = source
+        .find("let lease_release = match")
+        .expect("lease finalization seam");
+    let post_finalization = &source[finalization..];
+    let acpx_publication = finalization
+        + post_finalization
+            .find("persist_acpx_events_and_map(")
+            .expect("ACPX publication seam");
+    let native_publication = finalization
+        + post_finalization
+            .find("publish_native_acp_artifacts(")
+            .expect("native ACP publication seam");
+
+    assert!(finalization < acpx_publication);
+    assert!(finalization < native_publication);
+}
+
+#[test]
+fn descriptor_bound_carriers_receive_dot_instead_of_the_mutable_lease_path() {
+    let grant = tachi_params::ExecutionGrant {
+        grant_id: "carrier-cwd-test".to_string(),
+        env_id: Some("env-test".to_string()),
+        unmanaged_cwd_allowed: false,
+        allowed_cwd: Some(std::path::PathBuf::from("/managed/lease/path")),
+        credential_profiles: Vec::new(),
+        mcp_access: None,
+        allowed_tools: Vec::new(),
+        permission_profile: None,
+        sandbox: None,
+        max_turns: None,
+        timeout_secs: 300,
+    };
+
+    let anchored = carrier_execution_grant(&grant, true);
+    assert_eq!(
+        anchored.allowed_cwd.as_deref(),
+        Some(std::path::Path::new(".")),
+        "Codex -C, ACPX --cwd, native ACP session cwd, and custom launch cwd must all resolve from the descriptor-bound process cwd"
+    );
+    assert_eq!(
+        carrier_execution_grant(&grant, false).allowed_cwd,
+        grant.allowed_cwd,
+        "unmanaged/default carriers retain their ordinary cwd contract"
+    );
+
+    let source = include_str!("../dispatch.rs");
+    assert!(source.contains("grant: &carrier_execution_grant,"));
+    assert!(source.contains("&carrier_execution_grant,\n                    &command,"));
 }

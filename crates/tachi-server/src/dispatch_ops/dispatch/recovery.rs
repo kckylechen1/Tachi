@@ -11,6 +11,14 @@ pub(super) fn dispatch_status_needs_recovery(status: &serde_json::Value) -> bool
     if status.get("completion_recovery").is_some() {
         return false;
     }
+    // A managed run with a durable identity record is owned by the S1
+    // restart/orphan reconciliation posture: its truth after a lost
+    // controller is orphaned / control_unavailable / outcome_unknown, and
+    // this recovery must never fabricate a terminal failed classification
+    // for it from stale nonterminal data.
+    if status.get(crate::managed_run_epoch::IDENTITY_KEY).is_some() {
+        return false;
+    }
     if status.get("exit_code").is_some() {
         return false;
     }

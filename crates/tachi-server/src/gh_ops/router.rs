@@ -184,10 +184,10 @@ pub(crate) async fn handle_tachi_gh(
             )
             .await?;
             // #894 S1: the exec_envs lease is the single owner of a managed env.
-            // When safe_merge reclaimed the local worktree, flip the lease
-            // through the one reclaim path. A failed transition is surfaced:
-            // discarding it after physical deletion would falsely report a
-            // complete reclaim while the durable lifecycle still says active.
+            // The cleaner's atomic removal claim normally completes the lease
+            // itself; this idempotent reconcile also covers legacy cleaners.
+            // A failed transition is surfaced rather than claiming complete
+            // reclaim while the durable lifecycle disagrees.
             if let Some(worktree) = worktree_for_lease.as_deref() {
                 if safe_merge_reclaimed_worktree(&out) {
                     server
@@ -236,7 +236,7 @@ pub(crate) async fn handle_tachi_gh(
                 task_params.allow_umbrella_close,
             )?;
             let client = gh_client_for_server(server)?;
-            handle_github_safe_merge(
+            handle_github_safe_merge_with_holder_gate(
                 &client,
                 &target.repo,
                 target.number,
@@ -248,6 +248,7 @@ pub(crate) async fn handle_tachi_gh(
                 // pr_status is a dry-run preview: reclamation never fires.
                 None,
                 false,
+                &|_| Ok(()),
             )
             .await
         }
@@ -287,8 +288,9 @@ pub(crate) async fn handle_tachi_gh(
 }
 
 /// Read-only WorkClaim gate used immediately before safe-merge invokes the
-/// external cleaner. Missing active leases are legacy/not-applicable; every
-/// held or uncertain holder answer is a loud refusal.
+/// in-process cleaner. Missing live leases are legacy/not-applicable; a
+/// dispatching lease and every held or uncertain holder answer are loud
+/// refusals.
 pub(crate) fn worktree_holder_gate(
     server: &MemoryServer,
     worktree_path: &str,
@@ -296,17 +298,36 @@ pub(crate) fn worktree_holder_gate(
     let canonical_path = crate::exec_env_ops::canonical_worktree_path(worktree_path)?;
     server.with_global_store_read(|store| {
         let Some(lease) =
-            memcore::find_active_exec_env_by_path(store.connection(), &canonical_path)
+            memcore::find_live_exec_env_by_path(store.connection(), &canonical_path)
             .map_err(|err| format!("holder evidence unavailable while locating ExecEnv: {err}"))?
         else {
             return Ok(());
         };
+        if lease.state != memcore::ExecEnvState::Active {
+            return Err(format!(
+                "refusing worktree cleaner for {worktree_path}: ExecEnv {} is {}",
+                lease.env_id,
+                lease.state.as_str()
+            ));
+        }
+        if let Some(detail) = memcore::exec_env_resource_removal_refusal(
+            store.connection(),
+            &lease.env_id,
+            &canonical_path,
+        )
+        .map_err(|err| {
+            format!("resource evidence unavailable for ExecEnv {}: {err}", lease.env_id)
+        })? {
+            return Err(format!(
+                "refusing worktree cleaner for {worktree_path}: {detail}"
+            ));
+        }
         match memcore::holder_evidence(store.connection(), &lease.env_id)
             .map_err(|err| format!("holder evidence unavailable for ExecEnv {}: {err}", lease.env_id))?
         {
             memcore::HolderEvidence::Clear | memcore::HolderEvidence::NotApplicable => Ok(()),
             evidence => Err(format!(
-                "refusing external cleaner for {worktree_path}: persisted WorkClaim holder evidence is {evidence:?}"
+                "refusing worktree cleaner for {worktree_path}: persisted WorkClaim holder evidence is {evidence:?}"
             )),
         }
     })
@@ -832,6 +853,118 @@ fn render_lifecycle_markdown(action: &str, value: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn worktree_holder_gate_rejects_dispatching_lease() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let worktree = root.path().join("worktree");
+        std::fs::create_dir(&worktree).expect("worktree");
+        let canonical = std::fs::canonicalize(&worktree).expect("canonical worktree");
+        let server = MemoryServer::new(root.path().join("memory.db"), None).expect("server");
+        server
+            .with_global_store(|store| {
+                memcore::insert_exec_env(
+                    store.connection_mut(),
+                    &memcore::NewExecEnvLease {
+                        env_id: "env-dispatching".to_string(),
+                        kind: "worktree".to_string(),
+                        path: canonical.to_string_lossy().into_owned(),
+                        repo_root: root.path().to_string_lossy().into_owned(),
+                        branch: "test/dispatching".to_string(),
+                        base_sha: "test-base".to_string(),
+                        dispatch_id: None,
+                        env_class: memcore::EnvClass::EditOnly,
+                        created_at: String::new(),
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+                store
+                    .connection_mut()
+                    .execute(
+                        "UPDATE exec_envs SET state='dispatching' WHERE env_id='env-dispatching'",
+                        [],
+                    )
+                    .map_err(|error| error.to_string())?;
+                Ok(())
+            })
+            .expect("seed dispatching lease");
+
+        let error = worktree_holder_gate(&server, worktree.to_str().expect("UTF-8 path"))
+            .expect_err("safe-merge must reject a dispatching lease");
+        assert!(error.contains("env-dispatching is dispatching"), "{error}");
+
+        server
+            .with_global_store(|store| {
+                store
+                    .connection_mut()
+                    .execute(
+                        "UPDATE exec_envs SET state='removing' WHERE env_id='env-dispatching'",
+                        [],
+                    )
+                    .map_err(|error| error.to_string())?;
+                Ok(())
+            })
+            .expect("move lease to removing");
+        let error = worktree_holder_gate(&server, worktree.to_str().expect("UTF-8 path"))
+            .expect_err("safe-merge must reject a removal claim");
+        assert!(error.contains("env-dispatching is removing"), "{error}");
+    }
+
+    #[test]
+    fn worktree_holder_gate_preserves_quarantined_worktree() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let worktree = root.path().join("worktree");
+        std::fs::create_dir(&worktree).expect("worktree");
+        let canonical = std::fs::canonicalize(&worktree).expect("canonical worktree");
+        let server = MemoryServer::new(root.path().join("memory.db"), None).expect("server");
+        server
+            .with_global_store(|store| {
+                memcore::insert_exec_env(
+                    store.connection_mut(),
+                    &memcore::NewExecEnvLease {
+                        env_id: "env-quarantined".to_string(),
+                        kind: "worktree".to_string(),
+                        path: canonical.to_string_lossy().into_owned(),
+                        repo_root: root.path().to_string_lossy().into_owned(),
+                        branch: "test/quarantined".to_string(),
+                        base_sha: "test-base".to_string(),
+                        dispatch_id: None,
+                        env_class: memcore::EnvClass::EditOnly,
+                        created_at: String::new(),
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+                memcore::insert_resource(
+                    store.connection_mut(),
+                    &memcore::NewExecEnvResource {
+                        resource_id: "res-quarantined".to_string(),
+                        kind: memcore::ResourceKind::Worktree,
+                        path: canonical.to_string_lossy().into_owned(),
+                        bytes: None,
+                        created_at: String::new(),
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+                memcore::bind_resource(
+                    store.connection_mut(),
+                    "env-quarantined",
+                    "res-quarantined",
+                )
+                .map_err(|error| error.to_string())?;
+                memcore::quarantine_resource(
+                    store.connection_mut(),
+                    "res-quarantined",
+                    "postflight rejected",
+                )
+                .map_err(|error| error.to_string())?;
+                Ok(())
+            })
+            .expect("seed quarantined resource");
+
+        let error = worktree_holder_gate(&server, worktree.to_str().expect("UTF-8 path"))
+            .expect_err("safe-merge must preserve a quarantined worktree");
+        assert!(error.contains("is quarantined"), "{error}");
+    }
 
     fn params(value: Value) -> TachiGhParams {
         serde_json::from_value(value).expect("params")

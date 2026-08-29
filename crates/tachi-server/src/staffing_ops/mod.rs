@@ -259,13 +259,36 @@ pub(crate) async fn staff_status(
     staff_status_impl(&request).await
 }
 
+/// Read-time projection for managed runs carrying a durable identity record:
+/// execution state, control state, controller epoch, reconciliation state,
+/// and artifact availability surfaced as SEPARATE facts. The durable receipt
+/// is never rewritten by a read; `None` means the receipt has no durable
+/// identity and its read shape is unchanged. A lost controller never makes
+/// this surface fabricate failed/cancelled/completed/running from stale
+/// nonterminal data.
+/// Compute the read projection from an ALREADY-READ receipt snapshot so the
+/// facade response decorates exactly the bytes it carries — the response can
+/// never stitch a top-level state from one receipt revision onto a
+/// projection from another. This function performs no filesystem read.
+pub(crate) fn staff_status_projection_from_receipt(
+    server: &MemoryServer,
+    dispatch_id: &str,
+    receipt: &serde_json::Value,
+) -> Option<serde_json::Value> {
+    let run_dir = dispatch_runs_root().join(dispatch_id);
+    crate::managed_run_epoch::read_projection(
+        receipt,
+        &run_dir,
+        &server.controller_epoch,
+        server.managed_run_controls.contains(dispatch_id),
+    )
+}
+
 /// Synchronous core of [`staff_status`], split out so tests can exercise the
 /// canonical-receipt read without constructing a full `MemoryServer` (the
-/// status read touches only the filesystem, never the server). The public
-/// `staff_status` keeps the `&MemoryServer` parameter for facade-call
-/// symmetry with `staff_start`, even though the status path does not use it
-/// today — a future slice that projects status through server-held policy
-/// will need it.
+/// status read touches only the filesystem, never the server). Returns the
+/// canonical receipt VERBATIM: projections layer on top at the facade
+/// surface, they never mutate the canonical bytes.
 async fn staff_status_impl(request: &StaffStatusRequest) -> Result<String, String> {
     if !is_valid_dispatch_id(&request.dispatch_id) {
         return Err(format!(
@@ -282,6 +305,18 @@ async fn staff_status_impl(request: &StaffStatusRequest) -> Result<String, Strin
         ));
     }
     let status_path = run_dir.join("status.json");
+    // Leaf discipline: a symlinked receipt is foreign content — refuse it
+    // with the same typed unknown as an absent one rather than read
+    // through the link and disclose whatever it points at.
+    let leaf_is_regular = std::fs::symlink_metadata(&status_path)
+        .map(|metadata| metadata.is_file())
+        .unwrap_or(false);
+    if !leaf_is_regular {
+        return Err(format!(
+            "staff_status: unknown dispatch_id {:?}",
+            request.dispatch_id
+        ));
+    }
     let Some(status) = crate::task_lifecycle::read_json_file(&status_path)
         .map_err(|err| format!("staff_status: read {}: {err}", status_path.display()))?
     else {
@@ -525,6 +560,52 @@ pub(crate) mod tests {
         }
     }
 
+    /// Panic-safe cleanup for a test-owned Staff worktree root. The callback
+    /// is scoped to a fresh temporary root, and every removal still passes
+    /// through the production certified cleanup path.
+    struct CertifiedWorktreeCleanupGuard {
+        root: std::path::PathBuf,
+        find_worktree: fn(&std::path::Path) -> Option<std::path::PathBuf>,
+        armed: bool,
+    }
+
+    impl CertifiedWorktreeCleanupGuard {
+        fn arm(
+            root: &std::path::Path,
+            find_worktree: fn(&std::path::Path) -> Option<std::path::PathBuf>,
+        ) -> Self {
+            Self {
+                root: root.to_path_buf(),
+                find_worktree,
+                armed: true,
+            }
+        }
+
+        fn disarm(&mut self) {
+            self.armed = false;
+        }
+    }
+
+    impl Drop for CertifiedWorktreeCleanupGuard {
+        fn drop(&mut self) {
+            if !self.armed {
+                return;
+            }
+            while let Some(worktree) = (self.find_worktree)(&self.root) {
+                let cleanup = tachi_clean::wt_clean::remove_worktree_for_safe_merge(&worktree);
+                if !cleanup.removed {
+                    eprintln!(
+                        "certified fixture cleanup failed for {}: warnings={:?}, errors={:?}",
+                        worktree.display(),
+                        cleanup.warnings,
+                        cleanup.errors
+                    );
+                    break;
+                }
+            }
+        }
+    }
+
     struct CurrentDirGuard(std::path::PathBuf);
 
     impl CurrentDirGuard {
@@ -593,6 +674,7 @@ pub(crate) mod tests {
             flow_id: Some("flow_1814_staff_e2e".to_string()),
             completion_predicate: None,
             recommendation_ref: None,
+            declared_file_scope: None,
         }
     }
 
@@ -648,6 +730,18 @@ pub(crate) mod tests {
         let run_dir = dispatch_runs_root().join(dispatch_id);
         let (status, result) = wait_for_staff_terminal(&run_dir).await;
         wait_for_staff_cleanup(dispatch_id).await;
+        let env_id = status["env_id"].as_str().expect("managed Staff env_id");
+        let lease = server
+            .with_global_store_read(|store| {
+                memcore::get_exec_env(store.connection(), env_id).map_err(|error| error.to_string())
+            })
+            .expect("read automatic Staff lease")
+            .expect("automatic Staff lease remains auditable after cleanup");
+        assert_eq!(lease.state, memcore::ExecEnvState::Reclaimed);
+        assert!(
+            !std::path::Path::new(&lease.path).exists(),
+            "clean automatic Staff worktree must be removed"
+        );
 
         assert_eq!(
             terminal_staff_state(&status),
@@ -725,6 +819,124 @@ pub(crate) mod tests {
             Some(decision.route_decision_id.as_str()),
             "the evidence stamp must retain the fast child's terminal receipt"
         );
+    }
+
+    /// A Staff-owned worktree whose atomic lease/resource publication fails
+    /// must remain available to the certified cleanup path. The provisioning
+    /// caller cannot safely remove it by pathname after another same-UID
+    /// process could replace that path. Inject through the unrestricted second
+    /// connection required by the store failure-injection contract; the
+    /// guarded MemoryStore doorway intentionally refuses trigger DDL.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[allow(clippy::await_holding_lock)] // serializes process-global Staff roots through cleanup
+    async fn staff_publication_failure_retains_worktree_for_certified_cleanup() {
+        fn find_worktree(path: &std::path::Path) -> Option<std::path::PathBuf> {
+            let Ok(entries) = std::fs::read_dir(path) else {
+                return None;
+            };
+            for entry in entries.filter_map(Result::ok) {
+                if entry.file_name() == ".git" {
+                    return entry.path().parent().map(std::path::Path::to_path_buf);
+                }
+                if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                    continue;
+                }
+                if let Some(worktree) = find_worktree(&entry.path()) {
+                    return Some(worktree);
+                }
+            }
+            None
+        }
+
+        let _environment = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let temp_home = tempfile::tempdir().expect("temp tachi home");
+        let temp_runs = tempfile::tempdir().expect("temp canonical run root");
+        let temp_worktrees = tempfile::tempdir().expect("temp Staff worktree root");
+        let _tachi_home = crate::test_support::EnvRestore::set_path("TACHI_HOME", temp_home.path());
+        let _user_home = crate::test_support::EnvRestore::set_path("HOME", temp_home.path());
+        let _runs = crate::test_support::EnvRestore::set_path("TACHI_RUN_ROOT", temp_runs.path());
+        let _worktrees = crate::test_support::EnvRestore::set_path(
+            "TACHI_WORKTREES_ROOT",
+            temp_worktrees.path(),
+        );
+        let mut fixture_cleanup =
+            CertifiedWorktreeCleanupGuard::arm(temp_worktrees.path(), find_worktree);
+        let server = test_server();
+        let injector = rusqlite::Connection::open(server.global_db_path_buf())
+            .expect("unrestricted second global DB connection");
+        injector
+            .execute_batch(
+                "CREATE TRIGGER fail_staff_exec_env_publication
+                 BEFORE INSERT ON exec_envs
+                 BEGIN
+                   SELECT RAISE(ABORT, 'injected Staff exec-env publication failure');
+                 END;",
+            )
+            .expect("install Staff publication failure trigger");
+        let _failure_hook = crate::exec_env_ops::install_publication_failure_hook(move || {
+            injector
+                .execute_batch("DROP TRIGGER fail_staff_exec_env_publication;")
+                .expect("remove injected trigger before certified worktree cleanup");
+        });
+
+        let error = staff_start(&server, staff_request("tachi"))
+            .await
+            .expect_err("atomic publication failure must refuse Staff before spawn");
+        assert!(
+            error.contains("injected Staff exec-env publication failure")
+                && error.contains("retained the registered worktree")
+                && error.contains("certified cleanup"),
+            "truthful publication and cleanup error: {error}"
+        );
+        assert!(
+            server
+                .with_global_store_read(|store| {
+                    memcore::list_exec_envs(store.connection(), None)
+                        .map_err(|error| error.to_string())
+                })
+                .expect("read leases after failed Staff publication")
+                .is_empty(),
+            "the failed transaction must publish no lease"
+        );
+        let retained = find_worktree(temp_worktrees.path()).unwrap_or_else(|| {
+            panic!(
+                "failed Staff publication must retain the registered worktree under {}",
+                temp_worktrees.path().display()
+            )
+        });
+        let isolated_registry = temp_home.path().join(".tachi/worktrees.json");
+        assert!(
+            isolated_registry.is_file(),
+            "the certified-cleaner registry must be isolated under the fixture HOME"
+        );
+        assert!(
+            std::fs::read_dir(temp_runs.path())
+                .expect("read canonical run root")
+                .next()
+                .is_none(),
+            "publication fails before a worker receipt/run directory exists"
+        );
+
+        let cleanup = tachi_clean::wt_clean::remove_worktree_for_safe_merge(&retained);
+        assert!(
+            cleanup.removed,
+            "certified cleanup must remove the retained fixture worktree: warnings={:?}, errors={:?}",
+            cleanup.warnings, cleanup.errors
+        );
+        assert!(
+            find_worktree(temp_worktrees.path()).is_none(),
+            "certified cleanup must not leave a registered fixture worktree"
+        );
+        let registry = std::fs::read_to_string(&isolated_registry)
+            .expect("read isolated certified-cleaner registry after cleanup");
+        assert!(
+            !registry.contains(retained.to_string_lossy().as_ref()),
+            "certified cleanup must remove the fixture's isolated registry entry"
+        );
+        fixture_cleanup.disarm();
     }
 
     /// The facade must install the in-memory cancellation owner before its
@@ -1658,6 +1870,8 @@ pub(crate) mod tests {
         wait_for_staff_cleanup(result_failure_id).await;
         result_failure_guard.disarm();
         drop(_result_persist_failure);
+        let _ = std::fs::remove_file(&root_pid);
+        let _ = std::fs::remove_file(&descendant_pid);
 
         let mut request = staff_request("tachi");
         request.profile = Some("glm_impl".to_string());
@@ -1994,6 +2208,34 @@ pub(crate) mod tests {
             !server.managed_run_controls.contains(dispatch_id),
             "terminal cleanup must remove managed cancellation authority"
         );
+        // Durable managed-run identity (additive S1 assertion): the real
+        // managed-custom start path stamps a closed identity record carrying
+        // the owning controller epoch, and the terminal rewrite carries it
+        // forward without any process-control or secret material.
+        let identity = terminal["managed_run_identity"]
+            .as_object()
+            .expect("durable managed-run identity on the terminal receipt");
+        assert_eq!(
+            identity["controller_epoch_id"], server.controller_epoch,
+            "the accepting controller epoch is recorded"
+        );
+        assert_eq!(identity["lifecycle_mode"], "TachiManagedBatch");
+        assert_eq!(identity["managed_run_id"], dispatch_id);
+        assert_eq!(identity["work_claim_ref"], Value::Null);
+        let identity_serialized =
+            serde_json::to_string(&terminal["managed_run_identity"]).expect("serialize identity");
+        for forbidden in [
+            "\"pid\"",
+            "\"pgid\"",
+            "\"signal\"",
+            "\"credential\"",
+            "\"token\"",
+        ] {
+            assert!(
+                !identity_serialized.contains(forbidden),
+                "durable identity must not carry process-control/secret key {forbidden}"
+            );
+        }
         let terminal_revision = terminal["status_revision"]
             .as_u64()
             .expect("completed terminal revision");
@@ -2176,6 +2418,7 @@ pub(crate) mod tests {
             flow_id: Some("flow_xyz".to_string()),
             completion_predicate: None,
             recommendation_ref: Some("rec-xyz".to_string()),
+            declared_file_scope: None,
         };
         assert_eq!(
             request.staffing_reason,
@@ -2383,10 +2626,19 @@ pub(crate) mod tests {
     // ─── tachi#1675 PR1 Seam B: record_route_decision_best_effort ──────────
 
     pub(crate) fn test_server() -> MemoryServer {
-        let db_path = crate::utils::test_fixture_path(format!(
-            "staffing-seam-b-{}.sqlite",
-            uuid::Uuid::new_v4()
-        ));
+        let db_path = std::env::var_os("TACHI_HOME")
+            .filter(|home| !home.is_empty())
+            .map(std::path::PathBuf::from)
+            .map(|home| home.join("global").join(memcore::MEMORY_DB_FILENAME))
+            .unwrap_or_else(|| {
+                crate::utils::test_fixture_path(format!(
+                    "staffing-seam-b-{}.sqlite",
+                    uuid::Uuid::new_v4()
+                ))
+            });
+        if let Some(parent) = db_path.parent() {
+            std::fs::create_dir_all(parent).expect("create Staff test global DB parent");
+        }
         MemoryServer::new(db_path, None).expect("test memory server")
     }
 
@@ -2721,6 +2973,7 @@ pub(crate) mod tests {
                 flow_id: None,
                 completion_predicate: None,
                 recommendation_ref: Some("missing-recommendation".to_string()),
+                declared_file_scope: None,
             },
         )
         .await

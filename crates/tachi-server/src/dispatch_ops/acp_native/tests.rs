@@ -54,6 +54,107 @@ fn model_config_option_uses_only_the_typed_current_model_value() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn descriptor_relative_cwd_reaches_native_acp_new_and_resume_requests() {
+    use std::collections::{HashMap, HashSet};
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::Duration;
+
+    for resume in [false, true] {
+        let root = tempfile::tempdir().expect("native ACP cwd root");
+        let managed = root.path().join("managed");
+        let captured = root.path().join("captured");
+        std::fs::create_dir(&managed).unwrap();
+        let authority = memcore::anchored_fs::AnchoredDirectory::open_absolute(
+            &managed.canonicalize().unwrap(),
+        )
+        .unwrap();
+        std::fs::rename(&managed, &captured).unwrap();
+        std::fs::create_dir(&managed).unwrap();
+
+        let request_log = root.path().join("session-request.json");
+        let adapter = root.path().join("adapter.sh");
+        std::fs::write(
+            &adapter,
+            r#"#!/bin/sh
+IFS= read -r _
+printf '%s\n' '{"jsonrpc":"2.0","id":"tachi-acp-1","result":{"protocolVersion":1}}'
+IFS= read -r session_request
+printf '%s\n' "$session_request" >"$REQUEST_LOG"
+touch adapter-ran-here
+printf '%s\n' '{"jsonrpc":"2.0","id":"tachi-acp-2","result":{"sessionId":"s-1"}}'
+IFS= read -r _
+printf '%s\n' '{"jsonrpc":"2.0","id":"tachi-acp-3","result":{"content":[{"type":"text","text":"done"}]}}'
+"#,
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&adapter).unwrap().permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&adapter, permissions).unwrap();
+
+        let session_record = root.path().join("session.json");
+        if resume {
+            crate::utils::write_owner_only_file_atomic(
+                &session_record,
+                br#"{"acp_session_id":"stored-session","closed":false}"#,
+            )
+            .unwrap();
+        }
+        let mut env = HashMap::new();
+        env.insert(
+            "REQUEST_LOG".to_string(),
+            request_log.to_string_lossy().to_string(),
+        );
+        let outcome = super::run_native_acp_dispatch_with_liveness(
+            super::NativeAcpRunSpec {
+                command: "/bin/sh".to_string(),
+                args: vec![adapter.to_string_lossy().to_string()],
+                cwd: std::path::PathBuf::from("."),
+                cwd_authority: Some(authority),
+                prompt: "cwd test".to_string(),
+                mode: if resume {
+                    super::NativeAcpRunMode::Session
+                } else {
+                    super::NativeAcpRunMode::OneShot
+                },
+                permission_label: "approve-reads".to_string(),
+                session: resume.then(|| super::NativeAcpSession {
+                    name: "resume-test".to_string(),
+                    source: "test",
+                }),
+                session_record_path: resume.then_some(session_record),
+                session_distill_path: None,
+                metadata: json!({}),
+                env,
+                env_remove: HashSet::new(),
+            },
+            root.path(),
+            &root.path().join("trajectory.jsonl"),
+            "cwd-dispatch",
+            "codex",
+            Duration::from_secs(2),
+            false,
+        )
+        .await;
+        assert_eq!(outcome.result.unwrap().output, "done");
+
+        let request: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(request_log).unwrap()).unwrap();
+        assert_eq!(
+            request["method"],
+            json!(if resume {
+                "session/resume"
+            } else {
+                "session/new"
+            })
+        );
+        assert_eq!(request["params"]["cwd"], json!("."));
+        assert!(captured.join("adapter-ran-here").exists());
+        assert!(!managed.join("adapter-ran-here").exists());
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn native_acp_runner_uses_the_latest_reported_model_config() {
     use std::collections::HashMap;
     use std::os::unix::fs::PermissionsExt;
@@ -85,6 +186,7 @@ printf '%s\n' '{"jsonrpc":"2.0","id":"tachi-acp-3","result":{"content":[{"type":
             command: "/bin/sh".to_string(),
             args: vec![adapter.to_string_lossy().to_string()],
             cwd: temp.path().to_path_buf(),
+            cwd_authority: None,
             prompt: "test prompt".to_string(),
             mode: super::NativeAcpRunMode::OneShot,
             permission_label: "approve-reads".to_string(),
@@ -93,6 +195,7 @@ printf '%s\n' '{"jsonrpc":"2.0","id":"tachi-acp-3","result":{"content":[{"type":
             session_distill_path: None,
             metadata: json!({}),
             env: HashMap::new(),
+            env_remove: std::collections::HashSet::new(),
         },
         temp.path(),
         &temp.path().join("trajectory.jsonl"),
@@ -140,6 +243,7 @@ printf '%s\n' '{"jsonrpc":"2.0","id":"tachi-acp-3","result":{"content":[{"type":
             command: "/bin/sh".to_string(),
             args: vec![adapter.to_string_lossy().to_string()],
             cwd: temp.path().to_path_buf(),
+            cwd_authority: None,
             prompt: "test prompt".to_string(),
             mode: super::NativeAcpRunMode::OneShot,
             permission_label: "approve-reads".to_string(),
@@ -148,6 +252,7 @@ printf '%s\n' '{"jsonrpc":"2.0","id":"tachi-acp-3","result":{"content":[{"type":
             session_distill_path: None,
             metadata: json!({}),
             env: HashMap::new(),
+            env_remove: std::collections::HashSet::new(),
         },
         temp.path(),
         &temp.path().join("trajectory.jsonl"),
@@ -160,6 +265,189 @@ printf '%s\n' '{"jsonrpc":"2.0","id":"tachi-acp-3","result":{"content":[{"type":
 
     assert_eq!(outcome.output, "done");
     assert_eq!(outcome.observed_model.as_deref(), Some("openai/gpt-5.2"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn required_postflight_stages_native_acp_artifacts_until_parent_release() {
+    use std::collections::HashMap;
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::Duration;
+
+    let temp = tempfile::tempdir().expect("temp ACP run directory");
+    let adapter = temp.path().join("adapter.sh");
+    std::fs::write(
+        &adapter,
+        r#"#!/bin/sh
+IFS= read -r _
+printf '%s\n' '{"jsonrpc":"2.0","id":"tachi-acp-1","result":{"protocolVersion":1}}'
+IFS= read -r _
+printf '%s\n' '{"jsonrpc":"2.0","id":"tachi-acp-2","result":{"sessionId":"s-1"}}'
+IFS= read -r _
+printf '%s\n' '{"jsonrpc":"2.0","id":"permission-1","method":"session/request_permission","params":{"toolCall":{"kind":"SECRET-WORKER-TOOL-KIND"},"options":[{"optionId":"once"}]}}'
+IFS= read -r _
+printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s-1","update":{"sessionUpdate":"agent_message","content":{"type":"text","text":"sensitive-native-output"}}}}'
+printf '%s\n' '{"jsonrpc":"2.0","id":"tachi-acp-3","result":{}}'
+"#,
+    )
+    .expect("write ACP adapter fixture");
+    let mut permissions = std::fs::metadata(&adapter)
+        .expect("adapter metadata")
+        .permissions();
+    permissions.set_mode(0o700);
+    std::fs::set_permissions(&adapter, permissions).expect("make adapter executable");
+
+    let trajectory = temp.path().join("trajectory.jsonl");
+    let session_record = temp.path().join("session.json");
+    let session_distill = temp.path().join("session.md");
+    crate::utils::write_owner_only_file_atomic(&trajectory, b"").expect("trajectory");
+    let mut outcome = super::run_native_acp_dispatch_with_liveness(
+        super::NativeAcpRunSpec {
+            command: "/bin/sh".to_string(),
+            args: vec![adapter.to_string_lossy().to_string()],
+            cwd: temp.path().to_path_buf(),
+            cwd_authority: None,
+            prompt: "test prompt".to_string(),
+            mode: super::NativeAcpRunMode::Session,
+            permission_label: "approve-reads".to_string(),
+            session: Some(super::NativeAcpSession {
+                name: "postflight-session".to_string(),
+                source: "test",
+            }),
+            session_record_path: Some(session_record.clone()),
+            session_distill_path: Some(session_distill.clone()),
+            metadata: json!({}),
+            env: HashMap::new(),
+            env_remove: std::collections::HashSet::new(),
+        },
+        temp.path(),
+        &trajectory,
+        "staged-dispatch",
+        "codex",
+        Duration::from_secs(2),
+        true,
+    )
+    .await;
+
+    assert_eq!(
+        outcome.result.as_ref().expect("dispatch result").output,
+        "sensitive-native-output"
+    );
+    assert!(!temp.path().join(super::ACP_STREAM_FILE).exists());
+    assert!(!temp.path().join("progress.jsonl").exists());
+    assert!(!session_record.exists());
+    assert!(!session_distill.exists());
+    let preflight_trajectory = std::fs::read_to_string(&trajectory).expect("trajectory");
+    assert!(!preflight_trajectory.contains("sensitive-native-output"));
+    assert!(!preflight_trajectory.contains("SECRET-WORKER-TOOL-KIND"));
+
+    let deferred = outcome
+        .deferred_native_acp
+        .take()
+        .expect("parent-owned deferred artifacts");
+    let blocker = temp.path().join("not-a-directory");
+    std::fs::write(&blocker, b"block session parent").expect("write blocker");
+    let mut failing = deferred.clone();
+    failing.spec.session_record_path = Some(blocker.join("session.json"));
+    let error = super::publish_native_acp_artifacts(
+        failing,
+        temp.path(),
+        &trajectory,
+        "staged-dispatch",
+        "codex",
+        false,
+    )
+    .expect_err("session metadata failure must precede raw carrier publication");
+    assert!(error.contains("native ACP session dir"), "{error}");
+    assert!(
+        !temp.path().join(super::ACP_STREAM_FILE).exists(),
+        "a later metadata failure must not leave raw output visible"
+    );
+
+    super::publish_native_acp_artifacts(
+        deferred,
+        temp.path(),
+        &trajectory,
+        "staged-dispatch",
+        "codex",
+        false,
+    )
+    .expect("publish after clean postflight");
+    assert!(
+        std::fs::read_to_string(temp.path().join(super::ACP_STREAM_FILE))
+            .expect("raw stream")
+            .contains("sensitive-native-output")
+    );
+    let released_trajectory = std::fs::read_to_string(&trajectory).expect("released trajectory");
+    assert!(!released_trajectory.contains("SECRET-WORKER-TOOL-KIND"));
+    assert!(released_trajectory.contains("[withheld pending exec_env_postflight]"));
+    let progress =
+        std::fs::read_to_string(temp.path().join("progress.jsonl")).expect("sanitized progress");
+    assert!(!progress.contains("sensitive-native-output"));
+    assert!(progress.contains("\"worker_mappings_published\":false"));
+    assert!(!std::fs::read_to_string(session_record)
+        .expect("sanitized session record")
+        .contains("sensitive-native-output"));
+    assert!(!std::fs::read_to_string(session_distill)
+        .expect("sanitized session distill")
+        .contains("sensitive-native-output"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn native_acp_timeout_returns_runner_owned_terminal_liveness() {
+    use std::collections::HashMap;
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::Duration;
+
+    let temp = tempfile::tempdir().expect("temp ACP run directory");
+    let adapter = temp.path().join("slow-adapter.sh");
+    std::fs::write(&adapter, "#!/bin/sh\nsleep 30\n").expect("write slow ACP adapter");
+    let mut permissions = std::fs::metadata(&adapter)
+        .expect("adapter metadata")
+        .permissions();
+    permissions.set_mode(0o700);
+    std::fs::set_permissions(&adapter, permissions).expect("make adapter executable");
+
+    let outcome = super::run_native_acp_dispatch_with_liveness(
+        super::NativeAcpRunSpec {
+            command: "/bin/sh".to_string(),
+            args: vec![adapter.to_string_lossy().to_string()],
+            cwd: temp.path().to_path_buf(),
+            cwd_authority: None,
+            prompt: "timeout test".to_string(),
+            mode: super::NativeAcpRunMode::OneShot,
+            permission_label: "approve-reads".to_string(),
+            session: None,
+            session_record_path: None,
+            session_distill_path: None,
+            metadata: json!({}),
+            env: HashMap::new(),
+            env_remove: std::collections::HashSet::new(),
+        },
+        temp.path(),
+        &temp.path().join("trajectory.jsonl"),
+        "timeout-dispatch",
+        "codex",
+        Duration::from_millis(100),
+        false,
+    )
+    .await;
+
+    assert!(matches!(
+        &outcome.liveness,
+        crate::exec_env_postflight::RunnerLivenessEvidence::Indeterminate { detail }
+            if detail.contains("setsid")
+    ));
+    let error = match outcome.result {
+        Ok(_) => panic!("slow native adapter must time out"),
+        Err(error) => error,
+    };
+    assert!(error.contains("timed out"), "{error}");
+    assert!(
+        crate::exec_env_postflight::DescendantLiveness::any_alive(&outcome.liveness).is_err(),
+        "process-group absence cannot prove that no setsid descendant escaped"
+    );
 }
 
 /// Realistic ACP `PermissionOption` list: every option carries the typed

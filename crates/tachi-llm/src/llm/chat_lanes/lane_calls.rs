@@ -7,12 +7,23 @@ use serde_json::{self, Value};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use super::super::auth_probe_descriptor_for_host;
 use super::super::catalog_import::DeploymentAttribution;
 use super::super::provider_health::{
-    ChatLane, ChatLaneConfig, CompletionStatusV1, Generated, ModelInvocationLaneV1,
-    ProviderInvocationFailure, ProviderInvocationFailureClass, ProviderInvocationOutcome,
-    ProviderInvocationReceipt, SelectedProviderSecret,
+    bind_lane_config_to_selected_key, ChatLane, ChatLaneConfig, CompletionStatusV1, Generated,
+    LaneAuthority, ModelInvocationLaneV1, ProviderAuthProbeFamily, ProviderInvocationFailure,
+    ProviderInvocationFailureClass, ProviderInvocationOutcome, ProviderInvocationReceipt,
+    SelectedProviderSecret,
 };
+
+/// Exact-host family for thinking-suppression fields. Lookalikes and custom
+/// OpenAI-compatible hosts are `None` — never inherit SiliconFlow or DeepSeek
+/// request keys from a substring match on the full URL.
+fn thinking_suppression_family(base_url: &str) -> Option<ProviderAuthProbeFamily> {
+    let url = Url::parse(base_url).ok()?;
+    let host = url.host_str()?;
+    auth_probe_descriptor_for_host(host).map(|descriptor| descriptor.family)
+}
 
 /// Maximum retained characters from a caller-supplied model override.
 const MAX_REFERENCE_CHARS: usize = 64;
@@ -83,13 +94,40 @@ impl super::super::LlmClient {
             return false;
         }
 
-        // Legacy heuristic: disable for specific provider/model combinations
-        // This is kept as a fallback for backwards compatibility
-        if !base_url.to_ascii_lowercase().contains("siliconflow") {
-            return false;
-        }
+        // Flash is the extract/summary/distill default: official DeepSeek V4
+        // thinking is on by default and a tiny probe budget then returns empty
+        // content (finish_reason=length, all tokens in reasoning). Pro keeps
+        // thinking unless the env override above names it. Unknown hosts stay
+        // false — suppression fields are host-specific and must not be guessed.
         let model = model.to_ascii_lowercase();
-        model.contains("qwen") || model.contains("deepseek")
+        match thinking_suppression_family(base_url) {
+            Some(ProviderAuthProbeFamily::DeepSeek) => model.contains("deepseek-v4-flash"),
+            Some(ProviderAuthProbeFamily::SiliconFlow) => {
+                model.contains("qwen") || model.contains("deepseek")
+            }
+            _ => false,
+        }
+    }
+
+    /// Attach the provider-shaped "no thinking" fields for a chat body.
+    /// SiliconFlow reads `enable_thinking`. Official DeepSeek V4 documents
+    /// `thinking: {type: disabled}` and does not document `enable_thinking`.
+    /// Emit a family only after the exact probe-table host matches. Custom
+    /// OpenAI-compatible hosts get neither field, even when the env override
+    /// asked to disable thinking — unknown hosts reject unknown keys.
+    pub(super) fn apply_thinking_suppression(body: &mut Value, base_url: &str, model: &str) {
+        if !Self::should_disable_thinking(base_url, model) {
+            return;
+        }
+        match thinking_suppression_family(base_url) {
+            Some(ProviderAuthProbeFamily::DeepSeek) => {
+                body["thinking"] = serde_json::json!({ "type": "disabled" });
+            }
+            Some(ProviderAuthProbeFamily::SiliconFlow) => {
+                body["enable_thinking"] = Value::Bool(false);
+            }
+            _ => {}
+        }
     }
 
     pub async fn call_extract_llm(
@@ -208,6 +246,7 @@ impl super::super::LlmClient {
     ) -> Result<ProviderInvocationOutcome, ProviderInvocationFailure> {
         let lane = ChatLane::Reasoning;
         let cfg = self.lane(lane).clone();
+        let authority = self.lane_authority(lane);
 
         let breaker_key = format!("chat:{}", lane.as_str());
         if !self.circuit_breakers.allow(&breaker_key) {
@@ -221,6 +260,7 @@ impl super::super::LlmClient {
             .call_provider_tier(
                 lane,
                 &cfg,
+                authority,
                 &breaker_key,
                 1,
                 system,
@@ -310,11 +350,12 @@ impl super::super::LlmClient {
         max_tokens: u32,
     ) -> Result<ProviderInvocationOutcome, String> {
         let primary_cfg = self.lane(lane).clone();
+        let primary_authority = self.lane_authority(lane);
         let primary_breaker_key = format!("chat:{}", lane.as_str());
 
-        let mut tiers: Vec<(ChatLaneConfig, String)> =
-            vec![(primary_cfg.clone(), primary_breaker_key)];
-        if let Some(fallback_cfg) = self.fallback_lane(lane) {
+        let mut tiers: Vec<(ChatLaneConfig, LaneAuthority, String)> =
+            vec![(primary_cfg.clone(), primary_authority, primary_breaker_key)];
+        if let Some((fallback_cfg, fallback_authority)) = self.fallback_lane_with_authority(lane) {
             // A fallback that resolves to the exact same provider config as
             // primary (e.g. no `*_FALLBACK_*` env configured and the
             // convenience default happens to match) carries no resilience
@@ -322,13 +363,13 @@ impl super::super::LlmClient {
             // twice under a different breaker key.
             if fallback_cfg != primary_cfg {
                 let fallback_breaker_key = format!("chat:{}:fallback", lane.as_str());
-                tiers.push((fallback_cfg, fallback_breaker_key));
+                tiers.push((fallback_cfg, fallback_authority, fallback_breaker_key));
             }
         }
         let tier_count = tiers.len();
 
         let mut last_err = String::new();
-        for (tier_index, (cfg, breaker_key)) in tiers.into_iter().enumerate() {
+        for (tier_index, (cfg, authority, breaker_key)) in tiers.into_iter().enumerate() {
             if !self.circuit_breakers.allow(&breaker_key) {
                 last_err = format!(
                     "Circuit breaker open for {} (lane {}, tier {tier_index}/{tier_count}) — provider is failing, fast-rejecting. Retry in ~30s.",
@@ -342,6 +383,7 @@ impl super::super::LlmClient {
                 .call_provider_tier(
                     lane,
                     &cfg,
+                    authority,
                     &breaker_key,
                     Self::MAX_ATTEMPTS,
                     system,
@@ -392,6 +434,7 @@ impl super::super::LlmClient {
         &self,
         lane: ChatLane,
         cfg: &ChatLaneConfig,
+        authority: LaneAuthority,
         breaker_key: &str,
         max_attempts: usize,
         system: &str,
@@ -402,31 +445,6 @@ impl super::super::LlmClient {
     ) -> Result<ProviderInvocationOutcome, ProviderTierFailure> {
         debug_assert!(max_attempts > 0);
         let tier_started = Instant::now();
-        let model = model_override.unwrap_or(&cfg.model);
-        // Which catalog deployment this tier's requests are attributable to
-        // (#1681 D4, PR-C). Identity only — the store checks the endpoint and
-        // model against the stored row, so a #1197 fallback tier or a
-        // `model_override` lands as a counted skip rather than as health for a
-        // deployment that never served this request.
-        let attribution = DeploymentAttribution::EnvLane {
-            lane: lane.as_str(),
-            endpoint: &cfg.base_url,
-            model,
-        };
-
-        let mut body = serde_json::json!({
-            "model": model,
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user}
-            ],
-            "temperature": temperature,
-            "max_tokens": max_tokens
-        });
-        if Self::should_disable_thinking(&cfg.base_url, model) {
-            body["enable_thinking"] = Value::Bool(false);
-        }
-
         let mut last_err = String::new();
         let mut last_class = ProviderInvocationFailureClass::LaneOutage;
         let mut provider_attempts = 0;
@@ -444,11 +462,47 @@ impl super::super::LlmClient {
             else {
                 continue;
             };
+            let bound = bind_lane_config_to_selected_key(
+                lane,
+                cfg,
+                authority,
+                &selected.logical_name,
+                self.rebind_selected_provider,
+            )
+            .map_err(|safe_detail| ProviderTierFailure {
+                class: ProviderInvocationFailureClass::LaneOutage,
+                provider_attempts,
+                latency_ms: tier_started.elapsed().as_millis(),
+                safe_detail,
+            })?;
+            let model = model_override.unwrap_or(bound.model.as_str());
+            // Which catalog deployment this tier's requests are attributable to
+            // (#1681 D4, PR-C). Identity only — the store checks the endpoint and
+            // model against the stored row, so a #1197 fallback tier or a
+            // `model_override` lands as a counted skip rather than as health for a
+            // deployment that never served this request.
+            let attribution = DeploymentAttribution::EnvLane {
+                lane: lane.as_str(),
+                endpoint: &bound.base_url,
+                model,
+            };
+
+            let mut body = serde_json::json!({
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user}
+                ],
+                "temperature": temperature,
+                "max_tokens": max_tokens
+            });
+            Self::apply_thinking_suppression(&mut body, &bound.base_url, model);
+
             let attempt_started = Instant::now();
             provider_attempts += 1;
             let resp = self
                 .http_client()
-                .post(&cfg.base_url)
+                .post(&bound.base_url)
                 .header(CONTENT_TYPE, "application/json")
                 .header(AUTHORIZATION, format!("Bearer {}", selected.value))
                 .json(&body)
@@ -734,7 +788,7 @@ impl super::super::LlmClient {
                 self.record_successful_llm_usage(
                     lane,
                     &bounded_reference(model),
-                    &cfg.base_url,
+                    &bound.base_url,
                     &selected,
                     usage,
                     max_tokens,
@@ -747,7 +801,7 @@ impl super::super::LlmClient {
                     truncated: completion_status == CompletionStatusV1::Truncated,
                     completion_status,
                     receipt: ProviderInvocationReceipt {
-                        effective_provider: provider_host(&cfg.base_url),
+                        effective_provider: provider_host(&bound.base_url),
                         effective_model: json
                             .get("model")
                             .and_then(Value::as_str)
@@ -1042,5 +1096,78 @@ mod failure_class_tests {
             assert!(!class.as_str().contains("secret"));
             assert!(!class.as_str().contains("prompt"));
         }
+    }
+
+    #[test]
+    fn official_flash_suppresses_thinking_pro_does_not() {
+        assert!(
+            super::super::super::LlmClient::should_disable_thinking(
+                "https://api.deepseek.com/chat/completions",
+                "deepseek-v4-flash",
+            ),
+            "Flash extract/distill probes empty-content when thinking is left on"
+        );
+        assert!(
+            !super::super::super::LlmClient::should_disable_thinking(
+                "https://api.deepseek.com/chat/completions",
+                "deepseek-v4-pro",
+            ),
+            "Pro reasoning keeps official thinking unless env-overridden"
+        );
+
+        let mut flash = serde_json::json!({"model": "deepseek-v4-flash"});
+        super::super::super::LlmClient::apply_thinking_suppression(
+            &mut flash,
+            "https://api.deepseek.com/chat/completions",
+            "deepseek-v4-flash",
+        );
+        assert!(
+            flash.get("enable_thinking").is_none(),
+            "official DeepSeek does not document enable_thinking: {flash}"
+        );
+        assert_eq!(flash["thinking"]["type"], "disabled");
+
+        let mut pro = serde_json::json!({"model": "deepseek-v4-pro"});
+        super::super::super::LlmClient::apply_thinking_suppression(
+            &mut pro,
+            "https://api.deepseek.com/chat/completions",
+            "deepseek-v4-pro",
+        );
+        assert!(pro.get("enable_thinking").is_none());
+        assert!(pro.get("thinking").is_none());
+
+        let mut siliconflow = serde_json::json!({"model": "Qwen/Qwen3.5-27B"});
+        super::super::super::LlmClient::apply_thinking_suppression(
+            &mut siliconflow,
+            "https://api.siliconflow.cn/v1/chat/completions",
+            "Qwen/Qwen3.5-27B",
+        );
+        assert_eq!(siliconflow["enable_thinking"], false);
+        assert!(
+            siliconflow.get("thinking").is_none(),
+            "SiliconFlow does not document official DeepSeek thinking: {siliconflow}"
+        );
+
+        let mut custom = serde_json::json!({"model": "deepseek-v4-flash"});
+        super::super::super::LlmClient::apply_thinking_suppression(
+            &mut custom,
+            "https://llm.example.test/v1/chat/completions",
+            "deepseek-v4-flash",
+        );
+        assert!(
+            custom.get("enable_thinking").is_none() && custom.get("thinking").is_none(),
+            "unknown OpenAI-compatible hosts must not inherit either suppression field: {custom}"
+        );
+
+        let mut lookalike = serde_json::json!({"model": "deepseek-v4-flash"});
+        super::super::super::LlmClient::apply_thinking_suppression(
+            &mut lookalike,
+            "https://api.deepseek.com.attacker.invalid/chat/completions",
+            "deepseek-v4-flash",
+        );
+        assert!(
+            lookalike.get("enable_thinking").is_none() && lookalike.get("thinking").is_none(),
+            "probe-table lookalikes must not inherit DeepSeek suppression: {lookalike}"
+        );
     }
 }
