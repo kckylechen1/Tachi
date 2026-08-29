@@ -289,3 +289,71 @@ async fn concurrent_first_writers_cannot_bypass_lane_slot_rebind() {
     assert_eq!(refusals, 15);
     assert_eq!(slot_value(&server, "EXTRACT_API_KEY").await, winner);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn independent_store_connection_cannot_bypass_lane_slot_rebind() {
+    let server = make_server();
+    server
+        .vault_init(Parameters(VaultInitParams {
+            password: "slot-rebind-cross-connection".to_string(),
+        }))
+        .await
+        .expect("init");
+    server
+        .vault_set(Parameters(slot_params(
+            "SILICONFLOW_API_KEY",
+            "external-account-family",
+            false,
+        )))
+        .await
+        .expect("seed account");
+
+    let db_path = server.global_db_path_buf();
+    let mut competing_store = memcore::MemoryStore::open(
+        db_path
+            .to_str()
+            .expect("global fixture database path is UTF-8"),
+    )
+    .expect("open independent store connection");
+    let transaction = competing_store
+        .begin_vault_transaction()
+        .expect("begin competing immediate transaction");
+    let mut copied_account = transaction
+        .vault_get_entry("SILICONFLOW_API_KEY")
+        .expect("read seeded account")
+        .expect("seeded account exists");
+    copied_account.name = "EXTRACT_API_KEY".to_string();
+    transaction
+        .vault_upsert_entry(&copied_account)
+        .expect("stage competing slot write");
+
+    let independent_server = std::ops::Deref::deref(&server).clone();
+    let writer = tokio::spawn(async move {
+        independent_server
+            .vault_set(Parameters(slot_params(
+                "EXTRACT_API_KEY",
+                "mcp-writer-family",
+                false,
+            )))
+            .await
+    });
+
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(
+        !writer.is_finished(),
+        "MCP writer must wait for the independent SQLite writer"
+    );
+    transaction.commit().expect("commit competing slot write");
+
+    let error = writer
+        .await
+        .expect("MCP writer task")
+        .expect_err("MCP writer must re-evaluate after the competing commit");
+    assert!(error.contains("rebind"), "{error}");
+    assert!(!error.contains("external-account-family"), "{error}");
+    assert!(!error.contains("mcp-writer-family"), "{error}");
+    assert_eq!(
+        slot_value(&server, "EXTRACT_API_KEY").await,
+        "external-account-family"
+    );
+}

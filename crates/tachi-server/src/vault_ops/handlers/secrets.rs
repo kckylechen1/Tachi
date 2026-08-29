@@ -19,17 +19,19 @@ pub(crate) async fn handle_vault_set(
             let (encrypted_value, nonce) = crypto::encrypt(key, params.value.as_bytes())?;
 
             server.with_global_store(|store| {
-                // Keep the old-value decision and the resulting write under
-                // one store lease. Splitting these operations lets two
-                // concurrent vault_set calls both pass the fingerprint check
-                // and then silently overwrite each other (tachi#1861).
-                let is_new = !store
+                // Keep the old-value decision and the resulting write in one
+                // IMMEDIATE SQLite transaction. The in-process store lease is
+                // not enough: the direct CLI opens an independent connection.
+                let transaction = store
+                    .begin_vault_transaction()
+                    .map_err(|e| format!("Failed to begin vault transaction: {e}"))?;
+                let is_new = !transaction
                     .vault_entry_exists(&params.name)
                     .map_err(|e| format!("Failed to check existing entry: {e}"))?;
 
                 let mut rebind_meta: Option<(bool, String, String)> = None;
                 if is_lane_slot_secret_name(&params.name) && secret_type == SECRET_TYPE_API_KEY {
-                    let entries = store
+                    let entries = transaction
                         .vault_list_entries()
                         .map_err(|e| format!("Failed to list entries: {e}"))?;
                     for other in entries {
@@ -46,18 +48,21 @@ pub(crate) async fn handle_vault_set(
                         else {
                             continue;
                         };
-                        let Ok(other_value) = String::from_utf8(plain) else {
+                        let Ok(mut other_value) = crypto::decode_utf8_zeroizing(
+                            plain,
+                            "Vault account secret is not valid UTF-8",
+                        ) else {
                             continue;
                         };
-                        if fingerprint_secret(key, kind, &other_value)
-                            == fingerprint_secret(key, kind, &params.value)
-                        {
+                        let other_fingerprint = fingerprint_secret(key, kind, &other_value);
+                        crypto::zero_string(&mut other_value);
+                        if other_fingerprint == fingerprint_secret(key, kind, &params.value) {
                             return Err(copy_existing_account_message(&params.name, &other.name));
                         }
                     }
 
                     if !is_new {
-                        let existing = store
+                        let existing = transaction
                             .vault_get_entry(&params.name)
                             .map_err(|e| format!("Failed to read existing slot: {e}"))?;
                         if let Some(existing) = existing {
@@ -67,21 +72,21 @@ pub(crate) async fn handle_vault_set(
                                     &existing.encrypted_value,
                                     &existing.nonce,
                                 )?;
-                                let old_value = String::from_utf8(old_bytes).map_err(|e| {
-                                    format!(
-                                        "Existing slot '{}' is not valid UTF-8: {e}",
-                                        params.name
-                                    )
-                                })?;
+                                let mut old_value = crypto::decode_utf8_zeroizing(
+                                    old_bytes,
+                                    format!("Existing slot '{}' is not valid UTF-8", params.name),
+                                )?;
                                 let provider_kind =
                                     provider_kind_for_env_name(&params.name).unwrap_or("unknown");
-                                match evaluate_lane_slot_overwrite(
+                                let overwrite = evaluate_lane_slot_overwrite(
                                     &old_value,
                                     &params.value,
                                     provider_kind,
                                     key,
                                     params.rebind,
-                                ) {
+                                );
+                                crypto::zero_string(&mut old_value);
+                                match overwrite {
                                     Ok(LaneSlotOverwrite::Identical { fingerprint }) => {
                                         rebind_meta =
                                             Some((false, fingerprint.clone(), fingerprint));
@@ -110,7 +115,7 @@ pub(crate) async fn handle_vault_set(
                     access_count: 0,
                 };
 
-                store
+                transaction
                     .vault_upsert_entry(&entry)
                     .map_err(|e| format!("Failed to save secret: {e}"))?;
 
@@ -126,7 +131,7 @@ pub(crate) async fn handle_vault_set(
                                     .unwrap_or_else(|| "round_robin".to_string()),
                             );
 
-                            let all_entries = store
+                            let all_entries = transaction
                                 .vault_list_entries()
                                 .map_err(|e| format!("Failed to list entries: {e}"))?;
 
@@ -141,12 +146,16 @@ pub(crate) async fn handle_vault_set(
                                 updated_at: Utc::now().to_rfc3339(),
                             };
 
-                            store
+                            transaction
                                 .vault_set_rotation(&rotation)
                                 .map_err(|e| format!("Failed to save rotation config: {e}"))?;
                         }
                     }
                 }
+
+                transaction
+                    .commit()
+                    .map_err(|e| format!("Failed to commit vault transaction: {e}"))?;
 
                 let mut body = json!({
                     "stored": true,

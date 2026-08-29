@@ -1015,7 +1015,9 @@ const EXEMPTIONS: &[Exemption<'static>] = &[
     },
     Exemption {
         path: "crates/memcore/src/store/vault.rs",
-        basis: ExemptionBasis::Proven(MachineProof::NoStoreDoorwayInFile),
+        basis: ExemptionBasis::DeclaredByReviewerNotProven {
+            signed_by: "Codex Sol, body read 2026-08-30",
+        },
         sites: &[Site {
             symbol: "vault_replace_api_key_pool_rolls_back_when_rotation_write_fails",
             trigger: "FAIL_POOL_ROTATION",
@@ -1023,10 +1025,12 @@ const EXEMPTIONS: &[Exemption<'static>] = &[
             occurrences: 1,
         }],
         reason: "vault_replace_api_key_pool_rolls_back_when_rotation_write_fails \
-                 — memcore's raw second-connection idiom, the shape #1443's \
-                 doorway doc points fixture authors at. Re-derived: this file \
-                 names no store doorway at all, so the trigger cannot be \
-                 reaching a guarded connection from here.",
+                 installs FAIL_POOL_ROTATION through a raw second rusqlite \
+                 connection opened from the store path. The trigger is test-only \
+                 failure injection and is not installed through the guarded \
+                 MemoryStore connection. Body read 2026-08-30; this declaration \
+                 replaces the former NoStoreDoorwayInFile proof after the \
+                 production vault transaction API added a real doorway.",
     },
     Exemption {
         path: "crates/tachi-server/src/bootstrap/wiki_corpus/apply.rs",
