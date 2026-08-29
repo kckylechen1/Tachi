@@ -120,6 +120,12 @@ fn durable_load_from_keychain_scan(
     }
 }
 
+fn should_use_default_vault_fallback(load: &tachi_llm::DurableVaultLoad) -> bool {
+    load.availability == VaultSourceAvailability::Readable
+        || !load.pools.is_empty()
+        || !load.listed_drops.is_empty()
+}
+
 /// Prefix aliases resolve `VOYAGE_API_KEY`, not `VOYAGE_API_KEY_1`. Copy a
 /// member drop onto a configured rotation prefix only when that prefix has
 /// no admitted pool — unconfigured member names must not invent prefix
@@ -210,7 +216,7 @@ fn resolve_vault_pools(
     }
 
     let fallback = vault_api_key_load_from_keychain(&default_global)?;
-    if !fallback.pools.is_empty() || !fallback.listed_drops.is_empty() {
+    if should_use_default_vault_fallback(&fallback) {
         tracing::warn!(
             "[provider] global DB {} has no initialized Vault; using default Vault DB {} for provider key materialization",
             global_db_path.display(),
@@ -1463,10 +1469,23 @@ mod tests {
     }
 
     #[test]
+    fn readable_empty_default_vault_fallback_stays_readable() {
+        let fallback = tachi_llm::DurableVaultLoad {
+            pools: HashMap::new(),
+            listed_drops: HashMap::new(),
+            availability: VaultSourceAvailability::Readable,
+        };
+        assert!(
+            should_use_default_vault_fallback(&fallback),
+            "a readable empty fallback must take the production return branch"
+        );
+    }
+
+    #[test]
     fn configured_rotation_prefix_drop_uses_lowest_member_deterministically() {
         let mut drops = HashMap::from([
             (
-                "VOYAGE_API_KEY_2".to_string(),
+                "VOYAGE_API_KEY_10".to_string(),
                 tachi_llm::AliasSkipClass::ListedFenced,
             ),
             (

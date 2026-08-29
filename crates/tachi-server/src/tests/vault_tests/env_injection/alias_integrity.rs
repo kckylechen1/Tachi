@@ -475,6 +475,94 @@ async fn unhealthy_configured_rotation_member_cannot_fall_back_as_standalone() {
     );
 }
 
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn unlocked_rotation_prefix_drop_uses_lowest_member_across_current_index() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let server = make_server();
+
+    server
+        .vault_init(Parameters(VaultInitParams {
+            password: "alias-integrity-mixed-rotation".to_string(),
+        }))
+        .await
+        .expect("vault_init");
+    for member in ["VOYAGE_API_KEY_1", "VOYAGE_API_KEY_2"] {
+        server
+            .vault_set(Parameters(VaultSetParams {
+                name: member.to_string(),
+                value: format!("{member}-fixture"),
+                agent_id: None,
+                secret_type: "api_key".to_string(),
+                description: "mixed rotation control member".to_string(),
+                allowed_agents: None,
+                enable_rotation: false,
+                rotation_strategy: None,
+            }))
+            .await
+            .expect("vault_set member");
+    }
+    server
+        .vault_setup_rotation(Parameters(VaultSetupRotationParams {
+            prefix: "VOYAGE_API_KEY".to_string(),
+            agent_id: None,
+            total_keys: 2,
+            strategy: "round_robin".to_string(),
+        }))
+        .await
+        .expect("vault_setup_rotation");
+    server
+        .vault_set(Parameters(VaultSetParams {
+            name: "VOYAGE_API_KEY_1".to_string(),
+            value: "wrong-type-member".to_string(),
+            agent_id: None,
+            secret_type: "other".to_string(),
+            description: "lowest member determines prefix class".to_string(),
+            allowed_agents: None,
+            enable_rotation: false,
+            rotation_strategy: None,
+        }))
+        .await
+        .expect("replace member one");
+    server
+        .vault_set(Parameters(VaultSetParams {
+            name: "VOYAGE_API_KEY_2".to_string(),
+            value: "fenced-member".to_string(),
+            agent_id: None,
+            secret_type: "api_key".to_string(),
+            description: "higher fenced member".to_string(),
+            allowed_agents: Some(vec!["agent-a".to_string()]),
+            enable_rotation: false,
+            rotation_strategy: None,
+        }))
+        .await
+        .expect("replace member two");
+
+    for current_index in [1, 2] {
+        server
+            .with_global_store(|store| {
+                let mut rotation = store
+                    .vault_get_rotation("VOYAGE_API_KEY")
+                    .map_err(|error| error.to_string())?
+                    .expect("configured rotation");
+                rotation.current_index = current_index;
+                store
+                    .vault_set_rotation(&rotation)
+                    .map_err(|error| error.to_string())
+            })
+            .expect("set current index");
+        let scan = crate::vault_ops::load_unlocked_api_key_secret_pools_with_drops(&server)
+            .expect("scan configured rotation");
+        assert_eq!(
+            scan.dropped.get("VOYAGE_API_KEY"),
+            Some(&AliasSkipClass::ListedWrongType),
+            "current index {current_index} must not change the prefix class"
+        );
+    }
+}
+
 /// Corrupt listed payloads fail the real refresh seam without exposing the
 /// alias target or the decoder's byte-position/length details (#1854).
 #[tokio::test]

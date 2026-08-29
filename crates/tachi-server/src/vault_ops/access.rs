@@ -324,17 +324,17 @@ fn record_listed_drop(
     dropped.entry(name.to_string()).or_insert(class);
 }
 
-/// Rotation aliases look up the prefix (`VOYAGE_API_KEY`), not the member
-/// (`VOYAGE_API_KEY_1`). Record both so an all-skipped rotation is
-/// `ListedFenced` / `ListedEmpty` / … instead of `SecretAbsent`.
-fn record_rotation_listed_drop(
+fn record_rotation_member_drop(
     dropped: &mut HashMap<String, AliasSkipClass>,
-    prefix: &str,
+    prefix_drop: &mut Option<(u32, AliasSkipClass)>,
+    member_index: u32,
     member_name: &str,
     class: AliasSkipClass,
 ) {
     record_listed_drop(dropped, member_name, class);
-    record_listed_drop(dropped, prefix, class);
+    if prefix_drop.is_none_or(|(lowest_index, _)| member_index < lowest_index) {
+        *prefix_drop = Some((member_index, class));
+    }
 }
 
 fn load_unlocked_api_key_secret_pools_filtered(
@@ -435,15 +435,17 @@ fn load_unlocked_api_key_secret_pools_filtered(
             };
             matching.rotate_left(selected_idx);
             let mut pool = Vec::new();
-            for (_, entry) in matching {
+            let mut prefix_drop = None;
+            for (member_index, entry) in matching {
                 // Membership is structural, not conditional on admission.
                 // A configured member rejected below must never fall through
                 // to the standalone raw-name pass and bypass prefix health.
                 rotation_members.insert(entry.name.clone());
                 if entry.secret_type != SECRET_TYPE_API_KEY {
-                    record_rotation_listed_drop(
+                    record_rotation_member_drop(
                         &mut dropped,
-                        &rotation.prefix,
+                        &mut prefix_drop,
+                        member_index,
                         &entry.name,
                         AliasSkipClass::ListedWrongType,
                     );
@@ -454,16 +456,23 @@ fn load_unlocked_api_key_secret_pools_filtered(
                     .as_ref()
                     .is_some_and(|agents| !agents.is_empty())
                 {
-                    record_rotation_listed_drop(
+                    record_rotation_member_drop(
                         &mut dropped,
-                        &rotation.prefix,
+                        &mut prefix_drop,
+                        member_index,
                         &entry.name,
                         AliasSkipClass::ListedFenced,
                     );
                     continue;
                 }
                 if let Some(class) = unusable_class(&rotation.prefix, &entry.name) {
-                    record_rotation_listed_drop(&mut dropped, &rotation.prefix, &entry.name, class);
+                    record_rotation_member_drop(
+                        &mut dropped,
+                        &mut prefix_drop,
+                        member_index,
+                        &entry.name,
+                        class,
+                    );
                     continue;
                 }
                 let decrypted = crypto::decrypt(key, &entry.encrypted_value, &entry.nonce)?;
@@ -472,9 +481,10 @@ fn load_unlocked_api_key_secret_pools_filtered(
                     super::VAULT_MATERIALIZATION_INVALID_UTF8,
                 )?;
                 if value.trim().is_empty() {
-                    record_rotation_listed_drop(
+                    record_rotation_member_drop(
                         &mut dropped,
-                        &rotation.prefix,
+                        &mut prefix_drop,
+                        member_index,
                         &entry.name,
                         AliasSkipClass::ListedEmpty,
                     );
@@ -489,6 +499,8 @@ fn load_unlocked_api_key_secret_pools_filtered(
             }
             if !pool.is_empty() {
                 pools.insert(rotation.prefix, pool);
+            } else if let Some((_, class)) = prefix_drop {
+                dropped.insert(rotation.prefix, class);
             }
         }
 
