@@ -35,6 +35,7 @@ async fn dispatch_legacy_vault_env_binding_still_injects_without_credential_prof
             allowed_agents: None,
             enable_rotation: false,
             rotation_strategy: None,
+            rebind: false,
         }))
         .await
         .expect("vault_set should succeed");

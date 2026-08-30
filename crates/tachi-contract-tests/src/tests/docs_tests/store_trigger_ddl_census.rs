@@ -1014,7 +1014,7 @@ const EXEMPTIONS: &[Exemption<'static>] = &[
                  Enclosing symbols extracted mechanically; bodies NOT read.",
     },
     Exemption {
-        path: "crates/memcore/src/store/vault.rs",
+        path: "crates/memcore/src/store/vault/tests/vault_failure_injection.rs",
         basis: ExemptionBasis::Proven(MachineProof::NoStoreDoorwayInFile),
         sites: &[Site {
             symbol: "vault_replace_api_key_pool_rolls_back_when_rotation_write_fails",
@@ -1023,10 +1023,9 @@ const EXEMPTIONS: &[Exemption<'static>] = &[
             occurrences: 1,
         }],
         reason: "vault_replace_api_key_pool_rolls_back_when_rotation_write_fails \
-                 — memcore's raw second-connection idiom, the shape #1443's \
-                 doorway doc points fixture authors at. Re-derived: this file \
-                 names no store doorway at all, so the trigger cannot be \
-                 reaching a guarded connection from here.",
+                 — isolated raw second-connection failure fixture. Re-derived: \
+                 this dedicated file names no store doorway, so the trigger \
+                 cannot reach a guarded MemoryStore connection from here.",
     },
     Exemption {
         path: "crates/tachi-server/src/bootstrap/wiki_corpus/apply.rs",

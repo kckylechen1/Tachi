@@ -116,6 +116,7 @@ async fn explicit_lock_dominates_refresh_with_prelock_resolved_vault_pools() {
             allowed_agents: None,
             enable_rotation: false,
             rotation_strategy: None,
+            rebind: false,
         },
     )
     .await
@@ -332,6 +333,7 @@ fn locked_provider_refresh_auto_unlocks_once_without_recursive_materialization()
                     allowed_agents: None,
                     enable_rotation: false,
                     rotation_strategy: None,
+                    rebind: false,
                 },
             )
             .await
@@ -412,6 +414,7 @@ fn failed_keychain_auto_unlock_keeps_vault_locked_and_refresh_fails_loudly() {
                     allowed_agents: None,
                     enable_rotation: false,
                     rotation_strategy: None,
+                    rebind: false,
                 },
             )
             .await
@@ -476,6 +479,7 @@ fn bootstrap_auto_unlock_owns_one_provider_refresh() {
                     allowed_agents: None,
                     enable_rotation: false,
                     rotation_strategy: None,
+                    rebind: false,
                 },
             )
             .await
@@ -919,6 +923,40 @@ fn read_unlock_password_fifo_rejects_invalid_utf8_without_echoing_payload() {
         !err.contains("secret"),
         "error must not expose FIFO payload: {err}"
     );
+    assert!(!fifo_path.exists(), "daemon reader should remove FIFO");
+}
+
+#[cfg(unix)]
+#[test]
+fn read_unlock_password_fifo_rejects_oversized_payload_and_removes_fifo() {
+    use std::ffi::CString;
+    use std::io::Write;
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().expect("temp tachi home");
+    let unlock_dir = temp.path().join("runtime").join("vault-unlock");
+    std::fs::create_dir_all(&unlock_dir).expect("unlock dir");
+    std::fs::set_permissions(&unlock_dir, std::fs::Permissions::from_mode(0o700))
+        .expect("unlock dir perms");
+    let fifo_path = unlock_dir.join("oversized.fifo");
+    let c_path = CString::new(fifo_path.as_os_str().as_bytes()).expect("fifo path");
+    let rc = unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) };
+    assert_eq!(rc, 0, "mkfifo failed: {}", std::io::Error::last_os_error());
+
+    let writer_path = fifo_path.clone();
+    let writer = std::thread::spawn(move || {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(writer_path)
+            .expect("open fifo writer");
+        file.write_all(&vec![b'x'; 4097]).expect("write fifo");
+    });
+
+    let err = read_unlock_password_fifo(temp.path(), fifo_path.to_str().unwrap())
+        .expect_err("oversized FIFO password must fail");
+    writer.join().expect("writer thread");
+    assert_eq!(err, "unlock FIFO password exceeded maximum length");
     assert!(!fifo_path.exists(), "daemon reader should remove FIFO");
 }
 

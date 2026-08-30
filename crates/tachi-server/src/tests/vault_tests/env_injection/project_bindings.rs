@@ -25,6 +25,7 @@ async fn dispatch_vault_env_injection_resolves_project_bindings_from_cwd() {
                 allowed_agents: None,
                 enable_rotation: false,
                 rotation_strategy: None,
+                rebind: false,
             }))
             .await
             .expect("vault_set should succeed");

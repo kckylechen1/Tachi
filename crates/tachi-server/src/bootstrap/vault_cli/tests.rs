@@ -9,6 +9,7 @@ use super::password::{
     read_password_file, read_vault_init_password, read_vault_init_password_stdin_lines,
     read_vault_password,
 };
+use super::secret_actions::ZeroizingSecretString;
 use crate::test_support::EnvRestore;
 use std::io::{Cursor, Read};
 use std::path::Path;
@@ -50,6 +51,21 @@ fn config_for_password(password: &str) -> memcore::vault::VaultConfig {
 
 fn string_is_zeroed(value: &str) -> bool {
     value.as_bytes().iter().all(|byte| *byte == 0)
+}
+
+#[test]
+fn cli_secret_guard_zeroes_plaintext_on_early_error() {
+    let mut secret = "entered-secret-that-must-not-survive".to_string();
+    let result: Result<(), &str> = {
+        let _secret = ZeroizingSecretString(&mut secret);
+        Err("simulated store failure")
+    };
+
+    assert_eq!(result, Err("simulated store failure"));
+    assert!(
+        string_is_zeroed(&secret),
+        "CLI secret buffer was not zeroed on early return"
+    );
 }
 
 fn daemon_info(global_db: Option<&Path>) -> crate::cli_client::DaemonInfo {
@@ -101,6 +117,22 @@ fn stdin_init_password_reads_two_lines_without_waiting_for_eof() {
 }
 
 #[test]
+fn stdin_init_password_rejects_missing_confirmation_file_after_first_line() {
+    let mut input = Cursor::new("correct horse battery staple\n");
+    let missing = std::env::temp_dir().join(format!(
+        "tachi-missing-confirm-password-{}",
+        uuid::Uuid::new_v4()
+    ));
+
+    let err = read_vault_init_password_stdin_lines(&mut input, Some(&missing), false)
+        .expect_err("missing confirmation file must fail after reading the password");
+    assert!(
+        err.to_string().contains("Failed to inspect password file"),
+        "{err}"
+    );
+}
+
+#[test]
 fn derive_verified_vault_key_zeroes_password_on_success() {
     let config = config_for_password("correct horse battery staple");
     let mut password = "correct horse battery staple".to_string();
@@ -128,6 +160,21 @@ fn derive_verified_vault_key_zeroes_password_on_wrong_password() {
     assert!(
         string_is_zeroed(&password),
         "password buffer was not zeroed"
+    );
+}
+
+#[test]
+fn derive_verified_vault_key_zeroes_password_on_invalid_salt() {
+    let mut config = config_for_password("correct horse battery staple");
+    config.salt = "not-valid-base64%%%".to_string();
+    let mut password = "correct horse battery staple".to_string();
+
+    let err = derive_verified_vault_key_from_password(&config, &mut password)
+        .expect_err("invalid salt must fail");
+    assert!(err.to_string().contains("Invalid vault salt"), "{err}");
+    assert!(
+        string_is_zeroed(&password),
+        "password buffer was not zeroed after invalid salt"
     );
 }
 
@@ -195,6 +242,28 @@ fn vault_upsert_rejects_empty_value() {
     )
     .expect_err("empty value should be rejected");
     assert!(err.to_string().contains("empty"), "{err}");
+}
+
+#[test]
+fn legacy_vault_upsert_rejects_lane_slot_bypass() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("memory.db");
+    let key = vault_init_with_password(&db_path, "correct horse battery staple".to_string())
+        .expect("init vault");
+    let error = vault_upsert_secret_with_key(
+        &db_path,
+        &key,
+        "EXTRACT_API_KEY",
+        "api_key",
+        "",
+        "must-not-bypass-rebind".to_string(),
+    )
+    .expect_err("legacy helper must not write lane slots")
+    .to_string();
+
+    assert!(error.contains("EXTRACT_API_KEY"), "{error}");
+    assert!(error.contains("--rebind"), "{error}");
+    assert!(!error.contains("must-not-bypass-rebind"), "{error}");
 }
 
 #[test]

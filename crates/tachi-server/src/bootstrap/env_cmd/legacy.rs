@@ -26,12 +26,13 @@ pub(super) async fn run_legacy_env_export(
         })?;
 
     // 2. Resolve password from the requested portable source.
-    let password = vault_cli::read_vault_password(
+    let mut password = vault_cli::read_vault_password(
         stdin_password,
         keychain,
         password_file,
         insecure_password_file,
     )?;
+    let password = crate::vault_crypto::ZeroizingStringRef::new(&mut password);
 
     // 3. Derive key and verify
     use base64::{engine::general_purpose::STANDARD as B64, Engine};

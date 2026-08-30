@@ -23,6 +23,7 @@ async fn vault_remove_deletes_secret_and_audit_records() {
             allowed_agents: None,
             enable_rotation: false,
             rotation_strategy: None,
+            rebind: false,
         }))
         .await
         .expect("vault_set should succeed");
@@ -80,6 +81,7 @@ async fn vault_list_filters_by_secret_type() {
             allowed_agents: None,
             enable_rotation: false,
             rotation_strategy: None,
+            rebind: false,
         }))
         .await
         .expect("vault_set api_key should succeed");
@@ -94,6 +96,7 @@ async fn vault_list_filters_by_secret_type() {
             allowed_agents: None,
             enable_rotation: false,
             rotation_strategy: None,
+            rebind: false,
         }))
         .await
         .expect("vault_set oauth_token should succeed");

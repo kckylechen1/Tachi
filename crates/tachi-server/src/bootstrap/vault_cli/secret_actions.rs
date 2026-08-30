@@ -5,14 +5,42 @@ use super::output::{
     print_lease_output, vault_get_output,
 };
 use crate::bootstrap::{open_cli_store, open_cli_store_read_only};
-use std::io::Read;
+use std::io::BufRead;
+use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use tachi_bootstrap::cli::VaultAction;
+
+pub(super) struct ZeroizingSecretString<'a>(pub(super) &'a mut String);
+
+impl Deref for ZeroizingSecretString<'_> {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        self.0
+    }
+}
+
+impl Drop for ZeroizingSecretString<'_> {
+    fn drop(&mut self) {
+        crate::vault_crypto::zero_string(self.0);
+    }
+}
 
 pub(super) async fn run_secret_action(
     global_db_path: &PathBuf,
     app_home: &Path,
     action: VaultAction,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let stdin = std::io::stdin();
+    let mut stdin = stdin.lock();
+    run_secret_action_with_reader(global_db_path, app_home, action, &mut stdin).await
+}
+
+async fn run_secret_action_with_reader(
+    global_db_path: &PathBuf,
+    app_home: &Path,
+    action: VaultAction,
+    stdin: &mut impl BufRead,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match action {
         VaultAction::Set {
@@ -24,6 +52,7 @@ pub(super) async fn run_secret_action(
             password_file,
             insecure_password_file,
             value_stdin,
+            rebind,
         } => {
             crate::vault_crypto::validate_secret_name(&name)?;
             let secret_type = secret_type
@@ -31,6 +60,7 @@ pub(super) async fn run_secret_action(
                 .map(memcore::normalize_secret_type)
                 .unwrap_or_else(|| memcore::infer_vault_secret_type(&name))
                 .to_string();
+            crate::vault_ops::validate_lane_slot_secret_type(&name, &secret_type)?;
 
             let store_ro = open_cli_store_read_only(global_db_path)?;
             let config = store_ro
@@ -48,25 +78,122 @@ pub(super) async fn run_secret_action(
             )?;
 
             let mut secret_value = if value_stdin {
-                let mut buf = String::new();
-                std::io::stdin().read_line(&mut buf)?;
-                buf.trim().to_string()
+                let mut input = String::new();
+                if let Err(error) = stdin.read_line(&mut input) {
+                    crate::vault_crypto::zero_string(&mut input);
+                    return Err(error.into());
+                }
+                let value = input.trim().to_string();
+                crate::vault_crypto::zero_string(&mut input);
+                value
             } else {
                 rpassword::prompt_password(format!("Value for {name}: "))?
             };
-            if secret_value.is_empty() {
+            let secret_value = ZeroizingSecretString(&mut secret_value);
+            if secret_value.trim().is_empty() {
                 return Err("Secret value cannot be empty".into());
             }
 
-            let encrypt_result = crate::vault_crypto::encrypt(key.bytes(), secret_value.as_bytes());
-            crate::vault_crypto::zero_string(&mut secret_value);
-            let (encrypted_value, nonce) = encrypt_result?;
-
-            let is_new = !open_cli_store_read_only(global_db_path)?
+            let now = chrono::Utc::now().to_rfc3339();
+            let mut store = open_cli_store(global_db_path)?;
+            let transaction = store
+                .begin_vault_transaction()
+                .map_err(|e| format!("begin vault transaction: {e}"))?;
+            let is_new = !transaction
                 .vault_entry_exists(&name)
                 .map_err(|e| format!("vault_entry_exists: {e}"))?;
 
-            let now = chrono::Utc::now().to_rfc3339();
+            if crate::vault_ops::is_lane_slot_secret_name(&name)
+                && secret_type == memcore::vault::SECRET_TYPE_API_KEY
+            {
+                // This scan and the slot decision are deliberately inside the
+                // same IMMEDIATE transaction as the upsert. It prevents both
+                // concurrent first writers from observing an empty slot, and
+                // applies copy protection to existing slots as well.
+                let entries = transaction
+                    .vault_list_entries()
+                    .map_err(|e| format!("vault_list_entries: {e}"))?;
+                for other in entries {
+                    if other.name == name
+                        || other.secret_type != memcore::vault::SECRET_TYPE_API_KEY
+                        || crate::vault_ops::is_lane_slot_secret_name(&other.name)
+                    {
+                        continue;
+                    }
+                    let provider_kind =
+                        crate::status_ops::status_health::provider_kind_for_env_name(&other.name)
+                            .unwrap_or("unregistered");
+                    let Ok(plain) = crate::vault_crypto::decrypt(
+                        key.bytes(),
+                        &other.encrypted_value,
+                        &other.nonce,
+                    ) else {
+                        continue;
+                    };
+                    let Ok(mut other_value) = crate::vault_crypto::decode_utf8_zeroizing(
+                        plain,
+                        "Vault account secret is not valid UTF-8",
+                    ) else {
+                        continue;
+                    };
+                    let other_fingerprint = crate::vault_ops::fingerprint_secret(
+                        key.bytes(),
+                        provider_kind,
+                        &other_value,
+                    );
+                    crate::vault_crypto::zero_string(&mut other_value);
+                    if other_fingerprint
+                        == crate::vault_ops::fingerprint_secret(
+                            key.bytes(),
+                            provider_kind,
+                            &secret_value,
+                        )
+                    {
+                        return Err(crate::vault_ops::copy_existing_account_message(
+                            &name,
+                            &other.name,
+                        )
+                        .into());
+                    }
+                }
+
+                if let Some(existing) = transaction
+                    .vault_get_entry(&name)
+                    .map_err(|e| format!("vault_get_entry: {e}"))?
+                {
+                    crate::vault_ops::validate_existing_lane_slot_secret_type(
+                        &name,
+                        &existing.secret_type,
+                    )?;
+                    let old_bytes = crate::vault_crypto::decrypt(
+                        key.bytes(),
+                        &existing.encrypted_value,
+                        &existing.nonce,
+                    )?;
+                    let mut old_value = crate::vault_crypto::decode_utf8_zeroizing(
+                        old_bytes,
+                        format!("Existing slot '{name}' is not valid UTF-8"),
+                    )?;
+                    let provider_kind =
+                        crate::status_ops::status_health::provider_kind_for_env_name(&name)
+                            .unwrap_or("unknown");
+                    let overwrite = crate::vault_ops::evaluate_lane_slot_overwrite(
+                        &old_value,
+                        &secret_value,
+                        provider_kind,
+                        key.bytes(),
+                        rebind,
+                    );
+                    crate::vault_crypto::zero_string(&mut old_value);
+                    if let Err(err) = overwrite {
+                        return Err(err.operator_message(&name).into());
+                    }
+                }
+            }
+
+            let encrypt_result = crate::vault_crypto::encrypt(key.bytes(), secret_value.as_bytes());
+            let (encrypted_value, nonce) = encrypt_result?;
+
             let entry = memcore::vault::VaultEntry {
                 name: name.clone(),
                 encrypted_value,
@@ -80,10 +207,12 @@ pub(super) async fn run_secret_action(
                 access_count: 0,
             };
 
-            let store = open_cli_store(global_db_path)?;
-            store
+            transaction
                 .vault_upsert_entry(&entry)
                 .map_err(|e| format!("vault_upsert_entry: {e}"))?;
+            transaction
+                .commit()
+                .map_err(|e| format!("commit vault transaction: {e}"))?;
 
             println!("Secret '{name}' saved (type: {secret_type}).");
             Ok(())
@@ -109,15 +238,14 @@ pub(super) async fn run_secret_action(
                 .into());
             }
 
-            let mut raw_values = String::new();
-            std::io::stdin().read_to_string(&mut raw_values)?;
-            let mut values = raw_values
+            let mut raw_values = crate::vault_crypto::ZeroizingString::new(String::new());
+            stdin.read_to_string(raw_values.as_mut_string())?;
+            let values = raw_values
                 .lines()
                 .map(str::trim)
                 .filter(|line| !line.is_empty())
-                .map(str::to_string)
+                .map(|line| crate::vault_crypto::ZeroizingString::new(line.to_string()))
                 .collect::<Vec<_>>();
-            crate::vault_crypto::zero_string(&mut raw_values);
             if values.is_empty() {
                 return Err("No API key values received on stdin.".into());
             }
@@ -159,9 +287,6 @@ pub(super) async fn run_secret_action(
                 }
                 Ok(())
             })();
-            for value in &mut values {
-                crate::vault_crypto::zero_string(value);
-            }
             build_entries?;
 
             let strategy = normalize_rotation_strategy_cli(&strategy);
@@ -360,5 +485,76 @@ pub(super) async fn run_secret_action(
             Ok(())
         }
         _ => unreachable!("secret action router received non-secret action"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn direct_cli_set_refuses_legacy_lane_type_without_overwrite() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let db_path = temp.path().join("memory.db");
+        let password_file = temp.path().join("vault-password");
+        std::fs::write(&password_file, b"direct-cli-password\n").expect("password file");
+        std::fs::set_permissions(&password_file, std::fs::Permissions::from_mode(0o600))
+            .expect("password file permissions");
+
+        let key = super::super::keys::vault_init_with_password(
+            &db_path,
+            "direct-cli-password".to_string(),
+        )
+        .expect("initialize fixture vault");
+        let (encrypted_value, nonce) =
+            crate::vault_crypto::encrypt(key.bytes(), b"legacy-family").expect("encrypt fixture");
+        let legacy = memcore::vault::VaultEntry {
+            name: "EXTRACT_API_KEY".to_string(),
+            encrypted_value: encrypted_value.clone(),
+            nonce: nonce.clone(),
+            secret_type: "other".to_string(),
+            description: "legacy lane fixture".to_string(),
+            allowed_agents: None,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+            accessed_at: String::new(),
+            access_count: 0,
+        };
+        open_cli_store(&db_path)
+            .expect("open fixture store")
+            .vault_upsert_entry(&legacy)
+            .expect("seed legacy lane");
+
+        let action = VaultAction::Set {
+            name: "EXTRACT_API_KEY".to_string(),
+            secret_type: Some("api_key".to_string()),
+            description: None,
+            stdin_password: false,
+            keychain: false,
+            password_file: Some(password_file),
+            insecure_password_file: false,
+            value_stdin: true,
+            rebind: false,
+        };
+        let mut input = Cursor::new(b"replacement-family\n".to_vec());
+        let error = run_secret_action_with_reader(&db_path, temp.path(), action, &mut input)
+            .await
+            .expect_err("legacy lane type must fail closed")
+            .to_string();
+        assert!(error.contains("legacy secret_type 'other'"), "{error}");
+        assert!(!error.contains("replacement-family"), "{error}");
+
+        let retained = open_cli_store_read_only(&db_path)
+            .expect("open fixture store read-only")
+            .vault_get_entry("EXTRACT_API_KEY")
+            .expect("read lane")
+            .expect("legacy lane remains");
+        assert_eq!(retained.secret_type, "other");
+        assert_eq!(retained.encrypted_value, encrypted_value);
+        assert_eq!(retained.nonce, nonce);
     }
 }

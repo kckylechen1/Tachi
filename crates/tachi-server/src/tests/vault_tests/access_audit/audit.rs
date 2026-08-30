@@ -21,6 +21,7 @@ async fn vault_operations_record_audit_entries() {
             allowed_agents: None,
             enable_rotation: false,
             rotation_strategy: None,
+            rebind: false,
         }))
         .await
         .expect("vault_set should succeed");

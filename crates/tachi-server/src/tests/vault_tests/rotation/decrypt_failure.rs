@@ -25,6 +25,7 @@ async fn vault_get_auto_rotate_does_not_advance_rotation_on_decrypt_failure() {
                 allowed_agents: None,
                 enable_rotation: false,
                 rotation_strategy: None,
+                rebind: false,
             }))
             .await
             .expect("vault_set rotation key should succeed");

@@ -21,6 +21,53 @@ pub use vault_kit::{
 #[cfg(test)]
 pub use vault_kit::{cheap_kdf_params_json, derive_cheap};
 
+pub(crate) struct ZeroizingString(String);
+
+impl ZeroizingString {
+    pub(crate) fn new(value: String) -> Self {
+        Self(value)
+    }
+    pub(crate) fn as_mut_string(&mut self) -> &mut String {
+        &mut self.0
+    }
+}
+
+impl std::ops::Deref for ZeroizingString {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl Drop for ZeroizingString {
+    fn drop(&mut self) {
+        zero_string(&mut self.0);
+    }
+}
+
+pub(crate) struct ZeroizingStringRef<'a>(&'a mut String);
+
+impl<'a> ZeroizingStringRef<'a> {
+    pub(crate) fn new(value: &'a mut String) -> Self {
+        Self(value)
+    }
+}
+
+impl std::ops::Deref for ZeroizingStringRef<'_> {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        self.0
+    }
+}
+
+impl Drop for ZeroizingStringRef<'_> {
+    fn drop(&mut self) {
+        zero_string(self.0);
+    }
+}
+
 use aes_gcm::{
     aead::{AeadInPlace, KeyInit},
     Aes256Gcm, Key, Nonce, Tag,

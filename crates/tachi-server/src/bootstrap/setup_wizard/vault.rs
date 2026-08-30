@@ -27,10 +27,12 @@ pub(super) fn init_vault_inline(
         drop(store);
     }
 
-    let password = Password::with_theme(theme)
-        .with_prompt("    New vault password")
-        .with_confirmation("    Confirm password", "    Passwords do not match")
-        .interact()?;
+    let password = crate::vault_crypto::ZeroizingString::new(
+        Password::with_theme(theme)
+            .with_prompt("    New vault password")
+            .with_confirmation("    Confirm password", "    Passwords do not match")
+            .interact()?,
+    );
     if password.is_empty() {
         return Err("password cannot be empty".into());
     }
@@ -114,6 +116,9 @@ pub(super) fn upsert_keys_and_rewrite_aliases(
         if !key_names.iter().any(|k| k == name) {
             continue;
         }
+        // Frozen recovery contract: if persistence fails, keep the caller's
+        // entry intact so the wizard can report/retry without losing input.
+        // The helper owns and zeroes this working copy on every path.
         let secret_value = value.clone();
         vault_cli::vault_upsert_secret_with_key(
             global_db_path,
@@ -139,6 +144,8 @@ fn derive_verified_vault_key_for_wizard(
 ) -> Result<crate::vault_crypto::DerivedVaultKey, Box<dyn Error>> {
     use base64::{engine::general_purpose::STANDARD as B64, Engine};
 
+    let password = crate::vault_crypto::ZeroizingStringRef::new(password);
+
     let salt = B64
         .decode(&config.salt)
         .map_err(|e| format!("Invalid vault salt: {e}"))?;
@@ -156,12 +163,11 @@ fn derive_verified_vault_key_for_wizard(
     let key_result: Result<crate::vault_crypto::DerivedVaultKey, Box<dyn std::error::Error>> =
         match crate::vault_crypto::parse_stored_kdf_params(&config.kdf_params) {
             Ok(params) => {
-                crate::vault_crypto::DerivedVaultKey::derive_with_params(password, &salt, &params)
+                crate::vault_crypto::DerivedVaultKey::derive_with_params(&password, &salt, &params)
                     .map_err(|e| Box::<dyn std::error::Error>::from(e.to_string()))
             }
             Err(err) => Err(Box::<dyn std::error::Error>::from(err)),
         };
-    crate::vault_crypto::zero_string(password);
     let key = key_result?;
     if !crate::vault_crypto::verify_password(key.bytes(), &config.verifier)? {
         return Err("Wrong password".into());

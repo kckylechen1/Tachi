@@ -11,6 +11,47 @@ use super::env::{is_secret_key, looks_like_api_key, mask_secret, merge_config_en
 use super::vault::{init_vault_inline, store_collected_keys_in_vault};
 use super::SetupWizardOutcome;
 
+#[derive(Default)]
+struct ZeroizingWizardEntries(Vec<(String, String)>);
+
+impl ZeroizingWizardEntries {
+    fn push(&mut self, entry: (String, String)) {
+        self.0.push(entry);
+    }
+
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    fn iter(&self) -> impl Iterator<Item = &(String, String)> {
+        self.0.iter()
+    }
+
+    fn as_slice(&self) -> &[(String, String)] {
+        &self.0
+    }
+
+    fn as_mut_slice(&mut self) -> &mut [(String, String)] {
+        &mut self.0
+    }
+
+    fn changed_keys(&self) -> Vec<String> {
+        self.0.iter().map(|(key, _)| key.clone()).collect()
+    }
+
+    fn scrub(&mut self) {
+        for (_, value) in &mut self.0 {
+            crate::vault_crypto::zero_string(value);
+        }
+    }
+}
+
+impl Drop for ZeroizingWizardEntries {
+    fn drop(&mut self) {
+        self.scrub();
+    }
+}
+
 pub(in crate::bootstrap) async fn run_interactive_wizard(
     home: &Path,
     app_home: &Path,
@@ -26,7 +67,7 @@ pub(in crate::bootstrap) async fn run_interactive_wizard(
     println!(" Press Ctrl+C at any prompt to abort.");
     println!("───────────────────────────────────────────────");
 
-    let mut new_entries: Vec<(String, String)> = Vec::new();
+    let mut new_entries = ZeroizingWizardEntries::default();
 
     // ─── [1/5] API Keys ────────────────────────────────────────────────────
     println!("\n[1/5] API Keys");
@@ -38,7 +79,7 @@ pub(in crate::bootstrap) async fn run_interactive_wizard(
         let label = entry.label;
         let existing = env_vars
             .get(key)
-            .map(|v| v.trim().to_string())
+            .map(|v| crate::vault_crypto::ZeroizingString::new(v.trim().to_string()))
             .filter(|v| !v.is_empty());
 
         let prompt = if let Some(current) = existing.as_ref() {
@@ -67,11 +108,13 @@ pub(in crate::bootstrap) async fn run_interactive_wizard(
         };
 
         if should_set {
-            let secret = Password::with_theme(&theme)
-                .with_prompt(format!("    {key} value"))
-                .allow_empty_password(true)
-                .interact()?;
-            let secret = secret.trim().to_string();
+            let raw_secret = crate::vault_crypto::ZeroizingString::new(
+                Password::with_theme(&theme)
+                    .with_prompt(format!("    {key} value"))
+                    .allow_empty_password(true)
+                    .interact()?,
+            );
+            let secret = crate::vault_crypto::ZeroizingString::new(raw_secret.trim().to_string());
             if secret.is_empty() {
                 println!("    (skipped — empty input)");
                 continue;
@@ -86,7 +129,7 @@ pub(in crate::bootstrap) async fn run_interactive_wizard(
                     continue;
                 }
             }
-            new_entries.push((key.to_string(), secret));
+            new_entries.push((key.to_string(), secret.to_string()));
         }
     }
 
@@ -237,7 +280,7 @@ pub(in crate::bootstrap) async fn run_interactive_wizard(
                 global_db_path,
                 vault_already,
                 &collected_secret_keys,
-                &mut new_entries,
+                new_entries.as_mut_slice(),
                 &theme,
             ) {
                 Ok(stored) => {
@@ -292,7 +335,7 @@ pub(in crate::bootstrap) async fn run_interactive_wizard(
         });
     }
     println!("  Pending writes to {}:", config_env_path.display());
-    for (k, v) in &new_entries {
+    for (k, v) in new_entries.iter() {
         // `vault:` alias lines hold no secret material — show them verbatim.
         let shown = if crate::provider_config::is_vault_alias(v) {
             v.clone()
@@ -310,7 +353,7 @@ pub(in crate::bootstrap) async fn run_interactive_wizard(
         .interact()?;
     if !confirm {
         return Ok(SetupWizardOutcome {
-            changed_keys: new_entries.into_iter().map(|(k, _)| k).collect(),
+            changed_keys: new_entries.changed_keys(),
             wrote_changes: false,
             aborted: true,
         });
@@ -323,13 +366,35 @@ pub(in crate::bootstrap) async fn run_interactive_wizard(
         std::fs::write(&probe, b"")?;
         let _ = std::fs::remove_file(&probe);
     }
-    let existing = std::fs::read_to_string(config_env_path).unwrap_or_default();
-    let merged = merge_config_env(&existing, &new_entries);
-    std::fs::write(config_env_path, merged)?;
+    let existing = crate::vault_crypto::ZeroizingString::new(
+        std::fs::read_to_string(config_env_path).unwrap_or_default(),
+    );
+    let merged = crate::vault_crypto::ZeroizingString::new(merge_config_env(
+        &existing,
+        new_entries.as_slice(),
+    ));
+    std::fs::write(config_env_path, merged.as_bytes())?;
 
     Ok(SetupWizardOutcome {
-        changed_keys: new_entries.into_iter().map(|(k, _)| k).collect(),
+        changed_keys: new_entries.changed_keys(),
         wrote_changes: true,
         aborted: false,
     })
+}
+
+#[cfg(test)]
+mod zeroizing_entry_tests {
+    use super::ZeroizingWizardEntries;
+
+    #[test]
+    fn wizard_entry_owner_scrubs_values() {
+        let mut entries = ZeroizingWizardEntries(vec![(
+            "VOYAGE_API_KEY".to_string(),
+            "wizard-owned-secret".to_string(),
+        )]);
+
+        entries.scrub();
+
+        assert!(entries.0[0].1.as_bytes().iter().all(|byte| *byte == 0));
+    }
 }

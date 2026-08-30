@@ -199,6 +199,7 @@ pub(super) fn import_vault_bundle(
         bundle_config,
         &bundle.entries,
         &bundle.rotations,
+        verification_key,
     )?;
 
     Ok(VaultSyncImportReport {
@@ -212,13 +213,10 @@ pub(super) fn import_vault_bundle(
 /// The single validating import path for persisting a `VaultConfig` +
 /// entries + rotation rows into a target store (tachi#1110). `tachi-server`
 /// is the crypto-aware layer, so this is where `kdf_algorithm`/`kdf_params`
-/// validation belongs — `memcore`'s `MemoryStore::vault_import_bundle_unchecked`
-/// is a storage-leaf primitive that intentionally has no `vault-kit`
-/// dependency (the #1106 layering ruling) and persists `config` verbatim.
-/// Every caller that wants to import a `VaultConfig` into a store MUST route
-/// through this function rather than calling the `_unchecked` primitive
-/// directly — that primitive's name exists precisely to make a future bypass
-/// visible in review, not to be convenient to call around. `pub(super)`
+/// validation and lane-slot policy belong. The validated reads and writes run
+/// inside one IMMEDIATE `VaultTransaction`; memcore's raw unchecked import is
+/// test-only, so production callers cannot route around this boundary.
+/// `pub(super)`
 /// (reachable throughout `bootstrap`, matching this module's other
 /// entry points like `import_vault_bundle`/`open_cli_store`) rather than
 /// `pub(crate)`: both `mod bootstrap` (in `lib.rs`) and `mod vault_sync`
@@ -254,11 +252,15 @@ pub(super) fn import_validated_vault_bundle(
     config: &VaultConfig,
     entries: &[VaultEntry],
     rotations: &[VaultKeyRotation],
+    verification_key: Option<&[u8; 32]>,
 ) -> Result<bool, Box<dyn std::error::Error>> {
     ensure_importable_kdf(config)?;
 
     let mut store = open_cli_store(global_db_path)?;
-    let local_config = store
+    let transaction = store
+        .begin_vault_transaction()
+        .map_err(|e| format!("begin vault import transaction: {e}"))?;
+    let local_config = transaction
         .vault_get_config()
         .map_err(|e| format!("vault_get_config: {e}"))?;
 
@@ -267,11 +269,110 @@ pub(super) fn import_validated_vault_bundle(
         ensure_same_vault(local_config, config)?;
     }
 
-    store
-        .vault_import_bundle_unchecked(config, entries, rotations)
-        .map_err(|e| format!("vault_import_bundle_unchecked: {e}"))?;
+    let local_entries = transaction
+        .vault_list_entries()
+        .map_err(|e| format!("vault_list_entries: {e}"))?;
+    validate_imported_lane_slots(entries, &local_entries, verification_key)?;
+
+    transaction
+        .vault_set_config(config)
+        .map_err(|e| format!("vault_set_config: {e}"))?;
+    for entry in entries {
+        transaction
+            .vault_upsert_entry(entry)
+            .map_err(|e| format!("vault_upsert_entry '{}': {e}", entry.name))?;
+    }
+    for rotation in rotations {
+        transaction.vault_set_rotation(rotation).map_err(|e| {
+            format!(
+                "vault_import_bundle: vault_set_rotation '{}': {e}",
+                rotation.prefix
+            )
+        })?;
+    }
+    transaction
+        .commit()
+        .map_err(|e| format!("commit vault import transaction: {e}"))?;
 
     Ok(initialized_vault)
+}
+
+fn validate_imported_lane_slots(
+    incoming: &[VaultEntry],
+    local: &[VaultEntry],
+    verification_key: Option<&[u8; 32]>,
+) -> Result<(), String> {
+    for lane in incoming
+        .iter()
+        .filter(|entry| crate::vault_ops::is_lane_slot_secret_name(&entry.name))
+    {
+        crate::vault_ops::validate_lane_slot_secret_type(&lane.name, &lane.secret_type)?;
+        let key = verification_key.ok_or_else(|| {
+            format!(
+                "Unsigned Vault sync import cannot write lane slot '{}'; import the bundle with signature verification or rebind explicitly with `tachi vault set {} --rebind`",
+                lane.name, lane.name
+            )
+        })?;
+        let lane_plain = crate::vault_crypto::decrypt(key, &lane.encrypted_value, &lane.nonce)?;
+        let lane_value =
+            crate::vault_crypto::ZeroizingString::new(crate::vault_crypto::decode_utf8_zeroizing(
+                lane_plain,
+                format!("Imported lane slot '{}' is not valid UTF-8", lane.name),
+            )?);
+
+        if let Some(existing) = local.iter().find(|entry| entry.name == lane.name) {
+            crate::vault_ops::validate_existing_lane_slot_secret_type(
+                &existing.name,
+                &existing.secret_type,
+            )?;
+            let old_plain =
+                crate::vault_crypto::decrypt(key, &existing.encrypted_value, &existing.nonce)?;
+            let old_value = crate::vault_crypto::ZeroizingString::new(
+                crate::vault_crypto::decode_utf8_zeroizing(
+                    old_plain,
+                    format!("Existing lane slot '{}' is not valid UTF-8", lane.name),
+                )?,
+            );
+            let provider_kind =
+                crate::status_ops::status_health::provider_kind_for_env_name(&lane.name)
+                    .unwrap_or("unknown");
+            crate::vault_ops::evaluate_lane_slot_overwrite(
+                &old_value,
+                &lane_value,
+                provider_kind,
+                key,
+                false,
+            )
+            .map_err(|error| error.operator_message(&lane.name))?;
+        }
+
+        for account in local.iter().chain(incoming).filter(|entry| {
+            entry.name != lane.name
+                && entry.secret_type == memcore::vault::SECRET_TYPE_API_KEY
+                && !crate::vault_ops::is_lane_slot_secret_name(&entry.name)
+        }) {
+            let account_plain =
+                crate::vault_crypto::decrypt(key, &account.encrypted_value, &account.nonce)?;
+            let account_value = crate::vault_crypto::ZeroizingString::new(
+                crate::vault_crypto::decode_utf8_zeroizing(
+                    account_plain,
+                    format!("Imported account '{}' is not valid UTF-8", account.name),
+                )?,
+            );
+            let provider_kind =
+                crate::status_ops::status_health::provider_kind_for_env_name(&account.name)
+                    .unwrap_or("unregistered");
+            if crate::vault_ops::fingerprint_secret(key, provider_kind, &account_value)
+                == crate::vault_ops::fingerprint_secret(key, provider_kind, &lane_value)
+            {
+                return Err(crate::vault_ops::copy_existing_account_message(
+                    &lane.name,
+                    &account.name,
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn read_bundle_vault_config(
@@ -544,6 +645,114 @@ mod tests {
             created_at: "2026-01-01T00:00:00Z".to_string(),
             updated_at: "2026-01-01T00:00:00Z".to_string(),
         }
+    }
+
+    fn encrypted_entry(name: &str, value: &str, key: &[u8; 32]) -> VaultEntry {
+        let (encrypted_value, nonce) =
+            crate::vault_crypto::encrypt(key, value.as_bytes()).expect("encrypt fixture entry");
+        VaultEntry {
+            name: name.to_string(),
+            encrypted_value,
+            nonce,
+            secret_type: memcore::vault::SECRET_TYPE_API_KEY.to_string(),
+            description: "vault sync lane guard fixture".to_string(),
+            allowed_agents: None,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+            accessed_at: String::new(),
+            access_count: 0,
+        }
+    }
+
+    #[test]
+    fn unsigned_vault_sync_import_refuses_lane_slots() {
+        let target_db = temp_db_path();
+        let lane = VaultEntry {
+            name: "EXTRACT_API_KEY".to_string(),
+            encrypted_value: "unverified-ciphertext".to_string(),
+            nonce: "unverified-nonce".to_string(),
+            secret_type: memcore::vault::SECRET_TYPE_API_KEY.to_string(),
+            description: String::new(),
+            allowed_agents: None,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+            accessed_at: String::new(),
+            access_count: 0,
+        };
+
+        let error = import_validated_vault_bundle(&target_db, &sample_config(), &[lane], &[], None)
+            .expect_err("unsigned import must not write a lane slot")
+            .to_string();
+        assert!(error.contains("Unsigned Vault sync import"), "{error}");
+        assert!(error.contains("EXTRACT_API_KEY"), "{error}");
+
+        let target = open_cli_store_read_only(&target_db).expect("target store");
+        assert!(target
+            .vault_get_entry("EXTRACT_API_KEY")
+            .expect("read lane")
+            .is_none());
+        let _ = std::fs::remove_file(target_db);
+    }
+
+    #[test]
+    fn signed_vault_sync_import_refuses_copied_unregistered_account() {
+        let target_db = temp_db_path();
+        let key = [7u8; 32];
+        let entries = vec![
+            encrypted_entry("MCP_CONTEXT7_API_KEY", "shared-account", &key),
+            encrypted_entry("EXTRACT_API_KEY", "shared-account", &key),
+        ];
+
+        let error =
+            import_validated_vault_bundle(&target_db, &sample_config(), &entries, &[], Some(&key))
+                .expect_err("signed import must enforce account-copy protection")
+                .to_string();
+        assert!(error.contains("MCP_CONTEXT7_API_KEY"), "{error}");
+        assert!(!error.contains("shared-account"), "{error}");
+
+        let target = open_cli_store_read_only(&target_db).expect("target store");
+        assert!(target
+            .vault_get_entry("EXTRACT_API_KEY")
+            .expect("read lane")
+            .is_none());
+        let _ = std::fs::remove_file(target_db);
+    }
+
+    #[test]
+    fn signed_vault_sync_import_refuses_legacy_lane_slot_type() {
+        let target_db = temp_db_path();
+        let key = [7u8; 32];
+        let target = open_cli_store(&target_db).expect("target store");
+        target
+            .vault_set_config(&sample_config())
+            .expect("set target config");
+        let mut legacy = encrypted_entry("EXTRACT_API_KEY", "same-family", &key);
+        legacy.secret_type = "other".to_string();
+        target
+            .vault_upsert_entry(&legacy)
+            .expect("seed legacy lane slot");
+        drop(target);
+
+        let incoming = encrypted_entry("EXTRACT_API_KEY", "same-family", &key);
+        let error = import_validated_vault_bundle(
+            &target_db,
+            &sample_config(),
+            &[incoming],
+            &[],
+            Some(&key),
+        )
+        .expect_err("signed import must not silently migrate a legacy lane slot")
+        .to_string();
+        assert!(error.contains("legacy secret_type 'other'"), "{error}");
+        assert!(error.contains("Remove or migrate"), "{error}");
+
+        let target = open_cli_store_read_only(&target_db).expect("target read store");
+        let retained = target
+            .vault_get_entry("EXTRACT_API_KEY")
+            .expect("read lane")
+            .expect("legacy lane remains");
+        assert_eq!(retained.secret_type, "other");
+        let _ = std::fs::remove_file(target_db);
     }
 
     /// tachi#1210: a WHITESPACE-ONLY stored `kdf_algorithm` is not the
@@ -955,7 +1164,7 @@ mod tests {
     /// (and any future tachi-server caller) must route through — rather than
     /// only exercising it transitively via a signed/parsed bundle file. An
     /// unsupported `kdf_params` profile must be rejected before the wrapper
-    /// ever calls `MemoryStore::vault_import_bundle_unchecked`, and the
+    /// ever opens a transaction or target store, and the
     /// target DB file must not even be created (mirrors the day-one-brick
     /// invariant `vault_sync_import_rejects_unsupported_kdf_params_before_persisting`
     /// already pins for the file-based entry point above).
@@ -978,7 +1187,7 @@ mod tests {
         let target_db = temp_db_path();
         let config = sample_config_with_kdf_params(UNSUPPORTED_KDF_PARAMS);
 
-        let err = import_validated_vault_bundle(&target_db, &config, &[], &[])
+        let err = import_validated_vault_bundle(&target_db, &config, &[], &[], None)
             .expect_err("unsupported kdf_params must be rejected before persisting");
         assert!(
             err.to_string().contains("unsupported KDF parameters"),

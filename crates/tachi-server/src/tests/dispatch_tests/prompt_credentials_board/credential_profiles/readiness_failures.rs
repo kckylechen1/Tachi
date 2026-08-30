@@ -44,6 +44,7 @@ async fn dispatch_credential_profile_requires_unlocked_vault_before_spawn() {
             allowed_agents: None,
             enable_rotation: false,
             rotation_strategy: None,
+            rebind: false,
         }))
         .await
         .expect("vault_set should succeed");
@@ -125,6 +126,7 @@ async fn dispatch_credential_profile_denies_consumer_before_decrypting_secret() 
             allowed_agents: None,
             enable_rotation: false,
             rotation_strategy: None,
+            rebind: false,
         }))
         .await
         .expect("vault_set should succeed");

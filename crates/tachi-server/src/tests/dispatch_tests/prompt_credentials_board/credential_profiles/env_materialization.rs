@@ -57,6 +57,7 @@ async fn dispatch_credential_profile_injects_env_without_response_secret() {
             allowed_agents: None,
             enable_rotation: false,
             rotation_strategy: None,
+            rebind: false,
         }))
         .await
         .expect("vault_set should succeed");

@@ -25,12 +25,13 @@ pub(super) fn unlock_cli_vault(
                 .to_string()
         })?;
 
-    let password = vault_cli::read_vault_password(
+    let mut password = vault_cli::read_vault_password(
         stdin_password,
         keychain,
         password_file,
         insecure_password_file,
     )?;
+    let password = crate::vault_crypto::ZeroizingStringRef::new(&mut password);
     use base64::{engine::general_purpose::STANDARD as B64, Engine};
     let salt = B64
         .decode(&config.salt)

@@ -56,6 +56,10 @@ pub(crate) struct VaultSetParams {
     pub enable_rotation: bool,
     #[serde(default)]
     pub rotation_strategy: Option<String>,
+    /// Lane slots (`EXTRACT_API_KEY`, …) refuse a fingerprint-changing
+    /// overwrite unless this is set (tachi#1855). Account names ignore it.
+    #[serde(default)]
+    pub rebind: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -104,6 +108,14 @@ pub(crate) struct VaultSetApiKeyPoolParams {
     pub description: String,
     #[serde(default)]
     pub allowed_agents: Option<Vec<String>>,
+}
+
+impl Drop for VaultSetApiKeyPoolParams {
+    fn drop(&mut self) {
+        for value in &mut self.values {
+            crypto::zero_string(value);
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]

@@ -24,6 +24,7 @@ async fn vault_init_set_get_lock_unlock_roundtrip() {
             allowed_agents: None,
             enable_rotation: false,
             rotation_strategy: None,
+            rebind: false,
         }))
         .await
         .expect("vault_set should succeed");

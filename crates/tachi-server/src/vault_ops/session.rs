@@ -293,17 +293,17 @@ pub(super) fn read_unlock_password_fifo(home: &Path, path: &str) -> Result<Strin
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         let mut bytes = Vec::new();
         let mut buffer = [0_u8; 512];
-        loop {
+        let read_result = loop {
             match file.read(&mut buffer) {
-                Ok(0) if !bytes.is_empty() => break,
+                Ok(0) if !bytes.is_empty() => break Ok(()),
                 Ok(0) if std::time::Instant::now() < deadline => {
                     std::thread::sleep(std::time::Duration::from_millis(10));
                 }
-                Ok(0) => return Err("timed out waiting for unlock FIFO password".to_string()),
+                Ok(0) => break Err("timed out waiting for unlock FIFO password".to_string()),
                 Ok(n) => {
                     bytes.extend_from_slice(&buffer[..n]);
                     if bytes.len() > 4096 {
-                        return Err("unlock FIFO password exceeded maximum length".to_string());
+                        break Err("unlock FIFO password exceeded maximum length".to_string());
                     }
                 }
                 Err(err)
@@ -311,12 +311,17 @@ pub(super) fn read_unlock_password_fifo(home: &Path, path: &str) -> Result<Strin
                         || err.kind() == std::io::ErrorKind::Interrupted =>
                 {
                     if std::time::Instant::now() >= deadline {
-                        return Err("timed out waiting for unlock FIFO password".to_string());
+                        break Err("timed out waiting for unlock FIFO password".to_string());
                     }
                     std::thread::sleep(std::time::Duration::from_millis(10));
                 }
-                Err(err) => return Err(format!("read unlock FIFO failed: {err}")),
+                Err(err) => break Err(format!("read unlock FIFO failed: {err}")),
             }
+        };
+        crypto::zero_bytes(&mut buffer);
+        if let Err(err) = read_result {
+            crypto::zero_bytes(&mut bytes);
+            return Err(err);
         }
         crypto::decode_utf8_zeroizing(bytes, "unlock FIFO password is not valid UTF-8")
     })();

@@ -33,6 +33,7 @@ async fn dispatch_vault_env_injection_does_not_export_all_secrets_by_default() {
                 allowed_agents: None,
                 enable_rotation: false,
                 rotation_strategy: None,
+                rebind: false,
             }))
             .await
             .expect("vault_set should succeed");
@@ -81,6 +82,7 @@ async fn default_and_fill_missing_preserve_inherited_openai_api_key() {
             allowed_agents: None,
             enable_rotation: false,
             rotation_strategy: None,
+            rebind: false,
         }))
         .await
         .expect("vault_set should succeed");
@@ -142,6 +144,7 @@ async fn dispatch_vault_env_injection_overrides_existing_env_when_all_configured
                 allowed_agents: None,
                 enable_rotation: false,
                 rotation_strategy: None,
+                rebind: false,
             }))
             .await
             .expect("vault_set should succeed");
@@ -194,6 +197,7 @@ async fn dispatch_vault_env_injection_overrides_existing_env_when_all_configured
                 allowed_agents: None,
                 enable_rotation: false,
                 rotation_strategy: None,
+                rebind: false,
             }))
             .await
             .expect("vault_set should succeed");

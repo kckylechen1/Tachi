@@ -7,8 +7,72 @@ use crate::vault::{
     SECRET_TYPE_API_KEY,
 };
 use crate::MemoryStore;
+use rusqlite::{Connection, Transaction, TransactionBehavior};
+
+/// A single immediate transaction for vault decisions that must observe and
+/// update the same database state.  In particular, lane-slot rebind policy
+/// must not be evaluated through one connection and written through another.
+pub struct VaultTransaction<'conn> {
+    transaction: Option<Transaction<'conn>>,
+}
+
+impl VaultTransaction<'_> {
+    fn connection(&self) -> &Connection {
+        self.transaction
+            .as_ref()
+            .expect("vault transaction is present until commit")
+    }
+
+    pub fn vault_entry_exists(&self, name: &str) -> Result<bool, MemoryError> {
+        db::vault_entry_exists(self.connection(), name)
+    }
+
+    pub fn vault_get_config(&self) -> Result<Option<VaultConfig>, MemoryError> {
+        db::vault_get_config(self.connection())
+    }
+
+    pub fn vault_set_config(&self, config: &VaultConfig) -> Result<(), MemoryError> {
+        db::vault_set_config(self.connection(), config)
+    }
+
+    pub fn vault_get_entry(&self, name: &str) -> Result<Option<VaultEntry>, MemoryError> {
+        db::vault_get_entry(self.connection(), name)
+    }
+
+    pub fn vault_list_entries(&self) -> Result<Vec<VaultEntry>, MemoryError> {
+        db::vault_list_entries(self.connection())
+    }
+
+    pub fn vault_upsert_entry(&self, entry: &VaultEntry) -> Result<(), MemoryError> {
+        db::vault_upsert_entry(self.connection(), entry)
+    }
+
+    pub fn vault_set_rotation(&self, rotation: &VaultKeyRotation) -> Result<(), MemoryError> {
+        db::vault_set_rotation(self.connection(), rotation)
+    }
+
+    pub fn commit(mut self) -> Result<(), MemoryError> {
+        self.transaction
+            .take()
+            .expect("vault transaction is present until commit")
+            .commit()?;
+        Ok(())
+    }
+}
 
 impl MemoryStore {
+    /// Begin an immediate vault transaction so reads used for a policy
+    /// decision and the resulting writes share one serialized critical
+    /// section, including across independently opened CLI processes.
+    pub fn begin_vault_transaction(&mut self) -> Result<VaultTransaction<'_>, MemoryError> {
+        let transaction = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        Ok(VaultTransaction {
+            transaction: Some(transaction),
+        })
+    }
+
     // ─── Vault Entries ───────────────────────────────────────────────────────
 
     /// Get vault configuration (returns None if not initialized).
@@ -85,14 +149,10 @@ impl MemoryStore {
     /// method.** Skipping that step can persist a Vault whose KDF is never
     /// unlockable — a day-one brick with no recovery path.
     ///
-    /// The sole current caller, `tachi-server`'s
-    /// `bootstrap::vault_sync::import_validated_vault_bundle` (the
-    /// crypto-aware layer's single validating import wrapper), performs this
-    /// validation before this method is ever reached (Refs
-    /// kckylechen1/Hyperion-HyperTachi#28, tachi#1080, tachi#1110 — this
-    /// method was named `vault_import_bundle` before #1110 renamed it to put
-    /// the unvalidated nature in the name itself, rather than relying on
-    /// caller discipline alone).
+    /// This primitive is test-only. Production import is assembled through
+    /// `VaultTransaction` by tachi-server's crypto-aware validating wrapper,
+    /// so no production caller can accidentally persist an unchecked config.
+    #[cfg(test)]
     pub fn vault_import_bundle_unchecked(
         &mut self,
         config: &VaultConfig,
@@ -236,6 +296,9 @@ impl MemoryStore {
 mod tests {
     use super::*;
 
+    #[path = "vault_failure_injection.rs"]
+    mod failure_injection;
+
     fn test_entry(name: &str) -> VaultEntry {
         VaultEntry {
             name: name.to_string(),
@@ -346,59 +409,6 @@ mod tests {
         assert_eq!(
             stored.kdf_params, r#"{"m":1,"t":1,"p":1}"#,
             "unchecked primitive must write kdf_params verbatim, no validation"
-        );
-    }
-
-    #[test]
-    fn vault_replace_api_key_pool_rolls_back_when_rotation_write_fails() {
-        let dir = tempfile::tempdir().expect("vault rollback temp dir");
-        let path = dir.path().join("memory.db");
-        let mut store = MemoryStore::open(&path.to_string_lossy()).expect("open test store");
-        let offline = rusqlite::Connection::open(&path).expect("open offline trigger fixture");
-        offline
-            .execute_batch(
-                "CREATE TRIGGER fail_pool_rotation
-                 BEFORE INSERT ON vault_key_rotations
-                 WHEN NEW.prefix = 'FAIL_API_KEY'
-                 BEGIN
-                   SELECT RAISE(ABORT, 'forced rotation failure');
-                 END;",
-            )
-            .expect("install failure trigger");
-        drop(offline);
-
-        let err = store
-            .vault_replace_api_key_pool(
-                "FAIL_API_KEY",
-                &[test_entry("FAIL_API_KEY_1"), test_entry("FAIL_API_KEY_2")],
-                &test_rotation("FAIL_API_KEY", 2),
-            )
-            .expect_err("rotation failure should abort replacement");
-
-        assert!(
-            err.to_string().contains("forced rotation failure"),
-            "unexpected error: {err}"
-        );
-        assert!(
-            store
-                .vault_get_entry("FAIL_API_KEY_1")
-                .expect("read first member")
-                .is_none(),
-            "pool member inserted before the failing rotation must roll back"
-        );
-        assert!(
-            store
-                .vault_get_entry("FAIL_API_KEY_2")
-                .expect("read second member")
-                .is_none(),
-            "pool member inserted before the failing rotation must roll back"
-        );
-        assert!(
-            store
-                .vault_get_rotation("FAIL_API_KEY")
-                .expect("read rotation")
-                .is_none(),
-            "failed replacement must not leave a rotation row"
         );
     }
 

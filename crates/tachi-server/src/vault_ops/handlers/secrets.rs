@@ -2,11 +2,15 @@ use super::*;
 
 pub(crate) async fn handle_vault_set(
     server: &MemoryServer,
-    params: VaultSetParams,
+    mut params: VaultSetParams,
 ) -> Result<String, String> {
     let secret_name = params.name.clone();
+    let value = crypto::ZeroizingString::new(std::mem::take(&mut params.value));
     let result = (|| {
         crypto::validate_secret_name(&params.name)?;
+        if is_lane_slot_secret_name(&params.name) && value.trim().is_empty() {
+            return Err("Secret value cannot be empty".to_string());
+        }
         authorize_vault_mutation(server, &params.name, params.agent_id.as_deref())
             .map_err(|e| e.to_string())?;
         with_vault_key(server, |key| {
@@ -15,83 +19,159 @@ pub(crate) async fn handle_vault_set(
             } else {
                 normalize_secret_type(&params.secret_type)
             };
+            validate_lane_slot_secret_type(&params.name, secret_type)?;
             let allowed_agents = normalize_allowed_agents(params.allowed_agents.clone());
-            let (encrypted_value, nonce) = crypto::encrypt(key, params.value.as_bytes())?;
+            let (encrypted_value, nonce) = crypto::encrypt(key, value.as_bytes())?;
 
-            let is_new = !server
-                .with_global_store(|store| {
-                    store
-                        .vault_entry_exists(&params.name)
-                        .map_err(|e| e.to_string())
-                })
-                .map_err(|e| format!("Failed to check existing entry: {e}"))?;
+            server.with_global_store(|store| {
+                // Keep the old-value decision and the resulting write in one
+                // IMMEDIATE SQLite transaction. The in-process store lease is
+                // not enough: the direct CLI opens an independent connection.
+                let transaction = store
+                    .begin_vault_transaction()
+                    .map_err(|e| format!("Failed to begin vault transaction: {e}"))?;
+                let is_new = !transaction
+                    .vault_entry_exists(&params.name)
+                    .map_err(|e| format!("Failed to check existing entry: {e}"))?;
 
-            let now = Utc::now().to_rfc3339();
-            let entry = VaultEntry {
-                name: params.name.clone(),
-                encrypted_value,
-                nonce,
-                secret_type: secret_type.to_string(),
-                description: params.description.clone(),
-                allowed_agents,
-                created_at: if is_new { now.clone() } else { String::new() },
-                updated_at: now,
-                accessed_at: String::new(),
-                access_count: 0,
-            };
-
-            server
-                .with_global_store(|store| {
-                    store.vault_upsert_entry(&entry).map_err(|e| e.to_string())
-                })
-                .map_err(|e| format!("Failed to save secret: {e}"))?;
-
-            if params.enable_rotation {
-                if let Some(pos) = params.name.rfind('_') {
-                    let suffix = &params.name[pos + 1..];
-                    if suffix.parse::<u32>().is_ok() {
-                        let prefix = &params.name[..pos];
-                        let strategy = normalize_rotation_strategy(
-                            &params
-                                .rotation_strategy
-                                .clone()
-                                .unwrap_or_else(|| "round_robin".to_string()),
-                        );
-
-                        let all_entries = server
-                            .with_global_store_read(|store| {
-                                store.vault_list_entries().map_err(|e| e.to_string())
-                            })
-                            .map_err(|e| format!("Failed to list entries: {e}"))?;
-
-                        let total_keys = collect_rotation_entries(all_entries, prefix).len() as i64;
-                        let rotation = VaultKeyRotation {
-                            prefix: prefix.to_string(),
-                            current_index: 1,
-                            total_keys,
-                            rotation_strategy: strategy,
-                            created_at: Utc::now().to_rfc3339(),
-                            updated_at: Utc::now().to_rfc3339(),
+                let mut rebind_meta: Option<(bool, String, String)> = None;
+                if is_lane_slot_secret_name(&params.name) && secret_type == SECRET_TYPE_API_KEY {
+                    let entries = transaction
+                        .vault_list_entries()
+                        .map_err(|e| format!("Failed to list entries: {e}"))?;
+                    for other in entries {
+                        if other.name == params.name
+                            || other.secret_type != SECRET_TYPE_API_KEY
+                            || is_lane_slot_secret_name(&other.name)
+                        {
+                            continue;
+                        }
+                        let kind =
+                            provider_kind_for_env_name(&other.name).unwrap_or("unregistered");
+                        let Ok(plain) = crypto::decrypt(key, &other.encrypted_value, &other.nonce)
+                        else {
+                            continue;
                         };
+                        let Ok(mut other_value) = crypto::decode_utf8_zeroizing(
+                            plain,
+                            "Vault account secret is not valid UTF-8",
+                        ) else {
+                            continue;
+                        };
+                        let other_fingerprint = fingerprint_secret(key, kind, &other_value);
+                        crypto::zero_string(&mut other_value);
+                        if other_fingerprint == fingerprint_secret(key, kind, &value) {
+                            return Err(copy_existing_account_message(&params.name, &other.name));
+                        }
+                    }
 
-                        server
-                            .with_global_store(|store| {
-                                store
-                                    .vault_set_rotation(&rotation)
-                                    .map_err(|e| e.to_string())
-                            })
-                            .map_err(|e| format!("Failed to save rotation config: {e}"))?;
+                    if !is_new {
+                        let existing = transaction
+                            .vault_get_entry(&params.name)
+                            .map_err(|e| format!("Failed to read existing slot: {e}"))?;
+                        if let Some(existing) = existing {
+                            validate_existing_lane_slot_secret_type(
+                                &params.name,
+                                &existing.secret_type,
+                            )?;
+                            let old_bytes =
+                                crypto::decrypt(key, &existing.encrypted_value, &existing.nonce)?;
+                            let mut old_value = crypto::decode_utf8_zeroizing(
+                                old_bytes,
+                                format!("Existing slot '{}' is not valid UTF-8", params.name),
+                            )?;
+                            let provider_kind =
+                                provider_kind_for_env_name(&params.name).unwrap_or("unknown");
+                            let overwrite = evaluate_lane_slot_overwrite(
+                                &old_value,
+                                &value,
+                                provider_kind,
+                                key,
+                                params.rebind,
+                            );
+                            crypto::zero_string(&mut old_value);
+                            match overwrite {
+                                Ok(LaneSlotOverwrite::Identical { fingerprint }) => {
+                                    rebind_meta = Some((false, fingerprint.clone(), fingerprint));
+                                }
+                                Ok(LaneSlotOverwrite::Rebound { old_fp, new_fp }) => {
+                                    rebind_meta = Some((true, old_fp, new_fp));
+                                }
+                                Err(err) => return Err(err.operator_message(&params.name)),
+                            }
+                        }
                     }
                 }
-            }
 
-            serde_json::to_string(&json!({
-                "stored": true,
-                "name": params.name,
-                "secret_type": secret_type,
-                "created": is_new
-            }))
-            .map_err(|e| format!("serialize: {e}"))
+                let now = Utc::now().to_rfc3339();
+                let entry = VaultEntry {
+                    name: params.name.clone(),
+                    encrypted_value,
+                    nonce,
+                    secret_type: secret_type.to_string(),
+                    description: params.description.clone(),
+                    allowed_agents,
+                    created_at: if is_new { now.clone() } else { String::new() },
+                    updated_at: now,
+                    accessed_at: String::new(),
+                    access_count: 0,
+                };
+
+                transaction
+                    .vault_upsert_entry(&entry)
+                    .map_err(|e| format!("Failed to save secret: {e}"))?;
+
+                if params.enable_rotation {
+                    if let Some(pos) = params.name.rfind('_') {
+                        let suffix = &params.name[pos + 1..];
+                        if suffix.parse::<u32>().is_ok() {
+                            let prefix = &params.name[..pos];
+                            let strategy = normalize_rotation_strategy(
+                                &params
+                                    .rotation_strategy
+                                    .clone()
+                                    .unwrap_or_else(|| "round_robin".to_string()),
+                            );
+
+                            let all_entries = transaction
+                                .vault_list_entries()
+                                .map_err(|e| format!("Failed to list entries: {e}"))?;
+
+                            let total_keys =
+                                collect_rotation_entries(all_entries, prefix).len() as i64;
+                            let rotation = VaultKeyRotation {
+                                prefix: prefix.to_string(),
+                                current_index: 1,
+                                total_keys,
+                                rotation_strategy: strategy,
+                                created_at: Utc::now().to_rfc3339(),
+                                updated_at: Utc::now().to_rfc3339(),
+                            };
+
+                            transaction
+                                .vault_set_rotation(&rotation)
+                                .map_err(|e| format!("Failed to save rotation config: {e}"))?;
+                        }
+                    }
+                }
+
+                transaction
+                    .commit()
+                    .map_err(|e| format!("Failed to commit vault transaction: {e}"))?;
+
+                let mut body = json!({
+                    "stored": true,
+                    "name": params.name,
+                    "secret_type": secret_type,
+                    "created": is_new
+                });
+                if let Some((rebound, old_fp, new_fp)) = rebind_meta {
+                    body["rebind"] = json!(rebound);
+                    body["old_fingerprint"] = json!(old_fp);
+                    body["new_fingerprint"] = json!(new_fp);
+                }
+                serde_json::to_string(&body).map_err(|e| format!("serialize: {e}"))
+            })
         })
     })();
 
