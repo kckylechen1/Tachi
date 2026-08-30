@@ -102,6 +102,7 @@ fn mint_new(idempotency_key: &str, private: bool) -> NewDeliveryIntent {
         protocol_capability: "result-ref-v1".to_string(),
         requester: DeliveryRequesterBinding::default(),
         expires_at: None,
+        correction: false,
     }
 }
 
@@ -513,6 +514,57 @@ fn managed_terminal_outcome_mints_and_binds_the_requester() {
     assert_eq!(observed[0].visibility_class, "private");
 }
 
+/// codex R2 round-2 regression: host rotation does not inherit private
+/// reads. The SAME agent identity offered over a DIFFERENT admitted host
+/// connection cannot read a delivery bound to the original host.
+#[tokio::test]
+async fn private_get_is_bound_to_the_admitting_host() {
+    let server = test_server();
+    seed_admission_and_requester(&server, "{}");
+    let mut new = mint_new("managed:dispatch-bound", true);
+    new.visibility_class = DeliveryVisibilityClass::Private;
+    new.requester = DeliveryRequesterBinding {
+        agent_identity_id: Some("agent-requester".to_string()),
+        host_identity: Some("host-1".to_string()),
+        session_ref: None,
+    };
+    let intent = server
+        .with_global_store(|store| {
+            mint_delivery_intent(store.connection(), &new).map_err(|error| error.to_string())
+        })
+        .expect("mint private");
+
+    // The original admitted host reads it.
+    let ok = seam_call(
+        &server,
+        json!({
+            "action": "get",
+            "agent_identity_id": "agent-requester",
+            "host_identity": "host-1",
+            "delivery_id": intent.delivery_id
+        }),
+    );
+    assert!(ok.is_ok());
+
+    // Admission rotates to host-2; the same agent over host-2 is refused
+    // with the same generic not-found.
+    server.set_work_claim_connection(
+        Some("host-2".to_string()),
+        "connection-2".to_string(),
+        "self_asserted".to_string(),
+    );
+    let rotated = seam_call(
+        &server,
+        json!({
+            "action": "get",
+            "agent_identity_id": "agent-requester",
+            "host_identity": "host-2",
+            "delivery_id": intent.delivery_id
+        }),
+    );
+    assert_eq!(rotated, Err("delivery intent not found".to_string()));
+}
+
 const GRANT_DELEGATE: &str =
     r#"{"acp":{"tool_profiles":["delegate"],"capability_classes":["tachi"]}}"#;
 
@@ -669,9 +721,28 @@ async fn attached_terminal_event_mints_a_delivery_intent() {
             .map_err(|error| error.to_string())
         })
         .expect("observe after stale");
+    // Freeze the run's delivery exactly as the first canonical terminal set
+    // it: one intent, same state, same result revision, same result ref,
+    // same revision counter, same event count. Nothing about a stale or
+    // redundant terminal may re-arm or supersede it.
+    assert_eq!(after.len(), 1);
+    assert_eq!(after[0].delivery_state, "ready");
+    assert_eq!(after[0].result_revision, 7);
     assert_eq!(
-        after.len(),
-        1,
-        "a stale terminal fact must not mint a delivery"
+        after[0].result_ref,
+        format!("harness_session:{attachment_id}:evt-terminal-1")
     );
+    let events: i64 = server
+        .with_global_store(|store| {
+            store
+                .connection()
+                .query_row(
+                    "SELECT COUNT(*) FROM delivery_events WHERE delivery_id = ?1",
+                    [&after[0].delivery_id],
+                    |row| row.get(0),
+                )
+                .map_err(|error| error.to_string())
+        })
+        .expect("event count");
+    assert_eq!(events, 2, "mint receipts only; no supersede/re-arm events");
 }

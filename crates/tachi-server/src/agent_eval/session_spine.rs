@@ -13,10 +13,9 @@ use memcore::{
     advertise_harness_session_capabilities, get_harness_session_state,
     ingest_harness_session_event, mark_harness_session_connection, reconnect_harness_session,
     HarnessSessionAttachmentCapabilities, HarnessSessionAttachmentSelector,
-    HarnessSessionConnectionFact, HarnessSessionEventKind, HarnessSessionTerminalOutcome,
-    NewHarnessSessionEvent,
+    HarnessSessionConnectionFact, HarnessSessionEventDisposition, HarnessSessionEventKind,
+    HarnessSessionTerminalOutcome, NewHarnessSessionEvent,
 };
-use memcore::{get_harness_session_attachment, HarnessSessionEventDisposition};
 use serde_json::{json, Value};
 
 pub(crate) fn attachment_selector(
@@ -118,26 +117,27 @@ pub(crate) fn handle_ingest_session_event(
     // the PERSISTED attachment row, never from request parameters, so an
     // admitted host cannot redirect a private delivery to another
     // registered identity by naming it on the terminal event.
+    // Strictly Advanced: a redundant terminal (same authoritative outcome,
+    // possibly a newer revision) adds NO delivery information, so minting
+    // on it could only supersede/re-arm an already-settled intent. Replayed
+    // admissions never re-mint either — the first journaling already made
+    // (or refused) the mint decision.
     if kind == HarnessSessionEventKind::Terminal
-        && matches!(
-            receipt.disposition,
-            HarnessSessionEventDisposition::Advanced
-                | HarnessSessionEventDisposition::JournaledRedundantTerminal
-        )
+        && receipt.disposition == HarnessSessionEventDisposition::Advanced
+        && receipt.admission == memcore::HarnessSessionEventAdmission::Journaled
     {
         if let Some(outcome) = outcome {
-            let selector = attachment_selector(&params, &host.host_identity)?;
-            let attachment = server.with_global_store(|store| {
-                get_harness_session_attachment(
+            // Read-only binding view: deliberately NOT the claim-state-
+            // gated getter, because a terminal result outlives a WorkClaim
+            // release and the binding must survive with it.
+            let binding = server.with_global_store(|store| {
+                memcore::harness_session_attachment_delivery_binding(
                     store.connection(),
-                    &selector,
-                    &host,
-                    &admission_receipt_ref,
-                    crate::claims_ops::CLAIM_TTL_SECONDS,
+                    &receipt.attachment_id,
                 )
                 .map_err(|error| error.to_string())
             })?;
-            if let Some(attachment) = attachment {
+            if let Some(binding) = binding {
                 crate::delivery_ops::mint_delivery_for_attached_terminal(
                     server,
                     &receipt.attachment_id,
@@ -146,10 +146,10 @@ pub(crate) fn handle_ingest_session_event(
                     outcome.as_str(),
                     input.summary.as_deref(),
                     input.payload_digest.as_deref(),
-                    &attachment.agent_identity_id,
-                    &attachment.host_identity,
-                    &attachment.remote_session_id,
-                    &attachment.work_claim_id,
+                    &binding.agent_identity_id,
+                    &binding.host_identity,
+                    &binding.remote_session_id,
+                    &binding.work_claim_id,
                 );
             }
         }

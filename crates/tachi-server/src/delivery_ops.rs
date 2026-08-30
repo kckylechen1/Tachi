@@ -217,9 +217,18 @@ pub(crate) fn handle_tachi_delivery(
             })?;
             match intent {
                 Some(intent)
-                    if intent.visibility_class != "private"
-                        || intent.requester_agent_identity_id.as_deref()
-                            == Some(caller.agent_identity_id.as_str()) =>
+                    if intent.visibility_class != "private" || {
+                        // A private intent is readable only by its FULL
+                        // admitted binding: agent identity AND the host it
+                        // was bound to (host rotation does not inherit
+                        // another host's reads).
+                        intent.requester_agent_identity_id.as_deref()
+                            == Some(caller.agent_identity_id.as_str())
+                            && intent
+                                .requester_host_identity
+                                .as_deref()
+                                .is_none_or(|bound| bound == caller.host_identity)
+                    } =>
                 {
                     Ok(json!({
                         "status": "completed",
@@ -302,30 +311,11 @@ pub(crate) fn mint_delivery_for_managed_outcome(
         eval_memory_id,
         &outcome.evidence_refs.to_string(),
     ]);
-    // Content-aware correction revision: the FIRST mint takes the wall
-    // clock; a content CHANGE (a corrected terminal receipt) takes
-    // strictly-more-than any revision this intent has ever carried, so the
-    // spine's supersede path re-arms delivery instead of hitting the
-    // equal-revision idempotency conflict — even when two corrections land
-    // within the same clock tick.
-    let result_revision = match server.with_global_store(|store| {
-        memcore::find_delivery_intent_by_idempotency_key(store.connection(), &idempotency_key)
-            .map_err(|error| error.to_string())
-    }) {
-        Ok(Some(existing)) if existing.payload_digest != payload_digest => {
-            (existing.result_revision + 1).max(revision_wall_clock_base())
-        }
-        Ok(Some(existing)) => existing.result_revision,
-        Ok(None) => revision_wall_clock_base(),
-        Err(error) => {
-            tracing::warn!(
-                error = %error,
-                dispatch_id = %outcome.dispatch_id,
-                "failed to read existing delivery intent before mint"
-            );
-            return;
-        }
-    };
+    // Correction authority: the spine serializes corrections inside the
+    // mint transaction (equal-revision + different content supersedes at
+    // prev+1), so two corrections in the same clock tick can never be
+    // silently lost. The wall clock only provides the first-mint floor.
+    let result_revision = revision_wall_clock_base();
     let mut new = memcore::NewDeliveryIntent {
         idempotency_key,
         execution_source: memcore::DeliveryExecutionSource::ManagedDispatch,
@@ -340,6 +330,7 @@ pub(crate) fn mint_delivery_for_managed_outcome(
         protocol_capability: "result-ref-v1".to_string(),
         requester: memcore::DeliveryRequesterBinding::default(),
         expires_at: None,
+        correction: true,
     };
     // Bind the admitted requester from the owning WorkClaim when one names
     // this dispatch. A bound intent is private to that requester (fail-
@@ -412,6 +403,7 @@ pub(crate) fn mint_delivery_for_attached_terminal(
             session_ref: Some(remote_session_id.to_string()),
         },
         expires_at: None,
+        correction: true,
     };
     if let Err(error) = server.with_global_store(|store| {
         memcore::mint_delivery_intent(store.connection(), &new).map_err(|error| error.to_string())

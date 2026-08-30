@@ -260,6 +260,14 @@ pub struct NewDeliveryIntent {
     pub requester: DeliveryRequesterBinding,
     /// Optional absolute expiry of the intent itself.
     pub expires_at: Option<String>,
+    /// Terminal-plane correction authority: when set, an equal-revision
+    /// mint carrying DIFFERENT content supersedes (strictly grows the
+    /// result revision) inside the mint transaction instead of hitting the
+    /// idempotency conflict. Only Tachi's own terminal planes set this —
+    /// it exists so two corrections landing in the same clock tick can
+    /// never be silently lost, and the supersede stays serialized by the
+    /// write transaction.
+    pub correction: bool,
 }
 
 /// Visibility of the result ref. A `private` intent MUST bind a requester
@@ -1129,8 +1137,20 @@ fn reconcile_mint(
     now: &str,
 ) -> Result<DeliveryIntent, MemoryError> {
     if new.result_revision < existing.result_revision {
-        // Stale reconcile: a lower revision never regresses the intent.
-        return Ok(existing);
+        // Stale reconcile without correction authority: a lower revision
+        // never regresses the intent — plain no-op, regardless of content.
+        if !new.correction {
+            return Ok(existing);
+        }
+        // Correction-authoritative mints fall through: the spine mirrors
+        // the terminal plane's latest canonical receipt, and the supersede
+        // strictly GROWS the result revision, so an out-of-order correction
+        // can never produce a lower revision than the one it replaces.
+        if new.payload_digest == existing.payload_digest {
+            return Ok(existing);
+        }
+        let next = existing.result_revision + 1;
+        return supersede_intent(conn, existing, new, next, now);
     }
     if new.result_revision == existing.result_revision {
         let same_content = existing.result_ref == new.result_ref
@@ -1138,17 +1158,43 @@ fn reconcile_mint(
             && existing.execution_source == new.execution_source.as_str()
             && existing.execution_ref == new.execution_ref;
         if !same_content {
-            return Err(MemoryError::DeliveryIdempotencyConflict(format!(
-                "idempotency_key '{}' already mints intent {} at revision {} with different content",
-                new.idempotency_key, existing.delivery_id, existing.result_revision
-            )));
+            if !new.correction {
+                return Err(MemoryError::DeliveryIdempotencyConflict(format!(
+                    "idempotency_key '{}' already mints intent {} at revision {} with different content",
+                    new.idempotency_key, existing.delivery_id, existing.result_revision
+                )));
+            }
+            // Terminal-plane correction at an equal wall-clock revision:
+            // supersede strictly INSIDE the mint transaction, so two
+            // same-tick corrections serialize and none is silently lost.
+            return supersede_intent(
+                conn,
+                existing.clone(),
+                new,
+                existing.result_revision + 1,
+                now,
+            );
         }
         return Ok(existing);
     }
 
     // Corrected result: a strictly higher revision re-arms delivery. The
-    // whole rewrite + ledger receipts land atomically and the rewrite is
-    // CAS-guarded on the revision it reconciled against.
+    // floor stays strictly above whatever the intent already carried, so
+    // corrections are monotone no matter the incoming hint.
+    let next_result_revision = new.result_revision.max(existing.result_revision + 1);
+    supersede_intent(conn, existing, new, next_result_revision, now)
+}
+
+/// Re-arm an intent with a corrected result. The whole rewrite + ledger
+/// receipts land atomically and the rewrite is CAS-guarded on the revision
+/// it reconciled against.
+fn supersede_intent(
+    conn: &Connection,
+    existing: DeliveryIntent,
+    new: &NewDeliveryIntent,
+    next_result_revision: i64,
+    now: &str,
+) -> Result<DeliveryIntent, MemoryError> {
     let reopens = existing.delivery_state != DeliveryState::Ready.as_str();
     let next_revision = existing.revision + 1;
     let tx = conn.unchecked_transaction()?;
@@ -1163,7 +1209,7 @@ fn reconcile_mint(
         params![
             existing.delivery_id,
             new.result_ref,
-            new.result_revision,
+            next_result_revision,
             new.payload_digest,
             new.terminal_receipt_revision,
             now,
@@ -1182,13 +1228,13 @@ fn reconcile_mint(
         &existing.delivery_id,
         &format!(
             "superseded:{}:{}",
-            existing.delivery_id, new.result_revision
+            existing.delivery_id, next_result_revision
         ),
         DeliveryEventKind::ResultSuperseded,
         Some(existing.revision),
         Some(&format!(
             "corrected result revision {} replaces {}",
-            new.result_revision, existing.result_revision
+            next_result_revision, existing.result_revision
         )),
         Some(&new.payload_digest),
         "tachi",
@@ -1486,6 +1532,7 @@ mod tests {
                 session_ref: Some("session-1".to_string()),
             },
             expires_at: None,
+            correction: false,
         }
     }
 
@@ -2290,6 +2337,90 @@ mod tests {
             )
             .unwrap();
         assert_eq!(events, 3, "mint receipts + claim only; no block event");
+    }
+
+    // --- codex R2 round-2 regression: a terminal-plane correction at an
+    // EQUAL wall-clock revision with different content supersedes strictly
+    // (prev+1) inside the mint — never a conflict, never a lost update.
+    // Without the correction authority the same call stays a typed conflict.
+    #[test]
+    fn same_tick_correction_supersedes_and_conflict_law_holds_without_it() {
+        let conn = test_conn();
+        let intent = make_ready(&conn, "managed:outcome-21");
+
+        // Without correction authority: equal revision + different content
+        // is a typed conflict (the TB-7 law for everyone else).
+        let mut forged = mint_new("managed:outcome-21");
+        forged.result_revision = 1;
+        forged.payload_digest = "sha256-BBBB".to_string();
+        let error = mint_delivery_intent(&conn, &forged).unwrap_err();
+        assert!(matches!(error, MemoryError::DeliveryIdempotencyConflict(_)));
+
+        // With correction authority: the SAME tick supersedes to prev+1.
+        let mut corrected = mint_new("managed:outcome-21");
+        corrected.result_revision = 1;
+        corrected.payload_digest = "sha256-CCCC".to_string();
+        corrected.correction = true;
+        let superseded = mint_delivery_intent(&conn, &corrected).unwrap();
+        assert_eq!(superseded.delivery_id, intent.delivery_id);
+        assert_eq!(superseded.result_revision, 2, "strictly grows");
+        assert_eq!(superseded.delivery_state, "ready");
+
+        // A second same-tick correction also strictly grows: corrections
+        // serialize inside the mint, none is silently lost.
+        let mut corrected2 = mint_new("managed:outcome-21");
+        corrected2.result_revision = 1;
+        corrected2.payload_digest = "sha256-DDDD".to_string();
+        corrected2.correction = true;
+        let superseded2 = mint_delivery_intent(&conn, &corrected2).unwrap();
+        assert_eq!(superseded2.result_revision, 3);
+    }
+
+    // --- codex R2 round-2 regression: replaying the same claim key after
+    // the claim lease expired is NOT stranded: the receipt comes back and
+    // the ack on it succeeds.
+    #[test]
+    fn expired_claim_replay_returns_receipt_and_ack_still_lands() {
+        let conn = test_conn();
+        let intent = make_ready(&conn, "managed:outcome-22");
+        claim_ready_delivery(
+            &conn,
+            &DeliveryClaimRequest {
+                caller: caller("requester-a"),
+                claim_key: "ck-expired".to_string(),
+                lease_seconds: 0,
+                only_delivery_id: None,
+            },
+        )
+        .unwrap();
+        set_claim_expired(&conn, &intent.delivery_id);
+
+        let replay = claim_ready_delivery(
+            &conn,
+            &DeliveryClaimRequest {
+                caller: caller("requester-a"),
+                claim_key: "ck-expired".to_string(),
+                lease_seconds: 0,
+                only_delivery_id: None,
+            },
+        )
+        .unwrap();
+        let DeliveryClaimOutcome::ReplayedClaim(receipt) = replay else {
+            panic!("expected the original receipt");
+        };
+        assert_eq!(receipt.delivery_id, intent.delivery_id);
+
+        // The holder can still ack the lapsed claim: delivery lands.
+        let ack = ack_delivered(
+            &conn,
+            &intent.delivery_id,
+            &caller("requester-a"),
+            "ak-expired",
+            None,
+        )
+        .unwrap();
+        assert!(matches!(ack, DeliveryAckOutcome::Acknowledged { .. }));
+        assert_eq!(state_of(&conn, &intent.delivery_id), "delivered");
     }
 
     // --- CAS: an ack carrying a stale expected revision is a typed conflict.

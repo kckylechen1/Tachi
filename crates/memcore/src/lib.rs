@@ -183,8 +183,9 @@ pub use db::foundry_jobs::{
 #[cfg(feature = "admin")]
 pub use db::harness_session_attachments::{
     attach_harness_session, authorize_harness_session_attachment, get_harness_session_attachment,
-    HarnessSessionAttachment, HarnessSessionAttachmentAdmission,
-    HarnessSessionAttachmentAuthorization, HarnessSessionAttachmentCapabilities,
+    harness_session_attachment_delivery_binding, HarnessSessionAttachment,
+    HarnessSessionAttachmentAdmission, HarnessSessionAttachmentAuthorization,
+    HarnessSessionAttachmentCapabilities, HarnessSessionAttachmentDeliveryBinding,
     HarnessSessionAttachmentReceipt, HarnessSessionAttachmentSelector,
     HarnessSessionAttachmentState, HarnessSessionHostAdmission, NewHarnessSessionAttachment,
     ACP_CAPABILITY_CLASSES, ACP_SESSION_CAPABILITIES, ACP_TOOL_PROFILES,

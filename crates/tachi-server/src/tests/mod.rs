@@ -222,6 +222,7 @@ const TEMPLATE_IDENTITY_SOURCE_BLOBS: &[&[u8]] = &[
     embedded_template_source!(
         "/../memcore/src/db/migrations/dispatch_outcomes_identity_receipt.rs"
     ),
+    embedded_template_source!("/../memcore/src/db/migrations/delivery_spine.rs"),
     embedded_template_source!("/../memcore/src/db/migrations/dispatch_outcomes_reported.rs"),
     embedded_template_source!("/../memcore/src/db/migrations/domain_retire.rs"),
     embedded_template_source!("/../memcore/src/db/migrations/exec_env_class.rs"),
