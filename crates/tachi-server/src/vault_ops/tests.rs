@@ -1,10 +1,11 @@
+use super::access::record_successful_vault_access;
 use super::handlers::{
-    handle_vault_init, handle_vault_lease_api_key, handle_vault_list, handle_vault_lock,
-    handle_vault_remove, handle_vault_set, handle_vault_set_api_key_pool,
+    handle_vault_get, handle_vault_init, handle_vault_lease_api_key, handle_vault_list,
+    handle_vault_lock, handle_vault_remove, handle_vault_set, handle_vault_set_api_key_pool,
     handle_vault_setup_rotation, handle_vault_unlock,
 };
 use super::params::{
-    VaultInitParams, VaultLeaseApiKeyParams, VaultListParams, VaultRemoveParams,
+    VaultGetParams, VaultInitParams, VaultLeaseApiKeyParams, VaultListParams, VaultRemoveParams,
     VaultSetApiKeyPoolParams, VaultSetParams, VaultSetupRotationParams, VaultUnlockParams,
 };
 use super::session::{read_unlock_password_fifo, with_vault_key};
@@ -1571,6 +1572,27 @@ async fn vault_set_infers_config_for_lane_urls_and_refuses_api_key() {
         .expect("read refused append")
         .is_none());
 
+    let zero_member = handle_vault_set(
+        &server,
+        VaultSetParams {
+            name: "MUTABLE_POOL_API_KEY_0".to_string(),
+            value: "key-zero".to_string(),
+            agent_id: None,
+            secret_type: "api_key".to_string(),
+            description: "attempt zero-index member".to_string(),
+            allowed_agents: None,
+            enable_rotation: false,
+            rotation_strategy: None,
+            rebind: false,
+        },
+    )
+    .await
+    .expect_err("zero-index member must not bypass configured rotation validation");
+    assert!(
+        zero_member.contains("non-contiguous member index 0") && zero_member.contains("expected 1"),
+        "{zero_member}"
+    );
+
     plant_vault_secret(
         &server,
         "MUTABLE_POOL_API_KEY_3",
@@ -1678,6 +1700,108 @@ async fn vault_set_infers_config_for_lane_urls_and_refuses_api_key() {
     .await
     .expect_err("config URLs must not lease as API keys");
     assert!(leased.contains("lane config"), "{leased}");
+}
+
+#[tokio::test]
+async fn rotated_get_rejects_legacy_mixed_members_and_access_advance_preserves_new_count() {
+    let db_path = crate::utils::test_fixture_path(format!(
+        "memory-server-vault-rotation-final-state-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let server = MemoryServer::new(db_path, None).expect("create test server");
+    handle_vault_init(
+        &server,
+        VaultInitParams {
+            password: "rotation-final-state".to_string(),
+        },
+    )
+    .await
+    .expect("vault init");
+
+    plant_vault_secret(&server, "LEGACY_MIXED_1", "key-one", "api_key");
+    plant_vault_secret(&server, "LEGACY_MIXED_2", "not-a-key", "config");
+    server
+        .with_global_store(|store| {
+            store
+                .vault_set_rotation(&memcore::vault::VaultKeyRotation {
+                    prefix: "LEGACY_MIXED".to_string(),
+                    current_index: 2,
+                    total_keys: 2,
+                    rotation_strategy: "round_robin".to_string(),
+                    created_at: "2026-01-01T00:00:00Z".to_string(),
+                    updated_at: "2026-01-01T00:00:00Z".to_string(),
+                })
+                .map_err(|error| error.to_string())
+        })
+        .expect("seed legacy mixed rotation");
+    let mixed_get = handle_vault_get(
+        &server,
+        VaultGetParams {
+            name: "LEGACY_MIXED".to_string(),
+            agent_id: None,
+            auto_rotate: true,
+        },
+    )
+    .await
+    .expect_err("rotated get must reject a legacy config member");
+    assert!(
+        mixed_get.contains("LEGACY_MIXED_2") && mixed_get.contains("config"),
+        "{mixed_get}"
+    );
+
+    handle_vault_set_api_key_pool(
+        &server,
+        VaultSetApiKeyPoolParams {
+            prefix: "RACE_POOL_API_KEY".to_string(),
+            values: vec!["one".to_string(), "two".to_string()],
+            agent_id: None,
+            strategy: "round_robin".to_string(),
+            description: String::new(),
+            allowed_agents: None,
+        },
+    )
+    .await
+    .expect("create two-member pool");
+    let stale_rotation = server
+        .with_global_store_read(|store| {
+            store
+                .vault_get_rotation("RACE_POOL_API_KEY")
+                .map_err(|error| error.to_string())
+        })
+        .expect("read stale rotation")
+        .expect("rotation exists");
+    handle_vault_set_api_key_pool(
+        &server,
+        VaultSetApiKeyPoolParams {
+            prefix: "RACE_POOL_API_KEY".to_string(),
+            values: vec![
+                "one-new".to_string(),
+                "two-new".to_string(),
+                "three".to_string(),
+            ],
+            agent_id: None,
+            strategy: "round_robin".to_string(),
+            description: String::new(),
+            allowed_agents: None,
+        },
+    )
+    .await
+    .expect("expand pool to three members");
+    server
+        .with_global_store(|store| {
+            record_successful_vault_access(store, "RACE_POOL_API_KEY_2", Some(&stale_rotation))
+        })
+        .expect("stale access completion must re-read current rotation");
+    let final_rotation = server
+        .with_global_store_read(|store| {
+            store
+                .vault_get_rotation("RACE_POOL_API_KEY")
+                .map_err(|error| error.to_string())
+        })
+        .expect("read final rotation")
+        .expect("rotation remains");
+    assert_eq!(final_rotation.total_keys, 3);
+    assert_eq!(final_rotation.current_index, 3);
 }
 
 fn plant_vault_secret(server: &MemoryServer, name: &str, value: &str, secret_type: &str) {

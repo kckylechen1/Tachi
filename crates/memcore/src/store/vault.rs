@@ -51,6 +51,10 @@ impl VaultTransaction<'_> {
         db::vault_delete_entry(self.connection(), name)
     }
 
+    pub fn vault_touch_entry(&self, name: &str) -> Result<i64, MemoryError> {
+        db::vault_touch_entry(self.connection(), name)
+    }
+
     pub fn vault_set_rotation(&self, rotation: &VaultKeyRotation) -> Result<(), MemoryError> {
         db::vault_set_rotation(self.connection(), rotation)
     }

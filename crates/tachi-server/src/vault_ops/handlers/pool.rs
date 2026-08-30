@@ -178,7 +178,10 @@ fn advance_rotation_after_key(
 
     server
         .with_global_store(|store| {
-            let Some(rotation) = store
+            let transaction = store
+                .begin_vault_transaction()
+                .map_err(|e| format!("begin rotation advance transaction: {e}"))?;
+            let Some(rotation) = transaction
                 .vault_get_rotation(logical_name)
                 .map_err(|e| e.to_string())?
             else {
@@ -187,15 +190,21 @@ fn advance_rotation_after_key(
             if rotation.total_keys <= 0 {
                 return Ok(());
             }
+            let entries = transaction
+                .vault_list_entries()
+                .map_err(|e| e.to_string())?;
+            memcore::validate_api_key_rotation(&entries, &rotation)
+                .map_err(|error| format!("{error}; refusing rotation advance"))?;
             let next = (idx as i64 % rotation.total_keys) + 1;
             let updated = VaultKeyRotation {
                 current_index: next,
                 updated_at: Utc::now().to_rfc3339(),
                 ..rotation
             };
-            store
+            transaction
                 .vault_set_rotation(&updated)
                 .map_err(|e| e.to_string())?;
+            transaction.commit().map_err(|e| e.to_string())?;
             Ok(())
         })
         .map_err(|e| format!("advance rotation: {e}"))

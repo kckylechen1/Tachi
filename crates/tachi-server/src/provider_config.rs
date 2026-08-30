@@ -170,7 +170,7 @@ fn promote_configured_rotation_prefix_drops(
     pools: &HashMap<String, Vec<ProviderSecret>>,
     rotation_prefixes: &HashSet<String>,
 ) {
-    let mut extra: Vec<(String, u32, String, AliasSkipClass)> = dropped
+    let mut extra: Vec<(String, usize, String, AliasSkipClass)> = dropped
         .iter()
         .filter_map(|(name, class)| {
             let (prefix, member_index) = parse_rotation_member_name(name)?;

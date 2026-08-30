@@ -161,6 +161,8 @@ pub(super) fn select_vault_entry(
             let all_entries = store
                 .vault_list_entries()
                 .map_err(|e| format!("Failed to list entries: {e}"))?;
+            memcore::validate_api_key_rotation(&all_entries, &rotation)
+                .map_err(|error| format!("{error}; refusing rotated Vault get"))?;
             let matching_keys = collect_rotation_entries(all_entries, &rotation.prefix);
 
             if matching_keys.is_empty() {
@@ -229,9 +231,38 @@ pub(super) fn record_successful_vault_access(
     pending_rotation: Option<&VaultKeyRotation>,
 ) -> Result<i64, String> {
     if let Some(rotation) = pending_rotation {
-        store
-            .vault_set_rotation(rotation)
+        let transaction = store
+            .begin_vault_transaction()
+            .map_err(|e| format!("Failed to begin access transaction: {e}"))?;
+        let current = transaction
+            .vault_get_rotation(&rotation.prefix)
+            .map_err(|e| format!("Failed to read current rotation: {e}"))?
+            .ok_or_else(|| format!("Vault rotation '{}' disappeared", rotation.prefix))?;
+        let entries = transaction
+            .vault_list_entries()
+            .map_err(|e| format!("Failed to list current rotation members: {e}"))?;
+        memcore::validate_api_key_rotation(&entries, &current)
+            .map_err(|error| format!("{error}; refusing rotation advance"))?;
+        let member_index = memcore::api_key_pool_member_index(target_name, &current.prefix)
+            .ok_or_else(|| {
+                format!(
+                    "Vault entry '{target_name}' is not a member of rotation '{}'",
+                    current.prefix
+                )
+            })?;
+        let mut updated = current;
+        updated.current_index = (member_index as i64 % updated.total_keys) + 1;
+        updated.updated_at = Utc::now().to_rfc3339();
+        transaction
+            .vault_set_rotation(&updated)
             .map_err(|e| format!("Failed to update rotation: {e}"))?;
+        let access_count = transaction
+            .vault_touch_entry(target_name)
+            .map_err(|e| e.to_string())?;
+        transaction
+            .commit()
+            .map_err(|e| format!("Failed to commit access transaction: {e}"))?;
+        return Ok(access_count);
     }
     store
         .vault_touch_entry(target_name)
@@ -371,8 +402,8 @@ fn record_listed_drop(
 
 fn record_rotation_member_drop(
     dropped: &mut HashMap<String, AliasSkipClass>,
-    prefix_drop: &mut Option<(u32, AliasSkipClass)>,
-    member_index: u32,
+    prefix_drop: &mut Option<(usize, AliasSkipClass)>,
+    member_index: usize,
     member_name: &str,
     class: AliasSkipClass,
 ) {

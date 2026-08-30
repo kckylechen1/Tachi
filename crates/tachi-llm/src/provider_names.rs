@@ -48,9 +48,9 @@ pub fn validate_vault_alias_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-pub fn parse_rotation_member_name(name: &str) -> Option<(&str, u32)> {
+pub fn parse_rotation_member_name(name: &str) -> Option<(&str, usize)> {
     let (prefix, suffix) = name.rsplit_once('_')?;
-    let index = suffix.parse::<u32>().ok()?;
+    let index = suffix.parse::<usize>().ok()?;
     if prefix.is_empty() {
         None
     } else {
@@ -85,5 +85,14 @@ mod tests {
     #[test]
     fn validate_vault_alias_name_rejects_empty() {
         assert!(validate_vault_alias_name("").is_err());
+    }
+
+    #[test]
+    fn rotation_member_parser_matches_runtime_numeric_width_and_zero_shape() {
+        assert_eq!(parse_rotation_member_name("POOL_0"), Some(("POOL", 0)));
+        assert_eq!(
+            parse_rotation_member_name("POOL_9999999999"),
+            Some(("POOL", 9_999_999_999usize))
+        );
     }
 }
