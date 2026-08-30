@@ -33,7 +33,7 @@ fn verify_caller(
 ) -> Result<DeliveryCaller, String> {
     let host_identity = required(params.host_identity.clone(), "host_identity")?;
     let agent_identity_id = required(params.agent_identity_id.clone(), "agent_identity_id")?;
-    let (admitted_host, connection_id, admission_state) =
+    let (admitted_host, _connection_id, admission_state) =
         server.work_claim_connection().ok_or_else(|| {
             "no active host admission; the delivery seam requires an admitted host connection"
                 .to_string()
@@ -65,7 +65,9 @@ fn verify_caller(
     Ok(DeliveryCaller {
         agent_identity_id,
         host_identity,
-        connection_id,
+        // Server-resolved session client (never caller-supplied): the
+        // managed-binding comparator.
+        session_client: server.session_client(),
     })
 }
 

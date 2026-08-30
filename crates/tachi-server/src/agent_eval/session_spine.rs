@@ -132,7 +132,11 @@ pub(crate) fn handle_ingest_session_event(
             HarnessSessionEventDisposition::Advanced
                 | HarnessSessionEventDisposition::JournaledRedundantTerminal
         )
-        && receipt.admission == memcore::HarnessSessionEventAdmission::Journaled
+        && matches!(
+            receipt.admission,
+            memcore::HarnessSessionEventAdmission::Journaled
+                | memcore::HarnessSessionEventAdmission::Replayed
+        )
     {
         if let Some(outcome) = outcome {
             // Read-only binding view: deliberately NOT the claim-state-

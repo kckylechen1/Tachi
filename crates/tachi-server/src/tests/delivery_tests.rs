@@ -52,6 +52,10 @@ fn seed_admission_and_requester(server: &MemoryServer, grant: &str) {
     );
 }
 
+fn set_server_session_client(server: &MemoryServer, session_client: &str) {
+    server.agent_runtime_write().session_client = Some(session_client.to_string());
+}
+
 fn seed_claim(server: &MemoryServer, dispatch_id: &str) {
     server
         .with_global_store(|store| {
@@ -494,6 +498,21 @@ fn managed_terminal_outcome_mints_and_binds_the_requester() {
     // Idempotent reconcile on re-record.
     crate::delivery_ops::mint_delivery_for_managed_outcome(&server, &row, "eval-1");
 
+    // The server session matches the claim's session client: the seam can
+    // claim it. A server session that minted a DIFFERENT binding cannot.
+    set_server_session_client(&server, "connection-1");
+    let claim = seam_call(
+        &server,
+        json!({
+            "action": "claim_ready_delivery",
+            "agent_identity_id": "agent-requester",
+            "host_identity": "host-1",
+            "claim_key": "ck-m1"
+        }),
+    )
+    .expect("claim");
+    assert!(claim.contains(r#""outcome":"claimed""#));
+
     let observed: Vec<memcore::DeliveryIntent> = server
         .with_global_store(|store| {
             memcore::observe_delivery_for_execution(
@@ -505,7 +524,10 @@ fn managed_terminal_outcome_mints_and_binds_the_requester() {
         })
         .expect("observe");
     assert_eq!(observed.len(), 1, "one intent per terminal receipt");
-    assert_eq!(observed[0].delivery_state, "ready");
+    assert_eq!(
+        observed[0].delivery_state, "requester_queued",
+        "the seam claim above holds it"
+    );
     assert_eq!(
         observed[0].requester_agent_identity_id.as_deref(),
         Some("agent-requester"),

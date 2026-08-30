@@ -371,11 +371,13 @@ impl DeliveryClaimView {
 pub struct DeliveryCaller {
     pub agent_identity_id: String,
     pub host_identity: String,
-    /// The admitted host connection id the call is served over. For
-    /// managed intents the requester binding is the WorkClaim's session
-    /// connection, so a foreign host cannot claim another requester's
-    /// private delivery merely by naming the registered agent id.
-    pub connection_id: String,
+    /// The server's own session client at call time (server-resolved via
+    /// its runtime, never caller-supplied). A managed intent binds the
+    /// owning WorkClaim's session client; a managed seam call must be
+    /// served by the server session that minted the binding, so a foreign
+    /// session cannot adopt a registered agent id to reach another
+    /// requester's private delivery.
+    pub session_client: Option<String>,
 }
 
 /// Input to [`claim_ready_delivery`].
@@ -843,12 +845,19 @@ pub fn resume_requester_operation(
     let mut stmt = conn.prepare(&format!(
         "{} WHERE (requester_agent_identity_id IS NULL OR requester_agent_identity_id = ?1)
               AND (requester_host_identity IS NULL OR requester_host_identity = ?2)
+              AND (execution_source != 'managed_dispatch'
+                   OR requester_session_ref IS NULL
+                   OR requester_session_ref = ?3)
               AND delivery_state IN ('ready', 'requester_queued', 'blocked', 'retrying')
             ORDER BY created_at, delivery_id",
         select_intent_sql()
     ))?;
     let bound = stmt.query_map(
-        params![caller.agent_identity_id, caller.host_identity],
+        params![
+            caller.agent_identity_id,
+            caller.host_identity,
+            caller.session_client
+        ],
         row_to_intent,
     )?;
     let mut intents = Vec::new();
@@ -1059,7 +1068,6 @@ fn validate_caller(caller: &DeliveryCaller) -> Result<(), MemoryError> {
     for (name, value) in [
         ("agent_identity_id", &caller.agent_identity_id),
         ("host_identity", &caller.host_identity),
-        ("connection_id", &caller.connection_id),
     ] {
         if value.trim().is_empty() || value.len() > 128 {
             return Err(MemoryError::InvalidArg(format!(
@@ -1301,12 +1309,13 @@ fn requester_matches(intent: &DeliveryIntent, caller: &DeliveryCaller) -> bool {
             return false;
         }
     }
-    // A managed intent's session binding is the WorkClaim's connection: the
-    // caller must be serving over THAT connection, so a foreign host cannot
-    // adopt a registered agent id to reach its private delivery.
+    // A managed intent's session binding is the owning WorkClaim's session
+    // client, resolved SERVER-side at seam time: a foreign server session
+    // cannot adopt a registered agent id to reach its private delivery.
+    // Attached intents already bind host + agent, which is stronger.
     if intent.execution_source == "managed_dispatch" {
         if let Some(bound) = &intent.requester_session_ref {
-            if bound != &caller.connection_id {
+            if caller.session_client.as_deref() != Some(bound.as_str()) {
                 return false;
             }
         }
@@ -1529,7 +1538,7 @@ mod tests {
         DeliveryCaller {
             agent_identity_id: id.to_string(),
             host_identity: format!("host-{id}"),
-            connection_id: "connection-1".to_string(),
+            session_client: Some("connection-1".to_string()),
         }
     }
 
