@@ -1,5 +1,7 @@
 use super::access::{
-    load_unlocked_api_key_secret_pools_with_acl_hook_for_tests, record_successful_vault_access,
+    load_unlocked_api_key_secret_pools_with_acl_hook_for_tests,
+    materialize_unrestricted_vault_entries_from_store_with_hook_for_tests,
+    record_successful_vault_access,
     select_authorized_vault_entry_and_record_access_with_hook_for_tests,
 };
 use super::handlers::{
@@ -109,6 +111,98 @@ fn authorized_vault_read_serializes_acl_revocation_with_selection_and_touch() {
         Ok(_) => panic!("subsequent anonymous read must observe the committed ACL revocation"),
     };
     assert!(denied.contains("agent_id is required"), "{denied}");
+}
+
+#[test]
+fn identityless_cli_materialization_serializes_acl_revocation_with_decrypt_and_touch() {
+    let db_path = crate::utils::test_fixture_path(format!(
+        "memory-server-vault-cli-materialize-race-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let mut reader_store =
+        memcore::MemoryStore::open(db_path.to_string_lossy().as_ref()).expect("open reader");
+    let writer_store =
+        memcore::MemoryStore::open(db_path.to_string_lossy().as_ref()).expect("open writer");
+    let key = [9u8; 32];
+    let (encrypted_value, nonce) =
+        crate::vault_crypto::encrypt(&key, b"legacy-export-secret").expect("encrypt");
+    let now = chrono::Utc::now().to_rfc3339();
+    let entry = memcore::vault::VaultEntry {
+        name: "LEGACY_EXPORT_API_KEY".to_string(),
+        encrypted_value,
+        nonce,
+        secret_type: "api_key".to_string(),
+        description: String::new(),
+        allowed_agents: None,
+        created_at: now.clone(),
+        updated_at: now,
+        accessed_at: String::new(),
+        access_count: 0,
+    };
+    reader_store
+        .vault_upsert_entry(&entry)
+        .expect("seed unrestricted entry");
+
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let writer_barrier = std::sync::Arc::clone(&barrier);
+    let (attempt_tx, attempt_rx) = std::sync::mpsc::channel();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let writer_handle = std::cell::RefCell::new(None);
+    let mut restricted = entry.clone();
+    restricted.allowed_agents = Some(vec!["agent-a".to_string()]);
+
+    let materialized = materialize_unrestricted_vault_entries_from_store_with_hook_for_tests(
+        &mut reader_store,
+        &key,
+        |_| true,
+        || {
+            let handle = std::thread::spawn(move || {
+                attempt_tx.send(()).expect("announce ACL revocation");
+                writer_barrier.wait();
+                writer_store
+                    .vault_upsert_entry(&restricted)
+                    .expect("commit ACL revocation");
+                done_tx.send(()).expect("announce committed revocation");
+            });
+            attempt_rx
+                .recv()
+                .expect("writer reached revocation boundary");
+            barrier.wait();
+            assert!(
+                done_rx.recv_timeout(Duration::from_millis(250)).is_err(),
+                "ACL revocation must not commit between snapshot and decrypt/touch"
+            );
+            writer_handle.replace(Some(handle));
+        },
+    )
+    .expect("materialization linearizes before ACL revocation");
+    assert_eq!(
+        materialized,
+        vec![(entry.name.clone(), "legacy-export-secret".to_string())]
+    );
+    writer_handle
+        .into_inner()
+        .expect("writer handle")
+        .join()
+        .expect("writer thread");
+    done_rx.recv().expect("ACL revocation committed");
+    let retained = reader_store
+        .vault_get_entry(&entry.name)
+        .expect("read entry")
+        .expect("entry remains");
+    assert_eq!(retained.access_count, 1);
+
+    let subsequent = materialize_unrestricted_vault_entries_from_store_with_hook_for_tests(
+        &mut reader_store,
+        &key,
+        |_| true,
+        || {},
+    )
+    .expect("subsequent materialization");
+    assert!(
+        subsequent.is_empty(),
+        "restricted row must no longer materialize"
+    );
 }
 
 #[test]

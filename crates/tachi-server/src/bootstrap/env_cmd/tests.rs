@@ -1,5 +1,5 @@
 use super::bindings::{build_project_env_plan, parse_project_vault_env_bindings_detailed};
-use super::materialize::sync_project_env;
+use super::materialize::{resolve_project_env_values, sync_project_env};
 use super::shell::shell_export_line;
 use super::types::UnlockedVaultStore;
 
@@ -162,7 +162,7 @@ fn project_env_sync_preview_does_not_write() {
     let store = temp_store();
     let key = crate::vault_crypto::derive_cheap("test-password", b"1234567890123456").expect("key");
     put_secret(&store, key.bytes(), "direct.secret", "direct-value");
-    let unlocked = UnlockedVaultStore { store, key };
+    let mut unlocked = UnlockedVaultStore { store, key };
 
     let temp = tempfile::tempdir().expect("temp project");
     let project = temp.path().join("project");
@@ -173,11 +173,53 @@ fn project_env_sync_preview_does_not_write() {
     )
     .expect("write bindings");
 
-    let report = sync_project_env(&unlocked, &project, None, true, false, None, false)
+    let report = sync_project_env(&mut unlocked, &project, None, true, false, None, false)
         .expect("preview sync");
     assert!(!report.written);
     assert!(report.dry_run);
     assert!(!project.join(".tachi/env.generated").exists());
+}
+
+#[test]
+fn project_env_materialization_rejects_restricted_secret_and_does_not_touch_it() {
+    let store = temp_store();
+    let key = crate::vault_crypto::derive_cheap("test-password", b"1234567890123456").expect("key");
+    let (encrypted_value, nonce) =
+        crate::vault_crypto::encrypt(key.bytes(), b"restricted-value").expect("encrypt");
+    store
+        .vault_upsert_entry(&memcore::vault::VaultEntry {
+            name: "restricted.secret".to_string(),
+            encrypted_value,
+            nonce,
+            secret_type: "api_key".to_string(),
+            description: String::new(),
+            allowed_agents: Some(vec!["agent-a".to_string()]),
+            created_at: "2026-06-09T00:00:00Z".to_string(),
+            updated_at: "2026-06-09T00:00:00Z".to_string(),
+            accessed_at: String::new(),
+            access_count: 0,
+        })
+        .expect("seed restricted secret");
+    let mut unlocked = UnlockedVaultStore { store, key };
+    let temp = tempfile::tempdir().expect("temp project");
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(project.join(".tachi")).expect("create .tachi");
+    std::fs::write(
+        project.join(".tachi/vault.env"),
+        "PROJECT_SECRET=vault:restricted.secret\n",
+    )
+    .expect("write bindings");
+
+    let error = resolve_project_env_values(&mut unlocked, &project)
+        .expect_err("identity-less project export must reject restricted secret")
+        .to_string();
+    assert!(error.contains("agent_id is required"), "{error}");
+    let retained = unlocked
+        .store
+        .vault_get_entry("restricted.secret")
+        .expect("read secret")
+        .expect("secret remains");
+    assert_eq!(retained.access_count, 0);
 }
 
 #[test]
@@ -196,7 +238,7 @@ fn project_env_sync_writes_generated_exports() {
             updated_at: "2026-06-09T00:00:00Z".to_string(),
         })
         .expect("set rotation");
-    let unlocked = UnlockedVaultStore { store, key };
+    let mut unlocked = UnlockedVaultStore { store, key };
 
     let temp = tempfile::tempdir().expect("temp project");
     let project = temp.path().join("project");
@@ -210,7 +252,7 @@ PROJECT_POOL=vault:POOL_API_KEY
     )
     .expect("write bindings");
 
-    let report = sync_project_env(&unlocked, &project, None, false, false, None, false)
+    let report = sync_project_env(&mut unlocked, &project, None, false, false, None, false)
         .expect("sync project env");
     assert!(report.written);
     let generated = project.join(".tachi/env.generated");
@@ -246,7 +288,7 @@ fn project_env_sync_refuses_overwrite_without_force() {
     let store = temp_store();
     let key = crate::vault_crypto::derive_cheap("test-password", b"1234567890123456").expect("key");
     put_secret(&store, key.bytes(), "direct.secret", "new-value");
-    let unlocked = UnlockedVaultStore { store, key };
+    let mut unlocked = UnlockedVaultStore { store, key };
 
     let temp = tempfile::tempdir().expect("temp project");
     let project = temp.path().join("project");
@@ -259,7 +301,7 @@ fn project_env_sync_refuses_overwrite_without_force() {
     let generated = project.join(".tachi/env.generated");
     std::fs::write(&generated, "existing\n").expect("write existing generated env");
 
-    let err = sync_project_env(&unlocked, &project, None, false, false, None, false)
+    let err = sync_project_env(&mut unlocked, &project, None, false, false, None, false)
         .expect_err("sync without force must reject existing output");
     assert!(
         err.to_string().contains("pass --force to overwrite"),
@@ -270,7 +312,7 @@ fn project_env_sync_refuses_overwrite_without_force() {
         "existing\n"
     );
 
-    let report = sync_project_env(&unlocked, &project, None, false, true, None, false)
+    let report = sync_project_env(&mut unlocked, &project, None, false, true, None, false)
         .expect("force sync should overwrite");
     assert!(report.written);
     let content = std::fs::read_to_string(&generated).expect("read forced output");

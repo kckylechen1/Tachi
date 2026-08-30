@@ -41,6 +41,12 @@ pub(super) async fn run_exec_action(
     allow_unauthenticated: bool,
     command: &[String],
 ) -> Result<(), Box<dyn std::error::Error>> {
+    if consumer.is_some_and(|value| !value.trim().is_empty()) {
+        return Err(
+            "vault exec cannot assert --consumer from an identity-less direct CLI; use a server-bound agent session"
+                .into(),
+        );
+    }
     let require = normalize_requirements(require)?;
     let cwd = std::env::current_dir()?;
     let server = match unlock_cli_server(
@@ -450,6 +456,37 @@ mod tests {
             "refusal must surface the unlock failure as 'vault unavailable': {msg}"
         );
         assert!(!marker.exists(), "default refusal spawned the child");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn exec_action_rejects_self_asserted_consumer_before_unlock_or_spawn() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let dir = tempfile::tempdir().expect("temp vault db");
+        let marker = dir.path().join("must-not-exist");
+        let command = vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            format!("touch {}", marker.display()),
+        ];
+        let error = run_exec_action(
+            &dir.path().join("must-not-be-created.sqlite"),
+            false,
+            false,
+            None,
+            false,
+            Some("agent-a"),
+            &[],
+            false,
+            &command,
+        )
+        .await
+        .expect_err("identity-less CLI must not self-assert a Vault consumer")
+        .to_string();
+        assert!(error.contains("cannot assert --consumer"), "{error}");
+        assert!(!marker.exists(), "consumer refusal spawned the child");
     }
 
     #[tokio::test]

@@ -339,9 +339,32 @@ async fn run_secret_action_with_reader(
                 updated_at: now,
             };
             let mut store = open_cli_store(global_db_path)?;
-            let removed_members = store
+            let transaction = store
+                .begin_vault_transaction()
+                .map_err(|e| format!("begin vault pool transaction: {e}"))?;
+            for existing in transaction
+                .vault_list_entries()
+                .map_err(|e| format!("vault_list_entries: {e}"))?
+            {
+                if memcore::api_key_pool_member_index(&existing.name, &prefix).is_some()
+                    && existing
+                        .allowed_agents
+                        .as_ref()
+                        .is_some_and(|agents| !agents.is_empty())
+                {
+                    return Err(format!(
+                        "Access denied: direct CLI cannot replace agent-restricted pool member '{}'",
+                        existing.name
+                    )
+                    .into());
+                }
+            }
+            let removed_members = transaction
                 .vault_replace_api_key_pool(&prefix, &entries, &rotation)
                 .map_err(|e| format!("vault_replace_api_key_pool: {e}"))?;
+            transaction
+                .commit()
+                .map_err(|e| format!("commit vault pool transaction: {e}"))?;
 
             println!(
                 "{}",
@@ -1031,5 +1054,67 @@ mod tests {
             String::from_utf8(decrypted).expect("UTF-8 retained secret"),
             "restricted-original"
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn direct_cli_set_pool_rejects_agent_restricted_member() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let db_path = temp.path().join("memory.db");
+        let password_file = temp.path().join("vault-password");
+        std::fs::write(&password_file, b"direct-cli-password\n").expect("password file");
+        std::fs::set_permissions(&password_file, std::fs::Permissions::from_mode(0o600))
+            .expect("password permissions");
+        let key = super::super::keys::vault_init_with_password(
+            &db_path,
+            "direct-cli-password".to_string(),
+        )
+        .expect("initialize vault");
+        let (encrypted_value, nonce) =
+            crate::vault_crypto::encrypt(key.bytes(), b"restricted-original").expect("encrypt");
+        open_cli_store(&db_path)
+            .expect("open fixture")
+            .vault_upsert_entry(&memcore::vault::VaultEntry {
+                name: "RESTRICTED_POOL_API_KEY_1".to_string(),
+                encrypted_value,
+                nonce,
+                secret_type: "api_key".to_string(),
+                description: String::new(),
+                allowed_agents: Some(vec!["agent-a".to_string()]),
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                updated_at: "2026-01-01T00:00:00Z".to_string(),
+                accessed_at: String::new(),
+                access_count: 0,
+            })
+            .expect("seed restricted member");
+
+        let error = run_secret_action_with_reader(
+            &db_path,
+            temp.path(),
+            VaultAction::SetPool {
+                prefix: "RESTRICTED_POOL_API_KEY".to_string(),
+                strategy: "round_robin".to_string(),
+                description: None,
+                stdin_password: false,
+                keychain: false,
+                password_file: Some(password_file),
+                insecure_password_file: false,
+                values_stdin: true,
+            },
+            &mut Cursor::new(b"replacement\n".to_vec()),
+        )
+        .await
+        .expect_err("identity-less set-pool must reject a restricted member")
+        .to_string();
+        assert!(error.contains("agent-restricted"), "{error}");
+        assert!(!error.contains("replacement"), "{error}");
+        let retained = open_cli_store_read_only(&db_path)
+            .expect("reopen fixture")
+            .vault_get_entry("RESTRICTED_POOL_API_KEY_1")
+            .expect("read member")
+            .expect("member remains");
+        assert_eq!(retained.allowed_agents, Some(vec!["agent-a".to_string()]));
     }
 }

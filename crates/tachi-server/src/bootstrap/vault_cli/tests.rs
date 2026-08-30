@@ -227,6 +227,50 @@ fn setup_keys_init_and_upsert_roundtrip() {
 }
 
 #[test]
+fn legacy_vault_upsert_rejects_agent_restricted_existing_entry() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("memory.db");
+    let key = vault_init_with_password(&db_path, "correct horse battery staple".to_string())
+        .expect("init vault");
+    let (encrypted_value, nonce) =
+        crate::vault_crypto::encrypt(key.bytes(), b"restricted-original").expect("encrypt");
+    open_cli_store(&db_path)
+        .expect("open fixture")
+        .vault_upsert_entry(&memcore::vault::VaultEntry {
+            name: "RESTRICTED_SETUP_API_KEY".to_string(),
+            encrypted_value,
+            nonce,
+            secret_type: "api_key".to_string(),
+            description: String::new(),
+            allowed_agents: Some(vec!["agent-a".to_string()]),
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+            accessed_at: String::new(),
+            access_count: 0,
+        })
+        .expect("seed restricted entry");
+
+    let error = vault_upsert_secret_with_key(
+        &db_path,
+        &key,
+        "RESTRICTED_SETUP_API_KEY",
+        "api_key",
+        "",
+        "must-not-overwrite".to_string(),
+    )
+    .expect_err("identity-less setup helper must reject restricted entry")
+    .to_string();
+    assert!(error.contains("agent-restricted"), "{error}");
+    assert!(!error.contains("must-not-overwrite"), "{error}");
+    let retained = open_cli_store_read_only(&db_path)
+        .expect("reopen fixture")
+        .vault_get_entry("RESTRICTED_SETUP_API_KEY")
+        .expect("read entry")
+        .expect("entry remains");
+    assert_eq!(retained.allowed_agents, Some(vec!["agent-a".to_string()]));
+}
+
+#[test]
 fn vault_upsert_rejects_empty_value() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("memory.db");

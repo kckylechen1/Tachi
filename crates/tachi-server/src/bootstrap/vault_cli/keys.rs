@@ -135,9 +135,21 @@ pub(in crate::bootstrap) fn vault_upsert_secret_with_key(
     let transaction = store
         .begin_vault_transaction()
         .map_err(|e| format!("begin vault transaction: {e}"))?;
-    let is_new = !transaction
-        .vault_entry_exists(name)
-        .map_err(|e| format!("vault_entry_exists: {e}"))?;
+    let existing = transaction
+        .vault_get_entry(name)
+        .map_err(|e| format!("vault_get_entry: {e}"))?;
+    if existing.as_ref().is_some_and(|entry| {
+        entry
+            .allowed_agents
+            .as_ref()
+            .is_some_and(|agents| !agents.is_empty())
+    }) {
+        return Err(format!(
+            "Access denied: direct CLI cannot overwrite agent-restricted secret '{name}'"
+        )
+        .into());
+    }
+    let is_new = existing.is_none();
     if is_new && memcore::is_lane_config_url_name(name) {
         if let Some(leak) = memcore::catalog::endpoint::endpoint_credential_leak(&secret_value) {
             return Err(format!(

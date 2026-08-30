@@ -1,7 +1,6 @@
 use std::path::PathBuf;
 
-use super::super::{open_cli_store_read_only, vault_cli};
-use super::materialize::decrypt_entry_value;
+use super::super::{open_cli_store, vault_cli};
 use super::shell::{is_upper_snake_env_name, shell_export_line};
 
 pub(super) async fn run_legacy_env_export(
@@ -13,7 +12,7 @@ pub(super) async fn run_legacy_env_export(
     password_file: Option<&std::path::Path>,
     insecure_password_file: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let store = open_cli_store_read_only(global_db_path)?;
+    let mut store = open_cli_store(global_db_path)?;
 
     // 1. Check vault is initialized
     let config = store
@@ -56,63 +55,24 @@ pub(super) async fn run_legacy_env_export(
         return Err("Wrong password".into());
     }
 
-    // 4. List and decrypt all entries
-    let entries = store
-        .vault_list_entries()
-        .map_err(|e| format!("Failed to list vault entries: {e}"))?;
-    for rotation in store
-        .vault_list_rotations()
-        .map_err(|e| format!("Failed to list vault rotations: {e}"))?
-    {
-        memcore::validate_api_key_rotation(&entries, &rotation)
-            .map_err(|error| format!("{error}; refusing legacy env export"))?;
-    }
-
     // Build glob pattern if provided
     let glob_pattern = filter.map(glob::Pattern::new).transpose()?;
-
-    let mut emitted = 0usize;
-    for entry in entries {
-        // Skip agent-restricted secrets — those aren't meant for env injection
-        if entry
-            .allowed_agents
-            .as_ref()
-            .is_some_and(|agents| !agents.is_empty())
-        {
-            continue;
-        }
-
-        if !crate::utils::is_shell_env_name(&entry.name) {
-            eprintln!(
-                "WARNING: skipped secret '{}' because it is not a valid shell environment name",
-                entry.name
-            );
-            continue;
-        }
-
-        // --env-only: skip names that don't look like env vars (UPPER_SNAKE_CASE)
-        if env_only && !is_upper_snake_env_name(&entry.name) {
-            continue;
-        }
-
-        // --filter: apply glob pattern
-        if let Some(ref pat) = glob_pattern {
-            if !pat.matches(&entry.name) {
-                continue;
-            }
-        }
-
-        let value = match decrypt_entry_value(&entry, key.bytes()) {
-            Ok(v) => v,
-            Err(e) => {
-                eprintln!("WARNING: failed to decrypt '{}': {}", entry.name, e);
-                continue;
-            }
-        };
-
-        print!("{}", shell_export_line(&entry.name, &value));
+    let entries = crate::vault_ops::materialize_unrestricted_vault_entries_from_store(
+        &mut store,
+        key.bytes(),
+        |entry| {
+            crate::utils::is_shell_env_name(&entry.name)
+                && (!env_only || is_upper_snake_env_name(&entry.name))
+                && glob_pattern
+                    .as_ref()
+                    .is_none_or(|pattern| pattern.matches(&entry.name))
+        },
+    )
+    .map_err(|error| format!("{error}; refusing legacy env export"))?;
+    let emitted = entries.len();
+    for (name, value) in entries {
+        print!("{}", shell_export_line(&name, &value));
         println!();
-        emitted += 1;
     }
 
     eprintln!("# tachi env: {} secret(s) emitted", emitted);

@@ -316,6 +316,117 @@ pub(super) fn select_authorized_vault_entry_and_record_access(
     )
 }
 
+/// Direct, identity-less CLI read boundary. Selection, ACL validation,
+/// decryption, access accounting, and any rotation advance share one
+/// immediate transaction so an ACL update cannot race plaintext release.
+pub(crate) fn read_vault_secret_from_store(
+    store: &mut MemoryStore,
+    key: &[u8; 32],
+    name: &str,
+    auto_rotate: bool,
+) -> Result<String, String> {
+    let params = VaultGetParams {
+        name: name.to_string(),
+        agent_id: None,
+        auto_rotate,
+    };
+    let (_selected, value, _access_count) =
+        select_authorized_vault_entry_and_record_access(store, &params, None, key)?;
+    Ok(value)
+}
+
+/// Materialize unrestricted entries for an identity-less CLI consumer in one
+/// transaction. Rotation validation, ACL filtering, decrypt, and access
+/// accounting all observe the same database state.
+pub(crate) fn materialize_unrestricted_vault_entries_from_store(
+    store: &mut MemoryStore,
+    key: &[u8; 32],
+    include_entry: impl Fn(&VaultEntry) -> bool,
+) -> Result<Vec<(String, String)>, String> {
+    materialize_unrestricted_vault_entries_from_store_with_hook(store, key, include_entry, || {})
+}
+
+fn materialize_unrestricted_vault_entries_from_store_with_hook(
+    store: &mut MemoryStore,
+    key: &[u8; 32],
+    include_entry: impl Fn(&VaultEntry) -> bool,
+    after_snapshot: impl FnOnce(),
+) -> Result<Vec<(String, String)>, String> {
+    let transaction = store
+        .begin_vault_transaction()
+        .map_err(|e| format!("Failed to begin Vault materialization transaction: {e}"))?;
+    let entries = transaction
+        .vault_list_entries()
+        .map_err(|e| format!("Failed to list vault secrets: {e}"))?;
+    for rotation in transaction
+        .vault_list_rotations()
+        .map_err(|e| format!("Failed to list Vault rotations: {e}"))?
+    {
+        memcore::validate_api_key_rotation(&entries, &rotation)
+            .map_err(|error| format!("{error}; refusing Vault materialization"))?;
+    }
+    after_snapshot();
+
+    let mut secrets = Vec::new();
+    for entry in entries {
+        if !include_entry(&entry)
+            || entry
+                .allowed_agents
+                .as_ref()
+                .is_some_and(|agents| !agents.is_empty())
+        {
+            continue;
+        }
+        let decrypted = match crypto::decrypt(key, &entry.encrypted_value, &entry.nonce) {
+            Ok(value) => value,
+            Err(error) => {
+                eprintln!("WARNING: failed to decrypt '{}': {}", entry.name, error);
+                continue;
+            }
+        };
+        let value = match crypto::decode_utf8_zeroizing(
+            decrypted,
+            format!("Vault secret '{}' is not valid UTF-8", entry.name),
+        ) {
+            Ok(value) => value,
+            Err(error) => {
+                eprintln!("WARNING: failed to decrypt '{}': {}", entry.name, error);
+                continue;
+            }
+        };
+        if value.trim().is_empty() {
+            eprintln!(
+                "WARNING: failed to decrypt '{}': secret is empty",
+                entry.name
+            );
+            continue;
+        }
+        transaction
+            .vault_touch_entry(&entry.name)
+            .map_err(|e| format!("Failed to record Vault access: {e}"))?;
+        secrets.push((entry.name, value));
+    }
+    transaction
+        .commit()
+        .map_err(|e| format!("Failed to commit Vault materialization transaction: {e}"))?;
+    Ok(secrets)
+}
+
+#[cfg(test)]
+pub(super) fn materialize_unrestricted_vault_entries_from_store_with_hook_for_tests(
+    store: &mut MemoryStore,
+    key: &[u8; 32],
+    include_entry: impl Fn(&VaultEntry) -> bool,
+    after_snapshot: impl FnOnce(),
+) -> Result<Vec<(String, String)>, String> {
+    materialize_unrestricted_vault_entries_from_store_with_hook(
+        store,
+        key,
+        include_entry,
+        after_snapshot,
+    )
+}
+
 #[cfg(test)]
 pub(super) fn select_authorized_vault_entry_and_record_access_with_hook_for_tests(
     store: &mut MemoryStore,
