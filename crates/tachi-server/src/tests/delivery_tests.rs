@@ -745,4 +745,77 @@ async fn attached_terminal_event_mints_a_delivery_intent() {
         })
         .expect("event count");
     assert_eq!(events, 2, "mint receipts only; no supersede/re-arm events");
+
+    // Exact replay of the SAME terminal event id: Replayed admission, mint
+    // re-attempted idempotently (the recovery path if the first mint
+    // failed), zero duplication.
+    let exact_replay = TachiAgentEvalParams {
+        action: "ingest_session_event".to_string(),
+        host_identity: Some("host-1".to_string()),
+        admission_receipt_ref: Some("admission-1".to_string()),
+        attachment_id: Some(attachment_id.clone()),
+        session_event_id: Some("evt-terminal-1".to_string()),
+        session_event_kind: Some("terminal".to_string()),
+        session_event_outcome: Some("completed".to_string()),
+        source_revision: Some(7),
+        event_summary: Some("run completed".to_string()),
+        event_occurred_at: Some("2026-08-30T00:00:00Z".to_string()),
+        ..attach_params("attach-1")
+    };
+    let replayed = handle_agent_eval(&server, exact_replay)
+        .await
+        .expect("exact replay");
+    assert!(replayed.contains(r#""admission":"replayed""#));
+    let after_replay: Vec<memcore::DeliveryIntent> = server
+        .with_global_store(|store| {
+            memcore::observe_delivery_for_execution(
+                store.connection(),
+                "attached_session",
+                &attachment_id,
+            )
+            .map_err(|error| error.to_string())
+        })
+        .expect("observe after replay");
+    assert_eq!(after_replay.len(), 1, "replay never mints a sibling");
+    assert_eq!(after_replay[0].result_revision, 7);
+
+    // A newer-revision redundant terminal carrying a CORRECTED payload is
+    // fresher delivery truth: the same intent supersedes to the new
+    // payload.
+    let corrected = TachiAgentEvalParams {
+        action: "ingest_session_event".to_string(),
+        host_identity: Some("host-1".to_string()),
+        admission_receipt_ref: Some("admission-1".to_string()),
+        attachment_id: Some(attachment_id.clone()),
+        session_event_id: Some("evt-terminal-2".to_string()),
+        session_event_kind: Some("terminal".to_string()),
+        session_event_outcome: Some("completed".to_string()),
+        source_revision: Some(11),
+        event_summary: Some("run completed with corrected artifact".to_string()),
+        event_occurred_at: Some("2026-08-30T00:00:01Z".to_string()),
+        ..attach_params("attach-1")
+    };
+    let corrected_receipt = handle_agent_eval(&server, corrected)
+        .await
+        .expect("corrected terminal");
+    assert!(corrected_receipt.contains("journaled_redundant_terminal"));
+    let after_corrected: Vec<memcore::DeliveryIntent> = server
+        .with_global_store(|store| {
+            memcore::observe_delivery_for_execution(
+                store.connection(),
+                "attached_session",
+                &attachment_id,
+            )
+            .map_err(|error| error.to_string())
+        })
+        .expect("observe after corrected");
+    assert_eq!(after_corrected.len(), 1, "still one intent per run");
+    assert_eq!(
+        after_corrected[0].result_revision, 11,
+        "mirrors fresher payload"
+    );
+    assert_eq!(
+        after_corrected[0].delivery_state, "ready",
+        "corrected payload re-arms delivery"
+    );
 }

@@ -1136,53 +1136,49 @@ fn reconcile_mint(
     new: &NewDeliveryIntent,
     now: &str,
 ) -> Result<DeliveryIntent, MemoryError> {
+    // Content identity: the result ref and digest together decide whether a
+    // mint carries new information. The execution identity is fixed by the
+    // idempotency key, so it cannot differ on this path.
+    let same_content =
+        existing.result_ref == new.result_ref && existing.payload_digest == new.payload_digest;
+
     if new.result_revision < existing.result_revision {
-        // Stale reconcile without correction authority: a lower revision
-        // never regresses the intent — plain no-op, regardless of content.
-        if !new.correction {
-            return Ok(existing);
-        }
-        // Correction-authoritative mints fall through: the spine mirrors
-        // the terminal plane's latest canonical receipt, and the supersede
-        // strictly GROWS the result revision, so an out-of-order correction
-        // can never produce a lower revision than the one it replaces.
-        if new.payload_digest == existing.payload_digest {
-            return Ok(existing);
-        }
-        let next = existing.result_revision + 1;
-        return supersede_intent(conn, existing, new, next, now);
-    }
-    if new.result_revision == existing.result_revision {
-        let same_content = existing.result_ref == new.result_ref
-            && existing.payload_digest == new.payload_digest
-            && existing.execution_source == new.execution_source.as_str()
-            && existing.execution_ref == new.execution_ref;
-        if !same_content {
-            if !new.correction {
-                return Err(MemoryError::DeliveryIdempotencyConflict(format!(
-                    "idempotency_key '{}' already mints intent {} at revision {} with different content",
-                    new.idempotency_key, existing.delivery_id, existing.result_revision
-                )));
-            }
-            // Terminal-plane correction at an equal wall-clock revision:
-            // supersede strictly INSIDE the mint transaction, so two
-            // same-tick corrections serialize and none is silently lost.
-            return supersede_intent(
-                conn,
-                existing.clone(),
-                new,
-                existing.result_revision + 1,
-                now,
-            );
-        }
+        // STALE, absolutely: a lower revision is older information and can
+        // never change the intent — no correction authority overrides this,
+        // because mirroring an older payload would be a content regression
+        // even though the revision counter would grow.
         return Ok(existing);
     }
+    if new.result_revision == existing.result_revision {
+        if same_content {
+            return Ok(existing);
+        }
+        if !new.correction {
+            return Err(MemoryError::DeliveryIdempotencyConflict(format!(
+                "idempotency_key '{}' already mints intent {} at revision {} with different content",
+                new.idempotency_key, existing.delivery_id, existing.result_revision
+            )));
+        }
+        // Terminal-plane correction at an equal wall-clock revision:
+        // supersede strictly INSIDE the mint transaction, so two same-tick
+        // corrections serialize and none is silently lost.
+        return supersede_intent(
+            conn,
+            existing.clone(),
+            new,
+            existing.result_revision + 1,
+            now,
+        );
+    }
 
-    // Corrected result: a strictly higher revision re-arms delivery. The
-    // floor stays strictly above whatever the intent already carried, so
-    // corrections are monotone no matter the incoming hint.
-    let next_result_revision = new.result_revision.max(existing.result_revision + 1);
-    supersede_intent(conn, existing, new, next_result_revision, now)
+    // Strictly higher revision.
+    if same_content {
+        // Unchanged content at a higher revision (a delayed replay of the
+        // same terminal receipt) carries NO new information: it must not
+        // re-arm a settled delivery.
+        return Ok(existing);
+    }
+    supersede_intent(conn, existing, new, new.result_revision, now)
 }
 
 /// Re-arm an intent with a corrected result. The whole rewrite + ledger
@@ -2366,14 +2362,66 @@ mod tests {
         assert_eq!(superseded.result_revision, 2, "strictly grows");
         assert_eq!(superseded.delivery_state, "ready");
 
-        // A second same-tick correction also strictly grows: corrections
-        // serialize inside the mint, none is silently lost.
-        let mut corrected2 = mint_new("managed:outcome-21");
-        corrected2.result_revision = 1;
-        corrected2.payload_digest = "sha256-DDDD".to_string();
-        corrected2.correction = true;
-        let superseded2 = mint_delivery_intent(&conn, &corrected2).unwrap();
-        assert_eq!(superseded2.result_revision, 3);
+        // An OLDER-revision mint is stale absolutely — even with correction
+        // authority, older content can never replace newer content (the
+        // revision counter would grow but the payload would regress).
+        let mut stale_correction = mint_new("managed:outcome-21");
+        stale_correction.result_revision = 1;
+        stale_correction.payload_digest = "sha256-DDDD".to_string();
+        stale_correction.result_ref = "artifact://older".to_string();
+        stale_correction.correction = true;
+        let untouched = mint_delivery_intent(&conn, &stale_correction).unwrap();
+        assert_eq!(untouched.result_revision, 2, "stale no-op");
+        assert_eq!(untouched.result_ref, corrected.result_ref);
+    }
+
+    // --- codex R2 round-3 regression: unchanged content at a HIGHER
+    // revision (a delayed replay of the same terminal receipt) carries no
+    // new information and must not re-arm a settled delivery.
+    #[test]
+    fn unchanged_higher_revision_replay_never_rearms() {
+        let conn = test_conn();
+        let mut first = mint_new("managed:outcome-23");
+        first.result_revision = 10;
+        first.payload_digest = "sha256-AAAA".to_string();
+        let intent = mint_delivery_intent(&conn, &first).unwrap();
+
+        // Deliver: the intent settles.
+        claim_ready_delivery(
+            &conn,
+            &DeliveryClaimRequest {
+                caller: caller("requester-a"),
+                claim_key: "ck-hi1".to_string(),
+                lease_seconds: 0,
+                only_delivery_id: None,
+            },
+        )
+        .unwrap();
+        ack_delivered(
+            &conn,
+            &intent.delivery_id,
+            &caller("requester-a"),
+            "ak-hi1",
+            None,
+        )
+        .unwrap();
+        assert_eq!(state_of(&conn, &intent.delivery_id), "delivered");
+
+        // Delayed replay of the SAME receipt with a higher terminal
+        // revision but unchanged content: no re-arm, delivered stands.
+        let mut replay = mint_new("managed:outcome-23");
+        replay.result_revision = 20;
+        replay.payload_digest = "sha256-AAAA".to_string();
+        let reconciled = mint_delivery_intent(&conn, &replay).unwrap();
+        assert_eq!(reconciled.delivery_state, "delivered");
+        assert_eq!(reconciled.result_revision, 10);
+
+        // A genuinely CHANGED payload at a higher revision does re-arm.
+        let mut corrected = mint_new("managed:outcome-23");
+        corrected.result_revision = 30;
+        corrected.payload_digest = "sha256-BBBB".to_string();
+        let rearmed = mint_delivery_intent(&conn, &corrected).unwrap();
+        assert_eq!(rearmed.delivery_state, "ready");
     }
 
     // --- codex R2 round-2 regression: replaying the same claim key after

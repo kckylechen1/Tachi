@@ -117,13 +117,21 @@ pub(crate) fn handle_ingest_session_event(
     // the PERSISTED attachment row, never from request parameters, so an
     // admitted host cannot redirect a private delivery to another
     // registered identity by naming it on the terminal event.
-    // Strictly Advanced: a redundant terminal (same authoritative outcome,
-    // possibly a newer revision) adds NO delivery information, so minting
-    // on it could only supersede/re-arm an already-settled intent. Replayed
-    // admissions never re-mint either — the first journaling already made
-    // (or refused) the mint decision.
+    // Gate: the mint runs for a canonical terminal advance AND for a
+    // redundant same-outcome terminal — the latter can still carry a
+    // corrected payload/summary, and the spine reconcile turns that into a
+    // supersede; identical content is a no-op, so a settled intent is never
+    // re-armed by a redundant fact. Replayed admissions DO re-attempt the
+    // mint: the mint is idempotent by run key, so this is the recovery path
+    // when a first-journal mint failed transiently. Stale and conflicting
+    // terminal facts mint nothing (the receipt plane's own law keeps them
+    // from advancing state, so they cannot be fresher delivery truth).
     if kind == HarnessSessionEventKind::Terminal
-        && receipt.disposition == HarnessSessionEventDisposition::Advanced
+        && matches!(
+            receipt.disposition,
+            HarnessSessionEventDisposition::Advanced
+                | HarnessSessionEventDisposition::JournaledRedundantTerminal
+        )
         && receipt.admission == memcore::HarnessSessionEventAdmission::Journaled
     {
         if let Some(outcome) = outcome {
