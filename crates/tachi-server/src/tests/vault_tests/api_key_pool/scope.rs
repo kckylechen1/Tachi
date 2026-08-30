@@ -1,6 +1,24 @@
 use super::*;
 
 #[tokio::test]
+async fn vault_api_key_pool_invalid_prefix_rejects_before_storage_without_echoing_values() {
+    let server = make_server();
+    let error = server
+        .vault_set_api_key_pool(Parameters(VaultSetApiKeyPoolParams {
+            prefix: "not-a-shell-name".to_string(),
+            agent_id: None,
+            values: vec!["early-error-secret".to_string()],
+            strategy: "round_robin".to_string(),
+            description: String::new(),
+            allowed_agents: None,
+        }))
+        .await
+        .expect_err("invalid prefix must fail before storage");
+    assert!(error.contains("not-a-shell-name"), "{error}");
+    assert!(!error.contains("early-error-secret"), "{error}");
+}
+
+#[tokio::test]
 async fn vault_api_key_lease_does_not_decrypt_unrelated_provider_secrets() {
     let server = make_server();
 

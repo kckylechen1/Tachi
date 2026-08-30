@@ -110,6 +110,14 @@ pub(crate) struct VaultSetApiKeyPoolParams {
     pub allowed_agents: Option<Vec<String>>,
 }
 
+impl Drop for VaultSetApiKeyPoolParams {
+    fn drop(&mut self) {
+        for value in &mut self.values {
+            crypto::zero_string(value);
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct VaultLeaseApiKeyParams {
     /// Logical provider env name or standalone API key name.
