@@ -371,6 +371,11 @@ impl DeliveryClaimView {
 pub struct DeliveryCaller {
     pub agent_identity_id: String,
     pub host_identity: String,
+    /// The admitted host connection id the call is served over. For
+    /// managed intents the requester binding is the WorkClaim's session
+    /// connection, so a foreign host cannot claim another requester's
+    /// private delivery merely by naming the registered agent id.
+    pub connection_id: String,
 }
 
 /// Input to [`claim_ready_delivery`].
@@ -1054,6 +1059,7 @@ fn validate_caller(caller: &DeliveryCaller) -> Result<(), MemoryError> {
     for (name, value) in [
         ("agent_identity_id", &caller.agent_identity_id),
         ("host_identity", &caller.host_identity),
+        ("connection_id", &caller.connection_id),
     ] {
         if value.trim().is_empty() || value.len() > 128 {
             return Err(MemoryError::InvalidArg(format!(
@@ -1295,6 +1301,16 @@ fn requester_matches(intent: &DeliveryIntent, caller: &DeliveryCaller) -> bool {
             return false;
         }
     }
+    // A managed intent's session binding is the WorkClaim's connection: the
+    // caller must be serving over THAT connection, so a foreign host cannot
+    // adopt a registered agent id to reach its private delivery.
+    if intent.execution_source == "managed_dispatch" {
+        if let Some(bound) = &intent.requester_session_ref {
+            if bound != &caller.connection_id {
+                return false;
+            }
+        }
+    }
     true
 }
 
@@ -1361,15 +1377,16 @@ fn release_expired_claim(
     now: &str,
 ) -> Result<(), MemoryError> {
     let next_revision = intent.revision + 1;
-    conn.execute(
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
         "UPDATE delivery_intents
          SET delivery_state = 'ready', ready_at = ?2, revision = ?3, updated_at = ?2,
              active_claim_key = NULL, claimed_by = NULL, claim_expires_at = NULL
-         WHERE delivery_id = ?1 AND delivery_state = 'requester_queued'",
-        params![intent.delivery_id, now, next_revision],
+         WHERE delivery_id = ?1 AND delivery_state = 'requester_queued' AND revision = ?4",
+        params![intent.delivery_id, now, next_revision, intent.revision],
     )?;
     append_event(
-        conn,
+        &tx,
         &intent.delivery_id,
         &format!("claim_expired:{}:{next_revision}", intent.delivery_id),
         DeliveryEventKind::ClaimExpired,
@@ -1379,6 +1396,7 @@ fn release_expired_claim(
         "tachi",
         now,
     )?;
+    tx.commit()?;
     Ok(())
 }
 
@@ -1391,7 +1409,11 @@ fn transition_to_claimed(
 ) -> Result<DeliveryClaimOutcome, MemoryError> {
     let reopen = intent.delivery_state == DeliveryState::Retrying.as_str();
     let next_revision = intent.revision + 1;
-    let updated = conn.execute(
+    // State change + canonical receipts land atomically: a claim is never
+    // observable as a bare state write without its event(s), so replay
+    // resolution can always trust the ledger.
+    let tx = conn.unchecked_transaction()?;
+    let updated = tx.execute(
         "UPDATE delivery_intents
          SET delivery_state = 'requester_queued',
              active_claim_key = ?2, claimed_by = ?3, claim_expires_at = ?4,
@@ -1415,7 +1437,7 @@ fn transition_to_claimed(
         )));
     }
     append_event(
-        conn,
+        &tx,
         &intent.delivery_id,
         &format!("claim:{}", request.claim_key),
         DeliveryEventKind::Claimed,
@@ -1427,7 +1449,7 @@ fn transition_to_claimed(
     )?;
     if reopen {
         append_event(
-            conn,
+            &tx,
             &intent.delivery_id,
             &format!("debt:claim:{}", request.claim_key),
             DeliveryEventKind::TransitionDebt,
@@ -1438,6 +1460,7 @@ fn transition_to_claimed(
             now,
         )?;
     }
+    tx.commit()?;
     let claimed = find_intent_by_id(conn, &intent.delivery_id)?
         .ok_or_else(|| MemoryError::Internal("claimed delivery intent not found".to_string()))?;
     Ok(DeliveryClaimOutcome::Claimed(
@@ -1506,6 +1529,7 @@ mod tests {
         DeliveryCaller {
             agent_identity_id: id.to_string(),
             host_identity: format!("host-{id}"),
+            connection_id: "connection-1".to_string(),
         }
     }
 
@@ -1525,7 +1549,9 @@ mod tests {
             requester: DeliveryRequesterBinding {
                 agent_identity_id: Some("requester-a".to_string()),
                 host_identity: Some("host-requester-a".to_string()),
-                session_ref: Some("session-1".to_string()),
+                // The managed binding is the owning WorkClaim's session
+                // connection: the claiming caller must serve over it.
+                session_ref: Some("connection-1".to_string()),
             },
             expires_at: None,
             correction: false,

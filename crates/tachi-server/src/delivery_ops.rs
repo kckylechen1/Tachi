@@ -33,7 +33,7 @@ fn verify_caller(
 ) -> Result<DeliveryCaller, String> {
     let host_identity = required(params.host_identity.clone(), "host_identity")?;
     let agent_identity_id = required(params.agent_identity_id.clone(), "agent_identity_id")?;
-    let (admitted_host, _connection_id, admission_state) =
+    let (admitted_host, connection_id, admission_state) =
         server.work_claim_connection().ok_or_else(|| {
             "no active host admission; the delivery seam requires an admitted host connection"
                 .to_string()
@@ -65,6 +65,7 @@ fn verify_caller(
     Ok(DeliveryCaller {
         agent_identity_id,
         host_identity,
+        connection_id,
     })
 }
 
@@ -391,7 +392,10 @@ pub(crate) fn mint_delivery_for_attached_terminal(
         execution_ref: attachment_id.to_string(),
         terminal_receipt_revision: source_revision.max(0),
         work_claim_id: (!work_claim_id.is_empty()).then(|| work_claim_id.to_string()),
-        result_ref: format!("harness_session:{attachment_id}:{event_id}"),
+        // Run-stable locator: the redundant-terminal supersede comparison
+        // must not see a content change merely because a different event id
+        // journaled the same outcome.
+        result_ref: format!("harness_session:{attachment_id}"),
         result_revision: source_revision.max(1),
         payload_digest: digest,
         visibility_class: memcore::DeliveryVisibilityClass::Private,

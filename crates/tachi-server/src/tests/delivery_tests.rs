@@ -730,7 +730,8 @@ async fn attached_terminal_event_mints_a_delivery_intent() {
     assert_eq!(after[0].result_revision, 7);
     assert_eq!(
         after[0].result_ref,
-        format!("harness_session:{attachment_id}:evt-terminal-1")
+        format!("harness_session:{attachment_id}"),
+        "run-stable result locator"
     );
     let events: i64 = server
         .with_global_store(|store| {
