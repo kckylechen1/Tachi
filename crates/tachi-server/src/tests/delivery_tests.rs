@@ -52,10 +52,6 @@ fn seed_admission_and_requester(server: &MemoryServer, grant: &str) {
     );
 }
 
-fn set_server_session_client(server: &MemoryServer, session_client: &str) {
-    server.agent_runtime_write().session_client = Some(session_client.to_string());
-}
-
 fn seed_claim(server: &MemoryServer, dispatch_id: &str) {
     server
         .with_global_store(|store| {
@@ -493,22 +489,32 @@ fn managed_terminal_outcome_mints_and_binds_the_requester() {
                 .map_err(|error| error.to_string())
         })
         .expect("record outcome");
-    crate::delivery_ops::mint_delivery_for_managed_outcome(
-        &server,
-        &row,
-        "memory:eval-1".to_string(),
-    );
+    server
+        .with_global_store(|store| {
+            crate::delivery_ops::mint_delivery_for_managed_outcome(
+                store,
+                &row,
+                "memory:eval-1".to_string(),
+            );
+            Ok::<(), String>(())
+        })
+        .expect("mint");
 
     // Idempotent reconcile on re-record.
-    crate::delivery_ops::mint_delivery_for_managed_outcome(
-        &server,
-        &row,
-        "memory:eval-1".to_string(),
-    );
+    server
+        .with_global_store(|store| {
+            crate::delivery_ops::mint_delivery_for_managed_outcome(
+                store,
+                &row,
+                "memory:eval-1".to_string(),
+            );
+            Ok::<(), String>(())
+        })
+        .expect("mint");
 
-    // The server session matches the claim's session client: the seam can
-    // claim it. A server session that minted a DIFFERENT binding cannot.
-    set_server_session_client(&server, "connection-1");
+    // Managed binding law: the intent is bound to the AGENT identity the
+    // owning WorkClaim carried (the fabric's registry identity). The seam
+    // claim presents that identity over the admitted host connection.
     let claim = seam_call(
         &server,
         json!({
@@ -519,20 +525,10 @@ fn managed_terminal_outcome_mints_and_binds_the_requester() {
         }),
     )
     .expect("claim");
-    if !claim.contains(r#""outcome":"claimed""#) {
-        let debug_rows: Vec<memcore::DeliveryIntent> = server
-            .with_global_store(|store| {
-                memcore::observe_delivery_for_execution(
-                    store.connection(),
-                    "managed_dispatch",
-                    "dispatch-1",
-                )
-                .map_err(|error| error.to_string())
-            })
-            .unwrap_or_default();
-        let session_now = server.session_client();
-        panic!("claim response: {claim}; rows: {debug_rows:?}; session: {session_now:?}");
-    }
+    assert!(
+        claim.contains(r#""outcome":"claimed""#),
+        "claim response: {claim}"
+    );
 
     let observed: Vec<memcore::DeliveryIntent> = server
         .with_global_store(|store| {

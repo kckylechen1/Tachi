@@ -167,28 +167,37 @@ pub(crate) fn record_complete_outcome(
     // the full mechanism.
     let write_result = if let Some(project) = params.project.as_deref().filter(|s| !s.is_empty()) {
         server.with_named_project_store(project, |store| {
-            store
+            let row = store
                 .upsert_dispatch_outcome(&new_outcome)
-                .map_err(|e| e.to_string())
+                .map_err(|e| e.to_string())?;
+            // #1679: mint the durable delivery intent for this terminal
+            // receipt INSIDE the same store scope: the mint re-reads the
+            // canonical row and the owning WorkClaim under one lock.
+            // Delivery is a separate plane — a mint failure warns and
+            // never rewrites the execution truth above.
+            crate::delivery_ops::mint_delivery_for_managed_outcome(
+                store,
+                &row,
+                format!("memory:{eval_memory_id}"),
+            );
+            Ok(row)
         })
     } else {
         server.with_store_for_scope(scope, |store| {
-            store
+            let row = store
                 .upsert_dispatch_outcome(&new_outcome)
-                .map_err(|e| e.to_string())
+                .map_err(|e| e.to_string())?;
+            crate::delivery_ops::mint_delivery_for_managed_outcome(
+                store,
+                &row,
+                format!("memory:{eval_memory_id}"),
+            );
+            Ok(row)
         })
     };
 
     match write_result {
         Ok(row) => {
-            // #1679: mint the durable delivery intent for this terminal
-            // receipt. Delivery is a separate plane — a mint failure warns
-            // and never rewrites the execution truth above.
-            crate::delivery_ops::mint_delivery_for_managed_outcome(
-                server,
-                &row,
-                format!("memory:{eval_memory_id}"),
-            );
             json!({
                 "recorded": true,
                 "outcome_id": row.outcome_id,
@@ -780,10 +789,17 @@ pub(crate) fn record_terminal_failure_outcome(
         {
             return Ok(None);
         }
-        store
+        let row = store
             .upsert_dispatch_outcome(&new_outcome)
-            .map(Some)
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string())?;
+        // #1679: internal failed terminals owe their requester a delivery
+        // intent too — minted inside the same store scope.
+        crate::delivery_ops::mint_delivery_for_managed_outcome(
+            store,
+            &row,
+            format!("outcome:{}", row.outcome_id),
+        );
+        Ok(Some(row))
     };
     // Mirrors `record_complete_outcome`'s branching: a named project DB (when
     // the original dispatch carried one) takes priority over the scope
@@ -795,18 +811,10 @@ pub(crate) fn record_terminal_failure_outcome(
         let (scope, _) = server.resolve_write_scope("");
         server.with_store_for_scope(scope, write_fn)
     };
+    // The failed terminal's delivery mint already ran inside write_fn, in
+    // the same store scope as the canonical row write.
     match write_result {
-        // #1679: a canonical FAILED terminal still owes its requester a
-        // delivery intent — backend/preflight/watchdog failures are exactly
-        // the results a requester must hear about. Same separate-plane law:
-        // a mint failure warns and never rewrites the execution truth.
-        Ok(Some(row)) => {
-            crate::delivery_ops::mint_delivery_for_managed_outcome(
-                server,
-                &row,
-                format!("outcome:{}", row.outcome_id),
-            );
-        }
+        Ok(Some(_)) => {}
         Ok(None) => {}
         Err(error) => {
             tracing::warn!(
