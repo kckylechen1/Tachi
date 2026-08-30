@@ -816,22 +816,10 @@ pub(crate) fn record_terminal_failure_outcome(
     };
 
     let write_fn = |store: &mut memcore::MemoryStore, mint_in_store: bool| {
-        // First-writer-wins: skip a second canonical write if this dispatch
-        // already has an outcome row — but the delivery mint is still
-        // attempted, idempotently, so a transient mint failure on the
-        // first recording recovers on any later failure record.
+        // First-writer-wins: skip if this dispatch already has an outcome row.
         if memcore::outcome_exists_for_dispatch(store.connection(), dispatch_id)
             .map_err(|e| e.to_string())?
         {
-            if let Ok(Some(existing)) =
-                memcore::find_outcome_by_dispatch_id(store.connection(), dispatch_id)
-            {
-                crate::delivery_ops::mint_delivery_for_managed_outcome_in_store(
-                    store,
-                    &existing,
-                    format!("outcome:{}", existing.outcome_id),
-                );
-            }
             return Ok(None);
         }
         let row = store
