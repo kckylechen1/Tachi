@@ -137,39 +137,27 @@ pub(crate) async fn handle_vault_set(
                     .vault_upsert_entry(&entry)
                     .map_err(|e| format!("Failed to save secret: {e}"))?;
 
-                if params.enable_rotation {
-                    if let Some(pos) = params.name.rfind('_') {
-                        let suffix = &params.name[pos + 1..];
-                        if suffix.parse::<u32>().is_ok() {
-                            let prefix = &params.name[..pos];
+                if let Some((prefix, _)) =
+                    crate::provider_config::parse_rotation_member_name(&params.name)
+                {
+                    let existing_rotation = transaction
+                        .vault_get_rotation(prefix)
+                        .map_err(|e| format!("Failed to read rotation config: {e}"))?;
+                    if params.enable_rotation || existing_rotation.is_some() {
+                        let all_entries = transaction
+                            .vault_list_entries()
+                            .map_err(|e| format!("Failed to list entries: {e}"))?;
+                        let total_keys =
+                            memcore::validate_api_key_rotation_members(&all_entries, prefix)
+                                .map_err(|error| format!("{error}; refusing rotation"))?
+                                as i64;
+                        if params.enable_rotation {
                             let strategy = normalize_rotation_strategy(
                                 &params
                                     .rotation_strategy
                                     .clone()
                                     .unwrap_or_else(|| "round_robin".to_string()),
                             );
-
-                            let all_entries = transaction
-                                .vault_list_entries()
-                                .map_err(|e| format!("Failed to list entries: {e}"))?;
-
-                            let members = collect_rotation_entries(all_entries, prefix);
-                            if let Some((_, member)) = members.iter().find(|(_, member)| {
-                                memcore::effective_vault_secret_type(
-                                    &member.name,
-                                    &member.secret_type,
-                                ) != SECRET_TYPE_API_KEY
-                            }) {
-                                let effective = memcore::effective_vault_secret_type(
-                                    &member.name,
-                                    &member.secret_type,
-                                );
-                                return Err(format!(
-                                    "Vault rotation member '{}' is {effective}, not an API-key credential; refusing rotation",
-                                    member.name
-                                ));
-                            }
-                            let total_keys = members.len() as i64;
                             let rotation = VaultKeyRotation {
                                 prefix: prefix.to_string(),
                                 current_index: 1,
@@ -178,7 +166,6 @@ pub(crate) async fn handle_vault_set(
                                 created_at: Utc::now().to_rfc3339(),
                                 updated_at: Utc::now().to_rfc3339(),
                             };
-
                             transaction
                                 .vault_set_rotation(&rotation)
                                 .map_err(|e| format!("Failed to save rotation config: {e}"))?;

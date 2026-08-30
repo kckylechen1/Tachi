@@ -15,36 +15,6 @@ pub(crate) async fn handle_vault_setup_rotation(
         }
 
         let strategy = normalize_rotation_strategy(&params.strategy);
-        let all_entries = server
-            .with_global_store_read(|store| store.vault_list_entries().map_err(|e| e.to_string()))
-            .map_err(|e| format!("Failed to list entries: {e}"))?;
-
-        let mut found_keys = 0;
-        let mut wrong_type = None;
-        for i in 1..=params.total_keys {
-            let key_name = format!("{}_{}", params.prefix, i);
-            if let Some(entry) = all_entries.iter().find(|entry| entry.name == key_name) {
-                found_keys += 1;
-                let effective =
-                    memcore::effective_vault_secret_type(&entry.name, &entry.secret_type);
-                if effective != memcore::SECRET_TYPE_API_KEY && wrong_type.is_none() {
-                    wrong_type = Some((entry.name.clone(), effective));
-                }
-            }
-        }
-
-        if found_keys < params.total_keys {
-            return Err(format!(
-                "Expected {} keys for prefix '{}', found {}. Please set all keys first.",
-                params.total_keys, params.prefix, found_keys
-            ));
-        }
-        if let Some((name, effective)) = wrong_type {
-            return Err(format!(
-                "Vault rotation member '{name}' is {effective}, not an API-key credential; refusing rotation setup"
-            ));
-        }
-
         let now = Utc::now().to_rfc3339();
         let rotation = VaultKeyRotation {
             prefix: params.prefix.clone(),
@@ -55,13 +25,29 @@ pub(crate) async fn handle_vault_setup_rotation(
             updated_at: now,
         };
 
-        server
-            .with_global_store(|store| {
-                store
-                    .vault_set_rotation(&rotation)
-                    .map_err(|e| e.to_string())
-            })
-            .map_err(|e| format!("Failed to save rotation config: {e}"))?;
+        server.with_global_store(|store| {
+            let transaction = store
+                .begin_vault_transaction()
+                .map_err(|e| format!("Failed to begin rotation transaction: {e}"))?;
+            let all_entries = transaction
+                .vault_list_entries()
+                .map_err(|e| format!("Failed to list entries: {e}"))?;
+            let member_count =
+                memcore::validate_api_key_rotation_members(&all_entries, &params.prefix)
+                    .map_err(|error| format!("{error}; refusing rotation setup"))?;
+            if member_count != params.total_keys as usize {
+                return Err(format!(
+                    "Expected exactly {} contiguous API keys for prefix '{}', found {}. Please reconcile all numeric members first.",
+                    params.total_keys, params.prefix, member_count
+                ));
+            }
+            transaction
+                .vault_set_rotation(&rotation)
+                .map_err(|e| format!("Failed to save rotation config: {e}"))?;
+            transaction
+                .commit()
+                .map_err(|e| format!("Failed to commit rotation config: {e}"))
+        })?;
 
         let resp = json!({
             "setup": true,

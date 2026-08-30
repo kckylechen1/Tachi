@@ -220,6 +220,19 @@ async fn run_secret_action_with_reader(
             transaction
                 .vault_upsert_entry(&entry)
                 .map_err(|e| format!("vault_upsert_entry: {e}"))?;
+            if let Some((prefix, _)) = crate::provider_config::parse_rotation_member_name(&name) {
+                if transaction
+                    .vault_get_rotation(prefix)
+                    .map_err(|e| format!("vault_get_rotation: {e}"))?
+                    .is_some()
+                {
+                    let entries = transaction
+                        .vault_list_entries()
+                        .map_err(|e| format!("vault_list_entries: {e}"))?;
+                    memcore::validate_api_key_rotation_members(&entries, prefix)
+                        .map_err(|error| format!("{error}; refusing rotation member update"))?;
+                }
+            }
             transaction
                 .commit()
                 .map_err(|e| format!("commit vault transaction: {e}"))?;
@@ -488,10 +501,28 @@ async fn run_secret_action_with_reader(
                 insecure_password_file,
             )?;
 
-            let store = open_cli_store(global_db_path)?;
-            let removed = store
+            let mut store = open_cli_store(global_db_path)?;
+            let transaction = store
+                .begin_vault_transaction()
+                .map_err(|e| format!("begin vault remove transaction: {e}"))?;
+            if let Some((prefix, _)) = crate::provider_config::parse_rotation_member_name(&name) {
+                if transaction
+                    .vault_get_rotation(prefix)
+                    .map_err(|e| format!("vault_get_rotation: {e}"))?
+                    .is_some()
+                {
+                    return Err(format!(
+                        "Vault name '{name}' is a configured rotation member; refusing deletion while rotation '{prefix}' exists"
+                    )
+                    .into());
+                }
+            }
+            let removed = transaction
                 .vault_delete_entry(&name)
                 .map_err(|e| format!("vault_delete_entry: {e}"))?;
+            transaction
+                .commit()
+                .map_err(|e| format!("commit vault remove transaction: {e}"))?;
 
             if removed {
                 println!("Secret '{name}' removed.");
@@ -604,5 +635,108 @@ mod tests {
         assert_eq!(retained.secret_type, "other");
         assert_eq!(retained.encrypted_value, encrypted_value);
         assert_eq!(retained.nonce, nonce);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn direct_cli_cannot_mutate_or_delete_configured_rotation_members() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let db_path = temp.path().join("memory.db");
+        let password_file = temp.path().join("vault-password");
+        std::fs::write(&password_file, b"direct-cli-password\n").expect("password file");
+        std::fs::set_permissions(&password_file, std::fs::Permissions::from_mode(0o600))
+            .expect("password file permissions");
+        let key = super::super::keys::vault_init_with_password(
+            &db_path,
+            "direct-cli-password".to_string(),
+        )
+        .expect("initialize fixture vault");
+        let now = "2026-01-01T00:00:00Z".to_string();
+        let store = open_cli_store(&db_path).expect("open fixture store");
+        for idx in 1..=2 {
+            let (encrypted_value, nonce) =
+                crate::vault_crypto::encrypt(key.bytes(), format!("key-{idx}").as_bytes())
+                    .expect("encrypt member");
+            store
+                .vault_upsert_entry(&memcore::vault::VaultEntry {
+                    name: format!("DIRECT_POOL_API_KEY_{idx}"),
+                    encrypted_value,
+                    nonce,
+                    secret_type: "api_key".to_string(),
+                    description: "rotation member".to_string(),
+                    allowed_agents: None,
+                    created_at: now.clone(),
+                    updated_at: now.clone(),
+                    accessed_at: String::new(),
+                    access_count: 0,
+                })
+                .expect("seed member");
+        }
+        store
+            .vault_set_rotation(&memcore::vault::VaultKeyRotation {
+                prefix: "DIRECT_POOL_API_KEY".to_string(),
+                current_index: 1,
+                total_keys: 2,
+                rotation_strategy: "round_robin".to_string(),
+                created_at: now.clone(),
+                updated_at: now,
+            })
+            .expect("seed rotation");
+        drop(store);
+
+        let set_action = VaultAction::Set {
+            name: "DIRECT_POOL_API_KEY_1".to_string(),
+            secret_type: Some("config".to_string()),
+            description: None,
+            stdin_password: false,
+            keychain: false,
+            password_file: Some(password_file.clone()),
+            insecure_password_file: false,
+            value_stdin: true,
+            rebind: false,
+        };
+        let set_error = run_secret_action_with_reader(
+            &db_path,
+            temp.path(),
+            set_action,
+            &mut Cursor::new(b"downgrade\n".to_vec()),
+        )
+        .await
+        .expect_err("direct CLI must not downgrade a configured member")
+        .to_string();
+        assert!(
+            set_error.contains("config") && set_error.contains("rotation"),
+            "{set_error}"
+        );
+
+        let remove_action = VaultAction::Remove {
+            name: "DIRECT_POOL_API_KEY_2".to_string(),
+            stdin_password: false,
+            keychain: false,
+            password_file: Some(password_file),
+            insecure_password_file: false,
+        };
+        let remove_error = run_secret_action_with_reader(
+            &db_path,
+            temp.path(),
+            remove_action,
+            &mut Cursor::new(Vec::<u8>::new()),
+        )
+        .await
+        .expect_err("direct CLI must not delete a configured member")
+        .to_string();
+        assert!(
+            remove_error.contains("rotation member") && remove_error.contains("refusing deletion"),
+            "{remove_error}"
+        );
+
+        let retained = open_cli_store_read_only(&db_path)
+            .expect("reopen fixture")
+            .vault_get_entry("DIRECT_POOL_API_KEY_1")
+            .expect("read retained member")
+            .expect("member remains");
+        assert_eq!(retained.secret_type, "api_key");
     }
 }

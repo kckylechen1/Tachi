@@ -23,9 +23,7 @@ use super::params::{
     VaultRecordKeyResultParams, VaultRemoveParams, VaultSetApiKeyPoolParams, VaultSetParams,
     VaultSetupRotationParams, VaultUnlockParams,
 };
-use super::rotation::{
-    collect_rotation_entries, normalize_allowed_agents, normalize_rotation_strategy,
-};
+use super::rotation::{normalize_allowed_agents, normalize_rotation_strategy};
 use super::session::{
     clear_cached_vault_state, ensure_vault_unlock_allowed, is_vault_initialized,
     maybe_auto_lock_vault, read_unlock_password_fifo, record_vault_unlock_failure, with_vault_key,

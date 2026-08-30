@@ -47,8 +47,19 @@ impl VaultTransaction<'_> {
         db::vault_upsert_entry(self.connection(), entry)
     }
 
+    pub fn vault_delete_entry(&self, name: &str) -> Result<bool, MemoryError> {
+        db::vault_delete_entry(self.connection(), name)
+    }
+
     pub fn vault_set_rotation(&self, rotation: &VaultKeyRotation) -> Result<(), MemoryError> {
         db::vault_set_rotation(self.connection(), rotation)
+    }
+
+    pub fn vault_get_rotation(
+        &self,
+        prefix: &str,
+    ) -> Result<Option<VaultKeyRotation>, MemoryError> {
+        db::vault_get_rotation(self.connection(), prefix)
     }
 
     pub fn commit(mut self) -> Result<(), MemoryError> {
@@ -98,6 +109,9 @@ impl MemoryStore {
         rotation: &VaultKeyRotation,
     ) -> Result<Vec<String>, MemoryError> {
         let tx = self.conn.transaction()?;
+        let all_existing_entries = db::vault_list_entries(&tx)?;
+        crate::vault::validate_api_key_rotation_members(&all_existing_entries, prefix)
+            .map_err(MemoryError::InvalidArg)?;
         let existing_entries = db::vault_list_entries_by_type(&tx, SECRET_TYPE_API_KEY)?;
         let mut surplus_members: Vec<String> = existing_entries
             .iter()

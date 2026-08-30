@@ -1,11 +1,11 @@
 use super::handlers::{
     handle_vault_init, handle_vault_lease_api_key, handle_vault_list, handle_vault_lock,
-    handle_vault_set, handle_vault_set_api_key_pool, handle_vault_setup_rotation,
-    handle_vault_unlock,
+    handle_vault_remove, handle_vault_set, handle_vault_set_api_key_pool,
+    handle_vault_setup_rotation, handle_vault_unlock,
 };
 use super::params::{
-    VaultInitParams, VaultLeaseApiKeyParams, VaultListParams, VaultSetApiKeyPoolParams,
-    VaultSetParams, VaultSetupRotationParams, VaultUnlockParams,
+    VaultInitParams, VaultLeaseApiKeyParams, VaultListParams, VaultRemoveParams,
+    VaultSetApiKeyPoolParams, VaultSetParams, VaultSetupRotationParams, VaultUnlockParams,
 };
 use super::session::{read_unlock_password_fifo, with_vault_key};
 use crate::server_state::MemoryServer;
@@ -1486,6 +1486,98 @@ async fn vault_set_infers_config_for_lane_urls_and_refuses_api_key() {
     assert!(
         mixed_entry.is_none() && mixed_state.is_none(),
         "mixed rotation refusal must roll back the new member and rotation state"
+    );
+
+    handle_vault_set_api_key_pool(
+        &server,
+        VaultSetApiKeyPoolParams {
+            prefix: "MUTABLE_POOL_API_KEY".to_string(),
+            values: vec!["key-one".to_string(), "key-two".to_string()],
+            agent_id: None,
+            strategy: "round_robin".to_string(),
+            description: "valid pool".to_string(),
+            allowed_agents: None,
+        },
+    )
+    .await
+    .expect("create valid rotation before mutation attempt");
+    let remove_member = handle_vault_remove(
+        &server,
+        VaultRemoveParams {
+            name: "MUTABLE_POOL_API_KEY_2".to_string(),
+            agent_id: None,
+        },
+    )
+    .await
+    .expect_err("configured rotation members must not be deleted");
+    assert!(
+        remove_member.contains("rotation member") && remove_member.contains("refusing deletion"),
+        "{remove_member}"
+    );
+    let downgrade = handle_vault_set(
+        &server,
+        VaultSetParams {
+            name: "MUTABLE_POOL_API_KEY_1".to_string(),
+            value: "config-downgrade".to_string(),
+            agent_id: None,
+            secret_type: "config".to_string(),
+            description: "attempt member downgrade".to_string(),
+            allowed_agents: None,
+            enable_rotation: false,
+            rotation_strategy: None,
+            rebind: false,
+        },
+    )
+    .await
+    .expect_err("existing rotation member cannot be downgraded without enable_rotation");
+    assert!(
+        downgrade.contains("MUTABLE_POOL_API_KEY_1") && downgrade.contains("config"),
+        "{downgrade}"
+    );
+    let retained = server
+        .with_global_store_read(|store| {
+            store
+                .vault_get_entry("MUTABLE_POOL_API_KEY_1")
+                .map_err(|error| error.to_string())
+        })
+        .expect("read retained rotation member")
+        .expect("member remains after rollback");
+    assert_eq!(retained.secret_type, "api_key");
+
+    plant_vault_secret(&server, "EXTRA_POOL_API_KEY_1", "key-one", "api_key");
+    plant_vault_secret(&server, "EXTRA_POOL_API_KEY_2", "key-two", "api_key");
+    plant_vault_secret(&server, "EXTRA_POOL_API_KEY_3", "config-extra", "config");
+    let extra_setup = handle_vault_setup_rotation(
+        &server,
+        VaultSetupRotationParams {
+            prefix: "EXTRA_POOL_API_KEY".to_string(),
+            total_keys: 2,
+            strategy: "round_robin".to_string(),
+            agent_id: None,
+        },
+    )
+    .await
+    .expect_err("setup must inspect numeric members beyond the declared count");
+    assert!(
+        extra_setup.contains("EXTRA_POOL_API_KEY_3") && extra_setup.contains("config"),
+        "{extra_setup}"
+    );
+    let extra_set_pool = handle_vault_set_api_key_pool(
+        &server,
+        VaultSetApiKeyPoolParams {
+            prefix: "EXTRA_POOL_API_KEY".to_string(),
+            values: vec!["replacement-one".to_string(), "replacement-two".to_string()],
+            agent_id: None,
+            strategy: "round_robin".to_string(),
+            description: "must refuse extra config".to_string(),
+            allowed_agents: None,
+        },
+    )
+    .await
+    .expect_err("set-pool must refuse every structural config member");
+    assert!(
+        extra_set_pool.contains("EXTRA_POOL_API_KEY_3") && extra_set_pool.contains("config"),
+        "{extra_set_pool}"
     );
 
     let pool = handle_vault_set_api_key_pool(

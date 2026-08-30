@@ -281,6 +281,39 @@ pub fn api_key_pool_member_index(name: &str, prefix: &str) -> Option<usize> {
         .filter(|idx| *idx > 0)
 }
 
+/// Validate the complete structural member set for an API-key rotation.
+/// Every numeric `prefix_N` row participates, regardless of a rotation row's
+/// declared count, and indices must be contiguous from one.
+pub fn validate_api_key_rotation_members(
+    entries: &[VaultEntry],
+    prefix: &str,
+) -> Result<usize, String> {
+    let mut indices = Vec::new();
+    for entry in entries {
+        let Some(index) = api_key_pool_member_index(&entry.name, prefix) else {
+            continue;
+        };
+        let effective = effective_vault_secret_type(&entry.name, &entry.secret_type);
+        if effective != SECRET_TYPE_API_KEY {
+            return Err(format!(
+                "Vault rotation member '{}' is {effective}, not an API-key credential",
+                entry.name
+            ));
+        }
+        indices.push(index);
+    }
+    indices.sort_unstable();
+    for (offset, index) in indices.iter().enumerate() {
+        let expected = offset + 1;
+        if *index != expected {
+            return Err(format!(
+                "Vault rotation '{prefix}' has non-contiguous member index {index}; expected {expected}"
+            ));
+        }
+    }
+    Ok(indices.len())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

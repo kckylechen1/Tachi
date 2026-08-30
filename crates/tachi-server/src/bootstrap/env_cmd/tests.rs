@@ -85,6 +85,40 @@ fn local_lease_refuses_explicit_config_even_when_name_is_not_lane_config() {
 }
 
 #[test]
+fn member_lease_preflight_validates_the_canonical_rotation_member_set() {
+    let store = temp_store();
+    let key = crate::vault_crypto::derive_cheap("test-password", b"1234567890123456").expect("key");
+    put_secret(&store, key.bytes(), "CUSTOM_POOL_API_KEY_1", "key-one");
+    put_secret(&store, key.bytes(), "CUSTOM_POOL_API_KEY_2", "key-two");
+    put_secret_typed(
+        &store,
+        key.bytes(),
+        "CUSTOM_POOL_API_KEY_3",
+        "not-a-key",
+        "config",
+    );
+    store
+        .vault_set_rotation(&memcore::vault::VaultKeyRotation {
+            prefix: "CUSTOM_POOL_API_KEY".to_string(),
+            current_index: 1,
+            total_keys: 2,
+            rotation_strategy: "round_robin".to_string(),
+            created_at: "2026-06-09T00:00:00Z".to_string(),
+            updated_at: "2026-06-09T00:00:00Z".to_string(),
+        })
+        .expect("seed poisoned legacy rotation");
+
+    let error =
+        super::super::vault_cli::validate_api_key_lease_target(&store, "CUSTOM_POOL_API_KEY_2")
+            .expect_err("member lease must validate the canonical prefix")
+            .to_string();
+    assert!(
+        error.contains("CUSTOM_POOL_API_KEY_3") && error.contains("config"),
+        "{error}"
+    );
+}
+
+#[test]
 fn project_env_plan_marks_secret_pool_and_missing() {
     let store = temp_store();
     let key = crate::vault_crypto::derive_cheap("test-password", b"1234567890123456").expect("key");

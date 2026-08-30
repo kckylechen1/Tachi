@@ -156,24 +156,16 @@ pub(crate) fn validate_api_key_lease_target(
             .into());
         }
     }
-    if let Some(rotation) = store
-        .vault_get_rotation(logical_name)
+    let rotation_prefix =
+        crate::vault_ops::canonical_api_key_health_logical_name(store, logical_name)?;
+    if store
+        .vault_get_rotation(&rotation_prefix)
         .map_err(|e| format!("vault_get_rotation: {e}"))?
+        .is_some()
     {
-        for idx in 1..=rotation.total_keys.max(0) {
-            let member_name = rotation_member_name(logical_name, idx);
-            if let Some(entry) = entries.iter().find(|entry| entry.name == member_name) {
-                let effective =
-                    memcore::effective_vault_secret_type(&entry.name, &entry.secret_type);
-                if effective != memcore::SECRET_TYPE_API_KEY {
-                    return Err(format!(
-                        "Vault rotation member '{}' is {effective}, not a credential; refusing to lease '{logical_name}' as an API key",
-                        entry.name
-                    )
-                    .into());
-                }
-            }
-        }
+        memcore::validate_api_key_rotation_members(&entries, &rotation_prefix).map_err(
+            |error| format!("{error}; refusing to lease '{logical_name}' as an API key"),
+        )?;
     }
     Ok(())
 }

@@ -67,13 +67,32 @@ pub(crate) async fn handle_vault_remove(
     let result = (|| {
         authorize_vault_mutation(server, &params.name, params.agent_id.as_deref())
             .map_err(|e| e.to_string())?;
-        let removed = server
-            .with_global_store(|store| {
-                store
-                    .vault_delete_entry(&params.name)
-                    .map_err(|e| e.to_string())
-            })
-            .map_err(|e| format!("Failed to remove secret: {e}"))?;
+        let removed = server.with_global_store(|store| {
+            let transaction = store
+                .begin_vault_transaction()
+                .map_err(|e| format!("Failed to begin remove transaction: {e}"))?;
+            if let Some((prefix, _)) =
+                crate::provider_config::parse_rotation_member_name(&params.name)
+            {
+                if transaction
+                    .vault_get_rotation(prefix)
+                    .map_err(|e| format!("Failed to read rotation config: {e}"))?
+                    .is_some()
+                {
+                    return Err(format!(
+                        "Vault name '{}' is a configured rotation member; refusing deletion while rotation '{}' exists",
+                        params.name, prefix
+                    ));
+                }
+            }
+            let removed = transaction
+                .vault_delete_entry(&params.name)
+                .map_err(|e| format!("Failed to remove secret: {e}"))?;
+            transaction
+                .commit()
+                .map_err(|e| format!("Failed to commit remove transaction: {e}"))?;
+            Ok::<_, String>(removed)
+        })?;
 
         if removed {
             serde_json::to_string(&json!({
