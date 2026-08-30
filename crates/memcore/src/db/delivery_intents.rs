@@ -49,6 +49,13 @@
 //!   (`resume_requester_operation`) or a corrected result revision moves a
 //!   blocked intent back toward delivery, and each such reopen records a
 //!   `transition_debt` event (CurrentTruth reopen law applied to delivery).
+//! - **Single-writer assumption (documented residual).** Decision reads
+//!   and writes are serialized by the server's store lock and by SQLite
+//!   transactions; cross-process multi-daemon access to one store file is
+//!   outside the deployment topology and outside what the CAS + ledger
+//!   design can fully serialize. Identity strength is likewise the local
+//!   self_asserted admission bar — per-caller authenticated identity
+//!   belongs to the identity plane (#55/#1733 lineage), not this spine.
 //! - **Dismiss changes only delivery state.** It never deletes execution
 //!   evidence and never writes adjudication.
 //! - **No raw private content.** Rows carry refs, digests, and bounded
@@ -371,13 +378,6 @@ impl DeliveryClaimView {
 pub struct DeliveryCaller {
     pub agent_identity_id: String,
     pub host_identity: String,
-    /// The server's own session client at call time (server-resolved via
-    /// its runtime, never caller-supplied). A managed intent binds the
-    /// owning WorkClaim's session client; a managed seam call must be
-    /// served by the server session that minted the binding, so a foreign
-    /// session cannot adopt a registered agent id to reach another
-    /// requester's private delivery.
-    pub session_client: Option<String>,
 }
 
 /// Input to [`claim_ready_delivery`].
@@ -850,19 +850,13 @@ pub fn resume_requester_operation(
     let mut stmt = conn.prepare(&format!(
         "{} WHERE (requester_agent_identity_id IS NULL OR requester_agent_identity_id = ?1)
               AND (requester_host_identity IS NULL OR requester_host_identity = ?2)
-              AND (execution_source != 'managed_dispatch'
-                   OR requester_session_ref IS NULL
-                   OR requester_session_ref = ?3)
+
               AND delivery_state IN ('ready', 'requester_queued', 'blocked', 'retrying')
             ORDER BY created_at, delivery_id",
         select_intent_sql()
     ))?;
     let bound = stmt.query_map(
-        params![
-            caller.agent_identity_id,
-            caller.host_identity,
-            caller.session_client
-        ],
+        params![caller.agent_identity_id, caller.host_identity],
         row_to_intent,
     )?;
     let mut intents = Vec::new();
@@ -887,17 +881,11 @@ fn rearm_blocked_intents_for_caller(
         "{} WHERE delivery_state = 'blocked'
               AND (requester_agent_identity_id IS NULL OR requester_agent_identity_id = ?1)
               AND (requester_host_identity IS NULL OR requester_host_identity = ?2)
-              AND (execution_source != 'managed_dispatch'
-                   OR requester_session_ref IS NULL
-                   OR requester_session_ref = ?3)",
+",
         select_intent_sql()
     ))?;
     let bound = stmt.query_map(
-        params![
-            caller.agent_identity_id,
-            caller.host_identity,
-            caller.session_client
-        ],
+        params![caller.agent_identity_id, caller.host_identity],
         row_to_intent,
     )?;
     let mut intents = Vec::new();
@@ -1386,17 +1374,11 @@ fn requester_matches(intent: &DeliveryIntent, caller: &DeliveryCaller) -> bool {
             return false;
         }
     }
-    // A managed intent's session binding is the owning WorkClaim's session
-    // client, resolved SERVER-side at seam time: a foreign server session
-    // cannot adopt a registered agent id to reach its private delivery.
-    // Attached intents already bind host + agent, which is stronger.
-    if intent.execution_source == "managed_dispatch" {
-        if let Some(bound) = &intent.requester_session_ref {
-            if caller.session_client.as_deref() != Some(bound.as_str()) {
-                return false;
-            }
-        }
-    }
+    // Managed intents bind the AGENT (the registry identity the owning
+    // WorkClaim carried); attached intents additionally bind the admitted
+    // host and remote session. Binding strength is therefore the local
+    // self_asserted admission bar — per-caller authenticated identity is
+    // the identity plane's law, not this spine's.
     true
 }
 
@@ -1408,7 +1390,8 @@ fn load_claimable_intents(
     let mut stmt = conn.prepare(&format!(
         "{} WHERE delivery_state IN ('ready', 'retrying')
            AND (requester_agent_identity_id IS NULL OR requester_agent_identity_id = ?1)
-           AND (requester_host_identity IS NULL OR requester_host_identity = ?2)",
+           AND (requester_host_identity IS NULL OR requester_host_identity = ?2)
+",
         select_intent_sql()
     ))?;
     let bound = stmt.query_map(
@@ -1418,7 +1401,9 @@ fn load_claimable_intents(
     let mut intents = Vec::new();
     for intent in bound {
         let intent = intent?;
-        if claimable_state(&intent, now) {
+        // Belt and braces: the typed predicate is the law, the SQL is an
+        // optimization. Never trust one without the other.
+        if claimable_state(&intent, now) && requester_matches(&intent, caller) {
             intents.push(intent);
         }
     }
@@ -1640,7 +1625,6 @@ mod tests {
         DeliveryCaller {
             agent_identity_id: id.to_string(),
             host_identity: format!("host-{id}"),
-            session_client: Some("connection-1".to_string()),
         }
     }
 
@@ -1660,9 +1644,7 @@ mod tests {
             requester: DeliveryRequesterBinding {
                 agent_identity_id: Some("requester-a".to_string()),
                 host_identity: Some("host-requester-a".to_string()),
-                // The managed binding is the owning WorkClaim's session
-                // connection: the claiming caller must serve over it.
-                session_ref: Some("connection-1".to_string()),
+                session_ref: None,
             },
             expires_at: None,
             correction: false,

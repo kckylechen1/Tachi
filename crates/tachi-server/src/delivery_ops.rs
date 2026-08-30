@@ -66,9 +66,6 @@ fn verify_caller(
     Ok(DeliveryCaller {
         agent_identity_id,
         host_identity,
-        // Server-resolved session client (never caller-supplied): the
-        // managed-binding comparator.
-        session_client: server.session_client(),
     })
 }
 
@@ -310,8 +307,11 @@ pub(crate) fn mint_delivery_for_managed_outcome(
     outcome: &memcore::DispatchOutcomeRow,
     result_ref: String,
 ) {
-    let task_type = outcome.task_type.as_deref().unwrap_or("-");
-    let idempotency_key = format!("managed:{}:{}", outcome.dispatch_id, task_type);
+    // One delivery intent per DISPATCH (never per task_type variant): a
+    // failure terminal minted with task_type None and a later completion
+    // that carries a task type must reconcile the SAME intent, not mint a
+    // sibling.
+    let idempotency_key = format!("managed:{}", outcome.dispatch_id);
     let payload_digest = digest_token(&[
         &outcome.outcome_id,
         &outcome.execution_outcome,
@@ -326,6 +326,15 @@ pub(crate) fn mint_delivery_for_managed_outcome(
 
     let mint_result = server.with_global_store(|store| {
         let conn = store.connection();
+        // Re-read the CANONICAL outcome row under this lock: the caller's
+        // copy may be stale if a reconciliation landed between the outcome
+        // write and this mint. The canonical row is what delivery mirrors.
+        let canonical_outcome =
+            memcore::get_outcome(conn, &outcome.outcome_id).map_err(|error| error.to_string())?;
+        let outcome = match canonical_outcome {
+            Some(row) => row,
+            None => return Ok(None),
+        };
         // Binding decision and mint share this lock.
         let mut new = memcore::NewDeliveryIntent {
             idempotency_key: idempotency_key.clone(),
@@ -352,7 +361,10 @@ pub(crate) fn mint_delivery_for_managed_outcome(
                 new.requester = memcore::DeliveryRequesterBinding {
                     agent_identity_id: Some(binding.agent_identity_id),
                     host_identity: None,
-                    session_ref: binding.session_client,
+                    // The legacy namespaced session key is misleading as a
+                    // session ref; the WorkClaim linkage lives in
+                    // work_claim_id.
+                    session_ref: None,
                 };
             }
             // The claim exists but is NOT active (released/handed off): the
@@ -428,10 +440,23 @@ pub(crate) fn mint_delivery_for_attached_terminal(
             return Ok(None);
         }
 
-        // 2. Older-information guard: an event whose source revision is
-        //    below the intent's current result revision is stale truth;
-        //    correction authority must never mirror an older payload over
-        //    a newer one.
+        // 2. Older-information guard, against the AUTHORITATIVE canonical
+        //    revision (not just the intent's): the stored projection's
+        //    canonical_revision is the freshest truth the receipt spine
+        //    committed, so an event below it is stale even when no intent
+        //    exists yet (a faster sibling may have committed projection
+        //    but not yet minted).
+        let canonical_revision: i64 = conn
+            .query_row(
+                "SELECT COALESCE(canonical_revision, 0) FROM harness_session_state
+                 WHERE attachment_id = ?1",
+                params![attachment_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        if canonical_revision > source_revision {
+            return Ok(None);
+        }
         let intent_key = format!("attached:{attachment_id}");
         let existing = memcore::find_delivery_intent_by_idempotency_key(conn, &intent_key)
             .map_err(|error| error.to_string())?;

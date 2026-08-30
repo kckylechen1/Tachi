@@ -519,7 +519,20 @@ fn managed_terminal_outcome_mints_and_binds_the_requester() {
         }),
     )
     .expect("claim");
-    assert!(claim.contains(r#""outcome":"claimed""#));
+    if !claim.contains(r#""outcome":"claimed""#) {
+        let debug_rows: Vec<memcore::DeliveryIntent> = server
+            .with_global_store(|store| {
+                memcore::observe_delivery_for_execution(
+                    store.connection(),
+                    "managed_dispatch",
+                    "dispatch-1",
+                )
+                .map_err(|error| error.to_string())
+            })
+            .unwrap_or_default();
+        let session_now = server.session_client();
+        panic!("claim response: {claim}; rows: {debug_rows:?}; session: {session_now:?}");
+    }
 
     let observed: Vec<memcore::DeliveryIntent> = server
         .with_global_store(|store| {
