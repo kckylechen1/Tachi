@@ -117,7 +117,7 @@ struct VaultSourceLoad {
 }
 
 fn vault_api_key_pool_load_from_server(server: &MemoryServer) -> Result<VaultSourceLoad, String> {
-    let scan = crate::vault_ops::load_unlocked_api_key_secret_pools_with_drops(server)?;
+    let scan = crate::vault_ops::load_validated_unlocked_api_key_secret_pools_with_drops(server)?;
     Ok(VaultSourceLoad {
         load: tachi_llm::DurableVaultLoad {
             pools: scan.pools,

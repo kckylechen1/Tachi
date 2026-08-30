@@ -92,6 +92,18 @@ impl MemoryStore {
         })
     }
 
+    /// Begin an immediate Vault transaction through a shared store reference.
+    /// This is reserved for legacy read-shaped callers that already perform
+    /// Vault writes through `&MemoryStore`; SQLite rejects accidental nesting
+    /// at runtime while the transaction still serializes cross-process writes.
+    pub fn begin_vault_transaction_shared(&self) -> Result<VaultTransaction<'_>, MemoryError> {
+        let transaction =
+            rusqlite::Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        Ok(VaultTransaction {
+            transaction: Some(transaction),
+        })
+    }
+
     // ─── Vault Entries ───────────────────────────────────────────────────────
 
     /// Get vault configuration (returns None if not initialized).

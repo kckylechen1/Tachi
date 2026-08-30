@@ -571,34 +571,35 @@ async fn unlocked_rotation_prefix_drop_uses_lowest_member_across_current_index()
         }))
         .await
         .expect("vault_setup_rotation");
+    // Seed a legacy-invalid row below the production mutation boundary. The
+    // assertion exercises diagnostic classification of already-corrupt data;
+    // production `vault_set` now correctly refuses to create this state.
     server
-        .vault_set(Parameters(VaultSetParams {
-            name: "VOYAGE_API_KEY_1".to_string(),
-            value: "wrong-type-member".to_string(),
-            agent_id: None,
-            secret_type: "other".to_string(),
-            description: "lowest member determines prefix class".to_string(),
-            allowed_agents: None,
-            enable_rotation: false,
-            rotation_strategy: None,
-            rebind: false,
-        }))
-        .await
-        .expect("replace member one");
+        .with_global_store(|store| {
+            let mut entry = store
+                .vault_get_entry("VOYAGE_API_KEY_1")
+                .map_err(|error| error.to_string())?
+                .expect("seeded member one");
+            entry.secret_type = "other".to_string();
+            entry.description = "lowest member determines prefix class".to_string();
+            store
+                .vault_upsert_entry(&entry)
+                .map_err(|error| error.to_string())
+        })
+        .expect("seed legacy wrong-type member one");
     server
-        .vault_set(Parameters(VaultSetParams {
-            name: "VOYAGE_API_KEY_2".to_string(),
-            value: "fenced-member".to_string(),
-            agent_id: None,
-            secret_type: "api_key".to_string(),
-            description: "higher fenced member".to_string(),
-            allowed_agents: Some(vec!["agent-a".to_string()]),
-            enable_rotation: false,
-            rotation_strategy: None,
-            rebind: false,
-        }))
-        .await
-        .expect("replace member two");
+        .with_global_store(|store| {
+            let mut entry = store
+                .vault_get_entry("VOYAGE_API_KEY_2")
+                .map_err(|error| error.to_string())?
+                .expect("seeded member two");
+            entry.allowed_agents = Some(vec!["agent-a".to_string()]);
+            entry.description = "higher fenced member".to_string();
+            store
+                .vault_upsert_entry(&entry)
+                .map_err(|error| error.to_string())
+        })
+        .expect("seed legacy fenced member two");
 
     for current_index in [1, 2] {
         server

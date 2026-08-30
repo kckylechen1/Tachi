@@ -264,13 +264,34 @@ pub(crate) fn lease_api_key_from_store(
                 crate::provider_config::parse_rotation_member_name(&entry.name)
             {
                 if prefix == health_logical_name && rotation.total_keys > 0 {
-                    store
-                        .vault_set_rotation(&memcore::vault::VaultKeyRotation {
-                            current_index: (idx as i64 % rotation.total_keys) + 1,
-                            updated_at: chrono::Utc::now().to_rfc3339(),
-                            ..rotation.clone()
-                        })
+                    let transaction = store
+                        .begin_vault_transaction_shared()
+                        .map_err(|e| format!("begin lease transaction: {e}"))?;
+                    let current = transaction
+                        .vault_get_rotation(&health_logical_name)
+                        .map_err(|e| format!("vault_get_rotation: {e}"))?
+                        .ok_or_else(|| {
+                            format!("Vault rotation '{health_logical_name}' disappeared")
+                        })?;
+                    let current_entries = transaction
+                        .vault_list_entries()
+                        .map_err(|e| format!("vault_list_entries: {e}"))?;
+                    memcore::validate_api_key_rotation(&current_entries, &current).map_err(
+                        |error| format!("{error}; refusing direct CLI rotation advance"),
+                    )?;
+                    let mut updated = current;
+                    updated.current_index = (idx as i64 % updated.total_keys) + 1;
+                    updated.updated_at = chrono::Utc::now().to_rfc3339();
+                    transaction
+                        .vault_set_rotation(&updated)
                         .map_err(|e| format!("vault_set_rotation: {e}"))?;
+                    transaction
+                        .vault_touch_entry(&entry.name)
+                        .map_err(|e| format!("vault_touch_entry: {e}"))?;
+                    transaction
+                        .commit()
+                        .map_err(|e| format!("commit lease transaction: {e}"))?;
+                    return Ok((health_logical_name.to_string(), entry.name.clone(), value));
                 }
             }
         }

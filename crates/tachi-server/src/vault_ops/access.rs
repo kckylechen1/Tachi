@@ -327,7 +327,7 @@ fn load_unlocked_vault_secrets_with_key(
 pub(crate) fn load_unlocked_api_key_secret_pools(
     server: &MemoryServer,
 ) -> Result<HashMap<String, Vec<tachi_llm::ProviderSecret>>, String> {
-    load_unlocked_api_key_secret_pools_with_drops(server).map(|scan| scan.pools)
+    load_unlocked_api_key_secret_pools_filtered(server, None, true).map(|scan| scan.pools)
 }
 
 pub(crate) fn canonical_api_key_health_logical_name(
@@ -364,24 +364,31 @@ pub(crate) struct ProviderSecretScan {
 
 /// Same scan as [`load_unlocked_api_key_secret_pools`], plus the drop reason
 /// recorded at the moment each listed row was skipped (tachi#1860).
+#[cfg(test)]
 pub(crate) fn load_unlocked_api_key_secret_pools_with_drops(
     server: &MemoryServer,
 ) -> Result<ProviderSecretScan, String> {
-    load_unlocked_api_key_secret_pools_filtered(server, None)
+    load_unlocked_api_key_secret_pools_filtered(server, None, false)
+}
+
+pub(crate) fn load_validated_unlocked_api_key_secret_pools_with_drops(
+    server: &MemoryServer,
+) -> Result<ProviderSecretScan, String> {
+    load_unlocked_api_key_secret_pools_filtered(server, None, true)
 }
 
 pub(super) fn load_unlocked_api_key_secret_pool(
     server: &MemoryServer,
     logical_name: &str,
 ) -> Result<Vec<tachi_llm::ProviderSecret>, String> {
-    let mut direct = load_unlocked_api_key_secret_pools_filtered(server, Some(logical_name))?;
+    let mut direct = load_unlocked_api_key_secret_pools_filtered(server, Some(logical_name), true)?;
     if let Some(pool) = direct.pools.remove(logical_name) {
         return Ok(pool);
     }
     let Some((prefix, _)) = crate::provider_config::parse_rotation_member_name(logical_name) else {
         return Ok(Vec::new());
     };
-    let grouped = load_unlocked_api_key_secret_pools_filtered(server, Some(prefix))?;
+    let grouped = load_unlocked_api_key_secret_pools_filtered(server, Some(prefix), true)?;
     Ok(grouped
         .pools
         .get(prefix)
@@ -416,6 +423,7 @@ fn record_rotation_member_drop(
 fn load_unlocked_api_key_secret_pools_filtered(
     server: &MemoryServer,
     only_logical_name: Option<&str>,
+    validate_rotations: bool,
 ) -> Result<ProviderSecretScan, String> {
     with_vault_key_for_provider_refresh(server, |key| {
         let (entries, rotations, key_health_rows) = server
@@ -435,6 +443,9 @@ fn load_unlocked_api_key_secret_pools_filtered(
                 .map(|(prefix, _)| prefix)
         });
         for rotation in &rotations {
+            if !validate_rotations {
+                break;
+            }
             if only_logical_name.is_none()
                 || only_logical_name == Some(rotation.prefix.as_str())
                 || requested_rotation_prefix == Some(rotation.prefix.as_str())

@@ -28,14 +28,6 @@ pub(crate) async fn handle_vault_set(
                     params.name,
                 ));
             }
-            if memcore::is_lane_config_url_name(&params.name) {
-                if let Some(leak) = memcore::catalog::endpoint::endpoint_credential_leak(&value) {
-                    return Err(format!(
-                        "Vault name '{}' value embeds a credential in the endpoint ({leak}); refusing write",
-                        params.name
-                    ));
-                }
-            }
             let allowed_agents = normalize_allowed_agents(params.allowed_agents.clone());
             let (encrypted_value, nonce) = crypto::encrypt(key, value.as_bytes())?;
 
@@ -49,6 +41,16 @@ pub(crate) async fn handle_vault_set(
                 let is_new = !transaction
                     .vault_entry_exists(&params.name)
                     .map_err(|e| format!("Failed to check existing entry: {e}"))?;
+                if is_new && memcore::is_lane_config_url_name(&params.name) {
+                    if let Some(leak) =
+                        memcore::catalog::endpoint::endpoint_credential_leak(&value)
+                    {
+                        return Err(format!(
+                            "Vault name '{}' value embeds a credential in the endpoint ({leak}); refusing write",
+                            params.name
+                        ));
+                    }
+                }
 
                 let mut rebind_meta: Option<(bool, String, String)> = None;
                 if is_lane_slot_secret_name(&params.name) && secret_type == SECRET_TYPE_API_KEY {
