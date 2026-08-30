@@ -117,6 +117,22 @@ fn stdin_init_password_reads_two_lines_without_waiting_for_eof() {
 }
 
 #[test]
+fn stdin_init_password_rejects_missing_confirmation_file_after_first_line() {
+    let mut input = Cursor::new("correct horse battery staple\n");
+    let missing = std::env::temp_dir().join(format!(
+        "tachi-missing-confirm-password-{}",
+        uuid::Uuid::new_v4()
+    ));
+
+    let err = read_vault_init_password_stdin_lines(&mut input, Some(&missing), false)
+        .expect_err("missing confirmation file must fail after reading the password");
+    assert!(
+        err.to_string().contains("Failed to inspect password file"),
+        "{err}"
+    );
+}
+
+#[test]
 fn derive_verified_vault_key_zeroes_password_on_success() {
     let config = config_for_password("correct horse battery staple");
     let mut password = "correct horse battery staple".to_string();

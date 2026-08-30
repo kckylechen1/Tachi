@@ -151,7 +151,8 @@ pub(super) fn read_vault_init_password_stdin_lines(
 ) -> Result<(String, String), Box<dyn std::error::Error>> {
     let mut password_raw = crate::vault_crypto::ZeroizingString::new(String::new());
     reader.read_line(password_raw.as_mut_string())?;
-    let password = password_raw.trim().to_string();
+    let mut password = password_raw.trim().to_string();
+    let password_guard = crate::vault_crypto::ZeroizingStringRef::new(&mut password);
     let confirm = if let Some(path) = confirm_password_file {
         read_password_file(path, insecure_password_file)?
     } else {
@@ -159,7 +160,7 @@ pub(super) fn read_vault_init_password_stdin_lines(
         reader.read_line(confirm_raw.as_mut_string())?;
         confirm_raw.trim().to_string()
     };
-    Ok((password, confirm))
+    Ok((password_guard.to_string(), confirm))
 }
 
 pub(super) fn read_password_file(
