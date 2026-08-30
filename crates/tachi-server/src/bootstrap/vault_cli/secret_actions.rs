@@ -5,7 +5,7 @@ use super::output::{
     print_lease_output, vault_get_output,
 };
 use crate::bootstrap::{open_cli_store, open_cli_store_read_only};
-use std::io::Read;
+use std::io::BufRead;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use tachi_bootstrap::cli::VaultAction;
@@ -30,6 +30,17 @@ pub(super) async fn run_secret_action(
     global_db_path: &PathBuf,
     app_home: &Path,
     action: VaultAction,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let stdin = std::io::stdin();
+    let mut stdin = stdin.lock();
+    run_secret_action_with_reader(global_db_path, app_home, action, &mut stdin).await
+}
+
+async fn run_secret_action_with_reader(
+    global_db_path: &PathBuf,
+    app_home: &Path,
+    action: VaultAction,
+    stdin: &mut impl BufRead,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match action {
         VaultAction::Set {
@@ -68,7 +79,7 @@ pub(super) async fn run_secret_action(
 
             let mut secret_value = if value_stdin {
                 let mut input = String::new();
-                if let Err(error) = std::io::stdin().read_line(&mut input) {
+                if let Err(error) = stdin.read_line(&mut input) {
                     crate::vault_crypto::zero_string(&mut input);
                     return Err(error.into());
                 }
@@ -228,7 +239,7 @@ pub(super) async fn run_secret_action(
             }
 
             let mut raw_values = crate::vault_crypto::ZeroizingString::new(String::new());
-            std::io::stdin().read_to_string(raw_values.as_mut_string())?;
+            stdin.read_to_string(raw_values.as_mut_string())?;
             let values = raw_values
                 .lines()
                 .map(str::trim)
@@ -474,5 +485,76 @@ pub(super) async fn run_secret_action(
             Ok(())
         }
         _ => unreachable!("secret action router received non-secret action"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn direct_cli_set_refuses_legacy_lane_type_without_overwrite() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let db_path = temp.path().join("memory.db");
+        let password_file = temp.path().join("vault-password");
+        std::fs::write(&password_file, b"direct-cli-password\n").expect("password file");
+        std::fs::set_permissions(&password_file, std::fs::Permissions::from_mode(0o600))
+            .expect("password file permissions");
+
+        let key = super::super::keys::vault_init_with_password(
+            &db_path,
+            "direct-cli-password".to_string(),
+        )
+        .expect("initialize fixture vault");
+        let (encrypted_value, nonce) =
+            crate::vault_crypto::encrypt(key.bytes(), b"legacy-family").expect("encrypt fixture");
+        let legacy = memcore::vault::VaultEntry {
+            name: "EXTRACT_API_KEY".to_string(),
+            encrypted_value: encrypted_value.clone(),
+            nonce: nonce.clone(),
+            secret_type: "other".to_string(),
+            description: "legacy lane fixture".to_string(),
+            allowed_agents: None,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+            accessed_at: String::new(),
+            access_count: 0,
+        };
+        open_cli_store(&db_path)
+            .expect("open fixture store")
+            .vault_upsert_entry(&legacy)
+            .expect("seed legacy lane");
+
+        let action = VaultAction::Set {
+            name: "EXTRACT_API_KEY".to_string(),
+            secret_type: Some("api_key".to_string()),
+            description: None,
+            stdin_password: false,
+            keychain: false,
+            password_file: Some(password_file),
+            insecure_password_file: false,
+            value_stdin: true,
+            rebind: false,
+        };
+        let mut input = Cursor::new(b"replacement-family\n".to_vec());
+        let error = run_secret_action_with_reader(&db_path, temp.path(), action, &mut input)
+            .await
+            .expect_err("legacy lane type must fail closed")
+            .to_string();
+        assert!(error.contains("legacy secret_type 'other'"), "{error}");
+        assert!(!error.contains("replacement-family"), "{error}");
+
+        let retained = open_cli_store_read_only(&db_path)
+            .expect("open fixture store read-only")
+            .vault_get_entry("EXTRACT_API_KEY")
+            .expect("read lane")
+            .expect("legacy lane remains");
+        assert_eq!(retained.secret_type, "other");
+        assert_eq!(retained.encrypted_value, encrypted_value);
+        assert_eq!(retained.nonce, nonce);
     }
 }
