@@ -28,9 +28,7 @@ pub(crate) async fn handle_vault_set(
                 ));
             }
             if memcore::is_lane_config_url_name(&params.name) {
-                if let Some(leak) =
-                    memcore::catalog::endpoint::endpoint_credential_leak(&params.value)
-                {
+                if let Some(leak) = memcore::catalog::endpoint::endpoint_credential_leak(&value) {
                     return Err(format!(
                         "Vault name '{}' value embeds a credential in the endpoint ({leak}); refusing write",
                         params.name

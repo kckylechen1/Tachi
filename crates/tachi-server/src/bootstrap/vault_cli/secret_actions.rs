@@ -98,7 +98,6 @@ async fn run_secret_action_with_reader(
                 if let Some(leak) =
                     memcore::catalog::endpoint::endpoint_credential_leak(&secret_value)
                 {
-                    crate::vault_crypto::zero_string(&mut secret_value);
                     return Err(format!(
                         "Vault name '{name}' value embeds a credential in the endpoint ({leak}); refusing write"
                     ).into());

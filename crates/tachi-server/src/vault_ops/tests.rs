@@ -1215,6 +1215,7 @@ async fn vault_set_infers_config_for_lane_urls_and_refuses_api_key() {
             allowed_agents: None,
             enable_rotation: false,
             rotation_strategy: None,
+            rebind: false,
         },
     )
     .await
@@ -1232,6 +1233,7 @@ async fn vault_set_infers_config_for_lane_urls_and_refuses_api_key() {
             allowed_agents: None,
             enable_rotation: false,
             rotation_strategy: None,
+            rebind: false,
         },
     )
     .await
@@ -1252,6 +1254,7 @@ async fn vault_set_infers_config_for_lane_urls_and_refuses_api_key() {
             allowed_agents: None,
             enable_rotation: false,
             rotation_strategy: None,
+            rebind: false,
         },
     )
     .await
@@ -1282,6 +1285,7 @@ async fn vault_set_infers_config_for_lane_urls_and_refuses_api_key() {
             allowed_agents: None,
             enable_rotation: false,
             rotation_strategy: None,
+            rebind: false,
         },
     )
     .await
@@ -1310,6 +1314,7 @@ async fn vault_set_infers_config_for_lane_urls_and_refuses_api_key() {
             allowed_agents: None,
             enable_rotation: false,
             rotation_strategy: None,
+            rebind: false,
         },
     )
     .await
@@ -1345,6 +1350,7 @@ async fn vault_set_infers_config_for_lane_urls_and_refuses_api_key() {
             allowed_agents: None,
             enable_rotation: false,
             rotation_strategy: None,
+            rebind: false,
         },
     )
     .await
@@ -1362,6 +1368,7 @@ async fn vault_set_infers_config_for_lane_urls_and_refuses_api_key() {
             allowed_agents: None,
             enable_rotation: false,
             rotation_strategy: None,
+            rebind: false,
         },
     )
     .await
@@ -1382,6 +1389,7 @@ async fn vault_set_infers_config_for_lane_urls_and_refuses_api_key() {
             allowed_agents: None,
             enable_rotation: true,
             rotation_strategy: Some("round_robin".to_string()),
+            rebind: false,
         },
     )
     .await
@@ -1420,6 +1428,7 @@ async fn vault_set_infers_config_for_lane_urls_and_refuses_api_key() {
             allowed_agents: None,
             enable_rotation: false,
             rotation_strategy: None,
+            rebind: false,
         },
     )
     .await
