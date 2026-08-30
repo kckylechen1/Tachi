@@ -533,22 +533,17 @@ fn materialize_for_server_inner(
                 Ok(snapshot.into_provider_publication())
             },
             |catalog| {
-                if let Some(fence) = publication_fence.borrow().as_ref() {
-                    write_env_catalog_projection(fence.connection(), &catalog).map(|_| ())
-                } else {
-                    commit_env_catalog_projection(server, &catalog).map(|_| ())
-                }
+                let Some(fence) = publication_fence.borrow_mut().take() else {
+                    return commit_env_catalog_projection(server, &catalog).map(|_| ());
+                };
+                write_env_catalog_projection(fence.connection(), &catalog)?;
+                fence
+                    .commit()
+                    .map_err(|error| format!("Failed to commit fenced Vault publication: {error}"))
             },
         );
     match materialize_result {
-        Ok(report) => {
-            if let Some(fence) = publication_fence.borrow_mut().take() {
-                fence.commit().map_err(|error| {
-                    format!("Failed to release Vault provider publication fence: {error}")
-                })?;
-            }
-            Ok(report)
-        }
+        Ok(report) => Ok(report),
         Err(error) => Err(format_provider_materialization_error(error)),
     }
 }

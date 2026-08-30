@@ -10,6 +10,23 @@ use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use tachi_bootstrap::cli::VaultAction;
 
+fn ensure_direct_cli_entry_unrestricted(
+    entry: &memcore::vault::VaultEntry,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if entry
+        .allowed_agents
+        .as_ref()
+        .is_some_and(|agents| !agents.is_empty())
+    {
+        return Err(format!(
+            "Vault secret '{}' is agent-restricted; direct CLI has no agent identity and cannot access or mutate it",
+            entry.name
+        )
+        .into());
+    }
+    Ok(())
+}
+
 pub(super) struct ZeroizingSecretString<'a>(pub(super) &'a mut String);
 
 impl Deref for ZeroizingSecretString<'_> {
@@ -99,9 +116,13 @@ async fn run_secret_action_with_reader(
             let transaction = store
                 .begin_vault_transaction()
                 .map_err(|e| format!("begin vault transaction: {e}"))?;
-            let is_new = !transaction
-                .vault_entry_exists(&name)
-                .map_err(|e| format!("vault_entry_exists: {e}"))?;
+            let existing_entry = transaction
+                .vault_get_entry(&name)
+                .map_err(|e| format!("vault_get_entry: {e}"))?;
+            if let Some(existing) = existing_entry.as_ref() {
+                ensure_direct_cli_entry_unrestricted(existing)?;
+            }
+            let is_new = existing_entry.is_none();
             if is_new && memcore::is_lane_config_url_name(&name) {
                 if let Some(leak) =
                     memcore::catalog::endpoint::endpoint_credential_leak(&secret_value)
@@ -166,10 +187,7 @@ async fn run_secret_action_with_reader(
                     }
                 }
 
-                if let Some(existing) = transaction
-                    .vault_get_entry(&name)
-                    .map_err(|e| format!("vault_get_entry: {e}"))?
-                {
+                if let Some(existing) = existing_entry.as_ref() {
                     crate::vault_ops::validate_existing_lane_slot_secret_type(
                         &name,
                         &existing.secret_type,
@@ -446,7 +464,7 @@ async fn run_secret_action_with_reader(
             password_file,
             insecure_password_file,
         } => {
-            let store = open_cli_store_read_only(global_db_path)?;
+            let mut store = open_cli_store(global_db_path)?;
             let config = store
                 .vault_get_config()
                 .map_err(|e| format!("vault_get_config: {e}"))?
@@ -460,17 +478,25 @@ async fn run_secret_action_with_reader(
                 insecure_password_file,
             )?;
 
-            let entry = store
+            let transaction = store
+                .begin_vault_transaction()
+                .map_err(|e| format!("begin Vault get transaction: {e}"))?;
+            let entry = transaction
                 .vault_get_entry(&name)
                 .map_err(|e| format!("vault_get_entry: {e}"))?
                 .ok_or(format!("Secret '{name}' not found"))?;
+            ensure_direct_cli_entry_unrestricted(&entry)?;
             if let Some((prefix, _)) = crate::provider_config::parse_rotation_member_name(&name) {
-                if store
+                if let Some(rotation) = transaction
                     .vault_get_rotation(prefix)
                     .map_err(|e| format!("vault_get_rotation: {e}"))?
-                    .is_some()
                 {
-                    super::validate_api_key_lease_target(&store, &name)?;
+                    let entries = transaction
+                        .vault_list_entries()
+                        .map_err(|e| format!("vault_list_entries: {e}"))?;
+                    memcore::validate_api_key_rotation(&entries, &rotation).map_err(|error| {
+                        format!("{error}; refusing configured-member Vault get")
+                    })?;
                 }
             }
 
@@ -478,6 +504,9 @@ async fn run_secret_action_with_reader(
                 crate::vault_crypto::decrypt(key.bytes(), &entry.encrypted_value, &entry.nonce)?;
             let mut value =
                 crate::vault_crypto::decode_utf8_zeroizing(decrypted, "Secret is not valid UTF-8")?;
+            transaction
+                .commit()
+                .map_err(|e| format!("commit Vault get transaction: {e}"))?;
 
             let output = vault_get_output(&name, &value, reveal, json)?;
             crate::vault_crypto::zero_string(&mut value);
@@ -512,6 +541,12 @@ async fn run_secret_action_with_reader(
             let transaction = store
                 .begin_vault_transaction()
                 .map_err(|e| format!("begin vault remove transaction: {e}"))?;
+            if let Some(existing) = transaction
+                .vault_get_entry(&name)
+                .map_err(|e| format!("vault_get_entry: {e}"))?
+            {
+                ensure_direct_cli_entry_unrestricted(&existing)?;
+            }
             if let Some((prefix, _)) = crate::provider_config::parse_rotation_member_name(&name) {
                 if transaction
                     .vault_get_rotation(prefix)
@@ -886,6 +921,115 @@ mod tests {
         assert!(
             get_error.contains("DIRECT_POOL_API_KEY_3") && get_error.contains("config"),
             "{get_error}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn direct_cli_rejects_get_set_and_remove_for_agent_restricted_secret() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let db_path = temp.path().join("memory.db");
+        let password_file = temp.path().join("vault-password");
+        std::fs::write(&password_file, b"direct-cli-password\n").expect("password file");
+        std::fs::set_permissions(&password_file, std::fs::Permissions::from_mode(0o600))
+            .expect("password file permissions");
+        let key = super::super::keys::vault_init_with_password(
+            &db_path,
+            "direct-cli-password".to_string(),
+        )
+        .expect("initialize fixture vault");
+        let (encrypted_value, nonce) =
+            crate::vault_crypto::encrypt(key.bytes(), b"restricted-original")
+                .expect("encrypt restricted fixture");
+        open_cli_store(&db_path)
+            .expect("open fixture store")
+            .vault_upsert_entry(&memcore::vault::VaultEntry {
+                name: "RESTRICTED_API_KEY".to_string(),
+                encrypted_value,
+                nonce,
+                secret_type: "api_key".to_string(),
+                description: "restricted fixture".to_string(),
+                allowed_agents: Some(vec!["agent-a".to_string()]),
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                updated_at: "2026-01-01T00:00:00Z".to_string(),
+                accessed_at: String::new(),
+                access_count: 0,
+            })
+            .expect("seed restricted secret");
+
+        let get_error = run_secret_action_with_reader(
+            &db_path,
+            temp.path(),
+            VaultAction::Get {
+                name: "RESTRICTED_API_KEY".to_string(),
+                reveal: true,
+                json: false,
+                stdin_password: false,
+                keychain: false,
+                password_file: Some(password_file.clone()),
+                insecure_password_file: false,
+            },
+            &mut Cursor::new(Vec::<u8>::new()),
+        )
+        .await
+        .expect_err("direct CLI get must reject agent-restricted secrets")
+        .to_string();
+        assert!(get_error.contains("agent-restricted"), "{get_error}");
+        assert!(!get_error.contains("restricted-original"), "{get_error}");
+
+        let set_error = run_secret_action_with_reader(
+            &db_path,
+            temp.path(),
+            VaultAction::Set {
+                name: "RESTRICTED_API_KEY".to_string(),
+                secret_type: Some("api_key".to_string()),
+                description: None,
+                stdin_password: false,
+                keychain: false,
+                password_file: Some(password_file.clone()),
+                insecure_password_file: false,
+                value_stdin: true,
+                rebind: false,
+            },
+            &mut Cursor::new(b"must-not-overwrite\n".to_vec()),
+        )
+        .await
+        .expect_err("direct CLI set must reject agent-restricted secrets")
+        .to_string();
+        assert!(set_error.contains("agent-restricted"), "{set_error}");
+        assert!(!set_error.contains("must-not-overwrite"), "{set_error}");
+
+        let remove_error = run_secret_action_with_reader(
+            &db_path,
+            temp.path(),
+            VaultAction::Remove {
+                name: "RESTRICTED_API_KEY".to_string(),
+                stdin_password: false,
+                keychain: false,
+                password_file: Some(password_file),
+                insecure_password_file: false,
+            },
+            &mut Cursor::new(Vec::<u8>::new()),
+        )
+        .await
+        .expect_err("direct CLI remove must reject agent-restricted secrets")
+        .to_string();
+        assert!(remove_error.contains("agent-restricted"), "{remove_error}");
+
+        let retained = open_cli_store_read_only(&db_path)
+            .expect("reopen fixture")
+            .vault_get_entry("RESTRICTED_API_KEY")
+            .expect("read retained restricted entry")
+            .expect("restricted entry remains");
+        assert_eq!(retained.allowed_agents, Some(vec!["agent-a".to_string()]));
+        let decrypted =
+            crate::vault_crypto::decrypt(key.bytes(), &retained.encrypted_value, &retained.nonce)
+                .expect("decrypt retained secret");
+        assert_eq!(
+            String::from_utf8(decrypted).expect("UTF-8 retained secret"),
+            "restricted-original"
         );
     }
 }
