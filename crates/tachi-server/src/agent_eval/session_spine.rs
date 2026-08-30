@@ -106,6 +106,27 @@ pub(crate) fn handle_ingest_session_event(
         )
         .map_err(|error| error.to_string())
     })?;
+    // #1679: a terminal event mints (or idempotently reconciles) the durable
+    // delivery intent for the admitted requester. Delivery is a separate
+    // plane — a mint failure warns and never rewrites the receipt spine.
+    if kind == HarnessSessionEventKind::Terminal {
+        if let Some(outcome) = outcome {
+            let agent_identity_id =
+                required(params.agent_identity_id.clone(), "agent_identity_id")?;
+            crate::delivery_ops::mint_delivery_for_attached_terminal(
+                server,
+                &receipt.attachment_id,
+                &receipt.event_id,
+                input.source_revision,
+                outcome.as_str(),
+                input.summary.as_deref(),
+                input.payload_digest.as_deref(),
+                &agent_identity_id,
+                &host.host_identity,
+                &required(params.remote_session_id.clone(), "remote_session_id")?,
+            );
+        }
+    }
     serde_json::to_string(&json!({
         "status": "completed",
         "action": "ingest_session_event",

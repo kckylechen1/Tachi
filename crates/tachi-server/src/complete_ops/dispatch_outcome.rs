@@ -180,16 +180,22 @@ pub(crate) fn record_complete_outcome(
     };
 
     match write_result {
-        Ok(row) => json!({
-            "recorded": true,
-            "outcome_id": row.outcome_id,
-            "dispatch_id": row.dispatch_id,
-            "idempotency_key": row.idempotency_key,
-            "vendor": row.vendor,
-            "identity_attribution_basis": row.identity_attribution_basis,
-            "identity_receipt": row.identity_receipt,
-            "scope": scope.as_str(),
-        }),
+        Ok(row) => {
+            // #1679: mint the durable delivery intent for this terminal
+            // receipt. Delivery is a separate plane — a mint failure warns
+            // and never rewrites the execution truth above.
+            crate::delivery_ops::mint_delivery_for_managed_outcome(server, &row, eval_memory_id);
+            json!({
+                "recorded": true,
+                "outcome_id": row.outcome_id,
+                "dispatch_id": row.dispatch_id,
+                "idempotency_key": row.idempotency_key,
+                "vendor": row.vendor,
+                "identity_attribution_basis": row.identity_attribution_basis,
+                "identity_receipt": row.identity_receipt,
+                "scope": scope.as_str(),
+            })
+        }
         Err(error) => {
             tracing::warn!(
                 error = %error,

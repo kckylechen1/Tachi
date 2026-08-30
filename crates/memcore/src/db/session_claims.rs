@@ -1315,6 +1315,30 @@ pub fn gc_session_claims(
     })
 }
 
+/// tachi#1679: the admitted requester binding for a managed dispatch, read
+/// from the WorkClaim that owns the dispatch (identity + session client).
+/// `None` when no claim names the dispatch — the delivery intent then mints
+/// unbound (pull-only) instead of guessing a requester.
+pub fn find_claim_requester_for_dispatch(
+    conn: &Connection,
+    dispatch_id: &str,
+) -> Result<Option<(String, Option<String>)>, MemoryError> {
+    if dispatch_id.trim().is_empty() {
+        return Ok(None);
+    }
+    let mut stmt = conn.prepare(
+        "SELECT agent_identity_id, session_client FROM session_claims
+         WHERE dispatch_id = ?1 AND agent_identity_id IS NOT NULL
+         ORDER BY created_at DESC LIMIT 1",
+    )?;
+    let found = stmt
+        .query_row(params![dispatch_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+        })
+        .optional()?;
+    Ok(found)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

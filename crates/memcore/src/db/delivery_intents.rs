@@ -214,10 +214,7 @@ pub mod blocker_class {
 
     /// Classes permitted to take the `retrying` state. Anything else
     /// (including the ambiguous-send class) is `blocked`.
-    pub const RETRYABLE: &[&str] = &[
-        TRANSPORT_FAILURE,
-        REQUESTER_UNAVAILABLE,
-    ];
+    pub const RETRYABLE: &[&str] = &[TRANSPORT_FAILURE, REQUESTER_UNAVAILABLE];
 }
 
 /// The admitted requester binding an intent may carry. Every field comes
@@ -543,7 +540,11 @@ pub fn claim_ready_delivery(
     }
 
     let mut candidates = load_claimable_intents(conn, &request.caller, &now)?;
-    candidates.sort_by(|a, b| a.created_at.cmp(&b.created_at).then(a.delivery_id.cmp(&b.delivery_id)));
+    candidates.sort_by(|a, b| {
+        a.created_at
+            .cmp(&b.created_at)
+            .then(a.delivery_id.cmp(&b.delivery_id))
+    });
     let Some(intent) = candidates.into_iter().next() else {
         return Ok(DeliveryClaimOutcome::NoneReady);
     };
@@ -707,7 +708,10 @@ pub fn reject_or_block(
         DeliveryState::Blocked
     };
     let next_retry_at = if retryable {
-        Some(lease_expiration(&now, retry_in_seconds.unwrap_or(0).max(1))?)
+        Some(lease_expiration(
+            &now,
+            retry_in_seconds.unwrap_or(0).max(1),
+        )?)
     } else {
         None
     };
@@ -769,7 +773,10 @@ pub fn resume_requester_operation(
             ORDER BY created_at, delivery_id",
         select_intent_sql()
     ))?;
-    let bound = stmt.query_map(params![caller.agent_identity_id, caller.host_identity], row_to_intent)?;
+    let bound = stmt.query_map(
+        params![caller.agent_identity_id, caller.host_identity],
+        row_to_intent,
+    )?;
     let mut intents = Vec::new();
     for intent in bound {
         intents.push(intent?);
@@ -790,7 +797,9 @@ pub fn dismiss_delivery(
     expected_revision: Option<i64>,
 ) -> Result<DeliveryIntent, MemoryError> {
     if actor.trim().is_empty() {
-        return Err(MemoryError::InvalidArg("actor must not be empty".to_string()));
+        return Err(MemoryError::InvalidArg(
+            "actor must not be empty".to_string(),
+        ));
     }
     let now = now_utc_iso();
     let intent = find_intent_by_id(conn, delivery_id)?
@@ -931,7 +940,9 @@ fn find_intent_by_key(
         "{} WHERE idempotency_key = ?1",
         select_intent_sql()
     ))?;
-    let found = stmt.query_row(params![idempotency_key], row_to_intent).optional()?;
+    let found = stmt
+        .query_row(params![idempotency_key], row_to_intent)
+        .optional()?;
     Ok(found)
 }
 
@@ -988,10 +999,9 @@ fn validate_mint(new: &NewDeliveryIntent) -> Result<(), MemoryError> {
     }
     if new.payload_digest.is_empty()
         || new.payload_digest.len() > 128
-        || !new
-            .payload_digest
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'=' | b'/' | b'_' | b':' | b'-'))
+        || !new.payload_digest.bytes().all(|b| {
+            b.is_ascii_alphanumeric() || matches!(b, b'+' | b'=' | b'/' | b'_' | b':' | b'-')
+        })
     {
         return Err(MemoryError::InvalidArg(
             "payload_digest must be a bounded opaque digest token".to_string(),
@@ -1009,13 +1019,14 @@ fn validate_mint(new: &NewDeliveryIntent) -> Result<(), MemoryError> {
     for value in [
         new.requester.agent_identity_id.as_deref(),
         new.requester.host_identity.as_deref(),
-    ] {
-        if let Some(value) = value {
-            if value.trim().is_empty() || value.len() > 128 {
-                return Err(MemoryError::InvalidArg(
-                    "requester identity fields must be 1..=128 characters".to_string(),
-                ));
-            }
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if value.trim().is_empty() || value.len() > 128 {
+            return Err(MemoryError::InvalidArg(
+                "requester identity fields must be 1..=128 characters".to_string(),
+            ));
         }
     }
     if let Some(session_ref) = &new.requester.session_ref {
@@ -1076,7 +1087,10 @@ fn reconcile_mint(
     append_event(
         conn,
         &existing.delivery_id,
-        &format!("superseded:{}:{}", existing.delivery_id, new.result_revision),
+        &format!(
+            "superseded:{}:{}",
+            existing.delivery_id, new.result_revision
+        ),
         DeliveryEventKind::ResultSuperseded,
         Some(existing.revision),
         Some(&format!(
@@ -1159,7 +1173,10 @@ fn load_claimable_intents(
            AND (requester_host_identity IS NULL OR requester_host_identity = ?2)",
         select_intent_sql()
     ))?;
-    let bound = stmt.query_map(params![caller.agent_identity_id, caller.host_identity], row_to_intent)?;
+    let bound = stmt.query_map(
+        params![caller.agent_identity_id, caller.host_identity],
+        row_to_intent,
+    )?;
     let mut intents = Vec::new();
     for intent in bound {
         let intent = intent?;
@@ -1181,7 +1198,10 @@ fn release_expired_claims_for_caller(
            AND (requester_host_identity IS NULL OR requester_host_identity = ?2)",
         select_intent_sql()
     ))?;
-    let bound = stmt.query_map(params![caller.agent_identity_id, caller.host_identity], row_to_intent)?;
+    let bound = stmt.query_map(
+        params![caller.agent_identity_id, caller.host_identity],
+        row_to_intent,
+    )?;
     let mut released = 0;
     for intent in bound {
         let intent = intent?;
@@ -1284,9 +1304,9 @@ fn transition_to_claimed(
     }
     let claimed = find_intent_by_id(conn, &intent.delivery_id)?
         .ok_or_else(|| MemoryError::Internal("claimed delivery intent not found".to_string()))?;
-    Ok(DeliveryClaimOutcome::Claimed(DeliveryClaimView::from_intent(
-        &claimed,
-    )))
+    Ok(DeliveryClaimOutcome::Claimed(
+        DeliveryClaimView::from_intent(&claimed),
+    ))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1402,7 +1422,8 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        outcome == ("completed".to_string(), "2026-08-30T00:00:00Z".to_string()) && verdict == "accepted"
+        outcome == ("completed".to_string(), "2026-08-30T00:00:00Z".to_string())
+            && verdict == "accepted"
     }
 
     fn state_of(conn: &Connection, delivery_id: &str) -> String {
@@ -1519,7 +1540,7 @@ mod tests {
         assert_eq!(
             conn.query_row("SELECT COUNT(*) FROM delivery_intents", [], |row| row
                 .get::<_, i64>(0))
-            .unwrap(),
+                .unwrap(),
             1,
             "restart must never mint a second intent"
         );
@@ -1599,14 +1620,26 @@ mod tests {
             },
         )
         .unwrap();
-        let ack = ack_delivered(&conn, &intent.delivery_id, &caller("requester-a"), "ak-1", None)
-            .unwrap();
+        let ack = ack_delivered(
+            &conn,
+            &intent.delivery_id,
+            &caller("requester-a"),
+            "ak-1",
+            None,
+        )
+        .unwrap();
         // revision: mint 1 -> claim 2 -> ack 3.
         assert_eq!(ack, DeliveryAckOutcome::Acknowledged { revision: 3 });
 
         // Replayed ack (new key, same delivered intent) is suppressed.
-        let replay = ack_delivered(&conn, &intent.delivery_id, &caller("requester-a"), "ak-2", None)
-            .unwrap();
+        let replay = ack_delivered(
+            &conn,
+            &intent.delivery_id,
+            &caller("requester-a"),
+            "ak-2",
+            None,
+        )
+        .unwrap();
         assert_eq!(replay, DeliveryAckOutcome::AlreadyDelivered);
 
         // A delivered intent is never claimable again: no duplicate delivery.
@@ -1660,7 +1693,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(parked.delivery_state, "blocked");
-        assert_eq!(parked.blocker_class.as_deref(), Some("ambiguous_send_outcome"));
+        assert_eq!(
+            parked.blocker_class.as_deref(),
+            Some("ambiguous_send_outcome")
+        );
 
         // Claims never pick up blocked intents.
         let attempt = claim_ready_delivery(
@@ -1811,8 +1847,14 @@ mod tests {
             },
         )
         .unwrap();
-        ack_delivered(&conn, &intent2.delivery_id, &caller("requester-a"), "ak-d1", None)
-            .unwrap();
+        ack_delivered(
+            &conn,
+            &intent2.delivery_id,
+            &caller("requester-a"),
+            "ak-d1",
+            None,
+        )
+        .unwrap();
         let error = dismiss_delivery(&conn, &intent2.delivery_id, "requester-a", None).unwrap_err();
         assert!(error.to_string().contains("cannot be dismissed"));
     }
@@ -1833,8 +1875,14 @@ mod tests {
             },
         )
         .unwrap();
-        ack_delivered(&conn, &intent.delivery_id, &caller("requester-a"), "ak-r1", None)
-            .unwrap();
+        ack_delivered(
+            &conn,
+            &intent.delivery_id,
+            &caller("requester-a"),
+            "ak-r1",
+            None,
+        )
+        .unwrap();
         assert_eq!(state_of(&conn, &intent.delivery_id), "delivered");
 
         // A corrected revision re-arms delivery of the SAME intent.
@@ -1927,8 +1975,14 @@ mod tests {
             },
         )
         .unwrap();
-        ack_delivered(&conn, &intent.delivery_id, &caller("requester-a"), "ak-e1", None)
-            .unwrap();
+        ack_delivered(
+            &conn,
+            &intent.delivery_id,
+            &caller("requester-a"),
+            "ak-e1",
+            None,
+        )
+        .unwrap();
 
         // Folding the append-only events yields the same terminal delivery
         // truth the materialized row holds.

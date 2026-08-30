@@ -24,7 +24,8 @@
 //! * **Full rebuild == incremental build.** Both fold snapshots through the
 //!   same no-regression `apply`; arrival order is never an input.
 //! * **Honest degradation.** Missing sources stay `Unavailable`; delivery
-//!   reports `not_integrated` until #1679 lands — a pending-delivery table
+//!   reports `not_integrated` when the #1679 spine is unreachable — a
+//!   pending-delivery table
 //!   is never fabricated.
 //! * **Conflicts block success-shaped projection**; unknown is never
 //!   success-shaped; `implemented != merged != accepted != owner_closed`

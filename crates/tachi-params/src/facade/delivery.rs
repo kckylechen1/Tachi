@@ -26,7 +26,8 @@
 use rmcp::schemars::{self, JsonSchema};
 use serde::Deserialize;
 
-/// Closed seam action set (#1679).
+/// Closed seam action set (#1679). Also the wire enum: an unknown or
+/// mint-shaped action fails at deserialization, before any handler runs.
 pub const TACHI_DELIVERY_ACTIONS: &[&str] = &[
     "claim_ready_delivery",
     "ack_delivered",
@@ -36,14 +37,33 @@ pub const TACHI_DELIVERY_ACTIONS: &[&str] = &[
     "get",
 ];
 
-fn delivery_action_schema(
-    _generator: &mut schemars::SchemaGenerator,
-) -> schemars::Schema {
-    schemars::json_schema!({
-        "type": "string",
-        "enum": TACHI_DELIVERY_ACTIONS,
-        "description": "Required delivery seam action."
-    })
+/// The frozen seam actions as a closed wire type (#1679). There is no
+/// `mint` variant: delivery intents are minted only by Tachi's own
+/// terminal planes, so a worker-shaped "create a delivery" call is a
+/// deserialization refusal, structurally.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TachiDeliveryAction {
+    ClaimReadyDelivery,
+    AckDelivered,
+    RejectOrBlock,
+    ResumeRequesterOperation,
+    Dismiss,
+    Get,
+}
+
+impl TachiDeliveryAction {
+    /// The frozen wire token (matches [`TACHI_DELIVERY_ACTIONS`]).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ClaimReadyDelivery => "claim_ready_delivery",
+            Self::AckDelivered => "ack_delivered",
+            Self::RejectOrBlock => "reject_or_block",
+            Self::ResumeRequesterOperation => "resume_requester_operation",
+            Self::Dismiss => "dismiss",
+            Self::Get => "get",
+        }
+    }
 }
 
 /// Parameters for `tachi_delivery`. Unknown fields are refused so a
@@ -52,8 +72,7 @@ fn delivery_action_schema(
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TachiDeliveryParams {
-    #[schemars(schema_with = "delivery_action_schema")]
-    pub action: String,
+    pub action: TachiDeliveryAction,
 
     /// Admitted requester AgentIdentity id. Verified against the
     /// `agent_identities` registry server-side before any seam operation.
@@ -136,7 +155,7 @@ mod tests {
             "claim_key": "ck-1"
         }))
         .expect("frozen claim wire");
-        assert_eq!(valid.action, "claim_ready_delivery");
+        assert_eq!(valid.action, TachiDeliveryAction::ClaimReadyDelivery);
 
         for forged in [
             serde_json::json!({

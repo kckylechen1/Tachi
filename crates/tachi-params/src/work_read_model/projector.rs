@@ -282,10 +282,11 @@ pub fn project(index: &WorkProjectionIndex, options: &ProjectionOptions) -> Work
             }
         }
     }
-    // Delivery degrades honestly: the only minter of delivery truth is
-    // #1679, which is not integrated. A delivery snapshot (when one
-    // arrives) still names `not_integrated`; no pending-delivery table is
-    // ever fabricated here.
+    // Delivery degrades honestly: the only minter of delivery truth is the
+    // #1679 v36 delivery spine, observed through an adapter-minted
+    // `Observed` snapshot. Sources without the spine (pre-v36 stores,
+    // portable builds) still name `not_integrated`; no pending-delivery
+    // table is ever fabricated here.
     let delivery_observation = index
         .snapshots()
         .find_map(|snapshot| match &snapshot.facts {

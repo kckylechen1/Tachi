@@ -5,9 +5,10 @@
 
 use super::projector::{project, rebuild, ApplyOutcome, WorkProjectionIndex};
 use super::sources::{
-    AdjudicationFactV1, ClaimModeV1, ClaimStateV1, DeliveryObservationV1, ExecEnvFactV1,
-    OwnerDispositionFactV1, OwnerDispositionV1, RunReceiptFactV1, SnapshotError, SourceFacts,
-    SourceKind, SourceSnapshot, SourceStamp, VerificationFactV1, WorkClaimFactV1,
+    AdjudicationFactV1, ClaimModeV1, ClaimStateV1, DeliveryIntentObservationV1,
+    DeliveryObservationV1, DeliveryStateV1, ExecEnvFactV1, OwnerDispositionFactV1,
+    OwnerDispositionV1, RunReceiptFactV1, SnapshotError, SourceFacts, SourceKind, SourceSnapshot,
+    SourceStamp, VerificationFactV1, WorkClaimFactV1,
 };
 use super::types::{
     DebtClearingV1, DebtStateV1, ExecutionStateV1, ImplementationStatusV1, NextActionKindV1,
@@ -486,6 +487,22 @@ fn delivery_snapshot(observed_at: &str) -> SourceSnapshot {
         }),
     )
     .expect("delivery snapshot")
+}
+
+/// #1679 is INTEGRATED: the adapter materializes an `Observed` snapshot
+/// from the v36 delivery spine.
+fn integrated_delivery_snapshot(
+    intents: Vec<DeliveryIntentObservationV1>,
+    revision: &str,
+    observed_at: &str,
+) -> SourceSnapshot {
+    SourceSnapshot::new(
+        SourceKind::Delivery,
+        revision,
+        observed_at,
+        SourceFacts::Delivery(DeliveryObservationV1::Observed { intents }),
+    )
+    .expect("integrated delivery snapshot")
 }
 
 fn env_snapshot(envs: Vec<ExecEnvFactV1>, revision: &str, observed_at: &str) -> SourceSnapshot {
@@ -3504,6 +3521,54 @@ fn delivery_unavailable_never_rewrites_execution_or_adjudication() {
     assert_eq!(
         model_without.delivery.observation.as_str(),
         "not_integrated"
+    );
+}
+
+/// #1679 integrated: the delivery section carries the observed intents with
+/// their frozen seven-state vocabulary, and still never rewrites execution
+/// or adjudication state.
+#[test]
+fn integrated_delivery_observation_is_visible_and_independent() {
+    let base = full_snapshot_set();
+    let mut with_delivery = rebuild(base.clone()).expect("rebuild");
+    with_delivery.apply_ok(integrated_delivery_snapshot(
+        vec![DeliveryIntentObservationV1 {
+            delivery_id: "di-1".to_string(),
+            execution_source: "managed_dispatch".to_string(),
+            execution_ref: "dispatch-1".to_string(),
+            state: DeliveryStateV1::Ready,
+            result_revision: 1,
+            revision: 1,
+            visibility_class: "private".to_string(),
+            updated_at: READ_AT.to_string(),
+        }],
+        "delivery-2",
+        READ_AT,
+    ));
+
+    let without = project(&rebuild(base).expect("rebuild"), &options());
+    let with = project(&with_delivery, &options());
+
+    let model_without = find(&without, ISSUE_TOKEN);
+    let model_with = find(&with, ISSUE_TOKEN);
+    assert_eq!(model_with.delivery.observation.as_str(), "observed");
+    assert_eq!(
+        model_without.delivery.observation.as_str(),
+        "not_integrated"
+    );
+    // The delivery observation names its state; nothing else moved.
+    assert_eq!(model_with.run, model_without.run, "execution untouched");
+    assert_eq!(
+        model_with.adjudication, model_without.adjudication,
+        "adjudication untouched"
+    );
+    assert!(
+        matches!(
+            &model_with.delivery.observation,
+            DeliveryObservationV1::Observed { intents }
+                if intents.len() == 1 && intents[0].state == DeliveryStateV1::Ready
+        ),
+        "the observed intent carries its spine state"
     );
 }
 

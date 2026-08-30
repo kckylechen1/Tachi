@@ -9,10 +9,10 @@
 //! the same admission bar the attached-session seam (#1678) applies.
 
 use crate::server_state::MemoryServer;
-use crate::tool_params::TachiDeliveryParams;
+use crate::tool_params::{TachiDeliveryAction, TachiDeliveryParams};
 use memcore::{
-    ack_delivered, claim_ready_delivery, dismiss_delivery, get_delivery_intent,
-    reject_or_block, resume_requester_operation, DeliveryCaller, DeliveryClaimRequest,
+    ack_delivered, claim_ready_delivery, dismiss_delivery, get_delivery_intent, reject_or_block,
+    resume_requester_operation, DeliveryCaller, DeliveryClaimRequest,
 };
 use serde_json::{json, Value};
 
@@ -33,9 +33,11 @@ fn verify_caller(
 ) -> Result<DeliveryCaller, String> {
     let host_identity = required(params.host_identity.clone(), "host_identity")?;
     let agent_identity_id = required(params.agent_identity_id.clone(), "agent_identity_id")?;
-    let (admitted_host, _connection_id, admission_state) = server
-        .work_claim_connection()
-        .ok_or_else(|| "no active host admission; the delivery seam requires an admitted host connection".to_string())?;
+    let (admitted_host, _connection_id, admission_state) =
+        server.work_claim_connection().ok_or_else(|| {
+            "no active host admission; the delivery seam requires an admitted host connection"
+                .to_string()
+        })?;
     if !matches!(admission_state.as_str(), "self_asserted" | "verified") {
         return Err("current host admission is not active".to_string());
     }
@@ -54,7 +56,9 @@ fn verify_caller(
             )
             .map_err(|error| error.to_string())?;
         if !known {
-            return Err(format!("unknown requester agent identity {agent_identity_id}"));
+            return Err(format!(
+                "unknown requester agent identity {agent_identity_id}"
+            ));
         }
         Ok(())
     })?;
@@ -74,10 +78,10 @@ pub(crate) fn handle_tachi_delivery(
     server: &MemoryServer,
     params: TachiDeliveryParams,
 ) -> Result<String, String> {
-    let action = params.action.trim().to_ascii_lowercase();
+    let action = params.action.as_str();
     if !tachi_hub::facade_action_allowed(
         "tachi_delivery",
-        Some(&action),
+        Some(action),
         server.active_tool_profile(),
     ) {
         return Err(format!(
@@ -85,8 +89,8 @@ pub(crate) fn handle_tachi_delivery(
         ));
     }
     let caller = verify_caller(server, &params)?;
-    match action.as_str() {
-        "claim_ready_delivery" => {
+    match params.action {
+        TachiDeliveryAction::ClaimReadyDelivery => {
             let claim_key = required(params.claim_key.clone(), "claim_key")?;
             let request = DeliveryClaimRequest {
                 caller: caller.clone(),
@@ -94,15 +98,15 @@ pub(crate) fn handle_tachi_delivery(
                 lease_seconds: params.lease_seconds.unwrap_or(0),
                 only_delivery_id: None,
             };
-            let outcome = server
-                .with_global_store(|store| {
-                    claim_ready_delivery(store.connection(), &request)
-                        .map_err(|error| error.to_string())
-                })?;
+            let outcome = server.with_global_store(|store| {
+                claim_ready_delivery(store.connection(), &request)
+                    .map_err(|error| error.to_string())
+            })?;
             let (outcome_token, delivery) = match outcome {
-                memcore::DeliveryClaimOutcome::Claimed(view) => {
-                    ("claimed", Some(serde_json::to_value(&view).expect("view serializes")))
-                }
+                memcore::DeliveryClaimOutcome::Claimed(view) => (
+                    "claimed",
+                    Some(serde_json::to_value(&view).expect("view serializes")),
+                ),
                 memcore::DeliveryClaimOutcome::ReplayedClaim(view) => (
                     "replayed_claim",
                     Some(serde_json::to_value(&view).expect("view serializes")),
@@ -117,20 +121,19 @@ pub(crate) fn handle_tachi_delivery(
             })
             .to_string())
         }
-        "ack_delivered" => {
+        TachiDeliveryAction::AckDelivered => {
             let delivery_id = required(params.delivery_id.clone(), "delivery_id")?;
             let ack_key = required(params.ack_key.clone(), "ack_key")?;
-            let outcome = server
-                .with_global_store(|store| {
-                    ack_delivered(
-                        store.connection(),
-                        &delivery_id,
-                        &caller,
-                        &ack_key,
-                        params.expected_revision,
-                    )
-                    .map_err(|error| error.to_string())
-                })?;
+            let outcome = server.with_global_store(|store| {
+                ack_delivered(
+                    store.connection(),
+                    &delivery_id,
+                    &caller,
+                    &ack_key,
+                    params.expected_revision,
+                )
+                .map_err(|error| error.to_string())
+            })?;
             let (outcome_token, revision) = match outcome {
                 memcore::DeliveryAckOutcome::Acknowledged { revision } => {
                     ("acknowledged", Some(revision))
@@ -145,22 +148,21 @@ pub(crate) fn handle_tachi_delivery(
             })
             .to_string())
         }
-        "reject_or_block" => {
+        TachiDeliveryAction::RejectOrBlock => {
             let delivery_id = required(params.delivery_id.clone(), "delivery_id")?;
             let blocker_class = required(params.blocker_class.clone(), "blocker_class")?;
-            let intent = server
-                .with_global_store(|store| {
-                    reject_or_block(
-                        store.connection(),
-                        &delivery_id,
-                        &caller,
-                        &blocker_class,
-                        params.detail.as_deref(),
-                        params.retry_in_seconds,
-                        params.expected_revision,
-                    )
-                    .map_err(|error| error.to_string())
-                })?;
+            let intent = server.with_global_store(|store| {
+                reject_or_block(
+                    store.connection(),
+                    &delivery_id,
+                    &caller,
+                    &blocker_class,
+                    params.detail.as_deref(),
+                    params.retry_in_seconds,
+                    params.expected_revision,
+                )
+                .map_err(|error| error.to_string())
+            })?;
             Ok(json!({
                 "status": "completed",
                 "action": "reject_or_block",
@@ -171,12 +173,11 @@ pub(crate) fn handle_tachi_delivery(
             })
             .to_string())
         }
-        "resume_requester_operation" => {
-            let intents = server
-                .with_global_store(|store| {
-                    resume_requester_operation(store.connection(), &caller)
-                        .map_err(|error| error.to_string())
-                })?;
+        TachiDeliveryAction::ResumeRequesterOperation => {
+            let intents = server.with_global_store(|store| {
+                resume_requester_operation(store.connection(), &caller)
+                    .map_err(|error| error.to_string())
+            })?;
             let deliveries: Vec<Value> = intents
                 .iter()
                 .map(|intent| delivery_summary(intent))
@@ -188,19 +189,18 @@ pub(crate) fn handle_tachi_delivery(
             })
             .to_string())
         }
-        "dismiss" => {
+        TachiDeliveryAction::Dismiss => {
             let delivery_id = required(params.delivery_id.clone(), "delivery_id")?;
             let actor = caller.agent_identity_id.clone();
-            let intent = server
-                .with_global_store(|store| {
-                    dismiss_delivery(
-                        store.connection(),
-                        &delivery_id,
-                        &actor,
-                        params.expected_revision,
-                    )
-                    .map_err(|error| error.to_string())
-                })?;
+            let intent = server.with_global_store(|store| {
+                dismiss_delivery(
+                    store.connection(),
+                    &delivery_id,
+                    &actor,
+                    params.expected_revision,
+                )
+                .map_err(|error| error.to_string())
+            })?;
             Ok(json!({
                 "status": "completed",
                 "action": "dismiss",
@@ -210,13 +210,12 @@ pub(crate) fn handle_tachi_delivery(
             })
             .to_string())
         }
-        "get" => {
+        TachiDeliveryAction::Get => {
             let delivery_id = required(params.delivery_id.clone(), "delivery_id")?;
-            let intent = server
-                .with_global_store(|store| {
-                    get_delivery_intent(store.connection(), &delivery_id)
-                        .map_err(|error| error.to_string())
-                })?;
+            let intent = server.with_global_store(|store| {
+                get_delivery_intent(store.connection(), &delivery_id)
+                    .map_err(|error| error.to_string())
+            })?;
             match intent {
                 Some(intent)
                     if intent.visibility_class != "private"
@@ -235,7 +234,6 @@ pub(crate) fn handle_tachi_delivery(
                 _ => Err(not_found()),
             }
         }
-        other => Err(format!("unknown tachi_delivery action '{other}'")),
     }
 }
 
@@ -264,4 +262,137 @@ fn delivery_summary(intent: &memcore::DeliveryIntent) -> Value {
         "delivered_at": intent.delivered_at,
         "dismissed_at": intent.dismissed_at,
     })
+}
+
+// ---------------------------------------------------------------------------
+// terminal-plane mint (server-side; no seam action can mint)
+// ---------------------------------------------------------------------------
+
+/// `result_revision` for managed mints: epoch millis of the receipt's
+/// `updated_at`, so a re-completed (corrected) dispatch strictly grows the
+/// revision and the supersede path re-arms delivery. Same-second rewrites
+/// reconcile at the same revision and only conflict if content differs.
+fn revision_from_timestamp(ts: &str) -> i64 {
+    chrono::DateTime::parse_from_rfc3339(ts)
+        .map(|parsed| parsed.with_timezone(&chrono::Utc).timestamp_millis().max(1))
+        .unwrap_or(1)
+}
+
+fn digest_token(parts: &[&str]) -> String {
+    let joined = parts.join("\u{1f}");
+    let digest = <sha2::Sha256 as sha2::Digest>::digest(joined.as_bytes());
+    let hex: String = digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<Vec<_>>()
+        .join("");
+    format!("sha256-{hex}")
+}
+
+/// Mint (or idempotently reconcile) the durable delivery intent for a
+/// managed dispatch's canonical terminal receipt (#1679). Delivery is a
+/// separate plane: a mint failure logs a warning and never rewrites the
+/// execution truth the outcome row carries.
+pub(crate) fn mint_delivery_for_managed_outcome(
+    server: &MemoryServer,
+    outcome: &memcore::DispatchOutcomeRow,
+    eval_memory_id: &str,
+) {
+    let task_type = outcome.task_type.as_deref().unwrap_or("-");
+    let idempotency_key = format!("managed:{}:{}", outcome.dispatch_id, task_type);
+    let payload_digest = digest_token(&[
+        &outcome.outcome_id,
+        &outcome.execution_outcome,
+        eval_memory_id,
+        &outcome.evidence_refs.to_string(),
+    ]);
+    let mut new = memcore::NewDeliveryIntent {
+        idempotency_key,
+        execution_source: memcore::DeliveryExecutionSource::ManagedDispatch,
+        execution_ref: outcome.dispatch_id.clone(),
+        terminal_receipt_revision: 0,
+        work_claim_id: None,
+        result_ref: format!("memory:{eval_memory_id}"),
+        result_revision: revision_from_timestamp(&outcome.updated_at),
+        payload_digest,
+        visibility_class: memcore::DeliveryVisibilityClass::Public,
+        delivery_policy: memcore::DeliveryPolicy::ReturnToCurrentCall,
+        protocol_capability: "result-ref-v1".to_string(),
+        requester: memcore::DeliveryRequesterBinding::default(),
+        expires_at: None,
+    };
+    // Bind the admitted requester from the owning WorkClaim when one names
+    // this dispatch. A bound intent is private to that requester (fail-
+    // closed default); unbound stays public/pull-only.
+    if let Ok(Some((agent_identity_id, session_client))) = server.with_global_store(|store| {
+        memcore::find_claim_requester_for_dispatch(store.connection(), &outcome.dispatch_id)
+            .map_err(|error| error.to_string())
+    }) {
+        new.visibility_class = memcore::DeliveryVisibilityClass::Private;
+        new.requester = memcore::DeliveryRequesterBinding {
+            agent_identity_id: Some(agent_identity_id),
+            host_identity: None,
+            session_ref: session_client,
+        };
+    }
+    if let Err(error) = server.with_global_store(|store| {
+        memcore::mint_delivery_intent(store.connection(), &new).map_err(|error| error.to_string())
+    }) {
+        tracing::warn!(
+            error = %error,
+            dispatch_id = %outcome.dispatch_id,
+            "failed to mint delivery intent for terminal outcome"
+        );
+    }
+}
+
+/// Mint (or idempotently reconcile) the durable delivery intent for an
+/// attached session's terminal event receipt (#1678 spine, #1679 delivery).
+/// The requester binding comes from the admitted attachment, never from the
+/// host-reported event payload.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn mint_delivery_for_attached_terminal(
+    server: &MemoryServer,
+    attachment_id: &str,
+    event_id: &str,
+    source_revision: i64,
+    outcome_token: &str,
+    summary: Option<&str>,
+    payload_digest: Option<&str>,
+    agent_identity_id: &str,
+    host_identity: &str,
+    remote_session_id: &str,
+) {
+    let digest = payload_digest
+        .map(str::to_string)
+        .unwrap_or_else(|| digest_token(&[event_id, outcome_token, summary.unwrap_or("")]));
+    let new = memcore::NewDeliveryIntent {
+        idempotency_key: format!("attached:{attachment_id}:{event_id}"),
+        execution_source: memcore::DeliveryExecutionSource::AttachedSession,
+        execution_ref: attachment_id.to_string(),
+        terminal_receipt_revision: source_revision.max(0),
+        work_claim_id: None,
+        result_ref: format!("harness_session:{attachment_id}:{event_id}"),
+        result_revision: source_revision.max(1),
+        payload_digest: digest,
+        visibility_class: memcore::DeliveryVisibilityClass::Private,
+        delivery_policy: memcore::DeliveryPolicy::ResumeRequesterOperation,
+        protocol_capability: "result-ref-v1".to_string(),
+        requester: memcore::DeliveryRequesterBinding {
+            agent_identity_id: Some(agent_identity_id.to_string()),
+            host_identity: Some(host_identity.to_string()),
+            session_ref: Some(remote_session_id.to_string()),
+        },
+        expires_at: None,
+    };
+    if let Err(error) = server.with_global_store(|store| {
+        memcore::mint_delivery_intent(store.connection(), &new).map_err(|error| error.to_string())
+    }) {
+        tracing::warn!(
+            error = %error,
+            attachment_id = %attachment_id,
+            event_id = %event_id,
+            "failed to mint delivery intent for attached terminal event"
+        );
+    }
 }
