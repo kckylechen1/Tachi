@@ -1,7 +1,6 @@
 use std::path::PathBuf;
 
-use super::super::{open_cli_store_read_only, vault_cli};
-use super::materialize::decrypt_entry_value;
+use super::super::{open_cli_store, vault_cli};
 use super::shell::{is_upper_snake_env_name, shell_export_line};
 
 pub(super) async fn run_legacy_env_export(
@@ -13,7 +12,7 @@ pub(super) async fn run_legacy_env_export(
     password_file: Option<&std::path::Path>,
     insecure_password_file: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let store = open_cli_store_read_only(global_db_path)?;
+    let mut store = open_cli_store(global_db_path)?;
 
     // 1. Check vault is initialized
     let config = store
@@ -56,58 +55,100 @@ pub(super) async fn run_legacy_env_export(
         return Err("Wrong password".into());
     }
 
-    // 4. List and decrypt all entries
-    let entries = store
-        .vault_list_entries()
-        .map_err(|e| format!("Failed to list vault entries: {e}"))?;
-
     // Build glob pattern if provided
     let glob_pattern = filter.map(glob::Pattern::new).transpose()?;
-
-    let mut emitted = 0usize;
-    for entry in entries {
-        // Skip agent-restricted secrets — those aren't meant for env injection
-        if entry
-            .allowed_agents
-            .as_ref()
-            .is_some_and(|agents| !agents.is_empty())
-        {
-            continue;
-        }
-
-        if !crate::utils::is_shell_env_name(&entry.name) {
-            eprintln!(
-                "WARNING: skipped secret '{}' because it is not a valid shell environment name",
-                entry.name
-            );
-            continue;
-        }
-
-        // --env-only: skip names that don't look like env vars (UPPER_SNAKE_CASE)
-        if env_only && !is_upper_snake_env_name(&entry.name) {
-            continue;
-        }
-
-        // --filter: apply glob pattern
-        if let Some(ref pat) = glob_pattern {
-            if !pat.matches(&entry.name) {
-                continue;
-            }
-        }
-
-        let value = match decrypt_entry_value(&entry, key.bytes()) {
-            Ok(v) => v,
-            Err(e) => {
-                eprintln!("WARNING: failed to decrypt '{}': {}", entry.name, e);
-                continue;
-            }
-        };
-
-        print!("{}", shell_export_line(&entry.name, &value));
+    let entries = crate::vault_ops::materialize_unrestricted_vault_entries_from_store(
+        &mut store,
+        key.bytes(),
+        |entry| {
+            crate::utils::is_shell_env_name(&entry.name)
+                && (!env_only || is_upper_snake_env_name(&entry.name))
+                && glob_pattern
+                    .as_ref()
+                    .is_none_or(|pattern| pattern.matches(&entry.name))
+        },
+    )
+    .map_err(|error| format!("{error}; refusing legacy env export"))?;
+    let emitted = entries.len();
+    for (name, value) in entries {
+        print!("{}", shell_export_line(&name, &value));
         println!();
-        emitted += 1;
     }
 
     eprintln!("# tachi env: {} secret(s) emitted", emitted);
     Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::os::unix::fs::PermissionsExt;
+
+    use super::*;
+    use crate::bootstrap::open_cli_store;
+
+    #[tokio::test]
+    async fn legacy_env_export_rejects_a_poisoned_configured_rotation() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let db_path = temp.path().join("memory.db");
+        let password_file = temp.path().join("vault-password");
+        std::fs::write(&password_file, b"legacy-env-password\n").expect("password file");
+        std::fs::set_permissions(&password_file, std::fs::Permissions::from_mode(0o600))
+            .expect("password file permissions");
+        let key = crate::bootstrap::vault_cli::vault_init_with_password(
+            &db_path,
+            "legacy-env-password".to_string(),
+        )
+        .expect("initialize fixture vault");
+        let store = open_cli_store(&db_path).expect("open fixture store");
+        let now = "2026-01-01T00:00:00Z".to_string();
+        for (idx, secret_type) in [(1, "api_key"), (2, "api_key"), (3, "config")] {
+            let (encrypted_value, nonce) =
+                crate::vault_crypto::encrypt(key.bytes(), format!("key-{idx}").as_bytes())
+                    .expect("encrypt member");
+            store
+                .vault_upsert_entry(&memcore::vault::VaultEntry {
+                    name: format!("LEGACY_POOL_API_KEY_{idx}"),
+                    encrypted_value,
+                    nonce,
+                    secret_type: secret_type.to_string(),
+                    description: "rotation member".to_string(),
+                    allowed_agents: None,
+                    created_at: now.clone(),
+                    updated_at: now.clone(),
+                    accessed_at: String::new(),
+                    access_count: 0,
+                })
+                .expect("seed member");
+        }
+        store
+            .vault_set_rotation(&memcore::vault::VaultKeyRotation {
+                prefix: "LEGACY_POOL_API_KEY".to_string(),
+                current_index: 1,
+                total_keys: 2,
+                rotation_strategy: "round_robin".to_string(),
+                created_at: now.clone(),
+                updated_at: now,
+            })
+            .expect("seed rotation");
+        drop(store);
+
+        let error = run_legacy_env_export(
+            &db_path,
+            None,
+            false,
+            false,
+            false,
+            Some(&password_file),
+            false,
+        )
+        .await
+        .expect_err("legacy env export must reject a poisoned configured rotation")
+        .to_string();
+        assert!(
+            error.contains("LEGACY_POOL_API_KEY_3")
+                && error.contains("config")
+                && error.contains("refusing legacy env export"),
+            "{error}"
+        );
+    }
 }

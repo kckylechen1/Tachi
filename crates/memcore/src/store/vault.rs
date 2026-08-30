@@ -16,6 +16,52 @@ pub struct VaultTransaction<'conn> {
     transaction: Option<Transaction<'conn>>,
 }
 
+/// An owned cross-connection fence used while already-resolved Vault material
+/// is published to another runtime state. It intentionally exposes no Vault
+/// reads or writes: callers acquire it only after producing a revision digest,
+/// recheck that digest while the fence blocks writers, then hold it through
+/// publication.
+pub struct VaultMutationFence {
+    connection: Connection,
+    active: bool,
+}
+
+impl VaultMutationFence {
+    pub fn acquire(db_path: &std::path::Path) -> Result<Self, MemoryError> {
+        let connection = Connection::open(db_path)?;
+        connection.busy_timeout(std::time::Duration::from_secs(5))?;
+        connection.execute_batch("BEGIN IMMEDIATE")?;
+        Ok(Self {
+            connection,
+            active: true,
+        })
+    }
+
+    pub fn commit(mut self) -> Result<(), MemoryError> {
+        self.connection.execute_batch("COMMIT")?;
+        self.active = false;
+        Ok(())
+    }
+
+    pub fn connection(&self) -> &Connection {
+        &self.connection
+    }
+
+    pub fn rollback(mut self) -> Result<(), MemoryError> {
+        self.connection.execute_batch("ROLLBACK")?;
+        self.active = false;
+        Ok(())
+    }
+}
+
+impl Drop for VaultMutationFence {
+    fn drop(&mut self) {
+        if self.active {
+            let _ = self.connection.execute_batch("ROLLBACK");
+        }
+    }
+}
+
 impl VaultTransaction<'_> {
     fn connection(&self) -> &Connection {
         self.transaction
@@ -47,8 +93,51 @@ impl VaultTransaction<'_> {
         db::vault_upsert_entry(self.connection(), entry)
     }
 
+    pub fn vault_delete_entry(&self, name: &str) -> Result<bool, MemoryError> {
+        db::vault_delete_entry(self.connection(), name)
+    }
+
+    pub fn vault_touch_entry(&self, name: &str) -> Result<i64, MemoryError> {
+        db::vault_touch_entry(self.connection(), name)
+    }
+
     pub fn vault_set_rotation(&self, rotation: &VaultKeyRotation) -> Result<(), MemoryError> {
         db::vault_set_rotation(self.connection(), rotation)
+    }
+
+    pub fn vault_get_rotation(
+        &self,
+        prefix: &str,
+    ) -> Result<Option<VaultKeyRotation>, MemoryError> {
+        db::vault_get_rotation(self.connection(), prefix)
+    }
+
+    pub fn vault_list_rotations(&self) -> Result<Vec<VaultKeyRotation>, MemoryError> {
+        db::vault_list_rotations(self.connection())
+    }
+
+    pub fn vault_get_key_health(
+        &self,
+        logical_name: &str,
+        key_id: &str,
+    ) -> Result<Option<VaultKeyHealth>, MemoryError> {
+        db::vault_get_key_health(self.connection(), logical_name, key_id)
+    }
+
+    pub fn vault_list_key_health(
+        &self,
+        logical_name: Option<&str>,
+    ) -> Result<Vec<VaultKeyHealth>, MemoryError> {
+        db::vault_list_key_health(self.connection(), logical_name)
+    }
+
+    pub fn vault_replace_api_key_pool(
+        &self,
+        prefix: &str,
+        entries: &[VaultEntry],
+        rotation: &VaultKeyRotation,
+    ) -> Result<Vec<String>, MemoryError> {
+        replace_api_key_pool(self.connection(), prefix, entries, rotation)
     }
 
     pub fn commit(mut self) -> Result<(), MemoryError> {
@@ -68,6 +157,30 @@ impl MemoryStore {
         let transaction = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        Ok(VaultTransaction {
+            transaction: Some(transaction),
+        })
+    }
+
+    /// Begin an immediate Vault transaction through a shared store reference.
+    /// This is reserved for legacy read-shaped callers that already perform
+    /// Vault writes through `&MemoryStore`; SQLite rejects accidental nesting
+    /// at runtime while the transaction still serializes cross-process writes.
+    pub fn begin_vault_transaction_shared(&self) -> Result<VaultTransaction<'_>, MemoryError> {
+        let transaction =
+            rusqlite::Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        Ok(VaultTransaction {
+            transaction: Some(transaction),
+        })
+    }
+
+    /// Begin a deferred read snapshot for read-only Vault scanners. All rows
+    /// used to derive a publication revision share one SQLite snapshot, while
+    /// callers retain compatibility with read-only database files. A later
+    /// mutation fence must recheck the derived revision before publication.
+    pub fn begin_vault_read_transaction_shared(&self) -> Result<VaultTransaction<'_>, MemoryError> {
+        let transaction =
+            rusqlite::Transaction::new_unchecked(&self.conn, TransactionBehavior::Deferred)?;
         Ok(VaultTransaction {
             transaction: Some(transaction),
         })
@@ -98,34 +211,9 @@ impl MemoryStore {
         rotation: &VaultKeyRotation,
     ) -> Result<Vec<String>, MemoryError> {
         let tx = self.conn.transaction()?;
-        let existing_entries = db::vault_list_entries_by_type(&tx, SECRET_TYPE_API_KEY)?;
-        let mut surplus_members: Vec<String> = existing_entries
-            .iter()
-            .filter(|entry| {
-                api_key_pool_member_index(&entry.name, prefix)
-                    .is_some_and(|idx| idx > entries.len())
-            })
-            .map(|entry| entry.name.clone())
-            .collect();
-        surplus_members.sort();
-        if !surplus_members.is_empty() {
-            return Err(MemoryError::InvalidArg(format!(
-                "refusing API-key pool shrink for '{prefix}': default replacement would delete surplus members [{}]; archive or remove those named members explicitly",
-                surplus_members.join(", ")
-            )));
-        }
-
-        for entry in entries {
-            let mut entry = entry.clone();
-            if db::vault_entry_exists(&tx, &entry.name)? {
-                entry.created_at.clear();
-            }
-            db::vault_upsert_entry(&tx, &entry)?;
-        }
-
-        db::vault_set_rotation(&tx, rotation)?;
+        let removed = replace_api_key_pool(&tx, prefix, entries, rotation)?;
         tx.commit()?;
-        Ok(Vec::new())
+        Ok(removed)
     }
 
     /// Import a Vault sync bundle atomically.
@@ -292,6 +380,43 @@ impl MemoryStore {
     }
 }
 
+fn replace_api_key_pool(
+    conn: &Connection,
+    prefix: &str,
+    entries: &[VaultEntry],
+    rotation: &VaultKeyRotation,
+) -> Result<Vec<String>, MemoryError> {
+    let all_existing_entries = db::vault_list_entries(conn)?;
+    crate::vault::validate_api_key_rotation_members(&all_existing_entries, prefix)
+        .map_err(MemoryError::InvalidArg)?;
+    let existing_entries = db::vault_list_entries_by_type(conn, SECRET_TYPE_API_KEY)?;
+    let mut surplus_members: Vec<String> = existing_entries
+        .iter()
+        .filter(|entry| {
+            api_key_pool_member_index(&entry.name, prefix).is_some_and(|idx| idx > entries.len())
+        })
+        .map(|entry| entry.name.clone())
+        .collect();
+    surplus_members.sort();
+    if !surplus_members.is_empty() {
+        return Err(MemoryError::InvalidArg(format!(
+            "refusing API-key pool shrink for '{prefix}': default replacement would delete surplus members [{}]; archive or remove those named members explicitly",
+            surplus_members.join(", ")
+        )));
+    }
+
+    for entry in entries {
+        let mut entry = entry.clone();
+        if db::vault_entry_exists(conn, &entry.name)? {
+            entry.created_at.clear();
+        }
+        db::vault_upsert_entry(conn, &entry)?;
+    }
+
+    db::vault_set_rotation(conn, rotation)?;
+    Ok(Vec::new())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -323,6 +448,28 @@ mod tests {
             created_at: "2026-01-01T00:00:00Z".to_string(),
             updated_at: "2026-01-01T00:00:00Z".to_string(),
         }
+    }
+
+    #[test]
+    fn vault_read_snapshot_transaction_works_on_read_only_connection() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("memory.db");
+        let writable = MemoryStore::open(path.to_str().expect("UTF-8 path")).expect("open store");
+        writable
+            .vault_upsert_entry(&test_entry("READ_ONLY_API_KEY"))
+            .expect("seed entry");
+        drop(writable);
+
+        let read_only = MemoryStore::open_read_only(path.to_str().expect("UTF-8 path"))
+            .expect("open read-only store");
+        let transaction = read_only
+            .begin_vault_read_transaction_shared()
+            .expect("begin read snapshot");
+        assert!(transaction
+            .vault_get_entry("READ_ONLY_API_KEY")
+            .expect("read entry")
+            .is_some());
+        transaction.commit().expect("commit read snapshot");
     }
 
     /// Metadata-only timestamp listing must not require ciphertext fields and

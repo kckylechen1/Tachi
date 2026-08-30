@@ -1,4 +1,4 @@
-use super::super::open_cli_store_read_only;
+use super::super::{open_cli_store, open_cli_store_read_only};
 use super::daemon::daemon_matches_vault_db;
 use super::keys::{
     canonical_provider_key_defs, derive_verified_vault_key_from_password, vault_init_with_password,
@@ -227,6 +227,50 @@ fn setup_keys_init_and_upsert_roundtrip() {
 }
 
 #[test]
+fn legacy_vault_upsert_rejects_agent_restricted_existing_entry() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("memory.db");
+    let key = vault_init_with_password(&db_path, "correct horse battery staple".to_string())
+        .expect("init vault");
+    let (encrypted_value, nonce) =
+        crate::vault_crypto::encrypt(key.bytes(), b"restricted-original").expect("encrypt");
+    open_cli_store(&db_path)
+        .expect("open fixture")
+        .vault_upsert_entry(&memcore::vault::VaultEntry {
+            name: "RESTRICTED_SETUP_API_KEY".to_string(),
+            encrypted_value,
+            nonce,
+            secret_type: "api_key".to_string(),
+            description: String::new(),
+            allowed_agents: Some(vec!["agent-a".to_string()]),
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+            accessed_at: String::new(),
+            access_count: 0,
+        })
+        .expect("seed restricted entry");
+
+    let error = vault_upsert_secret_with_key(
+        &db_path,
+        &key,
+        "RESTRICTED_SETUP_API_KEY",
+        "api_key",
+        "",
+        "must-not-overwrite".to_string(),
+    )
+    .expect_err("identity-less setup helper must reject restricted entry")
+    .to_string();
+    assert!(error.contains("agent-restricted"), "{error}");
+    assert!(!error.contains("must-not-overwrite"), "{error}");
+    let retained = open_cli_store_read_only(&db_path)
+        .expect("reopen fixture")
+        .vault_get_entry("RESTRICTED_SETUP_API_KEY")
+        .expect("read entry")
+        .expect("entry remains");
+    assert_eq!(retained.allowed_agents, Some(vec!["agent-a".to_string()]));
+}
+
+#[test]
 fn vault_upsert_rejects_empty_value() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("memory.db");
@@ -264,6 +308,87 @@ fn legacy_vault_upsert_rejects_lane_slot_bypass() {
     assert!(error.contains("EXTRACT_API_KEY"), "{error}");
     assert!(error.contains("--rebind"), "{error}");
     assert!(!error.contains("must-not-bypass-rebind"), "{error}");
+}
+
+#[test]
+fn legacy_vault_upsert_rejects_new_credential_bearing_lane_url() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("memory.db");
+    let key = vault_init_with_password(&db_path, "correct horse battery staple".to_string())
+        .expect("init vault");
+    let error = vault_upsert_secret_with_key(
+        &db_path,
+        &key,
+        "EXTRACT_BASE_URL",
+        "config",
+        "",
+        "https://user:pass@proxy.example.test/v1/chat".to_string(),
+    )
+    .expect_err("legacy helper must reject a new credential-bearing lane URL")
+    .to_string();
+
+    assert!(error.contains("EXTRACT_BASE_URL"), "{error}");
+    assert!(
+        error.contains("userinfo") || error.contains("credential"),
+        "{error}"
+    );
+    assert!(!error.contains("user:pass"), "{error}");
+    assert!(open_cli_store_read_only(&db_path)
+        .expect("reopen fixture")
+        .vault_get_entry("EXTRACT_BASE_URL")
+        .expect("read refused URL")
+        .is_none());
+}
+
+#[test]
+fn legacy_vault_upsert_refuses_rotation_count_drift() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("memory.db");
+    let key = vault_init_with_password(&db_path, "correct horse battery staple".to_string())
+        .expect("init vault");
+    for idx in 1..=2 {
+        vault_upsert_secret_with_key(
+            &db_path,
+            &key,
+            &format!("LEGACY_POOL_API_KEY_{idx}"),
+            "api_key",
+            "",
+            format!("key-{idx}"),
+        )
+        .expect("seed member");
+    }
+    let store = open_cli_store(&db_path).expect("open writable fixture");
+    store
+        .vault_set_rotation(&memcore::vault::VaultKeyRotation {
+            prefix: "LEGACY_POOL_API_KEY".to_string(),
+            current_index: 1,
+            total_keys: 2,
+            rotation_strategy: "round_robin".to_string(),
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+        })
+        .expect("seed rotation");
+    drop(store);
+
+    let error = vault_upsert_secret_with_key(
+        &db_path,
+        &key,
+        "LEGACY_POOL_API_KEY_3",
+        "api_key",
+        "",
+        "key-three".to_string(),
+    )
+    .expect_err("legacy upsert must not leave total_keys stale")
+    .to_string();
+    assert!(
+        error.contains("declares 2 keys") && error.contains("has 3"),
+        "{error}"
+    );
+    assert!(open_cli_store_read_only(&db_path)
+        .expect("reopen fixture")
+        .vault_get_entry("LEGACY_POOL_API_KEY_3")
+        .expect("read refused append")
+        .is_none());
 }
 
 #[test]

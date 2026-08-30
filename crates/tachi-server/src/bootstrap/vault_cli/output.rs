@@ -1,36 +1,108 @@
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct VaultListRow {
+    pub name: String,
+    pub secret_type: String,
+    pub description: String,
+}
+
+fn json_list_row(entry: &serde_json::Value) -> VaultListRow {
+    VaultListRow {
+        name: entry
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        secret_type: entry
+            .get("secret_type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        description: entry
+            .get("description")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+    }
+}
+
+fn json_rows(value: &serde_json::Value, key: &str) -> Option<Vec<VaultListRow>> {
+    value
+        .get(key)
+        .and_then(|v| v.as_array())
+        .map(|rows| rows.iter().map(json_list_row).collect())
+}
+
+fn legacy_json_list_groups(
+    value: &serde_json::Value,
+) -> Option<(Vec<VaultListRow>, Vec<VaultListRow>)> {
+    let secrets = value.get("secrets").and_then(|v| v.as_array())?;
+    let mut config = Vec::new();
+    let mut credentials = Vec::new();
+    for entry in secrets {
+        let mut row = json_list_row(entry);
+        row.secret_type =
+            memcore::effective_vault_secret_type(&row.name, &row.secret_type).to_string();
+        if row.secret_type == memcore::SECRET_TYPE_CONFIG {
+            config.push(row);
+        } else {
+            credentials.push(row);
+        }
+    }
+    Some((config, credentials))
+}
+
+pub(super) fn format_vault_list_groups(
+    config: &[VaultListRow],
+    credentials: &[VaultListRow],
+) -> String {
+    if config.is_empty() && credentials.is_empty() {
+        return "(no secrets stored)\n".to_string();
+    }
+    let mut out = String::new();
+    let mut write_section = |title: &str, rows: &[VaultListRow]| {
+        if rows.is_empty() {
+            return;
+        }
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(title);
+        out.push('\n');
+        out.push_str(&format!("{:<30} {:<12} DESCRIPTION\n", "NAME", "TYPE"));
+        for row in rows {
+            out.push_str(&format!(
+                "{:<30} {:<12} {}\n",
+                row.name, row.secret_type, row.description
+            ));
+        }
+    };
+    write_section("CONFIG", config);
+    write_section("CREDENTIALS", credentials);
+    out.push_str(&format!(
+        "\n{} config, {} credential ({} total).\n",
+        config.len(),
+        credentials.len(),
+        config.len() + credentials.len()
+    ));
+    out
+}
+
 pub(super) fn print_vault_list_output(out: &str) -> Result<(), Box<dyn std::error::Error>> {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(out) else {
         println!("{out}");
         return Ok(());
     };
-    let Some(secrets) = value.get("secrets").and_then(|v| v.as_array()) else {
+    let config = json_rows(&value, "config");
+    let credentials = json_rows(&value, "credentials");
+    if let (Some(config), Some(credentials)) = (config, credentials) {
+        print!("{}", format_vault_list_groups(&config, &credentials));
+        return Ok(());
+    }
+    let Some((config, credentials)) = legacy_json_list_groups(&value) else {
         println!("{out}");
         return Ok(());
     };
-
-    if secrets.is_empty() {
-        println!("(no secrets stored)");
-        return Ok(());
-    }
-
-    println!("{:<30} {:<12} DESCRIPTION", "NAME", "TYPE");
-    for entry in secrets {
-        let name = entry.get("name").and_then(|v| v.as_str()).unwrap_or("");
-        let secret_type = entry
-            .get("secret_type")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        let description = entry
-            .get("description")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        println!("{name:<30} {secret_type:<12} {description}");
-    }
-    let count = value
-        .get("count")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(secrets.len() as u64);
-    println!("\n{count} secret(s) total.");
+    print!("{}", format_vault_list_groups(&config, &credentials));
     Ok(())
 }
 
@@ -62,19 +134,98 @@ fn rotation_member_name(prefix: &str, idx: i64) -> String {
     format!("{prefix}_{idx}")
 }
 
-pub(crate) fn lease_api_key_from_store(
+pub(crate) fn validate_api_key_lease_target(
     store: &memcore::MemoryStore,
-    key: &[u8; 32],
     logical_name: &str,
-) -> Result<(String, String, String), Box<dyn std::error::Error>> {
+) -> Result<(), Box<dyn std::error::Error>> {
+    if memcore::is_lane_config_secret_name(logical_name) {
+        return Err(format!(
+            "Vault name '{logical_name}' is lane config, not a credential; refusing to lease it as an API key"
+        )
+        .into());
+    }
     let entries = store
         .vault_list_entries()
         .map_err(|e| format!("vault_list_entries: {e}"))?;
-    let health_logical_name =
+    if let Some(entry) = entries.iter().find(|entry| entry.name == logical_name) {
+        let effective = memcore::effective_vault_secret_type(&entry.name, &entry.secret_type);
+        if effective != memcore::SECRET_TYPE_API_KEY {
+            return Err(format!(
+                "Vault name '{logical_name}' is {effective}, not a credential; refusing to lease it as an API key"
+            )
+            .into());
+        }
+    }
+    let rotation_prefix =
         crate::vault_ops::canonical_api_key_health_logical_name(store, logical_name)?;
-    let rotation = store
+    if let Some(rotation) = store
+        .vault_get_rotation(&rotation_prefix)
+        .map_err(|e| format!("vault_get_rotation: {e}"))?
+    {
+        memcore::validate_api_key_rotation(&entries, &rotation).map_err(|error| {
+            format!("{error}; refusing to lease '{logical_name}' as an API key")
+        })?;
+    }
+    Ok(())
+}
+
+fn lease_api_key_from_store_with_hook(
+    store: &memcore::MemoryStore,
+    key: &[u8; 32],
+    logical_name: &str,
+    after_snapshot: impl FnOnce(),
+) -> Result<(String, String, String), Box<dyn std::error::Error>> {
+    if memcore::is_lane_config_secret_name(logical_name) {
+        return Err(format!(
+            "Vault name '{logical_name}' is lane config, not a credential; refusing to lease it as an API key"
+        )
+        .into());
+    }
+    let transaction = store
+        .begin_vault_transaction_shared()
+        .map_err(|e| format!("begin lease transaction: {e}"))?;
+    let entries = transaction
+        .vault_list_entries()
+        .map_err(|e| format!("vault_list_entries: {e}"))?;
+    let health_logical_name = if transaction
+        .vault_get_rotation(logical_name)
+        .map_err(|e| format!("vault_get_rotation: {e}"))?
+        .is_some()
+    {
+        logical_name.to_string()
+    } else if let Some((prefix, _)) =
+        crate::provider_config::parse_rotation_member_name(logical_name)
+    {
+        if transaction
+            .vault_get_rotation(prefix)
+            .map_err(|e| format!("vault_get_rotation: {e}"))?
+            .is_some()
+        {
+            prefix.to_string()
+        } else {
+            logical_name.to_string()
+        }
+    } else {
+        logical_name.to_string()
+    };
+    if let Some(entry) = entries.iter().find(|entry| entry.name == logical_name) {
+        let effective = memcore::effective_vault_secret_type(&entry.name, &entry.secret_type);
+        if effective != memcore::SECRET_TYPE_API_KEY {
+            return Err(format!(
+                "Vault name '{logical_name}' is {effective}, not a credential; refusing to lease it as an API key"
+            )
+            .into());
+        }
+    }
+    let rotation = transaction
         .vault_get_rotation(&health_logical_name)
         .map_err(|e| format!("vault_get_rotation: {e}"))?;
+    if let Some(rotation) = rotation.as_ref() {
+        memcore::validate_api_key_rotation(&entries, rotation).map_err(|error| {
+            format!("{error}; refusing to lease '{logical_name}' as an API key")
+        })?;
+    }
+    after_snapshot();
     let configured_member_request = health_logical_name != logical_name;
 
     let candidate_names = if configured_member_request {
@@ -104,6 +255,12 @@ pub(crate) fn lease_api_key_from_store(
         let Some(entry) = entries.iter().find(|entry| entry.name == candidate) else {
             continue;
         };
+        if memcore::is_lane_config_secret_name(&entry.name)
+            || memcore::effective_vault_secret_type(&entry.name, &entry.secret_type)
+                != memcore::SECRET_TYPE_API_KEY
+        {
+            continue;
+        }
         if entry
             .allowed_agents
             .as_ref()
@@ -111,7 +268,7 @@ pub(crate) fn lease_api_key_from_store(
         {
             continue;
         }
-        if let Some(health) = store
+        if let Some(health) = transaction
             .vault_get_key_health(&health_logical_name, &candidate)
             .map_err(|e| format!("vault_get_key_health: {e}"))?
         {
@@ -135,17 +292,40 @@ pub(crate) fn lease_api_key_from_store(
                 crate::provider_config::parse_rotation_member_name(&entry.name)
             {
                 if prefix == health_logical_name && rotation.total_keys > 0 {
-                    store
-                        .vault_set_rotation(&memcore::vault::VaultKeyRotation {
-                            current_index: (idx as i64 % rotation.total_keys) + 1,
-                            updated_at: chrono::Utc::now().to_rfc3339(),
-                            ..rotation.clone()
-                        })
+                    let current = transaction
+                        .vault_get_rotation(&health_logical_name)
+                        .map_err(|e| format!("vault_get_rotation: {e}"))?
+                        .ok_or_else(|| {
+                            format!("Vault rotation '{health_logical_name}' disappeared")
+                        })?;
+                    let current_entries = transaction
+                        .vault_list_entries()
+                        .map_err(|e| format!("vault_list_entries: {e}"))?;
+                    memcore::validate_api_key_rotation(&current_entries, &current).map_err(
+                        |error| format!("{error}; refusing direct CLI rotation advance"),
+                    )?;
+                    let mut updated = current;
+                    updated.current_index = (idx as i64 % updated.total_keys) + 1;
+                    updated.updated_at = chrono::Utc::now().to_rfc3339();
+                    transaction
+                        .vault_set_rotation(&updated)
                         .map_err(|e| format!("vault_set_rotation: {e}"))?;
+                    transaction
+                        .vault_touch_entry(&entry.name)
+                        .map_err(|e| format!("vault_touch_entry: {e}"))?;
+                    transaction
+                        .commit()
+                        .map_err(|e| format!("commit lease transaction: {e}"))?;
+                    return Ok((health_logical_name.to_string(), entry.name.clone(), value));
                 }
             }
         }
-        let _ = store.vault_touch_entry(&entry.name);
+        transaction
+            .vault_touch_entry(&entry.name)
+            .map_err(|e| format!("vault_touch_entry: {e}"))?;
+        transaction
+            .commit()
+            .map_err(|e| format!("commit lease transaction: {e}"))?;
         return Ok((health_logical_name.to_string(), entry.name.clone(), value));
     }
 
@@ -153,6 +333,14 @@ pub(crate) fn lease_api_key_from_store(
         "No usable API key available for '{logical_name}' (missing, restricted, disabled, auth-failed, exhausted, or rate-limited)."
     )
     .into())
+}
+
+pub(crate) fn lease_api_key_from_store(
+    store: &memcore::MemoryStore,
+    key: &[u8; 32],
+    logical_name: &str,
+) -> Result<(String, String, String), Box<dyn std::error::Error>> {
+    lease_api_key_from_store_with_hook(store, key, logical_name, || {})
 }
 
 pub(super) fn print_lease_output(
@@ -261,4 +449,151 @@ pub(super) fn build_key_health_result(
         chrono::Utc::now(),
     )
     .health)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn row(name: &str, secret_type: &str, description: &str) -> VaultListRow {
+        VaultListRow {
+            name: name.to_string(),
+            secret_type: secret_type.to_string(),
+            description: description.to_string(),
+        }
+    }
+
+    #[test]
+    fn format_vault_list_groups_separates_config_from_credentials() {
+        let text = format_vault_list_groups(
+            &[row("EXTRACT_BASE_URL", "config", "lane url")],
+            &[row("DEEPSEEK_API_KEY", "api_key", "key")],
+        );
+        assert!(text.contains("CONFIG"), "{text}");
+        assert!(text.contains("CREDENTIALS"), "{text}");
+        assert!(text.contains("EXTRACT_BASE_URL"), "{text}");
+        assert!(text.contains("DEEPSEEK_API_KEY"), "{text}");
+        assert!(text.contains("1 config, 1 credential (2 total)."), "{text}");
+    }
+
+    #[test]
+    fn print_vault_list_output_uses_grouped_json_arrays() {
+        let json = serde_json::json!({
+            "count": 2,
+            "config": [{
+                "name": "EXTRACT_BASE_URL",
+                "secret_type": "config",
+                "group": "config",
+                "description": "lane"
+            }],
+            "credentials": [{
+                "name": "DEEPSEEK_API_KEY",
+                "secret_type": "api_key",
+                "group": "credential",
+                "description": "key"
+            }],
+            "secrets": []
+        });
+        let config = json_rows(&json, "config").expect("config");
+        let credentials = json_rows(&json, "credentials").expect("credentials");
+        let text = format_vault_list_groups(&config, &credentials);
+        assert!(text.starts_with("CONFIG\n"), "{text}");
+        assert!(!text.contains("(no secrets stored)"), "{text}");
+    }
+
+    #[test]
+    fn legacy_daemon_payload_remaps_leftover_lane_config_before_grouping() {
+        let json = serde_json::json!({
+            "secrets": [{
+                "name": "EXTRACT_BASE_URL",
+                "secret_type": "api_key",
+                "group": "credential",
+                "description": "legacy lane URL"
+            }, {
+                "name": "DEEPSEEK_API_KEY",
+                "secret_type": "api_key",
+                "description": "provider key"
+            }]
+        });
+        let (config, credentials) = legacy_json_list_groups(&json).expect("legacy payload");
+        assert_eq!(
+            config,
+            [row("EXTRACT_BASE_URL", "config", "legacy lane URL")]
+        );
+        assert_eq!(
+            credentials,
+            [row("DEEPSEEK_API_KEY", "api_key", "provider key")]
+        );
+    }
+
+    #[test]
+    fn direct_cli_lease_serializes_acl_revocation_with_decrypt_and_touch() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("memory.db");
+        let reader_store =
+            memcore::MemoryStore::open(db_path.to_string_lossy().as_ref()).expect("reader store");
+        let writer_store =
+            memcore::MemoryStore::open(db_path.to_string_lossy().as_ref()).expect("writer store");
+        let key = [9u8; 32];
+        let (encrypted_value, nonce) =
+            crate::vault_crypto::encrypt(&key, b"direct-lease-secret").expect("encrypt fixture");
+        let now = chrono::Utc::now().to_rfc3339();
+        let entry = memcore::vault::VaultEntry {
+            name: "DIRECT_LEASE_API_KEY".to_string(),
+            encrypted_value,
+            nonce,
+            secret_type: "api_key".to_string(),
+            description: "direct lease ACL race fixture".to_string(),
+            allowed_agents: None,
+            created_at: now.clone(),
+            updated_at: now,
+            accessed_at: String::new(),
+            access_count: 0,
+        };
+        reader_store
+            .vault_upsert_entry(&entry)
+            .expect("seed unrestricted entry");
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let writer_barrier = std::sync::Arc::clone(&barrier);
+        let (attempt_tx, attempt_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let writer_handle = std::cell::RefCell::new(None);
+        let mut restricted = entry;
+        restricted.allowed_agents = Some(vec!["agent-a".to_string()]);
+
+        let (_, _, value) =
+            lease_api_key_from_store_with_hook(&reader_store, &key, "DIRECT_LEASE_API_KEY", || {
+                let handle = std::thread::spawn(move || {
+                    attempt_tx.send(()).expect("announce ACL revocation");
+                    writer_barrier.wait();
+                    writer_store
+                        .vault_upsert_entry(&restricted)
+                        .expect("commit ACL revocation");
+                    done_tx.send(()).expect("announce committed revocation");
+                });
+                attempt_rx
+                    .recv()
+                    .expect("writer reached direct lease revocation boundary");
+                barrier.wait();
+                assert!(
+                    done_rx.recv_timeout(Duration::from_millis(250)).is_err(),
+                    "ACL revocation must not commit between direct lease snapshot and decrypt/touch"
+                );
+                writer_handle.replace(Some(handle));
+            })
+            .expect("direct lease linearizes before blocked ACL revocation");
+        assert_eq!(value, "direct-lease-secret");
+        writer_handle
+            .into_inner()
+            .expect("writer handle")
+            .join()
+            .expect("ACL writer thread");
+        done_rx.recv().expect("ACL revocation committed");
+
+        let error = lease_api_key_from_store(&reader_store, &key, "DIRECT_LEASE_API_KEY")
+            .expect_err("subsequent direct lease must observe ACL revocation")
+            .to_string();
+        assert!(error.contains("restricted"), "{error}");
+    }
 }

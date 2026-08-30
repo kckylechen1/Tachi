@@ -11,6 +11,7 @@ pub(crate) async fn handle_vault_set(
         if is_lane_slot_secret_name(&params.name) && value.trim().is_empty() {
             return Err("Secret value cannot be empty".to_string());
         }
+        let effective_agent_id = resolve_vault_acl_agent_id(server, params.agent_id.as_deref())?;
         authorize_vault_mutation(server, &params.name, params.agent_id.as_deref())
             .map_err(|e| e.to_string())?;
         with_vault_key(server, |key| {
@@ -20,6 +21,14 @@ pub(crate) async fn handle_vault_set(
                 normalize_secret_type(&params.secret_type)
             };
             validate_lane_slot_secret_type(&params.name, secret_type)?;
+            memcore::reject_api_key_type_for_lane_config(&params.name, secret_type)?;
+            let effective_type = memcore::effective_vault_secret_type(&params.name, secret_type);
+            if params.enable_rotation && effective_type != SECRET_TYPE_API_KEY {
+                return Err(format!(
+                    "Vault name '{}' is {effective_type}, not an API-key credential; refusing to attach rotation",
+                    params.name,
+                ));
+            }
             let allowed_agents = normalize_allowed_agents(params.allowed_agents.clone());
             let (encrypted_value, nonce) = crypto::encrypt(key, value.as_bytes())?;
 
@@ -30,9 +39,24 @@ pub(crate) async fn handle_vault_set(
                 let transaction = store
                     .begin_vault_transaction()
                     .map_err(|e| format!("Failed to begin vault transaction: {e}"))?;
-                let is_new = !transaction
-                    .vault_entry_exists(&params.name)
-                    .map_err(|e| format!("Failed to check existing entry: {e}"))?;
+                let existing_entry = transaction
+                    .vault_get_entry(&params.name)
+                    .map_err(|e| format!("Failed to read existing entry: {e}"))?;
+                if let Some(existing) = existing_entry.as_ref() {
+                    ensure_agent_allowed(existing, effective_agent_id.as_deref())
+                        .map_err(|e| e.to_string())?;
+                }
+                let is_new = existing_entry.is_none();
+                if is_new && memcore::is_lane_config_url_name(&params.name) {
+                    if let Some(leak) =
+                        memcore::catalog::endpoint::endpoint_credential_leak(&value)
+                    {
+                        return Err(format!(
+                            "Vault name '{}' value embeds a credential in the endpoint ({leak}); refusing write",
+                            params.name
+                        ));
+                    }
+                }
 
                 let mut rebind_meta: Option<(bool, String, String)> = None;
                 if is_lane_slot_secret_name(&params.name) && secret_type == SECRET_TYPE_API_KEY {
@@ -66,10 +90,7 @@ pub(crate) async fn handle_vault_set(
                     }
 
                     if !is_new {
-                        let existing = transaction
-                            .vault_get_entry(&params.name)
-                            .map_err(|e| format!("Failed to read existing slot: {e}"))?;
-                        if let Some(existing) = existing {
+                        if let Some(existing) = existing_entry.as_ref() {
                             validate_existing_lane_slot_secret_type(
                                 &params.name,
                                 &existing.secret_type,
@@ -121,24 +142,27 @@ pub(crate) async fn handle_vault_set(
                     .vault_upsert_entry(&entry)
                     .map_err(|e| format!("Failed to save secret: {e}"))?;
 
-                if params.enable_rotation {
-                    if let Some(pos) = params.name.rfind('_') {
-                        let suffix = &params.name[pos + 1..];
-                        if suffix.parse::<u32>().is_ok() {
-                            let prefix = &params.name[..pos];
+                if let Some((prefix, _)) =
+                    crate::provider_config::parse_rotation_member_name(&params.name)
+                {
+                    let existing_rotation = transaction
+                        .vault_get_rotation(prefix)
+                        .map_err(|e| format!("Failed to read rotation config: {e}"))?;
+                    if params.enable_rotation || existing_rotation.is_some() {
+                        let all_entries = transaction
+                            .vault_list_entries()
+                            .map_err(|e| format!("Failed to list entries: {e}"))?;
+                        let total_keys =
+                            memcore::validate_api_key_rotation_members(&all_entries, prefix)
+                                .map_err(|error| format!("{error}; refusing rotation"))?
+                                as i64;
+                        if params.enable_rotation {
                             let strategy = normalize_rotation_strategy(
                                 &params
                                     .rotation_strategy
                                     .clone()
                                     .unwrap_or_else(|| "round_robin".to_string()),
                             );
-
-                            let all_entries = transaction
-                                .vault_list_entries()
-                                .map_err(|e| format!("Failed to list entries: {e}"))?;
-
-                            let total_keys =
-                                collect_rotation_entries(all_entries, prefix).len() as i64;
                             let rotation = VaultKeyRotation {
                                 prefix: prefix.to_string(),
                                 current_index: 1,
@@ -147,10 +171,13 @@ pub(crate) async fn handle_vault_set(
                                 created_at: Utc::now().to_rfc3339(),
                                 updated_at: Utc::now().to_rfc3339(),
                             };
-
                             transaction
                                 .vault_set_rotation(&rotation)
                                 .map_err(|e| format!("Failed to save rotation config: {e}"))?;
+                        } else if let Some(rotation) = existing_rotation.as_ref() {
+                            memcore::validate_api_key_rotation(&all_entries, rotation).map_err(
+                                |error| format!("{error}; refusing rotation member update"),
+                            )?;
                         }
                     }
                 }
@@ -197,24 +224,14 @@ pub(crate) async fn handle_vault_get(
     let requested_name = params.name.clone();
     let effective_agent_id = resolve_vault_acl_agent_id(server, params.agent_id.as_deref())?;
     let result = with_vault_key(server, |key| {
-        let selected = server.with_global_store(|store| select_vault_entry(store, &params))?;
-
-        ensure_agent_allowed(&selected.entry, effective_agent_id.as_deref())
-            .map_err(|e| e.to_string())?;
-
-        let decrypted =
-            crypto::decrypt(key, &selected.entry.encrypted_value, &selected.entry.nonce)?;
-        let value = crypto::decode_utf8_zeroizing(decrypted, "Decrypted value is not valid UTF-8")?;
-
-        let new_access_count = server
-            .with_global_store(|store| {
-                record_successful_vault_access(
-                    store,
-                    &selected.target_name,
-                    selected.pending_rotation.as_ref(),
-                )
-            })
-            .map_err(|e| format!("Failed to update access stats: {e}"))?;
+        let (selected, value, new_access_count) = server.with_global_store(|store| {
+            select_authorized_vault_entry_and_record_access(
+                store,
+                &params,
+                effective_agent_id.as_deref(),
+                key,
+            )
+        })?;
 
         serde_json::to_string(&json!({
             "name": selected.entry.name,

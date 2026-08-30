@@ -125,6 +125,8 @@ pub(in crate::bootstrap) fn vault_upsert_secret_with_key(
         )
         .into());
     }
+    let secret_type = memcore::vault::normalize_secret_type(secret_type);
+    memcore::reject_api_key_type_for_lane_config(name, secret_type)?;
 
     let encrypt_result = crate::vault_crypto::encrypt(key.bytes(), secret_value.as_bytes());
     let (encrypted_value, nonce) = encrypt_result?;
@@ -133,9 +135,29 @@ pub(in crate::bootstrap) fn vault_upsert_secret_with_key(
     let transaction = store
         .begin_vault_transaction()
         .map_err(|e| format!("begin vault transaction: {e}"))?;
-    let is_new = !transaction
-        .vault_entry_exists(name)
-        .map_err(|e| format!("vault_entry_exists: {e}"))?;
+    let existing = transaction
+        .vault_get_entry(name)
+        .map_err(|e| format!("vault_get_entry: {e}"))?;
+    if existing.as_ref().is_some_and(|entry| {
+        entry
+            .allowed_agents
+            .as_ref()
+            .is_some_and(|agents| !agents.is_empty())
+    }) {
+        return Err(format!(
+            "Access denied: direct CLI cannot overwrite agent-restricted secret '{name}'"
+        )
+        .into());
+    }
+    let is_new = existing.is_none();
+    if is_new && memcore::is_lane_config_url_name(name) {
+        if let Some(leak) = memcore::catalog::endpoint::endpoint_credential_leak(&secret_value) {
+            return Err(format!(
+                "Vault name '{name}' value embeds a credential in the endpoint ({leak}); refusing write"
+            )
+            .into());
+        }
+    }
 
     let now = chrono::Utc::now().to_rfc3339();
     let entry = memcore::vault::VaultEntry {
@@ -154,6 +176,18 @@ pub(in crate::bootstrap) fn vault_upsert_secret_with_key(
     transaction
         .vault_upsert_entry(&entry)
         .map_err(|e| format!("vault_upsert_entry: {e}"))?;
+    if let Some((prefix, _)) = crate::provider_config::parse_rotation_member_name(name) {
+        if let Some(rotation) = transaction
+            .vault_get_rotation(prefix)
+            .map_err(|e| format!("vault_get_rotation: {e}"))?
+        {
+            let entries = transaction
+                .vault_list_entries()
+                .map_err(|e| format!("vault_list_entries: {e}"))?;
+            memcore::validate_api_key_rotation(&entries, &rotation)
+                .map_err(|error| format!("{error}; refusing rotation member update"))?;
+        }
+    }
     transaction
         .commit()
         .map_err(|e| format!("commit vault transaction: {e}"))?;

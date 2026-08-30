@@ -36,12 +36,14 @@ pub const SECRET_TYPE_API_KEY: &str = "api_key";
 pub const SECRET_TYPE_OAUTH_TOKEN: &str = "oauth_token";
 pub const SECRET_TYPE_JSON_BLOB: &str = "json_blob";
 pub const SECRET_TYPE_COOKIE: &str = "cookie";
+pub const SECRET_TYPE_CONFIG: &str = "config";
 pub const SECRET_TYPE_OTHER: &str = "other";
 pub const SECRET_TYPES: &[&str] = &[
     SECRET_TYPE_API_KEY,
     SECRET_TYPE_OAUTH_TOKEN,
     SECRET_TYPE_JSON_BLOB,
     SECRET_TYPE_COOKIE,
+    SECRET_TYPE_CONFIG,
     SECRET_TYPE_OTHER,
 ];
 
@@ -51,8 +53,38 @@ pub fn normalize_secret_type(value: &str) -> &'static str {
         SECRET_TYPE_OAUTH_TOKEN | "oauth" => SECRET_TYPE_OAUTH_TOKEN,
         SECRET_TYPE_JSON_BLOB | "json" => SECRET_TYPE_JSON_BLOB,
         SECRET_TYPE_COOKIE => SECRET_TYPE_COOKIE,
+        SECRET_TYPE_CONFIG => SECRET_TYPE_CONFIG,
         _ => SECRET_TYPE_OTHER,
     }
+}
+
+fn lane_config_stem(name: &str) -> &str {
+    let mut name = name.trim();
+    while let Some((stem, suffix)) = name.rsplit_once('_') {
+        if suffix.is_empty() || !suffix.bytes().all(|b| b.is_ascii_digit()) {
+            break;
+        }
+        name = stem;
+    }
+    name
+}
+
+fn is_lane_config_stem(name: &str) -> bool {
+    name.starts_with("ENABLE_")
+        || name.ends_with("_BASE_URL")
+        || name.ends_with("_URL")
+        || name.ends_with("_MODEL")
+        || name.ends_with("_BACKEND")
+        || name.ends_with("_TIMEOUT")
+        || name.ends_with("_ENABLED")
+}
+
+/// Lane URLs, models, and flags. These are not credentials: they must not
+/// default to `api_key` and must not enter API-key pools. Rotation members
+/// (`EXTRACT_BASE_URL_1`) follow the prefix.
+pub fn is_lane_config_secret_name(name: &str) -> bool {
+    let name = name.trim();
+    is_lane_config_stem(name) || is_lane_config_stem(lane_config_stem(name))
 }
 
 /// Infer a vault `secret_type` from an env-style name when the caller omits
@@ -61,23 +93,51 @@ pub fn normalize_secret_type(value: &str) -> &'static str {
 /// Lane URLs, models, and flags are not credentials. Storing them as
 /// `api_key` made `tachi vault list` indistinguishable from real keys and
 /// let `EXTRACT_BASE_URL` sit in the same injection class as
-/// `DEEPSEEK_API_KEY`.
+/// `DEEPSEEK_API_KEY`. `ENABLE_*` wins over a trailing `_API_KEY` so a name
+/// like `ENABLE_FALLBACK_API_KEY` infers config instead of being inferred as
+/// a key and then refused.
 pub fn infer_vault_secret_type(name: &str) -> &'static str {
     let name = name.trim();
+    if is_lane_config_secret_name(name) {
+        return SECRET_TYPE_CONFIG;
+    }
     if name.ends_with("_API_KEY") || name.ends_with("_TOKEN") || name.ends_with("_SECRET") {
         return SECRET_TYPE_API_KEY;
     }
-    if name.starts_with("ENABLE_")
-        || name.ends_with("_BASE_URL")
-        || name.ends_with("_URL")
-        || name.ends_with("_MODEL")
-        || name.ends_with("_BACKEND")
-        || name.ends_with("_TIMEOUT")
-        || name.ends_with("_ENABLED")
-    {
-        return SECRET_TYPE_OTHER;
-    }
     SECRET_TYPE_API_KEY
+}
+
+/// Lane-config names whose values are endpoints. Rotation members such as
+/// `EXTRACT_BASE_URL_1` follow the prefix stem, not the `_1` suffix.
+pub fn is_lane_config_url_name(name: &str) -> bool {
+    if !is_lane_config_secret_name(name) {
+        return false;
+    }
+    let stem = lane_config_stem(name);
+    stem.ends_with("_URL") || stem.ends_with("_BASE_URL")
+}
+
+/// Read-time classifier: lane-config names are config regardless of the
+/// stored type. Pre-#1857 omitted types defaulted to `api_key`, so leftover
+/// `EXTRACT_BASE_URL` rows must list as config without a schema bump.
+pub fn effective_vault_secret_type(name: &str, stored: &str) -> &'static str {
+    if is_lane_config_secret_name(name) {
+        SECRET_TYPE_CONFIG
+    } else {
+        normalize_secret_type(stored)
+    }
+}
+
+/// Explicit `api_key` on a lane-config name is refused. Inference already
+/// chooses `config`; this blocks `--secret-type api_key`.
+pub fn reject_api_key_type_for_lane_config(name: &str, secret_type: &str) -> Result<(), String> {
+    if is_lane_config_secret_name(name) && normalize_secret_type(secret_type) == SECRET_TYPE_API_KEY
+    {
+        return Err(format!(
+            "Vault name '{name}' is lane config, not a credential; refusing secret_type=api_key"
+        ));
+    }
+    Ok(())
 }
 
 /// Supported vault ciphers.
@@ -213,12 +273,62 @@ impl Default for VaultEntry {
 }
 
 /// Extract the 1-based member index from an API key pool entry name.
-/// Returns `Some(n)` if `name` matches the pattern `prefix_n` where n > 0.
+/// Returns `Some(n)` for every numeric `prefix_n` suffix, including zero so
+/// validation can reject it instead of letting runtime grouping disagree.
 pub fn api_key_pool_member_index(name: &str, prefix: &str) -> Option<usize> {
     name.strip_prefix(prefix)
         .and_then(|suffix| suffix.strip_prefix('_'))
         .and_then(|suffix| suffix.parse::<usize>().ok())
-        .filter(|idx| *idx > 0)
+}
+
+/// Validate the complete structural member set for an API-key rotation.
+/// Every numeric `prefix_N` row participates, regardless of a rotation row's
+/// declared count, and indices must be contiguous from one.
+pub fn validate_api_key_rotation_members(
+    entries: &[VaultEntry],
+    prefix: &str,
+) -> Result<usize, String> {
+    let mut indices = Vec::new();
+    for entry in entries {
+        let Some(index) = api_key_pool_member_index(&entry.name, prefix) else {
+            continue;
+        };
+        let effective = effective_vault_secret_type(&entry.name, &entry.secret_type);
+        if effective != SECRET_TYPE_API_KEY {
+            return Err(format!(
+                "Vault rotation member '{}' is {effective}, not an API-key credential",
+                entry.name
+            ));
+        }
+        indices.push(index);
+    }
+    indices.sort_unstable();
+    for (offset, index) in indices.iter().enumerate() {
+        let expected = offset + 1;
+        if *index != expected {
+            return Err(format!(
+                "Vault rotation '{prefix}' has non-contiguous member index {index}; expected {expected}"
+            ));
+        }
+    }
+    Ok(indices.len())
+}
+
+/// Validate that a persisted rotation row exactly describes its complete
+/// structural member set. A valid member append or removal is still invalid
+/// until the rotation row is updated in the same transaction.
+pub fn validate_api_key_rotation(
+    entries: &[VaultEntry],
+    rotation: &VaultKeyRotation,
+) -> Result<usize, String> {
+    let member_count = validate_api_key_rotation_members(entries, &rotation.prefix)?;
+    if rotation.total_keys <= 0 || member_count != rotation.total_keys as usize {
+        return Err(format!(
+            "Vault rotation '{}' declares {} keys but has {} contiguous API-key members",
+            rotation.prefix, rotation.total_keys, member_count
+        ));
+    }
+    Ok(member_count)
 }
 
 #[cfg(test)]
@@ -256,6 +366,7 @@ mod tests {
         assert_eq!(normalize_secret_type("oauth"), SECRET_TYPE_OAUTH_TOKEN);
         assert_eq!(normalize_secret_type("json"), SECRET_TYPE_JSON_BLOB);
         assert_eq!(normalize_secret_type("cookie"), SECRET_TYPE_COOKIE);
+        assert_eq!(normalize_secret_type("config"), SECRET_TYPE_CONFIG);
         assert_eq!(normalize_secret_type("weird"), SECRET_TYPE_OTHER);
         assert_eq!(
             SECRET_TYPES,
@@ -264,6 +375,7 @@ mod tests {
                 SECRET_TYPE_OAUTH_TOKEN,
                 SECRET_TYPE_JSON_BLOB,
                 SECRET_TYPE_COOKIE,
+                SECRET_TYPE_CONFIG,
                 SECRET_TYPE_OTHER,
             ]
         );
@@ -285,16 +397,51 @@ mod tests {
         );
         assert_eq!(
             infer_vault_secret_type("EXTRACT_BASE_URL"),
-            SECRET_TYPE_OTHER
+            SECRET_TYPE_CONFIG
         );
-        assert_eq!(infer_vault_secret_type("DISTILL_MODEL"), SECRET_TYPE_OTHER);
+        assert_eq!(infer_vault_secret_type("DISTILL_MODEL"), SECRET_TYPE_CONFIG);
         assert_eq!(
             infer_vault_secret_type("ENABLE_PIPELINE"),
-            SECRET_TYPE_OTHER
+            SECRET_TYPE_CONFIG
         );
         assert_eq!(
             infer_vault_secret_type("FOUNDRY_DISTILL_BACKEND"),
+            SECRET_TYPE_CONFIG
+        );
+        assert!(is_lane_config_secret_name("EXTRACT_BASE_URL_1"));
+        assert!(is_lane_config_secret_name("EXTRACT_BASE_URL_1_1"));
+        assert!(is_lane_config_url_name("EXTRACT_BASE_URL_1_1"));
+        assert_eq!(
+            infer_vault_secret_type("EXTRACT_BASE_URL_1_1"),
+            SECRET_TYPE_CONFIG
+        );
+        assert!(!is_lane_config_secret_name("DEEPSEEK_API_KEY_1"));
+        assert!(!is_lane_config_secret_name("DEEPSEEK_API_KEY_1_1"));
+        assert_eq!(
+            infer_vault_secret_type("ENABLE_FALLBACK_API_KEY"),
+            SECRET_TYPE_CONFIG
+        );
+        assert!(is_lane_config_url_name("EXTRACT_BASE_URL"));
+        assert!(is_lane_config_url_name("EXTRACT_BASE_URL_1"));
+        assert!(!is_lane_config_url_name("DISTILL_MODEL"));
+        assert!(!is_lane_config_url_name("DEEPSEEK_API_KEY"));
+        assert!(reject_api_key_type_for_lane_config("EXTRACT_BASE_URL", "api_key").is_err());
+        assert!(reject_api_key_type_for_lane_config("DEEPSEEK_API_KEY", "api_key").is_ok());
+        assert_eq!(
+            effective_vault_secret_type("EXTRACT_BASE_URL", "other"),
+            SECRET_TYPE_CONFIG
+        );
+        assert_eq!(
+            effective_vault_secret_type("EXTRACT_BASE_URL", "api_key"),
+            SECRET_TYPE_CONFIG
+        );
+        assert_eq!(
+            effective_vault_secret_type("DEEPSEEK_API_KEY", "other"),
             SECRET_TYPE_OTHER
+        );
+        assert_eq!(
+            effective_vault_secret_type("CUSTOM_ENDPOINT", "config"),
+            SECRET_TYPE_CONFIG
         );
     }
 }

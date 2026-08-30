@@ -25,6 +25,7 @@ pub(crate) struct KeychainApiKeyScan {
     pub dropped: HashMap<String, AliasSkipClass>,
     pub rotation_prefixes: HashSet<String>,
     pub source_readable: bool,
+    pub acl_revision: Option<u64>,
 }
 
 pub(crate) fn load_keychain_vault_api_key_values(
@@ -48,6 +49,7 @@ fn empty_keychain_scan() -> KeychainApiKeyScan {
         dropped: HashMap::new(),
         rotation_prefixes: HashSet::new(),
         source_readable: false,
+        acl_revision: None,
     }
 }
 
@@ -88,7 +90,8 @@ fn load_keychain_vault_api_key_scan_with_password(
         )
     })?;
     let store = memcore::MemoryStore::open_read_only(vault_db_str)?;
-    let Some(config) = store.vault_get_config()? else {
+    let transaction = store.begin_vault_read_transaction_shared()?;
+    let Some(config) = transaction.vault_get_config()? else {
         return Ok(empty_keychain_scan());
     };
 
@@ -99,13 +102,23 @@ fn load_keychain_vault_api_key_scan_with_password(
         return Ok(empty_keychain_scan());
     };
 
-    let entries = store.vault_list_entries()?;
-    let rotation_prefixes = store
-        .vault_list_rotations()?
+    let entries = transaction.vault_list_entries()?;
+    let rotations = transaction.vault_list_rotations()?;
+    let acl_revision =
+        crate::vault_ops::vault_materialization_acl_revision_from_rows(&entries, &rotations);
+    for rotation in &rotations {
+        memcore::validate_api_key_rotation(&entries, rotation).map_err(|error| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("{error}; refusing Keychain Vault provider materialization"),
+            )
+        })?;
+    }
+    let rotation_prefixes = rotations
         .into_iter()
         .map(|rotation| rotation.prefix)
         .collect::<HashSet<_>>();
-    let key_health_rows = store.vault_list_key_health(None)?;
+    let key_health_rows = transaction.vault_list_key_health(None)?;
     let mut scan = scan_keychain_api_key_entries(
         entries,
         &key,
@@ -114,6 +127,8 @@ fn load_keychain_vault_api_key_scan_with_password(
         Utc::now(),
     )?;
     scan.rotation_prefixes = rotation_prefixes;
+    scan.acl_revision = Some(acl_revision);
+    transaction.commit()?;
     Ok(scan)
 }
 
@@ -148,6 +163,10 @@ fn scan_keychain_api_key_entries(
         }
     }
     for entry in entries {
+        if memcore::is_lane_config_secret_name(&entry.name) {
+            record_keychain_listed_drop(&mut dropped, &entry.name, AliasSkipClass::ListedWrongType);
+            continue;
+        }
         if entry.secret_type != SECRET_TYPE_API_KEY {
             record_keychain_listed_drop(&mut dropped, &entry.name, AliasSkipClass::ListedWrongType);
             continue;
@@ -193,6 +212,7 @@ fn scan_keychain_api_key_entries(
         dropped,
         rotation_prefixes: rotation_prefixes.clone(),
         source_readable: true,
+        acl_revision: None,
     })
 }
 
@@ -465,6 +485,47 @@ mod tests {
             Err(err) => err,
         };
         assert!(err.to_string().contains("vault_key_health"), "{err}");
+    }
+
+    #[test]
+    fn keychain_materialization_rejects_a_legacy_mixed_rotation() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dir.path().join("memory.db");
+        let password = "keychain-mixed-rotation";
+        let config = stored_config(password);
+        let key = derive_status_vault_key(&config, password)
+            .expect("derive fixture key")
+            .expect("matching password");
+        let store =
+            memcore::MemoryStore::open(db.to_str().expect("UTF-8 db path")).expect("create store");
+        store.vault_set_config(&config).expect("seed config");
+        let first = encrypted_entry("MIXED_API_KEY_1", "key-one", &key);
+        let mut second = encrypted_entry("MIXED_API_KEY_2", "not-a-key", &key);
+        second.secret_type = "config".to_string();
+        store.vault_upsert_entry(&first).expect("seed first member");
+        store
+            .vault_upsert_entry(&second)
+            .expect("seed legacy wrong-type member");
+        store
+            .vault_set_rotation(&memcore::vault::VaultKeyRotation {
+                prefix: "MIXED_API_KEY".to_string(),
+                current_index: 1,
+                total_keys: 2,
+                rotation_strategy: "round_robin".to_string(),
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                updated_at: "2026-01-01T00:00:00Z".to_string(),
+            })
+            .expect("seed rotation");
+        drop(store);
+
+        let error = match load_keychain_vault_api_key_scan_with_password(&db, password) {
+            Ok(_) => panic!("Keychain materialization must not publish a surviving mixed-pool key"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            error.contains("MIXED_API_KEY_2") && error.contains("config"),
+            "{error}"
+        );
     }
 
     #[test]

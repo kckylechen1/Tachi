@@ -8,24 +8,29 @@ pub(crate) async fn handle_vault_list(
         return Err("Vault not initialized. Call vault_init first.".into());
     }
 
-    let entries = if let Some(ref secret_type) = params.secret_type {
-        let secret_type = normalize_secret_type(secret_type);
-        server.with_global_store_read(|store| {
-            store
-                .vault_list_entries_by_type(secret_type)
-                .map_err(|e| e.to_string())
-        })
-    } else {
-        server.with_global_store_read(|store| store.vault_list_entries().map_err(|e| e.to_string()))
+    let mut entries = server
+        .with_global_store_read(|store| store.vault_list_entries().map_err(|e| e.to_string()))
+        .map_err(|e| format!("Failed to list secrets: {e}"))?;
+    if let Some(ref secret_type) = params.secret_type {
+        let want = normalize_secret_type(secret_type);
+        entries.retain(|entry| {
+            memcore::effective_vault_secret_type(&entry.name, &entry.secret_type) == want
+        });
     }
-    .map_err(|e| format!("Failed to list secrets: {e}"))?;
 
     let payload: Vec<serde_json::Value> = entries
         .into_iter()
         .map(|e| {
+            let secret_type = memcore::effective_vault_secret_type(&e.name, &e.secret_type);
+            let group = if secret_type == memcore::SECRET_TYPE_CONFIG {
+                "config"
+            } else {
+                "credential"
+            };
             json!({
                 "name": e.name,
-                "secret_type": e.secret_type,
+                "secret_type": secret_type,
+                "group": group,
                 "description": e.description,
                 "allowed_agents": e.allowed_agents,
                 "created_at": e.created_at,
@@ -34,9 +39,21 @@ pub(crate) async fn handle_vault_list(
             })
         })
         .collect();
+    let config: Vec<_> = payload
+        .iter()
+        .filter(|row| row.get("group").and_then(|v| v.as_str()) == Some("config"))
+        .cloned()
+        .collect();
+    let credentials: Vec<_> = payload
+        .iter()
+        .filter(|row| row.get("group").and_then(|v| v.as_str()) != Some("config"))
+        .cloned()
+        .collect();
 
     let resp = json!({
         "count": payload.len(),
+        "credentials": credentials,
+        "config": config,
         "secrets": payload,
     });
     serde_json::to_string(&resp).map_err(|e| format!("serialize: {e}"))
@@ -48,15 +65,42 @@ pub(crate) async fn handle_vault_remove(
 ) -> Result<String, String> {
     let secret_name = params.name.clone();
     let result = (|| {
+        let effective_agent_id = resolve_vault_acl_agent_id(server, params.agent_id.as_deref())?;
         authorize_vault_mutation(server, &params.name, params.agent_id.as_deref())
             .map_err(|e| e.to_string())?;
-        let removed = server
-            .with_global_store(|store| {
-                store
-                    .vault_delete_entry(&params.name)
-                    .map_err(|e| e.to_string())
-            })
-            .map_err(|e| format!("Failed to remove secret: {e}"))?;
+        let removed = server.with_global_store(|store| {
+            let transaction = store
+                .begin_vault_transaction()
+                .map_err(|e| format!("Failed to begin remove transaction: {e}"))?;
+            if let Some(existing) = transaction
+                .vault_get_entry(&params.name)
+                .map_err(|e| format!("Failed to read removal target: {e}"))?
+            {
+                ensure_agent_allowed(&existing, effective_agent_id.as_deref())
+                    .map_err(|e| e.to_string())?;
+            }
+            if let Some((prefix, _)) =
+                crate::provider_config::parse_rotation_member_name(&params.name)
+            {
+                if transaction
+                    .vault_get_rotation(prefix)
+                    .map_err(|e| format!("Failed to read rotation config: {e}"))?
+                    .is_some()
+                {
+                    return Err(format!(
+                        "Vault name '{}' is a configured rotation member; refusing deletion while rotation '{}' exists",
+                        params.name, prefix
+                    ));
+                }
+            }
+            let removed = transaction
+                .vault_delete_entry(&params.name)
+                .map_err(|e| format!("Failed to remove secret: {e}"))?;
+            transaction
+                .commit()
+                .map_err(|e| format!("Failed to commit remove transaction: {e}"))?;
+            Ok::<_, String>(removed)
+        })?;
 
         if removed {
             serde_json::to_string(&json!({

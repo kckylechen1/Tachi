@@ -410,9 +410,12 @@ pub use vault::apply::{
 pub use vault::fingerprint::{account_fingerprint_class, AccountFingerprintClass, FingerprintKey};
 #[cfg(feature = "admin")]
 pub use vault::{
-    api_key_pool_member_index, infer_vault_secret_type, normalize_secret_type, VaultCipher,
-    VaultConfig, VaultEntry, VaultKeyRotation, SECRET_TYPES, SECRET_TYPE_API_KEY,
-    SECRET_TYPE_COOKIE, SECRET_TYPE_JSON_BLOB, SECRET_TYPE_OAUTH_TOKEN, SECRET_TYPE_OTHER,
+    api_key_pool_member_index, effective_vault_secret_type, infer_vault_secret_type,
+    is_lane_config_secret_name, is_lane_config_url_name, normalize_secret_type,
+    reject_api_key_type_for_lane_config, validate_api_key_rotation,
+    validate_api_key_rotation_members, VaultCipher, VaultConfig, VaultEntry, VaultKeyRotation,
+    SECRET_TYPES, SECRET_TYPE_API_KEY, SECRET_TYPE_CONFIG, SECRET_TYPE_COOKIE,
+    SECRET_TYPE_JSON_BLOB, SECRET_TYPE_OAUTH_TOKEN, SECRET_TYPE_OTHER,
 };
 pub use vector_backfill::{VectorBackfillCounts, VectorBackfillEntry, VectorBackfillScope};
 

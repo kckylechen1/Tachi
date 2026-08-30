@@ -599,7 +599,7 @@ mod tests {
                 reader_done_rx.recv_timeout(std::time::Duration::from_millis(100)),
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout)
             ),
-            "runtime readers must block while the durable companion commit is visible but in-memory publication is pending"
+            "runtime readers must block until companion commit and in-memory publication complete"
         );
         release_commit_tx
             .send(())
@@ -612,6 +612,46 @@ mod tests {
             .expect("materialization worker")
             .expect("materialization succeeds");
         reader.join().expect("runtime reader");
+    }
+
+    #[test]
+    fn provider_state_is_staged_before_companion_commit_and_restored_on_failure() {
+        let llm = LlmClient::new().expect("llm client");
+        let logical_name = "SILICONFLOW_API_KEY";
+        assert!(llm.set_provider_secret(logical_name, "prior-secret"));
+        let staged = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let staged_for_hook = std::sync::Arc::clone(&staged);
+
+        let error = llm
+            .publish_provider_secret_pools_with_hook_for_tests(
+                HashMap::from([(
+                    logical_name.to_string(),
+                    vec![ProviderSecret {
+                        key_id: logical_name.to_string(),
+                        value: "candidate-secret".to_string(),
+                    }],
+                )]),
+                &HashSet::new(),
+                None,
+                move || {
+                    staged_for_hook.store(true, std::sync::atomic::Ordering::SeqCst);
+                },
+                || {
+                    assert!(
+                        staged.load(std::sync::atomic::Ordering::SeqCst),
+                        "provider state must be staged before the companion commit can release its source fence"
+                    );
+                    Err("injected companion commit failure".to_string())
+                },
+            )
+            .expect_err("companion failure must abort publication");
+
+        assert_eq!(error, "injected companion commit failure");
+        assert_eq!(
+            llm.provider_secret_for_tests(&[logical_name]).as_deref(),
+            Some("prior-secret"),
+            "failed companion commit must restore the complete prior provider state"
+        );
     }
 
     struct EnvGuard {

@@ -30,7 +30,7 @@ pub(in crate::bootstrap) async fn run_env_command(
         }
         Some(EnvAction::Export { cwd, json }) => {
             let cwd = resolve_cwd(cwd.as_deref())?;
-            let unlocked = unlock_cli_vault(
+            let mut unlocked = unlock_cli_vault(
                 global_db_path,
                 stdin_password,
                 keychain,
@@ -38,7 +38,7 @@ pub(in crate::bootstrap) async fn run_env_command(
                 insecure_password_file,
             )?;
             let exports = filter_project_exports(
-                resolve_project_env_values(&unlocked, &cwd)?,
+                resolve_project_env_values(&mut unlocked, &cwd)?,
                 filter,
                 env_only,
             )?;
@@ -62,7 +62,7 @@ pub(in crate::bootstrap) async fn run_env_command(
             json,
         }) => {
             let cwd = resolve_cwd(cwd.as_deref())?;
-            let unlocked = unlock_cli_vault(
+            let mut unlocked = unlock_cli_vault(
                 global_db_path,
                 stdin_password,
                 keychain,
@@ -71,7 +71,7 @@ pub(in crate::bootstrap) async fn run_env_command(
             )?;
             let preview = dry_run || !apply;
             let report = sync_project_env(
-                &unlocked,
+                &mut unlocked,
                 &cwd,
                 output.as_deref(),
                 preview,
@@ -96,7 +96,7 @@ pub(in crate::bootstrap) async fn run_env_command(
         }
         Some(EnvAction::Run { cwd, command }) => {
             let cwd = resolve_cwd(cwd.as_deref())?;
-            let unlocked = unlock_cli_vault(
+            let mut unlocked = unlock_cli_vault(
                 global_db_path,
                 stdin_password,
                 keychain,
@@ -104,7 +104,7 @@ pub(in crate::bootstrap) async fn run_env_command(
                 insecure_password_file,
             )?;
             let exports = filter_project_exports(
-                resolve_project_env_values(&unlocked, &cwd)?,
+                resolve_project_env_values(&mut unlocked, &cwd)?,
                 filter,
                 env_only,
             )?;

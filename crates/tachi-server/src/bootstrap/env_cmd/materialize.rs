@@ -1,5 +1,3 @@
-use memcore::vault::VaultEntry;
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use super::super::{open_cli_store, vault_cli};
@@ -56,7 +54,7 @@ pub(super) fn unlock_cli_vault(
 }
 
 pub(super) fn resolve_project_env_values(
-    unlocked: &UnlockedVaultStore,
+    unlocked: &mut UnlockedVaultStore,
     cwd: &Path,
 ) -> Result<Vec<(String, String)>, Box<dyn std::error::Error>> {
     let (_, bindings, ignored_lines) = load_project_env_bindings(cwd)?;
@@ -68,18 +66,15 @@ pub(super) fn resolve_project_env_values(
             );
         }
     }
-    let entries = unlocked
-        .store
-        .vault_list_entries()
-        .map_err(|e| format!("Failed to list vault entries: {e}"))?;
-    let by_name = entries
-        .iter()
-        .map(|entry| (entry.name.as_str(), entry))
-        .collect::<HashMap<_, _>>();
     let mut exports = Vec::new();
     for binding in bindings {
-        let value = resolve_bound_secret_value(unlocked, &by_name, &binding.secret_name)
-            .map_err(|e| format!("{} (line {})", e, binding.line))?;
+        let value = crate::vault_ops::read_vault_secret_from_store(
+            &mut unlocked.store,
+            unlocked.key.bytes(),
+            &binding.secret_name,
+            true,
+        )
+        .map_err(|e| format!("{} (line {})", e, binding.line))?;
         upsert_env_secret(&mut exports, binding.env_name, value);
     }
     Ok(exports)
@@ -105,43 +100,8 @@ pub(super) fn filter_project_exports(
         .collect())
 }
 
-fn resolve_bound_secret_value(
-    unlocked: &UnlockedVaultStore,
-    entries: &HashMap<&str, &VaultEntry>,
-    secret_name: &str,
-) -> Result<String, Box<dyn std::error::Error>> {
-    if let Some(entry) = entries.get(secret_name).copied() {
-        return decrypt_entry_value(entry, unlocked.key.bytes());
-    }
-    let (_, _, value) =
-        vault_cli::lease_api_key_from_store(&unlocked.store, unlocked.key.bytes(), secret_name)?;
-    Ok(value)
-}
-
-pub(super) fn decrypt_entry_value(
-    entry: &VaultEntry,
-    key: &[u8; 32],
-) -> Result<String, Box<dyn std::error::Error>> {
-    if entry
-        .allowed_agents
-        .as_ref()
-        .is_some_and(|agents| !agents.is_empty())
-    {
-        return Err(format!("Vault secret '{}' is agent-restricted", entry.name).into());
-    }
-    let decrypted = crate::vault_crypto::decrypt(key, &entry.encrypted_value, &entry.nonce)?;
-    let value = crate::vault_crypto::decode_utf8_zeroizing(
-        decrypted,
-        format!("Vault secret '{}' is not valid UTF-8", entry.name),
-    )?;
-    if value.trim().is_empty() {
-        return Err(format!("Vault secret '{}' is empty", entry.name).into());
-    }
-    Ok(value)
-}
-
 pub(super) fn sync_project_env(
-    unlocked: &UnlockedVaultStore,
+    unlocked: &mut UnlockedVaultStore,
     cwd: &Path,
     output_path: Option<&Path>,
     dry_run: bool,

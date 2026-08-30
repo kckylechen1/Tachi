@@ -1,11 +1,460 @@
-use super::handlers::{
-    handle_vault_init, handle_vault_lock, handle_vault_set, handle_vault_unlock,
+use super::access::{
+    lease_authorized_api_key_with_hook_for_tests,
+    load_unlocked_api_key_secret_pools_with_acl_hook_for_tests,
+    materialize_unrestricted_vault_entries_from_store_with_hook_for_tests,
+    record_successful_vault_access,
+    select_authorized_vault_entry_and_record_access_with_hook_for_tests,
 };
-use super::params::{VaultInitParams, VaultSetParams, VaultUnlockParams};
+use super::handlers::{
+    handle_vault_get, handle_vault_init, handle_vault_lease_api_key, handle_vault_list,
+    handle_vault_lock, handle_vault_remove, handle_vault_set, handle_vault_set_api_key_pool,
+    handle_vault_setup_rotation, handle_vault_unlock,
+};
+use super::params::{
+    VaultGetParams, VaultInitParams, VaultLeaseApiKeyParams, VaultListParams, VaultRemoveParams,
+    VaultSetApiKeyPoolParams, VaultSetParams, VaultSetupRotationParams, VaultUnlockParams,
+};
 use super::session::{read_unlock_password_fifo, with_vault_key};
 use crate::server_state::MemoryServer;
 use crate::test_support::EnvRestore;
 use std::time::{Duration, Instant};
+
+#[test]
+fn authorized_vault_read_serializes_acl_revocation_with_selection_and_touch() {
+    let db_path = crate::utils::test_fixture_path(format!(
+        "memory-server-vault-acl-read-race-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let mut reader_store =
+        memcore::MemoryStore::open(db_path.to_string_lossy().as_ref()).expect("open reader store");
+    let writer_store =
+        memcore::MemoryStore::open(db_path.to_string_lossy().as_ref()).expect("open writer store");
+    let now = chrono::Utc::now().to_rfc3339();
+    let key = [7u8; 32];
+    let (encrypted_value, nonce) =
+        crate::vault_crypto::encrypt(&key, b"race-secret").expect("encrypt race fixture");
+    let entry = memcore::vault::VaultEntry {
+        name: "ACL_RACE_API_KEY".to_string(),
+        encrypted_value,
+        nonce,
+        secret_type: "api_key".to_string(),
+        description: "ACL race fixture".to_string(),
+        allowed_agents: None,
+        created_at: now.clone(),
+        updated_at: now,
+        accessed_at: String::new(),
+        access_count: 0,
+    };
+    reader_store
+        .vault_upsert_entry(&entry)
+        .expect("seed unrestricted entry");
+
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let (attempt_tx, attempt_rx) = std::sync::mpsc::channel();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let writer_handle = std::cell::RefCell::new(None);
+    let writer_barrier = std::sync::Arc::clone(&barrier);
+    let mut restricted = entry.clone();
+    restricted.allowed_agents = Some(vec!["agent-a".to_string()]);
+
+    let (_selected, value, access_count) =
+        select_authorized_vault_entry_and_record_access_with_hook_for_tests(
+            &mut reader_store,
+            &VaultGetParams {
+                name: entry.name.clone(),
+                agent_id: None,
+                auto_rotate: false,
+            },
+            None,
+            &key,
+            || {
+                let handle = std::thread::spawn(move || {
+                    attempt_tx.send(()).expect("announce ACL revocation");
+                    writer_barrier.wait();
+                    writer_store
+                        .vault_upsert_entry(&restricted)
+                        .expect("commit ACL revocation");
+                    done_tx.send(()).expect("announce committed revocation");
+                });
+                attempt_rx
+                    .recv()
+                    .expect("writer reached revocation boundary");
+                barrier.wait();
+                assert!(
+                    done_rx.recv_timeout(Duration::from_millis(250)).is_err(),
+                    "ACL revocation must not commit between selection and authorization"
+                );
+                writer_handle.replace(Some(handle));
+            },
+        )
+        .expect("read linearizes before the blocked ACL revocation");
+    assert_eq!(value, "race-secret");
+    assert_eq!(access_count, 1);
+    writer_handle
+        .into_inner()
+        .expect("writer handle")
+        .join()
+        .expect("ACL writer thread");
+    done_rx.recv().expect("ACL revocation committed");
+
+    let denied = match select_authorized_vault_entry_and_record_access_with_hook_for_tests(
+        &mut reader_store,
+        &VaultGetParams {
+            name: entry.name,
+            agent_id: None,
+            auto_rotate: false,
+        },
+        None,
+        &key,
+        || {},
+    ) {
+        Err(error) => error,
+        Ok(_) => panic!("subsequent anonymous read must observe the committed ACL revocation"),
+    };
+    assert!(denied.contains("agent_id is required"), "{denied}");
+}
+
+#[test]
+fn identityless_cli_materialization_serializes_acl_revocation_with_decrypt_and_touch() {
+    let db_path = crate::utils::test_fixture_path(format!(
+        "memory-server-vault-cli-materialize-race-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let mut reader_store =
+        memcore::MemoryStore::open(db_path.to_string_lossy().as_ref()).expect("open reader");
+    let writer_store =
+        memcore::MemoryStore::open(db_path.to_string_lossy().as_ref()).expect("open writer");
+    let key = [9u8; 32];
+    let (encrypted_value, nonce) =
+        crate::vault_crypto::encrypt(&key, b"legacy-export-secret").expect("encrypt");
+    let now = chrono::Utc::now().to_rfc3339();
+    let entry = memcore::vault::VaultEntry {
+        name: "LEGACY_EXPORT_API_KEY".to_string(),
+        encrypted_value,
+        nonce,
+        secret_type: "api_key".to_string(),
+        description: String::new(),
+        allowed_agents: None,
+        created_at: now.clone(),
+        updated_at: now,
+        accessed_at: String::new(),
+        access_count: 0,
+    };
+    reader_store
+        .vault_upsert_entry(&entry)
+        .expect("seed unrestricted entry");
+
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let writer_barrier = std::sync::Arc::clone(&barrier);
+    let (attempt_tx, attempt_rx) = std::sync::mpsc::channel();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let writer_handle = std::cell::RefCell::new(None);
+    let mut restricted = entry.clone();
+    restricted.allowed_agents = Some(vec!["agent-a".to_string()]);
+
+    let materialized = materialize_unrestricted_vault_entries_from_store_with_hook_for_tests(
+        &mut reader_store,
+        &key,
+        |_| true,
+        || {
+            let handle = std::thread::spawn(move || {
+                attempt_tx.send(()).expect("announce ACL revocation");
+                writer_barrier.wait();
+                writer_store
+                    .vault_upsert_entry(&restricted)
+                    .expect("commit ACL revocation");
+                done_tx.send(()).expect("announce committed revocation");
+            });
+            attempt_rx
+                .recv()
+                .expect("writer reached revocation boundary");
+            barrier.wait();
+            assert!(
+                done_rx.recv_timeout(Duration::from_millis(250)).is_err(),
+                "ACL revocation must not commit between snapshot and decrypt/touch"
+            );
+            writer_handle.replace(Some(handle));
+        },
+    )
+    .expect("materialization linearizes before ACL revocation");
+    assert_eq!(
+        materialized,
+        vec![(entry.name.clone(), "legacy-export-secret".to_string())]
+    );
+    writer_handle
+        .into_inner()
+        .expect("writer handle")
+        .join()
+        .expect("writer thread");
+    done_rx.recv().expect("ACL revocation committed");
+    let retained = reader_store
+        .vault_get_entry(&entry.name)
+        .expect("read entry")
+        .expect("entry remains");
+    assert_eq!(retained.access_count, 1);
+
+    let subsequent = materialize_unrestricted_vault_entries_from_store_with_hook_for_tests(
+        &mut reader_store,
+        &key,
+        |_| true,
+        || {},
+    )
+    .expect("subsequent materialization");
+    assert!(
+        subsequent.is_empty(),
+        "restricted row must no longer materialize"
+    );
+}
+
+#[test]
+fn mcp_api_key_lease_serializes_acl_revocation_with_selection_rotation_and_touch() {
+    let db_path = crate::utils::test_fixture_path(format!(
+        "memory-server-vault-mcp-lease-race-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let server = MemoryServer::new(db_path.clone(), None).expect("create server");
+    let key = [10u8; 32];
+    {
+        let mut vault = server.vault_write();
+        vault.key = Some(crate::CachedVaultKey::copy_from(&key));
+        vault.unlock_time = Some(Instant::now());
+    }
+    let (encrypted_value, nonce) =
+        crate::vault_crypto::encrypt(&key, b"leased-secret").expect("encrypt");
+    let now = chrono::Utc::now().to_rfc3339();
+    let entry = memcore::vault::VaultEntry {
+        name: "LEASE_RACE_API_KEY_1".to_string(),
+        encrypted_value,
+        nonce,
+        secret_type: "api_key".to_string(),
+        description: String::new(),
+        allowed_agents: None,
+        created_at: now.clone(),
+        updated_at: now.clone(),
+        accessed_at: String::new(),
+        access_count: 0,
+    };
+    server
+        .with_global_store(|store| {
+            store
+                .vault_upsert_entry(&entry)
+                .map_err(|e| e.to_string())?;
+            store
+                .vault_set_rotation(&memcore::vault::VaultKeyRotation {
+                    prefix: "LEASE_RACE_API_KEY".to_string(),
+                    current_index: 1,
+                    total_keys: 1,
+                    rotation_strategy: "round_robin".to_string(),
+                    created_at: now.clone(),
+                    updated_at: now,
+                })
+                .map_err(|e| e.to_string())
+        })
+        .expect("seed pool");
+    let writer_store =
+        memcore::MemoryStore::open(db_path.to_string_lossy().as_ref()).expect("open writer");
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let writer_barrier = std::sync::Arc::clone(&barrier);
+    let (attempt_tx, attempt_rx) = std::sync::mpsc::channel();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let writer_handle = std::cell::RefCell::new(None);
+    let mut restricted = entry.clone();
+    restricted.allowed_agents = Some(vec!["agent-a".to_string()]);
+
+    let lease =
+        lease_authorized_api_key_with_hook_for_tests(&server, "LEASE_RACE_API_KEY", None, || {
+            let handle = std::thread::spawn(move || {
+                attempt_tx.send(()).expect("announce ACL revocation");
+                writer_barrier.wait();
+                writer_store
+                    .vault_upsert_entry(&restricted)
+                    .expect("commit ACL revocation");
+                done_tx.send(()).expect("announce committed revocation");
+            });
+            attempt_rx
+                .recv()
+                .expect("writer reached revocation boundary");
+            barrier.wait();
+            assert!(
+                done_rx.recv_timeout(Duration::from_millis(250)).is_err(),
+                "ACL revocation must not commit between lease selection and rotation/touch"
+            );
+            writer_handle.replace(Some(handle));
+        })
+        .expect("lease linearizes before ACL revocation");
+    assert_eq!(lease.logical_name, "LEASE_RACE_API_KEY");
+    assert_eq!(lease.key_id, entry.name);
+    assert_eq!(lease.value, "leased-secret");
+    assert_eq!(lease.access_count, 1);
+    writer_handle
+        .into_inner()
+        .expect("writer handle")
+        .join()
+        .expect("writer thread");
+    done_rx.recv().expect("ACL revocation committed");
+
+    let denied =
+        lease_authorized_api_key_with_hook_for_tests(&server, "LEASE_RACE_API_KEY", None, || {})
+            .expect_err("subsequent anonymous lease must observe committed ACL");
+    assert!(
+        denied.contains("restricted") || denied.contains("No usable"),
+        "{denied}"
+    );
+}
+
+#[test]
+fn provider_materialization_serializes_acl_revocation_with_decrypt_and_touch() {
+    let db_path = crate::utils::test_fixture_path(format!(
+        "memory-server-vault-acl-materialize-race-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let server = MemoryServer::new(db_path.clone(), None).expect("create test server");
+    let key = [8u8; 32];
+    {
+        let mut vault = server.vault_write();
+        vault.key = Some(crate::CachedVaultKey::copy_from(&key));
+        vault.unlock_time = Some(Instant::now());
+    }
+    let (encrypted_value, nonce) =
+        crate::vault_crypto::encrypt(&key, b"materialized-secret").expect("encrypt fixture");
+    let now = chrono::Utc::now().to_rfc3339();
+    let entry = memcore::vault::VaultEntry {
+        name: "OPENAI_API_KEY".to_string(),
+        encrypted_value,
+        nonce,
+        secret_type: "api_key".to_string(),
+        description: "materialization ACL race fixture".to_string(),
+        allowed_agents: None,
+        created_at: now.clone(),
+        updated_at: now,
+        accessed_at: String::new(),
+        access_count: 0,
+    };
+    server
+        .with_global_store(|store| {
+            store
+                .vault_upsert_entry(&entry)
+                .map_err(|error| error.to_string())
+        })
+        .expect("seed unrestricted provider entry");
+    let writer_store =
+        memcore::MemoryStore::open(db_path.to_string_lossy().as_ref()).expect("open writer store");
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let writer_barrier = std::sync::Arc::clone(&barrier);
+    let (attempt_tx, attempt_rx) = std::sync::mpsc::channel();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let writer_handle = std::cell::RefCell::new(None);
+    let mut restricted = entry;
+    restricted.allowed_agents = Some(vec!["agent-a".to_string()]);
+
+    let pools = load_unlocked_api_key_secret_pools_with_acl_hook_for_tests(&server, || {
+        let handle = std::thread::spawn(move || {
+            attempt_tx.send(()).expect("announce ACL revocation");
+            writer_barrier.wait();
+            writer_store
+                .vault_upsert_entry(&restricted)
+                .expect("commit ACL revocation");
+            done_tx.send(()).expect("announce committed revocation");
+        });
+        attempt_rx
+            .recv()
+            .expect("writer reached materialization revocation boundary");
+        barrier.wait();
+        assert!(
+            done_rx.recv_timeout(Duration::from_millis(250)).is_err(),
+            "ACL revocation must not commit between provider snapshot and decrypt/touch"
+        );
+        writer_handle.replace(Some(handle));
+    })
+    .expect("materialization linearizes before the blocked ACL revocation");
+    assert_eq!(pools["OPENAI_API_KEY"][0].value, "materialized-secret");
+    writer_handle
+        .into_inner()
+        .expect("writer handle")
+        .join()
+        .expect("ACL writer thread");
+    done_rx.recv().expect("ACL revocation committed");
+
+    let after = crate::vault_ops::load_unlocked_api_key_secret_pools(&server)
+        .expect("scan after ACL revocation");
+    assert!(
+        !after.contains_key("OPENAI_API_KEY"),
+        "subsequent materialization must observe the committed ACL fence"
+    );
+}
+
+#[test]
+fn provider_publication_refuses_acl_revision_drift_after_resolution() {
+    let _lock = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _env = EnvRestore::set("OPENAI_API_KEY", "vault:OPENAI_API_KEY");
+    let db_path = crate::utils::test_fixture_path(format!(
+        "memory-server-vault-acl-publish-race-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let server = MemoryServer::new(db_path.clone(), None).expect("create test server");
+    let key = [10u8; 32];
+    {
+        let mut vault = server.vault_write();
+        vault.key = Some(crate::CachedVaultKey::copy_from(&key));
+        vault.unlock_time = Some(Instant::now());
+    }
+    let (encrypted_value, nonce) =
+        crate::vault_crypto::encrypt(&key, b"must-not-publish").expect("encrypt fixture");
+    let now = chrono::Utc::now().to_rfc3339();
+    let entry = memcore::vault::VaultEntry {
+        name: "OPENAI_API_KEY".to_string(),
+        encrypted_value,
+        nonce,
+        secret_type: "api_key".to_string(),
+        description: "publication ACL drift fixture".to_string(),
+        allowed_agents: None,
+        created_at: now.clone(),
+        updated_at: now,
+        accessed_at: String::new(),
+        access_count: 0,
+    };
+    server
+        .with_global_store(|store| {
+            store
+                .vault_upsert_entry(&entry)
+                .map_err(|error| error.to_string())
+        })
+        .expect("seed provider entry");
+    let writer_store =
+        memcore::MemoryStore::open(db_path.to_string_lossy().as_ref()).expect("open writer store");
+    let mut restricted = entry;
+    restricted.allowed_agents = Some(vec!["agent-a".to_string()]);
+
+    let error =
+        crate::provider_config::materialize_for_server_with_hook_for_tests(&server, move || {
+            writer_store
+                .vault_upsert_entry(&restricted)
+                .expect("commit ACL revocation after resolution");
+        })
+        .expect_err("ACL revision drift must refuse stale provider publication");
+    assert!(error.contains("changed before publication"), "{error}");
+    assert!(
+        server
+            .llm
+            .provider_secret_for_tests(&["OPENAI_API_KEY"])
+            .is_none(),
+        "stale resolved plaintext must not publish after ACL revocation"
+    );
+
+    memcore::store::vault::VaultMutationFence::acquire(&db_path)
+        .expect("stale publication fence released after refusal")
+        .rollback()
+        .expect("release probe fence");
+
+    crate::provider_config::materialize_for_server(&server)
+        .expect("fresh refresh observes restricted provider entry");
+    assert!(server
+        .llm
+        .provider_secret_for_tests(&["OPENAI_API_KEY"])
+        .is_none());
+}
 
 #[tokio::test]
 async fn with_vault_key_drops_vault_lock_before_running_work() {
@@ -1178,4 +1627,845 @@ async fn keychain_auto_unlock_smoke() {
     let unlocked = crate::provider_config::auto_unlock_vault_from_keychain(&server)
         .expect("auto-unlock attempt should return a Result, not panic");
     eprintln!("keychain_available={available} auto_unlocked={unlocked}");
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn vault_set_infers_config_for_lane_urls_and_refuses_api_key() {
+    let _lock = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let db_path = crate::utils::test_fixture_path(format!(
+        "memory-server-vault-lane-config-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let server = MemoryServer::new(db_path, None).expect("create test server");
+    handle_vault_init(
+        &server,
+        VaultInitParams {
+            password: "lane-config-classifier".to_string(),
+        },
+    )
+    .await
+    .expect("vault init");
+
+    let set = handle_vault_set(
+        &server,
+        VaultSetParams {
+            name: "EXTRACT_BASE_URL".to_string(),
+            value: "https://api.deepseek.com/chat/completions".to_string(),
+            agent_id: None,
+            secret_type: String::new(),
+            description: "lane config".to_string(),
+            allowed_agents: None,
+            enable_rotation: false,
+            rotation_strategy: None,
+            rebind: false,
+        },
+    )
+    .await
+    .expect("inferred config write");
+    assert!(set.contains("config"), "{set}");
+
+    let refused = handle_vault_set(
+        &server,
+        VaultSetParams {
+            name: "DISTILL_MODEL".to_string(),
+            value: "deepseek-v4-flash".to_string(),
+            agent_id: None,
+            secret_type: "api_key".to_string(),
+            description: "must refuse".to_string(),
+            allowed_agents: None,
+            enable_rotation: false,
+            rotation_strategy: None,
+            rebind: false,
+        },
+    )
+    .await
+    .expect_err("explicit api_key on lane config must be refused");
+    assert!(
+        refused.contains("lane config") && refused.contains("api_key"),
+        "{refused}"
+    );
+
+    handle_vault_set(
+        &server,
+        VaultSetParams {
+            name: "DEEPSEEK_API_KEY".to_string(),
+            value: "sk-test-not-a-real-key".to_string(),
+            agent_id: None,
+            secret_type: String::new(),
+            description: "real key".to_string(),
+            allowed_agents: None,
+            enable_rotation: false,
+            rotation_strategy: None,
+            rebind: false,
+        },
+    )
+    .await
+    .expect("key write");
+
+    let listed = handle_vault_list(&server, VaultListParams { secret_type: None })
+        .await
+        .expect("list");
+    let body: serde_json::Value = serde_json::from_str(&listed).expect("list json");
+    assert_eq!(body["config"].as_array().map(Vec::len), Some(1));
+    assert_eq!(body["config"][0]["name"], "EXTRACT_BASE_URL");
+    assert_eq!(body["config"][0]["secret_type"], "config");
+    assert_eq!(body["config"][0]["group"], "config");
+    let creds = body["credentials"].as_array().expect("credentials");
+    assert!(
+        creds.iter().any(|row| row["name"] == "DEEPSEEK_API_KEY"),
+        "{body}"
+    );
+
+    let leak = handle_vault_set(
+        &server,
+        VaultSetParams {
+            name: "REASONING_BASE_URL".to_string(),
+            value: "https://user:pass@api.deepseek.com/chat/completions".to_string(),
+            agent_id: None,
+            secret_type: String::new(),
+            description: "leaky url".to_string(),
+            allowed_agents: None,
+            enable_rotation: false,
+            rotation_strategy: None,
+            rebind: false,
+        },
+    )
+    .await
+    .expect_err("userinfo URL must be refused");
+    assert!(
+        leak.contains("userinfo") || leak.contains("credential"),
+        "{leak}"
+    );
+
+    let pools = crate::vault_ops::load_unlocked_api_key_secret_pools(&server).expect("pools");
+    let pool_names: Vec<&str> = pools.keys().map(String::as_str).collect();
+    assert!(
+        !pools.contains_key("EXTRACT_BASE_URL"),
+        "config rows must not enter API-key pools: {pool_names:?}"
+    );
+    assert!(pools.contains_key("DEEPSEEK_API_KEY"), "{pool_names:?}");
+
+    handle_vault_set(
+        &server,
+        VaultSetParams {
+            name: "SUMMARY_MODEL".to_string(),
+            value: "legacy-other".to_string(),
+            agent_id: None,
+            secret_type: "other".to_string(),
+            description: "leftover other".to_string(),
+            allowed_agents: None,
+            enable_rotation: false,
+            rotation_strategy: None,
+            rebind: false,
+        },
+    )
+    .await
+    .expect("legacy other write");
+    let config_only = handle_vault_list(
+        &server,
+        VaultListParams {
+            secret_type: Some("config".to_string()),
+        },
+    )
+    .await
+    .expect("filter config");
+    let config_body: serde_json::Value = serde_json::from_str(&config_only).expect("json");
+    let config_names: Vec<&str> = config_body["config"]
+        .as_array()
+        .expect("config")
+        .iter()
+        .filter_map(|row| row["name"].as_str())
+        .collect();
+    assert!(
+        config_names.contains(&"SUMMARY_MODEL"),
+        "legacy other lane-config names must list as config: {config_body}"
+    );
+
+    let enable = handle_vault_set(
+        &server,
+        VaultSetParams {
+            name: "ENABLE_FALLBACK_API_KEY".to_string(),
+            value: "1".to_string(),
+            agent_id: None,
+            secret_type: String::new(),
+            description: "flag that also looks like a key".to_string(),
+            allowed_agents: None,
+            enable_rotation: false,
+            rotation_strategy: None,
+            rebind: false,
+        },
+    )
+    .await
+    .expect("ENABLE_* infers config even with _API_KEY suffix");
+    assert!(enable.contains("config"), "{enable}");
+
+    let leak_member = handle_vault_set(
+        &server,
+        VaultSetParams {
+            name: "EXTRACT_BASE_URL_1".to_string(),
+            value: "https://user:pass@api.deepseek.com/chat/completions".to_string(),
+            agent_id: None,
+            secret_type: String::new(),
+            description: "rotated url".to_string(),
+            allowed_agents: None,
+            enable_rotation: false,
+            rotation_strategy: None,
+            rebind: false,
+        },
+    )
+    .await
+    .expect_err("rotation member URL must still run the leak gate");
+    assert!(
+        leak_member.contains("userinfo") || leak_member.contains("credential"),
+        "{leak_member}"
+    );
+
+    let rotation = handle_vault_set(
+        &server,
+        VaultSetParams {
+            name: "EXTRACT_BASE_URL_1".to_string(),
+            value: "https://api.deepseek.com/chat/completions".to_string(),
+            agent_id: None,
+            secret_type: String::new(),
+            description: "no rotation".to_string(),
+            allowed_agents: None,
+            enable_rotation: true,
+            rotation_strategy: Some("round_robin".to_string()),
+            rebind: false,
+        },
+    )
+    .await
+    .expect_err("config members must not attach API-key rotation");
+    assert!(
+        rotation.contains("config") && rotation.contains("rotation"),
+        "{rotation}"
+    );
+
+    let custom_rotation = handle_vault_set(
+        &server,
+        VaultSetParams {
+            name: "CUSTOM_ENDPOINT_9".to_string(),
+            value: "https://custom.example.test/v1".to_string(),
+            agent_id: None,
+            secret_type: "config".to_string(),
+            description: "explicit config member".to_string(),
+            allowed_agents: None,
+            enable_rotation: true,
+            rotation_strategy: Some("round_robin".to_string()),
+            rebind: false,
+        },
+    )
+    .await
+    .expect_err("explicit config members must not create rotation state through vault_set");
+    assert!(
+        custom_rotation.contains("config") && custom_rotation.contains("refusing"),
+        "{custom_rotation}"
+    );
+    let custom_entry = server
+        .with_global_store_read(|store| {
+            store
+                .vault_get_entry("CUSTOM_ENDPOINT_9")
+                .map_err(|error| error.to_string())
+        })
+        .expect("read refused custom member");
+    assert!(
+        custom_entry.is_none(),
+        "refused config rotation member must not persist its entry"
+    );
+
+    for idx in 1..=2 {
+        handle_vault_set(
+            &server,
+            VaultSetParams {
+                name: format!("CUSTOM_POOL_{idx}"),
+                value: format!("config-value-{idx}"),
+                agent_id: None,
+                secret_type: "config".to_string(),
+                description: "existing explicit config member".to_string(),
+                allowed_agents: None,
+                enable_rotation: false,
+                rotation_strategy: None,
+                rebind: false,
+            },
+        )
+        .await
+        .expect("seed explicit config member through vault_set");
+    }
+    let mixed_rotation = handle_vault_set(
+        &server,
+        VaultSetParams {
+            name: "CUSTOM_POOL_3".to_string(),
+            value: "api-key-value-3".to_string(),
+            agent_id: None,
+            secret_type: "api_key".to_string(),
+            description: "attempt mixed rotation".to_string(),
+            allowed_agents: None,
+            enable_rotation: true,
+            rotation_strategy: Some("round_robin".to_string()),
+            rebind: false,
+        },
+    )
+    .await
+    .expect_err("existing config members must block a mixed rotation");
+    assert!(
+        mixed_rotation.contains("CUSTOM_POOL_1")
+            && mixed_rotation.contains("config")
+            && mixed_rotation.contains("refusing rotation"),
+        "{mixed_rotation}"
+    );
+    let (mixed_entry, mixed_state) = server
+        .with_global_store_read(|store| {
+            let entry = store
+                .vault_get_entry("CUSTOM_POOL_3")
+                .map_err(|error| error.to_string())?;
+            let rotation = store
+                .vault_get_rotation("CUSTOM_POOL")
+                .map_err(|error| error.to_string())?;
+            Ok::<_, String>((entry, rotation))
+        })
+        .expect("read mixed-rotation rollback state");
+    assert!(
+        mixed_entry.is_none() && mixed_state.is_none(),
+        "mixed rotation refusal must roll back the new member and rotation state"
+    );
+
+    handle_vault_set_api_key_pool(
+        &server,
+        VaultSetApiKeyPoolParams {
+            prefix: "MUTABLE_POOL_API_KEY".to_string(),
+            values: vec!["key-one".to_string(), "key-two".to_string()],
+            agent_id: None,
+            strategy: "round_robin".to_string(),
+            description: "valid pool".to_string(),
+            allowed_agents: None,
+        },
+    )
+    .await
+    .expect("create valid rotation before mutation attempt");
+    let remove_member = handle_vault_remove(
+        &server,
+        VaultRemoveParams {
+            name: "MUTABLE_POOL_API_KEY_2".to_string(),
+            agent_id: None,
+        },
+    )
+    .await
+    .expect_err("configured rotation members must not be deleted");
+    assert!(
+        remove_member.contains("rotation member") && remove_member.contains("refusing deletion"),
+        "{remove_member}"
+    );
+    let downgrade = handle_vault_set(
+        &server,
+        VaultSetParams {
+            name: "MUTABLE_POOL_API_KEY_1".to_string(),
+            value: "config-downgrade".to_string(),
+            agent_id: None,
+            secret_type: "config".to_string(),
+            description: "attempt member downgrade".to_string(),
+            allowed_agents: None,
+            enable_rotation: false,
+            rotation_strategy: None,
+            rebind: false,
+        },
+    )
+    .await
+    .expect_err("existing rotation member cannot be downgraded without enable_rotation");
+    assert!(
+        downgrade.contains("MUTABLE_POOL_API_KEY_1") && downgrade.contains("config"),
+        "{downgrade}"
+    );
+    let retained = server
+        .with_global_store_read(|store| {
+            store
+                .vault_get_entry("MUTABLE_POOL_API_KEY_1")
+                .map_err(|error| error.to_string())
+        })
+        .expect("read retained rotation member")
+        .expect("member remains after rollback");
+    assert_eq!(retained.secret_type, "api_key");
+
+    let append = handle_vault_set(
+        &server,
+        VaultSetParams {
+            name: "MUTABLE_POOL_API_KEY_3".to_string(),
+            value: "key-three".to_string(),
+            agent_id: None,
+            secret_type: "api_key".to_string(),
+            description: "attempt unconfigured append".to_string(),
+            allowed_agents: None,
+            enable_rotation: false,
+            rotation_strategy: None,
+            rebind: false,
+        },
+    )
+    .await
+    .expect_err("member append must not leave total_keys stale");
+    assert!(
+        append.contains("declares 2 keys") && append.contains("has 3"),
+        "{append}"
+    );
+    assert!(server
+        .with_global_store_read(|store| store
+            .vault_get_entry("MUTABLE_POOL_API_KEY_3")
+            .map_err(|error| error.to_string()))
+        .expect("read refused append")
+        .is_none());
+
+    let zero_member = handle_vault_set(
+        &server,
+        VaultSetParams {
+            name: "MUTABLE_POOL_API_KEY_0".to_string(),
+            value: "key-zero".to_string(),
+            agent_id: None,
+            secret_type: "api_key".to_string(),
+            description: "attempt zero-index member".to_string(),
+            allowed_agents: None,
+            enable_rotation: false,
+            rotation_strategy: None,
+            rebind: false,
+        },
+    )
+    .await
+    .expect_err("zero-index member must not bypass configured rotation validation");
+    assert!(
+        zero_member.contains("non-contiguous member index 0") && zero_member.contains("expected 1"),
+        "{zero_member}"
+    );
+
+    plant_vault_secret(
+        &server,
+        "MUTABLE_POOL_API_KEY_3",
+        "legacy-key-three",
+        "api_key",
+    );
+    let poisoned_lease = handle_vault_lease_api_key(
+        &server,
+        VaultLeaseApiKeyParams {
+            name: "MUTABLE_POOL_API_KEY".to_string(),
+            env_name: None,
+            agent_id: None,
+        },
+    )
+    .await
+    .expect_err("MCP lease must reject a stale persisted rotation count");
+    assert!(
+        poisoned_lease.contains("declares 2 keys") && poisoned_lease.contains("has 3"),
+        "{poisoned_lease}"
+    );
+
+    plant_vault_secret(&server, "EXTRA_POOL_API_KEY_1", "key-one", "api_key");
+    plant_vault_secret(&server, "EXTRA_POOL_API_KEY_2", "key-two", "api_key");
+    plant_vault_secret(&server, "EXTRA_POOL_API_KEY_3", "config-extra", "config");
+    let extra_setup = handle_vault_setup_rotation(
+        &server,
+        VaultSetupRotationParams {
+            prefix: "EXTRA_POOL_API_KEY".to_string(),
+            total_keys: 2,
+            strategy: "round_robin".to_string(),
+            agent_id: None,
+        },
+    )
+    .await
+    .expect_err("setup must inspect numeric members beyond the declared count");
+    assert!(
+        extra_setup.contains("EXTRA_POOL_API_KEY_3") && extra_setup.contains("config"),
+        "{extra_setup}"
+    );
+    let extra_set_pool = handle_vault_set_api_key_pool(
+        &server,
+        VaultSetApiKeyPoolParams {
+            prefix: "EXTRA_POOL_API_KEY".to_string(),
+            values: vec!["replacement-one".to_string(), "replacement-two".to_string()],
+            agent_id: None,
+            strategy: "round_robin".to_string(),
+            description: "must refuse extra config".to_string(),
+            allowed_agents: None,
+        },
+    )
+    .await
+    .expect_err("set-pool must refuse every structural config member");
+    assert!(
+        extra_set_pool.contains("EXTRA_POOL_API_KEY_3") && extra_set_pool.contains("config"),
+        "{extra_set_pool}"
+    );
+
+    let pool = handle_vault_set_api_key_pool(
+        &server,
+        VaultSetApiKeyPoolParams {
+            prefix: "EXTRACT_BASE_URL".to_string(),
+            values: vec!["https://api.deepseek.com/chat/completions".to_string()],
+            agent_id: None,
+            strategy: "round_robin".to_string(),
+            description: String::new(),
+            allowed_agents: None,
+        },
+    )
+    .await
+    .expect_err("API-key pool writer must refuse config prefixes");
+    assert!(
+        pool.contains("lane config") && pool.contains("api_key"),
+        "{pool}"
+    );
+
+    let nested_leak = handle_vault_set(
+        &server,
+        VaultSetParams {
+            name: "EXTRACT_BASE_URL_1_1".to_string(),
+            value: "https://user:pass@api.deepseek.com/chat/completions".to_string(),
+            agent_id: None,
+            secret_type: String::new(),
+            description: "double suffix".to_string(),
+            allowed_agents: None,
+            enable_rotation: false,
+            rotation_strategy: None,
+            rebind: false,
+        },
+    )
+    .await
+    .expect_err("nested rotation suffix must still be a config URL");
+    assert!(
+        nested_leak.contains("userinfo") || nested_leak.contains("credential"),
+        "{nested_leak}"
+    );
+
+    let leased = handle_vault_lease_api_key(
+        &server,
+        VaultLeaseApiKeyParams {
+            name: "EXTRACT_BASE_URL".to_string(),
+            env_name: None,
+            agent_id: None,
+        },
+    )
+    .await
+    .expect_err("config URLs must not lease as API keys");
+    assert!(leased.contains("lane config"), "{leased}");
+}
+
+#[tokio::test]
+async fn rotated_get_rejects_legacy_mixed_members_and_access_advance_preserves_new_count() {
+    let db_path = crate::utils::test_fixture_path(format!(
+        "memory-server-vault-rotation-final-state-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let server = MemoryServer::new(db_path, None).expect("create test server");
+    handle_vault_init(
+        &server,
+        VaultInitParams {
+            password: "rotation-final-state".to_string(),
+        },
+    )
+    .await
+    .expect("vault init");
+
+    plant_vault_secret(&server, "LEGACY_MIXED_1", "key-one", "api_key");
+    plant_vault_secret(&server, "LEGACY_MIXED_2", "not-a-key", "config");
+    server
+        .with_global_store(|store| {
+            store
+                .vault_set_rotation(&memcore::vault::VaultKeyRotation {
+                    prefix: "LEGACY_MIXED".to_string(),
+                    current_index: 2,
+                    total_keys: 2,
+                    rotation_strategy: "round_robin".to_string(),
+                    created_at: "2026-01-01T00:00:00Z".to_string(),
+                    updated_at: "2026-01-01T00:00:00Z".to_string(),
+                })
+                .map_err(|error| error.to_string())
+        })
+        .expect("seed legacy mixed rotation");
+    let mixed_get = handle_vault_get(
+        &server,
+        VaultGetParams {
+            name: "LEGACY_MIXED".to_string(),
+            agent_id: None,
+            auto_rotate: true,
+        },
+    )
+    .await
+    .expect_err("rotated get must reject a legacy config member");
+    assert!(
+        mixed_get.contains("LEGACY_MIXED_2") && mixed_get.contains("config"),
+        "{mixed_get}"
+    );
+    let explicit_mixed_get = handle_vault_get(
+        &server,
+        VaultGetParams {
+            name: "LEGACY_MIXED_2".to_string(),
+            agent_id: None,
+            auto_rotate: false,
+        },
+    )
+    .await
+    .expect_err("explicit configured member get must validate the canonical rotation");
+    assert!(
+        explicit_mixed_get.contains("LEGACY_MIXED_2") && explicit_mixed_get.contains("config"),
+        "{explicit_mixed_get}"
+    );
+
+    handle_vault_set_api_key_pool(
+        &server,
+        VaultSetApiKeyPoolParams {
+            prefix: "RACE_POOL_API_KEY".to_string(),
+            values: vec!["one".to_string(), "two".to_string()],
+            agent_id: None,
+            strategy: "round_robin".to_string(),
+            description: String::new(),
+            allowed_agents: None,
+        },
+    )
+    .await
+    .expect("create two-member pool");
+    let stale_rotation = server
+        .with_global_store_read(|store| {
+            store
+                .vault_get_rotation("RACE_POOL_API_KEY")
+                .map_err(|error| error.to_string())
+        })
+        .expect("read stale rotation")
+        .expect("rotation exists");
+    handle_vault_set_api_key_pool(
+        &server,
+        VaultSetApiKeyPoolParams {
+            prefix: "RACE_POOL_API_KEY".to_string(),
+            values: vec![
+                "one-new".to_string(),
+                "two-new".to_string(),
+                "three".to_string(),
+            ],
+            agent_id: None,
+            strategy: "round_robin".to_string(),
+            description: String::new(),
+            allowed_agents: None,
+        },
+    )
+    .await
+    .expect("expand pool to three members");
+    server
+        .with_global_store(|store| {
+            record_successful_vault_access(store, "RACE_POOL_API_KEY_2", Some(&stale_rotation))
+        })
+        .expect("stale access completion must re-read current rotation");
+    let final_rotation = server
+        .with_global_store_read(|store| {
+            store
+                .vault_get_rotation("RACE_POOL_API_KEY")
+                .map_err(|error| error.to_string())
+        })
+        .expect("read final rotation")
+        .expect("rotation remains");
+    assert_eq!(final_rotation.total_keys, 3);
+    assert_eq!(final_rotation.current_index, 3);
+}
+
+fn plant_vault_secret(server: &MemoryServer, name: &str, value: &str, secret_type: &str) {
+    with_vault_key(server, |key| {
+        let (encrypted_value, nonce) =
+            crate::vault_crypto::encrypt(key, value.as_bytes()).map_err(|e| e.to_string())?;
+        let now = chrono::Utc::now().to_rfc3339();
+        server
+            .with_global_store(|store| {
+                store
+                    .vault_upsert_entry(&memcore::vault::VaultEntry {
+                        name: name.to_string(),
+                        encrypted_value,
+                        nonce,
+                        secret_type: secret_type.to_string(),
+                        description: "leftover plant".to_string(),
+                        allowed_agents: None,
+                        created_at: now.clone(),
+                        updated_at: now,
+                        accessed_at: String::new(),
+                        access_count: 0,
+                    })
+                    .map_err(|e| e.to_string())
+            })
+            .map_err(|e| format!("plant {name}: {e}"))
+    })
+    .unwrap_or_else(|e| panic!("plant {name}: {e}"));
+}
+
+/// Pre-#1857 omitted types defaulted to `api_key`. Leftover
+/// `EXTRACT_BASE_URL` rows must list as config. Explicit `config` on a
+/// non-lane-config name (`CUSTOM_ENDPOINT`) must still refuse to lease.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn leftover_api_key_lane_config_lists_as_config_and_config_rows_do_not_lease() {
+    let _lock = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let db_path = crate::utils::test_fixture_path(format!(
+        "memory-server-vault-leftover-api-key-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let server = MemoryServer::new(db_path, None).expect("create test server");
+    handle_vault_init(
+        &server,
+        VaultInitParams {
+            password: "leftover-api-key".to_string(),
+        },
+    )
+    .await
+    .expect("vault init");
+
+    plant_vault_secret(
+        &server,
+        "EXTRACT_BASE_URL",
+        "https://api.deepseek.com/chat/completions",
+        "api_key",
+    );
+    plant_vault_secret(
+        &server,
+        "CUSTOM_ENDPOINT",
+        "https://example.test/v1",
+        "config",
+    );
+    plant_vault_secret(
+        &server,
+        "CUSTOM_ENDPOINT_1",
+        "https://one.example.test/v1",
+        "config",
+    );
+    plant_vault_secret(
+        &server,
+        "CUSTOM_ENDPOINT_2",
+        "https://two.example.test/v1",
+        "config",
+    );
+
+    let setup = handle_vault_setup_rotation(
+        &server,
+        VaultSetupRotationParams {
+            prefix: "CUSTOM_ENDPOINT".to_string(),
+            total_keys: 2,
+            strategy: "round_robin".to_string(),
+            agent_id: None,
+        },
+    )
+    .await
+    .expect_err("explicit config members must not form an API-key rotation");
+    assert!(
+        setup.contains("CUSTOM_ENDPOINT_1")
+            && setup.contains("config")
+            && setup.contains("refusing rotation"),
+        "{setup}"
+    );
+    let stored_rotation = server
+        .with_global_store_read(|store| {
+            store
+                .vault_get_rotation("CUSTOM_ENDPOINT")
+                .map_err(|error| error.to_string())
+        })
+        .expect("read rotation state");
+    assert!(
+        stored_rotation.is_none(),
+        "refused config rotation must persist no rotation state"
+    );
+
+    let listed = handle_vault_list(&server, VaultListParams { secret_type: None })
+        .await
+        .expect("list");
+    let body: serde_json::Value = serde_json::from_str(&listed).expect("list json");
+    let config_names: Vec<&str> = body["config"]
+        .as_array()
+        .expect("config")
+        .iter()
+        .filter_map(|row| row["name"].as_str())
+        .collect();
+    let cred_names: Vec<&str> = body["credentials"]
+        .as_array()
+        .expect("credentials")
+        .iter()
+        .filter_map(|row| row["name"].as_str())
+        .collect();
+    assert!(
+        config_names.contains(&"EXTRACT_BASE_URL"),
+        "leftover api_key EXTRACT_BASE_URL must list as config: {body}"
+    );
+    assert!(
+        config_names.contains(&"CUSTOM_ENDPOINT"),
+        "explicit config CUSTOM_ENDPOINT must list as config: {body}"
+    );
+    assert!(
+        !cred_names.contains(&"EXTRACT_BASE_URL"),
+        "leftover EXTRACT_BASE_URL must not stay in credentials: {body}"
+    );
+    assert!(
+        !cred_names.contains(&"CUSTOM_ENDPOINT"),
+        "CUSTOM_ENDPOINT config must not list as a credential: {body}"
+    );
+
+    let leftover = body["config"]
+        .as_array()
+        .expect("config")
+        .iter()
+        .find(|row| row["name"] == "EXTRACT_BASE_URL")
+        .expect("leftover row");
+    assert_eq!(leftover["secret_type"], "config");
+    assert_eq!(leftover["group"], "config");
+
+    let keys_only = handle_vault_list(
+        &server,
+        VaultListParams {
+            secret_type: Some("api_key".to_string()),
+        },
+    )
+    .await
+    .expect("filter api_key");
+    let keys_body: serde_json::Value = serde_json::from_str(&keys_only).expect("json");
+    let key_names: Vec<&str> = keys_body["secrets"]
+        .as_array()
+        .expect("secrets")
+        .iter()
+        .filter_map(|row| row["name"].as_str())
+        .collect();
+    assert!(
+        !key_names.contains(&"EXTRACT_BASE_URL"),
+        "secret_type=api_key filter must hide leftover lane config: {keys_body}"
+    );
+
+    let leased_url = handle_vault_lease_api_key(
+        &server,
+        VaultLeaseApiKeyParams {
+            name: "EXTRACT_BASE_URL".to_string(),
+            env_name: None,
+            agent_id: None,
+        },
+    )
+    .await
+    .expect_err("leftover lane-config url must not lease");
+    assert!(
+        leased_url.contains("lane config") || leased_url.contains("not a credential"),
+        "{leased_url}"
+    );
+
+    let leased_custom = handle_vault_lease_api_key(
+        &server,
+        VaultLeaseApiKeyParams {
+            name: "CUSTOM_ENDPOINT".to_string(),
+            env_name: None,
+            agent_id: None,
+        },
+    )
+    .await
+    .expect_err("explicit config rows must not lease even when the name is not lane-config-shaped");
+    assert!(
+        leased_custom.contains("config") && leased_custom.contains("not a credential"),
+        "{leased_custom}"
+    );
+
+    let pools = crate::vault_ops::load_unlocked_api_key_secret_pools(&server).expect("pools");
+    assert!(
+        !pools.contains_key("EXTRACT_BASE_URL"),
+        "leftover api_key EXTRACT_BASE_URL must not enter API-key pools: {:?}",
+        pools.keys().collect::<Vec<_>>()
+    );
+    assert!(
+        !pools.contains_key("CUSTOM_ENDPOINT"),
+        "config CUSTOM_ENDPOINT must not enter API-key pools: {:?}",
+        pools.keys().collect::<Vec<_>>()
+    );
 }

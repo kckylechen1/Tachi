@@ -185,18 +185,26 @@ pub(super) async fn run_session_action(
                 .vault_list_entries()
                 .map_err(|e| format!("vault_list_entries: {e}"))?;
 
-            if entries.is_empty() {
-                println!("(no secrets stored)");
-            } else {
-                println!("{:<30} {:<12} DESCRIPTION", "NAME", "TYPE");
-                for entry in &entries {
-                    println!(
-                        "{:<30} {:<12} {}",
-                        entry.name, entry.secret_type, entry.description
-                    );
+            let mut config = Vec::new();
+            let mut credentials = Vec::new();
+            for entry in entries {
+                let secret_type =
+                    memcore::effective_vault_secret_type(&entry.name, &entry.secret_type);
+                let row = super::output::VaultListRow {
+                    name: entry.name,
+                    secret_type: secret_type.to_string(),
+                    description: entry.description,
+                };
+                if secret_type == memcore::SECRET_TYPE_CONFIG {
+                    config.push(row);
+                } else {
+                    credentials.push(row);
                 }
-                println!("\n{} secret(s) total.", entries.len());
             }
+            print!(
+                "{}",
+                super::output::format_vault_list_groups(&config, &credentials)
+            );
             Ok(())
         }
         _ => unreachable!("session action router received non-session action"),
