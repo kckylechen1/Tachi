@@ -641,7 +641,7 @@ pub fn ack_delivered(
     }
     let now = now_utc_iso();
     let intent = find_intent_by_id(conn, delivery_id)?
-        .ok_or_else(|| MemoryError::NotFound(format!("delivery intent not found")))?;
+        .ok_or_else(|| MemoryError::NotFound("delivery intent not found".to_string()))?;
 
     // Authorization BEFORE state disclosure: a caller outside the intent's
     // requester binding gets the same generic refusal as a missing intent —
@@ -770,7 +770,7 @@ pub fn reject_or_block(
     validate_detail(detail)?;
     let now = now_utc_iso();
     let intent = find_intent_by_id(conn, delivery_id)?
-        .ok_or_else(|| MemoryError::NotFound(format!("delivery intent not found")))?;
+        .ok_or_else(|| MemoryError::NotFound("delivery intent not found".to_string()))?;
 
     // Authorization BEFORE state disclosure (same law as ack).
     if !requester_matches(&intent, caller) {
