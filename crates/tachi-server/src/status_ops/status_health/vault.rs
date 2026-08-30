@@ -25,6 +25,7 @@ pub(crate) struct KeychainApiKeyScan {
     pub dropped: HashMap<String, AliasSkipClass>,
     pub rotation_prefixes: HashSet<String>,
     pub source_readable: bool,
+    pub acl_revision: Option<u64>,
 }
 
 pub(crate) fn load_keychain_vault_api_key_values(
@@ -48,6 +49,7 @@ fn empty_keychain_scan() -> KeychainApiKeyScan {
         dropped: HashMap::new(),
         rotation_prefixes: HashSet::new(),
         source_readable: false,
+        acl_revision: None,
     }
 }
 
@@ -88,7 +90,8 @@ fn load_keychain_vault_api_key_scan_with_password(
         )
     })?;
     let store = memcore::MemoryStore::open_read_only(vault_db_str)?;
-    let Some(config) = store.vault_get_config()? else {
+    let transaction = store.begin_vault_read_transaction_shared()?;
+    let Some(config) = transaction.vault_get_config()? else {
         return Ok(empty_keychain_scan());
     };
 
@@ -99,8 +102,10 @@ fn load_keychain_vault_api_key_scan_with_password(
         return Ok(empty_keychain_scan());
     };
 
-    let entries = store.vault_list_entries()?;
-    let rotations = store.vault_list_rotations()?;
+    let entries = transaction.vault_list_entries()?;
+    let rotations = transaction.vault_list_rotations()?;
+    let acl_revision =
+        crate::vault_ops::vault_materialization_acl_revision_from_rows(&entries, &rotations);
     for rotation in &rotations {
         memcore::validate_api_key_rotation(&entries, rotation).map_err(|error| {
             std::io::Error::new(
@@ -113,7 +118,7 @@ fn load_keychain_vault_api_key_scan_with_password(
         .into_iter()
         .map(|rotation| rotation.prefix)
         .collect::<HashSet<_>>();
-    let key_health_rows = store.vault_list_key_health(None)?;
+    let key_health_rows = transaction.vault_list_key_health(None)?;
     let mut scan = scan_keychain_api_key_entries(
         entries,
         &key,
@@ -122,6 +127,8 @@ fn load_keychain_vault_api_key_scan_with_password(
         Utc::now(),
     )?;
     scan.rotation_prefixes = rotation_prefixes;
+    scan.acl_revision = Some(acl_revision);
+    transaction.commit()?;
     Ok(scan)
 }
 
@@ -205,6 +212,7 @@ fn scan_keychain_api_key_entries(
         dropped,
         rotation_prefixes: rotation_prefixes.clone(),
         source_readable: true,
+        acl_revision: None,
     })
 }
 

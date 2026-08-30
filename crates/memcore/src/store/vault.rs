@@ -174,6 +174,18 @@ impl MemoryStore {
         })
     }
 
+    /// Begin a deferred read snapshot for read-only Vault scanners. All rows
+    /// used to derive a publication revision share one SQLite snapshot, while
+    /// callers retain compatibility with read-only database files. A later
+    /// mutation fence must recheck the derived revision before publication.
+    pub fn begin_vault_read_transaction_shared(&self) -> Result<VaultTransaction<'_>, MemoryError> {
+        let transaction =
+            rusqlite::Transaction::new_unchecked(&self.conn, TransactionBehavior::Deferred)?;
+        Ok(VaultTransaction {
+            transaction: Some(transaction),
+        })
+    }
+
     // ─── Vault Entries ───────────────────────────────────────────────────────
 
     /// Get vault configuration (returns None if not initialized).
@@ -436,6 +448,28 @@ mod tests {
             created_at: "2026-01-01T00:00:00Z".to_string(),
             updated_at: "2026-01-01T00:00:00Z".to_string(),
         }
+    }
+
+    #[test]
+    fn vault_read_snapshot_transaction_works_on_read_only_connection() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("memory.db");
+        let writable = MemoryStore::open(path.to_str().expect("UTF-8 path")).expect("open store");
+        writable
+            .vault_upsert_entry(&test_entry("READ_ONLY_API_KEY"))
+            .expect("seed entry");
+        drop(writable);
+
+        let read_only = MemoryStore::open_read_only(path.to_str().expect("UTF-8 path"))
+            .expect("open read-only store");
+        let transaction = read_only
+            .begin_vault_read_transaction_shared()
+            .expect("begin read snapshot");
+        assert!(transaction
+            .vault_get_entry("READ_ONLY_API_KEY")
+            .expect("read entry")
+            .is_some());
+        transaction.commit().expect("commit read snapshot");
     }
 
     /// Metadata-only timestamp listing must not require ciphertext fields and

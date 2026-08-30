@@ -154,7 +154,7 @@ fn durable_load_from_keychain_scan(
             availability,
         },
         lane_config_values: scan.lane_config_values,
-        acl_revision: None,
+        acl_revision: scan.acl_revision,
     }
 }
 
@@ -497,24 +497,29 @@ fn materialize_for_server_inner(
                 if let Some(hook) = after_vault_pools_resolved {
                     hook();
                 }
-                if let Some(expected_revision) = expected_revision {
+                if source_path.exists() {
                     let fence = memcore::store::vault::VaultMutationFence::acquire(&source_path)
                         .map_err(|error| {
                             format!("Failed to fence Vault provider publication: {error}")
                         })?;
-                    let actual_revision = server.with_global_store_read(|store| {
-                        crate::vault_ops::vault_materialization_acl_revision(store)
-                    })?;
-                    if actual_revision != expected_revision {
-                        fence.rollback().map_err(|error| {
-                            format!("Failed to release stale Vault publication fence: {error}")
-                        })?;
-                        return Err(
+                    if let Some(expected_revision) = expected_revision {
+                        let actual_revision = vault_acl_revision_at_path(&source_path)?;
+                        if actual_revision != expected_revision {
+                            fence.rollback().map_err(|error| {
+                                format!("Failed to release stale Vault publication fence: {error}")
+                            })?;
+                            return Err(
                         "Vault ACL, type, rotation, or entry revision changed before publication; retry provider refresh"
                             .to_string(),
-                    );
+                            );
+                        }
                     }
                     *publication_fence.borrow_mut() = Some(fence);
+                } else if expected_revision.is_some() {
+                    return Err(format!(
+                        "Vault source {} disappeared before provider publication",
+                        source_path.display()
+                    ));
                 }
                 Ok(load)
             },
@@ -546,6 +551,15 @@ fn materialize_for_server_inner(
         Ok(report) => Ok(report),
         Err(error) => Err(format_provider_materialization_error(error)),
     }
+}
+
+fn vault_acl_revision_at_path(source_path: &Path) -> Result<u64, String> {
+    let path = source_path
+        .to_str()
+        .ok_or_else(|| "Vault source path is not valid UTF-8".to_string())?;
+    let store = memcore::MemoryStore::open_read_only(path)
+        .map_err(|error| format!("Failed to reopen Vault source for revision check: {error}"))?;
+    crate::vault_ops::vault_materialization_acl_revision(&store)
 }
 
 fn annotate_non_model_drops(
@@ -752,16 +766,54 @@ pub fn materialize_standalone(
     llm: &LlmClient,
     global_db_path: &Path,
 ) -> Result<MaterializeReport, String> {
+    materialize_standalone_inner(llm, global_db_path, None)
+}
+
+fn materialize_standalone_inner(
+    llm: &LlmClient,
+    global_db_path: &Path,
+    after_vault_pools_resolved: Option<Box<dyn FnOnce() + Send>>,
+) -> Result<MaterializeReport, String> {
     let lane_config_values = std::cell::RefCell::new(None);
+    let publication_fence = std::cell::RefCell::new(None);
     tachi_llm::materialize_provider_secrets_from_durable_source_with_snapshot(
         llm,
         provider_env_keys(),
         || {
             let resolved = resolve_vault_pools(None, global_db_path)?;
+            let expected_revision = resolved.acl_revision;
+            let source_path = resolved.source_path.clone();
             *lane_config_values.borrow_mut() = Some(resolved.lane_config_values);
             let mut load = resolved.load;
             annotate_non_model_drops(&load.pools, &mut load.listed_drops);
             load.pools = filter_model_provider_pools(load.pools);
+            if let Some(hook) = after_vault_pools_resolved {
+                hook();
+            }
+            if source_path.exists() {
+                let fence = memcore::store::vault::VaultMutationFence::acquire(&source_path)
+                    .map_err(|error| {
+                        format!("Failed to fence standalone Vault publication: {error}")
+                    })?;
+                if let Some(expected_revision) = expected_revision {
+                    let actual_revision = vault_acl_revision_at_path(&source_path)?;
+                    if actual_revision != expected_revision {
+                        fence.rollback().map_err(|error| {
+                            format!("Failed to release stale standalone Vault fence: {error}")
+                        })?;
+                        return Err(
+                            "Vault ACL, type, rotation, or entry revision changed before standalone publication; retry provider refresh"
+                                .to_string(),
+                        );
+                    }
+                }
+                *publication_fence.borrow_mut() = Some(fence);
+            } else if expected_revision.is_some() {
+                return Err(format!(
+                    "Vault source {} disappeared before standalone publication",
+                    source_path.display()
+                ));
+            }
             Ok(load)
         },
         |provider_snapshot| {
@@ -776,9 +828,29 @@ pub fn materialize_standalone(
             provider_snapshot.validated_runtime_config(llm, &overlay)?;
             Ok((provider_snapshot, Some(overlay), ()))
         },
-        |()| Ok(()),
+        |()| {
+            let Some(fence) = publication_fence.borrow_mut().take() else {
+                return Ok(());
+            };
+            fence
+                .commit()
+                .map_err(|error| format!("Failed to commit standalone Vault fence: {error}"))
+        },
     )
     .map_err(format_provider_materialization_error)
+}
+
+#[cfg(test)]
+fn materialize_standalone_with_hook_for_tests(
+    llm: &LlmClient,
+    global_db_path: &Path,
+    after_vault_pools_resolved: impl FnOnce() + Send + 'static,
+) -> Result<MaterializeReport, String> {
+    materialize_standalone_inner(
+        llm,
+        global_db_path,
+        Some(Box::new(after_vault_pools_resolved)),
+    )
 }
 
 /// Check whether the macOS Keychain contains the background auto-unlock entry
@@ -1419,6 +1491,71 @@ mod tests {
     use super::*;
     use crate::test_support::EnvRestore;
 
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn standalone_keychain_publication_refuses_acl_revision_drift() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _password = EnvRestore::set("TACHI_TEST_KEYCHAIN_PASSWORD", "standalone-password");
+        let _alias = EnvRestore::set("VOYAGE_API_KEY", "vault:VOYAGE_API_KEY");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("memory.db");
+        let server = MemoryServer::new(db_path.clone(), None).expect("server");
+        crate::vault_ops::handle_vault_init(
+            &server,
+            crate::vault_ops::VaultInitParams {
+                password: "standalone-password".to_string(),
+            },
+        )
+        .await
+        .expect("init vault");
+        crate::vault_ops::handle_vault_set(
+            &server,
+            crate::vault_ops::VaultSetParams {
+                name: "VOYAGE_API_KEY".to_string(),
+                value: "stale-secret".to_string(),
+                agent_id: None,
+                secret_type: "api_key".to_string(),
+                description: String::new(),
+                allowed_agents: None,
+                enable_rotation: false,
+                rotation_strategy: None,
+                rebind: false,
+            },
+        )
+        .await
+        .expect("seed secret");
+        drop(server);
+
+        let llm = LlmClient::new().expect("llm client");
+        let writer_path = db_path.clone();
+        let error = materialize_standalone_with_hook_for_tests(&llm, &db_path, move || {
+            let store =
+                memcore::MemoryStore::open(writer_path.to_str().expect("UTF-8 writer path"))
+                    .expect("open writer");
+            let mut entry = store
+                .vault_get_entry("VOYAGE_API_KEY")
+                .expect("read entry")
+                .expect("entry exists");
+            entry.allowed_agents = Some(vec!["agent-a".to_string()]);
+            store.vault_upsert_entry(&entry).expect("revoke ACL");
+        })
+        .expect_err("standalone publication must reject ACL drift");
+        assert!(error.contains("revision changed"), "{error}");
+        assert!(
+            llm.provider_secret_for_tests(&["VOYAGE_API_KEY"]).is_none(),
+            "stale Keychain plaintext must not publish"
+        );
+
+        materialize_standalone(&llm, &db_path)
+            .expect("retry should observe the restricted entry and complete safely");
+        assert!(
+            llm.provider_secret_for_tests(&["VOYAGE_API_KEY"]).is_none(),
+            "restricted Keychain entry must remain absent after retry"
+        );
+    }
+
     #[test]
     fn vault_config_exists_fails_closed_for_corrupt_database() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1830,6 +1967,7 @@ mod tests {
                 dropped: HashMap::new(),
                 rotation_prefixes: HashSet::new(),
                 source_readable: true,
+                acl_revision: Some(0),
             });
         assert!(load.load.pools.is_empty());
         assert!(load.load.listed_drops.is_empty());

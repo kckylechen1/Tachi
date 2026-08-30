@@ -572,7 +572,7 @@ pub(crate) struct ProviderSecretScan {
     pub acl_revision: u64,
 }
 
-fn vault_materialization_acl_revision_from_rows(
+pub(crate) fn vault_materialization_acl_revision_from_rows(
     entries: &[VaultEntry],
     rotations: &[VaultKeyRotation],
 ) -> u64 {
