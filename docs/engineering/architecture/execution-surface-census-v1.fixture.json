@@ -9,16 +9,16 @@
   "provisional_budgets": {
     "profiles": {
       "admin": {
-        "max_total_input_schema_bytes": 142072,
-        "max_total_tool_definition_bytes": 173432,
+        "max_total_input_schema_bytes": 142353,
+        "max_total_tool_definition_bytes": 173713,
         "max_visible_tools": 83,
-        "rationale": "Exact live observed #1691 census for admin after profile-specific tools/list narrowing; any regrowth requires explicit adjudication.; #1454 server-run tachi_verify surface (action=run, +check_kind/+timeout_secs props; +1131 schema bytes / +1365 tool-definition bytes per profile) re-pinned after the rebase onto 53939b5b5 (main #1690/#1691 retirements); #1322 declared_file_scope on tachi_staff, including its exact serialized schema bytes; any further regrowth requires explicit adjudication.; #1861 vault_set explicit rebind property re-pinned to the exact live admin surface; #1679 adds the tachi_delivery seam (6 actions, +1771 schema bytes / +2198 tool-def bytes, coordinate+admin visibility only) for the durable delivery spine"
+        "rationale": "Exact live observed #1691 census for admin after profile-specific tools/list narrowing; any regrowth requires explicit adjudication.; #1454 server-run tachi_verify surface (action=run, +check_kind/+timeout_secs props; +1131 schema bytes / +1365 tool-definition bytes per profile) re-pinned after the rebase onto 53939b5b5 (main #1690/#1691 retirements); #1322 declared_file_scope on tachi_staff, including its exact serialized schema bytes; any further regrowth requires explicit adjudication.; #1861 vault_set explicit rebind property re-pinned to the exact live admin surface; #1679 adds the tachi_delivery seam (6 actions, +1771 schema bytes / +2198 tool-def bytes, coordinate+admin visibility only) for the durable delivery spine; #1679 re-measured after the delivery seam action field became a closed wire enum (denominator matches tachi_a2a)"
       },
       "coordinate": {
-        "max_total_input_schema_bytes": 96472,
-        "max_total_tool_definition_bytes": 110389,
+        "max_total_input_schema_bytes": 96753,
+        "max_total_tool_definition_bytes": 110670,
         "max_visible_tools": 30,
-        "rationale": "Exact live observed #1691 census for coordinate after profile-specific tools/list narrowing; any regrowth requires explicit adjudication.; #1454 server-run tachi_verify surface (action=run, +check_kind/+timeout_secs props; +1131 schema bytes / +1365 tool-definition bytes per profile) re-pinned after the rebase onto 53939b5b5 (main #1690/#1691 retirements); #1322 declared_file_scope on tachi_staff, including its exact serialized schema bytes; #1678 session-spine mutation policy narrows coordinate tachi_agent_eval schema; any further regrowth requires explicit adjudication.; #1679 adds the tachi_delivery seam (6 actions, +1771 schema bytes / +2198 tool-def bytes, coordinate+admin visibility only) for the durable delivery spine"
+        "rationale": "Exact live observed #1691 census for coordinate after profile-specific tools/list narrowing; any regrowth requires explicit adjudication.; #1454 server-run tachi_verify surface (action=run, +check_kind/+timeout_secs props; +1131 schema bytes / +1365 tool-definition bytes per profile) re-pinned after the rebase onto 53939b5b5 (main #1690/#1691 retirements); #1322 declared_file_scope on tachi_staff, including its exact serialized schema bytes; #1678 session-spine mutation policy narrows coordinate tachi_agent_eval schema; any further regrowth requires explicit adjudication.; #1679 adds the tachi_delivery seam (6 actions, +1771 schema bytes / +2198 tool-def bytes, coordinate+admin visibility only) for the durable delivery spine; #1679 re-measured after the delivery seam action field became a closed wire enum (denominator matches tachi_a2a)"
       },
       "delegate": {
         "max_total_input_schema_bytes": 38713,
@@ -72,17 +72,6 @@
           "list",
           "plan",
           "show"
-        ]
-      },
-      "tachi_delivery": {
-        "action_count": 6,
-        "actions": [
-          "ack_delivered",
-          "claim_ready_delivery",
-          "dismiss",
-          "get",
-          "reject_or_block",
-          "resume_requester_operation"
         ]
       },
       "tachi_event": {
@@ -201,8 +190,8 @@
     },
     "profiles": {
       "admin": {
-        "total_input_schema_bytes": 142072,
-        "total_tool_definition_bytes": 173432,
+        "total_input_schema_bytes": 142353,
+        "total_tool_definition_bytes": 173713,
         "visible_tool_count": 83,
         "visible_tools": [
           "archive_memory",
@@ -291,8 +280,8 @@
         ]
       },
       "coordinate": {
-        "total_input_schema_bytes": 96472,
-        "total_tool_definition_bytes": 110389,
+        "total_input_schema_bytes": 96753,
+        "total_tool_definition_bytes": 110670,
         "visible_tool_count": 30,
         "visible_tools": [
           "extract_facts",
