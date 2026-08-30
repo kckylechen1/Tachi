@@ -36,6 +36,13 @@
 //!   binding comes from ADMITTED identity only, and the delivery policy is
 //!   one of the four frozen policies carried on the intent — set by the
 //!   terminal planes (server-side), never by worker-reported prose.
+//! - **Lost-ack visibility contract.** A crash after send but before ack is
+//!   indistinguishable from a crash before send AT THE SPINE: the claim
+//!   lease expires, the intent re-arms, and the re-claim carries an
+//!   incremented `attempt_count`. Exactly-once VISIBLE delivery therefore
+//!   requires the host to dedupe its own sends on the receipt identity
+//!   `(delivery_id, attempt_count)` — the spine guarantees the same intent,
+//!   never a duplicate lifecycle row.
 //! - **Ambiguous send never auto-reduplicates.** An
 //!   `ambiguous_send_outcome` blocker parks the intent in `blocked`; claims
 //!   pick up `ready`/`retrying` only. Only an affirmative requester re-arm
@@ -417,7 +424,10 @@ pub fn mint_delivery_intent(
         return reconcile_mint(conn, existing, new, &now);
     }
 
-    conn.execute(
+    // Row + ledger events land atomically: a mint is never observable as a
+    // bare row without its receipts.
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
         "INSERT INTO delivery_intents (
             delivery_id, idempotency_key, execution_source, execution_ref,
             terminal_receipt_revision, work_claim_id, result_ref, result_revision,
@@ -449,7 +459,7 @@ pub fn mint_delivery_intent(
     )?;
 
     append_event(
-        conn,
+        &tx,
         &delivery_id,
         &format!("intent_created:{delivery_id}"),
         DeliveryEventKind::IntentCreated,
@@ -460,7 +470,7 @@ pub fn mint_delivery_intent(
         &now,
     )?;
     append_event(
-        conn,
+        &tx,
         &delivery_id,
         &format!("ready:{delivery_id}:{}", new.result_revision),
         DeliveryEventKind::ResultReady,
@@ -470,6 +480,7 @@ pub fn mint_delivery_intent(
         "tachi",
         &now,
     )?;
+    tx.commit()?;
 
     find_intent_by_id(conn, &delivery_id)?
         .ok_or_else(|| MemoryError::Internal("minted delivery intent not found".to_string()))
@@ -505,38 +516,24 @@ pub fn claim_ready_delivery(
     };
     let claim_expires_at = lease_expiration(&now, lease)?;
 
+    // Claim-key resolution comes FIRST, before any claim path: the same key
+    // replayed for the SAME intent must return the original receipt
+    // (replay-safe claim), and the same key found on ANY other intent is a
+    // typed conflict — never a second delivery.
+    let replayed = resolve_claim_key_replay(conn, request)?;
+    if let Some(outcome) = replayed {
+        return Ok(outcome);
+    }
+
     release_expired_claims_for_caller(conn, &request.caller, &now)?;
 
     if let Some(delivery_id) = &request.only_delivery_id {
         let intent = find_intent_by_id(conn, delivery_id)?
             .ok_or_else(|| MemoryError::NotFound(format!("delivery intent {delivery_id}")))?;
-        if intent.active_claim_key.as_deref() == Some(request.claim_key.as_str())
-            && intent.delivery_state == DeliveryState::RequesterQueued.as_str()
-        {
-            return Ok(DeliveryClaimOutcome::ReplayedClaim(
-                DeliveryClaimView::from_intent(&intent),
-            ));
-        }
         if !claimable_state(&intent, &now) || !requester_matches(&intent, &request.caller) {
             return Ok(DeliveryClaimOutcome::NoneReady);
         }
         return transition_to_claimed(conn, intent, request, &now, &claim_expires_at);
-    }
-
-    // Cross-intent claim-key replay detection: a claim key already recorded
-    // on a DIFFERENT intent is a conflict (never a second delivery).
-    let replay_row: Option<String> = conn
-        .query_row(
-            "SELECT delivery_id FROM delivery_events
-             WHERE event_id = ?1 AND delivery_id != ?2 LIMIT 1",
-            params![format!("claim:{}", request.claim_key), ""],
-            |row| row.get(0),
-        )
-        .optional()?;
-    if let Some(other) = replay_row {
-        return Err(MemoryError::DeliveryIdempotencyConflict(format!(
-            "claim_key already recorded against delivery intent {other}"
-        )));
     }
 
     let mut candidates = load_claimable_intents(conn, &request.caller, &now)?;
@@ -548,14 +545,57 @@ pub fn claim_ready_delivery(
     let Some(intent) = candidates.into_iter().next() else {
         return Ok(DeliveryClaimOutcome::NoneReady);
     };
-    if intent.active_claim_key.as_deref() == Some(request.claim_key.as_str()) {
-        // Same key reached the same intent through the scan path (e.g. the
-        // earlier claim's row is still queued and unexpired): replay.
-        return Ok(DeliveryClaimOutcome::ReplayedClaim(
-            DeliveryClaimView::from_intent(&intent),
-        ));
-    }
     transition_to_claimed(conn, intent, request, &now, &claim_expires_at)
+}
+
+/// Resolve a claim key against recorded claim events. Returns:
+/// - `Some(ReplayedClaim)` — the key was recorded for the SAME intent which
+///   still holds an unexpired claim from this key: the original receipt,
+///   zero writes (deterministic suppression);
+/// - `Some(NoneReady)` — the key was recorded for an intent bound to a
+///   different requester; the caller learns nothing about it;
+/// - `None` — the key is fresh.
+///
+/// A key recorded on intent X but replayed with content pointing at intent
+/// Y (or after X's claim was released/advanced) is a typed conflict.
+fn resolve_claim_key_replay(
+    conn: &Connection,
+    request: &DeliveryClaimRequest,
+) -> Result<Option<DeliveryClaimOutcome>, MemoryError> {
+    let event_id = format!("claim:{}", request.claim_key);
+    let recorded: Option<String> = conn
+        .query_row(
+            "SELECT delivery_id FROM delivery_events WHERE event_id = ?1 LIMIT 1",
+            params![event_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(recorded_id) = recorded else {
+        return Ok(None);
+    };
+    if let Some(pinned) = &request.only_delivery_id {
+        if pinned != &recorded_id {
+            return Err(MemoryError::DeliveryIdempotencyConflict(format!(
+                "claim_key already recorded against delivery intent {recorded_id}"
+            )));
+        }
+    }
+    let intent = find_intent_by_id(conn, &recorded_id)?
+        .ok_or_else(|| MemoryError::Internal("claim event without intent".to_string()))?;
+    if !requester_matches(&intent, &request.caller) {
+        // A foreign key must not reveal another requester's intent.
+        return Ok(Some(DeliveryClaimOutcome::NoneReady));
+    }
+    if intent.active_claim_key.as_deref() == Some(request.claim_key.as_str())
+        && intent.delivery_state == DeliveryState::RequesterQueued.as_str()
+    {
+        return Ok(Some(DeliveryClaimOutcome::ReplayedClaim(
+            DeliveryClaimView::from_intent(&intent),
+        )));
+    }
+    Err(MemoryError::DeliveryIdempotencyConflict(format!(
+        "claim_key already recorded against delivery intent {recorded_id}"
+    )))
 }
 
 /// Acknowledge delivery of a claimed intent (host seam: `ack_delivered`).
@@ -623,16 +663,26 @@ pub fn ack_delivered(
     }
 
     let next_revision = intent.revision + 1;
-    conn.execute(
+    // State + event write atomically, and the update is CAS-guarded on the
+    // revision it read: a concurrent writer cannot slip between the check
+    // and the write.
+    let tx = conn.unchecked_transaction()?;
+    let updated = tx.execute(
         "UPDATE delivery_intents
          SET delivery_state = 'delivered', delivered_at = ?2, revision = ?3,
              active_claim_key = NULL, claimed_by = NULL, claim_expires_at = NULL,
              blocker_class = NULL, next_retry_at = NULL, updated_at = ?2
-         WHERE delivery_id = ?1",
-        params![delivery_id, now, next_revision],
+         WHERE delivery_id = ?1 AND revision = ?4",
+        params![delivery_id, now, next_revision, intent.revision],
     )?;
+    if updated == 0 {
+        return Err(MemoryError::DeliveryRevisionConflict(format!(
+            "intent {delivery_id} moved during ack (expected revision {})",
+            intent.revision
+        )));
+    }
     append_event(
-        conn,
+        &tx,
         delivery_id,
         &ack_event_id,
         DeliveryEventKind::Delivered,
@@ -642,6 +692,7 @@ pub fn ack_delivered(
         &caller.host_identity,
         &now,
     )?;
+    tx.commit()?;
     Ok(DeliveryAckOutcome::Acknowledged {
         revision: next_revision,
     })
@@ -670,22 +721,23 @@ pub fn reject_or_block(
             "blocker_class must be 1..=128 characters".to_string(),
         ));
     }
+    // Validate the event detail BEFORE any state mutates: a refused report
+    // must leave both the intent and the ledger untouched (atomicity law).
+    validate_detail(detail)?;
     let now = now_utc_iso();
     let intent = find_intent_by_id(conn, delivery_id)?
         .ok_or_else(|| MemoryError::NotFound(format!("delivery intent {delivery_id}")))?;
 
-    let from_queued = intent.delivery_state == DeliveryState::RequesterQueued.as_str();
-    let from_ready = matches!(
-        intent.delivery_state.as_str(),
-        "ready" | "retrying" | "blocked"
-    );
-    if !from_queued && !from_ready {
+    // Holder-only: only the requester holding the active claim may report a
+    // failure. An unrelated admitted caller cannot park (or spy on) another
+    // requester's delivery — including a private one.
+    if intent.delivery_state != DeliveryState::RequesterQueued.as_str() {
         return Err(MemoryError::DeliveryIncompatibleState(format!(
-            "reject_or_block requires requester_queued/ready/retrying/blocked, intent {delivery_id} is {}",
+            "reject_or_block requires requester_queued, intent {delivery_id} is {}",
             intent.delivery_state
         )));
     }
-    if from_queued && intent.claimed_by.as_deref() != Some(caller.host_identity.as_str()) {
+    if intent.claimed_by.as_deref() != Some(caller.host_identity.as_str()) {
         return Err(MemoryError::DeliveryIncompatibleState(format!(
             "reject_or_block refused: intent {delivery_id} is claimed by {:?}, caller is {}",
             intent.claimed_by.unwrap_or_default(),
@@ -716,23 +768,31 @@ pub fn reject_or_block(
         None
     };
     let next_revision = intent.revision + 1;
-    conn.execute(
+    let tx = conn.unchecked_transaction()?;
+    let updated = tx.execute(
         "UPDATE delivery_intents
          SET delivery_state = ?2, blocker_class = ?3, next_retry_at = ?4,
              revision = ?5, updated_at = ?6,
              active_claim_key = NULL, claimed_by = NULL, claim_expires_at = NULL
-         WHERE delivery_id = ?1",
+         WHERE delivery_id = ?1 AND revision = ?7",
         params![
             delivery_id,
             next_state.as_str(),
             blocker_class,
             next_retry_at,
             next_revision,
-            now
+            now,
+            intent.revision
         ],
     )?;
+    if updated == 0 {
+        return Err(MemoryError::DeliveryRevisionConflict(format!(
+            "intent {delivery_id} moved during reject_or_block (expected revision {})",
+            intent.revision
+        )));
+    }
     append_event(
-        conn,
+        &tx,
         delivery_id,
         &format!("reject:{}:{now}", next_state.as_str()),
         if retryable {
@@ -746,6 +806,7 @@ pub fn reject_or_block(
         &caller.host_identity,
         &now,
     )?;
+    tx.commit()?;
     find_intent_by_id(conn, delivery_id)?
         .ok_or_else(|| MemoryError::Internal("blocked delivery intent not found".to_string()))
 }
@@ -793,17 +854,22 @@ pub fn resume_requester_operation(
 pub fn dismiss_delivery(
     conn: &Connection,
     delivery_id: &str,
-    actor: &str,
+    caller: &DeliveryCaller,
     expected_revision: Option<i64>,
 ) -> Result<DeliveryIntent, MemoryError> {
-    if actor.trim().is_empty() {
-        return Err(MemoryError::InvalidArg(
-            "actor must not be empty".to_string(),
-        ));
-    }
+    validate_caller(caller)?;
     let now = now_utc_iso();
     let intent = find_intent_by_id(conn, delivery_id)?
         .ok_or_else(|| MemoryError::NotFound(format!("delivery intent {delivery_id}")))?;
+    // Same requester-match rule as claiming: an intent bound to requester A
+    // cannot be dismissed by requester B (no cross-requester writes, and a
+    // private intent yields no existence signal — the caller sees not-found
+    // upstream before reaching this check).
+    if !requester_matches(&intent, caller) {
+        return Err(MemoryError::DeliveryIncompatibleState(format!(
+            "dismiss refused: intent {delivery_id} is bound to another requester"
+        )));
+    }
     if intent.delivery_state == DeliveryState::Delivered.as_str() {
         return Err(MemoryError::DeliveryIncompatibleState(format!(
             "delivered intent {delivery_id} cannot be dismissed"
@@ -821,27 +887,44 @@ pub fn dismiss_delivery(
         }
     }
     let next_revision = intent.revision + 1;
-    conn.execute(
+    let tx = conn.unchecked_transaction()?;
+    let updated = tx.execute(
         "UPDATE delivery_intents
          SET delivery_state = 'dismissed', dismissed_at = ?2, revision = ?3,
              updated_at = ?2, active_claim_key = NULL, claimed_by = NULL,
              claim_expires_at = NULL, blocker_class = NULL, next_retry_at = NULL
-         WHERE delivery_id = ?1",
-        params![delivery_id, now, next_revision],
+         WHERE delivery_id = ?1 AND revision = ?4",
+        params![delivery_id, now, next_revision, intent.revision],
     )?;
+    if updated == 0 {
+        return Err(MemoryError::DeliveryRevisionConflict(format!(
+            "intent {delivery_id} moved during dismiss (expected revision {})",
+            intent.revision
+        )));
+    }
     append_event(
-        conn,
+        &tx,
         delivery_id,
         &format!("dismissed:{delivery_id}:{next_revision}"),
         DeliveryEventKind::Dismissed,
         Some(intent.revision),
         Some("delivery dismissed; execution evidence and adjudication unchanged"),
         None,
-        actor,
+        &caller.agent_identity_id,
         &now,
     )?;
+    tx.commit()?;
     find_intent_by_id(conn, delivery_id)?
         .ok_or_else(|| MemoryError::Internal("dismissed delivery intent not found".to_string()))
+}
+
+/// Read one intent by its mint idempotency key (terminal-plane helper for
+/// content-aware correction revisions).
+pub fn find_delivery_intent_by_idempotency_key(
+    conn: &Connection,
+    idempotency_key: &str,
+) -> Result<Option<DeliveryIntent>, MemoryError> {
+    find_intent_by_key(conn, idempotency_key)
 }
 
 /// Read one intent (projection observer; no existence signal beyond the
@@ -1063,17 +1146,20 @@ fn reconcile_mint(
         return Ok(existing);
     }
 
-    // Corrected result: a strictly higher revision re-arms delivery.
+    // Corrected result: a strictly higher revision re-arms delivery. The
+    // whole rewrite + ledger receipts land atomically and the rewrite is
+    // CAS-guarded on the revision it reconciled against.
     let reopens = existing.delivery_state != DeliveryState::Ready.as_str();
     let next_revision = existing.revision + 1;
-    conn.execute(
+    let tx = conn.unchecked_transaction()?;
+    let updated = tx.execute(
         "UPDATE delivery_intents
          SET result_ref = ?2, result_revision = ?3, payload_digest = ?4,
              terminal_receipt_revision = ?5, delivery_state = 'ready', ready_at = ?6,
              revision = ?7, updated_at = ?6,
              active_claim_key = NULL, claimed_by = NULL, claim_expires_at = NULL,
              blocker_class = NULL, next_retry_at = NULL
-         WHERE delivery_id = ?1",
+         WHERE delivery_id = ?1 AND revision = ?8",
         params![
             existing.delivery_id,
             new.result_ref,
@@ -1081,11 +1167,18 @@ fn reconcile_mint(
             new.payload_digest,
             new.terminal_receipt_revision,
             now,
-            next_revision
+            next_revision,
+            existing.revision
         ],
     )?;
+    if updated == 0 {
+        return Err(MemoryError::DeliveryRevisionConflict(format!(
+            "intent {} moved during supersede (expected revision {})",
+            existing.delivery_id, existing.revision
+        )));
+    }
     append_event(
-        conn,
+        &tx,
         &existing.delivery_id,
         &format!(
             "superseded:{}:{}",
@@ -1103,7 +1196,7 @@ fn reconcile_mint(
     )?;
     if reopens {
         append_event(
-            conn,
+            &tx,
             &existing.delivery_id,
             &format!("debt:supersede:{}:{now}", existing.delivery_id),
             DeliveryEventKind::TransitionDebt,
@@ -1117,6 +1210,7 @@ fn reconcile_mint(
             now,
         )?;
     }
+    tx.commit()?;
     find_intent_by_id(conn, &existing.delivery_id)?
         .ok_or_else(|| MemoryError::Internal("superseded delivery intent not found".to_string()))
 }
@@ -1309,6 +1403,19 @@ fn transition_to_claimed(
     ))
 }
 
+/// Event-detail bound validation, callable BEFORE any state mutates so a
+/// refused report leaves the intent and ledger untouched.
+fn validate_detail(detail: Option<&str>) -> Result<(), MemoryError> {
+    if let Some(detail) = detail {
+        if detail.is_empty() || detail.len() > 1000 || detail.bytes().any(|b| b == 0) {
+            return Err(MemoryError::InvalidArg(
+                "delivery event detail must be 1..=1000 bytes without NUL".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn append_event(
     conn: &Connection,
@@ -1321,13 +1428,7 @@ fn append_event(
     actor: &str,
     now: &str,
 ) -> Result<(), MemoryError> {
-    if let Some(detail) = detail {
-        if detail.len() > 1000 || detail.bytes().any(|b| b == 0) {
-            return Err(MemoryError::InvalidArg(
-                "delivery event detail over bound".to_string(),
-            ));
-        }
-    }
+    validate_detail(detail)?;
     conn.execute(
         "INSERT INTO delivery_events (
             delivery_id, event_id, kind, expected_revision, detail,
@@ -1828,11 +1929,13 @@ mod tests {
         let conn = test_conn();
         seed_execution_fixture(&conn);
         let intent = make_ready(&conn, "managed:outcome-9");
-        let dismissed = dismiss_delivery(&conn, &intent.delivery_id, "requester-a", None).unwrap();
+        let dismissed =
+            dismiss_delivery(&conn, &intent.delivery_id, &caller("requester-a"), None).unwrap();
         assert_eq!(dismissed.delivery_state, "dismissed");
         assert!(execution_fixture_unchanged(&conn));
         // Idempotent dismiss of an already-dismissed intent.
-        let again = dismiss_delivery(&conn, &intent.delivery_id, "requester-a", None).unwrap();
+        let again =
+            dismiss_delivery(&conn, &intent.delivery_id, &caller("requester-a"), None).unwrap();
         assert_eq!(again.delivery_state, "dismissed");
 
         // Delivered is terminal for dismissal.
@@ -1855,7 +1958,8 @@ mod tests {
             None,
         )
         .unwrap();
-        let error = dismiss_delivery(&conn, &intent2.delivery_id, "requester-a", None).unwrap_err();
+        let error = dismiss_delivery(&conn, &intent2.delivery_id, &caller("requester-a"), None)
+            .unwrap_err();
         assert!(error.to_string().contains("cannot be dismissed"));
     }
 
@@ -1927,10 +2031,11 @@ mod tests {
         assert_eq!(claimed.result_revision, 2);
     }
 
-    // --- Discrimination 4 (claim twin): the same claim key against a
-    // DIFFERENT intent is a typed conflict, never a second delivery.
+    // --- Discrimination 4 (claim twin): a claim key is bound to the intent
+    // it created. Replaying it after that intent's claim advanced (here:
+    // acknowledged) is a typed conflict — never a fresh claim of ANY intent.
     #[test]
-    fn same_claim_key_on_a_different_intent_conflicts() {
+    fn reused_claim_key_after_advance_conflicts() {
         let conn = test_conn();
         let first = make_ready(&conn, "managed:outcome-12");
         claim_ready_delivery(
@@ -1941,6 +2046,14 @@ mod tests {
                 lease_seconds: 0,
                 only_delivery_id: None,
             },
+        )
+        .unwrap();
+        ack_delivered(
+            &conn,
+            &first.delivery_id,
+            &caller("requester-a"),
+            "ak-shared",
+            None,
         )
         .unwrap();
         let _second = make_ready(&conn, "managed:outcome-13");
@@ -1955,8 +2068,16 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(error, MemoryError::DeliveryIdempotencyConflict(_)));
-        // The first claim is untouched.
-        assert_eq!(state_of(&conn, &first.delivery_id), "requester_queued");
+        // The delivered intent is untouched and the second stays ready.
+        assert_eq!(state_of(&conn, &first.delivery_id), "delivered");
+        let second_state: String = conn
+            .query_row(
+                "SELECT delivery_state FROM delivery_intents WHERE idempotency_key = 'managed:outcome-13'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(second_state, "ready");
     }
 
     // --- Discrimination 11 (spine half): full event replay is canonically
@@ -2025,6 +2146,150 @@ mod tests {
             panic!("expected claim of a public intent");
         };
         assert_eq!(claimed.delivery_id, intent.delivery_id);
+    }
+
+    // --- codex R2 regression: the same claim key replayed for the SAME
+    // intent through the general claim path returns the original receipt
+    // (replay-safe), not a conflict.
+    #[test]
+    fn same_claim_key_replayed_on_the_same_intent_replays() {
+        let conn = test_conn();
+        let intent = make_ready(&conn, "managed:outcome-17");
+        let first = claim_ready_delivery(
+            &conn,
+            &DeliveryClaimRequest {
+                caller: caller("requester-a"),
+                claim_key: "ck-same".to_string(),
+                lease_seconds: 0,
+                only_delivery_id: None,
+            },
+        )
+        .unwrap();
+        let DeliveryClaimOutcome::Claimed(claimed) = first else {
+            panic!("expected claim");
+        };
+        assert_eq!(claimed.delivery_id, intent.delivery_id);
+
+        // The response was lost; the requester retries the SAME key.
+        let retry = claim_ready_delivery(
+            &conn,
+            &DeliveryClaimRequest {
+                caller: caller("requester-a"),
+                claim_key: "ck-same".to_string(),
+                lease_seconds: 0,
+                only_delivery_id: None,
+            },
+        )
+        .unwrap();
+        let DeliveryClaimOutcome::ReplayedClaim(replayed) = retry else {
+            panic!("expected replay receipt, got {retry:?}");
+        };
+        assert_eq!(replayed.delivery_id, intent.delivery_id);
+        assert_eq!(replayed.attempt_count, 1, "no duplicate attempt");
+        let claim_events: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM delivery_events WHERE delivery_id = ?1 AND kind = 'claimed'",
+                params![intent.delivery_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(claim_events, 1, "deterministic claim suppression");
+    }
+
+    // --- codex R2 regression: only the claim holder may reject_or_block,
+    // and only from requester_queued.
+    #[test]
+    fn reject_or_block_is_holder_only() {
+        let conn = test_conn();
+        let intent = make_ready(&conn, "managed:outcome-18");
+        // A non-holder while the intent is ready (unclaimed): refused.
+        let error = reject_or_block(
+            &conn,
+            &intent.delivery_id,
+            &caller("intruder"),
+            blocker_class::TRANSPORT_FAILURE,
+            None,
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(error, MemoryError::DeliveryIncompatibleState(_)));
+        assert_eq!(state_of(&conn, &intent.delivery_id), "ready");
+
+        // The holder claims; a different admitted caller is refused.
+        claim_ready_delivery(
+            &conn,
+            &DeliveryClaimRequest {
+                caller: caller("requester-a"),
+                claim_key: "ck-h1".to_string(),
+                lease_seconds: 0,
+                only_delivery_id: None,
+            },
+        )
+        .unwrap();
+        let error = reject_or_block(
+            &conn,
+            &intent.delivery_id,
+            &caller("intruder"),
+            blocker_class::TRANSPORT_FAILURE,
+            None,
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(error, MemoryError::DeliveryIncompatibleState(_)));
+        assert_eq!(state_of(&conn, &intent.delivery_id), "requester_queued");
+    }
+
+    // --- codex R2 regression: an intent bound to requester A cannot be
+    // dismissed by requester B.
+    #[test]
+    fn dismiss_is_requester_bound() {
+        let conn = test_conn();
+        let intent = make_ready(&conn, "managed:outcome-19");
+        let error =
+            dismiss_delivery(&conn, &intent.delivery_id, &caller("intruder"), None).unwrap_err();
+        assert!(matches!(error, MemoryError::DeliveryIncompatibleState(_)));
+        assert_eq!(state_of(&conn, &intent.delivery_id), "ready");
+    }
+
+    // --- codex R2 regression: a refused report (over-bound detail) leaves
+    // the intent and ledger untouched — no state write without its event.
+    #[test]
+    fn over_bound_detail_leaves_zero_writes() {
+        let conn = test_conn();
+        let intent = make_ready(&conn, "managed:outcome-20");
+        claim_ready_delivery(
+            &conn,
+            &DeliveryClaimRequest {
+                caller: caller("requester-a"),
+                claim_key: "ck-x1".to_string(),
+                lease_seconds: 0,
+                only_delivery_id: None,
+            },
+        )
+        .unwrap();
+        let long_detail = "x".repeat(1001);
+        let error = reject_or_block(
+            &conn,
+            &intent.delivery_id,
+            &caller("requester-a"),
+            blocker_class::TRANSPORT_FAILURE,
+            Some(long_detail.as_str()),
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(error, MemoryError::InvalidArg(_)));
+        assert_eq!(state_of(&conn, &intent.delivery_id), "requester_queued");
+        let events: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM delivery_events WHERE delivery_id = ?1",
+                params![intent.delivery_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(events, 3, "mint receipts + claim only; no block event");
     }
 
     // --- CAS: an ack carrying a stale expected revision is a typed conflict.

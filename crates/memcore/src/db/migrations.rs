@@ -352,6 +352,7 @@ pub(crate) fn validate_current_schema_integrity(conn: &Connection) -> Result<(),
     crate::db::schema::validate_memory_outbox_destination_apply_schema(conn)?;
     crate::db::schema::validate_harness_session_attachments_schema(conn)?;
     crate::db::schema::validate_harness_session_spine_schema(conn)?;
+    crate::db::schema::validate_delivery_spine_schema(conn)?;
     let product_schema: i64 = conn.query_row(
         "SELECT COUNT(*) FROM main.sqlite_schema WHERE type='table' AND name='identity_admissions'",
         [],

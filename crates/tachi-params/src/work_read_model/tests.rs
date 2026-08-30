@@ -3532,16 +3532,32 @@ fn integrated_delivery_observation_is_visible_and_independent() {
     let base = full_snapshot_set();
     let mut with_delivery = rebuild(base.clone()).expect("rebuild");
     with_delivery.apply_ok(integrated_delivery_snapshot(
-        vec![DeliveryIntentObservationV1 {
-            delivery_id: "di-1".to_string(),
-            execution_source: "managed_dispatch".to_string(),
-            execution_ref: "dispatch-1".to_string(),
-            state: DeliveryStateV1::Ready,
-            result_revision: 1,
-            revision: 1,
-            visibility_class: "private".to_string(),
-            updated_at: READ_AT.to_string(),
-        }],
+        vec![
+            DeliveryIntentObservationV1 {
+                delivery_id: "di-1".to_string(),
+                execution_source: "managed_dispatch".to_string(),
+                execution_ref: "d1".to_string(),
+                work_claim_id: None,
+                state: DeliveryStateV1::Ready,
+                result_revision: 1,
+                revision: 1,
+                visibility_class: "public".to_string(),
+                updated_at: READ_AT.to_string(),
+            },
+            // A sibling intent for an UNRELATED dispatch: must not spray
+            // onto this work item.
+            DeliveryIntentObservationV1 {
+                delivery_id: "di-unlinked".to_string(),
+                execution_source: "managed_dispatch".to_string(),
+                execution_ref: "dispatch-unrelated".to_string(),
+                work_claim_id: None,
+                state: DeliveryStateV1::Ready,
+                result_revision: 1,
+                revision: 1,
+                visibility_class: "public".to_string(),
+                updated_at: READ_AT.to_string(),
+            },
+        ],
         "delivery-2",
         READ_AT,
     ));
@@ -3568,7 +3584,55 @@ fn integrated_delivery_observation_is_visible_and_independent() {
             DeliveryObservationV1::Observed { intents }
                 if intents.len() == 1 && intents[0].state == DeliveryStateV1::Ready
         ),
-        "the observed intent carries its spine state"
+        "the observed intent carries its spine state on the matching item"
+    );
+
+    // No spray: the sibling intent bound to an unrelated dispatch is not
+    // carried on this item — only di-1 links.
+    assert!(
+        matches!(
+            &model_with.delivery.observation,
+            DeliveryObservationV1::Observed { intents }
+                if intents.len() == 1 && intents[0].delivery_id == "di-1"
+        ),
+        "unlinked intents stay off the item"
+    );
+}
+
+/// Fail-closed visibility: a PRIVATE delivery intent is hidden from a
+/// projection read without private authorization, even on the matching
+/// work item.
+#[test]
+fn private_delivery_intents_are_hidden_without_authorization() {
+    let base = full_snapshot_set();
+    let mut with_delivery = rebuild(base).expect("rebuild");
+    with_delivery.apply_ok(integrated_delivery_snapshot(
+        vec![DeliveryIntentObservationV1 {
+            delivery_id: "di-private".to_string(),
+            execution_source: "attached_session".to_string(),
+            execution_ref: "attachment-1".to_string(),
+            work_claim_id: Some("c1".to_string()),
+            state: DeliveryStateV1::Ready,
+            result_revision: 1,
+            revision: 1,
+            visibility_class: "private".to_string(),
+            updated_at: READ_AT.to_string(),
+        }],
+        "delivery-3",
+        READ_AT,
+    ));
+    let with = project(&with_delivery, &options());
+    // The item bound to claim c1 links the intent by work_claim_id, but the
+    // private intent is hidden for an unauthorized read (options() sees no
+    // private facts).
+    let model = find(&with, ISSUE_TOKEN);
+    assert_eq!(model.delivery.observation.as_str(), "observed");
+    assert!(
+        matches!(
+            &model.delivery.observation,
+            DeliveryObservationV1::Observed { intents } if intents.is_empty()
+        ),
+        "private intents yield no ids/refs/counts without authorization"
     );
 }
 

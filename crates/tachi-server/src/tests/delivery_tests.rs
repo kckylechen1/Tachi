@@ -602,7 +602,7 @@ async fn attached_terminal_event_mints_a_delivery_intent() {
         .expect("attachment id")
         .to_string();
     let mut terminal = terminal;
-    terminal.attachment_id = Some(attachment_id);
+    terminal.attachment_id = Some(attachment_id.clone());
     let receipt = handle_agent_eval(&server, terminal)
         .await
         .expect("ingest terminal");
@@ -633,4 +633,45 @@ async fn attached_terminal_event_mints_a_delivery_intent() {
         Some("remote-1")
     );
     assert_eq!(observed[0].result_revision, 7);
+
+    // Disposition gate: a STALE terminal fact (lower source revision) is
+    // journaled without advancing canonical state and mints NOTHING —
+    // still exactly one intent for the run.
+    let stale = TachiAgentEvalParams {
+        action: "ingest_session_event".to_string(),
+        host_identity: Some("host-1".to_string()),
+        admission_receipt_ref: Some("admission-1".to_string()),
+        attachment_id: Some(attachment_id.clone()),
+        session_event_id: Some("evt-terminal-0".to_string()),
+        session_event_kind: Some("terminal".to_string()),
+        session_event_outcome: Some("completed".to_string()),
+        source_revision: Some(3),
+        event_summary: Some("stale terminal".to_string()),
+        event_occurred_at: Some("2026-08-30T00:00:00Z".to_string()),
+        ..attach_params("attach-1")
+    };
+    let stale_receipt = handle_agent_eval(&server, stale)
+        .await
+        .expect("stale ingest");
+    // The receipt spine journals the redundant terminal without advancing
+    // anything; the delivery reconcile against the same run key is a no-op.
+    assert!(stale_receipt.contains("journaled_redundant_terminal"));
+
+    let after: Vec<memcore::DeliveryIntent> = server
+        .with_global_store(|store| {
+            memcore::observe_delivery_for_execution(
+                store.connection(),
+                "attached_session",
+                serde_json::from_str::<serde_json::Value>(&attached).unwrap()["attachment_id"]
+                    .as_str()
+                    .unwrap(),
+            )
+            .map_err(|error| error.to_string())
+        })
+        .expect("observe after stale");
+    assert_eq!(
+        after.len(),
+        1,
+        "a stale terminal fact must not mint a delivery"
+    );
 }

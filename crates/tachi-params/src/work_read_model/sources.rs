@@ -260,6 +260,9 @@ pub struct DeliveryIntentObservationV1 {
     /// plane; the intent binds the receipt, never re-owns execution).
     pub execution_source: String,
     pub execution_ref: String,
+    /// The WorkClaim the intent is bound to, when one is admitted — the
+    /// Claim-key linkage for attached-run delivery.
+    pub work_claim_id: Option<String>,
     pub state: DeliveryStateV1,
     pub result_revision: i64,
     /// The intent's compare-and-swap revision at observation time.

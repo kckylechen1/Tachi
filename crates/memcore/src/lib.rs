@@ -116,12 +116,13 @@ pub use db::a2a::{
 };
 #[cfg(feature = "admin")]
 pub use db::delivery_intents::{
-    ack_delivered, blocker_class, claim_ready_delivery, dismiss_delivery, get_delivery_intent,
-    mint_delivery_intent, observe_delivery_for_execution, reject_or_block,
-    resume_requester_operation, DeliveryAckOutcome, DeliveryCaller, DeliveryClaimOutcome,
-    DeliveryClaimRequest, DeliveryClaimView, DeliveryEventKind, DeliveryExecutionSource,
-    DeliveryIntent, DeliveryPolicy, DeliveryRequesterBinding, DeliveryState,
-    DeliveryVisibilityClass, NewDeliveryIntent, DEFAULT_CLAIM_LEASE_SECONDS,
+    ack_delivered, blocker_class, claim_ready_delivery, dismiss_delivery,
+    find_delivery_intent_by_idempotency_key, get_delivery_intent, mint_delivery_intent,
+    observe_delivery_for_execution, reject_or_block, resume_requester_operation,
+    DeliveryAckOutcome, DeliveryCaller, DeliveryClaimOutcome, DeliveryClaimRequest,
+    DeliveryClaimView, DeliveryEventKind, DeliveryExecutionSource, DeliveryIntent, DeliveryPolicy,
+    DeliveryRequesterBinding, DeliveryState, DeliveryVisibilityClass, NewDeliveryIntent,
+    DEFAULT_CLAIM_LEASE_SECONDS,
 };
 #[cfg(feature = "admin")]
 pub use db::dispatch_adjudications::{

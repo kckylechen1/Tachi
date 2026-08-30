@@ -191,12 +191,11 @@ pub(crate) fn handle_tachi_delivery(
         }
         TachiDeliveryAction::Dismiss => {
             let delivery_id = required(params.delivery_id.clone(), "delivery_id")?;
-            let actor = caller.agent_identity_id.clone();
             let intent = server.with_global_store(|store| {
                 dismiss_delivery(
                     store.connection(),
                     &delivery_id,
-                    &actor,
+                    &caller,
                     params.expected_revision,
                 )
                 .map_err(|error| error.to_string())
@@ -268,14 +267,11 @@ fn delivery_summary(intent: &memcore::DeliveryIntent) -> Value {
 // terminal-plane mint (server-side; no seam action can mint)
 // ---------------------------------------------------------------------------
 
-/// `result_revision` for managed mints: epoch millis of the receipt's
-/// `updated_at`, so a re-completed (corrected) dispatch strictly grows the
-/// revision and the supersede path re-arms delivery. Same-second rewrites
-/// reconcile at the same revision and only conflict if content differs.
-fn revision_from_timestamp(ts: &str) -> i64 {
-    chrono::DateTime::parse_from_rfc3339(ts)
-        .map(|parsed| parsed.with_timezone(&chrono::Utc).timestamp_millis().max(1))
-        .unwrap_or(1)
+/// Wall-clock base for managed correction revisions (epoch millis of NOW,
+/// not of the receipt timestamp): a corrected mint must strictly exceed
+/// every revision the wall clock could have produced before it.
+fn revision_wall_clock_base() -> i64 {
+    chrono::Utc::now().timestamp_millis().max(1)
 }
 
 fn digest_token(parts: &[&str]) -> String {
@@ -306,6 +302,30 @@ pub(crate) fn mint_delivery_for_managed_outcome(
         eval_memory_id,
         &outcome.evidence_refs.to_string(),
     ]);
+    // Content-aware correction revision: the FIRST mint takes the wall
+    // clock; a content CHANGE (a corrected terminal receipt) takes
+    // strictly-more-than any revision this intent has ever carried, so the
+    // spine's supersede path re-arms delivery instead of hitting the
+    // equal-revision idempotency conflict — even when two corrections land
+    // within the same clock tick.
+    let result_revision = match server.with_global_store(|store| {
+        memcore::find_delivery_intent_by_idempotency_key(store.connection(), &idempotency_key)
+            .map_err(|error| error.to_string())
+    }) {
+        Ok(Some(existing)) if existing.payload_digest != payload_digest => {
+            (existing.result_revision + 1).max(revision_wall_clock_base())
+        }
+        Ok(Some(existing)) => existing.result_revision,
+        Ok(None) => revision_wall_clock_base(),
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                dispatch_id = %outcome.dispatch_id,
+                "failed to read existing delivery intent before mint"
+            );
+            return;
+        }
+    };
     let mut new = memcore::NewDeliveryIntent {
         idempotency_key,
         execution_source: memcore::DeliveryExecutionSource::ManagedDispatch,
@@ -313,7 +333,7 @@ pub(crate) fn mint_delivery_for_managed_outcome(
         terminal_receipt_revision: 0,
         work_claim_id: None,
         result_ref: format!("memory:{eval_memory_id}"),
-        result_revision: revision_from_timestamp(&outcome.updated_at),
+        result_revision,
         payload_digest,
         visibility_class: memcore::DeliveryVisibilityClass::Public,
         delivery_policy: memcore::DeliveryPolicy::ReturnToCurrentCall,
@@ -324,11 +344,14 @@ pub(crate) fn mint_delivery_for_managed_outcome(
     // Bind the admitted requester from the owning WorkClaim when one names
     // this dispatch. A bound intent is private to that requester (fail-
     // closed default); unbound stays public/pull-only.
-    if let Ok(Some((agent_identity_id, session_client))) = server.with_global_store(|store| {
-        memcore::find_claim_requester_for_dispatch(store.connection(), &outcome.dispatch_id)
-            .map_err(|error| error.to_string())
-    }) {
+    if let Ok(Some((claim_id, agent_identity_id, session_client))) =
+        server.with_global_store(|store| {
+            memcore::find_claim_requester_for_dispatch(store.connection(), &outcome.dispatch_id)
+                .map_err(|error| error.to_string())
+        })
+    {
         new.visibility_class = memcore::DeliveryVisibilityClass::Private;
+        new.work_claim_id = Some(claim_id);
         new.requester = memcore::DeliveryRequesterBinding {
             agent_identity_id: Some(agent_identity_id),
             host_identity: None,
@@ -362,16 +385,21 @@ pub(crate) fn mint_delivery_for_attached_terminal(
     agent_identity_id: &str,
     host_identity: &str,
     remote_session_id: &str,
+    work_claim_id: &str,
 ) {
     let digest = payload_digest
         .map(str::to_string)
-        .unwrap_or_else(|| digest_token(&[event_id, outcome_token, summary.unwrap_or("")]));
+        .unwrap_or_else(|| digest_token(&[outcome_token, summary.unwrap_or("")]));
+    // One durable intent per attached RUN (keyed on the attachment): a
+    // redundant terminal event for the same run reconciles against the SAME
+    // intent instead of minting a sibling. The digest excludes the event id
+    // for the same reason.
     let new = memcore::NewDeliveryIntent {
-        idempotency_key: format!("attached:{attachment_id}:{event_id}"),
+        idempotency_key: format!("attached:{attachment_id}"),
         execution_source: memcore::DeliveryExecutionSource::AttachedSession,
         execution_ref: attachment_id.to_string(),
         terminal_receipt_revision: source_revision.max(0),
-        work_claim_id: None,
+        work_claim_id: (!work_claim_id.is_empty()).then(|| work_claim_id.to_string()),
         result_ref: format!("harness_session:{attachment_id}:{event_id}"),
         result_revision: source_revision.max(1),
         payload_digest: digest,
