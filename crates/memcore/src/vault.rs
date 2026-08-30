@@ -322,7 +322,7 @@ pub fn validate_api_key_rotation(
     rotation: &VaultKeyRotation,
 ) -> Result<usize, String> {
     let member_count = validate_api_key_rotation_members(entries, &rotation.prefix)?;
-    if rotation.total_keys < 0 || member_count != rotation.total_keys as usize {
+    if rotation.total_keys <= 0 || member_count != rotation.total_keys as usize {
         return Err(format!(
             "Vault rotation '{}' declares {} keys but has {} contiguous API-key members",
             rotation.prefix, rotation.total_keys, member_count

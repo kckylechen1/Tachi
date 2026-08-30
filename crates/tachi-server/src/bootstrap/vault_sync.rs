@@ -273,6 +273,7 @@ pub(super) fn import_validated_vault_bundle(
         .vault_list_entries()
         .map_err(|e| format!("vault_list_entries: {e}"))?;
     validate_imported_lane_slots(entries, &local_entries, verification_key)?;
+    validate_new_imported_lane_urls(entries, &local_entries, verification_key)?;
 
     transaction
         .vault_set_config(config)
@@ -305,6 +306,37 @@ pub(super) fn import_validated_vault_bundle(
         .map_err(|e| format!("commit vault import transaction: {e}"))?;
 
     Ok(initialized_vault)
+}
+
+fn validate_new_imported_lane_urls(
+    incoming: &[VaultEntry],
+    local: &[VaultEntry],
+    verification_key: Option<&[u8; 32]>,
+) -> Result<(), String> {
+    for entry in incoming.iter().filter(|entry| {
+        memcore::is_lane_config_url_name(&entry.name)
+            && !local.iter().any(|local| local.name == entry.name)
+    }) {
+        let key = verification_key.ok_or_else(|| {
+            format!(
+                "Unsigned Vault sync import cannot validate new lane URL '{}'; verify the bundle signature first",
+                entry.name
+            )
+        })?;
+        let plain = crate::vault_crypto::decrypt(key, &entry.encrypted_value, &entry.nonce)?;
+        let value =
+            crate::vault_crypto::ZeroizingString::new(crate::vault_crypto::decode_utf8_zeroizing(
+                plain,
+                format!("Imported lane URL '{}' is not valid UTF-8", entry.name),
+            )?);
+        if let Some(leak) = memcore::catalog::endpoint::endpoint_credential_leak(&value) {
+            return Err(format!(
+                "Imported new lane URL '{}' embeds a credential in the endpoint ({leak}); refusing import",
+                entry.name
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn validate_imported_lane_slots(
@@ -768,6 +800,66 @@ mod tests {
             .vault_list_rotations()
             .expect("read rotations")
             .is_empty());
+        let _ = std::fs::remove_file(target_db);
+    }
+
+    #[test]
+    fn vault_sync_import_rejects_new_credential_bearing_lane_url() {
+        let target_db = temp_db_path();
+        let key = [7u8; 32];
+        let mut lane_url = encrypted_entry(
+            "EXTRACT_BASE_URL",
+            "https://user:pass@proxy.example.test/v1/chat",
+            &key,
+        );
+        lane_url.secret_type = "config".to_string();
+
+        let error = import_validated_vault_bundle(
+            &target_db,
+            &sample_config(),
+            &[lane_url],
+            &[],
+            Some(&key),
+        )
+        .expect_err("new credential-bearing lane URL import must fail closed")
+        .to_string();
+        assert!(
+            error.contains("EXTRACT_BASE_URL")
+                && (error.contains("userinfo") || error.contains("credential")),
+            "{error}"
+        );
+        assert!(!error.contains("user:pass"), "{error}");
+
+        let target = open_cli_store_read_only(&target_db).expect("target store");
+        assert!(target.vault_get_config().expect("read config").is_none());
+        assert!(target
+            .vault_list_entries()
+            .expect("read entries")
+            .is_empty());
+        let _ = std::fs::remove_file(target_db);
+    }
+
+    #[test]
+    fn vault_sync_import_rejects_zero_member_rotation() {
+        let target_db = temp_db_path();
+        let rotation = VaultKeyRotation {
+            prefix: "EMPTY_API_KEY".to_string(),
+            current_index: 1,
+            total_keys: 0,
+            rotation_strategy: "round_robin".to_string(),
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+        };
+        let error = import_validated_vault_bundle(
+            &target_db,
+            &sample_config(),
+            &[],
+            &[rotation],
+            Some(&[7u8; 32]),
+        )
+        .expect_err("zero-member rotation import must fail closed")
+        .to_string();
+        assert!(error.contains("declares 0 keys"), "{error}");
         let _ = std::fs::remove_file(target_db);
     }
 

@@ -464,6 +464,15 @@ async fn run_secret_action_with_reader(
                 .vault_get_entry(&name)
                 .map_err(|e| format!("vault_get_entry: {e}"))?
                 .ok_or(format!("Secret '{name}' not found"))?;
+            if let Some((prefix, _)) = crate::provider_config::parse_rotation_member_name(&name) {
+                if store
+                    .vault_get_rotation(prefix)
+                    .map_err(|e| format!("vault_get_rotation: {e}"))?
+                    .is_some()
+                {
+                    super::validate_api_key_lease_target(&store, &name)?;
+                }
+            }
 
             let decrypted =
                 crate::vault_crypto::decrypt(key.bytes(), &entry.encrypted_value, &entry.nonce)?;
@@ -807,7 +816,7 @@ mod tests {
             name: "DIRECT_POOL_API_KEY_2".to_string(),
             stdin_password: false,
             keychain: false,
-            password_file: Some(password_file),
+            password_file: Some(password_file.clone()),
             insecure_password_file: false,
         };
         let remove_error = run_secret_action_with_reader(
@@ -835,5 +844,48 @@ mod tests {
             .vault_get_entry("DIRECT_POOL_API_KEY_3")
             .expect("read refused append")
             .is_none());
+
+        let store = open_cli_store(&db_path).expect("reopen fixture store");
+        let (encrypted_value, nonce) =
+            crate::vault_crypto::encrypt(key.bytes(), b"poisoned-member")
+                .expect("encrypt poisoned member");
+        store
+            .vault_upsert_entry(&memcore::vault::VaultEntry {
+                name: "DIRECT_POOL_API_KEY_3".to_string(),
+                encrypted_value,
+                nonce,
+                secret_type: "config".to_string(),
+                description: "poisoned rotation member".to_string(),
+                allowed_agents: None,
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                updated_at: "2026-01-01T00:00:00Z".to_string(),
+                accessed_at: String::new(),
+                access_count: 0,
+            })
+            .expect("seed poisoned member");
+        drop(store);
+
+        let get_action = VaultAction::Get {
+            name: "DIRECT_POOL_API_KEY_1".to_string(),
+            reveal: true,
+            json: false,
+            stdin_password: false,
+            keychain: false,
+            password_file: Some(password_file),
+            insecure_password_file: false,
+        };
+        let get_error = run_secret_action_with_reader(
+            &db_path,
+            temp.path(),
+            get_action,
+            &mut Cursor::new(Vec::<u8>::new()),
+        )
+        .await
+        .expect_err("direct CLI get must reject a poisoned configured rotation")
+        .to_string();
+        assert!(
+            get_error.contains("DIRECT_POOL_API_KEY_3") && get_error.contains("config"),
+            "{get_error}"
+        );
     }
 }
