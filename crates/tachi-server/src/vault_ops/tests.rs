@@ -1748,6 +1748,20 @@ async fn rotated_get_rejects_legacy_mixed_members_and_access_advance_preserves_n
         mixed_get.contains("LEGACY_MIXED_2") && mixed_get.contains("config"),
         "{mixed_get}"
     );
+    let explicit_mixed_get = handle_vault_get(
+        &server,
+        VaultGetParams {
+            name: "LEGACY_MIXED_2".to_string(),
+            agent_id: None,
+            auto_rotate: false,
+        },
+    )
+    .await
+    .expect_err("explicit configured member get must validate the canonical rotation");
+    assert!(
+        explicit_mixed_get.contains("LEGACY_MIXED_2") && explicit_mixed_get.contains("config"),
+        "{explicit_mixed_get}"
+    );
 
     handle_vault_set_api_key_pool(
         &server,

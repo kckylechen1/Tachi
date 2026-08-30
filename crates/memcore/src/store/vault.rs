@@ -70,6 +70,15 @@ impl VaultTransaction<'_> {
         db::vault_list_rotations(self.connection())
     }
 
+    pub fn vault_replace_api_key_pool(
+        &self,
+        prefix: &str,
+        entries: &[VaultEntry],
+        rotation: &VaultKeyRotation,
+    ) -> Result<Vec<String>, MemoryError> {
+        replace_api_key_pool(self.connection(), prefix, entries, rotation)
+    }
+
     pub fn commit(mut self) -> Result<(), MemoryError> {
         self.transaction
             .take()
@@ -129,37 +138,9 @@ impl MemoryStore {
         rotation: &VaultKeyRotation,
     ) -> Result<Vec<String>, MemoryError> {
         let tx = self.conn.transaction()?;
-        let all_existing_entries = db::vault_list_entries(&tx)?;
-        crate::vault::validate_api_key_rotation_members(&all_existing_entries, prefix)
-            .map_err(MemoryError::InvalidArg)?;
-        let existing_entries = db::vault_list_entries_by_type(&tx, SECRET_TYPE_API_KEY)?;
-        let mut surplus_members: Vec<String> = existing_entries
-            .iter()
-            .filter(|entry| {
-                api_key_pool_member_index(&entry.name, prefix)
-                    .is_some_and(|idx| idx > entries.len())
-            })
-            .map(|entry| entry.name.clone())
-            .collect();
-        surplus_members.sort();
-        if !surplus_members.is_empty() {
-            return Err(MemoryError::InvalidArg(format!(
-                "refusing API-key pool shrink for '{prefix}': default replacement would delete surplus members [{}]; archive or remove those named members explicitly",
-                surplus_members.join(", ")
-            )));
-        }
-
-        for entry in entries {
-            let mut entry = entry.clone();
-            if db::vault_entry_exists(&tx, &entry.name)? {
-                entry.created_at.clear();
-            }
-            db::vault_upsert_entry(&tx, &entry)?;
-        }
-
-        db::vault_set_rotation(&tx, rotation)?;
+        let removed = replace_api_key_pool(&tx, prefix, entries, rotation)?;
         tx.commit()?;
-        Ok(Vec::new())
+        Ok(removed)
     }
 
     /// Import a Vault sync bundle atomically.
@@ -324,6 +305,43 @@ impl MemoryStore {
     ) -> Result<Vec<VaultKeyHealth>, MemoryError> {
         db::vault_list_key_health(&self.conn, logical_name)
     }
+}
+
+fn replace_api_key_pool(
+    conn: &Connection,
+    prefix: &str,
+    entries: &[VaultEntry],
+    rotation: &VaultKeyRotation,
+) -> Result<Vec<String>, MemoryError> {
+    let all_existing_entries = db::vault_list_entries(conn)?;
+    crate::vault::validate_api_key_rotation_members(&all_existing_entries, prefix)
+        .map_err(MemoryError::InvalidArg)?;
+    let existing_entries = db::vault_list_entries_by_type(conn, SECRET_TYPE_API_KEY)?;
+    let mut surplus_members: Vec<String> = existing_entries
+        .iter()
+        .filter(|entry| {
+            api_key_pool_member_index(&entry.name, prefix).is_some_and(|idx| idx > entries.len())
+        })
+        .map(|entry| entry.name.clone())
+        .collect();
+    surplus_members.sort();
+    if !surplus_members.is_empty() {
+        return Err(MemoryError::InvalidArg(format!(
+            "refusing API-key pool shrink for '{prefix}': default replacement would delete surplus members [{}]; archive or remove those named members explicitly",
+            surplus_members.join(", ")
+        )));
+    }
+
+    for entry in entries {
+        let mut entry = entry.clone();
+        if db::vault_entry_exists(conn, &entry.name)? {
+            entry.created_at.clear();
+        }
+        db::vault_upsert_entry(conn, &entry)?;
+    }
+
+    db::vault_set_rotation(conn, rotation)?;
+    Ok(Vec::new())
 }
 
 #[cfg(test)]

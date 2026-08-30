@@ -9,7 +9,6 @@ pub(crate) async fn handle_vault_setup_rotation(
         memcore::reject_api_key_type_for_lane_config(&params.prefix, memcore::SECRET_TYPE_API_KEY)?;
         authorize_vault_pool_mutation(server, &params.prefix, params.agent_id.as_deref())
             .map_err(|e| e.to_string())?;
-
         if params.total_keys < 2 {
             return Err("Rotation requires at least 2 keys".into());
         }
@@ -97,6 +96,7 @@ pub(crate) async fn handle_vault_set_api_key_pool(
         }
         authorize_vault_pool_mutation(server, &params.prefix, params.agent_id.as_deref())
             .map_err(|e| e.to_string())?;
+        let effective_agent_id = resolve_vault_acl_agent_id(server, params.agent_id.as_deref())?;
         if values.is_empty() {
             return Err("API key pool requires at least one non-empty value".to_string());
         }
@@ -132,9 +132,26 @@ pub(crate) async fn handle_vault_set_api_key_pool(
             };
             server
                 .with_global_store(|store| {
-                    store
+                    let transaction = store
+                        .begin_vault_transaction()
+                        .map_err(|e| format!("begin pool replacement transaction: {e}"))?;
+                    let current_entries = transaction
+                        .vault_list_entries()
+                        .map_err(|e| format!("vault_list_entries: {e}"))?;
+                    for entry in &current_entries {
+                        if memcore::api_key_pool_member_index(&entry.name, &params.prefix).is_some()
+                        {
+                            ensure_agent_allowed(entry, effective_agent_id.as_deref())
+                                .map_err(|e| e.to_string())?;
+                        }
+                    }
+                    let removed = transaction
                         .vault_replace_api_key_pool(&params.prefix, &entries, &rotation)
-                        .map_err(|e| format!("vault_replace_api_key_pool: {e}"))
+                        .map_err(|e| format!("vault_replace_api_key_pool: {e}"))?;
+                    transaction
+                        .commit()
+                        .map_err(|e| format!("commit pool replacement transaction: {e}"))?;
+                    Ok::<_, String>(removed)
                 })
                 .map_err(|e| format!("save API key pool: {e}"))
         })?;

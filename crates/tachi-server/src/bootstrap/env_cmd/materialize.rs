@@ -111,6 +111,11 @@ fn resolve_bound_secret_value(
     secret_name: &str,
 ) -> Result<String, Box<dyn std::error::Error>> {
     if let Some(entry) = entries.get(secret_name).copied() {
+        if let Some((prefix, _)) = crate::provider_config::parse_rotation_member_name(secret_name) {
+            if unlocked.store.vault_get_rotation(prefix)?.is_some() {
+                vault_cli::validate_api_key_lease_target(&unlocked.store, secret_name)?;
+            }
+        }
         return decrypt_entry_value(entry, unlocked.key.bytes());
     }
     let (_, _, value) =

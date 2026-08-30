@@ -152,6 +152,18 @@ pub(super) fn select_vault_entry(
     let exact_entry = store
         .vault_get_entry(&params.name)
         .map_err(|e| format!("Failed to get secret: {e}"))?;
+    if let Some((prefix, _)) = crate::provider_config::parse_rotation_member_name(&params.name) {
+        if let Some(member_rotation) = store
+            .vault_get_rotation(prefix)
+            .map_err(|e| format!("Failed to check member rotation: {e}"))?
+        {
+            let all_entries = store
+                .vault_list_entries()
+                .map_err(|e| format!("Failed to list member rotation: {e}"))?;
+            memcore::validate_api_key_rotation(&all_entries, &member_rotation)
+                .map_err(|error| format!("{error}; refusing configured-member Vault get"))?;
+        }
+    }
     let rotation = store
         .vault_get_rotation(&params.name)
         .map_err(|e| format!("Failed to check rotation: {e}"))?;
