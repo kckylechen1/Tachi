@@ -16,6 +16,52 @@ pub struct VaultTransaction<'conn> {
     transaction: Option<Transaction<'conn>>,
 }
 
+/// An owned cross-connection fence used while already-resolved Vault material
+/// is published to another runtime state. It intentionally exposes no Vault
+/// reads or writes: callers acquire it only after producing a revision digest,
+/// recheck that digest while the fence blocks writers, then hold it through
+/// publication.
+pub struct VaultMutationFence {
+    connection: Connection,
+    active: bool,
+}
+
+impl VaultMutationFence {
+    pub fn acquire(db_path: &std::path::Path) -> Result<Self, MemoryError> {
+        let connection = Connection::open(db_path)?;
+        connection.busy_timeout(std::time::Duration::from_secs(5))?;
+        connection.execute_batch("BEGIN IMMEDIATE")?;
+        Ok(Self {
+            connection,
+            active: true,
+        })
+    }
+
+    pub fn commit(mut self) -> Result<(), MemoryError> {
+        self.connection.execute_batch("COMMIT")?;
+        self.active = false;
+        Ok(())
+    }
+
+    pub fn connection(&self) -> &Connection {
+        &self.connection
+    }
+
+    pub fn rollback(mut self) -> Result<(), MemoryError> {
+        self.connection.execute_batch("ROLLBACK")?;
+        self.active = false;
+        Ok(())
+    }
+}
+
+impl Drop for VaultMutationFence {
+    fn drop(&mut self) {
+        if self.active {
+            let _ = self.connection.execute_batch("ROLLBACK");
+        }
+    }
+}
+
 impl VaultTransaction<'_> {
     fn connection(&self) -> &Connection {
         self.transaction
@@ -68,6 +114,21 @@ impl VaultTransaction<'_> {
 
     pub fn vault_list_rotations(&self) -> Result<Vec<VaultKeyRotation>, MemoryError> {
         db::vault_list_rotations(self.connection())
+    }
+
+    pub fn vault_get_key_health(
+        &self,
+        logical_name: &str,
+        key_id: &str,
+    ) -> Result<Option<VaultKeyHealth>, MemoryError> {
+        db::vault_get_key_health(self.connection(), logical_name, key_id)
+    }
+
+    pub fn vault_list_key_health(
+        &self,
+        logical_name: Option<&str>,
+    ) -> Result<Vec<VaultKeyHealth>, MemoryError> {
+        db::vault_list_key_health(self.connection(), logical_name)
     }
 
     pub fn vault_replace_api_key_pool(

@@ -6,6 +6,7 @@ use memcore::vault::{
 };
 use memcore::MemoryStore;
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 use tachi_llm::AliasSkipClass;
 
 use super::alias_integrity::unusable_skip_class;
@@ -385,37 +386,46 @@ fn load_unlocked_vault_secrets_with_key(
     key: &[u8; 32],
     include_entry: impl Fn(&VaultEntry) -> bool,
 ) -> Result<Vec<(String, String)>, String> {
-    let entries = server
-        .with_global_store_read(|store| store.vault_list_entries().map_err(|e| e.to_string()))
-        .map_err(|e| format!("Failed to list vault secrets: {e}"))?;
-    let mut secrets = Vec::new();
-    for entry in entries {
-        if !include_entry(&entry) {
-            continue;
-        }
-        if entry
-            .allowed_agents
-            .as_ref()
-            .is_some_and(|agents| !agents.is_empty())
-        {
-            continue;
-        }
+    server.with_global_store(|store| {
+        let transaction = store
+            .begin_vault_transaction()
+            .map_err(|e| format!("Failed to begin Vault materialization transaction: {e}"))?;
+        let entries = transaction
+            .vault_list_entries()
+            .map_err(|e| format!("Failed to list vault secrets: {e}"))?;
+        let mut secrets = Vec::new();
+        for entry in entries {
+            if !include_entry(&entry) {
+                continue;
+            }
+            if entry
+                .allowed_agents
+                .as_ref()
+                .is_some_and(|agents| !agents.is_empty())
+            {
+                continue;
+            }
 
-        let decrypted = crypto::decrypt(key, &entry.encrypted_value, &entry.nonce)?;
-        let value =
-            crypto::decode_utf8_zeroizing(decrypted, super::VAULT_MATERIALIZATION_INVALID_UTF8)?;
-        if !value.trim().is_empty() {
-            secrets.push((entry.name, value));
+            let decrypted = crypto::decrypt(key, &entry.encrypted_value, &entry.nonce)?;
+            let value = crypto::decode_utf8_zeroizing(
+                decrypted,
+                super::VAULT_MATERIALIZATION_INVALID_UTF8,
+            )?;
+            if !value.trim().is_empty() {
+                secrets.push((entry.name, value));
+            }
         }
-    }
-
-    Ok(secrets)
+        transaction
+            .commit()
+            .map_err(|e| format!("Failed to commit Vault materialization transaction: {e}"))?;
+        Ok(secrets)
+    })
 }
 
 pub(crate) fn load_unlocked_api_key_secret_pools(
     server: &MemoryServer,
 ) -> Result<HashMap<String, Vec<tachi_llm::ProviderSecret>>, String> {
-    load_unlocked_api_key_secret_pools_filtered(server, None, true).map(|scan| scan.pools)
+    load_unlocked_api_key_secret_pools_filtered(server, None, true, || {}).map(|scan| scan.pools)
 }
 
 pub(crate) fn canonical_api_key_health_logical_name(
@@ -448,6 +458,39 @@ pub(crate) struct ProviderSecretScan {
     pub pools: HashMap<String, Vec<tachi_llm::ProviderSecret>>,
     pub dropped: HashMap<String, AliasSkipClass>,
     pub lane_config_values: crate::provider_config::LaneConfigValues,
+    pub acl_revision: u64,
+}
+
+fn vault_materialization_acl_revision_from_rows(
+    entries: &[VaultEntry],
+    rotations: &[VaultKeyRotation],
+) -> u64 {
+    let mut entries = entries.iter().collect::<Vec<_>>();
+    entries.sort_by(|left, right| left.name.cmp(&right.name));
+    let mut rotations = rotations.iter().collect::<Vec<_>>();
+    rotations.sort_by(|left, right| left.prefix.cmp(&right.prefix));
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for entry in entries {
+        entry.name.hash(&mut hasher);
+        entry.secret_type.hash(&mut hasher);
+        entry.allowed_agents.hash(&mut hasher);
+        entry.updated_at.hash(&mut hasher);
+    }
+    for rotation in rotations {
+        rotation.prefix.hash(&mut hasher);
+        rotation.current_index.hash(&mut hasher);
+        rotation.total_keys.hash(&mut hasher);
+        rotation.rotation_strategy.hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+pub(crate) fn vault_materialization_acl_revision(store: &MemoryStore) -> Result<u64, String> {
+    let entries = store.vault_list_entries().map_err(|e| e.to_string())?;
+    let rotations = store.vault_list_rotations().map_err(|e| e.to_string())?;
+    Ok(vault_materialization_acl_revision_from_rows(
+        &entries, &rotations,
+    ))
 }
 
 /// Same scan as [`load_unlocked_api_key_secret_pools`], plus the drop reason
@@ -456,27 +499,28 @@ pub(crate) struct ProviderSecretScan {
 pub(crate) fn load_unlocked_api_key_secret_pools_with_drops(
     server: &MemoryServer,
 ) -> Result<ProviderSecretScan, String> {
-    load_unlocked_api_key_secret_pools_filtered(server, None, false)
+    load_unlocked_api_key_secret_pools_filtered(server, None, false, || {})
 }
 
 pub(crate) fn load_validated_unlocked_api_key_secret_pools_with_drops(
     server: &MemoryServer,
 ) -> Result<ProviderSecretScan, String> {
-    load_unlocked_api_key_secret_pools_filtered(server, None, true)
+    load_unlocked_api_key_secret_pools_filtered(server, None, true, || {})
 }
 
 pub(super) fn load_unlocked_api_key_secret_pool(
     server: &MemoryServer,
     logical_name: &str,
 ) -> Result<Vec<tachi_llm::ProviderSecret>, String> {
-    let mut direct = load_unlocked_api_key_secret_pools_filtered(server, Some(logical_name), true)?;
+    let mut direct =
+        load_unlocked_api_key_secret_pools_filtered(server, Some(logical_name), true, || {})?;
     if let Some(pool) = direct.pools.remove(logical_name) {
         return Ok(pool);
     }
     let Some((prefix, _)) = crate::provider_config::parse_rotation_member_name(logical_name) else {
         return Ok(Vec::new());
     };
-    let grouped = load_unlocked_api_key_secret_pools_filtered(server, Some(prefix), true)?;
+    let grouped = load_unlocked_api_key_secret_pools_filtered(server, Some(prefix), true, || {})?;
     Ok(grouped
         .pools
         .get(prefix)
@@ -512,166 +556,254 @@ fn load_unlocked_api_key_secret_pools_filtered(
     server: &MemoryServer,
     only_logical_name: Option<&str>,
     validate_rotations: bool,
+    after_snapshot: impl FnOnce(),
 ) -> Result<ProviderSecretScan, String> {
     with_vault_key_for_provider_refresh(server, |key| {
-        let (entries, rotations, key_health_rows) = server
-            .with_global_store(|store| {
-                let entries = store.vault_list_entries().map_err(|e| e.to_string())?;
-                let rotations = store.vault_list_rotations().map_err(|e| e.to_string())?;
-                let key_health = store
-                    .vault_list_key_health(None)
-                    .map_err(|e| e.to_string())?;
-                Ok::<_, String>((entries, rotations, key_health))
-            })
-            .map_err(|e| format!("Failed to list vault provider secrets: {e}"))?;
+        server.with_global_store(|store| {
+            let transaction = store
+                .begin_vault_transaction()
+                .map_err(|e| format!("Failed to begin Vault provider transaction: {e}"))?;
+            let entries = transaction
+                .vault_list_entries()
+                .map_err(|e| format!("Failed to list vault provider secrets: {e}"))?;
+            let rotations = transaction
+                .vault_list_rotations()
+                .map_err(|e| format!("Failed to list Vault rotations: {e}"))?;
+            let key_health_rows = transaction
+                .vault_list_key_health(None)
+                .map_err(|e| format!("Failed to list Vault key health: {e}"))?;
+            let acl_revision = vault_materialization_acl_revision_from_rows(&entries, &rotations);
+            after_snapshot();
 
-        let now = Utc::now();
-        let requested_rotation_prefix = only_logical_name.and_then(|logical_name| {
-            crate::provider_config::parse_rotation_member_name(logical_name)
-                .map(|(prefix, _)| prefix)
-        });
-        for rotation in &rotations {
-            if !validate_rotations {
-                break;
-            }
-            if only_logical_name.is_none()
-                || only_logical_name == Some(rotation.prefix.as_str())
-                || requested_rotation_prefix == Some(rotation.prefix.as_str())
-            {
-                memcore::validate_api_key_rotation(&entries, rotation).map_err(|error| {
-                    format!("{error}; refusing to materialize API-key rotation")
-                })?;
-            }
-        }
-        let mut key_health_by_logical: HashMap<String, HashMap<String, VaultKeyHealth>> =
-            HashMap::new();
-        for row in key_health_rows {
-            key_health_by_logical
-                .entry(row.logical_name.clone())
-                .or_default()
-                .insert(row.key_id.clone(), row);
-        }
-
-        // Merge in-memory health so that runtime mutations are visible even when
-        // background persistence is disabled (e.g. in tests).
-        for (logical_name, members) in server.llm.provider_health_memory_snapshot() {
-            let target = key_health_by_logical.entry(logical_name).or_default();
-            for (key_id, health) in members {
-                let keep_in_memory = target
-                    .get(&key_id)
-                    .and_then(|db_row| {
-                        let db_updated = chrono::DateTime::parse_from_rfc3339(&db_row.updated_at)
-                            .ok()?
-                            .with_timezone(&Utc);
-                        let mem_updated = chrono::DateTime::parse_from_rfc3339(&health.updated_at)
-                            .ok()?
-                            .with_timezone(&Utc);
-                        Some(mem_updated >= db_updated)
-                    })
-                    .unwrap_or(true);
-                if keep_in_memory {
-                    target.insert(key_id, health);
+            let now = Utc::now();
+            let requested_rotation_prefix = only_logical_name.and_then(|logical_name| {
+                crate::provider_config::parse_rotation_member_name(logical_name)
+                    .map(|(prefix, _)| prefix)
+            });
+            for rotation in &rotations {
+                if !validate_rotations {
+                    break;
+                }
+                if only_logical_name.is_none()
+                    || only_logical_name == Some(rotation.prefix.as_str())
+                    || requested_rotation_prefix == Some(rotation.prefix.as_str())
+                {
+                    memcore::validate_api_key_rotation(&entries, rotation).map_err(|error| {
+                        format!("{error}; refusing to materialize API-key rotation")
+                    })?;
                 }
             }
-        }
+            let mut key_health_by_logical: HashMap<String, HashMap<String, VaultKeyHealth>> =
+                HashMap::new();
+            for row in key_health_rows {
+                key_health_by_logical
+                    .entry(row.logical_name.clone())
+                    .or_default()
+                    .insert(row.key_id.clone(), row);
+            }
 
-        let mut pools: HashMap<String, Vec<tachi_llm::ProviderSecret>> = HashMap::new();
-        let mut dropped: HashMap<String, AliasSkipClass> = HashMap::new();
-        let mut lane_config_values = crate::provider_config::LaneConfigValues::default();
-        if only_logical_name.is_none() {
-            for entry in &entries {
-                if !is_lane_config_name(&entry.name)
-                    || entry
+            // Merge in-memory health so that runtime mutations are visible even when
+            // background persistence is disabled (e.g. in tests).
+            for (logical_name, members) in server.llm.provider_health_memory_snapshot() {
+                let target = key_health_by_logical.entry(logical_name).or_default();
+                for (key_id, health) in members {
+                    let keep_in_memory = target
+                        .get(&key_id)
+                        .and_then(|db_row| {
+                            let db_updated =
+                                chrono::DateTime::parse_from_rfc3339(&db_row.updated_at)
+                                    .ok()?
+                                    .with_timezone(&Utc);
+                            let mem_updated =
+                                chrono::DateTime::parse_from_rfc3339(&health.updated_at)
+                                    .ok()?
+                                    .with_timezone(&Utc);
+                            Some(mem_updated >= db_updated)
+                        })
+                        .unwrap_or(true);
+                    if keep_in_memory {
+                        target.insert(key_id, health);
+                    }
+                }
+            }
+
+            let mut pools: HashMap<String, Vec<tachi_llm::ProviderSecret>> = HashMap::new();
+            let mut dropped: HashMap<String, AliasSkipClass> = HashMap::new();
+            let mut lane_config_values = crate::provider_config::LaneConfigValues::default();
+            if only_logical_name.is_none() {
+                for entry in &entries {
+                    if !is_lane_config_name(&entry.name)
+                        || entry
+                            .allowed_agents
+                            .as_ref()
+                            .is_some_and(|agents| !agents.is_empty())
+                    {
+                        continue;
+                    }
+                    let decrypted =
+                        crate::vault_crypto::decrypt(key, &entry.encrypted_value, &entry.nonce)?;
+                    let value = crate::vault_crypto::decode_utf8_zeroizing(
+                        decrypted,
+                        super::VAULT_MATERIALIZATION_INVALID_UTF8,
+                    )?;
+                    if !value.trim().is_empty() {
+                        lane_config_values.push((entry.name.clone(), value));
+                    }
+                }
+            }
+            let mut rotation_members: HashSet<String> = HashSet::new();
+            let mut materialized_key_ids: BTreeSet<String> = BTreeSet::new();
+
+            let unusable_class = |logical_name: &str, key_id: &str| -> Option<AliasSkipClass> {
+                let health = key_health_by_logical.get(logical_name)?.get(key_id)?;
+                unusable_skip_class(health, now)
+            };
+
+            // Record configured membership before applying the optional pool
+            // filter. A concrete-member lease must not fall through to raw-name
+            // health identity merely because its prefix pass was filtered out.
+            for rotation in &rotations {
+                for (_, entry) in collect_rotation_entries(entries.clone(), &rotation.prefix) {
+                    rotation_members.insert(entry.name);
+                }
+            }
+
+            for rotation in rotations {
+                if only_logical_name.is_some_and(|logical_name| logical_name != rotation.prefix) {
+                    continue;
+                }
+                let mut matching = collect_rotation_entries(entries.clone(), &rotation.prefix);
+                if matching.is_empty() {
+                    continue;
+                }
+                let selected_idx = match rotation.rotation_strategy.as_str() {
+                    "round_robin" => {
+                        if rotation.current_index <= 0 {
+                            0
+                        } else {
+                            (rotation.current_index as usize - 1) % matching.len()
+                        }
+                    }
+                    "random" => {
+                        use rand::Rng;
+                        rand::thread_rng().gen_range(0..matching.len())
+                    }
+                    "least_recently_used" => matching
+                        .iter()
+                        .enumerate()
+                        .min_by_key(|(_, (_, entry))| {
+                            (entry.access_count, entry.accessed_at.clone())
+                        })
+                        .map(|(idx, _)| idx)
+                        .unwrap_or(0),
+                    _ => 0,
+                };
+                matching.rotate_left(selected_idx);
+                let mut pool = Vec::new();
+                let mut prefix_drop = None;
+                for (member_index, entry) in matching {
+                    // Membership is structural, not conditional on admission.
+                    // A configured member rejected below must never fall through
+                    // to the standalone raw-name pass and bypass prefix health.
+                    rotation_members.insert(entry.name.clone());
+                    if memcore::is_lane_config_secret_name(&entry.name) {
+                        record_rotation_member_drop(
+                            &mut dropped,
+                            &mut prefix_drop,
+                            member_index,
+                            &entry.name,
+                            AliasSkipClass::ListedWrongType,
+                        );
+                        continue;
+                    }
+                    if memcore::effective_vault_secret_type(&entry.name, &entry.secret_type)
+                        != SECRET_TYPE_API_KEY
+                    {
+                        record_rotation_member_drop(
+                            &mut dropped,
+                            &mut prefix_drop,
+                            member_index,
+                            &entry.name,
+                            AliasSkipClass::ListedWrongType,
+                        );
+                        continue;
+                    }
+                    if entry
                         .allowed_agents
                         .as_ref()
                         .is_some_and(|agents| !agents.is_empty())
-                {
+                    {
+                        record_rotation_member_drop(
+                            &mut dropped,
+                            &mut prefix_drop,
+                            member_index,
+                            &entry.name,
+                            AliasSkipClass::ListedFenced,
+                        );
+                        continue;
+                    }
+                    if let Some(class) = unusable_class(&rotation.prefix, &entry.name) {
+                        record_rotation_member_drop(
+                            &mut dropped,
+                            &mut prefix_drop,
+                            member_index,
+                            &entry.name,
+                            class,
+                        );
+                        continue;
+                    }
+                    let decrypted = crypto::decrypt(key, &entry.encrypted_value, &entry.nonce)?;
+                    let value = crypto::decode_utf8_zeroizing(
+                        decrypted,
+                        super::VAULT_MATERIALIZATION_INVALID_UTF8,
+                    )?;
+                    if value.trim().is_empty() {
+                        record_rotation_member_drop(
+                            &mut dropped,
+                            &mut prefix_drop,
+                            member_index,
+                            &entry.name,
+                            AliasSkipClass::ListedEmpty,
+                        );
+                        continue;
+                    }
+                    let key_id = entry.name.clone();
+                    pool.push(tachi_llm::ProviderSecret {
+                        key_id: key_id.clone(),
+                        value,
+                    });
+                    materialized_key_ids.insert(key_id);
+                }
+                if !pool.is_empty() {
+                    pools.insert(rotation.prefix, pool);
+                } else if let Some((_, class)) = prefix_drop {
+                    dropped.insert(rotation.prefix, class);
+                }
+            }
+
+            for entry in entries {
+                if only_logical_name.is_some_and(|logical_name| logical_name != entry.name) {
                     continue;
                 }
-                let decrypted =
-                    crate::vault_crypto::decrypt(key, &entry.encrypted_value, &entry.nonce)?;
-                let value = crate::vault_crypto::decode_utf8_zeroizing(
-                    decrypted,
-                    super::VAULT_MATERIALIZATION_INVALID_UTF8,
-                )?;
-                if !value.trim().is_empty() {
-                    lane_config_values.push((entry.name.clone(), value));
-                }
-            }
-        }
-        let mut rotation_members: HashSet<String> = HashSet::new();
-        let mut materialized_key_ids: BTreeSet<String> = BTreeSet::new();
-
-        let unusable_class = |logical_name: &str, key_id: &str| -> Option<AliasSkipClass> {
-            let health = key_health_by_logical.get(logical_name)?.get(key_id)?;
-            unusable_skip_class(health, now)
-        };
-
-        // Record configured membership before applying the optional pool
-        // filter. A concrete-member lease must not fall through to raw-name
-        // health identity merely because its prefix pass was filtered out.
-        for rotation in &rotations {
-            for (_, entry) in collect_rotation_entries(entries.clone(), &rotation.prefix) {
-                rotation_members.insert(entry.name);
-            }
-        }
-
-        for rotation in rotations {
-            if only_logical_name.is_some_and(|logical_name| logical_name != rotation.prefix) {
-                continue;
-            }
-            let mut matching = collect_rotation_entries(entries.clone(), &rotation.prefix);
-            if matching.is_empty() {
-                continue;
-            }
-            let selected_idx = match rotation.rotation_strategy.as_str() {
-                "round_robin" => {
-                    if rotation.current_index <= 0 {
-                        0
-                    } else {
-                        (rotation.current_index as usize - 1) % matching.len()
-                    }
-                }
-                "random" => {
-                    use rand::Rng;
-                    rand::thread_rng().gen_range(0..matching.len())
-                }
-                "least_recently_used" => matching
-                    .iter()
-                    .enumerate()
-                    .min_by_key(|(_, (_, entry))| (entry.access_count, entry.accessed_at.clone()))
-                    .map(|(idx, _)| idx)
-                    .unwrap_or(0),
-                _ => 0,
-            };
-            matching.rotate_left(selected_idx);
-            let mut pool = Vec::new();
-            let mut prefix_drop = None;
-            for (member_index, entry) in matching {
-                // Membership is structural, not conditional on admission.
-                // A configured member rejected below must never fall through
-                // to the standalone raw-name pass and bypass prefix health.
-                rotation_members.insert(entry.name.clone());
                 if memcore::is_lane_config_secret_name(&entry.name) {
-                    record_rotation_member_drop(
-                        &mut dropped,
-                        &mut prefix_drop,
-                        member_index,
-                        &entry.name,
-                        AliasSkipClass::ListedWrongType,
-                    );
+                    record_listed_drop(&mut dropped, &entry.name, AliasSkipClass::ListedWrongType);
                     continue;
                 }
                 if memcore::effective_vault_secret_type(&entry.name, &entry.secret_type)
                     != SECRET_TYPE_API_KEY
                 {
-                    record_rotation_member_drop(
+                    record_listed_drop(&mut dropped, &entry.name, AliasSkipClass::ListedWrongType);
+                    continue;
+                }
+                if !crate::provider_config::is_provider_api_key_name(&entry.name) {
+                    record_listed_drop(
                         &mut dropped,
-                        &mut prefix_drop,
-                        member_index,
                         &entry.name,
-                        AliasSkipClass::ListedWrongType,
+                        AliasSkipClass::ListedNotModelProvider,
                     );
+                    continue;
+                }
+                if rotation_members.contains(&entry.name) {
                     continue;
                 }
                 if entry
@@ -679,23 +811,11 @@ fn load_unlocked_api_key_secret_pools_filtered(
                     .as_ref()
                     .is_some_and(|agents| !agents.is_empty())
                 {
-                    record_rotation_member_drop(
-                        &mut dropped,
-                        &mut prefix_drop,
-                        member_index,
-                        &entry.name,
-                        AliasSkipClass::ListedFenced,
-                    );
+                    record_listed_drop(&mut dropped, &entry.name, AliasSkipClass::ListedFenced);
                     continue;
                 }
-                if let Some(class) = unusable_class(&rotation.prefix, &entry.name) {
-                    record_rotation_member_drop(
-                        &mut dropped,
-                        &mut prefix_drop,
-                        member_index,
-                        &entry.name,
-                        class,
-                    );
+                if let Some(class) = unusable_class(&entry.name, &entry.name) {
+                    record_listed_drop(&mut dropped, &entry.name, class);
                     continue;
                 }
                 let decrypted = crypto::decrypt(key, &entry.encrypted_value, &entry.nonce)?;
@@ -704,105 +824,53 @@ fn load_unlocked_api_key_secret_pools_filtered(
                     super::VAULT_MATERIALIZATION_INVALID_UTF8,
                 )?;
                 if value.trim().is_empty() {
-                    record_rotation_member_drop(
-                        &mut dropped,
-                        &mut prefix_drop,
-                        member_index,
-                        &entry.name,
-                        AliasSkipClass::ListedEmpty,
-                    );
+                    record_listed_drop(&mut dropped, &entry.name, AliasSkipClass::ListedEmpty);
                     continue;
                 }
                 let key_id = entry.name.clone();
-                pool.push(tachi_llm::ProviderSecret {
-                    key_id: key_id.clone(),
-                    value,
-                });
-                materialized_key_ids.insert(key_id);
+                if let std::collections::hash_map::Entry::Vacant(slot) = pools.entry(key_id.clone())
+                {
+                    slot.insert(vec![tachi_llm::ProviderSecret {
+                        key_id: key_id.clone(),
+                        value,
+                    }]);
+                    materialized_key_ids.insert(key_id);
+                }
             }
-            if !pool.is_empty() {
-                pools.insert(rotation.prefix, pool);
-            } else if let Some((_, class)) = prefix_drop {
-                dropped.insert(rotation.prefix, class);
-            }
-        }
 
-        for entry in entries {
-            if only_logical_name.is_some_and(|logical_name| logical_name != entry.name) {
-                continue;
+            // Decode, UTF-8 validation, filtering, and pool construction must all
+            // succeed before access metadata changes. One store call performs one
+            // atomic SQLite batch, so any touch failure rolls back every delta.
+            if !materialized_key_ids.is_empty() {
+                let key_ids = materialized_key_ids.into_iter().collect::<Vec<_>>();
+                for key_id in &key_ids {
+                    transaction
+                        .vault_touch_entry(key_id)
+                        .map_err(|e| format!("Failed to record provider key access: {e}"))?;
+                }
             }
-            if memcore::is_lane_config_secret_name(&entry.name) {
-                record_listed_drop(&mut dropped, &entry.name, AliasSkipClass::ListedWrongType);
-                continue;
-            }
-            if memcore::effective_vault_secret_type(&entry.name, &entry.secret_type)
-                != SECRET_TYPE_API_KEY
-            {
-                record_listed_drop(&mut dropped, &entry.name, AliasSkipClass::ListedWrongType);
-                continue;
-            }
-            if !crate::provider_config::is_provider_api_key_name(&entry.name) {
-                record_listed_drop(
-                    &mut dropped,
-                    &entry.name,
-                    AliasSkipClass::ListedNotModelProvider,
-                );
-                continue;
-            }
-            if rotation_members.contains(&entry.name) {
-                continue;
-            }
-            if entry
-                .allowed_agents
-                .as_ref()
-                .is_some_and(|agents| !agents.is_empty())
-            {
-                record_listed_drop(&mut dropped, &entry.name, AliasSkipClass::ListedFenced);
-                continue;
-            }
-            if let Some(class) = unusable_class(&entry.name, &entry.name) {
-                record_listed_drop(&mut dropped, &entry.name, class);
-                continue;
-            }
-            let decrypted = crypto::decrypt(key, &entry.encrypted_value, &entry.nonce)?;
-            let value = crypto::decode_utf8_zeroizing(
-                decrypted,
-                super::VAULT_MATERIALIZATION_INVALID_UTF8,
-            )?;
-            if value.trim().is_empty() {
-                record_listed_drop(&mut dropped, &entry.name, AliasSkipClass::ListedEmpty);
-                continue;
-            }
-            let key_id = entry.name.clone();
-            if let std::collections::hash_map::Entry::Vacant(slot) = pools.entry(key_id.clone()) {
-                slot.insert(vec![tachi_llm::ProviderSecret {
-                    key_id: key_id.clone(),
-                    value,
-                }]);
-                materialized_key_ids.insert(key_id);
-            }
-        }
 
-        // Decode, UTF-8 validation, filtering, and pool construction must all
-        // succeed before access metadata changes. One store call performs one
-        // atomic SQLite batch, so any touch failure rolls back every delta.
-        if !materialized_key_ids.is_empty() {
-            let key_ids = materialized_key_ids.into_iter().collect::<Vec<_>>();
-            server
-                .with_global_store(|store| {
-                    store
-                        .vault_touch_entries_atomic(&key_ids)
-                        .map_err(|e| e.to_string())
-                })
-                .map_err(|e| format!("Failed to record provider key access batch: {e}"))?;
-        }
-
-        Ok(ProviderSecretScan {
-            pools,
-            dropped,
-            lane_config_values,
+            let scan = ProviderSecretScan {
+                pools,
+                dropped,
+                lane_config_values,
+                acl_revision,
+            };
+            transaction
+                .commit()
+                .map_err(|e| format!("Failed to commit Vault provider transaction: {e}"))?;
+            Ok(scan)
         })
     })
+}
+
+#[cfg(test)]
+pub(super) fn load_unlocked_api_key_secret_pools_with_acl_hook_for_tests(
+    server: &MemoryServer,
+    after_snapshot: impl FnOnce(),
+) -> Result<HashMap<String, Vec<tachi_llm::ProviderSecret>>, String> {
+    load_unlocked_api_key_secret_pools_filtered(server, None, true, after_snapshot)
+        .map(|scan| scan.pools)
 }
 
 pub(crate) fn read_unlocked_vault_secret(

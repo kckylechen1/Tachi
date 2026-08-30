@@ -1,5 +1,5 @@
 use super::access::{
-    record_successful_vault_access,
+    load_unlocked_api_key_secret_pools_with_acl_hook_for_tests, record_successful_vault_access,
     select_authorized_vault_entry_and_record_access_with_hook_for_tests,
 };
 use super::handlers::{
@@ -109,6 +109,160 @@ fn authorized_vault_read_serializes_acl_revocation_with_selection_and_touch() {
         Ok(_) => panic!("subsequent anonymous read must observe the committed ACL revocation"),
     };
     assert!(denied.contains("agent_id is required"), "{denied}");
+}
+
+#[test]
+fn provider_materialization_serializes_acl_revocation_with_decrypt_and_touch() {
+    let db_path = crate::utils::test_fixture_path(format!(
+        "memory-server-vault-acl-materialize-race-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let server = MemoryServer::new(db_path.clone(), None).expect("create test server");
+    let key = [8u8; 32];
+    {
+        let mut vault = server.vault_write();
+        vault.key = Some(crate::CachedVaultKey::copy_from(&key));
+        vault.unlock_time = Some(Instant::now());
+    }
+    let (encrypted_value, nonce) =
+        crate::vault_crypto::encrypt(&key, b"materialized-secret").expect("encrypt fixture");
+    let now = chrono::Utc::now().to_rfc3339();
+    let entry = memcore::vault::VaultEntry {
+        name: "OPENAI_API_KEY".to_string(),
+        encrypted_value,
+        nonce,
+        secret_type: "api_key".to_string(),
+        description: "materialization ACL race fixture".to_string(),
+        allowed_agents: None,
+        created_at: now.clone(),
+        updated_at: now,
+        accessed_at: String::new(),
+        access_count: 0,
+    };
+    server
+        .with_global_store(|store| {
+            store
+                .vault_upsert_entry(&entry)
+                .map_err(|error| error.to_string())
+        })
+        .expect("seed unrestricted provider entry");
+    let writer_store =
+        memcore::MemoryStore::open(db_path.to_string_lossy().as_ref()).expect("open writer store");
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let writer_barrier = std::sync::Arc::clone(&barrier);
+    let (attempt_tx, attempt_rx) = std::sync::mpsc::channel();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let writer_handle = std::cell::RefCell::new(None);
+    let mut restricted = entry;
+    restricted.allowed_agents = Some(vec!["agent-a".to_string()]);
+
+    let pools = load_unlocked_api_key_secret_pools_with_acl_hook_for_tests(&server, || {
+        let handle = std::thread::spawn(move || {
+            attempt_tx.send(()).expect("announce ACL revocation");
+            writer_barrier.wait();
+            writer_store
+                .vault_upsert_entry(&restricted)
+                .expect("commit ACL revocation");
+            done_tx.send(()).expect("announce committed revocation");
+        });
+        attempt_rx
+            .recv()
+            .expect("writer reached materialization revocation boundary");
+        barrier.wait();
+        assert!(
+            done_rx.recv_timeout(Duration::from_millis(250)).is_err(),
+            "ACL revocation must not commit between provider snapshot and decrypt/touch"
+        );
+        writer_handle.replace(Some(handle));
+    })
+    .expect("materialization linearizes before the blocked ACL revocation");
+    assert_eq!(pools["OPENAI_API_KEY"][0].value, "materialized-secret");
+    writer_handle
+        .into_inner()
+        .expect("writer handle")
+        .join()
+        .expect("ACL writer thread");
+    done_rx.recv().expect("ACL revocation committed");
+
+    let after = crate::vault_ops::load_unlocked_api_key_secret_pools(&server)
+        .expect("scan after ACL revocation");
+    assert!(
+        !after.contains_key("OPENAI_API_KEY"),
+        "subsequent materialization must observe the committed ACL fence"
+    );
+}
+
+#[test]
+fn provider_publication_refuses_acl_revision_drift_after_resolution() {
+    let _lock = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _env = EnvRestore::set("OPENAI_API_KEY", "vault:OPENAI_API_KEY");
+    let db_path = crate::utils::test_fixture_path(format!(
+        "memory-server-vault-acl-publish-race-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let server = MemoryServer::new(db_path.clone(), None).expect("create test server");
+    let key = [10u8; 32];
+    {
+        let mut vault = server.vault_write();
+        vault.key = Some(crate::CachedVaultKey::copy_from(&key));
+        vault.unlock_time = Some(Instant::now());
+    }
+    let (encrypted_value, nonce) =
+        crate::vault_crypto::encrypt(&key, b"must-not-publish").expect("encrypt fixture");
+    let now = chrono::Utc::now().to_rfc3339();
+    let entry = memcore::vault::VaultEntry {
+        name: "OPENAI_API_KEY".to_string(),
+        encrypted_value,
+        nonce,
+        secret_type: "api_key".to_string(),
+        description: "publication ACL drift fixture".to_string(),
+        allowed_agents: None,
+        created_at: now.clone(),
+        updated_at: now,
+        accessed_at: String::new(),
+        access_count: 0,
+    };
+    server
+        .with_global_store(|store| {
+            store
+                .vault_upsert_entry(&entry)
+                .map_err(|error| error.to_string())
+        })
+        .expect("seed provider entry");
+    let writer_store =
+        memcore::MemoryStore::open(db_path.to_string_lossy().as_ref()).expect("open writer store");
+    let mut restricted = entry;
+    restricted.allowed_agents = Some(vec!["agent-a".to_string()]);
+
+    let error =
+        crate::provider_config::materialize_for_server_with_hook_for_tests(&server, move || {
+            writer_store
+                .vault_upsert_entry(&restricted)
+                .expect("commit ACL revocation after resolution");
+        })
+        .expect_err("ACL revision drift must refuse stale provider publication");
+    assert!(error.contains("changed before publication"), "{error}");
+    assert!(
+        server
+            .llm
+            .provider_secret_for_tests(&["OPENAI_API_KEY"])
+            .is_none(),
+        "stale resolved plaintext must not publish after ACL revocation"
+    );
+
+    memcore::store::vault::VaultMutationFence::acquire(&db_path)
+        .expect("stale publication fence released after refusal")
+        .rollback()
+        .expect("release probe fence");
+
+    crate::provider_config::materialize_for_server(&server)
+        .expect("fresh refresh observes restricted provider entry");
+    assert!(server
+        .llm
+        .provider_secret_for_tests(&["OPENAI_API_KEY"])
+        .is_none());
 }
 
 #[tokio::test]
