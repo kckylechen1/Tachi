@@ -158,14 +158,13 @@ pub(crate) fn validate_api_key_lease_target(
     }
     let rotation_prefix =
         crate::vault_ops::canonical_api_key_health_logical_name(store, logical_name)?;
-    if store
+    if let Some(rotation) = store
         .vault_get_rotation(&rotation_prefix)
         .map_err(|e| format!("vault_get_rotation: {e}"))?
-        .is_some()
     {
-        memcore::validate_api_key_rotation_members(&entries, &rotation_prefix).map_err(
-            |error| format!("{error}; refusing to lease '{logical_name}' as an API key"),
-        )?;
+        memcore::validate_api_key_rotation(&entries, &rotation).map_err(|error| {
+            format!("{error}; refusing to lease '{logical_name}' as an API key")
+        })?;
     }
     Ok(())
 }

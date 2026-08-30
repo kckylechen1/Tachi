@@ -154,6 +154,18 @@ pub(in crate::bootstrap) fn vault_upsert_secret_with_key(
     transaction
         .vault_upsert_entry(&entry)
         .map_err(|e| format!("vault_upsert_entry: {e}"))?;
+    if let Some((prefix, _)) = crate::provider_config::parse_rotation_member_name(name) {
+        if let Some(rotation) = transaction
+            .vault_get_rotation(prefix)
+            .map_err(|e| format!("vault_get_rotation: {e}"))?
+        {
+            let entries = transaction
+                .vault_list_entries()
+                .map_err(|e| format!("vault_list_entries: {e}"))?;
+            memcore::validate_api_key_rotation(&entries, &rotation)
+                .map_err(|error| format!("{error}; refusing rotation member update"))?;
+        }
+    }
     transaction
         .commit()
         .map_err(|e| format!("commit vault transaction: {e}"))?;

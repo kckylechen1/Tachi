@@ -221,15 +221,14 @@ async fn run_secret_action_with_reader(
                 .vault_upsert_entry(&entry)
                 .map_err(|e| format!("vault_upsert_entry: {e}"))?;
             if let Some((prefix, _)) = crate::provider_config::parse_rotation_member_name(&name) {
-                if transaction
+                if let Some(rotation) = transaction
                     .vault_get_rotation(prefix)
                     .map_err(|e| format!("vault_get_rotation: {e}"))?
-                    .is_some()
                 {
                     let entries = transaction
                         .vault_list_entries()
                         .map_err(|e| format!("vault_list_entries: {e}"))?;
-                    memcore::validate_api_key_rotation_members(&entries, prefix)
+                    memcore::validate_api_key_rotation(&entries, &rotation)
                         .map_err(|error| format!("{error}; refusing rotation member update"))?;
                 }
             }
@@ -711,6 +710,31 @@ mod tests {
             "{set_error}"
         );
 
+        let append_action = VaultAction::Set {
+            name: "DIRECT_POOL_API_KEY_3".to_string(),
+            secret_type: Some("api_key".to_string()),
+            description: None,
+            stdin_password: false,
+            keychain: false,
+            password_file: Some(password_file.clone()),
+            insecure_password_file: false,
+            value_stdin: true,
+            rebind: false,
+        };
+        let append_error = run_secret_action_with_reader(
+            &db_path,
+            temp.path(),
+            append_action,
+            &mut Cursor::new(b"key-three\n".to_vec()),
+        )
+        .await
+        .expect_err("direct CLI must not leave total_keys stale after append")
+        .to_string();
+        assert!(
+            append_error.contains("declares 2 keys") && append_error.contains("has 3"),
+            "{append_error}"
+        );
+
         let remove_action = VaultAction::Remove {
             name: "DIRECT_POOL_API_KEY_2".to_string(),
             stdin_password: false,
@@ -738,5 +762,10 @@ mod tests {
             .expect("read retained member")
             .expect("member remains");
         assert_eq!(retained.secret_type, "api_key");
+        assert!(open_cli_store_read_only(&db_path)
+            .expect("reopen after refused append")
+            .vault_get_entry("DIRECT_POOL_API_KEY_3")
+            .expect("read refused append")
+            .is_none());
     }
 }

@@ -290,6 +290,16 @@ pub(super) fn import_validated_vault_bundle(
             )
         })?;
     }
+    let final_entries = transaction
+        .vault_list_entries()
+        .map_err(|e| format!("vault_list_entries after import: {e}"))?;
+    let final_rotations = transaction
+        .vault_list_rotations()
+        .map_err(|e| format!("vault_list_rotations after import: {e}"))?;
+    for rotation in &final_rotations {
+        memcore::validate_api_key_rotation(&final_entries, rotation)
+            .map_err(|error| format!("{error}; refusing vault bundle import"))?;
+    }
     transaction
         .commit()
         .map_err(|e| format!("commit vault import transaction: {e}"))?;
@@ -715,6 +725,49 @@ mod tests {
             .vault_get_entry("EXTRACT_API_KEY")
             .expect("read lane")
             .is_none());
+        let _ = std::fs::remove_file(target_db);
+    }
+
+    #[test]
+    fn vault_sync_import_rejects_mixed_or_stale_rotation_atomically() {
+        let target_db = temp_db_path();
+        let key = [7u8; 32];
+        let first = encrypted_entry("CUSTOM_POOL_1", "key-one", &key);
+        let mut second = encrypted_entry("CUSTOM_POOL_2", "not-a-key", &key);
+        second.secret_type = "config".to_string();
+        let rotation = VaultKeyRotation {
+            prefix: "CUSTOM_POOL".to_string(),
+            current_index: 1,
+            total_keys: 2,
+            rotation_strategy: "round_robin".to_string(),
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+        };
+
+        let error = import_validated_vault_bundle(
+            &target_db,
+            &sample_config(),
+            &[first, second],
+            &[rotation],
+            Some(&key),
+        )
+        .expect_err("mixed legacy rotation import must fail closed")
+        .to_string();
+        assert!(
+            error.contains("CUSTOM_POOL_2") && error.contains("config"),
+            "{error}"
+        );
+
+        let target = open_cli_store_read_only(&target_db).expect("target store");
+        assert!(target.vault_get_config().expect("read config").is_none());
+        assert!(target
+            .vault_list_entries()
+            .expect("read entries")
+            .is_empty());
+        assert!(target
+            .vault_list_rotations()
+            .expect("read rotations")
+            .is_empty());
         let _ = std::fs::remove_file(target_db);
     }
 

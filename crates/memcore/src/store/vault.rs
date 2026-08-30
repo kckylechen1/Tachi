@@ -62,6 +62,10 @@ impl VaultTransaction<'_> {
         db::vault_get_rotation(self.connection(), prefix)
     }
 
+    pub fn vault_list_rotations(&self) -> Result<Vec<VaultKeyRotation>, MemoryError> {
+        db::vault_list_rotations(self.connection())
+    }
+
     pub fn commit(mut self) -> Result<(), MemoryError> {
         self.transaction
             .take()

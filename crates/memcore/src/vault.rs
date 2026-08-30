@@ -277,8 +277,9 @@ impl Default for VaultEntry {
 pub fn api_key_pool_member_index(name: &str, prefix: &str) -> Option<usize> {
     name.strip_prefix(prefix)
         .and_then(|suffix| suffix.strip_prefix('_'))
-        .and_then(|suffix| suffix.parse::<usize>().ok())
+        .and_then(|suffix| suffix.parse::<u32>().ok())
         .filter(|idx| *idx > 0)
+        .map(|idx| idx as usize)
 }
 
 /// Validate the complete structural member set for an API-key rotation.
@@ -312,6 +313,23 @@ pub fn validate_api_key_rotation_members(
         }
     }
     Ok(indices.len())
+}
+
+/// Validate that a persisted rotation row exactly describes its complete
+/// structural member set. A valid member append or removal is still invalid
+/// until the rotation row is updated in the same transaction.
+pub fn validate_api_key_rotation(
+    entries: &[VaultEntry],
+    rotation: &VaultKeyRotation,
+) -> Result<usize, String> {
+    let member_count = validate_api_key_rotation_members(entries, &rotation.prefix)?;
+    if rotation.total_keys < 0 || member_count != rotation.total_keys as usize {
+        return Err(format!(
+            "Vault rotation '{}' declares {} keys but has {} contiguous API-key members",
+            rotation.prefix, rotation.total_keys, member_count
+        ));
+    }
+    Ok(member_count)
 }
 
 #[cfg(test)]

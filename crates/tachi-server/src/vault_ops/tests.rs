@@ -1544,6 +1544,54 @@ async fn vault_set_infers_config_for_lane_urls_and_refuses_api_key() {
         .expect("member remains after rollback");
     assert_eq!(retained.secret_type, "api_key");
 
+    let append = handle_vault_set(
+        &server,
+        VaultSetParams {
+            name: "MUTABLE_POOL_API_KEY_3".to_string(),
+            value: "key-three".to_string(),
+            agent_id: None,
+            secret_type: "api_key".to_string(),
+            description: "attempt unconfigured append".to_string(),
+            allowed_agents: None,
+            enable_rotation: false,
+            rotation_strategy: None,
+            rebind: false,
+        },
+    )
+    .await
+    .expect_err("member append must not leave total_keys stale");
+    assert!(
+        append.contains("declares 2 keys") && append.contains("has 3"),
+        "{append}"
+    );
+    assert!(server
+        .with_global_store_read(|store| store
+            .vault_get_entry("MUTABLE_POOL_API_KEY_3")
+            .map_err(|error| error.to_string()))
+        .expect("read refused append")
+        .is_none());
+
+    plant_vault_secret(
+        &server,
+        "MUTABLE_POOL_API_KEY_3",
+        "legacy-key-three",
+        "api_key",
+    );
+    let poisoned_lease = handle_vault_lease_api_key(
+        &server,
+        VaultLeaseApiKeyParams {
+            name: "MUTABLE_POOL_API_KEY".to_string(),
+            env_name: None,
+            agent_id: None,
+        },
+    )
+    .await
+    .expect_err("MCP lease must reject a stale persisted rotation count");
+    assert!(
+        poisoned_lease.contains("declares 2 keys") && poisoned_lease.contains("has 3"),
+        "{poisoned_lease}"
+    );
+
     plant_vault_secret(&server, "EXTRA_POOL_API_KEY_1", "key-one", "api_key");
     plant_vault_secret(&server, "EXTRA_POOL_API_KEY_2", "key-two", "api_key");
     plant_vault_secret(&server, "EXTRA_POOL_API_KEY_3", "config-extra", "config");

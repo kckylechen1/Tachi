@@ -399,6 +399,20 @@ fn load_unlocked_api_key_secret_pools_filtered(
             .map_err(|e| format!("Failed to list vault provider secrets: {e}"))?;
 
         let now = Utc::now();
+        let requested_rotation_prefix = only_logical_name.and_then(|logical_name| {
+            crate::provider_config::parse_rotation_member_name(logical_name)
+                .map(|(prefix, _)| prefix)
+        });
+        for rotation in &rotations {
+            if only_logical_name.is_none()
+                || only_logical_name == Some(rotation.prefix.as_str())
+                || requested_rotation_prefix == Some(rotation.prefix.as_str())
+            {
+                memcore::validate_api_key_rotation(&entries, rotation).map_err(|error| {
+                    format!("{error}; refusing to materialize API-key rotation")
+                })?;
+            }
+        }
         let mut key_health_by_logical: HashMap<String, HashMap<String, VaultKeyHealth>> =
             HashMap::new();
         for row in key_health_rows {

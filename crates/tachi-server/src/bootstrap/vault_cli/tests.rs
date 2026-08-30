@@ -1,4 +1,4 @@
-use super::super::open_cli_store_read_only;
+use super::super::{open_cli_store, open_cli_store_read_only};
 use super::daemon::daemon_matches_vault_db;
 use super::keys::{
     canonical_provider_key_defs, derive_verified_vault_key_from_password, vault_init_with_password,
@@ -264,6 +264,57 @@ fn legacy_vault_upsert_rejects_lane_slot_bypass() {
     assert!(error.contains("EXTRACT_API_KEY"), "{error}");
     assert!(error.contains("--rebind"), "{error}");
     assert!(!error.contains("must-not-bypass-rebind"), "{error}");
+}
+
+#[test]
+fn legacy_vault_upsert_refuses_rotation_count_drift() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("memory.db");
+    let key = vault_init_with_password(&db_path, "correct horse battery staple".to_string())
+        .expect("init vault");
+    for idx in 1..=2 {
+        vault_upsert_secret_with_key(
+            &db_path,
+            &key,
+            &format!("LEGACY_POOL_API_KEY_{idx}"),
+            "api_key",
+            "",
+            format!("key-{idx}"),
+        )
+        .expect("seed member");
+    }
+    let store = open_cli_store(&db_path).expect("open writable fixture");
+    store
+        .vault_set_rotation(&memcore::vault::VaultKeyRotation {
+            prefix: "LEGACY_POOL_API_KEY".to_string(),
+            current_index: 1,
+            total_keys: 2,
+            rotation_strategy: "round_robin".to_string(),
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+        })
+        .expect("seed rotation");
+    drop(store);
+
+    let error = vault_upsert_secret_with_key(
+        &db_path,
+        &key,
+        "LEGACY_POOL_API_KEY_3",
+        "api_key",
+        "",
+        "key-three".to_string(),
+    )
+    .expect_err("legacy upsert must not leave total_keys stale")
+    .to_string();
+    assert!(
+        error.contains("declares 2 keys") && error.contains("has 3"),
+        "{error}"
+    );
+    assert!(open_cli_store_read_only(&db_path)
+        .expect("reopen fixture")
+        .vault_get_entry("LEGACY_POOL_API_KEY_3")
+        .expect("read refused append")
+        .is_none());
 }
 
 #[test]

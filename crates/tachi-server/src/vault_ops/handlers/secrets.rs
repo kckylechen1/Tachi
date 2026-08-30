@@ -169,6 +169,10 @@ pub(crate) async fn handle_vault_set(
                             transaction
                                 .vault_set_rotation(&rotation)
                                 .map_err(|e| format!("Failed to save rotation config: {e}"))?;
+                        } else if let Some(rotation) = existing_rotation.as_ref() {
+                            memcore::validate_api_key_rotation(&all_entries, rotation).map_err(
+                                |error| format!("{error}; refusing rotation member update"),
+                            )?;
                         }
                     }
                 }
