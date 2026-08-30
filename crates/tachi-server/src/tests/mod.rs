@@ -222,6 +222,7 @@ const TEMPLATE_IDENTITY_SOURCE_BLOBS: &[&[u8]] = &[
     embedded_template_source!(
         "/../memcore/src/db/migrations/dispatch_outcomes_identity_receipt.rs"
     ),
+    embedded_template_source!("/../memcore/src/db/migrations/delivery_spine.rs"),
     embedded_template_source!("/../memcore/src/db/migrations/dispatch_outcomes_reported.rs"),
     embedded_template_source!("/../memcore/src/db/migrations/domain_retire.rs"),
     embedded_template_source!("/../memcore/src/db/migrations/exec_env_class.rs"),
@@ -2280,6 +2281,7 @@ fn make_skill_capability(
 mod chain_skills_tests;
 mod claims_tests;
 mod closure_scan_tests;
+mod delivery_tests;
 mod dispatch_tests;
 mod docs_tests;
 mod facade_tests;

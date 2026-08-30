@@ -13,8 +13,8 @@ use memcore::{
     advertise_harness_session_capabilities, get_harness_session_state,
     ingest_harness_session_event, mark_harness_session_connection, reconnect_harness_session,
     HarnessSessionAttachmentCapabilities, HarnessSessionAttachmentSelector,
-    HarnessSessionConnectionFact, HarnessSessionEventKind, HarnessSessionTerminalOutcome,
-    NewHarnessSessionEvent,
+    HarnessSessionConnectionFact, HarnessSessionEventDisposition, HarnessSessionEventKind,
+    HarnessSessionTerminalOutcome, NewHarnessSessionEvent,
 };
 use serde_json::{json, Value};
 
@@ -106,6 +106,79 @@ pub(crate) fn handle_ingest_session_event(
         )
         .map_err(|error| error.to_string())
     })?;
+    // #1679: a terminal event mints (or idempotently reconciles) the durable
+    // delivery intent for the admitted requester. Delivery is a separate
+    // plane — a mint failure warns and never rewrites the receipt spine.
+    //
+    // The gate is disposition-typed (never param-shaped): only a canonical
+    // terminal advance (or the idempotent replay of one) mints. Stale facts
+    // and conflicting terminals — the deliberately stuck states owned by
+    // #1623 adjudication — mint nothing. The requester binding comes from
+    // the PERSISTED attachment row, never from request parameters, so an
+    // admitted host cannot redirect a private delivery to another
+    // registered identity by naming it on the terminal event.
+    // Gate: the mint runs for a canonical terminal advance AND for a
+    // redundant same-outcome terminal — the latter can still carry a
+    // corrected payload/summary, and the spine reconcile turns that into a
+    // supersede; identical content is a no-op, so a settled intent is never
+    // re-armed by a redundant fact. Replayed admissions DO re-attempt the
+    // mint: the mint is idempotent by run key, so this is the recovery path
+    // when a first-journal mint failed transiently. Stale and conflicting
+    // terminal facts mint nothing (the receipt plane's own law keeps them
+    // from advancing state, so they cannot be fresher delivery truth).
+    // The canonical projection must be a CONSISTENT terminal: a mint while
+    // the spine is inconsistent_reconciling or unknown_orphaned would let
+    // an unresolved (possibly wrong) result reach a requester. #1623
+    // adjudication owns those states; delivery waits.
+    let consistent_terminal = matches!(
+        receipt.state.canonical_state,
+        Some(
+            memcore::HarnessSessionCanonicalState::Completed
+                | memcore::HarnessSessionCanonicalState::Failed
+                | memcore::HarnessSessionCanonicalState::Cancelled
+        )
+    );
+    if kind == HarnessSessionEventKind::Terminal
+        && consistent_terminal
+        && matches!(
+            receipt.disposition,
+            HarnessSessionEventDisposition::Advanced
+                | HarnessSessionEventDisposition::JournaledRedundantTerminal
+        )
+        && matches!(
+            receipt.admission,
+            memcore::HarnessSessionEventAdmission::Journaled
+                | memcore::HarnessSessionEventAdmission::Replayed
+        )
+    {
+        if let Some(outcome) = outcome {
+            // Read-only binding view: deliberately NOT the claim-state-
+            // gated getter, because a terminal result outlives a WorkClaim
+            // release and the binding must survive with it.
+            let binding = server.with_global_store(|store| {
+                memcore::harness_session_attachment_delivery_binding(
+                    store.connection(),
+                    &receipt.attachment_id,
+                )
+                .map_err(|error| error.to_string())
+            })?;
+            if let Some(binding) = binding {
+                crate::delivery_ops::mint_delivery_for_attached_terminal(
+                    server,
+                    &receipt.attachment_id,
+                    &receipt.event_id,
+                    input.source_revision,
+                    outcome.as_str(),
+                    input.summary.as_deref(),
+                    input.payload_digest.as_deref(),
+                    &binding.agent_identity_id,
+                    &binding.host_identity,
+                    &binding.remote_session_id,
+                    &binding.work_claim_id,
+                );
+            }
+        }
+    }
     serde_json::to_string(&json!({
         "status": "completed",
         "action": "ingest_session_event",

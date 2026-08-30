@@ -131,6 +131,23 @@ pub fn facade_action_allowed(
         // for direct callers).
         return profile.is_admin() || profile == ToolProfile::coordinate();
     }
+    if tool_name == "tachi_delivery"
+        && action.is_some_and(|action| {
+            matches!(
+                action.to_ascii_lowercase().as_str(),
+                "claim_ready_delivery"
+                    | "ack_delivered"
+                    | "reject_or_block"
+                    | "resume_requester_operation"
+                    | "dismiss"
+            )
+        })
+    {
+        // The #1679 requester delivery seam mutates the durable delivery
+        // spine. Like the #1678 attached-session spine routes, it is a
+        // coordination surface: coordinate/admin profiles only.
+        return profile.is_admin() || profile == ToolProfile::coordinate();
+    }
     if tool_name == "tachi_task"
         && action
             .map(|a| task_action_retired(&a.to_ascii_lowercase()))
@@ -225,6 +242,12 @@ fn delegate_facade_action_allowed(tool_name: &str, action: &str) -> bool {
 pub fn facade_action_required_bundle(tool_name: &str, action: &str) -> Option<ToolBundle> {
     let action = action.trim().to_ascii_lowercase();
     match tool_name {
+        "tachi_delivery" => match action.as_str() {
+            // #1679: the projection observation action is read-only; every
+            // mutating seam action is coordinate/admin-gated above.
+            "get" => Some(ToolBundle::Observe),
+            _ => None,
+        },
         "tachi_task" => match action.as_str() {
             "brief" | "status" | "board" => Some(ToolBundle::Observe),
             "complete" | "adjudicate" | "claim" | "release" | "heartbeat" => {
