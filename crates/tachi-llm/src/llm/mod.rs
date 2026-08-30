@@ -3,6 +3,7 @@
 // Uses raw reqwest for OpenAI-compatible chat completions.
 // SiliconFlow/Qwen still gets `enable_thinking: false` to avoid empty content.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex, MutexGuard, RwLock};
@@ -33,8 +34,8 @@ pub(crate) use circuit_breaker::{CircuitBreakerRegistry, LaneOutageTracker};
 pub use embedding::voyage_embeddings_endpoint;
 pub use provider_health::ProviderSecret;
 pub use provider_health::{
-    ChatLaneConfig, CompletionStatusV1, DeploymentHealthRecordCounts, Generated,
-    LaneFallbackConfig, ModelEngineKindV1, ModelInvocationLaneV1,
+    ChatLaneConfig, CompletionStatusV1, DeploymentHealthRecordCounts, Generated, LaneConfigOverlay,
+    LaneFallbackConfig, LaneFieldOverlay, ModelEngineKindV1, ModelInvocationLaneV1,
     PersistedModelInvocationReceiptV1, ProviderAuthProbeClass, ProviderAuthProbeFamily,
     ProviderAuthProbeResult, ProviderInvocationFailure, ProviderInvocationFailureClass,
     ProviderInvocationOutcome, ProviderInvocationReceipt, ProviderRuntimeConfig,
@@ -166,11 +167,78 @@ impl LlmClient {
     /// `ProviderRuntimeConfig` does not model them, and a fallback lane is a
     /// separate deployment question that #1681 D2's alias governance owns.
     pub fn runtime_config(&self) -> ProviderRuntimeConfig {
+        let state = self
+            .provider_state
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.runtime_config_from_overlay(&state.lane_config_overlay)
+    }
+
+    /// Project a candidate Vault overlay without publishing it. Materializers
+    /// use this while preparing the catalog projection, before the combined
+    /// provider-state publication is allowed to happen.
+    pub fn runtime_config_with_lane_config_overlay(
+        &self,
+        overlay: &LaneConfigOverlay,
+    ) -> ProviderRuntimeConfig {
+        self.runtime_config_from_overlay(overlay)
+    }
+
+    pub(crate) fn validated_runtime_config_with_lane_config_overlay(
+        &self,
+        overlay: &LaneConfigOverlay,
+        resolved_logical_names: &HashSet<String>,
+    ) -> Result<ProviderRuntimeConfig, String> {
+        let bind_lane = |lane| {
+            let (cfg, authority) = self.lane_with_overlay_and_authority(lane, overlay);
+            let fields = match lane {
+                provider_health::ChatLane::Extract => &overlay.extract,
+                provider_health::ChatLane::Summary => &overlay.summary,
+                provider_health::ChatLane::Reasoning => &overlay.reasoning,
+                provider_health::ChatLane::Distill => &overlay.distill,
+            };
+            if fields.is_empty() {
+                return Ok(cfg);
+            }
+            for logical_name in cfg
+                .api_key_envs
+                .iter()
+                .copied()
+                .filter(|name| resolved_logical_names.contains(*name))
+            {
+                let bound = provider_health::bind_lane_config_to_selected_key(
+                    lane,
+                    &cfg,
+                    authority,
+                    logical_name,
+                    self.rebind_selected_provider,
+                )?;
+                if bound != cfg {
+                    return Err(format!(
+                        "Vault lane config for '{}' would be rebound after selecting logical provider key '{}'; refusing snapshot publication",
+                        lane.as_str(),
+                        logical_name,
+                    ));
+                }
+            }
+            Ok(cfg)
+        };
+
+        Ok(ProviderRuntimeConfig {
+            extract: bind_lane(provider_health::ChatLane::Extract)?,
+            summary: bind_lane(provider_health::ChatLane::Summary)?,
+            reasoning: bind_lane(provider_health::ChatLane::Reasoning)?,
+            distill: bind_lane(provider_health::ChatLane::Distill)?,
+            rerank: self.rerank_config.clone(),
+        })
+    }
+
+    fn runtime_config_from_overlay(&self, overlay: &LaneConfigOverlay) -> ProviderRuntimeConfig {
         ProviderRuntimeConfig {
-            extract: self.extract.clone(),
-            summary: self.summary.clone(),
-            reasoning: self.reasoning.clone(),
-            distill: self.distill.clone(),
+            extract: self.lane_with_overlay(provider_health::ChatLane::Extract, overlay),
+            summary: self.lane_with_overlay(provider_health::ChatLane::Summary, overlay),
+            reasoning: self.lane_with_overlay(provider_health::ChatLane::Reasoning, overlay),
+            distill: self.lane_with_overlay(provider_health::ChatLane::Distill, overlay),
             rerank: self.rerank_config.clone(),
         }
     }

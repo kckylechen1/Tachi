@@ -40,6 +40,16 @@ impl LaneAuthority {
         }
         Self(bits)
     }
+
+    fn with_overlay(mut self, fields: &LaneFieldOverlay) -> Self {
+        if fields.base_url.is_some() {
+            self.0 |= Self::BASE_URL_EXPLICIT;
+        }
+        if fields.model.is_some() {
+            self.0 |= Self::MODEL_EXPLICIT;
+        }
+        self
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -846,17 +856,67 @@ impl super::super::LlmClient {
         })
     }
 
-    pub(in crate::llm) fn lane(&self, lane: ChatLane) -> &ChatLaneConfig {
-        match lane {
-            ChatLane::Extract => &self.extract,
-            ChatLane::Distill => &self.distill,
-            ChatLane::Reasoning => &self.reasoning,
-            ChatLane::Summary => &self.summary,
-        }
+    #[cfg(test)]
+    pub(in crate::llm) fn lane(&self, lane: ChatLane) -> ChatLaneConfig {
+        self.lane_and_authority(lane).0
     }
 
-    pub(in crate::llm) fn lane_authority(&self, lane: ChatLane) -> LaneAuthority {
-        self.lane_authority[lane.index()]
+    pub(in crate::llm) fn lane_and_authority(
+        &self,
+        lane: ChatLane,
+    ) -> (ChatLaneConfig, LaneAuthority) {
+        let state = self
+            .provider_state
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.lane_with_overlay_and_authority(lane, &state.lane_config_overlay)
+    }
+
+    pub(in crate::llm) fn lane_with_overlay(
+        &self,
+        lane: ChatLane,
+        overlay: &LaneConfigOverlay,
+    ) -> ChatLaneConfig {
+        let mut cfg = match lane {
+            ChatLane::Extract => self.extract.clone(),
+            ChatLane::Distill => self.distill.clone(),
+            ChatLane::Reasoning => self.reasoning.clone(),
+            ChatLane::Summary => self.summary.clone(),
+        };
+        let fields = match lane {
+            ChatLane::Extract => &overlay.extract,
+            ChatLane::Distill => &overlay.distill,
+            ChatLane::Reasoning => &overlay.reasoning,
+            ChatLane::Summary => &overlay.summary,
+        };
+        fields.apply_to(&mut cfg);
+        cfg
+    }
+
+    pub(in crate::llm) fn lane_with_overlay_and_authority(
+        &self,
+        lane: ChatLane,
+        overlay: &LaneConfigOverlay,
+    ) -> (ChatLaneConfig, LaneAuthority) {
+        let fields = match lane {
+            ChatLane::Extract => &overlay.extract,
+            ChatLane::Distill => &overlay.distill,
+            ChatLane::Reasoning => &overlay.reasoning,
+            ChatLane::Summary => &overlay.summary,
+        };
+        (
+            self.lane_with_overlay(lane, overlay),
+            self.lane_authority[lane.index()].with_overlay(fields),
+        )
+    }
+
+    /// Replace the Vault-wins URL/model overlay. Empty overlay restores the
+    /// construction-time env/default baseline (tachi#1856).
+    pub fn apply_lane_config_overlay(&self, overlay: LaneConfigOverlay) {
+        self.provider_state
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .lane_config_overlay = overlay;
     }
 
     /// The configured cross-provider fallback for `lane`, if any (#1197).

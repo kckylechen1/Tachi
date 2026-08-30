@@ -96,6 +96,10 @@ impl ProviderHealthSnapshot {
 #[derive(Default)]
 pub(in crate::llm) struct ProviderState {
     pub(in crate::llm) secrets: HashMap<String, Vec<ProviderSecret>>,
+    /// Vault-sourced lane URL/model overrides share the same state lock as
+    /// provider pools so one materialization publication has one linearization
+    /// point for both runtime surfaces.
+    pub(in crate::llm) lane_config_overlay: LaneConfigOverlay,
     /// Ephemeral cooldowns use the same exact identity as persisted health:
     /// logical provider name plus member key id. Member ids may legitimately
     /// collide across independent logical pools.

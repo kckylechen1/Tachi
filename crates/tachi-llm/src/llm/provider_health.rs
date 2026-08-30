@@ -24,17 +24,18 @@ pub(super) use self::state::{
     DeploymentHealthCounters, ProviderHealthPersistState, ProviderHealthReloadState,
     ProviderHealthSnapshot, ProviderState,
 };
+pub(crate) use self::types::zero_owned_string;
 pub use self::types::ProviderSecret;
 pub(super) use self::types::{
     ChatLane, ClaudeCliFailure, ClaudeCliFailureKind, ClaudeCliSkip, KeyAvailability,
     KeyRetryStatus, SelectedProviderSecret,
 };
 pub use self::types::{
-    ChatLaneConfig, CompletionStatusV1, Generated, ModelEngineKindV1, ModelInvocationLaneV1,
-    PersistedModelInvocationReceiptV1, ProviderAuthProbeClass, ProviderAuthProbeFamily,
-    ProviderAuthProbeResult, ProviderInvocationFailure, ProviderInvocationFailureClass,
-    ProviderInvocationOutcome, ProviderInvocationReceipt, LLM_OUTPUT_TRUNCATED,
-    MODEL_INVOCATION_SCHEMA_V1,
+    ChatLaneConfig, CompletionStatusV1, Generated, LaneConfigOverlay, LaneFieldOverlay,
+    ModelEngineKindV1, ModelInvocationLaneV1, PersistedModelInvocationReceiptV1,
+    ProviderAuthProbeClass, ProviderAuthProbeFamily, ProviderAuthProbeResult,
+    ProviderInvocationFailure, ProviderInvocationFailureClass, ProviderInvocationOutcome,
+    ProviderInvocationReceipt, LLM_OUTPUT_TRUNCATED, MODEL_INVOCATION_SCHEMA_V1,
 };
 pub use self::types::{
     LaneOutageStatus, ProviderHealthStatus, ProviderKeyCooldownStatus, ProviderPoolStatus,

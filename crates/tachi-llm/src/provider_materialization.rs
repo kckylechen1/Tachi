@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use crate::provider_names::{
     parse_rotation_member_name, parse_vault_alias, validate_vault_alias_name,
 };
-use crate::{LlmClient, ProviderSecret};
+use crate::{LaneConfigOverlay, LlmClient, ProviderRuntimeConfig, ProviderSecret};
 
 #[derive(Debug, Clone, Default)]
 pub struct MaterializeReport {
@@ -74,6 +74,60 @@ fn push_skipped_alias(report: &mut MaterializeReport, key: String, class: AliasS
     report.skipped_alias_classes.push((key, class));
 }
 
+/// Validated, unpublished provider materialization state.
+///
+/// The resolved pools stay private so callers cannot publish part of the
+/// snapshot. A durable-source caller may validate its companion runtime
+/// projection (for example, a Vault lane overlay and catalog rows) while this
+/// value is still transient; publication happens only after preparation and
+/// the companion commit succeed.
+pub struct ProviderMaterializationSnapshot {
+    resolved_pools: HashMap<String, Vec<ProviderSecret>>,
+    retained_logical_names: HashSet<String>,
+    report: MaterializeReport,
+}
+
+impl ProviderMaterializationSnapshot {
+    pub fn report(&self) -> &MaterializeReport {
+        &self.report
+    }
+
+    /// Validate and bind a candidate lane overlay against the exact logical
+    /// provider pools this snapshot would publish. The returned projection is
+    /// the endpoint/model identity production requests will use; a mismatched
+    /// known-provider credential fails before catalog or provider publication.
+    pub fn validated_runtime_config(
+        &self,
+        llm: &LlmClient,
+        overlay: &LaneConfigOverlay,
+    ) -> Result<ProviderRuntimeConfig, String> {
+        let resolved_logical_names = self.resolved_pools.keys().cloned().collect::<HashSet<_>>();
+        llm.validated_runtime_config_with_lane_config_overlay(overlay, &resolved_logical_names)
+    }
+
+    fn publish<P>(
+        self,
+        llm: &LlmClient,
+        lane_config_overlay: Option<LaneConfigOverlay>,
+        commit_companion_projection: P,
+    ) -> Result<(), String>
+    where
+        P: FnOnce() -> Result<(), String>,
+    {
+        let Self {
+            resolved_pools,
+            retained_logical_names,
+            report: _,
+        } = self;
+        llm.publish_provider_secret_pools(
+            resolved_pools,
+            &retained_logical_names,
+            lane_config_overlay,
+            commit_companion_projection,
+        )?;
+        Ok(())
+    }
+}
 fn flatten_pools(pools: &HashMap<String, Vec<ProviderSecret>>) -> HashMap<String, String> {
     pools
         .iter()
@@ -287,16 +341,62 @@ where
     S: AsRef<str>,
     F: FnOnce() -> Result<DurableVaultLoad, String>,
 {
+    materialize_provider_secrets_from_durable_source_with_snapshot(
+        llm,
+        provider_keys,
+        load_vault_pools,
+        |snapshot| Ok((snapshot, None, ())),
+        |()| Ok(()),
+    )
+}
+
+/// Materialize provider secrets and a caller-owned runtime projection as one
+/// transaction. The durable source is read and the provider pools are fully
+/// validated first. `prepare_runtime_snapshot` consumes that provider snapshot,
+/// reads/validates the companion runtime inputs, and returns both the candidate
+/// overlay and an unpublished companion projection. The companion commit runs
+/// while the provider-state write lock blocks new request snapshots; pools and
+/// overlay are replaced before that lock is released. A failed commit leaves
+/// in-memory runtime state unchanged.
+pub fn materialize_provider_secrets_from_durable_source_with_snapshot<I, S, F, C, P, T>(
+    llm: &LlmClient,
+    provider_keys: I,
+    load_vault_pools: F,
+    prepare_runtime_snapshot: C,
+    commit_companion_projection: P,
+) -> Result<MaterializeReport, String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+    F: FnOnce() -> Result<DurableVaultLoad, String>,
+    C: FnOnce(
+        ProviderMaterializationSnapshot,
+    ) -> Result<
+        (
+            ProviderMaterializationSnapshot,
+            Option<LaneConfigOverlay>,
+            T,
+        ),
+        String,
+    >,
+    P: FnOnce(T) -> Result<(), String>,
+{
     let _materialization_guard = llm.provider_materialization_guard()?;
     let load = load_vault_pools()?;
-    materialize_provider_secrets_under_guard(
+    let snapshot = prepare_provider_materialization_under_guard(
         llm,
         &load.pools,
         provider_keys,
         load.availability,
         &load.listed_drops,
         None,
-    )
+    )?;
+    let (snapshot, lane_config_overlay, companion_projection) = prepare_runtime_snapshot(snapshot)?;
+    let report = snapshot.report.clone();
+    snapshot.publish(llm, lane_config_overlay, || {
+        commit_companion_projection(companion_projection)
+    })?;
+    Ok(report)
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -315,24 +415,27 @@ where
     // one transaction across every LlmClient clone. This mutex is independent
     // from provider_state, so env/Vault work never nests under its lock.
     let _materialization_guard = llm.provider_materialization_guard()?;
-    materialize_provider_secrets_under_guard(
+    let snapshot = prepare_provider_materialization_under_guard(
         llm,
         vault_pools,
         provider_keys,
         availability,
         &HashMap::new(),
         after_missing_alias_snapshot,
-    )
+    )?;
+    let report = snapshot.report.clone();
+    snapshot.publish(llm, None, || Ok(()))?;
+    Ok(report)
 }
 
-fn materialize_provider_secrets_under_guard<I, S>(
+fn prepare_provider_materialization_under_guard<I, S>(
     llm: &LlmClient,
     vault_pools: &HashMap<String, Vec<ProviderSecret>>,
     provider_keys: I,
     availability: VaultSourceAvailability,
     listed_drops: &HashMap<String, AliasSkipClass>,
     mut after_missing_alias_snapshot: Option<Box<dyn FnOnce() + Send>>,
-) -> Result<MaterializeReport, String>
+) -> Result<ProviderMaterializationSnapshot, String>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
@@ -437,13 +540,79 @@ where
         .iter()
         .cloned()
         .collect::<HashSet<_>>();
-    report.loaded = llm.replace_provider_secret_pools(resolved_pools, &retained_logical_names)?;
-    Ok(report)
+    let resolved_pools = llm.prepare_provider_secret_pools(resolved_pools)?;
+    report.loaded = resolved_pools.len();
+    Ok(ProviderMaterializationSnapshot {
+        resolved_pools,
+        retained_logical_names,
+        report,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn companion_commit_holds_provider_state_write_boundary_until_publish() {
+        let llm = std::sync::Arc::new(LlmClient::new().expect("llm client"));
+        let worker_llm = std::sync::Arc::clone(&llm);
+        let reader_llm = std::sync::Arc::clone(&llm);
+        let (commit_entered_tx, commit_entered_rx) = std::sync::mpsc::sync_channel(0);
+        let (release_commit_tx, release_commit_rx) = std::sync::mpsc::sync_channel(0);
+        let (reader_done_tx, reader_done_rx) = std::sync::mpsc::sync_channel(0);
+
+        let worker = std::thread::spawn(move || {
+            materialize_provider_secrets_from_durable_source_with_snapshot(
+                worker_llm.as_ref(),
+                ["SILICONFLOW_API_KEY"],
+                || {
+                    Ok(DurableVaultLoad::from_pools(
+                        HashMap::from([(
+                            "SILICONFLOW_API_KEY".to_string(),
+                            vec![ProviderSecret {
+                                key_id: "SILICONFLOW_API_KEY".to_string(),
+                                value: "fixture-key".to_string(),
+                            }],
+                        )]),
+                        VaultSourceAvailability::Readable,
+                    ))
+                },
+                |snapshot| Ok((snapshot, None, ())),
+                |()| {
+                    commit_entered_tx.send(()).expect("signal commit entry");
+                    release_commit_rx.recv().expect("release commit");
+                    Ok(())
+                },
+            )
+        });
+
+        commit_entered_rx.recv().expect("commit callback entered");
+        let reader = std::thread::spawn(move || {
+            let runtime = reader_llm.runtime_config();
+            reader_done_tx
+                .send(runtime.extract.base_url.clone())
+                .expect("report runtime read");
+        });
+        assert!(
+            matches!(
+                reader_done_rx.recv_timeout(std::time::Duration::from_millis(100)),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+            ),
+            "runtime readers must block while the durable companion commit is visible but in-memory publication is pending"
+        );
+        release_commit_tx
+            .send(())
+            .expect("release companion commit");
+        reader_done_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("runtime reader should complete after publication");
+        worker
+            .join()
+            .expect("materialization worker")
+            .expect("materialization succeeds");
+        reader.join().expect("runtime reader");
+    }
 
     struct EnvGuard {
         key: &'static str,

@@ -245,8 +245,7 @@ impl super::super::LlmClient {
         max_tokens: u32,
     ) -> Result<ProviderInvocationOutcome, ProviderInvocationFailure> {
         let lane = ChatLane::Reasoning;
-        let cfg = self.lane(lane).clone();
-        let authority = self.lane_authority(lane);
+        let (cfg, authority) = self.lane_and_authority(lane);
 
         let breaker_key = format!("chat:{}", lane.as_str());
         if !self.circuit_breakers.allow(&breaker_key) {
@@ -261,6 +260,7 @@ impl super::super::LlmClient {
                 lane,
                 &cfg,
                 authority,
+                true,
                 &breaker_key,
                 1,
                 system,
@@ -349,27 +349,34 @@ impl super::super::LlmClient {
         temperature: f32,
         max_tokens: u32,
     ) -> Result<ProviderInvocationOutcome, String> {
-        let primary_cfg = self.lane(lane).clone();
-        let primary_authority = self.lane_authority(lane);
+        let (primary_cfg, primary_authority) = self.lane_and_authority(lane);
         let primary_breaker_key = format!("chat:{}", lane.as_str());
 
-        let mut tiers: Vec<(ChatLaneConfig, LaneAuthority, String)> =
-            vec![(primary_cfg.clone(), primary_authority, primary_breaker_key)];
+        let mut tiers: Vec<(ChatLaneConfig, LaneAuthority, bool, String)> = vec![(
+            primary_cfg.clone(),
+            primary_authority,
+            true,
+            primary_breaker_key,
+        )];
         if let Some((fallback_cfg, fallback_authority)) = self.fallback_lane_with_authority(lane) {
-            // A fallback that resolves to the exact same provider config as
-            // primary (e.g. no `*_FALLBACK_*` env configured and the
-            // convenience default happens to match) carries no resilience
-            // value — skip it rather than retrying the same dead endpoint
-            // twice under a different breaker key.
-            if fallback_cfg != primary_cfg {
-                let fallback_breaker_key = format!("chat:{}:fallback", lane.as_str());
-                tiers.push((fallback_cfg, fallback_authority, fallback_breaker_key));
-            }
+            // Keep every configured fallback in the request chain. The live
+            // primary is re-resolved at selection time, so deduplicating here
+            // against an earlier primary snapshot could suppress a now-distinct
+            // fallback when a Vault refresh lands between those two reads.
+            let fallback_breaker_key = format!("chat:{}:fallback", lane.as_str());
+            tiers.push((
+                fallback_cfg,
+                fallback_authority,
+                false,
+                fallback_breaker_key,
+            ));
         }
         let tier_count = tiers.len();
 
         let mut last_err = String::new();
-        for (tier_index, (cfg, authority, breaker_key)) in tiers.into_iter().enumerate() {
+        for (tier_index, (cfg, authority, live_primary, breaker_key)) in
+            tiers.into_iter().enumerate()
+        {
             if !self.circuit_breakers.allow(&breaker_key) {
                 last_err = format!(
                     "Circuit breaker open for {} (lane {}, tier {tier_index}/{tier_count}) — provider is failing, fast-rejecting. Retry in ~30s.",
@@ -384,6 +391,7 @@ impl super::super::LlmClient {
                     lane,
                     &cfg,
                     authority,
+                    live_primary,
                     &breaker_key,
                     Self::MAX_ATTEMPTS,
                     system,
@@ -435,6 +443,7 @@ impl super::super::LlmClient {
         lane: ChatLane,
         cfg: &ChatLaneConfig,
         authority: LaneAuthority,
+        live_primary: bool,
         breaker_key: &str,
         max_attempts: usize,
         system: &str,
@@ -450,22 +459,39 @@ impl super::super::LlmClient {
         let mut provider_attempts = 0;
 
         for attempt in 1..=max_attempts {
-            let Some(selected) = self
-                .required_selected_secret_or_wait(&cfg.api_key_envs, attempt, "chat lane")
-                .await
-                .map_err(|safe_detail| ProviderTierFailure {
-                    class: ProviderInvocationFailureClass::LaneOutage,
-                    provider_attempts,
-                    latency_ms: tier_started.elapsed().as_millis(),
-                    safe_detail,
-                })?
-            else {
-                continue;
+            let (attempt_cfg, attempt_authority, selected) = if live_primary {
+                let Some((attempt_cfg, attempt_authority, selected)) = self
+                    .required_lane_secret_or_wait(lane, attempt, "chat lane")
+                    .await
+                    .map_err(|safe_detail| ProviderTierFailure {
+                        class: ProviderInvocationFailureClass::LaneOutage,
+                        provider_attempts,
+                        latency_ms: tier_started.elapsed().as_millis(),
+                        safe_detail,
+                    })?
+                else {
+                    continue;
+                };
+                (attempt_cfg, attempt_authority, selected)
+            } else {
+                let Some(selected) = self
+                    .required_selected_secret_or_wait(&cfg.api_key_envs, attempt, "chat lane")
+                    .await
+                    .map_err(|safe_detail| ProviderTierFailure {
+                        class: ProviderInvocationFailureClass::LaneOutage,
+                        provider_attempts,
+                        latency_ms: tier_started.elapsed().as_millis(),
+                        safe_detail,
+                    })?
+                else {
+                    continue;
+                };
+                (cfg.clone(), authority, selected)
             };
             let bound = bind_lane_config_to_selected_key(
                 lane,
-                cfg,
-                authority,
+                &attempt_cfg,
+                attempt_authority,
                 &selected.logical_name,
                 self.rebind_selected_provider,
             )
@@ -591,8 +617,8 @@ impl super::super::LlmClient {
                     // another usable key — same fix as the main 401/403
                     // branch below, applied here for the (rarer) case where
                     // the body read itself also failed.
-                    let pool_has_another_key =
-                        is_auth_status && self.has_usable_secret_readonly(&cfg.api_key_envs);
+                    let pool_has_another_key = is_auth_status
+                        && self.has_usable_secret_readonly(&attempt_cfg.api_key_envs);
                     if attempt < max_attempts && (status.is_server_error() || pool_has_another_key)
                     {
                         tokio::time::sleep(Self::retry_delay(attempt)).await;
@@ -664,7 +690,9 @@ impl super::super::LlmClient {
                 // above, not "try every key in the pool no matter how
                 // many". A larger retry budget, if ever wanted, is a
                 // config knob for a future PR, not this one.
-                if attempt < max_attempts && self.has_usable_secret_readonly(&cfg.api_key_envs) {
+                if attempt < max_attempts
+                    && self.has_usable_secret_readonly(&attempt_cfg.api_key_envs)
+                {
                     eprintln!(
                         "[llm] auth/exhausted error {status} (attempt {}/{}); pool has another key, retrying",
                         attempt,

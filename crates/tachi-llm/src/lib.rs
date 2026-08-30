@@ -21,8 +21,9 @@ pub use llm::embedding_config::{
 };
 pub use llm::voyage_embeddings_endpoint;
 pub use llm::{
-    auth_probe_descriptor_for_host, auth_probe_descriptor_for_provider_kind, CompletionStatusV1,
-    DeploymentHealthRecordCounts, Generated, LlmClient, ModelEngineKindV1, ModelInvocationLaneV1,
+    auth_probe_descriptor_for_host, auth_probe_descriptor_for_provider_kind, ChatLaneConfig,
+    CompletionStatusV1, DeploymentHealthRecordCounts, Generated, LaneConfigOverlay,
+    LaneFieldOverlay, LlmClient, ModelEngineKindV1, ModelInvocationLaneV1,
     PersistedModelInvocationReceiptV1, ProviderAuthProbeClass, ProviderAuthProbeFamily,
     ProviderAuthProbeResult, ProviderInvocationFailure, ProviderInvocationFailureClass,
     ProviderInvocationOutcome, ProviderInvocationReceipt, ProviderProbeDescriptor,
@@ -38,7 +39,8 @@ pub use llm::{
 pub use provider_materialization::materialize_provider_secrets;
 pub use provider_materialization::{
     group_api_key_values_by_configured_rotations, materialize_provider_secrets_from_durable_source,
-    AliasSkipClass, DurableVaultLoad, MaterializeReport, VaultSourceAvailability,
+    materialize_provider_secrets_from_durable_source_with_snapshot, AliasSkipClass,
+    DurableVaultLoad, MaterializeReport, ProviderMaterializationSnapshot, VaultSourceAvailability,
 };
 pub use provider_names::{
     is_vault_alias, parse_rotation_member_name, parse_vault_alias, vault_alias_line,

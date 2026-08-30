@@ -238,40 +238,60 @@ pub(super) fn record_successful_vault_access(
         .map_err(|e| e.to_string())
 }
 
+pub(crate) fn is_lane_config_name(name: &str) -> bool {
+    matches!(
+        name,
+        "EXTRACT_BASE_URL"
+            | "EXTRACT_MODEL"
+            | "SUMMARY_BASE_URL"
+            | "SUMMARY_MODEL"
+            | "DISTILL_BASE_URL"
+            | "DISTILL_MODEL"
+            | "REASONING_BASE_URL"
+            | "REASONING_MODEL"
+    )
+}
+
 pub(super) fn load_unlocked_vault_secrets(
     server: &MemoryServer,
     include_entry: impl Fn(&VaultEntry) -> bool,
 ) -> Result<Vec<(String, String)>, String> {
     with_vault_key(server, |key| {
-        let entries = server
-            .with_global_store_read(|store| store.vault_list_entries().map_err(|e| e.to_string()))
-            .map_err(|e| format!("Failed to list vault secrets: {e}"))?;
+        load_unlocked_vault_secrets_with_key(server, key, include_entry)
+    })
+}
 
-        let mut secrets = Vec::new();
-        for entry in entries {
-            if !include_entry(&entry) {
-                continue;
-            }
-            if entry
-                .allowed_agents
-                .as_ref()
-                .is_some_and(|agents| !agents.is_empty())
-            {
-                continue;
-            }
+fn load_unlocked_vault_secrets_with_key(
+    server: &MemoryServer,
+    key: &[u8; 32],
+    include_entry: impl Fn(&VaultEntry) -> bool,
+) -> Result<Vec<(String, String)>, String> {
+    let entries = server
+        .with_global_store_read(|store| store.vault_list_entries().map_err(|e| e.to_string()))
+        .map_err(|e| format!("Failed to list vault secrets: {e}"))?;
 
-            let decrypted = crypto::decrypt(key, &entry.encrypted_value, &entry.nonce)?;
-            let value = crypto::decode_utf8_zeroizing(
-                decrypted,
-                super::VAULT_MATERIALIZATION_INVALID_UTF8,
-            )?;
-            if !value.trim().is_empty() {
-                secrets.push((entry.name, value));
-            }
+    let mut secrets = Vec::new();
+    for entry in entries {
+        if !include_entry(&entry) {
+            continue;
+        }
+        if entry
+            .allowed_agents
+            .as_ref()
+            .is_some_and(|agents| !agents.is_empty())
+        {
+            continue;
         }
 
-        Ok(secrets)
-    })
+        let decrypted = crypto::decrypt(key, &entry.encrypted_value, &entry.nonce)?;
+        let value =
+            crypto::decode_utf8_zeroizing(decrypted, super::VAULT_MATERIALIZATION_INVALID_UTF8)?;
+        if !value.trim().is_empty() {
+            secrets.push((entry.name, value));
+        }
+    }
+
+    Ok(secrets)
 }
 
 pub(crate) fn load_unlocked_api_key_secret_pools(
@@ -309,6 +329,7 @@ pub(crate) fn canonical_api_key_health_logical_name(
 pub(crate) struct ProviderSecretScan {
     pub pools: HashMap<String, Vec<tachi_llm::ProviderSecret>>,
     pub dropped: HashMap<String, AliasSkipClass>,
+    pub lane_config_values: crate::provider_config::LaneConfigValues,
 }
 
 /// Same scan as [`load_unlocked_api_key_secret_pools`], plus the drop reason
@@ -413,6 +434,28 @@ fn load_unlocked_api_key_secret_pools_filtered(
 
         let mut pools: HashMap<String, Vec<tachi_llm::ProviderSecret>> = HashMap::new();
         let mut dropped: HashMap<String, AliasSkipClass> = HashMap::new();
+        let mut lane_config_values = crate::provider_config::LaneConfigValues::default();
+        if only_logical_name.is_none() {
+            for entry in &entries {
+                if !is_lane_config_name(&entry.name)
+                    || entry
+                        .allowed_agents
+                        .as_ref()
+                        .is_some_and(|agents| !agents.is_empty())
+                {
+                    continue;
+                }
+                let decrypted =
+                    crate::vault_crypto::decrypt(key, &entry.encrypted_value, &entry.nonce)?;
+                let value = crate::vault_crypto::decode_utf8_zeroizing(
+                    decrypted,
+                    super::VAULT_MATERIALIZATION_INVALID_UTF8,
+                )?;
+                if !value.trim().is_empty() {
+                    lane_config_values.push((entry.name.clone(), value));
+                }
+            }
+        }
         let mut rotation_members: HashSet<String> = HashSet::new();
         let mut materialized_key_ids: BTreeSet<String> = BTreeSet::new();
 
@@ -593,7 +636,11 @@ fn load_unlocked_api_key_secret_pools_filtered(
                 .map_err(|e| format!("Failed to record provider key access batch: {e}"))?;
         }
 
-        Ok(ProviderSecretScan { pools, dropped })
+        Ok(ProviderSecretScan {
+            pools,
+            dropped,
+            lane_config_values,
+        })
     })
 }
 

@@ -16,6 +16,7 @@ pub(crate) use resolver::{classify_vault_read_error, is_env_fallback_eligible, V
 pub(crate) use rotation::collect_rotation_entries;
 
 pub(crate) use access::canonical_api_key_health_logical_name;
+pub(crate) use access::is_lane_config_name;
 pub(crate) use access::load_unlocked_api_key_secret_pools;
 pub(crate) use access::load_unlocked_api_key_secret_pools_with_drops;
 

@@ -21,6 +21,7 @@ fn derive_status_vault_key(
 
 pub(crate) struct KeychainApiKeyScan {
     pub values: Vec<(String, String)>,
+    pub lane_config_values: crate::provider_config::LaneConfigValues,
     pub dropped: HashMap<String, AliasSkipClass>,
     pub rotation_prefixes: HashSet<String>,
     pub source_readable: bool,
@@ -43,6 +44,7 @@ fn record_keychain_listed_drop(
 fn empty_keychain_scan() -> KeychainApiKeyScan {
     KeychainApiKeyScan {
         values: Vec::new(),
+        lane_config_values: crate::provider_config::LaneConfigValues::default(),
         dropped: HashMap::new(),
         rotation_prefixes: HashSet::new(),
         source_readable: false,
@@ -52,31 +54,17 @@ fn empty_keychain_scan() -> KeychainApiKeyScan {
 pub(crate) fn load_keychain_vault_api_key_scan(
     vault_db_path: &Path,
 ) -> Result<KeychainApiKeyScan, Box<dyn std::error::Error>> {
-    if !cfg!(target_os = "macos") {
-        return Ok(empty_keychain_scan());
-    }
-
-    let output = std::process::Command::new("security")
-        .args([
-            "find-generic-password",
-            "-s",
-            "tachi-vault",
-            "-a",
-            "default",
-            "-w",
-        ])
-        .output()?;
-    if !output.status.success() {
-        return Ok(empty_keychain_scan());
-    }
-
-    let mut raw_password = crate::vault_crypto::decode_keychain_password_output(output.stdout)
-        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
-    let mut password = raw_password.trim().to_string();
-    crate::vault_crypto::zero_string(&mut raw_password);
-    if password.is_empty() {
-        return Ok(empty_keychain_scan());
-    }
+    let mut password = match crate::vault_crypto::read_password_from_macos_keychain() {
+        Ok(password) => password,
+        Err(err)
+            if !cfg!(target_os = "macos")
+                || err.starts_with("no vault password found in Keychain")
+                || err == "Keychain entry for tachi-vault/default is empty" =>
+        {
+            return Ok(empty_keychain_scan());
+        }
+        Err(err) => return Err(Box::new(std::io::Error::other(err))),
+    };
 
     let result = load_keychain_vault_api_key_scan_with_password(vault_db_path, &password);
     crate::vault_crypto::zero_string(&mut password);
@@ -137,7 +125,28 @@ fn scan_keychain_api_key_entries(
     now: DateTime<Utc>,
 ) -> Result<KeychainApiKeyScan, Box<dyn std::error::Error>> {
     let mut values = Vec::new();
+    let mut lane_config_values = crate::provider_config::LaneConfigValues::default();
     let mut dropped = HashMap::new();
+    for entry in &entries {
+        if !crate::vault_ops::is_lane_config_name(&entry.name)
+            || entry
+                .allowed_agents
+                .as_ref()
+                .is_some_and(|agents| !agents.is_empty())
+        {
+            continue;
+        }
+        let decrypted =
+            crate::vault_crypto::decrypt(key.bytes(), &entry.encrypted_value, &entry.nonce)?;
+        let value = crate::vault_crypto::decode_utf8_zeroizing(
+            decrypted,
+            crate::vault_ops::VAULT_MATERIALIZATION_INVALID_UTF8,
+        )
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+        if !value.trim().is_empty() {
+            lane_config_values.push((entry.name.clone(), value));
+        }
+    }
     for entry in entries {
         if entry.secret_type != SECRET_TYPE_API_KEY {
             record_keychain_listed_drop(&mut dropped, &entry.name, AliasSkipClass::ListedWrongType);
@@ -180,6 +189,7 @@ fn scan_keychain_api_key_entries(
     }
     Ok(KeychainApiKeyScan {
         values,
+        lane_config_values,
         dropped,
         rotation_prefixes: rotation_prefixes.clone(),
         source_readable: true,

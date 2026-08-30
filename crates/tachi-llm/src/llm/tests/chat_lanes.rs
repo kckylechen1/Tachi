@@ -1,7 +1,7 @@
 use super::super::{
-    ChatLaneConfig, CompletionStatusV1, LaneFallbackConfig, ModelEngineKindV1,
-    ModelInvocationLaneV1, ProviderInvocationFailureClass, ProviderRuntimeConfig,
-    DEEPSEEK_AUTH_PROBE, SILICONFLOW_AUTH_PROBE,
+    ChatLaneConfig, CompletionStatusV1, LaneConfigOverlay, LaneFallbackConfig, LaneFieldOverlay,
+    ModelEngineKindV1, ModelInvocationLaneV1, ProviderInvocationFailureClass,
+    ProviderRuntimeConfig, DEEPSEEK_AUTH_PROBE, SILICONFLOW_AUTH_PROBE,
 };
 use super::*;
 
@@ -340,6 +340,154 @@ async fn injected_known_provider_mismatch_fails_closed_before_chat_request() {
         error.contains("refusing credential-bearing request"),
         "unexpected fail-closed error: {error}"
     );
+}
+
+/// The request path must treat a published Vault URL as explicit provider
+/// identity. Otherwise a later credential bind can silently rewrite the live
+/// endpoint after status/catalog already published the overlay.
+#[tokio::test]
+async fn vault_overlay_provider_mismatch_fails_closed_before_chat_request() {
+    let unused = ChatLaneConfig {
+        base_url: "https://unused.test/v1/chat/completions".to_string(),
+        model: "unused".to_string(),
+        api_key_envs: vec!["UNUSED_API_KEY"],
+    };
+    let config = ProviderRuntimeConfig {
+        extract: unused.clone(),
+        summary: unused.clone(),
+        reasoning: ChatLaneConfig {
+            base_url: "https://api.deepseek.com/chat/completions".to_string(),
+            model: "deepseek-v4-pro".to_string(),
+            api_key_envs: vec!["DEEPSEEK_API_KEY"],
+        },
+        distill: unused,
+        rerank: RerankConfig {
+            provider: RerankProviderKind::Voyage,
+            local_endpoint: None,
+        },
+    };
+    let client = LlmClient::new_with_config(config, None).expect("injected config should build");
+    assert!(client.set_provider_secret("DEEPSEEK_API_KEY", "deepseek-test-key"));
+    client.apply_lane_config_overlay(LaneConfigOverlay {
+        reasoning: LaneFieldOverlay {
+            base_url: Some("https://api.siliconflow.cn/v1/chat/completions".to_string()),
+            model: Some("siliconflow-model".to_string()),
+        },
+        ..LaneConfigOverlay::default()
+    });
+
+    let error = client
+        .call_reasoning_llm_provider_only("system", "user", None, 0.0, 16)
+        .await
+        .expect_err("Vault overlay cross-provider chat must fail closed");
+    assert!(
+        error.contains("refusing credential-bearing request"),
+        "unexpected fail-closed error: {error}"
+    );
+}
+
+/// The production primary-tier selector must observe endpoint/model and key
+/// from one provider-state generation while refreshes replace both surfaces.
+#[test]
+fn request_selection_never_straddles_provider_refresh_generations() {
+    use std::collections::{HashMap, HashSet};
+    use std::sync::Arc;
+
+    let unused = ChatLaneConfig {
+        base_url: "https://unused.test/v1/chat/completions".to_string(),
+        model: "unused".to_string(),
+        api_key_envs: vec!["UNUSED_API_KEY"],
+    };
+    let client = Arc::new(
+        LlmClient::new_with_config(
+            ProviderRuntimeConfig {
+                extract: ChatLaneConfig {
+                    base_url: "https://epoch-one.example/v1/chat/completions".to_string(),
+                    model: "epoch-one-model".to_string(),
+                    api_key_envs: vec!["EXTRACT_API_KEY"],
+                },
+                summary: unused.clone(),
+                reasoning: unused.clone(),
+                distill: unused,
+                rerank: RerankConfig {
+                    provider: RerankProviderKind::Local,
+                    local_endpoint: Some("http://127.0.0.1:9/rerank".to_string()),
+                },
+            },
+            None,
+        )
+        .expect("generation test client"),
+    );
+
+    let publish = |client: &LlmClient, generation: usize| {
+        let (url, model, key) = if generation == 1 {
+            (
+                "https://epoch-one.example/v1/chat/completions",
+                "epoch-one-model",
+                "epoch-one-key",
+            )
+        } else {
+            (
+                "https://epoch-two.example/v1/chat/completions",
+                "epoch-two-model",
+                "epoch-two-key",
+            )
+        };
+        let replacement = client
+            .prepare_provider_secret_pools(HashMap::from([(
+                "EXTRACT_API_KEY".to_string(),
+                vec![ProviderSecret {
+                    key_id: "EXTRACT_API_KEY".to_string(),
+                    value: key.to_string(),
+                }],
+            )]))
+            .expect("valid provider generation");
+        client
+            .publish_provider_secret_pools(
+                replacement,
+                &HashSet::new(),
+                Some(LaneConfigOverlay {
+                    extract: LaneFieldOverlay {
+                        base_url: Some(url.to_string()),
+                        model: Some(model.to_string()),
+                    },
+                    ..LaneConfigOverlay::default()
+                }),
+                || Ok(()),
+            )
+            .expect("publish provider generation");
+    };
+    publish(&client, 1);
+
+    let writer = {
+        let client = Arc::clone(&client);
+        std::thread::spawn(move || {
+            for generation in 0..2_000 {
+                publish(&client, 1 + generation % 2);
+            }
+        })
+    };
+    for _ in 0..2_000 {
+        let observed = client
+            .lane_secret_generation_for_tests(ChatLane::Extract)
+            .expect("published generation must have a key");
+        assert!(
+            observed
+                == (
+                    "https://epoch-one.example/v1/chat/completions".to_string(),
+                    "epoch-one-model".to_string(),
+                    "epoch-one-key".to_string(),
+                )
+                || observed
+                    == (
+                        "https://epoch-two.example/v1/chat/completions".to_string(),
+                        "epoch-two-model".to_string(),
+                        "epoch-two-key".to_string(),
+                    ),
+            "request selection observed a mixed provider generation"
+        );
+    }
+    writer.join().expect("refresh writer");
 }
 
 /// A known provider credential must never be sent to an unrecognized host,
@@ -3073,6 +3221,63 @@ async fn extract_lane_escalates_to_fallback_when_primary_breaker_is_open() {
 
     primary_task.abort();
     fallback_task.abort();
+}
+
+/// A fallback that matched an earlier primary snapshot must stay in the
+/// chain. Vault may change the live primary before selection, so eager
+/// equality-based deduplication can otherwise erase the only usable tier.
+#[tokio::test]
+async fn equal_snapshot_fallback_is_not_suppressed_before_live_primary_selection() {
+    use axum::{routing::post, Json, Router};
+
+    let app = Router::new().route(
+        "/chat/completions",
+        post(|| async {
+            Json(serde_json::json!({
+                "choices": [{
+                    "message": {"role": "assistant", "content": "fallback retained"},
+                    "finish_reason": "stop"
+                }],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+            }))
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind equal fallback provider");
+    let port = listener.local_addr().expect("equal fallback addr").port();
+    let task = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .await
+            .expect("equal fallback provider");
+    });
+
+    let shared = ChatLaneConfig {
+        base_url: format!("http://127.0.0.1:{port}/chat/completions"),
+        model: "shared-model".to_string(),
+        api_key_envs: vec!["__EQUAL_SNAPSHOT_FALLBACK_KEY"],
+    };
+    let client = LlmClient::new_with_config_and_fallbacks(
+        config_with_extract(shared.clone()),
+        LaneFallbackConfig {
+            extract: Some(shared),
+            ..Default::default()
+        },
+        None,
+    )
+    .expect("equal fallback client");
+    assert!(client.set_provider_secret("__EQUAL_SNAPSHOT_FALLBACK_KEY", "fallback-secret"));
+    for _ in 0..5 {
+        client.circuit_breakers.record_failure("chat:extract");
+    }
+
+    let out = client
+        .call_extract_llm("system", "user", None, 0.0, 16)
+        .await
+        .expect("configured fallback must survive snapshot equality");
+    assert_eq!(out, "fallback retained");
+
+    task.abort();
 }
 
 /// GREEN-vs-broken: with **no** fallback configured (or a fallback that is

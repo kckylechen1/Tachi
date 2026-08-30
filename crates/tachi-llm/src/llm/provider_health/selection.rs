@@ -8,6 +8,16 @@ impl super::super::LlmClient {
             .provider_state
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.select_secret_from_state(keys, &mut state, now, now_utc)
+    }
+
+    fn select_secret_from_state(
+        &self,
+        keys: &[&str],
+        state: &mut ProviderState,
+        now: Instant,
+        now_utc: DateTime<Utc>,
+    ) -> Option<SelectedProviderSecret> {
         state.prune_expired_cooldowns(now);
 
         let vault_value = keys.iter().find_map(|key| {
@@ -25,7 +35,7 @@ impl super::super::LlmClient {
                 }
 
                 let (availability, remaining_seconds) =
-                    Self::key_health_blocked_in_state(&state, key, &entry.key_id, now_utc);
+                    Self::key_health_blocked_in_state(state, key, &entry.key_id, now_utc);
                 let unusable = match availability {
                     KeyAvailability::AuthFailed
                     | KeyAvailability::Disabled
@@ -56,7 +66,7 @@ impl super::super::LlmClient {
         vault_value.or_else(|| {
             keys.iter().find_map(|key| {
                 let (availability, remaining_seconds) =
-                    Self::key_health_blocked_in_state(&state, key, key, now_utc);
+                    Self::key_health_blocked_in_state(state, key, key, now_utc);
                 let unusable = match availability {
                     KeyAvailability::AuthFailed
                     | KeyAvailability::Disabled
@@ -141,21 +151,12 @@ impl super::super::LlmClient {
             })
     }
 
-    /// Select the same currently usable credential as the normal provider
-    /// path without advancing its round-robin cursor, pruning state, or
-    /// persisting health. This is reserved for the observation-only auth
-    /// clearance probe.
-    pub(in crate::llm) fn selected_secret_readonly(
-        &self,
+    fn selected_secret_readonly_from_state(
         keys: &[&str],
+        state: &ProviderState,
+        now: Instant,
+        now_utc: DateTime<Utc>,
     ) -> Option<SelectedProviderSecret> {
-        let now = Instant::now();
-        let now_utc = Self::now_utc();
-        let state = self
-            .provider_state
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-
         let vault_value = keys.iter().find_map(|key| {
             let entries = state.secrets.get(*key)?;
             if entries.is_empty() {
@@ -168,7 +169,7 @@ impl super::super::LlmClient {
                     .cooldown_until(key, &entry.key_id)
                     .is_some_and(|until| *until > now);
                 let (availability, remaining_seconds) =
-                    Self::key_health_blocked_in_state(&state, key, &entry.key_id, now_utc);
+                    Self::key_health_blocked_in_state(state, key, &entry.key_id, now_utc);
                 (!entry.value.trim().is_empty()
                     && !in_active_cooldown
                     && !Self::availability_is_unusable(availability, remaining_seconds))
@@ -187,7 +188,7 @@ impl super::super::LlmClient {
                     .cooldown_until(key, key)
                     .is_some_and(|until| *until > now);
                 let (availability, remaining_seconds) =
-                    Self::key_health_blocked_in_state(&state, key, key, now_utc);
+                    Self::key_health_blocked_in_state(state, key, key, now_utc);
                 if in_active_cooldown
                     || Self::availability_is_unusable(availability, remaining_seconds)
                 {
@@ -202,6 +203,27 @@ impl super::super::LlmClient {
                     })
             })
         })
+    }
+
+    pub(in crate::llm) fn lane_and_selected_secret_readonly(
+        &self,
+        lane: ChatLane,
+    ) -> (
+        ChatLaneConfig,
+        LaneAuthority,
+        Option<SelectedProviderSecret>,
+    ) {
+        let now = Instant::now();
+        let now_utc = Self::now_utc();
+        let state = self
+            .provider_state
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (config, authority) =
+            self.lane_with_overlay_and_authority(lane, &state.lane_config_overlay);
+        let selected =
+            Self::selected_secret_readonly_from_state(&config.api_key_envs, &state, now, now_utc);
+        (config, authority, selected)
     }
 
     pub fn has_configured_secret(&self, keys: &[&str]) -> bool {
@@ -518,6 +540,69 @@ impl super::super::LlmClient {
                 Err(err)
             }
         }
+    }
+
+    pub(in crate::llm) async fn required_lane_secret_or_wait(
+        &self,
+        lane: ChatLane,
+        attempt: usize,
+        context: &str,
+    ) -> Result<Option<(ChatLaneConfig, LaneAuthority, SelectedProviderSecret)>, String> {
+        self.refresh_key_health_from_db_if_stale().await;
+        let (config, authority, selected) = self.select_lane_secret(lane);
+        if let Some(selected) = selected {
+            return Ok(Some((config, authority, selected)));
+        }
+        let keys = config.api_key_envs.clone();
+        let err = self.provider_secret_unavailable_error(&keys);
+        if attempt < Self::MAX_ATTEMPTS {
+            if let Some(retry_after) = self.selected_secret_retry_delay(&keys) {
+                let wait = retry_after.min(Self::retry_delay(attempt));
+                tracing::warn!(
+                    "[provider] {context} keys are temporarily unavailable; retrying selection in {}ms",
+                    wait.as_millis()
+                );
+                tokio::time::sleep(wait).await;
+                return Ok(None);
+            }
+        }
+        Err(err)
+    }
+
+    fn select_lane_secret(
+        &self,
+        lane: ChatLane,
+    ) -> (
+        ChatLaneConfig,
+        LaneAuthority,
+        Option<SelectedProviderSecret>,
+    ) {
+        let now = Instant::now();
+        let now_utc = Self::now_utc();
+        let mut state = self
+            .provider_state
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (config, authority) =
+            self.lane_with_overlay_and_authority(lane, &state.lane_config_overlay);
+        let keys = config.api_key_envs.clone();
+        let selected = self.select_secret_from_state(&keys, &mut state, now, now_utc);
+        (config, authority, selected)
+    }
+
+    #[cfg(test)]
+    pub(in crate::llm) fn lane_secret_generation_for_tests(
+        &self,
+        lane: ChatLane,
+    ) -> Option<(String, String, String)> {
+        let (config, _, selected) = self.select_lane_secret(lane);
+        selected.map(|selected| {
+            (
+                config.base_url.clone(),
+                config.model.clone(),
+                selected.value,
+            )
+        })
     }
 
     #[cfg(any(test, feature = "test-support"))]
