@@ -267,6 +267,36 @@ fn legacy_vault_upsert_rejects_lane_slot_bypass() {
 }
 
 #[test]
+fn legacy_vault_upsert_rejects_new_credential_bearing_lane_url() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("memory.db");
+    let key = vault_init_with_password(&db_path, "correct horse battery staple".to_string())
+        .expect("init vault");
+    let error = vault_upsert_secret_with_key(
+        &db_path,
+        &key,
+        "EXTRACT_BASE_URL",
+        "config",
+        "",
+        "https://user:pass@proxy.example.test/v1/chat".to_string(),
+    )
+    .expect_err("legacy helper must reject a new credential-bearing lane URL")
+    .to_string();
+
+    assert!(error.contains("EXTRACT_BASE_URL"), "{error}");
+    assert!(
+        error.contains("userinfo") || error.contains("credential"),
+        "{error}"
+    );
+    assert!(!error.contains("user:pass"), "{error}");
+    assert!(open_cli_store_read_only(&db_path)
+        .expect("reopen fixture")
+        .vault_get_entry("EXTRACT_BASE_URL")
+        .expect("read refused URL")
+        .is_none());
+}
+
+#[test]
 fn legacy_vault_upsert_refuses_rotation_count_drift() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("memory.db");

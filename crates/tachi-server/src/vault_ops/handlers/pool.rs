@@ -9,6 +9,7 @@ pub(crate) async fn handle_vault_setup_rotation(
         memcore::reject_api_key_type_for_lane_config(&params.prefix, memcore::SECRET_TYPE_API_KEY)?;
         authorize_vault_pool_mutation(server, &params.prefix, params.agent_id.as_deref())
             .map_err(|e| e.to_string())?;
+        let effective_agent_id = resolve_vault_acl_agent_id(server, params.agent_id.as_deref())?;
         if params.total_keys < 2 {
             return Err("Rotation requires at least 2 keys".into());
         }
@@ -31,6 +32,12 @@ pub(crate) async fn handle_vault_setup_rotation(
             let all_entries = transaction
                 .vault_list_entries()
                 .map_err(|e| format!("Failed to list entries: {e}"))?;
+            for entry in &all_entries {
+                if memcore::api_key_pool_member_index(&entry.name, &params.prefix).is_some() {
+                    ensure_agent_allowed(entry, effective_agent_id.as_deref())
+                        .map_err(|e| e.to_string())?;
+                }
+            }
             let member_count =
                 memcore::validate_api_key_rotation_members(&all_entries, &params.prefix)
                     .map_err(|error| format!("{error}; refusing rotation setup"))?;

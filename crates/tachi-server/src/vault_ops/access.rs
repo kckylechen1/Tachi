@@ -145,8 +145,8 @@ pub(super) struct SelectedVaultEntry {
     pub(super) pending_rotation: Option<VaultKeyRotation>,
 }
 
-pub(super) fn select_vault_entry(
-    store: &mut MemoryStore,
+fn select_vault_entry_from_transaction(
+    store: &memcore::store::vault::VaultTransaction<'_>,
     params: &VaultGetParams,
 ) -> Result<SelectedVaultEntry, String> {
     let exact_entry = store
@@ -237,15 +237,12 @@ pub(super) fn select_vault_entry(
     }
 }
 
-pub(super) fn record_successful_vault_access(
-    store: &mut MemoryStore,
+fn record_successful_vault_access_in_transaction(
+    transaction: &memcore::store::vault::VaultTransaction<'_>,
     target_name: &str,
     pending_rotation: Option<&VaultKeyRotation>,
 ) -> Result<i64, String> {
     if let Some(rotation) = pending_rotation {
-        let transaction = store
-            .begin_vault_transaction()
-            .map_err(|e| format!("Failed to begin access transaction: {e}"))?;
         let current = transaction
             .vault_get_rotation(&rotation.prefix)
             .map_err(|e| format!("Failed to read current rotation: {e}"))?
@@ -268,9 +265,88 @@ pub(super) fn record_successful_vault_access(
         transaction
             .vault_set_rotation(&updated)
             .map_err(|e| format!("Failed to update rotation: {e}"))?;
-        let access_count = transaction
-            .vault_touch_entry(target_name)
-            .map_err(|e| e.to_string())?;
+    }
+    transaction
+        .vault_touch_entry(target_name)
+        .map_err(|e| e.to_string())
+}
+
+fn select_authorized_vault_entry_and_record_access_with_hook(
+    store: &mut MemoryStore,
+    params: &VaultGetParams,
+    effective_agent_id: Option<&str>,
+    key: &[u8; 32],
+    after_select: impl FnOnce(),
+) -> Result<(SelectedVaultEntry, String, i64), String> {
+    let transaction = store
+        .begin_vault_transaction()
+        .map_err(|e| format!("Failed to begin authorized Vault read transaction: {e}"))?;
+    let selected = select_vault_entry_from_transaction(&transaction, params)?;
+    after_select();
+    ensure_agent_allowed(&selected.entry, effective_agent_id).map_err(|e| e.to_string())?;
+    let decrypted = crypto::decrypt(key, &selected.entry.encrypted_value, &selected.entry.nonce)?;
+    let value = crypto::decode_utf8_zeroizing(
+        decrypted,
+        format!("Vault secret '{}' is not valid UTF-8", selected.entry.name),
+    )?;
+    let access_count = record_successful_vault_access_in_transaction(
+        &transaction,
+        &selected.target_name,
+        selected.pending_rotation.as_ref(),
+    )?;
+    transaction
+        .commit()
+        .map_err(|e| format!("Failed to commit authorized Vault read transaction: {e}"))?;
+    Ok((selected, value, access_count))
+}
+
+pub(super) fn select_authorized_vault_entry_and_record_access(
+    store: &mut MemoryStore,
+    params: &VaultGetParams,
+    effective_agent_id: Option<&str>,
+    key: &[u8; 32],
+) -> Result<(SelectedVaultEntry, String, i64), String> {
+    select_authorized_vault_entry_and_record_access_with_hook(
+        store,
+        params,
+        effective_agent_id,
+        key,
+        || {},
+    )
+}
+
+#[cfg(test)]
+pub(super) fn select_authorized_vault_entry_and_record_access_with_hook_for_tests(
+    store: &mut MemoryStore,
+    params: &VaultGetParams,
+    effective_agent_id: Option<&str>,
+    key: &[u8; 32],
+    after_select: impl FnOnce(),
+) -> Result<(SelectedVaultEntry, String, i64), String> {
+    select_authorized_vault_entry_and_record_access_with_hook(
+        store,
+        params,
+        effective_agent_id,
+        key,
+        after_select,
+    )
+}
+
+#[cfg(test)]
+pub(super) fn record_successful_vault_access(
+    store: &mut MemoryStore,
+    target_name: &str,
+    pending_rotation: Option<&VaultKeyRotation>,
+) -> Result<i64, String> {
+    if let Some(rotation) = pending_rotation {
+        let transaction = store
+            .begin_vault_transaction()
+            .map_err(|e| format!("Failed to begin access transaction: {e}"))?;
+        let access_count = record_successful_vault_access_in_transaction(
+            &transaction,
+            target_name,
+            Some(rotation),
+        )?;
         transaction
             .commit()
             .map_err(|e| format!("Failed to commit access transaction: {e}"))?;
@@ -742,27 +818,14 @@ pub(crate) fn read_unlocked_vault_secret(
             agent_id: agent_id.map(str::to_string),
             auto_rotate,
         };
-        let selected = server.with_global_store(|store| select_vault_entry(store, &params))?;
-
-        ensure_agent_allowed(&selected.entry, effective_agent_id.as_deref())
-            .map_err(|e| e.to_string())?;
-
-        let decrypted =
-            crypto::decrypt(key, &selected.entry.encrypted_value, &selected.entry.nonce)?;
-        let value = crypto::decode_utf8_zeroizing(
-            decrypted,
-            format!("Vault secret '{}' is not valid UTF-8", selected.entry.name),
-        )?;
-
-        server
-            .with_global_store(|store| {
-                record_successful_vault_access(
-                    store,
-                    &selected.target_name,
-                    selected.pending_rotation.as_ref(),
-                )
-            })
-            .map_err(|e| format!("Failed to update access stats: {e}"))?;
+        let (_selected, value, _access_count) = server.with_global_store(|store| {
+            select_authorized_vault_entry_and_record_access(
+                store,
+                &params,
+                effective_agent_id.as_deref(),
+                key,
+            )
+        })?;
 
         Ok(value)
     })

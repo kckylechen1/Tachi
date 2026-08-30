@@ -361,6 +361,11 @@ fn select_mcp_vault_key_name(
             "MCP --key cannot write lane slot '{key_name}'; use `tachi vault set {key_name} --rebind` for an explicit lane rebind"
         )));
     }
+    if memcore::is_lane_config_secret_name(&key_name) {
+        return Err(std::io::Error::other(format!(
+            "MCP --key cannot write lane config '{key_name}'; use `tachi vault set {key_name}` for explicit lane configuration"
+        )));
+    }
     Ok(key_name)
 }
 
@@ -605,6 +610,19 @@ mod tests {
 
         assert!(error.contains("EXTRACT_API_KEY"), "{error}");
         assert!(error.contains("--rebind"), "{error}");
+    }
+
+    #[test]
+    fn mcp_key_flag_rejects_lane_config_url_vault_header_name() {
+        let error = select_mcp_vault_key_name(
+            "context7",
+            &["Authorization: Bearer ${vault:EXTRACT_BASE_URL}".to_string()],
+        )
+        .expect_err("MCP API-key storage must not target lane config")
+        .to_string();
+
+        assert!(error.contains("EXTRACT_BASE_URL"), "{error}");
+        assert!(error.contains("lane config"), "{error}");
     }
 
     #[test]

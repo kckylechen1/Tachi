@@ -125,6 +125,8 @@ pub(in crate::bootstrap) fn vault_upsert_secret_with_key(
         )
         .into());
     }
+    let secret_type = memcore::vault::normalize_secret_type(secret_type);
+    memcore::reject_api_key_type_for_lane_config(name, secret_type)?;
 
     let encrypt_result = crate::vault_crypto::encrypt(key.bytes(), secret_value.as_bytes());
     let (encrypted_value, nonce) = encrypt_result?;
@@ -136,6 +138,14 @@ pub(in crate::bootstrap) fn vault_upsert_secret_with_key(
     let is_new = !transaction
         .vault_entry_exists(name)
         .map_err(|e| format!("vault_entry_exists: {e}"))?;
+    if is_new && memcore::is_lane_config_url_name(name) {
+        if let Some(leak) = memcore::catalog::endpoint::endpoint_credential_leak(&secret_value) {
+            return Err(format!(
+                "Vault name '{name}' value embeds a credential in the endpoint ({leak}); refusing write"
+            )
+            .into());
+        }
+    }
 
     let now = chrono::Utc::now().to_rfc3339();
     let entry = memcore::vault::VaultEntry {

@@ -11,6 +11,7 @@ pub(crate) async fn handle_vault_set(
         if is_lane_slot_secret_name(&params.name) && value.trim().is_empty() {
             return Err("Secret value cannot be empty".to_string());
         }
+        let effective_agent_id = resolve_vault_acl_agent_id(server, params.agent_id.as_deref())?;
         authorize_vault_mutation(server, &params.name, params.agent_id.as_deref())
             .map_err(|e| e.to_string())?;
         with_vault_key(server, |key| {
@@ -38,9 +39,14 @@ pub(crate) async fn handle_vault_set(
                 let transaction = store
                     .begin_vault_transaction()
                     .map_err(|e| format!("Failed to begin vault transaction: {e}"))?;
-                let is_new = !transaction
-                    .vault_entry_exists(&params.name)
-                    .map_err(|e| format!("Failed to check existing entry: {e}"))?;
+                let existing_entry = transaction
+                    .vault_get_entry(&params.name)
+                    .map_err(|e| format!("Failed to read existing entry: {e}"))?;
+                if let Some(existing) = existing_entry.as_ref() {
+                    ensure_agent_allowed(existing, effective_agent_id.as_deref())
+                        .map_err(|e| e.to_string())?;
+                }
+                let is_new = existing_entry.is_none();
                 if is_new && memcore::is_lane_config_url_name(&params.name) {
                     if let Some(leak) =
                         memcore::catalog::endpoint::endpoint_credential_leak(&value)
@@ -84,10 +90,7 @@ pub(crate) async fn handle_vault_set(
                     }
 
                     if !is_new {
-                        let existing = transaction
-                            .vault_get_entry(&params.name)
-                            .map_err(|e| format!("Failed to read existing slot: {e}"))?;
-                        if let Some(existing) = existing {
+                        if let Some(existing) = existing_entry.as_ref() {
                             validate_existing_lane_slot_secret_type(
                                 &params.name,
                                 &existing.secret_type,
@@ -221,24 +224,14 @@ pub(crate) async fn handle_vault_get(
     let requested_name = params.name.clone();
     let effective_agent_id = resolve_vault_acl_agent_id(server, params.agent_id.as_deref())?;
     let result = with_vault_key(server, |key| {
-        let selected = server.with_global_store(|store| select_vault_entry(store, &params))?;
-
-        ensure_agent_allowed(&selected.entry, effective_agent_id.as_deref())
-            .map_err(|e| e.to_string())?;
-
-        let decrypted =
-            crypto::decrypt(key, &selected.entry.encrypted_value, &selected.entry.nonce)?;
-        let value = crypto::decode_utf8_zeroizing(decrypted, "Decrypted value is not valid UTF-8")?;
-
-        let new_access_count = server
-            .with_global_store(|store| {
-                record_successful_vault_access(
-                    store,
-                    &selected.target_name,
-                    selected.pending_rotation.as_ref(),
-                )
-            })
-            .map_err(|e| format!("Failed to update access stats: {e}"))?;
+        let (selected, value, new_access_count) = server.with_global_store(|store| {
+            select_authorized_vault_entry_and_record_access(
+                store,
+                &params,
+                effective_agent_id.as_deref(),
+                key,
+            )
+        })?;
 
         serde_json::to_string(&json!({
             "name": selected.entry.name,

@@ -1,4 +1,7 @@
-use super::access::record_successful_vault_access;
+use super::access::{
+    record_successful_vault_access,
+    select_authorized_vault_entry_and_record_access_with_hook_for_tests,
+};
 use super::handlers::{
     handle_vault_get, handle_vault_init, handle_vault_lease_api_key, handle_vault_list,
     handle_vault_lock, handle_vault_remove, handle_vault_set, handle_vault_set_api_key_pool,
@@ -12,6 +15,101 @@ use super::session::{read_unlock_password_fifo, with_vault_key};
 use crate::server_state::MemoryServer;
 use crate::test_support::EnvRestore;
 use std::time::{Duration, Instant};
+
+#[test]
+fn authorized_vault_read_serializes_acl_revocation_with_selection_and_touch() {
+    let db_path = crate::utils::test_fixture_path(format!(
+        "memory-server-vault-acl-read-race-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let mut reader_store =
+        memcore::MemoryStore::open(db_path.to_string_lossy().as_ref()).expect("open reader store");
+    let writer_store =
+        memcore::MemoryStore::open(db_path.to_string_lossy().as_ref()).expect("open writer store");
+    let now = chrono::Utc::now().to_rfc3339();
+    let key = [7u8; 32];
+    let (encrypted_value, nonce) =
+        crate::vault_crypto::encrypt(&key, b"race-secret").expect("encrypt race fixture");
+    let entry = memcore::vault::VaultEntry {
+        name: "ACL_RACE_API_KEY".to_string(),
+        encrypted_value,
+        nonce,
+        secret_type: "api_key".to_string(),
+        description: "ACL race fixture".to_string(),
+        allowed_agents: None,
+        created_at: now.clone(),
+        updated_at: now,
+        accessed_at: String::new(),
+        access_count: 0,
+    };
+    reader_store
+        .vault_upsert_entry(&entry)
+        .expect("seed unrestricted entry");
+
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let (attempt_tx, attempt_rx) = std::sync::mpsc::channel();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let writer_handle = std::cell::RefCell::new(None);
+    let writer_barrier = std::sync::Arc::clone(&barrier);
+    let mut restricted = entry.clone();
+    restricted.allowed_agents = Some(vec!["agent-a".to_string()]);
+
+    let (_selected, value, access_count) =
+        select_authorized_vault_entry_and_record_access_with_hook_for_tests(
+            &mut reader_store,
+            &VaultGetParams {
+                name: entry.name.clone(),
+                agent_id: None,
+                auto_rotate: false,
+            },
+            None,
+            &key,
+            || {
+                let handle = std::thread::spawn(move || {
+                    attempt_tx.send(()).expect("announce ACL revocation");
+                    writer_barrier.wait();
+                    writer_store
+                        .vault_upsert_entry(&restricted)
+                        .expect("commit ACL revocation");
+                    done_tx.send(()).expect("announce committed revocation");
+                });
+                attempt_rx
+                    .recv()
+                    .expect("writer reached revocation boundary");
+                barrier.wait();
+                assert!(
+                    done_rx.recv_timeout(Duration::from_millis(250)).is_err(),
+                    "ACL revocation must not commit between selection and authorization"
+                );
+                writer_handle.replace(Some(handle));
+            },
+        )
+        .expect("read linearizes before the blocked ACL revocation");
+    assert_eq!(value, "race-secret");
+    assert_eq!(access_count, 1);
+    writer_handle
+        .into_inner()
+        .expect("writer handle")
+        .join()
+        .expect("ACL writer thread");
+    done_rx.recv().expect("ACL revocation committed");
+
+    let denied = match select_authorized_vault_entry_and_record_access_with_hook_for_tests(
+        &mut reader_store,
+        &VaultGetParams {
+            name: entry.name,
+            agent_id: None,
+            auto_rotate: false,
+        },
+        None,
+        &key,
+        || {},
+    ) {
+        Err(error) => error,
+        Ok(_) => panic!("subsequent anonymous read must observe the committed ACL revocation"),
+    };
+    assert!(denied.contains("agent_id is required"), "{denied}");
+}
 
 #[tokio::test]
 async fn with_vault_key_drops_vault_lock_before_running_work() {
