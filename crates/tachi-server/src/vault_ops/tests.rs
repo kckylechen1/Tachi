@@ -1432,6 +1432,62 @@ async fn vault_set_infers_config_for_lane_urls_and_refuses_api_key() {
         "refused config rotation member must not persist its entry"
     );
 
+    for idx in 1..=2 {
+        handle_vault_set(
+            &server,
+            VaultSetParams {
+                name: format!("CUSTOM_POOL_{idx}"),
+                value: format!("config-value-{idx}"),
+                agent_id: None,
+                secret_type: "config".to_string(),
+                description: "existing explicit config member".to_string(),
+                allowed_agents: None,
+                enable_rotation: false,
+                rotation_strategy: None,
+                rebind: false,
+            },
+        )
+        .await
+        .expect("seed explicit config member through vault_set");
+    }
+    let mixed_rotation = handle_vault_set(
+        &server,
+        VaultSetParams {
+            name: "CUSTOM_POOL_3".to_string(),
+            value: "api-key-value-3".to_string(),
+            agent_id: None,
+            secret_type: "api_key".to_string(),
+            description: "attempt mixed rotation".to_string(),
+            allowed_agents: None,
+            enable_rotation: true,
+            rotation_strategy: Some("round_robin".to_string()),
+            rebind: false,
+        },
+    )
+    .await
+    .expect_err("existing config members must block a mixed rotation");
+    assert!(
+        mixed_rotation.contains("CUSTOM_POOL_1")
+            && mixed_rotation.contains("config")
+            && mixed_rotation.contains("refusing rotation"),
+        "{mixed_rotation}"
+    );
+    let (mixed_entry, mixed_state) = server
+        .with_global_store_read(|store| {
+            let entry = store
+                .vault_get_entry("CUSTOM_POOL_3")
+                .map_err(|error| error.to_string())?;
+            let rotation = store
+                .vault_get_rotation("CUSTOM_POOL")
+                .map_err(|error| error.to_string())?;
+            Ok::<_, String>((entry, rotation))
+        })
+        .expect("read mixed-rotation rollback state");
+    assert!(
+        mixed_entry.is_none() && mixed_state.is_none(),
+        "mixed rotation refusal must roll back the new member and rotation state"
+    );
+
     let pool = handle_vault_set_api_key_pool(
         &server,
         VaultSetApiKeyPoolParams {
