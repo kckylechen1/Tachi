@@ -20,10 +20,16 @@ pub(crate) async fn handle_vault_setup_rotation(
             .map_err(|e| format!("Failed to list entries: {e}"))?;
 
         let mut found_keys = 0;
+        let mut wrong_type = None;
         for i in 1..=params.total_keys {
             let key_name = format!("{}_{}", params.prefix, i);
-            if all_entries.iter().any(|e| e.name == key_name) {
+            if let Some(entry) = all_entries.iter().find(|entry| entry.name == key_name) {
                 found_keys += 1;
+                let effective =
+                    memcore::effective_vault_secret_type(&entry.name, &entry.secret_type);
+                if effective != memcore::SECRET_TYPE_API_KEY && wrong_type.is_none() {
+                    wrong_type = Some((entry.name.clone(), effective));
+                }
             }
         }
 
@@ -31,6 +37,11 @@ pub(crate) async fn handle_vault_setup_rotation(
             return Err(format!(
                 "Expected {} keys for prefix '{}', found {}. Please set all keys first.",
                 params.total_keys, params.prefix, found_keys
+            ));
+        }
+        if let Some((name, effective)) = wrong_type {
+            return Err(format!(
+                "Vault rotation member '{name}' is {effective}, not an API-key credential; refusing rotation setup"
             ));
         }
 

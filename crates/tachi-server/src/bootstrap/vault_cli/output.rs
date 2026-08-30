@@ -32,6 +32,25 @@ fn json_rows(value: &serde_json::Value, key: &str) -> Option<Vec<VaultListRow>> 
         .map(|rows| rows.iter().map(json_list_row).collect())
 }
 
+fn legacy_json_list_groups(
+    value: &serde_json::Value,
+) -> Option<(Vec<VaultListRow>, Vec<VaultListRow>)> {
+    let secrets = value.get("secrets").and_then(|v| v.as_array())?;
+    let mut config = Vec::new();
+    let mut credentials = Vec::new();
+    for entry in secrets {
+        let mut row = json_list_row(entry);
+        row.secret_type =
+            memcore::effective_vault_secret_type(&row.name, &row.secret_type).to_string();
+        if row.secret_type == memcore::SECRET_TYPE_CONFIG {
+            config.push(row);
+        } else {
+            credentials.push(row);
+        }
+    }
+    Some((config, credentials))
+}
+
 pub(super) fn format_vault_list_groups(
     config: &[VaultListRow],
     credentials: &[VaultListRow],
@@ -79,30 +98,10 @@ pub(super) fn print_vault_list_output(out: &str) -> Result<(), Box<dyn std::erro
         print!("{}", format_vault_list_groups(&config, &credentials));
         return Ok(());
     }
-    let Some(secrets) = value.get("secrets").and_then(|v| v.as_array()) else {
+    let Some((config, credentials)) = legacy_json_list_groups(&value) else {
         println!("{out}");
         return Ok(());
     };
-    let mut config = Vec::new();
-    let mut credentials = Vec::new();
-    for entry in secrets {
-        let row = json_list_row(entry);
-        let group = entry
-            .get("group")
-            .and_then(|v| v.as_str())
-            .unwrap_or_else(|| {
-                if row.secret_type == memcore::SECRET_TYPE_CONFIG {
-                    "config"
-                } else {
-                    "credential"
-                }
-            });
-        if group == "config" {
-            config.push(row);
-        } else {
-            credentials.push(row);
-        }
-    }
     print!("{}", format_vault_list_groups(&config, &credentials));
     Ok(())
 }
@@ -405,5 +404,30 @@ mod tests {
         let text = format_vault_list_groups(&config, &credentials);
         assert!(text.starts_with("CONFIG\n"), "{text}");
         assert!(!text.contains("(no secrets stored)"), "{text}");
+    }
+
+    #[test]
+    fn legacy_daemon_payload_remaps_leftover_lane_config_before_grouping() {
+        let json = serde_json::json!({
+            "secrets": [{
+                "name": "EXTRACT_BASE_URL",
+                "secret_type": "api_key",
+                "group": "credential",
+                "description": "legacy lane URL"
+            }, {
+                "name": "DEEPSEEK_API_KEY",
+                "secret_type": "api_key",
+                "description": "provider key"
+            }]
+        });
+        let (config, credentials) = legacy_json_list_groups(&json).expect("legacy payload");
+        assert_eq!(
+            config,
+            [row("EXTRACT_BASE_URL", "config", "legacy lane URL")]
+        );
+        assert_eq!(
+            credentials,
+            [row("DEEPSEEK_API_KEY", "api_key", "provider key")]
+        );
     }
 }

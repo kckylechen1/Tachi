@@ -1,10 +1,11 @@
 use super::handlers::{
     handle_vault_init, handle_vault_lease_api_key, handle_vault_list, handle_vault_lock,
-    handle_vault_set, handle_vault_set_api_key_pool, handle_vault_unlock,
+    handle_vault_set, handle_vault_set_api_key_pool, handle_vault_setup_rotation,
+    handle_vault_unlock,
 };
 use super::params::{
     VaultInitParams, VaultLeaseApiKeyParams, VaultListParams, VaultSetApiKeyPoolParams,
-    VaultSetParams, VaultUnlockParams,
+    VaultSetParams, VaultSetupRotationParams, VaultUnlockParams,
 };
 use super::session::{read_unlock_password_fifo, with_vault_key};
 use crate::server_state::MemoryServer;
@@ -1512,6 +1513,47 @@ async fn leftover_api_key_lane_config_lists_as_config_and_config_rows_do_not_lea
         "CUSTOM_ENDPOINT",
         "https://example.test/v1",
         "config",
+    );
+    plant_vault_secret(
+        &server,
+        "CUSTOM_ENDPOINT_1",
+        "https://one.example.test/v1",
+        "config",
+    );
+    plant_vault_secret(
+        &server,
+        "CUSTOM_ENDPOINT_2",
+        "https://two.example.test/v1",
+        "config",
+    );
+
+    let setup = handle_vault_setup_rotation(
+        &server,
+        VaultSetupRotationParams {
+            prefix: "CUSTOM_ENDPOINT".to_string(),
+            total_keys: 2,
+            strategy: "round_robin".to_string(),
+            agent_id: None,
+        },
+    )
+    .await
+    .expect_err("explicit config members must not form an API-key rotation");
+    assert!(
+        setup.contains("CUSTOM_ENDPOINT_1")
+            && setup.contains("config")
+            && setup.contains("refusing rotation"),
+        "{setup}"
+    );
+    let stored_rotation = server
+        .with_global_store_read(|store| {
+            store
+                .vault_get_rotation("CUSTOM_ENDPOINT")
+                .map_err(|error| error.to_string())
+        })
+        .expect("read rotation state");
+    assert!(
+        stored_rotation.is_none(),
+        "refused config rotation must persist no rotation state"
     );
 
     let listed = handle_vault_list(&server, VaultListParams { secret_type: None })
