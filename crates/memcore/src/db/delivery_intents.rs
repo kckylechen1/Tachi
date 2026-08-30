@@ -49,6 +49,12 @@
 //!   (`resume_requester_operation`) or a corrected result revision moves a
 //!   blocked intent back toward delivery, and each such reopen records a
 //!   `transition_debt` event (CurrentTruth reopen law applied to delivery).
+//! - **Failure-terminal mint residual (documented).** A transient mint
+//!   failure on a failure-terminal recording is WARN-logged and leaves that
+//!   outcome without an intent; recovery is a later completion or
+//!   re-dispatch of the same dispatch (the idempotent mint then re-runs).
+//!   An eager retry branch was deliberately rejected: it minted wrong-store
+//!   siblings and could re-arm settled completions.
 //! - **Single-writer assumption (documented residual).** Decision reads
 //!   and writes are serialized by the server's store lock and by SQLite
 //!   transactions; cross-process multi-daemon access to one store file is
@@ -635,8 +641,16 @@ pub fn ack_delivered(
     }
     let now = now_utc_iso();
     let intent = find_intent_by_id(conn, delivery_id)?
-        .ok_or_else(|| MemoryError::NotFound(format!("delivery intent {delivery_id}")))?;
+        .ok_or_else(|| MemoryError::NotFound(format!("delivery intent not found")))?;
 
+    // Authorization BEFORE state disclosure: a caller outside the intent's
+    // requester binding gets the same generic refusal as a missing intent —
+    // not an AlreadyDelivered/queued distinction that leaks existence.
+    if !requester_matches(&intent, caller) {
+        return Err(MemoryError::NotFound(
+            "delivery intent not found".to_string(),
+        ));
+    }
     if intent.delivery_state == DeliveryState::Delivered.as_str() {
         return Ok(DeliveryAckOutcome::AlreadyDelivered);
     }
@@ -696,7 +710,7 @@ pub fn ack_delivered(
             intent.revision
         )));
     }
-    append_event(
+    if let Err(error) = append_event(
         &tx,
         delivery_id,
         &ack_event_id,
@@ -706,7 +720,22 @@ pub fn ack_delivered(
         None,
         &caller.host_identity,
         &now,
-    )?;
+    ) {
+        // Ack-key cross-intent collision at the global partial-unique index
+        // (SQLite names the columns, not the index) is the same frozen law
+        // as claims: typed conflict, transaction rolled back, nothing
+        // written.
+        let message = error.to_string();
+        if matches!(error, MemoryError::Sqlite(_))
+            && (message.contains("UNIQUE constraint failed: delivery_events.event_id")
+                || message.contains("idx_delivery_events_ack_key_global"))
+        {
+            return Err(MemoryError::DeliveryIdempotencyConflict(format!(
+                "ack_key '{ack_key}' was recorded concurrently elsewhere"
+            )));
+        }
+        return Err(error);
+    }
     tx.commit()?;
     Ok(DeliveryAckOutcome::Acknowledged {
         revision: next_revision,
@@ -741,8 +770,14 @@ pub fn reject_or_block(
     validate_detail(detail)?;
     let now = now_utc_iso();
     let intent = find_intent_by_id(conn, delivery_id)?
-        .ok_or_else(|| MemoryError::NotFound(format!("delivery intent {delivery_id}")))?;
+        .ok_or_else(|| MemoryError::NotFound(format!("delivery intent not found")))?;
 
+    // Authorization BEFORE state disclosure (same law as ack).
+    if !requester_matches(&intent, caller) {
+        return Err(MemoryError::NotFound(
+            "delivery intent not found".to_string(),
+        ));
+    }
     // Holder-only: only the requester holding the active claim may report a
     // failure. An unrelated admitted caller cannot park (or spy on) another
     // requester's delivery — including a private one.
@@ -2372,7 +2407,9 @@ mod tests {
     fn reject_or_block_is_holder_only() {
         let conn = test_conn();
         let intent = make_ready(&conn, "managed:outcome-18");
-        // A non-holder while the intent is ready (unclaimed): refused.
+        // A non-holder while the intent is ready (unclaimed): the intent is
+        // bound to requester-a, so the intruder gets the generic not-found
+        // refusal (no existence signal, no state change).
         let error = reject_or_block(
             &conn,
             &intent.delivery_id,
@@ -2383,7 +2420,7 @@ mod tests {
             None,
         )
         .unwrap_err();
-        assert!(matches!(error, MemoryError::DeliveryIncompatibleState(_)));
+        assert!(matches!(error, MemoryError::NotFound(_)));
         assert_eq!(state_of(&conn, &intent.delivery_id), "ready");
 
         // The holder claims; a different admitted caller is refused.
@@ -2407,7 +2444,7 @@ mod tests {
             None,
         )
         .unwrap_err();
-        assert!(matches!(error, MemoryError::DeliveryIncompatibleState(_)));
+        assert!(matches!(error, MemoryError::NotFound(_)));
         assert_eq!(state_of(&conn, &intent.delivery_id), "requester_queued");
     }
 
