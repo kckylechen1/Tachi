@@ -1373,6 +1373,7 @@ mod tests {
             + MemoryServer::continuity_tool_router()
             + MemoryServer::component_tool_router()
             + MemoryServer::copilot_tool_router()
+            + MemoryServer::delivery_tool_router()
             + MemoryServer::dispatch_tool_router()
             + MemoryServer::handoff_tool_router()
             + MemoryServer::runtime_context_tool_router()

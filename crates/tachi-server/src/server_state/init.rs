@@ -337,6 +337,7 @@ impl MemoryServer {
                 + Self::continuity_tool_router()
                 + Self::component_tool_router()
                 + Self::copilot_tool_router()
+                + Self::delivery_tool_router()
                 + Self::dispatch_tool_router()
                 + Self::handoff_tool_router()
                 + Self::runtime_context_tool_router()

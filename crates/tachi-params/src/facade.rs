@@ -521,6 +521,9 @@ pub use task::{TachiDispatchReason, TachiTaskParams};
 mod a2a;
 pub use a2a::{TachiA2aAction, TachiA2aParams};
 
+mod delivery;
+pub use delivery::{TachiDeliveryParams, TACHI_DELIVERY_ACTIONS};
+
 mod tune;
 pub use tune::{TachiTuneAction, TachiTuneParams};
 

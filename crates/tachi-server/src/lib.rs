@@ -102,6 +102,7 @@ mod copilot_ops;
 mod daemon_lock;
 mod daily_pipeline;
 mod db_ownership;
+mod delivery_ops;
 mod dispatch_ops;
 mod dispatch_profile;
 mod dlq_ops;

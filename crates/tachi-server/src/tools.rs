@@ -45,6 +45,7 @@ mod a2a_facade;
 pub(crate) mod alias_manifest;
 mod component_facade;
 mod continuity_facade;
+mod delivery_facade;
 mod dispatch_complete_defaults;
 mod dispatch_facade;
 pub(crate) mod formatting;
