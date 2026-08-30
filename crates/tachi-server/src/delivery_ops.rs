@@ -313,6 +313,21 @@ pub(crate) fn mint_delivery_for_managed_outcome(
     outcome: &memcore::DispatchOutcomeRow,
     result_ref: String,
 ) {
+    let _ = server.with_global_store(|store| {
+        mint_delivery_for_managed_outcome_in_store(store, outcome, result_ref);
+        Ok::<(), String>(())
+    });
+}
+
+/// In-store core: the caller already holds the right store scope (the
+/// global-scope write closure). Locks are non-reentrant, so the global
+/// scope branch calls THIS directly; project-scope branches go through the
+/// server wrapper's nested global acquisition.
+pub(crate) fn mint_delivery_for_managed_outcome_in_store(
+    store: &mut memcore::MemoryStore,
+    outcome: &memcore::DispatchOutcomeRow,
+    result_ref: String,
+) {
     // Correction authority: the spine serializes corrections inside the
     // mint transaction (equal-revision + different content supersedes at
     // prev+1), so two corrections in the same clock tick can never be
@@ -320,7 +335,7 @@ pub(crate) fn mint_delivery_for_managed_outcome(
     let result_revision = revision_wall_clock_base();
     let idempotency_key = managed_delivery_key(&outcome.dispatch_id);
 
-    let mint_result = server.with_global_store(|store| {
+    let mint_result = || {
         let conn = store.connection();
         let mut new = memcore::NewDeliveryIntent {
             idempotency_key: idempotency_key.clone(),
@@ -375,8 +390,8 @@ pub(crate) fn mint_delivery_for_managed_outcome(
         memcore::mint_delivery_intent(conn, &new)
             .map(|intent| Some(intent))
             .map_err(|error| error.to_string())
-    });
-    if let Err(error) = mint_result {
+    };
+    if let Err(error) = mint_result() {
         tracing::warn!(
             error = %error,
             dispatch_id = %outcome.dispatch_id,
