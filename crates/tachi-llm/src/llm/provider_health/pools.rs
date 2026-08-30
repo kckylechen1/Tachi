@@ -100,7 +100,28 @@ impl super::super::LlmClient {
     where
         P: FnOnce() -> Result<(), String>,
     {
+        self.publish_provider_secret_pools_inner(
+            replacement,
+            retained_logical_names,
+            lane_config_overlay,
+            None,
+            commit_companion_projection,
+        )
+    }
+
+    fn publish_provider_secret_pools_inner<P>(
+        &self,
+        replacement: HashMap<String, Vec<ProviderSecret>>,
+        retained_logical_names: &HashSet<String>,
+        lane_config_overlay: Option<LaneConfigOverlay>,
+        before_companion_commit: Option<Box<dyn FnOnce() + Send>>,
+        commit_companion_projection: P,
+    ) -> Result<usize, String>
+    where
+        P: FnOnce() -> Result<(), String>,
+    {
         let loaded = replacement.len();
+        let replacement_logical_names = replacement.keys().cloned().collect::<HashSet<_>>();
         let mut retained_members_by_logical = HashMap::new();
         for logical_name in retained_logical_names {
             let Some(entries) = replacement.get(logical_name) else {
@@ -116,40 +137,76 @@ impl super::super::LlmClient {
             .provider_state
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        // The companion becomes durable while new request snapshots are
-        // blocked. Pools/overlay are replaced before this lock is released,
-        // so a caller cannot start after the durable commit and read old
-        // in-memory runtime state. Failure leaves the old state untouched.
-        commit_companion_projection()?;
-        state.indices.retain(|logical_name, _index| {
-            retained_logical_names.contains(logical_name) && replacement.contains_key(logical_name)
+        // Stage the complete next state while readers are blocked, then commit
+        // the companion transaction. Vault-backed callers keep their source
+        // mutation fence inside that commit callback, so the in-memory
+        // linearization happens before the fence releases a waiting revocation.
+        // On failure, restore the complete prior state before readers resume.
+        let previous = std::mem::take(&mut *state);
+        let mut next = ProviderState {
+            secrets: replacement,
+            lane_config_overlay: lane_config_overlay
+                .unwrap_or_else(|| previous.lane_config_overlay.clone()),
+            cooldowns: previous.cooldowns.clone(),
+            indices: previous.indices.clone(),
+            health: previous.health.clone(),
+            health_snapshots: previous.health_snapshots.clone(),
+        };
+        next.indices.retain(|logical_name, _index| {
+            retained_logical_names.contains(logical_name)
+                && replacement_logical_names.contains(logical_name)
         });
-        state.cooldowns.retain(|logical_name, members| {
+        next.cooldowns.retain(|logical_name, members| {
             let Some(retained_members) = retained_members_by_logical.get(logical_name) else {
                 return false;
             };
             members.retain(|key_id, _until| retained_members.contains(key_id));
             !members.is_empty()
         });
-        state.health.retain(|logical_name, members| {
+        next.health.retain(|logical_name, members| {
             let Some(retained_members) = retained_members_by_logical.get(logical_name) else {
                 return false;
             };
             members.retain(|key_id, _health| retained_members.contains(key_id));
             !members.is_empty()
         });
-        state.health_snapshots.retain(|logical_name, members| {
+        next.health_snapshots.retain(|logical_name, members| {
             let Some(retained_members) = retained_members_by_logical.get(logical_name) else {
                 return false;
             };
             members.retain(|key_id, _snapshot| retained_members.contains(key_id));
             !members.is_empty()
         });
-        state.secrets = replacement;
-        if let Some(overlay) = lane_config_overlay {
-            state.lane_config_overlay = overlay;
+        *state = next;
+        if let Some(hook) = before_companion_commit {
+            hook();
+        }
+        if let Err(error) = commit_companion_projection() {
+            *state = previous;
+            return Err(error);
         }
         Ok(loaded)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn publish_provider_secret_pools_with_hook_for_tests<P>(
+        &self,
+        replacement: HashMap<String, Vec<ProviderSecret>>,
+        retained_logical_names: &HashSet<String>,
+        lane_config_overlay: Option<LaneConfigOverlay>,
+        before_companion_commit: impl FnOnce() + Send + 'static,
+        commit_companion_projection: P,
+    ) -> Result<usize, String>
+    where
+        P: FnOnce() -> Result<(), String>,
+    {
+        self.publish_provider_secret_pools_inner(
+            replacement,
+            retained_logical_names,
+            lane_config_overlay,
+            Some(Box::new(before_companion_commit)),
+            commit_companion_projection,
+        )
     }
 
     pub fn clear_provider_secrets(&self) -> Result<(), String> {
