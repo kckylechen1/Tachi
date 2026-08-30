@@ -134,11 +134,56 @@ fn rotation_member_name(prefix: &str, idx: i64) -> String {
     format!("{prefix}_{idx}")
 }
 
+pub(crate) fn validate_api_key_lease_target(
+    store: &memcore::MemoryStore,
+    logical_name: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if memcore::is_lane_config_secret_name(logical_name) {
+        return Err(format!(
+            "Vault name '{logical_name}' is lane config, not a credential; refusing to lease it as an API key"
+        )
+        .into());
+    }
+    let entries = store
+        .vault_list_entries()
+        .map_err(|e| format!("vault_list_entries: {e}"))?;
+    if let Some(entry) = entries.iter().find(|entry| entry.name == logical_name) {
+        let effective = memcore::effective_vault_secret_type(&entry.name, &entry.secret_type);
+        if effective != memcore::SECRET_TYPE_API_KEY {
+            return Err(format!(
+                "Vault name '{logical_name}' is {effective}, not a credential; refusing to lease it as an API key"
+            )
+            .into());
+        }
+    }
+    if let Some(rotation) = store
+        .vault_get_rotation(logical_name)
+        .map_err(|e| format!("vault_get_rotation: {e}"))?
+    {
+        for idx in 1..=rotation.total_keys.max(0) {
+            let member_name = rotation_member_name(logical_name, idx);
+            if let Some(entry) = entries.iter().find(|entry| entry.name == member_name) {
+                let effective =
+                    memcore::effective_vault_secret_type(&entry.name, &entry.secret_type);
+                if effective != memcore::SECRET_TYPE_API_KEY {
+                    return Err(format!(
+                        "Vault rotation member '{}' is {effective}, not a credential; refusing to lease '{logical_name}' as an API key",
+                        entry.name
+                    )
+                    .into());
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn lease_api_key_from_store(
     store: &memcore::MemoryStore,
     key: &[u8; 32],
     logical_name: &str,
 ) -> Result<(String, String, String), Box<dyn std::error::Error>> {
+    validate_api_key_lease_target(store, logical_name)?;
     if memcore::is_lane_config_secret_name(logical_name) {
         return Err(format!(
             "Vault name '{logical_name}' is lane config, not a credential; refusing to lease it as an API key"

@@ -21,10 +21,11 @@ pub(crate) async fn handle_vault_set(
             };
             validate_lane_slot_secret_type(&params.name, secret_type)?;
             memcore::reject_api_key_type_for_lane_config(&params.name, secret_type)?;
-            if params.enable_rotation && memcore::is_lane_config_secret_name(&params.name) {
+            let effective_type = memcore::effective_vault_secret_type(&params.name, secret_type);
+            if params.enable_rotation && effective_type != SECRET_TYPE_API_KEY {
                 return Err(format!(
-                    "Vault name '{}' is lane config; refusing to attach API-key rotation",
-                    params.name
+                    "Vault name '{}' is {effective_type}, not an API-key credential; refusing to attach rotation",
+                    params.name,
                 ));
             }
             if memcore::is_lane_config_url_name(&params.name) {

@@ -335,6 +335,11 @@ async fn run_secret_action_with_reader(
             insecure_password_file,
             json,
         } => {
+            memcore::reject_api_key_type_for_lane_config(&name, memcore::SECRET_TYPE_API_KEY)?;
+            if global_db_path.exists() {
+                let store = open_cli_store_read_only(global_db_path)?;
+                super::validate_api_key_lease_target(&store, &name)?;
+            }
             if let Some(info) = detect_matching_daemon(app_home, global_db_path).await {
                 let mut args = serde_json::Map::new();
                 args.insert("name".to_string(), serde_json::json!(name));
@@ -503,6 +508,38 @@ async fn run_secret_action_with_reader(
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    #[tokio::test]
+    async fn cli_lease_refuses_lane_config_before_daemon_or_store_access() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let db_path = temp.path().join("must-not-be-created.sqlite");
+        let action = VaultAction::Lease {
+            name: "ENABLE_FALLBACK_API_KEY".to_string(),
+            env_name: None,
+            stdin_password: false,
+            keychain: false,
+            password_file: None,
+            insecure_password_file: false,
+            json: true,
+        };
+        let error = run_secret_action_with_reader(
+            &db_path,
+            temp.path(),
+            action,
+            &mut Cursor::new(Vec::<u8>::new()),
+        )
+        .await
+        .expect_err("lane config must be refused before daemon forwarding")
+        .to_string();
+        assert!(
+            error.contains("lane config") && error.contains("api_key"),
+            "{error}"
+        );
+        assert!(
+            !db_path.exists(),
+            "preflight refusal must not create or open the Vault DB"
+        );
+    }
 
     #[cfg(unix)]
     #[tokio::test]

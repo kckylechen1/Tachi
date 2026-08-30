@@ -1396,8 +1396,40 @@ async fn vault_set_infers_config_for_lane_urls_and_refuses_api_key() {
     .await
     .expect_err("config members must not attach API-key rotation");
     assert!(
-        rotation.contains("lane config") && rotation.contains("rotation"),
+        rotation.contains("config") && rotation.contains("rotation"),
         "{rotation}"
+    );
+
+    let custom_rotation = handle_vault_set(
+        &server,
+        VaultSetParams {
+            name: "CUSTOM_ENDPOINT_9".to_string(),
+            value: "https://custom.example.test/v1".to_string(),
+            agent_id: None,
+            secret_type: "config".to_string(),
+            description: "explicit config member".to_string(),
+            allowed_agents: None,
+            enable_rotation: true,
+            rotation_strategy: Some("round_robin".to_string()),
+            rebind: false,
+        },
+    )
+    .await
+    .expect_err("explicit config members must not create rotation state through vault_set");
+    assert!(
+        custom_rotation.contains("config") && custom_rotation.contains("refusing"),
+        "{custom_rotation}"
+    );
+    let custom_entry = server
+        .with_global_store_read(|store| {
+            store
+                .vault_get_entry("CUSTOM_ENDPOINT_9")
+                .map_err(|error| error.to_string())
+        })
+        .expect("read refused custom member");
+    assert!(
+        custom_entry.is_none(),
+        "refused config rotation member must not persist its entry"
     );
 
     let pool = handle_vault_set_api_key_pool(
