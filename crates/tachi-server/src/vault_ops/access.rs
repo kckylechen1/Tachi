@@ -596,14 +596,6 @@ pub(crate) fn vault_materialization_acl_revision_from_rows(
     hasher.finish()
 }
 
-pub(crate) fn vault_materialization_acl_revision(store: &MemoryStore) -> Result<u64, String> {
-    let entries = store.vault_list_entries().map_err(|e| e.to_string())?;
-    let rotations = store.vault_list_rotations().map_err(|e| e.to_string())?;
-    Ok(vault_materialization_acl_revision_from_rows(
-        &entries, &rotations,
-    ))
-}
-
 /// Same scan as [`load_unlocked_api_key_secret_pools`], plus the drop reason
 /// recorded at the moment each listed row was skipped (tachi#1860).
 #[cfg(test)]

@@ -503,7 +503,7 @@ fn materialize_for_server_inner(
                             format!("Failed to fence Vault provider publication: {error}")
                         })?;
                     if let Some(expected_revision) = expected_revision {
-                        let actual_revision = vault_acl_revision_at_path(&source_path)?;
+                        let actual_revision = vault_acl_revision_on_connection(fence.connection())?;
                         if actual_revision != expected_revision {
                             fence.rollback().map_err(|error| {
                                 format!("Failed to release stale Vault publication fence: {error}")
@@ -553,13 +553,12 @@ fn materialize_for_server_inner(
     }
 }
 
-fn vault_acl_revision_at_path(source_path: &Path) -> Result<u64, String> {
-    let path = source_path
-        .to_str()
-        .ok_or_else(|| "Vault source path is not valid UTF-8".to_string())?;
-    let store = memcore::MemoryStore::open_read_only(path)
-        .map_err(|error| format!("Failed to reopen Vault source for revision check: {error}"))?;
-    crate::vault_ops::vault_materialization_acl_revision(&store)
+fn vault_acl_revision_on_connection(connection: &rusqlite::Connection) -> Result<u64, String> {
+    let entries = memcore::db::vault_list_entries(connection)
+        .map_err(|error| format!("Failed to read Vault entries for revision check: {error}"))?;
+    let rotations = memcore::db::vault_list_rotations(connection)
+        .map_err(|error| format!("Failed to read Vault rotations for revision check: {error}"))?;
+    Ok(crate::vault_ops::vault_materialization_acl_revision_from_rows(&entries, &rotations))
 }
 
 fn annotate_non_model_drops(
@@ -796,7 +795,8 @@ fn materialize_standalone_inner(
                         format!("Failed to fence standalone Vault publication: {error}")
                     })?;
                 if let Some(expected_revision) = expected_revision {
-                    let actual_revision = vault_acl_revision_at_path(&source_path)?;
+                    let actual_revision =
+                        vault_acl_revision_on_connection(fence.connection())?;
                     if actual_revision != expected_revision {
                         fence.rollback().map_err(|error| {
                             format!("Failed to release stale standalone Vault fence: {error}")
