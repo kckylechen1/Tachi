@@ -12,9 +12,10 @@ use crate::error::MemoryError;
 pub(super) fn migrate_v36_delivery_spine(conn: &Connection) -> Result<usize, MemoryError> {
     crate::db::schema::install_delivery_spine_schema(conn)?;
     crate::db::schema::validate_delivery_spine_schema(conn)?;
-    // Two tables plus three indexes; CREATE IF NOT EXISTS keeps the receipt
+    // Two tables plus five indexes (three of them partial global-uniqueness
+    // guards on claim/ack keys); CREATE IF NOT EXISTS keeps the receipt
     // count stable on replay.
-    Ok(5)
+    Ok(7)
 }
 
 #[cfg(test)]
@@ -26,7 +27,7 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         assert_eq!(
             migrate_v36_delivery_spine(&conn).unwrap(),
-            5,
+            7,
             "migration receipt count is stable on replay"
         );
         crate::db::schema::validate_delivery_spine_schema(&conn).unwrap();

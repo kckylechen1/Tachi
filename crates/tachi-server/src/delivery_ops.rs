@@ -308,6 +308,7 @@ pub(crate) fn mint_delivery_for_managed_outcome(
 ) {
     let task_type = outcome.task_type.as_deref().unwrap_or("-");
     let idempotency_key = format!("managed:{}:{}", outcome.dispatch_id, task_type);
+    let idempotency_key_for_check = idempotency_key.clone();
     let payload_digest = digest_token(&[
         &outcome.outcome_id,
         &outcome.execution_outcome,
@@ -338,19 +339,55 @@ pub(crate) fn mint_delivery_for_managed_outcome(
     // Bind the admitted requester from the owning WorkClaim when one names
     // this dispatch. A bound intent is private to that requester (fail-
     // closed default); unbound stays public/pull-only.
-    if let Ok(Some((claim_id, agent_identity_id, session_client))) =
-        server.with_global_store(|store| {
-            memcore::find_claim_requester_for_dispatch(store.connection(), &outcome.dispatch_id)
-                .map_err(|error| error.to_string())
-        })
-    {
-        new.visibility_class = memcore::DeliveryVisibilityClass::Private;
-        new.work_claim_id = Some(claim_id);
-        new.requester = memcore::DeliveryRequesterBinding {
-            agent_identity_id: Some(agent_identity_id),
-            host_identity: None,
-            session_ref: session_client,
-        };
+    let claim = server.with_global_store(|store| {
+        memcore::find_claim_requester_for_dispatch(store.connection(), &outcome.dispatch_id)
+            .map_err(|error| error.to_string())
+    });
+    match claim {
+        Ok(Some(binding)) if binding.state == "active" => {
+            new.visibility_class = memcore::DeliveryVisibilityClass::Private;
+            new.work_claim_id = Some(binding.claim_id);
+            new.requester = memcore::DeliveryRequesterBinding {
+                agent_identity_id: Some(binding.agent_identity_id),
+                host_identity: None,
+                session_ref: binding.session_client,
+            };
+        }
+        // The claim exists but is NOT active (released/handed off): the
+        // requester context is gone. A mint now would either keep the old
+        // binding (harmless reconcile) or — if no intent exists yet —
+        // create an UNBOUND public delivery for work whose owner left.
+        // Only reconcile an existing intent; never mint fresh.
+        Ok(Some(_)) => {
+            if server
+                .with_global_store(|store| {
+                    memcore::find_delivery_intent_by_idempotency_key(
+                        store.connection(),
+                        &idempotency_key_for_check,
+                    )
+                    .map_err(|error| error.to_string())
+                })
+                .ok()
+                .flatten()
+                .is_none()
+            {
+                tracing::warn!(
+                    dispatch_id = %outcome.dispatch_id,
+                    "claim inactive and no delivery intent; skipping mint"
+                );
+                return;
+            }
+        }
+        // No claim names this dispatch: honestly unbound (pull-only).
+        Ok(None) => {}
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                dispatch_id = %outcome.dispatch_id,
+                "failed to read the owning WorkClaim before mint"
+            );
+            return;
+        }
     }
     if let Err(error) = server.with_global_store(|store| {
         memcore::mint_delivery_intent(store.connection(), &new).map_err(|error| error.to_string())
@@ -381,6 +418,21 @@ pub(crate) fn mint_delivery_for_attached_terminal(
     remote_session_id: &str,
     work_claim_id: &str,
 ) {
+    // Older-information guard: an event whose source revision is below the
+    // intent's current result revision is stale truth; with correction
+    // authority it could otherwise mirror an older payload over a newer
+    // one. The receipt spine already refuses to advance on such events.
+    if let Ok(Some(existing)) = server.with_global_store(|store| {
+        memcore::find_delivery_intent_by_idempotency_key(
+            store.connection(),
+            &format!("attached:{attachment_id}"),
+        )
+        .map_err(|error| error.to_string())
+    }) {
+        if existing.result_revision > source_revision.max(1) {
+            return;
+        }
+    }
     let digest = payload_digest
         .map(str::to_string)
         .unwrap_or_else(|| digest_token(&[outcome_token, summary.unwrap_or("")]));

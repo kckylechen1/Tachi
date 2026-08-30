@@ -126,7 +126,20 @@ pub(crate) fn handle_ingest_session_event(
     // when a first-journal mint failed transiently. Stale and conflicting
     // terminal facts mint nothing (the receipt plane's own law keeps them
     // from advancing state, so they cannot be fresher delivery truth).
+    // The canonical projection must be a CONSISTENT terminal: a mint while
+    // the spine is inconsistent_reconciling or unknown_orphaned would let
+    // an unresolved (possibly wrong) result reach a requester. #1623
+    // adjudication owns those states; delivery waits.
+    let consistent_terminal = matches!(
+        receipt.state.canonical_state,
+        Some(
+            memcore::HarnessSessionCanonicalState::Completed
+                | memcore::HarnessSessionCanonicalState::Failed
+                | memcore::HarnessSessionCanonicalState::Cancelled
+        )
+    );
     if kind == HarnessSessionEventKind::Terminal
+        && consistent_terminal
         && matches!(
             receipt.disposition,
             HarnessSessionEventDisposition::Advanced

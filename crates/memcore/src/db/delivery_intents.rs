@@ -1156,13 +1156,18 @@ fn reconcile_mint(
     let same_content =
         existing.result_ref == new.result_ref && existing.payload_digest == new.payload_digest;
 
-    if new.result_revision < existing.result_revision {
-        // STALE, absolutely: a lower revision is older information and can
-        // never change the intent — no correction authority overrides this,
-        // because mirroring an older payload would be a content regression
-        // even though the revision counter would grow.
+    if new.result_revision < existing.result_revision && !new.correction {
+        // STALE: a lower revision without correction authority is older
+        // information and can never change the intent.
         return Ok(existing);
     }
+    // (A correction-authoritative lower-revision mint falls through: the
+    // terminal plane asserts the incoming receipt is the canonical latest,
+    // so the supersede below grows the revision to prev+1 — mirroring the
+    // plane's truth without ever producing a lower revision than the one
+    // it replaces. The attached plane additionally refuses to mint at all
+    // when the event revision is below the intent's, so "older payload"
+    // cannot slip through there.)
     if new.result_revision == existing.result_revision {
         if same_content {
             return Ok(existing);
@@ -1185,14 +1190,18 @@ fn reconcile_mint(
         );
     }
 
-    // Strictly higher revision.
+    // Strictly higher revision (or a correction-authoritative fallthrough
+    // from above): the supersede revision floor stays strictly above
+    // whatever the intent already carried, so corrections are monotone no
+    // matter the incoming hint.
     if same_content {
         // Unchanged content at a higher revision (a delayed replay of the
         // same terminal receipt) carries NO new information: it must not
         // re-arm a settled delivery.
         return Ok(existing);
     }
-    supersede_intent(conn, existing, new, new.result_revision, now)
+    let next_result_revision = new.result_revision.max(existing.result_revision + 1);
+    supersede_intent(conn, existing, new, next_result_revision, now)
 }
 
 /// Re-arm an intent with a corrected result. The whole rewrite + ledger
@@ -1445,7 +1454,7 @@ fn transition_to_claimed(
             intent.delivery_id, intent.revision
         )));
     }
-    append_event(
+    if let Err(error) = append_event(
         &tx,
         &intent.delivery_id,
         &format!("claim:{}", request.claim_key),
@@ -1455,7 +1464,23 @@ fn transition_to_claimed(
         None,
         &request.caller.host_identity,
         now,
-    )?;
+    ) {
+        // The global partial-unique index on claim keys is the race
+        // backstop for the pre-transaction replay check: a concurrent
+        // claim of the same key on a different intent loses here, inside
+        // its own transaction, as a typed conflict.
+        if matches!(error, MemoryError::Sqlite(_))
+            && error
+                .to_string()
+                .contains("idx_delivery_events_claim_key_global")
+        {
+            return Err(MemoryError::DeliveryIdempotencyConflict(format!(
+                "claim_key '{}' was claimed concurrently elsewhere",
+                request.claim_key
+            )));
+        }
+        return Err(error);
+    }
     if reopen {
         append_event(
             &tx,
@@ -2397,17 +2422,27 @@ mod tests {
         assert_eq!(superseded.result_revision, 2, "strictly grows");
         assert_eq!(superseded.delivery_state, "ready");
 
-        // An OLDER-revision mint is stale absolutely — even with correction
-        // authority, older content can never replace newer content (the
-        // revision counter would grow but the payload would regress).
-        let mut stale_correction = mint_new("managed:outcome-21");
-        stale_correction.result_revision = 1;
-        stale_correction.payload_digest = "sha256-DDDD".to_string();
-        stale_correction.result_ref = "artifact://older".to_string();
-        stale_correction.correction = true;
-        let untouched = mint_delivery_intent(&conn, &stale_correction).unwrap();
+        // An OLDER-revision mint WITHOUT correction authority is stale —
+        // no-op even with different content.
+        let mut stale = mint_new("managed:outcome-21");
+        stale.result_revision = 1;
+        stale.payload_digest = "sha256-DDDD".to_string();
+        stale.result_ref = "artifact://older".to_string();
+        let untouched = mint_delivery_intent(&conn, &stale).unwrap();
         assert_eq!(untouched.result_revision, 2, "stale no-op");
         assert_eq!(untouched.result_ref, corrected.result_ref);
+
+        // With correction authority, an older-revision mint IS the
+        // terminal plane asserting a canonical-latest correction: the
+        // supersede grows strictly (prev+1) and mirrors the plane's truth.
+        let mut authoritative = mint_new("managed:outcome-21");
+        authoritative.result_revision = 1;
+        authoritative.payload_digest = "sha256-DDDD".to_string();
+        authoritative.result_ref = "artifact://older".to_string();
+        authoritative.correction = true;
+        let superseded2 = mint_delivery_intent(&conn, &authoritative).unwrap();
+        assert_eq!(superseded2.result_revision, 3, "strictly grows");
+        assert_eq!(superseded2.payload_digest, "sha256-DDDD");
     }
 
     // --- codex R2 round-3 regression: unchanged content at a HIGHER

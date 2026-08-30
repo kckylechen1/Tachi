@@ -829,7 +829,12 @@ pub(crate) fn install_delivery_spine_schema(conn: &Connection) -> Result<(), Mem
             UNIQUE (delivery_id, event_id)
         );
         CREATE INDEX IF NOT EXISTS idx_delivery_events_delivery
-            ON delivery_events(delivery_id, event_row_id);",
+            ON delivery_events(delivery_id, event_row_id);
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_delivery_events_claim_key_global
+            ON delivery_events(event_id) WHERE kind = 'claimed';
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_delivery_events_ack_key_global
+            ON delivery_events(event_id) WHERE kind = 'delivered';",
     )
 }
 
@@ -841,6 +846,8 @@ pub(crate) fn validate_delivery_spine_schema(conn: &Connection) -> Result<(), Me
         ("index", "idx_delivery_intents_execution"),
         ("table", "delivery_events"),
         ("index", "idx_delivery_events_delivery"),
+        ("index", "idx_delivery_events_claim_key_global"),
+        ("index", "idx_delivery_events_ack_key_global"),
     ];
     for (object_type, name) in REQUIRED_OBJECTS {
         let present = match conn.query_row(
