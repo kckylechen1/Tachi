@@ -94,16 +94,6 @@ async fn run_secret_action_with_reader(
             if secret_value.trim().is_empty() {
                 return Err("Secret value cannot be empty".into());
             }
-            if memcore::is_lane_config_url_name(&name) {
-                if let Some(leak) =
-                    memcore::catalog::endpoint::endpoint_credential_leak(&secret_value)
-                {
-                    return Err(format!(
-                        "Vault name '{name}' value embeds a credential in the endpoint ({leak}); refusing write"
-                    ).into());
-                }
-            }
-
             let now = chrono::Utc::now().to_rfc3339();
             let mut store = open_cli_store(global_db_path)?;
             let transaction = store
@@ -112,6 +102,15 @@ async fn run_secret_action_with_reader(
             let is_new = !transaction
                 .vault_entry_exists(&name)
                 .map_err(|e| format!("vault_entry_exists: {e}"))?;
+            if is_new && memcore::is_lane_config_url_name(&name) {
+                if let Some(leak) =
+                    memcore::catalog::endpoint::endpoint_credential_leak(&secret_value)
+                {
+                    return Err(format!(
+                        "Vault name '{name}' value embeds a credential in the endpoint ({leak}); refusing write"
+                    ).into());
+                }
+            }
 
             if crate::vault_ops::is_lane_slot_secret_name(&name)
                 && secret_type == memcore::vault::SECRET_TYPE_API_KEY
@@ -634,6 +633,75 @@ mod tests {
         assert_eq!(retained.secret_type, "other");
         assert_eq!(retained.encrypted_value, encrypted_value);
         assert_eq!(retained.nonce, nonce);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn direct_cli_existing_lane_url_uses_the_frozen_publication_boundary() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let db_path = temp.path().join("memory.db");
+        let password_file = temp.path().join("vault-password");
+        std::fs::write(&password_file, b"direct-cli-password\n").expect("password file");
+        std::fs::set_permissions(&password_file, std::fs::Permissions::from_mode(0o600))
+            .expect("password file permissions");
+        let key = super::super::keys::vault_init_with_password(
+            &db_path,
+            "direct-cli-password".to_string(),
+        )
+        .expect("initialize fixture vault");
+        let (encrypted_value, nonce) =
+            crate::vault_crypto::encrypt(key.bytes(), b"https://api.example.test/v1/chat")
+                .expect("encrypt existing URL");
+        open_cli_store(&db_path)
+            .expect("open fixture store")
+            .vault_upsert_entry(&memcore::vault::VaultEntry {
+                name: "EXTRACT_BASE_URL".to_string(),
+                encrypted_value,
+                nonce,
+                secret_type: "config".to_string(),
+                description: "existing lane URL".to_string(),
+                allowed_agents: None,
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                updated_at: "2026-01-01T00:00:00Z".to_string(),
+                accessed_at: String::new(),
+                access_count: 0,
+            })
+            .expect("seed existing URL");
+
+        let action = VaultAction::Set {
+            name: "EXTRACT_BASE_URL".to_string(),
+            secret_type: Some("config".to_string()),
+            description: None,
+            stdin_password: false,
+            keychain: false,
+            password_file: Some(password_file),
+            insecure_password_file: false,
+            value_stdin: true,
+            rebind: false,
+        };
+        run_secret_action_with_reader(
+            &db_path,
+            temp.path(),
+            action,
+            &mut Cursor::new(b"https://user:pass@proxy.example.test/v1/chat\n".to_vec()),
+        )
+        .await
+        .expect("existing URL update is stored for the publication boundary to reject");
+
+        let retained = open_cli_store_read_only(&db_path)
+            .expect("open fixture read-only")
+            .vault_get_entry("EXTRACT_BASE_URL")
+            .expect("read URL")
+            .expect("URL remains");
+        let decrypted =
+            crate::vault_crypto::decrypt(key.bytes(), &retained.encrypted_value, &retained.nonce)
+                .expect("decrypt updated URL");
+        assert_eq!(
+            String::from_utf8(decrypted).expect("UTF-8 URL"),
+            "https://user:pass@proxy.example.test/v1/chat"
+        );
     }
 
     #[cfg(unix)]
