@@ -13,7 +13,7 @@ use std::time::Instant;
 
 use super::access::{
     authorize_vault_mutation, authorize_vault_pool_mutation, ensure_agent_allowed,
-    load_unlocked_api_key_secret_pool, resolve_vault_acl_agent_id,
+    lease_authorized_api_key, resolve_vault_acl_agent_id,
     select_authorized_vault_entry_and_record_access,
 };
 use super::audit::{record_vault_audit, result_with_vault_audit_warning};

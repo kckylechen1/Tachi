@@ -619,29 +619,6 @@ pub(crate) fn load_validated_unlocked_api_key_secret_pools_with_drops(
     load_unlocked_api_key_secret_pools_filtered(server, None, true, || {})
 }
 
-pub(super) fn load_unlocked_api_key_secret_pool(
-    server: &MemoryServer,
-    logical_name: &str,
-) -> Result<Vec<tachi_llm::ProviderSecret>, String> {
-    let mut direct =
-        load_unlocked_api_key_secret_pools_filtered(server, Some(logical_name), true, || {})?;
-    if let Some(pool) = direct.pools.remove(logical_name) {
-        return Ok(pool);
-    }
-    let Some((prefix, _)) = crate::provider_config::parse_rotation_member_name(logical_name) else {
-        return Ok(Vec::new());
-    };
-    let grouped = load_unlocked_api_key_secret_pools_filtered(server, Some(prefix), true, || {})?;
-    Ok(grouped
-        .pools
-        .get(prefix)
-        .into_iter()
-        .flatten()
-        .filter(|secret| secret.key_id == logical_name)
-        .cloned()
-        .collect())
-}
-
 fn record_listed_drop(
     dropped: &mut HashMap<String, AliasSkipClass>,
     name: &str,
@@ -1008,4 +985,186 @@ pub(crate) fn read_unlocked_vault_secret(
 
         Ok(value)
     })
+}
+
+#[derive(Debug)]
+pub(super) struct AuthorizedApiKeyLease {
+    pub logical_name: String,
+    pub key_id: String,
+    pub value: String,
+    pub access_count: i64,
+}
+
+fn lease_authorized_api_key_with_hook(
+    server: &MemoryServer,
+    requested_name: &str,
+    effective_agent_id: Option<&str>,
+    after_select: impl FnOnce(),
+) -> Result<AuthorizedApiKeyLease, String> {
+    with_vault_key(server, |key| {
+        server.with_global_store(|store| {
+            let transaction = store
+                .begin_vault_transaction()
+                .map_err(|e| format!("Failed to begin API-key lease transaction: {e}"))?;
+            let entries = transaction
+                .vault_list_entries()
+                .map_err(|e| format!("Failed to list Vault entries: {e}"))?;
+            let rotations = transaction
+                .vault_list_rotations()
+                .map_err(|e| format!("Failed to list Vault rotations: {e}"))?;
+            let health_rows = transaction
+                .vault_list_key_health(None)
+                .map_err(|e| format!("Failed to list Vault key health: {e}"))?;
+
+            let member_rotation = crate::provider_config::parse_rotation_member_name(requested_name)
+                .and_then(|(prefix, _)| rotations.iter().find(|row| row.prefix == prefix));
+            let rotation = rotations
+                .iter()
+                .find(|row| row.prefix == requested_name)
+                .or(member_rotation);
+            if let Some(rotation) = rotation {
+                memcore::validate_api_key_rotation(&entries, rotation)
+                    .map_err(|error| format!("{error}; refusing API-key lease"))?;
+            }
+
+            let logical_name = rotation
+                .map(|row| row.prefix.as_str())
+                .unwrap_or(requested_name);
+            let mut health_by_key = health_rows
+                .into_iter()
+                .filter(|row| row.logical_name == logical_name)
+                .map(|row| (row.key_id.clone(), row))
+                .collect::<HashMap<_, _>>();
+            if let Some(in_memory) = server.llm.provider_health_memory_snapshot().get(logical_name) {
+                for (key_id, health) in in_memory {
+                    let keep_in_memory = health_by_key
+                        .get(key_id)
+                        .and_then(|persisted| {
+                            let persisted_at = chrono::DateTime::parse_from_rfc3339(&persisted.updated_at).ok()?;
+                            let memory_at = chrono::DateTime::parse_from_rfc3339(&health.updated_at).ok()?;
+                            Some(memory_at >= persisted_at)
+                        })
+                        .unwrap_or(true);
+                    if keep_in_memory {
+                        health_by_key.insert(key_id.clone(), health.clone());
+                    }
+                }
+            }
+
+            let mut candidates = if let Some(rotation) = rotation {
+                let mut matching = collect_rotation_entries(entries.clone(), &rotation.prefix);
+                let selected_idx = match rotation.rotation_strategy.as_str() {
+                    "round_robin" => {
+                        if rotation.current_index <= 0 {
+                            0
+                        } else {
+                            (rotation.current_index as usize - 1) % matching.len()
+                        }
+                    }
+                    "random" => {
+                        use rand::Rng;
+                        rand::thread_rng().gen_range(0..matching.len())
+                    }
+                    "least_recently_used" => matching
+                        .iter()
+                        .enumerate()
+                        .min_by_key(|(_, (_, entry))| {
+                            (entry.access_count, entry.accessed_at.clone())
+                        })
+                        .map(|(index, _)| index)
+                        .unwrap_or(0),
+                    _ => 0,
+                };
+                matching.rotate_left(selected_idx);
+                matching
+            } else {
+                entries
+                    .iter()
+                    .find(|entry| entry.name == requested_name)
+                    .cloned()
+                    .map(|entry| vec![(1, entry)])
+                    .unwrap_or_default()
+            };
+            if member_rotation.is_some() {
+                candidates.retain(|(_, entry)| entry.name == requested_name);
+            }
+
+            let now = Utc::now();
+            let mut selected = None;
+            for (_, entry) in candidates {
+                if memcore::effective_vault_secret_type(&entry.name, &entry.secret_type)
+                    != SECRET_TYPE_API_KEY
+                {
+                    continue;
+                }
+                if ensure_agent_allowed(&entry, effective_agent_id).is_err() {
+                    continue;
+                }
+                if health_by_key
+                    .get(&entry.name)
+                    .and_then(|health| unusable_skip_class(health, now))
+                    .is_some()
+                {
+                    continue;
+                }
+                let decrypted = crypto::decrypt(key, &entry.encrypted_value, &entry.nonce)?;
+                let value = crypto::decode_utf8_zeroizing(
+                    decrypted,
+                    super::VAULT_MATERIALIZATION_INVALID_UTF8,
+                )?;
+                if !value.trim().is_empty() {
+                    selected = Some((entry, value));
+                    break;
+                }
+            }
+            let (entry, value) = selected.ok_or_else(|| {
+                format!(
+                    "No usable API key available for '{requested_name}'. Vault may be locked, missing, restricted, or all keys are disabled/auth-failed/rate-limited."
+                )
+            })?;
+            after_select();
+            ensure_agent_allowed(&entry, effective_agent_id).map_err(|e| e.to_string())?;
+
+            if let Some(rotation) = rotation {
+                let member_index = memcore::api_key_pool_member_index(&entry.name, &rotation.prefix)
+                    .ok_or_else(|| format!("Selected key '{}' is not in rotation '{}'", entry.name, rotation.prefix))?;
+                let mut updated = rotation.clone();
+                updated.current_index = (member_index as i64 % updated.total_keys) + 1;
+                updated.updated_at = Utc::now().to_rfc3339();
+                transaction
+                    .vault_set_rotation(&updated)
+                    .map_err(|e| format!("Failed to advance API-key rotation: {e}"))?;
+            }
+            let access_count = transaction
+                .vault_touch_entry(&entry.name)
+                .map_err(|e| format!("Failed to record API-key lease access: {e}"))?;
+            transaction
+                .commit()
+                .map_err(|e| format!("Failed to commit API-key lease transaction: {e}"))?;
+            Ok(AuthorizedApiKeyLease {
+                logical_name: logical_name.to_string(),
+                key_id: entry.name,
+                value,
+                access_count,
+            })
+        })
+    })
+}
+
+pub(super) fn lease_authorized_api_key(
+    server: &MemoryServer,
+    requested_name: &str,
+    effective_agent_id: Option<&str>,
+) -> Result<AuthorizedApiKeyLease, String> {
+    lease_authorized_api_key_with_hook(server, requested_name, effective_agent_id, || {})
+}
+
+#[cfg(test)]
+pub(super) fn lease_authorized_api_key_with_hook_for_tests(
+    server: &MemoryServer,
+    requested_name: &str,
+    effective_agent_id: Option<&str>,
+    after_select: impl FnOnce(),
+) -> Result<AuthorizedApiKeyLease, String> {
+    lease_authorized_api_key_with_hook(server, requested_name, effective_agent_id, after_select)
 }

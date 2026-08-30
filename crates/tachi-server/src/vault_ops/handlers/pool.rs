@@ -188,52 +188,6 @@ pub(crate) async fn handle_vault_set_api_key_pool(
     result_with_vault_audit_warning(result, audit_result)
 }
 
-fn advance_rotation_after_key(
-    server: &MemoryServer,
-    logical_name: &str,
-    key_id: &str,
-) -> Result<(), String> {
-    let Some((prefix, idx)) = crate::provider_config::parse_rotation_member_name(key_id) else {
-        return Ok(());
-    };
-    if prefix != logical_name {
-        return Ok(());
-    }
-
-    server
-        .with_global_store(|store| {
-            let transaction = store
-                .begin_vault_transaction()
-                .map_err(|e| format!("begin rotation advance transaction: {e}"))?;
-            let Some(rotation) = transaction
-                .vault_get_rotation(logical_name)
-                .map_err(|e| e.to_string())?
-            else {
-                return Ok(());
-            };
-            if rotation.total_keys <= 0 {
-                return Ok(());
-            }
-            let entries = transaction
-                .vault_list_entries()
-                .map_err(|e| e.to_string())?;
-            memcore::validate_api_key_rotation(&entries, &rotation)
-                .map_err(|error| format!("{error}; refusing rotation advance"))?;
-            let next = (idx as i64 % rotation.total_keys) + 1;
-            let updated = VaultKeyRotation {
-                current_index: next,
-                updated_at: Utc::now().to_rfc3339(),
-                ..rotation
-            };
-            transaction
-                .vault_set_rotation(&updated)
-                .map_err(|e| e.to_string())?;
-            transaction.commit().map_err(|e| e.to_string())?;
-            Ok(())
-        })
-        .map_err(|e| format!("advance rotation: {e}"))
-}
-
 pub(crate) async fn handle_vault_lease_api_key(
     server: &MemoryServer,
     params: VaultLeaseApiKeyParams,
@@ -241,9 +195,6 @@ pub(crate) async fn handle_vault_lease_api_key(
     let requested_name = params.name.clone();
     let mut success_audit_detail = None;
     let result = (|| {
-        let logical_name = server.with_global_store_read(|store| {
-            crate::vault_ops::canonical_api_key_health_logical_name(store, &params.name)
-        })?;
         let env_name = params
             .env_name
             .clone()
@@ -277,31 +228,13 @@ pub(crate) async fn handle_vault_lease_api_key(
             }
         }
 
-        let pool = load_unlocked_api_key_secret_pool(server, &params.name)?;
-        let selected = pool.first().ok_or_else(|| {
-            format!(
-                "No usable API key available for '{}'. Vault may be locked, missing, or all keys are disabled/auth-failed/rate-limited.",
-                params.name
-            )
-        })?;
-
-        advance_rotation_after_key(server, &logical_name, &selected.key_id)?;
-        let selected_key_id = selected.key_id.clone();
-        let access_count = server
-            .with_global_store_read(|store| {
-                store
-                    .vault_get_entry(&selected_key_id)
-                    .map_err(|e| e.to_string())?
-                    .map(|entry| entry.access_count)
-                    .ok_or_else(|| {
-                        format!("leased key '{selected_key_id}' disappeared after materialization")
-                    })
-            })
-            .map_err(|e| format!("read materialized key access count: {e}"))?;
+        let effective_agent_id = resolve_vault_acl_agent_id(server, params.agent_id.as_deref())?;
+        let selected =
+            lease_authorized_api_key(server, &params.name, effective_agent_id.as_deref())?;
 
         success_audit_detail = Some(
             json!({
-                "logical_name": logical_name.clone(),
+                "logical_name": selected.logical_name.clone(),
                 "key_id": selected.key_id.clone(),
                 "env_name": env_name.clone(),
                 "agent_id": params.agent_id.clone(),
@@ -311,14 +244,14 @@ pub(crate) async fn handle_vault_lease_api_key(
 
         serde_json::to_string(&json!({
             "leased": true,
-            "logical_name": logical_name,
+            "logical_name": selected.logical_name,
             "key_id": selected.key_id,
             "env_name": env_name,
             "agent_id": params.agent_id,
             "env": {
                 env_name: selected.value
             },
-            "access_count": access_count,
+            "access_count": selected.access_count,
         }))
         .map_err(|e| format!("serialize: {e}"))
     })();
