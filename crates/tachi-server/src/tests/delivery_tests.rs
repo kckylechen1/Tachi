@@ -493,10 +493,18 @@ fn managed_terminal_outcome_mints_and_binds_the_requester() {
                 .map_err(|error| error.to_string())
         })
         .expect("record outcome");
-    crate::delivery_ops::mint_delivery_for_managed_outcome(&server, &row, "eval-1");
+    crate::delivery_ops::mint_delivery_for_managed_outcome(
+        &server,
+        &row,
+        "memory:eval-1".to_string(),
+    );
 
     // Idempotent reconcile on re-record.
-    crate::delivery_ops::mint_delivery_for_managed_outcome(&server, &row, "eval-1");
+    crate::delivery_ops::mint_delivery_for_managed_outcome(
+        &server,
+        &row,
+        "memory:eval-1".to_string(),
+    );
 
     // The server session matches the claim's session client: the seam can
     // claim it. A server session that minted a DIFFERENT binding cannot.

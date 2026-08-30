@@ -184,7 +184,11 @@ pub(crate) fn record_complete_outcome(
             // #1679: mint the durable delivery intent for this terminal
             // receipt. Delivery is a separate plane — a mint failure warns
             // and never rewrites the execution truth above.
-            crate::delivery_ops::mint_delivery_for_managed_outcome(server, &row, eval_memory_id);
+            crate::delivery_ops::mint_delivery_for_managed_outcome(
+                server,
+                &row,
+                format!("memory:{eval_memory_id}"),
+            );
             json!({
                 "recorded": true,
                 "outcome_id": row.outcome_id,
@@ -774,11 +778,11 @@ pub(crate) fn record_terminal_failure_outcome(
         if memcore::outcome_exists_for_dispatch(store.connection(), dispatch_id)
             .map_err(|e| e.to_string())?
         {
-            return Ok(false);
+            return Ok(None);
         }
         store
             .upsert_dispatch_outcome(&new_outcome)
-            .map(|_| true)
+            .map(Some)
             .map_err(|e| e.to_string())
     };
     // Mirrors `record_complete_outcome`'s branching: a named project DB (when
@@ -791,13 +795,27 @@ pub(crate) fn record_terminal_failure_outcome(
         let (scope, _) = server.resolve_write_scope("");
         server.with_store_for_scope(scope, write_fn)
     };
-    if let Err(error) = write_result {
-        tracing::warn!(
-            error = %error,
-            dispatch_id = %dispatch_id,
-            error_class = %error_class,
-            "failed to persist terminal dispatch_outcomes row"
-        );
+    match write_result {
+        // #1679: a canonical FAILED terminal still owes its requester a
+        // delivery intent — backend/preflight/watchdog failures are exactly
+        // the results a requester must hear about. Same separate-plane law:
+        // a mint failure warns and never rewrites the execution truth.
+        Ok(Some(row)) => {
+            crate::delivery_ops::mint_delivery_for_managed_outcome(
+                server,
+                &row,
+                format!("outcome:{}", row.outcome_id),
+            );
+        }
+        Ok(None) => {}
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                dispatch_id = %dispatch_id,
+                error_class = %error_class,
+                "failed to persist terminal dispatch_outcomes row"
+            );
+        }
     }
 }
 

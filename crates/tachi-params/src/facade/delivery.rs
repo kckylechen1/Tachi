@@ -138,6 +138,16 @@ pub struct TachiDeliveryParams {
         description = "[action=ack_delivered|reject_or_block|dismiss] Expected intent revision (CAS)."
     )]
     pub expected_revision: Option<i64>,
+
+    /// Affirmative re-arm: on resume, blocked intents bound to this
+    /// requester re-enter `ready`. This is the only path out of `blocked`
+    /// besides a corrected result revision — an ambiguous send is never
+    /// re-delivered silently.
+    #[serde(default)]
+    #[schemars(
+        description = "[action=resume_requester_operation] Affirmatively re-arm this requester's blocked intents."
+    )]
+    pub rearm_blocked: Option<bool>,
 }
 
 #[cfg(test)]

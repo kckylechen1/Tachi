@@ -14,6 +14,7 @@ use memcore::{
     ack_delivered, claim_ready_delivery, dismiss_delivery, get_delivery_intent, reject_or_block,
     resume_requester_operation, DeliveryCaller, DeliveryClaimRequest,
 };
+use rusqlite::params;
 use serde_json::{json, Value};
 
 fn required(value: Option<String>, name: &str) -> Result<String, String> {
@@ -177,8 +178,9 @@ pub(crate) fn handle_tachi_delivery(
             .to_string())
         }
         TachiDeliveryAction::ResumeRequesterOperation => {
+            let rearm_blocked = params.rearm_blocked.unwrap_or(false);
             let intents = server.with_global_store(|store| {
-                resume_requester_operation(store.connection(), &caller)
+                resume_requester_operation(store.connection(), &caller, rearm_blocked)
                     .map_err(|error| error.to_string())
             })?;
             let deliveries: Vec<Value> = intents
@@ -298,21 +300,22 @@ fn digest_token(parts: &[&str]) -> String {
 }
 
 /// Mint (or idempotently reconcile) the durable delivery intent for a
-/// managed dispatch's canonical terminal receipt (#1679). Delivery is a
-/// separate plane: a mint failure logs a warning and never rewrites the
-/// execution truth the outcome row carries.
+/// managed dispatch's canonical terminal receipt (#1679). Every read that
+/// decides the mint (owning WorkClaim binding, existing intent) and the
+/// write itself share ONE store lock, so no release/complete interleaving
+/// can produce a torn decision. Delivery is a separate plane: a mint
+/// failure logs a warning and never rewrites the execution truth above.
 pub(crate) fn mint_delivery_for_managed_outcome(
     server: &MemoryServer,
     outcome: &memcore::DispatchOutcomeRow,
-    eval_memory_id: &str,
+    result_ref: String,
 ) {
     let task_type = outcome.task_type.as_deref().unwrap_or("-");
     let idempotency_key = format!("managed:{}:{}", outcome.dispatch_id, task_type);
-    let idempotency_key_for_check = idempotency_key.clone();
     let payload_digest = digest_token(&[
         &outcome.outcome_id,
         &outcome.execution_outcome,
-        eval_memory_id,
+        &result_ref,
         &outcome.evidence_refs.to_string(),
     ]);
     // Correction authority: the spine serializes corrections inside the
@@ -320,78 +323,60 @@ pub(crate) fn mint_delivery_for_managed_outcome(
     // prev+1), so two corrections in the same clock tick can never be
     // silently lost. The wall clock only provides the first-mint floor.
     let result_revision = revision_wall_clock_base();
-    let mut new = memcore::NewDeliveryIntent {
-        idempotency_key,
-        execution_source: memcore::DeliveryExecutionSource::ManagedDispatch,
-        execution_ref: outcome.dispatch_id.clone(),
-        terminal_receipt_revision: 0,
-        work_claim_id: None,
-        result_ref: format!("memory:{eval_memory_id}"),
-        result_revision,
-        payload_digest,
-        visibility_class: memcore::DeliveryVisibilityClass::Public,
-        delivery_policy: memcore::DeliveryPolicy::ReturnToCurrentCall,
-        protocol_capability: "result-ref-v1".to_string(),
-        requester: memcore::DeliveryRequesterBinding::default(),
-        expires_at: None,
-        correction: true,
-    };
-    // Bind the admitted requester from the owning WorkClaim when one names
-    // this dispatch. A bound intent is private to that requester (fail-
-    // closed default); unbound stays public/pull-only.
-    let claim = server.with_global_store(|store| {
-        memcore::find_claim_requester_for_dispatch(store.connection(), &outcome.dispatch_id)
+
+    let mint_result = server.with_global_store(|store| {
+        let conn = store.connection();
+        // Binding decision and mint share this lock.
+        let mut new = memcore::NewDeliveryIntent {
+            idempotency_key: idempotency_key.clone(),
+            execution_source: memcore::DeliveryExecutionSource::ManagedDispatch,
+            execution_ref: outcome.dispatch_id.clone(),
+            terminal_receipt_revision: 0,
+            work_claim_id: None,
+            result_ref,
+            result_revision,
+            payload_digest: payload_digest.clone(),
+            visibility_class: memcore::DeliveryVisibilityClass::Public,
+            delivery_policy: memcore::DeliveryPolicy::ReturnToCurrentCall,
+            protocol_capability: "result-ref-v1".to_string(),
+            requester: memcore::DeliveryRequesterBinding::default(),
+            expires_at: None,
+            correction: true,
+        };
+        match memcore::find_claim_requester_for_dispatch(conn, &outcome.dispatch_id)
+            .map_err(|error| error.to_string())
+        {
+            Ok(Some(binding)) if binding.state == "active" => {
+                new.visibility_class = memcore::DeliveryVisibilityClass::Private;
+                new.work_claim_id = Some(binding.claim_id);
+                new.requester = memcore::DeliveryRequesterBinding {
+                    agent_identity_id: Some(binding.agent_identity_id),
+                    host_identity: None,
+                    session_ref: binding.session_client,
+                };
+            }
+            // The claim exists but is NOT active (released/handed off): the
+            // requester context is gone. A mint now would either keep the
+            // old binding (harmless reconcile) or — if no intent exists
+            // yet — create an UNBOUND public delivery for work whose owner
+            // left. Only reconcile an existing intent; never mint fresh.
+            Ok(Some(_)) => {
+                if memcore::find_delivery_intent_by_idempotency_key(conn, &idempotency_key)
+                    .map_err(|error| error.to_string())?
+                    .is_none()
+                {
+                    return Ok(None);
+                }
+            }
+            // No claim names this dispatch: honestly unbound (pull-only).
+            Ok(None) => {}
+            Err(error) => return Err(error),
+        }
+        memcore::mint_delivery_intent(conn, &new)
+            .map(|intent| Some(intent))
             .map_err(|error| error.to_string())
     });
-    match claim {
-        Ok(Some(binding)) if binding.state == "active" => {
-            new.visibility_class = memcore::DeliveryVisibilityClass::Private;
-            new.work_claim_id = Some(binding.claim_id);
-            new.requester = memcore::DeliveryRequesterBinding {
-                agent_identity_id: Some(binding.agent_identity_id),
-                host_identity: None,
-                session_ref: binding.session_client,
-            };
-        }
-        // The claim exists but is NOT active (released/handed off): the
-        // requester context is gone. A mint now would either keep the old
-        // binding (harmless reconcile) or — if no intent exists yet —
-        // create an UNBOUND public delivery for work whose owner left.
-        // Only reconcile an existing intent; never mint fresh.
-        Ok(Some(_)) => {
-            if server
-                .with_global_store(|store| {
-                    memcore::find_delivery_intent_by_idempotency_key(
-                        store.connection(),
-                        &idempotency_key_for_check,
-                    )
-                    .map_err(|error| error.to_string())
-                })
-                .ok()
-                .flatten()
-                .is_none()
-            {
-                tracing::warn!(
-                    dispatch_id = %outcome.dispatch_id,
-                    "claim inactive and no delivery intent; skipping mint"
-                );
-                return;
-            }
-        }
-        // No claim names this dispatch: honestly unbound (pull-only).
-        Ok(None) => {}
-        Err(error) => {
-            tracing::warn!(
-                error = %error,
-                dispatch_id = %outcome.dispatch_id,
-                "failed to read the owning WorkClaim before mint"
-            );
-            return;
-        }
-    }
-    if let Err(error) = server.with_global_store(|store| {
-        memcore::mint_delivery_intent(store.connection(), &new).map_err(|error| error.to_string())
-    }) {
+    if let Err(error) = mint_result {
         tracing::warn!(
             error = %error,
             dispatch_id = %outcome.dispatch_id,
@@ -418,54 +403,78 @@ pub(crate) fn mint_delivery_for_attached_terminal(
     remote_session_id: &str,
     work_claim_id: &str,
 ) {
-    // Older-information guard: an event whose source revision is below the
-    // intent's current result revision is stale truth; with correction
-    // authority it could otherwise mirror an older payload over a newer
-    // one. The receipt spine already refuses to advance on such events.
-    if let Ok(Some(existing)) = server.with_global_store(|store| {
-        memcore::find_delivery_intent_by_idempotency_key(
-            store.connection(),
-            &format!("attached:{attachment_id}"),
-        )
-        .map_err(|error| error.to_string())
-    }) {
-        if existing.result_revision > source_revision.max(1) {
-            return;
+    // Older-information guard + canonical-terminal re-check + mint run
+    // under ONE store lock: no ingest/receipt interleaving can mint from a
+    // receipt the canonical projection no longer supports.
+    let mint_result = server.with_global_store(|store| {
+        let conn = store.connection();
+
+        // 1. The canonical projection must RIGHT NOW be a consistent
+        //    terminal: a mint while inconsistent_reconciling or
+        //    unknown_orphaned would let an unresolved (possibly wrong)
+        //    result reach a requester. #1623 adjudication owns those
+        //    states; delivery waits.
+        let canonical: Option<String> = conn
+            .query_row(
+                "SELECT canonical_state FROM harness_session_state WHERE attachment_id = ?1",
+                params![attachment_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        if !matches!(
+            canonical.as_deref(),
+            Some("completed") | Some("failed") | Some("cancelled")
+        ) {
+            return Ok(None);
         }
-    }
-    let digest = payload_digest
-        .map(str::to_string)
-        .unwrap_or_else(|| digest_token(&[outcome_token, summary.unwrap_or("")]));
-    // One durable intent per attached RUN (keyed on the attachment): a
-    // redundant terminal event for the same run reconciles against the SAME
-    // intent instead of minting a sibling. The digest excludes the event id
-    // for the same reason.
-    let new = memcore::NewDeliveryIntent {
-        idempotency_key: format!("attached:{attachment_id}"),
-        execution_source: memcore::DeliveryExecutionSource::AttachedSession,
-        execution_ref: attachment_id.to_string(),
-        terminal_receipt_revision: source_revision.max(0),
-        work_claim_id: (!work_claim_id.is_empty()).then(|| work_claim_id.to_string()),
-        // Run-stable locator: the redundant-terminal supersede comparison
-        // must not see a content change merely because a different event id
-        // journaled the same outcome.
-        result_ref: format!("harness_session:{attachment_id}"),
-        result_revision: source_revision.max(1),
-        payload_digest: digest,
-        visibility_class: memcore::DeliveryVisibilityClass::Private,
-        delivery_policy: memcore::DeliveryPolicy::ResumeRequesterOperation,
-        protocol_capability: "result-ref-v1".to_string(),
-        requester: memcore::DeliveryRequesterBinding {
-            agent_identity_id: Some(agent_identity_id.to_string()),
-            host_identity: Some(host_identity.to_string()),
-            session_ref: Some(remote_session_id.to_string()),
-        },
-        expires_at: None,
-        correction: true,
-    };
-    if let Err(error) = server.with_global_store(|store| {
-        memcore::mint_delivery_intent(store.connection(), &new).map_err(|error| error.to_string())
-    }) {
+
+        // 2. Older-information guard: an event whose source revision is
+        //    below the intent's current result revision is stale truth;
+        //    correction authority must never mirror an older payload over
+        //    a newer one.
+        let intent_key = format!("attached:{attachment_id}");
+        let existing = memcore::find_delivery_intent_by_idempotency_key(conn, &intent_key)
+            .map_err(|error| error.to_string())?;
+        if let Some(existing) = &existing {
+            if existing.result_revision > source_revision.max(1) {
+                return Ok(None);
+            }
+        }
+
+        let digest = payload_digest
+            .map(str::to_string)
+            .unwrap_or_else(|| digest_token(&[outcome_token, summary.unwrap_or("")]));
+        // One durable intent per attached RUN (keyed on the attachment): a
+        // redundant terminal event for the same run reconciles against the
+        // SAME intent instead of minting a sibling. The digest excludes the
+        // event id for the same reason; the result ref is a run-stable
+        // locator, so an identical payload compares unchanged no matter
+        // which event id journaled it.
+        let new = memcore::NewDeliveryIntent {
+            idempotency_key: intent_key,
+            execution_source: memcore::DeliveryExecutionSource::AttachedSession,
+            execution_ref: attachment_id.to_string(),
+            terminal_receipt_revision: source_revision.max(0),
+            work_claim_id: (!work_claim_id.is_empty()).then(|| work_claim_id.to_string()),
+            result_ref: format!("harness_session:{attachment_id}"),
+            result_revision: source_revision.max(1),
+            payload_digest: digest,
+            visibility_class: memcore::DeliveryVisibilityClass::Private,
+            delivery_policy: memcore::DeliveryPolicy::ResumeRequesterOperation,
+            protocol_capability: "result-ref-v1".to_string(),
+            requester: memcore::DeliveryRequesterBinding {
+                agent_identity_id: Some(agent_identity_id.to_string()),
+                host_identity: Some(host_identity.to_string()),
+                session_ref: Some(remote_session_id.to_string()),
+            },
+            expires_at: None,
+            correction: true,
+        };
+        memcore::mint_delivery_intent(conn, &new)
+            .map(Some)
+            .map_err(|error| error.to_string())
+    });
+    if let Err(error) = mint_result {
         tracing::warn!(
             error = %error,
             attachment_id = %attachment_id,

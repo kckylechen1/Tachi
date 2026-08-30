@@ -837,10 +837,15 @@ pub fn reject_or_block(
 pub fn resume_requester_operation(
     conn: &Connection,
     caller: &DeliveryCaller,
+    rearm_blocked: bool,
 ) -> Result<Vec<DeliveryIntent>, MemoryError> {
     validate_caller(caller)?;
     let now = now_utc_iso();
     release_expired_claims_for_caller(conn, caller, &now)?;
+
+    if rearm_blocked {
+        rearm_blocked_intents_for_caller(conn, caller, &now)?;
+    }
 
     let mut stmt = conn.prepare(&format!(
         "{} WHERE (requester_agent_identity_id IS NULL OR requester_agent_identity_id = ?1)
@@ -865,6 +870,69 @@ pub fn resume_requester_operation(
         intents.push(intent?);
     }
     Ok(intents)
+}
+
+/// Affirmative re-arm (host seam: `resume_requester_operation` with
+/// re-arm): the requester, having SEEN the blocked warning on reconnect,
+/// affirms a fresh delivery attempt of its own blocked intent. This is the
+/// only path out of `blocked` besides a corrected result revision, so an
+/// ambiguous send is never re-delivered silently. Requester-bound and
+/// atomic like every other mutation.
+fn rearm_blocked_intents_for_caller(
+    conn: &Connection,
+    caller: &DeliveryCaller,
+    now: &str,
+) -> Result<(), MemoryError> {
+    let mut stmt = conn.prepare(&format!(
+        "{} WHERE delivery_state = 'blocked'
+              AND (requester_agent_identity_id IS NULL OR requester_agent_identity_id = ?1)
+              AND (requester_host_identity IS NULL OR requester_host_identity = ?2)
+              AND (execution_source != 'managed_dispatch'
+                   OR requester_session_ref IS NULL
+                   OR requester_session_ref = ?3)",
+        select_intent_sql()
+    ))?;
+    let bound = stmt.query_map(
+        params![
+            caller.agent_identity_id,
+            caller.host_identity,
+            caller.session_client
+        ],
+        row_to_intent,
+    )?;
+    let mut intents = Vec::new();
+    for intent in bound {
+        intents.push(intent?);
+    }
+    for intent in intents {
+        let next_revision = intent.revision + 1;
+        let tx = conn.unchecked_transaction()?;
+        let updated = tx.execute(
+            "UPDATE delivery_intents
+             SET delivery_state = 'ready', ready_at = ?2, revision = ?3, updated_at = ?2,
+                 blocker_class = NULL, next_retry_at = NULL,
+                 active_claim_key = NULL, claimed_by = NULL, claim_expires_at = NULL
+             WHERE delivery_id = ?1 AND delivery_state = 'blocked' AND revision = ?4",
+            params![intent.delivery_id, now, next_revision, intent.revision],
+        )?;
+        if updated == 0 {
+            tx.rollback()?;
+            continue;
+        }
+        append_event(
+            &tx,
+            &intent.delivery_id,
+            &format!("rearm:{}:{next_revision}", intent.delivery_id),
+            DeliveryEventKind::TransitionDebt,
+            Some(intent.revision),
+            Some("requester affirmatively re-armed a blocked delivery after reconnect"),
+            None,
+            &caller.host_identity,
+            now,
+        )?;
+        tx.commit()?;
+    }
+    Ok(())
 }
 
 /// Dismiss a delivery (host seam side effect of requester dismissal).
@@ -1396,13 +1464,19 @@ fn release_expired_claim(
 ) -> Result<(), MemoryError> {
     let next_revision = intent.revision + 1;
     let tx = conn.unchecked_transaction()?;
-    tx.execute(
+    let updated = tx.execute(
         "UPDATE delivery_intents
          SET delivery_state = 'ready', ready_at = ?2, revision = ?3, updated_at = ?2,
              active_claim_key = NULL, claimed_by = NULL, claim_expires_at = NULL
          WHERE delivery_id = ?1 AND delivery_state = 'requester_queued' AND revision = ?4",
         params![intent.delivery_id, now, next_revision, intent.revision],
     )?;
+    if updated == 0 {
+        // The claim was settled concurrently (acked or re-written): its
+        // release receipt would contradict the row — write nothing.
+        tx.rollback()?;
+        return Ok(());
+    }
     append_event(
         &tx,
         &intent.delivery_id,
@@ -1469,10 +1543,13 @@ fn transition_to_claimed(
         // backstop for the pre-transaction replay check: a concurrent
         // claim of the same key on a different intent loses here, inside
         // its own transaction, as a typed conflict.
+        // SQLite reports the violated columns, not the partial-index name:
+        // the per-intent UNIQUE names both columns, the global guards name
+        // event_id alone.
+        let message = error.to_string();
         if matches!(error, MemoryError::Sqlite(_))
-            && error
-                .to_string()
-                .contains("idx_delivery_events_claim_key_global")
+            && (message.contains("UNIQUE constraint failed: delivery_events.event_id")
+                || message.contains("idx_delivery_events_claim_key_global"))
         {
             return Err(MemoryError::DeliveryIdempotencyConflict(format!(
                 "claim_key '{}' was claimed concurrently elsewhere",
@@ -1915,12 +1992,20 @@ mod tests {
         .unwrap();
         assert_eq!(attempt, DeliveryClaimOutcome::NoneReady);
 
-        // Resume reports the blocked intent but never re-arms it.
-        let resumed = resume_requester_operation(&conn, &caller("requester-a")).unwrap();
+        // Resume reports the blocked intent but never re-arms it silently.
+        let resumed = resume_requester_operation(&conn, &caller("requester-a"), false).unwrap();
         assert_eq!(resumed.len(), 1);
         assert_eq!(resumed[0].delivery_state, "blocked");
 
-        // Only a corrected result revision re-arms the SAME intent.
+        // The AFFIRMATIVE re-arm (resume with re-arm authority) is the only
+        // requester path out of blocked besides a corrected revision.
+        let rearmed = resume_requester_operation(&conn, &caller("requester-a"), true).unwrap();
+        assert_eq!(rearmed.len(), 1);
+        assert_eq!(rearmed[0].delivery_state, "ready");
+        let kinds = event_kinds(&conn, &intent.delivery_id);
+        assert!(kinds.contains(&"transition_debt".to_string()));
+
+        // Only a corrected result revision ALSO re-arms the SAME intent.
         let mut corrected = mint_new("managed:outcome-5");
         corrected.result_revision = 2;
         corrected.payload_digest = "sha256-BBBB".to_string();
@@ -1958,7 +2043,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(wrong, DeliveryClaimOutcome::NoneReady);
-        let resumed = resume_requester_operation(&conn, &caller("intruder")).unwrap();
+        let resumed = resume_requester_operation(&conn, &caller("intruder"), false).unwrap();
         assert!(resumed.is_empty());
 
         // The bound requester claims it.
