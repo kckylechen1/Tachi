@@ -297,16 +297,19 @@ fn digest_token(parts: &[&str]) -> String {
 }
 
 /// Mint (or idempotently reconcile) the durable delivery intent for a
-/// managed dispatch's canonical terminal receipt (#1679). Runs INSIDE the
-/// caller's store scope: every read that decides the mint (canonical
-/// outcome row, owning WorkClaim binding, existing intent) and the write
-/// itself share one store lock, and the minted payload is recomputed from
-/// the CANONICAL row - a reconciliation landing between the outcome write
-/// and this mint can neither be missed nor supersede newer delivery with
-/// stale data. Delivery is a separate plane: a mint failure logs a warning
-/// and never rewrites the execution truth above.
+/// managed dispatch's canonical terminal receipt (#1679).
+///
+/// Store topology law: delivery intents are GLOBAL (requester-facing — the
+/// claiming host must find them regardless of which project store holds the
+/// outcome), while the canonical outcome row may live in a project store.
+/// The caller therefore reads the canonical row INSIDE the write closure's
+/// lock and passes the snapshot here; this helper then binds the requester
+/// from the GLOBAL WorkClaim table and mints into the GLOBAL delivery
+/// spine, so the seam's claim/get/ack surface and the mint share one
+/// store. Delivery is a separate plane: a mint failure logs a warning and
+/// never rewrites the execution truth above.
 pub(crate) fn mint_delivery_for_managed_outcome(
-    store: &mut memcore::MemoryStore,
+    server: &MemoryServer,
     outcome: &memcore::DispatchOutcomeRow,
     result_ref: String,
 ) {
@@ -315,35 +318,24 @@ pub(crate) fn mint_delivery_for_managed_outcome(
     // prev+1), so two corrections in the same clock tick can never be
     // silently lost. The wall clock only provides the first-mint floor.
     let result_revision = revision_wall_clock_base();
+    let idempotency_key = managed_delivery_key(&outcome.dispatch_id);
 
-    let mint_result = (|| {
+    let mint_result = server.with_global_store(|store| {
         let conn = store.connection();
-        // Re-read the CANONICAL outcome row under this lock: the caller's
-        // copy may be stale if a reconciliation landed between the outcome
-        // write and this mint. The canonical row is what delivery mirrors,
-        // and the minted payload is recomputed from it.
-        let canonical_outcome =
-            memcore::get_outcome(conn, &outcome.outcome_id).map_err(|error| error.to_string())?;
-        let outcome = match canonical_outcome {
-            Some(row) => row,
-            None => return Ok(None),
-        };
-        let payload_digest = digest_token(&[
-            &outcome.outcome_id,
-            &outcome.execution_outcome,
-            &result_ref,
-            &outcome.evidence_refs.to_string(),
-        ]);
-        // Binding decision and mint share this lock.
         let mut new = memcore::NewDeliveryIntent {
-            idempotency_key: managed_delivery_key(&outcome.dispatch_id),
+            idempotency_key: idempotency_key.clone(),
             execution_source: memcore::DeliveryExecutionSource::ManagedDispatch,
             execution_ref: outcome.dispatch_id.clone(),
             terminal_receipt_revision: 0,
             work_claim_id: None,
-            result_ref,
+            result_ref: result_ref.clone(),
             result_revision,
-            payload_digest,
+            payload_digest: digest_token(&[
+                &outcome.outcome_id,
+                &outcome.execution_outcome,
+                &result_ref,
+                &outcome.evidence_refs.to_string(),
+            ]),
             visibility_class: memcore::DeliveryVisibilityClass::Public,
             delivery_policy: memcore::DeliveryPolicy::ReturnToCurrentCall,
             protocol_capability: "result-ref-v1".to_string(),
@@ -369,12 +361,9 @@ pub(crate) fn mint_delivery_for_managed_outcome(
             // yet - create an UNBOUND public delivery for work whose owner
             // left. Only reconcile an existing intent; never mint fresh.
             Ok(Some(_)) => {
-                if memcore::find_delivery_intent_by_idempotency_key(
-                    conn,
-                    &managed_delivery_key(&outcome.dispatch_id),
-                )
-                .map_err(|error| error.to_string())?
-                .is_none()
+                if memcore::find_delivery_intent_by_idempotency_key(conn, &idempotency_key)
+                    .map_err(|error| error.to_string())?
+                    .is_none()
                 {
                     return Ok(None);
                 }
@@ -386,7 +375,7 @@ pub(crate) fn mint_delivery_for_managed_outcome(
         memcore::mint_delivery_intent(conn, &new)
             .map(|intent| Some(intent))
             .map_err(|error| error.to_string())
-    })();
+    });
     if let Err(error) = mint_result {
         tracing::warn!(
             error = %error,

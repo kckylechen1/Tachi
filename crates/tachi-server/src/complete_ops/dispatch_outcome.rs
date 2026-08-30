@@ -170,35 +170,46 @@ pub(crate) fn record_complete_outcome(
             let row = store
                 .upsert_dispatch_outcome(&new_outcome)
                 .map_err(|e| e.to_string())?;
-            // #1679: mint the durable delivery intent for this terminal
-            // receipt INSIDE the same store scope: the mint re-reads the
-            // canonical row and the owning WorkClaim under one lock.
-            // Delivery is a separate plane — a mint failure warns and
-            // never rewrites the execution truth above.
-            crate::delivery_ops::mint_delivery_for_managed_outcome(
-                store,
-                &row,
-                format!("memory:{eval_memory_id}"),
-            );
-            Ok(row)
+            // Re-read the CANONICAL row under the same lock: the minted
+            // delivery payload must mirror exactly what the store holds.
+            let canonical = memcore::get_outcome(store.connection(), &row.outcome_id)
+                .map_err(|e| e.to_string())?
+                .unwrap_or(row);
+            Ok(canonical)
         })
     } else {
         server.with_store_for_scope(scope, |store| {
             let row = store
                 .upsert_dispatch_outcome(&new_outcome)
                 .map_err(|e| e.to_string())?;
-            crate::delivery_ops::mint_delivery_for_managed_outcome(
-                store,
-                &row,
-                format!("memory:{eval_memory_id}"),
-            );
-            Ok(row)
+            let canonical = memcore::get_outcome(store.connection(), &row.outcome_id)
+                .map_err(|e| e.to_string())?
+                .unwrap_or(row);
+            Ok(canonical)
         })
     };
 
     match write_result {
         Ok(row) => {
+            // #1679: mint the durable delivery intent for this terminal
+            // receipt on the GLOBAL delivery spine (requester-facing), with
+            // the requester binding resolved from the owning WorkClaim.
+            // Delivery is a separate plane — a mint failure warns and
+            // never rewrites the execution truth above.
+            crate::delivery_ops::mint_delivery_for_managed_outcome(
+                server,
+                &row,
+                format!("memory:{eval_memory_id}"),
+            );
             json!({
+                "recorded": true,
+                "outcome_id": row.outcome_id,
+                "dispatch_id": row.dispatch_id,
+                "idempotency_key": row.idempotency_key,
+                "vendor": row.vendor,
+                "identity_attribution_basis": row.identity_attribution_basis,
+                "identity_receipt": row.identity_receipt,
+                "scope": scope.as_str(),
                 "recorded": true,
                 "outcome_id": row.outcome_id,
                 "dispatch_id": row.dispatch_id,
@@ -792,14 +803,12 @@ pub(crate) fn record_terminal_failure_outcome(
         let row = store
             .upsert_dispatch_outcome(&new_outcome)
             .map_err(|e| e.to_string())?;
-        // #1679: internal failed terminals owe their requester a delivery
-        // intent too — minted inside the same store scope.
-        crate::delivery_ops::mint_delivery_for_managed_outcome(
-            store,
-            &row,
-            format!("outcome:{}", row.outcome_id),
-        );
-        Ok(Some(row))
+        // Re-read the canonical row under the same lock for the delivery
+        // payload snapshot.
+        let canonical = memcore::get_outcome(store.connection(), &row.outcome_id)
+            .map_err(|e| e.to_string())?
+            .unwrap_or(row);
+        Ok(Some(canonical))
     };
     // Mirrors `record_complete_outcome`'s branching: a named project DB (when
     // the original dispatch carried one) takes priority over the scope
@@ -814,7 +823,15 @@ pub(crate) fn record_terminal_failure_outcome(
     // The failed terminal's delivery mint already ran inside write_fn, in
     // the same store scope as the canonical row write.
     match write_result {
-        Ok(Some(_)) => {}
+        // #1679: the failed terminal's delivery intent mints on the GLOBAL
+        // delivery spine (requester-facing), bound to the owning WorkClaim.
+        Ok(Some(row)) => {
+            crate::delivery_ops::mint_delivery_for_managed_outcome(
+                server,
+                &row,
+                format!("outcome:{}", row.outcome_id),
+            );
+        }
         Ok(None) => {}
         Err(error) => {
             tracing::warn!(
