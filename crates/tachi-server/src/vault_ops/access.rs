@@ -1091,6 +1091,7 @@ fn lease_authorized_api_key_with_hook(
 
             let now = Utc::now();
             let mut selected = None;
+            let mut materialized_key_ids = BTreeSet::new();
             for (_, entry) in candidates {
                 if memcore::effective_vault_secret_type(&entry.name, &entry.secret_type)
                     != SECRET_TYPE_API_KEY
@@ -1113,8 +1114,10 @@ fn lease_authorized_api_key_with_hook(
                     super::VAULT_MATERIALIZATION_INVALID_UTF8,
                 )?;
                 if !value.trim().is_empty() {
-                    selected = Some((entry, value));
-                    break;
+                    materialized_key_ids.insert(entry.name.clone());
+                    if selected.is_none() {
+                        selected = Some((entry, value));
+                    }
                 }
             }
             let (entry, value) = selected.ok_or_else(|| {
@@ -1135,9 +1138,18 @@ fn lease_authorized_api_key_with_hook(
                     .vault_set_rotation(&updated)
                     .map_err(|e| format!("Failed to advance API-key rotation: {e}"))?;
             }
-            let access_count = transaction
-                .vault_touch_entry(&entry.name)
-                .map_err(|e| format!("Failed to record API-key lease access: {e}"))?;
+            let mut access_count = None;
+            for key_id in materialized_key_ids {
+                let count = transaction
+                    .vault_touch_entry(&key_id)
+                    .map_err(|e| format!("Failed to record API-key lease access: {e}"))?;
+                if key_id == entry.name {
+                    access_count = Some(count);
+                }
+            }
+            let access_count = access_count.ok_or_else(|| {
+                format!("Selected API key '{}' was not materialized", entry.name)
+            })?;
             transaction
                 .commit()
                 .map_err(|e| format!("Failed to commit API-key lease transaction: {e}"))?;
