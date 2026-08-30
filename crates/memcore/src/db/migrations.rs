@@ -111,11 +111,12 @@ use super::common::now_utc_iso;
 ///
 /// See the module doc comment ("Schema version stamp (#984)") for what this
 /// counts and when to bump it.
-pub const EXPECTED_SCHEMA_VERSION: u32 = 35;
+pub const EXPECTED_SCHEMA_VERSION: u32 = 36;
 
 mod a2a_body_retention;
 mod basic;
 mod cross_db;
+mod delivery_spine;
 mod dispatch_adjudications;
 mod dispatch_outcomes_attribution_basis;
 mod dispatch_outcomes_identity_receipt;
@@ -137,6 +138,7 @@ mod symbolic_fts;
 use a2a_body_retention::*;
 use basic::*;
 use cross_db::*;
+use delivery_spine::*;
 use dispatch_adjudications::*;
 use dispatch_outcomes_attribution_basis::*;
 use dispatch_outcomes_identity_receipt::*;
@@ -203,6 +205,7 @@ pub(crate) const MIGRATION_SENTINEL_KEYS: &[&str] = &[
     "v33_harness_session_attachments",
     "v34_harness_session_spine",
     "v35_harness_session_spine_receipts",
+    "v36_delivery_spine",
 ];
 
 #[derive(Debug, Default, Clone, serde::Serialize)]
@@ -237,6 +240,7 @@ pub struct MigrationReport {
     pub recall_impression_replay_identity_columns_added: usize,
     pub typo_fallback_attribution_columns_added: usize,
     pub wiki_recovery_schema_objects_created: usize,
+    pub delivery_spine_schema_objects_created: usize,
     pub memory_outbox_schema_objects_created: usize,
     pub memory_outbox_destination_apply_schema_objects_created: usize,
     pub a2a_mailbox_schema_objects_created: usize,
@@ -772,6 +776,9 @@ pub(crate) fn run_data_migrations_in_tx(
         migrate_v35_harness_session_spine_receipts,
     )?
     .unwrap_or(0);
+    report.delivery_spine_schema_objects_created =
+        apply_versioned_migration(conn, "v36_delivery_spine", migrate_v36_delivery_spine)?
+            .unwrap_or(0);
 
     Ok(report)
 }
@@ -1787,9 +1794,13 @@ mod tests {
             .expect("the shipped v34 database must upgrade and reopen");
 
         assert_eq!(report.harness_session_spine_receipt_tables_rebuilt, 2);
-        assert_eq!(read_schema_version(&conn).unwrap(), 35);
+        // v36 (delivery spine) is already current in this fixture: its
+        // sentinel survives, so the reopen re-runs only the v35 rebuild.
+        assert_eq!(read_schema_version(&conn).unwrap(), 36);
         assert!(was_run(&conn, "v34_harness_session_spine").unwrap());
         assert!(was_run(&conn, "v35_harness_session_spine_receipts").unwrap());
+        assert!(was_run(&conn, "v36_delivery_spine").unwrap());
+        assert_eq!(report.delivery_spine_schema_objects_created, 0);
         validate_current_schema_integrity(&conn).expect("the completed v35 shape is valid");
     }
 

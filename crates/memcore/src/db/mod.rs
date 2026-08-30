@@ -38,6 +38,11 @@ pub mod harness_session_attachments;
 pub mod harness_session_events;
 #[cfg(feature = "admin")]
 pub mod harness_session_interventions;
+/// tachi#1679: the durable delivery spine — delivery intents plus their
+/// append-only event ledger. A receipt plane only: no execution or
+/// adjudication table is reachable from it.
+#[cfg(feature = "admin")]
+pub mod delivery_intents;
 #[cfg(feature = "admin")]
 mod hub_db;
 mod memory_crud;
