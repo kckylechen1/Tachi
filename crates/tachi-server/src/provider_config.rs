@@ -19,6 +19,31 @@ use tachi_llm::{
     VaultSourceAvailability,
 };
 
+#[derive(Default)]
+pub(crate) struct LaneConfigValues(Vec<(String, String)>);
+
+impl LaneConfigValues {
+    pub(crate) fn push(&mut self, value: (String, String)) {
+        self.0.push(value);
+    }
+
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    fn into_values(mut self) -> Vec<(String, String)> {
+        std::mem::take(&mut self.0)
+    }
+}
+
+impl Drop for LaneConfigValues {
+    fn drop(&mut self) {
+        for (_, value) in &mut self.0 {
+            crate::vault_crypto::zero_string(value);
+        }
+    }
+}
+
 /// #1680/D3: the LLM materialization allowlist — `ModelApi`-class names only.
 /// This is the compile-time allowlist consulted by
 /// `materialize_provider_secrets_from_durable_source`; it deliberately
@@ -86,20 +111,24 @@ pub(crate) fn is_provider_api_key_name(name: &str) -> bool {
         || parse_rotation_member_name(name).is_some_and(|(prefix, _)| prefix.ends_with("_API_KEY"))
 }
 
-fn vault_api_key_pool_load_from_server(
-    server: &MemoryServer,
-) -> Result<tachi_llm::DurableVaultLoad, String> {
+struct VaultSourceLoad {
+    load: tachi_llm::DurableVaultLoad,
+    lane_config_values: LaneConfigValues,
+}
+
+fn vault_api_key_pool_load_from_server(server: &MemoryServer) -> Result<VaultSourceLoad, String> {
     let scan = crate::vault_ops::load_unlocked_api_key_secret_pools_with_drops(server)?;
-    Ok(tachi_llm::DurableVaultLoad {
-        pools: scan.pools,
-        listed_drops: scan.dropped,
-        availability: VaultSourceAvailability::Readable,
+    Ok(VaultSourceLoad {
+        load: tachi_llm::DurableVaultLoad {
+            pools: scan.pools,
+            listed_drops: scan.dropped,
+            availability: VaultSourceAvailability::Readable,
+        },
+        lane_config_values: scan.lane_config_values,
     })
 }
 
-fn vault_api_key_load_from_keychain(
-    global_db_path: &Path,
-) -> Result<tachi_llm::DurableVaultLoad, String> {
+fn vault_api_key_load_from_keychain(global_db_path: &Path) -> Result<VaultSourceLoad, String> {
     let scan = crate::status_ops::status_health::load_keychain_vault_api_key_scan(global_db_path)
         .map_err(|err| format!("Keychain Vault provider read failed: {err}"))?;
     Ok(durable_load_from_keychain_scan(scan))
@@ -107,7 +136,7 @@ fn vault_api_key_load_from_keychain(
 
 fn durable_load_from_keychain_scan(
     scan: crate::status_ops::status_health::KeychainApiKeyScan,
-) -> tachi_llm::DurableVaultLoad {
+) -> VaultSourceLoad {
     let availability = if scan.source_readable {
         VaultSourceAvailability::Readable
     } else {
@@ -116,10 +145,13 @@ fn durable_load_from_keychain_scan(
     let pools = group_api_key_values_by_configured_rotations(scan.values, &scan.rotation_prefixes);
     let mut listed_drops = scan.dropped;
     promote_configured_rotation_prefix_drops(&mut listed_drops, &pools, &scan.rotation_prefixes);
-    tachi_llm::DurableVaultLoad {
-        pools,
-        listed_drops,
-        availability,
+    VaultSourceLoad {
+        load: tachi_llm::DurableVaultLoad {
+            pools,
+            listed_drops,
+            availability,
+        },
+        lane_config_values: scan.lane_config_values,
     }
 }
 
@@ -162,10 +194,22 @@ fn promote_configured_rotation_prefix_drops(
 /// it to decide whether a missing `vault:` alias target means "revoked" (drop
 /// the cached pool) or "cannot tell right now" (retain it). See
 /// [`tachi_llm::VaultSourceAvailability`].
+struct ResolvedVaultLoad {
+    load: tachi_llm::DurableVaultLoad,
+    lane_config_values: LaneConfigValues,
+}
+
+fn resolved_vault_load(source: VaultSourceLoad, _source_path: &Path) -> ResolvedVaultLoad {
+    ResolvedVaultLoad {
+        load: source.load,
+        lane_config_values: source.lane_config_values,
+    }
+}
+
 fn resolve_vault_pools(
     server: Option<&MemoryServer>,
     global_db_path: &Path,
-) -> Result<tachi_llm::DurableVaultLoad, String> {
+) -> Result<ResolvedVaultLoad, String> {
     resolve_vault_pools_with_keychain_loader(
         server,
         global_db_path,
@@ -177,17 +221,21 @@ fn resolve_vault_pools_with_keychain_loader<F>(
     server: Option<&MemoryServer>,
     global_db_path: &Path,
     keychain_loader: &F,
-) -> Result<tachi_llm::DurableVaultLoad, String>
+) -> Result<ResolvedVaultLoad, String>
 where
-    F: Fn(&Path) -> Result<tachi_llm::DurableVaultLoad, String>,
+    F: Fn(&Path) -> Result<VaultSourceLoad, String>,
 {
     // Starts unavailable and is only promoted by a read that actually
     // succeeded: an unproven source must never license retention.
     let mut availability = VaultSourceAvailability::LockedOrUnavailable;
     if let Some(server) = server {
         match vault_api_key_pool_load_from_server(server) {
-            Ok(load) if !load.pools.is_empty() || !load.listed_drops.is_empty() => {
-                return Ok(load);
+            Ok(source)
+                if !source.load.pools.is_empty()
+                    || !source.load.listed_drops.is_empty()
+                    || !source.lane_config_values.is_empty() =>
+            {
+                return Ok(resolved_vault_load(source, global_db_path));
             }
             // Unlocked and genuinely empty: the Vault answered, it just has
             // nothing. That is a readable source.
@@ -212,45 +260,63 @@ where
         }
     }
     let keychain = keychain_loader(global_db_path)?;
-    if keychain.availability == VaultSourceAvailability::Readable {
-        return Ok(keychain);
+    if keychain.load.availability == VaultSourceAvailability::Readable {
+        return Ok(resolved_vault_load(keychain, global_db_path));
     }
-    if !keychain.pools.is_empty() || !keychain.listed_drops.is_empty() {
-        return Ok(keychain);
+    if !keychain.load.pools.is_empty()
+        || !keychain.load.listed_drops.is_empty()
+        || !keychain.lane_config_values.is_empty()
+    {
+        return Ok(resolved_vault_load(keychain, global_db_path));
     }
     if vault_config_exists(global_db_path)? {
-        return Ok(tachi_llm::DurableVaultLoad::from_pools(
-            keychain.pools,
-            availability,
+        return Ok(resolved_vault_load(
+            VaultSourceLoad {
+                load: tachi_llm::DurableVaultLoad::from_pools(keychain.load.pools, availability),
+                lane_config_values: keychain.lane_config_values,
+            },
+            global_db_path,
         ));
     }
 
     let default_global = default_global_db_path();
     if paths_equal(global_db_path, &default_global) {
-        return Ok(tachi_llm::DurableVaultLoad::from_pools(
-            keychain.pools,
-            availability,
+        return Ok(resolved_vault_load(
+            VaultSourceLoad {
+                load: tachi_llm::DurableVaultLoad::from_pools(keychain.load.pools, availability),
+                lane_config_values: keychain.lane_config_values,
+            },
+            global_db_path,
         ));
     }
 
     let fallback = keychain_loader(&default_global)?;
-    if should_use_default_vault_fallback(&fallback) {
+    if should_use_default_vault_fallback(&fallback.load) {
         tracing::warn!(
             "[provider] global DB {} has no initialized Vault; using default Vault DB {} for provider key materialization",
             global_db_path.display(),
             default_global.display()
         );
-        return Ok(fallback);
+        return Ok(resolved_vault_load(fallback, &default_global));
     }
     if vault_config_exists(&default_global)? {
-        return Ok(tachi_llm::DurableVaultLoad::from_pools(
-            fallback.pools,
-            VaultSourceAvailability::LockedOrUnavailable,
+        return Ok(resolved_vault_load(
+            VaultSourceLoad {
+                load: tachi_llm::DurableVaultLoad::from_pools(
+                    fallback.load.pools,
+                    VaultSourceAvailability::LockedOrUnavailable,
+                ),
+                lane_config_values: fallback.lane_config_values,
+            },
+            &default_global,
         ));
     }
-    Ok(tachi_llm::DurableVaultLoad::from_pools(
-        fallback.pools,
-        availability,
+    Ok(resolved_vault_load(
+        VaultSourceLoad {
+            load: tachi_llm::DurableVaultLoad::from_pools(fallback.load.pools, availability),
+            lane_config_values: fallback.lane_config_values,
+        },
+        &default_global,
     ))
 }
 
@@ -403,11 +469,14 @@ fn materialize_for_server_inner(
     after_vault_pools_resolved: Option<Box<dyn FnOnce() + Send>>,
 ) -> Result<MaterializeReport, String> {
     let global = server.global_db_path_buf();
+    let lane_config_values = std::cell::RefCell::new(None);
     tachi_llm::materialize_provider_secrets_from_durable_source_with_snapshot(
         server.llm.as_ref(),
         provider_env_keys(),
         || {
-            let mut load = resolve_vault_pools(Some(server), &global)?;
+            let resolved = resolve_vault_pools(Some(server), &global)?;
+            *lane_config_values.borrow_mut() = Some(resolved.lane_config_values);
+            let mut load = resolved.load;
             annotate_non_model_drops(&load.pools, &mut load.listed_drops);
             load.pools = filter_model_provider_pools(load.pools);
             if let Some(hook) = after_vault_pools_resolved {
@@ -416,16 +485,20 @@ fn materialize_for_server_inner(
             Ok(load)
         },
         |provider_snapshot| {
-            let snapshot = prepare_vault_runtime_snapshot(server, provider_snapshot)?;
+            let values = lane_config_values
+                .borrow_mut()
+                .take()
+                .ok_or_else(|| "Vault lane-config snapshot was not captured".to_string())?;
+            let snapshot = prepare_vault_runtime_snapshot(server, provider_snapshot, values)?;
             if snapshot.source_availability != snapshot.provider.report().source_availability {
                 return Err(
                     "Vault runtime snapshot source availability changed during preparation"
                         .to_string(),
                 );
             }
-            commit_env_catalog_projection(server, &snapshot.catalog)?;
             Ok(snapshot.into_provider_publication())
         },
+        |catalog| commit_env_catalog_projection(server, &catalog).map(|_| ()),
     )
     .map_err(format_provider_materialization_error)
 }
@@ -468,28 +541,27 @@ impl VaultRuntimeSnapshot {
     ) -> (
         tachi_llm::ProviderMaterializationSnapshot,
         Option<LaneConfigOverlay>,
+        EnvCatalogProjection,
     ) {
-        (self.provider, self.lane_config_overlay)
+        (self.provider, self.lane_config_overlay, self.catalog)
     }
 }
 
 fn prepare_vault_runtime_snapshot(
     server: &MemoryServer,
     provider: tachi_llm::ProviderMaterializationSnapshot,
+    lane_config_values: LaneConfigValues,
 ) -> Result<VaultRuntimeSnapshot, String> {
     let source_availability = provider.report().source_availability;
     let lane_config_overlay = if source_availability == VaultSourceAvailability::Readable {
-        Some(load_vault_lane_config_overlay(
-            server,
-            &server.global_db_path_buf(),
-        )?)
+        Some(lane_config_overlay_from_values(lane_config_values)?)
     } else {
         // An unreadable source cannot prove revocation or a replacement. `None`
         // tells the publisher to retain the already-published overlay.
         None
     };
     let effective_config = match lane_config_overlay.as_ref() {
-        Some(overlay) => server.llm.runtime_config_with_lane_config_overlay(overlay),
+        Some(overlay) => provider.validated_runtime_config(server.llm.as_ref(), overlay)?,
         None => server.llm.runtime_config(),
     };
     let catalog = prepare_env_catalog_projection(&effective_config)?;
@@ -501,108 +573,111 @@ fn prepare_vault_runtime_snapshot(
     })
 }
 
-fn load_vault_lane_config_overlay(
-    server: &MemoryServer,
-    global_db_path: &Path,
-) -> Result<LaneConfigOverlay, String> {
-    let in_process_vault_is_readable = {
-        let vault = server.vault_read();
-        vault.key.is_some() && vault.unlock_time.is_some() && !vault.auto_lock_expired()
-    };
-    let values = if in_process_vault_is_readable {
-        crate::vault_ops::load_unlocked_lane_config_values(server)?
-    } else {
-        load_keychain_lane_config_values(global_db_path)?
-    };
-    lane_config_overlay_from_values(values)
-}
-
-fn lane_config_overlay_from_values(
-    values: Vec<(String, String)>,
-) -> Result<LaneConfigOverlay, String> {
-    let map: std::collections::HashMap<String, String> = values.into_iter().collect();
-    let mut overlay = LaneConfigOverlay::default();
-    fill_lane_overlay(&mut overlay.extract, "EXTRACT", &map)?;
-    fill_lane_overlay(&mut overlay.summary, "SUMMARY", &map)?;
-    fill_lane_overlay(&mut overlay.distill, "DISTILL", &map)?;
-    fill_lane_overlay(&mut overlay.reasoning, "REASONING", &map)?;
-    Ok(overlay)
-}
-
-fn load_keychain_lane_config_values(
-    global_db_path: &Path,
-) -> Result<Vec<(String, String)>, String> {
-    let Some(path) = keychain_vault_path(global_db_path)? else {
-        return Ok(Vec::new());
-    };
-    crate::status_ops::status_health::load_keychain_vault_lane_config_values(&path)
-        .map_err(|err| format!("Keychain Vault lane-config read failed: {err}"))
-}
-
-fn keychain_vault_path(global_db_path: &Path) -> Result<Option<std::path::PathBuf>, String> {
-    let default_global = default_global_db_path();
-    for path in [Some(global_db_path), Some(default_global.as_path())] {
-        let Some(path) = path else {
-            continue;
-        };
-        if path != global_db_path && paths_equal(path, global_db_path) {
-            continue;
-        }
-        let readable = crate::status_ops::status_health::keychain_vault_source_readable(path)
-            .map_err(|err| format!("Keychain Vault source read failed: {err}"))?;
-        if readable {
-            return Ok(Some(path.to_path_buf()));
+fn lane_config_overlay_from_values(values: LaneConfigValues) -> Result<LaneConfigOverlay, String> {
+    let mut map = std::collections::HashMap::new();
+    for (name, value) in values.into_values() {
+        if let Some(mut replaced) = map.insert(name, value) {
+            crate::vault_crypto::zero_string(&mut replaced);
         }
     }
-    Ok(None)
+    let mut overlay = LaneConfigOverlay::default();
+    let result = (|| {
+        fill_lane_overlay(&mut overlay.extract, "EXTRACT", &mut map)?;
+        fill_lane_overlay(&mut overlay.summary, "SUMMARY", &mut map)?;
+        fill_lane_overlay(&mut overlay.distill, "DISTILL", &mut map)?;
+        fill_lane_overlay(&mut overlay.reasoning, "REASONING", &mut map)?;
+        Ok(())
+    })();
+    for value in map.values_mut() {
+        crate::vault_crypto::zero_string(value);
+    }
+    match result {
+        Ok(()) => Ok(overlay),
+        Err(error) => {
+            zero_lane_config_overlay(&mut overlay);
+            Err(error)
+        }
+    }
+}
+
+fn zero_lane_config_overlay(overlay: &mut LaneConfigOverlay) {
+    for fields in [
+        &mut overlay.extract,
+        &mut overlay.summary,
+        &mut overlay.distill,
+        &mut overlay.reasoning,
+    ] {
+        if let Some(value) = fields.base_url.as_mut() {
+            crate::vault_crypto::zero_string(value);
+        }
+        if let Some(value) = fields.model.as_mut() {
+            crate::vault_crypto::zero_string(value);
+        }
+    }
 }
 
 fn fill_lane_overlay(
     fields: &mut LaneFieldOverlay,
     prefix: &str,
-    vault: &std::collections::HashMap<String, String>,
+    vault: &mut std::collections::HashMap<String, String>,
 ) -> Result<(), String> {
     let url_name = format!("{prefix}_BASE_URL");
     let model_name = format!("{prefix}_MODEL");
-    if let Some(url) = vault.get(&url_name) {
-        warn_if_env_conflicts(&url_name, url);
+    if let Some(url) = vault.remove(&url_name) {
+        warn_if_env_conflicts(&url_name, &url);
         fields.base_url = Some(validate_vault_lane_url(&url_name, url)?);
     }
-    if let Some(model) = vault.get(&model_name) {
-        warn_if_env_conflicts(&model_name, model);
+    if let Some(model) = vault.remove(&model_name) {
+        warn_if_env_conflicts(&model_name, &model);
         fields.model = Some(validate_vault_lane_model(&model_name, model)?);
     }
     Ok(())
 }
 
-fn validate_vault_lane_url(name: &str, value: &str) -> Result<String, String> {
-    let value = value.trim();
-    let url = reqwest::Url::parse(value).map_err(|_| {
-        format!(
-            "Vault lane config '{name}' has a malformed URL; provider refresh refused and prior runtime state left unchanged"
-        )
-    })?;
-    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
-        return Err(format!(
-            "Vault lane config '{name}' must use an HTTP(S) URL with a host; provider refresh refused and prior runtime state left unchanged"
-        ));
+fn validate_vault_lane_url(name: &str, mut value: String) -> Result<String, String> {
+    let trimmed = value.trim().to_string();
+    crate::vault_crypto::zero_string(&mut value);
+    value = trimmed;
+    let result = (|| {
+        // Reject credential-shaped material before handing the string to a URL
+        // parser that may allocate an additional copy of userinfo/query data.
+        if let Some(leak) = memcore::catalog::endpoint::endpoint_credential_leak(&value) {
+            return Err(format!(
+                "Vault lane config '{name}' refused before publication: {leak}; prior runtime state left unchanged"
+            ));
+        }
+        let url = reqwest::Url::parse(&value).map_err(|_| {
+            format!(
+                "Vault lane config '{name}' has a malformed URL; provider refresh refused and prior runtime state left unchanged"
+            )
+        })?;
+        if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+            return Err(format!(
+                "Vault lane config '{name}' must use an HTTP(S) URL with a host; provider refresh refused and prior runtime state left unchanged"
+            ));
+        }
+        Ok(())
+    })();
+    match result {
+        Ok(()) => Ok(value),
+        Err(error) => {
+            crate::vault_crypto::zero_string(&mut value);
+            Err(error)
+        }
     }
-    if let Some(leak) = memcore::catalog::endpoint::endpoint_credential_leak(value) {
-        return Err(format!(
-            "Vault lane config '{name}' refused before publication: {leak}; prior runtime state left unchanged"
-        ));
-    }
-    Ok(value.to_string())
 }
 
-fn validate_vault_lane_model(name: &str, value: &str) -> Result<String, String> {
-    let value = value.trim();
+fn validate_vault_lane_model(name: &str, mut value: String) -> Result<String, String> {
+    let trimmed = value.trim().to_string();
+    crate::vault_crypto::zero_string(&mut value);
+    value = trimmed;
     if value.is_empty() || value.chars().any(char::is_control) {
+        crate::vault_crypto::zero_string(&mut value);
         return Err(format!(
             "Vault lane config '{name}' has an invalid model; provider refresh refused and prior runtime state left unchanged"
         ));
     }
-    Ok(value.to_string())
+    Ok(value)
 }
 
 fn warn_if_env_conflicts(name: &str, vault_value: &str) {
@@ -632,23 +707,31 @@ pub fn materialize_standalone(
     llm: &LlmClient,
     global_db_path: &Path,
 ) -> Result<MaterializeReport, String> {
+    let lane_config_values = std::cell::RefCell::new(None);
     tachi_llm::materialize_provider_secrets_from_durable_source_with_snapshot(
         llm,
         provider_env_keys(),
         || {
-            let mut load = resolve_vault_pools(None, global_db_path)?;
+            let resolved = resolve_vault_pools(None, global_db_path)?;
+            *lane_config_values.borrow_mut() = Some(resolved.lane_config_values);
+            let mut load = resolved.load;
             annotate_non_model_drops(&load.pools, &mut load.listed_drops);
             load.pools = filter_model_provider_pools(load.pools);
             Ok(load)
         },
         |provider_snapshot| {
             if provider_snapshot.report().source_availability != VaultSourceAvailability::Readable {
-                return Ok((provider_snapshot, None));
+                return Ok((provider_snapshot, None, ()));
             }
-            let values = load_keychain_lane_config_values(global_db_path)?;
+            let values = lane_config_values
+                .borrow_mut()
+                .take()
+                .ok_or_else(|| "Vault lane-config snapshot was not captured".to_string())?;
             let overlay = lane_config_overlay_from_values(values)?;
-            Ok((provider_snapshot, Some(overlay)))
+            provider_snapshot.validated_runtime_config(llm, &overlay)?;
+            Ok((provider_snapshot, Some(overlay), ()))
         },
+        |()| Ok(()),
     )
     .map_err(format_provider_materialization_error)
 }
@@ -1694,13 +1777,14 @@ mod tests {
         let load =
             durable_load_from_keychain_scan(crate::status_ops::status_health::KeychainApiKeyScan {
                 values: Vec::new(),
+                lane_config_values: LaneConfigValues::default(),
                 dropped: HashMap::new(),
                 rotation_prefixes: HashSet::new(),
                 source_readable: true,
             });
-        assert!(load.pools.is_empty());
-        assert!(load.listed_drops.is_empty());
-        assert_eq!(load.availability, VaultSourceAvailability::Readable);
+        assert!(load.load.pools.is_empty());
+        assert!(load.load.listed_drops.is_empty());
+        assert_eq!(load.load.availability, VaultSourceAvailability::Readable);
     }
 
     #[test]
@@ -1713,18 +1797,22 @@ mod tests {
         let default_db = default_global_db_path();
         let custom_db = home.path().join("custom").join(memcore::MEMORY_DB_FILENAME);
         let loader = |path: &Path| {
-            Ok(tachi_llm::DurableVaultLoad {
-                pools: HashMap::new(),
-                listed_drops: HashMap::new(),
-                availability: if paths_equal(path, &default_db) {
-                    VaultSourceAvailability::Readable
-                } else {
-                    VaultSourceAvailability::LockedOrUnavailable
+            Ok(VaultSourceLoad {
+                load: tachi_llm::DurableVaultLoad {
+                    pools: HashMap::new(),
+                    listed_drops: HashMap::new(),
+                    availability: if paths_equal(path, &default_db) {
+                        VaultSourceAvailability::Readable
+                    } else {
+                        VaultSourceAvailability::LockedOrUnavailable
+                    },
                 },
+                lane_config_values: LaneConfigValues::default(),
             })
         };
-        let load = resolve_vault_pools_with_keychain_loader(None, &custom_db, &loader)
+        let resolved = resolve_vault_pools_with_keychain_loader(None, &custom_db, &loader)
             .expect("resolve default fallback");
+        let load = resolved.load;
         assert!(load.pools.is_empty());
         assert_eq!(
             load.availability,

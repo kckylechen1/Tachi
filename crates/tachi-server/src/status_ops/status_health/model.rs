@@ -229,7 +229,7 @@ fn embedding_lane_json() -> Value {
     let endpoint = voyage_embeddings_endpoint();
     let observed_at = memcore::db::now_utc_iso();
     let row = match env_embedding_deployment(&config, &endpoint, &observed_at) {
-        Ok(row) => row.deployment,
+        Ok(row) => row.deployment.clone(),
         Err(err) => {
             // `VOYAGE_BASE_URL` carrying userinfo is refused, not scrubbed —
             // reported here exactly like a refused `EmbeddingConfig`, and with

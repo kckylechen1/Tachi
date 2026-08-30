@@ -32,10 +32,7 @@ pub(crate) use types::{
     DoctorProbeCacheRefresh, HealthDeduction, ProviderProbeCache, ProviderProbeReport,
     ProviderProbeResult, ProviderRotationGroupProbe,
 };
-pub(crate) use vault::{
-    keychain_vault_source_readable, load_keychain_vault_api_key_scan,
-    load_keychain_vault_lane_config_values, KeychainApiKeyScan,
-};
+pub(crate) use vault::{load_keychain_vault_api_key_scan, KeychainApiKeyScan};
 
 // ─── Stable internal facades for cross-module callers ───────────────────────
 //

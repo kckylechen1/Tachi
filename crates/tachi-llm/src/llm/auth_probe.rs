@@ -318,12 +318,11 @@ impl LlmClient {
         endpoint_override: Option<&str>,
         resolution_override: Option<(&str, SocketAddr)>,
     ) -> ProviderAuthProbeResult {
-        let lane = &self.reasoning;
-        // Resolved before the request as it always was: the lane's currently
-        // usable credential, chosen without advancing the round-robin cursor.
-        let selected = self.selected_secret_readonly(&lane.api_key_envs);
-        let authority = self.lane_authority(ChatLane::Reasoning);
-        let (base_url, model, selected) = match selected {
+        // Resolve the lane and its currently usable credential from one
+        // provider-state generation without advancing the round-robin cursor.
+        let (lane, authority, selected) =
+            self.lane_and_selected_secret_readonly(ChatLane::Reasoning);
+        let (probe_lane, selected) = match selected {
             Some(selected) => {
                 let bound = match bind_lane_config_to_selected_key(
                     ChatLane::Reasoning,
@@ -345,14 +344,14 @@ impl LlmClient {
                         }
                     }
                 };
-                (bound.base_url, bound.model, Some(selected))
+                (bound, Some(selected))
             }
-            None => (lane.base_url.clone(), lane.model.clone(), None),
+            None => (lane, None),
         };
         self.probe_target_inner(
-            ProbeTarget::from_base_url(&base_url),
-            model.clone(),
-            Some(model.as_str()),
+            ProbeTarget::from_base_url(&probe_lane.base_url),
+            probe_lane.model.as_str(),
+            Some(probe_lane.model.as_str()),
             selected,
             endpoint_override,
             resolution_override,
@@ -467,7 +466,7 @@ impl LlmClient {
         self.probe_target_inner(
             ProbeTarget::from_descriptor(descriptor),
             // A member probe is about a credential, not about a lane's model.
-            String::new(),
+            "",
             None,
             selected,
             endpoint_override,
@@ -490,7 +489,7 @@ impl LlmClient {
     async fn probe_target_inner(
         &self,
         target: ProbeTarget,
-        effective_model: String,
+        effective_model: &str,
         expected_model: Option<&str>,
         selected: Option<SelectedProviderSecret>,
         endpoint_override: Option<&str>,
@@ -500,7 +499,7 @@ impl LlmClient {
         let result = |auth_class, selected_model_present, model_count| ProviderAuthProbeResult {
             provider_family: target.family,
             provider_host: target.safe_host.to_string(),
-            effective_model: effective_model.clone(),
+            effective_model: effective_model.to_string(),
             auth_class,
             selected_model_present,
             model_count,

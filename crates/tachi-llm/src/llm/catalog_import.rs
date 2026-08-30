@@ -67,6 +67,7 @@ use rusqlite::Connection;
 use super::embedding_config::{
     EmbeddingConfig, EmbeddingModelSource, EMBEDDING_DIMENSION_ENV, EMBEDDING_MODEL_ENV,
 };
+use super::provider_health::zero_owned_string;
 use super::provider_health::{ChatLaneConfig, ProviderRuntimeConfig};
 
 /// Prefix every env-derived identifier carries, so "which rows did the env
@@ -208,6 +209,15 @@ impl From<MemoryError> for CatalogImportError {
 pub struct EnvLaneDeployment {
     pub lane: &'static str,
     pub deployment: NewModelDeployment,
+}
+
+impl Drop for EnvLaneDeployment {
+    fn drop(&mut self) {
+        if let Some(endpoint) = self.deployment.endpoint_ref.as_mut() {
+            zero_owned_string(endpoint);
+        }
+        zero_owned_string(&mut self.deployment.provider_model_id);
+    }
 }
 
 /// Project an already-resolved [`ProviderRuntimeConfig`] into catalog rows,

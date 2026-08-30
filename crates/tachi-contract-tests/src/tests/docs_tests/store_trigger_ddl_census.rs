@@ -1327,6 +1327,33 @@ const EXEMPTIONS: &[Exemption<'static>] = &[
                  fault-injection shape is declared rather than machine-proven.",
     },
     Exemption {
+        path: "crates/tachi-server/src/tests/vault_tests/env_injection/lane_config_overlay.rs",
+        basis: ExemptionBasis::DeclaredByReviewerNotProven {
+            signed_by: "Codex Sol, bodies read 2026-08-30",
+        },
+        sites: &[
+            Site {
+                symbol: "drop_catalog_failure_trigger",
+                trigger: "PR1862_FAIL_CATALOG_REFRESH",
+                ddl: "0241301fe84ca149",
+                occurrences: 1,
+            },
+            Site {
+                symbol: "install_catalog_failure_trigger",
+                trigger: "PR1862_FAIL_CATALOG_REFRESH",
+                ddl: "7204ba4a646bf264",
+                occurrences: 1,
+            },
+        ],
+        reason: "install_catalog_failure_trigger and drop_catalog_failure_trigger both use \
+                 with_unrestricted_fixture_connection on the file-backed server DB; the test \
+                 installs RAISE(ABORT) before exercising catalog refresh through MemoryServer, \
+                 asserts rollback across catalog/provider publication, and drops the trigger \
+                 before the next reopen. Bodies read 2026-08-30. The file also names guarded \
+                 store doorways, so this sanctioned fixture is declared rather than assigned \
+                 an inapplicable machine proof.",
+    },
+    Exemption {
         path: "crates/tachi-server/src/tests/wiki_tests/write/facade_routing/guide_metadata.rs",
         basis: ExemptionBasis::Proven(MachineProof::NoStoreDoorwayInFile),
         sites: &[

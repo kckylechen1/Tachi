@@ -23,6 +23,34 @@ pub struct LaneConfigOverlay {
     pub reasoning: LaneFieldOverlay,
 }
 
+pub(crate) fn zero_owned_string(value: &mut String) {
+    let bytes = unsafe { value.as_mut_vec() };
+    for byte in bytes {
+        unsafe {
+            std::ptr::write_volatile(byte, 0);
+        }
+    }
+    std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
+}
+
+impl Drop for ChatLaneConfig {
+    fn drop(&mut self) {
+        zero_owned_string(&mut self.base_url);
+        zero_owned_string(&mut self.model);
+    }
+}
+
+impl Drop for LaneFieldOverlay {
+    fn drop(&mut self) {
+        if let Some(value) = self.base_url.as_mut() {
+            zero_owned_string(value);
+        }
+        if let Some(value) = self.model.as_mut() {
+            zero_owned_string(value);
+        }
+    }
+}
+
 impl LaneFieldOverlay {
     pub(crate) fn apply_to(&self, cfg: &mut ChatLaneConfig) {
         if let Some(url) = &self.base_url {
@@ -101,6 +129,12 @@ pub struct ProviderAuthProbeResult {
     pub selected_model_present: Option<bool>,
     pub model_count: Option<usize>,
     pub latency_ms: u64,
+}
+
+impl Drop for ProviderAuthProbeResult {
+    fn drop(&mut self) {
+        zero_owned_string(&mut self.effective_model);
+    }
 }
 
 impl ProviderAuthProbeResult {
@@ -683,6 +717,13 @@ impl KeyAvailability {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn zero_owned_string_overwrites_contents_in_place() {
+        let mut value = "vault-derived-model".to_string();
+        zero_owned_string(&mut value);
+        assert!(value.as_bytes().iter().all(|byte| *byte == 0));
+    }
 
     #[test]
     fn persisted_model_invocation_receipts_are_schema_stable_and_secret_negative() {

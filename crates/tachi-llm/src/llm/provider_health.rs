@@ -24,6 +24,7 @@ pub(super) use self::state::{
     DeploymentHealthCounters, ProviderHealthPersistState, ProviderHealthReloadState,
     ProviderHealthSnapshot, ProviderState,
 };
+pub(crate) use self::types::zero_owned_string;
 pub use self::types::ProviderSecret;
 pub(super) use self::types::{
     ChatLane, ClaudeCliFailure, ClaudeCliFailureKind, ClaudeCliSkip, KeyAvailability,

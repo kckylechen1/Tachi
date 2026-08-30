@@ -238,19 +238,6 @@ pub(super) fn record_successful_vault_access(
         .map_err(|e| e.to_string())
 }
 
-/// Decrypt listed Vault rows used as lane URL/model config (tachi#1856).
-/// Any secret type is admitted because operators historically stored these as
-/// `api_key`. Empty and agent-fenced values are skipped.
-pub(crate) fn load_unlocked_lane_config_values(
-    server: &MemoryServer,
-) -> Result<Vec<(String, String)>, String> {
-    // Provider materialization already owns the transaction lock. Use the
-    // caller-owned key path to avoid recursively starting another refresh.
-    with_vault_key_for_provider_refresh(server, |key| {
-        load_unlocked_vault_secrets_with_key(server, key, |entry| is_lane_config_name(&entry.name))
-    })
-}
-
 pub(crate) fn is_lane_config_name(name: &str) -> bool {
     matches!(
         name,
@@ -342,6 +329,7 @@ pub(crate) fn canonical_api_key_health_logical_name(
 pub(crate) struct ProviderSecretScan {
     pub pools: HashMap<String, Vec<tachi_llm::ProviderSecret>>,
     pub dropped: HashMap<String, AliasSkipClass>,
+    pub lane_config_values: crate::provider_config::LaneConfigValues,
 }
 
 /// Same scan as [`load_unlocked_api_key_secret_pools`], plus the drop reason
@@ -446,6 +434,28 @@ fn load_unlocked_api_key_secret_pools_filtered(
 
         let mut pools: HashMap<String, Vec<tachi_llm::ProviderSecret>> = HashMap::new();
         let mut dropped: HashMap<String, AliasSkipClass> = HashMap::new();
+        let mut lane_config_values = crate::provider_config::LaneConfigValues::default();
+        if only_logical_name.is_none() {
+            for entry in &entries {
+                if !is_lane_config_name(&entry.name)
+                    || entry
+                        .allowed_agents
+                        .as_ref()
+                        .is_some_and(|agents| !agents.is_empty())
+                {
+                    continue;
+                }
+                let decrypted =
+                    crate::vault_crypto::decrypt(key, &entry.encrypted_value, &entry.nonce)?;
+                let value = crate::vault_crypto::decode_utf8_zeroizing(
+                    decrypted,
+                    super::VAULT_MATERIALIZATION_INVALID_UTF8,
+                )?;
+                if !value.trim().is_empty() {
+                    lane_config_values.push((entry.name.clone(), value));
+                }
+            }
+        }
         let mut rotation_members: HashSet<String> = HashSet::new();
         let mut materialized_key_ids: BTreeSet<String> = BTreeSet::new();
 
@@ -626,7 +636,11 @@ fn load_unlocked_api_key_secret_pools_filtered(
                 .map_err(|e| format!("Failed to record provider key access batch: {e}"))?;
         }
 
-        Ok(ProviderSecretScan { pools, dropped })
+        Ok(ProviderSecretScan {
+            pools,
+            dropped,
+            lane_config_values,
+        })
     })
 }
 

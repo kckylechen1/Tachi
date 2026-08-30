@@ -90,12 +90,16 @@ impl super::super::LlmClient {
     /// complete lane overlay under one provider-state write lock. A caller
     /// that supplies `Some` gets one linearization point for both surfaces;
     /// `None` preserves the existing overlay for legacy pool-only callers.
-    pub(crate) fn publish_provider_secret_pools(
+    pub(crate) fn publish_provider_secret_pools<P>(
         &self,
         replacement: HashMap<String, Vec<ProviderSecret>>,
         retained_logical_names: &HashSet<String>,
         lane_config_overlay: Option<LaneConfigOverlay>,
-    ) -> usize {
+        commit_companion_projection: P,
+    ) -> Result<usize, String>
+    where
+        P: FnOnce() -> Result<(), String>,
+    {
         let loaded = replacement.len();
         let mut retained_members_by_logical = HashMap::new();
         for logical_name in retained_logical_names {
@@ -112,6 +116,11 @@ impl super::super::LlmClient {
             .provider_state
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // The companion becomes durable while new request snapshots are
+        // blocked. Pools/overlay are replaced before this lock is released,
+        // so a caller cannot start after the durable commit and read old
+        // in-memory runtime state. Failure leaves the old state untouched.
+        commit_companion_projection()?;
         state.indices.retain(|logical_name, _index| {
             retained_logical_names.contains(logical_name) && replacement.contains_key(logical_name)
         });
@@ -140,11 +149,11 @@ impl super::super::LlmClient {
         if let Some(overlay) = lane_config_overlay {
             state.lane_config_overlay = overlay;
         }
-        loaded
+        Ok(loaded)
     }
 
     pub fn clear_provider_secrets(&self) -> Result<(), String> {
-        self.clear_provider_secrets_inner(|| Ok(()), None)
+        self.clear_provider_secrets_inner(|| Ok(()), false, None)
     }
 
     /// Make a durable-custody state transition and clear the provider cache
@@ -158,12 +167,13 @@ impl super::super::LlmClient {
     where
         F: FnOnce() -> Result<(), String>,
     {
-        self.clear_provider_secrets_inner(clear_custody, None)
+        self.clear_provider_secrets_inner(clear_custody, true, None)
     }
 
     fn clear_provider_secrets_inner<F>(
         &self,
         clear_custody: F,
+        clear_lane_config_overlay: bool,
         before_materialization_guard: Option<Box<dyn FnOnce() + Send>>,
     ) -> Result<(), String>
     where
@@ -186,6 +196,9 @@ impl super::super::LlmClient {
         state.secrets.clear();
         state.cooldowns.clear();
         state.indices.clear();
+        if clear_lane_config_overlay {
+            state.lane_config_overlay = LaneConfigOverlay::default();
+        }
         Ok(())
     }
 
@@ -194,7 +207,11 @@ impl super::super::LlmClient {
         &self,
         before_materialization_guard: impl FnOnce() + Send + 'static,
     ) -> Result<(), String> {
-        self.clear_provider_secrets_inner(|| Ok(()), Some(Box::new(before_materialization_guard)))
+        self.clear_provider_secrets_inner(
+            || Ok(()),
+            false,
+            Some(Box::new(before_materialization_guard)),
+        )
     }
 
     pub fn provider_secret_count(&self) -> usize {

@@ -21,6 +21,7 @@ fn derive_status_vault_key(
 
 pub(crate) struct KeychainApiKeyScan {
     pub values: Vec<(String, String)>,
+    pub lane_config_values: crate::provider_config::LaneConfigValues,
     pub dropped: HashMap<String, AliasSkipClass>,
     pub rotation_prefixes: HashSet<String>,
     pub source_readable: bool,
@@ -30,118 +31,6 @@ pub(crate) fn load_keychain_vault_api_key_values(
     vault_db_path: &Path,
 ) -> Result<Vec<(String, String)>, Box<dyn std::error::Error>> {
     Ok(load_keychain_vault_api_key_scan(vault_db_path)?.values)
-}
-
-pub(crate) fn load_keychain_vault_lane_config_values(
-    vault_db_path: &Path,
-) -> Result<Vec<(String, String)>, Box<dyn std::error::Error>> {
-    Ok(load_keychain_vault_values(vault_db_path, |entry| {
-        matches!(
-            entry.name.as_str(),
-            "EXTRACT_BASE_URL"
-                | "EXTRACT_MODEL"
-                | "SUMMARY_BASE_URL"
-                | "SUMMARY_MODEL"
-                | "DISTILL_BASE_URL"
-                | "DISTILL_MODEL"
-                | "REASONING_BASE_URL"
-                | "REASONING_MODEL"
-        ) && !entry
-            .allowed_agents
-            .as_ref()
-            .is_some_and(|agents| !agents.is_empty())
-    })?
-    .values)
-}
-
-pub(crate) fn keychain_vault_source_readable(
-    vault_db_path: &Path,
-) -> Result<bool, Box<dyn std::error::Error>> {
-    Ok(load_keychain_vault_values(vault_db_path, |_| false)?.readable)
-}
-
-struct KeychainVaultRead {
-    readable: bool,
-    values: Vec<(String, String)>,
-}
-
-fn load_keychain_vault_values(
-    vault_db_path: &Path,
-    include_entry: impl Fn(&VaultEntry) -> bool,
-) -> Result<KeychainVaultRead, Box<dyn std::error::Error>> {
-    let mut password = match crate::vault_crypto::read_password_from_macos_keychain() {
-        Ok(password) => password,
-        Err(err)
-            if !cfg!(target_os = "macos")
-                || err.starts_with("no vault password found in Keychain")
-                || err == "Keychain entry for tachi-vault/default is empty" =>
-        {
-            return Ok(KeychainVaultRead {
-                readable: false,
-                values: Vec::new(),
-            });
-        }
-        Err(err) => {
-            return Err(Box::new(std::io::Error::other(err)));
-        }
-    };
-    let result = load_keychain_vault_values_with_password(vault_db_path, &password, include_entry);
-    crate::vault_crypto::zero_string(&mut password);
-    result
-}
-
-fn load_keychain_vault_values_with_password(
-    vault_db_path: &Path,
-    password: &str,
-    include_entry: impl Fn(&VaultEntry) -> bool,
-) -> Result<KeychainVaultRead, Box<dyn std::error::Error>> {
-    if !vault_db_path.exists() {
-        return Ok(KeychainVaultRead {
-            readable: false,
-            values: Vec::new(),
-        });
-    }
-    let vault_db_str = vault_db_path.to_str().ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!(
-                "Vault DB path contains invalid UTF-8: {}",
-                vault_db_path.display()
-            ),
-        )
-    })?;
-    let store = memcore::MemoryStore::open_read_only(vault_db_str)?;
-    let Some(config) = store.vault_get_config()? else {
-        return Ok(KeychainVaultRead {
-            readable: false,
-            values: Vec::new(),
-        });
-    };
-    let Some(key) = derive_status_vault_key(&config, password)? else {
-        return Ok(KeychainVaultRead {
-            readable: false,
-            values: Vec::new(),
-        });
-    };
-
-    let mut values = Vec::new();
-    for entry in store.vault_list_entries()? {
-        if !include_entry(&entry) {
-            continue;
-        }
-        let decrypted =
-            crate::vault_crypto::decrypt(key.bytes(), &entry.encrypted_value, &entry.nonce)?;
-        let value = crate::vault_crypto::decode_utf8_zeroizing(
-            decrypted,
-            crate::vault_ops::VAULT_MATERIALIZATION_INVALID_UTF8,
-        )
-        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
-        values.push((entry.name, value));
-    }
-    Ok(KeychainVaultRead {
-        readable: true,
-        values,
-    })
 }
 
 fn record_keychain_listed_drop(
@@ -155,6 +44,7 @@ fn record_keychain_listed_drop(
 fn empty_keychain_scan() -> KeychainApiKeyScan {
     KeychainApiKeyScan {
         values: Vec::new(),
+        lane_config_values: crate::provider_config::LaneConfigValues::default(),
         dropped: HashMap::new(),
         rotation_prefixes: HashSet::new(),
         source_readable: false,
@@ -235,7 +125,28 @@ fn scan_keychain_api_key_entries(
     now: DateTime<Utc>,
 ) -> Result<KeychainApiKeyScan, Box<dyn std::error::Error>> {
     let mut values = Vec::new();
+    let mut lane_config_values = crate::provider_config::LaneConfigValues::default();
     let mut dropped = HashMap::new();
+    for entry in &entries {
+        if !crate::vault_ops::is_lane_config_name(&entry.name)
+            || entry
+                .allowed_agents
+                .as_ref()
+                .is_some_and(|agents| !agents.is_empty())
+        {
+            continue;
+        }
+        let decrypted =
+            crate::vault_crypto::decrypt(key.bytes(), &entry.encrypted_value, &entry.nonce)?;
+        let value = crate::vault_crypto::decode_utf8_zeroizing(
+            decrypted,
+            crate::vault_ops::VAULT_MATERIALIZATION_INVALID_UTF8,
+        )
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+        if !value.trim().is_empty() {
+            lane_config_values.push((entry.name.clone(), value));
+        }
+    }
     for entry in entries {
         if entry.secret_type != SECRET_TYPE_API_KEY {
             record_keychain_listed_drop(&mut dropped, &entry.name, AliasSkipClass::ListedWrongType);
@@ -278,6 +189,7 @@ fn scan_keychain_api_key_entries(
     }
     Ok(KeychainApiKeyScan {
         values,
+        lane_config_values,
         dropped,
         rotation_prefixes: rotation_prefixes.clone(),
         source_readable: true,

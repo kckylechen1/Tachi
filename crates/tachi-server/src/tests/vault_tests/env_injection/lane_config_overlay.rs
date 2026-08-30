@@ -1,4 +1,7 @@
+#![allow(clippy::await_holding_lock)]
+
 use super::*;
+use std::path::Path;
 
 fn clear_model_provider_env() -> Vec<crate::test_support::EnvRestore> {
     [
@@ -258,9 +261,9 @@ async fn vault_lane_decrypt_failure_keeps_previous_runtime_snapshot() {
     seed_provider_and_lane(
         &server,
         "pr1862-decrypt-password",
-        "SILICONFLOW_API_KEY",
+        "EXTRACT_API_KEY",
         "vault-siliconflow-key",
-        "https://vault-extract.example/v1/chat/completions",
+        "https://api.siliconflow.cn/v1/chat/completions",
         "vault-extract-model",
     )
     .await;
@@ -303,9 +306,9 @@ async fn vault_catalog_failure_cannot_publish_a_mixed_state() {
     seed_provider_and_lane(
         &server,
         "pr1862-catalog-password",
-        "SILICONFLOW_API_KEY",
+        "EXTRACT_API_KEY",
         "vault-siliconflow-key",
-        "https://vault-extract.example/v1/chat/completions",
+        "https://api.siliconflow.cn/v1/chat/completions",
         "vault-extract-model",
     )
     .await;
@@ -331,6 +334,69 @@ async fn vault_catalog_failure_cannot_publish_a_mixed_state() {
     );
 }
 
+/// Provider pools and lane config are decrypted from one durable entries
+/// snapshot. A Vault write after that scan must become visible only on the
+/// next refresh, never as a mixed old-key/new-model publication.
+#[tokio::test]
+async fn vault_refresh_publishes_one_source_epoch_across_pool_and_lane_config() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _provider_env = clear_model_provider_env();
+    let server = materialization_test_server();
+    seed_provider_and_lane(
+        &server,
+        "pr1862-source-epoch-password",
+        "EXTRACT_API_KEY",
+        "epoch-one-key",
+        "https://baseline-extract.example/v1/chat/completions",
+        "epoch-one-model",
+    )
+    .await;
+    set_vault_value(&server, "STAGED_API_KEY", "epoch-two-key", "api_key").await;
+    set_vault_value(&server, "STAGED_MODEL", "epoch-two-model", "other").await;
+
+    let db_path = server.global_db_path_buf();
+    crate::provider_config::materialize_for_server_with_hook_for_tests(&server, move || {
+        crate::test_support::with_unrestricted_fixture_connection(&db_path, |connection| {
+            connection.execute_batch(
+                "UPDATE vault_entries
+                    SET encrypted_value = (SELECT encrypted_value FROM vault_entries WHERE name = 'STAGED_API_KEY'),
+                        nonce = (SELECT nonce FROM vault_entries WHERE name = 'STAGED_API_KEY')
+                  WHERE name = 'EXTRACT_API_KEY';
+                 UPDATE vault_entries
+                    SET encrypted_value = (SELECT encrypted_value FROM vault_entries WHERE name = 'STAGED_MODEL'),
+                        nonce = (SELECT nonce FROM vault_entries WHERE name = 'STAGED_MODEL')
+                  WHERE name = 'EXTRACT_MODEL';",
+            )
+        })
+        .expect("stage the next durable Vault generation");
+    })
+    .expect("publish the already-scanned generation");
+
+    let first = server.llm.runtime_config();
+    assert_eq!(first.extract.model, "epoch-one-model");
+    assert_eq!(
+        server
+            .llm
+            .provider_secret_for_tests(&["EXTRACT_API_KEY"])
+            .as_deref(),
+        Some("epoch-one-key")
+    );
+
+    crate::provider_config::materialize_for_server(&server)
+        .expect("publish the next complete durable generation");
+    let second = server.llm.runtime_config();
+    assert_eq!(second.extract.model, "epoch-two-model");
+    assert_eq!(
+        server
+            .llm
+            .provider_secret_for_tests(&["EXTRACT_API_KEY"])
+            .as_deref(),
+        Some("epoch-two-key")
+    );
+}
+
 /// Vault lane URLs are validated before either the catalog or the provider
 /// cache sees them. The rejected value must not appear in the error surface.
 #[tokio::test]
@@ -345,9 +411,9 @@ async fn credential_bearing_vault_lane_url_is_rejected_before_publish() {
     seed_provider_and_lane(
         &server,
         "pr1862-url-password",
-        "SILICONFLOW_API_KEY",
+        "EXTRACT_API_KEY",
         "vault-siliconflow-key",
-        "https://vault-extract.example/v1/chat/completions",
+        "https://api.siliconflow.cn/v1/chat/completions",
         "vault-extract-model",
     )
     .await;
@@ -377,6 +443,128 @@ async fn credential_bearing_vault_lane_url_is_rejected_before_publish() {
     );
 }
 
+/// A Vault endpoint is explicit provider identity. It must be validated
+/// against the exact logical credential pool before catalog or runtime state
+/// is published, rather than being silently rebound at request time.
+#[tokio::test]
+async fn mismatched_known_provider_overlay_is_rejected_before_publish() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _provider_env = clear_model_provider_env();
+    let server = materialization_test_server();
+    initialize_vault(&server, "pr1862-provider-mismatch-password").await;
+    set_vault_value(
+        &server,
+        "SILICONFLOW_API_KEY",
+        "vault-siliconflow-key",
+        "api_key",
+    )
+    .await;
+    set_vault_value(
+        &server,
+        "EXTRACT_BASE_URL",
+        "https://api.deepseek.com/chat/completions",
+        "other",
+    )
+    .await;
+
+    let before = published_snapshot(&server, &["SILICONFLOW_API_KEY"]);
+    let err = crate::provider_config::materialize_for_server(&server)
+        .expect_err("known-provider endpoint/key mismatch must refuse refresh");
+    assert!(
+        err.contains("refusing credential-bearing request"),
+        "unexpected mismatch error: {err}"
+    );
+    assert_eq!(
+        before,
+        published_snapshot(&server, &["SILICONFLOW_API_KEY"]),
+        "mismatched provider identity must publish neither catalog nor runtime state"
+    );
+}
+
+/// Validation covers every logical key the production selector may reach,
+/// not just the first currently healthy alias. Otherwise health/cooldown
+/// failover could cross-bind a later known-provider credential after publish.
+#[tokio::test]
+async fn secondary_provider_pool_mismatch_is_rejected_before_publish() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _provider_env = clear_model_provider_env();
+    let _alias =
+        crate::test_support::EnvRestore::set("EXTRACT_API_KEY", "vault:SILICONFLOW_API_KEY");
+    let server = materialization_test_server();
+    initialize_vault(&server, "pr1862-secondary-provider-password").await;
+    set_vault_value(
+        &server,
+        "SILICONFLOW_API_KEY",
+        "vault-siliconflow-key",
+        "api_key",
+    )
+    .await;
+    set_vault_value(
+        &server,
+        "EXTRACT_BASE_URL",
+        "https://custom-lane.example/v1/chat/completions",
+        "other",
+    )
+    .await;
+
+    let before = published_snapshot(&server, &["EXTRACT_API_KEY", "SILICONFLOW_API_KEY"]);
+    let err = crate::provider_config::materialize_for_server(&server)
+        .expect_err("secondary known-provider pool mismatch must refuse refresh");
+    assert!(
+        err.contains("refusing credential-bearing request"),
+        "unexpected secondary mismatch error: {err}"
+    );
+    assert_eq!(
+        before,
+        published_snapshot(&server, &["EXTRACT_API_KEY", "SILICONFLOW_API_KEY"]),
+        "secondary provider mismatch must publish no partial snapshot"
+    );
+}
+
+/// User-initiated lock purges both Vault credentials and Vault-derived lane
+/// URL/model state. Auto-lock remains key-only by design.
+#[tokio::test]
+async fn explicit_vault_lock_clears_lane_overlay() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _provider_env = clear_model_provider_env();
+    let server = materialization_test_server();
+    seed_provider_and_lane(
+        &server,
+        "pr1862-lock-password",
+        "EXTRACT_API_KEY",
+        "vault-extract-key",
+        "https://vault-lock.example/v1/chat/completions",
+        "vault-lock-model",
+    )
+    .await;
+    assert_eq!(
+        server.llm.runtime_config().extract.base_url,
+        "https://vault-lock.example/v1/chat/completions"
+    );
+
+    server.vault_lock().await.expect("explicit vault lock");
+
+    let live = server.llm.runtime_config();
+    assert_eq!(
+        live.extract.base_url,
+        "https://baseline-extract.example/v1/chat/completions"
+    );
+    assert_eq!(live.extract.model, "baseline-extract-model");
+    assert!(
+        server
+            .llm
+            .provider_secret_for_tests(&["EXTRACT_API_KEY"])
+            .is_none(),
+        "explicit lock must purge the Vault provider pool"
+    );
+}
+
 /// A readable missing alias is a revocation, while the same missing alias from
 /// an unreadable Vault is retained as last-known-good provider state.
 #[tokio::test]
@@ -395,7 +583,7 @@ async fn readable_missing_alias_revokes_but_unavailable_alias_retains() {
         "pr1862-alias-password",
         "SILICONFLOW_API_KEY",
         "vault-alias-key",
-        "https://vault-extract.example/v1/chat/completions",
+        "https://api.siliconflow.cn/v1/chat/completions",
         "vault-extract-model",
     )
     .await;
@@ -505,6 +693,59 @@ async fn standalone_materialization_sees_vault_lane_url_and_model() {
     assert_eq!(live.extract.model, "standalone-vault-model");
 }
 
+/// When standalone custody falls back from an uninitialized custom DB to the
+/// default Vault, provider pools and lane config must come from that same
+/// selected durable source.
+#[tokio::test]
+async fn standalone_default_vault_fallback_uses_matching_lane_overlay() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _provider_env = clear_model_provider_env();
+    let _keychain_password = crate::test_support::EnvRestore::set(
+        "TACHI_TEST_KEYCHAIN_PASSWORD",
+        "pr1862-default-fallback-password",
+    );
+    let server = materialization_test_server();
+    let default_db = server.global_db_path_buf();
+    let fixture_root = default_db
+        .parent()
+        .and_then(Path::parent)
+        .expect("fixture root")
+        .to_path_buf();
+    let _home = crate::test_support::EnvRestore::set_path("TACHI_HOME", &fixture_root);
+    seed_provider_and_lane(
+        &server,
+        "pr1862-default-fallback-password",
+        "EXTRACT_API_KEY",
+        "default-vault-extract-key",
+        "https://default-vault.example/v1/chat/completions",
+        "default-vault-model",
+    )
+    .await;
+
+    let custom_db = fixture_root
+        .join("custom")
+        .join(memcore::MEMORY_DB_FILENAME);
+    let standalone = tachi_llm::LlmClient::new_with_config(materialization_test_config(), None)
+        .expect("standalone fallback client");
+    crate::provider_config::materialize_standalone(&standalone, &custom_db)
+        .expect("standalone default Vault fallback");
+
+    let live = standalone.runtime_config();
+    assert_eq!(
+        live.extract.base_url,
+        "https://default-vault.example/v1/chat/completions"
+    );
+    assert_eq!(live.extract.model, "default-vault-model");
+    assert_eq!(
+        standalone
+            .provider_secret_for_tests(&["EXTRACT_API_KEY"])
+            .as_deref(),
+        Some("default-vault-extract-key")
+    );
+}
+
 /// The rows committed by the serve materialization must be the exact identity
 /// projection of the effective client snapshot, including the Vault overlay.
 #[tokio::test]
@@ -519,9 +760,9 @@ async fn vault_catalog_rows_match_the_effective_runtime_snapshot() {
     seed_provider_and_lane(
         &server,
         "pr1862-catalog-match-password",
-        "SILICONFLOW_API_KEY",
+        "EXTRACT_API_KEY",
         "vault-siliconflow-key",
-        "https://catalog-match.example/v1/chat/completions",
+        "https://api.siliconflow.cn/v1/chat/completions",
         "catalog-match-model",
     )
     .await;
