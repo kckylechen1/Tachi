@@ -15,6 +15,8 @@ use std::path::{Path, PathBuf};
 const ENV_REF_PREFIX: &str = "{env:";
 const ENV_REF_SUFFIX: &str = "}";
 
+mod slot_evidence;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ApiKeyShape {
     /// `{env:NAME}` — name is not a secret; print literally.
@@ -797,6 +799,14 @@ fn collect_provider_vault_evidence(
             .insert(entry.name.clone(), entry.updated_at.clone());
         evidence.exact_values.insert(entry.name.clone(), value);
     }
+
+    slot_evidence::collect_lane_slot_report_evidence(
+        &entries,
+        &health_by_identity,
+        names,
+        key,
+        &mut evidence,
+    );
 
     for rotation in rotations.into_iter().filter(|rotation| {
         names.contains(&rotation.prefix)
