@@ -6,6 +6,9 @@ use serde::{Deserialize, Serialize};
 
 use super::{open_cli_store, open_cli_store_read_only};
 
+mod account_updates;
+use account_updates::record_imported_account_updates;
+
 // ---------------------------------------------------------------------------
 // SECURITY: residual offline-guessing risk (#576)
 // ---------------------------------------------------------------------------
@@ -341,6 +344,7 @@ pub(super) fn import_validated_vault_bundle(
         &health_rows,
     )?;
     validate_new_imported_lane_urls(&entries, &local_entries, vault_key)?;
+    record_imported_account_updates(&transaction, &entries, vault_key)?;
 
     transaction
         .vault_set_config(config)

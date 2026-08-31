@@ -10,6 +10,19 @@ use crate::vault::accounts::{
 };
 
 impl VaultTransaction<'_> {
+    /// Whether replacing this physical entry must also update a durable
+    /// account identity. This check shares the caller's write transaction.
+    pub fn vault_account_entry_is_tracked(&self, entry_name: &str) -> Result<bool, MemoryError> {
+        for account in db::list_provider_accounts(self.connection())? {
+            if db::get_account_custody(self.connection(), &account.account_id)?
+                .is_some_and(|custody| custody.custody_target == entry_name)
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     /// Observe one already-validated ModelApi entry. Existing custody is the
     /// rotation-stable identity; fingerprint matches only discover an identity
     /// when no account already owns this entry. Ambiguity never mints another

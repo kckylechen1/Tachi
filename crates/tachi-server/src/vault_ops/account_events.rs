@@ -18,6 +18,14 @@ pub(crate) fn observe_account_entry(
         || crate::provider_config::parse_vault_alias(value).is_some()
         || value.trim().is_empty()
     {
+        if transaction
+            .vault_account_entry_is_tracked(name)
+            .map_err(|error| format!("read provider account custody: {error}"))?
+        {
+            return Err(format!(
+                "Vault account '{name}' owns a durable ModelApi identity; refusing a non-API-key, empty, or alias replacement that would invalidate its custody"
+            ));
+        }
         return Ok(None);
     }
     let kind = crate::status_ops::status_health::provider_kind_for_env_name(name)
