@@ -240,8 +240,12 @@ mod imp {
             }
             // SAFETY: fstat succeeded and initialized stat.
             let stat = unsafe { stat.assume_init() };
+            #[cfg(target_os = "linux")]
+            let device = stat.st_dev;
+            #[cfg(not(target_os = "linux"))]
+            let device = stat.st_dev as u64;
             Ok(DirectoryIdentity {
-                device: stat.st_dev as u64,
+                device,
                 inode: stat.st_ino,
             })
         }
