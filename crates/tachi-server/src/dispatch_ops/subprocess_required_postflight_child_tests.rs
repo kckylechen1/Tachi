@@ -16,6 +16,48 @@ const DESCENDANT_WRONG_GROUP_AFTER_DENIAL: i32 = 6;
 const DESCENDANT_WRONG_SETID_RESULT: i32 = 7;
 const DESCENDANT_WRONG_GROUP_AFTER_SETID: i32 = 8;
 
+pub(super) async fn assert_descendant_setsid_discrimination() {
+    let mut descendant_command =
+        Command::new(std::env::current_exe().expect("current test binary"));
+    descendant_command
+        .arg(DESCENDANT_PROBE_TEST_NAME)
+        .arg("--exact")
+        .arg("--nocapture")
+        .env("TACHI_TEST_REQUIRED_POSTFLIGHT_DESCENDANT_MODE", "deny");
+    let contained_descendant =
+        run_agent_subprocess_with_liveness(descendant_command, Duration::from_secs(10), true, None)
+            .await;
+    let result = contained_descendant
+        .result
+        .expect("contained non-leader descendant probe must pass");
+    assert_eq!(result.exit_code, Some(0));
+    assert!(matches!(
+        contained_descendant.liveness,
+        crate::exec_env_postflight::RunnerLivenessEvidence::ConfirmedReaped {
+            proof: "kernel_denied_process_group_escape_and_owned_group_absent"
+        }
+    ));
+
+    let mut control_command = Command::new(std::env::current_exe().expect("current test binary"));
+    control_command
+        .arg(DESCENDANT_PROBE_TEST_NAME)
+        .arg("--exact")
+        .arg("--nocapture")
+        .env("TACHI_TEST_REQUIRED_POSTFLIGHT_DESCENDANT_MODE", "allow");
+    let uncontained_control =
+        run_agent_subprocess_with_liveness(control_command, Duration::from_secs(10), false, None)
+            .await;
+    let result = uncontained_control
+        .result
+        .expect("uncontained non-leader descendant control must pass");
+    assert_eq!(result.exit_code, Some(0));
+    assert!(matches!(
+        uncontained_control.liveness,
+        crate::exec_env_postflight::RunnerLivenessEvidence::Indeterminate { detail }
+            if detail.contains("could have escaped it with setsid()")
+    ));
+}
+
 #[cfg(target_os = "linux")]
 fn current_errno() -> libc::c_int {
     // SAFETY: libc exposes the calling thread's errno location; this reads
@@ -140,11 +182,7 @@ fn reap_descendant(descendant_pid: libc::pid_t) -> i32 {
         panic!("required-postflight descendant waitpid failed");
     }
     let status = std::process::ExitStatus::from_raw(status);
-    assert!(
-        status.success(),
-        "required-postflight descendant exited abnormally: {status:?}"
-    );
     status
         .code()
-        .expect("required-postflight descendant must exit with a code")
+        .unwrap_or_else(|| panic!("required-postflight descendant exited abnormally: {status:?}"))
 }
