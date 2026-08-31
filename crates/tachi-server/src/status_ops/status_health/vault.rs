@@ -26,7 +26,7 @@ pub(crate) struct KeychainApiKeyScan {
     pub dropped: HashMap<String, AliasSkipClass>,
     pub rotation_prefixes: HashSet<String>,
     pub source_readable: bool,
-    pub acl_revision: Option<u64>,
+    pub acl_revision: Option<crate::vault_ops::VaultMaterializationRevision>,
 }
 
 pub(crate) fn load_keychain_vault_api_key_values(
@@ -106,8 +106,12 @@ fn load_keychain_vault_api_key_scan_with_password(
 
     let entries = transaction.vault_list_entries()?;
     let rotations = transaction.vault_list_rotations()?;
-    let acl_revision =
-        crate::vault_ops::vault_materialization_acl_revision_from_rows(&entries, &rotations);
+    let key_health_rows = transaction.vault_list_key_health(None)?;
+    let acl_revision = crate::vault_ops::vault_materialization_acl_revision_from_rows(
+        &entries,
+        &rotations,
+        &key_health_rows,
+    );
     for rotation in &rotations {
         if crate::vault_ops::is_lane_slot_secret_name(&rotation.prefix) {
             continue;
@@ -124,7 +128,6 @@ fn load_keychain_vault_api_key_scan_with_password(
         .filter(|rotation| !crate::vault_ops::is_lane_slot_secret_name(&rotation.prefix))
         .map(|rotation| rotation.prefix)
         .collect::<HashSet<_>>();
-    let key_health_rows = transaction.vault_list_key_health(None)?;
     let mut scan = scan_keychain_api_key_entries(
         entries,
         &key,

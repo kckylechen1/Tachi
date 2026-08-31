@@ -2,11 +2,10 @@ use crate::server_state::MemoryServer;
 use crate::vault_crypto as crypto;
 use chrono::Utc;
 use memcore::vault::{
-    api_key_pool_member_index, VaultEntry, VaultKeyHealth, VaultKeyRotation, SECRET_TYPE_API_KEY,
+    api_key_pool_member_index, VaultEntry, VaultKeyRotation, SECRET_TYPE_API_KEY,
 };
 use memcore::MemoryStore;
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::hash::{Hash, Hasher};
 use tachi_llm::AliasSkipClass;
 
 use super::alias_integrity::unusable_skip_class;
@@ -16,6 +15,10 @@ use super::session::{ensure_vault_unlocked, with_vault_key, with_vault_key_for_p
 
 mod health_snapshot;
 use health_snapshot::merged_provider_key_health;
+mod revision;
+pub(crate) use revision::{
+    vault_materialization_acl_revision_from_rows, VaultMaterializationRevision,
+};
 
 #[derive(Debug)]
 pub(super) enum VaultOpsError {
@@ -735,57 +738,7 @@ pub(crate) struct ProviderSecretScan {
     pub pools: HashMap<String, Vec<tachi_llm::ProviderSecret>>,
     pub dropped: HashMap<String, AliasSkipClass>,
     pub lane_config_values: crate::provider_config::LaneConfigValues,
-    pub acl_revision: u64,
-}
-
-pub(crate) fn vault_materialization_acl_revision_from_rows(
-    entries: &[VaultEntry],
-    rotations: &[VaultKeyRotation],
-) -> u64 {
-    vault_materialization_acl_revision_from_rows_with_health(entries, rotations, &[])
-}
-
-pub(crate) fn vault_materialization_acl_revision_from_rows_with_health(
-    entries: &[VaultEntry],
-    rotations: &[VaultKeyRotation],
-    key_health: &[VaultKeyHealth],
-) -> u64 {
-    let mut entries = entries.iter().collect::<Vec<_>>();
-    entries.sort_by(|left, right| left.name.cmp(&right.name));
-    let mut rotations = rotations.iter().collect::<Vec<_>>();
-    rotations.sort_by(|left, right| left.prefix.cmp(&right.prefix));
-    let mut key_health = key_health.iter().collect::<Vec<_>>();
-    key_health.sort_by(|left, right| {
-        (&left.logical_name, &left.key_id).cmp(&(&right.logical_name, &right.key_id))
-    });
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    for entry in entries {
-        entry.name.hash(&mut hasher);
-        entry.secret_type.hash(&mut hasher);
-        entry.allowed_agents.hash(&mut hasher);
-        entry.updated_at.hash(&mut hasher);
-    }
-    for rotation in rotations {
-        rotation.prefix.hash(&mut hasher);
-        rotation.current_index.hash(&mut hasher);
-        rotation.total_keys.hash(&mut hasher);
-        rotation.rotation_strategy.hash(&mut hasher);
-    }
-    for health in key_health {
-        health.logical_name.hash(&mut hasher);
-        health.key_id.hash(&mut hasher);
-        health.status.hash(&mut hasher);
-        health.cooldown_until.hash(&mut hasher);
-        health.last_success.hash(&mut hasher);
-        health.last_attempt.hash(&mut hasher);
-        health.last_error.hash(&mut hasher);
-        health.error_count.hash(&mut hasher);
-        health.auth_failed.hash(&mut hasher);
-        health.disabled.hash(&mut hasher);
-        health.metadata.hash(&mut hasher);
-        health.updated_at.hash(&mut hasher);
-    }
-    hasher.finish()
+    pub acl_revision: VaultMaterializationRevision,
 }
 
 /// Same scan as [`load_unlocked_api_key_secret_pools`], plus the drop reason
@@ -844,7 +797,7 @@ fn load_unlocked_api_key_secret_pools_filtered(
             let key_health_rows = transaction
                 .vault_list_key_health(None)
                 .map_err(|e| format!("Failed to list Vault key health: {e}"))?;
-            let acl_revision = vault_materialization_acl_revision_from_rows_with_health(
+            let acl_revision = vault_materialization_acl_revision_from_rows(
                 &entries,
                 &rotations,
                 &key_health_rows,

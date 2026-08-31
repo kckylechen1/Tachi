@@ -85,13 +85,24 @@ fn push_skipped_alias(report: &mut MaterializeReport, key: String, class: AliasS
 pub struct ProviderMaterializationSnapshot {
     resolved_pools: HashMap<String, Vec<ProviderSecret>>,
     retained_logical_names: HashSet<String>,
-    health_baseline: HashMap<String, HashMap<String, VaultKeyHealth>>,
     report: MaterializeReport,
 }
 
 impl ProviderMaterializationSnapshot {
     pub fn report(&self) -> &MaterializeReport {
         &self.report
+    }
+
+    /// Metadata-only membership check for a durable publication fence. This
+    /// uses the final resolved pools, including config.env aliases, without
+    /// reclassifying any scan-time drop or exposing plaintext.
+    pub fn uses_health_identity(&self, logical_name: &str, key_id: &str) -> bool {
+        self.resolved_pools.iter().any(|(pool, members)| {
+            members.iter().any(|member| {
+                LlmClient::provider_member_health_identities(pool, &member.key_id)
+                    .any(|identity| identity == (logical_name, key_id))
+            })
+        })
     }
 
     /// Validate and bind a candidate lane overlay against the exact logical
@@ -110,6 +121,7 @@ impl ProviderMaterializationSnapshot {
     fn publish<P>(
         self,
         llm: &LlmClient,
+        health_baseline: HashMap<String, HashMap<String, VaultKeyHealth>>,
         lane_config_overlay: Option<LaneConfigOverlay>,
         commit_companion_projection: P,
     ) -> Result<(), String>
@@ -402,11 +414,10 @@ where
         load.availability,
         &load.listed_drops,
         None,
-        health_baseline,
     )?;
     let (snapshot, lane_config_overlay, companion_projection) = prepare_runtime_snapshot(snapshot)?;
     let report = snapshot.report.clone();
-    snapshot.publish(llm, lane_config_overlay, || {
+    snapshot.publish(llm, health_baseline, lane_config_overlay, || {
         commit_companion_projection(companion_projection)
     })?;
     Ok(report)
@@ -436,10 +447,9 @@ where
         availability,
         &HashMap::new(),
         after_missing_alias_snapshot,
-        health_baseline,
     )?;
     let report = snapshot.report.clone();
-    snapshot.publish(llm, None, || Ok(()))?;
+    snapshot.publish(llm, health_baseline, None, || Ok(()))?;
     Ok(report)
 }
 
@@ -450,7 +460,6 @@ fn prepare_provider_materialization_under_guard<I, S>(
     availability: VaultSourceAvailability,
     listed_drops: &HashMap<String, AliasSkipClass>,
     mut after_missing_alias_snapshot: Option<Box<dyn FnOnce() + Send>>,
-    health_baseline: HashMap<String, HashMap<String, VaultKeyHealth>>,
 ) -> Result<ProviderMaterializationSnapshot, String>
 where
     I: IntoIterator<Item = S>,
@@ -561,7 +570,6 @@ where
     Ok(ProviderMaterializationSnapshot {
         resolved_pools,
         retained_logical_names,
-        health_baseline,
         report,
     })
 }

@@ -1,6 +1,9 @@
 use super::*;
 use std::collections::HashSet;
 
+mod health_publication;
+use health_publication::{has_newly_unusable_health, preserve_newer_health_observations};
+
 impl super::super::LlmClient {
     #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
@@ -90,6 +93,7 @@ impl super::super::LlmClient {
     /// complete lane overlay under one provider-state write lock. A caller
     /// that supplies `Some` gets one linearization point for both surfaces;
     /// `None` preserves the existing overlay for legacy pool-only callers.
+    #[cfg(test)]
     pub(crate) fn publish_provider_secret_pools<P>(
         &self,
         replacement: HashMap<String, Vec<ProviderSecret>>,
@@ -144,18 +148,6 @@ impl super::super::LlmClient {
     {
         let loaded = replacement.len();
         let replacement_logical_names = replacement.keys().cloned().collect::<HashSet<_>>();
-        let replacement_member_ids = replacement
-            .iter()
-            .map(|(logical_name, entries)| {
-                (
-                    logical_name.clone(),
-                    entries
-                        .iter()
-                        .map(|entry| entry.key_id.clone())
-                        .collect::<HashSet<_>>(),
-                )
-            })
-            .collect::<HashMap<_, _>>();
         let mut retained_members_by_logical = HashMap::new();
         for logical_name in retained_logical_names {
             let Some(entries) = replacement.get(logical_name) else {
@@ -171,6 +163,15 @@ impl super::super::LlmClient {
             .provider_state
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // The Vault fence excludes durable writers, but runtime outcomes only
+        // take this state lock. Check their identities at the publication
+        // boundary, before either the pools or companion projection changes.
+        if has_newly_unusable_health(&state, &replacement, &health_baseline) {
+            return Err(
+                "Provider health changed before publication and an admitted credential is unusable; retry provider refresh"
+                    .to_string(),
+            );
+        }
         // Stage the complete next state while readers are blocked, then commit
         // the companion transaction. Vault-backed callers keep their source
         // mutation fence inside that commit callback, so the in-memory
@@ -211,13 +212,7 @@ impl super::super::LlmClient {
             members.retain(|key_id, _snapshot| retained_members.contains(key_id));
             !members.is_empty()
         });
-        preserve_newer_health_observations(
-            &mut next,
-            &previous,
-            &replacement_member_ids,
-            &health_baseline,
-            retained_logical_names,
-        );
+        preserve_newer_health_observations(&mut next, &previous, &health_baseline);
         *state = next;
         if let Some(hook) = before_companion_commit {
             hook();
@@ -506,99 +501,4 @@ impl super::super::LlmClient {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         state.health.clone()
     }
-}
-
-/// Preserve a health outcome that arrived after the durable pool snapshot but
-/// before publication acquired the provider-state write lock. Replaced pools
-/// intentionally discard their old health, including when a member id is
-/// reused; only an observation newer than the materialization-start baseline
-/// crosses that boundary. Retained last-known-good pools remain governed by
-/// `retained_logical_names` and keep their complete operational state.
-fn preserve_newer_health_observations(
-    next: &mut ProviderState,
-    previous: &ProviderState,
-    replacement_member_ids: &HashMap<String, HashSet<String>>,
-    health_baseline: &HashMap<String, HashMap<String, VaultKeyHealth>>,
-    retained_logical_names: &HashSet<String>,
-) {
-    for (logical_name, member_ids) in replacement_member_ids {
-        if retained_logical_names.contains(logical_name) {
-            continue;
-        }
-        for key_id in member_ids {
-            let Some(current) = previous
-                .health
-                .get(logical_name)
-                .and_then(|members| members.get(key_id))
-            else {
-                continue;
-            };
-            let baseline = health_baseline
-                .get(logical_name)
-                .and_then(|members| members.get(key_id));
-            if !health_observation_is_newer(current, baseline) {
-                continue;
-            }
-
-            next.health
-                .entry(logical_name.clone())
-                .or_default()
-                .insert(key_id.clone(), current.clone());
-            let snapshot = previous
-                .health_snapshots
-                .get(logical_name)
-                .and_then(|members| members.get(key_id))
-                .cloned()
-                .unwrap_or_else(|| ProviderHealthSnapshot::from_health(current));
-            next.health_snapshots
-                .entry(logical_name.clone())
-                .or_default()
-                .insert(key_id.clone(), snapshot);
-            if let Some(cooldown) = previous
-                .cooldowns
-                .get(logical_name)
-                .and_then(|members| members.get(key_id))
-            {
-                next.cooldowns
-                    .entry(logical_name.clone())
-                    .or_default()
-                    .insert(key_id.clone(), *cooldown);
-            }
-        }
-    }
-}
-
-fn health_observation_is_newer(
-    current: &VaultKeyHealth,
-    baseline: Option<&VaultKeyHealth>,
-) -> bool {
-    let Some(baseline) = baseline else {
-        return true;
-    };
-    if health_rows_equal(current, baseline) {
-        return false;
-    }
-    match (
-        chrono::DateTime::parse_from_rfc3339(&current.updated_at).ok(),
-        chrono::DateTime::parse_from_rfc3339(&baseline.updated_at).ok(),
-    ) {
-        (Some(current_at), Some(baseline_at)) => current_at >= baseline_at,
-        (Some(_), None) | (None, None) => true,
-        (None, Some(_)) => false,
-    }
-}
-
-fn health_rows_equal(left: &VaultKeyHealth, right: &VaultKeyHealth) -> bool {
-    left.logical_name == right.logical_name
-        && left.key_id == right.key_id
-        && left.status == right.status
-        && left.cooldown_until == right.cooldown_until
-        && left.last_success == right.last_success
-        && left.last_attempt == right.last_attempt
-        && left.last_error == right.last_error
-        && left.error_count == right.error_count
-        && left.auth_failed == right.auth_failed
-        && left.disabled == right.disabled
-        && left.metadata == right.metadata
-        && left.updated_at == right.updated_at
 }

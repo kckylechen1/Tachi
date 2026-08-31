@@ -3,6 +3,25 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use super::super::LlmClient;
 use super::*;
 
+impl LlmClient {
+    /// A lane slot's member id names its actual account. Other pools retain
+    /// exact logical/member health identity: equal member ids alone never
+    /// couple independent pools or rotation prefixes.
+    pub(crate) fn provider_member_health_identities<'a>(
+        logical_name: &'a str,
+        key_id: &'a str,
+    ) -> impl Iterator<Item = (&'a str, &'a str)> {
+        let bound_slot =
+            logical_name != key_id && crate::provider_names::is_lane_slot_secret_name(logical_name);
+        [
+            Some((logical_name, key_id)),
+            bound_slot.then_some((key_id, key_id)),
+        ]
+        .into_iter()
+        .flatten()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(in crate::llm) struct ProviderHealthSnapshot {
     pub(in crate::llm) availability: KeyAvailability,
@@ -281,6 +300,22 @@ mod persist_tracker_tests {
 }
 
 impl ProviderState {
+    pub(in crate::llm) fn health_availability(
+        &self,
+        logical_name: &str,
+        key_id: &str,
+        now: DateTime<Utc>,
+    ) -> (KeyAvailability, Option<i64>) {
+        LlmClient::provider_member_health_identities(logical_name, key_id)
+            .filter_map(|(logical, member)| self.health_snapshots.get(logical)?.get(member))
+            .map(|snapshot| snapshot.availability_at(now))
+            .find(|(availability, remaining)| {
+                *availability != KeyAvailability::Available
+                    && (*availability != KeyAvailability::Cooldown || remaining.unwrap_or(0) > 0)
+            })
+            .unwrap_or((KeyAvailability::Available, None))
+    }
+
     pub(in crate::llm) fn with_health(
         health: HashMap<String, HashMap<String, VaultKeyHealth>>,
     ) -> Self {
@@ -358,9 +393,9 @@ impl ProviderState {
         logical_name: &str,
         key_id: &str,
     ) -> Option<&Instant> {
-        self.cooldowns
-            .get(logical_name)
-            .and_then(|members| members.get(key_id))
+        LlmClient::provider_member_health_identities(logical_name, key_id)
+            .filter_map(|(logical, member)| self.cooldowns.get(logical)?.get(member))
+            .max()
     }
 
     pub(in crate::llm) fn is_cooling_down(&self, logical_name: &str, key_id: &str) -> bool {
