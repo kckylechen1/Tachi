@@ -404,8 +404,9 @@ fn is_bindable_account_metadata(entry: &VaultEntry) -> bool {
 
 /// Decrypt candidate accounts needed by the decision. Explicit pointers name
 /// required targets and fail loudly when those rows are corrupt, but ACL and
-/// structural eligibility are checked first. Raw matching skips unrelated,
-/// unauthorized, and structurally ineligible rows before decrypting them.
+/// structural eligibility are checked first. Raw matching skips unauthorized
+/// rows before decrypting them. Authorized provider-shaped rows remain available
+/// for the existing unregistered-account refusal diagnostic, never for binding.
 fn decrypt_candidate_account_rows(
     master_key: &[u8; 32],
     entries: &[VaultEntry],
@@ -427,7 +428,7 @@ fn decrypt_candidate_account_rows(
             }
             continue;
         }
-        if !is_bindable_account_metadata(entry) {
+        if required && !is_bindable_account_metadata(entry) {
             continue;
         }
         let value = match decrypt_secret_value(master_key, entry, "Vault") {
@@ -598,7 +599,8 @@ pub(crate) fn decide_lane_slot_write(
         find_matching_account(master_key, new_value, accounts).ok_or_else(|| {
             format!(
                 "Lane slot '{slot}' would store a second copy of ciphertext. \
-                 Store the key on a provider account (for example DEEPSEEK_API_KEY) \
+                 A matching provider account may be absent, unusable, or restricted. \
+                 Store the key on an accessible registered provider account \
                  then bind with {slot}=vault:ACCOUNT."
             )
         })?
