@@ -1936,11 +1936,6 @@ pub(crate) fn configure_required_postflight_containment(_cmd: &mut Command) -> b
     false
 }
 
-// The containment escape probe runs on every platform that installs a
-// required-postflight escape filter: macOS (seatbelt) and Linux
-// x86_64/aarch64 (seccomp). On Linux the filter is installed in `pre_exec`
-// and inherited across exec, so this re-exec'd child asserts the seccomp
-// `SECCOMP_RET_ERRNO|EPERM` retention directly (#1877 conformance gap).
 #[cfg(all(
     test,
     any(
@@ -1951,28 +1946,19 @@ pub(crate) fn configure_required_postflight_containment(_cmd: &mut Command) -> b
         )
     )
 ))]
-#[test]
-fn required_postflight_containment_child_cannot_setsid() {
-    if std::env::var_os("TACHI_TEST_ATTEMPT_SETSID").is_none() {
-        return;
-    }
-    // SAFETY: setsid takes no pointers. The required-postflight sandbox must
-    // deny this process-control operation with EPERM.
-    let result = unsafe { libc::setsid() };
-    assert_eq!(result, -1, "required worker unexpectedly escaped its group");
-    assert_eq!(
-        std::io::Error::last_os_error().raw_os_error(),
-        Some(libc::EPERM)
-    );
-}
+#[path = "subprocess_required_postflight_child_tests.rs"]
+mod required_postflight_child_tests;
 
-// Linux twin of the macOS-only discrimination test (#1877): the parent
-// spawns the re-exec'd child through `run_agent_subprocess_with_liveness`
-// with `require_postflight_containment = true`, so on Linux the seccomp
-// escape filter is actually installed and the child's `setsid` must fail
-// with EPERM while the runner still proves owned-group absence. The proof
-// emission path (`run_agent_subprocess_inner` ->
-// `terminate_reap_and_prove`) is platform-independent unix code.
+// The parent spawns the re-exec'd child through
+// `run_agent_subprocess_with_liveness` with `require_postflight_containment =
+// true`, so the platform's required-postflight escape control is installed
+// and the child's `setsid` must fail with EPERM while the runner still proves
+// owned-group absence. The proof emission path
+// (`run_agent_subprocess_inner` -> `terminate_reap_and_prove`) is
+// platform-independent unix code. The descendant probe below is the
+// discriminator: a forked non-process-group leader can call `setsid` in the
+// uncontained control, so EPERM in the contained run comes from inherited
+// containment rather than the kernel's process-group-leader rule.
 #[cfg(all(
     test,
     any(
@@ -1987,7 +1973,8 @@ fn required_postflight_containment_child_cannot_setsid() {
 async fn required_postflight_kernel_containment_discriminates_setsid_escape() {
     let mut command = Command::new(std::env::current_exe().expect("current test binary"));
     command
-        .arg("required_postflight_containment_child_cannot_setsid")
+        .arg(required_postflight_child_tests::CONTAINMENT_CHILD_TEST_NAME)
+        .arg("--exact")
         .arg("--nocapture")
         .env("TACHI_TEST_ATTEMPT_SETSID", "1");
     let outcome =
@@ -1999,6 +1986,46 @@ async fn required_postflight_kernel_containment_discriminates_setsid_escape() {
         crate::exec_env_postflight::RunnerLivenessEvidence::ConfirmedReaped {
             proof: "kernel_denied_process_group_escape_and_owned_group_absent"
         }
+    ));
+
+    let mut descendant_command =
+        Command::new(std::env::current_exe().expect("current test binary"));
+    descendant_command
+        .arg(required_postflight_child_tests::DESCENDANT_PROBE_TEST_NAME)
+        .arg("--exact")
+        .arg("--nocapture")
+        .env("TACHI_TEST_REQUIRED_POSTFLIGHT_DESCENDANT_MODE", "deny");
+    let contained_descendant =
+        run_agent_subprocess_with_liveness(descendant_command, Duration::from_secs(10), true, None)
+            .await;
+    let result = contained_descendant
+        .result
+        .expect("contained non-leader descendant probe must pass");
+    assert_eq!(result.exit_code, Some(0));
+    assert!(matches!(
+        contained_descendant.liveness,
+        crate::exec_env_postflight::RunnerLivenessEvidence::ConfirmedReaped {
+            proof: "kernel_denied_process_group_escape_and_owned_group_absent"
+        }
+    ));
+
+    let mut control_command = Command::new(std::env::current_exe().expect("current test binary"));
+    control_command
+        .arg(required_postflight_child_tests::DESCENDANT_PROBE_TEST_NAME)
+        .arg("--exact")
+        .arg("--nocapture")
+        .env("TACHI_TEST_REQUIRED_POSTFLIGHT_DESCENDANT_MODE", "allow");
+    let uncontained_control =
+        run_agent_subprocess_with_liveness(control_command, Duration::from_secs(10), false, None)
+            .await;
+    let result = uncontained_control
+        .result
+        .expect("uncontained non-leader descendant control must pass");
+    assert_eq!(result.exit_code, Some(0));
+    assert!(matches!(
+        uncontained_control.liveness,
+        crate::exec_env_postflight::RunnerLivenessEvidence::Indeterminate { detail }
+            if detail.contains("could have escaped it with setsid()")
     ));
 }
 
