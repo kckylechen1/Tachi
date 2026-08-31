@@ -191,8 +191,13 @@ pub(crate) fn rewrite_imported_lane_slots(
     let needs_raw_match = slot_plain
         .iter()
         .any(|(_, plain)| parse_vault_alias(plain.trim()).is_none());
-    let account_rows =
-        decrypt_candidate_account_rows(master_key, entries, &required_accounts, needs_raw_match)?;
+    let account_rows = decrypt_candidate_account_rows(
+        master_key,
+        entries,
+        &required_accounts,
+        needs_raw_match,
+        None,
+    )?;
     let accounts = SensitiveAccounts(bindable_accounts(account_rows.0.iter().cloned()));
     let mut out = entries.to_vec();
     for (idx, plain) in slot_plain {
@@ -269,8 +274,13 @@ pub(crate) fn write_lane_slot_binding(
         || existing_plain
             .as_deref()
             .is_some_and(|value| parse_vault_alias(value.trim()).is_none());
-    let account_rows =
-        decrypt_candidate_account_rows(master_key, &entries, &required_accounts, needs_raw_match)?;
+    let account_rows = decrypt_candidate_account_rows(
+        master_key,
+        &entries,
+        &required_accounts,
+        needs_raw_match,
+        effective_agent_id,
+    )?;
     let accounts = SensitiveAccounts(bindable_accounts(account_rows.0.iter().cloned()));
     let decided = decide_lane_slot_write(
         master_key,
@@ -385,26 +395,44 @@ fn is_candidate_account_entry(entry: &VaultEntry) -> bool {
             == SECRET_TYPE_API_KEY
 }
 
+fn is_bindable_account_metadata(entry: &VaultEntry) -> bool {
+    is_candidate_account_entry(entry)
+        && crate::status_ops::status_health::account_class_for_env_name(&entry.name)
+            == Some(memcore::AccountClass::ModelApi)
+        && crate::status_ops::status_health::provider_kind_for_env_name(&entry.name).is_some()
+}
+
 /// Decrypt candidate accounts needed by the decision. Explicit pointers name
-/// required targets and fail loudly when those rows are corrupt; raw matching
-/// may skip undecryptable unrelated rows and simply fail to match them.
+/// required targets and fail loudly when those rows are corrupt, but ACL and
+/// structural eligibility are checked first. Raw matching skips unrelated,
+/// unauthorized, and structurally ineligible rows before decrypting them.
 fn decrypt_candidate_account_rows(
     master_key: &[u8; 32],
     entries: &[VaultEntry],
     required_accounts: &[&str],
     needs_raw_match: bool,
+    effective_agent_id: Option<&str>,
 ) -> Result<SensitiveAccountRows, String> {
     let required_accounts: std::collections::HashSet<&str> =
         required_accounts.iter().copied().collect();
     let mut rows = SensitiveAccountRows(Vec::new());
-    for entry in entries
-        .iter()
-        .filter(|entry| is_candidate_account_entry(entry))
-        .filter(|entry| needs_raw_match || required_accounts.contains(entry.name.as_str()))
-    {
+    for entry in entries.iter().filter(|entry| {
+        required_accounts.contains(entry.name.as_str())
+            || (needs_raw_match && is_candidate_account_entry(entry))
+    }) {
+        let required = required_accounts.contains(entry.name.as_str());
+        if let Err(error) = super::access::ensure_agent_allowed(entry, effective_agent_id) {
+            if required {
+                return Err(error.to_string());
+            }
+            continue;
+        }
+        if !is_bindable_account_metadata(entry) {
+            continue;
+        }
         let value = match decrypt_secret_value(master_key, entry, "Vault") {
             Ok(value) => value,
-            Err(_) if !required_accounts.contains(entry.name.as_str()) => {
+            Err(_) if !required => {
                 continue;
             }
             Err(error) => return Err(error),
