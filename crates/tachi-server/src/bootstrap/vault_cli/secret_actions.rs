@@ -504,7 +504,7 @@ async fn run_secret_action_with_reader(
                 .ok_or("Vault not initialized. Run `tachi vault init` first.")?;
             drop(store_ro);
 
-            let _key = read_verified_vault_key(
+            let key = read_verified_vault_key(
                 &config,
                 stdin_password,
                 keychain,
@@ -534,6 +534,11 @@ async fn run_secret_action_with_reader(
                     .into());
                 }
             }
+            crate::vault_ops::account_events::prepare_entry_removal(
+                &transaction,
+                key.bytes(),
+                &name,
+            )?;
             let removed = transaction
                 .vault_delete_entry(&name)
                 .map_err(|e| format!("vault_delete_entry: {e}"))?;
@@ -556,6 +561,8 @@ async fn run_secret_action_with_reader(
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    mod account_removal;
 
     #[tokio::test]
     async fn cli_lease_refuses_lane_config_before_daemon_or_store_access() {

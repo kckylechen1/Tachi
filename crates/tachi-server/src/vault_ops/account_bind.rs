@@ -198,8 +198,11 @@ pub(crate) fn rewrite_imported_lane_slots(
         .iter()
         .filter_map(|(_, plain)| parse_vault_alias(plain.trim()))
         .collect();
-    let (account_rows, _) =
-        decrypt_candidate_account_rows(master_key, entries, &required_accounts)?;
+    let needs_raw_match = slot_plain
+        .iter()
+        .any(|(_, plain)| parse_vault_alias(plain.trim()).is_none());
+    let account_rows =
+        decrypt_candidate_account_rows(master_key, entries, &required_accounts, needs_raw_match)?;
     let accounts = SensitiveAccounts(bindable_accounts(account_rows.0.iter().cloned()));
     let mut out = entries.to_vec();
     for (idx, plain) in slot_plain {
@@ -272,8 +275,12 @@ pub(crate) fn write_lane_slot_binding(
     {
         required_accounts.push(account);
     }
-    let (account_rows, skipped_corrupt_accounts) =
-        decrypt_candidate_account_rows(master_key, &entries, &required_accounts)?;
+    let needs_raw_match = parse_vault_alias(new_value.trim()).is_none()
+        || existing_plain
+            .as_deref()
+            .is_some_and(|value| parse_vault_alias(value.trim()).is_none());
+    let account_rows =
+        decrypt_candidate_account_rows(master_key, &entries, &required_accounts, needs_raw_match)?;
     let accounts = SensitiveAccounts(bindable_accounts(account_rows.0.iter().cloned()));
     let decided = decide_lane_slot_write(
         master_key,
@@ -284,19 +291,6 @@ pub(crate) fn write_lane_slot_binding(
         rebind,
     )
     .map_err(|error| enrich_unmatched_account_error(error, new_value, &account_rows))?;
-    // A legacy raw slot has no named current target. If a candidate could not
-    // be decrypted, refusing rebind is the only fail-closed choice: otherwise
-    // corruption could be mistaken for proof that the old family is absent.
-    if decided.rebound
-        && skipped_corrupt_accounts
-        && existing_plain
-            .as_deref()
-            .is_some_and(|value| parse_vault_alias(value).is_none())
-    {
-        return Err(format!(
-            "Lane slot '{name}' has an unverifiable leftover ciphertext; refusing to rebind while provider account rows are corrupt"
-        ));
-    }
     let target_entry = entries
         .iter()
         .find(|entry| entry.name == decided.account)
@@ -408,19 +402,19 @@ fn decrypt_candidate_account_rows(
     master_key: &[u8; 32],
     entries: &[VaultEntry],
     required_accounts: &[&str],
-) -> Result<(SensitiveAccountRows, bool), String> {
+    needs_raw_match: bool,
+) -> Result<SensitiveAccountRows, String> {
     let required_accounts: std::collections::HashSet<&str> =
         required_accounts.iter().copied().collect();
-    let mut skipped_corrupt_accounts = false;
     let mut rows = SensitiveAccountRows(Vec::new());
     for entry in entries
         .iter()
         .filter(|entry| is_candidate_account_entry(entry))
+        .filter(|entry| needs_raw_match || required_accounts.contains(entry.name.as_str()))
     {
         let value = match decrypt_secret_value(master_key, entry, "Vault") {
             Ok(value) => value,
             Err(_) if !required_accounts.contains(entry.name.as_str()) => {
-                skipped_corrupt_accounts = true;
                 continue;
             }
             Err(error) => return Err(error),
@@ -431,7 +425,7 @@ fn decrypt_candidate_account_rows(
             entry.secret_type.clone(),
         ));
     }
-    Ok((rows, skipped_corrupt_accounts))
+    Ok(rows)
 }
 
 fn enrich_unmatched_account_error(
@@ -595,12 +589,23 @@ pub(crate) fn decide_lane_slot_write(
     let pointer = format!("vault:{}", target.name);
     let current = current_pointer(existing_slot_value);
     let old_match = current_account_match(master_key, existing_slot_value, accounts);
+    // Legacy bytes still have truthful keyed evidence even if their original
+    // account no longer exists. The slot-name domain identifies raw stored
+    // bytes, not an inferred provider identity; explicit rebind is still required.
+    let old_fingerprint = old_match
+        .as_ref()
+        .map(|account| account.fingerprint.clone())
+        .or_else(|| {
+            existing_slot_value
+                .filter(|value| parse_vault_alias(value).is_none())
+                .map(|value| fingerprint_secret(master_key, slot, value))
+        });
 
     if current == Some(target.name.as_str()) {
         return Ok(LaneSlotDecision {
             store_value: pointer,
             account: target.name,
-            old_fingerprint: old_match.map(|account| account.fingerprint),
+            old_fingerprint,
             new_fingerprint: target.fingerprint.clone(),
             fingerprint: target.fingerprint,
             rebound: false,
@@ -622,7 +627,7 @@ pub(crate) fn decide_lane_slot_write(
         return Ok(LaneSlotDecision {
             store_value: pointer,
             account: target.name,
-            old_fingerprint: old_match.map(|account| account.fingerprint),
+            old_fingerprint,
             new_fingerprint: target.fingerprint.clone(),
             fingerprint: target.fingerprint,
             rebound: false,
@@ -634,10 +639,7 @@ pub(crate) fn decide_lane_slot_write(
         let old = current
             .map(|name| format!("vault:{name}"))
             .unwrap_or_else(|| "a leftover ciphertext row".to_string());
-        let old_fingerprint = old_match
-            .as_ref()
-            .map(|account| account.fingerprint.as_str())
-            .unwrap_or("unavailable");
+        let old_fingerprint = old_fingerprint.as_deref().unwrap_or("unavailable");
         return Err(format!(
             "Lane slot '{slot}' is bound to {old} (old_fingerprint={old_fingerprint}); new binding is vault:{} (new_fingerprint={}). \
              Pass rebind=true / --rebind to change account family. \
@@ -649,7 +651,7 @@ pub(crate) fn decide_lane_slot_write(
     Ok(LaneSlotDecision {
         store_value: pointer,
         account: target.name,
-        old_fingerprint: old_match.map(|account| account.fingerprint),
+        old_fingerprint,
         new_fingerprint: target.fingerprint.clone(),
         fingerprint: target.fingerprint,
         rebound: true,
@@ -1154,8 +1156,8 @@ mod tests {
     #[test]
     fn rewrite_imported_lane_slots_skips_unrelated_corrupt_account() {
         let mut unrelated = encrypted_entry("SILICONFLOW_API_KEY", "unrelated-secret");
-        unrelated.encrypted_value = vec![0x01, 0x02, 0x03];
-        unrelated.nonce = vec![0x04, 0x05];
+        unrelated.encrypted_value = "corrupt-ciphertext".into();
+        unrelated.nonce = "corrupt-nonce".into();
         let rewritten = rewrite_imported_lane_slots(
             &MASTER,
             &[

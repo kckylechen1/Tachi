@@ -51,6 +51,16 @@ pub(super) fn collect_lane_slot_report_evidence(
             record_metadata(evidence, slot);
             continue;
         };
+        // Restricted material is not decrypted just to report that it cannot
+        // be used. The shared full guard below also checks class/type/health.
+        if target
+            .allowed_agents
+            .as_ref()
+            .is_some_and(|agents| !agents.is_empty())
+        {
+            record_metadata(evidence, slot);
+            continue;
+        }
         let Some(mut target_value) = decrypt_value(target, key) else {
             record_metadata(evidence, slot);
             continue;

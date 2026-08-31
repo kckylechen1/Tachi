@@ -533,8 +533,8 @@ fn vault_upsert_lane_slot_ignores_unrelated_corrupt_accounts() {
             entry.encrypted_value = encrypted_value;
             entry.nonce = nonce;
         } else {
-            entry.encrypted_value = vec![0x01, 0x02, 0x03];
-            entry.nonce = vec![0x04, 0x05];
+            entry.encrypted_value = "corrupt-ciphertext".into();
+            entry.nonce = "corrupt-nonce".into();
         }
         store.vault_upsert_entry(&entry).expect("corrupt account");
     }

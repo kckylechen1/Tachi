@@ -24,8 +24,8 @@ impl VaultTransaction<'_> {
     }
 
     /// Observe one already-validated ModelApi entry. Existing custody is the
-    /// rotation-stable identity; fingerprint matches only discover an identity
-    /// when no account already owns this entry. Ambiguity never mints another
+    /// rotation-stable identity. A fingerprint match with different custody
+    /// requires explicit reconciliation, never an implicit move or a second
     /// account. Normal entry writes use `create_if_missing = false`; a first
     /// slot binding admits the account and its custody together.
     pub fn vault_observe_model_account_entry(
@@ -53,8 +53,13 @@ impl VaultTransaction<'_> {
         if owners.is_empty() && !create_if_missing {
             return Ok(None);
         }
-        if owners.is_empty() {
-            owners = db::find_provider_accounts_by_fingerprint(conn, account_fingerprint)?;
+        if owners.is_empty()
+            && !db::find_provider_accounts_by_fingerprint(conn, account_fingerprint)?.is_empty()
+        {
+            return Err(MemoryError::InvalidArg(
+                "matching credential already has different account custody; bind its canonical Vault entry or reconcile the duplicate before binding"
+                    .into(),
+            ));
         }
         if owners.len() > 1 {
             return Err(MemoryError::InvalidArg(
@@ -134,6 +139,58 @@ impl VaultTransaction<'_> {
             )?;
         }
         Ok(Some(account))
+    }
+
+    /// Plain secret deletion cannot implicitly retire an active account.
+    /// Removing a lane slot only retires that slot alias, with its event in
+    /// the same transaction as the caller's encrypted-row deletion.
+    pub fn vault_prepare_account_entry_removal(&self, name: &str) -> Result<(), MemoryError> {
+        let conn = self.connection();
+        let accounts = db::list_provider_accounts(conn)?;
+        for account in accounts
+            .iter()
+            .filter(|account| account.status == ACCOUNT_STATUS_ACTIVE)
+        {
+            let owns_custody = db::get_account_custody(conn, &account.account_id)?
+                .is_some_and(|custody| custody.custody_target == name);
+            let owns_alias = db::list_provider_account_aliases(conn, &account.account_id)?
+                .iter()
+                .any(|alias| {
+                    !alias.retired && alias.alias_name == name && alias.source_kind != "lane_slot"
+                });
+            if owns_custody || owns_alias {
+                return Err(MemoryError::InvalidArg(format!(
+                    "Vault entry '{name}' backs active provider-account custody or aliases; reconcile or explicitly retire that account before deletion"
+                )));
+            }
+        }
+        for account in accounts {
+            let is_slot_alias = db::list_provider_account_aliases(conn, &account.account_id)?
+                .iter()
+                .any(|alias| {
+                    !alias.retired && alias.alias_name == name && alias.source_kind == "lane_slot"
+                });
+            if is_slot_alias && db::retire_provider_account_alias(conn, &account.account_id, name)?
+            {
+                db::append_provider_account_event(
+                    conn,
+                    &NewProviderAccountEvent::new(
+                        &account.account_id,
+                        account.revision,
+                        EVENT_KIND_ALIAS_RETIRED,
+                    )
+                    .with_evidence(
+                        serde_json::json!({
+                            "alias_name": name,
+                            "source_kind": "lane_slot",
+                            "reason": "slot_removed",
+                        })
+                        .to_string(),
+                    ),
+                )?;
+            }
+        }
+        Ok(())
     }
 
     /// Move a slot alias without deleting history. Event persistence is part of

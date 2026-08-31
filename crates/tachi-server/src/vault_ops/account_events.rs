@@ -3,6 +3,49 @@
 use memcore::store::vault::VaultTransaction;
 use memcore::vault::fingerprint::FingerprintKey;
 
+pub(crate) fn prepare_entry_removal(
+    transaction: &VaultTransaction<'_>,
+    key: &[u8; 32],
+    name: &str,
+) -> Result<(), String> {
+    transaction
+        .vault_prepare_account_entry_removal(name)
+        .map_err(|error| format!("protect provider account custody: {error}"))?;
+    if super::is_lane_slot_secret_name(name)
+        || crate::status_ops::status_health::account_class_for_env_name(name)
+            != Some(memcore::AccountClass::ModelApi)
+    {
+        return Ok(());
+    }
+    // Legacy or imported pointers can predate canonical account observation.
+    // Validate their actual encrypted references inside the same write lock.
+    for slot in transaction
+        .vault_list_entries()
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .filter(|entry| super::is_lane_slot_secret_name(&entry.name))
+    {
+        let value =
+            crate::vault_crypto::ZeroizingString::new(crate::vault_crypto::decode_utf8_zeroizing(
+                crate::vault_crypto::decrypt(key, &slot.encrypted_value, &slot.nonce).map_err(
+                    |error| {
+                        format!(
+                            "cannot verify lane-slot references before account deletion: {error}"
+                        )
+                    },
+                )?,
+                "cannot verify non-UTF8 lane-slot references before account deletion",
+            )?);
+        if crate::provider_config::parse_vault_alias(&value) == Some(name) {
+            return Err(format!(
+                "Vault account '{name}' is referenced by lane slot '{}'; rebind or remove the slot before deleting its target",
+                slot.name
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn observe_account_entry(
     transaction: &VaultTransaction<'_>,
     key: &[u8; 32],
