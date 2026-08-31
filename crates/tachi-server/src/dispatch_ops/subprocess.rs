@@ -1812,8 +1812,6 @@ pub(crate) fn configure_required_postflight_containment(cmd: &mut Command) -> bo
     any(target_arch = "x86_64", target_arch = "aarch64")
 ))]
 pub(crate) fn configure_required_postflight_containment(cmd: &mut Command) -> bool {
-    use std::os::unix::process::CommandExt;
-
     // SAFETY: the closure runs after fork and before exec. It performs only
     // prctl syscalls plus stack-local BPF construction; no allocation or lock
     // is touched in the child. The installed filter is inherited across both
