@@ -1938,7 +1938,21 @@ pub(crate) fn configure_required_postflight_containment(_cmd: &mut Command) -> b
     false
 }
 
-#[cfg(all(test, target_os = "macos"))]
+// The containment escape probe runs on every platform that installs a
+// required-postflight escape filter: macOS (seatbelt) and Linux
+// x86_64/aarch64 (seccomp). On Linux the filter is installed in `pre_exec`
+// and inherited across exec, so this re-exec'd child asserts the seccomp
+// `SECCOMP_RET_ERRNO|EPERM` retention directly (#1877 conformance gap).
+#[cfg(all(
+    test,
+    any(
+        target_os = "macos",
+        all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )
+    )
+))]
 #[test]
 fn required_postflight_containment_child_cannot_setsid() {
     if std::env::var_os("TACHI_TEST_ATTEMPT_SETSID").is_none() {
@@ -1954,7 +1968,23 @@ fn required_postflight_containment_child_cannot_setsid() {
     );
 }
 
-#[cfg(all(test, target_os = "macos"))]
+// Linux twin of the macOS-only discrimination test (#1877): the parent
+// spawns the re-exec'd child through `run_agent_subprocess_with_liveness`
+// with `require_postflight_containment = true`, so on Linux the seccomp
+// escape filter is actually installed and the child's `setsid` must fail
+// with EPERM while the runner still proves owned-group absence. The proof
+// emission path (`run_agent_subprocess_inner` ->
+// `terminate_reap_and_prove`) is platform-independent unix code.
+#[cfg(all(
+    test,
+    any(
+        target_os = "macos",
+        all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )
+    )
+))]
 #[tokio::test]
 async fn required_postflight_kernel_containment_discriminates_setsid_escape() {
     let mut command = Command::new(std::env::current_exe().expect("current test binary"));
