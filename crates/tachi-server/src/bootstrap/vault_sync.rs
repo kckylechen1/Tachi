@@ -8,6 +8,8 @@ use super::{open_cli_store, open_cli_store_read_only};
 
 mod account_updates;
 use account_updates::record_imported_account_updates;
+mod import_key_requirement;
+pub(super) use import_key_requirement::unsigned_import_requires_vault_key;
 
 // ---------------------------------------------------------------------------
 // SECURITY: residual offline-guessing risk (#576)

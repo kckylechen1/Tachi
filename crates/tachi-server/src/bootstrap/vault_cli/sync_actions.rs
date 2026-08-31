@@ -87,18 +87,22 @@ pub(super) fn run_sync_action(
                 allow_unsigned && !vault_sync::bundle_has_signature(&input)?;
             let bundle_config = vault_sync::read_bundle_vault_config(&input)?;
             let key = if unsigned_without_signature {
-                bundle_config
-                    .as_ref()
-                    .map(|config| {
-                        read_verified_vault_key(
-                            config,
-                            stdin_password,
-                            keychain,
-                            password_file.as_deref(),
-                            insecure_password_file,
-                        )
-                    })
-                    .transpose()?
+                if vault_sync::unsigned_import_requires_vault_key(global_db_path, &input)? {
+                    bundle_config
+                        .as_ref()
+                        .map(|config| {
+                            read_verified_vault_key(
+                                config,
+                                stdin_password,
+                                keychain,
+                                password_file.as_deref(),
+                                insecure_password_file,
+                            )
+                        })
+                        .transpose()?
+                } else {
+                    None
+                }
             } else {
                 let config = bundle_config.ok_or(
                     "Cannot verify an entries-only bundle without a local Vault password: \
