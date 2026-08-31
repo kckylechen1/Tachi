@@ -151,6 +151,9 @@ pub(crate) async fn handle_vault_set(
                     }
                 }
 
+                crate::vault_ops::account_events::observe_account_entry(
+                    &transaction, key, &params.name, secret_type, &value, false,
+                )?;
                 transaction
                     .commit()
                     .map_err(|e| format!("Failed to commit vault transaction: {e}"))?;

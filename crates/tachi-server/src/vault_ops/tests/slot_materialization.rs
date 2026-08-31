@@ -95,6 +95,11 @@ async fn slot_lease_honors_memory_only_account_and_slot_health() {
                 .expect("healthy lease");
         assert_eq!(allowed.key_id, "DEEPSEEK_API_KEY");
         assert_eq!(allowed.value, "account-secret");
+        assert_eq!(
+            crate::vault_ops::read_unlocked_vault_secret(&server, "EXTRACT_API_KEY", None, false)
+                .unwrap(),
+            "account-secret"
+        );
         server.llm.record_provider_key_result(
             logical_name,
             "DEEPSEEK_API_KEY",
@@ -108,6 +113,11 @@ async fn slot_lease_honors_memory_only_account_and_slot_health() {
         assert!(
             denied.is_err(),
             "memory-only auth failure under {logical_name} must revoke slot lease"
+        );
+        assert!(
+            crate::vault_ops::read_unlocked_vault_secret(&server, "EXTRACT_API_KEY", None, false)
+                .is_err(),
+            "memory-only auth failure must also revoke direct slot materialization"
         );
     }
 }

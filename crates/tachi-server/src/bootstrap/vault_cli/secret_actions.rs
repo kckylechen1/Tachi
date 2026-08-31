@@ -192,6 +192,14 @@ async fn run_secret_action_with_reader(
                         .map_err(|error| format!("{error}; refusing rotation member update"))?;
                 }
             }
+            crate::vault_ops::account_events::observe_account_entry(
+                &transaction,
+                key.bytes(),
+                &name,
+                &secret_type,
+                &secret_value,
+                false,
+            )?;
             transaction
                 .commit()
                 .map_err(|e| format!("commit vault transaction: {e}"))?;
@@ -737,6 +745,47 @@ mod tests {
         assert!(error.contains("rebind"), "{error}");
         assert!(!error.contains("direct-original-family"), "{error}");
         assert!(!error.contains("direct-new-family"), "{error}");
+
+        let mut rebind_action = set_lane("explicit rebind");
+        if let VaultAction::Set { rebind, .. } = &mut rebind_action {
+            *rebind = true;
+        }
+        run_secret_action_with_reader(
+            &db_path,
+            temp.path(),
+            rebind_action,
+            &mut Cursor::new(b"direct-new-family\n".to_vec()),
+        )
+        .await
+        .expect("direct CLI rebind");
+        let store = open_cli_store_read_only(&db_path).expect("reopen event ledger");
+        let accounts = memcore::db::list_provider_accounts(store.connection()).unwrap();
+        assert_eq!(accounts.len(), 2);
+        let events = accounts
+            .iter()
+            .flat_map(|account| {
+                memcore::db::list_provider_account_events(store.connection(), &account.account_id)
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let event = events
+            .iter()
+            .find(|event| event.event_kind == "slot_rebind")
+            .expect("CLI durable rebind event");
+        let evidence: serde_json::Value = serde_json::from_str(&event.evidence).unwrap();
+        assert_eq!(evidence["slot"], "EXTRACT_API_KEY");
+        assert!(evidence["old_fingerprint"]
+            .as_str()
+            .unwrap()
+            .starts_with("fp1:"));
+        assert!(evidence["new_fingerprint"]
+            .as_str()
+            .unwrap()
+            .starts_with("fp1:"));
+        assert_ne!(evidence["old_fingerprint"], evidence["new_fingerprint"]);
+        assert!(!event.evidence.contains("direct-original-family"));
+        assert!(!event.evidence.contains("direct-new-family"));
+        drop(store);
 
         let (encrypted_value, nonce) =
             crate::vault_crypto::encrypt(key.bytes(), b"restricted-target-family")

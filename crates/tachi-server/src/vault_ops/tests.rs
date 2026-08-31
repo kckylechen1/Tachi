@@ -19,8 +19,8 @@ use crate::server_state::MemoryServer;
 use crate::test_support::EnvRestore;
 use std::time::{Duration, Instant};
 
-mod slot_materialization;
 mod slot_events;
+mod slot_materialization;
 
 #[test]
 fn authorized_vault_read_serializes_acl_revocation_with_selection_and_touch() {
@@ -2712,8 +2712,8 @@ async fn lane_slot_pool_skips_restricted_or_unhealthy_target() {
     let mut bind = vault_set_params("EXTRACT_API_KEY", "deepseek-secret-bytes", false);
     bind.agent_id = Some("owner-bot".to_string());
     handle_vault_set(&server, bind)
-    .await
-    .expect("unrestricted slot bind");
+        .await
+        .expect("unrestricted slot bind");
 
     let pools = crate::vault_ops::load_unlocked_api_key_secret_pools(&server).expect("pools");
     assert!(

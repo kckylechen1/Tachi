@@ -45,15 +45,23 @@ fn stored_slot_value(server: &crate::tests::TestServer, name: &str) -> String {
 
 async fn slot_value(server: &crate::tests::TestServer, name: &str) -> String {
     let get = server
-        .vault_get(Parameters(VaultGetParams {
+        .vault_lease_api_key(Parameters(VaultLeaseApiKeyParams {
             name: name.to_string(),
+            env_name: None,
             agent_id: None,
-            auto_rotate: false,
         }))
         .await
-        .expect("vault_get");
+        .expect("materialize account through public Vault lease");
     let json: serde_json::Value = serde_json::from_str(&get).expect("json");
-    json["value"].as_str().expect("value").to_string()
+    assert_eq!(json["leased"], true);
+    if crate::vault_ops::is_lane_slot_secret_name(name) {
+        let pointer = stored_slot_value(server, name);
+        assert_eq!(json["key_id"], pointer.strip_prefix("vault:").unwrap());
+    }
+    json["env"][name]
+        .as_str()
+        .expect("leased value")
+        .to_string()
 }
 
 /// tachi#1855: copying a different family into EXTRACT_API_KEY without

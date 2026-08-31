@@ -203,6 +203,14 @@ pub(in crate::bootstrap) fn vault_upsert_secret_with_key(
                 .map_err(|error| format!("{error}; refusing rotation member update"))?;
         }
     }
+    crate::vault_ops::account_events::observe_account_entry(
+        &transaction,
+        key.bytes(),
+        name,
+        secret_type,
+        &secret_value,
+        false,
+    )?;
     transaction
         .commit()
         .map_err(|e| format!("commit vault transaction: {e}"))?;
@@ -314,6 +322,7 @@ pub(super) fn decrypt_named_secret_value(
         .vault_get_entry(name)
         .map_err(|e| format!("vault_get_entry: {e}"))?
         .ok_or_else(|| format!("Vault secret '{name}' is missing"))?;
+    crate::vault_ops::validate_existing_lane_slot_secret_type(name, &entry.secret_type)?;
     if entry
         .allowed_agents
         .as_ref()
@@ -330,8 +339,8 @@ pub(super) fn decrypt_named_secret_value(
             decrypted,
             format!("Vault secret '{name}' is not valid UTF-8"),
         )?);
-    let resolved_value = if !crate::vault_ops::is_lane_slot_secret_name(name) {
-        value.to_string()
+    let mut resolved_value = if !crate::vault_ops::is_lane_slot_secret_name(name) {
+        value
     } else {
         let Some(target) = crate::provider_config::parse_vault_alias(&value) else {
             return Err(format!("Lane slot '{name}' is not bound to a usable account").into());
@@ -346,6 +355,16 @@ pub(super) fn decrypt_named_secret_value(
             .vault_get_entry(target)
             .map_err(|e| format!("vault_get_entry: {e}"))?
             .ok_or_else(|| format!("Lane slot target '{target}' is missing"))?;
+        if target_entry
+            .allowed_agents
+            .as_ref()
+            .is_some_and(|agents| !agents.is_empty())
+        {
+            return Err(format!(
+                "Access denied: direct CLI cannot read agent-restricted secret '{target}'"
+            )
+            .into());
+        }
         let target_decrypted =
             crate::vault_crypto::decrypt(key, &target_entry.encrypted_value, &target_entry.nonce)?;
         let target_value =
@@ -365,12 +384,12 @@ pub(super) fn decrypt_named_secret_value(
             None,
             health_unusable,
         )?;
-        target_value.to_string()
+        target_value
     };
     transaction
         .commit()
         .map_err(|e| format!("commit Vault profile-read transaction: {e}"))?;
-    Ok(resolved_value)
+    Ok(std::mem::take(resolved_value.as_mut_string()))
 }
 
 pub(super) fn decrypt_profile_secret_values(
@@ -396,12 +415,14 @@ pub(super) fn decrypt_profile_secret_values(
     )?;
     let store = open_cli_store(global_db_path)?;
 
-    let mut values = std::collections::HashMap::new();
+    let mut values: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     for name in tachi_credential_profile::profile_secret_names(profile) {
-        values.insert(
-            name.clone(),
-            decrypt_named_secret_value(&store, key.bytes(), &name)?,
-        );
+        let value = decrypt_named_secret_value(&store, key.bytes(), &name).inspect_err(|_| {
+            for value in values.values_mut() {
+                crate::vault_crypto::zero_string(value);
+            }
+        })?;
+        values.insert(name.clone(), value);
     }
     Ok(values)
 }

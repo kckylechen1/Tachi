@@ -333,7 +333,13 @@ pub(super) fn import_validated_vault_bundle(
     } else {
         Vec::new()
     };
-    validate_imported_lane_slots(&entries, &local_entries, vault_key, &health_rows)?;
+    validate_and_record_imported_lane_slots(
+        &transaction,
+        &entries,
+        &local_entries,
+        vault_key,
+        &health_rows,
+    )?;
     validate_new_imported_lane_urls(&entries, &local_entries, vault_key)?;
 
     transaction
@@ -400,7 +406,8 @@ fn validate_new_imported_lane_urls(
     Ok(())
 }
 
-fn validate_imported_lane_slots(
+fn validate_and_record_imported_lane_slots(
+    transaction: &memcore::store::vault::VaultTransaction<'_>,
     incoming: &[VaultEntry],
     local: &[VaultEntry],
     verification_key: Option<&[u8; 32]>,
@@ -458,6 +465,7 @@ fn validate_imported_lane_slots(
                     .find(|health| health.logical_name == target && health.key_id == target),
             ),
         )?;
+        let mut old_fingerprint = None;
         if let Some(existing) = local.iter().find(|entry| entry.name == lane.name) {
             let old_value = crate::vault_crypto::ZeroizingString::new(
                 crate::vault_crypto::decode_utf8_zeroizing(
@@ -502,8 +510,31 @@ fn validate_imported_lane_slots(
             for (_, value, _) in &mut accounts {
                 crate::vault_crypto::zero_string(value);
             }
-            decision?;
+            old_fingerprint = decision?.old_fingerprint;
         }
+        let account = crate::vault_ops::account_events::observe_account_entry(
+            transaction,
+            key,
+            &target_entry.name,
+            &target_entry.secret_type,
+            &target_value,
+            true,
+        )?
+        .ok_or("imported lane slot has no ModelApi account identity")?;
+        let kind = crate::status_ops::status_health::provider_kind_for_env_name(target)
+            .ok_or("imported account has no provider kind")?;
+        let new_fingerprint =
+            memcore::vault::fingerprint::FingerprintKey::derive_from_master_key(key)
+                .key_fingerprint(kind, target_value.trim());
+        transaction
+            .vault_record_slot_account_alias(
+                &account,
+                &lane.name,
+                old_fingerprint.as_deref(),
+                &new_fingerprint,
+                false,
+            )
+            .map_err(|error| format!("record imported slot account event: {error}"))?;
     }
     Ok(())
 }

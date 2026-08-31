@@ -43,17 +43,20 @@ pub(crate) fn validate_existing_lane_slot_secret_type(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(test)]
 pub(crate) enum LaneSlotOverwrite {
     Identical { fingerprint: String },
     Rebound { old_fp: String, new_fp: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(test)]
 pub(crate) struct LaneSlotRebindRequired {
     pub old_fp: String,
     pub new_fp: String,
 }
 
+#[cfg(test)]
 impl LaneSlotRebindRequired {
     pub fn operator_message(&self, slot: &str) -> String {
         format!(
@@ -72,6 +75,7 @@ pub(crate) fn fingerprint_secret(
     FingerprintKey::derive_from_master_key(master_key).key_fingerprint(provider_kind, value)
 }
 
+#[cfg(test)]
 pub(crate) fn evaluate_lane_slot_overwrite(
     old_value: &str,
     new_value: &str,

@@ -2,6 +2,7 @@
 
 mod access;
 pub(crate) mod account_bind;
+pub(crate) mod account_events;
 mod alias_integrity;
 mod audit;
 mod env;

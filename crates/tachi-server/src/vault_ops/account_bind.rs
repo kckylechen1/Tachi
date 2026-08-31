@@ -6,9 +6,9 @@
 //! `vault:ACCOUNT` or refuses. `--rebind` changes the pointer, never copies
 //! a new family into the slot row. Account names still rotate in place.
 
+use super::slot_rebind::fingerprint_secret;
 use crate::vault_crypto as crypto;
 use chrono::Utc;
-use memcore::vault::fingerprint::FingerprintKey;
 use memcore::vault::{VaultEntry, VaultKeyHealth, SECRET_TYPE_API_KEY};
 use memcore::MemoryStore;
 use tachi_llm::parse_vault_alias;
@@ -201,12 +201,12 @@ pub(crate) fn rewrite_imported_lane_slots(
         let decided = decide_lane_slot_write(
             master_key,
             &out[idx].name,
-            &*plain,
+            &plain,
             Some(&*plain),
             &accounts.0,
             false,
         )
-        .map_err(|error| enrich_unmatched_account_error(error, &*plain, &account_rows))?;
+        .map_err(|error| enrich_unmatched_account_error(error, &plain, &account_rows))?;
         let target_entry = entries
             .iter()
             .find(|entry| entry.name == decided.account)
@@ -218,7 +218,7 @@ pub(crate) fn rewrite_imported_lane_slots(
             .map(|(_, value, _)| value.as_str())
             .ok_or_else(|| format!("Imported lane slot target '{}' is missing", decided.account))?;
         refuse_unusable_account_target(&out[idx].name, target_entry, target_value, None, false)?;
-        if decided.store_value != &*plain {
+        if decided.store_value != *plain {
             let (encrypted_value, nonce) =
                 crypto::encrypt(master_key, decided.store_value.as_bytes())
                     .map_err(|e| format!("encrypt imported slot pointer: {e}"))?;
@@ -306,6 +306,24 @@ pub(crate) fn write_lane_slot_binding(
     transaction
         .vault_upsert_entry(&entry)
         .map_err(|e| format!("vault_upsert_entry lane slot: {e}"))?;
+    let account = super::account_events::observe_account_entry(
+        &transaction,
+        master_key,
+        &target_entry.name,
+        &target_entry.secret_type,
+        target_value,
+        true,
+    )?
+    .ok_or("lane slot target has no ModelApi account identity")?;
+    transaction
+        .vault_record_slot_account_alias(
+            &account,
+            name,
+            decided.old_fingerprint.as_deref(),
+            &decided.new_fingerprint,
+            decided.rebound,
+        )
+        .map_err(|error| format!("record slot account event: {error}"))?;
     transaction
         .commit()
         .map_err(|e| format!("commit lane slot transaction: {e}"))?;
@@ -435,10 +453,6 @@ pub(crate) struct LaneSlotDecision {
 struct AccountMatch {
     name: String,
     fingerprint: String,
-}
-
-fn fingerprint_secret(master_key: &[u8; 32], provider_kind: &str, value: &str) -> String {
-    FingerprintKey::derive_from_master_key(master_key).key_fingerprint(provider_kind, value)
 }
 
 fn find_matching_account(

@@ -2,7 +2,7 @@ use crate::server_state::MemoryServer;
 use crate::vault_crypto as crypto;
 use chrono::Utc;
 use memcore::vault::{
-    api_key_pool_member_index, VaultEntry, VaultKeyHealth, VaultKeyRotation, SECRET_TYPE_API_KEY,
+    api_key_pool_member_index, VaultEntry, VaultKeyRotation, SECRET_TYPE_API_KEY,
 };
 use memcore::MemoryStore;
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -13,6 +13,9 @@ use super::alias_integrity::unusable_skip_class;
 use super::params::VaultGetParams;
 use super::rotation::collect_rotation_entries;
 use super::session::{ensure_vault_unlocked, with_vault_key, with_vault_key_for_provider_refresh};
+
+mod health_snapshot;
+use health_snapshot::merged_provider_key_health;
 
 #[derive(Debug)]
 pub(super) enum VaultOpsError {
@@ -134,7 +137,7 @@ pub(super) fn authorize_vault_pool_mutation(
         .map_err(|e| VaultOpsError::Internal(format!("Failed to list entries: {e}")))?;
     for entry in &entries {
         if api_key_pool_member_index(&entry.name, prefix).is_some() {
-            ensure_agent_allowed(&entry, effective_agent_id.as_deref())?;
+            ensure_agent_allowed(entry, effective_agent_id.as_deref())?;
         }
     }
     Ok(())
@@ -330,6 +333,7 @@ fn read_usable_vault_secret_from_store(
     key: &[u8; 32],
     params: &VaultGetParams,
     effective_agent_id: Option<&str>,
+    runtime_server: Option<&MemoryServer>,
 ) -> Result<String, String> {
     let transaction = store
         .begin_vault_transaction()
@@ -341,12 +345,12 @@ fn read_usable_vault_secret_from_store(
         &selected.entry.secret_type,
     )?;
     let decrypted = crypto::decrypt(key, &selected.entry.encrypted_value, &selected.entry.nonce)?;
-    let mut value = crypto::ZeroizingString::new(crypto::decode_utf8_zeroizing(
+    let value = crypto::ZeroizingString::new(crypto::decode_utf8_zeroizing(
         decrypted,
         format!("Vault secret '{}' is not valid UTF-8", selected.entry.name),
     )?);
 
-    let (touch_name, value) = if super::is_lane_slot_secret_name(&selected.entry.name) {
+    let (touch_name, mut value) = if super::is_lane_slot_secret_name(&selected.entry.name) {
         let target = tachi_llm::parse_vault_alias(&value).ok_or_else(|| {
             format!(
                 "Lane slot '{}' is not bound to a usable account",
@@ -373,16 +377,34 @@ fn read_usable_vault_secret_from_store(
             ));
         }
         let decrypted = crypto::decrypt(key, &target_entry.encrypted_value, &target_entry.nonce)?;
-        let mut target_value = crypto::ZeroizingString::new(crypto::decode_utf8_zeroizing(
+        let target_value = crypto::ZeroizingString::new(crypto::decode_utf8_zeroizing(
             decrypted,
             format!("Vault secret '{}' is not valid UTF-8", target_entry.name),
         )?);
-        let slot_health = transaction
+        let mut slot_health = transaction
             .vault_get_key_health(&selected.entry.name, &target_entry.name)
             .map_err(|e| format!("Failed to read lane slot health: {e}"))?;
-        let target_health = transaction
+        let mut target_health = transaction
             .vault_get_key_health(&target_entry.name, &target_entry.name)
             .map_err(|e| format!("Failed to read target account health: {e}"))?;
+        if let Some(server) = runtime_server {
+            let merged = merged_provider_key_health(
+                server,
+                slot_health
+                    .iter()
+                    .chain(target_health.iter())
+                    .cloned()
+                    .collect(),
+            );
+            slot_health = merged
+                .get(&selected.entry.name)
+                .and_then(|rows| rows.get(&target_entry.name))
+                .cloned();
+            target_health = merged
+                .get(&target_entry.name)
+                .and_then(|rows| rows.get(&target_entry.name))
+                .cloned();
+        }
         super::account_bind::refuse_unusable_account_target(
             &selected.entry.name,
             &target_entry,
@@ -393,15 +415,9 @@ fn read_usable_vault_secret_from_store(
                 target_health.as_ref(),
             ),
         )?;
-        (
-            target_entry.name,
-            std::mem::take(target_value.as_mut_string()),
-        )
+        (target_entry.name, target_value)
     } else {
-        (
-            selected.target_name.clone(),
-            std::mem::take(value.as_mut_string()),
-        )
+        (selected.target_name.clone(), value)
     };
 
     record_successful_vault_access_in_transaction(
@@ -412,7 +428,7 @@ fn read_usable_vault_secret_from_store(
     transaction
         .commit()
         .map_err(|e| format!("Failed to commit usable Vault read transaction: {e}"))?;
-    Ok(value)
+    Ok(std::mem::take(value.as_mut_string()))
 }
 
 pub(crate) fn read_usable_vault_secret_from_store_direct(
@@ -426,7 +442,7 @@ pub(crate) fn read_usable_vault_secret_from_store_direct(
         agent_id: None,
         auto_rotate,
     };
-    read_usable_vault_secret_from_store(store, key, &params, None)
+    read_usable_vault_secret_from_store(store, key, &params, None, None)
 }
 
 /// Materialize unrestricted entries for an identity-less CLI consumer in one
@@ -780,40 +796,6 @@ fn record_rotation_member_drop(
     if prefix_drop.is_none_or(|(lowest_index, _)| member_index < lowest_index) {
         *prefix_drop = Some((member_index, class));
     }
-}
-
-fn merged_provider_key_health(
-    server: &MemoryServer,
-    rows: Vec<VaultKeyHealth>,
-) -> HashMap<String, HashMap<String, VaultKeyHealth>> {
-    let mut snapshot: HashMap<String, HashMap<String, VaultKeyHealth>> = HashMap::new();
-    for row in rows {
-        snapshot
-            .entry(row.logical_name.clone())
-            .or_default()
-            .insert(row.key_id.clone(), row);
-    }
-    // A runtime outcome must affect both direct-account and bound-slot reads
-    // even before its asynchronous persistence completes.
-    for (logical_name, members) in server.llm.provider_health_memory_snapshot() {
-        let target = snapshot.entry(logical_name).or_default();
-        for (key_id, health) in members {
-            let keep_in_memory = target
-                .get(&key_id)
-                .and_then(|persisted| {
-                    let persisted_at =
-                        chrono::DateTime::parse_from_rfc3339(&persisted.updated_at).ok()?;
-                    let memory_at =
-                        chrono::DateTime::parse_from_rfc3339(&health.updated_at).ok()?;
-                    Some(memory_at >= persisted_at)
-                })
-                .unwrap_or(true);
-            if keep_in_memory {
-                target.insert(key_id, health);
-            }
-        }
-    }
-    snapshot
 }
 
 fn load_unlocked_api_key_secret_pools_filtered(
@@ -1246,7 +1228,13 @@ pub(crate) fn read_unlocked_vault_secret(
             auto_rotate,
         };
         server.with_global_store(|store| {
-            read_usable_vault_secret_from_store(store, key, &params, effective_agent_id.as_deref())
+            read_usable_vault_secret_from_store(
+                store,
+                key,
+                &params,
+                effective_agent_id.as_deref(),
+                Some(server),
+            )
         })
     })
 }
