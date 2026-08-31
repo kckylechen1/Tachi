@@ -129,3 +129,6 @@ pub(super) fn run_sync_action(
         _ => unreachable!("sync action router received non-sync action"),
     }
 }
+
+#[cfg(test)]
+mod tests;

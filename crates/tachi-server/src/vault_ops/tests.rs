@@ -19,6 +19,7 @@ use crate::server_state::MemoryServer;
 use crate::test_support::EnvRestore;
 use std::time::{Duration, Instant};
 
+mod slot_binding_acl;
 mod slot_events;
 mod slot_materialization;
 
