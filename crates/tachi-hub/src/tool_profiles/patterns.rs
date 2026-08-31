@@ -54,6 +54,9 @@ pub const COORDINATE_TOOL_PATTERNS: &[&str] = &[
     // (`promote_issue`).
     // Facade coordination tools
     "tachi_handoff",
+    // #1679 durable delivery seam: requester-side claim/ack/block/resume
+    // receipts over the delivery spine (coordinate/admin only).
+    "tachi_delivery",
     "tachi_agents",
     // GitHub tools (bundle membership for classification; visibility gated by vault token)
     "tachi_gh",

@@ -231,22 +231,79 @@ pub enum OwnerDispositionV1 {
     NoRepairRequired { note: String },
 }
 
-/// What the delivery surface can honestly report today. #1679 has not
-/// landed: there is no durable requester-delivery ledger to observe, so the
-/// only honest observation is `NotIntegrated`. When #1679 lands, its
-/// canonical states become additional variants here — never a fabricated
-/// `pending-delivery` table inside this projection.
+/// What the delivery surface reports. #1679 is now INTEGRATED: the v36
+/// delivery spine is the durable truth, and the adapter materializes
+/// [`DeliveryObservationV1::Observed`] from it. `NotIntegrated` remains
+/// honest for sources that predate the spine (or builds without the seam)
+/// — a pending-delivery table is never fabricated here either way.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeliveryObservationV1 {
-    /// No delivery surface is integrated (#1679 open). Delivery state is
+    /// No delivery spine is reachable for this source (pre-v36 store, or a
+    /// portable build without the seam). Delivery state is
     /// `unavailable / not_integrated`, never guessed.
     NotIntegrated { note: String },
+    /// Delivery intents observed from the #1679 spine. Each carries its own
+    /// seven-state delivery state; delivery never rewrites execution or
+    /// adjudication state (#1693 discrimination 7).
+    Observed {
+        intents: Vec<DeliveryIntentObservationV1>,
+    },
+}
+
+/// One delivery intent as the projection sees it (typed mirror of the v36
+/// `delivery_intents` row; refs and revisions only — the spine holds no raw
+/// content to mirror).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeliveryIntentObservationV1 {
+    pub delivery_id: String,
+    /// `managed_dispatch` or `attached_session` (the terminal receipt's
+    /// plane; the intent binds the receipt, never re-owns execution).
+    pub execution_source: String,
+    pub execution_ref: String,
+    /// The WorkClaim the intent is bound to, when one is admitted — the
+    /// Claim-key linkage for attached-run delivery.
+    pub work_claim_id: Option<String>,
+    pub state: DeliveryStateV1,
+    pub result_revision: i64,
+    /// The intent's compare-and-swap revision at observation time.
+    pub revision: i64,
+    pub visibility_class: String,
+    pub updated_at: String,
+}
+
+/// The frozen seven-state delivery vocabulary (#1679), as observed by the
+/// projection. Produced only by the adapter that mints the observation —
+/// never derived from execution or adjudication facts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeliveryStateV1 {
+    NotReady,
+    Ready,
+    RequesterQueued,
+    Delivered,
+    Blocked,
+    Retrying,
+    Dismissed,
+}
+
+impl DeliveryStateV1 {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NotReady => "not_ready",
+            Self::Ready => "ready",
+            Self::RequesterQueued => "requester_queued",
+            Self::Delivered => "delivered",
+            Self::Blocked => "blocked",
+            Self::Retrying => "retrying",
+            Self::Dismissed => "dismissed",
+        }
+    }
 }
 
 impl DeliveryObservationV1 {
     pub fn as_str(&self) -> &'static str {
         match self {
             DeliveryObservationV1::NotIntegrated { .. } => "not_integrated",
+            DeliveryObservationV1::Observed { .. } => "observed",
         }
     }
 }

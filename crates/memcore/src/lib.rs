@@ -115,6 +115,16 @@ pub use db::a2a::{
     A2A_SAME_HOST_TRUST_DOMAIN, A2A_TURN_RESPONSE_KIND, MAX_A2A_STORAGE_BATCH,
 };
 #[cfg(feature = "admin")]
+pub use db::delivery_intents::{
+    ack_delivered, blocker_class, claim_ready_delivery, dismiss_delivery,
+    find_delivery_intent_by_idempotency_key, get_delivery_intent, mint_delivery_intent,
+    observe_delivery_for_execution, reject_or_block, resume_requester_operation,
+    DeliveryAckOutcome, DeliveryCaller, DeliveryClaimOutcome, DeliveryClaimRequest,
+    DeliveryClaimView, DeliveryEventKind, DeliveryExecutionSource, DeliveryIntent, DeliveryPolicy,
+    DeliveryRequesterBinding, DeliveryState, DeliveryVisibilityClass, NewDeliveryIntent,
+    DEFAULT_CLAIM_LEASE_SECONDS,
+};
+#[cfg(feature = "admin")]
 pub use db::dispatch_adjudications::{
     append_dispatch_adjudication, list_adjudications_for_outcome, outcome_is_adjudicated,
     DispatchAdjudication, DispatchAdjudicationSignature, NewDispatchAdjudication,
@@ -173,8 +183,9 @@ pub use db::foundry_jobs::{
 #[cfg(feature = "admin")]
 pub use db::harness_session_attachments::{
     attach_harness_session, authorize_harness_session_attachment, get_harness_session_attachment,
-    HarnessSessionAttachment, HarnessSessionAttachmentAdmission,
-    HarnessSessionAttachmentAuthorization, HarnessSessionAttachmentCapabilities,
+    harness_session_attachment_delivery_binding, HarnessSessionAttachment,
+    HarnessSessionAttachmentAdmission, HarnessSessionAttachmentAuthorization,
+    HarnessSessionAttachmentCapabilities, HarnessSessionAttachmentDeliveryBinding,
     HarnessSessionAttachmentReceipt, HarnessSessionAttachmentSelector,
     HarnessSessionAttachmentState, HarnessSessionHostAdmission, NewHarnessSessionAttachment,
     ACP_CAPABILITY_CLASSES, ACP_SESSION_CAPABILITIES, ACP_TOOL_PROFILES,
@@ -226,13 +237,14 @@ pub use db::route_eval::{
 pub use db::row_to_entry;
 #[cfg(feature = "admin")]
 pub use db::session_claims::{
-    bind_work_claim_exec_env, gc_session_claims, get_claim, handoff_work_claim, heartbeat_claim,
-    heartbeat_work_claim, holder_evidence, insert_agent_identity, insert_claim, insert_work_claim,
-    is_claim_stale, list_active_claims, list_claims, record_rejected_admission,
-    record_unverified_admission, release_claim, release_work_claim, upsert_or_heartbeat_claim,
-    AdmissionState, AgentIdentity, ClaimSelector, ClaimState, HolderEvidence, NewSessionClaim,
-    NewWorkClaim, ReleaseOutcome, SessionClaim, SessionClaimsGc, UnverifiedAdmissionState,
-    WorkClaim, WorkClaimHandoff, WorkClaimHandoffRequest, WorkClaimHeartbeat, WorkClaimMode,
+    bind_work_claim_exec_env, find_claim_requester_for_dispatch, gc_session_claims, get_claim,
+    handoff_work_claim, heartbeat_claim, heartbeat_work_claim, holder_evidence,
+    insert_agent_identity, insert_claim, insert_work_claim, is_claim_stale, list_active_claims,
+    list_claims, record_rejected_admission, record_unverified_admission, release_claim,
+    release_work_claim, upsert_or_heartbeat_claim, AdmissionState, AgentIdentity, ClaimSelector,
+    ClaimState, HolderEvidence, NewSessionClaim, NewWorkClaim, ReleaseOutcome, SessionClaim,
+    SessionClaimsGc, UnverifiedAdmissionState, WorkClaim, WorkClaimHandoff,
+    WorkClaimHandoffRequest, WorkClaimHeartbeat, WorkClaimMode,
 };
 pub use db::{anchor_id, anchor_path, AnchorKind};
 pub use db::{

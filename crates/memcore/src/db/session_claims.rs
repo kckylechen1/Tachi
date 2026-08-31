@@ -1315,6 +1315,45 @@ pub fn gc_session_claims(
     })
 }
 
+/// tachi#1679: the requester binding facts of the WorkClaim that owns a
+/// managed dispatch. `state` carries the claim's own lifecycle token so the
+/// delivery mint can refuse inactive owners.
+pub struct ClaimRequesterBinding {
+    pub claim_id: String,
+    pub agent_identity_id: String,
+    pub session_client: Option<String>,
+    pub state: String,
+}
+
+/// tachi#1679: the requester binding for a managed dispatch, read from the
+/// WorkClaim that owns the dispatch (claim id, identity, session client,
+/// claim state). `None` when no claim names the dispatch — the delivery
+/// intent then mints unbound (pull-only) instead of guessing a requester.
+pub fn find_claim_requester_for_dispatch(
+    conn: &Connection,
+    dispatch_id: &str,
+) -> Result<Option<ClaimRequesterBinding>, MemoryError> {
+    if dispatch_id.trim().is_empty() {
+        return Ok(None);
+    }
+    let mut stmt = conn.prepare(
+        "SELECT claim_id, agent_identity_id, session_client, state FROM session_claims
+         WHERE dispatch_id = ?1 AND agent_identity_id IS NOT NULL
+         ORDER BY created_at DESC LIMIT 1",
+    )?;
+    let found = stmt
+        .query_row(params![dispatch_id], |row| {
+            Ok(ClaimRequesterBinding {
+                claim_id: row.get(0)?,
+                agent_identity_id: row.get(1)?,
+                session_client: row.get(2)?,
+                state: row.get(3)?,
+            })
+        })
+        .optional()?;
+    Ok(found)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

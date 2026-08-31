@@ -167,29 +167,81 @@ pub(crate) fn record_complete_outcome(
     // the full mechanism.
     let write_result = if let Some(project) = params.project.as_deref().filter(|s| !s.is_empty()) {
         server.with_named_project_store(project, |store| {
-            store
+            let row = store
                 .upsert_dispatch_outcome(&new_outcome)
-                .map_err(|e| e.to_string())
+                .map_err(|e| e.to_string())?;
+            // Re-read the CANONICAL row under the same lock, and mint while
+            // it is held: the delivery payload mirrors exactly what the
+            // canonical store holds at this instant, and a concurrent
+            // reconciliation cannot slip between the read and the global
+            // mint.
+            let canonical = memcore::get_outcome(store.connection(), &row.outcome_id)
+                .map_err(|e| e.to_string())?
+                .unwrap_or(row);
+            crate::delivery_ops::mint_delivery_for_managed_outcome(
+                server,
+                &canonical,
+                format!("memory:{eval_memory_id}"),
+            );
+            Ok(canonical)
+        })
+    } else if scope == crate::DbScope::Global {
+        // The global store lock is non-reentrant: the delivery spine lives
+        // here too, so the mint uses the in-store core directly.
+        server.with_global_store(|store| {
+            let row = store
+                .upsert_dispatch_outcome(&new_outcome)
+                .map_err(|e| e.to_string())?;
+            let canonical = memcore::get_outcome(store.connection(), &row.outcome_id)
+                .map_err(|e| e.to_string())?
+                .unwrap_or(row);
+            crate::delivery_ops::mint_delivery_for_managed_outcome_in_store(
+                store,
+                &canonical,
+                format!("memory:{eval_memory_id}"),
+            );
+            Ok(canonical)
         })
     } else {
         server.with_store_for_scope(scope, |store| {
-            store
+            let row = store
                 .upsert_dispatch_outcome(&new_outcome)
-                .map_err(|e| e.to_string())
+                .map_err(|e| e.to_string())?;
+            let canonical = memcore::get_outcome(store.connection(), &row.outcome_id)
+                .map_err(|e| e.to_string())?
+                .unwrap_or(row);
+            // Project-store scope: the mint acquires the global store
+            // (delivery spine topology) — different lock, safe to nest.
+            crate::delivery_ops::mint_delivery_for_managed_outcome(
+                server,
+                &canonical,
+                format!("memory:{eval_memory_id}"),
+            );
+            Ok(canonical)
         })
     };
 
     match write_result {
-        Ok(row) => json!({
-            "recorded": true,
-            "outcome_id": row.outcome_id,
-            "dispatch_id": row.dispatch_id,
-            "idempotency_key": row.idempotency_key,
-            "vendor": row.vendor,
-            "identity_attribution_basis": row.identity_attribution_basis,
-            "identity_receipt": row.identity_receipt,
-            "scope": scope.as_str(),
-        }),
+        Ok(row) => {
+            json!({
+                "recorded": true,
+                "outcome_id": row.outcome_id,
+                "dispatch_id": row.dispatch_id,
+                "idempotency_key": row.idempotency_key,
+                "vendor": row.vendor,
+                "identity_attribution_basis": row.identity_attribution_basis,
+                "identity_receipt": row.identity_receipt,
+                "scope": scope.as_str(),
+                "recorded": true,
+                "outcome_id": row.outcome_id,
+                "dispatch_id": row.dispatch_id,
+                "idempotency_key": row.idempotency_key,
+                "vendor": row.vendor,
+                "identity_attribution_basis": row.identity_attribution_basis,
+                "identity_receipt": row.identity_receipt,
+                "scope": scope.as_str(),
+            })
+        }
         Err(error) => {
             tracing::warn!(
                 error = %error,
@@ -763,35 +815,72 @@ pub(crate) fn record_terminal_failure_outcome(
         ..Default::default()
     };
 
-    let write_fn = |store: &mut memcore::MemoryStore| {
+    let write_fn = |store: &mut memcore::MemoryStore, mint_in_store: bool| {
         // First-writer-wins: skip if this dispatch already has an outcome row.
         if memcore::outcome_exists_for_dispatch(store.connection(), dispatch_id)
             .map_err(|e| e.to_string())?
         {
-            return Ok(false);
+            return Ok(None);
         }
-        store
+        let row = store
             .upsert_dispatch_outcome(&new_outcome)
-            .map(|_| true)
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string())?;
+        // Re-read the canonical row under the same lock for the delivery
+        // payload snapshot.
+        let canonical = memcore::get_outcome(store.connection(), &row.outcome_id)
+            .map_err(|e| e.to_string())?
+            .unwrap_or(row);
+        // Mint while the canonical read's lock is held. For the global
+        // scope the lock is non-reentrant, so the in-store core runs
+        // directly; project scopes go through the server wrapper (nested
+        // global acquisition, different lock).
+        if mint_in_store {
+            crate::delivery_ops::mint_delivery_for_managed_outcome_in_store(
+                store,
+                &canonical,
+                format!("outcome:{}", canonical.outcome_id),
+            );
+        } else {
+            crate::delivery_ops::mint_delivery_for_managed_outcome(
+                server,
+                &canonical,
+                format!("outcome:{}", canonical.outcome_id),
+            );
+        }
+        Ok(Some(canonical))
     };
     // Mirrors `record_complete_outcome`'s branching: a named project DB (when
     // the original dispatch carried one) takes priority over the scope
     // fallback, same as the complete path prioritizes `params.project` over
     // `params.scope`.
     let write_result = if let Some(project) = project.map(str::trim).filter(|s| !s.is_empty()) {
-        server.with_named_project_store(project, write_fn)
+        // Project store: the mint acquires the global store (delivery spine
+        // topology) — different lock, safe to nest.
+        server.with_named_project_store(project, |store| write_fn(store, false))
     } else {
         let (scope, _) = server.resolve_write_scope("");
-        server.with_store_for_scope(scope, write_fn)
+        match scope {
+            crate::DbScope::Global => {
+                // The global store lock is non-reentrant: use the in-store
+                // mint core directly.
+                server.with_global_store(|store| write_fn(store, true))
+            }
+            other_scope => server.with_store_for_scope(other_scope, |store| write_fn(store, false)),
+        }
     };
-    if let Err(error) = write_result {
-        tracing::warn!(
-            error = %error,
-            dispatch_id = %dispatch_id,
-            error_class = %error_class,
-            "failed to persist terminal dispatch_outcomes row"
-        );
+    // The failed terminal's delivery mint already ran inside write_fn, in
+    // the same store scope as the canonical row write.
+    match write_result {
+        Ok(Some(_)) => {}
+        Ok(None) => {}
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                dispatch_id = %dispatch_id,
+                error_class = %error_class,
+                "failed to persist terminal dispatch_outcomes row"
+            );
+        }
     }
 }
 

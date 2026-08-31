@@ -762,6 +762,239 @@ pub(crate) fn validate_harness_session_spine_schema(conn: &Connection) -> Result
     Ok(())
 }
 
+/// Canonical v36 installers for the #1679 durable delivery spine: one durable
+/// delivery intent per terminal result plus its append-only event ledger.
+///
+/// The spine is receipts-only like the rest of the receipt planes: no table
+/// here stores raw private result content (refs and digests only), no table
+/// touches execution (`dispatch_outcomes`, `harness_session_*`) or
+/// adjudication (`dispatch_adjudications`) truth, and no column admits a
+/// worker-chosen user/channel destination — the requester binding comes from
+/// admitted identity only.
+pub(crate) fn install_delivery_spine_schema(conn: &Connection) -> Result<(), MemoryError> {
+    execute_batch_retry(
+        conn,
+        "CREATE TABLE IF NOT EXISTS delivery_intents (
+            delivery_id TEXT PRIMARY KEY,
+            idempotency_key TEXT NOT NULL UNIQUE CHECK (length(idempotency_key) <= 128 AND length(trim(idempotency_key)) > 0 AND instr(CAST(idempotency_key AS BLOB), CAST(x'00' AS BLOB)) = 0),
+            execution_source TEXT NOT NULL CHECK (execution_source IN ('managed_dispatch', 'attached_session')),
+            execution_ref TEXT NOT NULL CHECK (length(execution_ref) <= 128 AND length(trim(execution_ref)) > 0 AND instr(CAST(execution_ref AS BLOB), CAST(x'00' AS BLOB)) = 0),
+            terminal_receipt_revision INTEGER NOT NULL CHECK (terminal_receipt_revision >= 0),
+            work_claim_id TEXT CHECK (work_claim_id IS NULL OR (length(work_claim_id) <= 128 AND length(trim(work_claim_id)) > 0 AND instr(CAST(work_claim_id AS BLOB), CAST(x'00' AS BLOB)) = 0)),
+            result_ref TEXT NOT NULL CHECK (length(result_ref) <= 512 AND length(trim(result_ref)) > 0 AND instr(CAST(result_ref AS BLOB), CAST(x'00' AS BLOB)) = 0),
+            result_revision INTEGER NOT NULL CHECK (result_revision >= 1),
+            payload_digest TEXT NOT NULL CHECK (length(payload_digest) <= 128 AND length(trim(payload_digest)) > 0 AND payload_digest NOT GLOB '*[^A-Za-z0-9+=/_:-]*' AND length(CAST(payload_digest AS BLOB)) = length(payload_digest)),
+            visibility_class TEXT NOT NULL CHECK (visibility_class IN ('public', 'private')),
+            delivery_policy TEXT NOT NULL CHECK (delivery_policy IN ('return_to_current_call', 'resume_requester_operation', 'announce_requester_session', 'silent_artifact_only')),
+            protocol_capability TEXT NOT NULL CHECK (length(protocol_capability) <= 128 AND length(trim(protocol_capability)) > 0 AND instr(CAST(protocol_capability AS BLOB), CAST(x'00' AS BLOB)) = 0),
+            requester_agent_identity_id TEXT CHECK (requester_agent_identity_id IS NULL OR (length(requester_agent_identity_id) <= 128 AND length(trim(requester_agent_identity_id)) > 0 AND instr(CAST(requester_agent_identity_id AS BLOB), CAST(x'00' AS BLOB)) = 0)),
+            requester_host_identity TEXT CHECK (requester_host_identity IS NULL OR (length(requester_host_identity) <= 128 AND length(trim(requester_host_identity)) > 0 AND instr(CAST(requester_host_identity AS BLOB), CAST(x'00' AS BLOB)) = 0)),
+            requester_session_ref TEXT CHECK (requester_session_ref IS NULL OR (length(requester_session_ref) <= 256 AND length(trim(requester_session_ref)) > 0 AND instr(CAST(requester_session_ref AS BLOB), CAST(x'00' AS BLOB)) = 0)),
+            delivery_state TEXT NOT NULL CHECK (delivery_state IN ('not_ready', 'ready', 'requester_queued', 'delivered', 'blocked', 'retrying', 'dismissed')),
+            blocker_class TEXT CHECK (blocker_class IS NULL OR (length(blocker_class) <= 128 AND length(trim(blocker_class)) > 0 AND instr(CAST(blocker_class AS BLOB), CAST(x'00' AS BLOB)) = 0)),
+            active_claim_key TEXT CHECK (active_claim_key IS NULL OR (length(active_claim_key) <= 128 AND length(trim(active_claim_key)) > 0 AND instr(CAST(active_claim_key AS BLOB), CAST(x'00' AS BLOB)) = 0)),
+            claimed_by TEXT CHECK (claimed_by IS NULL OR (length(claimed_by) <= 128 AND length(trim(claimed_by)) > 0 AND instr(CAST(claimed_by AS BLOB), CAST(x'00' AS BLOB)) = 0)),
+            claim_expires_at TEXT CHECK (claim_expires_at IS NULL OR (length(claim_expires_at) <= 64 AND instr(CAST(claim_expires_at AS BLOB), CAST(x'00' AS BLOB)) = 0)),
+            attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+            next_retry_at TEXT CHECK (next_retry_at IS NULL OR (length(next_retry_at) <= 64 AND instr(CAST(next_retry_at AS BLOB), CAST(x'00' AS BLOB)) = 0)),
+            expires_at TEXT CHECK (expires_at IS NULL OR (length(expires_at) <= 64 AND instr(CAST(expires_at AS BLOB), CAST(x'00' AS BLOB)) = 0)),
+            created_at TEXT NOT NULL,
+            ready_at TEXT,
+            delivered_at TEXT,
+            dismissed_at TEXT,
+            revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1),
+            updated_at TEXT NOT NULL,
+            CHECK (delivery_state != 'delivered' OR delivered_at IS NOT NULL),
+            CHECK (delivery_state != 'dismissed' OR dismissed_at IS NOT NULL),
+            CHECK (delivery_state = 'requester_queued' OR (active_claim_key IS NULL AND claimed_by IS NULL AND claim_expires_at IS NULL)),
+            CHECK (delivery_state != 'requester_queued' OR (active_claim_key IS NOT NULL AND claimed_by IS NOT NULL AND claim_expires_at IS NOT NULL)),
+            CHECK (delivery_state IN ('blocked', 'retrying') OR blocker_class IS NULL)
+        );
+        CREATE INDEX IF NOT EXISTS idx_delivery_intents_state_requester
+            ON delivery_intents(delivery_state, requester_agent_identity_id);
+        CREATE INDEX IF NOT EXISTS idx_delivery_intents_execution
+            ON delivery_intents(execution_source, execution_ref);
+
+        CREATE TABLE IF NOT EXISTS delivery_events (
+            event_row_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            delivery_id TEXT NOT NULL REFERENCES delivery_intents(delivery_id),
+            event_id TEXT NOT NULL CHECK (length(event_id) <= 256 AND length(trim(event_id)) > 0 AND instr(CAST(event_id AS BLOB), CAST(x'00' AS BLOB)) = 0),
+            kind TEXT NOT NULL CHECK (kind IN ('intent_created', 'result_ready', 'result_superseded', 'claimed', 'delivered', 'blocked', 'retry_scheduled', 'dismissed', 'claim_expired', 'transition_debt')),
+            expected_revision INTEGER CHECK (expected_revision IS NULL OR expected_revision >= 1),
+            detail TEXT CHECK (detail IS NULL OR (length(detail) > 0 AND length(detail) <= 1000 AND instr(CAST(detail AS BLOB), CAST(x'00' AS BLOB)) = 0)),
+            payload_digest TEXT CHECK (payload_digest IS NULL OR (length(payload_digest) <= 128 AND length(trim(payload_digest)) > 0 AND payload_digest NOT GLOB '*[^A-Za-z0-9+=/_:-]*' AND length(CAST(payload_digest AS BLOB)) = length(payload_digest))),
+            actor TEXT NOT NULL CHECK (length(trim(actor)) > 0),
+            occurred_at TEXT NOT NULL CHECK (length(occurred_at) <= 64 AND instr(CAST(occurred_at AS BLOB), CAST(x'00' AS BLOB)) = 0),
+            recorded_at TEXT NOT NULL,
+            UNIQUE (delivery_id, event_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_delivery_events_delivery
+            ON delivery_events(delivery_id, event_row_id);
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_delivery_events_claim_key_global
+            ON delivery_events(event_id) WHERE kind = 'claimed';
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_delivery_events_ack_key_global
+            ON delivery_events(event_id) WHERE kind = 'delivered';",
+    )
+}
+
+/// Refuse a drifted v36 delivery spine shape (same law as the v34 validator).
+pub(crate) fn validate_delivery_spine_schema(conn: &Connection) -> Result<(), MemoryError> {
+    const REQUIRED_OBJECTS: &[(&str, &str)] = &[
+        ("table", "delivery_intents"),
+        ("index", "idx_delivery_intents_state_requester"),
+        ("index", "idx_delivery_intents_execution"),
+        ("table", "delivery_events"),
+        ("index", "idx_delivery_events_delivery"),
+        ("index", "idx_delivery_events_claim_key_global"),
+        ("index", "idx_delivery_events_ack_key_global"),
+    ];
+    for (object_type, name) in REQUIRED_OBJECTS {
+        let present = match conn.query_row(
+            "SELECT 1 FROM main.sqlite_schema
+             WHERE type = ?1 AND name = ?2
+               AND (type = 'table' OR tbl_name IN ('delivery_intents', 'delivery_events'))",
+            params![object_type, name],
+            |_| Ok(()),
+        ) {
+            Ok(()) => true,
+            Err(rusqlite::Error::QueryReturnedNoRows) => false,
+            Err(error) => return Err(error.into()),
+        };
+        if !present {
+            return Err(MemoryError::InvalidArg(format!(
+                "incomplete v36 delivery spine: required {object_type} '{name}' is missing"
+            )));
+        }
+    }
+    type RequiredColumn = (&'static str, &'static str, bool, i64);
+    const REQUIRED_COLUMNS: &[(&str, &[RequiredColumn])] = &[
+        (
+            "delivery_intents",
+            &[
+                ("delivery_id", "TEXT", false, 1),
+                ("idempotency_key", "TEXT", true, 0),
+                ("execution_source", "TEXT", true, 0),
+                ("execution_ref", "TEXT", true, 0),
+                ("terminal_receipt_revision", "INTEGER", true, 0),
+                ("work_claim_id", "TEXT", false, 0),
+                ("result_ref", "TEXT", true, 0),
+                ("result_revision", "INTEGER", true, 0),
+                ("payload_digest", "TEXT", true, 0),
+                ("visibility_class", "TEXT", true, 0),
+                ("delivery_policy", "TEXT", true, 0),
+                ("protocol_capability", "TEXT", true, 0),
+                ("requester_agent_identity_id", "TEXT", false, 0),
+                ("requester_host_identity", "TEXT", false, 0),
+                ("requester_session_ref", "TEXT", false, 0),
+                ("delivery_state", "TEXT", true, 0),
+                ("blocker_class", "TEXT", false, 0),
+                ("active_claim_key", "TEXT", false, 0),
+                ("claimed_by", "TEXT", false, 0),
+                ("claim_expires_at", "TEXT", false, 0),
+                ("attempt_count", "INTEGER", true, 0),
+                ("next_retry_at", "TEXT", false, 0),
+                ("expires_at", "TEXT", false, 0),
+                ("created_at", "TEXT", true, 0),
+                ("ready_at", "TEXT", false, 0),
+                ("delivered_at", "TEXT", false, 0),
+                ("dismissed_at", "TEXT", false, 0),
+                ("revision", "INTEGER", true, 0),
+                ("updated_at", "TEXT", true, 0),
+            ],
+        ),
+        (
+            "delivery_events",
+            &[
+                ("event_row_id", "INTEGER", false, 1),
+                ("delivery_id", "TEXT", true, 0),
+                ("event_id", "TEXT", true, 0),
+                ("kind", "TEXT", true, 0),
+                ("expected_revision", "INTEGER", false, 0),
+                ("detail", "TEXT", false, 0),
+                ("payload_digest", "TEXT", false, 0),
+                ("actor", "TEXT", true, 0),
+                ("occurred_at", "TEXT", true, 0),
+                ("recorded_at", "TEXT", true, 0),
+            ],
+        ),
+    ];
+    for (table, expected) in REQUIRED_COLUMNS {
+        let mut stmt = conn.prepare(&format!(
+            "SELECT name, upper(type), [notnull] != 0, pk
+             FROM pragma_table_info('{table}') ORDER BY cid"
+        ))?;
+        let actual = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, bool>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        let expected = expected
+            .iter()
+            .map(|(name, ty, not_null, pk)| {
+                ((*name).to_string(), (*ty).to_string(), *not_null, *pk)
+            })
+            .collect::<Vec<_>>();
+        if actual != expected {
+            return Err(MemoryError::InvalidArg(format!(
+                "incomplete v36 delivery spine: {table} has non-canonical column shape"
+            )));
+        }
+    }
+    for (table, clause) in [
+        (
+            "delivery_intents",
+            "delivery_state IN ('not_ready', 'ready', 'requester_queued', 'delivered', 'blocked', 'retrying', 'dismissed')",
+        ),
+        (
+            "delivery_intents",
+            "delivery_policy IN ('return_to_current_call', 'resume_requester_operation', 'announce_requester_session', 'silent_artifact_only')",
+        ),
+        (
+            "delivery_intents",
+            "payload_digest NOT GLOB '*[^A-Za-z0-9+=/_:-]*'",
+        ),
+        (
+            "delivery_intents",
+            "CHECK (delivery_state != 'delivered' OR delivered_at IS NOT NULL)",
+        ),
+        (
+            "delivery_intents",
+            "CHECK (delivery_state = 'requester_queued' OR (active_claim_key IS NULL AND claimed_by IS NULL AND claim_expires_at IS NULL))",
+        ),
+        (
+            "delivery_intents",
+            "CHECK (delivery_state != 'requester_queued' OR (active_claim_key IS NOT NULL AND claimed_by IS NOT NULL AND claim_expires_at IS NOT NULL))",
+        ),
+        (
+            "delivery_intents",
+            "CHECK (delivery_state IN ('blocked', 'retrying') OR blocker_class IS NULL)",
+        ),
+        (
+            "delivery_events",
+            "kind IN ('intent_created', 'result_ready', 'result_superseded', 'claimed', 'delivered', 'blocked', 'retry_scheduled', 'dismissed', 'claim_expired', 'transition_debt')",
+        ),
+        ("delivery_events", "UNIQUE (delivery_id, event_id)"),
+    ] {
+        let sql: String = conn.query_row(
+            "SELECT COALESCE(sql, '') FROM main.sqlite_schema WHERE type = 'table' AND name = ?1",
+            params![table],
+            |row| row.get(0),
+        )?;
+        if !normalize_schema_sql(&sql).contains(&normalize_schema_sql(clause)) {
+            return Err(MemoryError::InvalidArg(format!(
+                "incomplete v36 delivery spine: {table} is missing canonical clause {clause:?}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 pub(crate) fn init_unversioned_schema_for_migration_tests(
     conn: &Connection,

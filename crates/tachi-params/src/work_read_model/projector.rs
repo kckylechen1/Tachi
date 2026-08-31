@@ -62,9 +62,9 @@ use crate::current_truth::types::{PredicateV1, ReductionStatusV1, VisibilityClas
 use crate::taskintent::mapping::adjudication::{project_adjudication, AdjudicationState};
 
 use super::sources::{
-    AdjudicationFactV1, ClaimStateV1, DeliveryObservationV1, ExecEnvFactV1, OwnerDispositionFactV1,
-    OwnerDispositionV1, RunReceiptFactV1, SourceFacts, SourceKind, SourceSnapshot, SourceStamp,
-    VerificationFactV1, WorkClaimFactV1,
+    AdjudicationFactV1, ClaimStateV1, DeliveryIntentObservationV1, DeliveryObservationV1,
+    ExecEnvFactV1, OwnerDispositionFactV1, OwnerDispositionV1, RunReceiptFactV1, SourceFacts,
+    SourceKind, SourceSnapshot, SourceStamp, VerificationFactV1, WorkClaimFactV1,
 };
 use super::types::{
     predicate_status, predicate_value, AdjudicationSectionV1, BlockerKindV1, BlockerV1, ClaimRowV1,
@@ -282,10 +282,11 @@ pub fn project(index: &WorkProjectionIndex, options: &ProjectionOptions) -> Work
             }
         }
     }
-    // Delivery degrades honestly: the only minter of delivery truth is
-    // #1679, which is not integrated. A delivery snapshot (when one
-    // arrives) still names `not_integrated`; no pending-delivery table is
-    // ever fabricated here.
+    // Delivery degrades honestly: the only minter of delivery truth is the
+    // #1679 v36 delivery spine, observed through an adapter-minted
+    // `Observed` snapshot. Sources without the spine (pre-v36 stores,
+    // portable builds) still name `not_integrated`; no pending-delivery
+    // table is ever fabricated here.
     let delivery_observation = index
         .snapshots()
         .find_map(|snapshot| match &snapshot.facts {
@@ -537,6 +538,35 @@ fn parse_subject_token(token: &str) -> Option<(String, u64)> {
     Some((repo.to_string(), number))
 }
 
+/// Whether a delivery intent belongs to this work item: a managed intent
+/// links by dispatch id, an attached intent links by its bound WorkClaim,
+/// and anything else stays unlinked (no guessed association).
+fn delivery_intent_binds_item(
+    key: &WorkKey,
+    bound_claims: &[&WorkClaimFactV1],
+    _bound_runs: &[&RunReceiptFactV1],
+    terminal_dispatch_ids: &[String],
+    intent: &DeliveryIntentObservationV1,
+) -> bool {
+    // A managed intent binds the terminal dispatch it was minted from: link
+    // it when this item's terminal runs include that dispatch (an issue-
+    // anchored item inherits its runs' dispatches through the key join).
+    let managed_match = intent.execution_source == "managed_dispatch"
+        && (terminal_dispatch_ids
+            .iter()
+            .any(|id| id == &intent.execution_ref)
+            || match key {
+                WorkKey::Dispatch(dispatch_id) => *dispatch_id == intent.execution_ref,
+                _ => false,
+            });
+    // An attached intent binds the WorkClaim admitted at attach time.
+    let attached_match = intent.execution_source == "attached_session"
+        && bound_claims
+            .iter()
+            .any(|claim| Some(claim.claim_id.as_str()) == intent.work_claim_id.as_deref());
+    managed_match || attached_match
+}
+
 /// Whether the work item carries any private fact (claims, runs, envs,
 /// verification observations, or adjudication rows).
 fn model_touches_private(model: &WorkReadModelV1) -> bool {
@@ -766,8 +796,37 @@ fn project_one(
         }
     };
 
+    // #1679 delivery section: intents are LINKED to this work item and
+    // visibility-filtered, so a private delivery for one work item never
+    // surfaces on another — and never surfaces at all for an unauthorized
+    // read (fail-closed: the whole observation hides, not its fields).
+    // Unmatched intents stay in the snapshot, never on unrelated items.
+    let linked_intents: Vec<DeliveryIntentObservationV1> = match &delivery_observation {
+        DeliveryObservationV1::Observed { intents } => intents
+            .iter()
+            .filter(|intent| {
+                delivery_intent_binds_item(
+                    &key,
+                    &bound_claims,
+                    &bound_runs,
+                    &terminal_dispatch_ids,
+                    intent,
+                )
+            })
+            .filter(|intent| {
+                intent.visibility_class != "private" || options.authorization.sees_private
+            })
+            .cloned()
+            .collect(),
+        _ => Vec::new(),
+    };
     let delivery_section = DeliverySectionV1 {
-        observation: delivery_observation.clone(),
+        observation: match (&delivery_observation, linked_intents.is_empty()) {
+            (DeliveryObservationV1::Observed { .. }, _) => DeliveryObservationV1::Observed {
+                intents: linked_intents,
+            },
+            (other, _) => (*other).clone(),
+        },
     };
 
     // GitHub section: only issue keys have an issue subject; orphaned

@@ -355,6 +355,27 @@ pub enum MemoryError {
         caller_identity_id: String,
     },
 
+    /// tachi#1679: a delivery-spine write lost its compare-and-swap against
+    /// the intent revision it read. Typed so the host seam can answer
+    /// "re-read the intent and retry" instead of string-sniffing a generic
+    /// error. Nothing is written on this refusal.
+    #[error("delivery intent revision conflict: {0}")]
+    DeliveryRevisionConflict(String),
+
+    /// tachi#1679: a delivery-spine operation is not valid for the persisted
+    /// delivery state (e.g. acknowledging an intent that is not
+    /// requester_queued, or dismissing a delivered intent). Typed so the
+    /// host seam can distinguish state refusals from races and conflicts.
+    /// Nothing is written on this refusal.
+    #[error("delivery state incompatible: {0}")]
+    DeliveryIncompatibleState(String),
+
+    /// tachi#1679: an idempotency key was replayed with different content —
+    /// the delivery twin of the TB-7 `RequestIdConflict` law. Never a silent
+    /// acceptance of a mismatched operation, never a second intent minted.
+    #[error("delivery idempotency conflict: {0}")]
+    DeliveryIdempotencyConflict(String),
+
     /// #1119: a process carrying [`crate::db::MigrationAuthority::Deny`] tried
     /// to open an EXISTING DB stamped below this kernel's
     /// `EXPECTED_SCHEMA_VERSION` (or a `CreateFresh` provisioning call landed

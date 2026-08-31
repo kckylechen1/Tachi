@@ -1640,3 +1640,45 @@ mod tests {
         }
     }
 }
+
+/// tachi#1679: the admitted requester binding persisted on an attachment
+/// row, for the durable delivery mint. Deliberately a plain row read with
+/// NO WorkClaim state law: a terminal result outlives a claim release, so
+/// the requester binding survives it too. `None` when the attachment id is
+/// unknown.
+pub fn harness_session_attachment_delivery_binding(
+    conn: &Connection,
+    attachment_id: &str,
+) -> Result<Option<HarnessSessionAttachmentDeliveryBinding>, MemoryError> {
+    if attachment_id.trim().is_empty() {
+        return Ok(None);
+    }
+    let found = conn
+        .query_row(
+            "SELECT attachment_id, agent_identity_id, host_identity, remote_session_id, work_claim_id
+             FROM harness_session_attachments WHERE attachment_id = ?1",
+            params![attachment_id],
+            |row| {
+                Ok(HarnessSessionAttachmentDeliveryBinding {
+                    attachment_id: row.get(0)?,
+                    agent_identity_id: row.get(1)?,
+                    host_identity: row.get(2)?,
+                    remote_session_id: row.get(3)?,
+                    work_claim_id: row.get(4)?,
+                })
+            },
+        )
+        .optional()?;
+    Ok(found)
+}
+
+/// The delivery-mint binding view (see
+/// [`harness_session_attachment_delivery_binding`]).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct HarnessSessionAttachmentDeliveryBinding {
+    pub attachment_id: String,
+    pub agent_identity_id: String,
+    pub host_identity: String,
+    pub remote_session_id: String,
+    pub work_claim_id: String,
+}

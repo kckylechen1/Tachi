@@ -153,6 +153,9 @@ pub(crate) const CACHE_INVALIDATING_TOOLS: &[&str] = &[
     "tachi_verify",
     "tachi_staff",
     "tachi_a2a",
+    // #1679 delivery seam is mixed read/write (claim/ack/block/dismiss
+    // mutate the delivery spine; get is read).
+    "tachi_delivery",
     // #757 Cut3-S1: folded sandbox verb is mixed read/write (set_rule/
     // set_policy mutate) — invalidate like the legacy sandbox_set_* aliases
     // above, matching the whole-facade invalidation used for tachi_memory.
@@ -236,6 +239,20 @@ pub(crate) fn facade_action_effect(
             &["emit", "project", "promote"],
         ),
         "tachi_a2a" => (&["status"], &[], &["respond"]),
+        // #1679 delivery seam: `get` is read-only; every mutating seam
+        // action re-enters the spine (claim/ack lease, block, dismiss) and
+        // is not safe to auto-replay after a failure.
+        "tachi_delivery" => (
+            &["get"],
+            &[],
+            &[
+                "claim_ready_delivery",
+                "ack_delivered",
+                "reject_or_block",
+                "resume_requester_operation",
+                "dismiss",
+            ],
+        ),
         "tachi_wiki" => (&["search", "browse", "read"], &[], &["write"]),
         "tachi_task" => (
             &["status", "board", "brief"],
@@ -611,6 +628,7 @@ mod tests {
         assert_all_classified("tachi_task", &task_actions);
         assert_all_classified("tachi_event", tachi_params::TACHI_EVENT_ACTIONS);
         assert_all_classified("tachi_a2a", tachi_params::TACHI_A2A_ACTIONS);
+        assert_all_classified("tachi_delivery", tachi_params::TACHI_DELIVERY_ACTIONS);
         assert_all_classified("tachi_wiki", tachi_params::TACHI_WIKI_ACTIONS);
         assert_all_classified("tachi_staff", tachi_params::TACHI_STAFF_ACTIONS);
         // codex checkpoint 3: "Typed TachiVerifyAction::ALL exists in
