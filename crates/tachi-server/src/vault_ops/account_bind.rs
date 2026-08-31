@@ -63,6 +63,14 @@ pub(crate) fn refuse_unusable_account_target(
             target.name
         ));
     }
+    if crate::status_ops::status_health::account_class_for_env_name(&target.name)
+        != Some(memcore::AccountClass::ModelApi)
+    {
+        return Err(format!(
+            "Lane slot '{slot}' points at '{}' which is not a registered ModelApi provider account",
+            target.name
+        ));
+    }
     if memcore::effective_vault_secret_type(&target.name, &target.secret_type)
         != SECRET_TYPE_API_KEY
     {
@@ -105,6 +113,26 @@ pub(crate) fn refuse_unusable_account_target(
     Ok(())
 }
 
+/// Read the slot-target and target-target health rows while holding the same
+/// Vault transaction as the binding decision.
+pub(crate) fn account_target_health_unusable(
+    transaction: &memcore::store::vault::VaultTransaction<'_>,
+    slot: &str,
+    target: &VaultEntry,
+) -> Result<bool, String> {
+    let slot_health = transaction
+        .vault_get_key_health(slot, &target.name)
+        .map_err(|e| format!("vault_get_key_health: {e}"))?;
+    let target_health = transaction
+        .vault_get_key_health(&target.name, &target.name)
+        .map_err(|e| format!("vault_get_key_health: {e}"))?;
+
+    Ok(slot_target_health_unusable(
+        slot_health.as_ref(),
+        target_health.as_ref(),
+    ))
+}
+
 pub(crate) fn refuse_lane_slot_pool_prefix(prefix: &str) -> Result<(), String> {
     if is_lane_slot_secret_name(prefix) {
         Err(format!(
@@ -115,6 +143,7 @@ pub(crate) fn refuse_lane_slot_pool_prefix(prefix: &str) -> Result<(), String> {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn follow_lane_slot_pointers(values: Vec<(String, String)>) -> Vec<(String, String)> {
     let by_name: std::collections::HashMap<&str, &str> = values
         .iter()
@@ -149,35 +178,47 @@ pub(crate) fn rewrite_imported_lane_slots(
     master_key: &[u8; 32],
     entries: &[VaultEntry],
 ) -> Result<Vec<VaultEntry>, String> {
+    let slot_entries = entries
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| is_lane_slot_secret_name(&entry.name));
     let mut slot_plain = Vec::new();
-    let mut account_rows = Vec::new();
-    for (idx, entry) in entries.iter().enumerate() {
-        let decrypted = crypto::decrypt(master_key, &entry.encrypted_value, &entry.nonce)
-            .map_err(|e| format!("decrypt imported {}: {e}", entry.name))?;
-        let value = String::from_utf8(decrypted).map_err(|e| {
-            format!(
-                "Imported vault secret '{}' is not valid UTF-8: {e}",
-                entry.name
-            )
-        })?;
-        if is_lane_slot_secret_name(&entry.name) {
-            slot_plain.push((idx, value));
-        } else {
-            account_rows.push((entry.name.clone(), value, entry.secret_type.clone()));
-        }
+    for (idx, entry) in slot_entries {
+        super::slot_rebind::validate_lane_slot_secret_type(&entry.name, &entry.secret_type)?;
+        slot_plain.push((
+            idx,
+            decrypt_secret_value(master_key, entry, "Imported vault")?,
+        ));
     }
-    let accounts = bindable_accounts(account_rows);
+    if slot_plain.is_empty() {
+        return Ok(entries.to_vec());
+    }
+
+    let account_rows = decrypt_candidate_account_rows(master_key, entries)?;
+    let accounts = SensitiveAccounts(bindable_accounts(account_rows.0.iter().cloned()));
     let mut out = entries.to_vec();
     for (idx, plain) in slot_plain {
         let decided = decide_lane_slot_write(
             master_key,
             &out[idx].name,
-            &plain,
-            Some(plain.as_str()),
-            &accounts,
+            &*plain,
+            Some(&*plain),
+            &accounts.0,
             false,
-        )?;
-        if decided.store_value != plain {
+        )
+        .map_err(|error| enrich_unmatched_account_error(error, &*plain, &account_rows))?;
+        let target_entry = entries
+            .iter()
+            .find(|entry| entry.name == decided.account)
+            .ok_or_else(|| format!("Imported lane slot target '{}' is missing", decided.account))?;
+        let target_value = accounts
+            .0
+            .iter()
+            .find(|(name, _, _)| name == &decided.account)
+            .map(|(_, value, _)| value.as_str())
+            .ok_or_else(|| format!("Imported lane slot target '{}' is missing", decided.account))?;
+        refuse_unusable_account_target(&out[idx].name, target_entry, target_value, None, false)?;
+        if decided.store_value != &*plain {
             let (encrypted_value, nonce) =
                 crypto::encrypt(master_key, decided.store_value.as_bytes())
                     .map_err(|e| format!("encrypt imported slot pointer: {e}"))?;
@@ -197,37 +238,56 @@ pub(crate) fn write_lane_slot_binding(
     rebind: bool,
     description: &str,
     allowed_agents: Option<Vec<String>>,
+    effective_agent_id: Option<&str>,
 ) -> Result<(LaneSlotDecision, bool), String> {
-    let entries = store
+    let name = name.trim();
+    let transaction = store
+        .begin_vault_transaction()
+        .map_err(|e| format!("begin lane slot transaction: {e}"))?;
+    let entries = transaction
         .vault_list_entries()
         .map_err(|e| format!("vault_list_entries: {e}"))?;
-    let mut existing_plain = None;
-    let mut expected_cipher: Option<(String, String)> = None;
-    let mut account_rows = Vec::new();
-    for entry in entries {
-        let decrypted = crypto::decrypt(master_key, &entry.encrypted_value, &entry.nonce)
-            .map_err(|e| format!("decrypt {}: {e}", entry.name))?;
-        let value = String::from_utf8(decrypted)
-            .map_err(|e| format!("Vault secret '{}' is not valid UTF-8: {e}", entry.name))?;
-        if entry.name == name {
-            expected_cipher = Some((entry.encrypted_value, entry.nonce));
-            existing_plain = Some(value);
-        } else {
-            account_rows.push((entry.name, value, entry.secret_type));
-        }
+    let existing_entry = entries.iter().find(|entry| entry.name == name);
+    if let Some(existing) = existing_entry {
+        super::slot_rebind::validate_existing_lane_slot_secret_type(name, &existing.secret_type)?;
+        super::access::ensure_agent_allowed(existing, effective_agent_id)
+            .map_err(|e| e.to_string())?;
     }
-    let accounts = bindable_accounts(account_rows);
+    let existing_plain = existing_entry
+        .map(|entry| decrypt_secret_value(master_key, entry, "Vault"))
+        .transpose()?;
+    let account_rows = decrypt_candidate_account_rows(master_key, &entries)?;
+    let accounts = SensitiveAccounts(bindable_accounts(account_rows.0.iter().cloned()));
     let decided = decide_lane_slot_write(
         master_key,
         name,
         new_value,
         existing_plain.as_deref(),
-        &accounts,
+        &accounts.0,
         rebind,
+    )
+    .map_err(|error| enrich_unmatched_account_error(error, new_value, &account_rows))?;
+    let target_entry = entries
+        .iter()
+        .find(|entry| entry.name == decided.account)
+        .ok_or_else(|| format!("Lane slot target '{}' is missing", decided.account))?;
+    let target_value = accounts
+        .0
+        .iter()
+        .find(|(account, _, _)| account == &decided.account)
+        .map(|(_, value, _)| value.as_str())
+        .ok_or_else(|| format!("Lane slot target '{}' is missing", decided.account))?;
+    let target_health_unusable = account_target_health_unusable(&transaction, name, target_entry)?;
+    refuse_unusable_account_target(
+        name,
+        target_entry,
+        target_value,
+        effective_agent_id,
+        target_health_unusable,
     )?;
     let (encrypted_value, nonce) = crypto::encrypt(master_key, decided.store_value.as_bytes())
         .map_err(|e| format!("encrypt slot pointer: {e}"))?;
-    let created = expected_cipher.is_none();
+    let created = existing_entry.is_none();
     let now = Utc::now().to_rfc3339();
     let entry = VaultEntry {
         name: name.to_string(),
@@ -236,40 +296,122 @@ pub(crate) fn write_lane_slot_binding(
         secret_type: SECRET_TYPE_API_KEY.to_string(),
         description: description.to_string(),
         allowed_agents,
-        created_at: if created { now.clone() } else { String::new() },
+        created_at: existing_entry
+            .map(|entry| entry.created_at.clone())
+            .unwrap_or_else(|| now.clone()),
         updated_at: now,
         accessed_at: String::new(),
         access_count: 0,
     };
-    let expected = expected_cipher
-        .as_ref()
-        .map(|(encrypted, nonce)| (encrypted.as_str(), nonce.as_str()));
-    let wrote = store
-        .vault_cas_upsert_entry(&entry, expected)
-        .map_err(|e| format!("vault_cas_upsert_entry: {e}"))?;
-    if !wrote {
-        return Err(format!(
-            "Lane slot '{name}' changed concurrently; pass rebind=true / --rebind to change account family"
+    transaction
+        .vault_upsert_entry(&entry)
+        .map_err(|e| format!("vault_upsert_entry lane slot: {e}"))?;
+    transaction
+        .commit()
+        .map_err(|e| format!("commit lane slot transaction: {e}"))?;
+    Ok((decided, created))
+}
+
+struct SensitiveAccountRows(Vec<(String, String, String)>);
+
+impl Drop for SensitiveAccountRows {
+    fn drop(&mut self) {
+        for (_, value, _) in &mut self.0 {
+            crypto::zero_string(value);
+        }
+    }
+}
+
+struct SensitiveAccounts(Vec<(String, String, &'static str)>);
+
+impl Drop for SensitiveAccounts {
+    fn drop(&mut self) {
+        for (_, value, _) in &mut self.0 {
+            crypto::zero_string(value);
+        }
+    }
+}
+
+fn decrypt_secret_value(
+    master_key: &[u8; 32],
+    entry: &VaultEntry,
+    surface: &str,
+) -> Result<crypto::ZeroizingString, String> {
+    let decrypted = crypto::decrypt(master_key, &entry.encrypted_value, &entry.nonce)
+        .map_err(|e| format!("decrypt {surface} '{}': {e}", entry.name))?;
+    let value = crypto::decode_utf8_zeroizing(
+        decrypted,
+        format!("{surface} secret '{}' is not valid UTF-8", entry.name),
+    )?;
+    Ok(crypto::ZeroizingString::new(value))
+}
+
+fn is_candidate_account_entry(entry: &VaultEntry) -> bool {
+    !is_lane_slot_secret_name(&entry.name)
+        && crate::provider_config::is_provider_api_key_name(&entry.name)
+        && memcore::effective_vault_secret_type(&entry.name, &entry.secret_type)
+            == SECRET_TYPE_API_KEY
+}
+
+fn decrypt_candidate_account_rows(
+    master_key: &[u8; 32],
+    entries: &[VaultEntry],
+) -> Result<SensitiveAccountRows, String> {
+    let mut rows = SensitiveAccountRows(Vec::new());
+    for entry in entries
+        .iter()
+        .filter(|entry| is_candidate_account_entry(entry))
+    {
+        let value = decrypt_secret_value(master_key, entry, "Vault")?;
+        rows.0.push((
+            entry.name.clone(),
+            value.to_string(),
+            entry.secret_type.clone(),
         ));
     }
-    Ok((decided, created))
+    Ok(rows)
+}
+
+fn enrich_unmatched_account_error(
+    error: String,
+    new_value: &str,
+    rows: &SensitiveAccountRows,
+) -> String {
+    if parse_vault_alias(new_value).is_some() || !error.contains("second copy") {
+        return error;
+    }
+    let new_value = new_value.trim();
+    let Some((name, _, _)) = rows
+        .0
+        .iter()
+        .find(|(_, value, _)| value.trim() == new_value)
+    else {
+        return error;
+    };
+    format!(
+        "Lane slot raw bytes match existing provider-shaped account '{name}', but that account is not a registered ModelApi account; refusing the copied ciphertext. {error}"
+    )
 }
 
 pub(crate) fn bindable_accounts(
     rows: impl IntoIterator<Item = (String, String, String)>,
 ) -> Vec<(String, String, &'static str)> {
     rows.into_iter()
-        .filter_map(|(name, value, secret_type)| {
-            if is_lane_slot_secret_name(&name) {
+        .filter_map(|(name, mut value, secret_type)| {
+            if is_lane_slot_secret_name(&name)
+                || parse_vault_alias(&value).is_some()
+                || memcore::effective_vault_secret_type(&name, &secret_type) != SECRET_TYPE_API_KEY
+                || crate::status_ops::status_health::account_class_for_env_name(&name)
+                    != Some(memcore::AccountClass::ModelApi)
+            {
+                crypto::zero_string(&mut value);
                 return None;
             }
-            if parse_vault_alias(&value).is_some() {
+            let Some(kind) = crate::status_ops::status_health::provider_kind_for_env_name(&name)
+            else {
+                crypto::zero_string(&mut value);
                 return None;
-            }
-            if memcore::effective_vault_secret_type(&name, &secret_type) != SECRET_TYPE_API_KEY {
-                return None;
-            }
-            let kind = crate::status_ops::status_health::provider_kind_for_env_name(&name)?;
+            };
             Some((name, value, kind))
         })
         .collect()
@@ -280,6 +422,10 @@ pub(crate) struct LaneSlotDecision {
     /// Value stored on the slot row: `vault:ACCOUNT`, never raw key bytes.
     pub store_value: String,
     pub account: String,
+    pub old_fingerprint: Option<String>,
+    pub new_fingerprint: String,
+    /// Compatibility alias for callers that predate the explicit transition
+    /// fields. It is always the same value as `new_fingerprint`.
     pub fingerprint: String,
     pub rebound: bool,
     pub noop: bool,
@@ -317,6 +463,24 @@ fn find_matching_account(
 
 fn current_pointer(existing: Option<&str>) -> Option<&str> {
     existing.and_then(parse_vault_alias)
+}
+
+fn current_account_match(
+    master_key: &[u8; 32],
+    existing: Option<&str>,
+    accounts: &[(String, String, &'static str)],
+) -> Option<AccountMatch> {
+    let existing = existing?.trim();
+    if let Some(pointer) = current_pointer(Some(existing)) {
+        return accounts
+            .iter()
+            .find(|(name, _, _)| name == pointer)
+            .map(|(name, value, kind)| AccountMatch {
+                name: name.clone(),
+                fingerprint: fingerprint_secret(master_key, kind, value),
+            });
+    }
+    find_matching_account(master_key, existing, accounts)
 }
 
 /// Decide what a lane-slot `vault set` may store.
@@ -372,25 +536,36 @@ pub(crate) fn decide_lane_slot_write(
 
     let pointer = format!("vault:{}", target.name);
     let current = current_pointer(existing_slot_value);
+    let old_match = current_account_match(master_key, existing_slot_value, accounts);
 
     if current == Some(target.name.as_str()) {
         return Ok(LaneSlotDecision {
             store_value: pointer,
             account: target.name,
+            old_fingerprint: old_match.map(|account| account.fingerprint),
+            new_fingerprint: target.fingerprint.clone(),
             fingerprint: target.fingerprint,
             rebound: false,
             noop: true,
         });
     }
 
-    let leftover_same_bytes = existing_slot_value.is_some()
+    // A legacy raw row is already semantically bound when its bytes match the
+    // selected registered account. The submitted value may be either the raw
+    // bytes or the new pointer, so comparing old bytes to `new_value` is not a
+    // valid migration test.
+    let leftover_same_account = existing_slot_value.is_some()
         && current.is_none()
-        && existing_slot_value.is_some_and(|value| value.trim() == new_value);
+        && old_match
+            .as_ref()
+            .is_some_and(|account| account.name == target.name);
     let is_first_write = existing_slot_value.is_none();
-    if is_first_write || leftover_same_bytes {
+    if is_first_write || leftover_same_account {
         return Ok(LaneSlotDecision {
             store_value: pointer,
             account: target.name,
+            old_fingerprint: old_match.map(|account| account.fingerprint),
+            new_fingerprint: target.fingerprint.clone(),
             fingerprint: target.fingerprint,
             rebound: false,
             noop: false,
@@ -401,8 +576,12 @@ pub(crate) fn decide_lane_slot_write(
         let old = current
             .map(|name| format!("vault:{name}"))
             .unwrap_or_else(|| "a leftover ciphertext row".to_string());
+        let old_fingerprint = old_match
+            .as_ref()
+            .map(|account| account.fingerprint.as_str())
+            .unwrap_or("unavailable");
         return Err(format!(
-            "Lane slot '{slot}' is bound to {old}; new binding is vault:{} ({}). \
+            "Lane slot '{slot}' is bound to {old} (old_fingerprint={old_fingerprint}); new binding is vault:{} (new_fingerprint={}). \
              Pass rebind=true / --rebind to change account family. \
              This is not a ciphertext overwrite.",
             target.name, target.fingerprint
@@ -412,6 +591,8 @@ pub(crate) fn decide_lane_slot_write(
     Ok(LaneSlotDecision {
         store_value: pointer,
         account: target.name,
+        old_fingerprint: old_match.map(|account| account.fingerprint),
+        new_fingerprint: target.fingerprint.clone(),
         fingerprint: target.fingerprint,
         rebound: true,
         noop: false,
@@ -499,6 +680,8 @@ mod tests {
         );
         assert!(err.contains("vault:DEEPSEEK_API_KEY"), "{err}");
         assert!(err.contains("SILICONFLOW_API_KEY"), "{err}");
+        assert!(err.contains("old_fingerprint=fp1:"), "{err}");
+        assert!(err.contains("new_fingerprint=fp1:"), "{err}");
         assert!(!err.contains("siliconflow-secret"), "{err}");
     }
 
@@ -556,6 +739,34 @@ mod tests {
     }
 
     #[test]
+    fn bindable_accounts_accept_only_exact_registered_model_api_names() {
+        let accounts = bindable_accounts(vec![
+            (
+                "TAVILY_API_KEY".to_string(),
+                "search-secret".to_string(),
+                SECRET_TYPE_API_KEY.to_string(),
+            ),
+            (
+                "MCP_CONTEXT7_API_KEY".to_string(),
+                "mcp-secret".to_string(),
+                SECRET_TYPE_API_KEY.to_string(),
+            ),
+            (
+                "VOYAGE_API_KEY_1".to_string(),
+                "numbered-secret".to_string(),
+                SECRET_TYPE_API_KEY.to_string(),
+            ),
+            (
+                "DEEPSEEK_API_KEY".to_string(),
+                "model-secret".to_string(),
+                SECRET_TYPE_API_KEY.to_string(),
+            ),
+        ]);
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0].0, "DEEPSEEK_API_KEY");
+    }
+
+    #[test]
     fn alias_valued_account_is_not_a_bind_target() {
         let accounts = vec![(
             "DEEPSEEK_API_KEY".to_string(),
@@ -590,6 +801,27 @@ mod tests {
         .expect("upgrade");
         assert_eq!(decided.store_value, "vault:DEEPSEEK_API_KEY");
         assert!(!decided.noop);
+    }
+
+    #[test]
+    fn leftover_raw_row_migrates_when_submission_is_the_matching_pointer() {
+        let decided = decide_lane_slot_write(
+            &MASTER,
+            "EXTRACT_API_KEY",
+            "vault:DEEPSEEK_API_KEY",
+            Some("deepseek-secret"),
+            &accounts(),
+            false,
+        )
+        .expect("matching legacy bytes migrate to the requested pointer");
+        assert_eq!(decided.store_value, "vault:DEEPSEEK_API_KEY");
+        assert_eq!(decided.account, "DEEPSEEK_API_KEY");
+        assert!(!decided.rebound);
+        assert!(!decided.noop);
+        assert_eq!(
+            decided.old_fingerprint,
+            Some(decided.new_fingerprint.clone())
+        );
     }
 
     #[test]
@@ -687,6 +919,7 @@ mod tests {
             false,
             "first",
             None,
+            None,
         )
         .expect("first bind");
         let (decided, created) = write_lane_slot_binding(
@@ -697,6 +930,7 @@ mod tests {
             false,
             "lane extract",
             Some(vec!["lane-bot".to_string()]),
+            None,
         )
         .expect("metadata write");
         assert!(decided.noop);
@@ -740,6 +974,7 @@ mod tests {
                 false,
                 "",
                 None,
+                None,
             )
         });
         let handle_b = std::thread::spawn(move || {
@@ -751,6 +986,7 @@ mod tests {
                 "siliconflow-secret",
                 false,
                 "",
+                None,
                 None,
             )
         });

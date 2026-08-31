@@ -18,7 +18,7 @@ pub(crate) const LANE_SLOT_SECRET_NAMES: &[&str] = &[
 ];
 
 pub(crate) fn is_lane_slot_secret_name(name: &str) -> bool {
-    LANE_SLOT_SECRET_NAMES.contains(&name)
+    LANE_SLOT_SECRET_NAMES.contains(&name.trim())
 }
 
 pub(crate) fn validate_lane_slot_secret_type(name: &str, secret_type: &str) -> Result<(), String> {

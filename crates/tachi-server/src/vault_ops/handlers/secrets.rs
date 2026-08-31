@@ -12,8 +12,10 @@ pub(crate) async fn handle_vault_set(
             return Err("Secret value cannot be empty".to_string());
         }
         let effective_agent_id = resolve_vault_acl_agent_id(server, params.agent_id.as_deref())?;
-        authorize_vault_mutation(server, &params.name, params.agent_id.as_deref())
-            .map_err(|e| e.to_string())?;
+        if !is_lane_slot_secret_name(&params.name) {
+            authorize_vault_mutation(server, &params.name, params.agent_id.as_deref())
+                .map_err(|e| e.to_string())?;
+        }
         with_vault_key(server, |key| {
             let secret_type = if params.secret_type.trim().is_empty() {
                 memcore::infer_vault_secret_type(&params.name)
@@ -38,13 +40,6 @@ pub(crate) async fn handle_vault_set(
                     ));
                 }
                 let (decided, created) = server.with_global_store(|store| {
-                    if let Some(existing) = store
-                        .vault_get_entry(&params.name)
-                        .map_err(|e| format!("Failed to read existing entry: {e}"))?
-                    {
-                        ensure_agent_allowed(&existing, effective_agent_id.as_deref())
-                            .map_err(|e| e.to_string())?;
-                    }
                     crate::vault_ops::account_bind::write_lane_slot_binding(
                         store,
                         key,
@@ -53,6 +48,7 @@ pub(crate) async fn handle_vault_set(
                         params.rebind,
                         &params.description,
                         allowed_agents.clone(),
+                        effective_agent_id.as_deref(),
                     )
                 })?;
                 return serde_json::to_string(&json!({
@@ -63,6 +59,8 @@ pub(crate) async fn handle_vault_set(
                     "bound_account": decided.account,
                     "rebind": decided.rebound,
                     "noop": decided.noop,
+                    "old_fingerprint": decided.old_fingerprint,
+                    "new_fingerprint": decided.new_fingerprint,
                     "fingerprint": decided.fingerprint,
                 }))
                 .map_err(|e| format!("serialize: {e}"));

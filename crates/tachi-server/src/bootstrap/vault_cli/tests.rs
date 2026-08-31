@@ -290,25 +290,42 @@ fn vault_upsert_rejects_empty_value() {
 }
 
 #[test]
-fn legacy_vault_upsert_rejects_lane_slot_bypass() {
+fn legacy_vault_upsert_binds_lane_slot_to_registered_account() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("memory.db");
     let key = vault_init_with_password(&db_path, "correct horse battery staple".to_string())
         .expect("init vault");
-    let error = vault_upsert_secret_with_key(
+    vault_upsert_secret_with_key(
+        &db_path,
+        &key,
+        "DEEPSEEK_API_KEY",
+        "api_key",
+        "provider account",
+        "legacy-helper-family".to_string(),
+    )
+    .expect("seed registered provider account");
+    let created = vault_upsert_secret_with_key(
         &db_path,
         &key,
         "EXTRACT_API_KEY",
         "api_key",
-        "",
-        "must-not-bypass-rebind".to_string(),
+        "lane slot",
+        "legacy-helper-family".to_string(),
     )
-    .expect_err("legacy helper must not write lane slots")
-    .to_string();
+    .expect("matching raw bytes bind through the legacy helper");
+    assert!(created);
 
-    assert!(error.contains("EXTRACT_API_KEY"), "{error}");
-    assert!(error.contains("--rebind"), "{error}");
-    assert!(!error.contains("must-not-bypass-rebind"), "{error}");
+    let entry = open_cli_store_read_only(&db_path)
+        .expect("reopen fixture")
+        .vault_get_entry("EXTRACT_API_KEY")
+        .expect("read lane slot")
+        .expect("lane slot exists");
+    let stored = crate::vault_crypto::decrypt(key.bytes(), &entry.encrypted_value, &entry.nonce)
+        .expect("decrypt lane slot");
+    assert_eq!(
+        String::from_utf8(stored).expect("lane pointer is UTF-8"),
+        "vault:DEEPSEEK_API_KEY"
+    );
 }
 
 #[test]
