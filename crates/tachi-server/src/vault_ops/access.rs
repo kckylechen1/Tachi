@@ -336,11 +336,15 @@ fn read_usable_vault_secret_from_store(
         .map_err(|e| format!("Failed to begin usable Vault read transaction: {e}"))?;
     let selected = select_vault_entry_from_transaction(&transaction, params)?;
     ensure_agent_allowed(&selected.entry, effective_agent_id).map_err(|e| e.to_string())?;
+    super::validate_existing_lane_slot_secret_type(
+        &selected.entry.name,
+        &selected.entry.secret_type,
+    )?;
     let decrypted = crypto::decrypt(key, &selected.entry.encrypted_value, &selected.entry.nonce)?;
-    let value = crypto::decode_utf8_zeroizing(
+    let mut value = crypto::ZeroizingString::new(crypto::decode_utf8_zeroizing(
         decrypted,
         format!("Vault secret '{}' is not valid UTF-8", selected.entry.name),
-    )?;
+    )?);
 
     let (touch_name, value) = if super::is_lane_slot_secret_name(&selected.entry.name) {
         let target = tachi_llm::parse_vault_alias(&value).ok_or_else(|| {
@@ -369,10 +373,10 @@ fn read_usable_vault_secret_from_store(
             ));
         }
         let decrypted = crypto::decrypt(key, &target_entry.encrypted_value, &target_entry.nonce)?;
-        let target_value = crypto::decode_utf8_zeroizing(
+        let mut target_value = crypto::ZeroizingString::new(crypto::decode_utf8_zeroizing(
             decrypted,
             format!("Vault secret '{}' is not valid UTF-8", target_entry.name),
-        )?;
+        )?);
         let slot_health = transaction
             .vault_get_key_health(&selected.entry.name, &target_entry.name)
             .map_err(|e| format!("Failed to read lane slot health: {e}"))?;
@@ -389,9 +393,15 @@ fn read_usable_vault_secret_from_store(
                 target_health.as_ref(),
             ),
         )?;
-        (target_entry.name, target_value)
+        (
+            target_entry.name,
+            std::mem::take(target_value.as_mut_string()),
+        )
     } else {
-        (selected.target_name.clone(), value)
+        (
+            selected.target_name.clone(),
+            std::mem::take(value.as_mut_string()),
+        )
     };
 
     record_successful_vault_access_in_transaction(
@@ -446,6 +456,9 @@ fn materialize_unrestricted_vault_entries_from_store_with_hook(
         .vault_list_rotations()
         .map_err(|e| format!("Failed to list Vault rotations: {e}"))?
     {
+        if super::is_lane_slot_secret_name(&rotation.prefix) {
+            continue;
+        }
         memcore::validate_api_key_rotation(&entries, &rotation)
             .map_err(|error| format!("{error}; refusing Vault materialization"))?;
     }
@@ -453,7 +466,7 @@ fn materialize_unrestricted_vault_entries_from_store_with_hook(
 
     let mut secrets = Vec::new();
     for entry in &entries {
-        if !include_entry(&entry)
+        if !include_entry(entry)
             || entry
                 .allowed_agents
                 .as_ref()
@@ -769,6 +782,40 @@ fn record_rotation_member_drop(
     }
 }
 
+fn merged_provider_key_health(
+    server: &MemoryServer,
+    rows: Vec<VaultKeyHealth>,
+) -> HashMap<String, HashMap<String, VaultKeyHealth>> {
+    let mut snapshot: HashMap<String, HashMap<String, VaultKeyHealth>> = HashMap::new();
+    for row in rows {
+        snapshot
+            .entry(row.logical_name.clone())
+            .or_default()
+            .insert(row.key_id.clone(), row);
+    }
+    // A runtime outcome must affect both direct-account and bound-slot reads
+    // even before its asynchronous persistence completes.
+    for (logical_name, members) in server.llm.provider_health_memory_snapshot() {
+        let target = snapshot.entry(logical_name).or_default();
+        for (key_id, health) in members {
+            let keep_in_memory = target
+                .get(&key_id)
+                .and_then(|persisted| {
+                    let persisted_at =
+                        chrono::DateTime::parse_from_rfc3339(&persisted.updated_at).ok()?;
+                    let memory_at =
+                        chrono::DateTime::parse_from_rfc3339(&health.updated_at).ok()?;
+                    Some(memory_at >= persisted_at)
+                })
+                .unwrap_or(true);
+            if keep_in_memory {
+                target.insert(key_id, health);
+            }
+        }
+    }
+    snapshot
+}
+
 fn load_unlocked_api_key_secret_pools_filtered(
     server: &MemoryServer,
     only_logical_name: Option<&str>,
@@ -801,6 +848,9 @@ fn load_unlocked_api_key_secret_pools_filtered(
                 if !validate_rotations {
                     break;
                 }
+                if super::is_lane_slot_secret_name(&rotation.prefix) {
+                    continue;
+                }
                 if only_logical_name.is_none()
                     || only_logical_name == Some(rotation.prefix.as_str())
                     || requested_rotation_prefix == Some(rotation.prefix.as_str())
@@ -810,39 +860,7 @@ fn load_unlocked_api_key_secret_pools_filtered(
                     })?;
                 }
             }
-            let mut key_health_by_logical: HashMap<String, HashMap<String, VaultKeyHealth>> =
-                HashMap::new();
-            for row in key_health_rows {
-                key_health_by_logical
-                    .entry(row.logical_name.clone())
-                    .or_default()
-                    .insert(row.key_id.clone(), row);
-            }
-
-            // Merge in-memory health so that runtime mutations are visible even when
-            // background persistence is disabled (e.g. in tests).
-            for (logical_name, members) in server.llm.provider_health_memory_snapshot() {
-                let target = key_health_by_logical.entry(logical_name).or_default();
-                for (key_id, health) in members {
-                    let keep_in_memory = target
-                        .get(&key_id)
-                        .and_then(|db_row| {
-                            let db_updated =
-                                chrono::DateTime::parse_from_rfc3339(&db_row.updated_at)
-                                    .ok()?
-                                    .with_timezone(&Utc);
-                            let mem_updated =
-                                chrono::DateTime::parse_from_rfc3339(&health.updated_at)
-                                    .ok()?
-                                    .with_timezone(&Utc);
-                            Some(mem_updated >= db_updated)
-                        })
-                        .unwrap_or(true);
-                    if keep_in_memory {
-                        target.insert(key_id, health);
-                    }
-                }
-            }
+            let key_health_by_logical = merged_provider_key_health(server, key_health_rows);
 
             let mut pools: HashMap<String, Vec<tachi_llm::ProviderSecret>> = HashMap::new();
             let mut dropped: HashMap<String, AliasSkipClass> = HashMap::new();
@@ -976,10 +994,10 @@ fn load_unlocked_api_key_secret_pools_filtered(
                         continue;
                     }
                     let decrypted = crypto::decrypt(key, &entry.encrypted_value, &entry.nonce)?;
-                    let value = crypto::decode_utf8_zeroizing(
+                    let mut value = crypto::ZeroizingString::new(crypto::decode_utf8_zeroizing(
                         decrypted,
                         super::VAULT_MATERIALIZATION_INVALID_UTF8,
-                    )?;
+                    )?);
                     if value.trim().is_empty() {
                         record_rotation_member_drop(
                             &mut dropped,
@@ -990,10 +1008,20 @@ fn load_unlocked_api_key_secret_pools_filtered(
                         );
                         continue;
                     }
+                    if tachi_llm::parse_vault_alias(&value).is_some() {
+                        record_rotation_member_drop(
+                            &mut dropped,
+                            &mut prefix_drop,
+                            member_index,
+                            &entry.name,
+                            AliasSkipClass::ListedInvalidBinding,
+                        );
+                        continue;
+                    }
                     let key_id = entry.name.clone();
                     pool.push(tachi_llm::ProviderSecret {
                         key_id: key_id.clone(),
-                        value,
+                        value: std::mem::take(value.as_mut_string()),
                     });
                     materialized_key_ids.insert(key_id);
                 }
@@ -1006,6 +1034,16 @@ fn load_unlocked_api_key_secret_pools_filtered(
 
             for entry in &entries {
                 if only_logical_name.is_some_and(|logical_name| logical_name != entry.name) {
+                    continue;
+                }
+                if crate::provider_config::parse_rotation_member_name(&entry.name)
+                    .is_some_and(|(prefix, _)| super::is_lane_slot_secret_name(prefix))
+                {
+                    record_listed_drop(
+                        &mut dropped,
+                        &entry.name,
+                        AliasSkipClass::ListedInvalidBinding,
+                    );
                     continue;
                 }
                 if memcore::is_lane_config_secret_name(&entry.name) {
@@ -1042,53 +1080,111 @@ fn load_unlocked_api_key_secret_pools_filtered(
                     continue;
                 }
                 let decrypted = crypto::decrypt(key, &entry.encrypted_value, &entry.nonce)?;
-                let value = crypto::decode_utf8_zeroizing(
+                let mut value = crypto::ZeroizingString::new(crypto::decode_utf8_zeroizing(
                     decrypted,
                     super::VAULT_MATERIALIZATION_INVALID_UTF8,
-                )?;
+                )?);
                 if value.trim().is_empty() {
                     record_listed_drop(&mut dropped, &entry.name, AliasSkipClass::ListedEmpty);
                     continue;
                 }
                 let (key_id, value) = if let Some(target) = tachi_llm::parse_vault_alias(&value) {
                     if !super::is_lane_slot_secret_name(&entry.name) {
+                        record_listed_drop(
+                            &mut dropped,
+                            &entry.name,
+                            AliasSkipClass::ListedInvalidBinding,
+                        );
                         continue;
                     }
                     let Some(target_entry) =
                         entries.iter().find(|candidate| candidate.name == target)
                     else {
+                        record_listed_drop(
+                            &mut dropped,
+                            &entry.name,
+                            AliasSkipClass::ListedInvalidBinding,
+                        );
                         continue;
                     };
-                    if super::is_lane_slot_secret_name(&target_entry.name)
-                        || memcore::effective_vault_secret_type(
-                            &target_entry.name,
-                            &target_entry.secret_type,
-                        ) != SECRET_TYPE_API_KEY
-                        || target_entry
-                            .allowed_agents
-                            .as_ref()
-                            .is_some_and(|agents| !agents.is_empty())
-                    {
+                    if super::is_lane_slot_secret_name(&target_entry.name) {
+                        record_listed_drop(
+                            &mut dropped,
+                            &entry.name,
+                            AliasSkipClass::ListedInvalidBinding,
+                        );
                         continue;
                     }
-                    if let Some(class) = unusable_class(&entry.name, &target_entry.name) {
+                    if memcore::effective_vault_secret_type(
+                        &target_entry.name,
+                        &target_entry.secret_type,
+                    ) != SECRET_TYPE_API_KEY
+                    {
+                        record_listed_drop(
+                            &mut dropped,
+                            &entry.name,
+                            AliasSkipClass::ListedWrongType,
+                        );
+                        continue;
+                    }
+                    if crate::status_ops::status_health::account_class_for_env_name(
+                        &target_entry.name,
+                    ) != Some(memcore::AccountClass::ModelApi)
+                    {
+                        record_listed_drop(
+                            &mut dropped,
+                            &entry.name,
+                            AliasSkipClass::ListedNotModelProvider,
+                        );
+                        continue;
+                    }
+                    if target_entry
+                        .allowed_agents
+                        .as_ref()
+                        .is_some_and(|agents| !agents.is_empty())
+                    {
+                        record_listed_drop(&mut dropped, &entry.name, AliasSkipClass::ListedFenced);
+                        continue;
+                    }
+                    if let Some(class) = unusable_class(&entry.name, &target_entry.name)
+                        .or_else(|| unusable_class(&target_entry.name, &target_entry.name))
+                    {
                         record_listed_drop(&mut dropped, &entry.name, class);
                         continue;
                     }
                     let decrypted =
                         crypto::decrypt(key, &target_entry.encrypted_value, &target_entry.nonce)?;
-                    let target_value = crypto::decode_utf8_zeroizing(
-                        decrypted,
-                        super::VAULT_MATERIALIZATION_INVALID_UTF8,
-                    )?;
-                    if target_value.trim().is_empty()
-                        || tachi_llm::parse_vault_alias(&target_value).is_some()
-                    {
+                    let mut target_value =
+                        crypto::ZeroizingString::new(crypto::decode_utf8_zeroizing(
+                            decrypted,
+                            super::VAULT_MATERIALIZATION_INVALID_UTF8,
+                        )?);
+                    if target_value.trim().is_empty() {
+                        record_listed_drop(&mut dropped, &entry.name, AliasSkipClass::ListedEmpty);
                         continue;
                     }
-                    (target_entry.name.clone(), target_value)
+                    if tachi_llm::parse_vault_alias(&target_value).is_some() {
+                        record_listed_drop(
+                            &mut dropped,
+                            &entry.name,
+                            AliasSkipClass::ListedInvalidBinding,
+                        );
+                        continue;
+                    }
+                    (
+                        target_entry.name.clone(),
+                        std::mem::take(target_value.as_mut_string()),
+                    )
                 } else {
-                    (entry.name.clone(), value)
+                    if super::is_lane_slot_secret_name(&entry.name) {
+                        record_listed_drop(
+                            &mut dropped,
+                            &entry.name,
+                            AliasSkipClass::ListedInvalidBinding,
+                        );
+                        continue;
+                    }
+                    (entry.name.clone(), std::mem::take(value.as_mut_string()))
                 };
                 if let std::collections::hash_map::Entry::Vacant(slot) =
                     pools.entry(entry.name.clone())
@@ -1205,26 +1301,7 @@ fn lease_authorized_api_key_with_hook(
             let logical_name = rotation
                 .map(|row| row.prefix.as_str())
                 .unwrap_or(requested_name);
-            let mut health_by_key = health_rows
-                .iter()
-                .filter(|row| row.logical_name == logical_name)
-                .map(|row| (row.key_id.clone(), row.clone()))
-                .collect::<HashMap<_, _>>();
-            if let Some(in_memory) = server.llm.provider_health_memory_snapshot().get(logical_name) {
-                for (key_id, health) in in_memory {
-                    let keep_in_memory = health_by_key
-                        .get(key_id)
-                        .and_then(|persisted| {
-                            let persisted_at = chrono::DateTime::parse_from_rfc3339(&persisted.updated_at).ok()?;
-                            let memory_at = chrono::DateTime::parse_from_rfc3339(&health.updated_at).ok()?;
-                            Some(memory_at >= persisted_at)
-                        })
-                        .unwrap_or(true);
-                    if keep_in_memory {
-                        health_by_key.insert(key_id.clone(), health.clone());
-                    }
-                }
-            }
+            let health_by_logical = merged_provider_key_health(server, health_rows);
 
             let mut candidates = if let Some(rotation) = rotation {
                 let mut matching = collect_rotation_entries(entries.clone(), &rotation.prefix);
@@ -1276,8 +1353,9 @@ fn lease_authorized_api_key_with_hook(
                 if ensure_agent_allowed(&entry, effective_agent_id).is_err() {
                     continue;
                 }
-                if health_by_key
-                    .get(&entry.name)
+                if health_by_logical
+                    .get(logical_name)
+                    .and_then(|members| members.get(&entry.name))
                     .and_then(|health| unusable_skip_class(health, now))
                     .is_some()
                 {
@@ -1302,19 +1380,22 @@ fn lease_authorized_api_key_with_hook(
                         .find(|candidate| candidate.name == target)
                         .cloned()
                         .ok_or_else(|| format!("Lane slot target '{target}' is missing"))?;
+                    if ensure_agent_allowed(&target_entry, effective_agent_id).is_err()
+                        || memcore::effective_vault_secret_type(&target_entry.name, &target_entry.secret_type) != SECRET_TYPE_API_KEY
+                        || crate::status_ops::status_health::account_class_for_env_name(&target_entry.name) != Some(memcore::AccountClass::ModelApi)
+                    {
+                        continue;
+                    }
                     let decrypted =
                         crypto::decrypt(key, &target_entry.encrypted_value, &target_entry.nonce)?;
-                    let target_value = crypto::decode_utf8_zeroizing(
+                    let mut target_value = crypto::ZeroizingString::new(crypto::decode_utf8_zeroizing(
                         decrypted,
                         super::VAULT_MATERIALIZATION_INVALID_UTF8,
-                    )?;
-                    let slot_health = health_rows.iter().find(|health| {
-                        health.logical_name == entry.name && health.key_id == target_entry.name
-                    });
-                    let target_health = health_rows.iter().find(|health| {
-                        health.logical_name == target_entry.name
-                            && health.key_id == target_entry.name
-                    });
+                    )?);
+                    let slot_health = health_by_logical.get(&entry.name)
+                        .and_then(|members| members.get(&target_entry.name));
+                    let target_health = health_by_logical.get(&target_entry.name)
+                        .and_then(|members| members.get(&target_entry.name));
                     super::account_bind::refuse_unusable_account_target(
                         &entry.name,
                         &target_entry,
@@ -1325,8 +1406,11 @@ fn lease_authorized_api_key_with_hook(
                             target_health,
                         ),
                     )?;
-                    (target_entry, target_value)
+                    (target_entry, std::mem::take(target_value.as_mut_string()))
                 } else {
+                    if tachi_llm::parse_vault_alias(&value).is_some() {
+                        continue;
+                    }
                     (entry, value)
                 };
                 if !value.trim().is_empty() {

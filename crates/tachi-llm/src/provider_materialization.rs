@@ -216,6 +216,7 @@ pub enum AliasSkipClass {
     ListedUnusableExhausted,
     ListedUnusableCooldown,
     ListedNotModelProvider,
+    ListedInvalidBinding,
 }
 
 impl AliasSkipClass {
@@ -259,6 +260,9 @@ impl AliasSkipClass {
             ),
             Self::ListedNotModelProvider => format!(
                 "Config key '{key}' references a Vault alias whose listed secret is not a model provider key."
+            ),
+            Self::ListedInvalidBinding => format!(
+                "Config key '{key}' references a Vault alias whose listed secret has no valid provider-account binding."
             ),
         }
     }
@@ -1765,6 +1769,7 @@ mod tests {
             AliasSkipClass::ListedUnusableExhausted,
             AliasSkipClass::ListedUnusableCooldown,
             AliasSkipClass::ListedNotModelProvider,
+            AliasSkipClass::ListedInvalidBinding,
         ] {
             let reason = class.operator_reason("SILICONFLOW_API_KEY");
             assert!(

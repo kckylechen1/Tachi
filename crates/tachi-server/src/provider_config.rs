@@ -144,7 +144,17 @@ fn durable_load_from_keychain_scan(
     } else {
         VaultSourceAvailability::LockedOrUnavailable
     };
-    let pools = group_api_key_values_by_configured_rotations(scan.values, &scan.rotation_prefixes);
+    let mut pools =
+        group_api_key_values_by_configured_rotations(scan.values, &scan.rotation_prefixes);
+    // Keep provider health and lease attribution on the actual account in the
+    // Keychain path, just as in the unlocked-server path.
+    for (slot, account) in scan.slot_accounts {
+        if let Some(entries) = pools.get_mut(&slot) {
+            for entry in entries {
+                entry.key_id = account.clone();
+            }
+        }
+    }
     let mut listed_drops = scan.dropped;
     promote_configured_rotation_prefix_drops(&mut listed_drops, &pools, &scan.rotation_prefixes);
     VaultSourceLoad {
@@ -1491,6 +1501,8 @@ mod tests {
     use super::*;
     use crate::test_support::EnvRestore;
 
+    mod slot_keychain;
+
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn standalone_keychain_publication_refuses_acl_revision_drift() {
@@ -1963,6 +1975,7 @@ mod tests {
         let load =
             durable_load_from_keychain_scan(crate::status_ops::status_health::KeychainApiKeyScan {
                 values: Vec::new(),
+                slot_accounts: HashMap::new(),
                 lane_config_values: LaneConfigValues::default(),
                 dropped: HashMap::new(),
                 rotation_prefixes: HashSet::new(),

@@ -18,6 +18,8 @@ pub(super) fn load_unlocked_env_secrets(
         crate::utils::is_shell_env_name(&entry.name)
             && !rotation_member_names.contains(&entry.name)
             && !crate::vault_ops::is_lane_slot_secret_name(&entry.name)
+            && !crate::provider_config::parse_rotation_member_name(&entry.name)
+                .is_some_and(|(prefix, _)| crate::vault_ops::is_lane_slot_secret_name(prefix))
     })?;
     for (logical_name, entries) in pools {
         if !crate::utils::is_shell_env_name(&logical_name) {

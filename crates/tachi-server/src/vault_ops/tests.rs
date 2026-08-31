@@ -19,6 +19,8 @@ use crate::server_state::MemoryServer;
 use crate::test_support::EnvRestore;
 use std::time::{Duration, Instant};
 
+mod slot_materialization;
+
 #[test]
 fn authorized_vault_read_serializes_acl_revocation_with_selection_and_touch() {
     let db_path = crate::utils::test_fixture_path(format!(

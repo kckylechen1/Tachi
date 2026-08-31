@@ -115,20 +115,7 @@ pub(super) fn normalize_rotation_strategy_cli(value: &str) -> String {
     }
 }
 
-fn key_health_blocks_cli(health: &memcore::vault::VaultKeyHealth) -> bool {
-    if health.disabled || health.auth_failed {
-        return true;
-    }
-    match health.status.as_str() {
-        "exhausted" => true,
-        "rate_limited" | "cooldown" => health
-            .cooldown_until
-            .as_deref()
-            .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
-            .is_some_and(|until| until.with_timezone(&chrono::Utc) > chrono::Utc::now()),
-        _ => false,
-    }
-}
+use crate::vault_ops::account_bind::health_row_unusable as key_health_blocks_cli;
 
 fn rotation_member_name(prefix: &str, idx: i64) -> String {
     format!("{prefix}_{idx}")
@@ -155,6 +142,9 @@ pub(crate) fn validate_api_key_lease_target(
             )
             .into());
         }
+    }
+    if crate::vault_ops::is_lane_slot_secret_name(logical_name) {
+        return Ok(());
     }
     let rotation_prefix =
         crate::vault_ops::canonical_api_key_health_logical_name(store, logical_name)?;
@@ -217,9 +207,13 @@ fn lease_api_key_from_store_with_hook(
             .into());
         }
     }
-    let rotation = transaction
-        .vault_get_rotation(&health_logical_name)
-        .map_err(|e| format!("vault_get_rotation: {e}"))?;
+    let rotation = if crate::vault_ops::is_lane_slot_secret_name(logical_name) {
+        None
+    } else {
+        transaction
+            .vault_get_rotation(&health_logical_name)
+            .map_err(|e| format!("vault_get_rotation: {e}"))?
+    };
     if let Some(rotation) = rotation.as_ref() {
         memcore::validate_api_key_rotation(&entries, rotation).map_err(|error| {
             format!("{error}; refusing to lease '{logical_name}' as an API key")
@@ -307,6 +301,8 @@ fn lease_api_key_from_store_with_hook(
                     &target_entry.name,
                     &target_entry.secret_type,
                 ) != memcore::SECRET_TYPE_API_KEY
+                || crate::status_ops::status_health::account_class_for_env_name(&target_entry.name)
+                    != Some(memcore::AccountClass::ModelApi)
                 || target_entry
                     .allowed_agents
                     .as_ref()
@@ -330,16 +326,15 @@ fn lease_api_key_from_store_with_hook(
                 &target_entry.encrypted_value,
                 &target_entry.nonce,
             )?;
-            let mut target_value = String::from_utf8(decrypted).map_err(|e| {
-                format!(
-                    "Vault secret '{}' is not valid UTF-8: {e}",
-                    target_entry.name
-                )
-            })?;
+            let mut target_value = crate::vault_crypto::ZeroizingString::new(
+                crate::vault_crypto::decode_utf8_zeroizing(
+                    decrypted,
+                    crate::vault_ops::VAULT_MATERIALIZATION_INVALID_UTF8,
+                )?,
+            );
             if target_value.trim().is_empty()
                 || crate::provider_config::parse_vault_alias(&target_value).is_some()
             {
-                crate::vault_crypto::zero_string(&mut target_value);
                 continue;
             }
             transaction
@@ -351,7 +346,7 @@ fn lease_api_key_from_store_with_hook(
             return Ok((
                 health_logical_name.to_string(),
                 target_entry.name.clone(),
-                target_value,
+                std::mem::take(target_value.as_mut_string()),
             ));
         }
 

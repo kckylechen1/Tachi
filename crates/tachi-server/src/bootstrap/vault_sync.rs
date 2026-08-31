@@ -255,6 +255,9 @@ pub(super) fn import_validated_vault_bundle(
     vault_key: Option<&[u8; 32]>,
 ) -> Result<bool, Box<dyn std::error::Error>> {
     ensure_importable_kdf(config)?;
+    for rotation in rotations {
+        crate::vault_ops::account_bind::refuse_lane_slot_pool_prefix(&rotation.prefix)?;
+    }
     let has_slots = entries
         .iter()
         .any(|entry| crate::vault_ops::is_lane_slot_secret_name(&entry.name));
@@ -302,12 +305,35 @@ pub(super) fn import_validated_vault_bundle(
             )?;
         }
     }
-    let entries = if let Some(key) = vault_key {
-        crate::vault_ops::account_bind::rewrite_imported_lane_slots(key, entries)?
+    let entries = if has_slots {
+        let key = vault_key.expect("lane-slot verification key checked before opening the store");
+        // Incoming account rows win, but an entries-only slot bundle may bind
+        // to an account already present in this same transaction snapshot.
+        let mut sources = entries.to_vec();
+        sources.extend(
+            local_entries
+                .iter()
+                .filter(|local| {
+                    !crate::vault_ops::is_lane_slot_secret_name(&local.name)
+                        && !entries.iter().any(|incoming| incoming.name == local.name)
+                })
+                .cloned(),
+        );
+        let mut rewritten =
+            crate::vault_ops::account_bind::rewrite_imported_lane_slots(key, &sources)?;
+        rewritten.truncate(entries.len());
+        rewritten
     } else {
         entries.to_vec()
     };
-    validate_imported_lane_slots(&entries, &local_entries, vault_key)?;
+    let health_rows = if has_slots {
+        transaction
+            .vault_list_key_health(None)
+            .map_err(|e| format!("vault_list_key_health: {e}"))?
+    } else {
+        Vec::new()
+    };
+    validate_imported_lane_slots(&entries, &local_entries, vault_key, &health_rows)?;
     validate_new_imported_lane_urls(&entries, &local_entries, vault_key)?;
 
     transaction
@@ -378,6 +404,7 @@ fn validate_imported_lane_slots(
     incoming: &[VaultEntry],
     local: &[VaultEntry],
     verification_key: Option<&[u8; 32]>,
+    health_rows: &[memcore::vault::VaultKeyHealth],
 ) -> Result<(), String> {
     for lane in incoming
         .iter()
@@ -422,8 +449,61 @@ fn validate_imported_lane_slots(
             target_entry,
             &target_value,
             None,
-            false,
+            crate::vault_ops::account_bind::slot_target_health_unusable(
+                health_rows
+                    .iter()
+                    .find(|health| health.logical_name == lane.name && health.key_id == target),
+                health_rows
+                    .iter()
+                    .find(|health| health.logical_name == target && health.key_id == target),
+            ),
         )?;
+        if let Some(existing) = local.iter().find(|entry| entry.name == lane.name) {
+            let old_value = crate::vault_crypto::ZeroizingString::new(
+                crate::vault_crypto::decode_utf8_zeroizing(
+                    crate::vault_crypto::decrypt(key, &existing.encrypted_value, &existing.nonce)?,
+                    format!("Existing lane slot '{}' is not valid UTF-8", lane.name),
+                )?,
+            );
+            let old_account = crate::provider_config::parse_vault_alias(&old_value)
+                .filter(|name| *name != target)
+                .and_then(|name| local.iter().find(|entry| entry.name == name));
+            let old_account_value = old_account
+                .map(|entry| {
+                    crate::vault_crypto::decode_utf8_zeroizing(
+                        crate::vault_crypto::decrypt(key, &entry.encrypted_value, &entry.nonce)?,
+                        format!("Existing account '{}' is not valid UTF-8", entry.name),
+                    )
+                    .map(crate::vault_crypto::ZeroizingString::new)
+                })
+                .transpose()?;
+            let kind = crate::status_ops::status_health::provider_kind_for_env_name(target)
+                .ok_or_else(|| {
+                    format!(
+                        "Imported lane slot target '{target}' is not a registered provider account"
+                    )
+                })?;
+            let mut accounts = vec![(target.to_string(), target_value.to_string(), kind)];
+            if let (Some(account), Some(value)) = (old_account, old_account_value.as_ref()) {
+                if let Some(kind) =
+                    crate::status_ops::status_health::provider_kind_for_env_name(&account.name)
+                {
+                    accounts.push((account.name.clone(), value.to_string(), kind));
+                }
+            }
+            let decision = crate::vault_ops::account_bind::decide_lane_slot_write(
+                key,
+                &lane.name,
+                &lane_value,
+                Some(&old_value),
+                &accounts,
+                false,
+            );
+            for (_, value, _) in &mut accounts {
+                crate::vault_crypto::zero_string(value);
+            }
+            decision?;
+        }
     }
     Ok(())
 }
@@ -654,6 +734,8 @@ pub(super) fn print_status(status: &VaultSyncStatus) {
 mod tests {
     use super::*;
 
+    mod bindings;
+
     fn temp_db_path() -> PathBuf {
         crate::utils::test_fixture_path(format!("tachi-vault-sync-{}.sqlite", uuid::Uuid::new_v4()))
     }
@@ -720,6 +802,9 @@ mod tests {
     #[test]
     fn unsigned_vault_sync_import_refuses_lane_slots() {
         let target_db = temp_db_path();
+        // This case checks an existing Vault; the missing-database case below
+        // independently requires rejection before a database is created.
+        drop(open_cli_store(&target_db).expect("create empty target store"));
         let lane = VaultEntry {
             name: "EXTRACT_API_KEY".to_string(),
             encrypted_value: "unverified-ciphertext".to_string(),
