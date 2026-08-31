@@ -168,7 +168,7 @@ jobs:
         # owned-group absence.
         # Keep this an exact module-root path, and fail if nextest discovers
         # zero tests rather than silently accepting a stale selector.
-        run: cargo nextest run -p tachi-server --locked --no-tests=fail --exact 'dispatch_ops::subprocess::required_postflight_kernel_containment_discriminates_setsid_escape'
+        run: cargo nextest run -p tachi-server --locked --no-tests=fail -- --exact 'dispatch_ops::subprocess::required_postflight_kernel_containment_discriminates_setsid_escape'
 
       - name: renameat2 no-clobber and anchored-rename legs (memcore)
         # filename.rs atomic rename (RENAME_NOREPLACE) and anchored_fs.rs
