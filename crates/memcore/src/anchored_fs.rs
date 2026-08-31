@@ -451,6 +451,32 @@ pub use imp::{AnchoredDirectory, CreateFileOutcome, DirectoryIdentity};
 mod tests {
     use super::AnchoredDirectory;
     use std::ffi::OsStr;
+    use std::os::unix::fs::MetadataExt;
+
+    #[test]
+    fn anchored_identity_matches_metadata_and_survives_path_replacement() {
+        let root = tempfile::tempdir().unwrap();
+        let managed = root.path().join("managed");
+        let captured = root.path().join("captured");
+        std::fs::create_dir(&managed).unwrap();
+        let authority = AnchoredDirectory::open_absolute(&managed.canonicalize().unwrap()).unwrap();
+        let metadata = std::fs::metadata(&managed).unwrap();
+        let identity = authority.identity().unwrap();
+        assert_eq!(identity.device, metadata.dev());
+        assert_eq!(identity.inode, metadata.ino());
+
+        std::fs::rename(&managed, &captured).unwrap();
+        std::fs::create_dir(&managed).unwrap();
+        let replacement =
+            AnchoredDirectory::open_absolute(&managed.canonicalize().unwrap()).unwrap();
+        let replacement_metadata = std::fs::metadata(&managed).unwrap();
+        let replacement_identity = replacement.identity().unwrap();
+        assert_eq!(replacement_identity.device, replacement_metadata.dev());
+        assert_eq!(replacement_identity.inode, replacement_metadata.ino());
+        assert_eq!(authority.identity().unwrap(), identity);
+        assert_eq!(std::fs::metadata(&captured).unwrap().ino(), identity.inode);
+        assert_ne!(replacement_identity, identity);
+    }
 
     #[test]
     fn anchored_children_reject_empty_dot_dotdot_and_slash() {
