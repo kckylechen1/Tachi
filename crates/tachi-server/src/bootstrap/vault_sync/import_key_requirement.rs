@@ -10,7 +10,7 @@ use std::path::Path;
 /// unnecessary password/Keychain read for untracked opaque entries while
 /// preserving the key requirement for lane bindings, new lane URLs, and
 /// entries that currently own durable account custody.
-pub(super) fn unsigned_import_requires_vault_key(
+pub(in crate::bootstrap) fn unsigned_import_requires_vault_key(
     global_db_path: &Path,
     input: &Path,
 ) -> Result<bool, Box<dyn std::error::Error>> {
