@@ -258,13 +258,20 @@ pub(super) fn import_validated_vault_bundle(
     let has_slots = entries
         .iter()
         .any(|entry| crate::vault_ops::is_lane_slot_secret_name(&entry.name));
-    let entries = if has_slots {
-        let key = vault_key.ok_or(
-            "Lane slots in a sync bundle require a vault password so leftover ciphertext can be bound or refused",
-        )?;
-        crate::vault_ops::account_bind::rewrite_imported_lane_slots(key, entries)?
+    let vault_key = if has_slots {
+        Some(vault_key.ok_or_else(|| {
+            let slots = entries
+                .iter()
+                .filter(|entry| crate::vault_ops::is_lane_slot_secret_name(&entry.name))
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "Unsigned Vault sync import cannot write lane slot(s) {slots}; a vault password is required so leftover ciphertext can be bound or refused"
+            )
+        })?)
     } else {
-        entries.to_vec()
+        vault_key
     };
 
     let mut store = open_cli_store(global_db_path)?;
@@ -283,6 +290,23 @@ pub(super) fn import_validated_vault_bundle(
     let local_entries = transaction
         .vault_list_entries()
         .map_err(|e| format!("vault_list_entries: {e}"))?;
+    for lane in entries
+        .iter()
+        .filter(|entry| crate::vault_ops::is_lane_slot_secret_name(&entry.name))
+    {
+        crate::vault_ops::validate_lane_slot_secret_type(&lane.name, &lane.secret_type)?;
+        if let Some(existing) = local_entries.iter().find(|entry| entry.name == lane.name) {
+            crate::vault_ops::validate_existing_lane_slot_secret_type(
+                &existing.name,
+                &existing.secret_type,
+            )?;
+        }
+    }
+    let entries = if let Some(key) = vault_key {
+        crate::vault_ops::account_bind::rewrite_imported_lane_slots(key, entries)?
+    } else {
+        entries.to_vec()
+    };
     validate_imported_lane_slots(&entries, &local_entries, vault_key)?;
     validate_new_imported_lane_urls(&entries, &local_entries, vault_key)?;
 
@@ -372,58 +396,34 @@ fn validate_imported_lane_slots(
                 lane_plain,
                 format!("Imported lane slot '{}' is not valid UTF-8", lane.name),
             )?);
-
-        if let Some(existing) = local.iter().find(|entry| entry.name == lane.name) {
-            crate::vault_ops::validate_existing_lane_slot_secret_type(
-                &existing.name,
-                &existing.secret_type,
-            )?;
-            let old_plain =
-                crate::vault_crypto::decrypt(key, &existing.encrypted_value, &existing.nonce)?;
-            let old_value = crate::vault_crypto::ZeroizingString::new(
-                crate::vault_crypto::decode_utf8_zeroizing(
-                    old_plain,
-                    format!("Existing lane slot '{}' is not valid UTF-8", lane.name),
-                )?,
-            );
-            let provider_kind =
-                crate::status_ops::status_health::provider_kind_for_env_name(&lane.name)
-                    .unwrap_or("unknown");
-            crate::vault_ops::evaluate_lane_slot_overwrite(
-                &old_value,
-                &lane_value,
-                provider_kind,
-                key,
-                false,
+        let target = crate::provider_config::parse_vault_alias(&lane_value).ok_or_else(|| {
+            format!(
+                "Imported lane slot '{}' is not bound to a provider account",
+                lane.name
             )
-            .map_err(|error| error.operator_message(&lane.name))?;
-        }
-
-        for account in local.iter().chain(incoming).filter(|entry| {
-            entry.name != lane.name
-                && entry.secret_type == memcore::vault::SECRET_TYPE_API_KEY
-                && !crate::vault_ops::is_lane_slot_secret_name(&entry.name)
-        }) {
-            let account_plain =
-                crate::vault_crypto::decrypt(key, &account.encrypted_value, &account.nonce)?;
-            let account_value = crate::vault_crypto::ZeroizingString::new(
-                crate::vault_crypto::decode_utf8_zeroizing(
-                    account_plain,
-                    format!("Imported account '{}' is not valid UTF-8", account.name),
-                )?,
-            );
-            let provider_kind =
-                crate::status_ops::status_health::provider_kind_for_env_name(&account.name)
-                    .unwrap_or("unregistered");
-            if crate::vault_ops::fingerprint_secret(key, provider_kind, &account_value)
-                == crate::vault_ops::fingerprint_secret(key, provider_kind, &lane_value)
-            {
-                return Err(crate::vault_ops::copy_existing_account_message(
-                    &lane.name,
-                    &account.name,
-                ));
-            }
-        }
+        })?;
+        let target_entry = incoming
+            .iter()
+            .chain(local)
+            .find(|entry| entry.name == target)
+            .ok_or_else(|| format!("Imported lane slot target '{target}' is missing"))?;
+        let target_plain =
+            crate::vault_crypto::decrypt(key, &target_entry.encrypted_value, &target_entry.nonce)?;
+        let target_value =
+            crate::vault_crypto::ZeroizingString::new(crate::vault_crypto::decode_utf8_zeroizing(
+                target_plain,
+                format!(
+                    "Imported account '{}' is not valid UTF-8",
+                    target_entry.name
+                ),
+            )?);
+        crate::vault_ops::account_bind::refuse_unusable_account_target(
+            &lane.name,
+            target_entry,
+            &target_value,
+            None,
+            false,
+        )?;
     }
     Ok(())
 }
@@ -1447,30 +1447,13 @@ mod tests {
         let _ = std::fs::remove_file(target_db);
     }
 
-    fn encrypted_entry(key: &[u8; 32], name: &str, value: &str) -> VaultEntry {
-        let (encrypted_value, nonce) =
-            crate::vault_crypto::encrypt(key, value.as_bytes()).expect("encrypt");
-        VaultEntry {
-            name: name.to_string(),
-            encrypted_value,
-            nonce,
-            secret_type: "api_key".to_string(),
-            description: String::new(),
-            allowed_agents: None,
-            created_at: "2026-01-01T00:00:00Z".to_string(),
-            updated_at: "2026-01-01T00:00:00Z".to_string(),
-            accessed_at: String::new(),
-            access_count: 0,
-        }
-    }
-
     #[test]
     fn import_validated_vault_bundle_refuses_slots_without_vault_key() {
         let target_db = temp_db_path();
         let err = import_validated_vault_bundle(
             &target_db,
             &sample_config(),
-            &[encrypted_entry(&[7u8; 32], "EXTRACT_API_KEY", "leftover")],
+            &[encrypted_entry("EXTRACT_API_KEY", "leftover", &[7u8; 32])],
             &[],
             None,
         )
@@ -1493,8 +1476,8 @@ mod tests {
             &target_db,
             &sample_config(),
             &[
-                encrypted_entry(&key, "DEEPSEEK_API_KEY", "deepseek-secret"),
-                encrypted_entry(&key, "EXTRACT_API_KEY", "deepseek-secret"),
+                encrypted_entry("DEEPSEEK_API_KEY", "deepseek-secret", &key),
+                encrypted_entry("EXTRACT_API_KEY", "deepseek-secret", &key),
             ],
             &[],
             Some(&key),

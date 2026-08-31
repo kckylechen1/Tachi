@@ -325,25 +325,6 @@ pub(super) fn select_authorized_vault_entry_and_record_access(
     )
 }
 
-/// Direct, identity-less CLI read boundary. Selection, ACL validation,
-/// decryption, access accounting, and any rotation advance share one
-/// immediate transaction so an ACL update cannot race plaintext release.
-pub(crate) fn read_vault_secret_from_store(
-    store: &mut MemoryStore,
-    key: &[u8; 32],
-    name: &str,
-    auto_rotate: bool,
-) -> Result<String, String> {
-    let params = VaultGetParams {
-        name: name.to_string(),
-        agent_id: None,
-        auto_rotate,
-    };
-    let (_selected, value, _access_count) =
-        select_authorized_vault_entry_and_record_access(store, &params, None, key)?;
-    Ok(value)
-}
-
 fn read_usable_vault_secret_from_store(
     store: &mut MemoryStore,
     key: &[u8; 32],
@@ -422,6 +403,20 @@ fn read_usable_vault_secret_from_store(
         .commit()
         .map_err(|e| format!("Failed to commit usable Vault read transaction: {e}"))?;
     Ok(value)
+}
+
+pub(crate) fn read_usable_vault_secret_from_store_direct(
+    store: &mut MemoryStore,
+    key: &[u8; 32],
+    name: &str,
+    auto_rotate: bool,
+) -> Result<String, String> {
+    let params = VaultGetParams {
+        name: name.to_string(),
+        agent_id: None,
+        auto_rotate,
+    };
+    read_usable_vault_secret_from_store(store, key, &params, None)
 }
 
 /// Materialize unrestricted entries for an identity-less CLI consumer in one
@@ -1189,12 +1184,19 @@ fn lease_authorized_api_key_with_hook(
                 .vault_list_key_health(None)
                 .map_err(|e| format!("Failed to list Vault key health: {e}"))?;
 
-            let member_rotation = crate::provider_config::parse_rotation_member_name(requested_name)
+            let requested_is_slot = super::is_lane_slot_secret_name(requested_name);
+            let member_rotation = (!requested_is_slot)
+                .then(|| crate::provider_config::parse_rotation_member_name(requested_name))
+                .flatten()
                 .and_then(|(prefix, _)| rotations.iter().find(|row| row.prefix == prefix));
-            let rotation = rotations
-                .iter()
-                .find(|row| row.prefix == requested_name)
-                .or(member_rotation);
+            let rotation = if requested_is_slot {
+                None
+            } else {
+                rotations
+                    .iter()
+                    .find(|row| row.prefix == requested_name)
+                    .or(member_rotation)
+            };
             if let Some(rotation) = rotation {
                 memcore::validate_api_key_rotation(&entries, rotation)
                     .map_err(|error| format!("{error}; refusing API-key lease"))?;
@@ -1204,9 +1206,9 @@ fn lease_authorized_api_key_with_hook(
                 .map(|row| row.prefix.as_str())
                 .unwrap_or(requested_name);
             let mut health_by_key = health_rows
-                .into_iter()
+                .iter()
                 .filter(|row| row.logical_name == logical_name)
-                .map(|row| (row.key_id.clone(), row))
+                .map(|row| (row.key_id.clone(), row.clone()))
                 .collect::<HashMap<_, _>>();
             if let Some(in_memory) = server.llm.provider_health_memory_snapshot().get(logical_name) {
                 for (key_id, health) in in_memory {
@@ -1286,6 +1288,47 @@ fn lease_authorized_api_key_with_hook(
                     decrypted,
                     super::VAULT_MATERIALIZATION_INVALID_UTF8,
                 )?;
+                let (entry, value) = if super::is_lane_slot_secret_name(&entry.name) {
+                    let target = tachi_llm::parse_vault_alias(&value)
+                        .map(str::to_string)
+                        .ok_or_else(|| {
+                            format!(
+                                "Lane slot '{}' is not bound to a usable account",
+                                entry.name
+                            )
+                        })?;
+                    let target_entry = entries
+                        .iter()
+                        .find(|candidate| candidate.name == target)
+                        .cloned()
+                        .ok_or_else(|| format!("Lane slot target '{target}' is missing"))?;
+                    let decrypted =
+                        crypto::decrypt(key, &target_entry.encrypted_value, &target_entry.nonce)?;
+                    let target_value = crypto::decode_utf8_zeroizing(
+                        decrypted,
+                        super::VAULT_MATERIALIZATION_INVALID_UTF8,
+                    )?;
+                    let slot_health = health_rows.iter().find(|health| {
+                        health.logical_name == entry.name && health.key_id == target_entry.name
+                    });
+                    let target_health = health_rows.iter().find(|health| {
+                        health.logical_name == target_entry.name
+                            && health.key_id == target_entry.name
+                    });
+                    super::account_bind::refuse_unusable_account_target(
+                        &entry.name,
+                        &target_entry,
+                        &target_value,
+                        effective_agent_id,
+                        super::account_bind::slot_target_health_unusable(
+                            slot_health,
+                            target_health,
+                        ),
+                    )?;
+                    (target_entry, target_value)
+                } else {
+                    (entry, value)
+                };
                 if !value.trim().is_empty() {
                     materialized_key_ids.insert(entry.name.clone());
                     if selected.is_none() {

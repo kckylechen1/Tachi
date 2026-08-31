@@ -466,7 +466,7 @@ fn vault_upsert_secret_with_key_binds_lane_slot_instead_of_copying() {
     );
 
     let store = open_cli_store(&db_path).expect("open rw");
-    let (key_id, value) =
+    let (_, key_id, value) =
         lease_api_key_from_store(&store, key.bytes(), "EXTRACT_API_KEY").expect("lease slot");
     assert_eq!(key_id, "DEEPSEEK_API_KEY");
     assert_eq!(value, "deepseek-secret");
@@ -542,7 +542,7 @@ fn lease_api_key_from_store_ignores_legacy_slot_rotation() {
             updated_at: now,
         })
         .expect("rotation");
-    let (key_id, value) =
+    let (_, key_id, value) =
         lease_api_key_from_store(&store, key.bytes(), "EXTRACT_API_KEY").expect("lease");
     assert_eq!(key_id, "DEEPSEEK_API_KEY");
     assert_eq!(value, "deepseek-secret");

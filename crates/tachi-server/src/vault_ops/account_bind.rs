@@ -82,13 +82,13 @@ pub(crate) fn refuse_unusable_account_target(
             match agent_id.map(str::trim).filter(|agent| !agent.is_empty()) {
                 None => {
                     return Err(format!(
-                        "Lane slot '{slot}' points at a restricted account '{}'",
+                        "Lane slot '{slot}' points at account '{}' which is not usable because it is restricted",
                         target.name
                     ));
                 }
                 Some(agent) if !allowed.iter().any(|allowed_agent| allowed_agent == agent) => {
                     return Err(format!(
-                        "Lane slot '{slot}' points at an account '{}' this agent cannot use",
+                        "Lane slot '{slot}' points at account '{}' which is not usable by this agent",
                         target.name
                     ));
                 }

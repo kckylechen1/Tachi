@@ -71,7 +71,7 @@ pub(super) fn resolve_project_env_values(
     }
     let mut exports = Vec::new();
     for binding in bindings {
-        let value = crate::vault_ops::read_vault_secret_from_store(
+        let value = crate::vault_ops::read_usable_vault_secret_from_store_direct(
             &mut unlocked.store,
             unlocked.key.bytes(),
             &binding.secret_name,

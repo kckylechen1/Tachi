@@ -92,13 +92,6 @@ pub(crate) fn evaluate_lane_slot_overwrite(
     Err(LaneSlotRebindRequired { old_fp, new_fp })
 }
 
-pub(crate) fn copy_existing_account_message(slot: &str, account_name: &str) -> String {
-    format!(
-        "Lane slot '{slot}' would copy ciphertext already stored as '{account_name}'. \
-         Bind with {slot}=vault:{account_name} instead of storing a second copy."
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

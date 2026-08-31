@@ -25,7 +25,7 @@ pub(crate) use access::load_unlocked_api_key_secret_pools_with_drops;
 pub(crate) use access::load_validated_unlocked_api_key_secret_pools_with_drops;
 pub(crate) use access::vault_materialization_acl_revision_from_rows;
 pub(crate) use access::{
-    materialize_unrestricted_vault_entries_from_store, read_vault_secret_from_store,
+    materialize_unrestricted_vault_entries_from_store, read_usable_vault_secret_from_store_direct,
 };
 
 /// Public-safe failure for background Vault materialization. The raw UTF-8
@@ -49,7 +49,6 @@ pub(crate) use params::{
     VaultSetupRotationParams, VaultUnlockParams,
 };
 pub(crate) use slot_rebind::{
-    copy_existing_account_message, evaluate_lane_slot_overwrite, fingerprint_secret,
     validate_existing_lane_slot_secret_type, validate_lane_slot_secret_type,
 };
 
