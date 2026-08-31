@@ -3,8 +3,9 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 
 /// Both observations come from the transaction that supplied the plaintext.
-/// Content drift always invalidates that plaintext; health drift requires a
-/// check of only the credentials the captured snapshot would publish.
+/// Authority metadata must still match at publication. Credentials and lane
+/// values publish as one captured generation; health drift requires a check
+/// of only the credentials that generation would publish.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct VaultMaterializationRevision {
     pub contents: u64,
@@ -28,10 +29,6 @@ pub(crate) fn vault_materialization_acl_revision_from_rows(
         entry.secret_type.hash(&mut contents);
         entry.allowed_agents.hash(&mut contents);
         entry.updated_at.hash(&mut contents);
-        // A writer can replace bytes without changing a timestamp. Bind the
-        // actual encrypted payload, but not access counters touched by scans.
-        entry.encrypted_value.hash(&mut contents);
-        entry.nonce.hash(&mut contents);
     }
     rotations.len().hash(&mut contents);
     for rotation in rotations {

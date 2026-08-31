@@ -518,7 +518,7 @@ async fn unlocked_and_keychain_publication_refuse_external_bound_health_changes(
 }
 
 #[tokio::test]
-async fn unlocked_and_keychain_publication_bind_ciphertext_with_unchanged_timestamp() {
+async fn unlocked_and_keychain_publication_preserve_captured_credential_generation() {
     let _lock = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
@@ -577,14 +577,29 @@ async fn unlocked_and_keychain_publication_bind_ciphertext_with_unchanged_timest
         } else {
             crate::provider_config::materialize_for_server_with_hook_for_tests(&server, after_scan)
         };
-        let error = result.expect_err("same timestamp cannot bless stale decrypted bytes");
-        assert!(error.contains("entry revision changed"), "{error}");
+        result.expect("publish the complete captured generation");
         observed_rx
             .try_recv()
             .expect("post-scan content mutation ran");
-        assert_eq!(server.llm.provider_secret_count(), 0);
-        assert_eq!(server.llm.provider_secret_for_tests(&[SLOT]), None);
-        assert_eq!(runtime_snapshot(&server), before);
+        assert_eq!(
+            server.llm.provider_secret_for_tests(&[SLOT]).as_deref(),
+            Some(SECRET)
+        );
+        assert_eq!(server.llm.runtime_config(), before.0);
+        if keychain {
+            let _missing = EnvRestore::remove("TACHI_TEST_FORCE_KEYCHAIN_MISSING");
+            let _password = EnvRestore::set("TACHI_TEST_KEYCHAIN_PASSWORD", PASSWORD);
+            crate::provider_config::materialize_standalone(server.llm.as_ref(), &path)
+                .expect("publish the next complete Keychain generation");
+        } else {
+            crate::provider_config::materialize_for_server(&server)
+                .expect("publish the next complete unlocked generation");
+        }
+        assert_eq!(
+            server.llm.provider_secret_for_tests(&[SLOT]).as_deref(),
+            Some("replacement-fixture-secret")
+        );
+        assert_eq!(server.llm.runtime_config(), before.0);
         assert!(health_rows(&server).is_empty());
     }
 }
