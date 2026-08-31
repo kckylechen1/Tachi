@@ -508,6 +508,140 @@ fn vault_upsert_secret_with_key_binds_lane_slot_instead_of_copying() {
 }
 
 #[test]
+fn vault_upsert_lane_slot_ignores_unrelated_corrupt_accounts() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("memory.db");
+    let key = vault_init_with_password(&db_path, "correct horse battery staple".to_string())
+        .expect("init vault");
+    for (name, value) in [
+        ("DEEPSEEK_API_KEY", "selected-family"),
+        ("SILICONFLOW_API_KEY", "bad-bytes"),
+        ("OPENAI_API_KEY", "corrupt-ciphertext-family"),
+    ] {
+        vault_upsert_secret_with_key(&db_path, &key, name, "api_key", "", value.to_string())
+            .expect("seed account");
+    }
+    let store = open_cli_store(&db_path).expect("open store");
+    for (name, invalid_utf8) in [("SILICONFLOW_API_KEY", true), ("OPENAI_API_KEY", false)] {
+        let mut entry = store
+            .vault_get_entry(name)
+            .expect("get account")
+            .expect("account exists");
+        if invalid_utf8 {
+            let (encrypted_value, nonce) =
+                crate::vault_crypto::encrypt(key.bytes(), &[0xff, 0xfe]).expect("encrypt");
+            entry.encrypted_value = encrypted_value;
+            entry.nonce = nonce;
+        } else {
+            entry.encrypted_value = vec![0x01, 0x02, 0x03];
+            entry.nonce = vec![0x04, 0x05];
+        }
+        store.vault_upsert_entry(&entry).expect("corrupt account");
+    }
+
+    vault_upsert_secret_with_key(
+        &db_path,
+        &key,
+        "EXTRACT_API_KEY",
+        "api_key",
+        "",
+        "vault:DEEPSEEK_API_KEY".to_string(),
+    )
+    .expect("healthy explicit target must bind");
+    let slot = open_cli_store_read_only(&db_path)
+        .expect("reopen store")
+        .vault_get_entry("EXTRACT_API_KEY")
+        .expect("get slot")
+        .expect("slot exists");
+    let value = crate::vault_crypto::decrypt(key.bytes(), &slot.encrypted_value, &slot.nonce)
+        .expect("decrypt slot");
+    assert_eq!(
+        String::from_utf8(value).expect("pointer utf8"),
+        "vault:DEEPSEEK_API_KEY"
+    );
+    vault_upsert_secret_with_key(
+        &db_path,
+        &key,
+        "SUMMARY_API_KEY",
+        "api_key",
+        "",
+        "selected-family".to_string(),
+    )
+    .expect("raw matching must skip unrelated corrupt accounts");
+    let summary = open_cli_store_read_only(&db_path)
+        .expect("reopen store")
+        .vault_get_entry("SUMMARY_API_KEY")
+        .expect("get summary slot")
+        .expect("summary slot exists");
+    let summary_value =
+        crate::vault_crypto::decrypt(key.bytes(), &summary.encrypted_value, &summary.nonce)
+            .expect("decrypt summary slot");
+    assert_eq!(
+        String::from_utf8(summary_value).expect("pointer utf8"),
+        "vault:DEEPSEEK_API_KEY"
+    );
+}
+
+#[test]
+fn vault_upsert_lane_slot_rejects_corrupt_selected_account_unchanged() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("memory.db");
+    let key = vault_init_with_password(&db_path, "correct horse battery staple".to_string())
+        .expect("init vault");
+    vault_upsert_secret_with_key(
+        &db_path,
+        &key,
+        "DEEPSEEK_API_KEY",
+        "api_key",
+        "",
+        "original-family".to_string(),
+    )
+    .expect("seed account");
+    vault_upsert_secret_with_key(
+        &db_path,
+        &key,
+        "EXTRACT_API_KEY",
+        "api_key",
+        "",
+        "vault:DEEPSEEK_API_KEY".to_string(),
+    )
+    .expect("initial bind");
+
+    let store = open_cli_store(&db_path).expect("open store");
+    let mut account = store
+        .vault_get_entry("DEEPSEEK_API_KEY")
+        .expect("get account")
+        .expect("account exists");
+    let (encrypted_value, nonce) =
+        crate::vault_crypto::encrypt(key.bytes(), &[0xff, 0xfe]).expect("encrypt");
+    account.encrypted_value = encrypted_value;
+    account.nonce = nonce;
+    store.vault_upsert_entry(&account).expect("corrupt account");
+
+    let error = vault_upsert_secret_with_key(
+        &db_path,
+        &key,
+        "EXTRACT_API_KEY",
+        "api_key",
+        "",
+        "vault:DEEPSEEK_API_KEY".to_string(),
+    )
+    .expect_err("corrupt selected account must fail");
+    assert!(error.to_string().contains("not valid UTF-8"), "{error}");
+    let slot = open_cli_store_read_only(&db_path)
+        .expect("reopen store")
+        .vault_get_entry("EXTRACT_API_KEY")
+        .expect("get slot")
+        .expect("slot exists");
+    let value = crate::vault_crypto::decrypt(key.bytes(), &slot.encrypted_value, &slot.nonce)
+        .expect("decrypt slot");
+    assert_eq!(
+        String::from_utf8(value).expect("pointer utf8"),
+        "vault:DEEPSEEK_API_KEY"
+    );
+}
+
+#[test]
 fn lease_api_key_from_store_ignores_legacy_slot_rotation() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("memory.db");

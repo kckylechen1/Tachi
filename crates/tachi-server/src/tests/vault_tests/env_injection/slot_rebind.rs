@@ -21,6 +21,33 @@ async fn seed_account(server: &crate::tests::TestServer, name: &str, value: &str
         .unwrap_or_else(|error| panic!("seed account {name}: {error}"));
 }
 
+fn corrupt_account_entry(server: &crate::tests::TestServer, name: &str, invalid_utf8: bool) {
+    let key = {
+        let vault = server.vault_read();
+        *vault.key.as_ref().expect("unlocked vault key").bytes()
+    };
+    server
+        .with_global_store(|store| {
+            let mut entry = store
+                .vault_get_entry(name)
+                .map_err(|error| error.to_string())?
+                .unwrap_or_else(|| panic!("missing account {name}"));
+            if invalid_utf8 {
+                let (encrypted_value, nonce) = crate::vault_crypto::encrypt(&key, &[0xff, 0xfe])
+                    .map_err(|error| error.to_string())?;
+                entry.encrypted_value = encrypted_value;
+                entry.nonce = nonce;
+            } else {
+                entry.encrypted_value = vec![0x01, 0x02, 0x03];
+                entry.nonce = vec![0x04, 0x05];
+            }
+            store
+                .vault_upsert_entry(&entry)
+                .map_err(|error| error.to_string())
+        })
+        .expect("corrupt account entry");
+}
+
 fn stored_slot_value(server: &crate::tests::TestServer, name: &str) -> String {
     let key = {
         let vault = server.vault_read();
@@ -150,6 +177,88 @@ async fn lane_slot_same_bytes_are_noop_not_refusal() {
     assert_eq!(
         slot_value(&server, "EXTRACT_API_KEY").await,
         "same-slot-bytes"
+    );
+}
+
+#[tokio::test]
+async fn explicit_lane_slot_bind_ignores_unrelated_corrupt_accounts() {
+    let server = make_server();
+    server
+        .vault_init(Parameters(VaultInitParams {
+            password: "slot-rebind-unrelated-corruption".to_string(),
+        }))
+        .await
+        .expect("init");
+    seed_account(&server, "DEEPSEEK_API_KEY", "selected-family").await;
+    seed_account(&server, "SILICONFLOW_API_KEY", "bad-bytes").await;
+    seed_account(&server, "OPENAI_API_KEY", "corrupt-ciphertext-family").await;
+    corrupt_account_entry(&server, "SILICONFLOW_API_KEY", true);
+    corrupt_account_entry(&server, "OPENAI_API_KEY", false);
+
+    let body = server
+        .vault_set(Parameters(slot_params(
+            "EXTRACT_API_KEY",
+            "vault:DEEPSEEK_API_KEY",
+            false,
+        )))
+        .await
+        .expect("healthy explicit target must bind");
+    let json: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(json["bound_account"], "DEEPSEEK_API_KEY");
+    assert_eq!(
+        stored_slot_value(&server, "EXTRACT_API_KEY"),
+        "vault:DEEPSEEK_API_KEY"
+    );
+    assert_eq!(
+        slot_value(&server, "EXTRACT_API_KEY").await,
+        "selected-family"
+    );
+    server
+        .vault_set(Parameters(slot_params(
+            "SUMMARY_API_KEY",
+            "selected-family",
+            false,
+        )))
+        .await
+        .expect("raw matching must skip unrelated corrupt accounts");
+    assert_eq!(
+        stored_slot_value(&server, "SUMMARY_API_KEY"),
+        "vault:DEEPSEEK_API_KEY"
+    );
+}
+
+#[tokio::test]
+async fn explicit_lane_slot_bind_rejects_corrupt_selected_account_unchanged() {
+    let server = make_server();
+    server
+        .vault_init(Parameters(VaultInitParams {
+            password: "slot-rebind-selected-corruption".to_string(),
+        }))
+        .await
+        .expect("init");
+    seed_account(&server, "DEEPSEEK_API_KEY", "original-family").await;
+    server
+        .vault_set(Parameters(slot_params(
+            "EXTRACT_API_KEY",
+            "vault:DEEPSEEK_API_KEY",
+            false,
+        )))
+        .await
+        .expect("initial bind");
+    corrupt_account_entry(&server, "DEEPSEEK_API_KEY", true);
+
+    let error = server
+        .vault_set(Parameters(slot_params(
+            "EXTRACT_API_KEY",
+            "vault:DEEPSEEK_API_KEY",
+            false,
+        )))
+        .await
+        .expect_err("corrupt selected account must fail");
+    assert!(error.contains("not valid UTF-8"), "{error}");
+    assert_eq!(
+        stored_slot_value(&server, "EXTRACT_API_KEY"),
+        "vault:DEEPSEEK_API_KEY"
     );
 }
 

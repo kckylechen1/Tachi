@@ -194,7 +194,12 @@ pub(crate) fn rewrite_imported_lane_slots(
         return Ok(entries.to_vec());
     }
 
-    let account_rows = decrypt_candidate_account_rows(master_key, entries)?;
+    let required_accounts: Vec<&str> = slot_plain
+        .iter()
+        .filter_map(|(_, plain)| parse_vault_alias(plain.trim()))
+        .collect();
+    let (account_rows, _) =
+        decrypt_candidate_account_rows(master_key, entries, &required_accounts)?;
     let accounts = SensitiveAccounts(bindable_accounts(account_rows.0.iter().cloned()));
     let mut out = entries.to_vec();
     for (idx, plain) in slot_plain {
@@ -256,7 +261,19 @@ pub(crate) fn write_lane_slot_binding(
     let existing_plain = existing_entry
         .map(|entry| decrypt_secret_value(master_key, entry, "Vault"))
         .transpose()?;
-    let account_rows = decrypt_candidate_account_rows(master_key, &entries)?;
+    let mut required_accounts = Vec::new();
+    if let Some(account) = parse_vault_alias(new_value.trim()) {
+        required_accounts.push(account);
+    }
+    if let Some(account) = existing_plain
+        .as_deref()
+        .map(str::trim)
+        .and_then(parse_vault_alias)
+    {
+        required_accounts.push(account);
+    }
+    let (account_rows, skipped_corrupt_accounts) =
+        decrypt_candidate_account_rows(master_key, &entries, &required_accounts)?;
     let accounts = SensitiveAccounts(bindable_accounts(account_rows.0.iter().cloned()));
     let decided = decide_lane_slot_write(
         master_key,
@@ -267,6 +284,19 @@ pub(crate) fn write_lane_slot_binding(
         rebind,
     )
     .map_err(|error| enrich_unmatched_account_error(error, new_value, &account_rows))?;
+    // A legacy raw slot has no named current target. If a candidate could not
+    // be decrypted, refusing rebind is the only fail-closed choice: otherwise
+    // corruption could be mistaken for proof that the old family is absent.
+    if decided.rebound
+        && skipped_corrupt_accounts
+        && existing_plain
+            .as_deref()
+            .is_some_and(|value| parse_vault_alias(value).is_none())
+    {
+        return Err(format!(
+            "Lane slot '{name}' has an unverifiable leftover ciphertext; refusing to rebind while provider account rows are corrupt"
+        ));
+    }
     let target_entry = entries
         .iter()
         .find(|entry| entry.name == decided.account)
@@ -371,23 +401,37 @@ fn is_candidate_account_entry(entry: &VaultEntry) -> bool {
             == SECRET_TYPE_API_KEY
 }
 
+/// Decrypt candidate accounts needed by the decision. Explicit pointers name
+/// required targets and fail loudly when those rows are corrupt; raw matching
+/// may skip undecryptable unrelated rows and simply fail to match them.
 fn decrypt_candidate_account_rows(
     master_key: &[u8; 32],
     entries: &[VaultEntry],
-) -> Result<SensitiveAccountRows, String> {
+    required_accounts: &[&str],
+) -> Result<(SensitiveAccountRows, bool), String> {
+    let required_accounts: std::collections::HashSet<&str> =
+        required_accounts.iter().copied().collect();
+    let mut skipped_corrupt_accounts = false;
     let mut rows = SensitiveAccountRows(Vec::new());
     for entry in entries
         .iter()
         .filter(|entry| is_candidate_account_entry(entry))
     {
-        let value = decrypt_secret_value(master_key, entry, "Vault")?;
+        let value = match decrypt_secret_value(master_key, entry, "Vault") {
+            Ok(value) => value,
+            Err(_) if !required_accounts.contains(entry.name.as_str()) => {
+                skipped_corrupt_accounts = true;
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
         rows.0.push((
             entry.name.clone(),
             value.to_string(),
             entry.secret_type.clone(),
         ));
     }
-    Ok(rows)
+    Ok((rows, skipped_corrupt_accounts))
 }
 
 fn enrich_unmatched_account_error(
@@ -1100,6 +1144,27 @@ mod tests {
             ],
         )
         .expect("keep pointer");
+        let slot = rewritten
+            .iter()
+            .find(|entry| entry.name == "EXTRACT_API_KEY")
+            .expect("slot");
+        assert_eq!(decrypt_entry(slot), "vault:DEEPSEEK_API_KEY");
+    }
+
+    #[test]
+    fn rewrite_imported_lane_slots_skips_unrelated_corrupt_account() {
+        let mut unrelated = encrypted_entry("SILICONFLOW_API_KEY", "unrelated-secret");
+        unrelated.encrypted_value = vec![0x01, 0x02, 0x03];
+        unrelated.nonce = vec![0x04, 0x05];
+        let rewritten = rewrite_imported_lane_slots(
+            &MASTER,
+            &[
+                encrypted_entry("DEEPSEEK_API_KEY", "deepseek-secret"),
+                unrelated,
+                encrypted_entry("EXTRACT_API_KEY", "vault:DEEPSEEK_API_KEY"),
+            ],
+        )
+        .expect("explicit imported target must ignore unrelated corruption");
         let slot = rewritten
             .iter()
             .find(|entry| entry.name == "EXTRACT_API_KEY")
