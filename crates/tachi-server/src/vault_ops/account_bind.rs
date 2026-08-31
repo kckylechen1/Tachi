@@ -11,18 +11,8 @@ use crate::vault_crypto as crypto;
 use chrono::Utc;
 use memcore::vault::{VaultEntry, VaultKeyHealth, SECRET_TYPE_API_KEY};
 use memcore::MemoryStore;
+pub(crate) use tachi_llm::is_lane_slot_secret_name;
 use tachi_llm::parse_vault_alias;
-
-pub(crate) const LANE_SLOT_SECRET_NAMES: &[&str] = &[
-    "EXTRACT_API_KEY",
-    "SUMMARY_API_KEY",
-    "DISTILL_API_KEY",
-    "REASONING_API_KEY",
-];
-
-pub(crate) fn is_lane_slot_secret_name(name: &str) -> bool {
-    LANE_SLOT_SECRET_NAMES.contains(&name.trim())
-}
 
 pub(crate) fn health_row_unusable(health: &VaultKeyHealth) -> bool {
     if health.disabled || health.auth_failed {
