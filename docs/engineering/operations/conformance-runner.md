@@ -78,7 +78,17 @@ applies to the real backing store — the host disk under the VM image):
   `Verify runner platform` step to `x86_64|aarch64` (both one-line diffs).
   The workflow as landed follows the census ruling (x86_64).
 
-## Installation (host + VM, once disk allows)
+## Installation (owner-authorized activation, once disk allows)
+
+Merging the workflow does not authorize provisioning, registration, or
+activation. Recheck capacity and the runner inventory before starting; the
+capacity record above is a dated census, not a current probe.
+
+Use the owner's already-authenticated administration workstation for GitHub
+operations. If using the CLI, install `gh` there and verify `gh auth status`
+for the owner account before proceeding. Do not copy that login, a PAT, or a
+GitHub credential file into the VM. The runner VM needs only the short-lived
+registration token supplied interactively by the owner.
 
 ```bash
 # Host (Apple Silicon), when free disk >= 80 GiB:
@@ -93,24 +103,45 @@ Inside the VM (Debian/Ubuntu example):
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y git curl ca-certificates lsof python3 python3-venv
-# pwsh: the setup-rust composite runs under pwsh (same as C1's macOS host).
-# Prefer the distro tarball; the C1 runbook's staging recipe ports directly:
-sudo mkdir -p /opt/pwsh && curl -sL \
-  https://github.com/PowerShell/PowerShell/releases/download/<ver>/powershell-<ver>-linux-x64.tar.gz \
-  | sudo tar xz -C /opt/pwsh && sudo ln -s /opt/pwsh/pwsh /usr/local/bin/pwsh
-# rustup as the runner user (setup-rust refuses non-rustup hosts and installs
-# the exact rust-toolchain.toml pin):
-curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
-
-mkdir -p ~/runner-tachi-c2 && cd ~/runner-tachi-c2
-# Fetch the latest actions-runner release for linux-x64 and unpack it here.
-# Registration token: single-use, short-lived; pipe straight from gh into
-# config.sh via command substitution -- never echoed, never stored.
-./config.sh --url https://github.com/kckylechen1/tachi \
-  --token "$(gh api repos/kckylechen1/tachi/actions/runners/registration-token --jq .token)" \
-  --name tachi-conformance-1 --labels tachi-conformance --ephemeral=no
+sudo apt-get install -y git curl ca-certificates lsof python3 python3-venv build-essential pkg-config libssl-dev
 ```
+
+Before registration, provision **PowerShell (`pwsh`)** and **rustup** as
+explicit prerequisites. The setup-rust composite runs under PowerShell and
+requires rustup; it then installs the repository's `rust-toolchain.toml` pin.
+Use owner-approved signed packages or locally staged, version-pinned release
+artifacts. Record each version, official source URL, and independently
+verified release checksum in the activation receipt **before** extracting
+or executing it. A checksum generated only from the downloaded file is not
+verification. Never pipe a remote installer into a shell or a tarball into
+privileged extraction. If these prerequisites or their verification evidence
+are missing, stop preparation rather than inventing a version or hash.
+
+On the administration workstation, open **Settings → Actions → Runners → New
+self-hosted runner**, select **Linux / x64**, and use the download and SHA-256
+verification instructions shown for that exact runner release. Stage the
+verified archive in the VM and extract it as the unprivileged runner user in
+the directory below. Do not select an unpinned `latest` asset. See
+[GitHub's runner registration instructions](https://docs.github.com/en/actions/how-tos/manage-runners/self-hosted-runners/add-runners).
+
+```bash
+mkdir -p ~/runner-tachi-c2 && cd ~/runner-tachi-c2
+# After extracting the verified runner release here, verify prerequisites:
+command -v pwsh
+command -v rustup
+pwsh -NoProfile -Command '$PSVersionTable.PSVersion.ToString()'
+rustup --version
+# The owner enters the short-lived token at the interactive prompt. Do not
+# put it in shell history, command arguments, logs, files, or the service env.
+./config.sh --url https://github.com/kckylechen1/tachi \
+  --name tachi-conformance-1 --labels tachi-conformance
+```
+
+Persistent registration is the default; do not pass `--ephemeral` for this
+service runner. `--ephemeral=no` is not a supported way to disable the flag.
+Registration tokens expire after one hour; request a fresh token from the
+owner if preparation takes longer. No `gh` installation or login is needed
+inside the VM.
 
 Runner service environment (the Linux systemd service does not inherit the
 interactive environment, same as C1's launchd):
@@ -160,11 +191,13 @@ sudo ./svc.sh install && sudo ./svc.sh start
 
 ## Queue hygiene before first activation
 
-Same law as C1: enumerate (`gh api --paginate
-'repos/kckylechen1/tachi/actions/runs?status=queued&per_page=100'`), cancel
-every stale queued run, prove the queue is empty, then dispatch exactly one
-`conformance-linux` smoke on current `main`. The 2026-08 memcore-mirror
-dispatch must never execute on this lane.
+From the authenticated administration workstation, enumerate C2's queued
+runs (`gh api --paginate
+'repos/kckylechen1/tachi/actions/workflows/conformance-linux.yml/runs?status=queued&per_page=100'`).
+Identify exact stale run IDs and cancel them with owner authorization; do not
+cancel unrelated C1 or other workflows. Recheck both queued and in-progress
+C2 runs, then dispatch exactly one `conformance-linux` smoke on current
+`main`. The 2026-08 memcore-mirror dispatch must never execute on this lane.
 
 ## First-smoke requirements
 
@@ -187,9 +220,15 @@ Windows `cfg(not(unix))` identity leg (C1/C2 both leave it to
 
 ## Rollback / decommission
 
+Requires a separate owner decision. Confirm that the named C2 runner has no
+active job, stop its service, and obtain a short-lived removal token from the
+owner's runner settings. Enter it at the interactive removal prompt; do not
+authenticate `gh` in the VM. Confirm the exact VM and preserve any required
+receipts before deleting its disk image.
+
 ```bash
 cd ~/runner-tachi-c2 && sudo ./svc.sh stop && sudo ./svc.sh uninstall
-./config.sh remove --token "$(gh api repos/kckylechen1/tachi/actions/runners/remove-token --jq .token)"
+./config.sh remove
 limactl stop tachi-c2 && limactl delete tachi-c2   # frees the VM image
 brew uninstall lima                                  # optional, host reclaim
 ```
