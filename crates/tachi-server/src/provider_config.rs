@@ -133,7 +133,11 @@ fn vault_api_key_pool_load_from_server(server: &MemoryServer) -> Result<VaultSou
 fn vault_api_key_load_from_keychain(global_db_path: &Path) -> Result<VaultSourceLoad, String> {
     let scan = crate::status_ops::status_health::load_keychain_vault_api_key_scan(global_db_path)
         .map_err(|err| format!("Keychain Vault provider read failed: {err}"))?;
-    Ok(durable_load_from_keychain_scan(scan))
+    let mut source = durable_load_from_keychain_scan(scan);
+    if source.acl_revision.is_some() {
+        source.acl_revision = Some(vault_acl_revision_on_path(global_db_path)?);
+    }
+    Ok(source)
 }
 
 fn durable_load_from_keychain_scan(
@@ -482,12 +486,13 @@ pub fn describe_skipped_alias_report(report: &MaterializeReport) -> String {
 }
 
 pub fn materialize_for_server(server: &MemoryServer) -> Result<MaterializeReport, String> {
-    materialize_for_server_inner(server, None)
+    materialize_for_server_inner(server, None, None)
 }
 
 fn materialize_for_server_inner(
     server: &MemoryServer,
     after_vault_pools_resolved: Option<Box<dyn FnOnce() + Send>>,
+    after_vault_load: Option<Box<dyn FnOnce() + Send>>,
 ) -> Result<MaterializeReport, String> {
     let global = server.global_db_path_buf();
     let lane_config_values = std::cell::RefCell::new(None);
@@ -498,6 +503,9 @@ fn materialize_for_server_inner(
             provider_env_keys(),
             || {
                 let resolved = resolve_vault_pools(Some(server), &global)?;
+                if let Some(hook) = after_vault_load {
+                    hook();
+                }
                 let expected_revision = resolved.acl_revision;
                 let source_path = resolved.source_path.clone();
                 *lane_config_values.borrow_mut() = Some(resolved.lane_config_values);
@@ -519,7 +527,7 @@ fn materialize_for_server_inner(
                                 format!("Failed to release stale Vault publication fence: {error}")
                             })?;
                             return Err(
-                        "Vault ACL, type, rotation, or entry revision changed before publication; retry provider refresh"
+                        "Vault ACL, type, rotation, entry, or health revision changed before publication; retry provider refresh"
                             .to_string(),
                             );
                         }
@@ -568,7 +576,44 @@ fn vault_acl_revision_on_connection(connection: &rusqlite::Connection) -> Result
         .map_err(|error| format!("Failed to read Vault entries for revision check: {error}"))?;
     let rotations = memcore::db::vault_list_rotations(connection)
         .map_err(|error| format!("Failed to read Vault rotations for revision check: {error}"))?;
-    Ok(crate::vault_ops::vault_materialization_acl_revision_from_rows(&entries, &rotations))
+    let key_health = memcore::db::vault_list_key_health(connection, None)
+        .map_err(|error| format!("Failed to read Vault key health for revision check: {error}"))?;
+    Ok(
+        crate::vault_ops::vault_materialization_acl_revision_from_rows_with_health(
+            &entries,
+            &rotations,
+            &key_health,
+        ),
+    )
+}
+
+fn vault_acl_revision_on_path(path: &Path) -> Result<u64, String> {
+    let path = path
+        .to_str()
+        .ok_or_else(|| "Vault DB path is not valid UTF-8".to_string())?;
+    let store = memcore::MemoryStore::open_read_only(path)
+        .map_err(|error| format!("Failed to open Vault for revision check: {error}"))?;
+    let transaction = store
+        .begin_vault_read_transaction_shared()
+        .map_err(|error| format!("Failed to begin Vault revision check: {error}"))?;
+    let entries = transaction
+        .vault_list_entries()
+        .map_err(|error| format!("Failed to read Vault entries for revision check: {error}"))?;
+    let rotations = transaction
+        .vault_list_rotations()
+        .map_err(|error| format!("Failed to read Vault rotations for revision check: {error}"))?;
+    let key_health = transaction
+        .vault_list_key_health(None)
+        .map_err(|error| format!("Failed to read Vault key health for revision check: {error}"))?;
+    let revision = crate::vault_ops::vault_materialization_acl_revision_from_rows_with_health(
+        &entries,
+        &rotations,
+        &key_health,
+    );
+    transaction
+        .commit()
+        .map_err(|error| format!("Failed to finish Vault revision check: {error}"))?;
+    Ok(revision)
 }
 
 fn annotate_non_model_drops(
@@ -768,7 +813,15 @@ pub(crate) fn materialize_for_server_with_hook_for_tests(
     server: &MemoryServer,
     after_vault_pools_resolved: impl FnOnce() + Send + 'static,
 ) -> Result<MaterializeReport, String> {
-    materialize_for_server_inner(server, Some(Box::new(after_vault_pools_resolved)))
+    materialize_for_server_inner(server, Some(Box::new(after_vault_pools_resolved)), None)
+}
+
+#[cfg(test)]
+pub(crate) fn materialize_for_server_with_post_vault_load_hook_for_tests(
+    server: &MemoryServer,
+    after_vault_load: impl FnOnce() + Send + 'static,
+) -> Result<MaterializeReport, String> {
+    materialize_for_server_inner(server, None, Some(Box::new(after_vault_load)))
 }
 
 pub fn materialize_standalone(
@@ -812,7 +865,7 @@ fn materialize_standalone_inner(
                             format!("Failed to release stale standalone Vault fence: {error}")
                         })?;
                         return Err(
-                            "Vault ACL, type, rotation, or entry revision changed before standalone publication; retry provider refresh"
+                            "Vault ACL, type, rotation, entry, or health revision changed before standalone publication; retry provider refresh"
                                 .to_string(),
                         );
                     }

@@ -4,6 +4,7 @@ use crate::provider_names::{
     parse_rotation_member_name, parse_vault_alias, validate_vault_alias_name,
 };
 use crate::{LaneConfigOverlay, LlmClient, ProviderRuntimeConfig, ProviderSecret};
+use memcore::vault::VaultKeyHealth;
 
 #[derive(Debug, Clone, Default)]
 pub struct MaterializeReport {
@@ -84,6 +85,7 @@ fn push_skipped_alias(report: &mut MaterializeReport, key: String, class: AliasS
 pub struct ProviderMaterializationSnapshot {
     resolved_pools: HashMap<String, Vec<ProviderSecret>>,
     retained_logical_names: HashSet<String>,
+    health_baseline: HashMap<String, HashMap<String, VaultKeyHealth>>,
     report: MaterializeReport,
 }
 
@@ -119,9 +121,10 @@ impl ProviderMaterializationSnapshot {
             retained_logical_names,
             report: _,
         } = self;
-        llm.publish_provider_secret_pools(
+        llm.publish_provider_secret_pools_with_health_baseline(
             resolved_pools,
             &retained_logical_names,
+            health_baseline,
             lane_config_overlay,
             commit_companion_projection,
         )?;
@@ -386,6 +389,11 @@ where
     P: FnOnce(T) -> Result<(), String>,
 {
     let _materialization_guard = llm.provider_materialization_guard()?;
+    // Capture the in-memory health state before reading the durable source.
+    // A provider outcome may arrive while Vault is being scanned; publication
+    // must distinguish that newer observation from health belonging to a
+    // replaced credential with the same logical/key identity.
+    let health_baseline = llm.provider_health_memory_snapshot();
     let load = load_vault_pools()?;
     let snapshot = prepare_provider_materialization_under_guard(
         llm,
@@ -394,6 +402,7 @@ where
         load.availability,
         &load.listed_drops,
         None,
+        health_baseline,
     )?;
     let (snapshot, lane_config_overlay, companion_projection) = prepare_runtime_snapshot(snapshot)?;
     let report = snapshot.report.clone();
@@ -419,6 +428,7 @@ where
     // one transaction across every LlmClient clone. This mutex is independent
     // from provider_state, so env/Vault work never nests under its lock.
     let _materialization_guard = llm.provider_materialization_guard()?;
+    let health_baseline = llm.provider_health_memory_snapshot();
     let snapshot = prepare_provider_materialization_under_guard(
         llm,
         vault_pools,
@@ -426,6 +436,7 @@ where
         availability,
         &HashMap::new(),
         after_missing_alias_snapshot,
+        health_baseline,
     )?;
     let report = snapshot.report.clone();
     snapshot.publish(llm, None, || Ok(()))?;
@@ -439,6 +450,7 @@ fn prepare_provider_materialization_under_guard<I, S>(
     availability: VaultSourceAvailability,
     listed_drops: &HashMap<String, AliasSkipClass>,
     mut after_missing_alias_snapshot: Option<Box<dyn FnOnce() + Send>>,
+    health_baseline: HashMap<String, HashMap<String, VaultKeyHealth>>,
 ) -> Result<ProviderMaterializationSnapshot, String>
 where
     I: IntoIterator<Item = S>,
@@ -549,6 +561,7 @@ where
     Ok(ProviderMaterializationSnapshot {
         resolved_pools,
         retained_logical_names,
+        health_baseline,
         report,
     })
 }
