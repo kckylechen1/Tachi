@@ -2281,7 +2281,6 @@ fn make_skill_capability(
 mod chain_skills_tests;
 mod claims_tests;
 mod closure_scan_tests;
-mod delivery_tests;
 mod dispatch_tests;
 mod docs_tests;
 mod facade_tests;

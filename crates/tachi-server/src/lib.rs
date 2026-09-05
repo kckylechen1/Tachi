@@ -103,6 +103,9 @@ mod daemon_lock;
 mod daily_pipeline;
 mod db_ownership;
 mod delivery_ops;
+#[cfg(feature = "delivery-test-api")]
+#[doc(hidden)]
+pub mod delivery_test_api;
 mod dispatch_ops;
 mod dispatch_profile;
 mod dlq_ops;

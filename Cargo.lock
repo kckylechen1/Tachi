@@ -2359,6 +2359,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "tachi-delivery-tests"
+version = "1.9.2"
+dependencies = [
+ "chrono",
+ "memcore",
+ "serde_json",
+ "tachi-hub",
+ "tachi-params",
+ "tachi-server",
+ "tempfile",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "tachi-dispatch"
 version = "1.9.2"
 dependencies = [

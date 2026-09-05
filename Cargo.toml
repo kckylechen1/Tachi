@@ -32,6 +32,9 @@ members = [
     # lib and activates tachi-server's non-default bootstrap-test-api feature
     # only for its own integration-test target.
     "crates/tachi-bootstrap-tests",
+    # Test-only member (#1831 Track T): durable delivery seam tests moved
+    # out of tachi-server's monolithic lib-test binary.
+    "crates/tachi-delivery-tests",
     "crates/tachi-credential-profile",
     "crates/tachi-dispatch",
     "crates/tachi-foundry",

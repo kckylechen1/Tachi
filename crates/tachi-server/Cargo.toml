@@ -50,6 +50,12 @@ portable = []
 # expose test fault injection, lock fixtures, or migration authority wrappers.
 bootstrap-test-api = ["memcore/test-support"]
 
+# Non-default friend surface for the external delivery test crate (#1831 Track T).
+# It is intentionally absent from `full`: ordinary product builds must not
+# expose test fixtures or internal delivery handlers.
+delivery-test-api = ["memcore/test-support"]
+
+
 [dependencies]
 memcore = { path = "../memcore" }
 memory-server-capture-gate = { path = "../memory-server-capture-gate" }

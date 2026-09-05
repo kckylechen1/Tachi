@@ -23,7 +23,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock};
 use tokio::sync::mpsc;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "delivery-test-api"))]
 thread_local! {
     static TEST_BACKGROUND_WORKERS_OVERRIDE: std::cell::Cell<Option<bool>> = const {
         std::cell::Cell::new(None)
@@ -54,6 +54,10 @@ fn background_workers_enabled() -> bool {
     }
     #[cfg(not(test))]
     {
+        #[cfg(feature = "delivery-test-api")]
+        if let Some(enabled) = TEST_BACKGROUND_WORKERS_OVERRIDE.get() {
+            return enabled;
+        }
         !embedded_mcp_facade()
     }
 }
@@ -98,6 +102,19 @@ impl MemoryServer {
     ) -> Result<Self, Box<dyn std::error::Error>> {
         TEST_BACKGROUND_WORKERS_OVERRIDE.with(|override_value| {
             let previous = override_value.replace(Some(enabled));
+            let result = Self::new(global_db_path, project_db_path);
+            override_value.set(previous);
+            result
+        })
+    }
+
+    #[cfg(feature = "delivery-test-api")]
+    pub(crate) fn new_isolated_for_test(
+        global_db_path: PathBuf,
+        project_db_path: Option<PathBuf>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        TEST_BACKGROUND_WORKERS_OVERRIDE.with(|override_value| {
+            let previous = override_value.replace(Some(false));
             let result = Self::new(global_db_path, project_db_path);
             override_value.set(previous);
             result

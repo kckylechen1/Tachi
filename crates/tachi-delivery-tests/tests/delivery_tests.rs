@@ -3,26 +3,39 @@
 //! independent, the worker cannot choose a destination, and a private
 //! intent yields no existence signal to other requesters.
 
-use crate::server_state::MemoryServer;
-use crate::tool_params::{TachiAgentEvalParams, TachiDeliveryParams};
 use memcore::{
     insert_agent_identity, insert_work_claim, mint_delivery_intent, AgentIdentity,
     DeliveryExecutionSource, DeliveryPolicy, DeliveryRequesterBinding, DeliveryVisibilityClass,
     NewDeliveryIntent, NewWorkClaim, WorkClaimMode,
 };
+
 use serde_json::json;
+use tachi_params::TachiDeliveryParams;
+use tachi_server::delivery_test_api::{test_fixture_root, DeliveryTestServer};
 
-use crate::agent_eval::handle_agent_eval;
-
-fn test_server() -> MemoryServer {
-    let db_path =
-        crate::utils::test_fixture_path(format!("delivery-seam-{}.sqlite", uuid::Uuid::new_v4()));
-    let server = MemoryServer::new(db_path, None).expect("test memory server");
-    server.set_tool_profile(Some(tachi_hub::ToolProfile::coordinate()));
-    server
+struct TestFixture {
+    server: DeliveryTestServer,
+    _dir: tempfile::TempDir,
 }
 
-fn seed_admission_and_requester(server: &MemoryServer, grant: &str) {
+impl std::ops::Deref for TestFixture {
+    type Target = DeliveryTestServer;
+    fn deref(&self) -> &Self::Target {
+        &self.server
+    }
+}
+
+fn test_server() -> TestFixture {
+    let dir = tempfile::Builder::new()
+        .prefix("delivery-seam-")
+        .tempdir_in(test_fixture_root())
+        .expect("create test temp dir");
+    let db_path = dir.path().join("delivery.sqlite");
+    let server = DeliveryTestServer::new_at(db_path);
+    TestFixture { server, _dir: dir }
+}
+
+fn seed_admission_and_requester(server: &DeliveryTestServer, grant: &str) {
     server
         .with_global_store(|store| {
             for identity in [
@@ -52,7 +65,7 @@ fn seed_admission_and_requester(server: &MemoryServer, grant: &str) {
     );
 }
 
-fn seed_claim(server: &MemoryServer, dispatch_id: &str) {
+fn seed_claim(server: &DeliveryTestServer, dispatch_id: &str) {
     server
         .with_global_store(|store| {
             insert_work_claim(
@@ -79,10 +92,6 @@ fn seed_claim(server: &MemoryServer, dispatch_id: &str) {
         .expect("seed claim");
 }
 
-fn delivery_params(value: serde_json::Value) -> TachiDeliveryParams {
-    serde_json::from_value(value).expect("delivery params deserialize")
-}
-
 fn mint_new(idempotency_key: &str, private: bool) -> NewDeliveryIntent {
     NewDeliveryIntent {
         idempotency_key: idempotency_key.to_string(),
@@ -106,14 +115,14 @@ fn mint_new(idempotency_key: &str, private: bool) -> NewDeliveryIntent {
     }
 }
 
-fn seam_call(server: &MemoryServer, value: serde_json::Value) -> Result<String, String> {
-    crate::delivery_ops::handle_tachi_delivery(server, delivery_params(value))
+fn seam_call(server: &DeliveryTestServer, value: serde_json::Value) -> Result<String, String> {
+    server.handle_delivery_value(value)
 }
 
 /// Discrimination 1/4: a requester that crashes mid-claim, restarts, and
 /// re-claims recovers the SAME intent exactly once through the seam.
-#[test]
-fn requester_restart_reclaims_the_same_intent_through_the_seam() {
+#[tokio::test]
+async fn requester_restart_reclaims_the_same_intent_through_the_seam() {
     let server = test_server();
     seed_admission_and_requester(&server, "{}");
     let intent = server
@@ -201,8 +210,8 @@ fn requester_restart_reclaims_the_same_intent_through_the_seam() {
 
 /// Frozen law: execution / delivery / adjudication read independently —
 /// "message not delivered" is never "execution failed".
-#[test]
-fn delivery_failure_leaves_execution_and_adjudication_untouched() {
+#[tokio::test]
+async fn delivery_failure_leaves_execution_and_adjudication_untouched() {
     let server = test_server();
     seed_admission_and_requester(&server, "{}");
     seed_claim(&server, "dispatch-1");
@@ -372,8 +381,8 @@ fn seam_wire_refuses_worker_chosen_destinations() {
 
 /// Discrimination 6: a private intent yields no existence signal — not an
 /// error shape, not a count — to a requester it is not bound to.
-#[test]
-fn private_intent_yields_no_existence_signal_to_other_requesters() {
+#[tokio::test]
+async fn private_intent_yields_no_existence_signal_to_other_requesters() {
     let server = test_server();
     seed_admission_and_requester(&server, "{}");
     let mut new = mint_new("managed:dispatch-private", true);
@@ -452,8 +461,8 @@ fn private_intent_yields_no_existence_signal_to_other_requesters() {
 
 /// The managed terminal plane mints (and reconciles) a delivery intent with
 /// the admitted requester binding from the owning WorkClaim.
-#[test]
-fn managed_terminal_outcome_mints_and_binds_the_requester() {
+#[tokio::test]
+async fn managed_terminal_outcome_mints_and_binds_the_requester() {
     let server = test_server();
     seed_admission_and_requester(&server, "{}");
     seed_claim(&server, "dispatch-1");
@@ -489,18 +498,10 @@ fn managed_terminal_outcome_mints_and_binds_the_requester() {
                 .map_err(|error| error.to_string())
         })
         .expect("record outcome");
-    crate::delivery_ops::mint_delivery_for_managed_outcome(
-        &server,
-        &row,
-        "memory:eval-1".to_string(),
-    );
+    server.mint_delivery_for_managed(&row, "memory:eval-1".to_string());
 
     // Idempotent reconcile on re-record.
-    crate::delivery_ops::mint_delivery_for_managed_outcome(
-        &server,
-        &row,
-        "memory:eval-1".to_string(),
-    );
+    server.mint_delivery_for_managed(&row, "memory:eval-1".to_string());
 
     // Managed binding law: the intent is bound to the AGENT identity the
     // owning WorkClaim carried (the fabric's registry identity). The seam
@@ -597,24 +598,23 @@ async fn private_get_is_bound_to_the_admitting_host() {
 const GRANT_DELEGATE: &str =
     r#"{"acp":{"tool_profiles":["delegate"],"capability_classes":["tachi"]}}"#;
 
-fn attach_params(idempotency_key: &str) -> TachiAgentEvalParams {
-    TachiAgentEvalParams {
-        action: "attach_session".to_string(),
-        host_identity: Some("host-1".to_string()),
-        agent_identity_id: Some("agent-requester".to_string()),
-        work_claim_id: Some("claim-attached".to_string()),
-        expected_transition_revision: Some(0),
-        protocol_version: Some(1),
-        adapter_connection_identity: Some("adapter-1".to_string()),
-        remote_session_id: Some("remote-1".to_string()),
-        contract_digest: Some("contract-digest".to_string()),
-        session_capabilities: vec!["observe".to_string()],
-        tool_profile: Some("delegate".to_string()),
-        capability_class: Some("tachi".to_string()),
-        idempotency_key: Some(idempotency_key.to_string()),
-        admission_receipt_ref: Some("admission-1".to_string()),
-        ..Default::default()
-    }
+fn attach_params(idempotency_key: &str) -> serde_json::Value {
+    json!({
+        "action": "attach_session",
+        "host_identity": "host-1",
+        "agent_identity_id": "agent-requester",
+        "work_claim_id": "claim-attached",
+        "expected_transition_revision": 0,
+        "protocol_version": 1,
+        "adapter_connection_identity": "adapter-1",
+        "remote_session_id": "remote-1",
+        "contract_digest": "contract-digest",
+        "session_capabilities": ["observe"],
+        "tool_profile": "delegate",
+        "capability_class": "tachi",
+        "idempotency_key": idempotency_key,
+        "admission_receipt_ref": "admission-1"
+    })
 }
 
 /// The attached terminal plane (#1678 spine) mints a delivery intent bound
@@ -657,24 +657,13 @@ async fn attached_terminal_event_mints_a_delivery_intent() {
         })
         .expect("seed attached admission");
 
-    let attached = handle_agent_eval(&server, attach_params("attach-1"))
+    let attached = server
+        .handle_agent_eval_value(attach_params("attach-1"))
         .await
         .expect("attach");
     assert!(attached.contains("attachment_id"));
     assert!(!attached.contains("\"attachment_id\":\"\""));
 
-    let terminal = TachiAgentEvalParams {
-        action: "ingest_session_event".to_string(),
-        host_identity: Some("host-1".to_string()),
-        admission_receipt_ref: Some("admission-1".to_string()),
-        session_event_id: Some("evt-terminal-1".to_string()),
-        session_event_kind: Some("terminal".to_string()),
-        session_event_outcome: Some("completed".to_string()),
-        source_revision: Some(7),
-        event_summary: Some("run completed".to_string()),
-        event_occurred_at: Some("2026-08-30T00:00:00Z".to_string()),
-        ..attach_params("attach-1")
-    };
     // The ingest route resolves the attachment by its natural key; the
     // attachment_id returned by attach feeds the selector.
     let attachment_id = serde_json::from_str::<serde_json::Value>(&attached)
@@ -682,9 +671,19 @@ async fn attached_terminal_event_mints_a_delivery_intent() {
         .as_str()
         .expect("attachment id")
         .to_string();
-    let mut terminal = terminal;
-    terminal.attachment_id = Some(attachment_id.clone());
-    let receipt = handle_agent_eval(&server, terminal)
+
+    let mut terminal = attach_params("attach-1");
+    terminal["action"] = json!("ingest_session_event");
+    terminal["session_event_id"] = json!("evt-terminal-1");
+    terminal["session_event_kind"] = json!("terminal");
+    terminal["session_event_outcome"] = json!("completed");
+    terminal["source_revision"] = json!(7);
+    terminal["event_summary"] = json!("run completed");
+    terminal["event_occurred_at"] = json!("2026-08-30T00:00:00Z");
+    terminal["attachment_id"] = json!(attachment_id.clone());
+
+    let receipt = server
+        .handle_agent_eval_value(terminal)
         .await
         .expect("ingest terminal");
     assert!(receipt.contains("\"canonical_state\""));
@@ -718,20 +717,18 @@ async fn attached_terminal_event_mints_a_delivery_intent() {
     // Disposition gate: a STALE terminal fact (lower source revision) is
     // journaled without advancing canonical state and mints NOTHING —
     // still exactly one intent for the run.
-    let stale = TachiAgentEvalParams {
-        action: "ingest_session_event".to_string(),
-        host_identity: Some("host-1".to_string()),
-        admission_receipt_ref: Some("admission-1".to_string()),
-        attachment_id: Some(attachment_id.clone()),
-        session_event_id: Some("evt-terminal-0".to_string()),
-        session_event_kind: Some("terminal".to_string()),
-        session_event_outcome: Some("completed".to_string()),
-        source_revision: Some(3),
-        event_summary: Some("stale terminal".to_string()),
-        event_occurred_at: Some("2026-08-30T00:00:00Z".to_string()),
-        ..attach_params("attach-1")
-    };
-    let stale_receipt = handle_agent_eval(&server, stale)
+    let mut stale = attach_params("attach-1");
+    stale["action"] = json!("ingest_session_event");
+    stale["attachment_id"] = json!(attachment_id.clone());
+    stale["session_event_id"] = json!("evt-terminal-0");
+    stale["session_event_kind"] = json!("terminal");
+    stale["session_event_outcome"] = json!("completed");
+    stale["source_revision"] = json!(3);
+    stale["event_summary"] = json!("stale terminal");
+    stale["event_occurred_at"] = json!("2026-08-30T00:00:00Z");
+
+    let stale_receipt = server
+        .handle_agent_eval_value(stale)
         .await
         .expect("stale ingest");
     // The receipt spine journals the redundant terminal without advancing
@@ -779,20 +776,18 @@ async fn attached_terminal_event_mints_a_delivery_intent() {
     // Exact replay of the SAME terminal event id: Replayed admission, mint
     // re-attempted idempotently (the recovery path if the first mint
     // failed), zero duplication.
-    let exact_replay = TachiAgentEvalParams {
-        action: "ingest_session_event".to_string(),
-        host_identity: Some("host-1".to_string()),
-        admission_receipt_ref: Some("admission-1".to_string()),
-        attachment_id: Some(attachment_id.clone()),
-        session_event_id: Some("evt-terminal-1".to_string()),
-        session_event_kind: Some("terminal".to_string()),
-        session_event_outcome: Some("completed".to_string()),
-        source_revision: Some(7),
-        event_summary: Some("run completed".to_string()),
-        event_occurred_at: Some("2026-08-30T00:00:00Z".to_string()),
-        ..attach_params("attach-1")
-    };
-    let replayed = handle_agent_eval(&server, exact_replay)
+    let mut exact_replay = attach_params("attach-1");
+    exact_replay["action"] = json!("ingest_session_event");
+    exact_replay["attachment_id"] = json!(attachment_id.clone());
+    exact_replay["session_event_id"] = json!("evt-terminal-1");
+    exact_replay["session_event_kind"] = json!("terminal");
+    exact_replay["session_event_outcome"] = json!("completed");
+    exact_replay["source_revision"] = json!(7);
+    exact_replay["event_summary"] = json!("run completed");
+    exact_replay["event_occurred_at"] = json!("2026-08-30T00:00:00Z");
+
+    let replayed = server
+        .handle_agent_eval_value(exact_replay)
         .await
         .expect("exact replay");
     assert!(replayed.contains(r#""admission":"replayed""#));
@@ -812,20 +807,18 @@ async fn attached_terminal_event_mints_a_delivery_intent() {
     // A newer-revision redundant terminal carrying a CORRECTED payload is
     // fresher delivery truth: the same intent supersedes to the new
     // payload.
-    let corrected = TachiAgentEvalParams {
-        action: "ingest_session_event".to_string(),
-        host_identity: Some("host-1".to_string()),
-        admission_receipt_ref: Some("admission-1".to_string()),
-        attachment_id: Some(attachment_id.clone()),
-        session_event_id: Some("evt-terminal-2".to_string()),
-        session_event_kind: Some("terminal".to_string()),
-        session_event_outcome: Some("completed".to_string()),
-        source_revision: Some(11),
-        event_summary: Some("run completed with corrected artifact".to_string()),
-        event_occurred_at: Some("2026-08-30T00:00:01Z".to_string()),
-        ..attach_params("attach-1")
-    };
-    let corrected_receipt = handle_agent_eval(&server, corrected)
+    let mut corrected = attach_params("attach-1");
+    corrected["action"] = json!("ingest_session_event");
+    corrected["attachment_id"] = json!(attachment_id.clone());
+    corrected["session_event_id"] = json!("evt-terminal-2");
+    corrected["session_event_kind"] = json!("terminal");
+    corrected["session_event_outcome"] = json!("completed");
+    corrected["source_revision"] = json!(11);
+    corrected["event_summary"] = json!("run completed with corrected artifact");
+    corrected["event_occurred_at"] = json!("2026-08-30T00:00:01Z");
+
+    let corrected_receipt = server
+        .handle_agent_eval_value(corrected)
         .await
         .expect("corrected terminal");
     assert!(corrected_receipt.contains("journaled_redundant_terminal"));

@@ -1,7 +1,7 @@
 mod env;
 mod file;
 mod locks;
-#[cfg(test)]
+#[cfg(any(test, feature = "delivery-test-api"))]
 mod test_fixtures;
 mod text;
 mod validation;
@@ -20,8 +20,8 @@ pub(super) use self::file::{
 #[cfg(test)]
 pub(crate) use self::locks::global_test_lock;
 pub(super) use self::locks::{lock_or_recover, read_or_recover, write_or_recover};
-#[cfg(test)]
-pub(crate) use self::test_fixtures::test_fixture_path;
+#[cfg(any(test, feature = "delivery-test-api"))]
+pub(crate) use self::test_fixtures::{test_fixture_path, test_fixture_root};
 pub(crate) use self::text::{compact_text_line, sanitize_safe_path_name};
 pub(super) use self::text::{redact_sensitive_value, render_skill_prompt_template};
 pub(super) use self::validation::{
