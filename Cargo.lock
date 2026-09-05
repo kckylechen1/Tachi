@@ -2561,6 +2561,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "tachi-vault-tests"
+version = "1.9.2"
+dependencies = [
+ "chrono",
+ "memcore",
+ "memory-server-runtime",
+ "rmcp",
+ "rusqlite",
+ "serde_json",
+ "tachi-hub",
+ "tachi-llm",
+ "tachi-server",
+ "tempfile",
+ "tokio",
+ "uuid",
+ "vault-kit",
+]
+
+[[package]]
 name = "tempfile"
 version = "3.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

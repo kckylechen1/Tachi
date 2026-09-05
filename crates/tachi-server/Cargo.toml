@@ -55,6 +55,11 @@ bootstrap-test-api = ["memcore/test-support"]
 # expose test fixtures or internal delivery handlers.
 delivery-test-api = ["memcore/test-support"]
 
+# Non-default friend surface for the external vault test crate (#1831 Track T).
+# It is intentionally absent from `full`: ordinary product builds must not
+# expose test fixtures or internal vault test helpers.
+vault-test-api = ["memcore/test-support", "vault-kit/test-support"]
+
 
 [dependencies]
 memcore = { path = "../memcore" }

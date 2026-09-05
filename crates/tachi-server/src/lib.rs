@@ -182,8 +182,14 @@ mod tool_params;
 mod tools;
 mod tune_ops;
 mod utils;
+#[cfg(feature = "vault-test-api")]
+pub mod vault_crypto;
+#[cfg(not(feature = "vault-test-api"))]
 mod vault_crypto;
 mod vault_ops;
+#[cfg(feature = "vault-test-api")]
+#[doc(hidden)]
+pub mod vault_test_api;
 mod vector_backfill;
 mod vector_sweep;
 mod verify_ops;
@@ -194,7 +200,8 @@ mod workflow_closure;
 use crate::tool_params::*;
 
 pub(crate) mod server_state;
-pub(crate) use server_state::{CachedVaultKey, DbScope, MemoryServer, VaultState};
+pub use server_state::MemoryServer;
+pub(crate) use server_state::{CachedVaultKey, DbScope, VaultState};
 
 // Enrichment batcher methods are in enrichment.rs
 

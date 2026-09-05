@@ -38,7 +38,7 @@ mod vault_sync;
 pub(crate) mod wiki_corpus;
 
 mod vault_cli;
-#[cfg(test)]
+#[cfg(feature = "vault-test-api")]
 pub(crate) use vault_cli::lease_api_key_from_store;
 
 #[derive(Debug)]

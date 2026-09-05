@@ -7,7 +7,7 @@ use rmcp::handler::server::tool::ToolRouter;
 use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock};
 
 #[derive(Clone)]
-pub(crate) struct MemoryServer {
+pub struct MemoryServer {
     // Daemon-local managed-custom cancellation authority.
     pub(crate) managed_run_controls: Arc<crate::managed_run_control::ManagedRunControlRegistry>,
     /// Opaque identity of THIS daemon/controller incarnation. Minted fresh

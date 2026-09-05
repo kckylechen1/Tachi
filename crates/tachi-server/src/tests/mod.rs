@@ -2297,7 +2297,6 @@ mod sandbox_fold;
 mod sandbox_tests;
 mod skill_tests;
 mod tachi_handoff_tests;
-mod vault_tests;
 mod vc_tests;
 mod wiki_tests;
 mod workflow_tests;

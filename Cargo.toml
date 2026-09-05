@@ -35,6 +35,9 @@ members = [
     # Test-only member (#1831 Track T): durable delivery seam tests moved
     # out of tachi-server's monolithic lib-test binary.
     "crates/tachi-delivery-tests",
+    # Test-only member (#1831 Track T): vault integration and lifecycle tests moved
+    # out of tachi-server's monolithic lib-test binary.
+    "crates/tachi-vault-tests",
     "crates/tachi-credential-profile",
     "crates/tachi-dispatch",
     "crates/tachi-foundry",

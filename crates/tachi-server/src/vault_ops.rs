@@ -5,7 +5,7 @@ mod alias_integrity;
 mod audit;
 mod env;
 mod handlers;
-mod params;
+pub mod params;
 mod resolver;
 mod rotation;
 mod session;
@@ -18,10 +18,12 @@ pub(crate) use rotation::collect_rotation_entries;
 pub(crate) use access::canonical_api_key_health_logical_name;
 pub(crate) use access::is_lane_config_name;
 pub(crate) use access::load_unlocked_api_key_secret_pools;
-#[cfg(test)]
+#[cfg(feature = "vault-test-api")]
 pub(crate) use access::load_unlocked_api_key_secret_pools_with_drops;
 pub(crate) use access::load_validated_unlocked_api_key_secret_pools_with_drops;
 pub(crate) use access::vault_materialization_acl_revision_from_rows;
+#[cfg(feature = "vault-test-api")]
+pub use access::ProviderSecretScan;
 pub(crate) use access::{
     materialize_unrestricted_vault_entries_from_store, read_vault_secret_from_store,
 };
@@ -29,7 +31,7 @@ pub(crate) use access::{
 /// Public-safe failure for background Vault materialization. The raw UTF-8
 /// decoder error carries byte offsets/lengths, and the scanned entry name may
 /// be an alias target rather than the operator-visible config key (#1854).
-pub(crate) const VAULT_MATERIALIZATION_INVALID_UTF8: &str =
+pub const VAULT_MATERIALIZATION_INVALID_UTF8: &str =
     "A listed Vault payload is not valid UTF-8; refusing materialization";
 pub(crate) use access::read_unlocked_vault_secret;
 pub(crate) use env::{
@@ -41,7 +43,7 @@ pub(crate) use handlers::{
     handle_vault_set_api_key_pool, handle_vault_setup_rotation, handle_vault_status,
     handle_vault_unlock,
 };
-pub(crate) use params::{
+pub use params::{
     VaultGetParams, VaultInitParams, VaultLeaseApiKeyParams, VaultListParams,
     VaultRecordKeyResultParams, VaultRemoveParams, VaultSetApiKeyPoolParams, VaultSetParams,
     VaultSetupRotationParams, VaultUnlockParams,

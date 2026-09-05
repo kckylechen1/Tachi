@@ -753,8 +753,8 @@ fn warn_if_env_conflicts(name: &str, vault_value: &str) {
     }
 }
 
-#[cfg(test)]
-pub(crate) fn materialize_for_server_with_hook_for_tests(
+#[cfg(any(test, feature = "vault-test-api"))]
+pub fn materialize_for_server_with_hook_for_tests(
     server: &MemoryServer,
     after_vault_pools_resolved: impl FnOnce() + Send + 'static,
 ) -> Result<MaterializeReport, String> {
@@ -892,7 +892,7 @@ pub(crate) fn auto_unlock_vault_key_from_keychain(server: &MemoryServer) -> Resu
     if !cfg!(target_os = "macos") {
         return Ok(false);
     }
-    #[cfg(test)]
+    #[cfg(any(test, feature = "vault-test-api"))]
     if std::env::var_os("TACHI_TEST_ALLOW_KEYCHAIN_AUTO_UNLOCK").is_none() {
         return Ok(false);
     }

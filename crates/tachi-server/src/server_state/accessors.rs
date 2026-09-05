@@ -213,7 +213,7 @@ impl MemoryServer {
         read_or_recover(&self.bound_agent_id, "bound_agent_id").clone()
     }
 
-    #[cfg(test)]
+    #[cfg(feature = "vault-test-api")]
     pub(crate) fn set_bound_agent_id_for_test(&self, agent_id: Option<&str>) {
         *write_or_recover(&self.bound_agent_id, "bound_agent_id") = agent_id
             .map(str::trim)
