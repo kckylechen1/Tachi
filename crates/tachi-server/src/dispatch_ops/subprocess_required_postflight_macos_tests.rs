@@ -81,7 +81,7 @@ async fn required_postflight_macos_refuses_all_runners_before_launch() {
             if required {
                 assert!(outcome.deferred_native_acp.is_none());
                 assert_eq!(
-                    outcome.result.unwrap_err(),
+                    outcome.result.err().expect("Required runner must refuse"),
                     REQUIRED_POSTFLIGHT_UNSUPPORTED,
                     "{runner}"
                 );
