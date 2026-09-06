@@ -76,6 +76,28 @@ fn lease_state(server: &crate::server_state::MemoryServer, env_id: &str) -> memc
         .state
 }
 
+#[cfg(target_os = "macos")]
+fn assert_unsupported_without_resource_uncertainty(
+    server: &crate::server_state::MemoryServer,
+    status: &serde_json::Value,
+    run_dir: &std::path::Path,
+    env_id: &str,
+    resource_id: &str,
+) {
+    assert_eq!(status["state"], "TASK_STATE_FAILED");
+    assert!(
+        fs::read_to_string(run_dir.join("result.md"))
+            .unwrap()
+            .contains("required_postflight_unsupported")
+    );
+    // No worker ran: the workspace can still be verified clean, but that
+    // never converts the unsupported execution into task success.
+    assert_eq!(status["exec_env_postflight"]["verdict"], "clean");
+    assert_eq!(status["exec_env_postflight"]["lease_action"], "none");
+    assert_eq!(resource_state(server, resource_id), memcore::ResourceState::Active);
+    assert_eq!(lease_state(server, env_id), memcore::ExecEnvState::Active);
+}
+
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn required_postflight_rejects_unmanaged_and_default_bindings_before_spawn() {
@@ -150,6 +172,14 @@ async fn postflight_dispatch_with_declared_scope_accepts_in_scope_write() {
     let run_dir = PathBuf::from(response["run_dir"].as_str().expect("run_dir"));
 
     let terminal_status = wait_for_dispatch_status(&run_dir).await;
+    if cfg!(target_os = "macos") {
+        #[cfg(target_os = "macos")]
+        assert_unsupported_without_resource_uncertainty(
+            &server, &terminal_status, &run_dir, &env_id, &resource_id,
+        );
+        assert_eq!(fs::read(lease_path.join("allowed.txt")).unwrap(), b"initial allowed\n");
+        return;
+    }
     assert!(matches!(
         terminal_status["state"].as_str(),
         Some("TASK_STATE_COMPLETED" | "TASK_STATE_CLOSED")
@@ -203,6 +233,14 @@ async fn postflight_dispatch_rejects_and_withholds_when_worker_mutates_out_of_sc
     let run_dir = PathBuf::from(response["run_dir"].as_str().expect("run_dir"));
 
     let terminal_status = wait_for_dispatch_status(&run_dir).await;
+    if cfg!(target_os = "macos") {
+        #[cfg(target_os = "macos")]
+        assert_unsupported_without_resource_uncertainty(
+            &server, &terminal_status, &run_dir, &env_id, &resource_id,
+        );
+        assert_eq!(fs::read(lease_path.join("forbidden.txt")).unwrap(), b"initial forbidden\n");
+        return;
+    }
     assert_eq!(terminal_status["state"], "TASK_STATE_FAILED");
     assert_eq!(terminal_status["result_written"], false);
     assert!(terminal_status["result_persist_error"].is_string());
@@ -257,6 +295,14 @@ async fn postflight_dispatch_rejects_and_withholds_when_untracked_file_created_o
     let run_dir = PathBuf::from(response["run_dir"].as_str().expect("run_dir"));
 
     let terminal_status = wait_for_dispatch_status(&run_dir).await;
+    if cfg!(target_os = "macos") {
+        #[cfg(target_os = "macos")]
+        assert_unsupported_without_resource_uncertainty(
+            &server, &terminal_status, &run_dir, &env_id, &resource_id,
+        );
+        assert!(!lease_path.join("untracked_secret.txt").exists());
+        return;
+    }
     assert_eq!(terminal_status["state"], "TASK_STATE_FAILED");
     assert_eq!(terminal_status["result_written"], false);
     assert!(terminal_status["result_persist_error"].is_string());

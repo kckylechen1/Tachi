@@ -333,6 +333,13 @@ pub(super) async fn run_agent_subprocess_with_liveness(
     require_postflight_containment: bool,
     cwd_authority: Option<memcore::anchored_fs::AnchoredDirectory>,
 ) -> DispatchRunOutcome {
+    #[cfg(target_os = "macos")]
+    if require_postflight_containment {
+        return DispatchRunOutcome::failure(
+            REQUIRED_POSTFLIGHT_UNSUPPORTED,
+            crate::exec_env_postflight::RunnerLivenessEvidence::NoWorkerSpawned,
+        );
+    }
     let escape_contained =
         require_postflight_containment && configure_required_postflight_containment(&mut cmd);
     if let Some(authority) = cwd_authority.as_ref() {
@@ -361,6 +368,10 @@ pub(super) async fn run_managed_custom_subprocess_outcome(
     require_postflight_containment: bool,
     cwd_authority: Option<memcore::anchored_fs::AnchoredDirectory>,
 ) -> ManagedSubprocessOutcome {
+    #[cfg(target_os = "macos")]
+    if require_postflight_containment {
+        return ManagedSubprocessOutcome::plain(Err(REQUIRED_POSTFLIGHT_UNSUPPORTED.to_string()));
+    }
     #[cfg(not(unix))]
     {
         let _ = cancellations;
@@ -1566,6 +1577,13 @@ pub(super) async fn run_opencode_sop_subprocess_with_liveness(
     require_postflight_containment: bool,
     cwd_authority: Option<memcore::anchored_fs::AnchoredDirectory>,
 ) -> DispatchRunOutcome {
+    #[cfg(target_os = "macos")]
+    if require_postflight_containment {
+        return DispatchRunOutcome::failure(
+            REQUIRED_POSTFLIGHT_UNSUPPORTED,
+            crate::exec_env_postflight::RunnerLivenessEvidence::NoWorkerSpawned,
+        );
+    }
     let _permit = opencode_sop_semaphore().acquire().await;
     let _permit = match _permit {
         Ok(permit) => permit,
@@ -1767,10 +1785,14 @@ pub(crate) fn configure_process_group(cmd: &mut Command) {
 #[cfg(not(unix))]
 pub(crate) fn configure_process_group(_cmd: &mut Command) {}
 
+#[cfg(target_os = "macos")]
+pub(crate) const REQUIRED_POSTFLIGHT_UNSUPPORTED: &str =
+    "required_postflight_unsupported: macOS has no proven inherited process-group escape containment";
+
 /// macOS has no proven inherited process-group escape control here.
 /// `process-info-setcontrol` does not deny a non-leader descendant's `setsid`.
-/// Returning false keeps owned-group absence from becoming a containment
-/// proof: Required postflight must remain indeterminate, not release resources.
+/// Required runners refuse before spawn; this capability must never authorize
+/// a kernel-denied-escape proof even if a caller omits that admission check.
 #[cfg(target_os = "macos")]
 pub(crate) fn configure_required_postflight_containment(_cmd: &mut Command) -> bool {
     false
@@ -1907,16 +1929,15 @@ pub(crate) fn configure_required_postflight_containment(_cmd: &mut Command) -> b
 
 #[cfg(all(
     test,
-    any(
-        target_os = "macos",
-        all(
-            target_os = "linux",
-            any(target_arch = "x86_64", target_arch = "aarch64")
-        )
-    )
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
 ))]
 #[path = "subprocess_required_postflight_child_tests.rs"]
 mod required_postflight_child_tests;
+
+#[cfg(all(test, target_os = "macos"))]
+#[path = "subprocess_required_postflight_macos_tests.rs"]
+mod required_postflight_macos_tests;
 
 // The parent spawns the re-exec'd child through
 // `run_agent_subprocess_with_liveness` with `require_postflight_containment =
@@ -1930,13 +1951,8 @@ mod required_postflight_child_tests;
 // containment rather than the kernel's process-group-leader rule.
 #[cfg(all(
     test,
-    any(
-        target_os = "macos",
-        all(
-            target_os = "linux",
-            any(target_arch = "x86_64", target_arch = "aarch64")
-        )
-    )
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
 ))]
 #[tokio::test]
 async fn required_postflight_kernel_containment_discriminates_setsid_escape() {

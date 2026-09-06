@@ -267,7 +267,9 @@ printf '%s\n' '{"jsonrpc":"2.0","id":"tachi-acp-3","result":{"content":[{"type":
     assert_eq!(outcome.observed_model.as_deref(), Some("openai/gpt-5.2"));
 }
 
-#[cfg(unix)]
+// macOS Required execution is refused before launch; its four-runner
+// refusal/control test covers that platform instead of artifact staging.
+#[cfg(all(unix, not(target_os = "macos")))]
 #[tokio::test]
 async fn required_postflight_stages_native_acp_artifacts_until_parent_release() {
     use std::collections::HashMap;

@@ -11,13 +11,41 @@ different lane and stays untouched.
 
 The C1 lane executes the Linux-class acceptance surface on darwin-arm64, so
 every `cfg(linux)` leg compiles out there. #1877 names the uncovered
-conformance inventory: the seccomp containment escape tests (now cfg-shared
-with Linux x86_64/aarch64 in
+conformance inventory: the seccomp containment escape tests (Linux
+x86_64/aarch64 in
 `crates/tachi-server/src/dispatch_ops/subprocess.rs`), the renameat2
 no-clobber / atomic-exchange / receipt legs (`memcore::db::filename`,
 `memcore::anchored_fs`, `tachi-server` `repair::receipt`,
 `sticky_cutover_cli`), and — still open — a Linux kill-test certification
 receipt. Only a real Linux host closes this; a macOS runner cannot.
+
+## Required postflight platform contract
+
+Required-postflight worker execution is unsupported on macOS. The
+`process-info-setcontrol` sandbox operation does not prevent a non-group-leader
+descendant from calling `setsid`, so owned-group absence cannot prove that all
+descendants were contained and reaped. The runner must not issue
+`kernel_denied_process_group_escape_and_owned_group_absent` on that premise.
+
+The owner-approved capability migration replaces macOS positive containment
+acceptance with pre-spawn refusal: ordinary agent, managed custom, OpenCode
+SOP, and native ACP Required runners return `required_postflight_unsupported`
+with `NoWorkerSpawned` before command launch, cwd anchoring, runner artifacts,
+or limiter acquisition. Ordinary non-required execution remains available.
+This is an unsupported-capability error, not successful Required execution or
+containment certification; it does not create descendant-liveness uncertainty.
+The surrounding dispatch may already own admission metadata or a lease; the
+runner does not claim that no higher-level bookkeeping occurred.
+
+The macOS regression exercises all four refusal paths with an absent launch
+marker and no runner artifacts, then proves the identical commands can launch
+when non-required. The Linux exact positive test retains its root EPERM,
+non-leader descendant/control, and kernel-proof assertions unchanged. Its
+platform scope is Linux x86_64/aarch64 only; a macOS refusal pass is not Linux
+acceptance. Restoring macOS Required execution needs a validated inherited
+containment mechanism and a new explicit capability decision, not a relaxed
+proof assertion. This contract change neither provisions a runner nor mints a
+Linux certification receipt.
 
 ## What this lane is (and is not)
 

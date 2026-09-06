@@ -69,6 +69,13 @@ async fn run_native_acp_dispatch_inner(
     timeout: Duration,
     defer_artifacts: bool,
 ) -> DispatchRunOutcome {
+    #[cfg(target_os = "macos")]
+    if defer_artifacts {
+        return DispatchRunOutcome::failure(
+            crate::dispatch_ops::subprocess::REQUIRED_POSTFLIGHT_UNSUPPORTED,
+            crate::exec_env_postflight::RunnerLivenessEvidence::NoWorkerSpawned,
+        );
+    }
     let mut cmd = Command::new(&spec.command);
     cmd.args(&spec.args);
     if spec.cwd_authority.is_none() {
