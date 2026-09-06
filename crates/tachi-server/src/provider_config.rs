@@ -815,12 +815,9 @@ pub(crate) fn materialize_standalone_with_password_for_tests(
     password: &str,
     after_vault_pools_resolved: Option<Box<dyn FnOnce() + Send>>,
 ) -> Result<MaterializeReport, String> {
-    materialize_standalone_inner(
-        llm,
-        global_db_path,
-        after_vault_pools_resolved,
-        &|path| vault_api_key_load_with_password_for_tests(path, Some(password)),
-    )
+    materialize_standalone_inner(llm, global_db_path, after_vault_pools_resolved, &|path| {
+        vault_api_key_load_with_password_for_tests(path, Some(password))
+    })
 }
 
 fn materialize_standalone_inner(

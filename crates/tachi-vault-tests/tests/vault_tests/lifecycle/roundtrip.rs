@@ -165,8 +165,11 @@ fn feature_enabled_product_keychain_ignores_test_env() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().expect("security fixture directory");
         let security = dir.path().join("security");
-        std::fs::write(&security, "#!/bin/sh\nprintf 'security-fixture-password\\n'\n")
-            .expect("write security fixture");
+        std::fs::write(
+            &security,
+            "#!/bin/sh\nprintf 'security-fixture-password\\n'\n",
+        )
+        .expect("write security fixture");
         std::fs::set_permissions(&security, std::fs::Permissions::from_mode(0o700))
             .expect("executable security fixture");
         let path = crate::test_support::EnvRestore::set_path("PATH", dir.path());
@@ -176,7 +179,10 @@ fn feature_enabled_product_keychain_ignores_test_env() {
     for missing_override in [Some(missing), None] {
         let result = crate::vault_crypto::read_password_from_macos_keychain();
         #[cfg(target_os = "macos")]
-        assert_eq!(result.expect("real security command path"), "security-fixture-password");
+        assert_eq!(
+            result.expect("real security command path"),
+            "security-fixture-password"
+        );
         #[cfg(not(target_os = "macos"))]
         assert!(result
             .expect_err("non-macOS product path must reject Keychain reads")
