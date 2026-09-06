@@ -21,11 +21,12 @@ fn derive_status_vault_key(
 
 pub(crate) struct KeychainApiKeyScan {
     pub values: Vec<(String, String)>,
+    pub slot_accounts: HashMap<String, String>,
     pub lane_config_values: crate::provider_config::LaneConfigValues,
     pub dropped: HashMap<String, AliasSkipClass>,
     pub rotation_prefixes: HashSet<String>,
     pub source_readable: bool,
-    pub acl_revision: Option<u64>,
+    pub acl_revision: Option<crate::vault_ops::VaultMaterializationRevision>,
 }
 
 pub(crate) fn load_keychain_vault_api_key_values(
@@ -45,6 +46,7 @@ fn record_keychain_listed_drop(
 fn empty_keychain_scan() -> KeychainApiKeyScan {
     KeychainApiKeyScan {
         values: Vec::new(),
+        slot_accounts: HashMap::new(),
         lane_config_values: crate::provider_config::LaneConfigValues::default(),
         dropped: HashMap::new(),
         rotation_prefixes: HashSet::new(),
@@ -104,9 +106,16 @@ fn load_keychain_vault_api_key_scan_with_password(
 
     let entries = transaction.vault_list_entries()?;
     let rotations = transaction.vault_list_rotations()?;
-    let acl_revision =
-        crate::vault_ops::vault_materialization_acl_revision_from_rows(&entries, &rotations);
+    let key_health_rows = transaction.vault_list_key_health(None)?;
+    let acl_revision = crate::vault_ops::vault_materialization_acl_revision_from_rows(
+        &entries,
+        &rotations,
+        &key_health_rows,
+    );
     for rotation in &rotations {
+        if crate::vault_ops::is_lane_slot_secret_name(&rotation.prefix) {
+            continue;
+        }
         memcore::validate_api_key_rotation(&entries, rotation).map_err(|error| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -116,9 +125,9 @@ fn load_keychain_vault_api_key_scan_with_password(
     }
     let rotation_prefixes = rotations
         .into_iter()
+        .filter(|rotation| !crate::vault_ops::is_lane_slot_secret_name(&rotation.prefix))
         .map(|rotation| rotation.prefix)
         .collect::<HashSet<_>>();
-    let key_health_rows = transaction.vault_list_key_health(None)?;
     let mut scan = scan_keychain_api_key_entries(
         entries,
         &key,
@@ -140,6 +149,7 @@ fn scan_keychain_api_key_entries(
     now: DateTime<Utc>,
 ) -> Result<KeychainApiKeyScan, Box<dyn std::error::Error>> {
     let mut values = Vec::new();
+    let mut slot_accounts = HashMap::new();
     let mut lane_config_values = crate::provider_config::LaneConfigValues::default();
     let mut dropped = HashMap::new();
     for entry in &entries {
@@ -162,7 +172,17 @@ fn scan_keychain_api_key_entries(
             lane_config_values.push((entry.name.clone(), value));
         }
     }
-    for entry in entries {
+    for entry in &entries {
+        if crate::provider_config::parse_rotation_member_name(&entry.name)
+            .is_some_and(|(prefix, _)| crate::vault_ops::is_lane_slot_secret_name(prefix))
+        {
+            record_keychain_listed_drop(
+                &mut dropped,
+                &entry.name,
+                AliasSkipClass::ListedInvalidBinding,
+            );
+            continue;
+        }
         if memcore::is_lane_config_secret_name(&entry.name) {
             record_keychain_listed_drop(&mut dropped, &entry.name, AliasSkipClass::ListedWrongType);
             continue;
@@ -195,19 +215,125 @@ fn scan_keychain_api_key_entries(
         }
         let decrypted =
             crate::vault_crypto::decrypt(key.bytes(), &entry.encrypted_value, &entry.nonce)?;
-        let value = crate::vault_crypto::decode_utf8_zeroizing(
-            decrypted,
-            crate::vault_ops::VAULT_MATERIALIZATION_INVALID_UTF8,
-        )
-        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+        let mut value = crate::vault_crypto::ZeroizingString::new(
+            crate::vault_crypto::decode_utf8_zeroizing(
+                decrypted,
+                crate::vault_ops::VAULT_MATERIALIZATION_INVALID_UTF8,
+            )
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?,
+        );
         if value.trim().is_empty() {
             record_keychain_listed_drop(&mut dropped, &entry.name, AliasSkipClass::ListedEmpty);
             continue;
         }
-        values.push((entry.name, value));
+        let resolved = if crate::vault_ops::is_lane_slot_secret_name(&entry.name) {
+            let Some(target) = crate::provider_config::parse_vault_alias(&value) else {
+                record_keychain_listed_drop(
+                    &mut dropped,
+                    &entry.name,
+                    AliasSkipClass::ListedInvalidBinding,
+                );
+                continue;
+            };
+            let Some(account) = entries.iter().find(|candidate| candidate.name == target) else {
+                record_keychain_listed_drop(
+                    &mut dropped,
+                    &entry.name,
+                    AliasSkipClass::ListedInvalidBinding,
+                );
+                continue;
+            };
+            if crate::vault_ops::is_lane_slot_secret_name(&account.name) {
+                record_keychain_listed_drop(
+                    &mut dropped,
+                    &entry.name,
+                    AliasSkipClass::ListedInvalidBinding,
+                );
+                continue;
+            }
+            if memcore::effective_vault_secret_type(&account.name, &account.secret_type)
+                != SECRET_TYPE_API_KEY
+            {
+                record_keychain_listed_drop(
+                    &mut dropped,
+                    &entry.name,
+                    AliasSkipClass::ListedWrongType,
+                );
+                continue;
+            }
+            if super::account_class_for_env_name(&account.name)
+                != Some(memcore::AccountClass::ModelApi)
+            {
+                record_keychain_listed_drop(
+                    &mut dropped,
+                    &entry.name,
+                    AliasSkipClass::ListedNotModelProvider,
+                );
+                continue;
+            }
+            if account
+                .allowed_agents
+                .as_ref()
+                .is_some_and(|agents| !agents.is_empty())
+            {
+                record_keychain_listed_drop(
+                    &mut dropped,
+                    &entry.name,
+                    AliasSkipClass::ListedFenced,
+                );
+                continue;
+            }
+            let slot_health = key_health_rows
+                .iter()
+                .find(|health| health.logical_name == entry.name && health.key_id == account.name)
+                .and_then(|health| crate::vault_ops::unusable_skip_class(health, now));
+            if let Some(class) = slot_health.or_else(|| {
+                keychain_unusable_skip_class(&account.name, rotation_prefixes, key_health_rows, now)
+            }) {
+                record_keychain_listed_drop(&mut dropped, &entry.name, class);
+                continue;
+            }
+            let decrypted = crate::vault_crypto::decrypt(
+                key.bytes(),
+                &account.encrypted_value,
+                &account.nonce,
+            )?;
+            let mut account_value = crate::vault_crypto::ZeroizingString::new(
+                crate::vault_crypto::decode_utf8_zeroizing(
+                    decrypted,
+                    crate::vault_ops::VAULT_MATERIALIZATION_INVALID_UTF8,
+                )?,
+            );
+            if account_value.trim().is_empty() {
+                record_keychain_listed_drop(&mut dropped, &entry.name, AliasSkipClass::ListedEmpty);
+                continue;
+            }
+            if crate::provider_config::parse_vault_alias(&account_value).is_some() {
+                record_keychain_listed_drop(
+                    &mut dropped,
+                    &entry.name,
+                    AliasSkipClass::ListedInvalidBinding,
+                );
+                continue;
+            }
+            slot_accounts.insert(entry.name.clone(), account.name.clone());
+            std::mem::take(account_value.as_mut_string())
+        } else {
+            if crate::provider_config::parse_vault_alias(&value).is_some() {
+                record_keychain_listed_drop(
+                    &mut dropped,
+                    &entry.name,
+                    AliasSkipClass::ListedInvalidBinding,
+                );
+                continue;
+            }
+            std::mem::take(value.as_mut_string())
+        };
+        values.push((entry.name.clone(), resolved));
     }
     Ok(KeychainApiKeyScan {
         values,
+        slot_accounts,
         lane_config_values,
         dropped,
         rotation_prefixes: rotation_prefixes.clone(),
@@ -539,5 +665,67 @@ mod tests {
         assert!(scan.values.is_empty());
         assert!(scan.dropped.is_empty());
         assert!(scan.rotation_prefixes.is_empty());
+    }
+
+    #[test]
+    fn keychain_slot_binding_keeps_drop_reasons_and_model_account_boundary() {
+        let key = test_key();
+        let entries = vec![
+            encrypted_entry("DEEPSEEK_API_KEY", "allowed-secret", &key),
+            encrypted_entry("SUMMARY_API_KEY", "vault:DEEPSEEK_API_KEY", &key),
+            encrypted_entry("EXTRACT_API_KEY", "orphan-secret", &key),
+            encrypted_entry("DISTILL_API_KEY", "vault:MISSING_API_KEY", &key),
+            encrypted_entry("TAVILY_API_KEY", "search-secret", &key),
+            encrypted_entry("REASONING_API_KEY", "vault:TAVILY_API_KEY", &key),
+        ];
+        let scan = scan_keychain_api_key_entries(entries, &key, &HashSet::new(), &[], Utc::now())
+            .expect("scan");
+        assert!(scan
+            .values
+            .contains(&("SUMMARY_API_KEY".into(), "allowed-secret".into())));
+        assert_eq!(
+            scan.slot_accounts
+                .get("SUMMARY_API_KEY")
+                .map(String::as_str),
+            Some("DEEPSEEK_API_KEY")
+        );
+        for name in ["EXTRACT_API_KEY", "DISTILL_API_KEY", "REASONING_API_KEY"] {
+            assert!(
+                !scan.values.iter().any(|(candidate, _)| candidate == name),
+                "invalid slot {name} admitted"
+            );
+            assert!(scan
+                .dropped
+                .get(name)
+                .expect("listed slot drop reason")
+                .is_listed_integrity());
+        }
+        assert_eq!(
+            scan.dropped.get("REASONING_API_KEY"),
+            Some(&AliasSkipClass::ListedNotModelProvider)
+        );
+    }
+
+    #[test]
+    fn keychain_slot_target_acl_is_attributed_to_the_slot() {
+        let key = test_key();
+        let mut account = encrypted_entry("DEEPSEEK_API_KEY", "restricted-secret", &key);
+        account.allowed_agents = Some(vec!["owner".into()]);
+        let scan = scan_keychain_api_key_entries(
+            vec![
+                account,
+                encrypted_entry("EXTRACT_API_KEY", "vault:DEEPSEEK_API_KEY", &key),
+            ],
+            &key,
+            &HashSet::new(),
+            &[],
+            Utc::now(),
+        )
+        .expect("scan");
+        assert!(scan.values.is_empty());
+        assert_eq!(
+            scan.dropped.get("EXTRACT_API_KEY"),
+            Some(&AliasSkipClass::ListedFenced)
+        );
     }
 }

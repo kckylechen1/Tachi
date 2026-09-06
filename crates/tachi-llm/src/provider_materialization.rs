@@ -4,6 +4,7 @@ use crate::provider_names::{
     parse_rotation_member_name, parse_vault_alias, validate_vault_alias_name,
 };
 use crate::{LaneConfigOverlay, LlmClient, ProviderRuntimeConfig, ProviderSecret};
+use memcore::vault::VaultKeyHealth;
 
 #[derive(Debug, Clone, Default)]
 pub struct MaterializeReport {
@@ -92,6 +93,18 @@ impl ProviderMaterializationSnapshot {
         &self.report
     }
 
+    /// Metadata-only membership check for a durable publication fence. This
+    /// uses the final resolved pools, including config.env aliases, without
+    /// reclassifying any scan-time drop or exposing plaintext.
+    pub fn uses_health_identity(&self, logical_name: &str, key_id: &str) -> bool {
+        self.resolved_pools.iter().any(|(pool, members)| {
+            members.iter().any(|member| {
+                LlmClient::provider_member_health_identities(pool, &member.key_id)
+                    .any(|identity| identity == (logical_name, key_id))
+            })
+        })
+    }
+
     /// Validate and bind a candidate lane overlay against the exact logical
     /// provider pools this snapshot would publish. The returned projection is
     /// the endpoint/model identity production requests will use; a mismatched
@@ -108,6 +121,7 @@ impl ProviderMaterializationSnapshot {
     fn publish<P>(
         self,
         llm: &LlmClient,
+        health_baseline: HashMap<String, HashMap<String, VaultKeyHealth>>,
         lane_config_overlay: Option<LaneConfigOverlay>,
         commit_companion_projection: P,
     ) -> Result<(), String>
@@ -119,9 +133,10 @@ impl ProviderMaterializationSnapshot {
             retained_logical_names,
             report: _,
         } = self;
-        llm.publish_provider_secret_pools(
+        llm.publish_provider_secret_pools_with_health_baseline(
             resolved_pools,
             &retained_logical_names,
+            health_baseline,
             lane_config_overlay,
             commit_companion_projection,
         )?;
@@ -216,6 +231,7 @@ pub enum AliasSkipClass {
     ListedUnusableExhausted,
     ListedUnusableCooldown,
     ListedNotModelProvider,
+    ListedInvalidBinding,
 }
 
 impl AliasSkipClass {
@@ -259,6 +275,9 @@ impl AliasSkipClass {
             ),
             Self::ListedNotModelProvider => format!(
                 "Config key '{key}' references a Vault alias whose listed secret is not a model provider key."
+            ),
+            Self::ListedInvalidBinding => format!(
+                "Config key '{key}' references a Vault alias whose listed secret has no valid provider-account binding."
             ),
         }
     }
@@ -382,6 +401,11 @@ where
     P: FnOnce(T) -> Result<(), String>,
 {
     let _materialization_guard = llm.provider_materialization_guard()?;
+    // Capture the in-memory health state before reading the durable source.
+    // A provider outcome may arrive while Vault is being scanned; publication
+    // must distinguish that newer observation from health belonging to a
+    // replaced credential with the same logical/key identity.
+    let health_baseline = llm.provider_health_memory_snapshot();
     let load = load_vault_pools()?;
     let snapshot = prepare_provider_materialization_under_guard(
         llm,
@@ -393,7 +417,7 @@ where
     )?;
     let (snapshot, lane_config_overlay, companion_projection) = prepare_runtime_snapshot(snapshot)?;
     let report = snapshot.report.clone();
-    snapshot.publish(llm, lane_config_overlay, || {
+    snapshot.publish(llm, health_baseline, lane_config_overlay, || {
         commit_companion_projection(companion_projection)
     })?;
     Ok(report)
@@ -415,6 +439,7 @@ where
     // one transaction across every LlmClient clone. This mutex is independent
     // from provider_state, so env/Vault work never nests under its lock.
     let _materialization_guard = llm.provider_materialization_guard()?;
+    let health_baseline = llm.provider_health_memory_snapshot();
     let snapshot = prepare_provider_materialization_under_guard(
         llm,
         vault_pools,
@@ -424,7 +449,7 @@ where
         after_missing_alias_snapshot,
     )?;
     let report = snapshot.report.clone();
-    snapshot.publish(llm, None, || Ok(()))?;
+    snapshot.publish(llm, health_baseline, None, || Ok(()))?;
     Ok(report)
 }
 
@@ -1765,6 +1790,7 @@ mod tests {
             AliasSkipClass::ListedUnusableExhausted,
             AliasSkipClass::ListedUnusableCooldown,
             AliasSkipClass::ListedNotModelProvider,
+            AliasSkipClass::ListedInvalidBinding,
         ] {
             let reason = class.operator_reason("SILICONFLOW_API_KEY");
             assert!(

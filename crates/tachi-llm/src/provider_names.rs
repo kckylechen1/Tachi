@@ -1,5 +1,17 @@
 pub const VAULT_ALIAS_PREFIX: &str = "vault:";
 
+/// Lane slots reference provider accounts; they do not own credentials.
+pub const LANE_SLOT_SECRET_NAMES: &[&str] = &[
+    "EXTRACT_API_KEY",
+    "SUMMARY_API_KEY",
+    "DISTILL_API_KEY",
+    "REASONING_API_KEY",
+];
+
+pub fn is_lane_slot_secret_name(name: &str) -> bool {
+    LANE_SLOT_SECRET_NAMES.contains(&name.trim())
+}
+
 /// `vault:VOYAGE_API_KEY` -> `Some("VOYAGE_API_KEY")`
 pub fn parse_vault_alias(value: &str) -> Option<&str> {
     let trimmed = value.trim();
@@ -61,6 +73,13 @@ pub fn parse_rotation_member_name(name: &str) -> Option<(&str, usize)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lane_slot_recognition_preserves_surrounding_whitespace() {
+        assert!(is_lane_slot_secret_name(" \tEXTRACT_API_KEY\n"));
+        assert!(!is_lane_slot_secret_name(" \t\n"));
+        assert!(!is_lane_slot_secret_name(" SILICONFLOW_API_KEY "));
+    }
 
     #[test]
     fn validate_vault_alias_name_accepts_valid_names() {

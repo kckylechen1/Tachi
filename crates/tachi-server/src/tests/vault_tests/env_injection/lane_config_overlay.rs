@@ -112,7 +112,15 @@ async fn seed_provider_and_lane(
     lane_model: &str,
 ) {
     initialize_vault(server, password).await;
-    set_vault_value(server, provider_name, provider_value, "api_key").await;
+    if crate::vault_ops::is_lane_slot_secret_name(provider_name) {
+        // Keep custody outside this fixture's independent lane fallback lists:
+        // these assertions exercise the explicit slot and its overlay, not a
+        // second provider pool newly made reachable by seeding the account.
+        set_vault_value(server, "OPENAI_API_KEY", provider_value, "api_key").await;
+        set_vault_value(server, provider_name, "vault:OPENAI_API_KEY", "api_key").await;
+    } else {
+        set_vault_value(server, provider_name, provider_value, "api_key").await;
+    }
     set_vault_value(server, "EXTRACT_BASE_URL", lane_url, "other").await;
     set_vault_value(server, "EXTRACT_MODEL", lane_model, "other").await;
 }
@@ -363,7 +371,7 @@ async fn vault_refresh_publishes_one_source_epoch_across_pool_and_lane_config() 
                 "UPDATE vault_entries
                     SET encrypted_value = (SELECT encrypted_value FROM vault_entries WHERE name = 'STAGED_API_KEY'),
                         nonce = (SELECT nonce FROM vault_entries WHERE name = 'STAGED_API_KEY')
-                  WHERE name = 'EXTRACT_API_KEY';
+                  WHERE name = 'OPENAI_API_KEY';
                  UPDATE vault_entries
                     SET encrypted_value = (SELECT encrypted_value FROM vault_entries WHERE name = 'STAGED_MODEL'),
                         nonce = (SELECT nonce FROM vault_entries WHERE name = 'STAGED_MODEL')
