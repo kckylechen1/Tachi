@@ -279,14 +279,6 @@ impl VaultTestServer {
     }
 }
 
-impl std::ops::Deref for VaultTestServer {
-    type Target = MemoryServer;
-
-    fn deref(&self) -> &Self::Target {
-        self.inner()
-    }
-}
-
 pub fn apply_unlocked_vault_env(
     cmd: &mut tokio::process::Command,
     server: &VaultTestServer,
@@ -309,6 +301,12 @@ pub fn materialize_for_server(
     crate::provider_config::materialize_for_server(server.inner())
 }
 
+pub fn materialize_for_server_without_keychain_for_tests(
+    server: &VaultTestServer,
+) -> Result<tachi_llm::MaterializeReport, String> {
+    crate::provider_config::materialize_for_server_without_keychain_for_tests(server.inner())
+}
+
 pub fn materialize_for_server_with_hook_for_tests(
     server: &VaultTestServer,
     after_vault_pools_resolved: impl FnOnce() + Send + 'static,
@@ -319,11 +317,16 @@ pub fn materialize_for_server_with_hook_for_tests(
     )
 }
 
-pub fn materialize_standalone(
+pub fn materialize_standalone_with_password_for_tests(
     llm: &tachi_llm::LlmClient,
     global_db_path: &Path,
+    password: &str,
 ) -> Result<tachi_llm::MaterializeReport, String> {
-    crate::provider_config::materialize_standalone(llm, global_db_path)
+    crate::provider_config::materialize_standalone_with_password_for_tests(
+        llm,
+        global_db_path,
+        password,
+    )
 }
 
 pub fn format_skipped_alias_warning(

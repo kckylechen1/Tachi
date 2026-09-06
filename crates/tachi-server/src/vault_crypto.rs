@@ -18,7 +18,7 @@ pub use vault_kit::{
     active_kdf_params_json, create_verifier, decrypt, encrypt, generate_salt, verify_password,
     zero_bytes, zero_key, zero_string, DerivedVaultKey, KdfParams, AES_GCM_NONCE_LEN,
 };
-#[cfg(any(test, feature = "vault-test-api"))]
+#[cfg(test)]
 pub use vault_kit::{cheap_kdf_params_json, derive_cheap};
 
 pub(crate) struct ZeroizingString(String);
@@ -272,7 +272,7 @@ pub fn derive_verified_key_from_stored_config(
         .decode(&config.salt)
         .map_err(|err| StoredVaultKeyDerivationError::InvalidSalt(err.to_string()))?;
 
-    #[cfg(any(test, feature = "vault-test-api"))]
+    #[cfg(test)]
     if config.kdf_params == cheap_kdf_params_json() {
         let key =
             derive_cheap(password, &salt).map_err(StoredVaultKeyDerivationError::Derivation)?;
@@ -337,7 +337,7 @@ pub fn read_password_from_macos_keychain() -> Result<String, String> {
     // unlock --keychain` it would silently succeed against real state).
     // These overrides make both the success and the missing-entry paths
     // deterministic. Never compiled into a release build.
-    #[cfg(any(test, feature = "vault-test-api"))]
+    #[cfg(test)]
     if let Some(result) = test_keychain_override() {
         return result;
     }
@@ -388,7 +388,7 @@ pub fn read_password_from_macos_keychain() -> Result<String, String> {
 /// returns the real missing-entry error text without invoking `security`.
 /// Neither var set (the default for every other test) falls through to `None`
 /// and the function runs its normal platform/`security` logic.
-#[cfg(any(test, feature = "vault-test-api"))]
+#[cfg(test)]
 fn test_keychain_override() -> Option<Result<String, String>> {
     if std::env::var_os("TACHI_TEST_FORCE_KEYCHAIN_MISSING").is_some() {
         return Some(Err(

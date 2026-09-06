@@ -575,8 +575,6 @@ async fn readable_missing_alias_revokes_but_unavailable_alias_retains() {
     let _provider_env = clear_model_provider_env();
     let _alias =
         crate::test_support::EnvRestore::set("EXTRACT_API_KEY", "vault:SILICONFLOW_API_KEY");
-    let _keychain_missing =
-        crate::test_support::EnvRestore::set("TACHI_TEST_FORCE_KEYCHAIN_MISSING", "1");
     let server = materialization_test_server();
     seed_provider_and_lane(
         &server,
@@ -640,7 +638,7 @@ async fn readable_missing_alias_revokes_but_unavailable_alias_retains() {
         })
         .expect("remove alias from the now-unavailable fixture source");
 
-    let report = crate::provider_config::materialize_for_server(&server)
+    let report = crate::provider_config::materialize_for_server_without_keychain_for_tests(&server)
         .expect("an unavailable Vault should retain the last-known-good alias pool");
     assert!(
         report
@@ -666,10 +664,6 @@ async fn standalone_materialization_sees_vault_lane_url_and_model() {
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let _provider_env = clear_model_provider_env();
-    let _keychain_password = crate::test_support::EnvRestore::set(
-        "TACHI_TEST_KEYCHAIN_PASSWORD",
-        "pr1862-standalone-password",
-    );
     let server = materialization_test_server();
     initialize_vault(&server, "pr1862-standalone-password").await;
     set_vault_value(
@@ -683,8 +677,12 @@ async fn standalone_materialization_sees_vault_lane_url_and_model() {
 
     let standalone = tachi_llm::LlmClient::new_with_config(materialization_test_config(), None)
         .expect("standalone client");
-    crate::provider_config::materialize_standalone(&standalone, &server.global_db_path_buf())
-        .expect("standalone provider materialization");
+    crate::provider_config::materialize_standalone_with_password_for_tests(
+        &standalone,
+        &server.global_db_path_buf(),
+        "pr1862-standalone-password",
+    )
+    .expect("standalone provider materialization");
     let live = standalone.runtime_config();
     assert_eq!(
         live.extract.base_url,
@@ -702,10 +700,6 @@ async fn standalone_default_vault_fallback_uses_matching_lane_overlay() {
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let _provider_env = clear_model_provider_env();
-    let _keychain_password = crate::test_support::EnvRestore::set(
-        "TACHI_TEST_KEYCHAIN_PASSWORD",
-        "pr1862-default-fallback-password",
-    );
     let server = materialization_test_server();
     let default_db = server.global_db_path_buf();
     let fixture_root = default_db
@@ -729,8 +723,12 @@ async fn standalone_default_vault_fallback_uses_matching_lane_overlay() {
         .join(memcore::MEMORY_DB_FILENAME);
     let standalone = tachi_llm::LlmClient::new_with_config(materialization_test_config(), None)
         .expect("standalone fallback client");
-    crate::provider_config::materialize_standalone(&standalone, &custom_db)
-        .expect("standalone default Vault fallback");
+    crate::provider_config::materialize_standalone_with_password_for_tests(
+        &standalone,
+        &custom_db,
+        "pr1862-default-fallback-password",
+    )
+    .expect("standalone default Vault fallback");
 
     let live = standalone.runtime_config();
     assert_eq!(

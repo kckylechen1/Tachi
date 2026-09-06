@@ -16,11 +16,11 @@ pub(crate) async fn handle_vault_init(
         let salt = crypto::generate_salt();
         let salt_b64 = B64.encode(salt);
         let key = {
-            #[cfg(any(test, feature = "vault-test-api"))]
+            #[cfg(test)]
             {
                 crypto::derive_cheap(&params.password, &salt)?
             }
-            #[cfg(not(any(test, feature = "vault-test-api")))]
+            #[cfg(not(test))]
             {
                 crypto::DerivedVaultKey::derive(&params.password, &salt)?
             }
@@ -32,11 +32,11 @@ pub(crate) async fn handle_vault_init(
             verifier,
             kdf_algorithm: "argon2id".to_string(),
             kdf_params: {
-                #[cfg(any(test, feature = "vault-test-api"))]
+                #[cfg(test)]
                 {
                     crypto::cheap_kdf_params_json().to_string()
                 }
-                #[cfg(not(any(test, feature = "vault-test-api")))]
+                #[cfg(not(test))]
                 {
                     crypto::active_kdf_params_json().to_string()
                 }

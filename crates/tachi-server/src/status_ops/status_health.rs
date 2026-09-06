@@ -33,6 +33,8 @@ pub(crate) use types::{
     ProviderProbeResult, ProviderRotationGroupProbe,
 };
 pub(crate) use vault::{load_keychain_vault_api_key_scan, KeychainApiKeyScan};
+#[cfg(feature = "vault-test-api")]
+pub(crate) use vault::load_keychain_vault_api_key_scan_with_reader;
 
 // ─── Stable internal facades for cross-module callers ───────────────────────
 //

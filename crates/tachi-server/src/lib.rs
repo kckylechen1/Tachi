@@ -200,8 +200,7 @@ mod workflow_closure;
 use crate::tool_params::*;
 
 pub(crate) mod server_state;
-pub use server_state::MemoryServer;
-pub(crate) use server_state::{CachedVaultKey, DbScope, VaultState};
+pub(crate) use server_state::{CachedVaultKey, DbScope, MemoryServer, VaultState};
 
 // Enrichment batcher methods are in enrichment.rs
 

@@ -93,7 +93,9 @@ pub mod server_state {
 pub mod provider_config {
     pub use tachi_server::vault_test_api::{
         format_skipped_alias_warning, materialize_for_server,
-        materialize_for_server_with_hook_for_tests, materialize_standalone,
+        materialize_for_server_with_hook_for_tests,
+        materialize_for_server_without_keychain_for_tests,
+        materialize_standalone_with_password_for_tests,
     };
 }
 
