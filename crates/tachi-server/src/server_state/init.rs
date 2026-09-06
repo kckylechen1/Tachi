@@ -23,7 +23,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock};
 use tokio::sync::mpsc;
 
-#[cfg(any(test, feature = "delivery-test-api"))]
+#[cfg(any(test, feature = "delivery-test-api", feature = "vault-test-api"))]
 thread_local! {
     static TEST_BACKGROUND_WORKERS_OVERRIDE: std::cell::Cell<Option<bool>> = const {
         std::cell::Cell::new(None)
@@ -54,7 +54,7 @@ fn background_workers_enabled() -> bool {
     }
     #[cfg(not(test))]
     {
-        #[cfg(feature = "delivery-test-api")]
+        #[cfg(any(feature = "delivery-test-api", feature = "vault-test-api"))]
         if let Some(enabled) = TEST_BACKGROUND_WORKERS_OVERRIDE.get() {
             return enabled;
         }
@@ -116,6 +116,25 @@ impl MemoryServer {
         TEST_BACKGROUND_WORKERS_OVERRIDE.with(|override_value| {
             let previous = override_value.replace(Some(false));
             let result = Self::new(global_db_path, project_db_path);
+            override_value.set(previous);
+            result
+        })
+    }
+
+    #[cfg(any(feature = "delivery-test-api", feature = "vault-test-api"))]
+    pub(crate) fn new_isolated_with_home_for_test(
+        global_db_path: PathBuf,
+        project_db_path: Option<PathBuf>,
+        home_dir: PathBuf,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        TEST_BACKGROUND_WORKERS_OVERRIDE.with(|override_value| {
+            let previous = override_value.replace(Some(false));
+            let result = Self::new_with_migration_authority_and_home(
+                global_db_path,
+                project_db_path,
+                MigrationAuthority::Deny,
+                home_dir,
+            );
             override_value.set(previous);
             result
         })

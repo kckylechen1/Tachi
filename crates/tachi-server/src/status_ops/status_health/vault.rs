@@ -58,7 +58,17 @@ fn empty_keychain_scan() -> KeychainApiKeyScan {
 pub(crate) fn load_keychain_vault_api_key_scan(
     vault_db_path: &Path,
 ) -> Result<KeychainApiKeyScan, Box<dyn std::error::Error>> {
-    let mut password = match crate::vault_crypto::read_password_from_macos_keychain() {
+    load_keychain_vault_api_key_scan_with_reader(
+        vault_db_path,
+        crate::vault_crypto::read_password_from_macos_keychain,
+    )
+}
+
+pub(crate) fn load_keychain_vault_api_key_scan_with_reader(
+    vault_db_path: &Path,
+    read_password: impl FnOnce() -> Result<String, String>,
+) -> Result<KeychainApiKeyScan, Box<dyn std::error::Error>> {
+    let mut password = match read_password() {
         Ok(password) => password,
         Err(err)
             if !cfg!(target_os = "macos")

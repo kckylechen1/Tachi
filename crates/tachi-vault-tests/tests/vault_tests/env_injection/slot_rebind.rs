@@ -584,7 +584,7 @@ async fn concurrent_first_writers_cannot_bypass_lane_slot_rebind() {
         ("SILICONFLOW_API_KEY", "concurrent-family-siliconflow"),
         ("DEEPSEEK_API_KEY", "concurrent-family-deepseek"),
     ] {
-        let server = std::ops::Deref::deref(&server).clone();
+        let server = server.clone();
         let barrier = barrier.clone();
         writers.push(tokio::spawn(async move {
             barrier.wait().await;

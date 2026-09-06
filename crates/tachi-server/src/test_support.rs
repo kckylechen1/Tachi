@@ -45,7 +45,7 @@ use std::path::{Path, PathBuf};
 /// file mixes trigger DDL with `.connection()`/`.connection_mut()` and has no
 /// unguarded route, so the wrong shape lands as a named RED rather than as a
 /// mystery `not authorized`.
-pub(crate) fn with_unrestricted_fixture_connection<T>(
+pub fn with_unrestricted_fixture_connection<T>(
     path: &Path,
     operation: impl FnOnce(&rusqlite::Connection) -> rusqlite::Result<T>,
 ) -> rusqlite::Result<T> {
@@ -139,14 +139,14 @@ pub(crate) fn assert_repo_local_db_fixture_not_skipped(path: &Path) {
 /// Tests that mutate env vars MUST either use unique var names per test or
 /// hold [`crate::utils::global_test_lock`] for the guard's lifetime, because
 /// cargo runs `#[test]` fns in parallel by default.
-pub(crate) struct EnvRestore {
+pub struct EnvRestore {
     key: &'static str,
     old: Option<std::ffi::OsString>,
 }
 
 impl EnvRestore {
     /// Set `key` to `value`, returning a guard that restores the prior value.
-    pub(crate) fn set(key: &'static str, value: &str) -> Self {
+    pub fn set(key: &'static str, value: &str) -> Self {
         let old = std::env::var_os(key);
         std::env::set_var(key, value);
         Self { key, old }
@@ -158,7 +158,7 @@ impl EnvRestore {
     /// (each a byte-for-byte-near-identical copy of this one, several with a
     /// `set_path` constructor `set` alone can't express without an extra
     /// `.to_str()` round-trip) have one shared implementation to migrate to.
-    pub(crate) fn set_path(key: &'static str, value: &Path) -> Self {
+    pub fn set_path(key: &'static str, value: &Path) -> Self {
         let old = std::env::var_os(key);
         std::env::set_var(key, value);
         Self { key, old }
@@ -168,14 +168,14 @@ impl EnvRestore {
     /// prior value. For values that are not guaranteed UTF-8 (e.g. a PATH
     /// rebuilt via `join_paths`) — `set`'s `&str` parameter would force a
     /// lossy/panicking conversion that the old hand-rolled guards never did.
-    pub(crate) fn set_os(key: &'static str, value: &std::ffi::OsStr) -> Self {
+    pub fn set_os(key: &'static str, value: &std::ffi::OsStr) -> Self {
         let old = std::env::var_os(key);
         std::env::set_var(key, value);
         Self { key, old }
     }
 
     /// Remove `key`, returning a guard that restores the prior value.
-    pub(crate) fn remove(key: &'static str) -> Self {
+    pub fn remove(key: &'static str) -> Self {
         let old = std::env::var_os(key);
         std::env::remove_var(key);
         Self { key, old }

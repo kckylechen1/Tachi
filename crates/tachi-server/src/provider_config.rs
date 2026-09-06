@@ -139,6 +139,23 @@ fn vault_api_key_load_from_keychain(global_db_path: &Path) -> Result<VaultSource
     Ok(durable_load_from_keychain_scan(scan))
 }
 
+#[cfg(feature = "vault-test-api")]
+fn vault_api_key_load_with_password_for_tests(
+    global_db_path: &Path,
+    password: Option<&str>,
+) -> Result<VaultSourceLoad, String> {
+    let scan = crate::status_ops::status_health::load_keychain_vault_api_key_scan_with_reader(
+        global_db_path,
+        || {
+            password
+                .map(str::to_owned)
+                .ok_or_else(|| "no vault password found in Keychain (test fixture)".to_string())
+        },
+    )
+    .map_err(|err| format!("Keychain Vault provider read failed: {err}"))?;
+    Ok(durable_load_from_keychain_scan(scan))
+}
+
 fn durable_load_from_keychain_scan(
     scan: crate::status_ops::status_health::KeychainApiKeyScan,
 ) -> VaultSourceLoad {
@@ -226,6 +243,7 @@ fn resolved_vault_load(source: VaultSourceLoad, source_path: &Path) -> ResolvedV
     }
 }
 
+#[cfg(test)]
 fn resolve_vault_pools(
     server: Option<&MemoryServer>,
     global_db_path: &Path,
@@ -485,12 +503,13 @@ pub fn describe_skipped_alias_report(report: &MaterializeReport) -> String {
 }
 
 pub fn materialize_for_server(server: &MemoryServer) -> Result<MaterializeReport, String> {
-    materialize_for_server_inner(server, None)
+    materialize_for_server_inner(server, None, &vault_api_key_load_from_keychain)
 }
 
 fn materialize_for_server_inner(
     server: &MemoryServer,
     after_vault_pools_resolved: Option<Box<dyn FnOnce() + Send>>,
+    keychain_loader: &impl Fn(&Path) -> Result<VaultSourceLoad, String>,
 ) -> Result<MaterializeReport, String> {
     let global = server.global_db_path_buf();
     let lane_config_values = std::cell::RefCell::new(None);
@@ -501,7 +520,11 @@ fn materialize_for_server_inner(
             server.llm.as_ref(),
             provider_env_keys(),
             || {
-                let resolved = resolve_vault_pools(Some(server), &global)?;
+                let resolved = resolve_vault_pools_with_keychain_loader(
+                    Some(server),
+                    &global,
+                    keychain_loader,
+                )?;
                 let expected_revision = resolved.acl_revision;
                 let source_path = resolved.source_path.clone();
                 *lane_config_values.borrow_mut() = Some(resolved.lane_config_values);
@@ -755,25 +778,53 @@ fn warn_if_env_conflicts(name: &str, vault_value: &str) {
     }
 }
 
-#[cfg(test)]
-pub(crate) fn materialize_for_server_with_hook_for_tests(
+#[cfg(any(test, feature = "vault-test-api"))]
+pub fn materialize_for_server_with_hook_for_tests(
     server: &MemoryServer,
     after_vault_pools_resolved: impl FnOnce() + Send + 'static,
 ) -> Result<MaterializeReport, String> {
-    materialize_for_server_inner(server, Some(Box::new(after_vault_pools_resolved)))
+    materialize_for_server_inner(
+        server,
+        Some(Box::new(after_vault_pools_resolved)),
+        &vault_api_key_load_from_keychain,
+    )
+}
+
+/// Explicit missing-Keychain fixture; ordinary server calls keep the real reader.
+#[cfg(feature = "vault-test-api")]
+pub(crate) fn materialize_for_server_without_keychain_for_tests(
+    server: &MemoryServer,
+) -> Result<MaterializeReport, String> {
+    materialize_for_server_inner(server, None, &|path| {
+        vault_api_key_load_with_password_for_tests(path, None)
+    })
 }
 
 pub fn materialize_standalone(
     llm: &LlmClient,
     global_db_path: &Path,
 ) -> Result<MaterializeReport, String> {
-    materialize_standalone_inner(llm, global_db_path, None)
+    materialize_standalone_inner(llm, global_db_path, None, &vault_api_key_load_from_keychain)
+}
+
+/// Exercise durable custody with an explicit password, never a process-wide override.
+#[cfg(feature = "vault-test-api")]
+pub(crate) fn materialize_standalone_with_password_for_tests(
+    llm: &LlmClient,
+    global_db_path: &Path,
+    password: &str,
+    after_vault_pools_resolved: Option<Box<dyn FnOnce() + Send>>,
+) -> Result<MaterializeReport, String> {
+    materialize_standalone_inner(llm, global_db_path, after_vault_pools_resolved, &|path| {
+        vault_api_key_load_with_password_for_tests(path, Some(password))
+    })
 }
 
 fn materialize_standalone_inner(
     llm: &LlmClient,
     global_db_path: &Path,
     after_vault_pools_resolved: Option<Box<dyn FnOnce() + Send>>,
+    keychain_loader: &impl Fn(&Path) -> Result<VaultSourceLoad, String>,
 ) -> Result<MaterializeReport, String> {
     let lane_config_values = std::cell::RefCell::new(None);
     let publication_fence = std::cell::RefCell::new(None);
@@ -782,7 +833,8 @@ fn materialize_standalone_inner(
         llm,
         provider_env_keys(),
         || {
-            let resolved = resolve_vault_pools(None, global_db_path)?;
+            let resolved =
+                resolve_vault_pools_with_keychain_loader(None, global_db_path, keychain_loader)?;
             let expected_revision = resolved.acl_revision;
             let source_path = resolved.source_path.clone();
             *lane_config_values.borrow_mut() = Some(resolved.lane_config_values);
@@ -848,6 +900,7 @@ pub(crate) fn materialize_standalone_with_hook_for_tests(
         llm,
         global_db_path,
         Some(Box::new(after_vault_pools_resolved)),
+        &vault_api_key_load_from_keychain,
     )
 }
 

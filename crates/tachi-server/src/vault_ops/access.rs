@@ -734,16 +734,16 @@ pub(crate) fn canonical_api_key_health_logical_name(
 }
 
 /// Admitted pools plus drop reasons from the same scan (tachi#1860).
-pub(crate) struct ProviderSecretScan {
+pub struct ProviderSecretScan {
     pub pools: HashMap<String, Vec<tachi_llm::ProviderSecret>>,
     pub dropped: HashMap<String, AliasSkipClass>,
-    pub lane_config_values: crate::provider_config::LaneConfigValues,
-    pub acl_revision: VaultMaterializationRevision,
+    pub(crate) lane_config_values: crate::provider_config::LaneConfigValues,
+    pub(crate) acl_revision: VaultMaterializationRevision,
 }
 
 /// Same scan as [`load_unlocked_api_key_secret_pools`], plus the drop reason
 /// recorded at the moment each listed row was skipped (tachi#1860).
-#[cfg(test)]
+#[cfg(any(test, feature = "vault-test-api"))]
 pub(crate) fn load_unlocked_api_key_secret_pools_with_drops(
     server: &MemoryServer,
 ) -> Result<ProviderSecretScan, String> {

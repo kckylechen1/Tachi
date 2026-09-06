@@ -114,3 +114,79 @@ async fn vault_init_set_get_lock_unlock_roundtrip() {
     assert_eq!(status_json["resolver"]["state"], json!("unlocked"));
     assert!(status_json["secure_store"]["auto_unlock_available"].is_boolean());
 }
+
+/// The server dependency is compiled with vault-test-api but without cfg(test).
+/// Its ordinary init and stored-key paths must still enforce the product KDF.
+#[tokio::test]
+async fn feature_enabled_product_server_uses_production_kdf() {
+    let server = make_server();
+    let password = "feature-unification-password";
+    server
+        .vault_init(Parameters(VaultInitParams {
+            password: password.to_string(),
+        }))
+        .await
+        .expect("product vault init");
+    let mut config = server
+        .with_global_store_read(|store| store.vault_get_config().map_err(|err| err.to_string()))
+        .expect("read product config")
+        .expect("initialized config");
+    assert_eq!(config.kdf_params, vault_kit::active_kdf_params_json());
+    assert_eq!(
+        serde_json::from_str::<Value>(&config.kdf_params).expect("KDF JSON"),
+        json!({"m": 65536, "t": 3, "p": 4})
+    );
+    let key = crate::vault_crypto::derive_verified_key_from_stored_config(&config, password)
+        .expect("product stored KDF must verify the actual initialized key");
+    assert!(key.bytes() == &server.unlocked_key_bytes());
+
+    config.kdf_params = vault_kit::cheap_kdf_params_json().to_string();
+    assert!(matches!(
+        crate::vault_crypto::derive_verified_key_from_stored_config(&config, password),
+        Err(crate::vault_crypto::StoredVaultKeyDerivationError::KdfParamsFormat(_))
+    ));
+}
+
+#[cfg(unix)]
+#[test]
+fn feature_enabled_product_keychain_ignores_test_env() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    let _password = crate::test_support::EnvRestore::set(
+        "TACHI_TEST_KEYCHAIN_PASSWORD",
+        "environment-password-must-not-be-used",
+    );
+    let missing = crate::test_support::EnvRestore::set("TACHI_TEST_FORCE_KEYCHAIN_MISSING", "1");
+
+    // On macOS use a PATH-local security fixture, never the user's real Keychain.
+    #[cfg(target_os = "macos")]
+    let (_security_dir, _path) = {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("security fixture directory");
+        let security = dir.path().join("security");
+        std::fs::write(
+            &security,
+            "#!/bin/sh\nprintf 'security-fixture-password\\n'\n",
+        )
+        .expect("write security fixture");
+        std::fs::set_permissions(&security, std::fs::Permissions::from_mode(0o700))
+            .expect("executable security fixture");
+        let path = crate::test_support::EnvRestore::set_path("PATH", dir.path());
+        (dir, path)
+    };
+
+    for missing_override in [Some(missing), None] {
+        let result = crate::vault_crypto::read_password_from_macos_keychain();
+        #[cfg(target_os = "macos")]
+        assert_eq!(
+            result.expect("real security command path"),
+            "security-fixture-password"
+        );
+        #[cfg(not(target_os = "macos"))]
+        assert!(result
+            .expect_err("non-macOS product path must reject Keychain reads")
+            .contains("Keychain unlock is only supported on macOS"));
+        drop(missing_override);
+    }
+}

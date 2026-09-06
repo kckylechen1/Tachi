@@ -17,6 +17,7 @@ EXPECTED_PACKAGES = [
     "tachi-server",
     "tachi-bootstrap-tests",
     "tachi-delivery-tests",
+    "tachi-vault-tests",
     "tachi-contract-tests",
     "tachi-credential-profile",
     "tachi-gh-safe-merge",

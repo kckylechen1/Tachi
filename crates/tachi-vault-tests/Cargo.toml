@@ -1,0 +1,28 @@
+[package]
+name = "tachi-vault-tests"
+version = "1.9.2"
+edition = "2021"
+license = "AGPL-3.0-only"
+publish = false
+description = "External vault integration and lifecycle tests extracted from tachi-server (#1831 Track T)."
+
+[dependencies]
+
+[dev-dependencies]
+chrono = { workspace = true }
+memcore = { path = "../memcore", features = ["test-support"] }
+memory-server-runtime = { path = "../memory-server-runtime", features = ["test-support"] }
+rmcp = { version = "1.2", features = ["server", "schemars"] }
+rusqlite = { workspace = true }
+serde_json = { workspace = true }
+tachi-hub = { path = "../tachi-hub" }
+tachi-llm = { path = "../tachi-llm", features = ["test-support"] }
+tachi-server = { path = "../tachi-server", features = ["vault-test-api"] }
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+uuid = { workspace = true }
+vault-kit = { path = "../vault-kit", features = ["test-support"] }
+
+[[test]]
+name = "vault_tests"
+path = "tests/vault_tests/mod.rs"

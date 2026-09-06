@@ -32,6 +32,8 @@ pub(crate) use types::{
     DoctorProbeCacheRefresh, HealthDeduction, ProviderProbeCache, ProviderProbeReport,
     ProviderProbeResult, ProviderRotationGroupProbe,
 };
+#[cfg(feature = "vault-test-api")]
+pub(crate) use vault::load_keychain_vault_api_key_scan_with_reader;
 pub(crate) use vault::{load_keychain_vault_api_key_scan, KeychainApiKeyScan};
 
 // ─── Stable internal facades for cross-module callers ───────────────────────

@@ -1327,7 +1327,28 @@ const EXEMPTIONS: &[Exemption<'static>] = &[
                  fault-injection shape is declared rather than machine-proven.",
     },
     Exemption {
-        path: "crates/tachi-server/src/tests/vault_tests/env_injection/lane_config_overlay.rs",
+        path: "crates/tachi-server/src/tests/wiki_tests/write/facade_routing/guide_metadata.rs",
+        basis: ExemptionBasis::Proven(MachineProof::NoStoreDoorwayInFile),
+        sites: &[
+            Site {
+                symbol: "v22_named_project_write_migrates_before_guide_pattern_and_reference_reads",
+                trigger: "MEMORIES_RESERVED_REFS_INSERT_GUARD",
+                ddl: "bb3d35f8dd48927f",
+                occurrences: 1,
+            },
+            Site {
+                symbol: "v22_named_project_write_migrates_before_guide_pattern_and_reference_reads",
+                trigger: "MEMORIES_RESERVED_REFS_UPDATE_GUARD",
+                ddl: "07bdacf9fb6a3723",
+                occurrences: 1,
+            },
+        ],
+        reason: "pre-v23 wiki fixture seeding on an unguarded connection. \
+                 Re-derived: this file names no store doorway. Enclosing symbol \
+                 extracted mechanically; body NOT read.",
+    },
+    Exemption {
+        path: "crates/tachi-vault-tests/tests/vault_tests/env_injection/lane_config_overlay.rs",
         basis: ExemptionBasis::DeclaredByReviewerNotProven {
             signed_by: "Codex Sol, bodies read 2026-08-30",
         },
@@ -1352,27 +1373,6 @@ const EXEMPTIONS: &[Exemption<'static>] = &[
                  before the next reopen. Bodies read 2026-08-30. The file also names guarded \
                  store doorways, so this sanctioned fixture is declared rather than assigned \
                  an inapplicable machine proof.",
-    },
-    Exemption {
-        path: "crates/tachi-server/src/tests/wiki_tests/write/facade_routing/guide_metadata.rs",
-        basis: ExemptionBasis::Proven(MachineProof::NoStoreDoorwayInFile),
-        sites: &[
-            Site {
-                symbol: "v22_named_project_write_migrates_before_guide_pattern_and_reference_reads",
-                trigger: "MEMORIES_RESERVED_REFS_INSERT_GUARD",
-                ddl: "bb3d35f8dd48927f",
-                occurrences: 1,
-            },
-            Site {
-                symbol: "v22_named_project_write_migrates_before_guide_pattern_and_reference_reads",
-                trigger: "MEMORIES_RESERVED_REFS_UPDATE_GUARD",
-                ddl: "07bdacf9fb6a3723",
-                occurrences: 1,
-            },
-        ],
-        reason: "pre-v23 wiki fixture seeding on an unguarded connection. \
-                 Re-derived: this file names no store doorway. Enclosing symbol \
-                 extracted mechanically; body NOT read.",
     },
 ];
 

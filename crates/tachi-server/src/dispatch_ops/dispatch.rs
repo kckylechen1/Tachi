@@ -376,7 +376,7 @@ use self::start::assert_nested_mcp_profile_mechanics;
 use self::start::*;
 use self::workspace_setup::prepare_workspace_and_mcp;
 
-#[cfg(test)]
+#[cfg(feature = "vault-test-api")]
 pub(crate) use self::credentials::apply_unlocked_vault_env;
 pub(crate) use self::dedupe::dispatch_runs_root;
 pub(crate) use self::dedupe::new_dispatch_id;

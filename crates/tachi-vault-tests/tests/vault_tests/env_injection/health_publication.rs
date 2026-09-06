@@ -42,7 +42,6 @@ fn controlled_env() -> Vec<EnvRestore> {
         .into_iter()
         .map(EnvRestore::remove),
     );
-    guards.push(EnvRestore::set("TACHI_TEST_FORCE_KEYCHAIN_MISSING", "1"));
     guards
 }
 
@@ -479,12 +478,11 @@ async fn unlocked_and_keychain_publication_refuse_external_bound_health_changes(
                     .expect("capture external row");
             };
             let result = if keychain {
-                let _missing = EnvRestore::remove("TACHI_TEST_FORCE_KEYCHAIN_MISSING");
-                let _password = EnvRestore::set("TACHI_TEST_KEYCHAIN_PASSWORD", PASSWORD);
-                crate::provider_config::materialize_standalone_with_hook_for_tests(
+                crate::provider_config::materialize_standalone_with_password_for_tests(
                     server.llm.as_ref(),
                     &path,
-                    after_scan,
+                    PASSWORD,
+                    Some(Box::new(after_scan)),
                 )
             } else {
                 crate::provider_config::materialize_for_server_with_hook_for_tests(
@@ -567,12 +565,11 @@ async fn unlocked_and_keychain_publication_preserve_captured_credential_generati
                 observed_tx.send(()).expect("capture content mutation");
             };
         let result = if keychain {
-            let _missing = EnvRestore::remove("TACHI_TEST_FORCE_KEYCHAIN_MISSING");
-            let _password = EnvRestore::set("TACHI_TEST_KEYCHAIN_PASSWORD", PASSWORD);
-            crate::provider_config::materialize_standalone_with_hook_for_tests(
+            crate::provider_config::materialize_standalone_with_password_for_tests(
                 server.llm.as_ref(),
                 &path,
-                after_scan,
+                PASSWORD,
+                Some(Box::new(after_scan)),
             )
         } else {
             crate::provider_config::materialize_for_server_with_hook_for_tests(&server, after_scan)
@@ -587,10 +584,13 @@ async fn unlocked_and_keychain_publication_preserve_captured_credential_generati
         );
         assert_eq!(server.llm.runtime_config(), before.0);
         if keychain {
-            let _missing = EnvRestore::remove("TACHI_TEST_FORCE_KEYCHAIN_MISSING");
-            let _password = EnvRestore::set("TACHI_TEST_KEYCHAIN_PASSWORD", PASSWORD);
-            crate::provider_config::materialize_standalone(server.llm.as_ref(), &path)
-                .expect("publish the next complete Keychain generation");
+            crate::provider_config::materialize_standalone_with_password_for_tests(
+                server.llm.as_ref(),
+                &path,
+                PASSWORD,
+                None,
+            )
+            .expect("publish the next complete Keychain generation");
         } else {
             crate::provider_config::materialize_for_server(&server)
                 .expect("publish the next complete unlocked generation");

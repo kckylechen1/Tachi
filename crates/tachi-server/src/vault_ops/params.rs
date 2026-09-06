@@ -7,7 +7,7 @@ fn default_secret_type() -> String {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct VaultInitParams {
+pub struct VaultInitParams {
     pub password: String,
 }
 
@@ -18,7 +18,7 @@ impl Drop for VaultInitParams {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct VaultUnlockParams {
+pub struct VaultUnlockParams {
     #[serde(default)]
     pub password: String,
     #[serde(default)]
@@ -41,7 +41,7 @@ impl Drop for VaultUnlockParams {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct VaultSetParams {
+pub struct VaultSetParams {
     pub name: String,
     pub value: String,
     #[serde(default)]
@@ -63,7 +63,7 @@ pub(crate) struct VaultSetParams {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct VaultGetParams {
+pub struct VaultGetParams {
     pub name: String,
     #[serde(default)]
     pub agent_id: Option<String>,
@@ -72,20 +72,20 @@ pub(crate) struct VaultGetParams {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct VaultListParams {
+pub struct VaultListParams {
     #[serde(default)]
     pub secret_type: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct VaultRemoveParams {
+pub struct VaultRemoveParams {
     pub name: String,
     #[serde(default)]
     pub agent_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct VaultSetupRotationParams {
+pub struct VaultSetupRotationParams {
     pub prefix: String,
     pub total_keys: i64,
     #[serde(default)]
@@ -95,7 +95,7 @@ pub(crate) struct VaultSetupRotationParams {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct VaultSetApiKeyPoolParams {
+pub struct VaultSetApiKeyPoolParams {
     /// Logical provider env name, e.g. OPENAI_API_KEY or ROUTER_API_KEY.
     pub prefix: String,
     /// Concrete key values. Stored as PREFIX_1, PREFIX_2, ...
@@ -119,7 +119,7 @@ impl Drop for VaultSetApiKeyPoolParams {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct VaultLeaseApiKeyParams {
+pub struct VaultLeaseApiKeyParams {
     /// Logical provider env name or standalone API key name.
     pub name: String,
     /// Optional child env var name. Defaults to `name`.
@@ -131,7 +131,7 @@ pub(crate) struct VaultLeaseApiKeyParams {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct VaultRecordKeyResultParams {
+pub struct VaultRecordKeyResultParams {
     /// Logical provider/env name, e.g. DEEPSEEK_API_KEY.
     pub logical_name: String,
     /// Concrete leased key id, e.g. DEEPSEEK_API_KEY_2.
