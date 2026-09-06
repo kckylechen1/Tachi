@@ -120,6 +120,7 @@ pub mod status_ops {
 
 pub mod vault_crypto {
     pub use tachi_server::vault_crypto::*;
+    pub use tachi_server::vault_test_api::decode_utf8_zeroizing;
 }
 
 mod access_audit;

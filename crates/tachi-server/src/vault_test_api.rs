@@ -359,6 +359,13 @@ pub fn family_env_names_for_env_name(name: &str) -> Option<Vec<&'static str>> {
     crate::status_ops::status_health::family_env_names_for_env_name(name)
 }
 
+pub fn decode_utf8_zeroizing(
+    bytes: Vec<u8>,
+    invalid_utf8_error: impl Into<String>,
+) -> Result<String, String> {
+    crate::vault_crypto::decode_utf8_zeroizing(bytes, invalid_utf8_error)
+}
+
 /// Exercise the independent-store write; the internal decision type stays private.
 pub fn write_lane_slot_binding(
     store: &mut memcore::MemoryStore,
