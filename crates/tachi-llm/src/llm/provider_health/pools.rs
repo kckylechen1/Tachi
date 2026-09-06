@@ -1,6 +1,9 @@
 use super::*;
 use std::collections::HashSet;
 
+mod health_publication;
+use health_publication::{has_newly_unusable_health, preserve_newer_health_observations};
+
 impl super::super::LlmClient {
     #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
@@ -90,6 +93,7 @@ impl super::super::LlmClient {
     /// complete lane overlay under one provider-state write lock. A caller
     /// that supplies `Some` gets one linearization point for both surfaces;
     /// `None` preserves the existing overlay for legacy pool-only callers.
+    #[cfg(test)]
     pub(crate) fn publish_provider_secret_pools<P>(
         &self,
         replacement: HashMap<String, Vec<ProviderSecret>>,
@@ -100,9 +104,30 @@ impl super::super::LlmClient {
     where
         P: FnOnce() -> Result<(), String>,
     {
+        self.publish_provider_secret_pools_with_health_baseline(
+            replacement,
+            retained_logical_names,
+            self.provider_health_memory_snapshot(),
+            lane_config_overlay,
+            commit_companion_projection,
+        )
+    }
+
+    pub(crate) fn publish_provider_secret_pools_with_health_baseline<P>(
+        &self,
+        replacement: HashMap<String, Vec<ProviderSecret>>,
+        retained_logical_names: &HashSet<String>,
+        health_baseline: HashMap<String, HashMap<String, VaultKeyHealth>>,
+        lane_config_overlay: Option<LaneConfigOverlay>,
+        commit_companion_projection: P,
+    ) -> Result<usize, String>
+    where
+        P: FnOnce() -> Result<(), String>,
+    {
         self.publish_provider_secret_pools_inner(
             replacement,
             retained_logical_names,
+            health_baseline,
             lane_config_overlay,
             None,
             commit_companion_projection,
@@ -113,6 +138,7 @@ impl super::super::LlmClient {
         &self,
         replacement: HashMap<String, Vec<ProviderSecret>>,
         retained_logical_names: &HashSet<String>,
+        health_baseline: HashMap<String, HashMap<String, VaultKeyHealth>>,
         lane_config_overlay: Option<LaneConfigOverlay>,
         before_companion_commit: Option<Box<dyn FnOnce() + Send>>,
         commit_companion_projection: P,
@@ -137,6 +163,15 @@ impl super::super::LlmClient {
             .provider_state
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // The Vault fence excludes durable writers, but runtime outcomes only
+        // take this state lock. Check their identities at the publication
+        // boundary, before either the pools or companion projection changes.
+        if has_newly_unusable_health(&state, &replacement, &health_baseline) {
+            return Err(
+                "Provider health changed before publication and an admitted credential is unusable; retry provider refresh"
+                    .to_string(),
+            );
+        }
         // Stage the complete next state while readers are blocked, then commit
         // the companion transaction. Vault-backed callers keep their source
         // mutation fence inside that commit callback, so the in-memory
@@ -177,6 +212,7 @@ impl super::super::LlmClient {
             members.retain(|key_id, _snapshot| retained_members.contains(key_id));
             !members.is_empty()
         });
+        preserve_newer_health_observations(&mut next, &previous, &health_baseline);
         *state = next;
         if let Some(hook) = before_companion_commit {
             hook();
@@ -203,6 +239,7 @@ impl super::super::LlmClient {
         self.publish_provider_secret_pools_inner(
             replacement,
             retained_logical_names,
+            self.provider_health_memory_snapshot(),
             lane_config_overlay,
             Some(Box::new(before_companion_commit)),
             commit_companion_projection,

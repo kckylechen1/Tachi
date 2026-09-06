@@ -202,6 +202,78 @@ fn wizard_vault_funnel_preserves_plaintext_on_write_failure() {
 }
 
 #[test]
+fn wizard_vault_funnel_binds_lane_slot_after_account_in_same_batch() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("memory.db");
+    let key = super::super::vault_cli::vault_init_with_password(
+        &db_path,
+        "correct horse battery staple".to_string(),
+    )
+    .expect("init vault");
+    let mut new_entries = vec![
+        ("EXTRACT_API_KEY".to_string(), "deepseek-secret".to_string()),
+        (
+            "DEEPSEEK_API_KEY".to_string(),
+            "deepseek-secret".to_string(),
+        ),
+    ];
+    let key_names = vec![
+        "EXTRACT_API_KEY".to_string(),
+        "DEEPSEEK_API_KEY".to_string(),
+    ];
+    let stored = upsert_keys_and_rewrite_aliases(&db_path, &key, &key_names, &mut new_entries)
+        .expect("funnel");
+    assert_eq!(stored, 2);
+    assert_eq!(new_entries[0].1, "vault:EXTRACT_API_KEY");
+    assert_eq!(new_entries[1].1, "vault:DEEPSEEK_API_KEY");
+    let store = open_cli_store_read_only(&db_path).expect("open store");
+    let slot = store
+        .vault_get_entry("EXTRACT_API_KEY")
+        .expect("get slot")
+        .expect("slot exists");
+    let slot_plain = crate::vault_crypto::decrypt(key.bytes(), &slot.encrypted_value, &slot.nonce)
+        .expect("decrypt slot");
+    assert_eq!(
+        String::from_utf8(slot_plain).expect("utf8"),
+        "vault:DEEPSEEK_API_KEY"
+    );
+    let account = store
+        .vault_get_entry("DEEPSEEK_API_KEY")
+        .expect("get account")
+        .expect("account exists");
+    let account_plain =
+        crate::vault_crypto::decrypt(key.bytes(), &account.encrypted_value, &account.nonce)
+            .expect("decrypt account");
+    assert_eq!(
+        String::from_utf8(account_plain).expect("utf8"),
+        "deepseek-secret"
+    );
+}
+
+#[test]
+fn wizard_vault_funnel_refuses_unmatched_lane_slot_bytes() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("memory.db");
+    let key = super::super::vault_cli::vault_init_with_password(
+        &db_path,
+        "correct horse battery staple".to_string(),
+    )
+    .expect("init vault");
+    let mut new_entries = vec![(
+        "EXTRACT_API_KEY".to_string(),
+        "orphan-slot-secret".to_string(),
+    )];
+    let key_names = vec!["EXTRACT_API_KEY".to_string()];
+    let err = upsert_keys_and_rewrite_aliases(&db_path, &key, &key_names, &mut new_entries)
+        .expect_err("unmatched slot must not copy ciphertext");
+    assert!(
+        err.to_string().contains("second copy") || err.to_string().contains("provider account"),
+        "{err}"
+    );
+    assert_eq!(new_entries[0].1, "orphan-slot-secret");
+}
+
+#[test]
 fn merge_managed_block_appends_and_replaces() {
     let block = agent_memory_rules_block();
     let first = merge_managed_block("# Existing\n", &block);

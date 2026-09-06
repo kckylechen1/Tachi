@@ -191,8 +191,8 @@ pub enum VaultAction {
         /// Useful for piping: `gh auth token | tachi vault set GH_TOKEN --value-stdin --keychain`
         #[arg(long)]
         value_stdin: bool,
-        /// Lane slots (EXTRACT/SUMMARY/DISTILL/REASONING_API_KEY) refuse a
-        /// fingerprint-changing overwrite unless this flag is set.
+        /// Lane slots bind to a provider account (`vault:ACCOUNT`). A family
+        /// change requires this flag. It never copies ciphertext into the slot.
         #[arg(long)]
         rebind: bool,
     },

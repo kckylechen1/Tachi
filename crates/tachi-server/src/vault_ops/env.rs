@@ -15,7 +15,11 @@ pub(super) fn load_unlocked_env_secrets(
         .flat_map(|entries| entries.iter().map(|entry| entry.key_id.clone()))
         .collect();
     let mut secrets = load_unlocked_vault_secrets(server, |entry| {
-        crate::utils::is_shell_env_name(&entry.name) && !rotation_member_names.contains(&entry.name)
+        crate::utils::is_shell_env_name(&entry.name)
+            && !rotation_member_names.contains(&entry.name)
+            && !crate::vault_ops::is_lane_slot_secret_name(&entry.name)
+            && !crate::provider_config::parse_rotation_member_name(&entry.name)
+                .is_some_and(|(prefix, _)| crate::vault_ops::is_lane_slot_secret_name(prefix))
     })?;
     for (logical_name, entries) in pools {
         if !crate::utils::is_shell_env_name(&logical_name) {
