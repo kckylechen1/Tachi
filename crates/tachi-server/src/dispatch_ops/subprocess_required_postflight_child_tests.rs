@@ -16,6 +16,21 @@ const DESCENDANT_WRONG_GROUP_AFTER_DENIAL: i32 = 6;
 const DESCENDANT_WRONG_SETID_RESULT: i32 = 7;
 const DESCENDANT_WRONG_GROUP_AFTER_SETID: i32 = 8;
 
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn required_postflight_macos_fails_closed_without_escape_containment() {
+    let mut command = Command::new("/usr/bin/true");
+    assert!(!configure_required_postflight_containment(&mut command));
+    let outcome =
+        run_agent_subprocess_with_liveness(command, Duration::from_secs(10), true, None).await;
+    assert_eq!(outcome.result.unwrap_err(), "termination_unconfirmed");
+    assert!(matches!(
+        outcome.liveness,
+        crate::exec_env_postflight::RunnerLivenessEvidence::Indeterminate { detail }
+            if detail.contains("could have escaped it with setsid()")
+    ));
+}
+
 pub(super) async fn assert_descendant_setsid_discrimination() {
     let mut descendant_command =
         Command::new(std::env::current_exe().expect("current test binary"));

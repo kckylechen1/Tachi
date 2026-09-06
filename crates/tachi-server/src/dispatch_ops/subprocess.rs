@@ -1767,44 +1767,13 @@ pub(crate) fn configure_process_group(cmd: &mut Command) {
 #[cfg(not(unix))]
 pub(crate) fn configure_process_group(_cmd: &mut Command) {}
 
-/// Apply a kernel-enforced rule that prevents a Required-postflight worker or
-/// any inherited descendant from leaving its owned POSIX process group. The
-/// macOS sandbox operation still permits ordinary fork/exec, but denies the
-/// process-control operation used by `setsid`/`setpgid` escapes.
+/// macOS has no proven inherited process-group escape control here.
+/// `process-info-setcontrol` does not deny a non-leader descendant's `setsid`.
+/// Returning false keeps owned-group absence from becoming a containment
+/// proof: Required postflight must remain indeterminate, not release resources.
 #[cfg(target_os = "macos")]
-pub(crate) fn configure_required_postflight_containment(cmd: &mut Command) -> bool {
-    const PROFILE: &str = "(version 1)(allow default)(deny process-info-setcontrol)";
-    let original = cmd.as_std();
-    let program = original.get_program().to_os_string();
-    let args = original
-        .get_args()
-        .map(std::ffi::OsStr::to_os_string)
-        .collect::<Vec<_>>();
-    let env = original
-        .get_envs()
-        .map(|(name, value)| {
-            (
-                name.to_os_string(),
-                value.map(std::ffi::OsStr::to_os_string),
-            )
-        })
-        .collect::<Vec<_>>();
-    let cwd = original.get_current_dir().map(std::path::Path::to_path_buf);
-
-    let mut wrapped = Command::new("/usr/bin/sandbox-exec");
-    wrapped.arg("-p").arg(PROFILE).arg(program).args(args);
-    if let Some(cwd) = cwd {
-        wrapped.current_dir(cwd);
-    }
-    for (name, value) in env {
-        if let Some(value) = value {
-            wrapped.env(name, value);
-        } else {
-            wrapped.env_remove(name);
-        }
-    }
-    *cmd = wrapped;
-    true
+pub(crate) fn configure_required_postflight_containment(_cmd: &mut Command) -> bool {
+    false
 }
 
 #[cfg(all(
