@@ -16,6 +16,7 @@ KNOWN_REDS_SCRIPT = Path(__file__).with_name("nextest-known-reds-diff.sh")
 EXPECTED_PACKAGES = [
     "tachi-server",
     "tachi-bootstrap-tests",
+    "tachi-delivery-tests",
     "tachi-contract-tests",
     "tachi-credential-profile",
     "tachi-gh-safe-merge",
