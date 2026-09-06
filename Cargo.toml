@@ -112,6 +112,13 @@ debug = "line-tables-only"
 [profile.dev.package.tachi-bootstrap]
 opt-level = 1
 
+# Keep Argon2 at opt-level 3 in both non-release profiles.
+[profile.dev.package.argon2]
+opt-level = 3
+
+[profile.test.package.argon2]
+opt-level = 3
+
 [workspace.dependencies]
 # `bundled` compiles the SQLite C amalgamation (libsqlite3-sys).
 # Kept bundled intentionally (see #833 decision: CI/release targets
