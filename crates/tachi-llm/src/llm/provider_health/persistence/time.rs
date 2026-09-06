@@ -33,11 +33,6 @@ impl super::super::super::LlmClient {
         key_id: &str,
         now: DateTime<Utc>,
     ) -> (KeyAvailability, Option<i64>) {
-        state
-            .health_snapshots
-            .get(logical_name)
-            .and_then(|members| members.get(key_id))
-            .map(|snapshot| snapshot.availability_at(now))
-            .unwrap_or((KeyAvailability::Available, None))
+        state.health_availability(logical_name, key_id, now)
     }
 }

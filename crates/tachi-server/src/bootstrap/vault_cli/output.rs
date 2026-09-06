@@ -115,20 +115,7 @@ pub(super) fn normalize_rotation_strategy_cli(value: &str) -> String {
     }
 }
 
-fn key_health_blocks_cli(health: &memcore::vault::VaultKeyHealth) -> bool {
-    if health.disabled || health.auth_failed {
-        return true;
-    }
-    match health.status.as_str() {
-        "exhausted" => true,
-        "rate_limited" | "cooldown" => health
-            .cooldown_until
-            .as_deref()
-            .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
-            .is_some_and(|until| until.with_timezone(&chrono::Utc) > chrono::Utc::now()),
-        _ => false,
-    }
-}
+use crate::vault_ops::account_bind::health_row_unusable as key_health_blocks_cli;
 
 fn rotation_member_name(prefix: &str, idx: i64) -> String {
     format!("{prefix}_{idx}")
@@ -155,6 +142,9 @@ pub(crate) fn validate_api_key_lease_target(
             )
             .into());
         }
+    }
+    if crate::vault_ops::is_lane_slot_secret_name(logical_name) {
+        return Ok(());
     }
     let rotation_prefix =
         crate::vault_ops::canonical_api_key_health_logical_name(store, logical_name)?;
@@ -217,9 +207,13 @@ fn lease_api_key_from_store_with_hook(
             .into());
         }
     }
-    let rotation = transaction
-        .vault_get_rotation(&health_logical_name)
-        .map_err(|e| format!("vault_get_rotation: {e}"))?;
+    let rotation = if crate::vault_ops::is_lane_slot_secret_name(logical_name) {
+        None
+    } else {
+        transaction
+            .vault_get_rotation(&health_logical_name)
+            .map_err(|e| format!("vault_get_rotation: {e}"))?
+    };
     if let Some(rotation) = rotation.as_ref() {
         memcore::validate_api_key_rotation(&entries, rotation).map_err(|error| {
             format!("{error}; refusing to lease '{logical_name}' as an API key")
@@ -228,28 +222,29 @@ fn lease_api_key_from_store_with_hook(
     after_snapshot();
     let configured_member_request = health_logical_name != logical_name;
 
-    let candidate_names = if configured_member_request {
-        vec![logical_name.to_string()]
-    } else if let Some(rotation) = rotation.as_ref() {
-        let total = rotation.total_keys.max(0);
-        if total == 0 {
-            Vec::new()
-        } else {
-            let start = if rotation.current_index <= 0 {
-                1
+    let candidate_names =
+        if crate::vault_ops::is_lane_slot_secret_name(logical_name) || configured_member_request {
+            vec![logical_name.to_string()]
+        } else if let Some(rotation) = rotation.as_ref() {
+            let total = rotation.total_keys.max(0);
+            if total == 0 {
+                Vec::new()
             } else {
-                rotation.current_index
-            };
-            (0..total)
-                .map(|offset| {
-                    let idx = ((start - 1 + offset) % total) + 1;
-                    rotation_member_name(logical_name, idx)
-                })
-                .collect::<Vec<_>>()
-        }
-    } else {
-        vec![logical_name.to_string()]
-    };
+                let start = if rotation.current_index <= 0 {
+                    1
+                } else {
+                    rotation.current_index
+                };
+                (0..total)
+                    .map(|offset| {
+                        let idx = ((start - 1 + offset) % total) + 1;
+                        rotation_member_name(logical_name, idx)
+                    })
+                    .collect::<Vec<_>>()
+            }
+        } else {
+            vec![logical_name.to_string()]
+        };
 
     for candidate in candidate_names {
         let Some(entry) = entries.iter().find(|entry| entry.name == candidate) else {
@@ -285,6 +280,74 @@ fn lease_api_key_from_store_with_hook(
         if value.trim().is_empty() {
             crate::vault_crypto::zero_string(&mut value);
             continue;
+        }
+        if crate::vault_ops::is_lane_slot_secret_name(&entry.name) {
+            let Some(target) =
+                crate::provider_config::parse_vault_alias(&value).map(str::to_string)
+            else {
+                crate::vault_crypto::zero_string(&mut value);
+                continue;
+            };
+            crate::vault_crypto::zero_string(&mut value);
+            if crate::vault_ops::is_lane_slot_secret_name(&target) {
+                continue;
+            }
+            let Some(target_entry) = entries.iter().find(|candidate| candidate.name == target)
+            else {
+                continue;
+            };
+            if crate::vault_ops::is_lane_slot_secret_name(&target_entry.name)
+                || memcore::effective_vault_secret_type(
+                    &target_entry.name,
+                    &target_entry.secret_type,
+                ) != memcore::SECRET_TYPE_API_KEY
+                || crate::status_ops::status_health::account_class_for_env_name(&target_entry.name)
+                    != Some(memcore::AccountClass::ModelApi)
+                || target_entry
+                    .allowed_agents
+                    .as_ref()
+                    .is_some_and(|agents| !agents.is_empty())
+            {
+                continue;
+            }
+            let slot_health_blocked = transaction
+                .vault_get_key_health(logical_name, &target_entry.name)
+                .map_err(|e| format!("vault_get_key_health: {e}"))?
+                .is_some_and(|health| key_health_blocks_cli(&health));
+            let target_health_blocked = transaction
+                .vault_get_key_health(&target_entry.name, &target_entry.name)
+                .map_err(|e| format!("vault_get_key_health: {e}"))?
+                .is_some_and(|health| key_health_blocks_cli(&health));
+            if slot_health_blocked || target_health_blocked {
+                continue;
+            }
+            let decrypted = crate::vault_crypto::decrypt(
+                key,
+                &target_entry.encrypted_value,
+                &target_entry.nonce,
+            )?;
+            let mut target_value = crate::vault_crypto::ZeroizingString::new(
+                crate::vault_crypto::decode_utf8_zeroizing(
+                    decrypted,
+                    crate::vault_ops::VAULT_MATERIALIZATION_INVALID_UTF8,
+                )?,
+            );
+            if target_value.trim().is_empty()
+                || crate::provider_config::parse_vault_alias(&target_value).is_some()
+            {
+                continue;
+            }
+            transaction
+                .vault_touch_entry(&target_entry.name)
+                .map_err(|e| format!("vault_touch_entry: {e}"))?;
+            transaction
+                .commit()
+                .map_err(|e| format!("commit lease transaction: {e}"))?;
+            return Ok((
+                health_logical_name.to_string(),
+                target_entry.name.clone(),
+                std::mem::take(target_value.as_mut_string()),
+            ));
         }
 
         if let Some(rotation) = rotation.as_ref() {

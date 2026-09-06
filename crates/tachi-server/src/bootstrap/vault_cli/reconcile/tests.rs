@@ -187,12 +187,11 @@ fn a_script_bearing_candidate_is_refused_as_data_and_never_executed() {
 
 // ── The alias-family ruling: names propose, fingerprints dispose ────────────
 
-/// `EXTRACT_API_KEY` is a registry alias of the SiliconFlow family. That is a
-/// naming fact, not evidence that two credentials are one account: when the
-/// Vault holds both names with *different* values, reconcile plans two
-/// independent accounts and no merge action at all.
+/// `EXTRACT_API_KEY` is a lane slot, not a provider account. Leftover slot
+/// ciphertext must not be fingerprinted as a second SiliconFlow family
+/// account; reconcile plans only the real account.
 #[test]
-fn extract_and_siliconflow_with_different_values_stay_two_accounts() {
+fn extract_slot_is_not_fingerprinted_as_a_provider_account() {
     let (_lock, _tachi_home) = env_guard();
     let fixture = Fixture::new();
     fixture.seed_secret("SILICONFLOW_API_KEY", SILICONFLOW_VALUE);
@@ -202,37 +201,18 @@ fn extract_and_siliconflow_with_different_values_stay_two_accounts() {
     let created = created_accounts(&outcome.plan);
     assert_eq!(
         created.len(),
-        2,
-        "one account per distinct credential: {:#?}",
+        1,
+        "lane slots must not become provider accounts: {:#?}",
         outcome.plan.actions
     );
-
-    for account in &created {
-        let names: Vec<&str> = account
+    assert_eq!(created[0].custody_logical_name, "SILICONFLOW_API_KEY");
+    assert!(
+        created[0]
             .aliases
             .iter()
-            .map(|alias| alias.alias_name.as_str())
-            .collect();
-        assert_eq!(
-            names.len(),
-            1,
-            "a name must not join an account it shares no value with: {names:?}"
-        );
-    }
-    let custody: Vec<&str> = created
-        .iter()
-        .map(|account| account.custody_logical_name.as_str())
-        .collect();
-    assert!(custody.contains(&"SILICONFLOW_API_KEY"), "{custody:?}");
-    assert!(custody.contains(&"EXTRACT_API_KEY"), "{custody:?}");
-
-    assert!(
-        !outcome
-            .plan
-            .actions
-            .iter()
-            .any(|action| matches!(action, AccountAction::MergeAccounts { .. })),
-        "alias-family similarity must never produce a merge action"
+            .all(|alias| alias.alias_name != "EXTRACT_API_KEY"),
+        "{:#?}",
+        created[0].aliases
     );
 }
 

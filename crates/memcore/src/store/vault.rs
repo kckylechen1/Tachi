@@ -9,6 +9,8 @@ use crate::vault::{
 use crate::MemoryStore;
 use rusqlite::{Connection, Transaction, TransactionBehavior};
 
+mod account_bindings;
+
 /// A single immediate transaction for vault decisions that must observe and
 /// update the same database state.  In particular, lane-slot rebind policy
 /// must not be evaluated through one connection and written through another.
