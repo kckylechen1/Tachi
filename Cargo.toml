@@ -115,18 +115,12 @@ debug = "line-tables-only"
 [profile.dev.package.tachi-bootstrap]
 opt-level = 1
 
-# #1831: Fast Argon2 KDF in dev and test profiles avoids 20s+ test times on debug unoptimized loops.
+# Keep Argon2 at opt-level 3 in both non-release profiles.
 [profile.dev.package.argon2]
 opt-level = 3
 
 [profile.test.package.argon2]
 opt-level = 3
-
-# #1094 / #1831: debug=1 emits line tables only for panic/backtrace, stripping
-# massive variable DWARF info. Shrinks tachi-server test binary from 264MB to <50MB
-# and eliminates ld64 __eh_frame section overflow warnings and linker delays.
-[profile.test]
-debug = 1
 
 [workspace.dependencies]
 # `bundled` compiles the SQLite C amalgamation (libsqlite3-sys).
