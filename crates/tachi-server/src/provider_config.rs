@@ -520,8 +520,11 @@ fn materialize_for_server_inner(
             server.llm.as_ref(),
             provider_env_keys(),
             || {
-                let resolved =
-                    resolve_vault_pools_with_keychain_loader(Some(server), &global, keychain_loader)?;
+                let resolved = resolve_vault_pools_with_keychain_loader(
+                    Some(server),
+                    &global,
+                    keychain_loader,
+                )?;
                 let expected_revision = resolved.acl_revision;
                 let source_path = resolved.source_path.clone();
                 *lane_config_values.borrow_mut() = Some(resolved.lane_config_values);
