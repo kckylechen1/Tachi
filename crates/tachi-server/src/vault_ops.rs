@@ -21,7 +21,7 @@ pub(crate) use rotation::collect_rotation_entries;
 pub(crate) use access::canonical_api_key_health_logical_name;
 pub(crate) use access::is_lane_config_name;
 pub(crate) use access::load_unlocked_api_key_secret_pools;
-#[cfg(feature = "vault-test-api")]
+#[cfg(any(test, feature = "vault-test-api"))]
 pub(crate) use access::load_unlocked_api_key_secret_pools_with_drops;
 pub(crate) use access::load_validated_unlocked_api_key_secret_pools_with_drops;
 #[cfg(feature = "vault-test-api")]

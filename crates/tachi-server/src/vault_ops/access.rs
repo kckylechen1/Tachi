@@ -743,7 +743,7 @@ pub struct ProviderSecretScan {
 
 /// Same scan as [`load_unlocked_api_key_secret_pools`], plus the drop reason
 /// recorded at the moment each listed row was skipped (tachi#1860).
-#[cfg(feature = "vault-test-api")]
+#[cfg(any(test, feature = "vault-test-api"))]
 pub(crate) fn load_unlocked_api_key_secret_pools_with_drops(
     server: &MemoryServer,
 ) -> Result<ProviderSecretScan, String> {
