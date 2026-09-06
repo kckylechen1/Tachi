@@ -85,16 +85,17 @@ fn assert_unsupported_without_resource_uncertainty(
     resource_id: &str,
 ) {
     assert_eq!(status["state"], "TASK_STATE_FAILED");
-    assert!(
-        fs::read_to_string(run_dir.join("result.md"))
-            .unwrap()
-            .contains("required_postflight_unsupported")
-    );
+    assert!(fs::read_to_string(run_dir.join("result.md"))
+        .unwrap()
+        .contains("required_postflight_unsupported"));
     // No worker ran: the workspace can still be verified clean, but that
     // never converts the unsupported execution into task success.
     assert_eq!(status["exec_env_postflight"]["verdict"], "clean");
     assert_eq!(status["exec_env_postflight"]["lease_action"], "none");
-    assert_eq!(resource_state(server, resource_id), memcore::ResourceState::Active);
+    assert_eq!(
+        resource_state(server, resource_id),
+        memcore::ResourceState::Active
+    );
     assert_eq!(lease_state(server, env_id), memcore::ExecEnvState::Active);
 }
 
@@ -175,9 +176,16 @@ async fn postflight_dispatch_with_declared_scope_accepts_in_scope_write() {
     if cfg!(target_os = "macos") {
         #[cfg(target_os = "macos")]
         assert_unsupported_without_resource_uncertainty(
-            &server, &terminal_status, &run_dir, &env_id, &resource_id,
+            &server,
+            &terminal_status,
+            &run_dir,
+            &env_id,
+            &resource_id,
         );
-        assert_eq!(fs::read(lease_path.join("allowed.txt")).unwrap(), b"initial allowed\n");
+        assert_eq!(
+            fs::read(lease_path.join("allowed.txt")).unwrap(),
+            b"initial allowed\n"
+        );
         return;
     }
     assert!(matches!(
@@ -236,9 +244,16 @@ async fn postflight_dispatch_rejects_and_withholds_when_worker_mutates_out_of_sc
     if cfg!(target_os = "macos") {
         #[cfg(target_os = "macos")]
         assert_unsupported_without_resource_uncertainty(
-            &server, &terminal_status, &run_dir, &env_id, &resource_id,
+            &server,
+            &terminal_status,
+            &run_dir,
+            &env_id,
+            &resource_id,
         );
-        assert_eq!(fs::read(lease_path.join("forbidden.txt")).unwrap(), b"initial forbidden\n");
+        assert_eq!(
+            fs::read(lease_path.join("forbidden.txt")).unwrap(),
+            b"initial forbidden\n"
+        );
         return;
     }
     assert_eq!(terminal_status["state"], "TASK_STATE_FAILED");
@@ -298,7 +313,11 @@ async fn postflight_dispatch_rejects_and_withholds_when_untracked_file_created_o
     if cfg!(target_os = "macos") {
         #[cfg(target_os = "macos")]
         assert_unsupported_without_resource_uncertainty(
-            &server, &terminal_status, &run_dir, &env_id, &resource_id,
+            &server,
+            &terminal_status,
+            &run_dir,
+            &env_id,
+            &resource_id,
         );
         assert!(!lease_path.join("untracked_secret.txt").exists());
         return;

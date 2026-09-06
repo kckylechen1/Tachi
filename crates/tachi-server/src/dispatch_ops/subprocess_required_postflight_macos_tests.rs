@@ -1,6 +1,6 @@
 use super::*;
 use crate::dispatch_ops::acp_native::{
-    NativeAcpRunMode, NativeAcpRunSpec, run_native_acp_dispatch_with_liveness,
+    run_native_acp_dispatch_with_liveness, NativeAcpRunMode, NativeAcpRunSpec,
 };
 use crate::exec_env_postflight::RunnerLivenessEvidence;
 
@@ -22,14 +22,10 @@ async fn required_postflight_macos_refuses_all_runners_before_launch() {
             cmd.args(&args);
             let timeout = Duration::from_secs(10);
             let outcome = match runner {
-                "agent" => {
-                    run_agent_subprocess_with_liveness(cmd, timeout, required, None).await
-                }
+                "agent" => run_agent_subprocess_with_liveness(cmd, timeout, required, None).await,
                 "opencode" => {
-                    run_opencode_sop_subprocess_with_liveness(
-                        cmd, timeout, "probe", required, None,
-                    )
-                    .await
+                    run_opencode_sop_subprocess_with_liveness(cmd, timeout, "probe", required, None)
+                        .await
                 }
                 "managed" => {
                     let (_sender, receiver) = mpsc::channel(1);
@@ -89,7 +85,11 @@ async fn required_postflight_macos_refuses_all_runners_before_launch() {
                     outcome.liveness,
                     RunnerLivenessEvidence::NoWorkerSpawned
                 ));
-                assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 0, "{runner}");
+                assert_eq!(
+                    std::fs::read_dir(temp.path()).unwrap().count(),
+                    0,
+                    "{runner}"
+                );
             } else {
                 // This shell is deliberately not an ACP protocol adapter;
                 // ACP may reject its response, but must allow it to launch.
