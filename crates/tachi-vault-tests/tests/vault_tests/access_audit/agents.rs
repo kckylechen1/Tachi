@@ -250,18 +250,15 @@ async fn vault_acl_g5_agent_register_is_not_a_vault_binding() {
         .await
         .expect("G5 seed should succeed");
 
-    {
-        let mut guard = server.agent_runtime_write();
-        guard.agent_profile = Some(AgentProfile {
-            agent_id: "alice".to_string(),
-            display_name: "alice".to_string(),
-            capabilities: Vec::new(),
-            tool_filter: None,
-            rate_limit_rpm: None,
-            rate_limit_burst: None,
-            registered_at: Utc::now().to_rfc3339(),
-        });
-    }
+    server.set_agent_profile_for_test(Some(AgentProfile {
+        agent_id: "alice".to_string(),
+        display_name: "alice".to_string(),
+        capabilities: Vec::new(),
+        tool_filter: None,
+        rate_limit_rpm: None,
+        rate_limit_burst: None,
+        registered_at: Utc::now().to_rfc3339(),
+    }));
 
     let denied = server
         .vault_get(Parameters(VaultGetParams {

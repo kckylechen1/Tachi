@@ -152,12 +152,6 @@ impl VaultTestServer {
         self.inner().agent_runtime_write().agent_profile = profile;
     }
 
-    pub fn agent_runtime_write(
-        &self,
-    ) -> std::sync::RwLockWriteGuard<'_, crate::server_state::AgentRuntime> {
-        self.inner().agent_runtime_write()
-    }
-
     // --- Vault MCP Tool Facades ---
 
     pub async fn vault_init(&self, params: Parameters<VaultInitParams>) -> Result<String, String> {

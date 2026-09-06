@@ -6,8 +6,8 @@ use tachi_hub::ToolProfile;
 use tokio::sync::mpsc;
 
 #[derive(Debug, Clone)]
-pub struct AgentRuntime {
-    pub agent_profile: Option<AgentProfile>,
+pub(crate) struct AgentRuntime {
+    pub(crate) agent_profile: Option<AgentProfile>,
     pub(crate) tool_profile: Option<ToolProfile>,
     pub(crate) session_client: Option<String>,
     pub(crate) session_project: Option<String>,

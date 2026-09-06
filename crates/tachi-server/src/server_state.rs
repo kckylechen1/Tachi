@@ -2,8 +2,6 @@ mod accessors;
 mod cache;
 mod init;
 mod runtime;
-#[cfg(feature = "vault-test-api")]
-pub use self::runtime::AgentRuntime;
 mod tachi_server;
 
 pub(crate) use self::cache::{
