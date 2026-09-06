@@ -111,6 +111,34 @@ async fn run_secret_action_with_reader(
             if secret_value.trim().is_empty() {
                 return Err("Secret value cannot be empty".into());
             }
+            if crate::vault_ops::is_lane_slot_secret_name(&name) {
+                if secret_type != memcore::SECRET_TYPE_API_KEY {
+                    return Err(format!(
+                        "Lane slot '{name}' must bind as {} (got {secret_type})",
+                        memcore::SECRET_TYPE_API_KEY
+                    )
+                    .into());
+                }
+                let mut store = open_cli_store(global_db_path)?;
+                let (decided, _) = crate::vault_ops::account_bind::write_lane_slot_binding(
+                    &mut store,
+                    key.bytes(),
+                    &name,
+                    &secret_value,
+                    rebind,
+                    description.as_deref().unwrap_or(""),
+                    None,
+                    None,
+                )?;
+                let old_fingerprint = decided.old_fingerprint.as_deref().unwrap_or("none");
+                println!(
+                    "Secret '{name}' bound to {} (old_fingerprint={old_fingerprint}, new_fingerprint={}){}.",
+                    decided.account,
+                    decided.new_fingerprint,
+                    if decided.rebound { " [rebind]" } else { "" }
+                );
+                return Ok(());
+            }
             let now = chrono::Utc::now().to_rfc3339();
             let mut store = open_cli_store(global_db_path)?;
             let transaction = store
@@ -130,91 +158,6 @@ async fn run_secret_action_with_reader(
                     return Err(format!(
                         "Vault name '{name}' value embeds a credential in the endpoint ({leak}); refusing write"
                     ).into());
-                }
-            }
-
-            if crate::vault_ops::is_lane_slot_secret_name(&name)
-                && secret_type == memcore::vault::SECRET_TYPE_API_KEY
-            {
-                // This scan and the slot decision are deliberately inside the
-                // same IMMEDIATE transaction as the upsert. It prevents both
-                // concurrent first writers from observing an empty slot, and
-                // applies copy protection to existing slots as well.
-                let entries = transaction
-                    .vault_list_entries()
-                    .map_err(|e| format!("vault_list_entries: {e}"))?;
-                for other in entries {
-                    if other.name == name
-                        || other.secret_type != memcore::vault::SECRET_TYPE_API_KEY
-                        || crate::vault_ops::is_lane_slot_secret_name(&other.name)
-                    {
-                        continue;
-                    }
-                    let provider_kind =
-                        crate::status_ops::status_health::provider_kind_for_env_name(&other.name)
-                            .unwrap_or("unregistered");
-                    let Ok(plain) = crate::vault_crypto::decrypt(
-                        key.bytes(),
-                        &other.encrypted_value,
-                        &other.nonce,
-                    ) else {
-                        continue;
-                    };
-                    let Ok(mut other_value) = crate::vault_crypto::decode_utf8_zeroizing(
-                        plain,
-                        "Vault account secret is not valid UTF-8",
-                    ) else {
-                        continue;
-                    };
-                    let other_fingerprint = crate::vault_ops::fingerprint_secret(
-                        key.bytes(),
-                        provider_kind,
-                        &other_value,
-                    );
-                    crate::vault_crypto::zero_string(&mut other_value);
-                    if other_fingerprint
-                        == crate::vault_ops::fingerprint_secret(
-                            key.bytes(),
-                            provider_kind,
-                            &secret_value,
-                        )
-                    {
-                        return Err(crate::vault_ops::copy_existing_account_message(
-                            &name,
-                            &other.name,
-                        )
-                        .into());
-                    }
-                }
-
-                if let Some(existing) = existing_entry.as_ref() {
-                    crate::vault_ops::validate_existing_lane_slot_secret_type(
-                        &name,
-                        &existing.secret_type,
-                    )?;
-                    let old_bytes = crate::vault_crypto::decrypt(
-                        key.bytes(),
-                        &existing.encrypted_value,
-                        &existing.nonce,
-                    )?;
-                    let mut old_value = crate::vault_crypto::decode_utf8_zeroizing(
-                        old_bytes,
-                        format!("Existing slot '{name}' is not valid UTF-8"),
-                    )?;
-                    let provider_kind =
-                        crate::status_ops::status_health::provider_kind_for_env_name(&name)
-                            .unwrap_or("unknown");
-                    let overwrite = crate::vault_ops::evaluate_lane_slot_overwrite(
-                        &old_value,
-                        &secret_value,
-                        provider_kind,
-                        key.bytes(),
-                        rebind,
-                    );
-                    crate::vault_crypto::zero_string(&mut old_value);
-                    if let Err(err) = overwrite {
-                        return Err(err.operator_message(&name).into());
-                    }
                 }
             }
 
@@ -249,6 +192,14 @@ async fn run_secret_action_with_reader(
                         .map_err(|error| format!("{error}; refusing rotation member update"))?;
                 }
             }
+            crate::vault_ops::account_events::observe_account_entry(
+                &transaction,
+                key.bytes(),
+                &name,
+                &secret_type,
+                &secret_value,
+                false,
+            )?;
             transaction
                 .commit()
                 .map_err(|e| format!("commit vault transaction: {e}"))?;
@@ -271,6 +222,7 @@ async fn run_secret_action_with_reader(
             }
             crate::vault_crypto::validate_secret_name(&prefix)?;
             memcore::reject_api_key_type_for_lane_config(&prefix, memcore::SECRET_TYPE_API_KEY)?;
+            crate::vault_ops::account_bind::refuse_lane_slot_pool_prefix(&prefix)?;
             if !crate::utils::is_shell_env_name(&prefix) {
                 return Err(format!(
                     "API key pool prefix '{prefix}' must be a shell env name such as OPENAI_API_KEY"
@@ -552,7 +504,7 @@ async fn run_secret_action_with_reader(
                 .ok_or("Vault not initialized. Run `tachi vault init` first.")?;
             drop(store_ro);
 
-            let _key = read_verified_vault_key(
+            let key = read_verified_vault_key(
                 &config,
                 stdin_password,
                 keychain,
@@ -582,6 +534,11 @@ async fn run_secret_action_with_reader(
                     .into());
                 }
             }
+            crate::vault_ops::account_events::prepare_entry_removal(
+                &transaction,
+                key.bytes(),
+                &name,
+            )?;
             let removed = transaction
                 .vault_delete_entry(&name)
                 .map_err(|e| format!("vault_delete_entry: {e}"))?;
@@ -604,6 +561,8 @@ async fn run_secret_action_with_reader(
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    mod account_removal;
 
     #[tokio::test]
     async fn cli_lease_refuses_lane_config_before_daemon_or_store_access() {
@@ -700,6 +659,195 @@ mod tests {
         assert_eq!(retained.secret_type, "other");
         assert_eq!(retained.encrypted_value, encrypted_value);
         assert_eq!(retained.nonce, nonce);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn direct_cli_lane_set_updates_metadata_and_refuses_unbound_targets() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let db_path = temp.path().join("memory.db");
+        let password_file = temp.path().join("vault-password");
+        std::fs::write(&password_file, b"direct-cli-password\n").expect("password file");
+        std::fs::set_permissions(&password_file, std::fs::Permissions::from_mode(0o600))
+            .expect("password file permissions");
+        let key = super::super::keys::vault_init_with_password(
+            &db_path,
+            "direct-cli-password".to_string(),
+        )
+        .expect("initialize fixture vault");
+        super::super::keys::vault_upsert_secret_with_key(
+            &db_path,
+            &key,
+            "DEEPSEEK_API_KEY",
+            "api_key",
+            "provider account",
+            "direct-original-family".to_string(),
+        )
+        .expect("seed original provider account");
+        super::super::keys::vault_upsert_secret_with_key(
+            &db_path,
+            &key,
+            "SILICONFLOW_API_KEY",
+            "api_key",
+            "provider account",
+            "direct-new-family".to_string(),
+        )
+        .expect("seed replacement provider account");
+
+        let set_lane = |description: &str| VaultAction::Set {
+            name: "EXTRACT_API_KEY".to_string(),
+            secret_type: Some("api_key".to_string()),
+            description: Some(description.to_string()),
+            stdin_password: false,
+            keychain: false,
+            password_file: Some(password_file.clone()),
+            insecure_password_file: false,
+            value_stdin: true,
+            rebind: false,
+        };
+        run_secret_action_with_reader(
+            &db_path,
+            temp.path(),
+            set_lane("first metadata"),
+            &mut Cursor::new(b"direct-original-family\n".to_vec()),
+        )
+        .await
+        .expect("first direct CLI lane bind");
+        run_secret_action_with_reader(
+            &db_path,
+            temp.path(),
+            set_lane("updated metadata"),
+            &mut Cursor::new(b"direct-original-family\n".to_vec()),
+        )
+        .await
+        .expect("same-account direct CLI update is a noop bind");
+
+        let stored = open_cli_store_read_only(&db_path)
+            .expect("open fixture read-only")
+            .vault_get_entry("EXTRACT_API_KEY")
+            .expect("read lane slot")
+            .expect("lane slot exists");
+        assert_eq!(stored.description, "updated metadata");
+        let stored_value =
+            crate::vault_crypto::decrypt(key.bytes(), &stored.encrypted_value, &stored.nonce)
+                .expect("decrypt lane pointer");
+        assert_eq!(
+            String::from_utf8(stored_value).expect("lane pointer is UTF-8"),
+            "vault:DEEPSEEK_API_KEY"
+        );
+
+        let error = run_secret_action_with_reader(
+            &db_path,
+            temp.path(),
+            set_lane("refused update"),
+            &mut Cursor::new(b"direct-new-family\n".to_vec()),
+        )
+        .await
+        .expect_err("changing account without --rebind must fail")
+        .to_string();
+        assert!(error.contains("old_fingerprint="), "{error}");
+        assert!(error.contains("new_fingerprint="), "{error}");
+        assert!(error.contains("rebind"), "{error}");
+        assert!(!error.contains("direct-original-family"), "{error}");
+        assert!(!error.contains("direct-new-family"), "{error}");
+
+        let mut rebind_action = set_lane("explicit rebind");
+        if let VaultAction::Set { rebind, .. } = &mut rebind_action {
+            *rebind = true;
+        }
+        run_secret_action_with_reader(
+            &db_path,
+            temp.path(),
+            rebind_action,
+            &mut Cursor::new(b"direct-new-family\n".to_vec()),
+        )
+        .await
+        .expect("direct CLI rebind");
+        let store = open_cli_store_read_only(&db_path).expect("reopen event ledger");
+        let accounts = memcore::db::list_provider_accounts(store.connection()).unwrap();
+        assert_eq!(accounts.len(), 2);
+        let events = accounts
+            .iter()
+            .flat_map(|account| {
+                memcore::db::list_provider_account_events(store.connection(), &account.account_id)
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let event = events
+            .iter()
+            .find(|event| event.event_kind == "slot_rebind")
+            .expect("CLI durable rebind event");
+        let evidence: serde_json::Value = serde_json::from_str(&event.evidence).unwrap();
+        assert_eq!(evidence["slot"], "EXTRACT_API_KEY");
+        assert!(evidence["old_fingerprint"]
+            .as_str()
+            .unwrap()
+            .starts_with("fp1:"));
+        assert!(evidence["new_fingerprint"]
+            .as_str()
+            .unwrap()
+            .starts_with("fp1:"));
+        assert_ne!(evidence["old_fingerprint"], evidence["new_fingerprint"]);
+        assert!(!event.evidence.contains("direct-original-family"));
+        assert!(!event.evidence.contains("direct-new-family"));
+        drop(store);
+
+        let (encrypted_value, nonce) =
+            crate::vault_crypto::encrypt(key.bytes(), b"restricted-target-family")
+                .expect("encrypt restricted target");
+        open_cli_store(&db_path)
+            .expect("open restricted target fixture")
+            .vault_upsert_entry(&memcore::vault::VaultEntry {
+                name: "VOYAGE_API_KEY".to_string(),
+                encrypted_value,
+                nonce,
+                secret_type: "api_key".to_string(),
+                description: "restricted provider account".to_string(),
+                allowed_agents: Some(vec!["agent-a".to_string()]),
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                updated_at: "2026-01-01T00:00:00Z".to_string(),
+                accessed_at: String::new(),
+                access_count: 0,
+            })
+            .expect("seed restricted target");
+
+        let restricted_error = run_secret_action_with_reader(
+            &db_path,
+            temp.path(),
+            VaultAction::Set {
+                name: "SUMMARY_API_KEY".to_string(),
+                secret_type: Some("api_key".to_string()),
+                description: Some("restricted slot".to_string()),
+                stdin_password: false,
+                keychain: false,
+                password_file: Some(password_file.clone()),
+                insecure_password_file: false,
+                value_stdin: true,
+                rebind: false,
+            },
+            &mut Cursor::new(b"restricted-target-family\n".to_vec()),
+        )
+        .await
+        .expect_err("direct CLI must reject a restricted account target")
+        .to_string();
+        assert!(
+            restricted_error.contains("restricted"),
+            "{restricted_error}"
+        );
+        assert!(
+            !restricted_error.contains("restricted-target-family"),
+            "{restricted_error}"
+        );
+        assert!(
+            open_cli_store_read_only(&db_path)
+                .expect("reopen fixture")
+                .vault_get_entry("SUMMARY_API_KEY")
+                .expect("read refused slot")
+                .is_none(),
+            "restricted target refusal must not create the slot"
+        );
     }
 
     #[cfg(unix)]

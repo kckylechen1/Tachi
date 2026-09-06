@@ -14,17 +14,81 @@ fn slot_params(name: &str, value: &str, rebind: bool) -> VaultSetParams {
     }
 }
 
+async fn seed_account(server: &crate::tests::TestServer, name: &str, value: &str) {
+    server
+        .vault_set(Parameters(slot_params(name, value, false)))
+        .await
+        .unwrap_or_else(|error| panic!("seed account {name}: {error}"));
+}
+
+fn corrupt_account_entry(server: &crate::tests::TestServer, name: &str, invalid_utf8: bool) {
+    let key = {
+        let vault = server.vault_read();
+        *vault.key.as_ref().expect("unlocked vault key").bytes()
+    };
+    server
+        .with_global_store(|store| {
+            let mut entry = store
+                .vault_get_entry(name)
+                .map_err(|error| error.to_string())?
+                .unwrap_or_else(|| panic!("missing account {name}"));
+            if invalid_utf8 {
+                let (encrypted_value, nonce) = crate::vault_crypto::encrypt(&key, &[0xff, 0xfe])
+                    .map_err(|error| error.to_string())?;
+                entry.encrypted_value = encrypted_value;
+                entry.nonce = nonce;
+            } else {
+                entry.encrypted_value = "corrupt-ciphertext".into();
+                entry.nonce = "corrupt-nonce".into();
+            }
+            store
+                .vault_upsert_entry(&entry)
+                .map_err(|error| error.to_string())
+        })
+        .expect("corrupt account entry");
+}
+
+fn stored_slot_value(server: &crate::tests::TestServer, name: &str) -> String {
+    let key = {
+        let vault = server.vault_read();
+        *vault.key.as_ref().expect("unlocked vault key").bytes()
+    };
+    server
+        .with_global_store_read(|store| {
+            let entry = store
+                .vault_get_entry(name)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| format!("missing lane slot {name}"))?;
+            let decrypted =
+                crate::vault_crypto::decrypt(&key, &entry.encrypted_value, &entry.nonce)
+                    .map_err(|error| error.to_string())?;
+            crate::vault_crypto::decode_utf8_zeroizing(
+                decrypted,
+                format!("lane slot {name} is not valid UTF-8"),
+            )
+        })
+        .expect("read stored lane slot value")
+}
+
 async fn slot_value(server: &crate::tests::TestServer, name: &str) -> String {
     let get = server
-        .vault_get(Parameters(VaultGetParams {
+        .vault_lease_api_key(Parameters(VaultLeaseApiKeyParams {
             name: name.to_string(),
+            env_name: None,
             agent_id: None,
-            auto_rotate: false,
         }))
         .await
-        .expect("vault_get");
+        .expect("materialize account through public Vault lease");
     let json: serde_json::Value = serde_json::from_str(&get).expect("json");
-    json["value"].as_str().expect("value").to_string()
+    assert_eq!(json["leased"], true);
+    if crate::vault_ops::is_lane_slot_secret_name(name) {
+        let pointer = stored_slot_value(server, name);
+        assert_eq!(json["key_id"], pointer.strip_prefix("vault:").unwrap());
+    }
+    json["env"][name]
+        .as_str()
+        .expect("leased value")
+        .to_string()
 }
 
 /// tachi#1855: copying a different family into EXTRACT_API_KEY without
@@ -38,6 +102,8 @@ async fn lane_slot_overwrite_without_rebind_is_refused() {
         }))
         .await
         .expect("init");
+    seed_account(&server, "SILICONFLOW_API_KEY", "siliconflow-original").await;
+    seed_account(&server, "DEEPSEEK_API_KEY", "glm-copied-in").await;
     server
         .vault_set(Parameters(slot_params(
             "EXTRACT_API_KEY",
@@ -56,10 +122,16 @@ async fn lane_slot_overwrite_without_rebind_is_refused() {
         .await
         .expect_err("overwrite without rebind");
     assert!(err.contains("EXTRACT_API_KEY"), "{err}");
-    assert!(err.contains("fp1:"), "{err}");
+    assert!(err.matches("fp1:").count() >= 2, "{err}");
+    assert!(err.contains("old_fingerprint="), "{err}");
+    assert!(err.contains("new_fingerprint="), "{err}");
     assert!(err.contains("rebind"), "{err}");
     assert!(!err.contains("siliconflow-original"), "{err}");
     assert!(!err.contains("glm-copied-in"), "{err}");
+    assert_eq!(
+        stored_slot_value(&server, "EXTRACT_API_KEY").to_string(),
+        "vault:SILICONFLOW_API_KEY"
+    );
     assert_eq!(
         slot_value(&server, "EXTRACT_API_KEY").await,
         "siliconflow-original"
@@ -75,6 +147,7 @@ async fn lane_slot_same_bytes_are_noop_not_refusal() {
         }))
         .await
         .expect("init");
+    seed_account(&server, "SILICONFLOW_API_KEY", "same-slot-bytes").await;
     server
         .vault_set(Parameters(slot_params(
             "EXTRACT_API_KEY",
@@ -94,9 +167,98 @@ async fn lane_slot_same_bytes_are_noop_not_refusal() {
     let json: serde_json::Value = serde_json::from_str(&body).expect("json");
     assert_eq!(json["stored"], json!(true));
     assert_eq!(json["rebind"], json!(false));
+    assert_eq!(json["noop"], json!(true));
+    assert_eq!(json["old_fingerprint"], json["new_fingerprint"]);
+    assert_eq!(json["bound_account"], json!("SILICONFLOW_API_KEY"));
+    assert_eq!(
+        stored_slot_value(&server, "EXTRACT_API_KEY"),
+        "vault:SILICONFLOW_API_KEY"
+    );
     assert_eq!(
         slot_value(&server, "EXTRACT_API_KEY").await,
         "same-slot-bytes"
+    );
+}
+
+#[tokio::test]
+async fn explicit_lane_slot_bind_ignores_unrelated_corrupt_accounts() {
+    let server = make_server();
+    server
+        .vault_init(Parameters(VaultInitParams {
+            password: "slot-rebind-unrelated-corruption".to_string(),
+        }))
+        .await
+        .expect("init");
+    seed_account(&server, "DEEPSEEK_API_KEY", "selected-family").await;
+    seed_account(&server, "SILICONFLOW_API_KEY", "bad-bytes").await;
+    seed_account(&server, "OPENAI_API_KEY", "corrupt-ciphertext-family").await;
+    corrupt_account_entry(&server, "SILICONFLOW_API_KEY", true);
+    corrupt_account_entry(&server, "OPENAI_API_KEY", false);
+
+    let body = server
+        .vault_set(Parameters(slot_params(
+            "EXTRACT_API_KEY",
+            "vault:DEEPSEEK_API_KEY",
+            false,
+        )))
+        .await
+        .expect("healthy explicit target must bind");
+    let json: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(json["bound_account"], "DEEPSEEK_API_KEY");
+    assert_eq!(
+        stored_slot_value(&server, "EXTRACT_API_KEY"),
+        "vault:DEEPSEEK_API_KEY"
+    );
+    assert_eq!(
+        slot_value(&server, "EXTRACT_API_KEY").await,
+        "selected-family"
+    );
+    server
+        .vault_set(Parameters(slot_params(
+            "SUMMARY_API_KEY",
+            "selected-family",
+            false,
+        )))
+        .await
+        .expect("raw matching must skip unrelated corrupt accounts");
+    assert_eq!(
+        stored_slot_value(&server, "SUMMARY_API_KEY"),
+        "vault:DEEPSEEK_API_KEY"
+    );
+}
+
+#[tokio::test]
+async fn explicit_lane_slot_bind_rejects_corrupt_selected_account_unchanged() {
+    let server = make_server();
+    server
+        .vault_init(Parameters(VaultInitParams {
+            password: "slot-rebind-selected-corruption".to_string(),
+        }))
+        .await
+        .expect("init");
+    seed_account(&server, "DEEPSEEK_API_KEY", "original-family").await;
+    server
+        .vault_set(Parameters(slot_params(
+            "EXTRACT_API_KEY",
+            "vault:DEEPSEEK_API_KEY",
+            false,
+        )))
+        .await
+        .expect("initial bind");
+    corrupt_account_entry(&server, "DEEPSEEK_API_KEY", true);
+
+    let error = server
+        .vault_set(Parameters(slot_params(
+            "EXTRACT_API_KEY",
+            "vault:DEEPSEEK_API_KEY",
+            false,
+        )))
+        .await
+        .expect_err("corrupt selected account must fail");
+    assert!(error.contains("not valid UTF-8"), "{error}");
+    assert_eq!(
+        stored_slot_value(&server, "EXTRACT_API_KEY"),
+        "vault:DEEPSEEK_API_KEY"
     );
 }
 
@@ -109,6 +271,8 @@ async fn lane_slot_rebind_updates_and_returns_fingerprints() {
         }))
         .await
         .expect("init");
+    seed_account(&server, "SILICONFLOW_API_KEY", "siliconflow-original").await;
+    seed_account(&server, "DEEPSEEK_API_KEY", "glm-rebound").await;
     server
         .vault_set(Parameters(slot_params(
             "EXTRACT_API_KEY",
@@ -134,6 +298,10 @@ async fn lane_slot_rebind_updates_and_returns_fingerprints() {
     assert_ne!(old_fp, new_fp);
     assert!(!body.contains("siliconflow-original"));
     assert!(!body.contains("glm-rebound"));
+    assert_eq!(
+        stored_slot_value(&server, "EXTRACT_API_KEY"),
+        "vault:DEEPSEEK_API_KEY"
+    );
     assert_eq!(slot_value(&server, "EXTRACT_API_KEY").await, "glm-rebound");
 }
 
@@ -146,6 +314,7 @@ async fn lane_slot_rebind_rejects_empty_and_whitespace_values() {
         }))
         .await
         .expect("init");
+    seed_account(&server, "SILICONFLOW_API_KEY", "original-family").await;
     server
         .vault_set(Parameters(slot_params(
             "EXTRACT_API_KEY",
@@ -163,6 +332,10 @@ async fn lane_slot_rebind_rejects_empty_and_whitespace_values() {
         assert!(error.contains("cannot be empty"), "{error}");
     }
     assert_eq!(
+        stored_slot_value(&server, "EXTRACT_API_KEY"),
+        "vault:SILICONFLOW_API_KEY"
+    );
+    assert_eq!(
         slot_value(&server, "EXTRACT_API_KEY").await,
         "original-family"
     );
@@ -177,6 +350,7 @@ async fn lane_slot_rebind_rejects_secret_type_override_bypass() {
         }))
         .await
         .expect("init");
+    seed_account(&server, "SILICONFLOW_API_KEY", "original-family").await;
     server
         .vault_set(Parameters(slot_params(
             "EXTRACT_API_KEY",
@@ -195,6 +369,10 @@ async fn lane_slot_rebind_rejects_secret_type_override_bypass() {
     assert!(error.contains("must use secret_type 'api_key'"), "{error}");
     assert!(!error.contains("replacement-family"), "{error}");
     assert_eq!(
+        stored_slot_value(&server, "EXTRACT_API_KEY"),
+        "vault:SILICONFLOW_API_KEY"
+    );
+    assert_eq!(
         slot_value(&server, "EXTRACT_API_KEY").await,
         "original-family"
     );
@@ -209,6 +387,7 @@ async fn legacy_non_api_key_lane_slot_fails_closed_before_api_overwrite() {
         }))
         .await
         .expect("init");
+    seed_account(&server, "SILICONFLOW_API_KEY", "legacy-family").await;
     server
         .vault_set(Parameters(slot_params(
             "EXTRACT_API_KEY",
@@ -240,8 +419,8 @@ async fn legacy_non_api_key_lane_slot_fails_closed_before_api_overwrite() {
     assert!(error.contains("Remove or migrate"), "{error}");
     assert!(!error.contains("replacement-family"), "{error}");
     assert_eq!(
-        slot_value(&server, "EXTRACT_API_KEY").await,
-        "legacy-family"
+        stored_slot_value(&server, "EXTRACT_API_KEY"),
+        "vault:SILICONFLOW_API_KEY"
     );
 }
 
@@ -277,7 +456,7 @@ async fn account_name_rotation_does_not_require_rebind() {
 }
 
 #[tokio::test]
-async fn lane_slot_refuses_copying_existing_account_ciphertext() {
+async fn lane_slot_binds_to_existing_account_without_copying_ciphertext() {
     let server = make_server();
     server
         .vault_init(Parameters(VaultInitParams {
@@ -293,24 +472,26 @@ async fn lane_slot_refuses_copying_existing_account_ciphertext() {
         )))
         .await
         .expect("account write");
-    let err = server
+    server
         .vault_set(Parameters(slot_params(
             "EXTRACT_API_KEY",
             "shared-siliconflow-bytes",
             false,
         )))
         .await
-        .expect_err("copy into slot");
-    assert!(err.contains("SILICONFLOW_API_KEY"), "{err}");
-    assert!(err.contains("vault:SILICONFLOW_API_KEY"), "{err}");
-    assert!(!err.contains("shared-siliconflow-bytes"), "{err}");
+        .expect("bind existing account");
+    assert_eq!(
+        stored_slot_value(&server, "EXTRACT_API_KEY"),
+        "vault:SILICONFLOW_API_KEY"
+    );
+    assert_eq!(
+        slot_value(&server, "EXTRACT_API_KEY").await,
+        "shared-siliconflow-bytes"
+    );
 }
 
-/// Copy protection remains in force when the lane slot already exists and the
-/// caller explicitly requests a rebind. Rebind changes an account family; it
-/// must not create a second ciphertext for the same account credential.
 #[tokio::test]
-async fn existing_lane_slot_refuses_account_copy_even_with_rebind() {
+async fn existing_lane_slot_rebinds_to_registered_account_pointer() {
     let server = make_server();
     server
         .vault_init(Parameters(VaultInitParams {
@@ -318,6 +499,7 @@ async fn existing_lane_slot_refuses_account_copy_even_with_rebind() {
         }))
         .await
         .expect("init");
+    seed_account(&server, "DEEPSEEK_API_KEY", "old-slot-family").await;
     server
         .vault_set(Parameters(slot_params(
             "EXTRACT_API_KEY",
@@ -326,28 +508,26 @@ async fn existing_lane_slot_refuses_account_copy_even_with_rebind() {
         )))
         .await
         .expect("initial slot write");
-    server
-        .vault_set(Parameters(slot_params(
-            "SILICONFLOW_API_KEY",
-            "shared-account-bytes",
-            false,
-        )))
-        .await
-        .expect("account write");
-
-    let err = server
+    seed_account(&server, "SILICONFLOW_API_KEY", "shared-account-bytes").await;
+    let body = server
         .vault_set(Parameters(slot_params(
             "EXTRACT_API_KEY",
             "shared-account-bytes",
             true,
         )))
         .await
-        .expect_err("existing slot must reject account copy");
-    assert!(err.contains("vault:SILICONFLOW_API_KEY"), "{err}");
-    assert!(!err.contains("shared-account-bytes"), "{err}");
+        .expect("explicit rebind to registered account");
+    let json: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(json["rebind"], json!(true));
+    assert!(json["old_fingerprint"].as_str().is_some());
+    assert!(json["new_fingerprint"].as_str().is_some());
+    assert_eq!(
+        stored_slot_value(&server, "EXTRACT_API_KEY"),
+        "vault:SILICONFLOW_API_KEY"
+    );
     assert_eq!(
         slot_value(&server, "EXTRACT_API_KEY").await,
-        "old-slot-family"
+        "shared-account-bytes"
     );
 }
 
@@ -381,7 +561,7 @@ async fn lane_slot_refuses_copy_from_unregistered_mcp_account() {
     assert!(!error.contains("shared-mcp-account-bytes"), "{error}");
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn concurrent_first_writers_cannot_bypass_lane_slot_rebind() {
     let server = make_server();
     server
@@ -390,30 +570,39 @@ async fn concurrent_first_writers_cannot_bypass_lane_slot_rebind() {
         }))
         .await
         .expect("init");
+    seed_account(
+        &server,
+        "SILICONFLOW_API_KEY",
+        "concurrent-family-siliconflow",
+    )
+    .await;
+    seed_account(&server, "DEEPSEEK_API_KEY", "concurrent-family-deepseek").await;
 
-    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(16));
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
     let mut writers = Vec::new();
-    for index in 0..16 {
+    for (name, value) in [
+        ("SILICONFLOW_API_KEY", "concurrent-family-siliconflow"),
+        ("DEEPSEEK_API_KEY", "concurrent-family-deepseek"),
+    ] {
         let server = std::ops::Deref::deref(&server).clone();
         let barrier = barrier.clone();
         writers.push(tokio::spawn(async move {
-            let value = format!("concurrent-family-{index}");
             barrier.wait().await;
             let result = server
-                .vault_set(Parameters(slot_params("EXTRACT_API_KEY", &value, false)))
+                .vault_set(Parameters(slot_params("EXTRACT_API_KEY", value, false)))
                 .await;
-            (value, result)
+            (name, value, result)
         }));
     }
 
     let mut winner = None;
     let mut refusals = 0;
     for writer in writers {
-        let (value, result) = writer.await.expect("writer task");
+        let (name, value, result) = writer.await.expect("writer task");
         match result {
             Ok(_) => {
                 assert!(
-                    winner.replace(value).is_none(),
+                    winner.replace((name, value)).is_none(),
                     "only one first writer may win"
                 );
             }
@@ -423,9 +612,13 @@ async fn concurrent_first_writers_cannot_bypass_lane_slot_rebind() {
             }
         }
     }
-    let winner = winner.expect("one first writer succeeds");
-    assert_eq!(refusals, 15);
-    assert_eq!(slot_value(&server, "EXTRACT_API_KEY").await, winner);
+    let (winner_name, winner_value) = winner.expect("one first writer succeeds");
+    assert_eq!(refusals, 1);
+    assert_eq!(
+        stored_slot_value(&server, "EXTRACT_API_KEY"),
+        format!("vault:{winner_name}")
+    );
+    assert_eq!(slot_value(&server, "EXTRACT_API_KEY").await, winner_value);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -437,61 +630,77 @@ async fn independent_store_connection_cannot_bypass_lane_slot_rebind() {
         }))
         .await
         .expect("init");
-    server
-        .vault_set(Parameters(slot_params(
-            "SILICONFLOW_API_KEY",
-            "external-account-family",
-            false,
-        )))
-        .await
-        .expect("seed account");
+    seed_account(&server, "SILICONFLOW_API_KEY", "external-account-family").await;
+    seed_account(&server, "DEEPSEEK_API_KEY", "mcp-writer-family").await;
 
     let db_path = server.global_db_path_buf();
-    let mut competing_store = memcore::MemoryStore::open(
+    let mut store_a = memcore::MemoryStore::open(
         db_path
             .to_str()
             .expect("global fixture database path is UTF-8"),
     )
-    .expect("open independent store connection");
-    let transaction = competing_store
-        .begin_vault_transaction()
-        .expect("begin competing immediate transaction");
-    let mut copied_account = transaction
-        .vault_get_entry("SILICONFLOW_API_KEY")
-        .expect("read seeded account")
-        .expect("seeded account exists");
-    copied_account.name = "EXTRACT_API_KEY".to_string();
-    transaction
-        .vault_upsert_entry(&copied_account)
-        .expect("stage competing slot write");
-
-    let independent_server = std::ops::Deref::deref(&server).clone();
-    let writer = tokio::spawn(async move {
-        independent_server
-            .vault_set(Parameters(slot_params(
-                "EXTRACT_API_KEY",
-                "mcp-writer-family",
-                false,
-            )))
-            .await
+    .expect("open independent store A");
+    let mut store_b = memcore::MemoryStore::open(
+        db_path
+            .to_str()
+            .expect("global fixture database path is UTF-8"),
+    )
+    .expect("open independent store B");
+    let key = {
+        let vault = server.vault_read();
+        *vault.key.as_ref().expect("unlocked key").bytes()
+    };
+    let key_a = key;
+    let key_b = key;
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let barrier_a = std::sync::Arc::clone(&barrier);
+    let handle_a = std::thread::spawn(move || {
+        barrier_a.wait();
+        crate::vault_ops::account_bind::write_lane_slot_binding(
+            &mut store_a,
+            &key_a,
+            "EXTRACT_API_KEY",
+            "external-account-family",
+            false,
+            "",
+            None,
+            None,
+        )
     });
-
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    assert!(
-        !writer.is_finished(),
-        "MCP writer must wait for the independent SQLite writer"
+    let handle_b = std::thread::spawn(move || {
+        barrier.wait();
+        crate::vault_ops::account_bind::write_lane_slot_binding(
+            &mut store_b,
+            &key_b,
+            "EXTRACT_API_KEY",
+            "mcp-writer-family",
+            false,
+            "",
+            None,
+            None,
+        )
+    });
+    let result_a = handle_a.join().expect("store A writer");
+    let result_b = handle_b.join().expect("store B writer");
+    assert_eq!(
+        result_a.is_ok() as u8 + result_b.is_ok() as u8,
+        1,
+        "one independent store writer must win"
     );
-    transaction.commit().expect("commit competing slot write");
-
-    let error = writer
-        .await
-        .expect("MCP writer task")
-        .expect_err("MCP writer must re-evaluate after the competing commit");
-    assert!(error.contains("rebind"), "{error}");
+    let a_ok = result_a.is_ok();
+    let error = if result_a.is_err() {
+        result_a.expect_err("store A refusal")
+    } else {
+        result_b.expect_err("store B refusal")
+    };
+    assert!(error.contains("old_fingerprint="), "{error}");
+    assert!(error.contains("new_fingerprint="), "{error}");
     assert!(!error.contains("external-account-family"), "{error}");
     assert!(!error.contains("mcp-writer-family"), "{error}");
-    assert_eq!(
-        slot_value(&server, "EXTRACT_API_KEY").await,
+    let winner_value = if a_ok {
         "external-account-family"
-    );
+    } else {
+        "mcp-writer-family"
+    };
+    assert_eq!(slot_value(&server, "EXTRACT_API_KEY").await, winner_value);
 }

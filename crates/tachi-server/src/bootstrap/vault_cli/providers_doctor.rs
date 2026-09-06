@@ -15,6 +15,8 @@ use std::path::{Path, PathBuf};
 const ENV_REF_PREFIX: &str = "{env:";
 const ENV_REF_SUFFIX: &str = "}";
 
+mod slot_evidence;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ApiKeyShape {
     /// `{env:NAME}` — name is not a secret; print literally.
@@ -747,6 +749,9 @@ fn collect_provider_vault_evidence(
     let mut evidence = ProviderVaultReportEvidence::default();
     for entry in entries.iter().filter(|entry| {
         names.contains(&entry.name)
+            && !crate::vault_ops::is_lane_slot_secret_name(&entry.name)
+            && !crate::provider_config::parse_rotation_member_name(&entry.name)
+                .is_some_and(|(prefix, _)| crate::vault_ops::is_lane_slot_secret_name(prefix))
             && entry.secret_type == SECRET_TYPE_API_KEY
             && entry.name.ends_with("_API_KEY")
             && entry
@@ -795,10 +800,18 @@ fn collect_provider_vault_evidence(
         evidence.exact_values.insert(entry.name.clone(), value);
     }
 
-    for rotation in rotations
-        .into_iter()
-        .filter(|rotation| names.contains(&rotation.prefix))
-    {
+    slot_evidence::collect_lane_slot_report_evidence(
+        &entries,
+        &health_by_identity,
+        names,
+        key,
+        &mut evidence,
+    );
+
+    for rotation in rotations.into_iter().filter(|rotation| {
+        names.contains(&rotation.prefix)
+            && !crate::vault_ops::is_lane_slot_secret_name(&rotation.prefix)
+    }) {
         let configured_members = usize::try_from(rotation.total_keys.max(0)).unwrap_or(usize::MAX);
         let matching =
             crate::vault_ops::collect_rotation_entries(entries.clone(), &rotation.prefix);

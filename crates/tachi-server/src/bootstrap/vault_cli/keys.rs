@@ -119,14 +119,29 @@ pub(in crate::bootstrap) fn vault_upsert_secret_with_key(
     if secret_value.trim().is_empty() {
         return Err("Secret value cannot be empty".into());
     }
-    if crate::vault_ops::is_lane_slot_secret_name(name) {
-        return Err(format!(
-            "Legacy vault upsert cannot write lane slot '{name}'; use `tachi vault set {name} --rebind`"
-        )
-        .into());
-    }
     let secret_type = memcore::vault::normalize_secret_type(secret_type);
     memcore::reject_api_key_type_for_lane_config(name, secret_type)?;
+    if crate::vault_ops::is_lane_slot_secret_name(name) {
+        if secret_type != memcore::SECRET_TYPE_API_KEY {
+            return Err(format!(
+                "Lane slot '{name}' must bind as {} (got {secret_type})",
+                memcore::SECRET_TYPE_API_KEY
+            )
+            .into());
+        }
+        let mut store = open_cli_store(global_db_path)?;
+        let (_decided, created) = crate::vault_ops::account_bind::write_lane_slot_binding(
+            &mut store,
+            key.bytes(),
+            name,
+            &secret_value,
+            false,
+            description,
+            None,
+            None,
+        )?;
+        return Ok(created);
+    }
 
     let encrypt_result = crate::vault_crypto::encrypt(key.bytes(), secret_value.as_bytes());
     let (encrypted_value, nonce) = encrypt_result?;
@@ -188,6 +203,14 @@ pub(in crate::bootstrap) fn vault_upsert_secret_with_key(
                 .map_err(|error| format!("{error}; refusing rotation member update"))?;
         }
     }
+    crate::vault_ops::account_events::observe_account_entry(
+        &transaction,
+        key.bytes(),
+        name,
+        secret_type,
+        &secret_value,
+        false,
+    )?;
     transaction
         .commit()
         .map_err(|e| format!("commit vault transaction: {e}"))?;
@@ -204,6 +227,9 @@ pub(super) fn canonical_provider_key_defs(
     let mut out = Vec::new();
     for def in crate::status_ops::status_health::API_KEY_DEFS {
         if def.deprecated && !include_deprecated {
+            continue;
+        }
+        if crate::vault_ops::is_lane_slot_secret_name(def.key) {
             continue;
         }
         if seen.insert(def.key) {
@@ -284,6 +310,88 @@ pub(super) fn run_vault_setup_keys(
     Ok(())
 }
 
+pub(super) fn decrypt_named_secret_value(
+    store: &memcore::MemoryStore,
+    key: &[u8; 32],
+    name: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let transaction = store
+        .begin_vault_transaction_shared()
+        .map_err(|e| format!("begin Vault profile-read transaction: {e}"))?;
+    let entry = transaction
+        .vault_get_entry(name)
+        .map_err(|e| format!("vault_get_entry: {e}"))?
+        .ok_or_else(|| format!("Vault secret '{name}' is missing"))?;
+    crate::vault_ops::validate_existing_lane_slot_secret_type(name, &entry.secret_type)?;
+    if entry
+        .allowed_agents
+        .as_ref()
+        .is_some_and(|agents| !agents.is_empty())
+    {
+        return Err(format!(
+            "Access denied: direct CLI cannot read agent-restricted secret '{name}'"
+        )
+        .into());
+    }
+    let decrypted = crate::vault_crypto::decrypt(key, &entry.encrypted_value, &entry.nonce)?;
+    let value =
+        crate::vault_crypto::ZeroizingString::new(crate::vault_crypto::decode_utf8_zeroizing(
+            decrypted,
+            format!("Vault secret '{name}' is not valid UTF-8"),
+        )?);
+    let mut resolved_value = if !crate::vault_ops::is_lane_slot_secret_name(name) {
+        value
+    } else {
+        let Some(target) = crate::provider_config::parse_vault_alias(&value) else {
+            return Err(format!("Lane slot '{name}' is not bound to a usable account").into());
+        };
+        if crate::vault_ops::is_lane_slot_secret_name(target) {
+            return Err(format!(
+                "Lane slot '{name}' cannot resolve through another slot '{target}'"
+            )
+            .into());
+        }
+        let target_entry = transaction
+            .vault_get_entry(target)
+            .map_err(|e| format!("vault_get_entry: {e}"))?
+            .ok_or_else(|| format!("Lane slot target '{target}' is missing"))?;
+        if target_entry
+            .allowed_agents
+            .as_ref()
+            .is_some_and(|agents| !agents.is_empty())
+        {
+            return Err(format!(
+                "Access denied: direct CLI cannot read agent-restricted secret '{target}'"
+            )
+            .into());
+        }
+        let target_decrypted =
+            crate::vault_crypto::decrypt(key, &target_entry.encrypted_value, &target_entry.nonce)?;
+        let target_value =
+            crate::vault_crypto::ZeroizingString::new(crate::vault_crypto::decode_utf8_zeroizing(
+                target_decrypted,
+                format!("Vault secret '{target}' is not valid UTF-8"),
+            )?);
+        let health_unusable = crate::vault_ops::account_bind::account_target_health_unusable(
+            &transaction,
+            name,
+            &target_entry,
+        )?;
+        crate::vault_ops::account_bind::refuse_unusable_account_target(
+            name,
+            &target_entry,
+            &target_value,
+            None,
+            health_unusable,
+        )?;
+        target_value
+    };
+    transaction
+        .commit()
+        .map_err(|e| format!("commit Vault profile-read transaction: {e}"))?;
+    Ok(std::mem::take(resolved_value.as_mut_string()))
+}
+
 pub(super) fn decrypt_profile_secret_values(
     global_db_path: &PathBuf,
     profile: &tachi_credential_profile::CredentialProfile,
@@ -292,11 +400,12 @@ pub(super) fn decrypt_profile_secret_values(
     password_file: Option<&Path>,
     insecure_password_file: bool,
 ) -> Result<std::collections::HashMap<String, String>, Box<dyn std::error::Error>> {
-    let store = open_cli_store_read_only(global_db_path)?;
-    let config = store
+    let store_ro = open_cli_store_read_only(global_db_path)?;
+    let config = store_ro
         .vault_get_config()
         .map_err(|e| format!("vault_get_config: {e}"))?
         .ok_or("Vault not initialized. Run `tachi vault init` first.")?;
+    drop(store_ro);
     let key = read_verified_vault_key(
         &config,
         stdin_password,
@@ -304,20 +413,16 @@ pub(super) fn decrypt_profile_secret_values(
         password_file,
         insecure_password_file,
     )?;
+    let store = open_cli_store(global_db_path)?;
 
-    let mut values = std::collections::HashMap::new();
+    let mut values: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     for name in tachi_credential_profile::profile_secret_names(profile) {
-        let entry = store
-            .vault_get_entry(&name)
-            .map_err(|e| format!("vault_get_entry: {e}"))?
-            .ok_or_else(|| format!("Vault secret '{name}' is missing"))?;
-        let decrypted =
-            crate::vault_crypto::decrypt(key.bytes(), &entry.encrypted_value, &entry.nonce)?;
-        let value = crate::vault_crypto::decode_utf8_zeroizing(
-            decrypted,
-            format!("Vault secret '{name}' is not valid UTF-8"),
-        )?;
-        values.insert(name, value);
+        let value = decrypt_named_secret_value(&store, key.bytes(), &name).inspect_err(|_| {
+            for value in values.values_mut() {
+                crate::vault_crypto::zero_string(value);
+            }
+        })?;
+        values.insert(name.clone(), value);
     }
     Ok(values)
 }

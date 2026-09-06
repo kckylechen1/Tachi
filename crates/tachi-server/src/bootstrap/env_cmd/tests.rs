@@ -1,5 +1,5 @@
 use super::bindings::{build_project_env_plan, parse_project_vault_env_bindings_detailed};
-use super::materialize::{resolve_project_env_values, sync_project_env};
+use super::materialize::{follow_lane_slot_plain, resolve_project_env_values, sync_project_env};
 use super::shell::shell_export_line;
 use super::types::UnlockedVaultStore;
 
@@ -61,6 +61,45 @@ fn put_secret_typed(
             access_count: 0,
         })
         .expect("upsert test secret");
+}
+
+#[test]
+fn follow_lane_slot_plain_resolves_pointer_and_drops_leftover() {
+    let store = temp_store();
+    let key = crate::vault_crypto::derive_cheap("test-password", b"1234567890123456").expect("key");
+    put_secret(&store, key.bytes(), "DEEPSEEK_API_KEY", "deepseek-secret");
+    put_secret(
+        &store,
+        key.bytes(),
+        "EXTRACT_API_KEY",
+        "vault:DEEPSEEK_API_KEY",
+    );
+    put_secret(
+        &store,
+        key.bytes(),
+        "SUMMARY_API_KEY",
+        "leftover-slot-bytes",
+    );
+    let entries = store.vault_list_entries().expect("list");
+    let resolved = follow_lane_slot_plain(
+        "EXTRACT_API_KEY",
+        "vault:DEEPSEEK_API_KEY".to_string(),
+        &entries,
+        &store,
+        key.bytes(),
+    )
+    .expect("follow")
+    .expect("pointer");
+    assert_eq!(resolved, "deepseek-secret");
+    let leftover = follow_lane_slot_plain(
+        "SUMMARY_API_KEY",
+        "leftover-slot-bytes".to_string(),
+        &entries,
+        &store,
+        key.bytes(),
+    )
+    .expect("leftover");
+    assert!(leftover.is_none());
 }
 
 #[test]
@@ -220,6 +259,37 @@ fn project_env_materialization_rejects_restricted_secret_and_does_not_touch_it()
         .expect("read secret")
         .expect("secret remains");
     assert_eq!(retained.access_count, 0);
+}
+
+#[test]
+fn project_env_sync_resolves_lane_slot_pointer() {
+    let store = temp_store();
+    let key = crate::vault_crypto::derive_cheap("test-password", b"1234567890123456").expect("key");
+    put_secret(&store, key.bytes(), "DEEPSEEK_API_KEY", "deepseek-secret");
+    put_secret(
+        &store,
+        key.bytes(),
+        "EXTRACT_API_KEY",
+        "vault:DEEPSEEK_API_KEY",
+    );
+    let mut unlocked = UnlockedVaultStore { store, key };
+    let temp = tempfile::tempdir().expect("temp project");
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(project.join(".tachi")).expect("create .tachi");
+    std::fs::write(
+        project.join(".tachi/vault.env"),
+        "MY_KEY=vault:EXTRACT_API_KEY\n",
+    )
+    .expect("write bindings");
+
+    let report = sync_project_env(&mut unlocked, &project, None, false, false, None, false)
+        .expect("sync slot binding");
+    assert!(report.written);
+    let generated =
+        std::fs::read_to_string(project.join(".tachi/env.generated")).expect("read generated env");
+    assert!(generated.contains("deepseek-secret"), "{generated}");
+    assert!(!generated.contains("vault:DEEPSEEK_API_KEY"), "{generated}");
+    assert!(!generated.contains("vault:EXTRACT_API_KEY"), "{generated}");
 }
 
 #[test]
