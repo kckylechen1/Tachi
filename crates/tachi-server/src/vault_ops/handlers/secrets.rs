@@ -12,8 +12,10 @@ pub(crate) async fn handle_vault_set(
             return Err("Secret value cannot be empty".to_string());
         }
         let effective_agent_id = resolve_vault_acl_agent_id(server, params.agent_id.as_deref())?;
-        authorize_vault_mutation(server, &params.name, params.agent_id.as_deref())
-            .map_err(|e| e.to_string())?;
+        if !is_lane_slot_secret_name(&params.name) {
+            authorize_vault_mutation(server, &params.name, params.agent_id.as_deref())
+                .map_err(|e| e.to_string())?;
+        }
         with_vault_key(server, |key| {
             let secret_type = if params.secret_type.trim().is_empty() {
                 memcore::infer_vault_secret_type(&params.name)
@@ -30,6 +32,39 @@ pub(crate) async fn handle_vault_set(
                 ));
             }
             let allowed_agents = normalize_allowed_agents(params.allowed_agents.clone());
+            if crate::vault_ops::is_lane_slot_secret_name(&params.name) {
+                if secret_type != SECRET_TYPE_API_KEY {
+                    return Err(format!(
+                        "Vault name '{}' is a lane slot; it must bind as {SECRET_TYPE_API_KEY} (got {secret_type})",
+                        params.name
+                    ));
+                }
+                let (decided, created) = server.with_global_store(|store| {
+                    crate::vault_ops::account_bind::write_lane_slot_binding(
+                        store,
+                        key,
+                        &params.name,
+                        &value,
+                        params.rebind,
+                        &params.description,
+                        allowed_agents.clone(),
+                        effective_agent_id.as_deref(),
+                    )
+                })?;
+                return serde_json::to_string(&json!({
+                    "stored": true,
+                    "name": params.name,
+                    "secret_type": secret_type,
+                    "created": created,
+                    "bound_account": decided.account,
+                    "rebind": decided.rebound,
+                    "noop": decided.noop,
+                    "old_fingerprint": decided.old_fingerprint,
+                    "new_fingerprint": decided.new_fingerprint,
+                    "fingerprint": decided.fingerprint,
+                }))
+                .map_err(|e| format!("serialize: {e}"));
+            }
             let (encrypted_value, nonce) = crypto::encrypt(key, value.as_bytes())?;
 
             server.with_global_store(|store| {
@@ -55,72 +90,6 @@ pub(crate) async fn handle_vault_set(
                             "Vault name '{}' value embeds a credential in the endpoint ({leak}); refusing write",
                             params.name
                         ));
-                    }
-                }
-
-                let mut rebind_meta: Option<(bool, String, String)> = None;
-                if is_lane_slot_secret_name(&params.name) && secret_type == SECRET_TYPE_API_KEY {
-                    let entries = transaction
-                        .vault_list_entries()
-                        .map_err(|e| format!("Failed to list entries: {e}"))?;
-                    for other in entries {
-                        if other.name == params.name
-                            || other.secret_type != SECRET_TYPE_API_KEY
-                            || is_lane_slot_secret_name(&other.name)
-                        {
-                            continue;
-                        }
-                        let kind =
-                            provider_kind_for_env_name(&other.name).unwrap_or("unregistered");
-                        let Ok(plain) = crypto::decrypt(key, &other.encrypted_value, &other.nonce)
-                        else {
-                            continue;
-                        };
-                        let Ok(mut other_value) = crypto::decode_utf8_zeroizing(
-                            plain,
-                            "Vault account secret is not valid UTF-8",
-                        ) else {
-                            continue;
-                        };
-                        let other_fingerprint = fingerprint_secret(key, kind, &other_value);
-                        crypto::zero_string(&mut other_value);
-                        if other_fingerprint == fingerprint_secret(key, kind, &value) {
-                            return Err(copy_existing_account_message(&params.name, &other.name));
-                        }
-                    }
-
-                    if !is_new {
-                        if let Some(existing) = existing_entry.as_ref() {
-                            validate_existing_lane_slot_secret_type(
-                                &params.name,
-                                &existing.secret_type,
-                            )?;
-                            let old_bytes =
-                                crypto::decrypt(key, &existing.encrypted_value, &existing.nonce)?;
-                            let mut old_value = crypto::decode_utf8_zeroizing(
-                                old_bytes,
-                                format!("Existing slot '{}' is not valid UTF-8", params.name),
-                            )?;
-                            let provider_kind =
-                                provider_kind_for_env_name(&params.name).unwrap_or("unknown");
-                            let overwrite = evaluate_lane_slot_overwrite(
-                                &old_value,
-                                &value,
-                                provider_kind,
-                                key,
-                                params.rebind,
-                            );
-                            crypto::zero_string(&mut old_value);
-                            match overwrite {
-                                Ok(LaneSlotOverwrite::Identical { fingerprint }) => {
-                                    rebind_meta = Some((false, fingerprint.clone(), fingerprint));
-                                }
-                                Ok(LaneSlotOverwrite::Rebound { old_fp, new_fp }) => {
-                                    rebind_meta = Some((true, old_fp, new_fp));
-                                }
-                                Err(err) => return Err(err.operator_message(&params.name)),
-                            }
-                        }
                     }
                 }
 
@@ -182,21 +151,19 @@ pub(crate) async fn handle_vault_set(
                     }
                 }
 
+                crate::vault_ops::account_events::observe_account_entry(
+                    &transaction, key, &params.name, secret_type, &value, false,
+                )?;
                 transaction
                     .commit()
                     .map_err(|e| format!("Failed to commit vault transaction: {e}"))?;
 
-                let mut body = json!({
+                let body = json!({
                     "stored": true,
                     "name": params.name,
                     "secret_type": secret_type,
                     "created": is_new
                 });
-                if let Some((rebound, old_fp, new_fp)) = rebind_meta {
-                    body["rebind"] = json!(rebound);
-                    body["old_fingerprint"] = json!(old_fp);
-                    body["new_fingerprint"] = json!(new_fp);
-                }
                 serde_json::to_string(&body).map_err(|e| format!("serialize: {e}"))
             })
         })

@@ -338,7 +338,9 @@ fn fingerprint_vault_credentials(
     let pool_prefixes: Vec<String> = rotations
         .iter()
         .map(|rotation| rotation.prefix.clone())
-        .filter(|prefix| admitted.contains(prefix))
+        .filter(|prefix| {
+            admitted.contains(prefix) && !crate::vault_ops::is_lane_slot_secret_name(prefix)
+        })
         .collect();
 
     let mut credentials: Vec<VaultCredential> = Vec::new();
@@ -400,7 +402,12 @@ fn fingerprint_vault_credentials(
     }
 
     for entry in &entries {
-        if consumed.contains(&entry.name) || !admitted.contains(&entry.name) {
+        if consumed.contains(&entry.name)
+            || !admitted.contains(&entry.name)
+            || crate::vault_ops::is_lane_slot_secret_name(&entry.name)
+            || crate::provider_config::parse_rotation_member_name(&entry.name)
+                .is_some_and(|(prefix, _)| crate::vault_ops::is_lane_slot_secret_name(prefix))
+        {
             continue;
         }
         let Some(provider_kind) =

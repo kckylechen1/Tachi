@@ -173,6 +173,8 @@ pub const REFRESH_AUTHORITY_NONE: &str = "none";
 pub const EVENT_KIND_ACCOUNT_CREATED: &str = "account_created";
 pub const EVENT_KIND_ALIAS_OBSERVED: &str = "alias_observed";
 pub const EVENT_KIND_ALIAS_RETIRED: &str = "alias_retired";
+/// An explicit lane-slot binding change, committed with the Vault pointer.
+pub const EVENT_KIND_SLOT_REBIND: &str = "slot_rebind";
 /// A reconcile pass saw the account's member key material change (rotation,
 /// member added/removed) and recomputed its account fingerprint.
 pub const EVENT_KIND_FINGERPRINT_OBSERVED: &str = "fingerprint_observed";

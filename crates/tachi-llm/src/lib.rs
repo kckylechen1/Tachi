@@ -43,8 +43,8 @@ pub use provider_materialization::{
     DurableVaultLoad, MaterializeReport, ProviderMaterializationSnapshot, VaultSourceAvailability,
 };
 pub use provider_names::{
-    is_vault_alias, parse_rotation_member_name, parse_vault_alias, vault_alias_line,
-    VAULT_ALIAS_PREFIX,
+    is_lane_slot_secret_name, is_vault_alias, parse_rotation_member_name, parse_vault_alias,
+    vault_alias_line, LANE_SLOT_SECRET_NAMES, VAULT_ALIAS_PREFIX,
 };
 
 // ── TLS crypto provider ──────────────────────────────────────────────────────

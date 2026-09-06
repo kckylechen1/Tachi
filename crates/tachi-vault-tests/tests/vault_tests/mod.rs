@@ -95,15 +95,27 @@ pub mod provider_config {
         format_skipped_alias_warning, materialize_for_server,
         materialize_for_server_with_hook_for_tests,
         materialize_for_server_without_keychain_for_tests,
-        materialize_standalone_with_password_for_tests,
+        materialize_standalone_with_password_for_tests, provider_env_keys,
     };
 }
 
 pub mod vault_ops {
+    pub use tachi_llm::is_lane_slot_secret_name;
     pub use tachi_server::vault_test_api::{
         load_unlocked_api_key_secret_pools, load_unlocked_api_key_secret_pools_with_drops,
+        load_validated_unlocked_api_key_secret_pools_with_drops,
         VAULT_MATERIALIZATION_INVALID_UTF8,
     };
+
+    pub mod account_bind {
+        pub use tachi_server::vault_test_api::write_lane_slot_binding;
+    }
+}
+
+pub mod status_ops {
+    pub mod status_health {
+        pub use tachi_server::vault_test_api::family_env_names_for_env_name;
+    }
 }
 
 pub mod vault_crypto {

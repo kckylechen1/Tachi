@@ -8,7 +8,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use crate::vault_ops::{classify_vault_read_error, VaultReadState};
+use crate::vault_ops::{classify_vault_read_error, VaultMaterializationRevision, VaultReadState};
 use crate::MemoryServer;
 pub use tachi_llm::{
     group_api_key_values_by_configured_rotations, is_vault_alias, parse_rotation_member_name,
@@ -18,6 +18,9 @@ use tachi_llm::{
     AliasSkipClass, LaneConfigOverlay, LaneFieldOverlay, LlmClient, ProviderSecret,
     VaultSourceAvailability,
 };
+
+mod health_publication;
+use health_publication::{fenced_provider_health_recheck, validate_admitted_provider_health};
 
 #[derive(Default)]
 pub(crate) struct LaneConfigValues(Vec<(String, String)>);
@@ -114,7 +117,7 @@ pub(crate) fn is_provider_api_key_name(name: &str) -> bool {
 struct VaultSourceLoad {
     load: tachi_llm::DurableVaultLoad,
     lane_config_values: LaneConfigValues,
-    acl_revision: Option<u64>,
+    acl_revision: Option<VaultMaterializationRevision>,
 }
 
 fn vault_api_key_pool_load_from_server(server: &MemoryServer) -> Result<VaultSourceLoad, String> {
@@ -161,7 +164,17 @@ fn durable_load_from_keychain_scan(
     } else {
         VaultSourceAvailability::LockedOrUnavailable
     };
-    let pools = group_api_key_values_by_configured_rotations(scan.values, &scan.rotation_prefixes);
+    let mut pools =
+        group_api_key_values_by_configured_rotations(scan.values, &scan.rotation_prefixes);
+    // Keep provider health and lease attribution on the actual account in the
+    // Keychain path, just as in the unlocked-server path.
+    for (slot, account) in scan.slot_accounts {
+        if let Some(entries) = pools.get_mut(&slot) {
+            for entry in entries {
+                entry.key_id = account.clone();
+            }
+        }
+    }
     let mut listed_drops = scan.dropped;
     promote_configured_rotation_prefix_drops(&mut listed_drops, &pools, &scan.rotation_prefixes);
     VaultSourceLoad {
@@ -218,7 +231,7 @@ struct ResolvedVaultLoad {
     load: tachi_llm::DurableVaultLoad,
     lane_config_values: LaneConfigValues,
     source_path: std::path::PathBuf,
-    acl_revision: Option<u64>,
+    acl_revision: Option<VaultMaterializationRevision>,
 }
 
 fn resolved_vault_load(source: VaultSourceLoad, source_path: &Path) -> ResolvedVaultLoad {
@@ -501,6 +514,7 @@ fn materialize_for_server_inner(
     let global = server.global_db_path_buf();
     let lane_config_values = std::cell::RefCell::new(None);
     let publication_fence = std::cell::RefCell::new(None);
+    let health_recheck = std::cell::RefCell::new(None);
     let materialize_result =
         tachi_llm::materialize_provider_secrets_from_durable_source_with_snapshot(
             server.llm.as_ref(),
@@ -523,16 +537,8 @@ fn materialize_for_server_inner(
                             format!("Failed to fence Vault provider publication: {error}")
                         })?;
                     if let Some(expected_revision) = expected_revision {
-                        let actual_revision = vault_acl_revision_on_connection(fence.connection())?;
-                        if actual_revision != expected_revision {
-                            fence.rollback().map_err(|error| {
-                                format!("Failed to release stale Vault publication fence: {error}")
-                            })?;
-                            return Err(
-                        "Vault ACL, type, rotation, or entry revision changed before publication; retry provider refresh"
-                            .to_string(),
-                            );
-                        }
+                        *health_recheck.borrow_mut() =
+                            fenced_provider_health_recheck(fence.connection(), expected_revision)?;
                     }
                     *publication_fence.borrow_mut() = Some(fence);
                 } else if expected_revision.is_some() {
@@ -544,6 +550,10 @@ fn materialize_for_server_inner(
                 Ok(load)
             },
             |provider_snapshot| {
+                validate_admitted_provider_health(
+                    &provider_snapshot,
+                    health_recheck.borrow().as_deref(),
+                )?;
                 let values = lane_config_values
                     .borrow_mut()
                     .take()
@@ -571,14 +581,6 @@ fn materialize_for_server_inner(
         Ok(report) => Ok(report),
         Err(error) => Err(format_provider_materialization_error(error)),
     }
-}
-
-fn vault_acl_revision_on_connection(connection: &rusqlite::Connection) -> Result<u64, String> {
-    let entries = memcore::db::vault_list_entries(connection)
-        .map_err(|error| format!("Failed to read Vault entries for revision check: {error}"))?;
-    let rotations = memcore::db::vault_list_rotations(connection)
-        .map_err(|error| format!("Failed to read Vault rotations for revision check: {error}"))?;
-    Ok(crate::vault_ops::vault_materialization_acl_revision_from_rows(&entries, &rotations))
 }
 
 fn annotate_non_model_drops(
@@ -808,10 +810,14 @@ pub(crate) fn materialize_standalone_with_password_for_tests(
     llm: &LlmClient,
     global_db_path: &Path,
     password: &str,
+    after_vault_pools_resolved: Option<Box<dyn FnOnce() + Send>>,
 ) -> Result<MaterializeReport, String> {
-    materialize_standalone_inner(llm, global_db_path, None, &|path| {
-        vault_api_key_load_with_password_for_tests(path, Some(password))
-    })
+    materialize_standalone_inner(
+        llm,
+        global_db_path,
+        after_vault_pools_resolved,
+        &|path| vault_api_key_load_with_password_for_tests(path, Some(password)),
+    )
 }
 
 fn materialize_standalone_inner(
@@ -822,6 +828,7 @@ fn materialize_standalone_inner(
 ) -> Result<MaterializeReport, String> {
     let lane_config_values = std::cell::RefCell::new(None);
     let publication_fence = std::cell::RefCell::new(None);
+    let health_recheck = std::cell::RefCell::new(None);
     tachi_llm::materialize_provider_secrets_from_durable_source_with_snapshot(
         llm,
         provider_env_keys(),
@@ -843,17 +850,8 @@ fn materialize_standalone_inner(
                         format!("Failed to fence standalone Vault publication: {error}")
                     })?;
                 if let Some(expected_revision) = expected_revision {
-                    let actual_revision =
-                        vault_acl_revision_on_connection(fence.connection())?;
-                    if actual_revision != expected_revision {
-                        fence.rollback().map_err(|error| {
-                            format!("Failed to release stale standalone Vault fence: {error}")
-                        })?;
-                        return Err(
-                            "Vault ACL, type, rotation, or entry revision changed before standalone publication; retry provider refresh"
-                                .to_string(),
-                        );
-                    }
+                    *health_recheck.borrow_mut() =
+                        fenced_provider_health_recheck(fence.connection(), expected_revision)?;
                 }
                 *publication_fence.borrow_mut() = Some(fence);
             } else if expected_revision.is_some() {
@@ -865,6 +863,10 @@ fn materialize_standalone_inner(
             Ok(load)
         },
         |provider_snapshot| {
+            validate_admitted_provider_health(
+                &provider_snapshot,
+                health_recheck.borrow().as_deref(),
+            )?;
             if provider_snapshot.report().source_availability != VaultSourceAvailability::Readable {
                 return Ok((provider_snapshot, None, ()));
             }
@@ -889,7 +891,7 @@ fn materialize_standalone_inner(
 }
 
 #[cfg(test)]
-fn materialize_standalone_with_hook_for_tests(
+pub(crate) fn materialize_standalone_with_hook_for_tests(
     llm: &LlmClient,
     global_db_path: &Path,
     after_vault_pools_resolved: impl FnOnce() + Send + 'static,
@@ -1540,6 +1542,8 @@ mod tests {
     use super::*;
     use crate::test_support::EnvRestore;
 
+    mod slot_keychain;
+
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn standalone_keychain_publication_refuses_acl_revision_drift() {
@@ -2012,11 +2016,14 @@ mod tests {
         let load =
             durable_load_from_keychain_scan(crate::status_ops::status_health::KeychainApiKeyScan {
                 values: Vec::new(),
+                slot_accounts: HashMap::new(),
                 lane_config_values: LaneConfigValues::default(),
                 dropped: HashMap::new(),
                 rotation_prefixes: HashSet::new(),
                 source_readable: true,
-                acl_revision: Some(0),
+                acl_revision: Some(
+                    crate::vault_ops::vault_materialization_acl_revision_from_rows(&[], &[], &[]),
+                ),
             });
         assert!(load.load.pools.is_empty());
         assert!(load.load.listed_drops.is_empty());

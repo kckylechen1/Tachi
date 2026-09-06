@@ -321,11 +321,13 @@ pub fn materialize_standalone_with_password_for_tests(
     llm: &tachi_llm::LlmClient,
     global_db_path: &Path,
     password: &str,
+    after_vault_pools_resolved: Option<Box<dyn FnOnce() + Send>>,
 ) -> Result<tachi_llm::MaterializeReport, String> {
     crate::provider_config::materialize_standalone_with_password_for_tests(
         llm,
         global_db_path,
         password,
+        after_vault_pools_resolved,
     )
 }
 
@@ -347,4 +349,42 @@ pub fn load_unlocked_api_key_secret_pools_with_drops(
     server: &VaultTestServer,
 ) -> Result<ProviderSecretScan, String> {
     crate::vault_ops::load_unlocked_api_key_secret_pools_with_drops(server.inner())
+}
+
+pub fn load_validated_unlocked_api_key_secret_pools_with_drops(
+    server: &VaultTestServer,
+) -> Result<ProviderSecretScan, String> {
+    crate::vault_ops::load_validated_unlocked_api_key_secret_pools_with_drops(server.inner())
+}
+
+pub fn provider_env_keys() -> std::collections::HashSet<String> {
+    crate::provider_config::provider_env_keys()
+}
+
+pub fn family_env_names_for_env_name(name: &str) -> Option<Vec<&'static str>> {
+    crate::status_ops::status_health::family_env_names_for_env_name(name)
+}
+
+/// Exercise the independent-store write; the internal decision type stays private.
+pub fn write_lane_slot_binding(
+    store: &mut memcore::MemoryStore,
+    master_key: &[u8; 32],
+    name: &str,
+    new_value: &str,
+    rebind: bool,
+    description: &str,
+    allowed_agents: Option<Vec<String>>,
+    effective_agent_id: Option<&str>,
+) -> Result<(), String> {
+    crate::vault_ops::account_bind::write_lane_slot_binding(
+        store,
+        master_key,
+        name,
+        new_value,
+        rebind,
+        description,
+        allowed_agents,
+        effective_agent_id,
+    )
+    .map(|_| ())
 }

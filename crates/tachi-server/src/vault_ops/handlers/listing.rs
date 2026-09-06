@@ -68,7 +68,8 @@ pub(crate) async fn handle_vault_remove(
         let effective_agent_id = resolve_vault_acl_agent_id(server, params.agent_id.as_deref())?;
         authorize_vault_mutation(server, &params.name, params.agent_id.as_deref())
             .map_err(|e| e.to_string())?;
-        let removed = server.with_global_store(|store| {
+        let removed = with_vault_key(server, |key| {
+            server.with_global_store(|store| {
             let transaction = store
                 .begin_vault_transaction()
                 .map_err(|e| format!("Failed to begin remove transaction: {e}"))?;
@@ -93,6 +94,7 @@ pub(crate) async fn handle_vault_remove(
                     ));
                 }
             }
+            crate::vault_ops::account_events::prepare_entry_removal(&transaction, key, &params.name)?;
             let removed = transaction
                 .vault_delete_entry(&params.name)
                 .map_err(|e| format!("Failed to remove secret: {e}"))?;
@@ -100,6 +102,7 @@ pub(crate) async fn handle_vault_remove(
                 .commit()
                 .map_err(|e| format!("Failed to commit remove transaction: {e}"))?;
             Ok::<_, String>(removed)
+        })
         })?;
 
         if removed {

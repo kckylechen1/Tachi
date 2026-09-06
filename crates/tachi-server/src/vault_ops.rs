@@ -1,6 +1,8 @@
 // vault_ops.rs — MCP tool handlers for Tachi Vault
 
 mod access;
+pub(crate) mod account_bind;
+pub(crate) mod account_events;
 mod alias_integrity;
 mod audit;
 mod env;
@@ -11,6 +13,7 @@ mod rotation;
 mod session;
 mod slot_rebind;
 
+pub(crate) use account_bind::is_lane_slot_secret_name;
 pub(crate) use alias_integrity::unusable_skip_class;
 pub(crate) use resolver::{classify_vault_read_error, is_env_fallback_eligible, VaultReadState};
 pub(crate) use rotation::collect_rotation_entries;
@@ -21,11 +24,13 @@ pub(crate) use access::load_unlocked_api_key_secret_pools;
 #[cfg(feature = "vault-test-api")]
 pub(crate) use access::load_unlocked_api_key_secret_pools_with_drops;
 pub(crate) use access::load_validated_unlocked_api_key_secret_pools_with_drops;
-pub(crate) use access::vault_materialization_acl_revision_from_rows;
 #[cfg(feature = "vault-test-api")]
 pub use access::ProviderSecretScan;
 pub(crate) use access::{
-    materialize_unrestricted_vault_entries_from_store, read_vault_secret_from_store,
+    materialize_unrestricted_vault_entries_from_store, read_usable_vault_secret_from_store_direct,
+};
+pub(crate) use access::{
+    vault_materialization_acl_revision_from_rows, VaultMaterializationRevision,
 };
 
 /// Public-safe failure for background Vault materialization. The raw UTF-8
@@ -49,9 +54,7 @@ pub use params::{
     VaultSetupRotationParams, VaultUnlockParams,
 };
 pub(crate) use slot_rebind::{
-    copy_existing_account_message, evaluate_lane_slot_overwrite, fingerprint_secret,
-    is_lane_slot_secret_name, validate_existing_lane_slot_secret_type,
-    validate_lane_slot_secret_type,
+    validate_existing_lane_slot_secret_type, validate_lane_slot_secret_type,
 };
 
 #[cfg(test)]
