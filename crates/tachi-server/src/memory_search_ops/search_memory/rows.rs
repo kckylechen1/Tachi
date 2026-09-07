@@ -353,15 +353,19 @@ pub(crate) async fn search_memory_rows_with_access(
     project_only: bool,
     record_access: bool,
 ) -> Result<Vec<serde_json::Value>, String> {
-    search_memory_rows_with_named_project_reads(
-        server,
-        params,
-        project_only,
-        record_access,
-        None,
-        None,
-    )
-    .await
+    let server = server.clone();
+    super::concurrency::run_bounded_recall(move || async move {
+        search_memory_rows_with_named_project_reads(
+            &server,
+            params,
+            project_only,
+            record_access,
+            None,
+            None,
+        )
+        .await
+    })
+    .await?
 }
 
 pub(crate) async fn search_memory_rows_with_recall_config(
@@ -371,15 +375,20 @@ pub(crate) async fn search_memory_rows_with_recall_config(
     record_access: bool,
     recall_config: Option<&memcore::RecallConfig>,
 ) -> Result<Vec<serde_json::Value>, String> {
-    search_memory_rows_with_named_project_reads(
-        server,
-        params,
-        project_only,
-        record_access,
-        recall_config,
-        None,
-    )
-    .await
+    let server = server.clone();
+    let recall_config = recall_config.cloned();
+    super::concurrency::run_bounded_recall(move || async move {
+        search_memory_rows_with_named_project_reads(
+            &server,
+            params,
+            project_only,
+            record_access,
+            recall_config.as_ref(),
+            None,
+        )
+        .await
+    })
+    .await?
 }
 
 pub(super) async fn search_memory_rows_with_named_project_reads(

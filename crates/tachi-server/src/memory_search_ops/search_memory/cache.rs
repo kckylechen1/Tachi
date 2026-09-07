@@ -35,7 +35,7 @@ pub(super) fn recall_cache_read_enabled() -> bool {
 }
 
 #[cfg(test)]
-type RecallCacheRaceCallback = (RecallCacheRacePoint, Box<dyn FnOnce()>);
+type RecallCacheRaceCallback = (RecallCacheRacePoint, Box<dyn FnOnce() + Send>);
 
 #[cfg(test)]
 thread_local! {
@@ -75,7 +75,10 @@ pub(crate) struct RecallCacheRaceHook;
 
 #[cfg(test)]
 impl RecallCacheRaceHook {
-    pub(crate) fn install(point: RecallCacheRacePoint, action: impl FnOnce() + 'static) -> Self {
+    pub(crate) fn install(
+        point: RecallCacheRacePoint,
+        action: impl FnOnce() + Send + 'static,
+    ) -> Self {
         TEST_RACE_HOOK.with(|hook| {
             let previous = hook.replace(Some((point, Box::new(action))));
             assert!(
@@ -84,6 +87,50 @@ impl RecallCacheRaceHook {
             );
         });
         Self
+    }
+}
+
+#[cfg(test)]
+pub(super) struct RecallCacheTestContext {
+    enabled: Option<bool>,
+    race_hook: Option<RecallCacheRaceCallback>,
+}
+
+#[cfg(test)]
+pub(super) fn take_recall_cache_test_context() -> RecallCacheTestContext {
+    RecallCacheTestContext {
+        enabled: TEST_RECALL_CACHE_ENABLED.with(Cell::get),
+        race_hook: TEST_RACE_HOOK.with(|hook| hook.borrow_mut().take()),
+    }
+}
+
+#[cfg(test)]
+pub(super) struct InstalledRecallCacheTestContext {
+    previous_enabled: Option<bool>,
+    previous_hook: Option<RecallCacheRaceCallback>,
+}
+
+#[cfg(test)]
+pub(super) fn install_recall_cache_test_context(
+    context: RecallCacheTestContext,
+) -> InstalledRecallCacheTestContext {
+    let previous_enabled =
+        TEST_RECALL_CACHE_ENABLED.with(|enabled| enabled.replace(context.enabled));
+    let previous_hook = TEST_RACE_HOOK.with(|hook| hook.replace(context.race_hook));
+    assert!(previous_hook.is_none(), "recall-cache worker hook already installed");
+    InstalledRecallCacheTestContext {
+        previous_enabled,
+        previous_hook,
+    }
+}
+
+#[cfg(test)]
+impl Drop for InstalledRecallCacheTestContext {
+    fn drop(&mut self) {
+        TEST_RECALL_CACHE_ENABLED.with(|enabled| enabled.set(self.previous_enabled));
+        TEST_RACE_HOOK.with(|hook| {
+            hook.replace(self.previous_hook.take());
+        });
     }
 }
 
