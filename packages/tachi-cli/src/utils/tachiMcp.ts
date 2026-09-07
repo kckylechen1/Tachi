@@ -81,8 +81,10 @@ export async function callTachiTool(
   } finally {
     try {
       await cleanup(transport, client);
-    } catch (cleanupError) {
-      if (primaryError === undefined) throw cleanupError;
+    } catch {
+      if (primaryError === undefined) {
+        console.warn('MCP session cleanup failed; completed tool result retained.');
+      }
     }
   }
 }

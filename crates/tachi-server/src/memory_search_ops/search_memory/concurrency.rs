@@ -102,6 +102,9 @@ mod tests {
                     Arc::new(Semaphore::new(1)),
                     move || async move {
                         release_rx.recv().expect("release");
+                        // The blocking worker must also drive an inner async
+                        // wait while the current-thread runtime remains alive.
+                        tokio::time::sleep(Duration::from_millis(10)).await;
                     },
                 ));
                 tokio::time::timeout(Duration::from_millis(100), async {
@@ -134,12 +137,18 @@ mod tests {
                 }
 
                 let waiting_admitted = admitted.clone();
-                let waiting = tokio::spawn(run_bounded_recall_with(semaphore.clone(), move || {
+                let mut waiting = Box::pin(run_bounded_recall_with(semaphore.clone(), move || {
                     waiting_admitted.fetch_add(1, Ordering::SeqCst);
                     async {}
                 }));
-                tokio::task::yield_now().await;
-                waiting.abort();
+                std::future::poll_fn(|cx| {
+                    assert!(waiting.as_mut().poll(cx).is_pending());
+                    std::task::Poll::Ready(())
+                })
+                .await;
+                // Polling above proves admission was actually queued; dropping
+                // that future now cancels it before any worker can be spawned.
+                drop(waiting);
                 first.abort();
                 assert_eq!(semaphore.available_permits(), 0);
                 assert_eq!(admitted.load(Ordering::SeqCst), 1);

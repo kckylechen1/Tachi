@@ -330,6 +330,9 @@ jobs:
       - name: Test nextest census contracts
         run: python3 -m unittest scripts.test_nextest_census scripts.test_nextest_known_reds scripts.test_nextest_slow_diff
 
+      - name: Test Rust setup source contracts
+        run: python3 -m unittest discover -s .github/actions/setup-rust -v
+
       - name: Run clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 

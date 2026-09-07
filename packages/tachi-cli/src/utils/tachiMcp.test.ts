@@ -14,6 +14,8 @@ interface SeenRequest {
 
 const seen: SeenRequest[] = [];
 let mode: 'normal' | 'protocol-error' | 'tool-error' | 'http-error' | 'malformed' = 'normal';
+let termination: 'normal' | 'error' | 'hang' = 'normal';
+let hangInitialize = false;
 let port = 0;
 let home = '';
 
@@ -43,9 +45,12 @@ function toolPayload(name: string): unknown {
 }
 
 async function handler(request: IncomingMessage, response: ServerResponse) {
+  assert.equal(request.url, '/mcp');
   if (mode === 'http-error') return sendJson(response, 503, { error: 'offline' });
   if (request.method === 'DELETE') {
     seen.push({ method: 'DELETE', session: request.headers['mcp-session-id'] as string | undefined });
+    if (termination === 'hang') return;
+    if (termination === 'error') return sendJson(response, 500, { error: 'cleanup failed' });
     return sendJson(response, 200);
   }
   if (request.method === 'GET') return sendJson(response, 405);
@@ -58,6 +63,7 @@ async function handler(request: IncomingMessage, response: ServerResponse) {
   seen.push({ method, session, message });
 
   if (method === 'initialize') {
+    if (hangInitialize) return;
     return sendJson(response, 200, {
       jsonrpc: '2.0', id: message.id,
       result: { protocolVersion: '2025-06-18', capabilities: {}, serverInfo: { name: 'fixture', version: '1' } },
@@ -122,6 +128,33 @@ test('protocol, tool, HTTP, and malformed response failures remain useful', asyn
   mode = 'http-error';
   await assert.rejects(callTachiTool(port, 'bad', {}, { endpoint, timeoutMs: 500 }), /503|HTTP|initialize/i);
   mode = 'normal';
+});
+
+test('cleanup failure preserves successful mutations and primary tool errors', async () => {
+  termination = 'error';
+  try {
+    assert.deepEqual(await callTachiTool(port, 'hub_set_enabled', { id: 'skill-1', enabled: true }),
+      { id: 'skill-1', enabled: true });
+    mode = 'tool-error';
+    await assert.rejects(callTachiTool(port, 'hub_set_enabled', {}), /permission denied: admin only/);
+  } finally {
+    termination = 'normal';
+    mode = 'normal';
+  }
+});
+
+test('hung initialization and termination have bounded waits', async () => {
+  hangInitialize = true;
+  try {
+    await assert.rejects(callTachiTool(port, 'unused', {}, { timeoutMs: 50 }), /initialization.*timed out/);
+    hangInitialize = false;
+    termination = 'hang';
+    assert.deepEqual(await callTachiTool(port, 'sse_tool', {}), []);
+  } finally {
+    hangInitialize = false;
+    termination = 'normal';
+    server.closeAllConnections();
+  }
 });
 
 test('CLI utilities use current tool names, arguments, and result shapes', async () => {
