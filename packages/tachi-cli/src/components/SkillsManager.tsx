@@ -25,7 +25,7 @@ export function SkillsManager({ onBack }: SkillsManagerProps) {
       const skillList = await getSkills();
       setSkills(skillList);
     } catch (err) {
-      setError('Failed to load skills. Is the daemon running?');
+      setError(err instanceof Error ? err.message : 'Failed to load skills');
     }
     setLoading(false);
   };

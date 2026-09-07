@@ -446,6 +446,11 @@ jobs:
         working-directory: ${{ matrix.package }}
         run: npm run build
 
+      - name: Run CLI tests
+        if: matrix.package == 'packages/tachi-cli'
+        working-directory: packages/tachi-cli
+        run: npm test
+
       - name: Run OpenClaw runtime compatibility smoke
         if: matrix.package == 'integrations/openclaw'
         working-directory: integrations/openclaw
