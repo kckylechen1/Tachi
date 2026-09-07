@@ -117,7 +117,10 @@ pub(super) fn install_recall_cache_test_context(
     let previous_enabled =
         TEST_RECALL_CACHE_ENABLED.with(|enabled| enabled.replace(context.enabled));
     let previous_hook = TEST_RACE_HOOK.with(|hook| hook.replace(context.race_hook));
-    assert!(previous_hook.is_none(), "recall-cache worker hook already installed");
+    assert!(
+        previous_hook.is_none(),
+        "recall-cache worker hook already installed"
+    );
     InstalledRecallCacheTestContext {
         previous_enabled,
         previous_hook,

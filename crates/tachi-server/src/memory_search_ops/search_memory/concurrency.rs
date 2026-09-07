@@ -29,10 +29,7 @@ where
     run_bounded_recall_with(recall_blocking_seats().clone(), work).await
 }
 
-async fn run_bounded_recall_with<T, F, Fut>(
-    semaphore: Arc<Semaphore>,
-    work: F,
-) -> Result<T, String>
+async fn run_bounded_recall_with<T, F, Fut>(semaphore: Arc<Semaphore>, work: F) -> Result<T, String>
 where
     T: Send + 'static,
     F: FnOnce() -> Fut + Send + 'static,
