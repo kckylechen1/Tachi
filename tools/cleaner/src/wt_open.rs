@@ -505,7 +505,6 @@ pub fn rollback_private_cargo_target_config_with_authority(
     }
 }
 
-#[cfg(unix)]
 fn canonical_non_symlink_directory(path: &Path) -> Result<PathBuf, String> {
     let metadata = std::fs::symlink_metadata(path)
         .map_err(|error| format!("inspect directory {}: {error}", path.display()))?;

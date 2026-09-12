@@ -401,6 +401,24 @@ jobs:
           physical_db_identity::tests::canonical_fallback_inventory_never_mints_mutation_authority
           -- --exact
 
+      - name: Verify stable Windows identity refusals
+        run: |
+          cargo test -p memcore --locked --lib windows_canonical_identity_cannot_verify_an_opened_handle
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test -p tachi-clean --locked --lib windows_directory_identity_cannot_authorize_registration
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test -p tachi-server --locked --lib retained_file_identity_refuses_unproven_windows_object
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test -p tachi-server --locked --lib windows_directory_metadata_cannot_authorize_object_identity
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test -p tachi-server --locked --lib windows_dispatch_refuses_active_lease_without_object_identity
+
+      - name: Verify unsupported server operations refuse without mutation
+        run: cargo test -p tachi-server --locked --lib platform_refusal_
+
+      - name: Verify unproven fixture owners are retained
+        run: cargo test -p memcore --locked --lib platform_refusal_
+
   node:
     name: Node packages
     # Trusted acceptance lane (#1865): fork guard identical to

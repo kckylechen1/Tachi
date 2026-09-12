@@ -86,23 +86,16 @@ fn has_stable_unix_file_identity(device: u64, inode: u64) -> bool {
 }
 
 fn physical_db_identity_at_path(path: &Path) -> Option<String> {
-    let metadata = std::fs::metadata(path).ok()?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
+        let metadata = std::fs::metadata(path).ok()?;
         if has_stable_unix_file_identity(metadata.dev(), metadata.ino()) {
             return Some(format!("unix:{}:{}", metadata.dev(), metadata.ino()));
         }
     }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt;
-        if let (Some(volume), Some(index)) =
-            (metadata.volume_serial_number(), metadata.file_index())
-        {
-            return Some(format!("windows:{volume}:{index}"));
-        }
-    }
+    // Stable Rust does not expose Windows handle identity through MetadataExt.
+    // Canonical paths support inventory only; detached-handle guards reject them.
     Some(format!(
         "path:{}",
         std::fs::canonicalize(path).ok()?.display()
@@ -1440,6 +1433,20 @@ impl MemoryStore {
 #[cfg(test)]
 mod exact_dedupe_open_tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_canonical_identity_cannot_verify_an_opened_handle() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("memory.db");
+        let store = MemoryStore::open(path.to_str().unwrap()).unwrap();
+        let expected = format!("path:{}", std::fs::canonicalize(&path).unwrap().display());
+        assert_eq!(store.opened_physical_db_identity(), Some(expected.as_str()));
+        assert!(!physical_db_identity_is_stable(&expected));
+        let error = store.verify_opened_physical_db_identity(&path).unwrap_err();
+        assert!(error.to_string().contains("no stable physical identity"));
+        assert!(physical_db_identity_at_path(&dir.path().join("missing.db")).is_none());
+    }
 
     #[cfg(unix)]
     #[test]
