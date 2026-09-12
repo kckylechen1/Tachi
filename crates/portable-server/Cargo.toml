@@ -37,7 +37,7 @@ path = "src/main.rs"
 
 [dependencies]
 portable-kernel = { path = "../portable-kernel" }
-rmcp = { version = "1.2", features = ["server", "transport-io", "macros", "schemars", "transport-streamable-http-server"] }
+rmcp = { version = "3.3.0", features = ["server", "transport-io", "macros", "schemars", "transport-streamable-http-server"] }
 tokio = { version = "1", features = ["io-std", "macros", "net", "rt", "rt-multi-thread", "signal", "sync"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -51,7 +51,7 @@ axum = "0.7"
 # but has no reason to ship in the binary — Cargo only applies these extra
 # features when building this crate's own tests, not its release artifact.
 [dev-dependencies]
-rmcp = { version = "1.2", features = ["client", "transport-streamable-http-client-reqwest"] }
+rmcp = { version = "3.3.0", features = ["client", "transport-streamable-http-client-reqwest"] }
 reqwest = { package = "reqwest", version = "0.13", default-features = false, features = ["charset", "json", "rustls-no-provider", "system-proxy"] }
 # `reqwest`'s `rustls-no-provider` feature (above) ships rustls with no
 # default crypto backend installed; the plain `reqwest::get` in

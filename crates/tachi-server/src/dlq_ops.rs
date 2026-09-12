@@ -107,7 +107,7 @@ pub(crate) async fn handle_dlq_retry(
                 .content
                 .first()
                 .and_then(|c| {
-                    if let rmcp::model::RawContent::Text(t) = &c.raw {
+                    if let rmcp::model::ContentBlock::Text(t) = c {
                         Some(t.text.clone())
                     } else {
                         None

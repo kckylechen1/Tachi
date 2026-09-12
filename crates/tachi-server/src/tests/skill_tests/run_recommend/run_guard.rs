@@ -41,8 +41,8 @@ fn first_text_payload(result: &rmcp::model::CallToolResult) -> Value {
     let text = result
         .content
         .iter()
-        .find_map(|content| match &content.raw {
-            rmcp::model::RawContent::Text(text) => Some(text.text.as_str()),
+        .find_map(|content| match content {
+            rmcp::model::ContentBlock::Text(text) => Some(text.text.as_str()),
             _ => None,
         })
         .expect("text tool result");

@@ -30,8 +30,25 @@ pub(crate) fn current_exposed_tool_patterns() -> Option<Vec<String>> {
         .clone()
 }
 
+/// RMCP routes complete inline metadata statelessly even with an old version.
+/// Require initialize-time identity/project admission before tool access.
+pub(crate) fn require_legacy_session(
+    meta: &rmcp::model::RequestMetaObject,
+) -> Result<(), rmcp::ErrorData> {
+    if meta
+        .missing_required_keys(&rmcp::model::ProtocolVersion::V_2026_07_28)
+        .is_empty()
+    {
+        return Err(rmcp::ErrorData::invalid_request(
+            "legacy MCP initialize session required; inline requests are disabled",
+            None,
+        ));
+    }
+    Ok(())
+}
+
 fn tool_not_found_result(tool_name: &str) -> rmcp::model::CallToolResult {
-    rmcp::model::CallToolResult::error(vec![rmcp::model::Content::text(format!(
+    rmcp::model::CallToolResult::error(vec![rmcp::model::ContentBlock::text(format!(
         "tool not found: '{tool_name}'. Call tachi_tools() or tools/list and use an exact visible tool name for the current TACHI_PROFILE."
     ))])
 }
@@ -42,7 +59,7 @@ fn tool_action_denied_result(
     action: &str,
     profile_label: &str,
 ) -> rmcp::model::CallToolResult {
-    rmcp::model::CallToolResult::error(vec![rmcp::model::Content::text(format!(
+    rmcp::model::CallToolResult::error(vec![rmcp::model::ContentBlock::text(format!(
         "action '{action}' on tool '{tool_name}' is not allowed for ToolProfile '{profile_label}'. Use a permitted action for this profile, or call tachi_tools() to inspect the active surface."
     ))])
 }
@@ -777,7 +794,14 @@ fn http_session_identity(
     request: &InitializeRequestParams,
     context: &RequestContext<RoleServer>,
 ) -> HttpSessionIdentity {
-    let mut identity = identity_from_initialize_meta(request.meta.as_ref());
+    // RMCP moves wire `_meta` into RequestContext before dispatch. Typed params
+    // remain a fallback for direct in-process handler calls.
+    let meta = if context.meta.is_empty() {
+        request.meta.as_ref()
+    } else {
+        Some(&context.meta)
+    };
+    let mut identity = identity_from_initialize_meta(meta);
     if let Some(parts) = context.extensions.get::<axum::http::request::Parts>() {
         identity.profile =
             header_string(parts, crate::session_identity::HEADER_PROFILE).or(identity.profile);
@@ -858,7 +882,9 @@ fn assign_explicit_agent_identity(
     }
 }
 
-fn identity_from_initialize_meta(meta: Option<&rmcp::model::Meta>) -> HttpSessionIdentity {
+fn identity_from_initialize_meta(
+    meta: Option<&rmcp::model::RequestMetaObject>,
+) -> HttpSessionIdentity {
     let mut identity = HttpSessionIdentity::default();
     let Some(meta) = meta else {
         return identity;
@@ -910,7 +936,7 @@ fn identity_from_initialize_meta(meta: Option<&rmcp::model::Meta>) -> HttpSessio
     identity
 }
 
-fn meta_string(meta: &rmcp::model::Meta, key: &str) -> Option<String> {
+fn meta_string(meta: &rmcp::model::RequestMetaObject, key: &str) -> Option<String> {
     meta.0
         .get(key)
         .and_then(|value| value.as_str())
@@ -922,7 +948,10 @@ fn meta_string(meta: &rmcp::model::Meta, key: &str) -> Option<String> {
 /// absent; `Err` means it was present but unusable (wrong JSON type, or
 /// blank after trimming) — the caller must not collapse that into `Ok(None)`
 /// the way an absent key would be.
-fn meta_string_result(meta: &rmcp::model::Meta, key: &str) -> Result<Option<String>, String> {
+fn meta_string_result(
+    meta: &rmcp::model::RequestMetaObject,
+    key: &str,
+) -> Result<Option<String>, String> {
     match meta.0.get(key) {
         None => Ok(None),
         Some(value) => {
@@ -986,6 +1015,25 @@ fn parse_http_tool_profile(raw: &str) -> Result<tachi_hub::ToolProfile, rmcp::Er
 }
 
 impl ServerHandler for MemoryServer {
+    fn supported_protocol_versions(
+        &self,
+    ) -> std::borrow::Cow<'static, [rmcp::model::ProtocolVersion]> {
+        // Identity and project binding still use the legacy initialize lifecycle.
+        // Modern per-request admission belongs to the separate MCP-2026 adapter.
+        std::borrow::Cow::Borrowed(rmcp::model::ProtocolVersion::known_up_to(
+            &rmcp::model::ProtocolVersion::V_2025_11_25,
+        ))
+    }
+
+    async fn discover(
+        &self,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<rmcp::model::DiscoverResult, rmcp::ErrorData> {
+        Err(rmcp::ErrorData::method_not_found::<
+            rmcp::model::DiscoverRequestMethod,
+        >())
+    }
+
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_instructions(crate::server_instructions::mcp_server_instructions())
@@ -997,19 +1045,21 @@ impl ServerHandler for MemoryServer {
         context: RequestContext<RoleServer>,
     ) -> impl Future<Output = Result<InitializeResult, rmcp::ErrorData>> + Send + '_ {
         async move {
+            let info = self.negotiate_initialize(&request)?;
             self.apply_http_session_identity(&request, &context)?;
             context.peer.set_peer_info(request);
-            Ok(self.get_info())
+            Ok(info)
         }
     }
 
     fn list_tools(
         &self,
         _: Option<rmcp::model::PaginatedRequestParams>,
-        _: rmcp::service::RequestContext<rmcp::service::RoleServer>,
+        context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
     ) -> impl Future<Output = Result<rmcp::model::ListToolsResult, rmcp::ErrorData>> + Send + '_
     {
         async move {
+            require_legacy_session(&context.meta)?;
             let all_native = self.tool_router.list_all();
             let mut tools = prepare_native_tool_definitions(all_native);
 
@@ -1078,9 +1128,10 @@ impl ServerHandler for MemoryServer {
         &self,
         mut params: rmcp::model::CallToolRequestParams,
         context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
-    ) -> impl Future<Output = Result<rmcp::model::CallToolResult, rmcp::ErrorData>> + Send + '_
+    ) -> impl Future<Output = Result<rmcp::model::CallToolResponse, rmcp::ErrorData>> + Send + '_
     {
         async move {
+            require_legacy_session(&context.meta)?;
             // Idle reaper: every tool call (including ones a stdio child
             // forwards to this daemon) counts as activity, so an idle daemon is
             // genuinely unused and safe to self-terminate.
@@ -1093,7 +1144,7 @@ impl ServerHandler for MemoryServer {
             let visible = tachi_hub::tool_visible(name, active_profile, env_patterns.as_deref());
 
             if !visible {
-                return Ok(tool_not_found_result(name));
+                return Ok(tool_not_found_result(name).into());
             }
 
             // F3 (#495/#913): action-level ToolProfile gate for facade tools.
@@ -1110,11 +1161,7 @@ impl ServerHandler for MemoryServer {
                     .map(|p| p.as_str())
                     .unwrap_or_else(|| "standard".to_string());
                 let action_label = action_arg.as_deref().unwrap_or("");
-                return Ok(tool_action_denied_result(
-                    name,
-                    action_label,
-                    &profile_label,
-                ));
+                return Ok(tool_action_denied_result(name, action_label, &profile_label).into());
             }
 
             let bound_project = self.session_project();
@@ -1197,9 +1244,9 @@ impl ServerHandler for MemoryServer {
                     self.cache_hits
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     if let Some(warn) = stuck_warning.clone() {
-                        hit.content.push(rmcp::model::Content::text(warn));
+                        hit.content.push(rmcp::model::ContentBlock::text(warn));
                     }
-                    return Ok(hit);
+                    return Ok(hit.into());
                 }
                 self.cache_misses
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1218,7 +1265,14 @@ impl ServerHandler for MemoryServer {
                 if self.tool_router.has_route(name) {
                     let context =
                         rmcp::handler::server::tool::ToolCallContext::new(self, params, context);
-                    self.tool_router.call(context).await
+                    match self.tool_router.call(context).await {
+                        Ok(rmcp::model::CallToolResponse::Complete(result)) => Ok(result),
+                        Ok(_) => Err(rmcp::ErrorData::internal_error(
+                            "Native tools require a complete result in the legacy protocol profile",
+                            None,
+                        )),
+                        Err(error) => Err(error),
+                    }
                 }
                 // 2. Skill tools (tachi_skill_*)
                 else if lock_or_recover(&self.tool_discovery.skill_tools, "skill_tools")
@@ -1347,13 +1401,15 @@ impl ServerHandler for MemoryServer {
             // their own dispatch through call_tool.
             let result = match (result, stuck_warning) {
                 (Ok(mut tool_result), Some(warn)) => {
-                    tool_result.content.push(rmcp::model::Content::text(warn));
+                    tool_result
+                        .content
+                        .push(rmcp::model::ContentBlock::text(warn));
                     Ok(tool_result)
                 }
                 (other, _) => other,
             };
 
-            result
+            result.map(Into::into)
         }
     }
 }
@@ -1897,7 +1953,8 @@ mod tests {
 
     #[test]
     fn tool_error_results_are_not_cacheable() {
-        let error = rmcp::model::CallToolResult::error(vec![rmcp::model::Content::text("boom")]);
+        let error =
+            rmcp::model::CallToolResult::error(vec![rmcp::model::ContentBlock::text("boom")]);
         assert!(!tool_result_can_be_cached(&error));
 
         let ok: rmcp::model::CallToolResult = serde_json::from_value(json!({
@@ -1923,7 +1980,7 @@ mod tests {
             crate::session_identity::META_PROJECT.to_string(),
             json!("Sigil-meta"),
         );
-        let meta = rmcp::model::Meta(map);
+        let meta = rmcp::model::RequestMetaObject::from(map);
         let identity = identity_from_initialize_meta(Some(&meta));
         assert_eq!(identity.profile.as_deref(), Some("delegate"));
         assert_eq!(identity.client.as_deref(), Some("meta-client"));
@@ -1935,7 +1992,7 @@ mod tests {
         let mut map = serde_json::Map::new();
         map.insert("tachi.profile".to_string(), json!("observe"));
         map.insert("tachi.project".to_string(), json!("wiki"));
-        let meta = rmcp::model::Meta(map);
+        let meta = rmcp::model::RequestMetaObject::from(map);
         let identity = identity_from_initialize_meta(Some(&meta));
         assert_eq!(identity.profile.as_deref(), Some("observe"));
         assert_eq!(identity.project.as_deref(), Some("wiki"));
@@ -1963,7 +2020,8 @@ mod tests {
                 crate::session_identity::META_AGENT_IDENTITY.to_string(),
                 value,
             );
-            let identity = identity_from_initialize_meta(Some(&rmcp::model::Meta(map)));
+            let identity =
+                identity_from_initialize_meta(Some(&rmcp::model::RequestMetaObject::from(map)));
             assert!(
                 identity.agent_identity_id.is_none(),
                 "a present unusable identity must not bind"
@@ -1980,7 +2038,8 @@ mod tests {
         for value in [json!("   "), json!(12345)] {
             let mut map = serde_json::Map::new();
             map.insert(crate::session_identity::META_PROJECT.to_string(), value);
-            let identity = identity_from_initialize_meta(Some(&rmcp::model::Meta(map)));
+            let identity =
+                identity_from_initialize_meta(Some(&rmcp::model::RequestMetaObject::from(map)));
             assert!(identity.project.is_none());
             assert!(
                 identity.project_error.is_some(),
@@ -1998,7 +2057,7 @@ mod tests {
             crate::session_identity::META_WORKSPACE_ROOT.to_string(),
             json!("/home/agent/repos/sigil"),
         );
-        let meta = rmcp::model::Meta(map);
+        let meta = rmcp::model::RequestMetaObject::from(map);
         let identity = identity_from_initialize_meta(Some(&meta));
         assert_eq!(
             identity.workspace_root.as_deref(),
@@ -2013,7 +2072,7 @@ mod tests {
     fn initialize_meta_accepts_dotted_workspace_root_alias() {
         let mut map = serde_json::Map::new();
         map.insert("tachi.workspaceRoot".to_string(), json!("/repo/root"));
-        let meta = rmcp::model::Meta(map);
+        let meta = rmcp::model::RequestMetaObject::from(map);
         let identity = identity_from_initialize_meta(Some(&meta));
         assert_eq!(identity.workspace_root.as_deref(), Some("/repo/root"));
     }
@@ -2028,7 +2087,7 @@ mod tests {
             crate::session_identity::META_WORKSPACE_ROOT.to_string(),
             json!("   "),
         );
-        let meta = rmcp::model::Meta(map);
+        let meta = rmcp::model::RequestMetaObject::from(map);
         let identity = identity_from_initialize_meta(Some(&meta));
         assert!(
             identity.workspace_root.is_none(),
@@ -2049,7 +2108,7 @@ mod tests {
             crate::session_identity::META_WORKSPACE_ROOT.to_string(),
             json!(12345),
         );
-        let meta = rmcp::model::Meta(map);
+        let meta = rmcp::model::RequestMetaObject::from(map);
         let identity = identity_from_initialize_meta(Some(&meta));
         assert!(identity.workspace_root.is_none());
         assert!(
@@ -2070,7 +2129,7 @@ mod tests {
             json!(""),
         );
         map.insert("tachi.workspaceRoot".to_string(), json!("/repo/root"));
-        let meta = rmcp::model::Meta(map);
+        let meta = rmcp::model::RequestMetaObject::from(map);
         let identity = identity_from_initialize_meta(Some(&meta));
         assert!(
             identity.workspace_root.is_none(),

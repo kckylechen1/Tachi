@@ -1,3 +1,5 @@
+mod rmcp_compat;
+
 use super::*;
 use crate::test_support::EnvRestore;
 use tokio_util::sync::CancellationToken;
@@ -56,7 +58,7 @@ async fn spawn_test_http_daemon(
     let ct_shutdown = ct.clone();
 
     let mut http_config = StreamableHttpServerConfig::default();
-    http_config.stateful_mode = true;
+    http_config.legacy_session_mode = true;
     http_config.cancellation_token = ct.child_token();
 
     let service = StreamableHttpService::new(
@@ -199,8 +201,8 @@ fn first_text(result: &rmcp::model::CallToolResult) -> String {
     result
         .content
         .iter()
-        .find_map(|content| match &content.raw {
-            rmcp::model::RawContent::Text(text) => Some(text.text.clone()),
+        .find_map(|content| match content {
+            rmcp::model::ContentBlock::Text(text) => Some(text.text.clone()),
             _ => None,
         })
         .expect("text tool result")
@@ -2410,7 +2412,9 @@ fn http_direct_connect_bound_session_rejects_cross_project_write() {
     rt.block_on(daemon_task).expect("daemon task");
 }
 
-fn initialize_request(meta: Option<rmcp::model::Meta>) -> rmcp::model::InitializeRequestParams {
+fn initialize_request(
+    meta: Option<rmcp::model::RequestMetaObject>,
+) -> rmcp::model::InitializeRequestParams {
     let mut request = rmcp::model::InitializeRequestParams::new(
         rmcp::model::ClientCapabilities::default(),
         rmcp::model::Implementation::new("1761-test", "0"),
@@ -2445,7 +2449,9 @@ fn capture_initialize_identity_meta_wins_blank_omits_absent_uses_env() {
         crate::session_identity::META_AGENT_IDENTITY.to_string(),
         serde_json::json!("agent.meta"),
     );
-    proxy.capture_initialize_identity(&initialize_request(Some(rmcp::model::Meta(meta_wins))));
+    proxy.capture_initialize_identity(&initialize_request(Some(
+        rmcp::model::RequestMetaObject::from(meta_wins),
+    )));
     assert_eq!(
         proxy.forwarded_agent_identity(),
         crate::cli_client::ProxyIdentityForward::Header("agent.meta".to_string()),
@@ -2457,7 +2463,9 @@ fn capture_initialize_identity_meta_wins_blank_omits_absent_uses_env() {
         crate::session_identity::META_AGENT_IDENTITY.to_string(),
         serde_json::json!("   "),
     );
-    proxy.capture_initialize_identity(&initialize_request(Some(rmcp::model::Meta(blank))));
+    proxy.capture_initialize_identity(&initialize_request(Some(
+        rmcp::model::RequestMetaObject::from(blank),
+    )));
     assert_eq!(
         proxy.forwarded_agent_identity(),
         crate::cli_client::ProxyIdentityForward::Omit,
