@@ -289,7 +289,7 @@ async fn run_private_case(case: &str) {
         "branch" => Some("fixture/other".to_string()),
         _ => Some(branch.to_string()),
     };
-    let flow = "flow-private-reclamation";
+    let flow = "flow_private_reclamation";
     write_verification(&root.join("runs"), flow, "passed", &pr.head_sha);
     seed_full_passed_set(&root.join("home/.tachi"), flow, &pr.head_sha, None);
     let client = MockGhClient::new()
