@@ -715,7 +715,7 @@ async fn readable_missing_alias_revokes_but_unavailable_alias_retains() {
             "default",
             "-w",
         ];
-        for request in args.chunks_exact(6) {
+        for request in args.as_chunks::<6>().0 {
             assert_eq!(
                 request,
                 expected.as_slice(),
