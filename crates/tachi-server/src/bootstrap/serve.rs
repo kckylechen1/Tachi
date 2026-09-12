@@ -263,6 +263,34 @@ fn workspace_home_selection_notice(
     })
 }
 
+fn initialize_startup_observability(
+    cli: &Cli,
+    command: &Commands,
+    app_home: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Unix retains early tracing; other platforms first refuse unsupported
+    // startup modes using the fully loaded configuration.
+    init_tracing(app_home);
+    tracing::info!(
+        version = env!("CARGO_PKG_VERSION"),
+        app_home = %app_home.display(),
+        "tachi tachi-server starting"
+    );
+    if no_project_serve_detaches_launch_cwd(command, cli.no_project_db) {
+        let runtime_cwd = detach_launch_cwd_to_runtime(app_home).map_err(|error| {
+            format!(
+                "failed to detach --no-project-db serve cwd to {}: {error}",
+                app_home.join("runtime").display()
+            )
+        })?;
+        tracing::info!(
+            runtime_cwd = %runtime_cwd.display(),
+            "--no-project-db serve detached launch cwd to runtime"
+        );
+    }
+    Ok(())
+}
+
 fn initialize_startup_context(cli: &Cli) -> Result<StartupContext, Box<dyn std::error::Error>> {
     // Load config from dotenv files (same as before)
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
@@ -274,27 +302,9 @@ fn initialize_startup_context(cli: &Cli) -> Result<StartupContext, Box<dyn std::
     }
     let app_home = app_home_resolution.path;
 
-    // PR7 — install the tracing sink before doing anything else so early errors
-    // (config load, manifest resolution, daemon bind) are captured.
-    init_tracing(&app_home);
-    tracing::info!(
-        version = env!("CARGO_PKG_VERSION"),
-        app_home = %app_home.display(),
-        "tachi tachi-server starting"
-    );
     let command = cli.command.clone().unwrap_or(Commands::Serve);
-    if no_project_serve_detaches_launch_cwd(&command, cli.no_project_db) {
-        let runtime_cwd = detach_launch_cwd_to_runtime(&app_home).map_err(|error| {
-            format!(
-                "failed to detach --no-project-db serve cwd to {}: {error}",
-                app_home.join("runtime").display()
-            )
-        })?;
-        tracing::info!(
-            runtime_cwd = %runtime_cwd.display(),
-            "--no-project-db serve detached launch cwd to runtime"
-        );
-    }
+    #[cfg(unix)]
+    initialize_startup_observability(cli, &command, &app_home)?;
     let load_project_local_env = should_load_project_local_env(&command, cli.no_project_db);
     let defer_manifest_startup =
         should_defer_manifest_startup(&command, cli.daemon, cli.no_project_db);
@@ -310,6 +320,17 @@ fn initialize_startup_context(cli: &Cli) -> Result<StartupContext, Box<dyn std::
         load_project_local_env,
         git_root.as_deref(),
     );
+
+    #[cfg(not(unix))]
+    {
+        // config.env can override the inherited proxy setting. Evaluate the
+        // canonical environment after that load, before tracing or cwd setup
+        // can create files. Later transport setup observes this same config.
+        if matches!(command, Commands::Serve) && (cli.daemon || !stdio::stdio_proxy_disabled()) {
+            return Err(crate::daemon_lock::unsupported_daemon_lock_error().into());
+        }
+        initialize_startup_observability(cli, &command, &app_home)?;
+    }
 
     // #1119: resolve the schema-migration authority ONCE, from the CLI flag,
     // into a typed value. Then defensively remove the legacy opt-in env var
@@ -1107,12 +1128,7 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
         ) {
             crate::wiki_ops::ensure_wiki_export_supported()?;
         }
-        // Default stdio also requires a local daemon. Refuse that mode before
-        // startup hygiene or the implicit daemon spawn; the explicit debug
-        // opt-out retains its existing direct-stdio behavior.
-        if matches!(cli.command.as_ref(), None | Some(Commands::Serve))
-            && (cli.daemon || !stdio::stdio_proxy_disabled())
-        {
+        if cli.daemon && matches!(cli.command.as_ref(), None | Some(Commands::Serve)) {
             return Err(crate::daemon_lock::unsupported_daemon_lock_error().into());
         }
     }
@@ -1244,6 +1260,7 @@ mod tests {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let _proxy = EnvRestore::remove("TACHI_DISABLE_STDIO_PROXY");
+        let _host_profile = EnvRestore::remove(crate::host_profile::HOST_PROFILE_ENV);
         for explicit_serve in [false, true] {
             for auto_disabled in [false, true] {
                 let _auto = EnvRestore::set(
@@ -1301,6 +1318,63 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn platform_refusal_stdio_uses_loaded_proxy_configuration() {
+        let _env_lock = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _host_profile = EnvRestore::remove(crate::host_profile::HOST_PROFILE_ENV);
+        let _schema = EnvRestore::remove(memcore::db::SCHEMA_MIGRATION_LEGACY_ENV);
+        for configured_disabled in [false, true] {
+            let root = tempfile::tempdir().expect("temporary root");
+            let _cwd = crate::test_support::CwdRestore::set(root.path());
+            let home = root.path().join("home");
+            std::fs::create_dir(&home).expect("home directory");
+            let _home = EnvRestore::set_path("TACHI_HOME", &home);
+            // Each case reverses the inherited decision: config-only debug
+            // opt-out is allowed, while config re-enabling proxy must refuse.
+            let _proxy = if configured_disabled {
+                EnvRestore::remove("TACHI_DISABLE_STDIO_PROXY")
+            } else {
+                EnvRestore::set("TACHI_DISABLE_STDIO_PROXY", "1")
+            };
+            let config = if configured_disabled {
+                "TACHI_DISABLE_STDIO_PROXY=1\n"
+            } else {
+                "TACHI_DISABLE_STDIO_PROXY=0\n"
+            };
+            std::fs::write(home.join("config.env"), config).expect("config fixture");
+            let db = root.path().join("global/memory.db");
+            let mut cli = startup_test_cli();
+            cli.global_db = Some(db.clone());
+            if configured_disabled {
+                // Exercise the production config/preflight stage without
+                // entering the intentionally long-lived direct stdio server.
+                let ctx = initialize_startup_context(&cli)
+                    .expect("configured debug direct stdio remains supported");
+                assert_eq!(ctx.app_home, home);
+                assert!(stdio::stdio_proxy_disabled());
+                assert!(!db.parent().expect("DB parent").exists());
+            } else {
+                let error = tokio_main(cli).expect_err("loaded proxy mode must refuse");
+                assert_eq!(
+                    error
+                        .downcast_ref::<std::io::Error>()
+                        .map(std::io::Error::kind),
+                    Some(std::io::ErrorKind::Unsupported)
+                );
+                assert!(!stdio::stdio_proxy_disabled());
+                assert!(!db.parent().expect("DB parent").exists());
+                assert_eq!(std::fs::read_dir(&home).expect("home entries").count(), 1);
+            }
+            assert_eq!(
+                std::fs::read_to_string(home.join("config.env")).unwrap(),
+                config
+            );
         }
     }
 
