@@ -960,7 +960,10 @@ fn reject_server_root_claim(worktree: &Path) -> Result<(), String> {
 ///
 /// Fail-closed: no active claim, or an active claim without a worktree, is a
 /// typed `Err` — the executor never invents a working directory to run in.
-fn resolve_flow_worktree(server: &MemoryServer, flow_id: &str) -> Result<PathBuf, String> {
+fn resolve_flow_worktree(
+    server: &MemoryServer,
+    flow_id: &str,
+) -> Result<(PathBuf, String), String> {
     let claims = server.with_global_store_read(|store| {
         memcore::list_claims(store.connection(), Some(ClaimState::Active))
             .map_err(|err| err.to_string())
@@ -980,7 +983,12 @@ fn resolve_flow_worktree(server: &MemoryServer, flow_id: &str) -> Result<PathBuf
             format!("verification run requires an active claim with a worktree for flow {flow_id}")
         })?;
     reject_server_root_claim(&worktree)?;
-    Ok(worktree)
+    let expected_head = claim
+        .expected_head
+        .as_deref()
+        .filter(|head| !head.trim().is_empty())
+        .ok_or_else(|| format!("verification_claim_expected_head_missing: flow {flow_id}"))?;
+    Ok((worktree, expected_head.to_string()))
 }
 
 // ─── Entry point ─────────────────────────────────────────────────────────────
@@ -1021,7 +1029,7 @@ async fn run_with_runner<R: CheckRunner>(
     argv: &[&str],
     timeout: Duration,
 ) -> Result<Value, String> {
-    let worktree = resolve_flow_worktree(server, flow_id)?;
+    let (worktree, expected_head) = resolve_flow_worktree(server, flow_id)?;
     let _guard = acquire_flow_run_guard(flow_id)?;
     let tachi_home = server.tachi_home_dir();
 
@@ -1033,6 +1041,14 @@ async fn run_with_runner<R: CheckRunner>(
     // worktree itself is NEVER executed, so its dirtiness is never consulted;
     // the receipt binds `source_head` + copy immutability.
     let source_head = runner.observe_head(&worktree).await?;
+    // This per-run view comes from the same canonical claim as the path.
+    // Refuse drift before copy creation or receipt writes; it is not a durable
+    // invalidation epoch, and heartbeat is not an explicit rebind.
+    if source_head != expected_head {
+        return Err(format!(
+            "verification_claim_head_mismatch: flow {flow_id} expected {expected_head}, observed {source_head}"
+        ));
+    }
     let run_dir = run_dir_for_flow_id(flow_id)?;
     let utc_secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
