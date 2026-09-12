@@ -28,7 +28,10 @@ const WIKI_LOG_ENTRY_MAX_BYTES: usize = 4096;
 pub(crate) const WIKI_INGEST_SOURCE_MAX_BYTES: usize = 2 * 1024 * 1024;
 static WIKI_INGEST_HTTP_CLIENT: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
 
+#[cfg(unix)]
 mod export;
+#[cfg(not(unix))]
+mod export_windows;
 mod handoff_lookup;
 mod ingest;
 mod lint;
@@ -54,8 +57,12 @@ use self::store::{
     zero_store_refusal, StoredWikiEntry,
 };
 
+#[cfg(unix)]
 pub(crate) use self::export::export_wiki_obsidian;
+#[cfg(not(unix))]
+pub(crate) use self::export_windows::export_wiki_obsidian;
 #[cfg(test)]
+#[cfg(unix)]
 pub(crate) use self::export::{export_wiki_obsidian_with_hook, ExportTestHook};
 pub(crate) use self::handoff_lookup::list_handoff_mirrors_for_repo;
 pub(crate) use self::ingest::handle_wiki_ingest;
