@@ -287,12 +287,14 @@ const MIGRATE_APPLY_APPROVED_BY: &str = "cli:migrate --apply";
 /// both carry a live, signalable PID (`Foreign` only differs in whether its
 /// recorded identity matches this binary/global-db exactly) — either way a
 /// real process holds the lock this app home's `serve` daemon holds for its
-/// entire lifetime, so both are treated as "do not migrate out from under
+/// entire lifetime. `Unavailable` means the recorded owner cannot be ruled
+/// out on this platform; it is also treated as "do not migrate out from under
 /// it". `None`/`StalePid` mean no live process is attached to the lock.
 fn a_live_daemon_holds_this_app_home(app_home: &Path, global_db_path: &Path) -> Option<i32> {
     match crate::status_ops::collect_daemon_status(app_home, global_db_path) {
         crate::status_ops::DaemonStatus::Running { pid, .. }
-        | crate::status_ops::DaemonStatus::Foreign { pid, .. } => Some(pid),
+        | crate::status_ops::DaemonStatus::Foreign { pid, .. }
+        | crate::status_ops::DaemonStatus::Unavailable { pid, .. } => Some(pid),
         crate::status_ops::DaemonStatus::StalePid { .. }
         | crate::status_ops::DaemonStatus::None => None,
     }
@@ -340,10 +342,20 @@ fn apply_one(
     // it (the exact #1119 incident). See module doc.
     if let Some(pid) = a_live_daemon_holds_this_app_home(app_home, global_db_path) {
         finding.applied = Some(AppliedOutcome::SkippedLocked);
-        finding.note = format!(
-            "skipped: a live tachi daemon (pid {pid}) holds this app home's daemon lock; \
-             migrating now risks the #1119 race — stop it first (`tachi daemon kill`) and re-run"
-        );
+        #[cfg(unix)]
+        {
+            finding.note = format!(
+                "skipped: a live tachi daemon (pid {pid}) holds this app home's daemon lock; \
+                 migrating now risks the #1119 race — stop it first (`tachi daemon kill`) and re-run"
+            );
+        }
+        #[cfg(not(unix))]
+        {
+            finding.note = format!(
+                "skipped: daemon owner pid {pid} has unavailable liveness; \
+                 safe migration cannot be established on this platform"
+            );
+        }
         return finding;
     }
 
@@ -862,6 +874,30 @@ mod tests {
                  appearing here would mean the guard was bypassed and only the after-the-fact \
                  SQLITE_BUSY catch saved this test"
             );
+        });
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn platform_refusal_apply_preserves_db_for_unobservable_daemon_owner() {
+        crate::test_support::with_tachi_home(|home| {
+            let dir = tempfile::tempdir().expect("tmp");
+            let db_path = make_stamped_older_fixture(dir.path(), "global.db", 2);
+            let before = std::fs::read(&db_path).expect("read fixture before apply");
+            let lock_path = crate::daemon_lock::scoped_daemon_lock_path(home, &db_path);
+            std::fs::write(&lock_path, "2\n").expect("seed unobservable owner receipt");
+
+            let lib = Library {
+                label: "global".to_string(),
+                path: db_path.clone(),
+            };
+            let plan = plan_one(&lib);
+            assert_eq!(plan.status, GapStatus::NeedsMigration);
+            let result = apply_one(&lib, plan, home, &db_path);
+
+            assert_eq!(result.applied, Some(AppliedOutcome::SkippedLocked));
+            assert_eq!(std::fs::read(&db_path).unwrap(), before);
+            assert_eq!(std::fs::read(&lock_path).unwrap(), b"2\n");
         });
     }
 

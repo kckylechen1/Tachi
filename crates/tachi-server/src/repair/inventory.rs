@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use crate::daemon_lock::{legacy_daemon_lock_path, process_alive, read_pid_file};
+use crate::daemon_lock::{legacy_daemon_lock_path, process_liveness, read_pid_file};
 use crate::manifest::{classify_db_schema, DbEntry, DbRole, Manifest, SchemaKind};
 
 /// Stable human-friendly label for a DB entry.
@@ -181,7 +181,10 @@ pub fn daemon_alive(app_home: &Path) -> bool {
 
 fn lock_file_holds_live_pid(lock_path: &Path) -> bool {
     match read_pid_file(lock_path) {
-        Some(pid) => process_alive(pid),
+        // An unavailable probe is conservatively treated as occupied: this
+        // helper gates destructive VACUUM maintenance and must not reclaim a
+        // resource owned by a process we cannot observe.
+        Some(pid) => matches!(process_liveness(pid), Some(true) | None),
         None => false,
     }
 }
