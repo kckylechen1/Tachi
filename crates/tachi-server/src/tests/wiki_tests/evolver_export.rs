@@ -241,11 +241,13 @@ async fn rem_wiki_evolver_writes_pending_drafts_to_wiki_project() {
     let _ = std::fs::remove_dir_all(temp_home);
 }
 
+#[cfg(unix)]
 struct BlockingExportHook {
     acquired: std::sync::Arc<std::sync::Barrier>,
     release: std::sync::Arc<std::sync::Barrier>,
 }
 
+#[cfg(unix)]
 impl crate::wiki_ops::ExportTestHook for BlockingExportHook {
     fn after_lock_acquired(&self) -> Result<(), String> {
         self.acquired.wait();
@@ -254,10 +256,12 @@ impl crate::wiki_ops::ExportTestHook for BlockingExportHook {
     }
 }
 
+#[cfg(unix)]
 struct FailExportInstallHook {
     installed_count: usize,
 }
 
+#[cfg(unix)]
 impl crate::wiki_ops::ExportTestHook for FailExportInstallHook {
     fn before_install(&self, installed: usize, _path: &Path) -> Result<(), String> {
         if installed == self.installed_count {
@@ -274,12 +278,14 @@ impl crate::wiki_ops::ExportTestHook for FailExportInstallHook {
 /// one thing `Drop`-based cleanup cannot model: a SIGKILL'd process runs no
 /// destructor and leaves the staging tree exactly where it stood.
 #[derive(Default)]
+#[cfg(unix)]
 struct TornStopHook {
     stop_after_staging: bool,
     stop_after_backups: Option<usize>,
     stop_after_installs: Option<usize>,
 }
 
+#[cfg(unix)]
 impl TornStopHook {
     fn after_staging() -> Self {
         Self {
@@ -303,6 +309,7 @@ impl TornStopHook {
     }
 }
 
+#[cfg(unix)]
 impl crate::wiki_ops::ExportTestHook for TornStopHook {
     fn after_stage_ready(&self) -> Result<(), String> {
         if self.stop_after_staging {
@@ -333,6 +340,7 @@ impl crate::wiki_ops::ExportTestHook for TornStopHook {
     }
 }
 
+#[cfg(unix)]
 fn crash_fixture_entries() -> Vec<MemoryEntry> {
     ["alpha", "beta"]
         .into_iter()
@@ -347,6 +355,7 @@ fn crash_fixture_entries() -> Vec<MemoryEntry> {
         .collect()
 }
 
+#[cfg(unix)]
 fn rewrite_crash_fixture_body(server: &MemoryServer) {
     server
         .with_named_project_store("wiki", |store| {
@@ -362,6 +371,7 @@ fn rewrite_crash_fixture_body(server: &MemoryServer) {
 
 /// Byte-exact reference: what a clean export of the current source produces in
 /// a directory that never saw a crash.
+#[cfg(unix)]
 fn fresh_export_snapshot(
     server: &MemoryServer,
     label: &str,
@@ -377,6 +387,7 @@ fn fresh_export_snapshot(
 
 /// Staging roots claimed by `out_dir`. Fixture roots are shared between tests,
 /// so residue is matched by claim, never by mere presence.
+#[cfg(unix)]
 fn export_stage_residue(out_dir: &Path) -> Vec<(PathBuf, String)> {
     let parent = out_dir.parent().expect("output parent");
     let marker = out_dir
@@ -414,6 +425,7 @@ fn export_stage_residue(out_dir: &Path) -> Vec<(PathBuf, String)> {
     found
 }
 
+#[cfg(unix)]
 fn export_file_snapshot(root: &Path) -> std::collections::BTreeMap<String, Vec<u8>> {
     fn visit(
         root: &Path,
@@ -446,6 +458,7 @@ fn export_file_snapshot(root: &Path) -> std::collections::BTreeMap<String, Vec<u
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn wiki_export_obsidian_writes_markdown_index_and_wikilinks() {
     let mut entry = make_entry("wiki-export-entry");
     entry.path = "/wiki/engineering/debugging/export".to_string();
@@ -475,6 +488,7 @@ async fn wiki_export_obsidian_writes_markdown_index_and_wikilinks() {
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn wiki_export_obsidian_collision_manifest_and_rerun_are_deterministic() {
     let mut first = make_entry("wiki-export-collision-a");
     first.path = "/wiki/collisions".to_string();
@@ -554,6 +568,7 @@ async fn wiki_export_obsidian_collision_manifest_and_rerun_are_deterministic() {
 }
 
 #[test]
+#[cfg(unix)]
 fn wiki_export_obsidian_preflights_existing_output_before_mutation() {
     let mut entry = make_entry("wiki-export-preflight");
     entry.path = "/wiki/preflight".to_string();
@@ -575,6 +590,7 @@ fn wiki_export_obsidian_preflights_existing_output_before_mutation() {
 }
 
 #[test]
+#[cfg(unix)]
 fn wiki_export_obsidian_refuses_unmanaged_reserved_index() {
     let mut entry = make_entry("wiki-export-reserved-index");
     entry.path = "/wiki/reserved".to_string();
@@ -600,6 +616,7 @@ fn wiki_export_obsidian_refuses_unmanaged_reserved_index() {
 }
 
 #[test]
+#[cfg(unix)]
 fn wiki_export_obsidian_reconciles_stale_prior_manifest_entries() {
     let mut first = make_entry("wiki-export-stale-a");
     first.path = "/wiki/stale".to_string();
@@ -660,6 +677,7 @@ fn wiki_export_obsidian_reconciles_stale_prior_manifest_entries() {
 }
 
 #[test]
+#[cfg(unix)]
 fn wiki_export_obsidian_index_links_complete_relative_output_path() {
     let mut entry = make_entry("wiki-export-relative-index");
     entry.path = "/wiki/engineering/deep".to_string();
@@ -681,6 +699,7 @@ fn wiki_export_obsidian_index_links_complete_relative_output_path() {
 }
 
 #[test]
+#[cfg(unix)]
 fn wiki_export_obsidian_concurrent_run_refuses_shared_output_lock() {
     let mut entry = make_entry("wiki-export-lock");
     entry.path = "/wiki/export-lock".to_string();
@@ -719,6 +738,7 @@ fn wiki_export_obsidian_concurrent_run_refuses_shared_output_lock() {
 }
 
 #[test]
+#[cfg(unix)]
 fn wiki_export_obsidian_commit_failure_restores_complete_prior_state() {
     let mut original_entry = make_entry("wiki-export-rollback");
     original_entry.path = "/wiki/rollback".to_string();
@@ -764,6 +784,7 @@ fn wiki_export_obsidian_commit_failure_restores_complete_prior_state() {
 }
 
 #[test]
+#[cfg(unix)]
 fn wiki_export_recovers_from_process_death_during_backup_phase() {
     let (server, _home) = seed_wiki_project_entries(crash_fixture_entries());
     let out_dir = crate::utils::test_fixture_path(format!(
@@ -808,6 +829,7 @@ fn wiki_export_recovers_from_process_death_during_backup_phase() {
 }
 
 #[test]
+#[cfg(unix)]
 fn wiki_export_recovers_from_process_death_during_install_phase() {
     let (server, _home) = seed_wiki_project_entries(crash_fixture_entries());
     let out_dir = crate::utils::test_fixture_path(format!(
@@ -848,6 +870,7 @@ fn wiki_export_recovers_from_process_death_during_install_phase() {
 }
 
 #[test]
+#[cfg(unix)]
 fn wiki_export_recovers_when_index_is_published_without_its_manifest() {
     let (server, _home) = seed_wiki_project_entries(crash_fixture_entries());
     let out_dir = crate::utils::test_fixture_path(format!(
@@ -890,6 +913,7 @@ fn wiki_export_recovers_when_index_is_published_without_its_manifest() {
 }
 
 #[test]
+#[cfg(unix)]
 fn wiki_export_still_refuses_torn_output_with_no_staging_evidence() {
     let (server, _home) = seed_wiki_project_entries(crash_fixture_entries());
     let out_dir = crate::utils::test_fixture_path(format!(
@@ -919,6 +943,7 @@ fn wiki_export_still_refuses_torn_output_with_no_staging_evidence() {
 }
 
 #[test]
+#[cfg(unix)]
 fn wiki_export_reclaims_staging_residue_from_death_before_publish() {
     let (server, _home) = seed_wiki_project_entries(crash_fixture_entries());
     let out_dir = crate::utils::test_fixture_path(format!(
@@ -970,6 +995,7 @@ fn wiki_export_reclaims_staging_residue_from_death_before_publish() {
 /// happens to emit today.
 ///
 /// Returns the staging root it created.
+#[cfg(unix)]
 fn build_torn_export_state(
     out_dir: &Path,
     expected: &std::collections::BTreeMap<String, Vec<u8>>,
@@ -1046,6 +1072,7 @@ fn build_torn_export_state(
 /// that fails on the pre-recovery code: an `_index.md` with no `_manifest.json`
 /// was a permanent "reserved managed artifact" refusal there.
 #[test]
+#[cfg(unix)]
 fn wiki_export_recovers_from_hand_built_torn_state_without_hooks() {
     let (server, _home) = seed_wiki_project_entries(crash_fixture_entries());
     let out_dir = crate::utils::test_fixture_path(format!(
@@ -1076,6 +1103,7 @@ fn wiki_export_recovers_from_hand_built_torn_state_without_hooks() {
 /// proved ownership by path alone would load our staged files into a stranger's
 /// directory precisely when that check would have refused it.
 #[test]
+#[cfg(unix)]
 fn wiki_export_ignores_a_claim_whose_output_directory_was_replaced() {
     let (server, _home) = seed_wiki_project_entries(crash_fixture_entries());
     let out_dir = crate::utils::test_fixture_path(format!(
@@ -1120,6 +1148,7 @@ fn wiki_export_ignores_a_claim_whose_output_directory_was_replaced() {
 /// survive byte-for-byte. Truncating them would rename notes that already exist
 /// in the vault on the next export and orphan every wikilink into them.
 #[test]
+#[cfg(unix)]
 fn wiki_export_preserves_names_the_unbounded_predecessor_could_write() {
     let writable_stems = ["a".repeat(250), "b".repeat(252)];
     let overlong_stem = "c".repeat(253);
@@ -1199,6 +1228,7 @@ fn wiki_export_preserves_names_the_unbounded_predecessor_could_write() {
 }
 
 #[test]
+#[cfg(unix)]
 fn wiki_export_bounds_generated_file_name_length() {
     // An LLM-authored topic is unbounded; NAME_MAX is not.
     let long_topic = "n".repeat(5000);
@@ -1274,6 +1304,7 @@ fn wiki_export_bounds_generated_file_name_length() {
 }
 
 #[test]
+#[cfg(unix)]
 fn wiki_export_obsidian_refuses_invalid_prior_manifest_count_without_mutation() {
     let mut entry = make_entry("wiki-export-invalid-manifest");
     entry.path = "/wiki/invalid-manifest".to_string();
@@ -1304,6 +1335,7 @@ fn wiki_export_obsidian_refuses_invalid_prior_manifest_count_without_mutation() 
 }
 
 #[test]
+#[cfg(unix)]
 fn wiki_export_obsidian_explicit_project_never_falls_back_to_legacy_global() {
     let (server, _project_db) = crate::tests::make_server_with_project_fixture("export-target");
     let mut target = make_entry("wiki-export-store-identity");
@@ -1342,6 +1374,7 @@ fn wiki_export_obsidian_explicit_project_never_falls_back_to_legacy_global() {
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn wiki_export_obsidian_prefers_typed_refs_when_both_channels_exist() {
     let mut entry = make_entry("wiki-export-dual-refs");
     entry.path = "/wiki/engineering/debugging/dual-refs".to_string();
@@ -1382,6 +1415,7 @@ async fn wiki_export_obsidian_prefers_typed_refs_when_both_channels_exist() {
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn wiki_export_obsidian_exports_legacy_only_refs() {
     let mut entry = make_entry("wiki-export-legacy-refs");
     entry.path = "/wiki/export/legacy".to_string();
@@ -1399,6 +1433,7 @@ async fn wiki_export_obsidian_exports_legacy_only_refs() {
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn wiki_export_obsidian_exports_typed_only_refs() {
     let mut entry = make_entry("wiki-export-typed-refs");
     entry.path = "/wiki/export/typed".to_string();
@@ -1416,6 +1451,7 @@ async fn wiki_export_obsidian_exports_typed_only_refs() {
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn wiki_export_obsidian_ignores_invalid_typed_refs_and_falls_back_to_legacy() {
     let mut entry = make_entry("wiki-export-invalid-typed-refs");
     entry.path = "/wiki/export/invalid-typed".to_string();

@@ -25,6 +25,11 @@ pub(crate) async fn collect_agent_warning_lines(server: &crate::MemoryServer) ->
                 json!({ "running": false, "foreign": true, "reason": reason })
             }
             DaemonStatus::StalePid { .. } => json!({ "running": false, "stale": true }),
+            DaemonStatus::Unavailable { reason, .. } => json!({
+                "running": null,
+                "unavailable": true,
+                "reason": reason,
+            }),
             DaemonStatus::None => json!({ "running": false }),
         };
         let mut warnings = build_status_warnings(&snapshot, &daemon_state);
@@ -149,7 +154,14 @@ pub(crate) fn build_status_warnings(
         warnings.push(format!(
             "foreign daemon detected ({reason}); Tachi background tasks for this DB are paused"
         ));
-    } else if !daemon_state["running"].as_bool().unwrap_or(false) {
+    } else if daemon_state["running"].as_bool().is_none() {
+        let reason = daemon_state["reason"]
+            .as_str()
+            .unwrap_or("liveness unknown");
+        warnings.push(format!(
+            "daemon status unavailable ({reason}); background task activity cannot be confirmed"
+        ));
+    } else if daemon_state["running"].as_bool() == Some(false) {
         warnings.push(
             "daemon not running — background tasks (enrichment, distill, GC) are paused"
                 .to_string(),

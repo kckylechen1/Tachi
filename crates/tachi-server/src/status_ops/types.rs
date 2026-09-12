@@ -97,6 +97,11 @@ pub(crate) enum DaemonStatus {
         pid: i32,
         lock_path: PathBuf,
     },
+    Unavailable {
+        pid: i32,
+        lock_path: PathBuf,
+        reason: String,
+    },
     None,
 }
 
@@ -113,7 +118,8 @@ pub(crate) struct DaemonPidInfo {
 pub(crate) struct DaemonInventoryEntry {
     pub(crate) scope: String,
     pub(crate) pid: Option<i32>,
-    pub(crate) process_running: bool,
+    /// None means the recorded PID cannot be probed on this platform.
+    pub(crate) process_running: Option<bool>,
     pub(crate) authoritative_for_current_global: bool,
     pub(crate) state: String,
     pub(crate) reason: Option<String>,

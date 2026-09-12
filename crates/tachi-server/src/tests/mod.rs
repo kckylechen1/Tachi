@@ -765,8 +765,11 @@ fn reap_stale_template_cache_entries(
         if age <= max_age {
             continue;
         }
-        if matches!(kind, TemplateCacheEntry::Build { owner_pid } if crate::daemon_lock::process_alive(owner_pid))
-        {
+        if matches!(kind, TemplateCacheEntry::Build { owner_pid } if matches!(
+            crate::daemon_lock::process_liveness(owner_pid),
+            Some(true)
+                | None
+        )) {
             continue;
         }
 
@@ -983,6 +986,7 @@ fn template_published_entry_requires_a_direct_regular_file() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn template_cache_reaps_stale_recognized_entries_only() {
     let cache = tempfile::tempdir().expect("template cache tempdir");
@@ -1062,6 +1066,39 @@ fn template_cache_reaps_stale_recognized_entries_only() {
     );
 }
 
+#[cfg(not(unix))]
+#[test]
+fn platform_refusal_template_cache_retains_unproven_owner_and_reaps_peer() {
+    let cache = tempfile::tempdir().expect("template cache tempdir");
+    let current = cache
+        .path()
+        .join("memory-server-test-template-1111111111111111.sqlite");
+    let owner = cache
+        .path()
+        .join("memory-server-test-template-build-2-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.sqlite");
+    let peer = cache
+        .path()
+        .join("memory-server-test-template-2222222222222222.sqlite");
+    for path in [&current, &owner, &peer] {
+        std::fs::write(path, b"sentinel").expect("write template cache fixture");
+    }
+    let newest_mtime = std::fs::metadata(&current)
+        .and_then(|metadata| metadata.modified())
+        .expect("template cache fixture mtime");
+    let removed = reap_stale_template_cache_entries(
+        cache.path(),
+        &current,
+        TEMPLATE_CACHE_MAX_AGE,
+        newest_mtime + TEMPLATE_CACHE_MAX_AGE + std::time::Duration::from_secs(5),
+    )
+    .expect("reap stale template cache fixtures");
+
+    assert_eq!(removed, 1, "only the unowned peer is reclaimable");
+    assert_eq!(std::fs::read(&owner).unwrap(), b"sentinel");
+    assert!(!peer.exists());
+}
+
+#[cfg(unix)]
 #[test]
 fn template_cache_preserves_young_recognized_entries() {
     let cache = tempfile::tempdir().expect("template cache tempdir");

@@ -47,6 +47,12 @@ pub(crate) async fn run_daemon(
                             lock_path.display()
                         )
                     }
+                    crate::status_ops::DaemonStatus::Unavailable { pid, lock_path, reason } => {
+                        println!(
+                            "[!] cannot determine whether daemon pid={pid} is alive at {}: {reason}; refusing cleanup",
+                            lock_path.display()
+                        )
+                    }
                     crate::status_ops::DaemonStatus::None => println!(
                         "[i] no daemon running for this DB scope; background workers are paused. Stdio MCP clients may still be active; run `tachi daemon reap --json` to inspect live/stale clients."
                     ),
@@ -93,6 +99,9 @@ pub(crate) async fn run_daemon(
                 }
                 crate::status_ops::DaemonStatus::Foreign { reason, .. } => {
                     println!("[!] refusing to kill foreign daemon for current DB scope: {reason}");
+                }
+                crate::status_ops::DaemonStatus::Unavailable { reason, .. } => {
+                    println!("[!] refusing to kill daemon: process liveness unavailable: {reason}");
                 }
                 crate::status_ops::DaemonStatus::None => {
                     println!("[OK] no daemon to kill for current DB scope");

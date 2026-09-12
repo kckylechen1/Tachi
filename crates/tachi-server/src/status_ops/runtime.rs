@@ -45,6 +45,9 @@ pub(crate) fn runtime_observability_json(
                 false,
             ),
             Some(DaemonStatus::StalePid { pid, .. }) => (Some(*pid), "stale", None, None, false),
+            Some(DaemonStatus::Unavailable { pid, reason, .. }) => {
+                (Some(*pid), "unavailable", Some(reason.clone()), None, false)
+            }
             Some(DaemonStatus::None) => (None, "none", None, None, false),
             None => (
                 read_pid_file(app_home.join("daemon.lock")),
@@ -54,40 +57,61 @@ pub(crate) fn runtime_observability_json(
                 false,
             ),
         };
-    let daemon_process_running = daemon_pid.map(process_alive).unwrap_or(false);
-    let daemon_running = daemon_process_running && daemon_authoritative;
-    let serving_daemon = daemon_pid
-        .map(|pid| daemon_running && pid as u32 == current_pid)
-        .unwrap_or(false);
-    let mode = if serving_daemon {
-        "daemon"
-    } else if daemon_running {
-        "sidecar_or_stdio"
+    // Preserve an unavailable observation through the public routing metadata.
+    // A failed liveness probe cannot establish current-process authority.
+    let daemon_process_running = if daemon_state == "unavailable" {
+        None
     } else {
-        "single_process"
+        daemon_pid
+            .map(crate::daemon_lock::process_liveness)
+            .unwrap_or(Some(false))
     };
-    let process_role = if serving_daemon {
-        "daemon_authority"
-    } else if daemon_running {
-        "stdio_daemon_client"
-    } else {
-        "embedded_stdio"
+    let daemon_running = daemon_process_running.map(|running| running && daemon_authoritative);
+    let serving_daemon = daemon_running
+        .map(|running| running && daemon_pid.is_some_and(|pid| pid as u32 == current_pid));
+    let mode = match (serving_daemon, daemon_running) {
+        (Some(true), _) => "daemon",
+        (_, Some(true)) => "sidecar_or_stdio",
+        (_, Some(false)) => "single_process",
+        (_, None) => "unavailable",
     };
-    let authoritative_runtime = if daemon_running {
-        "daemon"
-    } else {
-        "current_process"
+    let process_role = match (serving_daemon, daemon_running) {
+        (Some(true), _) => "daemon_authority",
+        (_, Some(true)) => "stdio_daemon_client",
+        (_, Some(false)) => "embedded_stdio",
+        (_, None) => "unavailable",
     };
-    let stdio_adapter = !serving_daemon;
+    let authoritative_runtime = match daemon_running {
+        Some(true) => "daemon",
+        Some(false) => "current_process",
+        None => "unavailable",
+    };
+    let stdio_adapter = serving_daemon.map(|serving| !serving);
+    let forwarding_expected = daemon_running
+        .zip(serving_daemon)
+        .map(|(running, serving)| running && !serving);
+    let forwarding_target = match forwarding_expected {
+        Some(true) => "daemon",
+        Some(false) => "current_process",
+        None => "unavailable",
+    };
     let write_forwarding = json!({
-        "expected": daemon_running && !serving_daemon,
-        "target": if daemon_running && !serving_daemon { "daemon" } else { "current_process" },
-        "fallback": if daemon_running && !serving_daemon { "in_process_before_dispatch_only" } else { "none" },
+        "expected": forwarding_expected,
+        "target": forwarding_target,
+        "fallback": match forwarding_expected {
+            Some(true) => "in_process_before_dispatch_only",
+            Some(false) => "none",
+            None => "unavailable",
+        },
     });
     let read_forwarding = json!({
-        "expected": daemon_running && !serving_daemon,
-        "target": if daemon_running && !serving_daemon { "daemon" } else { "current_process" },
-        "fallback": if daemon_running && !serving_daemon { "in_process_on_transport_error" } else { "none" },
+        "expected": forwarding_expected,
+        "target": forwarding_target,
+        "fallback": match forwarding_expected {
+            Some(true) => "in_process_on_transport_error",
+            Some(false) => "none",
+            None => "unavailable",
+        },
     });
 
     let vault = {
@@ -143,7 +167,7 @@ pub(crate) fn runtime_observability_json(
             "process_running": daemon_process_running,
             "authoritative": daemon_running,
             "state": daemon_state,
-            "foreign": daemon_state == "foreign" && daemon_process_running,
+            "foreign": daemon_state == "foreign" && daemon_process_running == Some(true),
             "reason": daemon_reason,
             "global_db": daemon_global_db,
             "matches_current_process": serving_daemon,
@@ -294,6 +318,12 @@ async fn handle_tachi_status_detail(
             "running": false,
             "stale": true,
             "pid": pid,
+        }),
+        DaemonStatus::Unavailable { pid, reason, .. } => json!({
+            "running": null,
+            "unavailable": true,
+            "pid": pid,
+            "reason": reason,
         }),
         DaemonStatus::None => json!({
             "running": false,
@@ -518,13 +548,13 @@ async fn handle_tachi_status_detail(
     let running_daemons = snapshot
         .daemon_inventory
         .iter()
-        .filter(|daemon| daemon.process_running)
+        .filter(|daemon| daemon.process_running == Some(true))
         .count();
     if running_daemons > 1 {
         let scopes = snapshot
             .daemon_inventory
             .iter()
-            .filter(|daemon| daemon.process_running)
+            .filter(|daemon| daemon.process_running == Some(true))
             .map(|daemon| {
                 daemon
                     .global_db
