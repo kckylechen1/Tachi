@@ -985,7 +985,7 @@ async fn run_without_active_claim_is_typed_err() {
         "claim_role": "executor",
         "claim_mode": "read_only",
         "claim_scope": ["crates/tachi-server/src/verify_ops/run.rs"],
-        "expected_head": "f7467b3",
+        "expected_head": "deadbeef0123456789abcdef0123456789abcdef01",
         "lease_expires_at": "2030-01-01T00:00:00Z",
     }))
     .expect("read_only claim params");
