@@ -49,10 +49,10 @@ pub fn get_harness_session_state_with_events(
             "SELECT {EVENT_COLUMNS} FROM harness_session_events
              WHERE attachment_id = ?1 ORDER BY event_row_id DESC LIMIT ?2"
         ))?;
-        let rows = statement.query_map(
-            params![attachment.attachment_id, event_limit + 1],
-            row_to_event,
-        )?;
+        // The cap above bounds this conversion and lookahead to at most 101.
+        let query_limit = event_limit as i64 + 1;
+        let rows =
+            statement.query_map(params![attachment.attachment_id, query_limit], row_to_event)?;
         rows.collect::<Result<Vec<_>, _>>()?
     };
     let events_truncated = events.len() > event_limit;
