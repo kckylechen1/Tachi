@@ -140,7 +140,7 @@ pub(crate) fn assert_repo_local_db_fixture_not_skipped(path: &Path) {
 /// hold [`crate::utils::global_test_lock`] for the guard's lifetime, because
 /// cargo runs `#[test]` fns in parallel by default.
 pub struct EnvRestore {
-    key: &'static str,
+    key: std::ffi::OsString,
     old: Option<std::ffi::OsString>,
 }
 
@@ -149,7 +149,10 @@ impl EnvRestore {
     pub fn set(key: &'static str, value: &str) -> Self {
         let old = std::env::var_os(key);
         std::env::set_var(key, value);
-        Self { key, old }
+        Self {
+            key: key.into(),
+            old,
+        }
     }
 
     /// Set `key` to a filesystem path, returning a guard that restores the
@@ -161,7 +164,10 @@ impl EnvRestore {
     pub fn set_path(key: &'static str, value: &Path) -> Self {
         let old = std::env::var_os(key);
         std::env::set_var(key, value);
-        Self { key, old }
+        Self {
+            key: key.into(),
+            old,
+        }
     }
 
     /// Set `key` to a raw `OsStr` value, returning a guard that restores the
@@ -171,23 +177,34 @@ impl EnvRestore {
     pub fn set_os(key: &'static str, value: &std::ffi::OsStr) -> Self {
         let old = std::env::var_os(key);
         std::env::set_var(key, value);
-        Self { key, old }
+        Self {
+            key: key.into(),
+            old,
+        }
     }
 
     /// Remove `key`, returning a guard that restores the prior value.
     pub fn remove(key: &'static str) -> Self {
+        Self::remove_os(std::ffi::OsStr::new(key))
+    }
+
+    /// Remove a discovered environment key without leaking it to obtain a static lifetime.
+    pub fn remove_os(key: &std::ffi::OsStr) -> Self {
         let old = std::env::var_os(key);
         std::env::remove_var(key);
-        Self { key, old }
+        Self {
+            key: key.into(),
+            old,
+        }
     }
 }
 
 impl Drop for EnvRestore {
     fn drop(&mut self) {
         if let Some(value) = self.old.as_ref() {
-            std::env::set_var(self.key, value);
+            std::env::set_var(&self.key, value);
         } else {
-            std::env::remove_var(self.key);
+            std::env::remove_var(&self.key);
         }
     }
 }
