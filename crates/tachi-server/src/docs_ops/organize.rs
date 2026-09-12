@@ -1,5 +1,5 @@
 use super::classify::classify_and_extract_metadata;
-use super::frontmatter::{parse_frontmatter, serialize_frontmatter, Frontmatter};
+use super::frontmatter::{parse_frontmatter, serialize_representable_frontmatter, Frontmatter};
 use super::paths::{is_archive_dir, is_markdown_file};
 use super::tasks::sync_tasks_in_content;
 use crate::server_state::MemoryServer;
@@ -1273,6 +1273,16 @@ pub(crate) async fn handle_wiki_organize(
                 // logged but must not abort the remaining file scan.
                 let (new_body, task_modified) = sync_tasks_in_content(server, body);
                 if task_modified {
+                    let serialized = match serialize_representable_frontmatter(fm) {
+                        Ok(serialized) => serialized,
+                        Err(e) => {
+                            log_messages.push(format!(
+                                "WARN: task sync write failed for '{}': {e}",
+                                relative_str
+                            ));
+                            continue;
+                        }
+                    };
                     if dry_run {
                         log_messages.push(format!(
                             "[dry-run] Would sync task checkmarks in-place: '{}'",
@@ -1281,11 +1291,7 @@ pub(crate) async fn handle_wiki_organize(
                         synced_count += 1;
                         continue;
                     }
-                    let new_content = if let Some(ref fm) = fm_opt {
-                        format!("{}{}", serialize_frontmatter(fm), new_body)
-                    } else {
-                        new_body
-                    };
+                    let new_content = format!("{}{}", serialized, new_body);
                     if let Err(e) =
                         authorized.write_existing_file(&path, &source_identity, &new_content)
                     {
@@ -1366,7 +1372,7 @@ pub(crate) async fn handle_wiki_organize(
 
         // 就地任务状态检测与勾选
         let (new_body, task_modified) = sync_tasks_in_content(server, body);
-        let final_content = format!("{}{}", serialize_frontmatter(&fm), new_body);
+        let final_content = format!("{}{}", serialize_representable_frontmatter(&fm)?, new_body);
 
         if task_modified {
             synced_count += 1;
