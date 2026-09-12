@@ -638,25 +638,38 @@ async fn reclaim_worktree_after_merge(
 
     // Resolve worktree path: either from caller-supplied worktree or auto-resolved
     // via PR head_ref against the worktree registry (Refs #1118).
-    let resolved_path: Option<String> = match worktree.map(str::trim).filter(|s| !s.is_empty()) {
-        Some(w) => Some(w.to_string()),
-        None => head_ref.and_then(|target_branch| {
-            let target = target_branch.trim_start_matches("refs/heads/");
-            match tachi_clean::registry::list_registered_worktrees() {
-                Ok(registered) => registered
-                    .into_iter()
-                    .find(|wt| wt.branch.trim_start_matches("refs/heads/") == target)
-                    .map(|wt| wt.path),
-                Err(err) => {
-                    tracing::warn!(
-                        error = %err,
-                        target_branch = target,
-                        "safe_merge: failed to read worktree registry during auto-resolution"
-                    );
-                    None
-                }
-            }
-        }),
+    let resolve_path = || -> Result<Option<String>, &'static str> {
+        if let Some(path) = worktree.map(str::trim).filter(|path| !path.is_empty()) {
+            return Ok(Some(path.to_string()));
+        }
+        let Some(target_branch) = head_ref else {
+            return Ok(None);
+        };
+        let target = target_branch.trim_start_matches("refs/heads/");
+        let registered = tachi_clean::registry::list_registered_worktrees()
+            .map_err(|_| "worktree_mapping_unavailable")?;
+        // Every matching record counts, including stale or duplicate rows.
+        // Ownership and identical heads cannot distinguish different clones.
+        let mut matches = registered
+            .into_iter()
+            .filter(|wt| wt.branch.trim_start_matches("refs/heads/") == target);
+        match (matches.next(), matches.next()) {
+            (None, _) => Ok(None),
+            (Some(wt), None) => Ok(Some(wt.path)),
+            (Some(_), Some(_)) => Err("worktree_mapping_ambiguous"),
+        }
+    };
+    let resolved_path = match resolve_path() {
+        Ok(path) => path,
+        Err(reason) => {
+            let detail = json!({
+                "attempted": false,
+                "reclaimed": false,
+                "skipped": reason,
+            });
+            record_reclamation_event(flow_id, run_dir, &detail);
+            return detail;
+        }
     };
 
     let Some(worktree_path) = resolved_path
