@@ -36,6 +36,39 @@ other host systems without installing another control plane inside Tachi.
 
 ## Findings To Promote
 
+### Attached-session evidence reads
+
+`tachi_agent_eval(action="get_session_state")` returns the canonical session
+state together with a bounded recent `events` tail from the existing
+attached-session journal. This applies to an already admitted attachment;
+it does not provision admission or launch a worker.
+
+The existing optional `limit` selects how many recent receipts to include:
+20 by default, capped at 100 (provisional per-action limits). `limit=0`
+returns no event bodies. `event_limit` reports the effective limit, and
+`events_truncated` reports whether older journal rows were omitted, including
+when zero was requested. Selected receipts remain intact and are returned in
+ascending journal order. Late low-source-revision facts and conflicting
+terminal facts remain visible; replay does not append another row.
+
+Authorization, canonical state, and event selection use one read snapshot.
+The current host connection and attachment admission receipt are still
+required, including for an empty response. Released work ownership does not
+erase the admitted host's session evidence. The response does not store or
+return a transcript, resolve artifact contents, or operate a process.
+
+This is a recent tail, not a complete backfill or resumable event stream.
+`events_truncated=false` means all journal rows visible to this read fit in
+the response. It does not mean execution completed or the result was accepted.
+Consumers must continue to interpret canonical state and adjudication
+separately. The input schema and tool/action inventory remain unchanged.
+
+The bounded-read idea is informed by
+[Agent-Bridge's result retrieval](https://github.com/FeiZhuLulu/Agent-Bridge/blob/192ae53fe8ecb02ece4ff01dd6c5b39602639fe8/src/agent_bridge/registry.py#L1000-L1042).
+Tachi derives this response from its existing journal instead of adding a
+second registry. Rollback removes the additive response fields and reader;
+no data migration or worker restart is required.
+
 The following host-system behaviors are useful and should become Tachi-native
 contracts.
 
