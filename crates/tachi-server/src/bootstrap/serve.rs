@@ -1107,7 +1107,12 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
         ) {
             crate::wiki_ops::ensure_wiki_export_supported()?;
         }
-        if cli.daemon && matches!(cli.command.as_ref(), None | Some(Commands::Serve)) {
+        // Default stdio also requires a local daemon. Refuse that mode before
+        // startup hygiene or the implicit daemon spawn; the explicit debug
+        // opt-out retains its existing direct-stdio behavior.
+        if matches!(cli.command.as_ref(), None | Some(Commands::Serve))
+            && (cli.daemon || !stdio::stdio_proxy_disabled())
+        {
             return Err(crate::daemon_lock::unsupported_daemon_lock_error().into());
         }
     }
@@ -1227,6 +1232,73 @@ mod tests {
                 } else {
                     assert!(!db.parent().expect("DB parent").exists());
                     assert!(!output.exists());
+                }
+            }
+        }
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn platform_refusal_default_stdio_preserves_absent_and_existing_state() {
+        let _env_lock = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _proxy = EnvRestore::remove("TACHI_DISABLE_STDIO_PROXY");
+        for explicit_serve in [false, true] {
+            for auto_disabled in [false, true] {
+                let _auto = EnvRestore::set(
+                    "TACHI_DISABLE_AUTO_DAEMON",
+                    if auto_disabled { "1" } else { "0" },
+                );
+                for existing in [false, true] {
+                    let root = tempfile::tempdir().expect("temporary root");
+                    let home = root.path().join("home");
+                    let _home = EnvRestore::set_path("TACHI_HOME", &home);
+                    let db = root.path().join("global/memory.db");
+                    let project = root.path().join("project/memory.db");
+                    if existing {
+                        std::fs::create_dir(&home).expect("home directory");
+                        std::fs::write(home.join("sentinel"), b"existing home")
+                            .expect("home sentinel");
+                        std::fs::create_dir(db.parent().expect("DB parent")).expect("DB directory");
+                        std::fs::write(&db, b"existing database").expect("DB sentinel");
+                    }
+                    let mut cli = startup_test_cli();
+                    if !explicit_serve {
+                        cli.command = None;
+                    }
+                    cli.global_db = Some(db.clone());
+                    cli.project_db = Some(project.clone());
+                    cli.allow_schema_migration = true;
+                    let error = tokio_main(cli).expect_err("unsupported daemon-backed stdio");
+                    assert_eq!(
+                        error
+                            .downcast_ref::<std::io::Error>()
+                            .map(std::io::Error::kind),
+                        Some(std::io::ErrorKind::Unsupported)
+                    );
+                    assert_eq!(
+                        error.to_string(),
+                        "daemon locking is unsupported on this platform"
+                    );
+                    assert!(!project.parent().expect("project parent").exists());
+                    if existing {
+                        assert_eq!(std::fs::read(&db).expect("DB after"), b"existing database");
+                        assert_eq!(
+                            std::fs::read(home.join("sentinel")).expect("home after"),
+                            b"existing home"
+                        );
+                        assert_eq!(std::fs::read_dir(&home).expect("home entries").count(), 1);
+                        assert_eq!(
+                            std::fs::read_dir(db.parent().expect("DB parent"))
+                                .expect("DB entries")
+                                .count(),
+                            1
+                        );
+                    } else {
+                        assert!(!home.exists());
+                        assert!(!db.parent().expect("DB parent").exists());
+                    }
                 }
             }
         }
