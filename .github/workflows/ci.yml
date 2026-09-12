@@ -289,6 +289,7 @@ jobs:
              echo 'gh stub did not use GH_TOKEN precedence' >&2
              exit 1
            fi
+          python3 .github/scripts/runner_scan_diagnostics_test.py
 
       - name: Runner workspace cleanup
         # #1865: no checkout residue survives a failed or cancelled job.
