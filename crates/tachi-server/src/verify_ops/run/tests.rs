@@ -352,7 +352,7 @@ fn claim_params(flow_id: &str, worktree: &str) -> TachiTaskParams {
         "claim_mode": "writable",
         "worktree_path": worktree,
         "claim_scope": ["crates/tachi-server/src/verify_ops/run.rs"],
-        "expected_head": "f7467b3",
+        "expected_head": "deadbeef0123456789abcdef0123456789abcdef01",
         "lease_expires_at": "2030-01-01T00:00:00Z",
     }))
     .expect("claim params")
@@ -361,10 +361,15 @@ fn claim_params(flow_id: &str, worktree: &str) -> TachiTaskParams {
 /// Admit a local agent and claim `flow_id` against `worktree` (follows the
 /// claims_ops test fixture pattern, claims_ops.rs:958+).
 fn seed_claim(server: &MemoryServer, flow_id: &str, worktree: &str) {
+    seed_claim_at_head(server, flow_id, worktree, fake_runner().head_sha);
+}
+
+fn seed_claim_at_head(server: &MemoryServer, flow_id: &str, worktree: &str, head: &str) {
     crate::claims_ops::admit_agent_connection(server, Some("agent.alpha".to_string()), true)
         .expect("local admission");
-    crate::claims_ops::handle_task_claim(server, &claim_params(flow_id, worktree))
-        .expect("work claim");
+    let mut params = claim_params(flow_id, worktree);
+    params.expected_head = Some(head.to_string());
+    crate::claims_ops::handle_task_claim(server, &params).expect("work claim");
 }
 
 struct RunRootGuard {
@@ -980,7 +985,7 @@ async fn run_without_active_claim_is_typed_err() {
         "claim_role": "executor",
         "claim_mode": "read_only",
         "claim_scope": ["crates/tachi-server/src/verify_ops/run.rs"],
-        "expected_head": "f7467b3",
+        "expected_head": "deadbeef0123456789abcdef0123456789abcdef01",
         "lease_expires_at": "2030-01-01T00:00:00Z",
     }))
     .expect("read_only claim params");
@@ -1343,7 +1348,12 @@ async fn integration_fmt_run_uses_detached_copy_from_linked_worktree_and_cleans_
     let server = make_server();
     let (_main, claim, expected_head) = linked_claim_fixture(true);
     let flow_id = "flow_integration-linked-fmt";
-    seed_claim(&server, flow_id, claim.to_str().expect("utf8 worktree"));
+    seed_claim_at_head(
+        &server,
+        flow_id,
+        claim.to_str().expect("utf8 worktree"),
+        &expected_head,
+    );
 
     let params: TachiVerifyParams = serde_json::from_value(serde_json::json!({
         "action": "run",
@@ -1464,7 +1474,12 @@ async fn integration_fmt_run_failure_cleans_up_detached_copy() {
     let server = make_server();
     let (_main, claim, expected_head) = linked_claim_fixture(false);
     let flow_id = "flow_integration-linked-fmt-fail";
-    seed_claim(&server, flow_id, claim.to_str().expect("utf8 worktree"));
+    seed_claim_at_head(
+        &server,
+        flow_id,
+        claim.to_str().expect("utf8 worktree"),
+        &expected_head,
+    );
 
     let params: TachiVerifyParams = serde_json::from_value(serde_json::json!({
         "action": "run",
@@ -1522,7 +1537,7 @@ async fn integration_fmt_run_failure_cleans_up_detached_copy() {
 async fn integration_partial_worktree_add_failure_cleans_up_copy_and_registration() {
     use std::os::unix::fs::PermissionsExt;
 
-    let (_main, claim, _expected_head) = linked_claim_fixture(true);
+    let (_main, claim, expected_head) = linked_claim_fixture(true);
     // Linked worktrees resolve hooks to the COMMON git dir, so the failing
     // hook lives in the main repo's hooks dir and fires when the detached
     // copy is checked out.
@@ -1541,7 +1556,12 @@ async fn integration_partial_worktree_add_failure_cleans_up_copy_and_registratio
     let (_root, _guard) = with_run_root();
     let server = make_server();
     let flow_id = "flow_integration-partial-add";
-    seed_claim(&server, flow_id, claim.to_str().expect("utf8 worktree"));
+    seed_claim_at_head(
+        &server,
+        flow_id,
+        claim.to_str().expect("utf8 worktree"),
+        &expected_head,
+    );
 
     // Real git copy lifecycle: the failing hook only matters against a real
     // `git worktree add`.
@@ -1781,9 +1801,14 @@ impl CheckRunner for RealCopyKillIgnoringRunner {
 async fn integration_timeout_cleans_up_detached_copy_in_claim_repo() {
     let (_root, _guard) = with_run_root();
     let server = make_server();
-    let (_main, claim, _expected_head) = linked_claim_fixture(true);
+    let (_main, claim, expected_head) = linked_claim_fixture(true);
     let flow_id = "flow_integration-timeout-copy";
-    seed_claim(&server, flow_id, claim.to_str().expect("utf8 worktree"));
+    seed_claim_at_head(
+        &server,
+        flow_id,
+        claim.to_str().expect("utf8 worktree"),
+        &expected_head,
+    );
 
     let runner = RealCopyKillIgnoringRunner {
         claim: claim.clone(),
@@ -2165,9 +2190,9 @@ async fn run_refuses_copy_creation_when_home_path_contains_newline() {
     let server =
         MemoryServer::new_with_home_for_test(home_path.join("global.db"), None, home_path.clone())
             .expect("test server at a newline-bearing home");
-    let (_main, claim, _head) = linked_claim_fixture(true);
+    let (_main, claim, head) = linked_claim_fixture(true);
     let flow_id = "flow_newline-home-refusal";
-    seed_claim(&server, flow_id, claim.to_str().expect("utf8 claim"));
+    seed_claim_at_head(&server, flow_id, claim.to_str().expect("utf8 claim"), &head);
 
     let runner = RealCopyKillIgnoringRunner {
         claim: claim.clone(),
@@ -2253,4 +2278,274 @@ async fn receipts_root_under_unreadable_ancestor_with_git_refuses_closed() {
         err.contains("cannot inspect") || err.contains("inside a git worktree"),
         "typed refusal must name the unreadable ancestor (or the containment): {err}"
     );
+}
+
+/// #1912: exercise real Git observations/copies through the same production
+/// run core, counting copy and check invocation without launching Cargo.
+struct ClaimHeadRunner {
+    root: PathBuf,
+    copies: std::sync::atomic::AtomicUsize,
+    checks: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl CheckRunner for ClaimHeadRunner {
+    async fn observe_head(&self, worktree: &Path) -> Result<String, String> {
+        assert!(worktree.starts_with(&self.root));
+        ProcessCheckRunner.observe_head(worktree).await
+    }
+    async fn worktree_is_clean(&self, worktree: &Path) -> Result<bool, String> {
+        assert!(worktree.starts_with(&self.root));
+        ProcessCheckRunner.worktree_is_clean(worktree).await
+    }
+    async fn run_check(
+        &self,
+        _argv: &[&str],
+        cwd: &Path,
+        _timeout: Duration,
+        log_path: &Path,
+        _env: &[(&str, &str)],
+    ) -> Result<CheckRunOutcome, String> {
+        assert!(cwd.starts_with(&self.root) && log_path.starts_with(&self.root));
+        self.checks
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if let Some(parent) = log_path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        std::fs::write(log_path, "controlled successful check\n").map_err(|e| e.to_string())?;
+        Ok(CheckRunOutcome {
+            exit_code: Some(0),
+            duration_ms: 1,
+            timed_out: false,
+            kill_abandoned: false,
+        })
+    }
+    fn create_detached_copy(
+        &self,
+        claim: &Path,
+        observed_head: &str,
+        dest: &Path,
+    ) -> Result<(), String> {
+        assert!(claim.starts_with(&self.root) && dest.starts_with(&self.root));
+        self.copies
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        ProcessCheckRunner.create_detached_copy(claim, observed_head, dest)
+    }
+    fn remove_detached_copy(&self, claim: &Path, copy: &Path) -> Result<(), String> {
+        assert!(claim.starts_with(&self.root) && copy.starts_with(&self.root));
+        ProcessCheckRunner.remove_detached_copy(claim, copy)
+    }
+    fn copy_is_registered(&self, claim: &Path, copy: &Path) -> RegistrationProbe {
+        assert!(claim.starts_with(&self.root) && copy.starts_with(&self.root));
+        ProcessCheckRunner.copy_is_registered(claim, copy)
+    }
+    fn tool_version(&self, _kind: &str) -> Result<Option<String>, String> {
+        Ok(Some("controlled-fixture-check".to_string()))
+    }
+}
+
+struct ClaimHeadEnvironment(Vec<crate::test_support::EnvRestore>);
+impl Drop for ClaimHeadEnvironment {
+    fn drop(&mut self) {
+        while let Some(guard) = self.0.pop() {
+            drop(guard);
+        }
+    }
+}
+
+// The caller holds with_run_root's global lock and keeps that TempDir alive.
+fn claim_head_environment(root: &Path) -> ClaimHeadEnvironment {
+    use crate::test_support::EnvRestore;
+    let mut env = ClaimHeadEnvironment(
+        std::env::vars_os()
+            .filter(|(key, _)| key.to_string_lossy().starts_with("GIT_"))
+            .map(|(key, _)| EnvRestore::remove_os(&key))
+            .collect(),
+    );
+    for (key, suffix) in [
+        ("HOME", "home"),
+        ("USERPROFILE", "home"),
+        ("TACHI_HOME", "home"),
+        ("SIGIL_HOME", "home"),
+        ("TACHI_APP_HOME", "home"),
+        ("TACHI_RUN_ROOT", ""),
+        ("XDG_CONFIG_HOME", "config"),
+        ("CARGO_HOME", "cargo"),
+        ("RUSTUP_HOME", "rustup"),
+        ("TMPDIR", "tmp"),
+        ("TEMP", "tmp"),
+        ("TMP", "tmp"),
+    ] {
+        let path = root.join(suffix);
+        std::fs::create_dir_all(&path).unwrap();
+        env.0.push(EnvRestore::set_path(key, &path));
+    }
+    #[cfg(unix)]
+    env.0.push(EnvRestore::set("PATH", "/usr/bin:/bin"));
+    let config = root.join("gitconfig");
+    std::fs::write(&config, "").unwrap();
+    let templates = root.join("templates");
+    std::fs::create_dir(&templates).unwrap();
+    env.0.extend([
+        EnvRestore::set("GIT_CONFIG_NOSYSTEM", "1"),
+        EnvRestore::set_path("GIT_CONFIG_GLOBAL", &config),
+        EnvRestore::set_path("GIT_TEMPLATE_DIR", &templates),
+        EnvRestore::set("GIT_TERMINAL_PROMPT", "0"),
+        EnvRestore::set("GIT_ALLOW_PROTOCOL", "file"),
+    ]);
+    env
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn claim_expected_head_refuses_between_gates_and_preserves_receipt() {
+    let (root, _run_guard) = with_run_root();
+    let root_path = root.path().canonicalize().unwrap();
+    let _env = claim_head_environment(&root_path);
+    let (source, claim, head_a) = linked_claim_fixture(true);
+    assert!(source
+        .path()
+        .canonicalize()
+        .unwrap()
+        .starts_with(&root_path));
+    let common = std::process::Command::new("git")
+        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+        .current_dir(&claim)
+        .output()
+        .unwrap();
+    assert!(common.status.success());
+    assert_eq!(
+        Path::new(String::from_utf8(common.stdout).unwrap().trim())
+            .canonicalize()
+            .unwrap(),
+        source.path().join(".git").canonicalize().unwrap()
+    );
+    let server = MemoryServer::new_with_home_for_test(
+        root_path.join("global.db"),
+        None,
+        root_path.join("home"),
+    )
+    .unwrap();
+    let flow = "flow_claim_head_fence";
+    seed_claim_at_head(&server, flow, claim.to_str().unwrap(), &head_a);
+    let runner = ClaimHeadRunner {
+        root: root_path.clone(),
+        copies: 0.into(),
+        checks: 0.into(),
+    };
+    let first = run_with_runner(
+        &server,
+        &runner,
+        flow,
+        "fmt",
+        check_kind_argv("fmt").unwrap(),
+        Duration::from_secs(1),
+    )
+    .await
+    .unwrap();
+    assert_eq!(first["item_status"], "passed");
+    assert_eq!(first["head_sha"], head_a);
+    let receipt_path = server
+        .tachi_home_dir()
+        .join("verify-receipts")
+        .join(flow)
+        .join("fmt.json");
+    let receipt_a = std::fs::read(&receipt_path).unwrap();
+    // This empty commit changes identity without changing the accepted tree.
+    // It is confined to the fixture's independently verified Git common dir.
+    let changed = std::process::Command::new("git")
+        .args(["commit", "--allow-empty", "-m", "unexpected B"])
+        .current_dir(&claim)
+        .output()
+        .unwrap();
+    assert!(changed.status.success(), "{changed:?}");
+    let head_b = runner.observe_head(&claim).await.unwrap();
+    assert_ne!(head_a, head_b);
+    let second = run_with_runner(
+        &server,
+        &runner,
+        flow,
+        "fmt",
+        check_kind_argv("fmt").unwrap(),
+        Duration::from_secs(1),
+    )
+    .await;
+    let copies = runner.copies.load(std::sync::atomic::Ordering::SeqCst);
+    let checks = runner.checks.load(std::sync::atomic::Ordering::SeqCst);
+    let preserved = std::fs::read(&receipt_path).unwrap() == receipt_a;
+    eprintln!("CLAIM_HEAD_FENCE_OBSERVED expected={head_a} observed={head_b} copies={copies} checks={checks} prior_receipt_preserved={preserved} second={second:?}");
+    assert!(second
+        .unwrap_err()
+        .contains("verification_claim_head_mismatch"));
+    assert_eq!((copies, checks), (1, 1));
+    assert!(preserved);
+    assert_eq!(std::fs::read(&receipt_path).unwrap(), receipt_a);
+    assert_eq!(
+        registered_worktree_paths(&claim).len(),
+        2,
+        "no detached verification copy remains"
+    );
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn claim_missing_expected_head_refuses_without_copy_or_receipt() {
+    let (root, _run_guard) = with_run_root();
+    let root_path = root.path().canonicalize().unwrap();
+    let _env = claim_head_environment(&root_path);
+    let (source, claim, head) = linked_claim_fixture(true);
+    assert!(source
+        .path()
+        .canonicalize()
+        .unwrap()
+        .starts_with(&root_path));
+    let server = MemoryServer::new_with_home_for_test(
+        root_path.join("global.db"),
+        None,
+        root_path.join("home"),
+    )
+    .unwrap();
+    let flow = "flow_claim_missing_head";
+    seed_claim_at_head(&server, flow, claim.to_str().unwrap(), &head);
+    let runner = ClaimHeadRunner {
+        root: root_path.clone(),
+        copies: 0.into(),
+        checks: 0.into(),
+    };
+    for expected in [None, Some(""), Some("   ")] {
+        // Model legacy/malformed persisted evidence in the private canonical
+        // row; public claim admission already requires a nonempty value.
+        server
+            .with_global_store(|store| {
+                store
+                    .connection_mut()
+                    .execute(
+                        "UPDATE session_claims SET expected_head=?1 WHERE flow_id=?2",
+                        rusqlite::params![expected, flow],
+                    )
+                    .map_err(|e| e.to_string())?;
+                Ok(())
+            })
+            .unwrap();
+        let result = run_with_runner(
+            &server,
+            &runner,
+            flow,
+            "fmt",
+            check_kind_argv("fmt").unwrap(),
+            Duration::from_secs(1),
+        )
+        .await;
+        assert!(result
+            .unwrap_err()
+            .contains("verification_claim_expected_head_missing"));
+        assert_eq!(runner.copies.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(runner.checks.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(!server
+            .tachi_home_dir()
+            .join("verify-receipts")
+            .join(flow)
+            .join("fmt.json")
+            .exists());
+    }
 }
