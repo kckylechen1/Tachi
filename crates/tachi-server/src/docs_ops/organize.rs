@@ -13,7 +13,7 @@ use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Component, Path, PathBuf};
 #[cfg(test)]
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::SystemTime;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -481,34 +481,88 @@ impl AuthorizedDocs {
         run_organize_test_hook(OrganizeTestPoint::DestinationParentReady, parent);
         self.revalidate_roots()?;
         self.revalidate_object(parent, &parent_identity, true, "destination parent")?;
+        let temporary = parent.join(format!(".tachi-new-{}.tmp", uuid::Uuid::new_v4()));
         let mut options = OpenOptions::new();
         options.write(true).create_new(true);
         #[cfg(unix)]
         options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
-        let mut file = options
-            .open(path)
-            .map_err(|error| format!("Failed to create file '{}': {error}", path.display()))?;
-        if let Err(error) = file
-            .write_all(content.as_bytes())
-            .and_then(|_| file.sync_all())
-        {
-            drop(file);
-            let _ = self.remove_created_file(path);
-            return Err(format!(
-                "Failed to write file '{}': {error}",
-                path.display()
-            ));
+        let mut file = options.open(&temporary).map_err(|error| {
+            format!(
+                "Failed to create staged file '{}': {error}",
+                temporary.display()
+            )
+        })?;
+        // Retain the opened object's identity, never adopt a substituted path
+        // as ours for cleanup. The canonical parent was validated above.
+        let metadata = file.metadata().map_err(|error| {
+            format!(
+                "Failed to inspect staged file '{}': {error}",
+                temporary.display()
+            )
+        })?;
+        let staged_identity = PhysicalIdentity {
+            #[cfg(unix)]
+            dev: metadata.dev(),
+            #[cfg(unix)]
+            ino: metadata.ino(),
+            canonical: temporary.clone(),
+        };
+        let result = (|| {
+            #[cfg(test)]
+            if run_organize_test_hook(OrganizeTestPoint::NewFileWriteFailure, parent) {
+                file.write_all(&content.as_bytes()[..content.len().min(8)])
+                    .map_err(|error| error.to_string())?;
+                return Err(
+                    "Failed to write staged file: injected partial write failure".to_string(),
+                );
+            }
+            file.write_all(content.as_bytes())
+                .map_err(|error| format!("Failed to write staged file: {error}"))?;
+            #[cfg(test)]
+            if run_organize_test_hook(OrganizeTestPoint::NewFileSyncFailure, parent) {
+                return Err("Failed to sync staged file: injected sync failure".to_string());
+            }
+            file.sync_all()
+                .map_err(|error| format!("Failed to sync staged file: {error}"))?;
+            run_organize_test_hook(OrganizeTestPoint::NewFileStaged, parent);
+            self.revalidate_roots()?;
+            self.revalidate_object(parent, &parent_identity, true, "destination parent")?;
+            self.revalidate_object(&temporary, &staged_identity, false, "staged new file")?;
+            crate::bootstrap::wiki_corpus::fs::atomic_noreplace(&temporary, path).map_err(
+                |error| {
+                    // The hard-link fallback can install complete bytes before
+                    // failing to unlink staging. Never remove the destination.
+                    format!(
+                        "Failed to publish new file '{}': {error}; a complete destination may already exist; source retained",
+                        path.display()
+                    )
+                },
+            )?;
+            run_organize_test_hook(OrganizeTestPoint::NewFilePublished, parent);
+            let validation = (|| {
+                self.revalidate_roots()?;
+                self.revalidate_object(parent, &parent_identity, true, "destination parent")?;
+                self.revalidate_object(path, &staged_identity, false, "published new file")?;
+                let mut identity = staged_identity.clone();
+                identity.canonical = path.to_path_buf();
+                Ok(identity)
+            })();
+            validation.map_err(|error: String| {
+                format!("New file published but final validation failed; source retained: {error}")
+            })
+        })();
+        drop(file);
+        match result {
+            Err(error) if fs::symlink_metadata(&temporary).is_ok() => {
+                match self.remove_file(&temporary, &staged_identity) {
+                    Ok(()) => Err(error),
+                    Err(cleanup) => Err(format!(
+                        "{error}; staged cleanup refused or failed: {cleanup}"
+                    )),
+                }
+            }
+            other => other,
         }
-        self.revalidate_roots()?;
-        self.revalidate_object(parent, &parent_identity, true, "destination parent")?;
-        let (identity, metadata) = PhysicalIdentity::capture(path, "created file")?;
-        if !metadata.is_file() || !identity.canonical.starts_with(&self.docs_root) {
-            return Err(format!(
-                "Refusing Wiki organize: protected invariant: created file '{}' is not authorized",
-                path.display()
-            ));
-        }
-        Ok(identity)
     }
 
     fn write_existing_file(
@@ -938,6 +992,10 @@ pub(crate) enum OrganizeTestPoint {
     ApplyLockAcquired,
     DirectoryDequeued,
     DestinationParentReady,
+    NewFileStaged,
+    NewFilePublished,
+    NewFileWriteFailure,
+    NewFileSyncFailure,
 }
 
 #[cfg(not(test))]
@@ -946,6 +1004,8 @@ enum OrganizeTestPoint {
     ApplyLockAcquired,
     DirectoryDequeued,
     DestinationParentReady,
+    NewFileStaged,
+    NewFilePublished,
 }
 
 #[cfg(test)]
@@ -953,6 +1013,7 @@ struct OrganizeTestHook {
     point: OrganizeTestPoint,
     path: PathBuf,
     action: Box<dyn FnOnce() + Send + 'static>,
+    owner: Option<Arc<()>>,
 }
 
 #[cfg(test)]
@@ -975,11 +1036,59 @@ pub(crate) fn set_organize_test_hook(
         point,
         path,
         action,
+        owner: None,
     });
 }
 
+/// Clears only this new-file fixture's unconsumed hook on early exit.
 #[cfg(test)]
-fn run_organize_test_hook(point: OrganizeTestPoint, path: &Path) {
+pub(crate) struct NewFileTestHookGuard(Arc<()>);
+
+#[cfg(test)]
+impl Drop for NewFileTestHookGuard {
+    fn drop(&mut self) {
+        let mut slot = organize_test_hook()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if slot.as_ref().is_some_and(|hook| {
+            hook.owner
+                .as_ref()
+                .is_some_and(|owner| Arc::ptr_eq(owner, &self.0))
+        }) {
+            *slot = None;
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn set_new_file_test_hook(
+    point: OrganizeTestPoint,
+    path: PathBuf,
+    action: Box<dyn FnOnce() + Send + 'static>,
+) -> NewFileTestHookGuard {
+    assert!(matches!(
+        point,
+        OrganizeTestPoint::NewFileStaged
+            | OrganizeTestPoint::NewFilePublished
+            | OrganizeTestPoint::NewFileWriteFailure
+            | OrganizeTestPoint::NewFileSyncFailure
+    ));
+    let owner = Arc::new(());
+    let mut slot = organize_test_hook()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    assert!(slot.is_none(), "organize test hook already installed");
+    *slot = Some(OrganizeTestHook {
+        point,
+        path,
+        action,
+        owner: Some(owner.clone()),
+    });
+    NewFileTestHookGuard(owner)
+}
+
+#[cfg(test)]
+fn run_organize_test_hook(point: OrganizeTestPoint, path: &Path) -> bool {
     let action = {
         let mut slot = organize_test_hook()
             .lock()
@@ -995,6 +1104,9 @@ fn run_organize_test_hook(point: OrganizeTestPoint, path: &Path) {
     };
     if let Some(action) = action {
         action();
+        true
+    } else {
+        false
     }
 }
 
