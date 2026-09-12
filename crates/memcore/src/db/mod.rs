@@ -154,12 +154,12 @@ pub use harness_session_attachments::{
 };
 #[cfg(feature = "admin")]
 pub use harness_session_events::{
-    get_harness_session_state, ingest_harness_session_event, mark_harness_session_connection,
-    reconnect_harness_session, HarnessSessionCanonicalState, HarnessSessionConnectionFact,
-    HarnessSessionConnectionReceipt, HarnessSessionEvent, HarnessSessionEventAdmission,
-    HarnessSessionEventDisposition, HarnessSessionEventKind, HarnessSessionEventReceipt,
-    HarnessSessionReconnectReceipt, HarnessSessionStateProjection, HarnessSessionTerminalOutcome,
-    NewHarnessSessionEvent,
+    get_harness_session_state, get_harness_session_state_with_events, ingest_harness_session_event,
+    mark_harness_session_connection, reconnect_harness_session, HarnessSessionCanonicalState,
+    HarnessSessionConnectionFact, HarnessSessionConnectionReceipt, HarnessSessionEvent,
+    HarnessSessionEventAdmission, HarnessSessionEventDisposition, HarnessSessionEventKind,
+    HarnessSessionEventReceipt, HarnessSessionReconnectReceipt, HarnessSessionStateProjection,
+    HarnessSessionStateWithEvents, HarnessSessionTerminalOutcome, NewHarnessSessionEvent,
 };
 #[cfg(feature = "admin")]
 pub use harness_session_interventions::{

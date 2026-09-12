@@ -10,7 +10,7 @@ use crate::agent_eval::attachment::{current_host_admission, required};
 use crate::server_state::MemoryServer;
 use crate::tool_params::TachiAgentEvalParams;
 use memcore::{
-    advertise_harness_session_capabilities, get_harness_session_state,
+    advertise_harness_session_capabilities, get_harness_session_state_with_events,
     ingest_harness_session_event, mark_harness_session_connection, reconnect_harness_session,
     HarnessSessionAttachmentCapabilities, HarnessSessionAttachmentSelector,
     HarnessSessionConnectionFact, HarnessSessionEventDisposition, HarnessSessionEventKind,
@@ -216,15 +216,44 @@ pub(crate) fn handle_get_session_state(
         params.admission_receipt_ref.clone(),
     )?;
     let selector = attachment_selector(&params, &host.host_identity)?;
-    let state = server.with_global_store_read(|store| {
-        get_harness_session_state(store.connection(), &selector, &host, &admission_receipt_ref)
-            .map_err(|error| error.to_string())
+    let view = server.with_global_store_read(|store| {
+        get_harness_session_state_with_events(
+            store.connection(),
+            &selector,
+            &host,
+            &admission_receipt_ref,
+            params.limit,
+        )
+        .map_err(|error| error.to_string())
     })?;
+    let events: Vec<Value> = view
+        .events
+        .iter()
+        .map(|event| {
+            json!({
+                "event_row_id": event.event_row_id,
+                "attachment_id": event.attachment_id,
+                "event_id": event.event_id,
+                "kind": event.kind.as_str(),
+                "outcome": event.outcome.map(HarnessSessionTerminalOutcome::as_str),
+                "source_revision": event.source_revision,
+                "authority_confirmation_ref": event.authority_confirmation_ref,
+                "summary": event.summary,
+                "payload_digest": event.payload_digest,
+                "occurred_at": event.occurred_at,
+                "ingested_at": event.ingested_at,
+                "source_host_identity": event.source_host_identity,
+            })
+        })
+        .collect();
     serde_json::to_string(&json!({
         "status": "completed",
         "action": "get_session_state",
-        "attachment_id": state.attachment_id,
-        "canonical_state": session_state_json(&state),
+        "attachment_id": view.state.attachment_id,
+        "canonical_state": session_state_json(&view.state),
+        "events": events,
+        "event_limit": view.event_limit,
+        "events_truncated": view.events_truncated,
     }))
     .map_err(|error| format!("serialize session state projection: {error}"))
 }
@@ -339,6 +368,8 @@ pub(crate) fn handle_advertise_session_capabilities(
 
 #[cfg(test)]
 mod tests {
+    mod recent_events;
+
     use super::*;
     use crate::tool_params::TachiAgentEvalParams;
     use memcore::{

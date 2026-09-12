@@ -26,6 +26,10 @@
 //!   issue's receipt chain: request accepted -> real harness confirmation
 //!   received -> terminal+cleanup receipts).
 
+mod read;
+
+pub use read::{get_harness_session_state_with_events, HarnessSessionStateWithEvents};
+
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
