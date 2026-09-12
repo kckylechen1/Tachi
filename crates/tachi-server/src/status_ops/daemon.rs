@@ -13,7 +13,10 @@ pub(crate) fn collect_daemon_status(app_home: &Path, global_db_path: &Path) -> D
     let scoped_pid = crate::daemon_lock::scoped_daemon_pid_path(app_home, global_db_path);
     let scoped_status = collect_daemon_status_from_paths(&scoped_lock, &scoped_pid, global_db_path);
     if let Some(status) = scoped_status.as_ref() {
-        if matches!(status, DaemonStatus::Running { .. }) {
+        if matches!(
+            status,
+            DaemonStatus::Running { .. } | DaemonStatus::Unavailable { .. }
+        ) {
             return status.clone();
         }
     }
@@ -396,5 +399,22 @@ mod tests {
         assert!(entry.process_running.is_none());
         assert!(!entry.authoritative_for_current_global);
         assert!(serde_json::to_value(entry).unwrap()["process_running"].is_null());
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn platform_refusal_scoped_unknown_owner_is_not_shadowed_by_stale_legacy_pid() {
+        let dir = tempfile::tempdir().unwrap();
+        let global_db_path = dir.path().join("global.db");
+        let scoped = crate::daemon_lock::scoped_daemon_lock_path(dir.path(), &global_db_path);
+        let legacy = crate::daemon_lock::legacy_daemon_lock_path(dir.path());
+        std::fs::write(&scoped, b"2\n").unwrap();
+        std::fs::write(&legacy, b"1\n").unwrap();
+        assert!(matches!(
+            collect_daemon_status(dir.path(), &global_db_path),
+            DaemonStatus::Unavailable { pid: 2, .. }
+        ));
+        assert_eq!(std::fs::read(scoped).unwrap(), b"2\n");
+        assert_eq!(std::fs::read(legacy).unwrap(), b"1\n");
     }
 }

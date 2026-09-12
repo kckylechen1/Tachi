@@ -1095,6 +1095,23 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
         );
     }
 
+    // Refuse unsupported write modes before tracing, home resolution, legacy
+    // copies, schema migration, seed data, or orphan recovery can create state.
+    #[cfg(not(unix))]
+    {
+        if matches!(
+            cli.command.as_ref(),
+            Some(Commands::Wiki {
+                action: tachi_bootstrap::cli::WikiAction::Export { .. }
+            })
+        ) {
+            crate::wiki_ops::ensure_wiki_export_supported()?;
+        }
+        if cli.daemon && matches!(cli.command.as_ref(), None | Some(Commands::Serve)) {
+            return Err(crate::daemon_lock::unsupported_daemon_lock_error().into());
+        }
+    }
+
     let ctx = initialize_startup_context(&cli)?;
     let global_db_path = resolve_global_db(&cli, &ctx).await?;
     let Some(hygiene) = run_startup_hygiene(&cli, &ctx, &global_db_path).await? else {
@@ -1143,6 +1160,75 @@ mod tests {
             gc_initial_delay_secs: None,
             gc_interval_secs: None,
             command: Some(Commands::Serve),
+        }
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn platform_refusal_startup_write_modes_preserve_absent_and_existing_state() {
+        let _env_lock = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        for wiki in [false, true] {
+            for existing in [false, true] {
+                let root = tempfile::tempdir().expect("temporary root");
+                let home = root.path().join("absent-home");
+                let _tachi_home = EnvRestore::set_path("TACHI_HOME", &home);
+                let db = root.path().join("global/memory.db");
+                let project_db = root.path().join("project/memory.db");
+                let output = root.path().join("output");
+                if existing {
+                    std::fs::create_dir(db.parent().expect("DB parent")).expect("DB directory");
+                    std::fs::write(&db, b"existing database sentinel").expect("DB sentinel");
+                    std::fs::create_dir(&output).expect("output directory");
+                    std::fs::write(output.join("sentinel.md"), b"existing output")
+                        .expect("output sentinel");
+                }
+                let mut cli = startup_test_cli();
+                cli.daemon = !wiki;
+                cli.global_db = Some(db.clone());
+                cli.project_db = Some(project_db.clone());
+                cli.allow_schema_migration = true;
+                if wiki {
+                    cli.command = Some(Commands::Wiki {
+                        action: tachi_bootstrap::cli::WikiAction::Export {
+                            format: "obsidian".into(),
+                            output: output.clone(),
+                            project: "wiki".into(),
+                        },
+                    });
+                }
+                let error = tokio_main(cli).expect_err("unsupported startup mode");
+                assert!(error.to_string().contains("unsupported on this platform"));
+                assert!(
+                    !home.exists(),
+                    "unsupported startup must not initialize its home"
+                );
+                assert!(!project_db.parent().expect("project parent").exists());
+                if existing {
+                    assert_eq!(
+                        std::fs::read(&db).expect("DB after"),
+                        b"existing database sentinel"
+                    );
+                    assert_eq!(
+                        std::fs::read(output.join("sentinel.md")).expect("output after"),
+                        b"existing output"
+                    );
+                    assert_eq!(
+                        std::fs::read_dir(&output).expect("output entries").count(),
+                        1
+                    );
+                    assert_eq!(
+                        std::fs::read_dir(db.parent().expect("DB parent"))
+                            .expect("DB entries")
+                            .count(),
+                        1
+                    );
+                } else {
+                    assert!(!db.parent().expect("DB parent").exists());
+                    assert!(!output.exists());
+                }
+            }
         }
     }
 

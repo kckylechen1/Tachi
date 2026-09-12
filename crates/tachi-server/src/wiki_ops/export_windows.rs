@@ -9,7 +9,7 @@ use crate::server_state::MemoryServer;
 use serde_json::Value;
 use std::path::Path;
 
-const UNSUPPORTED: &str = "Wiki export is unsupported on this platform: transactional Unix write authority is unavailable";
+pub(crate) const UNSUPPORTED: &str = "Wiki export is unsupported on this platform: transactional Unix write authority is unavailable";
 
 pub(crate) fn export_wiki_obsidian(
     _server: &MemoryServer,

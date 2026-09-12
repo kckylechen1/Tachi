@@ -61,6 +61,15 @@ use self::store::{
 pub(crate) use self::export::export_wiki_obsidian;
 #[cfg(not(unix))]
 pub(crate) use self::export_windows::export_wiki_obsidian;
+
+#[cfg(not(unix))]
+pub(crate) fn ensure_wiki_export_supported() -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        self::export_windows::UNSUPPORTED,
+    ))
+}
+
 #[cfg(test)]
 #[cfg(unix)]
 pub(crate) use self::export::{export_wiki_obsidian_with_hook, ExportTestHook};

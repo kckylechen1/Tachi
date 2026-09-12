@@ -81,6 +81,14 @@ impl From<std::io::Error> for DaemonLockError {
     }
 }
 
+#[cfg(not(unix))]
+pub(crate) fn unsupported_daemon_lock_error() -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "daemon locking is unsupported on this platform",
+    )
+}
+
 /// RAII handle for the singleton daemon advisory lock.
 ///
 /// While alive, holds an exclusive `flock` on a stable lock-file path.
@@ -104,10 +112,7 @@ impl DaemonLock {
         #[cfg(not(unix))]
         {
             let _ = path;
-            return Err(DaemonLockError::Io(std::io::Error::new(
-                std::io::ErrorKind::Unsupported,
-                "daemon locking is unsupported on this platform",
-            )));
+            return Err(DaemonLockError::Io(unsupported_daemon_lock_error()));
         }
 
         #[cfg(unix)]
@@ -136,10 +141,7 @@ impl DaemonLock {
         #[cfg(not(unix))]
         {
             let _ = path;
-            return Err(DaemonLockError::Io(std::io::Error::new(
-                std::io::ErrorKind::Unsupported,
-                "daemon locking is unsupported on this platform",
-            )));
+            return Err(DaemonLockError::Io(unsupported_daemon_lock_error()));
         }
 
         #[cfg(unix)]

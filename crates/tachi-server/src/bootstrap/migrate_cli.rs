@@ -886,6 +886,8 @@ mod tests {
             let before = std::fs::read(&db_path).expect("read fixture before apply");
             let lock_path = crate::daemon_lock::scoped_daemon_lock_path(home, &db_path);
             std::fs::write(&lock_path, "2\n").expect("seed unobservable owner receipt");
+            let legacy_lock = crate::daemon_lock::legacy_daemon_lock_path(home);
+            std::fs::write(&legacy_lock, "1\n").expect("seed stale legacy receipt");
 
             let lib = Library {
                 label: "global".to_string(),
@@ -898,6 +900,7 @@ mod tests {
             assert_eq!(result.applied, Some(AppliedOutcome::SkippedLocked));
             assert_eq!(std::fs::read(&db_path).unwrap(), before);
             assert_eq!(std::fs::read(&lock_path).unwrap(), b"2\n");
+            assert_eq!(std::fs::read(legacy_lock).unwrap(), b"1\n");
         });
     }
 
