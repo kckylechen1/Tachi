@@ -606,6 +606,144 @@ pub(crate) mod tests {
         }
     }
 
+    /// Each mutating Staff fixture registers its own repository so the test-only
+    /// cwd fallback can never select the checkout running the test binary.
+    #[cfg(unix)]
+    struct StaffRepositoryFixture {
+        root: tempfile::TempDir,
+        repo: std::path::PathBuf,
+    }
+
+    #[cfg(unix)]
+    impl StaffRepositoryFixture {
+        fn new(home: &std::path::Path) -> Self {
+            let root = tempfile::tempdir().expect("temporary Staff repository sandbox");
+            let repo = root.path().join("source");
+            std::fs::create_dir_all(&repo).expect("create Staff source repository");
+            let fixture = Self { root, repo };
+            fixture.git(&["init", "-b", "main"]);
+            fixture.git(&["config", "user.name", "Staff Fixture"]);
+            fixture.git(&["config", "user.email", "staff-fixture@example.invalid"]);
+            fixture.git(&["config", "commit.gpgsign", "false"]);
+            let hooks = fixture.root.path().join("empty-hooks");
+            std::fs::create_dir(&hooks).expect("empty fixture hooks directory");
+            fixture.git(&[
+                "config",
+                "core.hooksPath",
+                hooks.to_str().expect("hooks path"),
+            ]);
+            std::fs::write(fixture.repo.join(".gitignore"), ".tachi/\n")
+                .expect("ignore fixture database");
+            fixture.git(&["add", ".gitignore"]);
+            fixture.git(&["commit", "-m", "fixture"]);
+            let remote = fixture.root.path().join("origin.git");
+            fixture.git(&["init", "--bare", remote.to_str().expect("remote path")]);
+            fixture.git(&[
+                "remote",
+                "add",
+                "origin",
+                remote.to_str().expect("remote path"),
+            ]);
+            fixture.git(&["push", "origin", "main"]);
+            let db = fixture
+                .repo
+                .join(".tachi")
+                .join(memcore::MEMORY_DB_FILENAME);
+            std::fs::create_dir_all(db.parent().expect("fixture database parent"))
+                .expect("create fixture database directory");
+            std::fs::write(&db, b"").expect("seed fixture database");
+            crate::project_db_ops::register_repo_local_manifest_entry_in_home(&db, "tachi", home)
+                .expect("register fixture repository in isolated manifest");
+            let resolved = MemoryServer::resolve_named_project_db_path_in_home("tachi", home)
+                .expect("resolve registered fixture project without cwd fallback");
+            assert_eq!(
+                std::fs::canonicalize(resolved).unwrap(),
+                std::fs::canonicalize(db).unwrap()
+            );
+            fixture
+        }
+
+        fn git(&self, args: &[&str]) -> String {
+            let output = std::process::Command::new("git")
+                .current_dir(&self.repo)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env_remove("GIT_DIR")
+                .env_remove("GIT_WORK_TREE")
+                .env_remove("GIT_INDEX_FILE")
+                .env_remove("GIT_COMMON_DIR")
+                .env_remove("GIT_CONFIG_COUNT")
+                .env_remove("GIT_CONFIG_PARAMETERS")
+                .args(args)
+                .output()
+                .expect("fixture Git command");
+            assert!(
+                output.status.success(),
+                "fixture git {args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8(output.stdout).expect("fixture Git output")
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn staff_repository_fixtures_are_independent_under_concurrent_mutation() {
+        let _environment = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let fixtures: Vec<_> = (0..2)
+            .map(|_| {
+                let home = tempfile::tempdir().expect("independent fixture home");
+                let fixture = StaffRepositoryFixture::new(home.path());
+                (home, fixture)
+            })
+            .collect();
+        let workers: Vec<_> = fixtures
+            .into_iter()
+            .map(|(home, fixture)| {
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    let _home = home;
+                    let worktree = fixture.root.path().join("worktree");
+                    barrier.wait();
+                    // Identical branch names deliberately collide if source ownership
+                    // regresses to one shared repository across test processes.
+                    fixture.git(&[
+                        "worktree",
+                        "add",
+                        "-b",
+                        "same-fixture-branch",
+                        worktree.to_str().unwrap(),
+                    ]);
+                    fixture.git(&["push", "origin", "same-fixture-branch"]);
+                    assert!(worktree.join(".git").is_file());
+                    let common = fixture.git(&["rev-parse", "--git-common-dir"]);
+                    assert_eq!(common.trim(), ".git");
+                    fixture.git(&["worktree", "remove", worktree.to_str().unwrap()]);
+                    fixture.git(&["branch", "-D", "same-fixture-branch"]);
+                    fixture.git(&["push", "origin", "--delete", "same-fixture-branch"]);
+                    assert!(!worktree.exists());
+                    let listed = fixture.git(&["worktree", "list", "--porcelain"]);
+                    assert_eq!(
+                        listed
+                            .lines()
+                            .filter(|line| line.starts_with("worktree "))
+                            .count(),
+                        1
+                    );
+                    std::fs::canonicalize(&fixture.repo).expect("fixture repository identity")
+                })
+            })
+            .collect();
+        let roots: Vec<_> = workers
+            .into_iter()
+            .map(|worker| worker.join().expect("independent fixture worker"))
+            .collect();
+        assert_ne!(roots[0], roots[1]);
+    }
+
     struct CurrentDirGuard(std::path::PathBuf);
 
     impl CurrentDirGuard {
@@ -699,6 +837,26 @@ pub(crate) mod tests {
         let _home = crate::test_support::EnvRestore::set_path("TACHI_HOME", temp_home.path());
         let _runs = crate::test_support::EnvRestore::set_path("TACHI_RUN_ROOT", temp_runs.path());
         let _path = crate::test_support::EnvRestore::set_os("PATH", &joined_path);
+        let _git_environment: Vec<_> = [
+            "GIT_DIR",
+            "GIT_WORK_TREE",
+            "GIT_INDEX_FILE",
+            "GIT_COMMON_DIR",
+            "GIT_CONFIG_COUNT",
+            "GIT_CONFIG_PARAMETERS",
+        ]
+        .into_iter()
+        .map(crate::test_support::EnvRestore::remove)
+        .collect();
+        let _git_global = crate::test_support::EnvRestore::set("GIT_CONFIG_GLOBAL", "/dev/null");
+        let _git_system = crate::test_support::EnvRestore::set("GIT_CONFIG_NOSYSTEM", "1");
+        let _repository = StaffRepositoryFixture::new(temp_home.path());
+        let temp_worktrees = tempfile::tempdir().expect("isolated Staff worktrees");
+        let _registry_home = crate::test_support::EnvRestore::set_path("HOME", temp_home.path());
+        let _worktrees = crate::test_support::EnvRestore::set_path(
+            "TACHI_WORKTREES_ROOT",
+            temp_worktrees.path(),
+        );
         let server = test_server();
         let recommendation = server
             .with_global_store(|store| {
@@ -862,6 +1020,20 @@ pub(crate) mod tests {
             "TACHI_WORKTREES_ROOT",
             temp_worktrees.path(),
         );
+        let _git_environment: Vec<_> = [
+            "GIT_DIR",
+            "GIT_WORK_TREE",
+            "GIT_INDEX_FILE",
+            "GIT_COMMON_DIR",
+            "GIT_CONFIG_COUNT",
+            "GIT_CONFIG_PARAMETERS",
+        ]
+        .into_iter()
+        .map(crate::test_support::EnvRestore::remove)
+        .collect();
+        let _git_global = crate::test_support::EnvRestore::set("GIT_CONFIG_GLOBAL", "/dev/null");
+        let _git_system = crate::test_support::EnvRestore::set("GIT_CONFIG_NOSYSTEM", "1");
+        let _repository = StaffRepositoryFixture::new(temp_home.path());
         let mut fixture_cleanup =
             CertifiedWorktreeCleanupGuard::arm(temp_worktrees.path(), find_worktree);
         let server = test_server();
@@ -2301,6 +2473,26 @@ pub(crate) mod tests {
         let _home = crate::test_support::EnvRestore::set_path("TACHI_HOME", temp_home.path());
         let _runs = crate::test_support::EnvRestore::set_path("TACHI_RUN_ROOT", temp_runs.path());
         let _path = crate::test_support::EnvRestore::set_os("PATH", &joined_path);
+        let _git_environment: Vec<_> = [
+            "GIT_DIR",
+            "GIT_WORK_TREE",
+            "GIT_INDEX_FILE",
+            "GIT_COMMON_DIR",
+            "GIT_CONFIG_COUNT",
+            "GIT_CONFIG_PARAMETERS",
+        ]
+        .into_iter()
+        .map(crate::test_support::EnvRestore::remove)
+        .collect();
+        let _git_global = crate::test_support::EnvRestore::set("GIT_CONFIG_GLOBAL", "/dev/null");
+        let _git_system = crate::test_support::EnvRestore::set("GIT_CONFIG_NOSYSTEM", "1");
+        let _repository = StaffRepositoryFixture::new(temp_home.path());
+        let temp_worktrees = tempfile::tempdir().expect("isolated Staff worktrees");
+        let _registry_home = crate::test_support::EnvRestore::set_path("HOME", temp_home.path());
+        let _worktrees = crate::test_support::EnvRestore::set_path(
+            "TACHI_WORKTREES_ROOT",
+            temp_worktrees.path(),
+        );
         let server = test_server();
 
         let raw = staff_start(&server, staff_request("tachi"))
