@@ -969,6 +969,40 @@ fn same_epoch_replacement_is_never_orphaned_by_a_raced_scan() {
     );
 }
 
+/// On platforms without the anchored descriptor-relative writer, the
+/// reconciliation append refuses before reading or mutating the receipt.
+#[cfg(not(unix))]
+#[test]
+fn platform_refusal_reconciliation_append_preserves_existing_status() {
+    let runs = tempfile::tempdir().expect("runs");
+    let run_dir = stage_managed_run_at(
+        runs.path(),
+        "20260829T120018Z-s1-unsupported-append",
+        "ctrl-epoch-a",
+    );
+    let receipt = run_dir.join("status.json");
+    let before = std::fs::read(&receipt).expect("receipt before");
+
+    let refusal = append_reconciliation_observation(&run_dir, VERDICT_ORPHANED, "ctrl-epoch-b")
+        .expect_err("unsupported append must refuse");
+
+    assert!(refusal.contains("unsupported on this platform"));
+    assert_eq!(std::fs::read(receipt).expect("receipt after"), before);
+}
+
+#[cfg(not(unix))]
+#[test]
+fn platform_refusal_reconciliation_append_does_not_create_run_directory() {
+    let runs = tempfile::tempdir().expect("runs");
+    let run_dir = runs.path().join("missing-run");
+
+    let refusal = append_reconciliation_observation(&run_dir, VERDICT_ORPHANED, "ctrl-epoch-b")
+        .expect_err("unsupported append must refuse");
+
+    assert!(refusal.contains("unsupported on this platform"));
+    assert!(!run_dir.exists(), "refusal must not create a run directory");
+}
+
 /// R9 leaf-discipline discrimination: a symlinked status.json is foreign
 /// content — the scan skips it and the append refuses it; neither ever
 /// reads through the link.

@@ -45,6 +45,9 @@ pub(crate) fn runtime_observability_json(
                 false,
             ),
             Some(DaemonStatus::StalePid { pid, .. }) => (Some(*pid), "stale", None, None, false),
+            Some(DaemonStatus::Unavailable { pid, reason, .. }) => {
+                (Some(*pid), "unavailable", Some(reason.clone()), None, false)
+            }
             Some(DaemonStatus::None) => (None, "none", None, None, false),
             None => (
                 read_pid_file(app_home.join("daemon.lock")),
@@ -54,8 +57,10 @@ pub(crate) fn runtime_observability_json(
                 false,
             ),
         };
-    let daemon_process_running = daemon_pid.map(process_alive).unwrap_or(false);
-    let daemon_running = daemon_process_running && daemon_authoritative;
+    let daemon_process_running = daemon_pid
+        .map(crate::daemon_lock::process_liveness)
+        .unwrap_or(Some(false));
+    let daemon_running = daemon_process_running == Some(true) && daemon_authoritative;
     let serving_daemon = daemon_pid
         .map(|pid| daemon_running && pid as u32 == current_pid)
         .unwrap_or(false);
@@ -143,7 +148,7 @@ pub(crate) fn runtime_observability_json(
             "process_running": daemon_process_running,
             "authoritative": daemon_running,
             "state": daemon_state,
-            "foreign": daemon_state == "foreign" && daemon_process_running,
+            "foreign": daemon_state == "foreign" && daemon_process_running == Some(true),
             "reason": daemon_reason,
             "global_db": daemon_global_db,
             "matches_current_process": serving_daemon,
@@ -294,6 +299,12 @@ async fn handle_tachi_status_detail(
             "running": false,
             "stale": true,
             "pid": pid,
+        }),
+        DaemonStatus::Unavailable { pid, reason, .. } => json!({
+            "running": null,
+            "unavailable": true,
+            "pid": pid,
+            "reason": reason,
         }),
         DaemonStatus::None => json!({
             "running": false,
@@ -518,13 +529,13 @@ async fn handle_tachi_status_detail(
     let running_daemons = snapshot
         .daemon_inventory
         .iter()
-        .filter(|daemon| daemon.process_running)
+        .filter(|daemon| daemon.process_running == Some(true))
         .count();
     if running_daemons > 1 {
         let scopes = snapshot
             .daemon_inventory
             .iter()
-            .filter(|daemon| daemon.process_running)
+            .filter(|daemon| daemon.process_running == Some(true))
             .map(|daemon| {
                 daemon
                     .global_db

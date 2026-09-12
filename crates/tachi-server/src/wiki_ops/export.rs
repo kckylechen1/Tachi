@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use super::*;
 use crate::utils::stable_hash;
 use std::collections::BTreeSet;

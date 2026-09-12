@@ -25,6 +25,11 @@ pub(crate) async fn collect_agent_warning_lines(server: &crate::MemoryServer) ->
                 json!({ "running": false, "foreign": true, "reason": reason })
             }
             DaemonStatus::StalePid { .. } => json!({ "running": false, "stale": true }),
+            DaemonStatus::Unavailable { reason, .. } => json!({
+                "running": null,
+                "unavailable": true,
+                "reason": reason,
+            }),
             DaemonStatus::None => json!({ "running": false }),
         };
         let mut warnings = build_status_warnings(&snapshot, &daemon_state);
