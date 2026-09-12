@@ -609,21 +609,7 @@ fn directory_identity(path: &Path) -> Result<(u64, u64), String> {
         Ok((device, inode))
     }
 
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt;
-        let device = metadata.volume_serial_number().unwrap_or(0) as u64;
-        let inode = metadata.file_index().unwrap_or(0);
-        if device == 0 || inode == 0 {
-            return Err(format!(
-                "worktree directory has no stable volume/file identity: {}",
-                path.display()
-            ));
-        }
-        Ok((device, inode))
-    }
-
-    #[cfg(not(any(unix, windows)))]
+    #[cfg(not(unix))]
     {
         let _ = metadata;
         Err("worktree directory identity is unsupported on this platform".to_string())
@@ -695,6 +681,19 @@ fn canonical_string(path: &Path) -> String {
 mod tests {
     use super::*;
     use crate::test_support::home_env_lock as env_lock;
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_directory_identity_cannot_authorize_registration() {
+        let root =
+            std::env::temp_dir().join(format!("tachi-windows-identity-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let result = directory_identity(&root);
+        let marker_exists = root.join(".tachi-worktree.json").exists();
+        std::fs::remove_dir(&root).unwrap();
+        assert!(result.unwrap_err().contains("identity is unsupported"));
+        assert!(!marker_exists);
+    }
 
     #[test]
     fn nested_registry_path_is_detected() {

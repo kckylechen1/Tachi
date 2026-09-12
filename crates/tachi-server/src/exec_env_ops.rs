@@ -1460,6 +1460,36 @@ mod tests {
         assert!(!same_directory_object(&metadata, &metadata));
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn windows_dispatch_refuses_active_lease_without_object_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let worktree = temp.path().join("worktree");
+        std::fs::create_dir(&worktree).unwrap();
+        let server = MemoryServer::new(temp.path().join("global.sqlite"), None).unwrap();
+        seed_dispatchable_env(&server, "env-windows", "resource-windows");
+        server
+            .with_global_store(|store| {
+                store
+                    .connection_mut()
+                    .execute(
+                        "UPDATE exec_envs SET path = ?1 WHERE env_id = 'env-windows'",
+                        [worktree.to_str().unwrap()],
+                    )
+                    .map_err(|error| error.to_string())?;
+                Ok(())
+            })
+            .unwrap();
+        let error = server
+            .resolve_dispatch_env_binding(Some("env-windows"), None, false)
+            .unwrap_err();
+        assert!(
+            error.contains("worktree identity changed since publication"),
+            "{error}"
+        );
+        assert!(worktree.is_dir());
+    }
+
     fn seed_dispatchable_env(server: &MemoryServer, env_id: &str, resource_id: &str) {
         server
             .with_global_store(|store| {
