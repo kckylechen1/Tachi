@@ -347,7 +347,8 @@ impl MemoryStore {
                 break;
             };
             result.admission_rows += 1;
-            let bytes: usize = row.get(1)?;
+            let bytes = usize::try_from(row.get::<_, i64>(1)?)
+                .map_err(|_| invalid("invalid admission byte count"))?;
             if bytes > b.max_row_bytes {
                 result.status = ExactEntityReadStatus::RowBytes;
                 return Ok(());
@@ -395,11 +396,13 @@ impl MemoryStore {
         for (_, rowid) in admitted {
             // Account all text/JSON columns before the existing full renderer.
             let lengths = "COALESCE(octet_length(id),0)+COALESCE(octet_length(path),0)+COALESCE(octet_length(summary),0)+COALESCE(octet_length(text),0)+COALESCE(octet_length(timestamp),0)+COALESCE(octet_length(valid_from),0)+COALESCE(octet_length(valid_until),0)+COALESCE(octet_length(category),0)+COALESCE(octet_length(topic),0)+COALESCE(octet_length(keywords),0)+COALESCE(octet_length(entities),0)+COALESCE(octet_length(source),0)+COALESCE(octet_length(scope),0)+COALESCE(octet_length(metadata),0)+COALESCE(octet_length(retention_policy),0)+COALESCE(octet_length(domain),0)+COALESCE(octet_length(last_access),0)+COALESCE(octet_length(last_use_at),0)+COALESCE(octet_length(tier),0)+COALESCE(octet_length(superseded_by),0)";
-            let bytes: usize = self.conn.query_row(
+            let bytes: i64 = self.conn.query_row(
                 &format!("SELECT {lengths} FROM memories WHERE rowid=?1"),
                 [rowid],
                 |r| r.get(0),
             )?;
+            let bytes =
+                usize::try_from(bytes).map_err(|_| invalid("invalid hydration byte count"))?;
             if bytes > b.max_row_bytes {
                 result.entries.clear();
                 result.status = ExactEntityReadStatus::RowBytes;
@@ -461,7 +464,8 @@ impl MemoryStore {
         let row = rows
             .next()?
             .ok_or_else(|| invalid("candidate disappeared within read snapshot"))?;
-        let bytes: usize = row.get(0)?;
+        let bytes = usize::try_from(row.get::<_, i64>(0)?)
+            .map_err(|_| invalid("invalid projection byte count"))?;
         if bytes > request.budget.max_row_bytes {
             result.status = ExactEntityReadStatus::RowBytes;
             return Ok(None);
