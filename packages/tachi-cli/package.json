@@ -15,12 +15,12 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "1.27.1",
     "chalk": "^5.3.0",
     "commander": "^12.1.0",
     "get-port": "^7.1.0",
     "ink": "^5.0.1",
     "js-yaml": "^5.2.2",
-    "node-fetch": "^3.3.2",
     "react": "^18.3.1"
   },
   "devDependencies": {
@@ -30,7 +30,7 @@
     "typescript": "^5.6.3"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=18.14.1"
   },
   "overrides": {
     "ws": "^8.21.0"
