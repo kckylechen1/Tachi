@@ -4,8 +4,10 @@
 //! asserts the secret VALUE string never appears in the serialized report.
 //! The boundary test proves the doctor leaves fixture bytes identical.
 
+#[cfg(unix)]
 use std::collections::BTreeMap;
 use std::fs;
+#[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -32,6 +34,7 @@ fn write(path: &Path, contents: &str) {
     fs::write(path, contents).unwrap();
 }
 
+#[cfg(unix)]
 fn write_mode(path: &Path, contents: &str, mode: u32) {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).unwrap();
@@ -43,6 +46,13 @@ fn write_mode(path: &Path, contents: &str, mode: u32) {
     file.write_all(contents.as_bytes()).unwrap();
 }
 
+// Portable fixtures only need file contents; permission assertions are Unix-only.
+#[cfg(not(unix))]
+fn write_mode(path: &Path, contents: &str, _mode: u32) {
+    write(path, contents);
+}
+
+#[cfg(unix)]
 fn snapshot_tree(root: &Path) -> BTreeMap<String, Vec<u8>> {
     let mut out = BTreeMap::new();
     fn walk(dir: &Path, root: &Path, out: &mut BTreeMap<String, Vec<u8>>) {
@@ -207,6 +217,7 @@ fn injection_surface_red_tachi_profile_mismatch() {
     let _ = fs::remove_dir_all(home);
 }
 
+#[cfg(unix)]
 #[test]
 fn injection_surface_red_credential_world_readable() {
     let home = temp_root("cred-world");
@@ -430,6 +441,7 @@ fn injection_surface_green_clean_two_harness_with_unscanned() {
     let _ = fs::remove_dir_all(home);
 }
 
+#[cfg(unix)]
 #[test]
 fn injection_surface_doctor_boundary_leaves_fixture_byte_identical() {
     let home = temp_root("boundary");
@@ -548,11 +560,13 @@ fn injection_surface_red_density_scanned_missing_path_not_clean() {
     let _ = fs::remove_dir_all(home);
 }
 
+#[cfg(unix)]
 #[test]
 fn injection_surface_red_credential_declared_id_rsa_world_readable() {
     credential_declared_basename_world_readable("id_rsa", "ID_RSA_SECRET_VALUE_do_not_leak_aa01");
 }
 
+#[cfg(unix)]
 #[test]
 fn injection_surface_red_credential_declared_id_ed25519_world_readable() {
     credential_declared_basename_world_readable(
@@ -561,6 +575,7 @@ fn injection_surface_red_credential_declared_id_ed25519_world_readable() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn injection_surface_red_credential_declared_private_key_pem_world_readable() {
     credential_declared_basename_world_readable(
@@ -569,6 +584,7 @@ fn injection_surface_red_credential_declared_private_key_pem_world_readable() {
     );
 }
 
+#[cfg(unix)]
 fn credential_declared_basename_world_readable(basename: &str, secret_value: &str) {
     let home = temp_root(&format!("cred-basename-{basename}"));
     let rel = format!("fixture-a/{basename}");
@@ -651,6 +667,7 @@ fn injection_surface_red_plane_io_missing_continues_other_planes() {
     let _ = fs::remove_dir_all(home);
 }
 
+#[cfg(unix)]
 #[test]
 fn injection_surface_red_plane_io_unreadable_continues() {
     let home = temp_root("plane-io-unreadable");

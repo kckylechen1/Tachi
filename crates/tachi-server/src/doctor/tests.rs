@@ -32,7 +32,6 @@ fn make_legacy_db(path: &Path) {
     .unwrap();
 }
 
-#[cfg(unix)]
 fn make_corrupt_db(path: &Path) {
     fs::write(
         path,
