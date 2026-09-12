@@ -55,6 +55,7 @@ pub mod mirror_eval;
 #[cfg(feature = "admin")]
 pub mod model_catalog;
 mod open;
+pub(crate) use open::{install_exact_reader_progress, EXACT_PROGRESS_INTERVAL};
 pub mod open_context;
 // tachi#1643: NOT admin-gated. #1630's premise is a host-owned sync loop with
 // no Tachi daemon, so the outbox is portable surface — the same reason the v29

@@ -240,3 +240,58 @@ The one supported dependency surface for Hypermem:
   database; the next resolving open re-confers. The stamp is write-once at
   the API level precisely so this is an operator action, never an ambient
   one.
+
+### Bounded exact-entity reads (#1882)
+
+`MemoryStore::read_exact_entities` accepts structural entity aliases, canonical
+store identity expectations, optional physical file identity, an explicit
+public/private partition expectation, path/domain/surface selectors, governed
+role rules, archive selection, `as_of`, and caller work ceilings. The borrowed
+`db::StoreIdentity` must match this handle's resolved role and effective profile.
+A supplied physical identity must match the opened file identity; no path is
+reopened. `expected_private_partition: None` requires a public handle. These
+checks assert existing admission; they do not grant access or route databases.
+An unknown store label is still unknown, not proof of project authority.
+
+The trusted host resolves role rules from its canonical authority for each
+request. For Tachi this is the server's Global store, not the candidate store's
+`sandbox_rules`. Rules use the existing deny/path evaluator before result
+selection. Surface and scope are not ACLs. The kernel does not deserialize tool
+arguments into authority or add a policy ledger. A Global-rule snapshot and a
+separate candidate database are not an atomic cross-database snapshot; adapters
+retain responsibility for admission and that existing limitation.
+
+The reader scans bounded id/path projections, then bounded entity, temporal,
+and namespace fields. Canonical namespace classifiers share a borrowed
+projection with existing full-entry callers. Only admitted, deterministically
+ID-ordered and capped rows use the full renderer, within the same SQLite read
+snapshot. Exact metadata matching does not normalize product symbols or treat
+text/keywords as identity. Canonical validity is half-open: A superseded by B in
+August remains visible in June, while August's boundary and current reads select
+B. Including archived rows does not revive current superseded rows.
+
+Every final internally owned connection installs a permanent progress callback.
+It shares the existing connection-lifetime authorization state but creates only
+runtime instrumentation, not authority. Inactive callbacks only check the armed
+flag; there is still callback overhead on unrelated SQL. Each exact read charges
+a fixed database-independent probe and requires its private witness to advance.
+A removed/replaced callback or replaced connection yields `CallbackUnavailable`
+without installing, clearing, or restoring a callback. A foreign interrupt is
+an error, not inferred budget exhaustion. RAII disarms instrumentation before
+owned snapshot rollback and restores the inherited SQLite length ceiling.
+
+VM accounting uses approximate 256-instruction callback quanta, including probe
+work; it is not a wall-clock, filesystem, or lock-wait deadline. Request bytes,
+scanned rows, admission bytes, per-row bytes, and hydrated bytes have independent
+ceilings. SQL byte-length/CASE guards precede JSON parsing, and only admitted
+content is fully hydrated. Reaching the row ceiling is conservatively exhausted
+without an extra EOF step. Resource exhaustion discards all partial rows;
+`ResultLimit` carries the deterministic capped result and explicitly does not
+claim completeness. No index, schema migration, ranking change, or access/use
+receipt write is introduced.
+
+The isolated `exact_entity_contract` target requires `portable-contract-test`
+and proves the public API without admin on disposable `PortableKernel` stores.
+Workspace tests also cover callback ownership and canonical namespace behavior.
+Current Hypermem adapter conformance and downstream benchmark/cutover acceptance
+remain separate gates; an archived prototype is not production evidence.

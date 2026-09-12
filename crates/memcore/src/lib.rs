@@ -66,11 +66,15 @@ pub mod catalog;
 pub mod db;
 pub mod embed_config;
 pub mod error;
+mod exact_entity;
 #[cfg(feature = "admin")]
 pub mod foundry;
 #[cfg(feature = "admin")]
 pub mod hub;
 pub mod kernel_policy;
+pub use exact_entity::{
+    ExactEntityReadBudget, ExactEntityReadRequest, ExactEntityReadResult, ExactEntityReadStatus,
+};
 pub mod model_broker_seam;
 pub mod namespace;
 pub mod near_dup;
