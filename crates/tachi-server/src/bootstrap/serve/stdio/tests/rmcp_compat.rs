@@ -249,3 +249,122 @@ fn stdio_auto_client_falls_back_to_legacy_initialize() {
         });
     });
 }
+
+fn default_legacy_methods() -> [(&'static str, serde_json::Value, &'static str); 4] {
+    [
+        ("prompts/list", json!({}), "prompts"),
+        ("resources/list", json!({}), "resources"),
+        ("resources/templates/list", json!({}), "resourceTemplates"),
+        (
+            "completion/complete",
+            json!({
+                "ref": {"type":"ref/prompt", "name":"legacy-probe"},
+                "argument": {"name":"query", "value":""}
+            }),
+            "completion",
+        ),
+    ]
+}
+
+fn inline_metadata() -> serde_json::Value {
+    json!({
+        "io.modelcontextprotocol/protocolVersion":"2025-11-25",
+        "io.modelcontextprotocol/clientCapabilities":{},
+        "io.modelcontextprotocol/clientInfo":{"name":"inline-probe", "version":"1"}
+    })
+}
+
+#[test]
+fn inherited_http_methods_require_initialize_and_preserve_legacy_results() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    with_tachi_home(temp.path(), || {
+        let global = temp.path().join("global/memory.db");
+        test_runtime().block_on(async {
+            let server = crate::MemoryServer::new(global.clone(), None).expect("server");
+            let (daemon, cancel, task) = spawn_test_http_daemon(server, &global).await;
+            let (client, session_headers, _) =
+                http_mcp_initialize(&daemon.url, http_headers(&[]), None).await;
+            http_mcp_initialized(&client, &daemon.url, session_headers.clone()).await;
+            for (method, params, field) in default_legacy_methods() {
+                let mut inline = params.clone();
+                inline["_meta"] = inline_metadata();
+                let response = client
+                    .post(&daemon.url)
+                    .headers(http_headers(&[
+                        ("mcp-protocol-version", "2025-11-25"),
+                        ("mcp-method", method),
+                    ]))
+                    .json(&json!({"jsonrpc":"2.0", "id":8, "method":method, "params":inline}))
+                    .send()
+                    .await
+                    .expect("inline request");
+                let body = parse_http_mcp_payload(&response.text().await.expect("body"), 8);
+                assert_eq!(body["error"]["code"], -32600, "{method}: {body:#}");
+                assert!(body.get("result").is_none(), "{method}: {body:#}");
+                let response = client
+                    .post(&daemon.url)
+                    .headers(session_headers.clone())
+                    .json(&json!({"jsonrpc":"2.0", "id":9, "method":method, "params":params}))
+                    .send()
+                    .await
+                    .expect("legacy request");
+                let body = parse_http_mcp_payload(&response.text().await.expect("body"), 9);
+                assert!(body.get("error").is_none(), "{method}: {body:#}");
+                assert!(body["result"].get("resultType").is_none(), "{body:#}");
+                let value = if field == "completion" {
+                    &body["result"][field]["values"]
+                } else {
+                    &body["result"][field]
+                };
+                assert_eq!(value, &json!([]), "{method}: {body:#}");
+            }
+            cancel.cancel();
+            task.await.expect("daemon task");
+        });
+    });
+}
+
+#[test]
+fn inherited_stdio_proxy_methods_reject_inline_wire_requests() {
+    use rmcp::ServiceExt;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let temp = tempfile::tempdir().expect("tempdir");
+    with_tachi_home(temp.path(), || {
+        test_runtime().block_on(async {
+            for (method, mut params, _) in default_legacy_methods() {
+                let proxy = identity_probe_proxy();
+                let (server_io, client_io) = tokio::io::duplex(16384);
+                let server = tokio::spawn(async move {
+                    if let Ok(service) = proxy.serve(server_io).await {
+                        let _ = service.waiting().await;
+                    }
+                });
+                let (reader, mut writer) = tokio::io::split(client_io);
+                let mut reader = BufReader::new(reader);
+                params["_meta"] = inline_metadata();
+                let request = json!({"jsonrpc":"2.0", "id":10, "method":method, "params":params});
+                writer
+                    .write_all(format!("{request}\n").as_bytes())
+                    .await
+                    .expect("write request");
+                let mut line = String::new();
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(30),
+                    reader.read_line(&mut line),
+                )
+                .await
+                .expect("response deadline")
+                .expect("read response");
+                let body: serde_json::Value = serde_json::from_str(&line).expect("wire JSON");
+                assert_eq!(body["error"]["code"], -32600, "{method}: {body:#}");
+                assert!(body.get("result").is_none(), "{method}: {body:#}");
+                drop(reader);
+                drop(writer);
+                tokio::time::timeout(std::time::Duration::from_secs(30), server)
+                    .await
+                    .expect("server exit deadline")
+                    .expect("server exit");
+            }
+        });
+    });
+}

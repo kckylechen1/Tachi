@@ -1034,6 +1034,43 @@ impl ServerHandler for MemoryServer {
         >())
     }
 
+    // Preserve the SDK's legacy empty results while closing its inline defaults.
+    async fn complete(
+        &self,
+        _request: rmcp::model::CompleteRequestParams,
+        context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
+    ) -> Result<rmcp::model::CompleteResult, rmcp::ErrorData> {
+        require_legacy_session(&context.meta)?;
+        Ok(Default::default())
+    }
+
+    async fn list_prompts(
+        &self,
+        _request: Option<rmcp::model::PaginatedRequestParams>,
+        context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
+    ) -> Result<rmcp::model::ListPromptsResult, rmcp::ErrorData> {
+        require_legacy_session(&context.meta)?;
+        Ok(Default::default())
+    }
+
+    async fn list_resources(
+        &self,
+        _request: Option<rmcp::model::PaginatedRequestParams>,
+        context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
+    ) -> Result<rmcp::model::ListResourcesResult, rmcp::ErrorData> {
+        require_legacy_session(&context.meta)?;
+        Ok(Default::default())
+    }
+
+    async fn list_resource_templates(
+        &self,
+        _request: Option<rmcp::model::PaginatedRequestParams>,
+        context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
+    ) -> Result<rmcp::model::ListResourceTemplatesResult, rmcp::ErrorData> {
+        require_legacy_session(&context.meta)?;
+        Ok(Default::default())
+    }
+
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_instructions(crate::server_instructions::mcp_server_instructions())

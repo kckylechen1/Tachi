@@ -329,6 +329,16 @@ mod tests {
             for (method, extra) in [
                 ("server/discover", serde_json::json!({})),
                 ("tools/list", serde_json::json!({})),
+                ("prompts/list", serde_json::json!({})),
+                ("resources/list", serde_json::json!({})),
+                ("resources/templates/list", serde_json::json!({})),
+                (
+                    "completion/complete",
+                    serde_json::json!({
+                        "ref": {"type":"ref/prompt", "name":"legacy-probe"},
+                        "argument": {"name":"query", "value":""}
+                    }),
+                ),
                 (
                     "tools/call",
                     serde_json::json!({"name": "status", "arguments": {}}),
@@ -462,6 +472,35 @@ mod tests {
         .expect("mcp initialize handshake");
 
         let peer = client.peer().clone();
+        assert!(peer
+            .list_prompts(None)
+            .await
+            .expect("legacy prompts")
+            .prompts
+            .is_empty());
+        assert!(peer
+            .list_resources(None)
+            .await
+            .expect("legacy resources")
+            .resources
+            .is_empty());
+        assert!(peer
+            .list_resource_templates(None)
+            .await
+            .expect("legacy templates")
+            .resource_templates
+            .is_empty());
+        let completion = peer
+            .complete(
+                serde_json::from_value(serde_json::json!({
+                    "ref": {"type":"ref/prompt", "name":"legacy-probe"},
+                    "argument": {"name":"query", "value":""}
+                }))
+                .expect("completion params"),
+            )
+            .await
+            .expect("legacy completion");
+        assert!(completion.completion.values.is_empty());
         let tools = tokio::time::timeout(std::time::Duration::from_secs(5), peer.list_tools(None))
             .await
             .expect("tools/list timed out")
