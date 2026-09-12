@@ -590,6 +590,7 @@ impl MemoryStore {
         let resolved = schema_result?.identity;
         db::validate_persistent_trigger_inventory(&conn, true)?;
         db::install_authority_row_guards(&conn, &reserved_reference_write)?;
+        db::install_exact_reader_progress(&conn, &reserved_reference_write)?;
         let mut store = Self {
             conn,
             reserved_reference_write,
@@ -760,6 +761,7 @@ impl MemoryStore {
                 busy_timeout,
             );
         }
+        db::install_exact_reader_progress(&conn, &reserved_reference_write)?;
         Ok(Self {
             conn,
             reserved_reference_write,
@@ -816,6 +818,7 @@ impl MemoryStore {
         // the reopen rather than re-derived: re-reading the stamp here would
         // open a window in which another process's write is observed instead of
         // the one this open committed.
+        db::install_exact_reader_progress(&conn, &reserved_reference_write)?;
         Ok(Self {
             conn,
             reserved_reference_write,
@@ -995,6 +998,7 @@ impl MemoryStore {
         let resolved_label =
             db::store_identity::resolve_role(stored_role.as_deref(), db_label, path)?;
         crate::private_partition::refuse_stamped_private_store(&conn)?;
+        db::install_exact_reader_progress(&conn, &reserved_reference_write)?;
         Ok(Self {
             conn,
             reserved_reference_write,
@@ -1064,6 +1068,7 @@ impl MemoryStore {
         let path = std::path::Path::new(db_path);
         let (stored_role, stored_profile) = db::store_identity::read_identity(&conn, path)?;
         crate::private_partition::refuse_stamped_private_store(&conn)?;
+        db::install_exact_reader_progress(&conn, &reserved_reference_write)?;
         Ok(Self {
             conn,
             reserved_reference_write,
@@ -1097,6 +1102,7 @@ impl MemoryStore {
         schema_result?;
         db::validate_persistent_trigger_inventory(&conn, true)?;
         db::install_authority_row_guards(&conn, &reserved_reference_write)?;
+        db::install_exact_reader_progress(&conn, &reserved_reference_write)?;
         Ok(Self {
             conn,
             reserved_reference_write,

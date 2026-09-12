@@ -55,6 +55,7 @@ pub mod mirror_eval;
 #[cfg(feature = "admin")]
 pub mod model_catalog;
 mod open;
+pub(crate) use open::{install_exact_reader_progress, EXACT_PROGRESS_INTERVAL};
 pub mod open_context;
 // tachi#1643: NOT admin-gated. #1630's premise is a host-owned sync loop with
 // no Tachi daemon, so the outbox is portable surface — the same reason the v29
@@ -66,6 +67,7 @@ mod recall_cache;
 pub mod route_eval;
 #[cfg(feature = "admin")]
 mod sandbox;
+mod sandbox_access;
 mod schema;
 mod search_generation;
 #[cfg(feature = "admin")]
@@ -309,10 +311,13 @@ pub use route_eval::{
 };
 #[cfg(feature = "admin")]
 pub use sandbox::{
-    check_sandbox_access, evaluate_sandbox_access, get_sandbox_policy, insert_sandbox_exec_audit,
-    list_sandbox_exec_audit, list_sandbox_policies, list_sandbox_rules_for_role,
-    path_matches_pattern, set_sandbox_policy, set_sandbox_rule,
+    check_sandbox_access, get_sandbox_policy, insert_sandbox_exec_audit, list_sandbox_exec_audit,
+    list_sandbox_policies, list_sandbox_rules_for_role, set_sandbox_policy, set_sandbox_rule,
 };
+#[cfg(not(feature = "admin"))]
+pub(crate) use sandbox_access::evaluate_sandbox_access;
+#[cfg(feature = "admin")]
+pub use sandbox_access::{evaluate_sandbox_access, path_matches_pattern};
 pub(crate) use schema::init_private_schema_with_label_mut;
 #[cfg(test)]
 pub(crate) use schema::install_reserved_reference_guard;

@@ -55,3 +55,8 @@ required-features = ["portable-contract-test"]
 name = "outbox_reconciliation_contract"
 path = "tests/outbox_reconciliation_contract.rs"
 required-features = ["portable-contract-test"]
+
+[[test]]
+name = "exact_entity_contract"
+path = "tests/exact_entity_contract.rs"
+required-features = ["portable-contract-test"]
