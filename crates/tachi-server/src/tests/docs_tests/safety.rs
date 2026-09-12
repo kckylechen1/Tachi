@@ -358,3 +358,173 @@ async fn test_docs_organize_concurrent_apply_refuses_docs_lock() {
     let error = concurrent.expect_err("concurrent organize apply must refuse the docs lock");
     assert!(error.contains("already held"), "{error}");
 }
+
+#[cfg(unix)]
+fn staged_new_document(parent: &Path) -> PathBuf {
+    let staged: Vec<_> = fs::read_dir(parent)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            path.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with(".tachi-new-")
+        })
+        .collect();
+    assert_eq!(staged.len(), 1, "exactly one owned staging file");
+    staged[0].clone()
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn docs_new_file_publication_is_complete_before_final_name_appears() {
+    let server = make_server();
+    let workspace = DocsWorktree::new();
+    let docs = workspace.docs_path().canonicalize().unwrap();
+    let source = docs.join("atomic-note.md");
+    fs::write(&source, "---\ntitle: Atomic Note\ncategory: docs/product\norganize: true\n---\n# Atomic note\nComplete body sentinel.\n").unwrap();
+    let parent = docs.join("product");
+    let destination = parent.join("atomic-note.md");
+    let observed = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let captured = observed.clone();
+    let source_for_hook = source.clone();
+    let destination_for_hook = destination.clone();
+    let parent_for_hook = parent.clone();
+    crate::docs_ops::set_organize_test_hook(
+        crate::docs_ops::OrganizeTestPoint::NewFileStaged,
+        parent,
+        Box::new(move || {
+            assert!(source_for_hook.exists(), "source survives staging");
+            assert!(
+                !destination_for_hook.exists(),
+                "final name must be absent until publication"
+            );
+            let bytes = fs::read(staged_new_document(&parent_for_hook)).unwrap();
+            assert!(String::from_utf8_lossy(&bytes).contains("Complete body sentinel."));
+            *captured.lock().unwrap() = Some(bytes);
+        }),
+    );
+    crate::docs_ops::handle_wiki_organize(&server, docs.to_str().unwrap(), false)
+        .await
+        .expect("publish complete new document");
+    assert!(!source.exists(), "source removed only after publication");
+    assert_eq!(
+        fs::read(&destination).unwrap(),
+        observed.lock().unwrap().clone().unwrap()
+    );
+    assert!(!fs::read_dir(destination.parent().unwrap())
+        .unwrap()
+        .any(|entry| entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".tachi-new-")));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn docs_new_file_publication_faults_preserve_source_and_foreign_objects() {
+    use crate::docs_ops::OrganizeTestPoint;
+    for scenario in [
+        "file",
+        "symlink",
+        "directory",
+        "stage-swap",
+        "write",
+        "sync",
+        "published-swap",
+    ] {
+        let server = make_server();
+        let workspace = DocsWorktree::new();
+        let docs = workspace.docs_path().canonicalize().unwrap();
+        let source = docs.join("atomic-note.md");
+        let original = "---\ntitle: Atomic Note\ncategory: docs/product\norganize: true\n---\n# Atomic note\nComplete body sentinel.\n";
+        fs::write(&source, original).unwrap();
+        let parent = docs.join("product");
+        let destination = parent.join("atomic-note.md");
+        let foreign = docs.join("foreign-sentinel.txt");
+        fs::write(&foreign, "foreign sentinel").unwrap();
+        let retained_stage = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let stage_for_hook = retained_stage.clone();
+        let parent_for_hook = parent.clone();
+        let destination_for_hook = destination.clone();
+        let foreign_for_hook = foreign.clone();
+        let point = match scenario {
+            "write" => OrganizeTestPoint::NewFileWriteFailure,
+            "sync" => OrganizeTestPoint::NewFileSyncFailure,
+            "published-swap" => OrganizeTestPoint::NewFilePublished,
+            _ => OrganizeTestPoint::NewFileStaged,
+        };
+        crate::docs_ops::set_organize_test_hook(
+            point,
+            parent.clone(),
+            Box::new(move || match scenario {
+                "file" => fs::write(&destination_for_hook, "collision").unwrap(),
+                "symlink" => {
+                    std::os::unix::fs::symlink(&foreign_for_hook, &destination_for_hook).unwrap()
+                }
+                "directory" => fs::create_dir(&destination_for_hook).unwrap(),
+                "stage-swap" => {
+                    let stage = staged_new_document(&parent_for_hook);
+                    fs::rename(&stage, parent_for_hook.join("displaced-stage")).unwrap();
+                    fs::write(&stage, "foreign stage").unwrap();
+                    *stage_for_hook.lock().unwrap() = Some(stage);
+                }
+                "published-swap" => {
+                    fs::rename(
+                        &destination_for_hook,
+                        parent_for_hook.join("complete-published"),
+                    )
+                    .unwrap();
+                    fs::write(&destination_for_hook, "foreign final").unwrap();
+                }
+                "write" | "sync" => assert!(!destination_for_hook.exists()),
+                _ => unreachable!(),
+            }),
+        );
+        let error = crate::docs_ops::handle_wiki_organize(&server, docs.to_str().unwrap(), false)
+            .await
+            .expect_err("publication fault must fail explicitly");
+        assert_eq!(fs::read_to_string(&source).unwrap(), original, "{scenario}");
+        assert_eq!(fs::read_to_string(&foreign).unwrap(), "foreign sentinel");
+        match scenario {
+            "file" => assert_eq!(fs::read_to_string(&destination).unwrap(), "collision"),
+            "symlink" => assert!(fs::symlink_metadata(&destination)
+                .unwrap()
+                .file_type()
+                .is_symlink()),
+            "directory" => assert!(destination.is_dir()),
+            "stage-swap" => {
+                assert!(error.contains("changed physical identity"), "{error}");
+                assert_eq!(
+                    fs::read_to_string(retained_stage.lock().unwrap().as_ref().unwrap()).unwrap(),
+                    "foreign stage"
+                );
+                assert!(!destination.exists());
+            }
+            "published-swap" => {
+                assert!(
+                    error.contains("published but final validation failed"),
+                    "{error}"
+                );
+                assert_eq!(fs::read_to_string(&destination).unwrap(), "foreign final");
+                assert!(fs::read_to_string(parent.join("complete-published"))
+                    .unwrap()
+                    .contains("Complete body sentinel."));
+            }
+            _ => assert!(!destination.exists()),
+        }
+        if scenario != "stage-swap" {
+            assert!(
+                !fs::read_dir(&parent).unwrap().any(|entry| entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".tachi-new-")),
+                "{scenario}: owned stage leaked"
+            );
+        }
+    }
+}
