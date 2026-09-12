@@ -495,8 +495,8 @@ fn spec_drift(
     if linked_docs.is_empty() && linked_specs.is_empty() {
         drift.push(drift_item(
             "missing_docs_specs",
-            "Cycle has no linked docs/specs; memory would become the only design context.",
-            "Attach doc_paths or spec_paths before treating the cycle as contract-backed.",
+            "This status view has no linked doc_paths or spec_paths; that does not establish whether other design context is available.",
+            "Review the referenced issue and applicable design sources; attach doc_paths or spec_paths required by the owning contract.",
         ));
     } else if linked_specs.is_empty() {
         drift.push(drift_item(
@@ -632,7 +632,7 @@ fn next_action(
             .to_string();
     }
     if linked_docs.is_empty() && linked_specs.is_empty() {
-        return "Attach linked docs/specs through doc_paths/spec_paths before execution."
+        return "Review the referenced issue and applicable design sources; attach doc_paths/spec_paths where required by the owning contract."
             .to_string();
     }
     if linked_specs.is_empty() {
