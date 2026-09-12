@@ -175,26 +175,38 @@ fn malformed_metadata_and_time_are_errors_and_cleanup_restores_connection() {
         ("metadata", "[]", "{}"),
         ("valid_from", "tomorrow", "2026-01-01T00:00:00Z"),
     ] {
-        store
-            .conn
-            .execute(
-                &format!("UPDATE memories SET {column}=?1 WHERE id='bad'"),
-                [bad],
-            )
-            .unwrap();
+        {
+            // Seed/restore malformed legacy data through the existing typed
+            // fixture authority; disarm it before the reader is exercised.
+            let _authorization =
+                db::authorize_reserved_reference_write(&store.reserved_reference_write).unwrap();
+            store
+                .conn
+                .execute(
+                    &format!("UPDATE memories SET {column}=?1 WHERE id='bad'"),
+                    [bad],
+                )
+                .unwrap();
+        }
         assert!(store.read_exact_entities(request(&aliases)).is_err());
         assert!(store.conn.is_autocommit());
         assert!(!store
             .reserved_reference_write
             .exact_active
             .load(Ordering::SeqCst));
-        store
-            .conn
-            .execute(
-                &format!("UPDATE memories SET {column}=?1 WHERE id='bad'"),
-                [good],
-            )
-            .unwrap();
+        {
+            // Seed/restore malformed legacy data through the existing typed
+            // fixture authority; disarm it before the reader is exercised.
+            let _authorization =
+                db::authorize_reserved_reference_write(&store.reserved_reference_write).unwrap();
+            store
+                .conn
+                .execute(
+                    &format!("UPDATE memories SET {column}=?1 WHERE id='bad'"),
+                    [good],
+                )
+                .unwrap();
+        }
         assert_eq!(
             ids(&store.read_exact_entities(request(&aliases)).unwrap()),
             ["bad"]
