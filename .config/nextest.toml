@@ -25,7 +25,7 @@ default-filter = "all()"
 slow-timeout = { period = "20s", terminate-after = 6 }
 failure-output = "immediate-final"
 success-output = "never"
-status-level = "fail"
+status-level = "leak"
 final-status-level = "flaky"
 # Retries absorb environment-sensitive flakes (issue #1261) without masking
 # real bugs. The CI-discovered flakes all stem from CI-runner-specific
