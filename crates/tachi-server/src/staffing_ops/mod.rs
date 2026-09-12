@@ -340,7 +340,7 @@ pub(crate) mod tests {
         std::fs::write(
             &worker,
             format!(
-                "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  printf 'codex-cli 0.144.1\\n'\n  exit 0\nfi\nprintf 'staff fake worker\\n'\nexit {exit_code}\n"
+                "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  printf 'codex-cli 0.144.1\\n'\n  exit 0\nfi\ncount=0\nwhile [ ! -e \"$0.release\" ] && [ \"$count\" -lt 200 ]; do\n  /bin/sleep 0.05\n  count=$((count + 1))\ndone\n[ -e \"$0.release\" ] || exit 98\nprintf 'staff fake worker\\n'\nexit {exit_code}\n"
             ),
         )
         .expect("write fake codex worker");
@@ -606,6 +606,267 @@ pub(crate) mod tests {
         }
     }
 
+    /// Each mutating Staff fixture registers its own repository so the test-only
+    /// cwd fallback can never select the checkout running the test binary.
+    #[cfg(unix)]
+    struct StaffRepositoryFixture {
+        root: tempfile::TempDir,
+        repo: std::path::PathBuf,
+    }
+
+    #[cfg(unix)]
+    impl StaffRepositoryFixture {
+        fn new(home: &std::path::Path) -> Self {
+            let root = tempfile::tempdir().expect("temporary Staff repository sandbox");
+            let repo = root.path().join("source");
+            std::fs::create_dir_all(&repo).expect("create Staff source repository");
+            let fixture = Self { root, repo };
+            fixture.git(&["init", "--template=", "-b", "main"]);
+            fixture.git(&["config", "user.name", "Staff Fixture"]);
+            fixture.git(&["config", "user.email", "staff-fixture@example.invalid"]);
+            fixture.git(&["config", "commit.gpgsign", "false"]);
+            let hooks = fixture.root.path().join("empty-hooks");
+            std::fs::create_dir(&hooks).expect("empty fixture hooks directory");
+            fixture.git(&[
+                "config",
+                "core.hooksPath",
+                hooks.to_str().expect("hooks path"),
+            ]);
+            std::fs::write(fixture.repo.join(".gitignore"), ".tachi/\n")
+                .expect("ignore fixture database");
+            fixture.git(&["add", ".gitignore"]);
+            fixture.git(&["commit", "-m", "fixture"]);
+            let remote = fixture.root.path().join("origin.git");
+            fixture.git(&[
+                "init",
+                "--template=",
+                "--bare",
+                remote.to_str().expect("remote path"),
+            ]);
+            fixture.git(&[
+                "remote",
+                "add",
+                "origin",
+                remote.to_str().expect("remote path"),
+            ]);
+            fixture.git(&["push", "origin", "main"]);
+            let db = fixture
+                .repo
+                .join(".tachi")
+                .join(memcore::MEMORY_DB_FILENAME);
+            std::fs::create_dir_all(db.parent().expect("fixture database parent"))
+                .expect("create fixture database directory");
+            std::fs::write(&db, b"").expect("seed fixture database");
+            crate::project_db_ops::register_repo_local_manifest_entry_in_home(&db, "tachi", home)
+                .expect("register fixture repository in isolated manifest");
+            let resolved = MemoryServer::resolve_named_project_db_path_in_home("tachi", home)
+                .expect("resolve registered fixture project without cwd fallback");
+            assert_eq!(
+                std::fs::canonicalize(resolved).unwrap(),
+                std::fs::canonicalize(db).unwrap()
+            );
+            fixture
+        }
+
+        fn assert_worktree_source(&self, worktree: &std::path::Path) {
+            let common = self.git(&[
+                "-C",
+                worktree.to_str().expect("worktree path"),
+                "rev-parse",
+                "--path-format=absolute",
+                "--git-common-dir",
+            ]);
+            assert_eq!(
+                std::fs::canonicalize(common.trim()).expect("created common directory"),
+                std::fs::canonicalize(self.repo.join(".git")).expect("fixture common directory"),
+                "the actual created worktree must belong to the private source repository"
+            );
+        }
+
+        fn assert_dispatch_source(&self, server: &MemoryServer, dispatch_id: &str) {
+            let leases = server
+                .with_global_store_read(|store| {
+                    memcore::list_exec_envs(store.connection(), None)
+                        .map_err(|error| error.to_string())
+                })
+                .expect("read actual created leases");
+            let lease = leases
+                .iter()
+                .find(|lease| lease.dispatch_id.as_deref() == Some(dispatch_id))
+                .expect("actual dispatch lease");
+            assert_eq!(
+                std::fs::canonicalize(&lease.repo_root).unwrap(),
+                std::fs::canonicalize(&self.repo).unwrap()
+            );
+            self.assert_worktree_source(std::path::Path::new(&lease.path));
+        }
+
+        fn git(&self, args: &[&str]) -> String {
+            let output = std::process::Command::new("git")
+                .current_dir(&self.repo)
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+                .env("HOME", self.root.path())
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .args(args)
+                .output()
+                .expect("fixture Git command");
+            assert!(
+                output.status.success(),
+                "fixture git {args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8(output.stdout).expect("fixture Git output")
+        }
+    }
+
+    #[cfg(unix)]
+    fn isolate_staff_repository_environment() -> Vec<crate::test_support::EnvRestore> {
+        let keys: Vec<_> = std::env::vars_os()
+            .map(|(key, _)| key)
+            .filter(|key| key.as_encoded_bytes().starts_with(b"GIT_"))
+            .collect();
+        let mut guards: Vec<_> = keys
+            .iter()
+            .map(|key| crate::test_support::EnvRestore::remove_os(key))
+            .collect();
+        guards.extend(
+            [
+                "TACHI_PROJECT_ROOT",
+                "TACHI_WORKSPACE_ROOT",
+                "PROJECT_ROOT",
+                "WORKSPACE_ROOT",
+                "WORKSPACE",
+                "PWD",
+            ]
+            .into_iter()
+            .map(crate::test_support::EnvRestore::remove),
+        );
+        guards.push(crate::test_support::EnvRestore::set(
+            "GIT_CONFIG_GLOBAL",
+            "/dev/null",
+        ));
+        guards.push(crate::test_support::EnvRestore::set(
+            "GIT_CONFIG_NOSYSTEM",
+            "1",
+        ));
+        // Restore overrides before the inherited values they replaced.
+        guards.reverse();
+        guards
+    }
+
+    #[cfg(unix)]
+    struct StaffFixtureChild {
+        child: std::process::Child,
+        root: tempfile::TempDir,
+    }
+
+    #[cfg(unix)]
+    impl Drop for StaffFixtureChild {
+        fn drop(&mut self) {
+            // This guard owns exactly the child returned by spawn. File-backed
+            // output avoids pipe-capacity deadlocks while the parent polls.
+            if !matches!(self.child.try_wait(), Ok(Some(_))) {
+                // SAFETY: process_group(0) created this owned child group.
+                let _ = unsafe { libc::kill(-(self.child.id() as libc::pid_t), libc::SIGKILL) };
+                let _ = self.child.kill();
+            }
+            let _ = self.child.wait();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn staff_repository_fixtures_are_independent_under_concurrent_mutation() {
+        use std::os::unix::process::CommandExt;
+        let executable = std::env::current_exe().expect("current Staff test binary");
+        let mut children = Vec::new();
+        for _ in 0..2 {
+            let root = tempfile::tempdir().expect("child fixture sandbox");
+            for dir in ["home", "tmp", "runs", "worktrees", "template-cache"] {
+                std::fs::create_dir(root.path().join(dir)).expect("child fixture directory");
+            }
+            let stdout =
+                std::fs::File::create(root.path().join("stdout.log")).expect("child stdout");
+            let stderr =
+                std::fs::File::create(root.path().join("stderr.log")).expect("child stderr");
+            let child = std::process::Command::new(&executable)
+                .args(["--exact", "staffing_ops::tests::staff_publication_failure_retains_worktree_for_certified_cleanup", "--nocapture"])
+                .current_dir(root.path())
+                .process_group(0)
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+                .env("HOME", root.path().join("home"))
+                .env("TMPDIR", root.path().join("tmp"))
+                .env("TMP", root.path().join("tmp"))
+                .env("TEMP", root.path().join("tmp"))
+                .env("TACHI_HOME", root.path().join("home"))
+                .env("TACHI_RUN_ROOT", root.path().join("runs"))
+                .env("TACHI_WORKTREES_ROOT", root.path().join("worktrees"))
+                .env("TACHI_TEST_TEMPLATE_CACHE_ROOT", root.path().join("template-cache"))
+                .stdout(stdout).stderr(stderr)
+                .spawn().expect("spawn real Staff publication-failure fixture");
+            // Insert immediately: a later spawn/poll/assertion failure must reap
+            // every child already started before its temporary files disappear.
+            children.push(StaffFixtureChild { child, root });
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let mut completed = vec![false; children.len()];
+        while completed.iter().any(|done| !done) {
+            for (index, fixture) in children.iter_mut().enumerate() {
+                if completed[index] {
+                    continue;
+                }
+                if let Some(status) = fixture.child.try_wait().expect("poll Staff fixture child") {
+                    let stdout = std::fs::read_to_string(fixture.root.path().join("stdout.log"))
+                        .expect("read child stdout");
+                    let stderr = std::fs::read_to_string(fixture.root.path().join("stderr.log"))
+                        .expect("read child stderr");
+                    std::fs::write(
+                        fixture.root.path().join("exit-status.txt"),
+                        status.to_string(),
+                    )
+                    .expect("capture child exit status");
+                    assert!(
+                        status.success(),
+                        "Staff child {index}: {status}\n{stdout}\n{stderr}"
+                    );
+                    assert!(
+                        stdout.contains("test result: ok. 1 passed;"),
+                        "child selector must run one real test: {stdout}"
+                    );
+                    completed[index] = true;
+                }
+            }
+            if completed.iter().any(|done| !done) && std::time::Instant::now() >= deadline {
+                for (index, fixture) in children.iter().enumerate() {
+                    for stream in ["stdout.log", "stderr.log"] {
+                        let output = std::fs::read_to_string(fixture.root.path().join(stream))
+                            .unwrap_or_else(|error| format!("unreadable fixture output: {error}"));
+                        eprintln!("Staff child {index} {stream}: {output}");
+                    }
+                }
+                panic!("Staff fixture children exceeded 60-second deadline; owned-child guards will kill and reap");
+            }
+            if completed.iter().any(|done| !done) {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        }
+    }
+
+    /// Release the bounded fake worker before the older cleanup guard waits
+    /// during unwinding, so source-identity assertion failures cannot strand it.
+    #[cfg(unix)]
+    struct StaffWorkerReleaseGuard(std::path::PathBuf);
+
+    #[cfg(unix)]
+    impl Drop for StaffWorkerReleaseGuard {
+        fn drop(&mut self) {
+            let _ = std::fs::write(&self.0, b"release");
+        }
+    }
+
     struct CurrentDirGuard(std::path::PathBuf);
 
     impl CurrentDirGuard {
@@ -691,7 +952,7 @@ pub(crate) mod tests {
         let temp_runs = tempfile::tempdir().expect("temp canonical run root");
         let temp_bin = tempfile::tempdir().expect("temp fake worker bin");
         write_fake_worker(temp_bin.path(), 0);
-        let old_path = std::env::var_os("PATH").unwrap_or_default();
+        let old_path = std::ffi::OsString::from("/usr/bin:/bin:/usr/sbin:/sbin");
         let joined_path = std::env::join_paths(
             std::iter::once(temp_bin.path().to_path_buf()).chain(std::env::split_paths(&old_path)),
         )
@@ -699,6 +960,23 @@ pub(crate) mod tests {
         let _home = crate::test_support::EnvRestore::set_path("TACHI_HOME", temp_home.path());
         let _runs = crate::test_support::EnvRestore::set_path("TACHI_RUN_ROOT", temp_runs.path());
         let _path = crate::test_support::EnvRestore::set_os("PATH", &joined_path);
+        let _git_environment = isolate_staff_repository_environment();
+        let _registry_home = crate::test_support::EnvRestore::set_path("HOME", temp_home.path());
+        let _repository = StaffRepositoryFixture::new(temp_home.path());
+        let _cwd = CurrentDirGuard::set(&_repository.repo);
+        assert_eq!(
+            std::fs::canonicalize(
+                crate::utils::find_project_git_root().expect("private fallback root")
+            )
+            .unwrap(),
+            std::fs::canonicalize(&_repository.repo).unwrap(),
+            "every production repository discovery route stays in the fixture"
+        );
+        let temp_worktrees = tempfile::tempdir().expect("isolated Staff worktrees");
+        let _worktrees = crate::test_support::EnvRestore::set_path(
+            "TACHI_WORKTREES_ROOT",
+            temp_worktrees.path(),
+        );
         let server = test_server();
         let recommendation = server
             .with_global_store(|store| {
@@ -725,8 +1003,11 @@ pub(crate) mod tests {
             .await
             .expect("Staff start should be accepted before background execution");
         let _cleanup_guard = StaffCleanupGuard::arm(&raw);
+        let release_worker = StaffWorkerReleaseGuard(temp_bin.path().join("codex.release"));
         let response: Value = serde_json::from_str(&raw).expect("canonical response JSON");
         let dispatch_id = response["dispatch_id"].as_str().expect("dispatch id");
+        _repository.assert_dispatch_source(&server, dispatch_id);
+        drop(release_worker);
         let run_dir = dispatch_runs_root().join(dispatch_id);
         let (status, result) = wait_for_staff_terminal(&run_dir).await;
         wait_for_staff_cleanup(dispatch_id).await;
@@ -862,6 +1143,18 @@ pub(crate) mod tests {
             "TACHI_WORKTREES_ROOT",
             temp_worktrees.path(),
         );
+        let _git_environment = isolate_staff_repository_environment();
+        let _path = crate::test_support::EnvRestore::set("PATH", "/usr/bin:/bin:/usr/sbin:/sbin");
+        let _repository = StaffRepositoryFixture::new(temp_home.path());
+        let _cwd = CurrentDirGuard::set(&_repository.repo);
+        assert_eq!(
+            std::fs::canonicalize(
+                crate::utils::find_project_git_root().expect("private fallback root")
+            )
+            .unwrap(),
+            std::fs::canonicalize(&_repository.repo).unwrap(),
+            "every production repository discovery route stays in the fixture"
+        );
         let mut fixture_cleanup =
             CertifiedWorktreeCleanupGuard::arm(temp_worktrees.path(), find_worktree);
         let server = test_server();
@@ -920,6 +1213,7 @@ pub(crate) mod tests {
             "publication fails before a worker receipt/run directory exists"
         );
 
+        _repository.assert_worktree_source(&retained);
         let cleanup = tachi_clean::wt_clean::remove_worktree_for_safe_merge(&retained);
         assert!(
             cleanup.removed,
@@ -2293,7 +2587,7 @@ pub(crate) mod tests {
         let temp_runs = tempfile::tempdir().expect("temp canonical run root");
         let temp_bin = tempfile::tempdir().expect("temp fake worker bin");
         write_fake_worker(temp_bin.path(), 17);
-        let old_path = std::env::var_os("PATH").unwrap_or_default();
+        let old_path = std::ffi::OsString::from("/usr/bin:/bin:/usr/sbin:/sbin");
         let joined_path = std::env::join_paths(
             std::iter::once(temp_bin.path().to_path_buf()).chain(std::env::split_paths(&old_path)),
         )
@@ -2301,14 +2595,34 @@ pub(crate) mod tests {
         let _home = crate::test_support::EnvRestore::set_path("TACHI_HOME", temp_home.path());
         let _runs = crate::test_support::EnvRestore::set_path("TACHI_RUN_ROOT", temp_runs.path());
         let _path = crate::test_support::EnvRestore::set_os("PATH", &joined_path);
+        let _git_environment = isolate_staff_repository_environment();
+        let _registry_home = crate::test_support::EnvRestore::set_path("HOME", temp_home.path());
+        let _repository = StaffRepositoryFixture::new(temp_home.path());
+        let _cwd = CurrentDirGuard::set(&_repository.repo);
+        assert_eq!(
+            std::fs::canonicalize(
+                crate::utils::find_project_git_root().expect("private fallback root")
+            )
+            .unwrap(),
+            std::fs::canonicalize(&_repository.repo).unwrap(),
+            "every production repository discovery route stays in the fixture"
+        );
+        let temp_worktrees = tempfile::tempdir().expect("isolated Staff worktrees");
+        let _worktrees = crate::test_support::EnvRestore::set_path(
+            "TACHI_WORKTREES_ROOT",
+            temp_worktrees.path(),
+        );
         let server = test_server();
 
         let raw = staff_start(&server, staff_request("tachi"))
             .await
             .expect("spawn failure remains asynchronously accepted");
         let mut cleanup_guard = StaffCleanupGuard::arm(&raw);
+        let release_worker = StaffWorkerReleaseGuard(temp_bin.path().join("codex.release"));
         let response: Value = serde_json::from_str(&raw).expect("canonical response JSON");
         let dispatch_id = response["dispatch_id"].as_str().expect("dispatch id");
+        _repository.assert_dispatch_source(&server, dispatch_id);
+        drop(release_worker);
         let run_dir = dispatch_runs_root().join(dispatch_id);
         let (status, result) = wait_for_staff_terminal(&run_dir).await;
         wait_for_staff_cleanup(dispatch_id).await;
