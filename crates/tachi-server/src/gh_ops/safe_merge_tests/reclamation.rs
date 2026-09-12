@@ -1,3 +1,4 @@
+use super::reclamation_head::{init_private_worktree, private_git_environment};
 use super::*;
 use std::io::Write;
 
@@ -70,15 +71,23 @@ async fn safe_merge_reclaims_worktree_after_successful_merge() {
 
     // Create a worktree dir the fake cleaner will remove.
     let worktree = tmp.path().join("wt-484");
-    std::fs::create_dir_all(&worktree).unwrap();
+    let _git_env = private_git_environment(tmp.path());
+    let head = init_private_worktree(
+        tmp.path(),
+        &tmp.path().join("repo"),
+        &worktree,
+        "feat/source-branch",
+    );
 
     let flow = "flow_reclaim-success";
-    write_verification(tmp.path(), flow, "passed", "deadbeef");
+    write_verification(tmp.path(), flow, "passed", &head);
     // #1454 F1: the gate needs the full canonical receipt set in the
     // server-owned store before safe_merge may reach ready/merged.
-    seed_full_passed_set(home.path(), flow, "deadbeef", None);
+    seed_full_passed_set(home.path(), flow, &head, None);
+    let mut pr = ready_pr();
+    pr.head_sha = head;
     let client = MockGhClient::new()
-        .with_pr("o/r", ready_pr())
+        .with_pr("o/r", pr)
         .with_checks("o/r", 42, vec![]);
     let out = handle_github_safe_merge(
         &client,
@@ -417,9 +426,10 @@ async fn safe_merge_auto_resolves_worktree_from_registry_when_worktree_is_none()
     let repo_dir = tmp.path().join("repo-auto");
     let worktree = tmp.path().join("wt-auto-reclaim");
     std::fs::create_dir_all(&repo_dir).unwrap();
-    std::fs::create_dir_all(&worktree).unwrap();
+    let _git_env = private_git_environment(tmp.path());
 
     let branch = "feat/auto-reclaim-branch";
+    let head = init_private_worktree(tmp.path(), &repo_dir, &worktree, branch);
     tachi_clean::registry::register_worktree(tachi_clean::registry::RegisterOptions {
         path: worktree.clone(),
         repo_root: repo_dir.clone(),
@@ -437,11 +447,12 @@ async fn safe_merge_auto_resolves_worktree_from_registry_when_worktree_is_none()
         .to_string();
 
     let flow = "flow_reclaim-auto";
-    write_verification(tmp.path(), flow, "passed", "deadbeef");
-    seed_full_passed_set(home.path(), flow, "deadbeef", None);
+    write_verification(tmp.path(), flow, "passed", &head);
+    seed_full_passed_set(home.path(), flow, &head, None);
 
     let mut pr = ready_pr();
     pr.head_ref = Some(branch.to_string());
+    pr.head_sha = head;
     let client = MockGhClient::new()
         .with_pr("o/r", pr)
         .with_checks("o/r", 42, vec![]);

@@ -168,5 +168,6 @@ mod flow_events;
 mod merge_gate;
 mod parsers;
 mod reclamation;
+mod reclamation_head;
 mod review_digest;
 mod strict_verification;
