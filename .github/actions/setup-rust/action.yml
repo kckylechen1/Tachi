@@ -31,7 +31,48 @@ runs:
         }
         $toolchain = $toolchainMatches[0].Matches[0].Groups[1].Value
 
-        rustup toolchain install $toolchain --profile minimal --component clippy --component rustfmt --no-self-update
+        function Test-InstalledToolchain {
+          param([string]$Name)
+          $hadAutoInstall = Test-Path Env:RUSTUP_AUTO_INSTALL
+          $previousAutoInstall = $env:RUSTUP_AUTO_INSTALL
+          try {
+            # Inspection must not implicitly download an absent toolchain.
+            $env:RUSTUP_AUTO_INSTALL = "0"
+            $details = @(& rustup run $Name rustc -vV)
+            if ($LASTEXITCODE -ne 0) { return $false }
+            $release = @($details | Select-String -Pattern '^release: (.+)$')
+            $hostLine = @($details | Select-String -Pattern '^host: ([a-zA-Z0-9_-]+)$')
+            if ($release.Count -ne 1 -or $hostLine.Count -ne 1 -or $release[0].Matches[0].Groups[1].Value -ne $Name) {
+              return $false
+            }
+            $toolchainHost = $hostLine[0].Matches[0].Groups[1].Value
+            $components = @(& rustup component list --toolchain $Name --installed --quiet)
+            if ($LASTEXITCODE -ne 0) { return $false }
+            foreach ($component in @("rustc", "cargo", "rust-std", "clippy", "rustfmt")) {
+              if ($components -cnotcontains "$component-$toolchainHost") { return $false }
+            }
+            foreach ($binary in @("rustc", "cargo", "rustdoc", "cargo-clippy", "clippy-driver", "rustfmt")) {
+              $binaryPath = (& rustup which --toolchain $Name $binary | Out-String).Trim()
+              if ($LASTEXITCODE -ne 0 -or -not $binaryPath -or -not (Test-Path -LiteralPath $binaryPath -PathType Leaf)) {
+                return $false
+              }
+            }
+            return $true
+          } catch {
+            # A failed inspection is not readiness; retain the pinned installer.
+            return $false
+          } finally {
+            if ($hadAutoInstall) {
+              $env:RUSTUP_AUTO_INSTALL = $previousAutoInstall
+            } else {
+              Remove-Item Env:RUSTUP_AUTO_INSTALL -ErrorAction SilentlyContinue
+            }
+          }
+        }
+
+        if (-not (Test-InstalledToolchain $toolchain)) {
+          rustup toolchain install $toolchain --profile minimal --component clippy --component rustfmt --no-self-update
+        }
 
         if ($env:INPUT_TARGETS) {
           $targets = $env:INPUT_TARGETS -split '[,\s]+' | Where-Object { $_ }
