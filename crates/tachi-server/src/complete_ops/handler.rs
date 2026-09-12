@@ -840,7 +840,9 @@ fn persist_resolved_completion_receipt_at_with_admission(
     admission: Option<(&MemoryServer, u64)>,
 ) -> Result<(), String> {
     #[cfg(unix)]
-    let anchored_target = target.anchored_for_mutation()?;
+    let anchored_target = target.anchored_for_mutation().map_err(|error| {
+        format!("cannot persist resolved completion receipt for dispatch_id={dispatch_id}: anchor {}: {error}", target.status_path().display())
+    })?;
     #[cfg(unix)]
     let target = &anchored_target;
     let status_lock = match target {
@@ -858,7 +860,9 @@ fn persist_resolved_completion_receipt_at_with_admission(
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     #[cfg(unix)]
-    let fence = target.acquire_fence()?;
+    let fence = target.acquire_fence().map_err(|error| {
+        format!("cannot persist resolved completion receipt for dispatch_id={dispatch_id}: fence {}: {error}", target.status_path().display())
+    })?;
     let status_path = target.status_path();
     let mut status = match target.read_json().map_err(|error| {
         format!("cannot persist resolved completion receipt for dispatch_id={dispatch_id}: {error}")
@@ -989,7 +993,9 @@ fn persist_pending_completion_recovery_receipt_at(
     dispatch_outcome: &Value,
 ) -> Result<(), String> {
     #[cfg(unix)]
-    let anchored_target = target.anchored_for_mutation()?;
+    let anchored_target = target.anchored_for_mutation().map_err(|error| {
+        format!("cannot persist completion recovery receipt for dispatch_id={dispatch_id}: anchor {}: {error}", target.status_path().display())
+    })?;
     #[cfg(unix)]
     let target = &anchored_target;
     let status_lock = match target {
@@ -1007,7 +1013,9 @@ fn persist_pending_completion_recovery_receipt_at(
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     #[cfg(unix)]
-    let fence = target.acquire_fence()?;
+    let fence = target.acquire_fence().map_err(|error| {
+        format!("cannot persist completion recovery receipt for dispatch_id={dispatch_id}: fence {}: {error}", target.status_path().display())
+    })?;
     let status_path = target.status_path();
     let mut status = match target.read_json().map_err(|error| {
         format!("cannot persist completion recovery receipt for dispatch_id={dispatch_id}: {error}")
