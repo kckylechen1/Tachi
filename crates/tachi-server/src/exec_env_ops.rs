@@ -560,15 +560,9 @@ fn same_directory_object(left: &std::fs::Metadata, right: &std::fs::Metadata) ->
     left.dev() == right.dev() && left.ino() == right.ino()
 }
 
-#[cfg(windows)]
-fn same_directory_object(left: &std::fs::Metadata, right: &std::fs::Metadata) -> bool {
-    use std::os::windows::fs::MetadataExt;
-    left.volume_serial_number() == right.volume_serial_number()
-        && left.file_index() == right.file_index()
-}
-
-#[cfg(not(any(unix, windows)))]
+#[cfg(not(unix))]
 fn same_directory_object(_left: &std::fs::Metadata, _right: &std::fs::Metadata) -> bool {
+    // Metadata timestamps or canonical paths cannot authorize private-target publication.
     false
 }
 
@@ -1457,6 +1451,14 @@ impl MemoryServer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_directory_metadata_cannot_authorize_object_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let metadata = std::fs::metadata(dir.path()).unwrap();
+        assert!(!same_directory_object(&metadata, &metadata));
+    }
 
     fn seed_dispatchable_env(server: &MemoryServer, env_id: &str, resource_id: &str) {
         server
