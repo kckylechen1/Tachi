@@ -968,12 +968,17 @@ fn resolve_flow_worktree(
         memcore::list_claims(store.connection(), Some(ClaimState::Active))
             .map_err(|err| err.to_string())
     })?;
-    let claim = claims
+    let mut matching = claims
         .iter()
-        .find(|claim| claim.flow_id.as_deref() == Some(flow_id))
-        .ok_or_else(|| {
-            format!("verification run requires an active claim with a worktree for flow {flow_id}")
-        })?;
+        .filter(|claim| claim.flow_id.as_deref() == Some(flow_id));
+    let claim = matching.next().ok_or_else(|| {
+        format!("verification run requires an active claim with a worktree for flow {flow_id}")
+    })?;
+    // Count canonical active matches before inspecting their usable fields.
+    // Heartbeat order is presence evidence, never authority to select a tree.
+    if matching.next().is_some() {
+        return Err(format!("verification_claim_ambiguous: flow {flow_id}"));
+    }
     let worktree = claim
         .worktree_path
         .as_deref()
