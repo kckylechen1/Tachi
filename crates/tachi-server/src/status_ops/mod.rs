@@ -37,7 +37,7 @@ use serde_json::json;
 
 use memcore::MemoryStore;
 
-use crate::daemon_lock::{process_alive, read_pid_file};
+use crate::daemon_lock::read_pid_file;
 use crate::manifest::Manifest;
 
 pub(crate) const STUCK_THRESHOLD_SECS: i64 = 600;

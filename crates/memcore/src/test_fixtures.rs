@@ -26,6 +26,7 @@ pub(crate) fn parse_run_dir_pid(name: &str) -> Option<u32> {
 }
 
 /// `kill(pid, 0)` existence probe. `EPERM` still counts as alive.
+#[cfg(unix)]
 pub(crate) fn process_alive(pid: u32) -> bool {
     if pid <= 1 {
         return false;
@@ -72,10 +73,14 @@ pub(crate) fn gc_stale_test_fixtures(
         }
         if path.is_dir() {
             if let Some(name) = path.file_name().and_then(|s| s.to_str()) {
-                if let Some(pid) = parse_run_dir_pid(name) {
-                    if process_alive(pid) {
-                        continue;
-                    }
+                let owner_pid = parse_run_dir_pid(name);
+                #[cfg(unix)]
+                let retain_owner = owner_pid.is_some_and(process_alive);
+                // A platform without a liveness probe cannot prove this owner exited.
+                #[cfg(not(unix))]
+                let retain_owner = owner_pid.is_some();
+                if retain_owner {
+                    continue;
                 }
             }
             if std::fs::remove_dir_all(&path).is_ok() {
@@ -159,6 +164,7 @@ mod tests {
         assert!(young_run.exists(), "young sibling run must survive");
     }
 
+    #[cfg(unix)]
     #[test]
     fn gc_skips_run_dir_when_owning_pid_alive_deletes_when_dead() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -194,6 +200,25 @@ mod tests {
         );
         assert!(live.join("held.txt").exists());
         assert!(!dead.exists(), "dead-pid run dir must be GC'd");
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn platform_refusal_fixture_gc_retains_unproven_owner_while_reclaiming_legacy_sibling() {
+        let dir = tempfile::tempdir().unwrap();
+        let owned = dir.path().join("run-2000000001-owner");
+        std::fs::create_dir(&owned).unwrap();
+        std::fs::write(owned.join("sentinel"), b"preserve").unwrap();
+        let legacy = dir.path().join("legacy");
+        std::fs::create_dir(&legacy).unwrap();
+        let now =
+            std::time::SystemTime::now() + TEST_FIXTURE_MAX_AGE + std::time::Duration::from_secs(5);
+        assert_eq!(
+            gc_stale_test_fixtures(dir.path(), TEST_FIXTURE_MAX_AGE, now, None),
+            1
+        );
+        assert_eq!(std::fs::read(owned.join("sentinel")).unwrap(), b"preserve");
+        assert!(!legacy.exists());
     }
 
     #[test]

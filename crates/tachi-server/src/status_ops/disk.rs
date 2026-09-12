@@ -189,6 +189,7 @@ fn disk_warning(free_bytes: u64, free_percent: Option<f64>) -> Option<String> {
 /// Nearest existing ancestor of `path` (inclusive) — the managed worktrees
 /// root / shared target dir may not have been created yet, but `statvfs`
 /// needs a path that exists.
+#[cfg(unix)]
 fn nearest_existing_ancestor(path: &Path) -> Option<PathBuf> {
     let mut probe = path.to_path_buf();
     loop {
@@ -201,6 +202,7 @@ fn nearest_existing_ancestor(path: &Path) -> Option<PathBuf> {
     }
 }
 
+#[cfg(unix)]
 fn real_disk_usage(path: &Path) -> Result<(u64, u64), String> {
     use std::os::unix::ffi::OsStrExt;
 
@@ -229,6 +231,11 @@ fn real_disk_usage(path: &Path) -> Result<(u64, u64), String> {
     let free_bytes = (stat.f_bavail as u64).saturating_mul(block_size);
     let total_bytes = (stat.f_blocks as u64).saturating_mul(block_size);
     Ok((free_bytes, total_bytes))
+}
+
+#[cfg(not(unix))]
+fn real_disk_usage(_path: &Path) -> Result<(u64, u64), String> {
+    Err("disk_usage_unavailable: filesystem capacity probe is unsupported on this platform".into())
 }
 
 #[cfg(test)]
@@ -314,6 +321,7 @@ mod tests {
         assert!(status.shared_target_dir.error.is_some());
     }
 
+    #[cfg(unix)]
     #[test]
     fn real_disk_usage_probes_an_existing_path() {
         // Discrimination against the real libc::statvfs call site: any
@@ -381,6 +389,7 @@ mod tests {
         assert!(collect_top_consumers(&missing, 3).is_empty());
     }
 
+    #[cfg(unix)]
     #[test]
     fn real_disk_usage_walks_up_to_nearest_existing_ancestor() {
         // A not-yet-created leaf under an existing dir must still resolve
@@ -389,5 +398,28 @@ mod tests {
         let _ = std::fs::remove_dir_all(&missing);
         let (_, total) = real_disk_usage(&missing).expect("should walk up to an existing ancestor");
         assert!(total > 0);
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn platform_refusal_disk_probe_reports_unavailable_without_inventing_capacity() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("absent");
+        let sentinel = dir.path().join("sentinel");
+        std::fs::write(&sentinel, b"preserve").unwrap();
+        let status = collect_disk_status_with_probe(
+            Ok(missing.clone()),
+            Ok(dir.path().to_path_buf()),
+            &real_disk_usage,
+        );
+        for volume in [status.worktrees_root, status.shared_target_dir] {
+            assert!(volume.error.unwrap().starts_with("disk_usage_unavailable:"));
+            assert!(volume.free_bytes.is_none());
+            assert!(volume.total_bytes.is_none());
+            assert!(volume.free_percent.is_none());
+            assert!(volume.warning.is_none());
+        }
+        assert!(!missing.exists());
+        assert_eq!(std::fs::read(sentinel).unwrap(), b"preserve");
     }
 }

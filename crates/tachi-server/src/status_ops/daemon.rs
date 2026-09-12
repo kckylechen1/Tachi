@@ -3,7 +3,7 @@
 //! Extracted from `status_ops::mod` (no behavior change).
 
 use super::{DaemonInventoryEntry, DaemonPidInfo, DaemonStatus};
-use crate::daemon_lock::{process_alive, read_pid_file};
+use crate::daemon_lock::{process_liveness, read_pid_file};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -13,7 +13,10 @@ pub(crate) fn collect_daemon_status(app_home: &Path, global_db_path: &Path) -> D
     let scoped_pid = crate::daemon_lock::scoped_daemon_pid_path(app_home, global_db_path);
     let scoped_status = collect_daemon_status_from_paths(&scoped_lock, &scoped_pid, global_db_path);
     if let Some(status) = scoped_status.as_ref() {
-        if matches!(status, DaemonStatus::Running { .. }) {
+        if matches!(
+            status,
+            DaemonStatus::Running { .. } | DaemonStatus::Unavailable { .. }
+        ) {
             return status.clone();
         }
     }
@@ -131,7 +134,7 @@ fn daemon_inventory_entry_from_process_line(
     let trimmed = line.trim();
     let (pid_raw, command) = trimmed.split_once(char::is_whitespace)?;
     let pid = pid_raw.trim().parse::<i32>().ok()?;
-    if known_pids.contains(&pid) || !process_alive(pid) {
+    if known_pids.contains(&pid) || !matches!(process_liveness(pid), Some(true)) {
         return None;
     }
     let command = command.trim();
@@ -160,7 +163,7 @@ fn daemon_inventory_entry_from_process_line(
     Some(DaemonInventoryEntry {
         scope: format!("process:{pid}"),
         pid: Some(pid),
-        process_running: true,
+        process_running: Some(true),
         authoritative_for_current_global,
         state: if authoritative_for_current_global {
             "running".to_string()
@@ -189,27 +192,35 @@ fn collect_daemon_status_from_paths(
 ) -> Option<DaemonStatus> {
     let pid_info = read_daemon_pid_info_from_path(pid_path);
     match read_pid_file(lock_path) {
-        Some(pid) if process_alive(pid) => {
-            if let Some(reason) = daemon_mismatch_reason(pid, pid_info.as_ref(), global_db_path) {
-                Some(DaemonStatus::Foreign {
-                    pid,
-                    lock_path: lock_path.to_path_buf(),
-                    reason,
-                    version: pid_info.as_ref().and_then(|info| info.version.clone()),
-                    port: pid_info.as_ref().and_then(|info| info.port),
-                    global_db: pid_info.as_ref().and_then(|info| info.global_db.clone()),
-                })
-            } else {
-                Some(DaemonStatus::Running {
-                    pid,
-                    lock_path: lock_path.to_path_buf(),
-                })
+        Some(pid) => match process_liveness(pid) {
+            Some(true) => {
+                if let Some(reason) = daemon_mismatch_reason(pid, pid_info.as_ref(), global_db_path)
+                {
+                    Some(DaemonStatus::Foreign {
+                        pid,
+                        lock_path: lock_path.to_path_buf(),
+                        reason,
+                        version: pid_info.as_ref().and_then(|info| info.version.clone()),
+                        port: pid_info.as_ref().and_then(|info| info.port),
+                        global_db: pid_info.as_ref().and_then(|info| info.global_db.clone()),
+                    })
+                } else {
+                    Some(DaemonStatus::Running {
+                        pid,
+                        lock_path: lock_path.to_path_buf(),
+                    })
+                }
             }
-        }
-        Some(pid) => Some(DaemonStatus::StalePid {
-            pid,
-            lock_path: lock_path.to_path_buf(),
-        }),
+            Some(false) => Some(DaemonStatus::StalePid {
+                pid,
+                lock_path: lock_path.to_path_buf(),
+            }),
+            None => Some(DaemonStatus::Unavailable {
+                pid,
+                lock_path: lock_path.to_path_buf(),
+                reason: "process liveness probe unavailable on this platform".to_string(),
+            }),
+        },
         None => None,
     }
 }
@@ -250,8 +261,10 @@ fn daemon_inventory_entry(
     let pid_info = read_daemon_pid_info_from_path(&pid_path);
     let lock_pid = read_pid_file(&lock_path);
     let pid = lock_pid.or_else(|| pid_info.as_ref().and_then(|info| info.pid));
-    let process_running = pid.map(process_alive).unwrap_or(false);
-    let reason = if process_running {
+    let process_running = pid.map(process_liveness).unwrap_or(Some(false));
+    let reason = if process_running.is_none() {
+        Some("process liveness probe unavailable on this platform".to_string())
+    } else if process_running == Some(true) {
         match lock_pid {
             Some(lock_pid) => {
                 daemon_mismatch_reason(lock_pid, pid_info.as_ref(), current_global_db_path)
@@ -261,10 +274,12 @@ fn daemon_inventory_entry(
     } else {
         None
     };
-    let authoritative_for_current_global = process_running && reason.is_none();
-    let state = if authoritative_for_current_global {
+    let authoritative_for_current_global = process_running == Some(true) && reason.is_none();
+    let state = if process_running.is_none() {
+        "unavailable"
+    } else if authoritative_for_current_global {
         "running"
-    } else if process_running {
+    } else if process_running == Some(true) {
         "foreign"
     } else if pid.is_some() {
         "stale"
@@ -366,5 +381,40 @@ mod tests {
             legacy_lock.exists(),
             "inventory must not unlink legacy locks"
         );
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn platform_refusal_status_reports_unavailable_liveness() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let global_db_path = dir.path().join("global").join("tachi-memory.db");
+        let lock = crate::daemon_lock::scoped_daemon_lock_path(dir.path(), &global_db_path);
+        std::fs::write(&lock, "2\n").expect("seed recorded owner");
+
+        let status = collect_daemon_status(dir.path(), &global_db_path);
+        assert!(matches!(status, DaemonStatus::Unavailable { pid: 2, .. }));
+        let inventory = collect_daemon_inventory(dir.path(), &global_db_path);
+        let entry = inventory.iter().find(|entry| entry.pid == Some(2)).unwrap();
+        assert_eq!(entry.state, "unavailable");
+        assert!(entry.process_running.is_none());
+        assert!(!entry.authoritative_for_current_global);
+        assert!(serde_json::to_value(entry).unwrap()["process_running"].is_null());
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn platform_refusal_scoped_unknown_owner_is_not_shadowed_by_stale_legacy_pid() {
+        let dir = tempfile::tempdir().unwrap();
+        let global_db_path = dir.path().join("global.db");
+        let scoped = crate::daemon_lock::scoped_daemon_lock_path(dir.path(), &global_db_path);
+        let legacy = crate::daemon_lock::legacy_daemon_lock_path(dir.path());
+        std::fs::write(&scoped, b"2\n").unwrap();
+        std::fs::write(&legacy, b"1\n").unwrap();
+        assert!(matches!(
+            collect_daemon_status(dir.path(), &global_db_path),
+            DaemonStatus::Unavailable { pid: 2, .. }
+        ));
+        assert_eq!(std::fs::read(scoped).unwrap(), b"2\n");
+        assert_eq!(std::fs::read(legacy).unwrap(), b"1\n");
     }
 }

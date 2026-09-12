@@ -15,8 +15,13 @@
 //! preserving the stable lock path. Callers must keep it alive for the
 //! daemon's full runtime.
 
-use std::fs::{File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::fs::File;
+#[cfg(unix)]
+use std::fs::OpenOptions;
+use std::io::Read;
+#[cfg(unix)]
+use std::io::{Seek, SeekFrom, Write};
+#[cfg(unix)]
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 
@@ -76,6 +81,14 @@ impl From<std::io::Error> for DaemonLockError {
     }
 }
 
+#[cfg(not(unix))]
+pub(crate) fn unsupported_daemon_lock_error() -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "daemon locking is unsupported on this platform",
+    )
+}
+
 /// RAII handle for the singleton daemon advisory lock.
 ///
 /// While alive, holds an exclusive `flock` on a stable lock-file path.
@@ -96,11 +109,20 @@ impl DaemonLock {
     /// - `Err(AlreadyRunning { pid })` if a live process holds the lock.
     /// - `Err(Io)` for filesystem/syscall failures.
     pub fn acquire(path: impl AsRef<Path>) -> Result<Self, DaemonLockError> {
+        #[cfg(not(unix))]
+        {
+            let _ = path;
+            return Err(DaemonLockError::Io(unsupported_daemon_lock_error()));
+        }
+
+        #[cfg(unix)]
         let path = path.as_ref().to_path_buf();
+        #[cfg(unix)]
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
 
+        #[cfg(unix)]
         let file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -108,6 +130,7 @@ impl DaemonLock {
             .truncate(false)
             .open(&path)?;
 
+        #[cfg(unix)]
         Self::acquire_file(file)
     }
 
@@ -115,15 +138,24 @@ impl DaemonLock {
     /// path or its parent directories. Cleanup callers use this to avoid
     /// manufacturing lock files for receipts that have no lock identity.
     pub fn acquire_existing(path: impl AsRef<Path>) -> Result<Self, DaemonLockError> {
+        #[cfg(not(unix))]
+        {
+            let _ = path;
+            return Err(DaemonLockError::Io(unsupported_daemon_lock_error()));
+        }
+
+        #[cfg(unix)]
         let file = OpenOptions::new()
             .read(true)
             .write(true)
             .truncate(false)
             .open(path)?;
 
+        #[cfg(unix)]
         Self::acquire_file(file)
     }
 
+    #[cfg(unix)]
     fn acquire_file(file: File) -> Result<Self, DaemonLockError> {
         // Try non-blocking exclusive lock.
         match try_flock_exclusive(&file)? {
@@ -134,7 +166,7 @@ impl DaemonLock {
             FlockOutcome::WouldBlock => {
                 // Lock is held by someone. Inspect the recorded PID.
                 let recorded = read_pid(&file).unwrap_or(0);
-                if recorded > 0 && process_alive(recorded) {
+                if recorded > 0 && matches!(process_liveness(recorded), Some(true)) {
                     Err(DaemonLockError::AlreadyRunning { pid: recorded })
                 } else {
                     // Stale/dead owner: POSIX flock is released on close, so
@@ -157,28 +189,37 @@ impl DaemonLock {
 
 impl Drop for DaemonLock {
     fn drop(&mut self) {
+        #[cfg(not(unix))]
+        {
+            return;
+        }
         // Clear the record while this owner still holds flock, then release it.
         // Do not unlink the path: an already-open waiter must remain on this
         // inode, rather than lock an unlinked predecessor while a later
         // acquirer creates and locks a replacement inode. `File` closes
         // immediately after this Drop implementation.
+        #[cfg(unix)]
         let _ = clear_pid(&self.file);
+        #[cfg(unix)]
         let fd = self.file.as_raw_fd();
         // SAFETY: `fd` comes from a live `File` owned by this `DaemonLock`.
         // `flock(LOCK_UN)` does not dereference Rust memory and only requests
         // kernel unlock for that descriptor. Errors are intentionally ignored
         // during drop because the fd close also releases any held flock.
+        #[cfg(unix)]
         unsafe {
             libc::flock(fd, libc::LOCK_UN);
         }
     }
 }
 
+#[cfg(unix)]
 enum FlockOutcome {
     Acquired,
     WouldBlock,
 }
 
+#[cfg(unix)]
 fn try_flock_exclusive(file: &File) -> Result<FlockOutcome, std::io::Error> {
     let fd = file.as_raw_fd();
     // SAFETY: `fd` is borrowed from a valid open `File`. The call only passes
@@ -196,6 +237,7 @@ fn try_flock_exclusive(file: &File) -> Result<FlockOutcome, std::io::Error> {
     }
 }
 
+#[cfg(unix)]
 fn write_pid(file: &File) -> std::io::Result<()> {
     let pid = std::process::id();
     let mut handle = file;
@@ -206,6 +248,7 @@ fn write_pid(file: &File) -> std::io::Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn clear_pid(file: &File) -> std::io::Result<()> {
     let mut handle = file;
     handle.seek(SeekFrom::Start(0))?;
@@ -214,6 +257,7 @@ fn clear_pid(file: &File) -> std::io::Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn read_pid(file: &File) -> std::io::Result<i32> {
     let mut handle = file;
     handle.seek(SeekFrom::Start(0))?;
@@ -366,21 +410,42 @@ impl ScopedDaemonLock {
 /// Check whether `pid` refers to a live process this user can signal. Uses
 /// `kill(pid, 0)` which performs the permission and existence check without
 /// delivering a signal. Returns `false` for pid<=1.
+#[cfg(unix)]
 pub fn process_alive(pid: i32) -> bool {
+    matches!(process_liveness(pid), Some(true))
+}
+
+/// `Some(true)` is observed alive, `Some(false)` is dead or an invalid PID,
+/// and `None` means the platform cannot perform this probe. An unavailable
+/// observation must not authorize reclaiming a recorded owner.
+pub(crate) fn process_liveness(pid: i32) -> Option<bool> {
     if pid <= 1 {
-        return false;
+        return Some(false);
     }
-    // SAFETY: `kill(pid, 0)` performs an existence/permission probe and does
-    // not deliver a signal. `pid` is range-checked above to avoid special
-    // process-group semantics for non-positive values.
-    let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
-    if rc == 0 {
-        return true;
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        return None;
     }
-    let err = std::io::Error::last_os_error();
-    // EPERM means the process exists but we lack permission to signal it —
-    // still alive from our perspective.
-    matches!(err.raw_os_error(), Some(code) if code == libc::EPERM)
+
+    #[cfg(unix)]
+    {
+        // SAFETY: `kill(pid, 0)` performs an existence/permission probe and does
+        // not deliver a signal. `pid` is range-checked above to avoid special
+        // process-group semantics for non-positive values.
+        let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
+        if rc == 0 {
+            return Some(true);
+        }
+        let err = std::io::Error::last_os_error();
+        // EPERM means the process exists but we lack permission to signal it —
+        // still alive from our perspective.
+        if matches!(err.raw_os_error(), Some(code) if code == libc::EPERM) {
+            Some(true)
+        } else {
+            Some(false)
+        }
+    }
 }
 
 /// Read the PID currently recorded in `path` without taking the lock. Returns
@@ -397,6 +462,7 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
+    #[cfg(unix)]
     #[test]
     fn acquire_records_current_pid_on_stable_lock_path() {
         let dir = tempdir().unwrap();
@@ -441,6 +507,7 @@ mod tests {
         assert!(pid.file_name().unwrap().to_string_lossy().ends_with(".pid"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn double_acquire_in_same_process_is_rejected() {
         let dir = tempdir().unwrap();
@@ -465,6 +532,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn stale_pid_file_with_dead_pid_is_taken_over() {
         let dir = tempdir().unwrap();
@@ -480,6 +548,7 @@ mod tests {
         drop(lock);
     }
 
+    #[cfg(unix)]
     #[test]
     fn acquire_releases_lock_on_drop() {
         let dir = tempdir().unwrap();
@@ -491,6 +560,7 @@ mod tests {
         let _again = DaemonLock::acquire(&path).expect("re-acquire after drop");
     }
 
+    #[cfg(unix)]
     #[test]
     fn dropping_owner_keeps_waiters_on_the_stable_lock_inode() {
         let dir = tempdir().unwrap();
@@ -521,11 +591,13 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn process_alive_self_is_true() {
         assert!(process_alive(std::process::id() as i32));
     }
 
+    #[cfg(unix)]
     #[test]
     fn process_alive_pid_one_is_false() {
         // pid 1 is conventionally init; we explicitly reject pid<=1 to avoid
@@ -533,6 +605,46 @@ mod tests {
         assert!(!process_alive(1));
     }
 
+    #[cfg(not(unix))]
+    #[test]
+    fn platform_refusal_daemon_lock_does_not_create_paths() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("nested").join("daemon.lock");
+        let error = match DaemonLock::acquire(&path) {
+            Err(error) => error,
+            Ok(_) => panic!("locking is unsupported"),
+        };
+        assert!(
+            matches!(error, DaemonLockError::Io(error) if error.kind() == std::io::ErrorKind::Unsupported)
+        );
+        assert!(!path.exists());
+        assert!(!path.parent().unwrap().exists());
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn platform_refusal_existing_daemon_lock_preserves_sentinel() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("daemon.lock");
+        std::fs::write(&path, b"sentinel\n").unwrap();
+        let error = match DaemonLock::acquire_existing(&path) {
+            Err(error) => error,
+            Ok(_) => panic!("locking is unsupported"),
+        };
+        assert!(
+            matches!(error, DaemonLockError::Io(error) if error.kind() == std::io::ErrorKind::Unsupported)
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), b"sentinel\n");
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn platform_refusal_process_liveness_distinguishes_unavailable_from_invalid_pid() {
+        assert_eq!(process_liveness(2), None);
+        assert_eq!(process_liveness(1), Some(false));
+    }
+
+    #[cfg(unix)]
     #[test]
     fn dual_lock_acquires_both_when_free() {
         let dir = tempdir().unwrap();
@@ -554,6 +666,7 @@ mod tests {
         let _legacy_again = DaemonLock::acquire(&legacy_path).expect("legacy released on drop");
     }
 
+    #[cfg(unix)]
     #[test]
     fn dual_lock_scoped_busy_reports_scoped_running() {
         let dir = tempdir().unwrap();
@@ -574,6 +687,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn dual_lock_legacy_busy_reports_legacy_running_and_releases_scoped() {
         let dir = tempdir().unwrap();
@@ -600,6 +714,7 @@ mod tests {
             .expect("scoped lock must have been released after legacy conflict");
     }
 
+    #[cfg(unix)]
     #[test]
     fn scoped_only_lock_acquires_and_releases_on_drop() {
         let dir = tempdir().unwrap();
@@ -615,6 +730,7 @@ mod tests {
         let _again = DaemonLock::acquire(&scoped_path).expect("released on drop");
     }
 
+    #[cfg(unix)]
     #[test]
     fn scoped_only_lock_busy_reports_running() {
         let dir = tempdir().unwrap();
@@ -633,6 +749,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn scoped_lock_succeeds_for_different_db_while_outer_dual_lock_holds_legacy() {
         // Regression for the exact self-deadlock `ScopedDaemonLock` exists to
