@@ -406,6 +406,7 @@ async fn handle_github_safe_merge_with_reclaimer<C: GhClient + ?Sized>(
         dry_run,
         worktree,
         pr.head_ref.as_deref(),
+        &pr.head_sha,
         reclaim_worktree,
         flow_id,
         flow_run_dir.as_deref(),
@@ -610,6 +611,7 @@ async fn reclaim_worktree_after_merge(
     dry_run: bool,
     worktree: Option<&str>,
     head_ref: Option<&str>,
+    accepted_head: &str,
     reclaim_worktree: bool,
     flow_id: Option<&str>,
     run_dir: Option<&std::path::Path>,
@@ -689,7 +691,7 @@ async fn reclaim_worktree_after_merge(
         return detail;
     }
 
-    // The durable WorkClaim check is deliberately immediately before the
+    // The durable WorkClaim check precedes local head evidence and the
     // in-process cleaner. A refusal is observable and removal is never
     // attempted, so a DB failure cannot become a silent destructive no-op.
     if let Err(err) = holder_gate(worktree_path) {
@@ -699,6 +701,23 @@ async fn reclaim_worktree_after_merge(
             "skipped": "holder_evidence_refused",
             "worktree": worktree_path,
             "error": err,
+        });
+        record_reclamation_event(flow_id, run_dir, &detail);
+        return detail;
+    }
+
+    // The accepted merge receipt is already owned by this invocation. Preserve
+    // later local commits, including empty commits with an identical tree.
+    // This is not repository binding or an atomic check/remove transaction.
+    if let Err(reason) = verify_reclamation_head(path, accepted_head, head_ref) {
+        let detail = json!({
+            "attempted": false,
+            "reclaimed": false,
+            "skipped": "worktree_head_evidence_refused",
+            "worktree": worktree_path,
+            "error": reason,
+            "accepted_head": accepted_head,
+            "accepted_branch": head_ref,
         });
         record_reclamation_event(flow_id, run_dir, &detail);
         return detail;
@@ -742,6 +761,54 @@ async fn reclaim_worktree_after_merge(
     };
     record_reclamation_event(flow_id, run_dir, &detail);
     detail
+}
+
+/// Necessary preservation check shared by explicit and discovered paths.
+fn verify_reclamation_head(
+    path: &std::path::Path,
+    accepted_head: &str,
+    accepted_branch: Option<&str>,
+) -> Result<(), &'static str> {
+    if accepted_head.is_empty() {
+        return Err("accepted_head_missing");
+    }
+    if !matches!(accepted_head.len(), 40 | 64)
+        || !accepted_head.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err("accepted_head_invalid");
+    }
+    let branch = accepted_branch
+        .map(|branch| branch.strip_prefix("refs/heads/").unwrap_or(branch))
+        .filter(|branch| !branch.is_empty())
+        .ok_or("accepted_branch_missing")?;
+    let read = |args: &[&str]| -> Option<String> {
+        let output = std::process::Command::new("git")
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_COMMON_DIR")
+            .arg("-C")
+            .arg(path)
+            .args(args)
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let value = String::from_utf8(output.stdout).ok()?;
+        let value = value.trim();
+        (!value.is_empty()).then(|| value.to_string())
+    };
+    let actual_head =
+        read(&["rev-parse", "--verify", "HEAD^{commit}"]).ok_or("worktree_head_unavailable")?;
+    let actual_branch = read(&["symbolic-ref", "--quiet", "--short", "HEAD"])
+        .ok_or("worktree_branch_unavailable")?;
+    if actual_head != accepted_head {
+        return Err("worktree_head_mismatch");
+    }
+    if actual_branch != branch {
+        return Err("worktree_branch_mismatch");
+    }
+    Ok(())
 }
 
 /// Append a reclamation event to the flow ledger when a flow run dir is
@@ -807,4 +874,35 @@ fn record_tests_run_verification(
     record_verification_items(&params, "passed")
         .map(|_| ())
         .map_err(|err| format!("record tests_run verification: {err}"))
+}
+
+#[cfg(test)]
+mod reclamation_head_tests {
+    use super::verify_reclamation_head;
+
+    #[test]
+    fn missing_or_malformed_accepted_evidence_refuses_without_git() {
+        let path = std::path::Path::new("/not-consulted-by-this-test");
+        assert_eq!(
+            verify_reclamation_head(path, "", Some("branch")),
+            Err("accepted_head_missing")
+        );
+        assert_eq!(
+            verify_reclamation_head(path, "unknown", Some("branch")),
+            Err("accepted_head_invalid")
+        );
+        let head = "0000000000000000000000000000000000000000";
+        assert_eq!(
+            verify_reclamation_head(path, head, None),
+            Err("accepted_branch_missing")
+        );
+        assert_eq!(
+            verify_reclamation_head(path, head, Some("")),
+            Err("accepted_branch_missing")
+        );
+        assert_eq!(
+            verify_reclamation_head(path, head, Some("refs/heads/")),
+            Err("accepted_branch_missing")
+        );
+    }
 }
