@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use http::{HeaderName, HeaderValue};
-use rmcp::model::{CallToolRequestParams, ListToolsResult, RawContent};
+use rmcp::model::{CallToolRequestParams, ContentBlock, ListToolsResult};
 use rmcp::transport::streamable_http_client::{
     StreamableHttpClientTransport, StreamableHttpClientTransportConfig,
 };
@@ -514,9 +514,9 @@ pub(crate) async fn list_daemon_tools_with_profile(
     Ok(result)
 }
 
-fn first_text_block(blocks: &[rmcp::model::Annotated<RawContent>]) -> Option<String> {
-    blocks.iter().find_map(|c| match &c.raw {
-        RawContent::Text(t) => Some(t.text.clone()),
+fn first_text_block(blocks: &[ContentBlock]) -> Option<String> {
+    blocks.iter().find_map(|c| match c {
+        ContentBlock::Text(t) => Some(t.text.clone()),
         _ => None,
     })
 }

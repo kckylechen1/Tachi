@@ -31,6 +31,30 @@ do HTTP. Target shape for Claude Code / Codex-class hosts:
 | Read/write asymmetry | `session_identity` |
 | E2E tests | `bootstrap/serve/stdio/tests.rs` (`http_direct_connect_*`) |
 
+## Protocol compatibility (RMCP 3.3, #1891)
+
+The daemon, stdio proxy, and portable server explicitly support MCP versions
+through `2025-11-25`. Upgrading the SDK does not enable the `2026-07-28`
+stateless lifecycle. Legacy `initialize` negotiates an older client's version;
+a newer version offered through that legacy handshake negotiates down to
+`2025-11-25`. Modern inline requests fail with `UNSUPPORTED_PROTOCOL_VERSION`
+before tool dispatch. A handler guard also rejects the inline
+lifecycle when its metadata selects an older version: otherwise RMCP can route
+that request statelessly and bypass initialize-time binding. Discovery returns
+`METHOD_NOT_FOUND` so Auto clients can fall back to initialize. Legacy tool
+responses omit `resultType`.
+
+RMCP 3.x delivers wire initialize `_meta` through `RequestContext.meta`.
+The adapters read it there, retaining typed initialize params only for direct
+in-process calls. Existing header precedence, project binding, self-asserted
+identity, profile filtering and retry rules remain in force.
+
+Modern per-request admission and the Tasks bridge remain separate work under
+[#1531](https://github.com/kckylechen1/tachi/issues/1531). Neither a new SDK type
+nor a protocol negotiation grants execution authority or durable task storage.
+No database migration or live configuration change is required by this SDK
+upgrade; rollback is reverting the compatibility change before deployment.
+
 ## Auth posture (v1 decision)
 
 | Decision | Value |

@@ -583,6 +583,36 @@ async fn readable_missing_alias_revokes_but_unavailable_alias_retains() {
     let _provider_env = clear_model_provider_env();
     let _alias =
         crate::test_support::EnvRestore::set("EXTRACT_API_KEY", "vault:SILICONFLOW_API_KEY");
+    // macOS-only: this external test crate compiles the server without
+    // `cfg(test)`, so the product auto-unlock path shells out to the ambient
+    // `security` executable. A PATH-local missing-entry fixture keeps this test
+    // off the host Keychain without bypassing the real product reader. The
+    // tempdir binding is declared before the PATH guard so it outlives PATH
+    // restoration (locals drop in reverse declaration order).
+    #[cfg(target_os = "macos")]
+    let security_fixture_dir = tempfile::tempdir().expect("security fixture directory");
+    #[cfg(target_os = "macos")]
+    let security_fixture_marker = security_fixture_dir.path().join("security.args");
+    #[cfg(target_os = "macos")]
+    let _security_fixture_path = {
+        use std::os::unix::fs::PermissionsExt;
+        let security = security_fixture_dir.path().join("security");
+        // The marker path is derived inside the shell from `$0`, so no
+        // filesystem path is ever interpolated into this script text.
+        std::fs::write(
+            &security,
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$0.args\"\nexit 1\n",
+        )
+        .expect("write missing-entry security fixture");
+        std::fs::set_permissions(&security, std::fs::Permissions::from_mode(0o700))
+            .expect("executable security fixture");
+        let mut paths = vec![security_fixture_dir.path().to_path_buf()];
+        paths.extend(std::env::split_paths(
+            &std::env::var_os("PATH").unwrap_or_default(),
+        ));
+        let joined = std::env::join_paths(paths).expect("join security fixture PATH");
+        crate::test_support::EnvRestore::set_path("PATH", Path::new(&joined))
+    };
     let server = materialization_test_server();
     seed_provider_and_lane(
         &server,
@@ -662,6 +692,37 @@ async fn readable_missing_alias_revokes_but_unavailable_alias_retains() {
             .is_some(),
         "an unavailable missing alias must retain its cached pool"
     );
+
+    // The fixture must have been exercised by the real product reader: the
+    // missing-entry result above is only deterministic if `security` resolved
+    // to this PATH-local shim and received the expected request.
+    #[cfg(target_os = "macos")]
+    {
+        let invoked = std::fs::read_to_string(&security_fixture_marker)
+            .expect("the missing-entry security fixture must have been invoked");
+        let args: Vec<&str> = invoked.lines().collect();
+        assert!(!args.is_empty(), "security fixture must have been invoked");
+        assert_eq!(
+            args.len() % 6,
+            0,
+            "security fixture witness must be whole requests: {invoked}"
+        );
+        let expected = [
+            "find-generic-password",
+            "-s",
+            "tachi-vault",
+            "-a",
+            "default",
+            "-w",
+        ];
+        for request in args.as_chunks::<6>().0 {
+            assert_eq!(
+                request,
+                expected.as_slice(),
+                "security fixture must receive the exact find-generic-password request"
+            );
+        }
+    }
 }
 
 /// Standalone bootstrap/probe materialization reads the same Vault lane

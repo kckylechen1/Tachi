@@ -15,7 +15,7 @@ thiserror = { workspace = true }
 # existing dispatch_outcomes truth (tachi#1840). Already resolved in this
 # workspace's dependency graph (memcore's store layer); direct edge only.
 rusqlite = { workspace = true }
-rmcp = { version = "1.2", features = ["schemars"] }
+rmcp = { version = "3.3.0", features = ["schemars"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
