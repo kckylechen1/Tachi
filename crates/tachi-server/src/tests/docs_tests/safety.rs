@@ -381,6 +381,14 @@ fn staged_new_document(parent: &Path) -> PathBuf {
 async fn docs_new_file_publication_is_complete_before_final_name_appears() {
     let server = make_server();
     let workspace = DocsWorktree::new();
+    use std::os::unix::fs::PermissionsExt;
+    let reference = workspace.repo_path().join("creation-mode-reference");
+    let reference_file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(reference)
+        .unwrap();
+    let expected_mode = reference_file.metadata().unwrap().permissions().mode() & 0o7777;
     let docs = workspace.docs_path().canonicalize().unwrap();
     let source = docs.join("atomic-note.md");
     fs::write(&source, "---\ntitle: Atomic Note\ncategory: docs/product\norganize: true\n---\n# Atomic note\nComplete body sentinel.\n").unwrap();
@@ -391,10 +399,15 @@ async fn docs_new_file_publication_is_complete_before_final_name_appears() {
     let source_for_hook = source.clone();
     let destination_for_hook = destination.clone();
     let parent_for_hook = parent.clone();
-    crate::docs_ops::set_organize_test_hook(
+    let _hook = crate::docs_ops::set_new_file_test_hook(
         crate::docs_ops::OrganizeTestPoint::NewFileStaged,
         parent,
         Box::new(move || {
+            eprintln!(
+                "DOCS_PUBLICATION_OBSERVED staged source_exists={} final_exists={}",
+                source_for_hook.exists(),
+                destination_for_hook.exists()
+            );
             assert!(source_for_hook.exists(), "source survives staging");
             assert!(
                 !destination_for_hook.exists(),
@@ -402,12 +415,22 @@ async fn docs_new_file_publication_is_complete_before_final_name_appears() {
             );
             let bytes = fs::read(staged_new_document(&parent_for_hook)).unwrap();
             assert!(String::from_utf8_lossy(&bytes).contains("Complete body sentinel."));
+            eprintln!(
+                "DOCS_PUBLICATION_OBSERVED staged complete_body=true bytes={}",
+                bytes.len()
+            );
             *captured.lock().unwrap() = Some(bytes);
         }),
     );
     crate::docs_ops::handle_wiki_organize(&server, docs.to_str().unwrap(), false)
         .await
         .expect("publish complete new document");
+    let actual_mode = fs::metadata(&destination).unwrap().permissions().mode() & 0o7777;
+    eprintln!("DOCS_PUBLICATION_OBSERVED success source_exists={} final_exists={} mode={actual_mode:o} reference_mode={expected_mode:o}", source.exists(), destination.exists());
+    assert_eq!(
+        actual_mode, expected_mode,
+        "preserve default creation permissions under current umask"
+    );
     assert!(!source.exists(), "source removed only after publication");
     assert_eq!(
         fs::read(&destination).unwrap(),
@@ -457,7 +480,7 @@ async fn docs_new_file_publication_faults_preserve_source_and_foreign_objects() 
             "published-swap" => OrganizeTestPoint::NewFilePublished,
             _ => OrganizeTestPoint::NewFileStaged,
         };
-        crate::docs_ops::set_organize_test_hook(
+        let _hook = crate::docs_ops::set_new_file_test_hook(
             point,
             parent.clone(),
             Box::new(move || match scenario {
@@ -487,6 +510,29 @@ async fn docs_new_file_publication_faults_preserve_source_and_foreign_objects() 
         let error = crate::docs_ops::handle_wiki_organize(&server, docs.to_str().unwrap(), false)
             .await
             .expect_err("publication fault must fail explicitly");
+        let stage_count = fs::read_dir(&parent)
+            .unwrap()
+            .filter(|entry| {
+                entry
+                    .as_ref()
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".tachi-new-")
+            })
+            .count();
+        let error_class = if error.contains("published but final validation failed") {
+            "published_validation"
+        } else if error.contains("changed physical identity") {
+            "identity"
+        } else if error.contains("injected partial write") {
+            "write"
+        } else if error.contains("injected sync") {
+            "sync"
+        } else {
+            "publish"
+        };
+        eprintln!("DOCS_PUBLICATION_OBSERVED fault={scenario} source_exists={} final_entry={} stages={stage_count} error_class={error_class}", source.exists(), fs::symlink_metadata(&destination).is_ok());
         assert_eq!(fs::read_to_string(&source).unwrap(), original, "{scenario}");
         assert_eq!(fs::read_to_string(&foreign).unwrap(), "foreign sentinel");
         match scenario {

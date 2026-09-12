@@ -13,7 +13,7 @@ use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Component, Path, PathBuf};
 #[cfg(test)]
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::SystemTime;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1013,6 +1013,7 @@ struct OrganizeTestHook {
     point: OrganizeTestPoint,
     path: PathBuf,
     action: Box<dyn FnOnce() + Send + 'static>,
+    owner: Option<Arc<()>>,
 }
 
 #[cfg(test)]
@@ -1035,7 +1036,55 @@ pub(crate) fn set_organize_test_hook(
         point,
         path,
         action,
+        owner: None,
     });
+}
+
+/// Clears only this new-file fixture's unconsumed hook on early exit.
+#[cfg(test)]
+pub(crate) struct NewFileTestHookGuard(Arc<()>);
+
+#[cfg(test)]
+impl Drop for NewFileTestHookGuard {
+    fn drop(&mut self) {
+        let mut slot = organize_test_hook()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if slot.as_ref().is_some_and(|hook| {
+            hook.owner
+                .as_ref()
+                .is_some_and(|owner| Arc::ptr_eq(owner, &self.0))
+        }) {
+            *slot = None;
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn set_new_file_test_hook(
+    point: OrganizeTestPoint,
+    path: PathBuf,
+    action: Box<dyn FnOnce() + Send + 'static>,
+) -> NewFileTestHookGuard {
+    assert!(matches!(
+        point,
+        OrganizeTestPoint::NewFileStaged
+            | OrganizeTestPoint::NewFilePublished
+            | OrganizeTestPoint::NewFileWriteFailure
+            | OrganizeTestPoint::NewFileSyncFailure
+    ));
+    let owner = Arc::new(());
+    let mut slot = organize_test_hook()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    assert!(slot.is_none(), "organize test hook already installed");
+    *slot = Some(OrganizeTestHook {
+        point,
+        path,
+        action,
+        owner: Some(owner.clone()),
+    });
+    NewFileTestHookGuard(owner)
 }
 
 #[cfg(test)]
