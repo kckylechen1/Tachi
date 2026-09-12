@@ -114,3 +114,96 @@ async fn tachi_status_surfaces_recall_eval_health_without_private_case_data() {
     assert!(!body.contains("private query"));
     assert!(!body.contains("private-id"));
 }
+
+fn assert_runtime_authority_unavailable(runtime: &Value) {
+    for key in ["mode", "process_role", "authoritative_runtime"] {
+        assert_eq!(runtime[key], json!("unavailable"), "{key}: {runtime}");
+    }
+    for key in ["serving_daemon", "stdio_adapter"] {
+        assert_eq!(runtime[key], Value::Null, "{key}: {runtime}");
+    }
+    for key in [
+        "running",
+        "process_running",
+        "authoritative",
+        "matches_current_process",
+    ] {
+        assert_eq!(runtime["daemon"][key], Value::Null, "{key}: {runtime}");
+    }
+    assert_eq!(runtime["daemon"]["state"], json!("unavailable"));
+    for direction in ["read_forwarding", "write_forwarding"] {
+        assert_eq!(runtime[direction]["expected"], Value::Null);
+        assert_eq!(runtime[direction]["target"], json!("unavailable"));
+        assert_eq!(runtime[direction]["fallback"], json!("unavailable"));
+    }
+}
+
+#[tokio::test]
+async fn platform_refusal_runtime_preserves_unavailable_authority() {
+    let (server, _temp_home) = make_server_with_temp_home();
+    let app_home = server.tachi_home_dir();
+    let daemon = crate::status_ops::DaemonStatus::Unavailable {
+        pid: std::process::id() as i32,
+        lock_path: app_home.join("daemon.lock"),
+        reason: "liveness probe unavailable".to_string(),
+    };
+    for verbose in [false, true] {
+        let runtime = crate::status_ops::runtime_observability_json(
+            &server,
+            &app_home,
+            Some(&daemon),
+            verbose,
+        );
+        assert_runtime_authority_unavailable(&runtime);
+    }
+    // No recorded daemon remains the established in-process case.
+    let runtime = crate::status_ops::runtime_observability_json(
+        &server,
+        &app_home,
+        Some(&crate::status_ops::DaemonStatus::None),
+        false,
+    );
+    assert_eq!(runtime["mode"], json!("single_process"));
+    assert_eq!(runtime["authoritative_runtime"], json!("current_process"));
+    assert_eq!(runtime["daemon"]["running"], json!(false));
+}
+
+#[cfg(not(unix))]
+#[tokio::test]
+async fn platform_refusal_status_and_alerts_preserve_unknown_owner() {
+    let (server, _temp_home) = make_server_with_temp_home();
+    let app_home = server.tachi_home_dir();
+    let lock = crate::daemon_lock::scoped_daemon_lock_path(&app_home, &server.global_db_path_buf());
+    std::fs::write(&lock, b"2\n").expect("seed recorded owner");
+    for full in [false, true] {
+        let body = if full {
+            crate::status_ops::handle_tachi_status_full(&server, Some("json")).await
+        } else {
+            crate::status_ops::handle_tachi_status_agent(&server, Some("json")).await
+        }
+        .expect("status response");
+        let status: Value = serde_json::from_str(&body).expect("status JSON");
+        assert_eq!(status["daemon"]["running"], Value::Null);
+        assert_eq!(status["daemon"]["unavailable"], json!(true));
+        assert_runtime_authority_unavailable(&status["runtime"]);
+        let warnings = status["warnings"].as_array().expect("warnings");
+        assert!(warnings
+            .iter()
+            .any(|v| v.as_str().unwrap().starts_with("daemon status unavailable")));
+        assert!(warnings
+            .iter()
+            .all(|v| !v.as_str().unwrap().starts_with("daemon not running")));
+    }
+    let markdown = crate::status_ops::handle_tachi_status_agent(&server, None)
+        .await
+        .expect("status Markdown");
+    assert!(markdown.contains("unavailable"));
+    assert!(!markdown.contains("daemon not running"));
+    assert!(!markdown.contains("current_process"));
+    let alerts = crate::status_ops::collect_agent_warning_lines(&server).await;
+    assert!(alerts
+        .iter()
+        .any(|v| v.starts_with("daemon status unavailable")));
+    assert!(alerts.iter().all(|v| !v.starts_with("daemon not running")));
+    assert_eq!(std::fs::read(&lock).unwrap(), b"2\n");
+}
