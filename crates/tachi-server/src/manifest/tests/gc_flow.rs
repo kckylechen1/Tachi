@@ -1,5 +1,6 @@
 use super::*;
 
+#[cfg(unix)]
 #[test]
 fn gc_manifest_full_flow() {
     use std::os::unix::fs::symlink;

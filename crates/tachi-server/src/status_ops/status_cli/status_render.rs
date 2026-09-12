@@ -178,6 +178,16 @@ async fn render_one(
                 lock_path.display()
             );
         }
+        crate::status_ops::DaemonStatus::Unavailable {
+            pid,
+            lock_path,
+            reason,
+        } => {
+            println!(
+                "  [!] daemon liveness unavailable pid={pid} lock={} reason={reason}",
+                lock_path.display()
+            );
+        }
         crate::status_ops::DaemonStatus::None => {
             println!(
                 "  [!] no daemon running (single-process/stdio mode; background tasks paused)"
@@ -187,7 +197,9 @@ async fn render_one(
     let other_running_daemons: Vec<_> = snapshot
         .daemon_inventory
         .iter()
-        .filter(|daemon| daemon.process_running && !daemon.authoritative_for_current_global)
+        .filter(|daemon| {
+            daemon.process_running == Some(true) && !daemon.authoritative_for_current_global
+        })
         .collect();
     if !other_running_daemons.is_empty() {
         println!("  [i] other daemon scopes running:");

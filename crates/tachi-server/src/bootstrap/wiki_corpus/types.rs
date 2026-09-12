@@ -755,10 +755,6 @@ pub(crate) enum SiblingDamageAssessment {
 pub(crate) enum RetainedFileIdentity {
     #[cfg(unix)]
     Unix { device: u64, inode: u64 },
-    #[cfg(windows)]
-    Windows { volume: u32, index: u64 },
-    #[cfg(not(any(unix, windows)))]
-    Unsupported,
 }
 
 pub(crate) fn retained_file_identity(
@@ -777,19 +773,9 @@ pub(crate) fn retained_file_identity(
         }
         Ok(RetainedFileIdentity::Unix { device, inode })
     }
-    #[cfg(windows)]
+    #[cfg(not(unix))]
     {
-        use std::os::windows::fs::MetadataExt;
-        let volume = metadata.volume_serial_number().ok_or_else(|| {
-            "protected Wiki corpus object has no Windows volume identity".to_string()
-        })?;
-        let index = metadata.file_index().ok_or_else(|| {
-            "protected Wiki corpus object has no Windows file identity".to_string()
-        })?;
-        Ok(RetainedFileIdentity::Windows { volume, index })
-    }
-    #[cfg(not(any(unix, windows)))]
-    {
+        // Canonical paths cannot certify the identity required by protected writes.
         let _ = metadata;
         Err("protected Wiki corpus writes require stable filesystem identity".to_string())
     }
@@ -989,3 +975,20 @@ pub(crate) const WIKI_LEGACY_ADOPTION_RECONCILER_IMPACT: &str =
      manual_review and build_plan only emits shared_candidate items, so `tachi wiki corpus \
      --apply` is inert for these paths until one side is deleted (tachi#1611 phase 5 must \
      delete a side first)";
+
+#[cfg(all(test, windows))]
+mod windows_identity_tests {
+    use super::*;
+
+    #[test]
+    fn retained_file_identity_refuses_unproven_windows_object() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("corpus.db");
+        std::fs::write(&path, b"fixture").unwrap();
+        let file = File::open(&path).unwrap();
+        let error = retained_file_identity(&file.metadata().unwrap()).unwrap_err();
+        assert!(error.contains("require stable filesystem identity"));
+        assert!(RetainedPathFile::from_file(&path, file).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"fixture");
+    }
+}
