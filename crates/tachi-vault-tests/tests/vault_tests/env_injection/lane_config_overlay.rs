@@ -592,23 +592,24 @@ async fn readable_missing_alias_revokes_but_unavailable_alias_retains() {
     #[cfg(target_os = "macos")]
     let security_fixture_dir = tempfile::tempdir().expect("security fixture directory");
     #[cfg(target_os = "macos")]
-    let security_fixture_marker = security_fixture_dir.path().join("security-args");
+    let security_fixture_marker = security_fixture_dir.path().join("security.args");
     #[cfg(target_os = "macos")]
     let _security_fixture_path = {
         use std::os::unix::fs::PermissionsExt;
         let security = security_fixture_dir.path().join("security");
+        // The marker path is derived inside the shell from `$0`, so no
+        // filesystem path is ever interpolated into this script text.
         std::fs::write(
             &security,
-            format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$@\" >> '{}'\nexit 1\n",
-                security_fixture_marker.display()
-            ),
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$0.args\"\nexit 1\n",
         )
         .expect("write missing-entry security fixture");
         std::fs::set_permissions(&security, std::fs::Permissions::from_mode(0o700))
             .expect("executable security fixture");
         let mut paths = vec![security_fixture_dir.path().to_path_buf()];
-        paths.extend(std::env::split_paths(std::env::var_os("PATH").unwrap_or_default()));
+        paths.extend(std::env::split_paths(
+            &std::env::var_os("PATH").unwrap_or_default(),
+        ));
         let joined = std::env::join_paths(paths).expect("join security fixture PATH");
         crate::test_support::EnvRestore::set_path("PATH", Path::new(&joined))
     };
@@ -700,22 +701,27 @@ async fn readable_missing_alias_revokes_but_unavailable_alias_retains() {
         let invoked = std::fs::read_to_string(&security_fixture_marker)
             .expect("the missing-entry security fixture must have been invoked");
         let args: Vec<&str> = invoked.lines().collect();
-        assert!(
-            args.contains(&"find-generic-password"),
-            "security fixture must receive a find-generic-password request: {invoked}"
+        assert!(!args.is_empty(), "security fixture must have been invoked");
+        assert_eq!(
+            args.len() % 6,
+            0,
+            "security fixture witness must be whole requests: {invoked}"
         );
-        assert!(
-            args.contains(&"-s") && args.contains(&"tachi-vault"),
-            "security fixture must request the tachi-vault service: {invoked}"
-        );
-        assert!(
-            args.contains(&"-a") && args.contains(&"default"),
-            "security fixture must request the default account: {invoked}"
-        );
-        assert!(
-            args.contains(&"-w"),
-            "security fixture must receive the password (-w) flag: {invoked}"
-        );
+        let expected = [
+            "find-generic-password",
+            "-s",
+            "tachi-vault",
+            "-a",
+            "default",
+            "-w",
+        ];
+        for request in args.chunks_exact(6) {
+            assert_eq!(
+                request,
+                expected.as_slice(),
+                "security fixture must receive the exact find-generic-password request"
+            );
+        }
     }
 }
 
