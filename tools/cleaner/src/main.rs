@@ -478,7 +478,7 @@ fn print_help() {
 
 fn print_wt_reconcile_help() {
     println!(
-        "Reconcile registered Tachi-managed worktrees against terminal GitHub PRs.\n\nUsage:\n  tachi-clean wt-reconcile [--dry-run|--force] [--json]\n\nOptions:\n  --dry-run  Preview only (default)\n  --force    Actually remove worktrees whose PRs are MERGED or CLOSED\n  --json     Print machine-readable JSON\n"
+        "Reconcile registered Tachi-managed worktrees against terminal GitHub PRs.\n\nUsage:\n  tachi-clean wt-reconcile [--dry-run|--force] [--json]\n\nOptions:\n  --dry-run  Preview only (default)\n  --force    Remove eligible MERGED-PR worktrees; CLOSED PRs remain refused\n  --json     Print machine-readable JSON\n"
     );
 }
 
