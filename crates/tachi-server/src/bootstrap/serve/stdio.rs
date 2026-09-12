@@ -596,13 +596,23 @@ impl StdioProxyServer {
                 "project": self.client_project,
             }
         });
-        rmcp::model::CallToolResult::success(vec![rmcp::model::Content::text(
+        rmcp::model::CallToolResult::success(vec![rmcp::model::ContentBlock::text(
             serde_json::to_string(&body).unwrap_or_else(|_| "{}".to_string()),
         )])
     }
 }
 
 impl rmcp::ServerHandler for StdioProxyServer {
+    fn supported_protocol_versions(
+        &self,
+    ) -> std::borrow::Cow<'static, [rmcp::model::ProtocolVersion]> {
+        // Identity and project binding still use the legacy initialize lifecycle.
+        // Modern per-request admission belongs to the separate MCP-2026 adapter.
+        std::borrow::Cow::Borrowed(rmcp::model::ProtocolVersion::known_up_to(
+            &rmcp::model::ProtocolVersion::V_2025_11_25,
+        ))
+    }
+
     fn initialize(
         &self,
         request: rmcp::model::InitializeRequestParams,
@@ -610,10 +620,63 @@ impl rmcp::ServerHandler for StdioProxyServer {
     ) -> impl Future<Output = Result<rmcp::model::InitializeResult, rmcp::ErrorData>> + Send + '_
     {
         async move {
+            let info = self.negotiate_initialize(&request)?;
+            // Wire metadata lives in the context in RMCP 3.x; retain typed
+            // params only for direct in-process callers.
+            let mut request = request;
+            if !context.meta.is_empty() {
+                request.meta = Some(context.meta.clone());
+            }
             self.capture_initialize_identity(&request);
             context.peer.set_peer_info(request);
-            Ok(self.get_info())
+            Ok(info)
         }
+    }
+
+    async fn discover(
+        &self,
+        _context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
+    ) -> Result<rmcp::model::DiscoverResult, rmcp::ErrorData> {
+        Err(rmcp::ErrorData::method_not_found::<
+            rmcp::model::DiscoverRequestMethod,
+        >())
+    }
+
+    // Preserve the SDK's legacy empty results while closing its inline defaults.
+    async fn complete(
+        &self,
+        _request: rmcp::model::CompleteRequestParams,
+        context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
+    ) -> Result<rmcp::model::CompleteResult, rmcp::ErrorData> {
+        crate::server_handler::require_legacy_session(&context.meta)?;
+        Ok(Default::default())
+    }
+
+    async fn list_prompts(
+        &self,
+        _request: Option<rmcp::model::PaginatedRequestParams>,
+        context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
+    ) -> Result<rmcp::model::ListPromptsResult, rmcp::ErrorData> {
+        crate::server_handler::require_legacy_session(&context.meta)?;
+        Ok(Default::default())
+    }
+
+    async fn list_resources(
+        &self,
+        _request: Option<rmcp::model::PaginatedRequestParams>,
+        context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
+    ) -> Result<rmcp::model::ListResourcesResult, rmcp::ErrorData> {
+        crate::server_handler::require_legacy_session(&context.meta)?;
+        Ok(Default::default())
+    }
+
+    async fn list_resource_templates(
+        &self,
+        _request: Option<rmcp::model::PaginatedRequestParams>,
+        context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
+    ) -> Result<rmcp::model::ListResourceTemplatesResult, rmcp::ErrorData> {
+        crate::server_handler::require_legacy_session(&context.meta)?;
+        Ok(Default::default())
     }
 
     fn get_info(&self) -> rmcp::model::ServerInfo {
@@ -628,10 +691,11 @@ impl rmcp::ServerHandler for StdioProxyServer {
     fn list_tools(
         &self,
         request: Option<rmcp::model::PaginatedRequestParams>,
-        _context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
+        context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
     ) -> impl Future<Output = Result<rmcp::model::ListToolsResult, rmcp::ErrorData>> + Send + '_
     {
         async move {
+            crate::server_handler::require_legacy_session(&context.meta)?;
             let current = self.current_daemon();
             match crate::cli_client::list_daemon_tools_with_profile(
                 &current,
@@ -663,12 +727,13 @@ impl rmcp::ServerHandler for StdioProxyServer {
     fn call_tool(
         &self,
         request: rmcp::model::CallToolRequestParams,
-        _context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
-    ) -> impl Future<Output = Result<rmcp::model::CallToolResult, rmcp::ErrorData>> + Send + '_
+        context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
+    ) -> impl Future<Output = Result<rmcp::model::CallToolResponse, rmcp::ErrorData>> + Send + '_
     {
         async move {
+            crate::server_handler::require_legacy_session(&context.meta)?;
             if request.name.as_ref() == "runtime_info" {
-                return Ok(self.runtime_info_result().await);
+                return Ok(self.runtime_info_result().await.into());
             }
             let request = prepare_proxy_tool_call(request, self.client_project.as_deref())?;
             let current = self.current_daemon();
@@ -705,6 +770,7 @@ impl rmcp::ServerHandler for StdioProxyServer {
                 }
                 Err(err) => Err(daemon_error_data(err)),
             }
+            .map(Into::into)
         }
     }
 }

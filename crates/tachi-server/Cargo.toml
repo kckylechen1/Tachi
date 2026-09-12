@@ -83,7 +83,7 @@ tachi-merge-ops = { path = "../tachi-merge-ops", optional = true }
 tachi-llm = { path = "../tachi-llm" }
 tachi-clean = { path = "../../tools/cleaner", optional = true }
 tachi-exec-env-reaper = { path = "../tachi-exec-env-reaper", optional = true }
-rmcp = { version = "1.2", features = ["server", "transport-io", "macros", "client", "transport-child-process", "transport-streamable-http-client", "transport-streamable-http-client-reqwest", "server-side-http", "transport-streamable-http-server", "schemars"] }
+rmcp = { version = "3.3.0", features = ["server", "transport-io", "macros", "client", "transport-child-process", "transport-streamable-http-client", "transport-streamable-http-client-reqwest", "server-side-http", "transport-streamable-http-server", "schemars"] }
 # `http` is needed at the stdio proxy transport layer to forward the bound
 # project identity (X-Tachi-Project) to the daemon via rmcp's custom_headers
 # builder. Pinned to `1` to match the `http` version rmcp 1.2+ resolves to.

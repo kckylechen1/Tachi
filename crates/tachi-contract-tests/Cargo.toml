@@ -18,4 +18,4 @@ tachi-hub = { path = "../tachi-hub" }
 # behind feature = "server" (rmcp-1.8.0 src/handler.rs:3). Without it this crate
 # compiles only under workspace feature unification and breaks under
 # `cargo test -p tachi-contract-tests`.
-rmcp = { version = "1.2", features = ["schemars", "server"] }
+rmcp = { version = "3.3.0", features = ["schemars", "server"] }

@@ -22,8 +22,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use rmcp::model::{
-    CallToolRequestParams, CallToolResult, InitializeRequestParams, InitializeResult,
-    ListToolsResult, PaginatedRequestParams, ServerInfo,
+    CallToolRequestParams, InitializeRequestParams, InitializeResult, ListToolsResult,
+    PaginatedRequestParams, ServerInfo,
 };
 use rmcp::service::{RequestContext, RoleServer};
 use rmcp::ServerHandler;
@@ -158,6 +158,12 @@ struct ObservedServer {
 }
 
 impl ServerHandler for ObservedServer {
+    fn supported_protocol_versions(
+        &self,
+    ) -> std::borrow::Cow<'static, [rmcp::model::ProtocolVersion]> {
+        self.inner.supported_protocol_versions()
+    }
+
     fn get_info(&self) -> ServerInfo {
         self.inner.get_info()
     }
@@ -182,7 +188,8 @@ impl ServerHandler for ObservedServer {
         &self,
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
-    ) -> impl Future<Output = Result<CallToolResult, rmcp::ErrorData>> + Send + '_ {
+    ) -> impl Future<Output = Result<rmcp::model::CallToolResponse, rmcp::ErrorData>> + Send + '_
+    {
         async move {
             let marker = extract_receipt_marker(&request);
             let _guard = self.observer.enter(marker);
@@ -268,8 +275,8 @@ fn first_text_preview(result: &rmcp::model::CallToolResult) -> String {
     result
         .content
         .iter()
-        .find_map(|c| match &c.raw {
-            rmcp::model::RawContent::Text(t) => Some(t.text.as_str()),
+        .find_map(|c| match c {
+            rmcp::model::ContentBlock::Text(t) => Some(t.text.as_str()),
             _ => None,
         })
         .unwrap_or("")
@@ -429,13 +436,10 @@ async fn record_runtime_info_call(
 }
 
 fn response_text(result: &rmcp::model::CallToolResult) -> Option<&str> {
-    result
-        .content
-        .iter()
-        .find_map(|content| match &content.raw {
-            rmcp::model::RawContent::Text(text) => Some(text.text.as_str()),
-            _ => None,
-        })
+    result.content.iter().find_map(|content| match content {
+        rmcp::model::ContentBlock::Text(text) => Some(text.text.as_str()),
+        _ => None,
+    })
 }
 
 fn search_result_rows_contain(value: &serde_json::Value, expected_text: &str) -> bool {
@@ -653,7 +657,7 @@ async fn spawn_receipt_http_daemon(
     let ct_shutdown = ct.clone();
 
     let mut http_config = StreamableHttpServerConfig::default();
-    http_config.stateful_mode = true;
+    http_config.legacy_session_mode = true;
     http_config.cancellation_token = ct.child_token();
 
     // Fresh MCP session id per Streamable connection so concurrent callers do

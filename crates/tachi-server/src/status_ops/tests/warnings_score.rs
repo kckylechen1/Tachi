@@ -503,3 +503,31 @@ fn fresh_failure_marker_still_warns_and_docks_health() {
         "fresh failure marker must dock health score, got deductions: {deductions:?}"
     );
 }
+
+#[test]
+fn platform_refusal_warnings_distinguish_unknown_from_stopped() {
+    let snapshot = empty_snapshot(vec![]);
+    for state in [
+        json!({"running": null}),
+        json!({}),
+        json!({"running": null, "unavailable": true, "reason": "unsupported probe"}),
+    ] {
+        let warnings = build_status_warnings(&snapshot, &state);
+        assert!(warnings
+            .iter()
+            .any(|v| v.starts_with("daemon status unavailable")));
+        assert!(warnings
+            .iter()
+            .all(|v| !v.starts_with("daemon not running")));
+    }
+    for running in [false, true] {
+        let warnings = build_status_warnings(&snapshot, &json!({"running": running}));
+        assert_eq!(
+            warnings.iter().any(|v| v.starts_with("daemon not running")),
+            !running
+        );
+        assert!(warnings
+            .iter()
+            .all(|v| !v.starts_with("daemon status unavailable")));
+    }
+}

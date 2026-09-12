@@ -218,6 +218,9 @@ pub(super) async fn run_cli_command(
                     )
                     .into());
                 }
+                #[cfg(not(unix))]
+                crate::wiki_ops::ensure_wiki_export_supported()?;
+
                 let output = if output == PathBuf::from("~") {
                     dirs::home_dir().unwrap_or_else(|| PathBuf::from("."))
                 } else if let Some(rest) = output.to_string_lossy().strip_prefix("~/") {
@@ -569,5 +572,48 @@ pub(super) async fn run_cli_command(
             .await?;
             print_cli_tool_result(&body)
         }
+    }
+}
+
+#[cfg(all(test, not(unix)))]
+mod platform_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn platform_refusal_wiki_cli_preserves_source_and_output() {
+        let root = tempfile::tempdir().expect("temporary root");
+        let app_home = root.path().join("absent-home");
+        let db = app_home.join("memory.db");
+        let project_db = root.path().join("absent-project/memory.db");
+        let output = root.path().join("output");
+        std::fs::create_dir(&output).expect("output directory");
+        let sentinel = output.join("sentinel.md");
+        std::fs::write(&sentinel, b"existing output").expect("sentinel");
+        let error = run_cli_command(
+            Commands::Wiki {
+                action: tachi_bootstrap::cli::WikiAction::Export {
+                    format: "obsidian".into(),
+                    output: output.clone(),
+                    project: "wiki".into(),
+                },
+            },
+            &db,
+            Some(&project_db),
+            &app_home,
+            &memcore::MigrationAuthority::Deny,
+        )
+        .await
+        .expect_err("unsupported export");
+        assert!(error.to_string().contains("unsupported on this platform"));
+        assert!(!app_home.exists());
+        assert!(!project_db.parent().expect("project parent").exists());
+        assert_eq!(
+            std::fs::read(&sentinel).expect("sentinel after"),
+            b"existing output"
+        );
+        assert_eq!(
+            std::fs::read_dir(&output).expect("output entries").count(),
+            1
+        );
     }
 }

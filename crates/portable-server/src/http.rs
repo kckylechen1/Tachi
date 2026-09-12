@@ -78,7 +78,7 @@ async fn run(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let local_addr = listener.local_addr()?;
     let health_server = server.clone();
-    let http_config = StreamableHttpServerConfig::default(); // stateful_mode: true
+    let http_config = StreamableHttpServerConfig::default().with_legacy_session_mode(true);
 
     let mcp_service = StreamableHttpService::new(
         move || Ok(server.clone()),
@@ -319,6 +319,72 @@ mod tests {
         assert_eq!(degraded["db_ready"], false);
     }
 
+    #[tokio::test]
+    async fn modern_protocol_is_rejected_by_portable_http_adapter() {
+        install_tls_provider();
+        let (listener, local_addr) = bind_loopback(0).await.expect("bind ephemeral port");
+        let task = tokio::spawn(run(listener, boot()));
+        let client = reqwest::Client::new();
+        for (version, code) in [("2026-07-28", -32022), ("2025-11-25", -32600)] {
+            for (method, extra) in [
+                ("server/discover", serde_json::json!({})),
+                ("tools/list", serde_json::json!({})),
+                ("prompts/list", serde_json::json!({})),
+                ("resources/list", serde_json::json!({})),
+                ("resources/templates/list", serde_json::json!({})),
+                (
+                    "completion/complete",
+                    serde_json::json!({
+                        "ref": {"type":"ref/prompt", "name":"legacy-probe"},
+                        "argument": {"name":"query", "value":""}
+                    }),
+                ),
+                (
+                    "tools/call",
+                    serde_json::json!({"name": "status", "arguments": {}}),
+                ),
+            ] {
+                let mut params = extra;
+                params["_meta"] = serde_json::json!({
+                    "io.modelcontextprotocol/protocolVersion": version,
+                    "io.modelcontextprotocol/clientCapabilities": {},
+                    "io.modelcontextprotocol/clientInfo": {"name": "modern-probe", "version": "1"}
+                });
+                let response = client
+                .post(format!("http://{local_addr}/mcp"))
+                .header("mcp-protocol-version", version)
+                .header("mcp-method", method)
+                .header("mcp-name", "status")
+                .header(
+                    reqwest::header::ACCEPT,
+                    "application/json, text/event-stream",
+                )
+                .json(
+                    &serde_json::json!({"jsonrpc":"2.0", "id":1, "method":method, "params":params}),
+                )
+                .send()
+                .await
+                .expect("modern request");
+                let text = response.text().await.expect("error response body");
+                let payload = text
+                    .lines()
+                    .find_map(|line| line.strip_prefix("data:"))
+                    .unwrap_or(&text);
+                let body: serde_json::Value = serde_json::from_str(payload)
+                    .unwrap_or_else(|error| panic!("{method} {version}: {error}; {text}"));
+                let expected = if method == "server/discover" && version == "2025-11-25" {
+                    -32601
+                } else {
+                    code
+                };
+                assert_eq!(body["error"]["code"], expected, "{body:#}");
+                assert!(body.get("result").is_none(), "{body:#}");
+            }
+        }
+        task.abort();
+        let _ = task.await;
+    }
+
     /// Bind an ephemeral port (`--port 0` equivalent), then prove the daemon
     /// serves both `/health` (plain HTTP GET) and `/mcp` (a real MCP
     /// `initialize` + `tools/list` round trip via rmcp's streamable-HTTP
@@ -406,6 +472,35 @@ mod tests {
         .expect("mcp initialize handshake");
 
         let peer = client.peer().clone();
+        assert!(peer
+            .list_prompts(None)
+            .await
+            .expect("legacy prompts")
+            .prompts
+            .is_empty());
+        assert!(peer
+            .list_resources(None)
+            .await
+            .expect("legacy resources")
+            .resources
+            .is_empty());
+        assert!(peer
+            .list_resource_templates(None)
+            .await
+            .expect("legacy templates")
+            .resource_templates
+            .is_empty());
+        let completion = peer
+            .complete(
+                serde_json::from_value(serde_json::json!({
+                    "ref": {"type":"ref/prompt", "name":"legacy-probe"},
+                    "argument": {"name":"query", "value":""}
+                }))
+                .expect("completion params"),
+            )
+            .await
+            .expect("legacy completion");
+        assert!(completion.completion.values.is_empty());
         let tools = tokio::time::timeout(std::time::Duration::from_secs(5), peer.list_tools(None))
             .await
             .expect("tools/list timed out")

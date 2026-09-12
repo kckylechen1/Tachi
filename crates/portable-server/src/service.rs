@@ -692,8 +692,101 @@ impl PortableServer {
     }
 }
 
+/// RMCP routes complete inline metadata statelessly even with an old version.
+/// Keep the portable lifecycle aligned without depending on the full server.
+fn require_legacy_session(meta: &rmcp::model::RequestMetaObject) -> Result<(), rmcp::ErrorData> {
+    if meta
+        .missing_required_keys(&rmcp::model::ProtocolVersion::V_2026_07_28)
+        .is_empty()
+    {
+        return Err(rmcp::ErrorData::invalid_request(
+            "legacy MCP initialize session required; inline requests are disabled",
+            None,
+        ));
+    }
+    Ok(())
+}
+
 #[tool_handler]
 impl ServerHandler for PortableServer {
+    fn supported_protocol_versions(
+        &self,
+    ) -> std::borrow::Cow<'static, [rmcp::model::ProtocolVersion]> {
+        // Keep the portable endpoint on the same legacy protocol era as Tachi.
+        // Modern protocol support is a separate, explicitly validated adapter.
+        std::borrow::Cow::Borrowed(rmcp::model::ProtocolVersion::known_up_to(
+            &rmcp::model::ProtocolVersion::V_2025_11_25,
+        ))
+    }
+
+    async fn discover(
+        &self,
+        _context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
+    ) -> Result<rmcp::model::DiscoverResult, rmcp::ErrorData> {
+        Err(rmcp::ErrorData::method_not_found::<
+            rmcp::model::DiscoverRequestMethod,
+        >())
+    }
+
+    async fn list_tools(
+        &self,
+        _request: Option<rmcp::model::PaginatedRequestParams>,
+        context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
+    ) -> Result<rmcp::model::ListToolsResult, rmcp::ErrorData> {
+        require_legacy_session(&context.meta)?;
+        Ok(rmcp::model::ListToolsResult {
+            tools: Self::tool_router().list_all(),
+            ..Default::default()
+        })
+    }
+
+    async fn call_tool(
+        &self,
+        request: rmcp::model::CallToolRequestParams,
+        context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
+    ) -> Result<rmcp::model::CallToolResponse, rmcp::ErrorData> {
+        require_legacy_session(&context.meta)?;
+        let call = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
+        Self::tool_router().call(call).await
+    }
+
+    // Preserve the SDK's legacy empty results while closing its inline defaults.
+    async fn complete(
+        &self,
+        _request: rmcp::model::CompleteRequestParams,
+        context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
+    ) -> Result<rmcp::model::CompleteResult, rmcp::ErrorData> {
+        require_legacy_session(&context.meta)?;
+        Ok(Default::default())
+    }
+
+    async fn list_prompts(
+        &self,
+        _request: Option<rmcp::model::PaginatedRequestParams>,
+        context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
+    ) -> Result<rmcp::model::ListPromptsResult, rmcp::ErrorData> {
+        require_legacy_session(&context.meta)?;
+        Ok(Default::default())
+    }
+
+    async fn list_resources(
+        &self,
+        _request: Option<rmcp::model::PaginatedRequestParams>,
+        context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
+    ) -> Result<rmcp::model::ListResourcesResult, rmcp::ErrorData> {
+        require_legacy_session(&context.meta)?;
+        Ok(Default::default())
+    }
+
+    async fn list_resource_templates(
+        &self,
+        _request: Option<rmcp::model::PaginatedRequestParams>,
+        context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
+    ) -> Result<rmcp::model::ListResourceTemplatesResult, rmcp::ErrorData> {
+        require_legacy_session(&context.meta)?;
+        Ok(Default::default())
+    }
+
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
             "Portable memory kernel (tachi #924): save/search/get/status plus Quant-compatible aliases. \
