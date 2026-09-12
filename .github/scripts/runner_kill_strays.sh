@@ -208,11 +208,11 @@ case "${mode}" in
       kill -9 ${pids} 2>/dev/null || true
       sleep 1
     fi
-    snapshot || { echo "::error::kill-strays: post-KILL lsof discovery failed; survivor state UNKNOWN" >&2; exit 5; }
-    snapshot_exe || { echo "::error::kill-strays: post-KILL lsof executable scan failed; survivor state UNKNOWN" >&2; exit 5; }
+    snapshot || { echo "::error::kill-strays: final lsof discovery failed; process state UNKNOWN" >&2; exit 5; }
+    snapshot_exe || { echo "::error::kill-strays: final lsof executable scan failed; process state UNKNOWN" >&2; exit 5; }
     pids="$(victims | tr '\n' ' ')"
     if [ -n "${pids// /}" ]; then
-      echo "::error::kill-strays: processes survived SIGKILL; resolve manually: ${pids}" >&2
+      echo "::error::kill-strays: processes remain in final workspace scan; resolve manually: ${pids}" >&2
       exit 4
     fi
     echo "kill-strays: clean"

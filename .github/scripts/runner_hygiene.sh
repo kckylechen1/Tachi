@@ -90,7 +90,7 @@ kill_prior_job_strays() {
   local rc=0
   SCAN_ROOT="${workspace}" bash "${killer}" kill || rc=$?
   if [ "${rc}" -ne 0 ]; then
-    echo "::error::runner-hygiene: processes from a previous job still hold the workspace (killer exit ${rc}); refusing to build beside them (#1865 acceptance 7)." >&2
+    echo "::error::runner-hygiene: workspace process hygiene unresolved (killer exit ${rc}); refusing to build (#1865 acceptance 7)." >&2
     return "${rc}"
   fi
   # Visibility (review R5): descendants that changed their cwd away from
