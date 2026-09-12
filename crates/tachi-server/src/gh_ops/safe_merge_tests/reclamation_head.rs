@@ -356,7 +356,7 @@ async fn run_private_case(case: &str) {
             let needle = if case == "dirty" {
                 "dirty worktree"
             } else {
-                "ownership records differ"
+                "worktree marker and registry ownership records differ"
             };
             assert!(value["reclamation"]["errors"]
                 .as_array()
