@@ -360,7 +360,7 @@ pub(super) async fn serve_http_daemon(
     let health_server = server.clone();
 
     let mut http_config = StreamableHttpServerConfig::default();
-    http_config.stateful_mode = true;
+    http_config.legacy_session_mode = true;
     http_config.cancellation_token = ct.child_token();
 
     let service = StreamableHttpService::new(

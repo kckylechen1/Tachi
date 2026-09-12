@@ -87,7 +87,7 @@ fn attach_auto_ingest_persistence_warning(result: &mut rmcp::model::CallToolResu
         "code": "auto_ingest_not_persisted",
         "reason": reason,
     });
-    let meta = result.meta.get_or_insert_with(rmcp::model::Meta::new);
+    let meta = result.meta.get_or_insert_with(rmcp::model::MetaObject::new);
     let warnings = meta
         .0
         .entry("warnings".to_string())
