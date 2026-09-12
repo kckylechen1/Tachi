@@ -177,8 +177,16 @@ where
     for wt in worktrees {
         let pr_status = pr_checker(&wt.repo_root, &wt.branch, wt.pr.as_deref());
         match pr_status {
-            BranchPrState::TerminalMerged { pr_number }
-            | BranchPrState::TerminalClosed { pr_number } => {
+            BranchPrState::TerminalClosed { pr_number } => {
+                report.refused.push(RefusedWorktree {
+                    path: wt.path.clone(),
+                    branch: wt.branch.clone(),
+                    repo_root: wt.repo_root.clone(),
+                    pr: pr_number.or_else(|| wt.pr.clone()),
+                    reasons: vec!["closed_pr_reclaimability_unproven".to_string()],
+                });
+            }
+            BranchPrState::TerminalMerged { pr_number } => {
                 let pr_id = pr_number.or_else(|| wt.pr.clone());
                 let plan = wt_clean::plan_wt_remove_default(Path::new(&wt.path), !force);
                 if plan.allowed {
