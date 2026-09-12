@@ -130,6 +130,9 @@ fn status_fence_child() {
             true,
         )
         .unwrap(),
+        "reconciliation" => {
+            assert!(crate::managed_run_epoch::status_fence_reconciliation_fixture(&run).unwrap());
+        }
         "acp" => crate::dispatch_ops::status_fence_acp_fixture(&run, false).unwrap(),
         "managed" => crate::managed_run_control::mark_managed_custom_start(
             &run,
@@ -169,7 +172,14 @@ fn status_fence_child() {
 
 #[test]
 fn status_fence_serializes_actual_writer_processes_and_releases_after_owner_death() {
-    for mode in ["completion", "route", "anchored", "managed", "acp"] {
+    for mode in [
+        "completion",
+        "route",
+        "anchored",
+        "managed",
+        "acp",
+        "reconciliation",
+    ] {
         for kill_owner in [false, true] {
             let tmp = tempfile::tempdir().unwrap();
             let run = seed(tmp.path());
@@ -212,6 +222,21 @@ fn status_fence_serializes_actual_writer_processes_and_releases_after_owner_deat
                     status.get("result").is_none(),
                     "killed writer published its uncommitted result"
                 );
+            }
+            if mode == "reconciliation" {
+                let transitions = status[crate::managed_run_epoch::RECONCILIATION_KEY]
+                    ["transitions"]
+                    .as_array()
+                    .unwrap();
+                assert_eq!(transitions.len(), 1);
+                assert_eq!(transitions[0]["verdict"], "inconsistent");
+                assert_eq!(
+                    transitions[0]["reconciling_controller_epoch_id"],
+                    "fixture-reconciling-epoch"
+                );
+                assert_eq!(transitions[0]["prior_state"], "TASK_STATE_WORKING");
+                assert_eq!(transitions[0]["execution_state"], "unknown");
+                assert_eq!(transitions[0]["control_state"], "unavailable");
             }
             if mode == "managed" {
                 assert_eq!(status["execution_classification"], "managed_custom");
