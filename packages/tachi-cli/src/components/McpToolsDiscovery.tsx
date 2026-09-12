@@ -1,18 +1,11 @@
 import React, { useState, useEffect } from 'react';
 import { Box, Text, useInput } from 'ink';
-import { t } from '../utils/i18n.js';
 import { colors } from '../utils/ui.js';
-import { getMcpServers, loadMcpConfig, type McpServer } from '../utils/mcp.js';
-import { loadConfig } from '../utils/config.js';
-import { TACHI_CLI_VERSION } from '../version.js';
+import { getMcpServers, type McpServer } from '../utils/mcp.js';
+import { discoverMcpTools, type DiscoveredTool } from '../utils/mcpDiscovery.js';
 
 interface McpToolsDiscoveryProps {
   onBack: () => void;
-}
-
-interface DiscoveredTool {
-  name: string;
-  description?: string;
 }
 
 export function McpToolsDiscovery({ onBack }: McpToolsDiscoveryProps) {
@@ -34,78 +27,7 @@ export function McpToolsDiscovery({ onBack }: McpToolsDiscoveryProps) {
     setSelectedServer(serverId);
     
     try {
-      const config = loadConfig();
-      const port = config.daemon.port || 6919;
-      
-      // Initialize session
-      const initResponse = await fetch(`http://127.0.0.1:${port}/mcp/message`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          jsonrpc: '2.0',
-          id: 1,
-          method: 'initialize',
-          params: {
-            protocolVersion: '2024-11-05',
-            capabilities: {},
-            clientInfo: { name: 'tachi-cli', version: TACHI_CLI_VERSION },
-          },
-        }),
-      });
-
-      if (!initResponse.ok) {
-        throw new Error('Daemon not responding');
-      }
-
-      const sessionId = initResponse.headers.get('mcp-session-id');
-
-      // Call hub_discover for this server
-      const response = await fetch(`http://127.0.0.1:${port}/mcp/message`, {
-        method: 'POST',
-        headers: { 
-          'Content-Type': 'application/json',
-          'mcp-session-id': sessionId || '',
-        },
-        body: JSON.stringify({
-          jsonrpc: '2.0',
-          id: 2,
-          method: 'tools/call',
-          params: {
-            name: 'hub_discover',
-            arguments: {
-              cap_type: 'mcp',
-              enabled_only: true,
-            },
-          },
-        }),
-      });
-
-      if (!response.ok) {
-        throw new Error('Failed to discover tools');
-      }
-
-      const data = await response.json() as { result?: { content?: { text?: string }[] } };
-      const content = data.result?.content?.[0]?.text;
-      
-      if (content) {
-        const parsed = JSON.parse(content);
-        if (Array.isArray(parsed)) {
-          const server = parsed.find((s: { id?: string }) => s.id === serverId);
-          if (server?.definition) {
-            const def = JSON.parse(server.definition);
-            if (def.tools) {
-              setTools(def.tools.map((t: { name?: string; description?: string }) => ({
-                name: t.name || 'unknown',
-                description: t.description,
-              })));
-            } else {
-              setError('No tools discovered. Server may need reconnect.');
-            }
-          } else {
-            setError('Server not found or not enabled');
-          }
-        }
-      }
+      setTools(await discoverMcpTools(serverId));
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Discovery failed');
     }

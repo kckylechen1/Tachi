@@ -27,7 +27,7 @@ export function MemoryManager({ onBack }: MemoryManagerProps) {
       setMemories(results);
       setViewMode('list');
     } catch (err) {
-      setError('Search failed. Is daemon running?');
+      setError(err instanceof Error ? err.message : 'Search failed');
     }
     setLoading(false);
   };
@@ -40,7 +40,7 @@ export function MemoryManager({ onBack }: MemoryManagerProps) {
       setMemories(results);
       setViewMode('list');
     } catch (err) {
-      setError('Failed to list memories. Is daemon running?');
+      setError(err instanceof Error ? err.message : 'Failed to list memories');
     }
     setLoading(false);
   };
@@ -53,7 +53,7 @@ export function MemoryManager({ onBack }: MemoryManagerProps) {
       setMemories(results);
       setViewMode('list');
     } catch (err) {
-      setError('Failed to list kanban. Is daemon running?');
+      setError(err instanceof Error ? err.message : 'Failed to list kanban');
     }
     setLoading(false);
   };
