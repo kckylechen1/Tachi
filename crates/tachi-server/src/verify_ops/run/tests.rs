@@ -2284,6 +2284,7 @@ async fn receipts_root_under_unreadable_ancestor_with_git_refuses_closed() {
 /// run core, counting copy and check invocation without launching Cargo.
 struct ClaimHeadRunner {
     root: PathBuf,
+    observations: std::sync::atomic::AtomicUsize,
     copies: std::sync::atomic::AtomicUsize,
     checks: std::sync::atomic::AtomicUsize,
 }
@@ -2292,6 +2293,8 @@ struct ClaimHeadRunner {
 impl CheckRunner for ClaimHeadRunner {
     async fn observe_head(&self, worktree: &Path) -> Result<String, String> {
         assert!(worktree.starts_with(&self.root));
+        self.observations
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         ProcessCheckRunner.observe_head(worktree).await
     }
     async fn worktree_is_clean(&self, worktree: &Path) -> Result<bool, String> {
@@ -2430,6 +2433,7 @@ async fn claim_expected_head_refuses_between_gates_and_preserves_receipt() {
     seed_claim_at_head(&server, flow, claim.to_str().unwrap(), &head_a);
     let runner = ClaimHeadRunner {
         root: root_path.clone(),
+        observations: 0.into(),
         copies: 0.into(),
         checks: 0.into(),
     };
@@ -2509,6 +2513,7 @@ async fn claim_missing_expected_head_refuses_without_copy_or_receipt() {
     seed_claim_at_head(&server, flow, claim.to_str().unwrap(), &head);
     let runner = ClaimHeadRunner {
         root: root_path.clone(),
+        observations: 0.into(),
         copies: 0.into(),
         checks: 0.into(),
     };
@@ -2548,4 +2553,249 @@ async fn claim_missing_expected_head_refuses_without_copy_or_receipt() {
             .join("fmt.json")
             .exists());
     }
+}
+
+/// #1914: canonical parallel claims are legal, but the flow-only executor
+/// cannot choose one by heartbeat order. All Git and database writes are private.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn ambiguous_claim_refuses_before_observation_and_preserves_sources() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let (root, _run_guard) = with_run_root();
+    let root_path = root.path().canonicalize().unwrap();
+    let _env = claim_head_environment(&root_path);
+    let (source, first_path, head) = linked_claim_fixture(true);
+    assert!(source
+        .path()
+        .canonicalize()
+        .unwrap()
+        .starts_with(&root_path));
+    let second_source = root_path.join("second-source");
+    let cloned = std::process::Command::new("git")
+        .args(["clone", "--no-hardlinks", "--local"])
+        .arg(source.path())
+        .arg(&second_source)
+        .current_dir(&root_path)
+        .output()
+        .unwrap();
+    assert!(cloned.status.success(), "{cloned:?}");
+    let second_path = second_source.join("claim-two");
+    // Verify both private common dirs before adding any verification worktree.
+    for (repo, expected) in [
+        (&first_path, source.path().join(".git")),
+        (&second_source, second_source.join(".git")),
+    ] {
+        let common = std::process::Command::new("git")
+            .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        assert!(common.status.success());
+        let actual = Path::new(String::from_utf8(common.stdout).unwrap().trim())
+            .canonicalize()
+            .unwrap();
+        assert_eq!(actual, expected.canonicalize().unwrap());
+        assert!(actual.starts_with(&root_path));
+    }
+    let added = std::process::Command::new("git")
+        .args(["worktree", "add", "--detach"])
+        .arg(&second_path)
+        .arg(&head)
+        .current_dir(&second_source)
+        .output()
+        .unwrap();
+    assert!(added.status.success(), "{added:?}");
+    let server = MemoryServer::new_with_home_for_test(
+        root_path.join("global.db"),
+        None,
+        root_path.join("home"),
+    )
+    .unwrap();
+    let flow = "flow_unique_claim";
+    let runner = ClaimHeadRunner {
+        root: root_path.clone(),
+        observations: 0.into(),
+        copies: 0.into(),
+        checks: 0.into(),
+    };
+    let counts = || {
+        (
+            runner.observations.load(SeqCst),
+            runner.copies.load(SeqCst),
+            runner.checks.load(SeqCst),
+        )
+    };
+    let zero = run_with_runner(
+        &server,
+        &runner,
+        flow,
+        "fmt",
+        check_kind_argv("fmt").unwrap(),
+        Duration::from_secs(1),
+    )
+    .await;
+    assert!(zero.unwrap_err().contains("requires an active claim"));
+    assert_eq!(counts(), (0, 0, 0));
+    crate::claims_ops::admit_agent_connection(&server, Some("agent.alpha".into()), true).unwrap();
+    let mut first_params = claim_params(flow, first_path.to_str().unwrap());
+    first_params.expected_head = Some(head.clone());
+    let first_claim = crate::claims_ops::handle_task_claim(&server, &first_params).unwrap();
+    let first = run_with_runner(
+        &server,
+        &runner,
+        flow,
+        "fmt",
+        check_kind_argv("fmt").unwrap(),
+        Duration::from_secs(1),
+    )
+    .await
+    .unwrap();
+    assert_eq!(first["item_status"], "passed");
+    assert_eq!(first["head_sha"], head);
+    let baseline = counts();
+    assert!(baseline.0 > 0);
+    assert_eq!((baseline.1, baseline.2), (1, 1));
+    let receipt_path = server
+        .tachi_home_dir()
+        .join("verify-receipts")
+        .join(flow)
+        .join("fmt.json");
+    let receipt = std::fs::read(&receipt_path).unwrap();
+    let run_dir = run_dir_for_flow_id(flow).unwrap();
+    let files_before: std::collections::BTreeSet<_> = std::fs::read_dir(&run_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    let sources_before = [
+        std::fs::read(first_path.join("src/lib.rs")).unwrap(),
+        std::fs::read(second_path.join("src/lib.rs")).unwrap(),
+    ];
+    let registrations_before = [
+        registered_worktree_paths(&first_path),
+        registered_worktree_paths(&second_path),
+    ];
+    let mut second_params = claim_params(flow, second_path.to_str().unwrap());
+    second_params.expected_head = Some(head.clone());
+    second_params.claim_scope = vec!["crates/tachi-server/src/verify_ops/run/tests.rs".into()];
+    let second_claim = crate::claims_ops::handle_task_claim(&server, &second_params).unwrap();
+    let second_id = second_claim["claim_id"].as_str().unwrap();
+
+    for phase in [
+        "initial",
+        "heartbeat-first",
+        "heartbeat-second",
+        "tie",
+        "missing-path",
+        "blank-path",
+        "missing-head",
+        "blank-head",
+    ] {
+        if phase.starts_with("heartbeat-") {
+            // Make the selected heartbeat deterministically newest without
+            // sleeps; the transition itself still uses canonical heartbeat.
+            server.with_global_store(|store| {
+                store.connection_mut().execute(
+                    "UPDATE session_claims SET heartbeat_at='2000-01-01T00:00:00Z' WHERE flow_id=?1",
+                    [flow],
+                ).map_err(|e| e.to_string())?;
+                Ok(())
+            }).unwrap();
+            let selected = if phase == "heartbeat-first" {
+                &first_claim
+            } else {
+                &second_claim
+            };
+            let mut params = claim_params(flow, first_path.to_str().unwrap());
+            params.claim_id = Some(selected["claim_id"].as_str().unwrap().into());
+            params.transition_version = Some(0);
+            crate::claims_ops::handle_task_heartbeat(&server, &params).unwrap();
+            let newest = server
+                .with_global_store_read(|store| {
+                    memcore::list_claims(store.connection(), Some(ClaimState::Active))
+                        .map_err(|e| e.to_string())
+                })
+                .unwrap();
+            assert_eq!(newest[0].claim_id, selected["claim_id"].as_str().unwrap());
+        }
+        // Only persisted malformed/tie premises use private SQL. Both rows
+        // were originally admitted through the real collision policy above.
+        server.with_global_store(|store| {
+            let conn = store.connection_mut();
+            conn.execute("UPDATE session_claims SET worktree_path=?1, expected_head=?2 WHERE claim_id=?3",
+                rusqlite::params![second_path.to_str().unwrap(), head, second_id]).map_err(|e| e.to_string())?;
+            match phase {
+                "tie" => { conn.execute("UPDATE session_claims SET heartbeat_at='2026-09-13T00:00:00Z' WHERE flow_id=?1", [flow]).map_err(|e| e.to_string())?; }
+                "missing-path" | "blank-path" => { conn.execute("UPDATE session_claims SET worktree_path=?1 WHERE claim_id=?2", rusqlite::params![if phase == "missing-path" { None } else { Some(" ") }, second_id]).map_err(|e| e.to_string())?; }
+                "missing-head" | "blank-head" => { conn.execute("UPDATE session_claims SET expected_head=?1 WHERE claim_id=?2", rusqlite::params![if phase == "missing-head" { None } else { Some(" ") }, second_id]).map_err(|e| e.to_string())?; }
+                _ => {}
+            }
+            Ok(())
+        }).unwrap();
+        let result = run_with_runner(
+            &server,
+            &runner,
+            flow,
+            "fmt",
+            check_kind_argv("fmt").unwrap(),
+            Duration::from_secs(1),
+        )
+        .await;
+        let observed = counts();
+        let preserved = std::fs::read(&receipt_path).unwrap() == receipt;
+        eprintln!("UNIQUE_CLAIM_OBSERVED phase={phase} before={baseline:?} after={observed:?} prior_receipt_preserved={preserved} result={result:?}");
+        assert_eq!(
+            result.unwrap_err(),
+            format!("verification_claim_ambiguous: flow {flow}")
+        );
+        assert_eq!(observed, baseline);
+        assert!(preserved);
+        let files_after: std::collections::BTreeSet<_> = std::fs::read_dir(&run_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(files_after, files_before);
+        for (index, path) in [&first_path, &second_path].into_iter().enumerate() {
+            assert_eq!(
+                std::fs::read(path.join("src/lib.rs")).unwrap(),
+                sources_before[index]
+            );
+            assert_eq!(registered_worktree_paths(path), registrations_before[index]);
+            assert_eq!(ProcessCheckRunner.observe_head(path).await.unwrap(), head);
+            assert!(ProcessCheckRunner.worktree_is_clean(path).await.unwrap());
+        }
+    }
+    // Released rows are excluded by the existing canonical query, not by a
+    // new preferred-role/path filter. Heartbeat advanced this claim to v1.
+    second_params.claim_id = Some(second_id.into());
+    second_params.transition_version = Some(1);
+    crate::claims_ops::handle_task_release(&server, &second_params).unwrap();
+    let released = run_with_runner(
+        &server,
+        &runner,
+        flow,
+        "fmt",
+        check_kind_argv("fmt").unwrap(),
+        Duration::from_secs(1),
+    )
+    .await
+    .unwrap();
+    assert_eq!(released["item_status"], "passed");
+    // A canonical active claim belonging to another flow is not ambiguous.
+    second_params.flow_id = Some("flow_other_claim".into());
+    crate::claims_ops::handle_task_claim(&server, &second_params).unwrap();
+    let other = run_with_runner(
+        &server,
+        &runner,
+        flow,
+        "fmt",
+        check_kind_argv("fmt").unwrap(),
+        Duration::from_secs(1),
+    )
+    .await
+    .unwrap();
+    assert_eq!(other["item_status"], "passed");
+    assert_eq!(
+        (runner.copies.load(SeqCst), runner.checks.load(SeqCst)),
+        (3, 3)
+    );
 }
