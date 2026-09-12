@@ -40,5 +40,41 @@ runs:
           }
         }
 
-        rustup run $toolchain rustc --version
-        rustup run $toolchain cargo --version
+        $rustcPath = (& rustup which --toolchain $toolchain rustc | Out-String).Trim()
+        if ($LASTEXITCODE -ne 0 -or -not $rustcPath) {
+          throw "Could not locate rustc for toolchain $toolchain."
+        }
+        $toolchainBin = Split-Path -Parent $rustcPath
+
+        # Pin command lookup as well as rustup: hosted macOS can put Homebrew Rust first.
+        $env:RUSTUP_TOOLCHAIN = $toolchain
+        $env:PATH = "$toolchainBin$([IO.Path]::PathSeparator)$env:PATH"
+        Add-Content -Path $env:GITHUB_PATH -Value $toolchainBin -Encoding utf8
+        Add-Content -Path $env:GITHUB_ENV -Value "RUSTUP_TOOLCHAIN=$toolchain" -Encoding utf8
+
+        $expectedRustcVersion = (& rustup run $toolchain rustc --version | Out-String).Trim()
+        if ($LASTEXITCODE -ne 0) {
+          throw "Could not read rustc version for toolchain $toolchain."
+        }
+        $expectedCargoVersion = (& rustup run $toolchain cargo --version | Out-String).Trim()
+        if ($LASTEXITCODE -ne 0) {
+          throw "Could not read cargo version for toolchain $toolchain."
+        }
+        $actualRustcVersion = (& rustc --version | Out-String).Trim()
+        if ($LASTEXITCODE -ne 0) {
+          throw "Effective rustc command failed."
+        }
+        $actualCargoVersion = (& cargo --version | Out-String).Trim()
+        if ($LASTEXITCODE -ne 0) {
+          throw "Effective cargo command failed."
+        }
+
+        if ($actualRustcVersion -ne $expectedRustcVersion -or $actualRustcVersion -notmatch "^rustc $([regex]::Escape($toolchain))(?: |$)") {
+          throw "Effective rustc version '$actualRustcVersion' does not match pinned toolchain '$expectedRustcVersion'."
+        }
+        if ($actualCargoVersion -ne $expectedCargoVersion) {
+          throw "Effective cargo version '$actualCargoVersion' does not match pinned toolchain '$expectedCargoVersion'."
+        }
+
+        Write-Output $actualRustcVersion
+        Write-Output $actualCargoVersion

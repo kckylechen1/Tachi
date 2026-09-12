@@ -18,22 +18,55 @@ export interface Config {
   };
 }
 
-const defaultConfig: Config = {
-  daemon: {
-    port: 6919,
-    autoStart: true,
-  },
-  ui: {
-    language: 'en',
-    theme: 'dark',
-  },
-  paths: {
-    dataDir: join(homedir(), '.tachi'),
-  },
-};
-
 const configDir = join(homedir(), '.tachi');
 const configPath = join(configDir, 'config.yaml');
+
+function createDefaultConfig(): Config {
+  return {
+    daemon: {
+      port: 6919,
+      autoStart: true,
+    },
+    ui: {
+      language: 'en',
+      theme: 'dark',
+    },
+    paths: {
+      dataDir: configDir,
+    },
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Object.prototype.toString.call(value) === '[object Object]';
+}
+
+function parseConfig(value: unknown): Config {
+  const config = createDefaultConfig();
+  if (!isRecord(value)) return config;
+
+  if (isRecord(value.daemon)) {
+    const { port, autoStart } = value.daemon;
+    if (Number.isInteger(port) && (port as number) >= 1 && (port as number) <= 65535) {
+      config.daemon.port = port as number;
+    }
+    if (typeof autoStart === 'boolean') config.daemon.autoStart = autoStart;
+  }
+
+  if (isRecord(value.ui)) {
+    const { language, theme } = value.ui;
+    if (language === 'en' || language === 'zh') config.ui.language = language;
+    if (theme === 'dark' || theme === 'light') config.ui.theme = theme;
+  }
+
+  if (isRecord(value.paths)) {
+    const { dataDir, projectDb } = value.paths;
+    if (typeof dataDir === 'string') config.paths.dataDir = dataDir;
+    if (typeof projectDb === 'string') config.paths.projectDb = projectDb;
+  }
+
+  return config;
+}
 
 export async function initConfig(): Promise<void> {
   if (!existsSync(configDir)) {
@@ -41,17 +74,16 @@ export async function initConfig(): Promise<void> {
   }
   
   if (!existsSync(configPath)) {
-    saveConfig(defaultConfig);
+    saveConfig(createDefaultConfig());
   }
 }
 
 export function loadConfig(): Config {
   try {
     const content = readFileSync(configPath, 'utf-8');
-    const parsed = yamlLoad(content) as Partial<Config>;
-    return { ...defaultConfig, ...parsed };
+    return parseConfig(yamlLoad(content));
   } catch {
-    return defaultConfig;
+    return createDefaultConfig();
   }
 }
 
