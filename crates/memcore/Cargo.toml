@@ -43,7 +43,7 @@ broker-fixtures = []
 # already resolved in this workspace (tachi-server, tachi-llm, tachi-params), so
 # this adds no new crate to the build graph.
 blake2 = { version = "0.10", optional = true }
-rusqlite = { workspace = true }
+rusqlite = { workspace = true, features = ["hooks", "limits"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }

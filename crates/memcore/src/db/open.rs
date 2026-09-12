@@ -114,9 +114,47 @@ pub(crate) struct ConnectionAuthorizationState {
     planner_maintenance: AtomicBool,
     ingest_owner_fence: AtomicBool,
     ingest_owner_fence_active: AtomicBool,
+    // New runtime instrumentation, not permission: one owned callback witnesses
+    // and bounds exact-reader work on this physical connection.
+    pub(crate) exact_active: AtomicBool,
+    pub(crate) exact_remaining: AtomicU64,
+    pub(crate) exact_exhausted: AtomicBool,
+    pub(crate) exact_witness: AtomicU64,
 }
 
 pub(crate) type ReservedReferenceWriteFlag = Arc<ConnectionAuthorizationState>;
+
+pub(crate) const EXACT_PROGRESS_INTERVAL: u64 = 256;
+
+/// Called only on the final internally opened connection, before exposure.
+/// Subsequent exact reads probe this ownership; they never overwrite a foreign
+/// callback installed through an admin connection accessor.
+pub(crate) fn install_exact_reader_progress(
+    conn: &Connection,
+    state: &ReservedReferenceWriteFlag,
+) -> rusqlite::Result<()> {
+    let state = Arc::clone(state);
+    conn.progress_handler(
+        EXACT_PROGRESS_INTERVAL as i32,
+        Some(move || {
+            if !state.exact_active.load(Ordering::SeqCst) {
+                return false;
+            }
+            state.exact_witness.fetch_add(1, Ordering::Relaxed);
+            let previous = state
+                .exact_remaining
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                    Some(remaining.saturating_sub(EXACT_PROGRESS_INTERVAL))
+                })
+                .unwrap_or(0);
+            if previous <= EXACT_PROGRESS_INTERVAL {
+                state.exact_exhausted.store(true, Ordering::SeqCst);
+                return true;
+            }
+            false
+        }),
+    )
+}
 
 enum AuthorizationKind {
     TypedDml,
@@ -167,6 +205,10 @@ pub(crate) fn register_reserved_reference_write_guard(
         planner_maintenance: AtomicBool::new(false),
         ingest_owner_fence: AtomicBool::new(false),
         ingest_owner_fence_active: AtomicBool::new(false),
+        exact_active: AtomicBool::new(false),
+        exact_remaining: AtomicU64::new(0),
+        exact_exhausted: AtomicBool::new(false),
+        exact_witness: AtomicU64::new(0),
     });
     let function_flag = Arc::clone(&flag);
     conn.create_scalar_function(

@@ -163,7 +163,33 @@ pub fn user_facing_wiki_sql_where(qualified: bool, allow_recall_cache: bool) -> 
     }
 }
 
-fn metadata_bool(entry: &MemoryEntry, key: &str) -> bool {
+/// Borrowed canonical namespace signals. Content is intentionally unavailable:
+/// extending classification to another field must extend this shared shape.
+pub(crate) struct NamespaceProjection<'a> {
+    pub(crate) id: &'a str,
+    pub(crate) path: &'a str,
+    pub(crate) source: &'a str,
+    pub(crate) category: &'a str,
+    pub(crate) topic: &'a str,
+    pub(crate) domain: Option<&'a str>,
+    pub(crate) metadata: &'a serde_json::Value,
+}
+
+impl<'a> From<&'a MemoryEntry> for NamespaceProjection<'a> {
+    fn from(entry: &'a MemoryEntry) -> Self {
+        Self {
+            id: &entry.id,
+            path: &entry.path,
+            source: &entry.source,
+            category: &entry.category,
+            topic: &entry.topic,
+            domain: entry.domain.as_deref(),
+            metadata: &entry.metadata,
+        }
+    }
+}
+
+fn metadata_bool_projection(entry: &NamespaceProjection<'_>, key: &str) -> bool {
     entry
         .metadata
         .get(key)
@@ -171,7 +197,7 @@ fn metadata_bool(entry: &MemoryEntry, key: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn metadata_bool_or_one(entry: &MemoryEntry, key: &str) -> bool {
+fn metadata_bool_or_one_projection(entry: &NamespaceProjection<'_>, key: &str) -> bool {
     match entry.metadata.get(key) {
         Some(serde_json::Value::Bool(true)) => true,
         Some(serde_json::Value::Number(number)) => {
@@ -181,7 +207,7 @@ fn metadata_bool_or_one(entry: &MemoryEntry, key: &str) -> bool {
     }
 }
 
-fn metadata_str_eq(entry: &MemoryEntry, key: &str, expected: &str) -> bool {
+fn metadata_str_eq_projection(entry: &NamespaceProjection<'_>, key: &str, expected: &str) -> bool {
     entry
         .metadata
         .get(key)
@@ -209,6 +235,10 @@ pub fn path_prefix_opts_into_recall_cache(path_prefix: Option<&str>) -> bool {
 }
 
 pub fn is_recall_cache_entry(entry: &MemoryEntry) -> bool {
+    is_recall_cache_entry_projection(&NamespaceProjection::from(entry))
+}
+
+pub(crate) fn is_recall_cache_entry_projection(entry: &NamespaceProjection<'_>) -> bool {
     entry
         .source
         .eq_ignore_ascii_case(FOUNDRY_RECALL_CACHE_SOURCE)
@@ -221,18 +251,22 @@ pub fn is_recall_cache_entry(entry: &MemoryEntry) -> bool {
             .id
             .to_ascii_lowercase()
             .starts_with("foundry:recall-cache:")
-        || path_contains_recall_cache(&entry.path)
-        || metadata_bool_or_one(entry, "recall_rerank_cache")
-        || metadata_str_eq(entry, "cache_key", FOUNDRY_RECALL_CACHE_SOURCE)
+        || path_contains_recall_cache(entry.path)
+        || metadata_bool_or_one_projection(entry, "recall_rerank_cache")
+        || metadata_str_eq_projection(entry, "cache_key", FOUNDRY_RECALL_CACHE_SOURCE)
 }
 
 /// Internal Wiki bookkeeping that must never consume a user-facing Wiki
 /// retrieval budget.
 pub fn is_wiki_log_entry(entry: &MemoryEntry) -> bool {
+    is_wiki_log_entry_projection(&NamespaceProjection::from(entry))
+}
+
+pub(crate) fn is_wiki_log_entry_projection(entry: &NamespaceProjection<'_>) -> bool {
     entry.path == "/wiki/_log"
         || entry.path.starts_with("/wiki/_log/")
         || entry.topic.eq_ignore_ascii_case("wiki_log")
-        || metadata_bool_or_one(entry, "wiki_log")
+        || metadata_bool_or_one_projection(entry, "wiki_log")
 }
 
 /// Rust counterpart of [`user_facing_wiki_sql_where`]. Every internal class the
@@ -247,7 +281,12 @@ pub fn is_wiki_log_entry(entry: &MemoryEntry) -> bool {
 /// built on it: browse, read, lint, obsidian export) still projected anchor
 /// plumbing rows.
 pub fn is_user_facing_wiki_entry(entry: &MemoryEntry) -> bool {
-    is_user_facing_wiki_entry_allowing_recall_cache(entry) && !is_recall_cache_entry(entry)
+    is_user_facing_wiki_entry_projection(&NamespaceProjection::from(entry))
+}
+
+pub(crate) fn is_user_facing_wiki_entry_projection(entry: &NamespaceProjection<'_>) -> bool {
+    is_user_facing_wiki_entry_allowing_recall_cache_projection(entry)
+        && !is_recall_cache_entry_projection(entry)
 }
 
 /// [`is_user_facing_wiki_entry`] with the recall-cache class allowed through:
@@ -256,18 +295,29 @@ pub fn is_user_facing_wiki_entry(entry: &MemoryEntry) -> bool {
 /// `path_prefix` is entitled to (tachi#1569 — same escape hatch
 /// [`is_namespace_search_noise`] has always honoured).
 pub fn is_user_facing_wiki_entry_allowing_recall_cache(entry: &MemoryEntry) -> bool {
-    !is_reserved_wiki_rem_id(&entry.id) && !is_wiki_log_entry(entry) && !is_anchor_entry(entry)
+    is_user_facing_wiki_entry_allowing_recall_cache_projection(&NamespaceProjection::from(entry))
+}
+
+pub(crate) fn is_user_facing_wiki_entry_allowing_recall_cache_projection(
+    entry: &NamespaceProjection<'_>,
+) -> bool {
+    !is_reserved_wiki_rem_id(entry.id)
+        && !is_wiki_log_entry_projection(entry)
+        && !is_anchor_entry_projection(entry)
 }
 
 pub fn is_wiki_entry(entry: &MemoryEntry) -> bool {
-    path_in_namespace(&entry.path, "/wiki")
+    is_wiki_entry_projection(&NamespaceProjection::from(entry))
+}
+
+pub(crate) fn is_wiki_entry_projection(entry: &NamespaceProjection<'_>) -> bool {
+    path_in_namespace(entry.path, "/wiki")
         || entry.source.eq_ignore_ascii_case("wiki")
         || entry.category.eq_ignore_ascii_case("wiki")
         || entry
             .domain
-            .as_deref()
             .is_some_and(|domain| domain.eq_ignore_ascii_case("wiki"))
-        || metadata_bool(entry, "wiki")
+        || metadata_bool_projection(entry, "wiki")
 }
 
 // ─── Retrieval surface (memcore ranking rework Phase 2, PIECE 1) ───────────
@@ -295,7 +345,11 @@ pub enum Surface {
 /// [`DOCS_SURFACE_SQL_WHERE`] / [`DOCS_SURFACE_SQL_WHERE_M`] below — see
 /// their doc comment for exactly which signals the SQL mirror covers.
 pub fn surface_of(entry: &MemoryEntry) -> Surface {
-    if is_wiki_entry(entry) || entry.category.eq_ignore_ascii_case("guide") {
+    surface_of_projection(&NamespaceProjection::from(entry))
+}
+
+pub(crate) fn surface_of_projection(entry: &NamespaceProjection<'_>) -> Surface {
+    if is_wiki_entry_projection(entry) || entry.category.eq_ignore_ascii_case("guide") {
         Surface::Docs
     } else {
         Surface::Memory
@@ -401,19 +455,31 @@ pub(crate) fn surface_sql_splice(surface: Option<Surface>, qualified: bool) -> S
 }
 
 pub fn is_kanban_entry(entry: &MemoryEntry) -> bool {
-    path_in_namespace(&entry.path, "/kanban")
+    is_kanban_entry_projection(&NamespaceProjection::from(entry))
+}
+
+pub(crate) fn is_kanban_entry_projection(entry: &NamespaceProjection<'_>) -> bool {
+    path_in_namespace(entry.path, "/kanban")
         || entry.source.eq_ignore_ascii_case("kanban")
         || entry.category.eq_ignore_ascii_case("kanban")
 }
 
 pub fn is_handoff_entry(entry: &MemoryEntry) -> bool {
-    path_in_namespace(&entry.path, "/handoff")
+    is_handoff_entry_projection(&NamespaceProjection::from(entry))
+}
+
+pub(crate) fn is_handoff_entry_projection(entry: &NamespaceProjection<'_>) -> bool {
+    path_in_namespace(entry.path, "/handoff")
         || entry.source.eq_ignore_ascii_case("handoff")
         || entry.category.eq_ignore_ascii_case("handoff")
 }
 
 pub fn is_eval_entry(entry: &MemoryEntry) -> bool {
-    path_in_namespace(&entry.path, "/eval") || entry.category.eq_ignore_ascii_case("eval")
+    is_eval_entry_projection(&NamespaceProjection::from(entry))
+}
+
+pub(crate) fn is_eval_entry_projection(entry: &NamespaceProjection<'_>) -> bool {
+    path_in_namespace(entry.path, "/eval") || entry.category.eq_ignore_ascii_case("eval")
 }
 
 /// tachi#773 item 4: anchor rows (`ensure_anchor`, `/anchors/<kind>/...`,
@@ -423,7 +489,11 @@ pub fn is_eval_entry(entry: &MemoryEntry) -> bool {
 /// content a user is searching for. So there is no `path_prefix` override
 /// here; [`is_namespace_search_noise`] excludes them unconditionally.
 pub fn is_anchor_entry(entry: &MemoryEntry) -> bool {
-    path_in_namespace(&entry.path, "/anchors") || entry.id.starts_with("anchor:")
+    is_anchor_entry_projection(&NamespaceProjection::from(entry))
+}
+
+pub(crate) fn is_anchor_entry_projection(entry: &NamespaceProjection<'_>) -> bool {
+    path_in_namespace(entry.path, "/anchors") || entry.id.starts_with("anchor:")
 }
 
 pub fn is_continuity_projection_path(path: &str) -> bool {
@@ -433,12 +503,16 @@ pub fn is_continuity_projection_path(path: &str) -> bool {
 }
 
 pub fn is_continuity_projection_entry(entry: &MemoryEntry) -> bool {
+    is_continuity_projection_entry_projection(&NamespaceProjection::from(entry))
+}
+
+pub(crate) fn is_continuity_projection_entry_projection(entry: &NamespaceProjection<'_>) -> bool {
     entry
         .metadata
         .get("projection_kind")
         .and_then(serde_json::Value::as_str)
         .is_some()
-        || is_continuity_projection_path(&entry.path)
+        || is_continuity_projection_path(entry.path)
 }
 
 pub fn path_prefix_opts_into_continuity_projection(path: &str, path_prefix: Option<&str>) -> bool {
@@ -493,13 +567,20 @@ pub fn path_prefix_opts_into_continuity_projection(path: &str, path_prefix: Opti
 /// `wiki_lifecycle_gate_catches_off_path_domain_classified_pending_rows` and
 /// `wiki_lifecycle_gate_does_not_capture_unrelated_lifecycle_key_usage`.
 pub fn is_non_default_retrievable_wiki_row(entry: &MemoryEntry) -> bool {
-    matches!(surface_of(entry), Surface::Docs) && !wiki_row_lifecycle_is_default_retrievable(entry)
+    is_non_default_retrievable_wiki_row_projection(&NamespaceProjection::from(entry))
+}
+
+pub(crate) fn is_non_default_retrievable_wiki_row_projection(
+    entry: &NamespaceProjection<'_>,
+) -> bool {
+    matches!(surface_of_projection(entry), Surface::Docs)
+        && !wiki_row_lifecycle_is_default_retrievable_projection(entry)
 }
 
 /// The retrievability half of the `derive_wiki_lifecycle` mirror — see
 /// [`is_non_default_retrievable_wiki_row`] for why this is a duplicate, not
 /// a re-export.
-fn wiki_row_lifecycle_is_default_retrievable(entry: &MemoryEntry) -> bool {
+fn wiki_row_lifecycle_is_default_retrievable_projection(entry: &NamespaceProjection<'_>) -> bool {
     if let Some(explicit) = entry.metadata.get("lifecycle") {
         // Only the literal `"active"` string is default-retrievable — any
         // other string, and any non-string/malformed value, mirrors
@@ -522,22 +603,29 @@ fn wiki_row_lifecycle_is_default_retrievable(entry: &MemoryEntry) -> bool {
 }
 
 pub fn is_namespace_search_noise(entry: &MemoryEntry, path_prefix: Option<&str>) -> bool {
+    is_namespace_search_noise_projection(&NamespaceProjection::from(entry), path_prefix)
+}
+
+pub(crate) fn is_namespace_search_noise_projection(
+    entry: &NamespaceProjection<'_>,
+    path_prefix: Option<&str>,
+) -> bool {
     let kanban_scoped = path_prefix.is_some_and(|prefix| prefix.starts_with("/kanban"));
     let handoff_scoped = path_prefix.is_some_and(|prefix| prefix.starts_with("/handoff"));
-    is_wiki_log_entry(entry)
-        || (!path_prefix_opts_into_recall_cache(path_prefix) && is_recall_cache_entry(entry))
-        || (!kanban_scoped && is_kanban_entry(entry))
-        || (!handoff_scoped && is_handoff_entry(entry))
-        || (!path_prefix_opts_into_continuity_projection(&entry.path, path_prefix)
-            && is_continuity_projection_entry(entry))
-        || is_anchor_entry(entry)
+    is_wiki_log_entry_projection(entry)
+        || (!path_prefix_opts_into_recall_cache(path_prefix) && is_recall_cache_entry_projection(entry))
+        || (!kanban_scoped && is_kanban_entry_projection(entry))
+        || (!handoff_scoped && is_handoff_entry_projection(entry))
+        || (!path_prefix_opts_into_continuity_projection(entry.path, path_prefix)
+            && is_continuity_projection_entry_projection(entry))
+        || is_anchor_entry_projection(entry)
         // Generic-surface backstop for reserved Wiki REM operation rows. The
         // wiki-scoped surface already excludes these via
         // `user_facing_wiki_sql_where`, but that clause only fires when a
         // `/wiki` path_prefix is in play; an unscoped search routed into the
         // wiki store by project-name inference has no such filter, so this
         // function is the only remaining backstop.
-        || is_reserved_wiki_rem_id(&entry.id)
+        || is_reserved_wiki_rem_id(entry.id)
 }
 
 /// Whether `entry` is bookkeeping the store itself owns — never content a
@@ -573,10 +661,14 @@ pub fn is_namespace_search_noise(entry: &MemoryEntry, path_prefix: Option<&str>)
 /// any future id-addressed read surface should reach for this, not
 /// [`is_namespace_search_noise`].
 pub fn is_internal_only_row(entry: &MemoryEntry) -> bool {
-    is_wiki_log_entry(entry)
-        || is_reserved_wiki_rem_id(&entry.id)
-        || is_recall_cache_entry(entry)
-        || is_anchor_entry(entry)
+    is_internal_only_row_projection(&NamespaceProjection::from(entry))
+}
+
+pub(crate) fn is_internal_only_row_projection(entry: &NamespaceProjection<'_>) -> bool {
+    is_wiki_log_entry_projection(entry)
+        || is_reserved_wiki_rem_id(entry.id)
+        || is_recall_cache_entry_projection(entry)
+        || is_anchor_entry_projection(entry)
 }
 
 #[cfg(test)]
@@ -1010,5 +1102,74 @@ mod tests {
             "the wiki-rem backstop must not classify ordinary user-facing \
              wiki entries as noise"
         );
+    }
+    #[test]
+    fn bounded_projection_uses_all_canonical_namespace_signals() {
+        for (field, value) in [
+            ("id", "anchor:fixture"),
+            ("path", "/wiki/_log/fixture"),
+            ("source", "wiki"),
+            ("category", "guide"),
+            ("topic", "recall_rerank_cache"),
+            ("domain", "wiki"),
+            ("metadata", "pending_review"),
+        ] {
+            let mut entry =
+                fixture_entry("ordinary", "/facts", "content is not a namespace signal");
+            match field {
+                "id" => entry.id = value.into(),
+                "path" => entry.path = value.into(),
+                "source" => entry.source = value.into(),
+                "category" => entry.category = value.into(),
+                "topic" => entry.topic = value.into(),
+                "domain" => entry.domain = Some(value.into()),
+                _ => entry.metadata = json!({"wiki":true,"lifecycle":value}),
+            }
+            let projection = NamespaceProjection::from(&entry);
+            let expected_surface = if field == "id" || field == "topic" {
+                Surface::Memory
+            } else {
+                Surface::Docs
+            };
+            let expected_noise = matches!(field, "id" | "path" | "topic");
+            let expected_nonretrievable = field == "metadata";
+            let expected_user_facing = !matches!(field, "id" | "path");
+            assert_eq!(surface_of(&entry), expected_surface, "full {field}");
+            assert_eq!(
+                surface_of_projection(&projection),
+                expected_surface,
+                "projection {field}"
+            );
+            assert_eq!(
+                is_namespace_search_noise(&entry, None),
+                expected_noise,
+                "full {field}"
+            );
+            assert_eq!(
+                is_namespace_search_noise_projection(&projection, None),
+                expected_noise,
+                "projection {field}"
+            );
+            assert_eq!(
+                is_non_default_retrievable_wiki_row(&entry),
+                expected_nonretrievable,
+                "full {field}"
+            );
+            assert_eq!(
+                is_non_default_retrievable_wiki_row_projection(&projection),
+                expected_nonretrievable,
+                "projection {field}"
+            );
+            assert_eq!(
+                is_user_facing_wiki_entry_allowing_recall_cache(&entry),
+                expected_user_facing,
+                "full {field}"
+            );
+            assert_eq!(
+                is_user_facing_wiki_entry_allowing_recall_cache_projection(&projection),
+                expected_user_facing,
+                "projection {field}"
+            );
+        }
     }
 }
