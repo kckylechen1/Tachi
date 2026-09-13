@@ -597,6 +597,88 @@ mod tests {
         );
     }
 
+    struct SourceFixtureChild(std::process::Child);
+
+    impl Drop for SourceFixtureChild {
+        fn drop(&mut self) {
+            if self.0.try_wait().ok().flatten().is_none() {
+                let _ = self.0.kill();
+            }
+            let _ = self.0.wait();
+        }
+    }
+
+    fn run_source_fixture(test: &str, body: impl FnOnce()) {
+        const SELECTOR: &str = "TACHI_SOURCE_BINDING_FIXTURE_SELECTOR";
+        const ROOT: &str = "TACHI_SOURCE_BINDING_FIXTURE_ROOT";
+        if std::env::var(SELECTOR).ok().as_deref() == Some(test) {
+            let root =
+                std::path::PathBuf::from(std::env::var_os(ROOT).expect("private fixture root"));
+            assert_eq!(std::env::current_dir().expect("child cwd"), root);
+            body();
+            std::fs::write(root.join("completed"), test).expect("child completion witness");
+            return;
+        }
+
+        // Only filesystem/process setup occurs in the ambient parent; no server or LLM exists here.
+        let root = tempfile::tempdir().expect("private source fixture process root");
+        let root_path = root.path().canonicalize().expect("canonical private root");
+        let home = root_path.join("home");
+        let temp = root_path.join("tmp");
+        let empty_path = root_path.join("empty-path");
+        for directory in [&home, &temp, &empty_path] {
+            std::fs::create_dir(directory).expect("private child directory");
+        }
+        let log_path = root_path.join("child.log");
+        let output = std::fs::File::create(&log_path).expect("private child log");
+        let exact = format!("continuity_ops::pipeline::tests::{test}");
+        let mut command = std::process::Command::new(std::env::current_exe().expect("test binary"));
+        command
+            .env_clear()
+            .current_dir(&root_path)
+            .args(["--exact", exact.as_str(), "--nocapture"])
+            .env(SELECTOR, test)
+            .env(ROOT, &root_path)
+            .env("HOME", &home)
+            .env("USERPROFILE", &home)
+            .env("TACHI_HOME", &home)
+            .env("TMPDIR", &temp)
+            .env("TMP", &temp)
+            .env("TEMP", &temp)
+            .env("PATH", &empty_path)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::from(
+                output.try_clone().expect("clone child log"),
+            ))
+            .stderr(std::process::Stdio::from(output));
+        #[cfg(windows)]
+        if let Some(system_root) = std::env::var_os("SystemRoot") {
+            command.env("SystemRoot", system_root);
+        }
+        let mut child = SourceFixtureChild(command.spawn().expect("spawn private test child"));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(45);
+        loop {
+            if let Some(status) = child.0.try_wait().expect("poll owned child") {
+                assert!(
+                    status.success(),
+                    "private fixture failed: {status}\n{}",
+                    std::fs::read_to_string(&log_path).expect("read private child log")
+                );
+                assert_eq!(
+                    std::fs::read_to_string(root_path.join("completed"))
+                        .expect("selected child actually completed"),
+                    test
+                );
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "private source fixture timed out"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
     async fn wait_for_source_outcomes(
         server: &MemoryServer,
         expected: usize,
@@ -619,17 +701,22 @@ mod tests {
     /// Capture lineage survives exact replay and distinguishes changed same-turn evidence.
     #[test]
     fn capture_outcome_source_binding_survives_restart_and_changed_evidence() {
-        crate::test_support::with_tachi_home(|home| {
-            let _enabled = crate::test_support::EnvRestore::set("TACHI_CONTINUITY_PIPELINE", "1");
-            let _health = crate::test_support::EnvRestore::set(
-                "TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST",
-                "1",
-            );
-            let _voyage = crate::test_support::EnvRestore::remove("VOYAGE_API_KEY");
-            let empty_path = tempfile::tempdir().expect("private empty PATH");
-            let _path = crate::test_support::EnvRestore::set_path("PATH", empty_path.path());
-            let runtime = tokio::runtime::Runtime::new().expect("private capture runtime");
-            runtime.block_on(async {
+        run_source_fixture(
+            "capture_outcome_source_binding_survives_restart_and_changed_evidence",
+            || {
+                crate::test_support::with_tachi_home(|home| {
+                    let _enabled =
+                        crate::test_support::EnvRestore::set("TACHI_CONTINUITY_PIPELINE", "1");
+                    let _health = crate::test_support::EnvRestore::set(
+                        "TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST",
+                        "1",
+                    );
+                    let _voyage = crate::test_support::EnvRestore::remove("VOYAGE_API_KEY");
+                    let empty_path = tempfile::tempdir().expect("private empty PATH");
+                    let _path =
+                        crate::test_support::EnvRestore::set_path("PATH", empty_path.path());
+                    let runtime = tokio::runtime::Runtime::new().expect("private capture runtime");
+                    runtime.block_on(async {
                 let calls = Arc::new(AtomicUsize::new(0));
                 let handler_calls = calls.clone();
                 let app = Router::new().route("/chat/completions", post(move |Json(request): Json<Value>| {
@@ -723,43 +810,52 @@ mod tests {
                     assert!(!provenance.contains("messages"));
                 }
             });
-        });
+                });
+            },
+        );
     }
 
     #[test]
     fn outcome_source_binding_refuses_missing_values_before_schedule_claim() {
-        crate::test_support::with_tachi_home(|home| {
-            let _enabled = crate::test_support::EnvRestore::set("TACHI_CONTINUITY_PIPELINE", "1");
-            let server = MemoryServer::new(home.join("memory.db"), None).expect("private server");
-            for (index, values) in [
-                ["", "revision", "event"],
-                ["turn", " ", "event"],
-                ["turn", "revision", ""],
-            ]
-            .into_iter()
-            .enumerate()
-            {
-                let key = format!("missing-source-{index}");
-                let target = ContinuityEventTarget::new(crate::DbScope::Global, None, None);
-                let result = maybe_spawn_session_continuity_pipeline(
-                    &server,
-                    target.clone(),
-                    &key,
-                    values[0],
-                    values[1],
-                    values[2],
-                    "session".into(),
-                    "turn".into(),
-                    "actor".into(),
-                    None,
-                    vec![],
-                );
-                assert_eq!(result["reason"], "source_binding_missing");
-                assert!(target
-                    .claim_pipeline_schedule(&server, &key)
-                    .expect("refusal must not consume schedule key"));
-                assert!(list_events(&server, "session").is_empty());
-            }
-        });
+        run_source_fixture(
+            "outcome_source_binding_refuses_missing_values_before_schedule_claim",
+            || {
+                crate::test_support::with_tachi_home(|home| {
+                    let _enabled =
+                        crate::test_support::EnvRestore::set("TACHI_CONTINUITY_PIPELINE", "1");
+                    let server =
+                        MemoryServer::new(home.join("memory.db"), None).expect("private server");
+                    for (index, values) in [
+                        ["", "revision", "event"],
+                        ["turn", " ", "event"],
+                        ["turn", "revision", ""],
+                    ]
+                    .into_iter()
+                    .enumerate()
+                    {
+                        let key = format!("missing-source-{index}");
+                        let target = ContinuityEventTarget::new(crate::DbScope::Global, None, None);
+                        let result = maybe_spawn_session_continuity_pipeline(
+                            &server,
+                            target.clone(),
+                            &key,
+                            values[0],
+                            values[1],
+                            values[2],
+                            "session".into(),
+                            "turn".into(),
+                            "actor".into(),
+                            None,
+                            vec![],
+                        );
+                        assert_eq!(result["reason"], "source_binding_missing");
+                        assert!(target
+                            .claim_pipeline_schedule(&server, &key)
+                            .expect("refusal must not consume schedule key"));
+                        assert!(list_events(&server, "session").is_empty());
+                    }
+                });
+            },
+        );
     }
 }
