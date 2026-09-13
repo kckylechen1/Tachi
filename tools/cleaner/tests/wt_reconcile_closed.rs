@@ -769,3 +769,208 @@ fn branch_pr_lookup_distinguishes_invalid_evidence_from_absence() {
         pr_lookup_error_cli_case(false, case);
     }
 }
+
+fn reconcile_warning_cli_case(case: &str) {
+    let root = std::env::temp_dir().join(format!(
+        "tachi-reconcile-warning-quote'-{}",
+        uuid::Uuid::new_v4()
+    ));
+    fs::create_dir(&root).unwrap();
+    let fixture = Fixture(root.canonicalize().unwrap());
+    for dir in [
+        "bin",
+        "home/.tachi/global",
+        "config",
+        "cargo",
+        "rustup",
+        "tmp",
+        "templates",
+        "repo",
+        "worktrees",
+    ] {
+        fs::create_dir_all(fixture.0.join(dir)).unwrap();
+    }
+    fs::write(fixture.0.join("gitconfig"), "").unwrap();
+    fixture.script("git", "#!/bin/sh\nexec /usr/bin/git \"$@\"\n");
+    let private_cli = |args: &[&str]| -> serde_json::Value {
+        let output = fixture
+            .command(env!("CARGO_BIN_EXE_tachi-clean"), &fixture.0)
+            .env("PATH", fixture.0.join("bin"))
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "private CLI {args:?}: {output:?}");
+        serde_json::from_slice(&output.stdout).unwrap()
+    };
+
+    drop(
+        memcore::MemoryStore::open(
+            fixture
+                .0
+                .join("home/.tachi/global/memory.db")
+                .to_str()
+                .unwrap(),
+        )
+        .unwrap(),
+    );
+
+    fixture.script("lsof", "#!/bin/sh\n[ \"$1\" = '+D' ] && [ \"$2\" = \"$FIXTURE_ROOT/worktrees/merged\" ] || exit 92\nprintf 'clear\\n' >> \"$FIXTURE_ROOT/holder-probes\"\nexit 1\n");
+    let repo = fixture.0.join("repo");
+    let origin = fixture.0.join("origin.git");
+    let wt = fixture.0.join("worktrees/merged");
+    fixture.git_ok(&fixture.0, &["init", "--bare", origin.to_str().unwrap()]);
+    fixture.git_ok(&repo, &["init", "-b", "main"]);
+    assert_eq!(
+        fixture.git_ok(&repo, &["rev-parse", "--absolute-git-dir"]),
+        repo.join(".git").to_str().unwrap()
+    );
+    fs::write(repo.join("base"), "base\n").unwrap();
+    fixture.git_ok(&repo, &["add", "base"]);
+    fixture.git_ok(&repo, &["commit", "-m", "base"]);
+    fixture.git_ok(
+        &repo,
+        &["remote", "add", "origin", origin.to_str().unwrap()],
+    );
+    fixture.git_ok(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "fixture/merged",
+            wt.to_str().unwrap(),
+            "main",
+        ],
+    );
+    assert_eq!(
+        fixture.git_ok(
+            &wt,
+            &["rev-parse", "--path-format=absolute", "--git-common-dir"]
+        ),
+        repo.join(".git").to_str().unwrap()
+    );
+    fs::write(wt.join("accepted"), "accepted change\n").unwrap();
+    fixture.git_ok(&wt, &["add", "accepted"]);
+    fixture.git_ok(&wt, &["commit", "-m", "accepted PR head"]);
+    let accepted = fixture.git_ok(&wt, &["rev-parse", "HEAD"]);
+    fixture.git_ok(&repo, &["merge", "--squash", "fixture/merged"]);
+    fixture.git_ok(&repo, &["commit", "-m", "independent squash merge"]);
+    assert_eq!(
+        fixture
+            .git(&repo, &["merge-base", "--is-ancestor", &accepted, "main"])
+            .status
+            .code(),
+        Some(1)
+    );
+    fixture.git_ok(&repo, &["push", "origin", "fixture/merged"]);
+    let mut register = vec![
+        "wt-register",
+        wt.to_str().unwrap(),
+        "--repo",
+        repo.to_str().unwrap(),
+        "--branch",
+        "fixture/merged",
+        "--json",
+    ];
+    register.extend(["--pr", "7"]);
+    private_cli(&register);
+
+    fixture.script("gh", "#!/bin/sh\n[ \"$*\" = 'pr view 7 --json state,headRefOid,headRefName' ] || exit 91\n/bin/cat \"$FIXTURE_ROOT/pr-state\"\n");
+    fs::write(fixture.0.join("pr-state"), serde_json::json!({"state":"MERGED", "headRefOid":accepted, "headRefName":"fixture/merged"}).to_string()).unwrap();
+    let fault_match = match case {
+        "branch" => {
+            r#"[ "$#" -eq 5 ] && [ "$1" = '-C' ] && [ "$2" = "$FIXTURE_ROOT/repo" ] && [ "$3" = 'branch' ] && [ "$4" = '-D' ] && [ "$5" = 'fixture/merged' ]"#
+        }
+        "remove" => {
+            r#"[ "$#" -eq 6 ] && [ "$1" = '-C' ] && [ "$2" = "$FIXTURE_ROOT/repo" ] && [ "$3" = 'worktree' ] && [ "$4" = 'remove' ] && [ "$5" = '--force' ] && [ "$6" = "$FIXTURE_ROOT/worktrees/merged" ]"#
+        }
+        "clean" => "false",
+        _ => panic!("unknown warning case"),
+    };
+    fixture.script(
+        "git",
+        &format!(
+            "#!/bin/sh\nif {fault_match}; then\n  printf 'injected\\n' >> \"$FIXTURE_ROOT/git-fault\"\n  printf 'private cleanup failure\\n' >&2\n  exit 17\nfi\nexec /usr/bin/git \"$@\"\n"
+        ),
+    );
+    let registry_path = fixture.0.join("home/.tachi/worktrees.json");
+    let marker_path = wt.join(".tachi-worktree.json");
+    let registry = fs::read(&registry_path).unwrap();
+    let marker = fs::read(&marker_path).unwrap();
+    let report = private_cli(&["wt-reconcile", "--force", "--json"]);
+    let directory = wt.is_dir();
+    let registration = fixture
+        .git_ok(&repo, &["worktree", "list", "--porcelain"])
+        .contains(wt.to_str().unwrap());
+    let local = fixture
+        .git(
+            &repo,
+            &["show-ref", "--verify", "refs/heads/fixture/merged"],
+        )
+        .status
+        .success();
+    let remote = fixture
+        .git(
+            &origin,
+            &["show-ref", "--verify", "refs/heads/fixture/merged"],
+        )
+        .status
+        .success();
+    let registry_preserved = fs::read(&registry_path).unwrap() == registry;
+    let marker_preserved = fs::read(&marker_path).ok().as_ref() == Some(&marker);
+    eprintln!("RECONCILE_WARNING_FIXTURE case={case} directory={directory} registration={registration} local={local} remote={remote} registry={registry_preserved} marker={marker_preserved} report={report}");
+    let warnings = report["warnings"].as_array().unwrap();
+    if case == "clean" {
+        assert!(warnings.is_empty());
+        assert!(!fixture.0.join("git-fault").exists());
+    } else {
+        assert_eq!(
+            warnings.len(),
+            1,
+            "executor warning must survive exactly once: {report}"
+        );
+        assert_eq!(
+            fs::read_to_string(fixture.0.join("git-fault")).unwrap(),
+            "injected\n"
+        );
+        if case == "branch" {
+            assert_eq!(
+                warnings[0],
+                "local branch deletion failed for fixture/merged: private cleanup failure"
+            );
+        } else {
+            assert_eq!(warnings[0], "the scrap ledger was already recorded before this failed removal; the path and branch are now flagged as scrapped even though the tree is still present and untouched — reopening either exact one will be (over-cautiously) refused until a new branch/path is used");
+        }
+    }
+    if case == "remove" {
+        assert!(
+            directory && registration && local && remote && registry_preserved && marker_preserved
+        );
+        assert!(report["reconciled"].as_array().unwrap().is_empty());
+        assert_eq!(
+            report["refused"][0]["reasons"][0],
+            "git worktree remove failed: private cleanup failure"
+        );
+    } else {
+        assert!(!directory && !registration && !remote && !registry_preserved && !marker_preserved);
+        assert_eq!(local, case == "branch");
+        assert_eq!(report["reconciled"][0]["removed"], true);
+        assert!(report["refused"].as_array().unwrap().is_empty());
+    }
+    assert!(report["errors"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn reconcile_preserves_executor_warning_after_local_branch_failure() {
+    reconcile_warning_cli_case("branch");
+}
+
+#[test]
+fn reconcile_preserves_executor_warning_after_worktree_remove_failure() {
+    reconcile_warning_cli_case("remove");
+}
+
+#[test]
+fn reconcile_clean_removal_has_no_executor_warnings() {
+    reconcile_warning_cli_case("clean");
+}
