@@ -1600,3 +1600,6 @@ fn test_staff_repo_root_fallback() -> Option<PathBuf> {
 fn test_staff_repo_root_fallback() -> Option<PathBuf> {
     None
 }
+
+#[cfg(all(test, unix))]
+pub(crate) use execution::status_fence_acp_fixture;

@@ -2,11 +2,12 @@ use super::super::acp_native::{is_native_acp_transport, NativeAcpRunSpec};
 use super::super::acpx::{is_acpx_transport, persist_acpx_events_and_map, AcpxReleaseMode};
 #[cfg(test)]
 use super::super::dispatch_v2::stamp_route_decision_id;
+#[cfg(not(unix))]
+use super::super::dispatch_v2::status_json_lock_for;
 #[cfg(test)]
 use super::super::dispatch_v2::write_status_json;
 use super::super::dispatch_v2::{
-    append_trajectory_event, status_json_lock_for, write_status_json_for_terminal,
-    ManagedTerminalStatusAnchor,
+    append_trajectory_event, write_status_json_for_terminal, ManagedTerminalStatusAnchor,
 };
 use super::super::kanban_helpers::{get_kanban_state, should_cleanup_run, update_kanban_state};
 use super::super::subprocess::{
@@ -1633,13 +1634,24 @@ fn persist_acp_model_acknowledgement(
     else {
         return Ok(false);
     };
+    #[cfg(unix)]
+    let anchor = crate::managed_run_control::AnchoredRunStatus::open_ordinary(run_dir)?;
+    #[cfg(unix)]
+    let status_lock = anchor.lock();
+    #[cfg(not(unix))]
     let status_lock = status_json_lock_for(run_dir);
     let _status_guard = status_lock
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
+    #[cfg(unix)]
+    let fence = anchor.acquire_fence()?;
     let status_path = run_dir.join("status.json");
-    let mut status = crate::task_lifecycle::read_json_file(&status_path)?
-        .ok_or_else(|| format!("ACP acknowledgement requires {}", status_path.display()))?;
+    #[cfg(unix)]
+    let read = anchor.read_json();
+    #[cfg(not(unix))]
+    let read = crate::task_lifecycle::read_json_file(&status_path);
+    let mut status =
+        read?.ok_or_else(|| format!("ACP acknowledgement requires {}", status_path.display()))?;
     #[cfg(test)]
     pause_acp_after_status_read(run_dir);
     let receipt_value = status.get("identity_receipt").cloned().ok_or_else(|| {
@@ -1689,8 +1701,11 @@ fn persist_acp_model_acknowledgement(
     crate::managed_run_control::advance_status_revision(status_object)?;
     let body = serde_json::to_vec_pretty(&status)
         .map_err(|error| format!("serialize {}: {error}", status_path.display()))?;
-    crate::utils::write_owner_only_file_atomic(&status_path, &body)
-        .map_err(|error| format!("persist {}: {error}", status_path.display()))?;
+    #[cfg(unix)]
+    let written = anchor.write_atomic(&body, &fence);
+    #[cfg(not(unix))]
+    let written = crate::utils::write_owner_only_file_atomic(&status_path, &body);
+    written.map_err(|error| format!("persist {}: {error}", status_path.display()))?;
     Ok(true)
 }
 
@@ -2645,5 +2660,31 @@ mod issue_1825_credential_cleanup_tests {
         let non_managed: Option<ManagedEphemeralCredentialCleanupObligation> = None;
         assert!(managed.is_some());
         assert!(non_managed.is_none());
+    }
+}
+
+#[cfg(all(test, unix))]
+pub(crate) fn status_fence_acp_fixture(run_dir: &Path, seed: bool) -> Result<(), String> {
+    if seed {
+        let receipt = DispatchIdentityReceipt::planned(
+            tachi_dispatch::DispatchIdentityRequest {
+                profile: None,
+                model: Some("gpt-5.5".into()),
+                agent: Some("codex".into()),
+                harness: Some("acp".into()),
+            },
+            acp_model_only_identity("gpt-5.5"),
+            "private status fence fixture".into(),
+            false,
+        );
+        let path = run_dir.join("status.json");
+        let mut value: Value =
+            serde_json::from_slice(&std::fs::read(&path).map_err(|e| e.to_string())?)
+                .map_err(|e| e.to_string())?;
+        value["identity_receipt"] = serde_json::to_value(receipt).map_err(|e| e.to_string())?;
+        std::fs::write(path, serde_json::to_vec(&value).map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())
+    } else {
+        persist_acp_model_acknowledgement(run_dir, Some("gpt-5.5")).map(|_| ())
     }
 }

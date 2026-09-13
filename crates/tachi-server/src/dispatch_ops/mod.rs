@@ -84,3 +84,6 @@ pub(crate) use predicate::{
 pub(crate) use prompt::{
     assemble_prompt, assemble_prompt_with_trace, assemble_resolved_prompt_with_trace,
 };
+
+#[cfg(all(test, unix))]
+pub(crate) use dispatch::status_fence_acp_fixture;

@@ -5,12 +5,12 @@
 #[cfg(all(test, unix))]
 mod repair_tests;
 #[cfg(all(test, unix))]
-mod test_hooks;
+pub(crate) mod test_hooks;
 #[cfg(unix)]
 mod unix_status;
 
 #[cfg(unix)]
-pub(crate) use unix_status::AnchoredRunStatus;
+pub(crate) use unix_status::{AnchoredRunStatus, StatusMutationFence};
 
 use crate::MemoryServer;
 use chrono::Utc;
@@ -668,10 +668,21 @@ pub(crate) fn mark_managed_custom_start(
     dispatch_id: &str,
     identity: &crate::managed_run_epoch::ManagedRunIdentityInput,
 ) -> Result<(), String> {
+    #[cfg(unix)]
+    let anchor = crate::managed_run_control::AnchoredRunStatus::open_ordinary(run_dir)?;
+    #[cfg(unix)]
+    let lock = anchor.lock();
+    #[cfg(not(unix))]
     let lock = crate::dispatch_ops::status_json_lock_for(run_dir);
     let _guard = lock.lock().unwrap_or_else(|p| p.into_inner());
+    #[cfg(unix)]
+    let fence = anchor.acquire_fence()?;
     let path = run_dir.join("status.json");
-    let Some(mut status) = crate::task_lifecycle::read_json_file(&path)? else {
+    #[cfg(unix)]
+    let read = anchor.read_json();
+    #[cfg(not(unix))]
+    let read = crate::task_lifecycle::read_json_file(&path);
+    let Some(mut status) = read? else {
         return Err(format!("managed custom run is missing {}", path.display()));
     };
     let object = status
@@ -711,8 +722,11 @@ pub(crate) fn mark_managed_custom_start(
     if managed_custom_start_write_failure_injected(run_dir) {
         return Err("injected managed custom classification persistence failure".to_string());
     }
-    crate::utils::write_owner_only_file_atomic(&path, &body)
-        .map_err(|e| format!("persist managed custom classification: {e}"))
+    #[cfg(unix)]
+    let written = anchor.write_atomic(&body, &fence);
+    #[cfg(not(unix))]
+    let written = crate::utils::write_owner_only_file_atomic(&path, &body);
+    written.map_err(|e| format!("persist managed custom classification: {e}"))
 }
 
 pub(crate) async fn request_managed_custom_cancel(
@@ -762,6 +776,7 @@ pub(crate) async fn request_managed_custom_cancel(
         let lock = status_dir.lock();
         let (sender, observed) = {
             let _guard = lock.lock().unwrap_or_else(|p| p.into_inner());
+            let fence = status_dir.acquire_fence()?;
             let Some(mut status) = status_dir.read_json()? else {
                 return Ok(unavailable(
                     dispatch_id,
@@ -887,7 +902,7 @@ pub(crate) async fn request_managed_custom_cancel(
                     return Ok(unavailable(dispatch_id, expected, Some(observed), reason));
                 }
             };
-            if let Err(error) = status_dir.write_atomic(&body) {
+            if let Err(error) = status_dir.write_atomic(&body, &fence) {
                 server
                     .managed_run_controls
                     .clear_accepted_status_anchor(dispatch_id, &status_dir);
@@ -1319,6 +1334,7 @@ fn record_unavailable_if_pending_anchored(
 ) -> Result<String, String> {
     let lock = status_dir.lock();
     let _guard = lock.lock().unwrap_or_else(|p| p.into_inner());
+    let fence = status_dir.acquire_fence()?;
     let Some(mut status) = status_dir.read_json()? else {
         return Ok(unavailable(
             dispatch_id,
@@ -1389,7 +1405,7 @@ fn record_unavailable_if_pending_anchored(
         let body = serde_json::to_vec_pretty(&status)
             .map_err(|e| format!("serialize cancellation_unavailable: {e}"))?;
         status_dir
-            .write_atomic(&body)
+            .write_atomic(&body, &fence)
             .map_err(|e| format!("persist cancellation_unavailable: {e}"))?;
         return serde_json::to_string(&committed_receipt)
             .map_err(|error| format!("serialize committed cancellation receipt: {error}"));

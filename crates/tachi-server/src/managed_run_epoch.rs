@@ -418,6 +418,7 @@ fn append_reconciliation_observation(
         .map_err(|error| format!("run_dir_anchor_failed:{error:?}"))?;
     let lock = anchored.lock();
     let _guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let fence = anchored.acquire_fence()?;
     // Re-read under the lock: a completion that landed between the scan and
     // this append must win; a run that turned terminal is never appended to.
     let mut status = anchored
@@ -498,7 +499,7 @@ fn append_reconciliation_observation(
     let body =
         serde_json::to_vec_pretty(&status).map_err(|error| format!("serialize_failed:{error}"))?;
     anchored
-        .write_atomic(&body)
+        .write_atomic(&body, &fence)
         .map(|()| true)
         .map_err(|error| format!("write_failed:{error}"))
 }
@@ -698,3 +699,8 @@ pub(crate) fn record_startup_reconciliation(server: &crate::MemoryServer) {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(all(test, unix))]
+pub(crate) fn status_fence_reconciliation_fixture(run_dir: &Path) -> Result<bool, String> {
+    append_reconciliation_observation(run_dir, VERDICT_INCONSISTENT, "fixture-reconciling-epoch")
+}
