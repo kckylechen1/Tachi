@@ -771,8 +771,10 @@ fn branch_pr_lookup_distinguishes_invalid_evidence_from_absence() {
 }
 
 fn reconcile_warning_cli_case(case: &str) {
-    let root =
-        std::env::temp_dir().join(format!("tachi-reconcile-warning-{}", uuid::Uuid::new_v4()));
+    let root = std::env::temp_dir().join(format!(
+        "tachi-reconcile-warning-quote'-{}",
+        uuid::Uuid::new_v4()
+    ));
     fs::create_dir(&root).unwrap();
     let fixture = Fixture(root.canonicalize().unwrap());
     for dir in [
@@ -875,17 +877,22 @@ fn reconcile_warning_cli_case(case: &str) {
 
     fixture.script("gh", "#!/bin/sh\n[ \"$*\" = 'pr view 7 --json state,headRefOid,headRefName' ] || exit 91\n/bin/cat \"$FIXTURE_ROOT/pr-state\"\n");
     fs::write(fixture.0.join("pr-state"), serde_json::json!({"state":"MERGED", "headRefOid":accepted, "headRefName":"fixture/merged"}).to_string()).unwrap();
-    let fault_args = match case {
-        "branch" => format!("-C {} branch -D fixture/merged", repo.display()),
-        "remove" => format!(
-            "-C {} worktree remove --force {}",
-            repo.display(),
-            wt.display()
-        ),
-        "clean" => String::new(),
+    let fault_match = match case {
+        "branch" => {
+            r#"[ "$#" -eq 5 ] && [ "$1" = '-C' ] && [ "$2" = "$FIXTURE_ROOT/repo" ] && [ "$3" = 'branch' ] && [ "$4" = '-D' ] && [ "$5" = 'fixture/merged' ]"#
+        }
+        "remove" => {
+            r#"[ "$#" -eq 6 ] && [ "$1" = '-C' ] && [ "$2" = "$FIXTURE_ROOT/repo" ] && [ "$3" = 'worktree' ] && [ "$4" = 'remove' ] && [ "$5" = '--force' ] && [ "$6" = "$FIXTURE_ROOT/worktrees/merged" ]"#
+        }
+        "clean" => "false",
         _ => panic!("unknown warning case"),
     };
-    fixture.script("git", &format!("#!/bin/sh\nif [ \"$*\" = '{fault_args}' ]; then\n  printf 'injected\\n' >> \"$FIXTURE_ROOT/git-fault\"\n  printf 'private cleanup failure\\n' >&2\n  exit 17\nfi\nexec /usr/bin/git \"$@\"\n"));
+    fixture.script(
+        "git",
+        &format!(
+            "#!/bin/sh\nif {fault_match}; then\n  printf 'injected\\n' >> \"$FIXTURE_ROOT/git-fault\"\n  printf 'private cleanup failure\\n' >&2\n  exit 17\nfi\nexec /usr/bin/git \"$@\"\n"
+        ),
+    );
     let registry_path = fixture.0.join("home/.tachi/worktrees.json");
     let marker_path = wt.join(".tachi-worktree.json");
     let registry = fs::read(&registry_path).unwrap();
