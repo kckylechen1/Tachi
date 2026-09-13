@@ -95,6 +95,7 @@ fn take_managed_terminal_status_write_failure(status_path: &std::path::Path) -> 
 fn persist_managed_terminal_status_failure(
     target: &StatusJsonTarget,
     status: &mut serde_json::Map<String, Value>,
+    #[cfg(unix)] fence: &crate::managed_run_control::StatusMutationFence,
 ) -> Result<(), String> {
     status.insert(
         "state".to_string(),
@@ -134,7 +135,11 @@ fn persist_managed_terminal_status_failure(
     let body = serde_json::to_vec_pretty(&Value::Object(status.clone()))
         .map_err(|error| format!("serialize {}: {error}", target.status_path().display()))?;
     target
-        .write_atomic(&body)
+        .write_atomic(
+            &body,
+            #[cfg(unix)]
+            fence,
+        )
         .map_err(|error| format!("write {}: {error}", target.status_path().display()))
 }
 
@@ -410,11 +415,22 @@ pub(crate) fn stamp_route_decision_id(
     run_dir: &std::path::Path,
     route_decision_id: &str,
 ) -> Result<(), String> {
+    #[cfg(unix)]
+    let anchor = crate::managed_run_control::AnchoredRunStatus::open_ordinary(run_dir)?;
+    #[cfg(unix)]
+    let lock = anchor.lock();
+    #[cfg(not(unix))]
     let lock = status_json_lock_for(run_dir);
     let _guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    #[cfg(unix)]
+    let fence = anchor.acquire_fence()?;
     let path = run_dir.join("status.json");
-    let Some(Value::Object(mut status)) = crate::task_lifecycle::read_json_file(&path)
-        .map_err(|error| format!("read {}: {error}", path.display()))?
+    #[cfg(unix)]
+    let read = anchor.read_json();
+    #[cfg(not(unix))]
+    let read = crate::task_lifecycle::read_json_file(&path);
+    let Some(Value::Object(mut status)) =
+        read.map_err(|error| format!("read {}: {error}", path.display()))?
     else {
         return Err(format!("missing or malformed {}", path.display()));
     };
@@ -425,8 +441,11 @@ pub(crate) fn stamp_route_decision_id(
     crate::managed_run_control::advance_status_revision(&mut status)?;
     let body = serde_json::to_vec_pretty(&Value::Object(status))
         .map_err(|error| format!("serialize {}: {error}", path.display()))?;
-    crate::utils::write_owner_only_file_atomic(&path, &body)
-        .map_err(|error| format!("write {}: {error}", path.display()))
+    #[cfg(unix)]
+    let written = anchor.write_atomic(&body, &fence);
+    #[cfg(not(unix))]
+    let written = crate::utils::write_owner_only_file_atomic(&path, &body);
+    written.map_err(|error| format!("write {}: {error}", path.display()))
 }
 
 /// Return the shared, weakly retained mutex for one canonical run receipt.
@@ -483,6 +502,7 @@ fn status_json_lock_for_key(lock_key: StatusJsonLockKey) -> Arc<Mutex<()>> {
 }
 
 enum StatusJsonTarget {
+    #[cfg(not(unix))]
     Path(std::path::PathBuf),
     #[cfg(unix)]
     Anchored(crate::managed_run_control::AnchoredRunStatus),
@@ -513,7 +533,14 @@ impl StatusJsonTarget {
                     );
                     Err("managed_terminal_status_anchor_missing")
                 }
-                ManagedTerminalStatusAnchor::Missing => Ok(Self::Path(run_dir.join("status.json"))),
+                ManagedTerminalStatusAnchor::Missing => {
+                    crate::managed_run_control::AnchoredRunStatus::open_ordinary(run_dir)
+                        .map(Self::Anchored)
+                        .map_err(|error| {
+                            tracing::warn!(%error, "status mutation fence unavailable");
+                            "status_mutation_fence_unavailable"
+                        })
+                }
             }
         }
         #[cfg(not(unix))]
@@ -530,6 +557,7 @@ impl StatusJsonTarget {
 
     fn status_path(&self) -> std::path::PathBuf {
         match self {
+            #[cfg(not(unix))]
             Self::Path(path) => path.clone(),
             #[cfg(unix)]
             Self::Anchored(status) => status.status_path(),
@@ -538,17 +566,23 @@ impl StatusJsonTarget {
 
     fn read_json(&self) -> Result<Option<Value>, String> {
         match self {
+            #[cfg(not(unix))]
             Self::Path(path) => crate::task_lifecycle::read_json_file(path),
             #[cfg(unix)]
             Self::Anchored(status) => status.read_json(),
         }
     }
 
-    fn write_atomic(&self, bytes: &[u8]) -> Result<(), String> {
+    fn write_atomic(
+        &self,
+        bytes: &[u8],
+        #[cfg(unix)] fence: &crate::managed_run_control::StatusMutationFence,
+    ) -> Result<(), String> {
         match self {
+            #[cfg(not(unix))]
             Self::Path(path) => crate::utils::write_owner_only_file_atomic(path, bytes),
             #[cfg(unix)]
-            Self::Anchored(status) => status.write_atomic(bytes),
+            Self::Anchored(status) => status.write_atomic(bytes, fence),
         }
     }
 }
@@ -678,17 +712,30 @@ fn write_status_json_inner(
     ) {
         Ok(target) => target,
         Err(reason) => {
-            return Some(crate::managed_run_control::CancelCompletion::Unavailable(
-                reason,
-            ));
+            return managed_finalization_requested.then_some(
+                crate::managed_run_control::CancelCompletion::Unavailable(reason),
+            );
         }
     };
     let lock = match &target {
+        #[cfg(not(unix))]
         StatusJsonTarget::Path(_) => status_json_lock_for(run_dir),
         #[cfg(unix)]
         StatusJsonTarget::Anchored(status) => status.lock(),
     };
     let _guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    #[cfg(unix)]
+    let fence = match &target {
+        StatusJsonTarget::Anchored(anchor) => match anchor.acquire_fence() {
+            Ok(fence) => fence,
+            Err(error) => {
+                tracing::warn!(%error, "status mutation fence unavailable");
+                return managed_finalization_requested.then_some(
+                    crate::managed_run_control::CancelCompletion::Unavailable("persist_failed"),
+                );
+            }
+        },
+    };
     let mut obj = serde_json::Map::new();
     obj.insert("dispatch_id".into(), Value::String(dispatch_id.to_string()));
     obj.insert("v2".into(), Value::Bool(v2));
@@ -734,6 +781,19 @@ fn write_status_json_inner(
     let mut terminal_cancellation_reconciled = false;
 
     let path = target.status_path();
+    #[cfg(unix)]
+    let previous_status = match target.read_json() {
+        Ok(status) => status,
+        Err(error) => {
+            tracing::warn!(%error, "status mutation skipped after failed locked read");
+            return managed_finalization_requested.then_some(
+                crate::managed_run_control::CancelCompletion::Unavailable(
+                    "managed_terminal_status_unreadable",
+                ),
+            );
+        }
+    };
+    #[cfg(not(unix))]
     let previous_status = target.read_json().ok().flatten();
     // Managed cancellation may acknowledge only a committed canonical
     // receipt.  Ordinary terminal writes retain their historical best-effort
@@ -936,14 +996,26 @@ fn write_status_json_inner(
         if managed_finalization.is_some() && take_managed_terminal_status_write_failure(&path) {
             Err("injected managed terminal status write failure".to_string())
         } else {
-            target.write_atomic(body.as_bytes())
+            target.write_atomic(
+                body.as_bytes(),
+                #[cfg(unix)]
+                &fence,
+            )
         };
     #[cfg(not(test))]
-    let write_result = target.write_atomic(body.as_bytes());
+    let write_result = target.write_atomic(
+        body.as_bytes(),
+        #[cfg(unix)]
+        &fence,
+    );
     if let Err(e) = write_result {
         if managed_finalization.is_some() {
-            if let Err(fallback_error) = persist_managed_terminal_status_failure(&target, &mut obj)
-            {
+            if let Err(fallback_error) = persist_managed_terminal_status_failure(
+                &target,
+                &mut obj,
+                #[cfg(unix)]
+                &fence,
+            ) {
                 eprintln!(
                     "[dispatch-v2] managed terminal write failed ({e}); fallback also failed: {fallback_error}"
                 );

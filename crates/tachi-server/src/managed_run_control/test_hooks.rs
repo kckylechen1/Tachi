@@ -2,9 +2,11 @@ use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum StatusIoHookStage {
+pub(crate) enum StatusIoHookStage {
     AfterDirectoryValidation,
     BeforeAtomicRename,
+    AfterStatusRead,
+    LockWouldBlock,
 }
 
 type StatusIoHook = (StatusIoHookStage, PathBuf, Box<dyn FnOnce(&Path)>);
@@ -13,7 +15,7 @@ thread_local! {
     static STATUS_IO_HOOK: RefCell<Option<StatusIoHook>> = RefCell::new(None);
 }
 
-pub(super) fn install_status_io_hook(
+pub(crate) fn install_status_io_hook(
     stage: StatusIoHookStage,
     target: PathBuf,
     hook: impl FnOnce(&Path) + 'static,
@@ -27,7 +29,7 @@ pub(super) fn install_status_io_hook(
     });
 }
 
-pub(super) fn run_status_io_hook(stage: StatusIoHookStage, target: &Path) {
+pub(crate) fn run_status_io_hook(stage: StatusIoHookStage, target: &Path) {
     let hook = STATUS_IO_HOOK.with(|slot| {
         let matches = slot
             .borrow()

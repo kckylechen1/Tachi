@@ -90,6 +90,67 @@ impl AnchoredRunStatus {
         Ok(anchored)
     }
 
+    /// Ordinary callers retain their existing directory-alias acceptance.
+    pub(crate) fn open_ordinary(run_dir: &Path) -> Result<Self, String> {
+        let target = run_dir
+            .canonicalize()
+            .map_err(|error| format!("resolve status directory: {error}"))?;
+        Self::open(&target).map_err(|error| format!("anchor status directory: {error:?}"))
+    }
+
+    /// Call only after acquiring this opened directory's process mutex.
+    pub(crate) fn acquire_fence(&self) -> Result<StatusMutationFence, String> {
+        // SAFETY: the directory is retained and the fixed basename has no slash.
+        let fd = unsafe {
+            libc::openat(
+                self.directory.as_raw_fd(),
+                c".status-mutation.lock".as_ptr(),
+                libc::O_RDWR
+                    | libc::O_CREAT
+                    | libc::O_NOFOLLOW
+                    | libc::O_CLOEXEC
+                    | libc::O_NONBLOCK,
+                0o600 as libc::c_uint,
+            )
+        };
+        if fd < 0 {
+            return Err(format!(
+                "open status mutation fence: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        // SAFETY: openat returned a fresh exclusively owned descriptor.
+        let file = unsafe { File::from_raw_fd(fd) };
+        validate_private_lock(&file)?;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            match file.try_lock() {
+                Ok(()) => break,
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    #[cfg(test)]
+                    super::test_hooks::run_status_io_hook(
+                        super::test_hooks::StatusIoHookStage::LockWouldBlock,
+                        &self.run_dir,
+                    );
+                    let now = std::time::Instant::now();
+                    if now >= deadline {
+                        return Err("status mutation fence timed out".into());
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10).min(deadline - now));
+                }
+                Err(std::fs::TryLockError::Error(error)) => {
+                    return Err(format!("acquire status mutation fence: {error}"))
+                }
+            }
+        }
+        let fence = StatusMutationFence {
+            file,
+            directory: Arc::clone(&self.directory),
+        };
+        fence.validate(self)?;
+        Ok(fence)
+    }
+
     pub(crate) fn lock(&self) -> Arc<Mutex<()>> {
         Arc::clone(&self.lock)
     }
@@ -106,7 +167,15 @@ impl AnchoredRunStatus {
     }
 
     pub(crate) fn read_json(&self) -> Result<Option<Value>, String> {
-        let Some(mut file) = self.open_status_file()? else {
+        self.read_json_limit(None)
+    }
+
+    pub(crate) fn read_json_bounded(&self, limit: usize) -> Result<Option<Value>, String> {
+        self.read_json_limit(Some(limit))
+    }
+
+    fn read_json_limit(&self, limit: Option<usize>) -> Result<Option<Value>, String> {
+        let Some(file) = self.open_status_file()? else {
             return Ok(None);
         };
         let metadata = file.metadata().map_err(|error| {
@@ -122,18 +191,36 @@ impl AnchoredRunStatus {
             ));
         }
         let mut raw = String::new();
-        file.read_to_string(&mut raw).map_err(|error| {
-            format!(
-                "read opened managed status {}: {error}",
-                self.status_path().display()
-            )
-        })?;
+        if limit.is_some_and(|limit| metadata.len() > limit as u64) {
+            return Err("status exceeds existing read limit".into());
+        }
+        file.take(limit.map_or(u64::MAX, |limit| limit as u64 + 1))
+            .read_to_string(&mut raw)
+            .map_err(|error| {
+                format!(
+                    "read opened managed status {}: {error}",
+                    self.status_path().display()
+                )
+            })?;
+        if limit.is_some_and(|limit| raw.len() > limit) {
+            return Err("status exceeds existing read limit".into());
+        }
+        #[cfg(test)]
+        super::test_hooks::run_status_io_hook(
+            super::test_hooks::StatusIoHookStage::AfterStatusRead,
+            &self.run_dir,
+        );
         serde_json::from_str(&raw)
             .map(Some)
             .map_err(|error| format!("parse {}: {error}", self.status_path().display()))
     }
 
-    pub(crate) fn write_atomic(&self, bytes: &[u8]) -> Result<(), String> {
+    pub(crate) fn write_atomic(
+        &self,
+        bytes: &[u8],
+        fence: &StatusMutationFence,
+    ) -> Result<(), String> {
+        fence.validate(self)?;
         let temp_name = CString::new(format!(
             "status.json.tmp.{}",
             uuid::Uuid::new_v4().as_simple()
@@ -178,6 +265,7 @@ impl AnchoredRunStatus {
                 super::test_hooks::StatusIoHookStage::BeforeAtomicRename,
                 &self.run_dir,
             );
+            fence.validate(self)?;
             // SAFETY: source and destination are single components resolved
             // against the same live directory descriptor.
             let renamed = unsafe {
@@ -308,4 +396,59 @@ fn open_directory_at(parent: &impl AsRawFd, name: &OsStr) -> std::io::Result<Own
     }
     // SAFETY: `fd` is freshly returned by openat and exclusively owned.
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
+/// A scoped synchronization fact, never a lifecycle receipt or retained lease.
+/// Dropping the handle releases the OS lock; the stable named file is retained.
+pub(crate) struct StatusMutationFence {
+    file: File,
+    directory: Arc<File>,
+}
+
+impl StatusMutationFence {
+    fn validate(&self, anchor: &AnchoredRunStatus) -> Result<(), String> {
+        if !Arc::ptr_eq(&self.directory, &anchor.directory) {
+            return Err("status mutation fence belongs to a different opened directory".into());
+        }
+        let opened = validate_private_lock(&self.file)?;
+        // SAFETY: the retained directory and fixed component are valid. A
+        // nonblocking no-follow open permits inspection without following an
+        // alias or waiting on a substituted FIFO.
+        let fd = unsafe {
+            libc::openat(
+                self.directory.as_raw_fd(),
+                c".status-mutation.lock".as_ptr(),
+                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK,
+            )
+        };
+        if fd < 0 {
+            return Err(format!(
+                "inspect status mutation fence entry: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        // SAFETY: openat returned a fresh exclusively owned descriptor.
+        let entry = unsafe { File::from_raw_fd(fd) };
+        let current = validate_private_lock(&entry)?;
+        if current.dev() != opened.dev() || current.ino() != opened.ino() {
+            return Err("status mutation fence entry changed".into());
+        }
+        Ok(())
+    }
+}
+
+fn validate_private_lock(file: &File) -> Result<std::fs::Metadata, String> {
+    let metadata = file
+        .metadata()
+        .map_err(|error| format!("inspect status mutation fence: {error}"))?;
+    // SAFETY: geteuid has no preconditions or side effects.
+    let owner = unsafe { libc::geteuid() };
+    if !metadata.is_file()
+        || metadata.uid() != owner
+        || metadata.mode() & 0o7777 != 0o600
+        || metadata.nlink() != 1
+    {
+        return Err("status mutation fence must be an owner-only single-link regular file".into());
+    }
+    Ok(metadata)
 }
