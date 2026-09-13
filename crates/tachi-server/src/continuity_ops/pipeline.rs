@@ -39,6 +39,9 @@ pub(crate) fn maybe_spawn_session_continuity_pipeline(
     server: &MemoryServer,
     target: ContinuityEventTarget,
     operation_key: &str,
+    source_ref_id: &str,
+    source_revision: &str,
+    source_event_id: &str,
     conversation_id: String,
     turn_id: String,
     agent_id: String,
@@ -52,6 +55,13 @@ pub(crate) fn maybe_spawn_session_continuity_pipeline(
         });
     }
 
+    if [source_ref_id, source_revision, source_event_id]
+        .iter()
+        .any(|value| value.trim().is_empty())
+    {
+        return json!({"status": "failed", "reason": "source_binding_missing"});
+    }
+
     match target.claim_pipeline_schedule(server, operation_key) {
         Ok(false) => return json!({"status": "already_scheduled", "operation_key": operation_key}),
         Err(error) => {
@@ -60,6 +70,9 @@ pub(crate) fn maybe_spawn_session_continuity_pipeline(
         Ok(true) => {}
     }
 
+    let source_ref_id = source_ref_id.to_string();
+    let source_revision = source_revision.to_string();
+    let source_event_id = source_event_id.to_string();
     let server_clone = server.clone();
     let event_count_hint = messages.len();
     tokio::spawn(async move {
@@ -175,6 +188,12 @@ pub(crate) fn maybe_spawn_session_continuity_pipeline(
                     let provenance = match crate::provenance::attach_event_model_invocation(
                         json!({
                             "source": "continuity_labeler",
+                            "source_refs": [{
+                                "ref_type": "turn",
+                                "ref_id": source_ref_id,
+                                "revision": source_revision,
+                            }],
+                            "source_event_id": source_event_id,
                             "lane": "reasoning",
                             "note": "read-only signal; projectors must calibrate before automatic counter updates",
                         }),
@@ -476,6 +495,9 @@ mod tests {
             &server,
             ContinuityEventTarget::new(crate::DbScope::Global, None, None),
             "continuity-receipt-shape",
+            "fixture-session:turn-1",
+            "fixture-source-revision",
+            "fixture-captured-event",
             "continuity-session-1".to_string(),
             "turn-1".to_string(),
             "codex".to_string(),
@@ -545,6 +567,9 @@ mod tests {
             &server,
             ContinuityEventTarget::new(crate::DbScope::Global, None, None),
             "continuity-truncated-zero-events",
+            "fixture-session:turn-1",
+            "fixture-source-revision",
+            "fixture-captured-event",
             "continuity-session-truncated".to_string(),
             "turn-1".to_string(),
             "codex".to_string(),
@@ -569,6 +594,268 @@ mod tests {
         assert!(
             events.is_empty(),
             "truncated candidate and outcome outputs must write zero events: {events:#?}"
+        );
+    }
+
+    struct SourceFixtureChild(std::process::Child);
+
+    impl Drop for SourceFixtureChild {
+        fn drop(&mut self) {
+            if self.0.try_wait().ok().flatten().is_none() {
+                let _ = self.0.kill();
+            }
+            let _ = self.0.wait();
+        }
+    }
+
+    fn run_source_fixture(test: &str, body: impl FnOnce()) {
+        const SELECTOR: &str = "TACHI_SOURCE_BINDING_FIXTURE_SELECTOR";
+        const ROOT: &str = "TACHI_SOURCE_BINDING_FIXTURE_ROOT";
+        if std::env::var(SELECTOR).ok().as_deref() == Some(test) {
+            let root =
+                std::path::PathBuf::from(std::env::var_os(ROOT).expect("private fixture root"));
+            assert_eq!(std::env::current_dir().expect("child cwd"), root);
+            body();
+            std::fs::write(root.join("completed"), test).expect("child completion witness");
+            return;
+        }
+
+        // Only filesystem/process setup occurs in the ambient parent; no server or LLM exists here.
+        let root = tempfile::tempdir().expect("private source fixture process root");
+        let root_path = root.path().canonicalize().expect("canonical private root");
+        let home = root_path.join("home");
+        let temp = root_path.join("tmp");
+        let empty_path = root_path.join("empty-path");
+        for directory in [&home, &temp, &empty_path] {
+            std::fs::create_dir(directory).expect("private child directory");
+        }
+        let log_path = root_path.join("child.log");
+        let output = std::fs::File::create(&log_path).expect("private child log");
+        let exact = format!("continuity_ops::pipeline::tests::{test}");
+        let mut command = std::process::Command::new(std::env::current_exe().expect("test binary"));
+        command
+            .env_clear()
+            .current_dir(&root_path)
+            .args(["--exact", exact.as_str(), "--nocapture"])
+            .env(SELECTOR, test)
+            .env(ROOT, &root_path)
+            .env("HOME", &home)
+            .env("USERPROFILE", &home)
+            .env("TACHI_HOME", &home)
+            .env("TMPDIR", &temp)
+            .env("TMP", &temp)
+            .env("TEMP", &temp)
+            .env("PATH", &empty_path)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::from(
+                output.try_clone().expect("clone child log"),
+            ))
+            .stderr(std::process::Stdio::from(output));
+        #[cfg(windows)]
+        if let Some(system_root) = std::env::var_os("SystemRoot") {
+            command.env("SystemRoot", system_root);
+        }
+        let mut child = SourceFixtureChild(command.spawn().expect("spawn private test child"));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(45);
+        loop {
+            if let Some(status) = child.0.try_wait().expect("poll owned child") {
+                assert!(
+                    status.success(),
+                    "private fixture failed: {status}\n{}",
+                    std::fs::read_to_string(&log_path).expect("read private child log")
+                );
+                assert_eq!(
+                    std::fs::read_to_string(root_path.join("completed"))
+                        .expect("selected child actually completed"),
+                    test
+                );
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "private source fixture timed out"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    async fn wait_for_source_outcomes(
+        server: &MemoryServer,
+        expected: usize,
+    ) -> Vec<TachiEventRecord> {
+        for _ in 0..100 {
+            let events = list_events(server, "source-session");
+            if events
+                .iter()
+                .filter(|event| event.event_type == "session.outcome")
+                .count()
+                == expected
+            {
+                return events;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("private capture outcome did not arrive");
+    }
+
+    /// Capture lineage survives exact replay and distinguishes changed same-turn evidence.
+    #[test]
+    fn capture_outcome_source_binding_survives_restart_and_changed_evidence() {
+        run_source_fixture(
+            "capture_outcome_source_binding_survives_restart_and_changed_evidence",
+            || {
+                crate::test_support::with_tachi_home(|home| {
+                    let _enabled =
+                        crate::test_support::EnvRestore::set("TACHI_CONTINUITY_PIPELINE", "1");
+                    let _health = crate::test_support::EnvRestore::set(
+                        "TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST",
+                        "1",
+                    );
+                    let _voyage = crate::test_support::EnvRestore::remove("VOYAGE_API_KEY");
+                    let empty_path = tempfile::tempdir().expect("private empty PATH");
+                    let _path =
+                        crate::test_support::EnvRestore::set_path("PATH", empty_path.path());
+                    let runtime = tokio::runtime::Runtime::new().expect("private capture runtime");
+                    runtime.block_on(async {
+                let calls = Arc::new(AtomicUsize::new(0));
+                let handler_calls = calls.clone();
+                let app = Router::new().route("/chat/completions", post(move |Json(request): Json<Value>| {
+                    let calls = handler_calls.clone();
+                    async move {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        let content = match request["model"].as_str().expect("fixture model") {
+                            "source-extract" => json!([{
+                                "text": "A captured source observation.", "summary": "Source observation",
+                                "topic": "session", "category": "fact", "scope": "global", "importance": 0.7
+                            }]).to_string(),
+                            "source-distill" => json!({"candidates": []}).to_string(),
+                            "source-reasoning" => json!({
+                                "outcome": "success", "evidence_basis": "external_evidence",
+                                "confidence": 0.9, "rationale": "Fixture outcome",
+                                "evidence_refs": [], "claims": [], "open_questions": []
+                            }).to_string(),
+                            other => panic!("unexpected private fixture model {other}"),
+                        };
+                        Json(json!({"choices": [{"message": {"role": "assistant", "content": content},
+                            "finish_reason": "stop"}], "model": request["model"],
+                            "usage": {"prompt_tokens": 2, "completion_tokens": 3, "total_tokens": 5}}))
+                    }
+                }));
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("private loopback");
+                let url = format!("http://{}/chat/completions", listener.local_addr().expect("loopback address"));
+                let task = tokio::spawn(async move { axum::serve(listener, app).await.expect("private provider"); });
+                let lane = |model: &str| ChatLaneConfig {
+                    base_url: url.clone(), model: model.to_string(), api_key_envs: vec!["SOURCE_FIXTURE_KEY"],
+                };
+                let llm = LlmClient::new_with_config(ProviderRuntimeConfig {
+                    extract: lane("source-extract"), summary: lane("source-summary"),
+                    reasoning: lane("source-reasoning"), distill: lane("source-distill"),
+                    rerank: RerankConfig { provider: RerankProviderKind::Voyage, local_endpoint: None },
+                }, None).expect("private LLM");
+                assert!(llm.set_provider_secret_pool("SOURCE_FIXTURE_KEY", vec![ProviderSecret {
+                    key_id: "source-fixture".into(), value: "synthetic-provider-key".into(),
+                }]));
+                // Existing RAII fixture guard aborts only this owned loopback task on every exit.
+                let provider = MockContinuityProvider { llm, calls, responses: Arc::new(AtomicUsize::new(0)), task };
+                let db = home.join("global").join("memory.db");
+                std::fs::create_dir_all(db.parent().expect("private DB parent")).expect("private DB directory");
+                let open = || {
+                    let mut server = MemoryServer::new_with_background_workers_for_test(db.clone(), None, true)
+                        .expect("private capture server");
+                    server.llm = Arc::new(provider.llm.clone());
+                    server
+                };
+                let params = crate::tool_params::CaptureSessionParams {
+                    conversation_id: "source-session".into(), turn_id: "same-turn".into(), agent_id: "source-fixture".into(),
+                    messages: vec![Message { role: "user".into(), content: "synthetic-source-secret-A".into() }],
+                    path_prefix: Some("/capture/source-binding".into()), scope: "global".into(), project: None,
+                    project_explicit: false, min_chars: 1, force: true,
+                };
+                let server = open();
+                crate::foundry_runtime_ops::handle_capture_session(&server, params.clone())
+                    .await.expect("capture A");
+                let events = wait_for_source_outcomes(&server, 1).await;
+                let first = events.iter().find(|event| event.event_type == "session.outcome").expect("outcome A").clone();
+                let capture_id = first.provenance["source_event_id"].as_str().expect("actual source event ID");
+                assert!(events.iter().any(|event| event.id == capture_id && event.event_type == "session.captured"));
+                let revision = crate::tool_params::canonical_json_sha256(&json!({"messages": params.messages})).expect("canonical source hash");
+                assert_eq!(first.provenance["source_refs"], json!([{"ref_type": "turn", "ref_id": "source-session:same-turn", "revision": revision}]));
+                assert_eq!(first.provenance.pointer("/model_invocation/effective_model"), Some(&json!("source-reasoning")));
+                let first_bytes = serde_json::to_value(&first).expect("first event bytes");
+                let count = events.len();
+                let calls = provider.calls.load(Ordering::SeqCst);
+                assert_eq!(calls, 3, "one extraction, distill and outcome call");
+                drop(server);
+                let server = open();
+                crate::foundry_runtime_ops::handle_capture_session(&server, params.clone())
+                    .await.expect("exact A replay after reopen");
+                assert_eq!(provider.calls.load(Ordering::SeqCst), calls);
+                assert_eq!(list_events(&server, "source-session").len(), count);
+                let mut changed = params;
+                changed.messages[0].content = "synthetic-source-secret-B".into();
+                let changed_revision = crate::tool_params::canonical_json_sha256(&json!({"messages": changed.messages})).expect("changed hash");
+                crate::foundry_runtime_ops::handle_capture_session(&server, changed)
+                    .await.expect("same-turn changed B");
+                let events = wait_for_source_outcomes(&server, 2).await;
+                assert_eq!(provider.calls.load(Ordering::SeqCst), calls + 3);
+                assert_eq!(serde_json::to_value(events.iter().find(|event| event.id == first.id).expect("A retained")).expect("A bytes"), first_bytes);
+                let second = events.iter().find(|event| event.event_type == "session.outcome" && event.id != first.id).expect("outcome B");
+                assert_eq!(second.provenance["source_refs"][0]["revision"], changed_revision);
+                assert_ne!(second.provenance["source_event_id"], first.provenance["source_event_id"]);
+                assert!(events.iter().any(|event| event.event_type == "session.captured" && Some(event.id.as_str()) == second.provenance["source_event_id"].as_str()));
+                for event in [first, second.clone()] {
+                    let provenance = event.provenance.to_string();
+                    assert!(!provenance.contains("synthetic-source-secret"));
+                    assert!(!provenance.contains("synthetic-provider-key"));
+                    assert!(!provenance.contains("messages"));
+                }
+            });
+                });
+            },
+        );
+    }
+
+    #[test]
+    fn outcome_source_binding_refuses_missing_values_before_schedule_claim() {
+        run_source_fixture(
+            "outcome_source_binding_refuses_missing_values_before_schedule_claim",
+            || {
+                crate::test_support::with_tachi_home(|home| {
+                    let _enabled =
+                        crate::test_support::EnvRestore::set("TACHI_CONTINUITY_PIPELINE", "1");
+                    let server =
+                        MemoryServer::new(home.join("memory.db"), None).expect("private server");
+                    for (index, values) in [
+                        ["", "revision", "event"],
+                        ["turn", " ", "event"],
+                        ["turn", "revision", ""],
+                    ]
+                    .into_iter()
+                    .enumerate()
+                    {
+                        let key = format!("missing-source-{index}");
+                        let target = ContinuityEventTarget::new(crate::DbScope::Global, None, None);
+                        let result = maybe_spawn_session_continuity_pipeline(
+                            &server,
+                            target.clone(),
+                            &key,
+                            values[0],
+                            values[1],
+                            values[2],
+                            "session".into(),
+                            "turn".into(),
+                            "actor".into(),
+                            None,
+                            vec![],
+                        );
+                        assert_eq!(result["reason"], "source_binding_missing");
+                        assert!(target
+                            .claim_pipeline_schedule(&server, &key)
+                            .expect("refusal must not consume schedule key"));
+                        assert!(list_events(&server, "session").is_empty());
+                    }
+                });
+            },
         );
     }
 }
