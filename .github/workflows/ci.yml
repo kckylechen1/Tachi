@@ -389,9 +389,13 @@ jobs:
         run: bash .github/scripts/runner_hygiene.sh cleanup
 
   physical-db-identity-windows:
-    name: Physical DB identity fallback (Windows)
+    name: Physical DB identity fallback (Windows, ${{ matrix.crate }})
     runs-on: windows-latest
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        crate: [tachi-server, memcore, tachi-clean]
 
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
@@ -400,17 +404,23 @@ jobs:
         uses: ./.github/actions/setup-rust
 
       - name: Exercise canonical-only inventory fallback
+        if: matrix.crate == 'tachi-server'
         run: >-
           cargo test -p tachi-server --locked --lib
           physical_db_identity::tests::canonical_fallback_inventory_never_mints_mutation_authority
           -- --exact
 
-      - name: Verify stable Windows identity refusals
+      - name: Verify stable Windows kernel identity refusal
+        if: matrix.crate == 'memcore'
+        run: cargo test -p memcore --locked --lib windows_canonical_identity_cannot_verify_an_opened_handle
+
+      - name: Verify stable Windows cleaner identity refusal
+        if: matrix.crate == 'tachi-clean'
+        run: cargo test -p tachi-clean --locked --lib windows_directory_identity_cannot_authorize_registration
+
+      - name: Verify stable Windows server identity refusals
+        if: matrix.crate == 'tachi-server'
         run: |
-          cargo test -p memcore --locked --lib windows_canonical_identity_cannot_verify_an_opened_handle
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo test -p tachi-clean --locked --lib windows_directory_identity_cannot_authorize_registration
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test -p tachi-server --locked --lib retained_file_identity_refuses_unproven_windows_object
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test -p tachi-server --locked --lib windows_directory_metadata_cannot_authorize_object_identity
@@ -418,9 +428,11 @@ jobs:
           cargo test -p tachi-server --locked --lib windows_dispatch_refuses_active_lease_without_object_identity
 
       - name: Verify unsupported server operations refuse without mutation
+        if: matrix.crate == 'tachi-server'
         run: cargo test -p tachi-server --locked --lib platform_refusal_
 
       - name: Verify unproven fixture owners are retained
+        if: matrix.crate == 'memcore'
         run: cargo test -p memcore --locked --lib platform_refusal_
 
   node:
