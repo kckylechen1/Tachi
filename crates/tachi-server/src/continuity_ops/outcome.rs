@@ -66,14 +66,12 @@ pub(crate) fn evaluate_outcome_labels(
 
     for review in reviews {
         let target_event_id = review_target(&review).map(str::to_string);
-        let matched = target_event_id
-            .as_deref()
-            .and_then(|id| outcomes.iter().find(|event| event.id == id))
-            .or_else(|| {
-                outcomes.iter().find(|event| {
-                    !review.session_id.is_empty() && event.session_id == review.session_id
-                })
-            });
+        let matched = match target_event_id.as_deref() {
+            Some(id) => outcomes.iter().find(|event| event.id == id),
+            None => outcomes.iter().find(|event| {
+                !review.session_id.is_empty() && event.session_id == review.session_id
+            }),
+        };
 
         let Some(label_event) = matched else {
             missing_targets += 1;
