@@ -291,6 +291,7 @@ where
                 if plan.allowed {
                     if force {
                         let exec_report = wt_clean::execute_wt_remove_planned(plan);
+                        report.warnings.extend(exec_report.warnings);
                         if exec_report.removed {
                             report.reconciled.push(ReconciledWorktree {
                                 path: wt.path.clone(),
