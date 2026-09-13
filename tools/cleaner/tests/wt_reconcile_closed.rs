@@ -974,3 +974,257 @@ fn reconcile_preserves_executor_warning_after_worktree_remove_failure() {
 fn reconcile_clean_removal_has_no_executor_warnings() {
     reconcile_warning_cli_case("clean");
 }
+
+fn completion_error_cli_case(withhold_db: bool) {
+    let root = std::env::temp_dir().join(format!(
+        "tachi-completion-error-quote'-{}",
+        uuid::Uuid::new_v4()
+    ));
+    fs::create_dir(&root).unwrap();
+    let fixture = Fixture(root.canonicalize().unwrap());
+    for dir in [
+        "bin",
+        "home/.tachi/global",
+        "config",
+        "cargo",
+        "rustup",
+        "tmp",
+        "templates",
+        "repo",
+        "worktrees",
+    ] {
+        fs::create_dir_all(fixture.0.join(dir)).unwrap();
+    }
+    fs::write(fixture.0.join("gitconfig"), "").unwrap();
+    fixture.script("git", "#!/bin/sh\nexec /usr/bin/git \"$@\"\n");
+    let private_cli = |args: &[&str]| -> serde_json::Value {
+        let output = fixture
+            .command(env!("CARGO_BIN_EXE_tachi-clean"), &fixture.0)
+            .env("PATH", fixture.0.join("bin"))
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "private CLI {args:?}: {output:?}");
+        serde_json::from_slice(&output.stdout).unwrap()
+    };
+
+    drop(
+        memcore::MemoryStore::open(
+            fixture
+                .0
+                .join("home/.tachi/global")
+                .join(memcore::MEMORY_DB_FILENAME)
+                .to_str()
+                .unwrap(),
+        )
+        .unwrap(),
+    );
+
+    fixture.script("lsof", "#!/bin/sh\n[ \"$1\" = '+D' ] && [ \"$2\" = \"$FIXTURE_ROOT/worktrees/merged\" ] || exit 92\nprintf 'clear\\n' >> \"$FIXTURE_ROOT/holder-probes\"\nexit 1\n");
+    let repo = fixture.0.join("repo");
+    let origin = fixture.0.join("origin.git");
+    let wt = fixture.0.join("worktrees/merged");
+    fixture.git_ok(&fixture.0, &["init", "--bare", origin.to_str().unwrap()]);
+    fixture.git_ok(&repo, &["init", "-b", "main"]);
+    assert_eq!(
+        fixture.git_ok(&repo, &["rev-parse", "--absolute-git-dir"]),
+        repo.join(".git").to_str().unwrap()
+    );
+    fs::write(repo.join("base"), "base\n").unwrap();
+    fixture.git_ok(&repo, &["add", "base"]);
+    fixture.git_ok(&repo, &["commit", "-m", "base"]);
+    fixture.git_ok(
+        &repo,
+        &["remote", "add", "origin", origin.to_str().unwrap()],
+    );
+    fixture.git_ok(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "fixture/merged",
+            wt.to_str().unwrap(),
+            "main",
+        ],
+    );
+    assert_eq!(
+        fixture.git_ok(
+            &wt,
+            &["rev-parse", "--path-format=absolute", "--git-common-dir"]
+        ),
+        repo.join(".git").to_str().unwrap()
+    );
+    fs::write(wt.join("accepted"), "accepted change\n").unwrap();
+    fixture.git_ok(&wt, &["add", "accepted"]);
+    fixture.git_ok(&wt, &["commit", "-m", "accepted PR head"]);
+    let accepted = fixture.git_ok(&wt, &["rev-parse", "HEAD"]);
+    fixture.git_ok(&repo, &["merge", "--squash", "fixture/merged"]);
+    fixture.git_ok(&repo, &["commit", "-m", "independent squash merge"]);
+    assert_eq!(
+        fixture
+            .git(&repo, &["merge-base", "--is-ancestor", &accepted, "main"])
+            .status
+            .code(),
+        Some(1)
+    );
+    fixture.git_ok(&repo, &["push", "origin", "fixture/merged"]);
+    let mut register = vec![
+        "wt-register",
+        wt.to_str().unwrap(),
+        "--repo",
+        repo.to_str().unwrap(),
+        "--branch",
+        "fixture/merged",
+        "--json",
+    ];
+    register.extend(["--pr", "7"]);
+    private_cli(&register);
+
+    fixture.script("gh", "#!/bin/sh\n[ \"$*\" = 'pr view 7 --json state,headRefOid,headRefName' ] || exit 91\n/bin/cat \"$FIXTURE_ROOT/pr-state\"\n");
+    fs::write(fixture.0.join("pr-state"), serde_json::json!({"state":"MERGED", "headRefOid":accepted, "headRefName":"fixture/merged"}).to_string()).unwrap();
+
+    let db_path = fixture
+        .0
+        .join("home/.tachi/global")
+        .join(memcore::MEMORY_DB_FILENAME);
+    {
+        let mut store =
+            memcore::MemoryStore::open_existing_read_write(db_path.to_str().unwrap()).unwrap();
+        memcore::insert_exec_env(
+            store.connection(),
+            &memcore::NewExecEnvLease {
+                env_id: "completion-env".to_string(),
+                kind: "worktree".to_string(),
+                path: wt.to_str().unwrap().to_string(),
+                repo_root: repo.to_str().unwrap().to_string(),
+                branch: "fixture/merged".to_string(),
+                base_sha: accepted.clone(),
+                dispatch_id: None,
+                env_class: memcore::EnvClass::EditOnly,
+                created_at: "2026-09-13T00:00:00Z".to_string(),
+            },
+        )
+        .unwrap();
+        memcore::insert_resource(
+            store.connection_mut(),
+            &memcore::NewExecEnvResource {
+                resource_id: "completion-resource".to_string(),
+                kind: memcore::ResourceKind::Worktree,
+                path: wt.to_str().unwrap().to_string(),
+                bytes: None,
+                created_at: "2026-09-13T00:00:00Z".to_string(),
+            },
+        )
+        .unwrap();
+        memcore::bind_resource(
+            store.connection_mut(),
+            "completion-env",
+            "completion-resource",
+        )
+        .unwrap();
+    }
+    let withheld = fixture.0.join("global-withheld");
+    assert!(!withheld.exists());
+    if withhold_db {
+        fixture.script("git", r#"#!/bin/sh
+if [ "$#" -eq 6 ] && [ "$1" = '-C' ] && [ "$2" = "$FIXTURE_ROOT/repo" ] && [ "$3" = 'worktree' ] && [ "$4" = 'remove' ] && [ "$5" = '--force' ] && [ "$6" = "$FIXTURE_ROOT/worktrees/merged" ]; then
+  /usr/bin/git "$@" || exit 93
+  printf 'git-removed\n' >> "$FIXTURE_ROOT/completion-fault"
+  [ ! -e "$FIXTURE_ROOT/global-withheld" ] || exit 94
+  /bin/mv "$FIXTURE_ROOT/home/.tachi/global" "$FIXTURE_ROOT/global-withheld" || exit 95
+  printf 'db-withheld\n' >> "$FIXTURE_ROOT/completion-fault"
+  exit 0
+fi
+exec /usr/bin/git "$@"
+"#);
+    }
+    let registry_path = fixture.0.join("home/.tachi/worktrees.json");
+    let marker_path = wt.join(".tachi-worktree.json");
+    let registry = fs::read(&registry_path).unwrap();
+    let marker = fs::read(&marker_path).unwrap();
+    let output = fixture
+        .command(env!("CARGO_BIN_EXE_tachi-clean"), &fixture.0)
+        .env("PATH", fixture.0.join("bin"))
+        .args(["wt-reconcile", "--force", "--json"])
+        .output()
+        .unwrap();
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let directory = wt.is_dir();
+    let registration = fixture
+        .git_ok(&repo, &["worktree", "list", "--porcelain"])
+        .contains(wt.to_str().unwrap());
+    let local = fixture
+        .git(
+            &repo,
+            &["show-ref", "--verify", "refs/heads/fixture/merged"],
+        )
+        .status
+        .success();
+    let remote = fixture
+        .git(
+            &origin,
+            &["show-ref", "--verify", "refs/heads/fixture/merged"],
+        )
+        .status
+        .success();
+    let registry_preserved = fs::read(&registry_path).unwrap() == registry;
+    let marker_preserved = fs::read(&marker_path).ok().as_ref() == Some(&marker);
+    let observed_db = if withhold_db {
+        withheld.join(memcore::MEMORY_DB_FILENAME)
+    } else {
+        db_path
+    };
+    let observed = memcore::MemoryStore::open_read_only(observed_db.to_str().unwrap()).unwrap();
+    let lease = memcore::get_exec_env(observed.connection(), "completion-env")
+        .unwrap()
+        .unwrap();
+    let resource = memcore::get_resource(observed.connection(), "completion-resource")
+        .unwrap()
+        .unwrap();
+    let bindings =
+        memcore::active_binding_count(observed.connection(), "completion-resource").unwrap();
+    eprintln!("COMPLETION_ERROR_FIXTURE withhold={withhold_db} exit={:?} directory={directory} registration={registration} local={local} remote={remote} registry={registry_preserved} marker={marker_preserved} lease={:?} resource={:?} bindings={bindings} report={report}", output.status.code(), lease.state, resource.state);
+    assert_eq!(
+        output.status.success(),
+        !withhold_db,
+        "physical removal must not hide durable completion failure: {report}"
+    );
+    assert!(
+        !directory
+            && !registration
+            && !local
+            && !remote
+            && !registry_preserved
+            && !marker_preserved
+    );
+    assert_eq!(report["reconciled"][0]["removed"], true);
+    assert!(report["refused"].as_array().unwrap().is_empty());
+    if withhold_db {
+        assert_eq!(
+            fs::read_to_string(fixture.0.join("completion-fault")).unwrap(),
+            "git-removed\ndb-withheld\n"
+        );
+        assert_eq!(report["errors"].as_array().unwrap().len(), 1);
+        assert!(report["errors"][0].as_str().unwrap().starts_with("worktree was removed but ExecEnv removal completion failed; lease remains fail-closed: open global DB for removal claim:"));
+        assert_eq!(lease.state, memcore::ExecEnvState::Removing);
+        assert_eq!(resource.state, memcore::ResourceState::Reclaiming);
+        assert_eq!(bindings, 1);
+    } else {
+        assert!(!fixture.0.join("completion-fault").exists());
+        assert!(report["errors"].as_array().unwrap().is_empty());
+        assert_eq!(lease.state, memcore::ExecEnvState::Reclaimed);
+        assert_eq!(resource.state, memcore::ResourceState::Reclaimed);
+        assert_eq!(bindings, 0);
+    }
+}
+
+#[test]
+fn reconcile_reports_real_managed_completion_failure_after_physical_removal() {
+    completion_error_cli_case(true);
+}
+
+#[test]
+fn reconcile_managed_completion_success_reclaims_lease_and_resources() {
+    completion_error_cli_case(false);
+}
