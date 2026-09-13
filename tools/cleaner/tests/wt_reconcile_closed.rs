@@ -1228,3 +1228,198 @@ fn reconcile_reports_real_managed_completion_failure_after_physical_removal() {
 fn reconcile_managed_completion_success_reclaims_lease_and_resources() {
     completion_error_cli_case(false);
 }
+
+fn remote_delete_warning_cli_case(case: &str) {
+    let root = std::env::temp_dir().join(format!(
+        "tachi-remote-warning-quote'-{}",
+        uuid::Uuid::new_v4()
+    ));
+    fs::create_dir(&root).unwrap();
+    let fixture = Fixture(root.canonicalize().unwrap());
+    for dir in [
+        "bin",
+        "home/.tachi/global",
+        "config",
+        "cargo",
+        "rustup",
+        "tmp",
+        "templates",
+        "repo",
+        "worktrees",
+    ] {
+        fs::create_dir_all(fixture.0.join(dir)).unwrap();
+    }
+    fs::write(fixture.0.join("gitconfig"), "").unwrap();
+    fixture.script("git", "#!/bin/sh\nexec /usr/bin/git \"$@\"\n");
+    let private_cli = |args: &[&str]| -> serde_json::Value {
+        let output = fixture
+            .command(env!("CARGO_BIN_EXE_tachi-clean"), &fixture.0)
+            .env("PATH", fixture.0.join("bin"))
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "private CLI {args:?}: {output:?}");
+        serde_json::from_slice(&output.stdout).unwrap()
+    };
+
+    drop(
+        memcore::MemoryStore::open(
+            fixture
+                .0
+                .join("home/.tachi/global/memory.db")
+                .to_str()
+                .unwrap(),
+        )
+        .unwrap(),
+    );
+
+    fixture.script("lsof", "#!/bin/sh\n[ \"$1\" = '+D' ] && [ \"$2\" = \"$FIXTURE_ROOT/worktrees/merged\" ] || exit 92\nprintf 'clear\\n' >> \"$FIXTURE_ROOT/holder-probes\"\nexit 1\n");
+    let repo = fixture.0.join("repo");
+    let origin = fixture.0.join("origin.git");
+    let wt = fixture.0.join("worktrees/merged");
+    fixture.git_ok(&fixture.0, &["init", "--bare", origin.to_str().unwrap()]);
+    fixture.git_ok(&repo, &["init", "-b", "main"]);
+    assert_eq!(
+        fixture.git_ok(&repo, &["rev-parse", "--absolute-git-dir"]),
+        repo.join(".git").to_str().unwrap()
+    );
+    fs::write(repo.join("base"), "base\n").unwrap();
+    fixture.git_ok(&repo, &["add", "base"]);
+    fixture.git_ok(&repo, &["commit", "-m", "base"]);
+    fixture.git_ok(
+        &repo,
+        &["remote", "add", "origin", origin.to_str().unwrap()],
+    );
+    fixture.git_ok(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "fixture/merged",
+            wt.to_str().unwrap(),
+            "main",
+        ],
+    );
+    assert_eq!(
+        fixture.git_ok(
+            &wt,
+            &["rev-parse", "--path-format=absolute", "--git-common-dir"]
+        ),
+        repo.join(".git").to_str().unwrap()
+    );
+    fs::write(wt.join("accepted"), "accepted change\n").unwrap();
+    fixture.git_ok(&wt, &["add", "accepted"]);
+    fixture.git_ok(&wt, &["commit", "-m", "accepted PR head"]);
+    let accepted = fixture.git_ok(&wt, &["rev-parse", "HEAD"]);
+    fixture.git_ok(&repo, &["merge", "--squash", "fixture/merged"]);
+    fixture.git_ok(&repo, &["commit", "-m", "independent squash merge"]);
+    assert_eq!(
+        fixture
+            .git(&repo, &["merge-base", "--is-ancestor", &accepted, "main"])
+            .status
+            .code(),
+        Some(1)
+    );
+    fixture.git_ok(&repo, &["push", "origin", "fixture/merged"]);
+    let mut register = vec![
+        "wt-register",
+        wt.to_str().unwrap(),
+        "--repo",
+        repo.to_str().unwrap(),
+        "--branch",
+        "fixture/merged",
+        "--json",
+    ];
+    register.extend(["--pr", "7"]);
+    private_cli(&register);
+
+    fixture.script("gh", "#!/bin/sh\n[ \"$*\" = 'pr view 7 --json state,headRefOid,headRefName' ] || exit 91\n/bin/cat \"$FIXTURE_ROOT/pr-state\"\n");
+    fs::write(fixture.0.join("pr-state"), serde_json::json!({"state":"MERGED", "headRefOid":accepted, "headRefName":"fixture/merged"}).to_string()).unwrap();
+
+    if matches!(case, "absent" | "no-origin") {
+        fixture.git_ok(&origin, &["update-ref", "-d", "refs/heads/fixture/merged"]);
+    }
+    if case == "no-origin" {
+        fixture.git_ok(&repo, &["remote", "remove", "origin"]);
+    }
+    let fault = match case {
+        "fault" => "printf 'private-remote-diagnostic-sentinel\\n' >&2; exit 17",
+        "clean" | "absent" | "no-origin" => ":",
+        _ => panic!("unknown remote warning case"),
+    };
+    fixture.script("git", &format!(r#"#!/bin/sh
+if [ "$#" -eq 6 ] && [ "$1" = '-C' ] && [ "$2" = "$FIXTURE_ROOT/repo" ] && [ "$3" = 'push' ] && [ "$4" = 'origin' ] && [ "$5" = '--delete' ] && [ "$6" = 'fixture/merged' ]; then
+  printf 'attempt\n' >> "$FIXTURE_ROOT/remote-attempts"
+  {fault}
+fi
+exec /usr/bin/git "$@"
+"#));
+    let registry_path = fixture.0.join("home/.tachi/worktrees.json");
+    let marker_path = wt.join(".tachi-worktree.json");
+    let registry = fs::read(&registry_path).unwrap();
+    let marker = fs::read(&marker_path).unwrap();
+    let report = private_cli(&["wt-reconcile", "--force", "--json"]);
+    let directory = wt.is_dir();
+    let registration = fixture
+        .git_ok(&repo, &["worktree", "list", "--porcelain"])
+        .contains(wt.to_str().unwrap());
+    let local = fixture
+        .git(
+            &repo,
+            &["show-ref", "--verify", "refs/heads/fixture/merged"],
+        )
+        .status
+        .success();
+    let remote = fixture
+        .git(
+            &origin,
+            &["show-ref", "--verify", "refs/heads/fixture/merged"],
+        )
+        .status
+        .success();
+    let registry_preserved = fs::read(&registry_path).unwrap() == registry;
+    let marker_preserved = fs::read(&marker_path).ok().as_ref() == Some(&marker);
+    eprintln!("REMOTE_WARNING_FIXTURE case={case} directory={directory} registration={registration} local={local} remote={remote} registry={registry_preserved} marker={marker_preserved} report={report}");
+    let expected = if case == "clean" {
+        serde_json::json!([])
+    } else {
+        serde_json::json!(["remote branch deletion command did not succeed for fixture/merged; remote state is unverified"])
+    };
+    assert_eq!(
+        report["warnings"], expected,
+        "remote failure must be visible but nonfatal"
+    );
+    assert!(!directory && !registration && !local && !registry_preserved && !marker_preserved);
+    assert_eq!(remote, case == "fault");
+    assert_eq!(
+        fs::read_to_string(fixture.0.join("remote-attempts")).unwrap(),
+        "attempt\n"
+    );
+    assert_eq!(report["reconciled"][0]["removed"], true);
+    assert!(report["errors"].as_array().unwrap().is_empty());
+    assert!(report["refused"].as_array().unwrap().is_empty());
+    assert!(!report
+        .to_string()
+        .contains("private-remote-diagnostic-sentinel"));
+}
+
+#[test]
+fn reconcile_remote_delete_failure_is_visible_without_failing_cleanup() {
+    remote_delete_warning_cli_case("fault");
+}
+
+#[test]
+fn reconcile_remote_delete_success_has_no_warning() {
+    remote_delete_warning_cli_case("clean");
+}
+
+#[test]
+fn reconcile_already_absent_remote_is_nonfatal_and_unverified() {
+    remote_delete_warning_cli_case("absent");
+}
+
+#[test]
+fn reconcile_missing_origin_is_nonfatal_and_unverified() {
+    remote_delete_warning_cli_case("no-origin");
+}
