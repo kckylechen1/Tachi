@@ -53,9 +53,17 @@ pub struct SkippedWorktree {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BranchPrState {
-    TerminalMerged { pr_number: Option<String> },
-    TerminalClosed { pr_number: Option<String> },
-    Open { pr_number: Option<String> },
+    TerminalMerged {
+        pr_number: Option<String>,
+        head_oid: Option<String>,
+        head_name: Option<String>,
+    },
+    TerminalClosed {
+        pr_number: Option<String>,
+    },
+    Open {
+        pr_number: Option<String>,
+    },
     NotFound,
     Error(String),
 }
@@ -78,7 +86,13 @@ pub fn check_branch_pr_state(
     if let Some(pr_str) = registered_pr.filter(|s| !s.trim().is_empty()) {
         let clean_num = pr_str.trim_start_matches('#');
         if let Ok(out) = Command::new("gh")
-            .args(["pr", "view", clean_num, "--json", "state"])
+            .args([
+                "pr",
+                "view",
+                clean_num,
+                "--json",
+                "state,headRefOid,headRefName",
+            ])
             .current_dir(repo_root)
             .output()
         {
@@ -86,9 +100,7 @@ pub fn check_branch_pr_state(
                 if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&out.stdout) {
                     if let Some(state) = val.get("state").and_then(|s| s.as_str()) {
                         return match state {
-                            "MERGED" => BranchPrState::TerminalMerged {
-                                pr_number: Some(pr_str.to_string()),
-                            },
+                            "MERGED" => merged_pr_state(&val, Some(pr_str.to_string())),
                             "CLOSED" => BranchPrState::TerminalClosed {
                                 pr_number: Some(pr_str.to_string()),
                             },
@@ -112,7 +124,7 @@ pub fn check_branch_pr_state(
             "--state",
             "all",
             "--json",
-            "number,state",
+            "number,state,headRefOid,headRefName",
             "--limit",
             "1",
         ])
@@ -126,7 +138,7 @@ pub fn check_branch_pr_state(
                         let num = first.get("number").map(|n| n.to_string());
                         let state = first.get("state").and_then(|s| s.as_str()).unwrap_or("");
                         return match state {
-                            "MERGED" => BranchPrState::TerminalMerged { pr_number: num },
+                            "MERGED" => merged_pr_state(first, num),
                             "CLOSED" => BranchPrState::TerminalClosed { pr_number: num },
                             "OPEN" => BranchPrState::Open { pr_number: num },
                             _ => BranchPrState::NotFound,
@@ -142,6 +154,75 @@ pub fn check_branch_pr_state(
         }
         Err(err) => BranchPrState::Error(err.to_string()),
     }
+}
+
+fn merged_pr_state(value: &serde_json::Value, pr_number: Option<String>) -> BranchPrState {
+    BranchPrState::TerminalMerged {
+        pr_number,
+        head_oid: value
+            .get("headRefOid")
+            .and_then(|value| value.as_str())
+            .map(str::to_owned),
+        head_name: value
+            .get("headRefName")
+            .and_then(|value| value.as_str())
+            .map(str::to_owned),
+    }
+}
+
+// Terminal state nominates a candidate; it cannot authorize discarding later commits.
+fn verify_merged_worktree_head(
+    worktree: &ListedWorktree,
+    head_oid: Option<&str>,
+    head_name: Option<&str>,
+) -> Result<(), &'static str> {
+    let head = head_oid
+        .filter(|head| !head.is_empty())
+        .ok_or("merged_pr_head_missing")?;
+    if !matches!(head.len(), 40 | 64)
+        || !head.bytes().all(|byte| byte.is_ascii_hexdigit())
+        || head.bytes().all(|byte| byte == b'0')
+    {
+        return Err("merged_pr_head_invalid");
+    }
+    let branch = head_name
+        .map(|branch| branch.trim_start_matches("refs/heads/"))
+        .filter(|branch| !branch.is_empty())
+        .ok_or("merged_pr_branch_missing")?;
+    let read = |args: &[&str]| -> Option<String> {
+        let output = Command::new("git")
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_COMMON_DIR")
+            .arg("-C")
+            .arg(&worktree.path)
+            .args(args)
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        Some(String::from_utf8(output.stdout).ok()?.trim().to_string())
+    };
+    if read(&["check-ref-format", &format!("refs/heads/{branch}")]).is_none() {
+        return Err("merged_pr_branch_invalid");
+    }
+    if worktree.branch.trim_start_matches("refs/heads/") != branch {
+        return Err("registered_branch_mismatch");
+    }
+    let actual_head = read(&["rev-parse", "--verify", "HEAD^{commit}"])
+        .filter(|head| !head.is_empty())
+        .ok_or("worktree_head_unavailable")?;
+    let actual_branch = read(&["symbolic-ref", "--quiet", "--short", "HEAD"])
+        .filter(|branch| !branch.is_empty())
+        .ok_or("worktree_branch_unavailable")?;
+    if actual_head != head {
+        return Err("worktree_head_mismatch");
+    }
+    if actual_branch != branch {
+        return Err("worktree_branch_mismatch");
+    }
+    Ok(())
 }
 
 pub fn run_wt_reconcile(options: WtReconcileOptions) -> Result<(), String> {
@@ -186,8 +267,24 @@ where
                     reasons: vec!["closed_pr_reclaimability_unproven".to_string()],
                 });
             }
-            BranchPrState::TerminalMerged { pr_number } => {
+            BranchPrState::TerminalMerged {
+                pr_number,
+                head_oid,
+                head_name,
+            } => {
                 let pr_id = pr_number.or_else(|| wt.pr.clone());
+                if let Err(reason) =
+                    verify_merged_worktree_head(wt, head_oid.as_deref(), head_name.as_deref())
+                {
+                    report.refused.push(RefusedWorktree {
+                        path: wt.path.clone(),
+                        branch: wt.branch.clone(),
+                        repo_root: wt.repo_root.clone(),
+                        pr: pr_id,
+                        reasons: vec![reason.to_string()],
+                    });
+                    continue;
+                }
                 let plan = wt_clean::plan_wt_remove_default(Path::new(&wt.path), !force);
                 if plan.allowed {
                     if force {
@@ -353,6 +450,8 @@ mod tests {
             },
             "feat/merged" => BranchPrState::TerminalMerged {
                 pr_number: Some("2".to_string()),
+                head_oid: None,
+                head_name: None,
             },
             _ => BranchPrState::NotFound,
         };

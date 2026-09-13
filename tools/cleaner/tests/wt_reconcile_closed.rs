@@ -101,7 +101,7 @@ fn closed_pr_cli_preserves_unmerged_worktree_and_refs() {
         )
         .unwrap(),
     );
-    fixture.script("gh", "#!/bin/sh\n[ \"$*\" = 'pr view 7 --json state' ] || exit 91\n/bin/cat \"$FIXTURE_ROOT/pr-state\"\n");
+    fixture.script("gh", "#!/bin/sh\n[ \"$*\" = 'pr view 7 --json state,headRefOid,headRefName' ] || exit 91\n/bin/cat \"$FIXTURE_ROOT/pr-state\"\n");
     fixture.script("lsof", "#!/bin/sh\n[ \"$1\" = '+D' ] && [ \"$2\" = \"$FIXTURE_ROOT/worktrees/closed\" ] || exit 92\nprintf 'clear\\n' >> \"$FIXTURE_ROOT/holder-probes\"\nexit 1\n");
     let repo = fixture.0.join("repo");
     let origin = fixture.0.join("origin.git");
@@ -198,7 +198,7 @@ fn closed_pr_cli_preserves_unmerged_worktree_and_refs() {
     );
     // MERGED still reaches the existing shared planner: dirty work remains refused.
     fs::write(wt.join("unique"), "dirty\n").unwrap();
-    fs::write(fixture.0.join("pr-state"), "{\"state\":\"MERGED\"}").unwrap();
+    fs::write(fixture.0.join("pr-state"), serde_json::to_vec(&serde_json::json!({"state":"MERGED", "headRefOid":head, "headRefName":"fixture/closed"})).unwrap()).unwrap();
     let merged = fixture.cli(&["wt-reconcile", "--force", "--json"]);
     assert!(merged["refused"][0]["reasons"]
         .as_array()
@@ -217,4 +217,279 @@ fn closed_pr_cli_preserves_unmerged_worktree_and_refs() {
     assert!(wt.is_dir());
     assert_eq!(fs::read(&registry_path).unwrap(), registry);
     assert_eq!(fs::read(&marker_path).unwrap(), marker);
+}
+
+fn merged_cli_case(registered_pr: bool, case: &str) {
+    let root = std::env::temp_dir().join(format!("tachi-merged-head-{}", uuid::Uuid::new_v4()));
+    fs::create_dir(&root).unwrap();
+    let fixture = Fixture(root.canonicalize().unwrap());
+    for dir in [
+        "bin",
+        "home/.tachi/global",
+        "config",
+        "cargo",
+        "rustup",
+        "tmp",
+        "templates",
+        "repo",
+        "worktrees",
+    ] {
+        fs::create_dir_all(fixture.0.join(dir)).unwrap();
+    }
+    fs::write(fixture.0.join("gitconfig"), "").unwrap();
+    drop(
+        memcore::MemoryStore::open(
+            fixture
+                .0
+                .join("home/.tachi/global/memory.db")
+                .to_str()
+                .unwrap(),
+        )
+        .unwrap(),
+    );
+    let expected_query = if registered_pr {
+        "pr view 7 --json state,headRefOid,headRefName"
+    } else {
+        "pr list --head fixture/merged --state all --json number,state,headRefOid,headRefName --limit 1"
+    };
+    fixture.script("gh", &format!("#!/bin/sh\n[ \"$*\" = '{expected_query}' ] || exit 91\nprintf '%s\\n' \"$*\" >> \"$FIXTURE_ROOT/gh-queries\"\n/bin/cat \"$FIXTURE_ROOT/pr-state\"\n"));
+    fixture.script("lsof", "#!/bin/sh\n[ \"$1\" = '+D' ] && [ \"$2\" = \"$FIXTURE_ROOT/worktrees/merged\" ] || exit 92\nprintf 'clear\\n' >> \"$FIXTURE_ROOT/holder-probes\"\nexit 1\n");
+    let repo = fixture.0.join("repo");
+    let origin = fixture.0.join("origin.git");
+    let wt = fixture.0.join("worktrees/merged");
+    fixture.git_ok(&fixture.0, &["init", "--bare", origin.to_str().unwrap()]);
+    fixture.git_ok(&repo, &["init", "-b", "main"]);
+    assert_eq!(
+        fixture.git_ok(&repo, &["rev-parse", "--absolute-git-dir"]),
+        repo.join(".git").to_str().unwrap()
+    );
+    fs::write(repo.join("base"), "base\n").unwrap();
+    fixture.git_ok(&repo, &["add", "base"]);
+    fixture.git_ok(&repo, &["commit", "-m", "base"]);
+    fixture.git_ok(
+        &repo,
+        &["remote", "add", "origin", origin.to_str().unwrap()],
+    );
+    fixture.git_ok(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "fixture/merged",
+            wt.to_str().unwrap(),
+            "main",
+        ],
+    );
+    assert_eq!(
+        fixture.git_ok(
+            &wt,
+            &["rev-parse", "--path-format=absolute", "--git-common-dir"]
+        ),
+        repo.join(".git").to_str().unwrap()
+    );
+    fs::write(wt.join("accepted"), "accepted change\n").unwrap();
+    fixture.git_ok(&wt, &["add", "accepted"]);
+    fixture.git_ok(&wt, &["commit", "-m", "accepted PR head"]);
+    let accepted = fixture.git_ok(&wt, &["rev-parse", "HEAD"]);
+    fixture.git_ok(&repo, &["merge", "--squash", "fixture/merged"]);
+    fixture.git_ok(&repo, &["commit", "-m", "independent squash merge"]);
+    assert_eq!(
+        fixture
+            .git(&repo, &["merge-base", "--is-ancestor", &accepted, "main"])
+            .status
+            .code(),
+        Some(1)
+    );
+    if case == "unique" {
+        fs::write(wt.join("later"), "must survive\n").unwrap();
+        fixture.git_ok(&wt, &["add", "later"]);
+        fixture.git_ok(&wt, &["commit", "-m", "later unique commit"]);
+    } else if case == "empty" {
+        fixture.git_ok(
+            &wt,
+            &["commit", "--allow-empty", "-m", "later empty commit"],
+        );
+        assert_eq!(
+            fixture.git_ok(&wt, &["rev-parse", "HEAD^{tree}"]),
+            fixture.git_ok(&wt, &["rev-parse", &format!("{accepted}^{{tree}}")])
+        );
+        assert_ne!(fixture.git_ok(&wt, &["rev-parse", "HEAD"]), accepted);
+    }
+    fixture.git_ok(&repo, &["push", "origin", "fixture/merged"]);
+    let mut register = vec![
+        "wt-register",
+        wt.to_str().unwrap(),
+        "--repo",
+        repo.to_str().unwrap(),
+        "--branch",
+        "fixture/merged",
+        "--json",
+    ];
+    if registered_pr {
+        register.extend(["--pr", "7"]);
+    }
+    fixture.cli(&register);
+    if case == "detached" {
+        fixture.git_ok(&wt, &["checkout", "--detach"]);
+    }
+    if case == "local-branch" {
+        fixture.git_ok(&wt, &["branch", "-m", "fixture/renamed"]);
+    }
+    let local_ref = if case == "local-branch" {
+        "refs/heads/fixture/renamed"
+    } else {
+        "refs/heads/fixture/merged"
+    };
+    let current = fixture.git_ok(&wt, &["rev-parse", "HEAD"]);
+    if case == "unknown-head" {
+        fixture.git_ok(&wt, &["symbolic-ref", "HEAD", "refs/heads/fixture/missing"]);
+    }
+    let registry_path = fixture.0.join("home/.tachi/worktrees.json");
+    let marker_path = wt.join(".tachi-worktree.json");
+    let registry = fs::read(&registry_path).unwrap();
+    let marker = fs::read(&marker_path).unwrap();
+    let mut payload = serde_json::json!({"number":7, "state":"MERGED", "headRefOid":accepted, "headRefName":"fixture/merged"});
+    let expected_reason = match case {
+        "unique" | "empty" => Some("worktree_head_mismatch"),
+        "missing-head" => {
+            payload.as_object_mut().unwrap().remove("headRefOid");
+            Some("merged_pr_head_missing")
+        }
+        "empty-head" => {
+            payload["headRefOid"] = serde_json::json!("");
+            Some("merged_pr_head_missing")
+        }
+        "malformed-head" => {
+            payload["headRefOid"] = serde_json::json!("not-a-commit");
+            Some("merged_pr_head_invalid")
+        }
+        "zero-head" => {
+            payload["headRefOid"] = serde_json::json!("0".repeat(40));
+            Some("merged_pr_head_invalid")
+        }
+        "missing-branch" => {
+            payload.as_object_mut().unwrap().remove("headRefName");
+            Some("merged_pr_branch_missing")
+        }
+        "empty-branch" => {
+            payload["headRefName"] = serde_json::json!("");
+            Some("merged_pr_branch_missing")
+        }
+        "malformed-branch" => {
+            payload["headRefName"] = serde_json::json!("bad branch");
+            Some("merged_pr_branch_invalid")
+        }
+        "registry-branch" => {
+            payload["headRefName"] = serde_json::json!("fixture/other");
+            Some("registered_branch_mismatch")
+        }
+        "local-branch" => Some("worktree_branch_mismatch"),
+        "detached" => Some("worktree_branch_unavailable"),
+        "unknown-head" => Some("worktree_head_unavailable"),
+        "exact" => None,
+        _ => panic!("unknown private case"),
+    };
+    if !registered_pr {
+        payload = serde_json::json!([payload]);
+    }
+    fs::write(
+        fixture.0.join("pr-state"),
+        serde_json::to_vec(&payload).unwrap(),
+    )
+    .unwrap();
+    let dry = fixture.cli(&["wt-reconcile", "--dry-run", "--json"]);
+    let apply = fixture.cli(&["wt-reconcile", "--force", "--json"]);
+    let directory = wt.is_dir();
+    let git_registration = fixture
+        .git_ok(&repo, &["worktree", "list", "--porcelain"])
+        .contains(wt.to_str().unwrap());
+    let local = fixture
+        .git(&repo, &["show-ref", "--verify", local_ref])
+        .status
+        .success();
+    let remote = fixture
+        .git(
+            &origin,
+            &["show-ref", "--verify", "refs/heads/fixture/merged"],
+        )
+        .status
+        .success();
+    let registry_bytes = fs::read(&registry_path).unwrap();
+    let registry_preserved = registry_bytes == registry;
+    let marker_preserved = fs::read(&marker_path).ok().as_ref() == Some(&marker);
+    eprintln!("MERGED_HEAD_FIXTURE registered_pr={registered_pr} case={case} directory={directory} git_registration={git_registration} local_ref={local} remote_ref={remote} registry={registry_preserved} marker={marker_preserved} dry={dry} apply={apply}");
+    assert_eq!(
+        fs::read_to_string(fixture.0.join("gh-queries"))
+            .unwrap()
+            .lines()
+            .collect::<Vec<_>>(),
+        vec![expected_query, expected_query]
+    );
+    if let Some(reason) = expected_reason {
+        assert!(
+            directory
+                && git_registration
+                && local
+                && remote
+                && registry_preserved
+                && marker_preserved
+        );
+        if case != "unknown-head" {
+            assert_eq!(fixture.git_ok(&wt, &["rev-parse", "HEAD"]), current);
+        } else {
+            assert!(!fixture
+                .git(&wt, &["rev-parse", "--verify", "HEAD^{commit}"])
+                .status
+                .success());
+        }
+        for report in [&dry, &apply] {
+            assert_eq!(report["refused"][0]["reasons"], serde_json::json!([reason]));
+            assert_eq!(report["reconciled"], serde_json::json!([]));
+        }
+        assert!(
+            !fixture.0.join("holder-probes").exists(),
+            "head refusal must precede planner"
+        );
+    } else {
+        assert!(!directory && !git_registration && !local && !remote);
+        assert!(!String::from_utf8(registry_bytes)
+            .unwrap()
+            .contains(wt.to_str().unwrap()));
+        assert!(!marker_path.exists());
+        assert_eq!(dry["reconciled"][0]["removed"], false);
+        assert_eq!(apply["reconciled"][0]["removed"], true);
+        assert_eq!(apply["refused"], serde_json::json!([]));
+    }
+}
+
+#[test]
+fn merged_pr_cli_preserves_later_unique_and_empty_commits() {
+    for registered in [true, false] {
+        for case in ["unique", "empty"] {
+            merged_cli_case(registered, case);
+        }
+    }
+}
+
+#[test]
+fn merged_pr_cli_requires_head_and_branch_evidence_and_retains_exact_head_cleanup() {
+    for registered in [true, false] {
+        for case in [
+            "missing-head",
+            "empty-head",
+            "malformed-head",
+            "zero-head",
+            "missing-branch",
+            "empty-branch",
+            "malformed-branch",
+            "registry-branch",
+            "local-branch",
+            "detached",
+            "unknown-head",
+            "exact",
+        ] {
+            merged_cli_case(registered, case);
+        }
+    }
 }
