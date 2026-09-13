@@ -552,9 +552,14 @@ fn execute_wt_remove_with_claim(
                 }
 
                 // 3. Delete remote branch (best-effort, don't fail if already gone or no remote)
-                let _ = Command::new("git")
+                let remote_delete = Command::new("git")
                     .args(["-C", &repo_root, "push", "origin", "--delete", &branch])
                     .output();
+                if !matches!(remote_delete, Ok(output) if output.status.success()) {
+                    report.warnings.push(format!(
+                        "remote branch deletion command did not succeed for {branch}; remote state is unverified"
+                    ));
+                }
             }
 
             // Round-2 cross-vendor review (FIX 2): the old canonicalizing
