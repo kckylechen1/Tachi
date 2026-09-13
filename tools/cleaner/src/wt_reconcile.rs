@@ -85,7 +85,7 @@ pub fn check_branch_pr_state(
 
     if let Some(pr_str) = registered_pr.filter(|s| !s.trim().is_empty()) {
         let clean_num = pr_str.trim_start_matches('#');
-        if let Ok(out) = Command::new("gh")
+        return match Command::new("gh")
             .args([
                 "pr",
                 "view",
@@ -96,23 +96,15 @@ pub fn check_branch_pr_state(
             .current_dir(repo_root)
             .output()
         {
-            if out.status.success() {
-                if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&out.stdout) {
-                    if let Some(state) = val.get("state").and_then(|s| s.as_str()) {
-                        return match state {
-                            "MERGED" => merged_pr_state(&val, Some(pr_str.to_string())),
-                            "CLOSED" => BranchPrState::TerminalClosed {
-                                pr_number: Some(pr_str.to_string()),
-                            },
-                            "OPEN" => BranchPrState::Open {
-                                pr_number: Some(pr_str.to_string()),
-                            },
-                            _ => BranchPrState::NotFound,
-                        };
-                    }
+            Ok(out) if out.status.success() => {
+                match serde_json::from_slice::<serde_json::Value>(&out.stdout) {
+                    Ok(value) => parsed_pr_state(&value, Some(pr_str.to_string())),
+                    Err(_) => BranchPrState::Error("pr view returned malformed JSON".to_string()),
                 }
             }
-        }
+            Ok(_) => BranchPrState::Error("pr view command failed".to_string()),
+            Err(_) => BranchPrState::Error("pr view command unavailable".to_string()),
+        };
     }
 
     match Command::new("gh")
@@ -132,27 +124,37 @@ pub fn check_branch_pr_state(
         .output()
     {
         Ok(out) if out.status.success() => {
-            if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&out.stdout) {
-                if let Some(prs) = val.as_array() {
-                    if let Some(first) = prs.first() {
-                        let num = first.get("number").map(|n| n.to_string());
-                        let state = first.get("state").and_then(|s| s.as_str()).unwrap_or("");
-                        return match state {
-                            "MERGED" => merged_pr_state(first, num),
-                            "CLOSED" => BranchPrState::TerminalClosed { pr_number: num },
-                            "OPEN" => BranchPrState::Open { pr_number: num },
-                            _ => BranchPrState::NotFound,
-                        };
-                    }
+            let value = match serde_json::from_slice::<serde_json::Value>(&out.stdout) {
+                Ok(value) => value,
+                Err(_) => {
+                    return BranchPrState::Error("pr list returned malformed JSON".to_string())
                 }
+            };
+            let Some(prs) = value.as_array() else {
+                return BranchPrState::Error("pr list returned a non-array".to_string());
+            };
+            match prs.first() {
+                Some(first) => parsed_pr_state(first, first.get("number").map(|n| n.to_string())),
+                None => BranchPrState::NotFound,
             }
-            BranchPrState::NotFound
         }
         Ok(out) => {
             let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
             BranchPrState::Error(err)
         }
         Err(err) => BranchPrState::Error(err.to_string()),
+    }
+}
+
+fn parsed_pr_state(value: &serde_json::Value, pr_number: Option<String>) -> BranchPrState {
+    if !value.is_object() {
+        return BranchPrState::Error("PR lookup returned a non-object entry".to_string());
+    }
+    match value.get("state").and_then(|state| state.as_str()) {
+        Some("MERGED") => merged_pr_state(value, pr_number),
+        Some("CLOSED") => BranchPrState::TerminalClosed { pr_number },
+        Some("OPEN") => BranchPrState::Open { pr_number },
+        _ => BranchPrState::Error("PR lookup returned a missing or invalid state".to_string()),
     }
 }
 

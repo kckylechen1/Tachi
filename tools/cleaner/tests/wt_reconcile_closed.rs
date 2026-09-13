@@ -493,3 +493,250 @@ fn merged_pr_cli_requires_head_and_branch_evidence_and_retains_exact_head_cleanu
         }
     }
 }
+
+fn pr_lookup_error_cli_case(registered_pr: bool, case: &str) {
+    let root = std::env::temp_dir().join(format!("tachi-pr-lookup-{}", uuid::Uuid::new_v4()));
+    fs::create_dir(&root).unwrap();
+    let fixture = Fixture(root.canonicalize().unwrap());
+    for dir in [
+        "bin",
+        "home/.tachi/global",
+        "config",
+        "cargo",
+        "rustup",
+        "tmp",
+        "templates",
+        "repo",
+        "worktrees",
+    ] {
+        fs::create_dir_all(fixture.0.join(dir)).unwrap();
+    }
+    fs::write(fixture.0.join("gitconfig"), "").unwrap();
+    drop(
+        memcore::MemoryStore::open(
+            fixture
+                .0
+                .join("home/.tachi/global/memory.db")
+                .to_str()
+                .unwrap(),
+        )
+        .unwrap(),
+    );
+
+    fixture.script("lsof", "#!/bin/sh\n[ \"$1\" = '+D' ] && [ \"$2\" = \"$FIXTURE_ROOT/worktrees/closed\" ] || exit 92\nprintf 'clear\\n' >> \"$FIXTURE_ROOT/holder-probes\"\nexit 1\n");
+    let repo = fixture.0.join("repo");
+    let origin = fixture.0.join("origin.git");
+    let wt = fixture.0.join("worktrees/merged");
+    fixture.git_ok(&fixture.0, &["init", "--bare", origin.to_str().unwrap()]);
+    fixture.git_ok(&repo, &["init", "-b", "main"]);
+    assert_eq!(
+        fixture.git_ok(&repo, &["rev-parse", "--absolute-git-dir"]),
+        repo.join(".git").to_str().unwrap()
+    );
+    fs::write(repo.join("base"), "base\n").unwrap();
+    fixture.git_ok(&repo, &["add", "base"]);
+    fixture.git_ok(&repo, &["commit", "-m", "base"]);
+    fixture.git_ok(
+        &repo,
+        &["remote", "add", "origin", origin.to_str().unwrap()],
+    );
+    fixture.git_ok(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "fixture/merged",
+            wt.to_str().unwrap(),
+            "main",
+        ],
+    );
+    assert_eq!(
+        fixture.git_ok(
+            &wt,
+            &["rev-parse", "--path-format=absolute", "--git-common-dir"]
+        ),
+        repo.join(".git").to_str().unwrap()
+    );
+    fs::write(wt.join("accepted"), "accepted change\n").unwrap();
+    fixture.git_ok(&wt, &["add", "accepted"]);
+    fixture.git_ok(&wt, &["commit", "-m", "accepted PR head"]);
+    let accepted = fixture.git_ok(&wt, &["rev-parse", "HEAD"]);
+    fixture.git_ok(&repo, &["merge", "--squash", "fixture/merged"]);
+    fixture.git_ok(&repo, &["commit", "-m", "independent squash merge"]);
+    assert_eq!(
+        fixture
+            .git(&repo, &["merge-base", "--is-ancestor", &accepted, "main"])
+            .status
+            .code(),
+        Some(1)
+    );
+    fixture.git_ok(&repo, &["push", "origin", "fixture/merged"]);
+    let mut register = vec![
+        "wt-register",
+        wt.to_str().unwrap(),
+        "--repo",
+        repo.to_str().unwrap(),
+        "--branch",
+        "fixture/merged",
+        "--json",
+    ];
+    if registered_pr {
+        register.extend(["--pr", "7"]);
+    }
+    fixture.cli(&register);
+
+    let view = "pr view 7 --json state,headRefOid,headRefName";
+    let list = "pr list --head fixture/merged --state all --json number,state,headRefOid,headRefName --limit 1";
+    let merged = serde_json::json!({"number":8,"state":"MERGED","headRefOid":accepted,"headRefName":"fixture/merged"});
+    let payload = match case {
+        "malformed" => "{private-invalid-json".to_string(),
+        "nonobject" => "[0]".to_string(),
+        "missing-state" => "{}".to_string(),
+        "nonstring-state" => r#"{"state":7}"#.to_string(),
+        "unknown-state" => r#"{"state":"UNRECOGNIZED"}"#.to_string(),
+        "nonarray" => "{}".to_string(),
+        "empty" => "[]".to_string(),
+        "open" => r#"{"state":"OPEN"}"#.to_string(),
+        "closed" => r#"{"state":"CLOSED"}"#.to_string(),
+        "merged" | "command-failure" | "spawn-failure" => merged.to_string(),
+        _ => panic!("unknown lookup case"),
+    };
+    let payload = if !registered_pr && !matches!(case, "malformed" | "nonarray" | "empty") {
+        format!("[{payload}]")
+    } else {
+        payload
+    };
+    fs::write(fixture.0.join("lookup-payload"), payload).unwrap();
+    fs::write(
+        fixture.0.join("fallback-payload"),
+        serde_json::json!([merged]).to_string(),
+    )
+    .unwrap();
+    let failed_exit = if case == "command-failure" {
+        "exit 17"
+    } else {
+        "/bin/cat \"$FIXTURE_ROOT/lookup-payload\""
+    };
+    let script = if registered_pr {
+        format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$FIXTURE_ROOT/gh-queries\"\ncase \"$*\" in\n'{view}') {failed_exit} ;;\n'{list}') /bin/cat \"$FIXTURE_ROOT/fallback-payload\" ;;\n*) exit 91 ;;\nesac\n")
+    } else {
+        format!("#!/bin/sh\n[ \"$*\" = '{list}' ] || exit 91\nprintf '%s\\n' \"$*\" >> \"$FIXTURE_ROOT/gh-queries\"\n{failed_exit}\n")
+    };
+    fixture.script("gh", &script);
+    if case == "spawn-failure" {
+        fixture.script("gh", "invalid executable format\n");
+    }
+    let registry_path = fixture.0.join("home/.tachi/worktrees.json");
+    let marker_path = wt.join(".tachi-worktree.json");
+    let registry = fs::read(&registry_path).unwrap();
+    let marker = fs::read(&marker_path).unwrap();
+    let dry = fixture.cli(&["wt-reconcile", "--dry-run", "--json"]);
+    let apply = fixture.cli(&["wt-reconcile", "--force", "--json"]);
+    let directory = wt.is_dir();
+    let registration = fixture
+        .git_ok(&repo, &["worktree", "list", "--porcelain"])
+        .contains(wt.to_str().unwrap());
+    let local = fixture
+        .git(
+            &repo,
+            &["show-ref", "--verify", "refs/heads/fixture/merged"],
+        )
+        .status
+        .success();
+    let remote = fixture
+        .git(
+            &origin,
+            &["show-ref", "--verify", "refs/heads/fixture/merged"],
+        )
+        .status
+        .success();
+    let registry_preserved = fs::read(&registry_path).unwrap() == registry;
+    let marker_preserved = fs::read(&marker_path).ok().as_ref() == Some(&marker);
+    eprintln!("PR_LOOKUP_FIXTURE registered={registered_pr} case={case} directory={directory} registration={registration} local={local} remote={remote} registry={registry_preserved} marker={marker_preserved} dry={dry} apply={apply}");
+    if case == "merged" {
+        assert!(
+            !directory
+                && !registration
+                && !local
+                && !remote
+                && !registry_preserved
+                && !marker_preserved
+        );
+    } else {
+        assert!(
+            directory && registration && local && remote && registry_preserved && marker_preserved,
+            "lookup uncertainty must preserve all six surfaces"
+        );
+    }
+    let expected_query = if registered_pr { view } else { list };
+    if case == "spawn-failure" {
+        assert!(!fixture.0.join("gh-queries").exists());
+    } else {
+        assert_eq!(
+            fs::read_to_string(fixture.0.join("gh-queries"))
+                .unwrap()
+                .lines()
+                .collect::<Vec<_>>(),
+            vec![expected_query, expected_query],
+            "failed registered lookup must never select another PR"
+        );
+    }
+    for report in [&dry, &apply] {
+        match case {
+            "merged" => assert_eq!(report["reconciled"].as_array().unwrap().len(), 1),
+            "closed" => assert_eq!(
+                report["refused"][0]["reasons"][0],
+                "closed_pr_reclaimability_unproven"
+            ),
+            "open" => assert_eq!(report["skipped"][0]["reason"], "PR is still open"),
+            "empty" => assert_eq!(report["skipped"][0]["reason"], "no PR found for branch"),
+            _ => {
+                assert!(report["reconciled"].as_array().unwrap().is_empty());
+                assert!(report["skipped"][0]["reason"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("could not inspect PR status:"));
+                assert!(!report.to_string().contains("private-invalid-json"));
+            }
+        }
+    }
+}
+
+#[test]
+fn registered_pr_lookup_errors_never_fall_back_to_another_merged_pr() {
+    for case in [
+        "command-failure",
+        "spawn-failure",
+        "malformed",
+        "nonobject",
+        "missing-state",
+        "nonstring-state",
+        "unknown-state",
+        "open",
+        "closed",
+        "merged",
+    ] {
+        pr_lookup_error_cli_case(true, case);
+    }
+}
+
+#[test]
+fn branch_pr_lookup_distinguishes_invalid_evidence_from_absence() {
+    for case in [
+        "command-failure",
+        "spawn-failure",
+        "malformed",
+        "nonarray",
+        "nonobject",
+        "missing-state",
+        "nonstring-state",
+        "unknown-state",
+        "empty",
+        "open",
+        "closed",
+        "merged",
+    ] {
+        pr_lookup_error_cli_case(false, case);
+    }
+}
