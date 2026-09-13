@@ -625,7 +625,10 @@ fn pr_lookup_error_cli_case(registered_pr: bool, case: &str) {
     };
     fixture.script("gh", &script);
     if case == "spawn-failure" {
-        fixture.script("gh", "invalid executable format\n");
+        let interpreter = fixture.0.join("nonexistent-interpreter");
+        assert!(interpreter.is_absolute());
+        assert!(!interpreter.exists());
+        fixture.script("gh", &format!("#!{}\n", interpreter.display()));
     }
     let registry_path = fixture.0.join("home/.tachi/worktrees.json");
     let marker_path = wt.join(".tachi-worktree.json");
@@ -683,6 +686,20 @@ fn pr_lookup_error_cli_case(registered_pr: bool, case: &str) {
         );
     }
     for report in [&dry, &apply] {
+        if case == "spawn-failure" {
+            let reason = report["skipped"][0]["reason"].as_str().unwrap();
+            if registered_pr {
+                assert_eq!(
+                    reason,
+                    "could not inspect PR status: pr view command unavailable"
+                );
+            } else {
+                assert!(
+                    reason.contains("os error 2"),
+                    "expected missing-interpreter spawn error: {reason}"
+                );
+            }
+        }
         match case {
             "merged" => assert_eq!(report["reconciled"].as_array().unwrap().len(), 1),
             "closed" => assert_eq!(
