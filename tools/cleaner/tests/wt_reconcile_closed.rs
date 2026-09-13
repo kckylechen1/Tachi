@@ -523,7 +523,7 @@ fn pr_lookup_error_cli_case(registered_pr: bool, case: &str) {
         .unwrap(),
     );
 
-    fixture.script("lsof", "#!/bin/sh\n[ \"$1\" = '+D' ] && [ \"$2\" = \"$FIXTURE_ROOT/worktrees/closed\" ] || exit 92\nprintf 'clear\\n' >> \"$FIXTURE_ROOT/holder-probes\"\nexit 1\n");
+    fixture.script("lsof", "#!/bin/sh\n[ \"$1\" = '+D' ] && [ \"$2\" = \"$FIXTURE_ROOT/worktrees/merged\" ] || exit 92\nprintf 'clear\\n' >> \"$FIXTURE_ROOT/holder-probes\"\nexit 1\n");
     let repo = fixture.0.join("repo");
     let origin = fixture.0.join("origin.git");
     let wt = fixture.0.join("worktrees/merged");
