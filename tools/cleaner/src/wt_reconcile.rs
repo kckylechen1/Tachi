@@ -293,6 +293,7 @@ where
                         let exec_report = wt_clean::execute_wt_remove_planned(plan);
                         report.warnings.extend(exec_report.warnings);
                         if exec_report.removed {
+                            report.errors.extend(exec_report.errors);
                             report.reconciled.push(ReconciledWorktree {
                                 path: wt.path.clone(),
                                 branch: wt.branch.clone(),
