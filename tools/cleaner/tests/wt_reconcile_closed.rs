@@ -512,6 +512,18 @@ fn pr_lookup_error_cli_case(registered_pr: bool, case: &str) {
         fs::create_dir_all(fixture.0.join(dir)).unwrap();
     }
     fs::write(fixture.0.join("gitconfig"), "").unwrap();
+    fixture.script("git", "#!/bin/sh\nexec /usr/bin/git \"$@\"\n");
+    let private_cli = |args: &[&str]| -> serde_json::Value {
+        let output = fixture
+            .command(env!("CARGO_BIN_EXE_tachi-clean"), &fixture.0)
+            .env("PATH", fixture.0.join("bin"))
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "private CLI {args:?}: {output:?}");
+        serde_json::from_slice(&output.stdout).unwrap()
+    };
+
     drop(
         memcore::MemoryStore::open(
             fixture
@@ -584,7 +596,7 @@ fn pr_lookup_error_cli_case(registered_pr: bool, case: &str) {
     if registered_pr {
         register.extend(["--pr", "7"]);
     }
-    fixture.cli(&register);
+    private_cli(&register);
 
     let view = "pr view 7 --json state,headRefOid,headRefName";
     let list = "pr list --head fixture/merged --state all --json number,state,headRefOid,headRefName --limit 1";
@@ -634,8 +646,8 @@ fn pr_lookup_error_cli_case(registered_pr: bool, case: &str) {
     let marker_path = wt.join(".tachi-worktree.json");
     let registry = fs::read(&registry_path).unwrap();
     let marker = fs::read(&marker_path).unwrap();
-    let dry = fixture.cli(&["wt-reconcile", "--dry-run", "--json"]);
-    let apply = fixture.cli(&["wt-reconcile", "--force", "--json"]);
+    let dry = private_cli(&["wt-reconcile", "--dry-run", "--json"]);
+    let apply = private_cli(&["wt-reconcile", "--force", "--json"]);
     let directory = wt.is_dir();
     let registration = fixture
         .git_ok(&repo, &["worktree", "list", "--porcelain"])
