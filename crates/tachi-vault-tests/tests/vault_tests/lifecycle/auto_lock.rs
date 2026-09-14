@@ -2,6 +2,28 @@ use super::*;
 
 #[tokio::test]
 async fn vault_auto_lock_expires_cached_key() {
+    // The external test crate links the product Keychain reader, which would
+    // otherwise see the host's background password after the forced lock.
+    #[cfg(target_os = "macos")]
+    let security_fixture_dir = tempfile::tempdir().expect("security fixture directory");
+    #[cfg(target_os = "macos")]
+    let _security_fixture_path = {
+        use std::os::unix::fs::PermissionsExt;
+        let security = security_fixture_dir.path().join("security");
+        std::fs::write(
+            &security,
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$0.args\"\nexit 1\n",
+        )
+        .expect("write missing-entry security fixture");
+        std::fs::set_permissions(&security, std::fs::Permissions::from_mode(0o700))
+            .expect("executable security fixture");
+        let mut paths = vec![security_fixture_dir.path().to_path_buf()];
+        paths.extend(std::env::split_paths(
+            &std::env::var_os("PATH").unwrap_or_default(),
+        ));
+        let joined = std::env::join_paths(paths).expect("join security fixture PATH");
+        crate::test_support::EnvRestore::set_path("PATH", std::path::Path::new(&joined))
+    };
     let server = make_server();
     // Use a longer timeout than the slowest CI step between init/set so the
     // setup itself does not race the auto-lock; the test then forces
@@ -37,6 +59,11 @@ async fn vault_auto_lock_expires_cached_key() {
         Some("secret-value"),
         "vault_set should refresh provider cache before auto-lock"
     );
+    #[cfg(target_os = "macos")]
+    let keychain_calls_before_lock =
+        std::fs::metadata(security_fixture_dir.path().join("security.args"))
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
 
     server.vault_write().unlock_time = Some(Instant::now() - Duration::from_secs(60));
 
@@ -51,6 +78,16 @@ async fn vault_auto_lock_expires_cached_key() {
     assert!(
         err.contains("Vault auto-locked"),
         "expected auto-lock error, got: {err}"
+    );
+    #[cfg(target_os = "macos")]
+    let keychain_calls_after_lock =
+        std::fs::metadata(security_fixture_dir.path().join("security.args"))
+            .expect("auto-lock must exercise the product Keychain read against the fixture")
+            .len();
+    #[cfg(target_os = "macos")]
+    assert!(
+        keychain_calls_after_lock > keychain_calls_before_lock,
+        "auto-lock must issue a new product Keychain read"
     );
 
     let status = server
