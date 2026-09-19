@@ -435,9 +435,7 @@ fn dual_era_conformance_matrix_covers_stdio_and_http() {
                 .resolved_agent_identity
                 .lock()
                 .expect("proxy identity lock") = Some(
-                crate::cli_client::ProxyIdentityForward::Header(
-                    "agent.legacy-session".to_string(),
-                ),
+                crate::cli_client::ProxyIdentityForward::Header("agent.legacy-session".to_string()),
             );
             let observer = proxy.clone();
             let stdio_identity = stdio_responses(
@@ -664,9 +662,7 @@ fn modern_stdio_forwards_validated_client_and_agent_per_request_without_stickine
                 .resolved_agent_identity
                 .lock()
                 .expect("proxy identity lock") = Some(
-                crate::cli_client::ProxyIdentityForward::Header(
-                    "agent.legacy-session".to_string(),
-                ),
+                crate::cli_client::ProxyIdentityForward::Header("agent.legacy-session".to_string()),
             );
             let observer = proxy.clone();
             let responses = stdio_responses(
@@ -697,27 +693,31 @@ fn modern_stdio_forwards_validated_client_and_agent_per_request_without_stickine
                 ],
             )
             .await;
-            assert_eq!(responses[0]["result"]["resultType"], "complete", "{:#}", responses[0]);
+            assert_eq!(
+                responses[0]["result"]["resultType"],
+                "complete",
+                "{:#}",
+                responses[0]
+            );
             let omitted = http_tool_text(&responses[1]);
             assert!(omitted.contains("admission rejected"), "{:#}", responses[1]);
             assert!(!omitted.contains("agent.modern-stdio"), "{omitted}");
 
-            let (session_client, agent_identity): (String, String) =
-                rusqlite::Connection::open(&global)
-                    .expect("open global DB")
-                    .query_row(
-                        "SELECT session_client, agent_identity_id FROM session_claims WHERE issue_ref = ?1",
-                        ["owner/repo#1939-stdio"],
-                        |row| Ok((row.get(0)?, row.get(1)?)),
-                    )
-                    .expect("modern stdio work claim");
+            let (session_client, agent_identity): (String, String) = rusqlite::Connection::open(
+                &global,
+            )
+            .expect("open global DB")
+            .query_row(
+                "SELECT session_client, agent_identity_id FROM session_claims WHERE issue_ref = ?1",
+                ["owner/repo#1939-stdio"],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("modern stdio work claim");
             assert_eq!(session_client, "modern-stdio-client");
             assert_eq!(agent_identity, "agent.modern-stdio");
             assert_eq!(
                 observer.forwarded_agent_identity(),
-                crate::cli_client::ProxyIdentityForward::Header(
-                    "agent.legacy-session".to_string()
-                )
+                crate::cli_client::ProxyIdentityForward::Header("agent.legacy-session".to_string())
             );
 
             cancel.cancel();

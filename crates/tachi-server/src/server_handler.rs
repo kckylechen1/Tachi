@@ -970,20 +970,20 @@ fn identity_from_initialize_meta(
             Ok(()) => {}
             Err(err) => identity.agent_identity_error = Some(err),
         },
-        Ok(None) => match crate::session_identity::meta_identity_string(meta, "tachi.agentIdentity") {
-            Ok(Some(value)) => match assign_explicit_agent_identity(&mut identity, value) {
-                Ok(()) => {}
+        Ok(None) => {
+            match crate::session_identity::meta_identity_string(meta, "tachi.agentIdentity") {
+                Ok(Some(value)) => match assign_explicit_agent_identity(&mut identity, value) {
+                    Ok(()) => {}
+                    Err(err) => identity.agent_identity_error = Some(err),
+                },
+                Ok(None) => {}
                 Err(err) => identity.agent_identity_error = Some(err),
-            },
-            Ok(None) => {}
-            Err(err) => identity.agent_identity_error = Some(err),
-        },
+            }
+        }
         Err(err) => identity.agent_identity_error = Some(err),
     }
-    match crate::session_identity::meta_identity_string(
-        meta,
-        crate::session_identity::META_PROJECT,
-    ) {
+    match crate::session_identity::meta_identity_string(meta, crate::session_identity::META_PROJECT)
+    {
         Ok(Some(value)) => identity.project = Some(value),
         Ok(None) => match crate::session_identity::meta_identity_string(meta, "tachi.project") {
             Ok(Some(value)) => identity.project = Some(value),
@@ -1004,14 +1004,13 @@ fn identity_from_initialize_meta(
         crate::session_identity::META_WORKSPACE_ROOT,
     ) {
         Ok(Some(value)) => identity.workspace_root = Some(value),
-        Ok(None) => match crate::session_identity::meta_identity_string(
-            meta,
-            "tachi.workspaceRoot",
-        ) {
-            Ok(Some(value)) => identity.workspace_root = Some(value),
-            Ok(None) => {}
-            Err(err) => identity.workspace_root_error = Some(err),
-        },
+        Ok(None) => {
+            match crate::session_identity::meta_identity_string(meta, "tachi.workspaceRoot") {
+                Ok(Some(value)) => identity.workspace_root = Some(value),
+                Ok(None) => {}
+                Err(err) => identity.workspace_root_error = Some(err),
+            }
+        }
         Err(err) => identity.workspace_root_error = Some(err),
     }
     identity

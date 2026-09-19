@@ -880,8 +880,7 @@ impl rmcp::ServerHandler for StdioProxyServer {
             if request.name.as_ref() == "runtime_info" {
                 return Ok(self.runtime_info_result().await.into());
             }
-            let request =
-                prepare_proxy_tool_call(request, identity.client_project.as_deref())?;
+            let request = prepare_proxy_tool_call(request, identity.client_project.as_deref())?;
             let current = self.current_daemon();
             match crate::cli_client::call_daemon_tool_raw_with_profile_and_identity(
                 &current,
