@@ -84,8 +84,8 @@ struct RawCandidate {
 #[derive(Debug)]
 struct EndpointEvidence {
     source_path: PathBuf,
-    prefix: Option<String>,
-    provider_kind: String,
+    prefix: String,
+    admitted_provider_kind: Option<String>,
 }
 
 #[derive(Debug)]
@@ -473,9 +473,9 @@ fn classify_candidates(
                 .iter()
                 .filter(|evidence| {
                     evidence.source_path == candidate.raw.source_path
-                        && evidence.provider_kind == provider_kind
+                        && evidence.admitted_provider_kind.as_deref() == Some(provider_kind)
                 })
-                .filter_map(|evidence| lane_slot_for_prefix(evidence.prefix.as_deref()?))
+                .filter_map(|evidence| lane_slot_for_prefix(&evidence.prefix))
                 .map(str::to_string),
         );
         let Some(fp_key) = fp_key else {
@@ -557,21 +557,32 @@ fn classify_candidate(raw: RawCandidate, endpoints: &[EndpointEvidence]) -> Clas
     let name_kind =
         crate::status_ops::status_health::provider_kind_for_env_name(&result.raw.logical_name);
     let prefix = key_prefix(&result.raw.logical_name);
-    let mut endpoint_kinds: BTreeSet<String> = endpoints
+    let matching: Vec<&EndpointEvidence> = endpoints
         .iter()
         .filter(|evidence| {
             evidence.source_path == result.raw.source_path
-                && evidence.prefix.as_deref() == prefix.as_deref()
+                && Some(evidence.prefix.as_str()) == prefix.as_deref()
         })
-        .map(|evidence| evidence.provider_kind.clone())
         .collect();
-    if endpoint_kinds.is_empty() {
-        endpoint_kinds = endpoints
+    let relevant = if matching.is_empty() {
+        endpoints
             .iter()
             .filter(|evidence| evidence.source_path == result.raw.source_path)
-            .map(|evidence| evidence.provider_kind.clone())
-            .collect();
+            .collect::<Vec<_>>()
+    } else {
+        matching
+    };
+    if relevant
+        .iter()
+        .any(|evidence| evidence.admitted_provider_kind.is_none())
+    {
+        result.classification = "conflicted";
+        return result;
     }
+    let endpoint_kinds: BTreeSet<String> = relevant
+        .iter()
+        .filter_map(|evidence| evidence.admitted_provider_kind.clone())
+        .collect();
 
     match (name_kind, endpoint_kinds.len()) {
         (Some(kind), 0) => {
@@ -616,11 +627,10 @@ fn endpoint_evidence(raw: &[RawCandidate]) -> Vec<EndpointEvidence> {
     raw.iter()
         .filter_map(|candidate| {
             let prefix = config_prefix(&candidate.logical_name)?;
-            let provider_kind = provider_kind_from_endpoint(&candidate.value)?;
             Some(EndpointEvidence {
                 source_path: candidate.source_path.clone(),
-                prefix: Some(prefix),
-                provider_kind,
+                prefix,
+                admitted_provider_kind: provider_kind_from_endpoint(&candidate.value),
             })
         })
         .collect()
@@ -1125,6 +1135,71 @@ mod tests {
             .find(|candidate| candidate.logical_name == "DEEPSEEK_API_KEY")
             .expect("candidate");
         assert_eq!(candidate.classification, "conflicted");
+    }
+
+    fn assert_rejected_endpoint_conflicts(endpoint: &str) {
+        let home = tempfile::tempdir().expect("home");
+        let cwd = tempfile::tempdir().expect("cwd");
+        write_file(
+            &cwd.path().join(".env"),
+            &format!(
+                "DEEPSEEK_API_KEY=fixture\nDEEPSEEK_BASE_URL={endpoint}\n"
+            ),
+        );
+
+        let report = plan(
+            home.path(),
+            cwd.path(),
+            &home.path().join(".tachi/global/tachi-global.db"),
+        );
+
+        assert!(report.actions.is_empty(), "{report:#?}");
+        let candidate = report
+            .candidates
+            .iter()
+            .find(|candidate| candidate.logical_name == "DEEPSEEK_API_KEY")
+            .expect("candidate");
+        assert_eq!(candidate.classification, "conflicted", "{report:#?}");
+    }
+
+    #[test]
+    fn unknown_https_endpoint_is_conflicted_and_plans_nothing() {
+        assert_rejected_endpoint_conflicts("https://evil.example/v1");
+    }
+
+    #[test]
+    fn malformed_endpoint_is_conflicted_and_plans_nothing() {
+        assert_rejected_endpoint_conflicts("://not-a-url");
+    }
+
+    #[test]
+    fn http_official_endpoint_is_conflicted_and_plans_nothing() {
+        assert_rejected_endpoint_conflicts("http://api.deepseek.com");
+    }
+
+    #[test]
+    fn absent_endpoint_keeps_registry_name_classification_known() {
+        let home = tempfile::tempdir().expect("home");
+        let cwd = tempfile::tempdir().expect("cwd");
+        write_file(
+            &cwd.path().join(".env"),
+            "DEEPSEEK_API_KEY=fixture\n",
+        );
+
+        let report = plan(
+            home.path(),
+            cwd.path(),
+            &home.path().join(".tachi/global/tachi-global.db"),
+        );
+
+        assert_eq!(report.actions.len(), 1, "{report:#?}");
+        assert_eq!(report.actions[0].action, ACTION_CREATE_ACCOUNT);
+        let candidate = report
+            .candidates
+            .iter()
+            .find(|candidate| candidate.logical_name == "DEEPSEEK_API_KEY")
+            .expect("candidate");
+        assert_eq!(candidate.classification, "known");
     }
 
     #[test]
