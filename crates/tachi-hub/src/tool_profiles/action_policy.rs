@@ -24,6 +24,7 @@ fn is_gated_facade(tool_name: &str) -> bool {
             | "tachi_wiki"
             | "tachi_verify"
             | "tachi_gh"
+            | "tachi_staff"
             | "tachi_event"
             | "tachi_a2a"
     )
@@ -217,17 +218,20 @@ fn delegate_facade_action_allowed(tool_name: &str, action: &str) -> bool {
                 | "alerts"
                 | "ask"
         ),
-        "tachi_wiki" => matches!(action, "search" | "browse" | "read"),
-        "tachi_skill" => matches!(action, "discover" | "run"),
+        "tachi_gh" => matches!(
+            action,
+            "repo_view"
+                | "issue_list"
+                | "issue_read"
+                | "issue_freshness_scan"
+                | "pr_list"
+                | "pr_read"
+                | "pr_comments"
+                | "pr_review_digest"
+                | "pr_status"
+        ),
+        "tachi_staff" => action == "status",
         "tachi_a2a" => matches!(action, "respond" | "status"),
-        // Non-facade tools on the delegate list (no action concept): tool
-        // visibility is enough, regardless of what's in the `action` arg.
-        // `peer_query` (#1016 S1) is action-less (its selector is `noun`, gated
-        // internally by an exhaustive whitelist) and read-only, so it belongs
-        // here rather than in an action-bundle map.
-        "tachi_tools" | "runtime_info" | "tachi_web_search" | "tachi_unstick" | "peer_query" => {
-            true
-        }
         // Anything else — a tool not on the delegate allow-list at all, or a
         // gated facade we forgot to enumerate above — is denied by default.
         _ => false,
@@ -294,6 +298,11 @@ pub fn facade_action_required_bundle(tool_name: &str, action: &str) -> Option<To
             | "ship" | "link_pr" | "pr_handoff" | "release_note" | "close_loop" => {
                 Some(ToolBundle::Coordinate)
             }
+            _ => None,
+        },
+        "tachi_staff" => match action.as_str() {
+            "status" => Some(ToolBundle::Observe),
+            "start" | "cancel" => Some(ToolBundle::Coordinate),
             _ => None,
         },
         "tachi_event" => match action.as_str() {
@@ -369,29 +378,45 @@ mod tests {
     }
 
     #[test]
-    fn f3_delegate_skill_and_memory_allowlists() {
+    fn worker_core_facades_keep_read_access_without_recursive_staffing_or_gh_writes() {
         let profile = Some(ToolProfile::delegate());
         assert!(facade_action_allowed(
+            "tachi_staff",
+            Some("status"),
+            profile
+        ));
+        assert!(!facade_action_allowed(
+            "tachi_staff",
+            Some("start"),
+            profile
+        ));
+        assert!(!facade_action_allowed(
+            "tachi_staff",
+            Some("cancel"),
+            profile
+        ));
+        assert!(facade_action_allowed(
+            "tachi_gh",
+            Some("pr_read"),
+            profile
+        ));
+        assert!(!facade_action_allowed(
+            "tachi_gh",
+            Some("safe_merge"),
+            profile
+        ));
+    }
+
+    #[test]
+    fn delegate_action_policy_denies_residual_facades_and_keeps_memory_actions() {
+        let profile = Some(ToolProfile::delegate());
+        assert!(!facade_action_allowed(
             "tachi_skill",
             Some("discover"),
             profile
         ));
-        assert!(facade_action_allowed("tachi_skill", Some("run"), profile));
-        assert!(!facade_action_allowed(
-            "tachi_skill",
-            Some("bundle"),
-            profile
-        ));
-        assert!(!facade_action_allowed(
-            "tachi_skill",
-            Some("loadout"),
-            profile
-        ));
-        assert!(!facade_action_allowed(
-            "tachi_skill",
-            Some("from_pattern"),
-            profile
-        ));
+        assert!(!facade_action_allowed("tachi_skill", Some("run"), profile));
+        assert!(!facade_action_allowed("tachi_wiki", Some("search"), profile));
 
         assert!(facade_action_allowed(
             "tachi_memory",
@@ -406,10 +431,6 @@ mod tests {
         ));
 
         assert!(!facade_action_allowed("tachi_browse", None, profile));
-        assert!(facade_action_allowed("tachi_wiki", Some("search"), profile));
-        assert!(facade_action_allowed("tachi_wiki", Some("browse"), profile));
-        assert!(facade_action_allowed("tachi_wiki", Some("read"), profile));
-        assert!(!facade_action_allowed("tachi_wiki", Some("write"), profile));
     }
 
     #[test]

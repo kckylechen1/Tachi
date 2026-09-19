@@ -18,7 +18,8 @@ fn legacy_http_initialize_meta_survives_wire_dispatch() {
                 Some(json!({
                     "tachiClient": "legacy-meta-client",
                     "tachiProject": project_name,
-                    "tachiAgentIdentity": "agent.legacy.meta"
+                    "tachiAgentIdentity": "agent.legacy.meta",
+                    "tachiProfile": "ops"
                 })),
             )
             .await;

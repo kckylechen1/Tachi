@@ -98,14 +98,14 @@ impl ToolProfile {
         }
     }
 
-    /// Delegate profile for workers spawned by an admitted Tachi dispatch.
-    /// Read + remember bundles only, intersected with a curated allow-list.
-    /// No dispatch (prevent recursion), no handoff (parent manages), no hub_discover.
+    /// Worker profile for bounded delegated agents. It discovers the same five
+    /// product facades as Lead; per-action policy keeps recursive staffing and
+    /// GitHub mutation unavailable.
     pub const fn delegate() -> Self {
         Self {
             observe: true,
             remember: true,
-            coordinate: false,
+            coordinate: true,
             operate: false,
             admin: false,
             standard_minimal: false,

@@ -47,9 +47,9 @@ pub(crate) fn require_legacy_session(
     Ok(())
 }
 
-fn tool_not_found_result(tool_name: &str) -> rmcp::model::CallToolResult {
+pub(crate) fn tool_not_found_result(tool_name: &str) -> rmcp::model::CallToolResult {
     rmcp::model::CallToolResult::error(vec![rmcp::model::ContentBlock::text(format!(
-        "tool not found: '{tool_name}'. Call tachi_tools() or tools/list and use an exact visible tool name for the current TACHI_PROFILE."
+        "tool not found: '{tool_name}'. Call tools/list and use an exact visible tool name for the current TACHI_PROFILE."
     ))])
 }
 
@@ -60,7 +60,7 @@ fn tool_action_denied_result(
     profile_label: &str,
 ) -> rmcp::model::CallToolResult {
     rmcp::model::CallToolResult::error(vec![rmcp::model::ContentBlock::text(format!(
-        "action '{action}' on tool '{tool_name}' is not allowed for ToolProfile '{profile_label}'. Use a permitted action for this profile, or call tachi_tools() to inspect the active surface."
+        "action '{action}' on tool '{tool_name}' is not allowed for ToolProfile '{profile_label}'. Use a permitted action from tools/list for this profile."
     ))])
 }
 
@@ -310,6 +310,46 @@ fn narrow_gated_action_schemas(
                 tool.description = Some(std::borrow::Cow::Owned(format!(
                     "Task memory, policy, and ledger facade. Ordinary local delegation uses the host harness's native subagent.{action_summary} Sequencing and delegation decisions are the host model's job, not this facade. GitHub PR lifecycle is tachi_gh only.",
                 )));
+            }
+            "tachi_staff" => {
+                if profile == tachi_hub::ToolProfile::delegate() {
+                    let allowed: Vec<&str> = tachi_params::TACHI_STAFF_ACTIONS
+                        .iter()
+                        .copied()
+                        .filter(|action| {
+                            tachi_hub::facade_action_allowed(
+                                "tachi_staff",
+                                Some(action),
+                                Some(profile),
+                            )
+                        })
+                        .collect();
+                    narrow_action_enum_property(
+                        tool,
+                        &allowed,
+                        "Required staffing action allowed by the active profile.",
+                    );
+                }
+            }
+            "tachi_gh" => {
+                if profile == tachi_hub::ToolProfile::delegate() {
+                    let allowed: Vec<&str> = tachi_params::TACHI_GH_ACTIONS
+                        .iter()
+                        .copied()
+                        .filter(|action| {
+                            tachi_hub::facade_action_allowed(
+                                "tachi_gh",
+                                Some(action),
+                                Some(profile),
+                            )
+                        })
+                        .collect();
+                    narrow_action_enum_property(
+                        tool,
+                        &allowed,
+                        "Required GitHub action allowed by the active profile.",
+                    );
+                }
             }
             "tachi_a2a" => {
                 let allowed: Vec<&str> = tachi_params::TACHI_A2A_ACTIONS
@@ -737,6 +777,16 @@ impl MemoryServer {
             .as_deref()
             .map(parse_http_tool_profile)
             .transpose()?;
+        // A direct HTTP/proxy session that does not assert a profile must not
+        // inherit a daemon-wide Ops/admin profile. Local stdio keeps the
+        // explicitly configured process profile; only the per-connection HTTP
+        // boundary defaults missing identity to the narrow Lead surface.
+        let profile = profile.or_else(|| {
+            context
+                .extensions
+                .get::<axum::http::request::Parts>()
+                .map(|_| tachi_hub::default_tool_profile())
+        });
         let project = match project_binding_source(&identity) {
             ProjectBindingSource::Named(project) => {
                 let (canonical_project, _) = self
@@ -1000,7 +1050,7 @@ fn parse_http_tool_profile(raw: &str) -> Result<tachi_hub::ToolProfile, rmcp::Er
     let profile = tachi_hub::parse_tool_profile(raw).ok_or_else(|| {
         rmcp::ErrorData::invalid_params(
             format!(
-                "unknown HTTP direct-connect Tachi profile '{raw}'; expected standard, delegate, observe, remember, coordinate, operate, or a host alias"
+                "unknown HTTP direct-connect Tachi profile '{raw}'; expected standard/lead, delegate/worker, observe, remember, coordinate, operate/ops, or a compatible host alias"
             ),
             None,
         )
@@ -1929,31 +1979,18 @@ mod tests {
     }
 
     #[test]
-    fn delegate_wiki_schema_hides_write_only_properties() {
+    fn delegate_projection_excludes_residual_wiki_facade() {
         let projected = project_tool_definitions(
             native_tools(),
             Some(tachi_hub::ToolProfile::delegate()),
             None,
         );
-        let wiki_tool = projected
-            .iter()
-            .find(|tool| tool.name.as_ref() == "tachi_wiki")
-            .expect("tachi_wiki is exposed to delegate");
-        let properties = wiki_tool.input_schema["properties"]
-            .as_object()
-            .expect("properties map");
-        for write_field in ["title", "text", "summary", "keywords", "entities", "force"] {
-            assert!(
-                !properties.contains_key(write_field),
-                "write field {write_field} must not be present in delegate wiki schema"
-            );
-        }
-        for read_field in ["action", "query", "category", "path"] {
-            assert!(
-                properties.contains_key(read_field),
-                "read field {read_field} must be present in delegate wiki schema"
-            );
-        }
+        assert!(
+            projected
+                .iter()
+                .all(|tool| tool.name.as_ref() != "tachi_wiki"),
+            "tachi_wiki must not appear in Worker discovery"
+        );
     }
 
     #[test]

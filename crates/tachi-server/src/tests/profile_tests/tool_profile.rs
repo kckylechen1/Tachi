@@ -116,19 +116,26 @@ async fn standard_profile_exposes_agent_intents_not_execution_internals() {
 
     assert!(tools.contains("`tachi_memory`"));
     assert!(tools.contains("`tachi_task`"));
-    assert!(tools.contains("`tachi_verify`"));
+    assert!(tools.contains("`tachi_staff`"));
     assert!(tools.contains("`tachi_gh`"));
+    assert!(tools.contains("`tachi_a2a`"));
     assert!(!tools.contains("`tachi_event`"));
     // Harnesses report native lifecycle/eval facts through their adapter
     // protocol. Ordinary agents supply semantic completion/adjudication via
     // the work ledger instead of manually relaying system bookkeeping.
     assert!(!tools.contains("`tachi_agent_eval`"));
-    assert!(!tools.contains("`tachi_staff`"));
+    assert!(!tools.contains("`tachi_verify`"));
+    assert!(!tools.contains("`tachi_tools`"));
+    assert!(!tools.contains("`tachi_status`"));
+    assert!(!tools.contains("`tachi_web_search`"));
+    assert!(!tools.contains("`tachi_wiki`"));
+    assert!(!tools.contains("`tachi_skill`"));
+    assert!(!tools.contains("`vault_status`"));
     assert!(!tools.contains("`tachi_orchestrator`"));
 }
 
 #[tokio::test]
-async fn coordinate_profile_exposes_advanced_coordination_facades() {
+async fn coordinate_profile_is_confined_to_product_facades() {
     let server = make_server();
     server.set_tool_profile(Some(
         tachi_hub::parse_tool_profile("coordinate").expect("coordinate profile should parse"),
@@ -140,16 +147,15 @@ async fn coordinate_profile_exposes_advanced_coordination_facades() {
         .expect("tool discovery should work");
 
     assert!(tools.contains("`tachi_staff`"));
+    assert!(!tools.contains("`tachi_agent_eval`"));
+    assert!(!tools.contains("`tachi_verify`"));
     assert!(!tools.contains("`tachi_orchestrator`"));
 }
 
-/// #1319-E2 recursive-dispatch guard: a worker/delegate MUST NOT see
-/// `tachi_staff` (staff.start). A dispatched worker should not be able to spawn
-/// further external staff — only the coordinate/authorized Lead profile exposes
-/// `tachi_staff`. End-to-end via `tachi_tools` so a future regression that adds
-/// `tachi_staff` back to the delegate allow-list fails loudly.
+/// #1935: Worker discovery matches Lead, while action policy still prevents a
+/// worker from recursively starting or cancelling staff.
 #[tokio::test]
-async fn delegate_profile_does_not_expose_tachi_staff_to_prevent_recursive_dispatch() {
+async fn delegate_profile_exposes_staff_status_but_denies_recursive_staffing() {
     let server = make_server();
     server.set_tool_profile(Some(
         tachi_hub::parse_tool_profile("delegate").expect("delegate profile should parse"),
@@ -160,10 +166,23 @@ async fn delegate_profile_does_not_expose_tachi_staff_to_prevent_recursive_dispa
         .await
         .expect("tool discovery should work");
 
-    assert!(
-        !tools.contains("`tachi_staff`"),
-        "delegate/worker must not see tachi_staff (staff.start) — recursive dispatch guard"
-    );
+    assert!(tools.contains("`tachi_staff`"));
+
+    for action in ["start", "cancel"] {
+        let mut args = serde_json::Map::new();
+        args.insert("action".to_string(), serde_json::json!(action));
+        let result = call_tool_via_server(server.clone(), "tachi_staff", Some(args))
+            .await
+            .expect("denied staffing action should return a tool result");
+        assert_eq!(result.is_error, Some(true));
+        let message = result
+            .content
+            .first()
+            .and_then(|content| content.as_text())
+            .map(|text| text.text.as_str())
+            .unwrap_or("");
+        assert!(message.contains("not allowed"), "{message}");
+    }
 }
 
 /// #1319-C2: `action='dispatch'` was removed from `tachi_task` wholesale
@@ -335,9 +354,9 @@ async fn session_spine_mutation_profile_gate_runs_at_real_tools_call_boundary() 
         .map(|text| text.text.as_str())
         .unwrap_or("");
     assert_eq!(denied.is_error, Some(true));
-    assert!(denied_message.contains("not allowed"), "{denied_message}");
+    assert!(denied_message.contains("tool not found"), "{denied_message}");
 
-    let admitted = call("coordinate").await;
+    let admitted = call("admin").await;
     let admitted_message = admitted
         .content
         .first()
@@ -353,11 +372,11 @@ async fn session_spine_mutation_profile_gate_runs_at_real_tools_call_boundary() 
         !admitted_message.contains("not allowed")
             && !admitted_message.contains("not available")
             && !admitted_message.contains("tool not found"),
-        "coordinate call must reach parameter validation: {admitted_message}"
+        "admin call must reach parameter validation: {admitted_message}"
     );
     assert_eq!(
         admitted_message, "current host admission is unavailable",
-        "coordinate call must reach the production host-admission gate"
+        "admin call must reach the production host-admission gate"
     );
 }
 

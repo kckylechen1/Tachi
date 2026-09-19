@@ -297,16 +297,29 @@ fn live_execution_surface_matches_fixture_and_provisional_budgets() {
         .expect("registered native tool names")
         .iter()
         .any(|tool| tool == "tachi_workflow"));
-    assert!(observed["profiles"]["coordinate"]["visible_tools"]
+    let expected_product_surface = json!([
+        "tachi_a2a",
+        "tachi_gh",
+        "tachi_memory",
+        "tachi_staff",
+        "tachi_task"
+    ]);
+    for profile in ["standard", "delegate", "coordinate"] {
+        assert_eq!(
+            observed["profiles"][profile]["visible_tools"], expected_product_surface,
+            "{profile} discovery must expose exactly the five product facades"
+        );
+    }
+    assert_eq!(
+        observed["registered_native_tools"]["tool_count"],
+        json!(83),
+        "this profile-only contraction must not claim physical route deletion"
+    );
+    assert!(observed["profiles"]["operate"]["visible_tools"]
         .as_array()
-        .expect("coordinate visible tools")
+        .expect("Ops visible tools")
         .iter()
-        .any(|tool| tool == "tachi_gh"));
-    assert!(!observed["profiles"]["delegate"]["visible_tools"]
-        .as_array()
-        .expect("delegate visible tools")
-        .iter()
-        .any(|tool| tool == "tachi_gh"));
+        .any(|tool| tool == "tachi_agent_eval"));
     let properties = task.input_schema["properties"]
         .as_object()
         .expect("standard task properties");

@@ -104,16 +104,16 @@ There are two unrelated "profile" concepts. This section is about **`ToolProfile
 trimming), defined in [`tool_profiles/types.rs`](../../../crates/tachi-hub/src/tool_profiles/types.rs).
 
 The early design had five additive bundles: `observe / remember / coordinate / operate / admin`.
-But v1.0 introduced the facade surface and, with it, `standard_minimal` — a curated
-allow-list ([`tool_profiles/patterns.rs`](../../../crates/tachi-hub/src/tool_profiles/patterns.rs) → `STANDARD_MINIMAL_TOOL_PATTERNS`).
-The net effect:
+The product boundary now uses the bundle bits only for action policy and
+explicit Ops/admin compatibility. Discovery is role-shaped:
 
-- **default = `standard` = the hard allow-list**, bypassing bundles
-- **worker = `delegate` = another hard allow-list**
-- **only `admin` actually walks the bundles**
+- **default Lead = `standard` = exactly the five product facades**
+- **Worker = `delegate` = those same five names with narrower action policy**
+- **legacy `observe` / `remember` / `coordinate` selectors = product-facade discovery with their existing action permissions**
+- **explicit `operate` / Ops and `admin` / emergency = retained diagnostics and compatibility routes**
 
-→ `observe/remember/coordinate/operate` have almost no live code path. They activate only when
-someone hand-types `--profile observe+coordinate`. That is dead design.
+The registered diagnostic routes remain physically present; ordinary profile
+hiding is not represented as deletion.
 
 ### The deeper problem: facades broke tool-level filtering
 
@@ -152,14 +152,11 @@ Two important nuances:
 | codex_55_review | `standard` (needs to see more) |
 | kimi_arch / deepseek_explore / kimi_ux | `observe` (read-only review/exploration) |
 
-**The `delegate` allow-list once omitted `tachi_task` entirely.** Historical tool-name-only
-filtering could not expose task completion without also exposing the then-present worker-launch
-action. Today `DELEGATE_MINIMAL_TOOL_PATTERNS` includes `tachi_task`, and
-`delegate_facade_action_allowed` admits exactly `complete`/`status`/`board`/`brief`. The typed
-`TachiTaskAction` inventory no longer contains the retired `dispatch` action, so workers use those
-four canonical task actions directly without gaining a recursive worker-launch path.
-`tachi_unstick` remains a separate self-rescue tool; the retired direct `tachi_complete` route is no
-longer required as a completion escape hatch.
+`DELEGATE_MINIMAL_TOOL_PATTERNS` now contains exactly the five product facades.
+`delegate_facade_action_allowed` admits worker-safe Task and Memory actions,
+`tachi_staff(status)`, GitHub reads, and A2A status/respond while denying
+recursive staffing and GitHub mutation. The retired direct `tachi_complete`
+route is not required as a completion escape hatch.
 
 ## 4b. `handoff_ops` deprecated — memo vs. baton split (resolved #1016)
 

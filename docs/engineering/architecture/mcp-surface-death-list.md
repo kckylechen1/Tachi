@@ -133,7 +133,7 @@ delete wrappers.
 | `tachi_wiki_search` | Direct wiki search remains live in observe patterns at `patterns.rs:4`; the CLI map routes both `tachi_wiki_search` and the retired `wiki_search` alias to `tachi_wiki(action="search")` at `tool_map.rs:20`. | `tachi_wiki(action="search")` | Fold/delete candidate; not retired. | Migrate tests/docs before a separate deletion leaf. |
 | `wiki_search` | **DONE:** Retired and removed from MCP tool router and observe patterns. | `tachi_wiki(action="search")` | Hard-retired alias. | — |
 | `tachi_wiki_write` | Direct wiki write remains in remember patterns at `patterns.rs:40`; CLI map routes `tachi_wiki_write` and `wiki_write` to `tachi_wiki(action="write")` at `tool_map.rs:21`. | `tachi_wiki(action="write")` | Fold/delete candidate. | Same wiki alias leaf. |
-| `tachi_browse` | Facade read tool remains in observe patterns at `patterns.rs:23`. | `tachi_wiki(action="browse")` if browse stays a wiki action. | Fold candidate, but not first cut. | Confirm delegate dogfood before removing; delegate currently exposes `tachi_browse`. |
+| `tachi_browse` | Facade read tool remains registered for explicit Ops/admin compatibility but is absent from ordinary Lead/Worker discovery. | `tachi_wiki(action="browse")` if browse stays a wiki action. | Fold candidate, but not first cut. | Decide physical retirement separately; profile hiding is not deletion. |
 
 ### Batch B: Retire Direct Kanban Tools
 
@@ -192,20 +192,19 @@ runtime escape hatches.
 
 ### Batch F: Worker Escape Hatches After Action-Level Filtering
 
-Action-level filtering resolved the former facade/profile mismatch. The
-`delegate` profile now includes `tachi_task` and `tachi_skill`, while typed
-action policy admits only the worker-safe task and skill actions. The retired
-direct completion and skill routes cannot be restored by profile selection;
-`tachi_unstick` remains the explicit worker self-rescue surface.
+Action-level filtering resolves the facade/profile mismatch. Lead and Worker
+discovery now expose only the five product facades; Worker action policy keeps
+recursive staffing and GitHub mutation denied. Retained diagnostic and
+compatibility routes remain physically registered for explicit Ops/admin use.
 
 | Surface | Current evidence | Decision | Remaining work |
 | --- | --- | --- | --- |
 | `tachi_complete` (retired) | The direct route is retired; delegates complete work through the action-scoped `tachi_task(action="complete")` path. | Retired (executed). | None. |
-| `tachi_unstick` | The delegate and observe bundles still expose this dedicated self-rescue route. | Keep as worker self-rescue. | Decide only if an equivalent worker-safe facade action is added. |
-| `run_skill` (retired) | The direct route is retired; delegates execute reviewed skills through action-scoped `tachi_skill(action="run")`. | Retired (executed; skills are static reviewed now). | None. |
-| `tachi_event` | The delegate bundle still exposes continuity events. | Keep while continuity events are worker-facing. | Decide whether event append/query folds into memory/task. |
-| `runtime_info` and `tachi_tools` | Standard and delegate bundles retain readiness/discovery surfaces; unknown-tool errors route users to `tachi_tools`. | Keep. | None. |
-| `tachi_verify` | Standard retains the verification ledger required by dispatch law. | Keep. | None until verification evidence is absorbed elsewhere. |
+| `tachi_unstick` | The route remains registered but is absent from ordinary Lead/Worker discovery. | Retain for explicit Ops/admin compatibility; do not claim deletion. | Decide physical retirement separately. |
+| `run_skill` (retired) | The direct route is retired; `tachi_skill` is also absent from ordinary Lead/Worker discovery. | Retired (executed; skills are static reviewed now). | None. |
+| `tachi_event` | The route remains registered but is absent from ordinary Lead/Worker discovery. | Retain for explicit Ops/admin compatibility; do not claim deletion. | Decide whether event append/query folds into memory/task. |
+| `runtime_info` and `tachi_tools` | Routes remain registered but ordinary Lead/Worker discovery no longer exposes them. | Retain for explicit Ops/admin compatibility; do not claim deletion. | Decide physical retirement separately. |
+| `tachi_verify` | The route remains registered for explicit Ops/admin compatibility; verification law does not require model-facing default discovery. | Retain outside ordinary profiles. | None until verification evidence is absorbed elsewhere. |
 
 ## Proposed Leaf Queue
 

@@ -733,6 +733,9 @@ impl rmcp::ServerHandler for StdioProxyServer {
         async move {
             crate::server_handler::require_legacy_session(&context.meta)?;
             if request.name.as_ref() == "runtime_info" {
+                if !tachi_hub::tool_visible("runtime_info", self.tool_profile, None) {
+                    return Ok(crate::server_handler::tool_not_found_result("runtime_info").into());
+                }
                 return Ok(self.runtime_info_result().await.into());
             }
             let request = prepare_proxy_tool_call(request, self.client_project.as_deref())?;

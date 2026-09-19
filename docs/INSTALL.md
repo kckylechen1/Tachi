@@ -697,21 +697,22 @@ model-facing Memory action.
 
 ## Tool Surface Selection
 
-Tachi does not need to expose the full tool catalog to every host. Use `--profile` or `TACHI_PROFILE` to select an additive surface bundle:
+Tachi does not need to expose the full tool catalog to every host. Use `--profile` or `TACHI_PROFILE` to select a role surface:
 
 | Profile | Exposed surface | Best for |
 |---|---|---|
-| `standard` | Daily agent-intent surface: `tachi_memory`, the non-dispatch actions of `tachi_task`, `tachi_verify`, `tachi_web_search`, `tachi_wiki`, `tachi_skill`, `tachi_gh`, `peer_query`, vault session/status tools, plus `runtime_info`, `tachi_status`, and `tachi_tools`. `tachi_staff` and manual native-eval intake are hidden. | IDE agents (Claude, Cursor, Codex, Windsurf, Trae, Antigravity). Ordinary delegation uses the host's native subagent. |
-| `coordinate` | the coordinate bundle layered on the live `remember` profile/bundle (not the retired native `remember` tool alias): adds advanced handoff/workflow/agents/staff tools. Tachi-owned staffing (`tachi_staff(action='start', task='review the API surface and write findings to result.md', staffing_reason='native_subagent_unavailable')`) remains operator-only. | Advanced coordination and adapter workflows. |
-| `operate` | the operate bundle layered on the live `remember` profile/bundle (not the retired native `remember` tool alias): adds Foundry lifecycle, `hub_call`, `vault_unlock`/`lock`/`status`, `wiki_lint`. | Runtime adapters and OpenClaw. |
-| `delegate` | Curated worker surface: `tachi_a2a`, `tachi_tools`, `runtime_info`, `tachi_memory`, `tachi_web_search`, `tachi_wiki(action='search'|'browse'|'read')`, `tachi_unstick`, `tachi_task`, `tachi_skill(action='discover'|'run')`, and read-only `peer_query`. | Worker subagents spawned via `tachi_staff(action='start')`. |
-| `admin` | Full catalog, including explicitly justified durable/remote Tachi dispatch. | Maintenance, development, and operator-approved execution exceptions. |
+| `standard` | Exactly `tachi_memory`, `tachi_task`, `tachi_staff`, `tachi_gh`, and `tachi_a2a`; facade action policy still applies. | Ordinary Lead sessions. |
+| `coordinate` | The same five-facade discovery surface with legacy coordinate action permissions. | Explicit coordination compatibility without diagnostic discovery. |
+| `operate` | Explicit non-default Ops surface retaining runtime, status, Vault-session, Foundry, and Hub diagnostics. | Runtime adapters and authorized Ops sessions. |
+| `delegate` | Exactly the same five facades as Lead; status/read actions remain available while recursive staffing and GitHub mutation stay denied. | Bounded Worker sessions. |
+| `admin` / `emergency` | Full retained catalog. Narrow-profile hiding does not physically delete compatibility routes. | Explicit maintenance, development, and emergency sessions. |
 
 Host aliases:
 
-- `codex`, `claude`, `claude-code`, `cursor`, `trae`, `windsurf`, `ide`, `antigravity` → `standard`
+- `lead`, `codex`, `claude`, `claude-code`, `cursor`, `trae`, `windsurf`, `ide`, `antigravity`, `companion`, `copilot`, `coach`, `workflow` → `standard`
 - `worker`, `subagent`, `delegate` → `delegate`
 - `openclaw`, `hermes`, `runtime`, `adapter`, `ops` → `operate`
+- `admin`, `full`, `emergency` → `admin` (must be selected alone)
 
 Examples:
 
