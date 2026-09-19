@@ -915,8 +915,10 @@ fn validate_modern_identity_headers(
         })?;
         let meta_value = aliased_meta_string_result(&context.meta, canonical_meta, alias_meta)
             .map_err(|error| rmcp::ErrorData::invalid_params(error, None))?;
-        if let (Some(header_value), Some(meta_value)) = (&header_value, &meta_value)
-            && header_value != meta_value
+        if let Some((header_value, meta_value)) = header_value
+            .as_ref()
+            .zip(meta_value.as_ref())
+            .filter(|(header_value, meta_value)| header_value != meta_value)
         {
             return Err(rmcp::ErrorData::header_mismatch(
                 format!(
@@ -936,8 +938,10 @@ fn aliased_meta_string_result(
 ) -> Result<Option<String>, String> {
     let canonical_value = meta_string_result(meta, canonical)?;
     let alias_value = meta_string_result(meta, alias)?;
-    if let (Some(canonical_value), Some(alias_value)) = (&canonical_value, &alias_value)
-        && canonical_value != alias_value
+    if let Some((canonical_value, alias_value)) = canonical_value
+        .as_ref()
+        .zip(alias_value.as_ref())
+        .filter(|(canonical_value, alias_value)| canonical_value != alias_value)
     {
         return Err(format!(
             "conflicting request _meta identities: {canonical} ({canonical_value}) does not match {alias} ({alias_value})"
