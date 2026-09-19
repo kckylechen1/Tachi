@@ -748,8 +748,7 @@ fn modern_stdio_forwards_validated_client_and_agent_per_request_without_stickine
             )
             .await;
             assert_eq!(
-                responses[0]["result"]["resultType"],
-                "complete",
+                responses[0]["result"]["resultType"], "complete",
                 "{:#}",
                 responses[0]
             );
@@ -816,13 +815,9 @@ fn modern_stdio_omitted_agent_identity_reresolves_process_binding_per_call() {
                 (&first[0], "agent.env-first"),
                 (&second[0], "agent.env-second"),
             ] {
-                assert_eq!(
-                    response["result"]["resultType"],
-                    "complete",
-                    "{response:#}"
-                );
-                let body: serde_json::Value = serde_json::from_str(&http_tool_text(response))
-                    .expect("A2A status JSON");
+                assert_eq!(response["result"]["resultType"], "complete", "{response:#}");
+                let body: serde_json::Value =
+                    serde_json::from_str(&http_tool_text(response)).expect("A2A status JSON");
                 assert_eq!(body["actor_agent_identity_id"], expected, "{body:#}");
             }
 
