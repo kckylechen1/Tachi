@@ -65,10 +65,9 @@ async fn vault_auto_lock_expires_cached_key() {
         "vault_set should refresh provider cache before auto-lock"
     );
     #[cfg(target_os = "macos")]
-    let keychain_calls_before_lock = std::fs::read_to_string(
-        security_fixture_dir.path().join("security.args"),
-    )
-    .unwrap_or_default();
+    let keychain_calls_before_lock =
+        std::fs::read_to_string(security_fixture_dir.path().join("security.args"))
+            .unwrap_or_default();
 
     server.vault_write().unlock_time = Some(Instant::now() - Duration::from_secs(60));
 
@@ -92,7 +91,10 @@ async fn vault_auto_lock_expires_cached_key() {
             .strip_prefix(&keychain_calls_before_lock)
             .expect("security fixture log must retain the calls made before auto-lock");
         let args: Vec<&str> = new_calls.lines().collect();
-        assert!(!args.is_empty(), "auto-lock must issue a new product Keychain read");
+        assert!(
+            !args.is_empty(),
+            "auto-lock must issue a new product Keychain read"
+        );
         let expected = [
             "find-generic-password",
             "-s",
