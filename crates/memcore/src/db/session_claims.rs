@@ -220,27 +220,6 @@ pub struct AgentIdentity {
     pub created_at: String,
 }
 
-/// Persisted admission state. Callers can inspect `Verified`, but public
-/// admission inputs cannot select it; the only writer consumes a bounded
-/// receipt produced behind tachi-server's trusted verifier port.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AdmissionState {
-    SelfAsserted,
-    Verified,
-    Rejected,
-    Unavailable,
-}
-impl AdmissionState {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::SelfAsserted => "self_asserted",
-            Self::Verified => "verified",
-            Self::Rejected => "rejected",
-            Self::Unavailable => "unavailable",
-        }
-    }
-}
-
 /// Public admission inputs deliberately exclude `verified`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnverifiedAdmissionState {
@@ -248,12 +227,12 @@ pub enum UnverifiedAdmissionState {
     Rejected,
     Unavailable,
 }
-impl From<UnverifiedAdmissionState> for AdmissionState {
-    fn from(value: UnverifiedAdmissionState) -> Self {
-        match value {
-            UnverifiedAdmissionState::SelfAsserted => Self::SelfAsserted,
-            UnverifiedAdmissionState::Rejected => Self::Rejected,
-            UnverifiedAdmissionState::Unavailable => Self::Unavailable,
+impl UnverifiedAdmissionState {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::SelfAsserted => "self_asserted",
+            Self::Rejected => "rejected",
+            Self::Unavailable => "unavailable",
         }
     }
 }
@@ -293,7 +272,7 @@ pub fn record_unverified_admission(
             "admission id, identity id, and connection id are required".into(),
         ));
     }
-    conn.execute("INSERT INTO identity_admissions (admission_id,agent_identity_id,connection_id,state,created_at) VALUES (?1,?2,?3,?4,?5)", params![admission_id, agent_identity_id, connection_id, AdmissionState::from(state).as_str(), normalize_utc_iso_or_now("")])?;
+    conn.execute("INSERT INTO identity_admissions (admission_id,agent_identity_id,connection_id,state,created_at) VALUES (?1,?2,?3,?4,?5)", params![admission_id, agent_identity_id, connection_id, state.as_str(), normalize_utc_iso_or_now("")])?;
     Ok(())
 }
 

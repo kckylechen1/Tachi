@@ -42,6 +42,9 @@ fn verify_caller(
     if !matches!(admission_state.as_str(), "self_asserted" | "verified") {
         return Err("current host admission is not active".to_string());
     }
+    if admission_state == "verified" {
+        crate::verified_admission::require_current_verified_admission(server)?;
+    }
     if let Some(admitted) = admitted_host {
         if !admitted.trim().is_empty() && admitted != host_identity {
             return Err("host_identity does not match the current host connection".to_string());

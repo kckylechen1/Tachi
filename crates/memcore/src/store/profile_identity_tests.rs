@@ -101,6 +101,7 @@ const PRODUCT_TABLES: &[&str] = &[
     "agent_identities",
     "identity_admissions",
     "identity_admission_verification_receipts",
+    "identity_admission_verification_revocations",
     "a2a_envelopes",
     "a2a_delivery_receipts",
 ];
@@ -265,6 +266,51 @@ fn portable_fresh_create_omits_product_tables() {
         crate::db::migrations::EXPECTED_SCHEMA_VERSION,
         "a portable store is a complete stamped-28 database"
     );
+}
+
+#[test]
+fn production_open_authorizer_migrates_v36_verified_admission_inventory() {
+    let dir = temp_dir("v37-production-authorizer");
+    let path = db_in(&dir, "memory.db");
+    drop(
+        MemoryStore::open_with_context(&path, &deny(StoreProfile::TachiFull))
+            .expect("fresh full create"),
+    );
+    {
+        let conn = raw(&path);
+        conn.execute_batch(
+            "DROP TABLE identity_admission_verification_revocations;
+             DROP TABLE identity_admission_verification_receipts;
+             DROP INDEX idx_identity_admissions_verified_binding;
+             DROP TRIGGER identity_verified_admissions_no_replace;
+             DROP TRIGGER identity_verified_admissions_no_update;
+             DROP TRIGGER identity_verified_admissions_no_delete;
+             DELETE FROM hard_state
+              WHERE namespace='migrations' AND key='v37_verified_agent_admissions';
+             PRAGMA user_version=36;",
+        )
+        .expect("construct a stamped v36 product store");
+    }
+
+    drop(
+        MemoryStore::open_with_context(&path, &allow(StoreProfile::TachiFull))
+            .expect("production authorizer must admit the complete canonical v37 migration"),
+    );
+    let reopened = MemoryStore::open_with_context(&path, &deny(StoreProfile::TachiFull))
+        .expect("current production inventory must reopen without migration authority");
+    let trigger_count: i64 = reopened
+        .connection()
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_schema WHERE type='trigger' AND (
+                 name LIKE 'identity_verification_receipts_%'
+                 OR name LIKE 'identity_verified_admissions_%'
+                 OR name LIKE 'identity_verification_revocations_%'
+             )",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(trigger_count, 9);
 }
 
 #[test]

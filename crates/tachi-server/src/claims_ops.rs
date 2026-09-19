@@ -119,6 +119,9 @@ fn task_identity(server: &MemoryServer, asserted: Option<String>) -> Result<Stri
             "AgentIdentity admission unavailable; remote identity has no #1170 proof".to_string(),
         );
     }
+    if admission == "verified" {
+        crate::verified_admission::require_current_verified_admission(server)?;
+    }
     let identity = identity.ok_or_else(|| {
         "AgentIdentity admission unavailable; remote identity has no #1170 proof".to_string()
     })?;

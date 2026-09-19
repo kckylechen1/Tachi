@@ -1769,8 +1769,12 @@ mod tests {
         let (mut conn, tmp) = open_test_db();
         run_data_migrations(&mut conn, "global", tmp.path()).expect("build current fixture");
         conn.execute_batch(
-            "DROP TABLE identity_admission_verification_receipts;
+            "DROP TABLE identity_admission_verification_revocations;
+             DROP TABLE identity_admission_verification_receipts;
              DROP INDEX idx_identity_admissions_verified_binding;
+             DROP TRIGGER identity_verified_admissions_no_replace;
+             DROP TRIGGER identity_verified_admissions_no_update;
+             DROP TRIGGER identity_verified_admissions_no_delete;
              DELETE FROM hard_state
               WHERE namespace = 'migrations' AND key = 'v37_verified_agent_admissions';
              INSERT INTO agent_identities (agent_identity_id, display_name, created_at)
@@ -1786,7 +1790,7 @@ mod tests {
         let report = run_data_migrations(&mut conn, "global", tmp.path())
             .expect("a stamped v36 database must receive v37");
 
-        assert_eq!(report.verified_admission_schema_objects_created, 5);
+        assert_eq!(report.verified_admission_schema_objects_created, 14);
         assert_eq!(read_schema_version(&conn).unwrap(), EXPECTED_SCHEMA_VERSION);
         let preserved: (String, String, String) = conn
             .query_row(

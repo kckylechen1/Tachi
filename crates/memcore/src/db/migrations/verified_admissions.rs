@@ -14,8 +14,8 @@ pub(super) fn migrate_v37_verified_agent_admissions(
     }
     crate::db::verified_admissions::install_verified_admission_schema(conn)?;
     crate::db::verified_admissions::validate_verified_admission_schema(conn)?;
-    // One table, two indexes, and two append-only triggers.
-    Ok(5)
+    // Two tables, three indexes, and nine canonical append-only triggers.
+    Ok(14)
 }
 
 #[cfg(test)]
@@ -56,11 +56,11 @@ mod tests {
 
         assert_eq!(
             migrate_v37_verified_agent_admissions(&conn, StoreProfile::TachiFull).unwrap(),
-            5
+            14
         );
         assert_eq!(
             migrate_v37_verified_agent_admissions(&conn, StoreProfile::TachiFull).unwrap(),
-            5,
+            14,
             "DDL replay must preserve the canonical shape"
         );
     }

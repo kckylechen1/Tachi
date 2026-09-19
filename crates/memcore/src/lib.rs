@@ -245,15 +245,15 @@ pub use db::session_claims::{
     handoff_work_claim, heartbeat_claim, heartbeat_work_claim, holder_evidence,
     insert_agent_identity, insert_claim, insert_work_claim, is_claim_stale, list_active_claims,
     list_claims, record_rejected_admission, record_unverified_admission, release_claim,
-    release_work_claim, upsert_or_heartbeat_claim, AdmissionState, AgentIdentity, ClaimSelector,
-    ClaimState, HolderEvidence, NewSessionClaim, NewWorkClaim, ReleaseOutcome, SessionClaim,
+    release_work_claim, upsert_or_heartbeat_claim, AgentIdentity, ClaimSelector, ClaimState,
+    HolderEvidence, NewSessionClaim, NewWorkClaim, ReleaseOutcome, SessionClaim,
     SessionClaimsGc, UnverifiedAdmissionState, WorkClaim, WorkClaimHandoff,
     WorkClaimHandoffRequest, WorkClaimHeartbeat, WorkClaimMode,
 };
 #[cfg(feature = "admin")]
-pub use db::verified_admissions::{
-    get_verified_admission_receipt, has_fresh_verified_admission, record_verified_admission,
-    NewVerifiedAdmission, VerifiedAdmissionReceipt, VerifiedAdmissionWriteOutcome,
+pub use db::{
+    get_verified_admission_receipt, has_current_verified_admission, VerifiedAdmissionReceipt,
+    VERIFIED_ADMISSION_METHOD, VERIFIED_ADMISSION_SCOPE, VERIFIED_ADMISSION_VERSION,
 };
 pub use db::{anchor_id, anchor_path, AnchorKind};
 pub use db::{

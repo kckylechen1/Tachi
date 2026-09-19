@@ -91,6 +91,11 @@ pub use anchor::{anchor_id, anchor_path, ensure_anchor, AnchorKind};
 pub use audit::{audit_log_insert, audit_log_list};
 pub(crate) use common::normalize_sqlite_as_of;
 pub use common::{normalize_utc_iso, normalize_utc_iso_or_now, now_utc_iso, row_to_entry};
+#[cfg(feature = "admin")]
+pub use verified_admissions::{
+    get_verified_admission_receipt, has_current_verified_admission, VerifiedAdmissionReceipt,
+    VERIFIED_ADMISSION_METHOD, VERIFIED_ADMISSION_SCOPE, VERIFIED_ADMISSION_VERSION,
+};
 pub use daily_pipeline::{
     collect_daily_health_snapshot, count_active_memories, count_consolidated_active_memories,
     count_distinct_access_days, count_distinct_promotion_days, list_eval_evidence,
