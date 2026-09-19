@@ -882,10 +882,12 @@ async fn post_rename_destination_sync_failure_stops_before_source_parent_sync() 
     install_classifier(&mut server, &classifier);
     let workspace = DocsWorktree::new();
     let docs = workspace.docs_path().canonicalize().unwrap();
-    let source = docs.join("rename-sync.md");
+    // Sort before `product/` so the conflict source is processed before the
+    // existing destination can receive an unrelated in-place mtime update.
+    let source = docs.join("a-rename-sync.md");
     let source_bytes = "new classified source remains recoverable\n";
     fs::write(&source, source_bytes).unwrap();
-    let destination = docs.join("product/acme/rename-sync.md");
+    let destination = docs.join("product/acme/a-rename-sync.md");
     fs::create_dir_all(destination.parent().unwrap()).unwrap();
     fs::write(&destination, "old destination moved to archive\n").unwrap();
     fs::File::open(&destination)
@@ -910,7 +912,7 @@ async fn post_rename_destination_sync_failure_stops_before_source_parent_sync() 
     assert_eq!(fs::read_to_string(&source).unwrap(), source_bytes);
     assert!(!destination.exists());
     assert_eq!(
-        fs::read_to_string(docs.join("archive/rename-sync.md")).unwrap(),
+        fs::read_to_string(docs.join("archive/a-rename-sync.md")).unwrap(),
         "old destination moved to archive\n"
     );
 }
