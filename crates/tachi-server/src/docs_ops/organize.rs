@@ -586,12 +586,7 @@ impl AuthorizedDocs {
                 self.revalidate_roots()?;
                 self.revalidate_object(parent, &parent_identity, true, "destination parent")?;
                 let published_identity = staged_identity.relocated_to(path);
-                self.revalidate_object(
-                    path,
-                    &published_identity,
-                    false,
-                    "published new file",
-                )?;
+                self.revalidate_object(path, &published_identity, false, "published new file")?;
                 Ok(published_identity)
             })();
             let identity = validation.map_err(|error: String| {

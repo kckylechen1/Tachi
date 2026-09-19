@@ -532,7 +532,10 @@ async fn missing_null_or_blank_response_model_falls_back_without_self_invalidati
         let destination = docs.join("engineering/debugging").join(filename);
         let first = fs::read_to_string(&destination).unwrap();
         assert!(receipt_from_document(&first).is_none(), "{label}: {first}");
-        assert!(!first.contains("Identityless model title"), "{label}: {first}");
+        assert!(
+            !first.contains("Identityless model title"),
+            "{label}: {first}"
+        );
 
         crate::docs_ops::handle_wiki_organize(&server, docs.to_str().unwrap(), true)
             .await
@@ -1044,10 +1047,9 @@ async fn retry_reproves_parent_sync_after_directory_creation_sync_failure() {
         docs.join("product"),
         Box::new(|| {}),
     );
-    let retry_error =
-        crate::docs_ops::handle_wiki_organize(&server, docs.to_str().unwrap(), false)
-            .await
-            .expect_err("retry must attempt the previously failed ancestor sync again");
+    let retry_error = crate::docs_ops::handle_wiki_organize(&server, docs.to_str().unwrap(), false)
+        .await
+        .expect_err("retry must attempt the previously failed ancestor sync again");
     assert!(
         retry_error.contains("injected directory sync failure"),
         "{retry_error}"
@@ -1060,12 +1062,11 @@ async fn retry_reproves_parent_sync_after_directory_creation_sync_failure() {
         .await
         .expect("retry must re-prove the existing directory chain");
 
-    assert!(sync_trace
-        .lock()
-        .unwrap()
-        .iter()
-        .any(|event| event
-            == &format!("existing directory parent:{}", docs.join("product").display())));
+    assert!(sync_trace.lock().unwrap().iter().any(|event| event
+        == &format!(
+            "existing directory parent:{}",
+            docs.join("product").display()
+        )));
     assert!(!source.exists());
     assert_model_document(
         &fs::read_to_string(destination).unwrap(),
