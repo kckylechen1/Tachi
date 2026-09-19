@@ -1061,10 +1061,19 @@ mod tests {
         write_manifest(&manifest_path, &projection_manifest());
 
         let report = scan_drift_for_test(&manifest_path).expect("parity scan");
+        assert_eq!(report.status, INCOMPLETE_STATUS, "{:?}", report.findings);
         assert!(
             kinds(&report).contains(&CHECK_PARITY_DRIFT),
             "{:?}",
             kinds(&report)
+        );
+        assert!(
+            report.findings.iter().any(|finding| {
+                finding.source_id == "public-projection"
+                    && finding.check_kind == CHECK_INCOMPLETE_COVERAGE
+            }),
+            "{:?}",
+            report.findings
         );
 
         let _ = std::fs::remove_dir_all(root);
@@ -1602,12 +1611,21 @@ mod tests {
         write_manifest(&manifest_path, &manifest);
 
         let report = scan_drift_for_test(&manifest_path).expect("leak scan");
+        assert_eq!(report.status, INCOMPLETE_STATUS, "{:?}", report.findings);
         assert!(
             report
                 .findings
                 .iter()
                 .any(|finding| finding.check_kind == CHECK_AUDIENCE_LEAK
                     && finding.target_path.as_deref() == Some("AGENTS.md")),
+            "{:?}",
+            report.findings
+        );
+        assert!(
+            report.findings.iter().any(|finding| {
+                finding.source_id == "public-projection"
+                    && finding.check_kind == CHECK_INCOMPLETE_COVERAGE
+            }),
             "{:?}",
             report.findings
         );
