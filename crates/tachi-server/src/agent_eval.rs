@@ -13,6 +13,7 @@ mod mirror;
 pub(crate) mod projection;
 mod session_spine;
 
+pub(crate) use self::attachment::current_host_admission;
 pub(crate) use self::fixture::*;
 pub(crate) use self::live::*;
 pub(crate) use tachi_dispatch::eval::{

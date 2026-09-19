@@ -885,7 +885,7 @@ mod tests {
         let claim_error = crate::claims_ops::handle_task_claim(&server, &claim_params)
             .expect_err("WorkClaim authority must not outlive verified evidence");
         assert!(claim_error.contains("expired, revoked"), "{claim_error}");
-        let attachment_error = crate::agent_eval::attachment::current_host_admission(
+        let attachment_error = crate::agent_eval::current_host_admission(
             &server,
             Some("agent.remote.alpha".into()),
             Some(expired_admission.receipt().admission_id.clone()),
