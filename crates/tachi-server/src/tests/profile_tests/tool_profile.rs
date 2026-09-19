@@ -171,7 +171,7 @@ async fn delegate_profile_exposes_staff_status_but_denies_recursive_staffing() {
     for action in ["start", "cancel"] {
         let mut args = serde_json::Map::new();
         args.insert("action".to_string(), serde_json::json!(action));
-        let result = call_tool_via_server(server.clone(), "tachi_staff", Some(args))
+        let result = call_tool_on_server(server.clone(), "tachi_staff", Some(args))
             .await
             .expect("denied staffing action should return a tool result");
         assert_eq!(result.is_error, Some(true));
