@@ -595,6 +595,61 @@ fn modern_stdio_rejects_identity_drift_and_malformed_metadata_before_dispatch() 
 }
 
 #[test]
+fn modern_stdio_explicit_standard_matches_implicit_process_default() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    with_tachi_home(temp.path(), || {
+        let global = temp.path().join("global/memory.db");
+        let _agent_env = EnvRestore::remove(crate::session_identity::ENV_AGENT_IDENTITY);
+        test_runtime().block_on(async {
+            let server = crate::MemoryServer::new(global.clone(), None).expect("server");
+            let (daemon, cancel, task) = spawn_test_http_daemon(server, &global).await;
+            let proxy = identity_probe_proxy();
+            assert!(proxy.tool_profile.is_none(), "fixture must use process default");
+            *proxy.daemon.write().expect("proxy daemon lock") = daemon;
+
+            let responses = stdio_responses(
+                proxy,
+                &[
+                    json!({
+                        "jsonrpc":"2.0", "id":45, "method":"tools/list",
+                        "params":{"_meta":modern_meta(json!({"tachiProfile":"standard"}))}
+                    }),
+                    json!({
+                        "jsonrpc":"2.0", "id":46, "method":"tools/call", "params":{
+                            "_meta":modern_meta(json!({"tachiProfile":"observe"})),
+                            "name":"tachi_memory", "arguments":{
+                                "action":"save", "scope":"global",
+                                "id":"stdio-default-profile-drift",
+                                "text":"non-standard declaration must not dispatch",
+                                "summary":"default profile equivalence",
+                                "path":"/tests/modern-stdio-profile", "category":"fact", "force":true
+                            }
+                        }
+                    }),
+                ],
+            )
+            .await;
+            assert!(responses[0].get("error").is_none(), "{:#}", responses[0]);
+            assert_eq!(responses[0]["result"]["resultType"], "complete");
+            let tools = responses[0]["result"]["tools"]
+                .as_array()
+                .expect("standard tools array");
+            assert!(tools.iter().any(|tool| tool["name"] == "tachi_memory"));
+            assert!(
+                !tools.iter().any(|tool| tool["name"] == "tachi_agent_eval"),
+                "implicit default must retain the standard surface: {:#}",
+                responses[0]
+            );
+            assert_eq!(responses[1]["error"]["code"], -32602, "{:#}", responses[1]);
+            assert_eq!(memory_id_count(&global, "stdio-default-profile-drift"), 0);
+
+            cancel.cancel();
+            task.await.expect("daemon task");
+        });
+    });
+}
+
+#[test]
 fn modern_stdio_forwards_validated_client_and_agent_per_request_without_stickiness() {
     let temp = tempfile::tempdir().expect("tempdir");
     with_tachi_home(temp.path(), || {

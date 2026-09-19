@@ -540,14 +540,15 @@ impl StdioProxyServer {
         })
         .transpose()?;
         if let Some(requested_profile) = requested_profile {
-            if self.tool_profile != Some(requested_profile) {
+            let admitted_profile = self
+                .tool_profile
+                .unwrap_or_else(tachi_hub::default_tool_profile);
+            if admitted_profile != requested_profile {
                 return Err(rmcp::ErrorData::invalid_params(
                     format!(
                         "modern stdio request profile '{}' does not match process-admitted profile '{}'",
                         requested_profile.as_str(),
-                        self.tool_profile
-                            .map(|profile| profile.as_str())
-                            .unwrap_or_else(|| "default".to_string())
+                        admitted_profile.as_str()
                     ),
                     None,
                 ));
@@ -585,6 +586,9 @@ impl StdioProxyServer {
                     None,
                 ));
             }
+            // Absence is request-local too: it cannot inherit another modern
+            // request's metadata. Preserve the longstanding stdio process
+            // binding by resolving TACHI_AGENT_IDENTITY on this outbound call.
             None => crate::cli_client::ProxyIdentityForward::AutoEnv,
         };
 

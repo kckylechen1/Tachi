@@ -95,12 +95,17 @@ those process bindings, while any different declaration is rejected before a
 daemon call. Client labels and AgentIdentity assertions are validated and
 forwarded only for that request. Canonical and dotted aliases must agree, and
 an omitted later request never inherits an earlier modern request's identity.
+An omitted modern stdio AgentIdentity does retain the longstanding process
+binding: the adapter resolves `TACHI_AGENT_IDENTITY` afresh for that outbound
+call. Thus “request-local” forbids previous-request stickiness; it does not
+discard process configuration. A present malformed assertion is rejected and
+never falls through to that environment value.
 
-A valid, explicit AgentIdentity assertion on this loopback-only transport is
-recorded as `self_asserted`, never `verified`. An absent assertion stays
-identity-less and rejected; the daemon process environment is not an identity
-fallback for HTTP clients. This is the local attribution posture frozen in
-`identity-workclaim-spine-v1.md`, not remote identity proof.
+For direct HTTP, a valid, explicit AgentIdentity assertion on this loopback-only
+transport is recorded as `self_asserted`, never `verified`. An absent assertion
+stays identity-less and rejected; the daemon process environment is not an
+identity fallback for HTTP clients. This is the local attribution posture
+frozen in `identity-workclaim-spine-v1.md`, not remote identity proof.
 
 ### Claude Code / host config sketch
 
