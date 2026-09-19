@@ -895,9 +895,11 @@ mod tests {
         .unwrap();
         let error = std::thread::scope(|scope| {
             let (started_tx, started_rx) = std::sync::mpsc::channel();
-            let worker = scope.spawn(|| {
+            let server = &server;
+            let params = &params;
+            let worker = scope.spawn(move || {
                 started_tx.send(()).unwrap();
-                crate::claims_ops::handle_task_claim(&server, &params)
+                crate::claims_ops::handle_task_claim(server, params)
             });
             started_rx.recv().unwrap();
             std::thread::sleep(std::time::Duration::from_millis(300));
@@ -971,9 +973,10 @@ mod tests {
         .unwrap();
         let error = std::thread::scope(|scope| {
             let (started_tx, started_rx) = std::sync::mpsc::channel();
-            let worker = scope.spawn(|| {
+            let server = &server;
+            let worker = scope.spawn(move || {
                 started_tx.send(()).unwrap();
-                crate::delivery_ops::handle_tachi_delivery(&server, params)
+                crate::delivery_ops::handle_tachi_delivery(server, params)
             });
             started_rx.recv().unwrap();
             std::thread::sleep(std::time::Duration::from_millis(300));
