@@ -168,16 +168,9 @@ pub(super) fn build_instruction_drift_report(
             ));
         }
         let valid_direct_consumers = evaluate_direct_consumers(source, &mut findings);
-        if source.targets.is_empty() && source.direct_consumers.is_empty() {
-            findings.push(finding_for_source(
-                source,
-                None,
-                None,
-                CHECK_INCOMPLETE_COVERAGE,
-                "direct_consumers=[] and targets=[]: carrier consumption coverage unscanned"
-                    .to_string(),
-            ));
-        } else if source.targets.is_empty() && valid_direct_consumers == 0 {
+        let valid_projection_consumers =
+            evaluate_target_checks(source, &resolved_sources, &source_contents, &mut findings);
+        if valid_direct_consumers.is_empty() && valid_projection_consumers.is_empty() {
             findings.push(finding_for_source(
                 source,
                 None,
@@ -189,7 +182,6 @@ pub(super) fn build_instruction_drift_report(
         }
 
         evaluate_source_content_checks(source, source_contents.get(&source.id), &mut findings);
-        evaluate_target_checks(source, &resolved_sources, &source_contents, &mut findings);
     }
 
     evaluate_required_sources(status, &claimed_sources, &mut findings);
@@ -268,11 +260,13 @@ pub(super) fn build_instruction_drift_report(
 fn evaluate_direct_consumers(
     source: &InstructionSourceStatus,
     findings: &mut Vec<InstructionDriftFinding>,
-) -> usize {
-    let mut valid = 0;
+) -> BTreeSet<String> {
+    let mut valid = BTreeSet::new();
     for carrier in &source.direct_consumers {
-        if carrier_consumes_source_path(carrier, &source.source) {
-            valid += 1;
+        if carrier_consumes_direct_source(carrier, &source.source) {
+            if source.status == CLEAN_STATUS && source.exists {
+                valid.insert(carrier.clone());
+            }
         } else {
             findings.push(finding_for_source(
                 source,
@@ -289,16 +283,23 @@ fn evaluate_direct_consumers(
     valid
 }
 
-fn carrier_consumes_source_path(carrier: &str, source_path: &str) -> bool {
-    let Some(file_name) = Path::new(source_path)
-        .file_name()
-        .and_then(|name| name.to_str())
-    else {
-        return false;
-    };
+fn carrier_consumes_direct_source(carrier: &str, source_path: &str) -> bool {
+    // The manifest scanner has already rejected absolute and root-escaping
+    // declarations. These are the repository-root discovery pairs established
+    // by the production carrier census; a matching basename elsewhere is not
+    // evidence of consumption.
+    let normalized = normalize_declared_path(source_path);
     matches!(
-        (carrier, file_name),
-        ("codex" | "claude", "AGENTS.md") | ("claude", "CLAUDE.md") | ("gemini", "GEMINI.md")
+        (carrier, normalized.as_str()),
+        ("codex", "AGENTS.md") | ("claude", "CLAUDE.md")
+    )
+}
+
+fn carrier_consumes_projection_path(carrier: &str, target_path: &str) -> bool {
+    let normalized = normalize_declared_path(target_path);
+    matches!(
+        (carrier, normalized.as_str()),
+        ("codex", "AGENTS.md") | ("claude", "CLAUDE.md")
     )
 }
 
@@ -392,23 +393,27 @@ fn evaluate_target_checks(
     resolved_sources: &BTreeSet<String>,
     source_contents: &BTreeMap<String, String>,
     findings: &mut Vec<InstructionDriftFinding>,
-) {
+) -> BTreeSet<String> {
     let source_text = source_contents.get(&source.id);
+    let mut valid_consumers = BTreeSet::new();
     for target in &source.targets {
-        if !carrier_matches_path(&target.carrier, &target.path) {
+        let mut valid = true;
+        if !carrier_consumes_projection_path(&target.carrier, &target.path) {
+            valid = false;
             findings.push(finding_for_source(
                 source,
                 Some(target),
                 target.hash.clone(),
                 CHECK_WRONG_CARRIER,
                 format!(
-                    "declared carrier '{}' does not appear as a path segment in '{}'",
+                    "declared carrier '{}' does not consume projection path '{}'",
                     target.carrier, target.path
                 ),
             ));
         }
 
         if resolved_sources.contains(&target.resolved_path) {
+            valid = false;
             findings.push(finding_for_source(
                 source,
                 Some(target),
@@ -422,6 +427,7 @@ fn evaluate_target_checks(
         }
 
         if !target.exists || target.status == "missing" {
+            valid = false;
             findings.push(finding_for_source(
                 source,
                 Some(target),
@@ -429,10 +435,10 @@ fn evaluate_target_checks(
                 CHECK_MISSING_TARGET,
                 format!("declared target '{}' is missing", target.path),
             ));
-            continue;
         }
 
         if source.status != CLEAN_STATUS || !source.exists {
+            valid = false;
             findings.push(finding_for_source(
                 source,
                 Some(target),
@@ -445,50 +451,74 @@ fn evaluate_target_checks(
             ));
         }
 
-        let Some(target_text) = target.content.as_deref() else {
-            continue;
-        };
+        if source.direct_consumers.contains(&target.carrier) {
+            valid = false;
+            findings.push(finding_for_source(
+                source,
+                Some(target),
+                target.hash.clone(),
+                CHECK_CONTRADICTION,
+                format!(
+                    "carrier '{}' is declared as both a direct consumer and a projection target",
+                    target.carrier
+                ),
+            ));
+        }
 
-        if target.projection == "exact" {
-            if let Some(source_text) = source_text {
-                if source_text != target_text {
+        if let Some(target_text) = target.content.as_deref() {
+            if target.projection == "exact" {
+                match source_text {
+                    Some(source_text) if source_text == target_text => {}
+                    Some(_) => {
+                        valid = false;
+                        findings.push(finding_for_source(
+                            source,
+                            Some(target),
+                            target.hash.clone(),
+                            CHECK_PARITY_DRIFT,
+                            format!(
+                                "exact projection diverges: source_hash={:?} target_hash={:?}",
+                                source.hash, target.hash
+                            ),
+                        ));
+                    }
+                    None => valid = false,
+                }
+            }
+
+            if source.audience == "public" {
+                for (start, end, matched) in carrier_mechanism_spans(target_text) {
+                    valid = false;
                     findings.push(finding_for_source(
                         source,
                         Some(target),
                         target.hash.clone(),
-                        CHECK_PARITY_DRIFT,
+                        CHECK_AUDIENCE_LEAK,
+                        format!("bytes {start}..{end}: carrier mechanism '{matched}'"),
+                    ));
+                }
+                for (start, end, matched) in private_contract_spans(target_text) {
+                    valid = false;
+                    findings.push(finding_for_source(
+                        source,
+                        Some(target),
+                        target.hash.clone(),
+                        CHECK_CONTRADICTION,
                         format!(
-                            "exact projection diverges: source_hash={:?} target_hash={:?}",
-                            source.hash, target.hash
+                            "bytes {start}..{end}: public target contains private marker '{matched}'"
                         ),
                     ));
                 }
             }
+        } else {
+            valid = false;
         }
 
-        if source.audience == "public" {
-            for (start, end, matched) in carrier_mechanism_spans(target_text) {
-                findings.push(finding_for_source(
-                    source,
-                    Some(target),
-                    target.hash.clone(),
-                    CHECK_AUDIENCE_LEAK,
-                    format!("bytes {start}..{end}: carrier mechanism '{matched}'"),
-                ));
-            }
-            for (start, end, matched) in private_contract_spans(target_text) {
-                findings.push(finding_for_source(
-                    source,
-                    Some(target),
-                    target.hash.clone(),
-                    CHECK_CONTRADICTION,
-                    format!(
-                        "bytes {start}..{end}: public target contains private marker '{matched}'"
-                    ),
-                ));
-            }
+        if valid {
+            valid_consumers.insert(target.carrier.clone());
         }
     }
+    valid_consumers
 }
 
 /// A block (#1710) is a level-2 (`##`) Markdown section: its heading plus
@@ -637,13 +667,6 @@ fn finding_for_source(
         evidence_span,
         remediation_owner: source.remediation_owner.clone(),
     }
-}
-
-fn carrier_matches_path(carrier: &str, declared_path: &str) -> bool {
-    let carrier = carrier.to_ascii_lowercase();
-    Path::new(declared_path).components().any(|component| {
-        matches!(component, Component::Normal(part) if part.to_string_lossy().to_ascii_lowercase() == carrier)
-    })
 }
 
 fn normalize_declared_path(path: &str) -> String {
@@ -850,14 +873,8 @@ mod tests {
                     "adapter_version": "fixture-v1",
                     "density_budget": {"name": "public-budget", "bytes": 4096},
                     "remediation_owner": "repository-owner",
-                    "targets": [
-                        {
-                            "carrier": "cursor",
-                            "path": "targets/cursor/AGENTS.md",
-                            "ownership_mode": "source-owned",
-                            "projection": "exact"
-                        }
-                    ]
+                    "direct_consumers": ["codex"],
+                    "targets": []
                 },
                 {
                     "id": "claude-private-manual",
@@ -867,10 +884,48 @@ mod tests {
                     "adapter_version": "fixture-v1",
                     "density_budget": {"name": "private-budget", "bytes": 8192},
                     "remediation_owner": "carrier-manual-owner",
+                    "direct_consumers": ["claude"],
+                    "targets": []
+                }
+            ]
+        })
+    }
+
+    fn projection_manifest() -> Value {
+        json!({
+            "schema_version": "tachi.instruction_surfaces.v1",
+            "root": "..",
+            "required_sources": ["PUBLIC.md", "PRIVATE.md"],
+            "surfaces": [
+                {
+                    "id": "public-projection",
+                    "source": "PUBLIC.md",
+                    "audience": "public",
+                    "tier": "compressed-adapter",
+                    "adapter_version": "fixture-v1",
+                    "density_budget": {"name": "public-budget", "bytes": 4096},
+                    "remediation_owner": "repository-owner",
+                    "targets": [
+                        {
+                            "carrier": "codex",
+                            "path": "AGENTS.md",
+                            "ownership_mode": "source-owned",
+                            "projection": "exact"
+                        }
+                    ]
+                },
+                {
+                    "id": "private-projection",
+                    "source": "PRIVATE.md",
+                    "audience": "carrier-private",
+                    "tier": "expanded-manual",
+                    "adapter_version": "fixture-v1",
+                    "density_budget": {"name": "private-budget", "bytes": 8192},
+                    "remediation_owner": "carrier-manual-owner",
                     "targets": [
                         {
                             "carrier": "claude",
-                            "path": "targets/claude/CLAUDE.md",
+                            "path": "CLAUDE.md",
                             "ownership_mode": "carrier-owned",
                             "projection": "carrier-adapted"
                         }
@@ -894,6 +949,17 @@ mod tests {
         .expect("adapted target");
     }
 
+    fn write_projection_tree(root: &Path) {
+        std::fs::write(root.join("PUBLIC.md"), "public contract\n").expect("source");
+        std::fs::write(root.join("PRIVATE.md"), "private manual body\n").expect("source");
+        std::fs::write(root.join("AGENTS.md"), "public contract\n").expect("exact target");
+        std::fs::write(
+            root.join("CLAUDE.md"),
+            "private manual body\ncarrier note\n",
+        )
+        .expect("adapted target");
+    }
+
     fn kinds(report: &InstructionDriftReport) -> Vec<&str> {
         report
             .findings
@@ -905,8 +971,8 @@ mod tests {
     #[test]
     fn clean_declared_source_targets_accounted_clean() {
         let (root, manifest_path) = fixture("clean");
-        write_clean_tree(&root);
-        write_manifest(&manifest_path, &clean_manifest());
+        write_projection_tree(&root);
+        write_manifest(&manifest_path, &projection_manifest());
 
         let report = scan_drift_for_test(&manifest_path).expect("clean scan");
         assert_eq!(report.status, CLEAN_STATUS);
@@ -990,10 +1056,9 @@ mod tests {
     #[test]
     fn one_byte_exact_projection_edit_emits_parity_finding() {
         let (root, manifest_path) = fixture("parity");
-        write_clean_tree(&root);
-        std::fs::write(root.join("targets/cursor/AGENTS.md"), "public contract!\n")
-            .expect("mutated target");
-        write_manifest(&manifest_path, &clean_manifest());
+        write_projection_tree(&root);
+        std::fs::write(root.join("AGENTS.md"), "public contract!\n").expect("mutated target");
+        write_manifest(&manifest_path, &projection_manifest());
 
         let report = scan_drift_for_test(&manifest_path).expect("parity scan");
         assert!(
@@ -1008,30 +1073,30 @@ mod tests {
     #[test]
     fn missing_extra_wrong_carrier_are_distinct_findings() {
         let (root, manifest_path) = fixture("target-kinds");
-        write_clean_tree(&root);
-        let mut manifest = clean_manifest();
+        write_projection_tree(&root);
+        let mut manifest = projection_manifest();
         manifest["surfaces"][0]["targets"] = json!([
             {
-                "carrier": "cursor",
-                "path": "targets/cursor/missing.md",
-                "ownership_mode": "source-owned",
-                "projection": "exact"
-            },
-            {
-                "carrier": "cursor",
-                "path": "AGENTS.md",
+                "carrier": "codex",
+                "path": "MISSING.md",
                 "ownership_mode": "source-owned",
                 "projection": "exact"
             },
             {
                 "carrier": "codex",
-                "path": "targets/cursor/AGENTS.md",
+                "path": "PUBLIC.md",
+                "ownership_mode": "source-owned",
+                "projection": "exact"
+            },
+            {
+                "carrier": "claude",
+                "path": "AGENTS.md",
                 "ownership_mode": "source-owned",
                 "projection": "exact"
             }
         ]);
-        // Drop the private surface targets to keep this fixture focused; keep
-        // one clean private target so incomplete coverage does not dominate.
+        // Keep the private surface's clean projection so incomplete coverage
+        // there does not dominate this public-target fixture.
         write_manifest(&manifest_path, &manifest);
 
         let report = scan_drift_for_test(&manifest_path).expect("target kinds");
@@ -1084,6 +1149,147 @@ mod tests {
     }
 
     #[test]
+    fn claude_does_not_directly_consume_agents_when_claude_md_exists() {
+        let (root, manifest_path) = fixture("claude-agents-precedence");
+        write_clean_tree(&root);
+        let mut manifest = clean_manifest();
+        manifest["surfaces"][0]["direct_consumers"] = json!(["claude"]);
+        write_manifest(&manifest_path, &manifest);
+
+        let report = scan_drift_for_test(&manifest_path).expect("precedence scan");
+        assert_eq!(report.status, INCOMPLETE_STATUS);
+        assert!(report.findings.iter().any(|finding| {
+            finding.source_id == "public-agents" && finding.check_kind == CHECK_WRONG_CARRIER
+        }));
+        assert!(report.findings.iter().any(|finding| {
+            finding.source_id == "public-agents" && finding.check_kind == CHECK_INCOMPLETE_COVERAGE
+        }));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn nested_direct_basename_is_not_a_repository_root_consumption_path() {
+        let (root, manifest_path) = fixture("nested-direct-source");
+        std::fs::create_dir_all(root.join("nested")).expect("nested dir");
+        std::fs::write(root.join("nested/AGENTS.md"), "nested public contract\n")
+            .expect("nested source");
+        std::fs::write(root.join("CLAUDE.md"), "private manual body\n").expect("source");
+        let mut manifest = clean_manifest();
+        manifest["required_sources"] = json!(["nested/AGENTS.md", "CLAUDE.md"]);
+        manifest["surfaces"][0]["source"] = json!("nested/AGENTS.md");
+        write_manifest(&manifest_path, &manifest);
+
+        let report = scan_drift_for_test(&manifest_path).expect("nested source scan");
+        assert_eq!(report.status, INCOMPLETE_STATUS);
+        assert!(report.findings.iter().any(|finding| {
+            finding.source_id == "public-agents" && finding.check_kind == CHECK_WRONG_CARRIER
+        }));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn decorative_target_copy_is_not_consumption_coverage() {
+        let (root, manifest_path) = fixture("decorative-target");
+        write_clean_tree(&root);
+        let mut manifest = clean_manifest();
+        manifest["surfaces"][0]["direct_consumers"] = json!([]);
+        manifest["surfaces"][0]["targets"] = json!([{
+            "carrier": "codex",
+            "path": "targets/codex/AGENTS.md",
+            "ownership_mode": "source-owned",
+            "projection": "exact"
+        }]);
+        std::fs::create_dir_all(root.join("targets/codex")).expect("decorative dir");
+        std::fs::write(root.join("targets/codex/AGENTS.md"), "public contract\n")
+            .expect("decorative copy");
+        write_manifest(&manifest_path, &manifest);
+
+        let report = scan_drift_for_test(&manifest_path).expect("decorative target scan");
+        assert_eq!(report.status, INCOMPLETE_STATUS);
+        assert!(report.findings.iter().any(|finding| {
+            finding.source_id == "public-agents" && finding.check_kind == CHECK_WRONG_CARRIER
+        }));
+        assert!(report.findings.iter().any(|finding| {
+            finding.source_id == "public-agents" && finding.check_kind == CHECK_INCOMPLETE_COVERAGE
+        }));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn invalid_direct_and_invalid_target_cannot_combine_into_coverage() {
+        let (root, manifest_path) = fixture("invalid-combined-coverage");
+        write_clean_tree(&root);
+        let mut manifest = clean_manifest();
+        manifest["surfaces"][0]["direct_consumers"] = json!(["gemini"]);
+        manifest["surfaces"][0]["targets"] = json!([{
+            "carrier": "codex",
+            "path": "targets/codex/AGENTS.md",
+            "ownership_mode": "source-owned",
+            "projection": "exact"
+        }]);
+        std::fs::create_dir_all(root.join("targets/codex")).expect("decorative dir");
+        std::fs::write(root.join("targets/codex/AGENTS.md"), "public contract\n")
+            .expect("decorative copy");
+        write_manifest(&manifest_path, &manifest);
+
+        let report = scan_drift_for_test(&manifest_path).expect("combined invalid scan");
+        assert_eq!(report.status, INCOMPLETE_STATUS);
+        assert!(report.findings.iter().any(|finding| {
+            finding.source_id == "public-agents" && finding.check_kind == CHECK_INCOMPLETE_COVERAGE
+        }));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn wrong_carrier_target_as_only_declaration_is_incomplete() {
+        let (root, manifest_path) = fixture("wrong-carrier-only");
+        write_projection_tree(&root);
+        let mut manifest = projection_manifest();
+        manifest["surfaces"][0]["targets"][0]["carrier"] = json!("claude");
+        write_manifest(&manifest_path, &manifest);
+
+        let report = scan_drift_for_test(&manifest_path).expect("wrong carrier scan");
+        assert_eq!(report.status, INCOMPLETE_STATUS);
+        assert!(report.findings.iter().any(|finding| {
+            finding.source_id == "public-projection" && finding.check_kind == CHECK_WRONG_CARRIER
+        }));
+        assert!(report.findings.iter().any(|finding| {
+            finding.source_id == "public-projection"
+                && finding.check_kind == CHECK_INCOMPLETE_COVERAGE
+        }));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn same_carrier_direct_and_projection_declarations_are_rejected() {
+        let (root, manifest_path) = fixture("redundant-consumption");
+        write_clean_tree(&root);
+        let mut manifest = clean_manifest();
+        manifest["surfaces"][0]["targets"] = json!([{
+            "carrier": "codex",
+            "path": "AGENTS.md",
+            "ownership_mode": "source-owned",
+            "projection": "exact"
+        }]);
+        write_manifest(&manifest_path, &manifest);
+
+        let report = scan_drift_for_test(&manifest_path).expect("redundant consumption scan");
+        assert!(report.findings.iter().any(|finding| {
+            finding.source_id == "public-agents"
+                && finding.check_kind == CHECK_CONTRADICTION
+                && finding.evidence_span.contains("both a direct consumer")
+        }));
+        assert_ne!(report.status, CLEAN_STATUS);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn target_aliasing_its_own_source_is_reported_under_the_renamed_check() {
         // A target whose declared path is textually equal to a registered
         // source's declared path is source aliasing, not surplus-target
@@ -1091,12 +1297,12 @@ mod tests {
         // `target_aliases_source` check_kind string, not the old
         // `extra_target` name.
         let (root, manifest_path) = fixture("target-alias-name");
-        write_clean_tree(&root);
-        let mut manifest = clean_manifest();
+        write_projection_tree(&root);
+        let mut manifest = projection_manifest();
         manifest["surfaces"][0]["targets"] = json!([
             {
-                "carrier": "cursor",
-                "path": "AGENTS.md",
+                "carrier": "codex",
+                "path": "PUBLIC.md",
                 "ownership_mode": "source-owned",
                 "projection": "exact"
             }
@@ -1124,17 +1330,17 @@ mod tests {
     #[test]
     fn symlink_target_aliasing_a_source_is_reported() {
         let (root, manifest_path) = fixture("target-symlink-alias");
-        write_clean_tree(&root);
-        std::fs::remove_file(root.join("targets/cursor/AGENTS.md")).expect("remove target");
-        std::os::unix::fs::symlink("../../AGENTS.md", root.join("targets/cursor/AGENTS.md"))
+        write_projection_tree(&root);
+        std::fs::remove_file(root.join("AGENTS.md")).expect("remove target");
+        std::os::unix::fs::symlink("PUBLIC.md", root.join("AGENTS.md"))
             .expect("source alias symlink");
-        write_manifest(&manifest_path, &clean_manifest());
+        write_manifest(&manifest_path, &projection_manifest());
 
         let report = scan_drift_for_test(&manifest_path).expect("symlink alias scan");
         assert!(
             report.findings.iter().any(|finding| {
                 finding.check_kind == CHECK_TARGET_ALIASES_SOURCE
-                    && finding.target_path.as_deref() == Some("targets/cursor/AGENTS.md")
+                    && finding.target_path.as_deref() == Some("AGENTS.md")
             }),
             "{:?}",
             report.findings
@@ -1383,14 +1589,14 @@ mod tests {
     #[test]
     fn public_target_with_carrier_command_emits_audience_leak() {
         let (root, manifest_path) = fixture("audience-leak");
-        write_clean_tree(&root);
+        write_projection_tree(&root);
         std::fs::write(
-            root.join("targets/cursor/AGENTS.md"),
+            root.join("AGENTS.md"),
             "public contract\nUse tachi_staff(action='start') here.\n",
         )
         .expect("leaky target");
         // Keep exact projection parity out of this fixture.
-        let mut manifest = clean_manifest();
+        let mut manifest = projection_manifest();
         manifest["surfaces"][0]["targets"][0]["projection"] = json!("carrier-adapted");
         manifest["surfaces"][0]["targets"][0]["ownership_mode"] = json!("carrier-owned");
         write_manifest(&manifest_path, &manifest);
@@ -1401,7 +1607,7 @@ mod tests {
                 .findings
                 .iter()
                 .any(|finding| finding.check_kind == CHECK_AUDIENCE_LEAK
-                    && finding.target_path.as_deref() == Some("targets/cursor/AGENTS.md")),
+                    && finding.target_path.as_deref() == Some("AGENTS.md")),
             "{:?}",
             report.findings
         );
@@ -1412,15 +1618,12 @@ mod tests {
     #[test]
     fn generic_read_only_prose_is_not_a_private_marker() {
         let (root, manifest_path) = fixture("private-marker-boundary");
-        write_clean_tree(&root);
-        std::fs::write(root.join("AGENTS.md"), "This file is read-only.\n")
+        write_projection_tree(&root);
+        std::fs::write(root.join("PUBLIC.md"), "This file is read-only.\n")
             .expect("generic source");
-        std::fs::write(
-            root.join("targets/cursor/AGENTS.md"),
-            "This file is read-only.\n",
-        )
-        .expect("generic target");
-        write_manifest(&manifest_path, &clean_manifest());
+        std::fs::write(root.join("AGENTS.md"), "This file is read-only.\n")
+            .expect("generic target");
+        write_manifest(&manifest_path, &projection_manifest());
 
         let report = scan_drift_for_test(&manifest_path).expect("generic marker scan");
         assert!(
@@ -1438,13 +1641,10 @@ mod tests {
     #[test]
     fn private_marker_on_public_target_is_reported() {
         let (root, manifest_path) = fixture("public-target-private-marker");
-        write_clean_tree(&root);
-        std::fs::write(
-            root.join("targets/cursor/AGENTS.md"),
-            "This file is Claude-only.\n",
-        )
-        .expect("private marker target");
-        let mut manifest = clean_manifest();
+        write_projection_tree(&root);
+        std::fs::write(root.join("AGENTS.md"), "This file is Claude-only.\n")
+            .expect("private marker target");
+        let mut manifest = projection_manifest();
         manifest["surfaces"][0]["targets"][0]["projection"] = json!("carrier-adapted");
         manifest["surfaces"][0]["targets"][0]["ownership_mode"] = json!("carrier-owned");
         write_manifest(&manifest_path, &manifest);
@@ -1453,7 +1653,7 @@ mod tests {
         assert!(
             report.findings.iter().any(|finding| {
                 finding.check_kind == CHECK_CONTRADICTION
-                    && finding.target_path.as_deref() == Some("targets/cursor/AGENTS.md")
+                    && finding.target_path.as_deref() == Some("AGENTS.md")
             }),
             "{:?}",
             report.findings
@@ -1505,16 +1705,13 @@ mod tests {
     #[test]
     fn report_uses_the_scanned_content_snapshot() {
         let (root, manifest_path) = fixture("snapshot-content");
-        write_clean_tree(&root);
-        write_manifest(&manifest_path, &clean_manifest());
+        write_projection_tree(&root);
+        write_manifest(&manifest_path, &projection_manifest());
         let status = scan_instruction_manifest(&manifest_path).expect("status snapshot");
 
-        std::fs::write(root.join("AGENTS.md"), "mutated source\n").expect("mutate source");
-        std::fs::write(
-            root.join("targets/cursor/AGENTS.md"),
-            "different mutated target\n",
-        )
-        .expect("mutate target");
+        std::fs::write(root.join("PUBLIC.md"), "mutated source\n").expect("mutate source");
+        std::fs::write(root.join("AGENTS.md"), "different mutated target\n")
+            .expect("mutate target");
 
         let report = build_instruction_drift_report(&status).expect("snapshot report");
         assert!(
@@ -1551,7 +1748,9 @@ mod tests {
         std::fs::write(root.join("AGENTS.md"), "public contract\n").expect("source");
         std::fs::write(root.join("CLAUDE.md"), "private manual body\n").expect("source");
         let mut manifest = clean_manifest();
+        manifest["surfaces"][0]["direct_consumers"] = json!([]);
         manifest["surfaces"][0]["targets"] = json!([]);
+        manifest["surfaces"][1]["direct_consumers"] = json!([]);
         manifest["surfaces"][1]["targets"] = json!([]);
         write_manifest(&manifest_path, &manifest);
 
@@ -1583,6 +1782,7 @@ mod tests {
         // claude-private-manual stays readable but gets its own real
         // (source-scoped) finding, to prove "findings for the healthy
         // surfaces" literally, not just "the scan didn't error".
+        manifest["surfaces"][1]["direct_consumers"] = json!([]);
         manifest["surfaces"][1]["targets"] = json!([]);
         write_manifest(&manifest_path, &manifest);
 
