@@ -171,7 +171,7 @@ fn selected_health<'a>(health: &[&'a VaultKeyHealth]) -> Option<&'a VaultKeyHeal
     })
 }
 
-fn probe_observation(health: Option<&VaultKeyHealth>) -> (&'static str, Option<&str>) {
+fn probe_observation(health: Option<&VaultKeyHealth>) -> (&'static str, Option<String>) {
     let Some(health) = health else {
         return ("unknown", None);
     };
@@ -184,7 +184,8 @@ fn probe_observation(health: Option<&VaultKeyHealth>) -> (&'static str, Option<&
     let evidence_at = metadata
         .as_ref()
         .and_then(|value| value.get(EVIDENCE_AT_FIELD))
-        .and_then(serde_json::Value::as_str);
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
     if let Some(class) = match (evidence, outcome) {
         (Some(EvidenceKind::Probed), Some("success")) => Some("ok"),
         (Some(EvidenceKind::Probed), Some("auth_failed")) => Some("401"),
@@ -223,7 +224,8 @@ fn probe_observation(health: Option<&VaultKeyHealth>) -> (&'static str, Option<&
         health
             .last_attempt
             .as_deref()
-            .or(health.last_success.as_deref()),
+            .or(health.last_success.as_deref())
+            .map(str::to_string),
     )
 }
 
@@ -507,7 +509,7 @@ mod tests {
 
         let observation = probe_observation(Some(&unknown));
         assert_eq!(observation.0, "unknown");
-        assert_eq!(observation.1, Some(at(2).to_rfc3339().as_str()));
+        assert_eq!(observation.1.as_deref(), Some(at(2).to_rfc3339().as_str()));
         assert_eq!(unknown.last_error.as_deref(), Some("RAW_PROVIDER_BODY_SENTINEL"));
 
         let first_unknown = record_key_outcome(
@@ -522,7 +524,7 @@ mod tests {
         .health;
         let observation = probe_observation(Some(&first_unknown));
         assert_eq!(observation.0, "unknown");
-        assert_eq!(observation.1, Some(at(3).to_rfc3339().as_str()));
+        assert_eq!(observation.1.as_deref(), Some(at(3).to_rfc3339().as_str()));
     }
 
     #[test]
@@ -614,7 +616,7 @@ mod tests {
 
         let observation = probe_observation(selected_health(&rows));
         assert_eq!(observation.0, "ok");
-        assert_eq!(observation.1, Some(at(2).to_rfc3339().as_str()));
+        assert_eq!(observation.1.as_deref(), Some(at(2).to_rfc3339().as_str()));
     }
 
     #[test]
