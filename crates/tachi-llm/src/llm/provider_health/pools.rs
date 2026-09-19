@@ -1,5 +1,5 @@
 use super::*;
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 
 mod health_publication;
 use health_publication::{has_newly_unusable_health, preserve_newer_health_observations};
@@ -314,6 +314,25 @@ impl super::super::LlmClient {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .secrets
             .len()
+    }
+
+    /// Snapshot the live provider cache's logical-name-to-key-id bindings.
+    /// This exposes identity metadata only, never key material.
+    pub fn provider_secret_bindings_snapshot(&self) -> HashMap<String, BTreeSet<String>> {
+        let state = self
+            .provider_state
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state
+            .secrets
+            .iter()
+            .map(|(logical_name, entries)| {
+                (
+                    logical_name.clone(),
+                    entries.iter().map(|entry| entry.key_id.clone()).collect(),
+                )
+            })
+            .collect()
     }
 
     /// Whether the live provider cache binds one logical env name to one

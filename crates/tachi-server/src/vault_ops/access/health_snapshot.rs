@@ -2,9 +2,9 @@ use crate::server_state::MemoryServer;
 use memcore::vault::VaultKeyHealth;
 use std::collections::HashMap;
 
-pub(super) fn merged_provider_key_health(
-    server: &MemoryServer,
+pub(crate) fn merge_provider_key_health(
     rows: Vec<VaultKeyHealth>,
+    memory: HashMap<String, HashMap<String, VaultKeyHealth>>,
 ) -> HashMap<String, HashMap<String, VaultKeyHealth>> {
     let mut snapshot: HashMap<String, HashMap<String, VaultKeyHealth>> = HashMap::new();
     for row in rows {
@@ -15,7 +15,7 @@ pub(super) fn merged_provider_key_health(
     }
     // A runtime outcome must affect both direct-account and bound-slot reads
     // even before its asynchronous persistence completes.
-    for (logical_name, members) in server.llm.provider_health_memory_snapshot() {
+    for (logical_name, members) in memory {
         let target = snapshot.entry(logical_name).or_default();
         for (key_id, health) in members {
             let keep_in_memory = target
@@ -34,4 +34,11 @@ pub(super) fn merged_provider_key_health(
         }
     }
     snapshot
+}
+
+pub(super) fn merged_provider_key_health(
+    server: &MemoryServer,
+    rows: Vec<VaultKeyHealth>,
+) -> HashMap<String, HashMap<String, VaultKeyHealth>> {
+    merge_provider_key_health(rows, server.llm.provider_health_memory_snapshot())
 }

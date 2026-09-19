@@ -2300,7 +2300,7 @@ async fn vault_list_is_a_secret_negative_account_health_board() {
     let _lock = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let _binding = EnvRestore::set("EXTRACT_API_KEY", "vault:DEEPSEEK_API_KEY");
+    let _binding = EnvRestore::set("EXTRACT_API_KEY", "  vault:DEEPSEEK_API_KEY  ");
     let db_path = crate::utils::test_fixture_path(format!(
         "memory-server-vault-health-board-{}.sqlite",
         uuid::Uuid::new_v4()
@@ -2332,6 +2332,22 @@ async fn vault_list_is_a_secret_negative_account_health_board() {
     )
     .await
     .expect("set DeepSeek fixture");
+    handle_vault_set(
+        &server,
+        VaultSetParams {
+            name: "ANTHROPIC_API_KEY".to_string(),
+            value: "anthropic-secret-never-list".to_string(),
+            agent_id: None,
+            secret_type: "api_key".to_string(),
+            description: "typed unknown fixture".to_string(),
+            allowed_agents: None,
+            enable_rotation: false,
+            rotation_strategy: None,
+            rebind: false,
+        },
+    )
+    .await
+    .expect("set typed unknown fixture");
     handle_vault_set(
         &server,
         VaultSetParams {
@@ -2378,13 +2394,58 @@ async fn vault_list_is_a_secret_negative_account_health_board() {
         probed_at,
     )
     .health;
+    let unrelated_newer = record_key_outcome(
+        None,
+        "UNRELATED_POOL",
+        "DEEPSEEK_API_KEY",
+        TypedOutcome::Success,
+        EvidenceKind::Probed,
+        None,
+        probed_at + chrono::Duration::minutes(1),
+    )
+    .health;
+    let raw_error_sentinel = "RAW_PROVIDER_ERROR_BODY_MUST_NOT_LIST";
+    let prior_error = record_key_outcome(
+        None,
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_API_KEY",
+        TypedOutcome::Error,
+        EvidenceKind::Probed,
+        Some(raw_error_sentinel),
+        probed_at + chrono::Duration::minutes(2),
+    )
+    .health;
+    let unknown = record_key_outcome(
+        Some(&prior_error),
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_API_KEY",
+        TypedOutcome::Unknown,
+        EvidenceKind::Probed,
+        None,
+        probed_at + chrono::Duration::minutes(3),
+    )
+    .health;
     server
         .with_global_store(|store| {
             store
                 .vault_upsert_key_health(&exhausted)
+                .map_err(|error| error.to_string())?;
+            store
+                .vault_upsert_key_health(&unrelated_newer)
+                .map_err(|error| error.to_string())?;
+            store
+                .vault_upsert_key_health(&unknown)
                 .map_err(|error| error.to_string())
         })
-        .expect("seed 402 health");
+        .expect("seed exact-identity and unknown health");
+    server.llm.record_provider_key_result(
+        "EXTRACT_API_KEY",
+        "DEEPSEEK_API_KEY",
+        Some(200),
+        None,
+        None,
+        None,
+    );
 
     let listed = handle_vault_list(&server, VaultListParams { secret_type: None })
         .await
@@ -2406,6 +2467,15 @@ async fn vault_list_is_a_secret_negative_account_health_board() {
     assert_eq!(deepseek["alias_integrity"], "unusable");
     assert_eq!(deepseek["provider_kind"], "deepseek");
     assert!(deepseek["account_id"].as_str().is_some());
+
+    let anthropic = body["credentials"]
+        .as_array()
+        .expect("credentials")
+        .iter()
+        .find(|row| row["name"] == "ANTHROPIC_API_KEY")
+        .expect("typed unknown row");
+    assert_eq!(anthropic["last_probe_class"], "unknown");
+    assert_eq!(anthropic["last_probe_at"], "2026-09-19T08:18:00+00:00");
 
     let (account_fingerprint, auth_ref) = server
         .with_global_store_read(|store| {
@@ -2437,6 +2507,14 @@ async fn vault_list_is_a_secret_negative_account_health_board() {
         "secret value leaked: {listed}"
     );
     assert!(
+        !listed.contains("anthropic-secret-never-list"),
+        "secret value leaked: {listed}"
+    );
+    assert!(
+        !listed.contains(raw_error_sentinel),
+        "raw provider error leaked: {listed}"
+    );
+    assert!(
         !listed.contains(&account_fingerprint),
         "full fingerprint leaked: {listed}"
     );
@@ -2458,6 +2536,22 @@ async fn vault_list_is_a_secret_negative_account_health_board() {
             "forbidden field leaked: {listed}"
         );
     }
+
+    handle_vault_lock(&server).await.expect("lock Vault");
+    let locked = handle_vault_list(&server, VaultListParams { secret_type: None })
+        .await
+        .expect("list locked health board");
+    let locked: serde_json::Value = serde_json::from_str(&locked).expect("locked list JSON");
+    let locked_deepseek = locked["credentials"]
+        .as_array()
+        .expect("credentials")
+        .iter()
+        .find(|row| row["name"] == "DEEPSEEK_API_KEY")
+        .expect("locked DeepSeek row");
+    assert_eq!(
+        locked_deepseek["alias_integrity"], "unknown",
+        "a locked cache cannot prove alias integrity"
+    );
 }
 
 /// Pre-#1857 omitted types defaulted to `api_key`. Leftover

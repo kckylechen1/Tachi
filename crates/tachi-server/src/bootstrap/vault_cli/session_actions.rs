@@ -185,8 +185,8 @@ pub(super) async fn run_session_action(
                 &store,
                 app_home,
                 None,
-                false,
-                |_logical_name, _key_id| false,
+                Default::default(),
+                None,
             )?;
             super::output::print_vault_list_output(&payload.to_string())?;
             Ok(())
