@@ -1,5 +1,5 @@
 use crate::server_state::MemoryServer;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::path::{Component, Path};
 
 #[cfg(test)]
@@ -19,15 +19,60 @@ pub(super) enum ClassificationProvenance {
     Heuristic,
 }
 
-impl ClassificationProvenance {
-    pub(super) fn model_invocation_json(&self) -> Result<Option<String>, String> {
-        match self {
-            Self::Model(invocation) => serde_json::to_string(invocation)
+impl ClassifiedMetadata {
+    pub(super) fn is_model_derived(&self) -> bool {
+        matches!(&self.provenance, ClassificationProvenance::Model(_))
+    }
+
+    pub(super) fn unbound_model_invocation_json(&self) -> Result<Option<String>, String> {
+        match &self.provenance {
+            ClassificationProvenance::Model(invocation) => serde_json::to_string(invocation)
                 .map(Some)
                 .map_err(|error| format!("serialize docs classification invocation: {error}")),
-            Self::Heuristic => Ok(None),
+            ClassificationProvenance::Heuristic => Ok(None),
         }
     }
+
+    pub(super) fn bound_model_invocation_json(
+        &self,
+        object_id: &str,
+        revision: i64,
+    ) -> Result<Option<String>, String> {
+        match &self.provenance {
+            ClassificationProvenance::Model(invocation) => {
+                let category = self
+                    .category_path
+                    .strip_prefix("docs/")
+                    .unwrap_or(&self.category_path);
+                let payload = canonical_model_payload(category, &self.title, &self.summary)?;
+                let bound = invocation.bound_to_content(&payload, object_id, revision);
+                serde_json::to_string(&bound)
+                    .map(Some)
+                    .map_err(|error| format!("serialize bound docs classification invocation: {error}"))
+            }
+            ClassificationProvenance::Heuristic => Ok(None),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct CanonicalModelPayload<'a> {
+    category: &'a str,
+    title: &'a str,
+    summary: &'a str,
+}
+
+pub(super) fn canonical_model_payload(
+    category: &str,
+    title: &str,
+    summary: &str,
+) -> Result<String, String> {
+    serde_json::to_string(&CanonicalModelPayload {
+        category,
+        title,
+        summary,
+    })
+    .map_err(|error| format!("serialize canonical docs classification payload: {error}"))
 }
 
 #[derive(Deserialize)]
@@ -80,9 +125,11 @@ Respond ONLY with a JSON object. No markdown wrapping except the raw JSON conten
     {
         Ok(response)
             if response.invocation.completion_status()
-                == tachi_llm::CompletionStatusV1::Truncated =>
+                != tachi_llm::CompletionStatusV1::Complete =>
         {
-            tracing::warn!("[wiki_organize] LLM classification was truncated; falling back");
+            tracing::warn!(
+                "[wiki_organize] LLM classification lacked an explicit complete status; falling back"
+            );
             fallback_metadata(source_path, content)
         }
         Ok(response) => match parse_model_classification(&response.value) {
@@ -145,8 +192,9 @@ fn normalize_model_category(category: &str) -> Result<String, String> {
         {
             true
         }
-        [family, name, ..]
-            if matches!(family.as_str(), "product" | "agent") && !name.is_empty() =>
+        [family, name]
+            if matches!(family.as_str(), "product" | "agent")
+                && is_canonical_taxonomy_name(name) =>
         {
             true
         }
@@ -156,6 +204,10 @@ fn normalize_model_category(category: &str) -> Result<String, String> {
         return Err("category is outside the supported docs taxonomy".to_string());
     }
     Ok(format!("docs/{}", components.join("/")))
+}
+
+fn is_canonical_taxonomy_name(name: &str) -> bool {
+    !name.trim().is_empty() && name.trim() == name && name.to_lowercase() == name
 }
 
 fn normalize_model_scalar(
@@ -255,11 +307,11 @@ mod tests {
 
     #[test]
     fn model_metadata_validation_distinguishes_safe_and_unsafe_outputs() {
-        let safe = r#"{"category_path":" docs/product/hyperion/decisions/ ","title":"Hyperion Design","summary":"A bounded summary"}"#;
+        let safe = r#"{"category_path":" docs/product/hyperion/ ","title":"Hyperion Design","summary":"A bounded summary"}"#;
         assert_eq!(
             parse_model_classification(safe).unwrap(),
             (
-                "docs/product/hyperion/decisions".to_string(),
+                "docs/product/hyperion".to_string(),
                 "Hyperion Design".to_string(),
                 "A bounded summary".to_string(),
             )
@@ -270,6 +322,9 @@ mod tests {
             r#"{"category_path":"docs/archive","title":"Safe","summary":"Safe"}"#,
             r#"{"category_path":"docs/engineering/devops","title":"line\nbreak","summary":"Safe"}"#,
             r#"{"category_path":"docs/engineering/devops","title":"Safe"}"#,
+            r#"{"category_path":"docs/product/Hyperion","title":"Safe","summary":"Safe"}"#,
+            r#"{"category_path":"docs/product/hyperion/decisions","title":"Safe","summary":"Safe"}"#,
+            r#"{"category_path":"docs/agent/   ","title":"Safe","summary":"Safe"}"#,
         ] {
             assert!(
                 parse_model_classification(unsafe_response).is_err(),

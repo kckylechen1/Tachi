@@ -1,4 +1,6 @@
-use super::classify::classify_and_extract_metadata;
+use super::classify::{
+    canonical_model_payload, classify_and_extract_metadata, ClassifiedMetadata,
+};
 use super::frontmatter::{parse_frontmatter, serialize_representable_frontmatter, Frontmatter};
 use super::paths::{is_archive_dir, is_markdown_file};
 use super::tasks::sync_tasks_in_content;
@@ -276,6 +278,20 @@ impl AuthorizedDocs {
         Ok(path)
     }
 
+    fn repo_relative_document_id(&self, path: &Path) -> Result<String, String> {
+        self.validate_contained_path(path)?;
+        let relative = path.strip_prefix(&self.worktree_root).map_err(|_| {
+            format!(
+                "Refusing Wiki organize: protected invariant: document '{}' is not repo-relative",
+                path.display()
+            )
+        })?;
+        let value = relative.to_str().ok_or_else(|| {
+            "Refusing Wiki organize: protected invariant: document identity is not UTF-8".to_string()
+        })?;
+        Ok(value.replace('\\', "/"))
+    }
+
     fn optional_file(
         &self,
         path: &Path,
@@ -374,6 +390,19 @@ impl AuthorizedDocs {
                     path.display()
                 ));
             }
+            // A prior attempt may have created this entry but failed before
+            // syncing its parent. Re-prove the complete directory chain on
+            // retry before a destination inside it can become durable.
+            if path != self.docs_root {
+                let parent = path.parent().ok_or_else(|| {
+                    format!(
+                        "Refusing Wiki organize: protected invariant: directory '{}' has no parent",
+                        path.display()
+                    )
+                })?;
+                let parent_identity = self.ensure_directory(parent)?;
+                self.sync_directory(parent, &parent_identity, "existing directory parent")?;
+            }
             return Ok(identity);
         }
         let parent = path.parent().ok_or_else(|| {
@@ -385,6 +414,10 @@ impl AuthorizedDocs {
         let parent_identity = self.ensure_directory(parent)?;
         self.revalidate_roots()?;
         self.revalidate_object(parent, &parent_identity, true, "destination parent")?;
+        #[cfg(test)]
+        if run_organize_test_hook(OrganizeTestPoint::DirectoryCreateFailure, path) {
+            return Err("Failed to create directory: injected mkdir failure".to_string());
+        }
         fs::create_dir(path)
             .map_err(|error| format!("Failed to create directory '{}': {error}", path.display()))?;
         self.revalidate_roots()?;
@@ -401,6 +434,12 @@ impl AuthorizedDocs {
                 path.display()
             ));
         }
+        #[cfg(test)]
+        if run_organize_test_hook(OrganizeTestPoint::DirectoryParentSyncFailure, path) {
+            return Err("Failed to sync created directory parent: injected sync failure".to_string());
+        }
+        self.sync_directory(parent, &parent_identity, "created directory parent")?;
+        self.revalidate_object(path, &identity, true, "created directory")?;
         Ok(identity)
     }
 
@@ -772,13 +811,31 @@ impl AuthorizedDocs {
                 destination.display()
             )
         })?;
-        self.sync_directory(
-            source_parent,
-            &source_parent_identity,
-            "rename source parent",
-        )?;
-        if source_parent != parent {
+        if source_parent == parent {
+            self.sync_directory(
+                source_parent,
+                &source_parent_identity,
+                "rename source and destination parent",
+            )?;
+        } else {
+            #[cfg(test)]
+            if run_organize_test_hook(
+                OrganizeTestPoint::RenameDestinationParentSyncFailure,
+                parent,
+            ) {
+                return Err(
+                    "Failed to sync rename destination parent: injected sync failure".to_string(),
+                );
+            }
             self.sync_directory(parent, destination_parent, "rename destination parent")?;
+            // The destination entry is durable before the source deletion is
+            // made durable. Reversing these fsyncs can lose both names after
+            // a crash even though rename returned successfully.
+            self.sync_directory(
+                source_parent,
+                &source_parent_identity,
+                "rename source parent",
+            )?;
         }
         self.revalidate_object(destination, source_identity, false, "renamed destination")?;
         Ok(())
@@ -1062,7 +1119,10 @@ pub(crate) enum OrganizeTestPoint {
     NewFileSyncFailure,
     ExistingFileWriteFailure,
     ExistingFileRenameFailure,
+    DirectoryCreateFailure,
+    DirectoryParentSyncFailure,
     RenameFileFailure,
+    RenameDestinationParentSyncFailure,
     SourceRemovalFailure,
 }
 
@@ -1234,6 +1294,120 @@ fn collect_markdown_files(
     }
     markdown.sort_by(|left, right| left.0.cmp(&right.0));
     Ok(markdown)
+}
+
+fn next_model_receipt_revision(
+    previous_content: Option<&str>,
+    object_id: &str,
+) -> Result<i64, String> {
+    let Some(previous_content) = previous_content else {
+        return Ok(1);
+    };
+    let (Some(frontmatter), _) = parse_frontmatter(previous_content) else {
+        return Ok(1);
+    };
+    let Some(receipt_json) = frontmatter.model_invocation_v1.as_deref() else {
+        return Ok(1);
+    };
+    let Ok(receipt) = serde_json::from_str::<serde_json::Value>(receipt_json) else {
+        return Ok(1);
+    };
+    let Some(receipt) = receipt.as_object() else {
+        return Ok(1);
+    };
+    let binding_keys = ["content_hash", "memory_id", "revision"];
+    if !binding_keys.iter().any(|key| receipt.contains_key(*key)) {
+        return Ok(1);
+    }
+    let prior_hash = receipt
+        .get("content_hash")
+        .and_then(serde_json::Value::as_str);
+    let prior_object_id = receipt.get("memory_id").and_then(serde_json::Value::as_str);
+    let prior_revision = receipt.get("revision").and_then(serde_json::Value::as_i64);
+    if receipt.get("schema").and_then(serde_json::Value::as_str)
+        != Some("model-invocation-v1")
+        || prior_hash.is_none()
+        || prior_object_id != Some(object_id)
+        || prior_revision.is_none_or(|revision| revision < 1)
+    {
+        return Err(
+            "Refusing Wiki organize: protected invariant: existing model receipt binding is incomplete or does not match the final document identity"
+                .to_string(),
+        );
+    }
+    let category = frontmatter.category.as_deref().ok_or_else(|| {
+        "Refusing Wiki organize: protected invariant: bound model receipt has no category"
+            .to_string()
+    })?;
+    let title = frontmatter.title.as_deref().ok_or_else(|| {
+        "Refusing Wiki organize: protected invariant: bound model receipt has no title".to_string()
+    })?;
+    let summary = frontmatter.summary.as_deref().ok_or_else(|| {
+        "Refusing Wiki organize: protected invariant: bound model receipt has no summary"
+            .to_string()
+    })?;
+    let payload = canonical_model_payload(category, title, summary)?;
+    let expected_hash =
+        tachi_llm::PersistedModelInvocationReceiptV1::content_hash_for(&payload);
+    if prior_hash != Some(expected_hash.as_str()) {
+        return Err(
+            "Refusing Wiki organize: protected invariant: existing model receipt content binding does not match its category/title/summary"
+                .to_string(),
+        );
+    }
+    prior_revision
+        .expect("validated bound receipt revision")
+        .checked_add(1)
+        .ok_or_else(|| {
+            "Refusing Wiki organize: protected invariant: model receipt revision overflow"
+                .to_string()
+        })
+}
+
+fn render_persisted_document(
+    frontmatter: &Frontmatter,
+    classification: Option<&ClassifiedMetadata>,
+    body: &str,
+    object_id: &str,
+    model_revision: Option<i64>,
+) -> Result<String, String> {
+    let mut frontmatter = frontmatter.clone();
+    if let Some(classified) = classification {
+        frontmatter.model_invocation_v1 = classified
+            .bound_model_invocation_json(object_id, model_revision.unwrap_or(1))?;
+    }
+    Ok(format!(
+        "{}{}",
+        serialize_representable_frontmatter(&frontmatter)?,
+        body
+    ))
+}
+
+fn model_revision_for_publication(
+    classification: Option<&ClassifiedMetadata>,
+    previous_content: Option<&str>,
+    object_id: &str,
+) -> Result<Option<i64>, String> {
+    classification
+        .filter(|classified| classified.is_model_derived())
+        .map(|_| next_model_receipt_revision(previous_content, object_id))
+        .transpose()
+}
+
+fn render_preview_document(
+    frontmatter: &Frontmatter,
+    classification: Option<&ClassifiedMetadata>,
+    body: &str,
+) -> Result<String, String> {
+    let mut frontmatter = frontmatter.clone();
+    if let Some(classified) = classification {
+        frontmatter.model_invocation_v1 = classified.unbound_model_invocation_json()?;
+    }
+    Ok(format!(
+        "{}{}",
+        serialize_representable_frontmatter(&frontmatter)?,
+        body
+    ))
 }
 
 /// 执行 docs 整理与索引生成的核心主流程
@@ -1453,18 +1627,18 @@ pub(crate) async fn handle_wiki_organize(
 
         // 保证 category 正确且同步
         fm.category = Some(dest_rel_dir.to_string());
-        if let Some(classified) = classification {
-            fm.title = Some(classified.title);
-            fm.summary = Some(classified.summary);
-            // A heuristic replacement deliberately clears stale model
-            // provenance; an accepted model result installs its exact typed
-            // receipt before final bytes are assembled.
-            fm.model_invocation_v1 = classified.provenance.model_invocation_json()?;
+        if let Some(classified) = classification.as_ref() {
+            fm.title = Some(classified.title.clone());
+            fm.summary = Some(classified.summary.clone());
+            // Clear stale provenance now. A model receipt is bound only after
+            // conflict handling determines the final surviving path.
+            fm.model_invocation_v1 = None;
         }
 
         // 就地任务状态检测与勾选
         let (new_body, task_modified) = sync_tasks_in_content(server, body);
-        let final_content = format!("{}{}", serialize_representable_frontmatter(&fm)?, new_body);
+        let preview_content =
+            render_preview_document(&fm, classification.as_ref(), &new_body)?;
 
         if task_modified {
             synced_count += 1;
@@ -1473,7 +1647,7 @@ pub(crate) async fn handle_wiki_organize(
         // 如果物理路径不需要移动 (即已经在标准目录，且目的地一致)
         if is_already_categorized && path == dest_path {
             if dry_run {
-                if final_content != content {
+                if preview_content != content {
                     log_messages.push(format!(
                         "[dry-run] Would sync tasks/frontmatter in-place: '{}'",
                         relative_str
@@ -1482,6 +1656,19 @@ pub(crate) async fn handle_wiki_organize(
                 continue;
             }
             // 只写入可能更新后的内容（就地勾选/Frontmatter 补齐）
+            let object_id = authorized.repo_relative_document_id(&path)?;
+            let model_revision = model_revision_for_publication(
+                classification.as_ref(),
+                Some(&content),
+                &object_id,
+            )?;
+            let final_content = render_persisted_document(
+                &fm,
+                classification.as_ref(),
+                &new_body,
+                &object_id,
+                model_revision,
+            )?;
             authorized.write_existing_file(&path, &source_identity, &final_content)?;
             log_messages.push(format!(
                 "Synced tasks/frontmatter in-place: '{}'",
@@ -1538,6 +1725,23 @@ pub(crate) async fn handle_wiki_organize(
 
                 if mtime_src >= mtime_dest {
                     // 源文件（当前文件）更新，覆盖 dest，并将 dest 上的旧文件移至 archive
+                    let previous_destination = if classification
+                        .as_ref()
+                        .is_some_and(|classified| classified.is_model_derived())
+                    {
+                        Some(authorized.read_text(
+                            &dest_path,
+                            &dest_identity,
+                        )?)
+                    } else {
+                        None
+                    };
+                    let object_id = authorized.repo_relative_document_id(&dest_path)?;
+                    let model_revision = model_revision_for_publication(
+                        classification.as_ref(),
+                        previous_destination.as_deref(),
+                        &object_id,
+                    )?;
                     let (archive_path, archive_filename) =
                         authorized.unique_archive_target(&archive_dir, &stem)?;
 
@@ -1546,6 +1750,13 @@ pub(crate) async fn handle_wiki_organize(
                         &dest_identity,
                         &archive_path,
                         &archive_identity,
+                    )?;
+                    let final_content = render_persisted_document(
+                        &fm,
+                        classification.as_ref(),
+                        &new_body,
+                        &object_id,
+                        model_revision,
                     )?;
                     authorized.write_new_file(&dest_path, &final_content)?;
                     authorized.remove_file(&path, &source_identity)?;
@@ -1560,6 +1771,19 @@ pub(crate) async fn handle_wiki_organize(
                     let (archive_path, archive_filename) =
                         authorized.unique_archive_target(&archive_dir, &stem)?;
 
+                    let object_id = authorized.repo_relative_document_id(&archive_path)?;
+                    let model_revision = model_revision_for_publication(
+                        classification.as_ref(),
+                        None,
+                        &object_id,
+                    )?;
+                    let final_content = render_persisted_document(
+                        &fm,
+                        classification.as_ref(),
+                        &new_body,
+                        &object_id,
+                        model_revision,
+                    )?;
                     authorized.write_new_file(&archive_path, &final_content)?;
                     authorized.remove_file(&path, &source_identity)?;
 
@@ -1570,6 +1794,19 @@ pub(crate) async fn handle_wiki_organize(
                 }
             } else {
                 // 无同名冲突，直接写新路径，删旧路径
+                let object_id = authorized.repo_relative_document_id(&dest_path)?;
+                let model_revision = model_revision_for_publication(
+                    classification.as_ref(),
+                    None,
+                    &object_id,
+                )?;
+                let final_content = render_persisted_document(
+                    &fm,
+                    classification.as_ref(),
+                    &new_body,
+                    &object_id,
+                    model_revision,
+                )?;
                 authorized.write_new_file(&dest_path, &final_content)?;
                 authorized.remove_file(&path, &source_identity)?;
                 log_messages.push(format!("Moved '{}' to '{}'", relative_str, dest_rel_path));
