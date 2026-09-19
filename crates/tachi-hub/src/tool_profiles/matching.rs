@@ -108,14 +108,18 @@ pub fn tool_visible(
         if !matches_any_pattern(tool_name, STANDARD_MINIMAL_TOOL_PATTERNS.iter().copied()) {
             return false;
         }
-    } else if profile.uses_delegate_allow_list()
-        && !matches_any_pattern(tool_name, DELEGATE_MINIMAL_TOOL_PATTERNS.iter().copied())
-    {
-        return false;
-    } else if !profile.allows(ToolBundle::Operate)
-        && !matches_any_pattern(tool_name, STANDARD_MINIMAL_TOOL_PATTERNS.iter().copied())
-    {
-        return false;
+    } else {
+        let delegate = profile.uses_delegate_allow_list();
+        let patterns = if delegate {
+            DELEGATE_MINIMAL_TOOL_PATTERNS
+        } else {
+            STANDARD_MINIMAL_TOOL_PATTERNS
+        };
+        if (delegate || !profile.allows(ToolBundle::Operate))
+            && !matches_any_pattern(tool_name, patterns.iter().copied())
+        {
+            return false;
+        }
     }
 
     profile.allows(ToolBundle::Observe)
