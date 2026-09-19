@@ -6,6 +6,10 @@
 //! params, transport headers, environment variables, display names, and model
 //! labels cannot construct either the verifier or its result.
 
+// #1938 deliberately lands the typed server port before #1170 supplies its
+// production provider adapter; the whole module becomes live through that adapter.
+#![cfg_attr(not(test), allow(dead_code))]
+
 use chrono::{DateTime, Duration, Utc};
 
 use crate::server_state::MemoryServer;
@@ -110,7 +114,6 @@ fn validate_verified_evidence(
 /// and has no handler, tool parameter, header, or environment-variable route.
 /// Exact replay returns the original receipt; conflicts and invalid evidence
 /// leave the prior append-only history untouched.
-#[allow(dead_code)] // First typed adapter port; #1170 supplies the production verifier.
 pub(crate) fn admit_verified_agent_connection(
     server: &MemoryServer,
     request: &VerifiedAdmissionRequest,
