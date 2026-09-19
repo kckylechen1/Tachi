@@ -2292,6 +2292,150 @@ fn plant_vault_secret(server: &MemoryServer, name: &str, value: &str, secret_typ
     .unwrap_or_else(|e| panic!("plant {name}: {e}"));
 }
 
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn vault_list_is_a_secret_negative_account_health_board() {
+    use memcore::vault::health::{record_key_outcome, EvidenceKind, TypedOutcome};
+
+    let _lock = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _binding = EnvRestore::set("EXTRACT_API_KEY", "vault:DEEPSEEK_API_KEY");
+    let db_path = crate::utils::test_fixture_path(format!(
+        "memory-server-vault-health-board-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let server = MemoryServer::new(db_path, None).expect("create test server");
+    handle_vault_init(
+        &server,
+        VaultInitParams {
+            password: "health-board-password".to_string(),
+        },
+    )
+    .await
+    .expect("vault init");
+
+    let secret_sentinel = "tachi-fixture-secret-never-list";
+    handle_vault_set(
+        &server,
+        VaultSetParams {
+            name: "DEEPSEEK_API_KEY".to_string(),
+            value: secret_sentinel.to_string(),
+            agent_id: None,
+            secret_type: "api_key".to_string(),
+            description: "official DeepSeek".to_string(),
+            allowed_agents: None,
+            enable_rotation: false,
+            rotation_strategy: None,
+            rebind: false,
+        },
+    )
+    .await
+    .expect("set DeepSeek fixture");
+    handle_vault_set(
+        &server,
+        VaultSetParams {
+            name: "EXTRACT_API_KEY".to_string(),
+            value: secret_sentinel.to_string(),
+            agent_id: None,
+            secret_type: "api_key".to_string(),
+            description: "extract lane slot".to_string(),
+            allowed_agents: None,
+            enable_rotation: false,
+            rotation_strategy: None,
+            rebind: false,
+        },
+    )
+    .await
+    .expect("bind extract slot to DeepSeek account");
+    handle_vault_set(
+        &server,
+        VaultSetParams {
+            name: "LEGACY_DESCRIPTION_ONLY".to_string(),
+            value: "another-secret-never-list".to_string(),
+            agent_id: None,
+            secret_type: "json_blob".to_string(),
+            description: "description-only leftover".to_string(),
+            allowed_agents: None,
+            enable_rotation: false,
+            rotation_strategy: None,
+            rebind: false,
+        },
+    )
+    .await
+    .expect("set legacy fixture");
+
+    let probed_at = chrono::DateTime::parse_from_rfc3339("2026-09-19T08:15:00Z")
+        .expect("fixed timestamp")
+        .with_timezone(&chrono::Utc);
+    let exhausted = record_key_outcome(
+        None,
+        "DEEPSEEK_API_KEY",
+        "DEEPSEEK_API_KEY",
+        TypedOutcome::Exhausted,
+        EvidenceKind::Probed,
+        None,
+        probed_at,
+    )
+    .health;
+    server
+        .with_global_store(|store| {
+            store
+                .vault_upsert_key_health(&exhausted)
+                .map_err(|error| error.to_string())
+        })
+        .expect("seed 402 health");
+
+    let listed = handle_vault_list(&server, VaultListParams { secret_type: None })
+        .await
+        .expect("list health board");
+    let body: serde_json::Value = serde_json::from_str(&listed).expect("list JSON");
+    let deepseek = body["credentials"]
+        .as_array()
+        .expect("credentials")
+        .iter()
+        .find(|row| row["name"] == "DEEPSEEK_API_KEY")
+        .expect("DeepSeek row");
+    assert_eq!(deepseek["secret_type"], "api_key");
+    assert_eq!(deepseek["bound_slots"], serde_json::json!(["EXTRACT_API_KEY"]));
+    assert_eq!(deepseek["last_probe_class"], "402");
+    assert_eq!(deepseek["last_probe_at"], "2026-09-19T08:15:00+00:00");
+    assert_eq!(deepseek["alias_integrity"], "unusable");
+    assert_eq!(deepseek["provider_kind"], "deepseek");
+    assert!(deepseek["account_id"].as_str().is_some());
+
+    let (account_fingerprint, auth_ref) = server
+        .with_global_store_read(|store| {
+            let account = memcore::db::list_provider_accounts(store.connection())
+                .map_err(|error| error.to_string())?
+                .into_iter()
+                .find(|account| account.provider_kind == "deepseek")
+                .ok_or_else(|| "DeepSeek account metadata missing".to_string())?;
+            Ok((account.account_fingerprint, account.auth_ref))
+        })
+        .expect("read private account identifiers");
+
+    let legacy = body["credentials"]
+        .as_array()
+        .expect("credentials")
+        .iter()
+        .find(|row| row["name"] == "LEGACY_DESCRIPTION_ONLY")
+        .expect("legacy description-only row");
+    assert_eq!(legacy["description"], "description-only leftover");
+    assert_eq!(legacy["last_probe_class"], "unknown");
+    assert!(legacy["last_probe_at"].is_null());
+
+    assert!(!listed.contains(secret_sentinel), "secret value leaked: {listed}");
+    assert!(!listed.contains("another-secret-never-list"), "secret value leaked: {listed}");
+    assert!(!listed.contains(&account_fingerprint), "full fingerprint leaked: {listed}");
+    if let Some(auth_ref) = auth_ref {
+        assert!(!listed.contains(&auth_ref), "custody reference leaked: {listed}");
+    }
+    for forbidden_field in ["encrypted_value", "nonce", "secret_length", "metadata", "last_error"] {
+        assert!(!listed.contains(forbidden_field), "forbidden field leaked: {listed}");
+    }
+}
+
 /// Pre-#1857 omitted types defaulted to `api_key`. Leftover
 /// `EXTRACT_BASE_URL` rows must list as config. Explicit `config` on a
 /// non-lane-config name (`CUSTOM_ENDPOINT`) must still refuse to lease.

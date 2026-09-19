@@ -316,6 +316,17 @@ impl super::super::LlmClient {
             .len()
     }
 
+    /// Whether the live provider cache binds one logical env name to one
+    /// concrete Vault key id. This exposes identity only, never key material.
+    pub fn has_provider_secret_binding(&self, logical_name: &str, key_id: &str) -> bool {
+        self.provider_state
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .secrets
+            .get(logical_name)
+            .is_some_and(|entries| entries.iter().any(|entry| entry.key_id == key_id))
+    }
+
     #[cfg(test)]
     pub(crate) fn seed_provider_operational_state_for_tests(
         &self,

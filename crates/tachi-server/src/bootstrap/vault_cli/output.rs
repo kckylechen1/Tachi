@@ -3,6 +3,12 @@ pub(super) struct VaultListRow {
     pub name: String,
     pub secret_type: String,
     pub description: String,
+    pub bound_slots: Vec<String>,
+    pub last_probe_class: String,
+    pub last_probe_at: Option<String>,
+    pub alias_integrity: String,
+    pub provider_kind: Option<String>,
+    pub account_id: Option<String>,
 }
 
 fn json_list_row(entry: &serde_json::Value) -> VaultListRow {
@@ -22,6 +28,38 @@ fn json_list_row(entry: &serde_json::Value) -> VaultListRow {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string(),
+        bound_slots: entry
+            .get("bound_slots")
+            .and_then(|value| value.as_array())
+            .map(|slots| {
+                slots
+                    .iter()
+                    .filter_map(|slot| slot.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        last_probe_class: entry
+            .get("last_probe_class")
+            .and_then(|value| value.as_str())
+            .unwrap_or("unknown")
+            .to_string(),
+        last_probe_at: entry
+            .get("last_probe_at")
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
+        alias_integrity: entry
+            .get("alias_integrity")
+            .and_then(|value| value.as_str())
+            .unwrap_or("unknown")
+            .to_string(),
+        provider_kind: entry
+            .get("provider_kind")
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
+        account_id: entry
+            .get("account_id")
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
     }
 }
 
@@ -68,12 +106,36 @@ pub(super) fn format_vault_list_groups(
         }
         out.push_str(title);
         out.push('\n');
-        out.push_str(&format!("{:<30} {:<12} DESCRIPTION\n", "NAME", "TYPE"));
-        for row in rows {
-            out.push_str(&format!(
-                "{:<30} {:<12} {}\n",
-                row.name, row.secret_type, row.description
-            ));
+        if title == "CONFIG" {
+            out.push_str(&format!("{:<30} {:<12} DESCRIPTION\n", "NAME", "TYPE"));
+            for row in rows {
+                out.push_str(&format!(
+                    "{:<30} {:<12} {}\n",
+                    row.name, row.secret_type, row.description
+                ));
+            }
+        } else {
+            out.push_str(
+                "NAME\tTYPE\tBOUND SLOTS\tPROBE\tLAST PROBE AT\tINTEGRITY\tPROVIDER\tACCOUNT\tDESCRIPTION\n",
+            );
+            for row in rows {
+                out.push_str(&format!(
+                    "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+                    row.name,
+                    row.secret_type,
+                    if row.bound_slots.is_empty() {
+                        "-".to_string()
+                    } else {
+                        row.bound_slots.join(",")
+                    },
+                    row.last_probe_class,
+                    row.last_probe_at.as_deref().unwrap_or("-"),
+                    row.alias_integrity,
+                    row.provider_kind.as_deref().unwrap_or("-"),
+                    row.account_id.as_deref().unwrap_or("-"),
+                    row.description,
+                ));
+            }
         }
     };
     write_section("CONFIG", config);
@@ -524,6 +586,12 @@ mod tests {
             name: name.to_string(),
             secret_type: secret_type.to_string(),
             description: description.to_string(),
+            bound_slots: Vec::new(),
+            last_probe_class: "unknown".to_string(),
+            last_probe_at: None,
+            alias_integrity: "unknown".to_string(),
+            provider_kind: None,
+            account_id: None,
         }
     }
 
@@ -538,6 +606,25 @@ mod tests {
         assert!(text.contains("EXTRACT_BASE_URL"), "{text}");
         assert!(text.contains("DEEPSEEK_API_KEY"), "{text}");
         assert!(text.contains("1 config, 1 credential (2 total)."), "{text}");
+    }
+
+    #[test]
+    fn format_vault_list_credentials_renders_health_board_columns() {
+        let mut credential = row("DEEPSEEK_API_KEY", "api_key", "official DeepSeek");
+        credential.bound_slots = vec!["EXTRACT_API_KEY".to_string()];
+        credential.last_probe_class = "402".to_string();
+        credential.last_probe_at = Some("2026-09-19T08:15:00+00:00".to_string());
+        credential.alias_integrity = "unusable".to_string();
+        credential.provider_kind = Some("deepseek".to_string());
+        credential.account_id = Some("account-redacted-label".to_string());
+
+        let text = format_vault_list_groups(&[], &[credential]);
+        assert!(text.contains("BOUND SLOTS\tPROBE\tLAST PROBE AT\tINTEGRITY"), "{text}");
+        assert!(
+            text.contains("EXTRACT_API_KEY\t402\t2026-09-19T08:15:00+00:00\tunusable"),
+            "{text}"
+        );
+        assert!(text.contains("deepseek\taccount-redacted-label"), "{text}");
     }
 
     #[test]

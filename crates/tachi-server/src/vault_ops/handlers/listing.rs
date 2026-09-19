@@ -1,4 +1,322 @@
 use super::*;
+use std::collections::{BTreeSet, HashMap};
+use std::path::Path;
+
+use chrono::Utc;
+use memcore::vault::accounts::{AccountCustody, CustodyKind, ProviderAccount};
+use memcore::vault::health::{
+    EvidenceKind, EVIDENCE_OUTCOME_FIELD, HEALTH_STATUS_AUTH_FAILED, HEALTH_STATUS_EXHAUSTED,
+    HEALTH_STATUS_OK,
+};
+use memcore::vault::{VaultEntry, VaultKeyHealth};
+
+struct AccountBinding {
+    account: ProviderAccount,
+    custody: AccountCustody,
+    aliases: Vec<memcore::vault::accounts::ProviderAccountAlias>,
+}
+
+fn effective_vault_alias_bindings(resolved_home: &Path) -> HashMap<String, BTreeSet<String>> {
+    let mut configured = crate::provider_config::collect_config_env_values(Some(resolved_home));
+    configured.extend(std::env::vars());
+
+    let mut by_target: HashMap<String, BTreeSet<String>> = HashMap::new();
+    for (slot, value) in configured {
+        if !crate::vault_ops::is_lane_slot_secret_name(&slot) {
+            continue;
+        }
+        if let Some(target) = tachi_llm::parse_vault_alias(&value) {
+            by_target
+                .entry(target.to_string())
+                .or_default()
+                .insert(slot);
+        }
+    }
+    by_target
+}
+
+fn account_bindings(store: &memcore::MemoryStore) -> Result<Vec<AccountBinding>, String> {
+    let mut bindings = Vec::new();
+    let accounts = memcore::db::list_provider_accounts(store.connection())
+        .map_err(|error| format!("Failed to list provider accounts: {error}"))?;
+    for account in accounts {
+        if account.status != memcore::vault::accounts::ACCOUNT_STATUS_ACTIVE {
+            continue;
+        }
+        let Some(custody) = memcore::db::get_account_custody(
+            store.connection(),
+            &account.account_id,
+        )
+        .map_err(|error| format!("Failed to read provider account custody: {error}"))?
+        else {
+            continue;
+        };
+        let aliases = memcore::db::list_provider_account_aliases(
+            store.connection(),
+            &account.account_id,
+        )
+        .map_err(|error| format!("Failed to list provider account aliases: {error}"))?;
+        bindings.push(AccountBinding {
+            account,
+            custody,
+            aliases,
+        });
+    }
+    Ok(bindings)
+}
+
+fn custody_contains_entry(custody: &AccountCustody, entry_name: &str) -> bool {
+    match custody.custody_kind {
+        CustodyKind::VaultEntry => custody.custody_target == entry_name,
+        CustodyKind::VaultRotationPool => {
+            memcore::vault::api_key_pool_member_index(entry_name, &custody.custody_target).is_some()
+        }
+    }
+}
+
+fn latest_health<'a>(
+    entry_name: &str,
+    health_rows: &'a [VaultKeyHealth],
+) -> Option<&'a VaultKeyHealth> {
+    health_rows
+        .iter()
+        .filter(|health| health.key_id == entry_name)
+        .max_by(|left, right| {
+            left.last_attempt
+                .as_deref()
+                .unwrap_or(left.updated_at.as_str())
+                .cmp(
+                    right
+                        .last_attempt
+                        .as_deref()
+                        .unwrap_or(right.updated_at.as_str()),
+                )
+        })
+}
+
+fn health_evidence_outcome(health: &VaultKeyHealth) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(&health.metadata)
+        .ok()?
+        .get(EVIDENCE_OUTCOME_FIELD)?
+        .as_str()
+        .map(str::to_string)
+}
+
+fn last_probe_class(health: Option<&VaultKeyHealth>) -> &'static str {
+    let Some(health) = health else {
+        return "unknown";
+    };
+    if health.disabled {
+        return "disabled";
+    }
+    if health
+        .last_error
+        .as_deref()
+        .is_some_and(|error| error.to_ascii_lowercase().contains("empty assistant content"))
+    {
+        return "empty_content";
+    }
+
+    let evidence = EvidenceKind::from_metadata(&health.metadata);
+    let outcome = health_evidence_outcome(health);
+    match (evidence, outcome.as_deref()) {
+        (Some(EvidenceKind::Probed), Some("success")) => "ok",
+        (Some(EvidenceKind::Probed), Some("auth_failed")) => "401",
+        (Some(EvidenceKind::Probed), Some("exhausted")) => "402",
+        (Some(EvidenceKind::SelfReported), Some("success")) => "ok",
+        (Some(EvidenceKind::SelfReported), Some("auth_failed")) => "auth_failed",
+        _ if health.auth_failed || health.status == HEALTH_STATUS_AUTH_FAILED => "auth_failed",
+        _ if health.status == HEALTH_STATUS_EXHAUSTED => "402",
+        _ if health.status == HEALTH_STATUS_OK
+            && (health.last_attempt.is_some() || health.last_success.is_some()) =>
+        {
+            "ok"
+        }
+        _ => "unknown",
+    }
+}
+
+fn account_secret_type(secret_type: &str) -> bool {
+    matches!(
+        secret_type,
+        memcore::vault::SECRET_TYPE_API_KEY
+            | memcore::vault::SECRET_TYPE_OAUTH_TOKEN
+            | memcore::vault::SECRET_TYPE_JSON_BLOB
+            | memcore::vault::SECRET_TYPE_COOKIE
+    )
+}
+
+fn is_model_provider_account(name: &str) -> bool {
+    let account_name = tachi_llm::parse_rotation_member_name(name)
+        .map(|(prefix, _)| prefix)
+        .unwrap_or(name);
+    crate::status_ops::status_health::account_class_for_env_name(account_name)
+        == Some(memcore::AccountClass::ModelApi)
+}
+
+fn alias_integrity(
+    entry: &VaultEntry,
+    secret_type: &str,
+    health: Option<&VaultKeyHealth>,
+    bound_slots: &BTreeSet<String>,
+    runtime_available: bool,
+    runtime_binding: &impl Fn(&str, &str) -> bool,
+) -> &'static str {
+    if bound_slots.is_empty() {
+        return "unknown";
+    }
+    if secret_type != memcore::vault::SECRET_TYPE_API_KEY {
+        return "wrong_type";
+    }
+    if entry
+        .allowed_agents
+        .as_ref()
+        .is_some_and(|agents| !agents.is_empty())
+    {
+        return "fenced";
+    }
+    if !is_model_provider_account(&entry.name) {
+        return "unusable";
+    }
+    if health.is_some_and(|health| {
+        crate::vault_ops::unusable_skip_class(health, Utc::now()).is_some()
+    }) {
+        return "unusable";
+    }
+    if bound_slots
+        .iter()
+        .any(|slot| runtime_binding(slot, &entry.name))
+    {
+        return "resolved";
+    }
+    if runtime_available {
+        "empty"
+    } else {
+        "unknown"
+    }
+}
+
+pub(crate) fn build_vault_list_payload(
+    store: &memcore::MemoryStore,
+    resolved_home: &Path,
+    requested_secret_type: Option<&str>,
+    runtime_available: bool,
+    runtime_binding: impl Fn(&str, &str) -> bool,
+) -> Result<serde_json::Value, String> {
+    let mut entries = store
+        .vault_list_entries()
+        .map_err(|error| format!("Failed to list secrets: {error}"))?;
+    if let Some(secret_type) = requested_secret_type {
+        let want = normalize_secret_type(secret_type);
+        entries.retain(|entry| {
+            memcore::effective_vault_secret_type(&entry.name, &entry.secret_type) == want
+        });
+    }
+
+    let health_rows = store
+        .vault_list_key_health(None)
+        .map_err(|error| format!("Failed to list Vault key health: {error}"))?;
+    let account_bindings = account_bindings(store)?;
+    let env_bindings = effective_vault_alias_bindings(resolved_home);
+    let mut payload = Vec::with_capacity(entries.len());
+
+    for entry in entries {
+        let secret_type = memcore::effective_vault_secret_type(&entry.name, &entry.secret_type);
+        let group = if secret_type == memcore::SECRET_TYPE_CONFIG {
+            "config"
+        } else {
+            "credential"
+        };
+        let mut row = json!({
+            "name": entry.name.clone(),
+            "secret_type": secret_type,
+            "group": group,
+            "description": entry.description.clone(),
+            "allowed_agents": entry.allowed_agents.clone(),
+            "created_at": entry.created_at.clone(),
+            "updated_at": entry.updated_at.clone(),
+            "access_count": entry.access_count,
+        });
+
+        if account_secret_type(secret_type) {
+            let health = latest_health(&entry.name, &health_rows);
+            let mut bound_slots = env_bindings.get(&entry.name).cloned().unwrap_or_default();
+            let matching_accounts = account_bindings
+                .iter()
+                .filter(|binding| custody_contains_entry(&binding.custody, &entry.name))
+                .collect::<Vec<_>>();
+            for binding in &matching_accounts {
+                for alias in &binding.aliases {
+                    if !alias.retired
+                        && crate::vault_ops::is_lane_slot_secret_name(&alias.alias_name)
+                    {
+                        bound_slots.insert(alias.alias_name.clone());
+                    }
+                }
+            }
+
+            let object = row.as_object_mut().expect("vault list rows are objects");
+            object.insert(
+                "bound_slots".to_string(),
+                json!(bound_slots.iter().collect::<Vec<_>>()),
+            );
+            object.insert(
+                "last_probe_class".to_string(),
+                json!(last_probe_class(health)),
+            );
+            object.insert(
+                "last_probe_at".to_string(),
+                health
+                    .and_then(|row| {
+                        row.last_attempt
+                            .as_deref()
+                            .or(row.last_success.as_deref())
+                    })
+                    .map_or(serde_json::Value::Null, |value| json!(value)),
+            );
+            object.insert(
+                "alias_integrity".to_string(),
+                json!(alias_integrity(
+                    &entry,
+                    secret_type,
+                    health,
+                    &bound_slots,
+                    runtime_available,
+                    &runtime_binding,
+                )),
+            );
+            if let [binding] = matching_accounts.as_slice() {
+                object.insert(
+                    "provider_kind".to_string(),
+                    json!(&binding.account.provider_kind),
+                );
+                object.insert(
+                    "account_id".to_string(),
+                    json!(&binding.account.account_id),
+                );
+            }
+        }
+        payload.push(row);
+    }
+
+    let config = payload
+        .iter()
+        .filter(|row| row.get("group").and_then(|value| value.as_str()) == Some("config"))
+        .cloned()
+        .collect::<Vec<_>>();
+    let credentials = payload
+        .iter()
+        .filter(|row| row.get("group").and_then(|value| value.as_str()) != Some("config"))
+        .cloned()
+        .collect::<Vec<_>>();
+
+    Ok(json!({
+        "count": payload.len(),
+        "credentials": credentials,
+        "config": config,
+        "secrets": payload,
+    }))
+}
 
 pub(crate) async fn handle_vault_list(
     server: &MemoryServer,
@@ -8,54 +326,20 @@ pub(crate) async fn handle_vault_list(
         return Err("Vault not initialized. Call vault_init first.".into());
     }
 
-    let mut entries = server
-        .with_global_store_read(|store| store.vault_list_entries().map_err(|e| e.to_string()))
-        .map_err(|e| format!("Failed to list secrets: {e}"))?;
-    if let Some(ref secret_type) = params.secret_type {
-        let want = normalize_secret_type(secret_type);
-        entries.retain(|entry| {
-            memcore::effective_vault_secret_type(&entry.name, &entry.secret_type) == want
-        });
-    }
-
-    let payload: Vec<serde_json::Value> = entries
-        .into_iter()
-        .map(|e| {
-            let secret_type = memcore::effective_vault_secret_type(&e.name, &e.secret_type);
-            let group = if secret_type == memcore::SECRET_TYPE_CONFIG {
-                "config"
-            } else {
-                "credential"
-            };
-            json!({
-                "name": e.name,
-                "secret_type": secret_type,
-                "group": group,
-                "description": e.description,
-                "allowed_agents": e.allowed_agents,
-                "created_at": e.created_at,
-                "updated_at": e.updated_at,
-                "access_count": e.access_count,
-            })
-        })
-        .collect();
-    let config: Vec<_> = payload
-        .iter()
-        .filter(|row| row.get("group").and_then(|v| v.as_str()) == Some("config"))
-        .cloned()
-        .collect();
-    let credentials: Vec<_> = payload
-        .iter()
-        .filter(|row| row.get("group").and_then(|v| v.as_str()) != Some("config"))
-        .cloned()
-        .collect();
-
-    let resp = json!({
-        "count": payload.len(),
-        "credentials": credentials,
-        "config": config,
-        "secrets": payload,
-    });
+    let runtime_available = server.vault_read().key.is_some();
+    let resp = server.with_global_store_read(|store| {
+        build_vault_list_payload(
+            store,
+            &server.tachi_home_dir(),
+            params.secret_type.as_deref(),
+            runtime_available,
+            |logical_name, key_id| {
+                server
+                    .llm
+                    .has_provider_secret_binding(logical_name, key_id)
+            },
+        )
+    })?;
     serde_json::to_string(&resp).map_err(|e| format!("serialize: {e}"))
 }
 
