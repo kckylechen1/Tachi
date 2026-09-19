@@ -5,6 +5,7 @@ use crate::tests::make_server;
 use crate::tool_params::TachiTaskParams;
 use crate::tool_params::TachiVerifyParams;
 use crate::verify_ops::seed_run_receipt_for_test;
+use memcore::ClaimState;
 
 /// Fake runner: canned head + canned exit code + a canned log file. Proves
 /// the run path end-to-end (claim resolution → head observation → detached
@@ -808,7 +809,6 @@ async fn run_canonical_set_completeness_single_kind_pending_naming_missing_kinds
     .await
     .expect("run completes");
 
-    let home = server.tachi_home_dir();
     let gate = crate::verify_ops::evaluate_verification_gate(&server, Some(flow_id))
         .unwrap()
         .unwrap();

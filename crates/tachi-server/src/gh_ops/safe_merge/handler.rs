@@ -469,7 +469,9 @@ fn bind_gate_to_live_pr_head(gate: Option<&mut Value>, live_pr_head: &str) {
     if claim_head == live_pr_head {
         return;
     }
-    gate["overall"] = json!("pending");
+    if gate.get("overall").and_then(Value::as_str) != Some("failed") {
+        gate["overall"] = json!("pending");
+    }
     let waiting_on = gate
         .get_mut("waiting_on")
         .and_then(Value::as_array_mut)

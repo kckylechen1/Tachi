@@ -293,6 +293,46 @@ async fn safe_merge_refuses_claim_and_live_pr_head_divergence() {
         .unwrap()
         .iter()
         .any(|reason| reason == "verification:claim_head_mismatch"));
+
+    // Divergence is an independent waiting reason; it must not downgrade a
+    // failed receipt verdict to pending.
+    seed_receipt(
+        home.path(),
+        flow,
+        "fmt",
+        "failed",
+        1,
+        "claim-head",
+        Some("failed"),
+    );
+    let failed_out = handle_github_safe_merge(
+        &server,
+        &client,
+        "o/r",
+        42,
+        MergeStrategy::Squash,
+        false,
+        Some(flow),
+        &[],
+        MergeGatePolicy::standard(),
+        None,
+        false,
+    )
+    .await
+    .expect("failed gate remains observable");
+    let failed: serde_json::Value = serde_json::from_str(&failed_out).unwrap();
+    assert_eq!(failed["merge_state"], "blocked");
+    assert_eq!(failed["status_patch"]["verification"]["overall"], "failed");
+    assert!(failed["decision"]["reasons"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|reason| reason == "verification:fmt:failed"));
+    assert!(failed["status_patch"]["verification"]["waiting_on"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|reason| reason == "verification:claim_head_mismatch"));
     assert!(client.merge_calls().is_empty());
     restore_env(original_home, original_runs);
 }
