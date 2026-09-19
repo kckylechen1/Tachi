@@ -400,7 +400,7 @@ mod tests {
             (
                 "secret-like-reference",
                 VerifiedAdmissionEvidence {
-                    evidence_ref: "https://user:password@attestor.invalid/evidence/7".into(),
+                    evidence_ref: "https://principal@attestor.invalid/evidence/7".into(),
                     ..evidence()
                 },
                 "secret-like material",
