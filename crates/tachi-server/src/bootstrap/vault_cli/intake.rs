@@ -876,6 +876,71 @@ mod tests {
         plan_report(home, cwd, db_path, HostFilter::Env, Vec::new(), &fp_key).expect("plan")
     }
 
+    fn insert_custodied_api_account(
+        store: &memcore::MemoryStore,
+        account_id: &str,
+        provider_kind: &str,
+        secret: &str,
+        custody_target: &str,
+    ) {
+        let fp_key = FingerprintKey::derive_from_master_key(&MASTER);
+        let member = fp_key.key_fingerprint(provider_kind, secret);
+        let account_fp = fp_key.account_fingerprint_from_members([member]);
+        let auth_ref = format!("va1:{account_id}");
+        memcore::db::insert_provider_account(
+            store.connection(),
+            &memcore::NewProviderAccount::api_key_pool(
+                account_id,
+                provider_kind,
+                &auth_ref,
+                account_fp,
+                memcore::AccountClass::ModelApi,
+            ),
+        )
+        .expect("account");
+        memcore::db::insert_account_custody(
+            store.connection(),
+            &auth_ref,
+            account_id,
+            memcore::CustodyKind::VaultEntry,
+            custody_target,
+        )
+        .expect("custody");
+    }
+
+    fn assert_ineligible_exact_account_is_not_reused(
+        configure: impl FnOnce(&mut memcore::NewProviderAccount),
+    ) {
+        let home = tempfile::tempdir().expect("home");
+        let cwd = tempfile::tempdir().expect("cwd");
+        let db_path = home.path().join(".tachi/global/tachi-global.db");
+        std::fs::create_dir_all(db_path.parent().expect("parent")).expect("mkdir");
+        let store = memcore::MemoryStore::open(db_path.to_str().expect("utf8")).expect("store");
+        let fp_key = FingerprintKey::derive_from_master_key(&MASTER);
+        let member = fp_key.key_fingerprint("deepseek", "same-fixture");
+        let account_fp = fp_key.account_fingerprint_from_members([member]);
+        let mut account = memcore::NewProviderAccount::api_key_pool(
+            "account-ineligible",
+            "deepseek",
+            "va1:ineligible-fixture",
+            account_fp,
+            memcore::AccountClass::ModelApi,
+        );
+        configure(&mut account);
+        memcore::db::insert_provider_account(store.connection(), &account).expect("account");
+        drop(store);
+        write_file(
+            &cwd.path().join(".env"),
+            "DEEPSEEK_API_KEY=same-fixture\n",
+        );
+
+        let report = plan(home.path(), cwd.path(), &db_path);
+
+        assert_eq!(report.actions.len(), 1, "{report:#?}");
+        assert_eq!(report.actions[0].action, ACTION_CREATE_ACCOUNT);
+        assert_ne!(report.actions[0].account_id, "account-ineligible");
+    }
+
     #[test]
     fn deepseek_endpoint_creates_one_account_and_binds_lane_aliases() {
         let home = tempfile::tempdir().expect("home");
@@ -1109,6 +1174,59 @@ mod tests {
         assert_eq!(candidate.classification, "conflicted");
     }
 
+    #[test]
+    fn unrelated_provider_endpoint_does_not_conflict_with_named_key() {
+        let home = tempfile::tempdir().expect("home");
+        let cwd = tempfile::tempdir().expect("cwd");
+        write_file(
+            &cwd.path().join(".env"),
+            "DEEPSEEK_API_KEY=fixture\nSILICONFLOW_BASE_URL=https://api.siliconflow.cn/v1\n",
+        );
+
+        let report = plan(
+            home.path(),
+            cwd.path(),
+            &home.path().join(".tachi/global/tachi-global.db"),
+        );
+
+        assert_eq!(report.actions.len(), 1, "{report:#?}");
+        assert_eq!(report.actions[0].action, ACTION_CREATE_ACCOUNT);
+        assert_eq!(report.actions[0].provider_kind, "deepseek");
+        let candidate = report
+            .candidates
+            .iter()
+            .find(|candidate| candidate.logical_name == "DEEPSEEK_API_KEY")
+            .expect("candidate");
+        assert_eq!(candidate.classification, "known");
+    }
+
+    #[test]
+    fn unrelated_secret_names_do_not_borrow_colocated_endpoint_identity() {
+        let home = tempfile::tempdir().expect("home");
+        let cwd = tempfile::tempdir().expect("cwd");
+        write_file(
+            &cwd.path().join(".env"),
+            "DATABASE_PASSWORD=database-fixture\nAWS_ACCESS_KEY_ID=aws-fixture\nDEEPSEEK_BASE_URL=https://api.deepseek.com\n",
+        );
+
+        let report = plan(
+            home.path(),
+            cwd.path(),
+            &home.path().join(".tachi/global/tachi-global.db"),
+        );
+
+        assert!(report.actions.is_empty(), "{report:#?}");
+        for name in ["DATABASE_PASSWORD", "AWS_ACCESS_KEY_ID"] {
+            let candidate = report
+                .candidates
+                .iter()
+                .find(|candidate| candidate.logical_name == name)
+                .expect("candidate");
+            assert_eq!(candidate.classification, "unknown", "{report:#?}");
+            assert!(candidate.provider_kind.is_none(), "{report:#?}");
+        }
+    }
+
     fn assert_rejected_endpoint_conflicts(endpoint: &str) {
         let home = tempfile::tempdir().expect("home");
         let cwd = tempfile::tempdir().expect("cwd");
@@ -1148,6 +1266,12 @@ mod tests {
     }
 
     #[test]
+    fn explicit_empty_endpoints_are_conflicted_and_plan_nothing() {
+        assert_rejected_endpoint_conflicts("");
+        assert_rejected_endpoint_conflicts("\"\"");
+    }
+
+    #[test]
     fn absent_endpoint_keeps_registry_name_classification_known() {
         let home = tempfile::tempdir().expect("home");
         let cwd = tempfile::tempdir().expect("cwd");
@@ -1167,6 +1291,128 @@ mod tests {
             .find(|candidate| candidate.logical_name == "DEEPSEEK_API_KEY")
             .expect("candidate");
         assert_eq!(candidate.classification, "known");
+    }
+
+    #[test]
+    fn voyage_rerank_rotation_selects_rerank_account_when_both_accounts_exist() {
+        let home = tempfile::tempdir().expect("home");
+        let cwd = tempfile::tempdir().expect("cwd");
+        let db_path = home.path().join(".tachi/global/tachi-global.db");
+        std::fs::create_dir_all(db_path.parent().expect("parent")).expect("mkdir");
+        let store = memcore::MemoryStore::open(db_path.to_str().expect("utf8")).expect("store");
+        insert_custodied_api_account(
+            &store,
+            "account-voyage-embeddings",
+            "voyage",
+            "old-embeddings",
+            "VOYAGE_API_KEY",
+        );
+        insert_custodied_api_account(
+            &store,
+            "account-voyage-rerank",
+            "voyage",
+            "old-rerank",
+            "VOYAGE_RERANK_API_KEY",
+        );
+        drop(store);
+        write_file(
+            &cwd.path().join(".env"),
+            "VOYAGE_RERANK_API_KEY=new-rerank\n",
+        );
+
+        let report = plan(home.path(), cwd.path(), &db_path);
+
+        assert_eq!(report.actions.len(), 1, "{report:#?}");
+        assert_eq!(report.actions[0].action, ACTION_ROTATE_ACCOUNT);
+        assert_eq!(report.actions[0].account_id, "account-voyage-rerank");
+    }
+
+    #[test]
+    fn voyage_rerank_rotation_does_not_create_duplicate_when_only_rerank_exists() {
+        let home = tempfile::tempdir().expect("home");
+        let cwd = tempfile::tempdir().expect("cwd");
+        let db_path = home.path().join(".tachi/global/tachi-global.db");
+        std::fs::create_dir_all(db_path.parent().expect("parent")).expect("mkdir");
+        let store = memcore::MemoryStore::open(db_path.to_str().expect("utf8")).expect("store");
+        insert_custodied_api_account(
+            &store,
+            "account-voyage-rerank",
+            "voyage",
+            "old-rerank",
+            "VOYAGE_RERANK_API_KEY",
+        );
+        drop(store);
+        write_file(
+            &cwd.path().join(".env"),
+            "VOYAGE_RERANK_API_KEY=new-rerank\n",
+        );
+
+        let report = plan(home.path(), cwd.path(), &db_path);
+
+        assert_eq!(report.actions.len(), 1, "{report:#?}");
+        assert_eq!(report.actions[0].action, ACTION_ROTATE_ACCOUNT);
+        assert_eq!(report.actions[0].account_id, "account-voyage-rerank");
+    }
+
+    #[test]
+    fn conflicting_rotation_sightings_are_order_independent_and_action_free() {
+        let home = tempfile::tempdir().expect("home");
+        let cwd = tempfile::tempdir().expect("cwd");
+        let db_path = home.path().join(".tachi/global/tachi-global.db");
+        std::fs::create_dir_all(db_path.parent().expect("parent")).expect("mkdir");
+        let store = memcore::MemoryStore::open(db_path.to_str().expect("utf8")).expect("store");
+        insert_custodied_api_account(
+            &store,
+            "account-deepseek",
+            "deepseek",
+            "old-fixture",
+            "DEEPSEEK_API_KEY",
+        );
+        drop(store);
+        let home_config = home.path().join(".tachi/config.env");
+        let cwd_config = cwd.path().join(".env");
+        write_file(&home_config, "DEEPSEEK_API_KEY=new-fixture-a\n");
+        write_file(&cwd_config, "DEEPSEEK_API_KEY=new-fixture-b\n");
+
+        let first = plan(home.path(), cwd.path(), &db_path);
+        write_file(&home_config, "DEEPSEEK_API_KEY=new-fixture-b\n");
+        write_file(&cwd_config, "DEEPSEEK_API_KEY=new-fixture-a\n");
+        let second = plan(home.path(), cwd.path(), &db_path);
+
+        for report in [&first, &second] {
+            assert!(report.actions.is_empty(), "{report:#?}");
+            let candidates: Vec<&Candidate> = report
+                .candidates
+                .iter()
+                .filter(|candidate| candidate.logical_name == "DEEPSEEK_API_KEY")
+                .collect();
+            assert_eq!(candidates.len(), 2, "{report:#?}");
+            assert!(candidates
+                .iter()
+                .all(|candidate| candidate.classification == "ambiguous"));
+        }
+        assert_eq!(first.plan_digest, second.plan_digest);
+    }
+
+    #[test]
+    fn retired_exact_account_is_not_eligible_for_intake_reuse() {
+        assert_ineligible_exact_account_is_not_reused(|account| {
+            account.status = memcore::vault::accounts::ACCOUNT_STATUS_RETIRED.to_string();
+        });
+    }
+
+    #[test]
+    fn non_api_key_exact_account_is_not_eligible_for_intake_reuse() {
+        assert_ineligible_exact_account_is_not_reused(|account| {
+            account.auth_mode = memcore::AuthMode::BrokeredOauth;
+        });
+    }
+
+    #[test]
+    fn wrong_class_exact_account_is_not_eligible_for_intake_reuse() {
+        assert_ineligible_exact_account_is_not_reused(|account| {
+            account.account_class = memcore::AccountClass::SearchApi;
+        });
     }
 
     #[test]
