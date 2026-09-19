@@ -144,14 +144,7 @@ pub(super) fn run_intake_action(
                     notes,
                 }
             } else if filter == HostFilter::Codex {
-                discover_report(
-                    &env_home,
-                    &cwd,
-                    global_db_path,
-                    filter,
-                    notes,
-                    None,
-                )?
+                discover_report(&env_home, &cwd, global_db_path, filter, notes, None)?
             } else {
                 let config = read_vault_config_for_key(global_db_path)?;
                 let key = read_verified_vault_key(
@@ -211,14 +204,7 @@ pub(super) fn run_intake_action(
                     insecure_password_file,
                 )?;
                 let fp_key = FingerprintKey::derive_from_master_key(key.bytes());
-                plan_report(
-                    &env_home,
-                    &cwd,
-                    global_db_path,
-                    filter,
-                    notes,
-                    &fp_key,
-                )?
+                plan_report(&env_home, &cwd, global_db_path, filter, notes, &fp_key)?
             };
             if json {
                 println!("{}", serde_json::to_string_pretty(&report)?);
@@ -409,9 +395,8 @@ fn build_plan_from_classified(
 
     let digest = plan_digest(&actions);
     let mut candidates: Vec<Candidate> = candidates.into_iter().map(public_candidate).collect();
-    candidates.sort_by(|a, b| {
-        (&a.source_path, &a.logical_name).cmp(&(&b.source_path, &b.logical_name))
-    });
+    candidates
+        .sort_by(|a, b| (&a.source_path, &a.logical_name).cmp(&(&b.source_path, &b.logical_name)));
     PlanReport {
         schema: PLAN_SCHEMA.to_string(),
         plan_digest: digest,
@@ -482,8 +467,7 @@ fn classify_candidates(
             continue;
         };
         let key_fingerprint = fp_key.key_fingerprint(provider_kind, candidate.raw.value.trim());
-        let account_fingerprint =
-            fp_key.account_fingerprint_from_members([&key_fingerprint]);
+        let account_fingerprint = fp_key.account_fingerprint_from_members([&key_fingerprint]);
         candidate.key_fingerprint = Some(key_fingerprint);
         candidate.account_fingerprint = Some(account_fingerprint.clone());
         let exact: Vec<&ProviderAccount> = inventory
@@ -503,10 +487,9 @@ fn classify_candidates(
             continue;
         }
 
-        let canonical =
-            crate::status_ops::status_health::canonical_account_key_for_provider_kind(
-                provider_kind,
-            );
+        let canonical = crate::status_ops::status_health::canonical_account_key_for_provider_kind(
+            provider_kind,
+        );
         let rotating: Vec<&ProviderAccount> = inventory
             .accounts
             .iter()
@@ -525,10 +508,8 @@ fn classify_candidates(
                 candidate.planned_action = Some(ACTION_ROTATE_ACCOUNT);
             }
             [] => {
-                candidate.account_id = Some(planned_account_id(
-                    provider_kind,
-                    &account_fingerprint,
-                ));
+                candidate.account_id =
+                    Some(planned_account_id(provider_kind, &account_fingerprint));
                 candidate.planned_action = Some(ACTION_CREATE_ACCOUNT);
             }
             _ => candidate.classification = "ambiguous",
@@ -819,7 +800,9 @@ fn render_discovery_human(report: &DiscoveryReport) -> String {
         out.push_str("(no credential candidates discovered)\n");
         return out;
     }
-    out.push_str("LOGICAL_NAME\tCLASSIFICATION\tPROVIDER_KIND\tACCOUNT_ID\tKEY_FP\tACCOUNT_FP\tSLOT_BINDS\n");
+    out.push_str(
+        "LOGICAL_NAME\tCLASSIFICATION\tPROVIDER_KIND\tACCOUNT_ID\tKEY_FP\tACCOUNT_FP\tSLOT_BINDS\n",
+    );
     for row in &report.candidates {
         out.push_str(&format!(
             "{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
@@ -890,15 +873,7 @@ mod tests {
 
     fn plan(home: &Path, cwd: &Path, db_path: &Path) -> PlanReport {
         let fp_key = FingerprintKey::derive_from_master_key(&MASTER);
-        plan_report(
-            home,
-            cwd,
-            db_path,
-            HostFilter::Env,
-            Vec::new(),
-            &fp_key,
-        )
-        .expect("plan")
+        plan_report(home, cwd, db_path, HostFilter::Env, Vec::new(), &fp_key).expect("plan")
     }
 
     #[test]
@@ -1055,10 +1030,7 @@ mod tests {
         )
         .expect("custody");
         drop(store);
-        write_file(
-            &cwd.path().join(".env"),
-            "DEEPSEEK_API_KEY=new-fixture\n",
-        );
+        write_file(&cwd.path().join(".env"), "DEEPSEEK_API_KEY=new-fixture\n");
 
         let report = plan(home.path(), cwd.path(), &db_path);
 
@@ -1142,9 +1114,7 @@ mod tests {
         let cwd = tempfile::tempdir().expect("cwd");
         write_file(
             &cwd.path().join(".env"),
-            &format!(
-                "DEEPSEEK_API_KEY=fixture\nDEEPSEEK_BASE_URL={endpoint}\n"
-            ),
+            &format!("DEEPSEEK_API_KEY=fixture\nDEEPSEEK_BASE_URL={endpoint}\n"),
         );
 
         let report = plan(
@@ -1181,10 +1151,7 @@ mod tests {
     fn absent_endpoint_keeps_registry_name_classification_known() {
         let home = tempfile::tempdir().expect("home");
         let cwd = tempfile::tempdir().expect("cwd");
-        write_file(
-            &cwd.path().join(".env"),
-            "DEEPSEEK_API_KEY=fixture\n",
-        );
+        write_file(&cwd.path().join(".env"), "DEEPSEEK_API_KEY=fixture\n");
 
         let report = plan(
             home.path(),

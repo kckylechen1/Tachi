@@ -135,9 +135,7 @@ pub(crate) fn canonical_key_for_env_name(name: &str) -> Option<&'static str> {
 /// only to recognize rotation of an existing account's custody target; the
 /// registry remains the single provider vocabulary and lane slots never
 /// become account names.
-pub(crate) fn canonical_account_key_for_provider_kind(
-    provider_kind: &str,
-) -> Option<&'static str> {
+pub(crate) fn canonical_account_key_for_provider_kind(provider_kind: &str) -> Option<&'static str> {
     const LANE_SLOTS: &[&str] = &[
         "EXTRACT_API_KEY",
         "SUMMARY_API_KEY",
