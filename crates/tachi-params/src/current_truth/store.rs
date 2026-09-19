@@ -16,12 +16,13 @@
 //! * The **refresh table is operational metadata** (staleness posture and
 //!   refresh debt), not a truth source: it never feeds the reducer.
 //!
-//! Schema lives in this crate (not memcore's DDL) because the typed
-//! assertion vocabulary is defined here and memcore cannot depend on it;
-//! `tachi-params` already carries the rusqlite edge for the taskintent
-//! ingest adapter. The store owns a typed connection handed to it; the
-//! production server binds that API to its existing global SQLite file, so
-//! no second CurrentTruth database or projection authority is introduced.
+//! This crate retains standalone/test DDL because the typed assertion
+//! vocabulary is defined here and memcore cannot depend on it. Production
+//! product databases acquire the same tables through memcore's canonical
+//! versioned migration boundary, then this store opens them with validation
+//! but no DDL. The production server binds that typed API to its existing
+//! global SQLite file, so no second CurrentTruth database or projection
+//! authority is introduced.
 //!
 //! # Trust boundary and integration status
 //!
@@ -46,6 +47,8 @@ use super::types::{
 pub enum CurrentTruthStoreError {
     #[error("sqlite error: {0}")]
     Sqlite(#[from] rusqlite::Error),
+    #[error("CurrentTruth schema is not admitted by the product migration boundary: {0}")]
+    Schema(String),
     #[error("assertion id must be non-empty")]
     EmptyAssertionId,
     #[error("subject repository must be `owner/name`")]
@@ -69,7 +72,7 @@ pub enum CurrentTruthStoreError {
     #[error("observed_at/effective_at must be RFC 3339 — `{0}` does not parse")]
     MalformedObservedAt(String),
     #[error(
-        "refresh record older than the recorded attempt for `{repo}`: {recorded_at} < {existing_attempt_at}"
+        "refresh record is not newer than the recorded attempt for `{repo}`: {recorded_at} <= {existing_attempt_at}"
     )]
     StaleRefreshRecord {
         repo: String,
@@ -158,15 +161,26 @@ impl CurrentTruthSqliteStore {
         Self::with_connection(conn)
     }
 
+    /// Open a production database whose CurrentTruth schema was already
+    /// admitted and installed by memcore's versioned migration boundary.
+    /// This path performs no DDL and refuses missing or drifted schema.
+    pub fn open_existing(path: &str) -> Result<Self, CurrentTruthStoreError> {
+        let conn = Connection::open(path)?;
+        memcore::db::validate_current_truth_schema(&conn)
+            .map_err(|error| CurrentTruthStoreError::Schema(error.to_string()))?;
+        Ok(Self { conn })
+    }
+
     /// Open an in-memory store (tests, projections over ephemeral state).
     pub fn open_in_memory() -> Result<Self, CurrentTruthStoreError> {
         let conn = Connection::open_in_memory()?;
         Self::with_connection(conn)
     }
 
-    /// Adopt a caller-owned connection and ensure the schema. Append-only
-    /// semantics are enforced by this API surface — no mutation of existing
-    /// assertion rows is possible through it.
+    /// Adopt a caller-owned standalone/test connection and ensure the schema.
+    /// Production product databases use [`Self::open_existing`] instead.
+    /// Append-only semantics are enforced by this API surface — no mutation
+    /// of existing assertion rows is possible through it.
     pub fn with_connection(conn: Connection) -> Result<Self, CurrentTruthStoreError> {
         conn.execute_batch(ASSERTION_SCHEMA_SQL)?;
         conn.execute_batch(PROJECTION_SCHEMA_SQL)?;
@@ -489,9 +503,10 @@ impl CurrentTruthSqliteStore {
     }
 
     /// Record one refresh attempt's operational posture. `recorded_at` is
-    /// caller-supplied. Monotonic by attempt instant: an attempt older than
-    /// the recorded one is refused — a late, out-of-order refresh record can
-    /// never erase a newer posture (a newer outage included).
+    /// caller-supplied. Strictly monotonic by attempt instant: an attempt
+    /// older than or equal to the recorded one is refused. First committer
+    /// wins an equal-time race, so arrival order can never overwrite posture
+    /// nondeterministically (a newer outage included).
     pub fn record_refresh(
         &self,
         repo: &str,
@@ -618,7 +633,7 @@ impl CurrentTruthSqliteStore {
             .optional()?;
         if let Some(existing) = existing {
             if super::types::ordering_instant(recorded_at)
-                < super::types::ordering_instant(&existing.last_attempt_at)
+                <= super::types::ordering_instant(&existing.last_attempt_at)
             {
                 return Err(CurrentTruthStoreError::StaleRefreshRecord {
                     repo: repo.to_string(),

@@ -45,19 +45,31 @@ const GH_ENV_ALLOWLIST: &[&str] = &[
 ];
 
 pub(in crate::gh_ops) fn validate_repo(repo: &str) -> Result<(), String> {
-    let count = repo.matches('/').count();
-    if count != 1 {
-        return Err(format!(
-            "Invalid repo format '{}'. Expected 'owner/repo' with exactly one '/'.",
-            repo
-        ));
+    let invalid =
+        || "Invalid repo format. Expected canonical GitHub 'owner/repo' syntax.".to_string();
+    let (owner, name) = repo.split_once('/').ok_or_else(&invalid)?;
+    if name.contains('/')
+        || owner.is_empty()
+        || owner.len() > 39
+        || name.is_empty()
+        || name.len() > 100
+    {
+        return Err(invalid());
     }
-    let parts: Vec<&str> = repo.splitn(2, '/').collect();
-    if parts[0].is_empty() || parts[1].is_empty() {
-        return Err(format!(
-            "Invalid repo format '{}'. Both owner and repo name must be non-empty.",
-            repo
-        ));
+    let owner_valid = owner
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        && !owner.starts_with('-')
+        && !owner.ends_with('-')
+        && !owner.contains("--");
+    let name_valid = name
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        && !name.starts_with('-')
+        && name != "."
+        && name != "..";
+    if !owner_valid || !name_valid {
+        return Err(invalid());
     }
     Ok(())
 }
@@ -345,6 +357,41 @@ pub(in crate::gh_ops) fn run_gh_json(mut cmd: Command, token: &str) -> Result<St
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validate_repo_accepts_canonical_github_names() {
+        for repo in [
+            "owner/repo",
+            "owner-2/repo_name.rs",
+            "a/.github",
+            "OWNER/Repo-123",
+        ] {
+            validate_repo(repo).unwrap_or_else(|error| panic!("{repo}: {error}"));
+        }
+    }
+
+    #[test]
+    fn validate_repo_rejects_option_control_and_path_shapes() {
+        for repo in [
+            "--repo/name",
+            "owner/--help",
+            "owner/repo\nnext",
+            "owner/repo\0next",
+            "owner/../repo",
+            "owner/..",
+            "./repo",
+            "owner/repo/extra",
+            "owner\\repo/name",
+            "owner /repo",
+            "owner/repo name",
+            "owner_/repo",
+            "owner--name/repo",
+            "/repo",
+            "owner/",
+        ] {
+            assert!(validate_repo(repo).is_err(), "must reject {repo:?}");
+        }
+    }
 
     #[test]
     fn attach_gh_body_file_writes_verbatim_body() {

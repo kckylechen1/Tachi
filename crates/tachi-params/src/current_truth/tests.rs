@@ -1887,6 +1887,38 @@ fn two_connection_refresh_guard_holds() {
     let _ = std::fs::remove_dir(&dir);
 }
 
+/// Equal attempt instants use a deterministic first-committer-wins law.
+#[test]
+fn equal_attempt_refresh_cannot_overwrite_committed_posture() {
+    let store = CurrentTruthSqliteStore::open_in_memory().unwrap();
+    store
+        .record_refresh(
+            REPO,
+            false,
+            None,
+            None,
+            "2026-08-26T12:00:00Z",
+            Some("first-outage"),
+        )
+        .unwrap();
+
+    match store.record_refresh(
+        REPO,
+        true,
+        Some("same-time-success"),
+        Some("2026-08-26T11:59:00Z"),
+        "2026-08-26T12:00:00Z",
+        None,
+    ) {
+        Err(CurrentTruthStoreError::StaleRefreshRecord { .. }) => {}
+        other => panic!("equal attempt must be refused, got {other:?}"),
+    }
+
+    let posture = store.refresh_posture_row(REPO).unwrap().unwrap();
+    assert!(!posture.fresh);
+    assert_eq!(posture.unavailable_reason.as_deref(), Some("first-outage"));
+}
+
 // ── Review round 4 fixes ───────────────────────────────────────────────────
 
 /// An inadmissible row sharing an id with an admitted assertion never

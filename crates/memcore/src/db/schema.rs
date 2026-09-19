@@ -762,6 +762,102 @@ pub(crate) fn validate_harness_session_spine_schema(conn: &Connection) -> Result
     Ok(())
 }
 
+/// Canonical v37 installer for CurrentTruth's existing assertion, projection,
+/// and refresh-posture tables. Production databases acquire this schema only
+/// through memcore's versioned migration transaction; the CurrentTruth typed
+/// store never installs it during an ordinary server open.
+pub(crate) fn install_current_truth_schema(conn: &Connection) -> Result<(), MemoryError> {
+    execute_batch_retry(
+        conn,
+        "CREATE TABLE IF NOT EXISTS current_truth_assertions (
+            assertion_id TEXT PRIMARY KEY,
+            subject_repo TEXT NOT NULL,
+            subject_kind TEXT NOT NULL,
+            subject_id TEXT NOT NULL,
+            predicate TEXT NOT NULL,
+            value_json TEXT NOT NULL,
+            issuer TEXT NOT NULL,
+            authority TEXT NOT NULL,
+            source_id TEXT NOT NULL,
+            source_revision TEXT NOT NULL,
+            observed_at TEXT NOT NULL,
+            effective_at TEXT NOT NULL,
+            supersedes TEXT,
+            evidence_json TEXT NOT NULL DEFAULT '[]',
+            review_state TEXT NOT NULL,
+            visibility TEXT NOT NULL,
+            content_digest TEXT NOT NULL,
+            recorded_at TEXT NOT NULL DEFAULT '',
+            UNIQUE (subject_repo, subject_kind, subject_id, predicate,
+                    authority, issuer, source_id, source_revision)
+        );
+        CREATE INDEX IF NOT EXISTS idx_ct_assertions_subject
+            ON current_truth_assertions(subject_repo, subject_kind, subject_id);
+        CREATE INDEX IF NOT EXISTS idx_ct_assertions_predicate
+            ON current_truth_assertions(predicate);
+
+        CREATE TABLE IF NOT EXISTS current_truth_projection (
+            repo TEXT PRIMARY KEY,
+            generation TEXT NOT NULL,
+            built_at TEXT NOT NULL,
+            view_json TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS current_truth_refresh (
+            repo TEXT PRIMARY KEY,
+            fresh INTEGER NOT NULL,
+            last_fresh_revision TEXT,
+            last_fresh_at TEXT,
+            last_attempt_at TEXT NOT NULL,
+            unavailable_reason TEXT
+        );",
+    )
+}
+
+/// Refuse a current product schema whose CurrentTruth objects or immutable
+/// ingestion-key constraint drifted from the v37 contract.
+pub fn validate_current_truth_schema(conn: &Connection) -> Result<(), MemoryError> {
+    for (object_type, name) in [
+        ("table", "current_truth_assertions"),
+        ("index", "idx_ct_assertions_subject"),
+        ("index", "idx_ct_assertions_predicate"),
+        ("table", "current_truth_projection"),
+        ("table", "current_truth_refresh"),
+    ] {
+        let present = conn
+            .query_row(
+                "SELECT 1 FROM main.sqlite_schema WHERE type = ?1 AND name = ?2",
+                params![object_type, name],
+                |_| Ok(()),
+            )
+            .optional()?;
+        if present.is_none() {
+            return Err(MemoryError::InvalidArg(format!(
+                "incomplete v37 CurrentTruth schema: required {object_type} '{name}' is missing"
+            )));
+        }
+    }
+
+    let assertion_sql: String = conn.query_row(
+        "SELECT COALESCE(sql, '') FROM main.sqlite_schema
+         WHERE type = 'table' AND name = 'current_truth_assertions'",
+        [],
+        |row| row.get(0),
+    )?;
+    for clause in [
+        "content_digest TEXT NOT NULL",
+        "recorded_at TEXT NOT NULL DEFAULT ''",
+        "UNIQUE (subject_repo, subject_kind, subject_id, predicate, authority, issuer, source_id, source_revision)",
+    ] {
+        if !normalize_schema_sql(&assertion_sql).contains(&normalize_schema_sql(clause)) {
+            return Err(MemoryError::InvalidArg(format!(
+                "incomplete v37 CurrentTruth schema: current_truth_assertions is missing canonical clause {clause:?}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Canonical v36 installers for the #1679 durable delivery spine: one durable
 /// delivery intent per terminal result plus its append-only event ledger.
 ///

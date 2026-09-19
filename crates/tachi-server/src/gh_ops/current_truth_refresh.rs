@@ -6,12 +6,14 @@
 //! or body text participates in linkage. The resulting adapter feeds the
 //! existing CurrentTruth assertion store/reducer and then exercises the
 //! existing WorkReadModel status consumer in the same production action.
+//! GitHub does not expose an authoritative merge-to-revert relation in this
+//! bounded surface, so any merged PR makes the refresh typed-unavailable
+//! rather than allowing implementation truth to remain falsely fresh.
 
 use super::*;
 use async_trait::async_trait;
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
-use tachi_github_runtime::github_corpus_ops::parse::parse_pr_snapshot_from_gh_json;
 use tachi_params::current_truth::consumer::{self, CallerAuthorizationV1, CurrentTruthViewV1};
 use tachi_params::current_truth::refresh::{
     reconcile_refresh, GithubRefreshAdapter, GithubRepositoryStateV1, RefreshOutcomeV1,
@@ -22,114 +24,30 @@ use tachi_params::current_truth::store::CurrentTruthSqliteStore;
 use tachi_params::current_truth::types::{
     ordering_instant, AssertionV1, AuthorityClassV1, PredicateV1, VisibilityClassV1,
 };
-use tachi_params::gh_json_parse::parse_issue_snapshot_from_gh_json;
 use tachi_params::work_read_model::{
     project, status_view, CurrentTruthFactsV1, ProjectionOptions, SourceFacts, SourceKind,
     SourceSnapshot, WorkProjectionIndex,
 };
 
+mod graphql;
+
+use graphql::{parse_graphql_bundle, GITHUB_REFRESH_QUERY};
+
 const CURRENT_TRUTH_GH_TIMEOUT: Duration = Duration::from_secs(6);
-const CURRENT_TRUTH_REFRESH_TIMEOUT: Duration = Duration::from_secs(30);
-const TIMELINE_PAGE_SIZE: usize = 100;
-const MAX_TIMELINE_PAGES: usize = 10;
-const PR_FIELDS: &str = "number,title,body,state,headRefOid,baseRefOid,updatedAt,mergeCommit,reviews,statusCheckRollup,closingIssuesReferences";
 
 const REASON_UNAVAILABLE: &str = "github_read_unavailable";
 const REASON_MALFORMED: &str = "github_data_malformed";
 const REASON_INCOMPLETE: &str = "github_data_incomplete";
 const REASON_STALE: &str = "github_data_stale";
 const REASON_CONTRADICTORY: &str = "github_data_contradictory_revision";
-
-#[async_trait]
-trait BoundedGithubRefreshReader: Send + Sync {
-    async fn repo_visibility(&self, repo: &str) -> Result<Value, String>;
-    async fn issue(&self, repo: &str, number: u64) -> Result<Value, String>;
-    async fn issue_timeline_page(
-        &self,
-        repo: &str,
-        number: u64,
-        page: usize,
-    ) -> Result<Value, String>;
-    async fn pull_request(&self, repo: &str, number: u64) -> Result<Value, String>;
-}
-
-struct ServerBoundedGithubRefreshReader<'a> {
-    server: &'a MemoryServer,
-}
-
-#[async_trait]
-impl BoundedGithubRefreshReader for ServerBoundedGithubRefreshReader<'_> {
-    async fn repo_visibility(&self, repo: &str) -> Result<Value, String> {
-        run_gh_json_bounded(
-            self.server,
-            vec![
-                "repo".to_string(),
-                "view".to_string(),
-                repo.to_string(),
-                "--json".to_string(),
-                "visibility".to_string(),
-            ],
-            CURRENT_TRUTH_GH_TIMEOUT,
-            "gh repo view",
-        )
-        .await
-    }
-
-    async fn issue(&self, repo: &str, number: u64) -> Result<Value, String> {
-        // This is the pre-existing bounded GitHub issue read path. Keeping
-        // this call (instead of rebuilding its argv here) makes the adapter
-        // inherit the hot-path timeout/kill contract by construction.
-        read_issue_snapshot_bounded(self.server, repo, number).await
-    }
-
-    async fn issue_timeline_page(
-        &self,
-        repo: &str,
-        number: u64,
-        page: usize,
-    ) -> Result<Value, String> {
-        run_gh_json_bounded(
-            self.server,
-            vec![
-                "api".to_string(),
-                "--method".to_string(),
-                "GET".to_string(),
-                format!(
-                    "repos/{repo}/issues/{number}/timeline?per_page={TIMELINE_PAGE_SIZE}&page={page}"
-                ),
-                "-H".to_string(),
-                "Accept: application/vnd.github+json".to_string(),
-            ],
-            CURRENT_TRUTH_GH_TIMEOUT,
-            "gh issue timeline",
-        )
-        .await
-    }
-
-    async fn pull_request(&self, repo: &str, number: u64) -> Result<Value, String> {
-        run_gh_json_bounded(
-            self.server,
-            vec![
-                "pr".to_string(),
-                "view".to_string(),
-                number.to_string(),
-                "--repo".to_string(),
-                repo.to_string(),
-                "--json".to_string(),
-                PR_FIELDS.to_string(),
-            ],
-            CURRENT_TRUTH_GH_TIMEOUT,
-            "gh pr view",
-        )
-        .await
-    }
-}
+const REASON_REVERT_UNAVAILABLE: &str = "github_revert_relation_unavailable";
 
 #[derive(Debug)]
 enum LoadFailure {
     Unavailable,
     Malformed,
     Incomplete,
+    RevertRelationUnavailable,
 }
 
 impl LoadFailure {
@@ -138,7 +56,54 @@ impl LoadFailure {
             Self::Unavailable => REASON_UNAVAILABLE,
             Self::Malformed => REASON_MALFORMED,
             Self::Incomplete => REASON_INCOMPLETE,
+            Self::RevertRelationUnavailable => REASON_REVERT_UNAVAILABLE,
         }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct GithubReadBundle {
+    visibility: Value,
+    issue: Value,
+    timeline: Vec<Value>,
+    pull_requests: BTreeMap<u64, Value>,
+    complete: bool,
+}
+
+#[async_trait]
+trait BoundedGithubRefreshReader: Send + Sync {
+    async fn repository_slice(&self, repo: &str, number: u64) -> Result<GithubReadBundle, String>;
+}
+
+struct ServerBoundedGithubRefreshReader<'a> {
+    server: &'a MemoryServer,
+}
+
+#[async_trait]
+impl BoundedGithubRefreshReader for ServerBoundedGithubRefreshReader<'_> {
+    async fn repository_slice(&self, repo: &str, number: u64) -> Result<GithubReadBundle, String> {
+        let (owner, name) = repo
+            .split_once('/')
+            .ok_or_else(|| "validated repository lost owner/name shape".to_string())?;
+        let value = run_gh_json_bounded(
+            self.server,
+            vec![
+                "api".to_string(),
+                "graphql".to_string(),
+                "-f".to_string(),
+                format!("query={GITHUB_REFRESH_QUERY}"),
+                "-F".to_string(),
+                format!("owner={owner}"),
+                "-F".to_string(),
+                format!("name={name}"),
+                "-F".to_string(),
+                format!("number={number}"),
+            ],
+            CURRENT_TRUTH_GH_TIMEOUT,
+            "gh current truth GraphQL read",
+        )
+        .await?;
+        parse_graphql_bundle(repo, number, &value).map_err(|failure| failure.reason().to_string())
     }
 }
 
@@ -157,49 +122,37 @@ impl ProductionGithubRefreshAdapter {
         issue_number: u64,
     ) -> ProductionGithubRefreshAdapter {
         let reader = ServerBoundedGithubRefreshReader { server };
-        Self::load_from_with_timeout(
-            &reader,
-            repo,
-            issue_number,
-            Some(CURRENT_TRUTH_REFRESH_TIMEOUT),
-        )
-        .await
+        Self::load_from_with_floor(&reader, repo, issue_number, CURRENT_TRUTH_GH_TIMEOUT).await
     }
 
-    #[cfg(test)]
+    async fn load_from_with_floor(
+        reader: &dyn BoundedGithubRefreshReader,
+        repo: &str,
+        issue_number: u64,
+        floor: Duration,
+    ) -> ProductionGithubRefreshAdapter {
+        let ((), adapter) = tokio::join!(
+            tokio::time::sleep(floor),
+            Self::load_from(reader, repo, issue_number),
+        );
+        adapter
+    }
+
     async fn load_from(
         reader: &dyn BoundedGithubRefreshReader,
         repo: &str,
         issue_number: u64,
     ) -> ProductionGithubRefreshAdapter {
-        Self::load_from_with_timeout(reader, repo, issue_number, None).await
-    }
-
-    async fn load_from_with_timeout(
-        reader: &dyn BoundedGithubRefreshReader,
-        repo: &str,
-        issue_number: u64,
-        state_timeout: Option<Duration>,
-    ) -> ProductionGithubRefreshAdapter {
-        let visibility_json = match reader.repo_visibility(repo).await {
-            Ok(value) => value,
+        let bundle = match reader.repository_slice(repo, issue_number).await {
+            Ok(bundle) => bundle,
             Err(_) => return Self::unavailable(repo, LoadFailure::Unavailable, false),
         };
-        let visibility = match parse_visibility(&visibility_json) {
+        let visibility = match parse_visibility(&bundle.visibility) {
             Ok(visibility) => visibility,
             Err(failure) => return Self::unavailable(repo, failure, false),
         };
         let repository_private = visibility == VisibilityClassV1::Private;
-        let state = match state_timeout {
-            Some(timeout) => tokio::time::timeout(
-                timeout,
-                load_repository_state(reader, repo, issue_number, visibility),
-            )
-            .await
-            .unwrap_or(Err(LoadFailure::Unavailable)),
-            None => load_repository_state(reader, repo, issue_number, visibility).await,
-        };
-        match state {
+        match load_repository_state(repo, issue_number, visibility, bundle) {
             Ok(state) => Self {
                 outcome: RefreshOutcomeV1::Fresh(Box::new(state)),
                 repository_private,
@@ -227,32 +180,39 @@ impl GithubRefreshAdapter for ProductionGithubRefreshAdapter {
     }
 }
 
-async fn load_repository_state(
-    reader: &dyn BoundedGithubRefreshReader,
+fn load_repository_state(
     repo: &str,
     issue_number: u64,
     visibility: VisibilityClassV1,
+    bundle: GithubReadBundle,
 ) -> Result<GithubRepositoryStateV1, LoadFailure> {
-    let issue_json = reader
-        .issue(repo, issue_number)
-        .await
-        .map_err(|_| LoadFailure::Unavailable)?;
-    let issue = parse_issue(repo, issue_number, &issue_json, visibility)?;
-
-    let timeline = read_complete_timeline(reader, repo, issue_number).await?;
-    let (candidate_prs, observations) = parse_timeline(repo, issue_number, &timeline, visibility)?;
+    if !bundle.complete {
+        return Err(LoadFailure::Incomplete);
+    }
+    let issue = parse_issue(repo, issue_number, &bundle.issue, visibility)?;
+    let (candidate_prs, observations) =
+        parse_timeline(repo, issue_number, &bundle.timeline, visibility)?;
 
     let mut pull_requests = Vec::new();
     for pr_number in candidate_prs {
-        let value = reader
-            .pull_request(repo, pr_number)
-            .await
-            .map_err(|_| LoadFailure::Unavailable)?;
-        if let Some(pr) = parse_linked_pr(repo, issue_number, pr_number, &value, visibility)? {
+        let value = bundle
+            .pull_requests
+            .get(&pr_number)
+            .ok_or(LoadFailure::Malformed)?;
+        if let Some(pr) = parse_linked_pr(repo, issue_number, pr_number, value, visibility)? {
             pull_requests.push(pr);
         }
     }
     pull_requests.sort_by_key(|pr| pr.number);
+    if pull_requests
+        .iter()
+        .any(|pr| pr.state == SnapshotPrStateV1::Merged)
+    {
+        // GitHub's bounded typed issue/PR surface identifies merges but has
+        // no authoritative original-merge → reverting-commit relation. Do
+        // not preserve a merge as fresh when its overturn status is unknown.
+        return Err(LoadFailure::RevertRelationUnavailable);
+    }
 
     let refreshed_at = std::iter::once(issue.updated_at.as_str())
         .chain(pull_requests.iter().map(|pr| pr.updated_at.as_str()))
@@ -305,21 +265,22 @@ fn parse_issue(
         Some("CLOSED") | Some("closed") => SnapshotIssueStateV1::Closed,
         _ => return Err(LoadFailure::Malformed),
     };
-    let snapshot = parse_issue_snapshot_from_gh_json(repo, number, value);
-    if snapshot.issue_snapshot_hash.is_empty()
-        || chrono::DateTime::parse_from_rfc3339(&snapshot.updated_at).is_err()
-    {
-        return Err(LoadFailure::Malformed);
-    }
+    let updated_at = value
+        .get("updatedAt")
+        .and_then(Value::as_str)
+        .filter(|timestamp| chrono::DateTime::parse_from_rfc3339(timestamp).is_ok())
+        .ok_or(LoadFailure::Malformed)?;
+    let object_revision = memcore::canonical_digest::canonical_json_digest_hex(&json!({
+        "repo": repo,
+        "number": number,
+        "state": state,
+        "updated_at": updated_at,
+    }));
     Ok(SnapshotIssueV1 {
         number,
         state,
-        updated_at: snapshot.updated_at,
-        snapshot_revision: visibility_bound_revision(
-            "issue",
-            &snapshot.issue_snapshot_hash,
-            visibility,
-        ),
+        updated_at: updated_at.to_string(),
+        snapshot_revision: visibility_bound_revision("issue", &object_revision, visibility),
         visibility,
     })
 }
@@ -336,28 +297,6 @@ fn visibility_bound_revision(
             "visibility": visibility,
         }))
     )
-}
-
-async fn read_complete_timeline(
-    reader: &dyn BoundedGithubRefreshReader,
-    repo: &str,
-    issue_number: u64,
-) -> Result<Vec<Value>, LoadFailure> {
-    let mut events = Vec::new();
-    for page in 1..=MAX_TIMELINE_PAGES {
-        let value = reader
-            .issue_timeline_page(repo, issue_number, page)
-            .await
-            .map_err(|_| LoadFailure::Unavailable)?;
-        let page_events = value.as_array().ok_or(LoadFailure::Malformed)?;
-        events.extend(page_events.iter().cloned());
-        if page_events.len() < TIMELINE_PAGE_SIZE {
-            return Ok(events);
-        }
-    }
-    // A full final page means another page may exist. Refuse the partial
-    // relation set instead of minting an authoritative-looking omission.
-    Err(LoadFailure::Incomplete)
 }
 
 fn parse_timeline(
@@ -397,10 +336,11 @@ fn parse_timeline(
                 }
             }
             Some("reopened") => {
-                let id = event
-                    .get("id")
-                    .and_then(Value::as_u64)
-                    .ok_or(LoadFailure::Malformed)?;
+                let id = match event.get("id") {
+                    Some(Value::String(id)) if !id.is_empty() => id.clone(),
+                    Some(Value::Number(id)) => id.to_string(),
+                    _ => return Err(LoadFailure::Malformed),
+                };
                 let observed_at = event
                     .get("created_at")
                     .and_then(Value::as_str)
@@ -411,7 +351,7 @@ fn parse_timeline(
                         number: issue_number,
                     },
                     observed_at: observed_at.to_string(),
-                    revision: visibility_bound_revision("event", &id.to_string(), visibility),
+                    revision: visibility_bound_revision("event", &id, visibility),
                     visibility,
                 });
             }
@@ -460,32 +400,55 @@ fn parse_linked_pr(
         return Ok(None);
     }
 
-    let snapshot =
-        parse_pr_snapshot_from_gh_json(repo, number, value).map_err(|_| LoadFailure::Malformed)?;
-    if snapshot.pr_snapshot_hash.is_empty()
-        || chrono::DateTime::parse_from_rfc3339(&snapshot.updated_at).is_err()
-    {
-        return Err(LoadFailure::Malformed);
-    }
-    let state = if snapshot.merged || snapshot.state.eq_ignore_ascii_case("MERGED") {
+    let source_state = value
+        .get("state")
+        .and_then(Value::as_str)
+        .ok_or(LoadFailure::Malformed)?;
+    let state = if source_state.eq_ignore_ascii_case("MERGED") {
         SnapshotPrStateV1::Merged
-    } else if snapshot.state.eq_ignore_ascii_case("OPEN") {
+    } else if source_state.eq_ignore_ascii_case("OPEN") {
         SnapshotPrStateV1::Open
-    } else if snapshot.state.eq_ignore_ascii_case("CLOSED") {
+    } else if source_state.eq_ignore_ascii_case("CLOSED") {
         SnapshotPrStateV1::ClosedUnmerged
     } else {
         return Err(LoadFailure::Malformed);
     };
+    let updated_at = value
+        .get("updatedAt")
+        .and_then(Value::as_str)
+        .filter(|timestamp| chrono::DateTime::parse_from_rfc3339(timestamp).is_ok())
+        .ok_or(LoadFailure::Malformed)?;
+    let head_sha = value
+        .get("headRefOid")
+        .and_then(Value::as_str)
+        .filter(|sha| !sha.is_empty())
+        .ok_or(LoadFailure::Malformed)?;
+    let base_sha = value
+        .get("baseRefOid")
+        .and_then(Value::as_str)
+        .filter(|sha| !sha.is_empty())
+        .ok_or(LoadFailure::Malformed)?;
+    let merge_commit_sha = value
+        .pointer("/mergeCommit/oid")
+        .and_then(Value::as_str)
+        .filter(|sha| !sha.is_empty())
+        .map(str::to_string);
+    let object_revision = memcore::canonical_digest::canonical_json_digest_hex(&json!({
+        "repo": repo,
+        "number": number,
+        "state": state,
+        "head_sha": head_sha,
+        "base_sha": base_sha,
+        "merge_commit_sha": merge_commit_sha,
+        "updated_at": updated_at,
+        "linked_issues": linked_issues,
+    }));
     Ok(Some(SnapshotPrV1 {
         number,
         state,
-        merge_commit_sha: snapshot.merge_commit_sha,
-        updated_at: snapshot.updated_at,
-        snapshot_revision: visibility_bound_revision(
-            "pull-request",
-            &snapshot.pr_snapshot_hash,
-            visibility,
-        ),
+        merge_commit_sha,
+        updated_at: updated_at.to_string(),
+        snapshot_revision: visibility_bound_revision("pull-request", &object_revision, visibility),
         linked_issues,
         visibility,
     }))
@@ -758,39 +721,43 @@ mod tests {
         issue: Option<Result<Value, String>>,
         timeline: BTreeMap<usize, Result<Value, String>>,
         prs: BTreeMap<u64, Result<Value, String>>,
+        incomplete: bool,
         calls: Mutex<Vec<String>>,
     }
 
     #[async_trait]
     impl BoundedGithubRefreshReader for FixtureReader {
-        async fn repo_visibility(&self, _repo: &str) -> Result<Value, String> {
-            self.calls.lock().unwrap().push("repo".to_string());
-            self.visibility
-                .clone()
-                .unwrap_or_else(|| Ok(json!({"visibility": "PUBLIC"})))
-        }
-
-        async fn issue(&self, _repo: &str, _number: u64) -> Result<Value, String> {
-            self.calls.lock().unwrap().push("issue".to_string());
-            self.issue.clone().expect("issue fixture")
-        }
-
-        async fn issue_timeline_page(
+        async fn repository_slice(
             &self,
             _repo: &str,
             _number: u64,
-            page: usize,
-        ) -> Result<Value, String> {
-            self.calls.lock().unwrap().push(format!("timeline:{page}"));
-            self.timeline
-                .get(&page)
+        ) -> Result<GithubReadBundle, String> {
+            self.calls.lock().unwrap().push("slice".to_string());
+            let visibility = self
+                .visibility
+                .clone()
+                .unwrap_or_else(|| Ok(json!({"visibility": "PUBLIC"})))?;
+            let issue = self.issue.clone().expect("issue fixture")?;
+            let timeline = self
+                .timeline
+                .get(&1)
                 .cloned()
-                .unwrap_or_else(|| Ok(json!([])))
-        }
-
-        async fn pull_request(&self, _repo: &str, number: u64) -> Result<Value, String> {
-            self.calls.lock().unwrap().push(format!("pr:{number}"));
-            self.prs.get(&number).cloned().expect("pr fixture")
+                .unwrap_or_else(|| Ok(json!([])))?
+                .as_array()
+                .cloned()
+                .ok_or_else(|| "timeline fixture must be an array".to_string())?;
+            let pull_requests = self
+                .prs
+                .iter()
+                .map(|(number, value)| Ok((*number, value.clone()?)))
+                .collect::<Result<BTreeMap<_, _>, String>>()?;
+            Ok(GithubReadBundle {
+                visibility,
+                issue,
+                timeline,
+                pull_requests,
+                complete: !self.incomplete,
+            })
         }
     }
 
@@ -862,6 +829,34 @@ mod tests {
         }
     }
 
+    fn synthetic_merged_adapter(merge_commit_sha: &str) -> ProductionGithubRefreshAdapter {
+        ProductionGithubRefreshAdapter {
+            outcome: RefreshOutcomeV1::Fresh(Box::new(GithubRepositoryStateV1 {
+                repo: "owner/repo".to_string(),
+                refresh_revision: "synthetic-merged-refresh".to_string(),
+                refreshed_at: "2026-09-02T00:00:00Z".to_string(),
+                issues: vec![SnapshotIssueV1 {
+                    number: 42,
+                    state: SnapshotIssueStateV1::Open,
+                    updated_at: "2026-09-01T00:00:00Z".to_string(),
+                    snapshot_revision: "synthetic-issue-revision".to_string(),
+                    visibility: VisibilityClassV1::Public,
+                }],
+                pull_requests: vec![SnapshotPrV1 {
+                    number: 7,
+                    state: SnapshotPrStateV1::Merged,
+                    merge_commit_sha: Some(merge_commit_sha.to_string()),
+                    updated_at: "2026-09-02T00:00:00Z".to_string(),
+                    snapshot_revision: "synthetic-pr-revision".to_string(),
+                    linked_issues: vec![42],
+                    visibility: VisibilityClassV1::Public,
+                }],
+                observations: vec![],
+            })),
+            repository_private: false,
+        }
+    }
+
     struct PathEnvGuard(Option<std::ffi::OsString>);
 
     impl PathEnvGuard {
@@ -895,8 +890,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn production_adapter_merged_while_open_then_close_later() {
-        let open_adapter = adapter_for(
+    async fn merged_pr_without_typed_revert_relation_marks_refresh_unavailable() {
+        let adapter = adapter_for(
             issue("OPEN", "2026-09-01T00:00:00Z"),
             vec![cross_reference(7)],
             vec![(
@@ -910,69 +905,23 @@ mod tests {
             )],
         )
         .await;
-        let closed_adapter = adapter_for(
-            issue("CLOSED", "2026-09-03T00:00:00Z"),
-            vec![cross_reference(7)],
-            vec![(
-                7,
-                pr(
-                    7,
-                    "MERGED",
-                    "2026-09-02T00:00:00Z",
-                    Some("merge00000000000000000000000000000000007"),
-                ),
-            )],
-        )
-        .await;
+        match adapter.refresh("owner/repo") {
+            RefreshOutcomeV1::Unavailable { reason, .. } => {
+                assert_eq!(reason, REASON_REVERT_UNAVAILABLE)
+            }
+            other => panic!("merged state must be unavailable, got {other:?}"),
+        }
         let store = CurrentTruthSqliteStore::open_in_memory().unwrap();
-        let open =
-            apply_refresh_and_consume(&store, &open_adapter, "owner/repo", "2026-09-02T01:00:00Z")
+        let consumed =
+            apply_refresh_and_consume(&store, &adapter, "owner/repo", "2026-09-02T01:00:00Z")
                 .unwrap();
-        let issue_row = open
-            .view
-            .subjects
-            .iter()
-            .find(|subject| subject.subject_token == "owner/repo#issue:42")
-            .unwrap();
+        assert!(!consumed.fresh);
         assert_eq!(
-            issue_row
-                .predicates
-                .iter()
-                .find(|predicate| predicate.predicate == PredicateV1::ImplementationPresent)
-                .unwrap()
-                .value_token,
-            "merge00000000000000000000000000000000007"
+            consumed.view.posture.unavailable_reason.as_deref(),
+            Some(REASON_REVERT_UNAVAILABLE)
         );
-        assert!(issue_row
-            .predicates
-            .iter()
-            .any(|predicate| predicate.predicate == PredicateV1::IssueOpen
-                && predicate.status
-                    == tachi_params::current_truth::types::ReductionStatusV1::Current));
-
-        let closed = apply_refresh_and_consume(
-            &store,
-            &closed_adapter,
-            "owner/repo",
-            "2026-09-03T01:00:00Z",
-        )
-        .unwrap();
-        let issue_row = closed
-            .view
-            .subjects
-            .iter()
-            .find(|subject| subject.subject_token == "owner/repo#issue:42")
-            .unwrap();
-        assert!(issue_row
-            .predicates
-            .iter()
-            .any(|predicate| predicate.predicate == PredicateV1::IssueClosed
-                && predicate.status
-                    == tachi_params::current_truth::types::ReductionStatusV1::Current));
-        assert!(closed
-            .work_statuses
-            .iter()
-            .any(|row| row.work_token == "owner/repo#issue:42"));
+        assert!(consumed.view.subjects.is_empty());
+        assert!(store.assertions_for_repo("owner/repo").unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -998,8 +947,55 @@ mod tests {
         }));
     }
 
+    #[test]
+    fn graphql_relation_normalizes_to_the_canonical_closed_unmerged_state() {
+        let raw = json!({"data": {"repository": {
+            "visibility": "PUBLIC",
+            "issueOrPullRequest": {
+                "__typename": "Issue",
+                "number": 42,
+                "state": "OPEN",
+                "updatedAt": "2026-09-01T00:00:00Z",
+                "timelineItems": {
+                    "pageInfo": {"hasNextPage": false},
+                    "nodes": [{
+                        "__typename": "CrossReferencedEvent",
+                        "id": "event-8",
+                        "createdAt": "2026-09-02T00:00:00Z",
+                        "source": {
+                            "__typename": "PullRequest",
+                            "number": 8,
+                            "state": "CLOSED",
+                            "updatedAt": "2026-09-02T00:00:00Z",
+                            "headRefOid": "head000000000000000000000000000000000008",
+                            "baseRefOid": "base000000000000000000000000000000000008",
+                            "mergeCommit": null,
+                            "repository": {"nameWithOwner": "owner/repo"},
+                            "closingIssuesReferences": {
+                                "pageInfo": {"hasNextPage": false},
+                                "nodes": [{
+                                    "number": 42,
+                                    "repository": {"nameWithOwner": "owner/repo"}
+                                }]
+                            }
+                        }
+                    }]
+                }
+            }
+        }}});
+        let bundle = parse_graphql_bundle("owner/repo", 42, &raw).unwrap();
+        let state =
+            load_repository_state("owner/repo", 42, VisibilityClassV1::Public, bundle).unwrap();
+        assert_eq!(state.pull_requests.len(), 1);
+        assert_eq!(
+            state.pull_requests[0].state,
+            SnapshotPrStateV1::ClosedUnmerged
+        );
+        assert_eq!(state.pull_requests[0].linked_issues, vec![42]);
+    }
+
     #[tokio::test]
-    async fn production_adapter_reopen_is_append_only_and_revert_is_not_inferred() {
+    async fn production_adapter_reopen_is_append_only() {
         let mut reopened = cross_reference(7);
         reopened["event"] = json!("reopened");
         reopened["id"] = json!(9001);
@@ -1007,25 +1003,13 @@ mod tests {
         let adapter = adapter_for(
             issue("OPEN", "2026-09-03T00:00:00Z"),
             vec![cross_reference(7), reopened],
-            vec![(
-                7,
-                pr(
-                    7,
-                    "MERGED",
-                    "2026-09-02T00:00:00Z",
-                    Some("merge00000000000000000000000000000000007"),
-                ),
-            )],
+            vec![(7, pr(7, "OPEN", "2026-09-02T00:00:00Z", None))],
         )
         .await;
         let state = fresh(&adapter);
         assert!(state.observations.iter().any(|observation| matches!(
             observation.kind,
             SnapshotObservationKindV1::IssueReopened { number: 42 }
-        )));
-        assert!(!state.observations.iter().any(|observation| matches!(
-            observation.kind,
-            SnapshotObservationKindV1::MergeReverted { .. }
         )));
         let store = CurrentTruthSqliteStore::open_in_memory().unwrap();
         let consumed =
@@ -1147,10 +1131,7 @@ mod tests {
         assert_eq!(result.view.health.conflicted_predicates, 0);
         assert_eq!(result.view.health.repos_with_refresh_debt, 0);
         assert!(result.work_statuses.is_empty());
-        assert_eq!(
-            reader.calls.lock().unwrap().as_slice(),
-            ["repo", "issue", "timeline:1"]
-        );
+        assert_eq!(reader.calls.lock().unwrap().as_slice(), ["slice"]);
         let response = serialize_refresh_response(
             "owner/repo",
             &result,
@@ -1163,11 +1144,13 @@ mod tests {
         assert_eq!(response["posture"]["last_fresh_revision"], Value::Null);
         assert_eq!(response["work_status"], json!([]));
 
-        let denied = FixtureReader {
+        let denied_reader = FixtureReader {
             visibility: Some(Err("denied".to_string())),
             ..FixtureReader::default()
         };
-        let denied = ProductionGithubRefreshAdapter::load_from(&denied, "owner/repo", 42).await;
+        let denied =
+            ProductionGithubRefreshAdapter::load_from(&denied_reader, "owner/repo", 42).await;
+        assert_eq!(denied_reader.calls.lock().unwrap().as_slice(), ["slice"]);
         let denied_store = CurrentTruthSqliteStore::open_in_memory().unwrap();
         let denied =
             apply_refresh_and_consume(&denied_store, &denied, "owner/repo", "2026-09-01T01:00:00Z")
@@ -1185,15 +1168,7 @@ mod tests {
         let production = adapter_for(
             issue("OPEN", "2026-09-01T00:00:00Z"),
             vec![cross_reference(7)],
-            vec![(
-                7,
-                pr(
-                    7,
-                    "MERGED",
-                    "2026-09-02T00:00:00Z",
-                    Some("merge00000000000000000000000000000000007"),
-                ),
-            )],
+            vec![(7, pr(7, "OPEN", "2026-09-02T00:00:00Z", None))],
         )
         .await;
         let expected_state = fresh(&production);
@@ -1244,9 +1219,7 @@ mod tests {
             &bin.path().join("gh"),
             r#"#!/bin/sh
 case "$1 $2" in
-  "repo view") echo '{"visibility":"PUBLIC"}' ;;
-  "issue view") echo '{"number":42,"title":"production path","body":"","state":"OPEN","labels":[],"milestone":null,"updatedAt":"2026-09-01T00:00:00Z","comments":[]}' ;;
-  "api --method") echo '[]' ;;
+  "api graphql") echo '{"data":{"repository":{"visibility":"PUBLIC","issueOrPullRequest":{"__typename":"Issue","number":42,"state":"OPEN","updatedAt":"2026-09-01T00:00:00Z","timelineItems":{"pageInfo":{"hasNextPage":false},"nodes":[]}}}}}' ;;
   *) echo "unexpected gh call: $*" >&2; exit 1 ;;
 esac
 "#,
@@ -1282,17 +1255,10 @@ esac
     }
 
     #[tokio::test]
-    async fn full_final_timeline_page_fails_closed_as_incomplete() {
-        let full_page = Value::Array(
-            (0..TIMELINE_PAGE_SIZE)
-                .map(|id| json!({"id": id, "event": "commented"}))
-                .collect(),
-        );
+    async fn paginated_graphql_relation_set_fails_closed_as_incomplete() {
         let reader = FixtureReader {
             issue: Some(Ok(issue("OPEN", "2026-09-01T00:00:00Z"))),
-            timeline: (1..=MAX_TIMELINE_PAGES)
-                .map(|page| (page, Ok(full_page.clone())))
-                .collect(),
+            incomplete: true,
             ..FixtureReader::default()
         };
         let adapter = ProductionGithubRefreshAdapter::load_from(&reader, "owner/repo", 42).await;
@@ -1373,66 +1339,48 @@ esac
     }
 
     #[tokio::test]
-    async fn whole_refresh_timeout_preserves_known_private_visibility() {
-        struct PrivateSlowReader;
+    async fn denied_and_private_refreshes_have_one_call_and_the_same_timing_floor() {
+        let denied_reader = FixtureReader {
+            visibility: Some(Err("denied".to_string())),
+            ..FixtureReader::default()
+        };
+        let private_reader = FixtureReader {
+            visibility: Some(Ok(json!({"visibility": "PRIVATE"}))),
+            issue: Some(Ok(issue("OPEN", "2026-09-01T00:00:00Z"))),
+            ..FixtureReader::default()
+        };
+        let floor = Duration::from_millis(30);
 
-        #[async_trait]
-        impl BoundedGithubRefreshReader for PrivateSlowReader {
-            async fn repo_visibility(&self, _repo: &str) -> Result<Value, String> {
-                Ok(json!({"visibility": "PRIVATE"}))
-            }
-
-            async fn issue(&self, _repo: &str, _number: u64) -> Result<Value, String> {
-                tokio::time::sleep(Duration::from_millis(50)).await;
-                unreachable!("the whole-refresh timeout must cancel this read")
-            }
-
-            async fn issue_timeline_page(
-                &self,
-                _repo: &str,
-                _number: u64,
-                _page: usize,
-            ) -> Result<Value, String> {
-                unreachable!("issue read must time out first")
-            }
-
-            async fn pull_request(&self, _repo: &str, _number: u64) -> Result<Value, String> {
-                unreachable!("issue read must time out first")
-            }
-        }
-
-        let adapter = ProductionGithubRefreshAdapter::load_from_with_timeout(
-            &PrivateSlowReader,
+        let denied_started = std::time::Instant::now();
+        let denied = ProductionGithubRefreshAdapter::load_from_with_floor(
+            &denied_reader,
             "owner/repo",
             42,
-            Some(Duration::from_millis(1)),
+            floor,
         )
         .await;
-        assert!(adapter.repository_private);
-        match adapter.refresh("owner/repo") {
-            RefreshOutcomeV1::Unavailable { reason, .. } => {
-                assert_eq!(reason, REASON_UNAVAILABLE)
-            }
-            other => panic!("expected unavailable, got {other:?}"),
-        }
+        let denied_elapsed = denied_started.elapsed();
+        let private_started = std::time::Instant::now();
+        let private = ProductionGithubRefreshAdapter::load_from_with_floor(
+            &private_reader,
+            "owner/repo",
+            42,
+            floor,
+        )
+        .await;
+        let private_elapsed = private_started.elapsed();
+
+        assert_eq!(denied_reader.calls.lock().unwrap().as_slice(), ["slice"]);
+        assert_eq!(private_reader.calls.lock().unwrap().as_slice(), ["slice"]);
+        assert!(denied_elapsed >= floor);
+        assert!(private_elapsed >= floor);
+        assert!(!denied.repository_private);
+        assert!(private.repository_private);
     }
 
     #[tokio::test]
     async fn contradictory_same_source_revision_fails_closed() {
-        let production = adapter_for(
-            issue("OPEN", "2026-09-01T00:00:00Z"),
-            vec![cross_reference(7)],
-            vec![(
-                7,
-                pr(
-                    7,
-                    "MERGED",
-                    "2026-09-02T00:00:00Z",
-                    Some("merge00000000000000000000000000000000007"),
-                ),
-            )],
-        )
-        .await;
+        let production = synthetic_merged_adapter("merge00000000000000000000000000000000007");
         let mut contradictory_state = fresh(&production);
         contradictory_state.pull_requests[0].merge_commit_sha =
             Some("other00000000000000000000000000000000007".to_string());
