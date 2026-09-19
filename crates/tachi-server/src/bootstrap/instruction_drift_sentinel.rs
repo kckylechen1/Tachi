@@ -19,6 +19,7 @@ const FINDINGS_STATUS: &str = "findings";
 const INCOMPLETE_STATUS: &str = "incomplete";
 
 const CHECK_PARITY_DRIFT: &str = "parity_drift";
+const CHECK_MISSING_SOURCE: &str = "missing_source";
 const CHECK_MISSING_TARGET: &str = "missing_target";
 const CHECK_TARGET_ALIASES_SOURCE: &str = "target_aliases_source";
 const CHECK_STALE_TARGET: &str = "stale_target";
@@ -157,13 +158,33 @@ pub(super) fn build_instruction_drift_report(
     }
 
     for source in &status.sources {
-        if source.targets.is_empty() {
+        if source.status == "missing" {
+            findings.push(finding_for_source(
+                source,
+                None,
+                None,
+                CHECK_MISSING_SOURCE,
+                format!("declared source '{}' is missing", source.source),
+            ));
+        }
+        let valid_direct_consumers = evaluate_direct_consumers(source, &mut findings);
+        if source.targets.is_empty() && source.direct_consumers.is_empty() {
             findings.push(finding_for_source(
                 source,
                 None,
                 None,
                 CHECK_INCOMPLETE_COVERAGE,
-                "targets=[]: projection coverage unscanned".to_string(),
+                "direct_consumers=[] and targets=[]: carrier consumption coverage unscanned"
+                    .to_string(),
+            ));
+        } else if source.targets.is_empty() && valid_direct_consumers == 0 {
+            findings.push(finding_for_source(
+                source,
+                None,
+                None,
+                CHECK_INCOMPLETE_COVERAGE,
+                "no valid direct consumer or projection target accounts for this surface"
+                    .to_string(),
             ));
         }
 
@@ -214,7 +235,9 @@ pub(super) fn build_instruction_drift_report(
     };
     for finding in &findings {
         match finding.check_kind.as_str() {
-            CHECK_INCOMPLETE_COVERAGE => summary.incomplete += 1,
+            CHECK_INCOMPLETE_COVERAGE | CHECK_MISSING_SOURCE | CHECK_MISSING_TARGET => {
+                summary.incomplete += 1;
+            }
             CHECK_PARITY_DRIFT => summary.parity_drift += 1,
             CHECK_DENSITY_OVERRUN => summary.density_overrun += 1,
             CHECK_AUDIENCE_LEAK => summary.audience_leak += 1,
@@ -240,6 +263,43 @@ pub(super) fn build_instruction_drift_report(
         findings,
         manifest_findings,
     })
+}
+
+fn evaluate_direct_consumers(
+    source: &InstructionSourceStatus,
+    findings: &mut Vec<InstructionDriftFinding>,
+) -> usize {
+    let mut valid = 0;
+    for carrier in &source.direct_consumers {
+        if carrier_consumes_source_path(carrier, &source.source) {
+            valid += 1;
+        } else {
+            findings.push(finding_for_source(
+                source,
+                None,
+                None,
+                CHECK_WRONG_CARRIER,
+                format!(
+                    "declared direct consumer '{}' does not consume source path '{}'",
+                    carrier, source.source
+                ),
+            ));
+        }
+    }
+    valid
+}
+
+fn carrier_consumes_source_path(carrier: &str, source_path: &str) -> bool {
+    let Some(file_name) = Path::new(source_path)
+        .file_name()
+        .and_then(|name| name.to_str())
+    else {
+        return false;
+    };
+    matches!(
+        (carrier, file_name),
+        ("codex" | "claude", "AGENTS.md") | ("claude", "CLAUDE.md") | ("gemini", "GEMINI.md")
+    )
 }
 
 fn evaluate_required_sources(
@@ -856,6 +916,78 @@ mod tests {
     }
 
     #[test]
+    fn direct_source_consumers_account_for_surfaces_without_projection_targets() {
+        let (root, manifest_path) = fixture("direct-clean");
+        std::fs::write(root.join("AGENTS.md"), "public contract\n").expect("source");
+        std::fs::write(root.join("CLAUDE.md"), "private manual body\n").expect("source");
+        let mut manifest = clean_manifest();
+        manifest["surfaces"][0]["direct_consumers"] = json!(["codex"]);
+        manifest["surfaces"][0]["targets"] = json!([]);
+        manifest["surfaces"][1]["direct_consumers"] = json!(["claude"]);
+        manifest["surfaces"][1]["targets"] = json!([]);
+        write_manifest(&manifest_path, &manifest);
+
+        let report = scan_drift_for_test(&manifest_path).expect("direct scan");
+        assert_eq!(report.status, CLEAN_STATUS, "{:?}", report.findings);
+        assert!(report.findings.is_empty(), "{:?}", report.findings);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn removing_one_direct_declaration_returns_incomplete() {
+        let (root, manifest_path) = fixture("direct-removed");
+        std::fs::write(root.join("AGENTS.md"), "public contract\n").expect("source");
+        std::fs::write(root.join("CLAUDE.md"), "private manual body\n").expect("source");
+        let mut manifest = clean_manifest();
+        manifest["surfaces"][0]["direct_consumers"] = json!([]);
+        manifest["surfaces"][0]["targets"] = json!([]);
+        manifest["surfaces"][1]["direct_consumers"] = json!(["claude"]);
+        manifest["surfaces"][1]["targets"] = json!([]);
+        write_manifest(&manifest_path, &manifest);
+
+        let report = scan_drift_for_test(&manifest_path).expect("removed declaration scan");
+        assert_eq!(report.status, INCOMPLETE_STATUS);
+        assert!(report.findings.iter().any(|finding| {
+            finding.source_id == "public-agents" && finding.check_kind == CHECK_INCOMPLETE_COVERAGE
+        }));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn missing_directly_consumed_source_returns_incomplete() {
+        let (root, manifest_path) = fixture("direct-missing-source");
+        std::fs::write(root.join("CLAUDE.md"), "private manual body\n").expect("source");
+        let mut manifest = clean_manifest();
+        manifest["surfaces"][0]["direct_consumers"] = json!(["codex"]);
+        manifest["surfaces"][0]["targets"] = json!([]);
+        manifest["surfaces"][1]["direct_consumers"] = json!(["claude"]);
+        manifest["surfaces"][1]["targets"] = json!([]);
+        write_manifest(&manifest_path, &manifest);
+
+        let report = scan_drift_for_test(&manifest_path).expect("missing source scan");
+        assert_eq!(report.status, INCOMPLETE_STATUS);
+        assert!(report.findings.iter().any(|finding| {
+            finding.source_id == "public-agents" && finding.check_kind == CHECK_MISSING_SOURCE
+        }));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn production_manifest_accounts_for_every_surface_cleanly() {
+        let manifest_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join(".agents/instruction-surfaces.json");
+
+        let report = scan_drift_for_test(&manifest_path).expect("production manifest scan");
+        assert_eq!(report.status, CLEAN_STATUS, "{:?}", report.findings);
+        assert!(report.findings.is_empty(), "{:?}", report.findings);
+        assert!(report.manifest_findings.is_empty());
+    }
+
+    #[test]
     fn one_byte_exact_projection_edit_emits_parity_finding() {
         let (root, manifest_path) = fixture("parity");
         write_clean_tree(&root);
@@ -903,6 +1035,7 @@ mod tests {
         write_manifest(&manifest_path, &manifest);
 
         let report = scan_drift_for_test(&manifest_path).expect("target kinds");
+        assert_eq!(report.status, INCOMPLETE_STATUS);
         let kind_set: BTreeSet<&str> = kinds(&report).into_iter().collect();
         assert!(kind_set.contains(CHECK_MISSING_TARGET), "{kind_set:?}");
         assert!(
@@ -910,6 +1043,42 @@ mod tests {
             "{kind_set:?}"
         );
         assert!(kind_set.contains(CHECK_WRONG_CARRIER), "{kind_set:?}");
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn direct_consumption_cannot_bypass_carrier_or_audience_checks() {
+        let (root, manifest_path) = fixture("direct-bypass");
+        std::fs::write(
+            root.join("AGENTS.md"),
+            "public contract\nUse tachi_staff(action='start') here.\n",
+        )
+        .expect("source");
+        std::fs::write(root.join("CLAUDE.md"), "private manual body\n").expect("source");
+        let mut manifest = clean_manifest();
+        manifest["surfaces"][0]["direct_consumers"] = json!(["gemini"]);
+        manifest["surfaces"][0]["targets"] = json!([]);
+        manifest["surfaces"][1]["direct_consumers"] = json!(["claude"]);
+        manifest["surfaces"][1]["targets"] = json!([]);
+        write_manifest(&manifest_path, &manifest);
+
+        let report = scan_drift_for_test(&manifest_path).expect("direct bypass scan");
+        assert_eq!(report.status, INCOMPLETE_STATUS);
+        assert!(
+            report.findings.iter().any(|finding| {
+                finding.source_id == "public-agents" && finding.check_kind == CHECK_WRONG_CARRIER
+            }),
+            "{:?}",
+            report.findings
+        );
+        assert!(
+            report.findings.iter().any(|finding| {
+                finding.source_id == "public-agents" && finding.check_kind == CHECK_AUDIENCE_LEAK
+            }),
+            "{:?}",
+            report.findings
+        );
 
         let _ = std::fs::remove_dir_all(root);
     }
