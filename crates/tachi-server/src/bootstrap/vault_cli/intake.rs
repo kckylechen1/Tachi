@@ -1,6 +1,6 @@
 use crate::provider_config::parse_vault_alias;
 use memcore::vault::{SECRET_TYPE_API_KEY, SECRET_TYPE_JSON_BLOB};
-use memcore::{FingerprintKey, ProviderAccount};
+use memcore::{AccountClass, AuthMode, FingerprintKey, ProviderAccount};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -73,7 +73,6 @@ enum HostFilter {
     Unsupported,
 }
 
-#[derive(Debug)]
 struct RawCandidate {
     source_path: PathBuf,
     logical_name: String,
@@ -88,11 +87,12 @@ struct EndpointEvidence {
     admitted_provider_kind: Option<String>,
 }
 
-#[derive(Debug)]
 struct ClassifiedCandidate {
     raw: RawCandidate,
     classification: &'static str,
     provider_kind: Option<String>,
+    canonical_key: Option<&'static str>,
+    account_class: Option<AccountClass>,
     key_fingerprint: Option<String>,
     account_fingerprint: Option<String>,
     account_id: Option<String>,
@@ -417,52 +417,18 @@ fn classify_candidates(
         .map(|raw| classify_candidate(raw, endpoints))
         .collect();
 
-    // An invented name can borrow provider identity only from identical bytes
-    // already classified by admitted name/endpoint evidence. This comparison
-    // stays in-memory and never enters a report.
-    for index in 0..candidates.len() {
-        if candidates[index].classification != "unknown"
-            || candidates[index].raw.secret_type != SECRET_TYPE_API_KEY
-        {
-            continue;
-        }
-        let kinds: BTreeSet<String> = candidates
-            .iter()
-            .filter(|other| {
-                other.classification == "known"
-                    && other.raw.secret_type == SECRET_TYPE_API_KEY
-                    && other.raw.value.trim() == candidates[index].raw.value.trim()
-            })
-            .filter_map(|other| other.provider_kind.clone())
-            .collect();
-        if kinds.len() == 1 {
-            candidates[index].classification = "known";
-            candidates[index].provider_kind = kinds.into_iter().next();
-        } else if kinds.len() > 1 {
-            candidates[index].classification = "ambiguous";
-        }
-    }
-
     for candidate in &mut candidates {
         if candidate.classification != "known" {
             continue;
         }
-        let Some(provider_kind) = candidate.provider_kind.as_deref() else {
+        let (Some(provider_kind), Some(account_class)) =
+            (candidate.provider_kind.as_deref(), candidate.account_class)
+        else {
             continue;
         };
         if let Some(slot) = slot_for_key_name(&candidate.raw.logical_name) {
             candidate.intended_slot_binds.insert(slot.to_string());
         }
-        candidate.intended_slot_binds.extend(
-            endpoints
-                .iter()
-                .filter(|evidence| {
-                    evidence.source_path == candidate.raw.source_path
-                        && evidence.admitted_provider_kind.as_deref() == Some(provider_kind)
-                })
-                .filter_map(|evidence| lane_slot_for_prefix(&evidence.prefix))
-                .map(str::to_string),
-        );
         let Some(fp_key) = fp_key else {
             continue;
         };
@@ -476,6 +442,7 @@ fn classify_candidates(
             .filter(|account| {
                 account.provider_kind == provider_kind
                     && account.account_fingerprint == account_fingerprint
+                    && account_is_eligible(account, account_class)
             })
             .collect();
         if let [account] = exact.as_slice() {
@@ -487,14 +454,13 @@ fn classify_candidates(
             continue;
         }
 
-        let canonical = crate::status_ops::status_health::canonical_account_key_for_provider_kind(
-            provider_kind,
-        );
+        let canonical = candidate.canonical_key;
         let rotating: Vec<&ProviderAccount> = inventory
             .accounts
             .iter()
             .filter(|account| {
                 account.provider_kind == provider_kind
+                    && account_is_eligible(account, account_class)
                     && inventory
                         .custody_targets
                         .get(&account.account_id)
@@ -515,7 +481,45 @@ fn classify_candidates(
             _ => candidate.classification = "ambiguous",
         }
     }
+
+    let mut fingerprints_by_account: HashMap<String, BTreeSet<String>> = HashMap::new();
+    for candidate in &candidates {
+        if candidate.classification != "known" {
+            continue;
+        }
+        if let (Some(account_id), Some(account_fingerprint)) = (
+            candidate.account_id.as_ref(),
+            candidate.account_fingerprint.as_ref(),
+        ) {
+            fingerprints_by_account
+                .entry(account_id.clone())
+                .or_default()
+                .insert(account_fingerprint.clone());
+        }
+    }
+    let ambiguous_accounts: HashSet<String> = fingerprints_by_account
+        .into_iter()
+        .filter_map(|(account_id, fingerprints)| (fingerprints.len() > 1).then_some(account_id))
+        .collect();
+    for candidate in &mut candidates {
+        if candidate
+            .account_id
+            .as_ref()
+            .is_some_and(|account_id| ambiguous_accounts.contains(account_id))
+        {
+            candidate.classification = "ambiguous";
+            candidate.account_id = None;
+            candidate.planned_action = None;
+            candidate.intended_slot_binds.clear();
+        }
+    }
     candidates
+}
+
+fn account_is_eligible(account: &ProviderAccount, expected_class: AccountClass) -> bool {
+    account.auth_mode == AuthMode::ApiKeyPool
+        && account.status == memcore::vault::accounts::ACCOUNT_STATUS_ACTIVE
+        && account.account_class == expected_class
 }
 
 fn classify_candidate(raw: RawCandidate, endpoints: &[EndpointEvidence]) -> ClassifiedCandidate {
@@ -523,6 +527,8 @@ fn classify_candidate(raw: RawCandidate, endpoints: &[EndpointEvidence]) -> Clas
         raw,
         classification: "unknown",
         provider_kind: None,
+        canonical_key: None,
+        account_class: None,
         key_fingerprint: None,
         account_fingerprint: None,
         account_id: None,
@@ -530,6 +536,7 @@ fn classify_candidate(raw: RawCandidate, endpoints: &[EndpointEvidence]) -> Clas
         intended_slot_binds: BTreeSet::new(),
     };
     if result.raw.secret_type != SECRET_TYPE_API_KEY
+        || result.raw.value.trim().is_empty()
         || classify_non_key(&result.raw.logical_name, &result.raw.value).is_some()
     {
         return result;
@@ -545,22 +552,14 @@ fn classify_candidate(raw: RawCandidate, endpoints: &[EndpointEvidence]) -> Clas
                 && Some(evidence.prefix.as_str()) == prefix.as_deref()
         })
         .collect();
-    let relevant = if matching.is_empty() {
-        endpoints
-            .iter()
-            .filter(|evidence| evidence.source_path == result.raw.source_path)
-            .collect::<Vec<_>>()
-    } else {
-        matching
-    };
-    if relevant
+    if matching
         .iter()
         .any(|evidence| evidence.admitted_provider_kind.is_none())
     {
         result.classification = "conflicted";
         return result;
     }
-    let endpoint_kinds: BTreeSet<String> = relevant
+    let endpoint_kinds: BTreeSet<String> = matching
         .iter()
         .filter_map(|evidence| evidence.admitted_provider_kind.clone())
         .collect();
@@ -569,15 +568,55 @@ fn classify_candidate(raw: RawCandidate, endpoints: &[EndpointEvidence]) -> Clas
         (Some(kind), 0) => {
             result.classification = "known";
             result.provider_kind = Some(kind.to_string());
+            result.canonical_key =
+                crate::status_ops::status_health::canonical_key_for_env_name(
+                    &result.raw.logical_name,
+                );
+            result.account_class =
+                crate::status_ops::status_health::account_class_for_env_name(
+                    &result.raw.logical_name,
+                );
         }
         (Some(kind), 1) if endpoint_kinds.contains(kind) => {
             result.classification = "known";
             result.provider_kind = Some(kind.to_string());
+            result.canonical_key =
+                crate::status_ops::status_health::canonical_key_for_env_name(
+                    &result.raw.logical_name,
+                );
+            result.account_class =
+                crate::status_ops::status_health::account_class_for_env_name(
+                    &result.raw.logical_name,
+                );
         }
         (Some(_), _) => result.classification = "conflicted",
         (None, 1) => {
-            result.classification = "known";
-            result.provider_kind = endpoint_kinds.into_iter().next();
+            let provider_kind = endpoint_kinds.into_iter().next().expect("one endpoint kind");
+            let inferred_key_name = prefix.as_ref().map(|prefix| format!("{prefix}_API_KEY"));
+            let registry_matches_endpoint = inferred_key_name.as_deref().is_some_and(|name| {
+                crate::status_ops::status_health::provider_kind_for_env_name(name)
+                    == Some(provider_kind.as_str())
+            });
+            if registry_matches_endpoint
+                || prefix
+                    .as_deref()
+                    .and_then(lane_slot_for_prefix)
+                    .is_some()
+            {
+                result.classification = "known";
+                result.provider_kind = Some(provider_kind);
+                if registry_matches_endpoint {
+                    result.canonical_key = inferred_key_name
+                        .as_deref()
+                        .and_then(crate::status_ops::status_health::canonical_key_for_env_name);
+                }
+                result.account_class = Some(
+                    inferred_key_name
+                        .as_deref()
+                        .and_then(crate::status_ops::status_health::account_class_for_env_name)
+                        .unwrap_or(AccountClass::ModelApi),
+                );
+            }
         }
         (None, 0) => {}
         (None, _) => result.classification = "ambiguous",
@@ -760,7 +799,7 @@ pub(super) fn parse_env_content(path: &Path, raw: &str) -> Vec<(PathBuf, String,
             let (key, value) = line.split_once('=')?;
             let key = key.trim();
             let mut value = value.trim();
-            if key.is_empty() || value.is_empty() {
+            if key.is_empty() {
                 return None;
             }
             if ((value.starts_with('"') && value.ends_with('"'))
@@ -769,7 +808,10 @@ pub(super) fn parse_env_content(path: &Path, raw: &str) -> Vec<(PathBuf, String,
             {
                 value = &value[1..value.len() - 1];
             }
-            (!value.is_empty()).then(|| (path.to_path_buf(), key.to_string(), value.to_string()))
+            if value.is_empty() && config_prefix(key).is_none() {
+                return None;
+            }
+            Some((path.to_path_buf(), key.to_string(), value.to_string()))
         })
         .collect()
 }
@@ -1225,6 +1267,51 @@ mod tests {
             assert_eq!(candidate.classification, "unknown", "{report:#?}");
             assert!(candidate.provider_kind.is_none(), "{report:#?}");
         }
+    }
+
+    #[test]
+    fn unknown_api_key_name_does_not_gain_identity_from_matching_prefix_alone() {
+        let home = tempfile::tempdir().expect("home");
+        let cwd = tempfile::tempdir().expect("cwd");
+        write_file(
+            &cwd.path().join(".env"),
+            "CUSTOM_API_KEY=custom-fixture\nCUSTOM_BASE_URL=https://api.deepseek.com\n",
+        );
+
+        let report = plan(
+            home.path(),
+            cwd.path(),
+            &home.path().join(".tachi/global/tachi-global.db"),
+        );
+
+        assert!(report.actions.is_empty(), "{report:#?}");
+        let candidate = report
+            .candidates
+            .iter()
+            .find(|candidate| candidate.logical_name == "CUSTOM_API_KEY")
+            .expect("candidate");
+        assert_eq!(candidate.classification, "unknown", "{report:#?}");
+        assert!(candidate.provider_kind.is_none(), "{report:#?}");
+    }
+
+    #[test]
+    fn unrelated_lane_endpoint_does_not_create_a_slot_bind() {
+        let home = tempfile::tempdir().expect("home");
+        let cwd = tempfile::tempdir().expect("cwd");
+        write_file(
+            &cwd.path().join(".env"),
+            "DEEPSEEK_API_KEY=fixture\nEXTRACT_BASE_URL=https://api.deepseek.com\n",
+        );
+
+        let report = plan(
+            home.path(),
+            cwd.path(),
+            &home.path().join(".tachi/global/tachi-global.db"),
+        );
+
+        assert_eq!(report.actions.len(), 1, "{report:#?}");
+        assert_eq!(report.actions[0].action, ACTION_CREATE_ACCOUNT);
+        assert!(report.actions[0].slot.is_none());
     }
 
     fn assert_rejected_endpoint_conflicts(endpoint: &str) {

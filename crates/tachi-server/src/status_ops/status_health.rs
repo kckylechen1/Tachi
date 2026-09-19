@@ -131,27 +131,6 @@ pub(crate) fn canonical_key_for_env_name(name: &str) -> Option<&'static str> {
     registry_def_for_env_name(name).map(|def| def.canonical_key)
 }
 
-/// The canonical non-slot Vault name for a provider kind. Intake uses this
-/// only to recognize rotation of an existing account's custody target; the
-/// registry remains the single provider vocabulary and lane slots never
-/// become account names.
-pub(crate) fn canonical_account_key_for_provider_kind(provider_kind: &str) -> Option<&'static str> {
-    const LANE_SLOTS: &[&str] = &[
-        "EXTRACT_API_KEY",
-        "SUMMARY_API_KEY",
-        "DISTILL_API_KEY",
-        "REASONING_API_KEY",
-    ];
-    api_keys::API_KEY_DEFS
-        .iter()
-        .find(|def| {
-            def.provider_kind == provider_kind
-                && def.key == def.canonical_key
-                && !LANE_SLOTS.contains(&def.key)
-        })
-        .map(|def| def.canonical_key)
-}
-
 /// Every interchangeable env-var name of the registry entry an admitted name
 /// belongs to — the entry's own key plus its aliases — or `None` when the name
 /// is not in the registry.
