@@ -26,7 +26,7 @@ do HTTP. Target shape for Claude Code / Codex-class hosts:
 |---|---|
 | Loopback HTTP listener + `/mcp` | `bootstrap/serve/daemon.rs` (`127.0.0.1`) |
 | `/health` (status, transport, auth posture, reconnect) | same |
-| Session identity at `initialize` | headers `x-tachi-*` **or** meta `tachi*` |
+| Legacy-only session identity at `initialize` | headers `x-tachi-*` **or** meta `tachi*` |
 | Profile filter (admin refused without #495 policy) | `server_handler::parse_http_tool_profile` |
 | Read/write asymmetry | `session_identity` |
 | E2E tests | `bootstrap/serve/stdio/tests.rs` (`http_direct_connect_*`) |
@@ -89,6 +89,13 @@ For compatibility, headers win over initialize metadata in legacy mode. Modern
 header and request-metadata identities must agree. Project must resolve via
 `resolve_named_project_db_path` (same as stdio).
 
+For modern stdio, per-request project and profile metadata may only repeat the
+project and profile admitted when the adapter process started; omission keeps
+those process bindings, while any different declaration is rejected before a
+daemon call. Client labels and AgentIdentity assertions are validated and
+forwarded only for that request. Canonical and dotted aliases must agree, and
+an omitted later request never inherits an earlier modern request's identity.
+
 A valid, explicit AgentIdentity assertion on this loopback-only transport is
 recorded as `self_asserted`, never `verified`. An absent assertion stays
 identity-less and rejected; the daemon process environment is not an identity
@@ -132,9 +139,10 @@ the compatibility path, not a failure of HTTP migration.
 
 | Actor | Behavior |
 |---|---|
-| **HTTP client** | Connection drops / JSON-RPC **`-32000`** (or transport error). **Re-run `initialize`** to get a new `mcp-session-id`. Wait until `/health` is `ok`. |
+| **Legacy HTTP client (through 2025-11-25)** | Connection drops / JSON-RPC **`-32000`** (or transport error). Wait until `/health` is `ok`, then **re-run `initialize`** to get a new `mcp-session-id`. |
+| **Modern HTTP client (2026-07-28)** | The request fails with a transport error. Wait until `/health` is `ok`, run `server/discover` again when capability refresh is needed, then retry the stateless request with the same validated per-request metadata and routing headers. Do **not** call `initialize`: explicit modern initialize is rejected by design and modern requests never carry an `mcp-session-id`. |
 | **stdio adapter** | Host respawns the pipe; adapter re-attaches to (or re-spawns) the daemon. Unrelated to HTTP session ids. |
-| **Idle reaper** | Daemon may exit after idle timeout and auto-respawn on next need — same reconnect for HTTP. |
+| **Idle reaper** | Daemon may exit after idle timeout and auto-respawn on next need; use the matching legacy-session or modern-stateless reconnect row above. |
 
 `/health` advertises:
 
@@ -147,6 +155,9 @@ the compatibility path, not a failure of HTTP migration.
   }
 }
 ```
+
+The `/health.reconnect.on_disconnect` string above describes the retained
+legacy session adapter. It is not an instruction for a `2026-07-28` peer.
 
 ## Migration policy
 

@@ -913,8 +913,12 @@ fn validate_modern_identity_headers(
         let header_value = header_string_result(parts, header).map_err(|error| {
             rmcp::ErrorData::invalid_params(format!("malformed {header} identity: {error}"), None)
         })?;
-        let meta_value = aliased_meta_string_result(&context.meta, canonical_meta, alias_meta)
-            .map_err(|error| rmcp::ErrorData::invalid_params(error, None))?;
+        let meta_value = crate::session_identity::aliased_meta_identity_string(
+            &context.meta,
+            canonical_meta,
+            alias_meta,
+        )
+        .map_err(|error| rmcp::ErrorData::invalid_params(error, None))?;
         if let Some((header_value, meta_value)) = header_value
             .as_ref()
             .zip(meta_value.as_ref())
@@ -929,25 +933,6 @@ fn validate_modern_identity_headers(
         }
     }
     Ok(())
-}
-
-fn aliased_meta_string_result(
-    meta: &RequestMetaObject,
-    canonical: &str,
-    alias: &str,
-) -> Result<Option<String>, String> {
-    let canonical_value = meta_string_result(meta, canonical)?;
-    let alias_value = meta_string_result(meta, alias)?;
-    if let Some((canonical_value, alias_value)) = canonical_value
-        .as_ref()
-        .zip(alias_value.as_ref())
-        .filter(|(canonical_value, alias_value)| canonical_value != alias_value)
-    {
-        return Err(format!(
-            "conflicting request _meta identities: {canonical} ({canonical_value}) does not match {alias} ({alias_value})"
-        ));
-    }
-    Ok(canonical_value.or(alias_value))
 }
 
 /// Extract session identity fields from MCP initialize `_meta` (#732).
@@ -977,12 +962,15 @@ fn identity_from_initialize_meta(
         .or_else(|| meta_string(meta, "tachi.profile"));
     identity.client = meta_string(meta, crate::session_identity::META_CLIENT)
         .or_else(|| meta_string(meta, "tachi.client"));
-    match meta_string_result(meta, crate::session_identity::META_AGENT_IDENTITY) {
+    match crate::session_identity::meta_identity_string(
+        meta,
+        crate::session_identity::META_AGENT_IDENTITY,
+    ) {
         Ok(Some(value)) => match assign_explicit_agent_identity(&mut identity, value) {
             Ok(()) => {}
             Err(err) => identity.agent_identity_error = Some(err),
         },
-        Ok(None) => match meta_string_result(meta, "tachi.agentIdentity") {
+        Ok(None) => match crate::session_identity::meta_identity_string(meta, "tachi.agentIdentity") {
             Ok(Some(value)) => match assign_explicit_agent_identity(&mut identity, value) {
                 Ok(()) => {}
                 Err(err) => identity.agent_identity_error = Some(err),
@@ -992,9 +980,12 @@ fn identity_from_initialize_meta(
         },
         Err(err) => identity.agent_identity_error = Some(err),
     }
-    match meta_string_result(meta, crate::session_identity::META_PROJECT) {
+    match crate::session_identity::meta_identity_string(
+        meta,
+        crate::session_identity::META_PROJECT,
+    ) {
         Ok(Some(value)) => identity.project = Some(value),
-        Ok(None) => match meta_string_result(meta, "tachi.project") {
+        Ok(None) => match crate::session_identity::meta_identity_string(meta, "tachi.project") {
             Ok(Some(value)) => identity.project = Some(value),
             Ok(None) => {}
             Err(err) => identity.project_error = Some(err),
@@ -1008,9 +999,15 @@ fn identity_from_initialize_meta(
     // fall through to the dotted alias when the canonical key is genuinely
     // ABSENT (a malformed canonical key is itself the caller's answer and
     // must not be masked by trying the alias next).
-    match meta_string_result(meta, crate::session_identity::META_WORKSPACE_ROOT) {
+    match crate::session_identity::meta_identity_string(
+        meta,
+        crate::session_identity::META_WORKSPACE_ROOT,
+    ) {
         Ok(Some(value)) => identity.workspace_root = Some(value),
-        Ok(None) => match meta_string_result(meta, "tachi.workspaceRoot") {
+        Ok(None) => match crate::session_identity::meta_identity_string(
+            meta,
+            "tachi.workspaceRoot",
+        ) {
             Ok(Some(value)) => identity.workspace_root = Some(value),
             Ok(None) => {}
             Err(err) => identity.workspace_root_error = Some(err),
@@ -1025,29 +1022,6 @@ fn meta_string(meta: &rmcp::model::RequestMetaObject, key: &str) -> Option<Strin
         .get(key)
         .and_then(|value| value.as_str())
         .and_then(crate::session_identity::normalize_identity_value)
-}
-
-/// Presence-distinguishing twin of [`meta_string`] for `workspace_root`
-/// (review finding [3], #1207): `Ok(None)` means the key is genuinely
-/// absent; `Err` means it was present but unusable (wrong JSON type, or
-/// blank after trimming) — the caller must not collapse that into `Ok(None)`
-/// the way an absent key would be.
-fn meta_string_result(
-    meta: &rmcp::model::RequestMetaObject,
-    key: &str,
-) -> Result<Option<String>, String> {
-    match meta.0.get(key) {
-        None => Ok(None),
-        Some(value) => {
-            let raw = value
-                .as_str()
-                .ok_or_else(|| format!("_meta.{key} must be a string"))?;
-            match crate::session_identity::normalize_identity_value(raw) {
-                Some(v) => Ok(Some(v)),
-                None => Err(format!("_meta.{key} is blank")),
-            }
-        }
-    }
 }
 
 fn header_string(parts: &axum::http::request::Parts, name: &str) -> Option<String> {

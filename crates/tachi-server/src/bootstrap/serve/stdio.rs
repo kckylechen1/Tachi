@@ -439,6 +439,14 @@ struct StdioProxyServer {
         std::sync::Arc<std::sync::Mutex<Option<crate::cli_client::ProxyIdentityForward>>>,
 }
 
+#[derive(Clone)]
+struct StdioRequestIdentity {
+    client_project: Option<String>,
+    tool_profile: Option<tachi_hub::ToolProfile>,
+    client: Option<String>,
+    agent_identity: crate::cli_client::ProxyIdentityForward,
+}
+
 impl StdioProxyServer {
     /// Snapshot the currently-targeted daemon. Cheap clone out of the lock so the
     /// guard is never held across an await.
@@ -450,7 +458,7 @@ impl StdioProxyServer {
             .unwrap_or(crate::cli_client::ProxyIdentityForward::AutoEnv)
     }
 
-    fn resolve_request_agent_identity(
+    fn resolve_legacy_agent_identity(
         meta: Option<&rmcp::model::RequestMetaObject>,
     ) -> crate::cli_client::ProxyIdentityForward {
         let (explicit_key_present, explicit_raw) = meta.map_or((false, None), |meta| {
@@ -483,11 +491,109 @@ impl StdioProxyServer {
     }
 
     fn capture_initialize_identity(&self, request: &rmcp::model::InitializeRequestParams) {
-        let choice = Self::resolve_request_agent_identity(request.meta.as_ref());
+        let choice = Self::resolve_legacy_agent_identity(request.meta.as_ref());
         *self
             .resolved_agent_identity
             .lock()
             .expect("stdio proxy identity lock poisoned") = Some(choice);
+    }
+
+    fn resolve_request_identity(
+        &self,
+        mode: crate::mcp_peer::McpPeerMode,
+        meta: &rmcp::model::RequestMetaObject,
+    ) -> Result<StdioRequestIdentity, rmcp::ErrorData> {
+        if mode == crate::mcp_peer::McpPeerMode::Legacy {
+            return Ok(StdioRequestIdentity {
+                client_project: self.client_project.clone(),
+                tool_profile: self.tool_profile,
+                client: None,
+                agent_identity: self.forwarded_agent_identity(),
+            });
+        }
+
+        let project = crate::session_identity::aliased_meta_identity_string(
+            meta,
+            crate::session_identity::META_PROJECT,
+            "tachi.project",
+        )
+        .map_err(stdio_identity_error)?;
+        require_stdio_binding_agreement(
+            "project",
+            project.as_deref(),
+            self.client_project.as_deref(),
+        )?;
+
+        let requested_profile = crate::session_identity::aliased_meta_identity_string(
+            meta,
+            crate::session_identity::META_PROFILE,
+            "tachi.profile",
+        )
+        .map_err(stdio_identity_error)?
+        .map(|raw| {
+            tachi_hub::parse_tool_profile(&raw).ok_or_else(|| {
+                rmcp::ErrorData::invalid_params(
+                    format!("unknown modern stdio request profile '{raw}'"),
+                    None,
+                )
+            })
+        })
+        .transpose()?;
+        if let Some(requested_profile) = requested_profile {
+            if self.tool_profile != Some(requested_profile) {
+                return Err(rmcp::ErrorData::invalid_params(
+                    format!(
+                        "modern stdio request profile '{}' does not match process-admitted profile '{}'",
+                        requested_profile.as_str(),
+                        self.tool_profile
+                            .map(|profile| profile.as_str())
+                            .unwrap_or_else(|| "default".to_string())
+                    ),
+                    None,
+                ));
+            }
+        }
+
+        let client = crate::session_identity::aliased_meta_identity_string(
+            meta,
+            crate::session_identity::META_CLIENT,
+            "tachi.client",
+        )
+        .map_err(stdio_identity_error)?;
+        if let Some(client) = client.as_deref() {
+            http::HeaderValue::from_str(client).map_err(|error| {
+                rmcp::ErrorData::invalid_params(
+                    format!("invalid modern stdio request client label: {error}"),
+                    None,
+                )
+            })?;
+        }
+
+        let agent_identity = crate::session_identity::aliased_meta_identity_string(
+            meta,
+            crate::session_identity::META_AGENT_IDENTITY,
+            "tachi.agentIdentity",
+        )
+        .map_err(stdio_identity_error)?;
+        let agent_identity = match agent_identity {
+            Some(value) if crate::session_identity::valid_agent_identity_assertion(&value) => {
+                crate::cli_client::ProxyIdentityForward::Header(value)
+            }
+            Some(_) => {
+                return Err(rmcp::ErrorData::invalid_params(
+                    "invalid modern stdio request AgentIdentity assertion",
+                    None,
+                ));
+            }
+            None => crate::cli_client::ProxyIdentityForward::AutoEnv,
+        };
+
+        Ok(StdioRequestIdentity {
+            client_project: self.client_project.clone(),
+            tool_profile: self.tool_profile,
+            client,
+            agent_identity,
+        })
     }
 
     fn current_daemon(&self) -> crate::cli_client::DaemonInfo {
@@ -507,12 +613,16 @@ impl StdioProxyServer {
     /// this project. Persist the fresh endpoint so later calls skip the dead URL.
     /// Returns None when nothing compatible is reachable, so the caller surfaces
     /// the original error.
-    async fn refresh_daemon(&self, stale_url: &str) -> Option<crate::cli_client::DaemonInfo> {
+    async fn refresh_daemon(
+        &self,
+        stale_url: &str,
+        identity: &StdioRequestIdentity,
+    ) -> Option<crate::cli_client::DaemonInfo> {
         let fresh = ensure_stdio_proxy_daemon(
             &self.app_home,
             &self.global_db_path,
             self.project_db_path.as_deref(),
-            self.client_project.as_deref(),
+            identity.client_project.as_deref(),
         )
         .await?;
         if !proxy_can_preserve_project_context(
@@ -520,7 +630,7 @@ impl StdioProxyServer {
             &self.app_home,
             &self.global_db_path,
             self.project_db_path.as_deref(),
-            self.client_project.as_deref(),
+            identity.client_project.as_deref(),
         ) {
             // A same-global daemon that can't preserve this project would
             // misroute writes; refuse it and surface the original error.
@@ -606,6 +716,30 @@ impl StdioProxyServer {
             serde_json::to_string(&body).unwrap_or_else(|_| "{}".to_string()),
         )])
     }
+}
+
+fn stdio_identity_error(message: String) -> rmcp::ErrorData {
+    rmcp::ErrorData::invalid_params(message, None)
+}
+
+fn require_stdio_binding_agreement(
+    field: &str,
+    requested: Option<&str>,
+    admitted: Option<&str>,
+) -> Result<(), rmcp::ErrorData> {
+    let Some(requested) = requested else {
+        return Ok(());
+    };
+    if admitted == Some(requested) {
+        return Ok(());
+    }
+    Err(rmcp::ErrorData::invalid_params(
+        format!(
+            "modern stdio request {field} '{requested}' does not match process-admitted {field} '{}'",
+            admitted.unwrap_or("<unbound>")
+        ),
+        None,
+    ))
 }
 
 impl rmcp::ServerHandler for StdioProxyServer {
@@ -700,12 +834,13 @@ impl rmcp::ServerHandler for StdioProxyServer {
     ) -> impl Future<Output = Result<rmcp::model::ListToolsResult, rmcp::ErrorData>> + Send + '_
     {
         async move {
-            crate::mcp_peer::McpPeerMode::from_context(&context)?;
+            let mode = crate::mcp_peer::McpPeerMode::from_context(&context)?;
+            let identity = self.resolve_request_identity(mode, &context.meta)?;
             let current = self.current_daemon();
             match crate::cli_client::list_daemon_tools_with_profile(
                 &current,
                 request.clone(),
-                self.tool_profile,
+                identity.tool_profile,
             )
             .await
             {
@@ -713,11 +848,11 @@ impl rmcp::ServerHandler for StdioProxyServer {
                 // BeforeDispatch = the request never reached the daemon; safe to
                 // re-resolve and retry (list_tools is read-only regardless).
                 Err(err) if err.allows_in_process_fallback() => {
-                    match self.refresh_daemon(&current.url).await {
+                    match self.refresh_daemon(&current.url, &identity).await {
                         Some(fresh) => crate::cli_client::list_daemon_tools_with_profile(
                             &fresh,
                             request,
-                            self.tool_profile,
+                            identity.tool_profile,
                         )
                         .await
                         .map_err(daemon_error_data),
@@ -737,23 +872,20 @@ impl rmcp::ServerHandler for StdioProxyServer {
     {
         async move {
             let mode = crate::mcp_peer::McpPeerMode::from_context(&context)?;
-            let identity = match mode {
-                crate::mcp_peer::McpPeerMode::Legacy => self.forwarded_agent_identity(),
-                crate::mcp_peer::McpPeerMode::Modern20260728 => {
-                    Self::resolve_request_agent_identity(Some(&context.meta))
-                }
-            };
+            let identity = self.resolve_request_identity(mode, &context.meta)?;
             if request.name.as_ref() == "runtime_info" {
                 return Ok(self.runtime_info_result().await.into());
             }
-            let request = prepare_proxy_tool_call(request, self.client_project.as_deref())?;
+            let request =
+                prepare_proxy_tool_call(request, identity.client_project.as_deref())?;
             let current = self.current_daemon();
             match crate::cli_client::call_daemon_tool_raw_with_profile_and_identity(
                 &current,
                 request.clone(),
-                self.client_project.as_deref(),
-                self.tool_profile,
-                identity.clone(),
+                identity.client_project.as_deref(),
+                identity.tool_profile,
+                identity.client.as_deref(),
+                identity.agent_identity.clone(),
             )
             .await
             {
@@ -763,14 +895,15 @@ impl rmcp::ServerHandler for StdioProxyServer {
                 // AfterDispatch (timeout / post-handshake failure) must surface
                 // as-is to avoid replaying a possibly-applied write.
                 Err(err) if err.allows_in_process_fallback() => {
-                    match self.refresh_daemon(&current.url).await {
+                    match self.refresh_daemon(&current.url, &identity).await {
                         Some(fresh) => {
                             crate::cli_client::call_daemon_tool_raw_with_profile_and_identity(
                                 &fresh,
                                 request,
-                                self.client_project.as_deref(),
-                                self.tool_profile,
-                                identity,
+                                identity.client_project.as_deref(),
+                                identity.tool_profile,
+                                identity.client.as_deref(),
+                                identity.agent_identity,
                             )
                             .await
                             .map_err(daemon_error_data)

@@ -74,6 +74,32 @@ async fn stdio_responses(
     responses
 }
 
+async fn modern_http_tool_call(
+    client: &reqwest::Client,
+    url: &str,
+    id: i64,
+    name: &str,
+    identity: serde_json::Value,
+    arguments: serde_json::Value,
+) -> serde_json::Value {
+    let response = client
+        .post(url)
+        .headers(http_headers(&[
+            ("mcp-protocol-version", "2026-07-28"),
+            ("mcp-method", "tools/call"),
+            ("mcp-name", name),
+        ]))
+        .json(&json!({
+            "jsonrpc":"2.0", "id":id, "method":"tools/call",
+            "params":{"_meta":modern_meta(identity), "name":name, "arguments":arguments}
+        }))
+        .send()
+        .await
+        .expect("modern HTTP tool call");
+    assert!(!response.headers().contains_key("mcp-session-id"));
+    parse_http_mcp_payload(&response.text().await.expect("modern HTTP body"), id)
+}
+
 #[test]
 fn legacy_http_initialize_meta_survives_wire_dispatch() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -456,6 +482,196 @@ fn dual_era_conformance_matrix_covers_stdio_and_http() {
 }
 
 #[test]
+fn modern_stdio_rejects_identity_drift_and_malformed_metadata_before_dispatch() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    with_tachi_home(temp.path(), || {
+        let global = temp.path().join("global/memory.db");
+        let project_a_name = "stdio-modern-project-a";
+        let project_b_name = "stdio-modern-project-b";
+        let project_a = temp
+            .path()
+            .join("projects")
+            .join(project_a_name)
+            .join("memory.db");
+        let project_b = temp
+            .path()
+            .join("projects")
+            .join(project_b_name)
+            .join("memory.db");
+        seed_project_db(temp.path(), &project_a);
+        seed_project_db(temp.path(), &project_b);
+        let _agent_env = EnvRestore::remove(crate::session_identity::ENV_AGENT_IDENTITY);
+
+        test_runtime().block_on(async {
+            let server = crate::MemoryServer::new(global.clone(), None).expect("server");
+            let (daemon, cancel, task) = spawn_test_http_daemon(server, &global).await;
+            let proxy = StdioProxyServer {
+                adapter_started_at: chrono::Utc::now(),
+                tool_profile: Some(tachi_hub::ToolProfile::remember()),
+                daemon: std::sync::Arc::new(std::sync::RwLock::new(daemon)),
+                app_home: temp.path().to_path_buf(),
+                global_db_path: global.clone(),
+                project_db_path: Some(project_a.clone()),
+                client_project: Some(project_a_name.to_string()),
+                resolved_agent_identity: Default::default(),
+            };
+
+            let write = |id: &str, identity: serde_json::Value| {
+                json!({
+                    "jsonrpc":"2.0", "id":id, "method":"tools/call", "params":{
+                        "_meta":modern_meta(identity), "name":"tachi_memory", "arguments":{
+                            "action":"save", "scope":"project", "id":id,
+                            "text":format!("{id} must not dispatch"), "summary":"identity guard",
+                            "path":"/tests/modern-stdio-identity", "category":"fact", "force":true
+                        }
+                    }
+                })
+            };
+            let requests = vec![
+                // Validation must happen before the local runtime_info fast path.
+                json!({
+                    "jsonrpc":"2.0", "id":40, "method":"tools/call", "params":{
+                        "_meta":modern_meta(json!({
+                            "tachiClient":"client-a", "tachi.client":"client-b"
+                        })),
+                        "name":"runtime_info", "arguments":{}
+                    }
+                }),
+                write(
+                    "stdio-project-drift",
+                    json!({"tachiProject":project_b_name, "tachiProfile":"remember"}),
+                ),
+                write(
+                    "stdio-profile-escalation",
+                    json!({"tachiProject":project_a_name, "tachiProfile":"admin"}),
+                ),
+                write(
+                    "stdio-profile-change",
+                    json!({"tachiProject":project_a_name, "tachiProfile":"observe"}),
+                ),
+                write(
+                    "stdio-malformed-client",
+                    json!({"tachiProject":project_a_name, "tachiProfile":"remember", "tachiClient":0}),
+                ),
+                write(
+                    "stdio-agent-conflict",
+                    json!({
+                        "tachiProject":project_a_name, "tachiProfile":"remember",
+                        "tachiAgentIdentity":"agent.canonical",
+                        "tachi.agentIdentity":"agent.alias"
+                    }),
+                ),
+                write(
+                    "stdio-malformed-agent",
+                    json!({
+                        "tachiProject":project_a_name, "tachiProfile":"remember",
+                        "tachiAgentIdentity":"agent identity with spaces"
+                    }),
+                ),
+            ];
+            let responses = stdio_responses(proxy, &requests).await;
+            assert_eq!(responses.len(), requests.len());
+            for response in &responses {
+                assert_eq!(response["error"]["code"], -32602, "{response:#}");
+                assert!(response.get("result").is_none(), "{response:#}");
+            }
+            for id in [
+                "stdio-project-drift",
+                "stdio-profile-escalation",
+                "stdio-profile-change",
+                "stdio-malformed-client",
+                "stdio-agent-conflict",
+                "stdio-malformed-agent",
+            ] {
+                assert_eq!(memory_id_count(&project_a, id), 0, "{id}");
+                assert_eq!(memory_id_count(&project_b, id), 0, "{id}");
+                assert_eq!(memory_id_count(&global, id), 0, "{id}");
+            }
+
+            cancel.cancel();
+            task.await.expect("daemon task");
+        });
+    });
+}
+
+#[test]
+fn modern_stdio_forwards_validated_client_and_agent_per_request_without_stickiness() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    with_tachi_home(temp.path(), || {
+        let global = temp.path().join("global/memory.db");
+        let _agent_env = EnvRestore::remove(crate::session_identity::ENV_AGENT_IDENTITY);
+        test_runtime().block_on(async {
+            let server = crate::MemoryServer::new(global.clone(), None).expect("server");
+            let (daemon, cancel, task) = spawn_test_http_daemon(server, &global).await;
+            let proxy = identity_probe_proxy();
+            *proxy.daemon.write().expect("proxy daemon lock") = daemon;
+            *proxy
+                .resolved_agent_identity
+                .lock()
+                .expect("proxy identity lock") = Some(
+                crate::cli_client::ProxyIdentityForward::Header(
+                    "agent.legacy-session".to_string(),
+                ),
+            );
+            let observer = proxy.clone();
+            let responses = stdio_responses(
+                proxy,
+                &[
+                    json!({
+                        "jsonrpc":"2.0", "id":50, "method":"tools/call", "params":{
+                            "_meta":modern_meta(json!({
+                                "tachiClient":"modern-stdio-client",
+                                "tachiAgentIdentity":"agent.modern-stdio"
+                            })),
+                            "name":"tachi_task", "arguments":{
+                                "action":"claim", "issue_ref":"owner/repo#1939-stdio",
+                                "branch":"identity-test", "worktree_path":"",
+                                "claim_scope":["crates/tachi-server/src/bootstrap/serve/stdio.rs"],
+                                "claim_role":"executor", "claim_mode":"writable",
+                                "expected_head":"stdio-head",
+                                "lease_expires_at":"2030-01-01T00:00:00Z"
+                            }
+                        }
+                    }),
+                    json!({
+                        "jsonrpc":"2.0", "id":51, "method":"tools/call", "params":{
+                            "_meta":modern_meta(json!({})),
+                            "name":"tachi_a2a", "arguments":{"action":"status"}
+                        }
+                    }),
+                ],
+            )
+            .await;
+            assert_eq!(responses[0]["result"]["resultType"], "complete", "{:#}", responses[0]);
+            let omitted = http_tool_text(&responses[1]);
+            assert!(omitted.contains("admission rejected"), "{:#}", responses[1]);
+            assert!(!omitted.contains("agent.modern-stdio"), "{omitted}");
+
+            let (session_client, agent_identity): (String, String) =
+                rusqlite::Connection::open(&global)
+                    .expect("open global DB")
+                    .query_row(
+                        "SELECT session_client, agent_identity_id FROM session_claims WHERE issue_ref = ?1",
+                        ["owner/repo#1939-stdio"],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .expect("modern stdio work claim");
+            assert_eq!(session_client, "modern-stdio-client");
+            assert_eq!(agent_identity, "agent.modern-stdio");
+            assert_eq!(
+                observer.forwarded_agent_identity(),
+                crate::cli_client::ProxyIdentityForward::Header(
+                    "agent.legacy-session".to_string()
+                )
+            );
+
+            cancel.cancel();
+            task.await.expect("daemon task");
+        });
+    });
+}
+
+#[test]
 fn modern_http_request_uses_2026_headers_metadata_and_no_session() {
     let temp = tempfile::tempdir().expect("tempdir");
     with_tachi_home(temp.path(), || {
@@ -495,6 +711,170 @@ fn modern_http_request_uses_2026_headers_metadata_and_no_session() {
             let (_, headers, init) = http_mcp_initialize(&daemon.url, http_headers(&[]), None).await;
             assert_eq!(init["result"]["protocolVersion"], "2024-11-05");
             assert!(headers.contains_key("mcp-session-id"));
+            cancel.cancel();
+            task.await.expect("daemon task");
+        });
+    });
+}
+
+#[test]
+fn modern_http_concurrent_requests_isolate_project_profile_actor_and_work_claim() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    with_tachi_home(temp.path(), || {
+        let global = temp.path().join("global/memory.db");
+        let project_a_name = "http-modern-project-a";
+        let project_b_name = "http-modern-project-b";
+        let project_a = temp
+            .path()
+            .join("projects")
+            .join(project_a_name)
+            .join("memory.db");
+        let project_b = temp
+            .path()
+            .join("projects")
+            .join(project_b_name)
+            .join("memory.db");
+        seed_project_db(temp.path(), &project_a);
+        seed_project_db(temp.path(), &project_b);
+
+        test_runtime().block_on(async {
+            let server = crate::MemoryServer::new(global.clone(), None).expect("server");
+            let (daemon, cancel, task) = spawn_test_http_daemon(server, &global).await;
+            let client = reqwest::Client::new();
+            let identity_a = || {
+                json!({
+                    "tachiProject":project_a_name, "tachiProfile":"remember",
+                    "tachiClient":"http-client-a", "tachiAgentIdentity":"agent.http-a"
+                })
+            };
+            let identity_b = || {
+                json!({
+                    "tachiProject":project_b_name, "tachiProfile":"coordinate",
+                    "tachiClient":"http-client-b", "tachiAgentIdentity":"agent.http-b"
+                })
+            };
+
+            let (save_a, save_b) = tokio::join!(
+                modern_http_tool_call(
+                    &client,
+                    &daemon.url,
+                    60,
+                    "tachi_memory",
+                    identity_a(),
+                    json!({
+                        "action":"save", "scope":"project", "id":"http-isolation-a",
+                        "text":"HTTP actor A isolated write", "summary":"actor A",
+                        "path":"/tests/http-isolation", "category":"fact", "force":true
+                    })
+                ),
+                modern_http_tool_call(
+                    &client,
+                    &daemon.url,
+                    61,
+                    "tachi_memory",
+                    identity_b(),
+                    json!({
+                        "action":"save", "scope":"project", "id":"http-isolation-b",
+                        "text":"HTTP actor B isolated write", "summary":"actor B",
+                        "path":"/tests/http-isolation", "category":"fact", "force":true
+                    })
+                )
+            );
+            for response in [&save_a, &save_b] {
+                assert!(response.get("error").is_none(), "{response:#}");
+                assert_eq!(response["result"]["resultType"], "complete");
+            }
+            assert_eq!(memory_id_count(&project_a, "http-isolation-a"), 1);
+            assert_eq!(memory_id_count(&project_a, "http-isolation-b"), 0);
+            assert_eq!(memory_id_count(&project_b, "http-isolation-a"), 0);
+            assert_eq!(memory_id_count(&project_b, "http-isolation-b"), 1);
+            assert_eq!(memory_id_count(&global, "http-isolation-a"), 0);
+            assert_eq!(memory_id_count(&global, "http-isolation-b"), 0);
+
+            let claim_args = |issue_ref: &str, scope: &str, role: &str| {
+                json!({
+                    "action":"claim", "issue_ref":issue_ref,
+                    "branch":format!("identity-{role}"), "worktree_path":"",
+                    "claim_scope":[scope], "claim_role":role, "claim_mode":"writable",
+                    "expected_head":format!("head-{role}"),
+                    "lease_expires_at":"2030-01-01T00:00:00Z"
+                })
+            };
+            let (claim_a, claim_b) = tokio::join!(
+                modern_http_tool_call(
+                    &client,
+                    &daemon.url,
+                    62,
+                    "tachi_task",
+                    identity_a(),
+                    claim_args("owner/repo#1939-http-a", "a/**", "executor-a")
+                ),
+                modern_http_tool_call(
+                    &client,
+                    &daemon.url,
+                    63,
+                    "tachi_task",
+                    identity_b(),
+                    claim_args("owner/repo#1939-http-b", "b/**", "executor-b")
+                )
+            );
+            for response in [&claim_a, &claim_b] {
+                assert!(response.get("error").is_none(), "{response:#}");
+                assert_eq!(response["result"]["resultType"], "complete");
+            }
+
+            let connection = rusqlite::Connection::open(&global).expect("open global DB");
+            for (issue_ref, expected_client, expected_agent, expected_role) in [
+                (
+                    "owner/repo#1939-http-a",
+                    "http-client-a",
+                    "agent.http-a",
+                    "executor-a",
+                ),
+                (
+                    "owner/repo#1939-http-b",
+                    "http-client-b",
+                    "agent.http-b",
+                    "executor-b",
+                ),
+            ] {
+                let actual: (String, String, String) = connection
+                    .query_row(
+                        "SELECT session_client, agent_identity_id, role FROM session_claims WHERE issue_ref = ?1",
+                        [issue_ref],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    )
+                    .expect("request-local work claim authority");
+                assert_eq!(actual, (expected_client.into(), expected_agent.into(), expected_role.into()));
+            }
+            drop(connection);
+
+            let (actor_a, actor_b) = tokio::join!(
+                modern_http_tool_call(
+                    &client,
+                    &daemon.url,
+                    64,
+                    "tachi_a2a",
+                    identity_a(),
+                    json!({"action":"status"})
+                ),
+                modern_http_tool_call(
+                    &client,
+                    &daemon.url,
+                    65,
+                    "tachi_a2a",
+                    identity_b(),
+                    json!({"action":"status"})
+                )
+            );
+            for (response, expected_actor) in
+                [(&actor_a, "agent.http-a"), (&actor_b, "agent.http-b")]
+            {
+                let body: serde_json::Value = serde_json::from_str(&http_tool_text(response))
+                    .expect("A2A status JSON");
+                assert_eq!(body["actor_agent_identity_id"], expected_actor, "{body:#}");
+            }
+
             cancel.cancel();
             task.await.expect("daemon task");
         });

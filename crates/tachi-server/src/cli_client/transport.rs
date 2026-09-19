@@ -252,6 +252,7 @@ pub(crate) async fn call_daemon_tool_raw_with_profile(
         params,
         proxy_project,
         profile,
+        None,
         ProxyIdentityForward::AutoEnv,
     )
     .await
@@ -259,19 +260,29 @@ pub(crate) async fn call_daemon_tool_raw_with_profile(
 }
 
 /// Raw call carrying BOTH the connection's immutable tool profile and the
-/// forwarded agent identity. The profile rides the same header rail as
-/// `list_daemon_tools_with_profile`, so the call surface cannot silently
-/// widen beyond what discovery already showed for this connection.
+/// request-local client/agent identity. The profile rides the same header rail
+/// as `list_daemon_tools_with_profile`, so the call surface cannot silently
+/// widen beyond what discovery already showed for this connection. The client
+/// label is attribution only and is never retained by the stdio protocol
+/// session.
 pub(crate) async fn call_daemon_tool_raw_with_profile_and_identity(
     info: &DaemonInfo,
     params: CallToolRequestParams,
     proxy_project: Option<&str>,
     profile: Option<tachi_hub::ToolProfile>,
+    proxy_client: Option<&str>,
     identity: ProxyIdentityForward,
 ) -> Result<rmcp::model::CallToolResult, DaemonCallError> {
-    call_daemon_tool_raw_with_phases_and_profile(info, params, proxy_project, profile, identity)
-        .await
-        .0
+    call_daemon_tool_raw_with_phases_and_profile(
+        info,
+        params,
+        proxy_project,
+        profile,
+        proxy_client,
+        identity,
+    )
+    .await
+    .0
 }
 
 /// Same transport path as [`call_daemon_tool_raw`], plus handshake/call phase
@@ -291,6 +302,7 @@ pub(crate) async fn call_daemon_tool_raw_with_phases(
         params,
         proxy_project,
         None,
+        None,
         ProxyIdentityForward::AutoEnv,
     )
     .await
@@ -301,6 +313,7 @@ async fn call_daemon_tool_raw_with_phases_and_profile(
     params: CallToolRequestParams,
     proxy_project: Option<&str>,
     profile: Option<tachi_hub::ToolProfile>,
+    proxy_client: Option<&str>,
     identity: ProxyIdentityForward,
 ) -> (
     Result<rmcp::model::CallToolResult, DaemonCallError>,
@@ -323,6 +336,29 @@ async fn call_daemon_tool_raw_with_phases_and_profile(
                 return (
                     Err(DaemonCallError::BeforeDispatch(format!(
                         "invalid proxy project header value: {e}"
+                    ))),
+                    DaemonCallPhaseTiming {
+                        handshake_ms: 0,
+                        call_ms: 0,
+                        total_ms,
+                    },
+                );
+            }
+        }
+    }
+    if let Some(client) = proxy_client {
+        match HeaderValue::from_str(client) {
+            Ok(value) => {
+                headers.insert(
+                    HeaderName::from_static(crate::session_identity::HEADER_CLIENT),
+                    value,
+                );
+            }
+            Err(e) => {
+                let total_ms = elapsed_ms(started);
+                return (
+                    Err(DaemonCallError::BeforeDispatch(format!(
+                        "invalid proxy client header value: {e}"
                     ))),
                     DaemonCallPhaseTiming {
                         handshake_ms: 0,
