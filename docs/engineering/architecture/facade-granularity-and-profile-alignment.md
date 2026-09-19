@@ -109,7 +109,7 @@ explicit Ops/admin compatibility. Discovery is role-shaped:
 
 - **default Lead = `standard` = exactly the five product facades**
 - **Worker = `delegate` = those same five names with narrower action policy**
-- **legacy `observe` / `remember` / `coordinate` selectors = product-facade discovery with their existing action permissions**
+- **legacy `observe` / `remember` (retired as a native tool alias) / `coordinate` selectors = product-facade discovery with their existing action permissions**
 - **explicit `operate` / Ops and `admin` / emergency = retained diagnostics and compatibility routes**
 
 The registered diagnostic routes remain physically present; ordinary profile

@@ -59,7 +59,7 @@ discovery now follows the Lead / Worker / Ops boundary:
   Vault-session, Foundry, and Hub diagnostics.
 - `admin` / `emergency` — the full retained catalog. Narrow-profile hiding is
   not physical route deletion.
-- Legacy `observe`, `remember`, and `coordinate` selectors retain their
+- Legacy `observe`, `remember` (retired as a native tool alias), and `coordinate` selectors retain their
   action-level bundle semantics but their discovery is confined to product
   facades. `companion`, `copilot`, `coach`, and `workflow` are ordinary Lead
   aliases rather than broad bundle combinations.
