@@ -1748,8 +1748,19 @@ pub(crate) async fn handle_wiki_organize(
                 // logged but must not abort the remaining file scan.
                 let (new_body, task_modified) = sync_tasks_in_content(server, body);
                 if task_modified {
-                    let serialized = match serialize_representable_frontmatter(fm) {
-                        Ok(serialized) => serialized,
+                    let model_revision = existing_receipt
+                        .as_ref()
+                        .map(|_| next_receipt_revision(existing_receipt.iter()))
+                        .transpose()?;
+                    let new_content = match render_persisted_document(
+                        fm,
+                        None,
+                        existing_receipt.as_ref(),
+                        &new_body,
+                        &source_object_id,
+                        model_revision,
+                    ) {
+                        Ok(content) => content,
                         Err(e) => {
                             log_messages.push(format!(
                                 "WARN: task sync write failed for '{}': {e}",
@@ -1766,7 +1777,6 @@ pub(crate) async fn handle_wiki_organize(
                         synced_count += 1;
                         continue;
                     }
-                    let new_content = format!("{}{}", serialized, new_body);
                     if let Err(e) =
                         authorized.write_existing_file(&path, &source_identity, &new_content)
                     {
@@ -1861,8 +1871,17 @@ pub(crate) async fn handle_wiki_organize(
         // 保证 category 正确且同步
         fm.category = Some(dest_rel_dir.to_string());
         if let Some(classified) = classification.as_ref() {
-            fm.title = Some(classified.title.clone());
-            fm.summary = Some(classified.summary.clone());
+            // A heuristic chooses only the route when the author already
+            // supplied metadata. Model output owns all three derived fields;
+            // heuristic fallback also replaces stale model-derived metadata.
+            let replace_derived_metadata =
+                classified.is_model_derived() || existing_receipt.is_some();
+            if replace_derived_metadata || fm.title.is_none() {
+                fm.title = Some(classified.title.clone());
+            }
+            if replace_derived_metadata || fm.summary.is_none() {
+                fm.summary = Some(classified.summary.clone());
+            }
             // Clear stale provenance now. A model receipt is bound only after
             // conflict handling determines the final surviving path.
             fm.model_invocation_v1 = None;

@@ -160,6 +160,15 @@ fn install_classifier(server: &mut crate::tests::TestServer, classifier: &MockDo
     server.replace_llm(classifier.llm.clone());
 }
 
+fn insert_resolved_card(server: &crate::tests::TestServer, id: &str) {
+    let mut card = crate::tests::make_entry(id);
+    card.category = "kanban".to_string();
+    card.metadata = json!({"status": "resolved"});
+    server
+        .with_global_store(|store| store.upsert(&card).map_err(|error| error.to_string()))
+        .expect("insert resolved task card");
+}
+
 fn model_response(category_path: &str, title: &str, summary: &str) -> String {
     json!({
         "category_path": category_path,
@@ -406,6 +415,36 @@ async fn heuristic_reclassification_replaces_fields_and_removes_stale_model_prov
     assert!(content.contains("summary: \"Heuristic body\""), "{content}");
     assert!(receipt_from_document(&content).is_none(), "{content}");
     assert!(!content.contains("mock-docs-classifier-v1"), "{content}");
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn heuristic_routing_preserves_authored_metadata_without_model_provenance() {
+    let server = make_server();
+    let workspace = DocsWorktree::new();
+    let docs = workspace.docs_path();
+    let source = docs.join("authored-prd.md");
+    fs::write(
+        &source,
+        "---\ntitle: \"Authored product title\"\nsummary: \"Authored product summary\"\norganize: true\n---\n# Heuristic body heading\n",
+    )
+    .unwrap();
+
+    crate::docs_ops::handle_wiki_organize(&server, docs.to_str().unwrap(), false)
+        .await
+        .expect("heuristic routing must preserve authored metadata");
+
+    let destination = docs.join("product/test_product/authored-prd.md");
+    let content = fs::read_to_string(destination).unwrap();
+    assert!(!source.exists());
+    assert!(content.contains("title: \"Authored product title\""), "{content}");
+    assert!(
+        content.contains("summary: \"Authored product summary\""),
+        "{content}"
+    );
+    assert!(receipt_from_document(&content).is_none(), "{content}");
+    assert!(!content.contains("title: \"authored prd\""), "{content}");
+    assert!(!content.contains("summary: \"Heuristic body heading\""), "{content}");
 }
 
 #[tokio::test]
@@ -1273,6 +1312,99 @@ async fn accepted_category_in_place_normalization_rebinds_payload_and_revision()
         "docs/engineering/devops/normalized.md",
         6,
     );
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn receipted_organize_false_task_sync_rebinds_each_committed_publication() {
+    let server = make_server();
+    insert_resolved_card(&server, "receipt-task");
+    let workspace = DocsWorktree::new();
+    let docs = workspace.docs_path().canonicalize().unwrap();
+    let path = docs.join("product/acme/task-note.md");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let receipt = valid_bound_receipt(
+        "product/acme",
+        "Task note",
+        "Task summary",
+        "docs/product/acme/task-note.md",
+        12,
+    );
+    let original = document_with_receipt(
+        "Task note",
+        "Task summary",
+        "product/acme",
+        false,
+        &receipt,
+        "- [ ] Finish <!-- tachi:receipt-task -->\n",
+    );
+    fs::write(&path, &original).unwrap();
+
+    crate::docs_ops::handle_wiki_organize(&server, docs.to_str().unwrap(), true)
+        .await
+        .expect("preview validates the next receipt revision without publishing it");
+    assert_eq!(fs::read_to_string(&path).unwrap(), original);
+
+    crate::docs_ops::handle_wiki_organize(&server, docs.to_str().unwrap(), false)
+        .await
+        .expect("task sync republishes the surviving receipt");
+    let published = fs::read_to_string(&path).unwrap();
+    assert!(
+        published.contains("- [x] Finish <!-- tachi:receipt-task -->"),
+        "{published}"
+    );
+    assert_model_document(
+        &published,
+        "Task note",
+        "Task summary",
+        "product/acme",
+        "docs/product/acme/task-note.md",
+        13,
+    );
+
+    crate::docs_ops::handle_wiki_organize(&server, docs.to_str().unwrap(), false)
+        .await
+        .expect("a no-op task sync keeps the committed receipt revision");
+    assert_eq!(fs::read_to_string(path).unwrap(), published);
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn receipted_organize_false_task_sync_rejects_revision_overflow_before_write() {
+    let server = make_server();
+    insert_resolved_card(&server, "overflow-task");
+    let workspace = DocsWorktree::new();
+    let docs = workspace.docs_path().canonicalize().unwrap();
+    let path = docs.join("product/acme/overflow-task.md");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let receipt = valid_bound_receipt(
+        "product/acme",
+        "Overflow task",
+        "Overflow summary",
+        "docs/product/acme/overflow-task.md",
+        i64::MAX,
+    );
+    let original = document_with_receipt(
+        "Overflow task",
+        "Overflow summary",
+        "product/acme",
+        false,
+        &receipt,
+        "- [ ] Finish <!-- tachi:overflow-task -->\n",
+    );
+    fs::write(&path, &original).unwrap();
+
+    for dry_run in [true, false] {
+        let error = crate::docs_ops::handle_wiki_organize(
+            &server,
+            docs.to_str().unwrap(),
+            dry_run,
+        )
+        .await
+        .expect_err("revision overflow must fail before preview or publication");
+        assert!(error.contains("receipt revision overflow"), "{error}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), original);
+    }
 }
 
 #[tokio::test]
