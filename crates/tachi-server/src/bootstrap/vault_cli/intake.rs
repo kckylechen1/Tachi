@@ -568,40 +568,36 @@ fn classify_candidate(raw: RawCandidate, endpoints: &[EndpointEvidence]) -> Clas
         (Some(kind), 0) => {
             result.classification = "known";
             result.provider_kind = Some(kind.to_string());
-            result.canonical_key =
-                crate::status_ops::status_health::canonical_key_for_env_name(
-                    &result.raw.logical_name,
-                );
-            result.account_class =
-                crate::status_ops::status_health::account_class_for_env_name(
-                    &result.raw.logical_name,
-                );
+            result.canonical_key = crate::status_ops::status_health::canonical_key_for_env_name(
+                &result.raw.logical_name,
+            );
+            result.account_class = crate::status_ops::status_health::account_class_for_env_name(
+                &result.raw.logical_name,
+            );
         }
         (Some(kind), 1) if endpoint_kinds.contains(kind) => {
             result.classification = "known";
             result.provider_kind = Some(kind.to_string());
-            result.canonical_key =
-                crate::status_ops::status_health::canonical_key_for_env_name(
-                    &result.raw.logical_name,
-                );
-            result.account_class =
-                crate::status_ops::status_health::account_class_for_env_name(
-                    &result.raw.logical_name,
-                );
+            result.canonical_key = crate::status_ops::status_health::canonical_key_for_env_name(
+                &result.raw.logical_name,
+            );
+            result.account_class = crate::status_ops::status_health::account_class_for_env_name(
+                &result.raw.logical_name,
+            );
         }
         (Some(_), _) => result.classification = "conflicted",
         (None, 1) => {
-            let provider_kind = endpoint_kinds.into_iter().next().expect("one endpoint kind");
+            let provider_kind = endpoint_kinds
+                .into_iter()
+                .next()
+                .expect("one endpoint kind");
             let inferred_key_name = prefix.as_ref().map(|prefix| format!("{prefix}_API_KEY"));
             let registry_matches_endpoint = inferred_key_name.as_deref().is_some_and(|name| {
                 crate::status_ops::status_health::provider_kind_for_env_name(name)
                     == Some(provider_kind.as_str())
             });
             if registry_matches_endpoint
-                || prefix
-                    .as_deref()
-                    .and_then(lane_slot_for_prefix)
-                    .is_some()
+                || prefix.as_deref().and_then(lane_slot_for_prefix).is_some()
             {
                 result.classification = "known";
                 result.provider_kind = Some(provider_kind);
@@ -971,10 +967,7 @@ mod tests {
         configure(&mut account);
         memcore::db::insert_provider_account(store.connection(), &account).expect("account");
         drop(store);
-        write_file(
-            &cwd.path().join(".env"),
-            "DEEPSEEK_API_KEY=same-fixture\n",
-        );
+        write_file(&cwd.path().join(".env"), "DEEPSEEK_API_KEY=same-fixture\n");
 
         let report = plan(home.path(), cwd.path(), &db_path);
 
