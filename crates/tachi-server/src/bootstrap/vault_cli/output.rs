@@ -619,7 +619,10 @@ mod tests {
         credential.account_id = Some("account-redacted-label".to_string());
 
         let text = format_vault_list_groups(&[], &[credential]);
-        assert!(text.contains("BOUND SLOTS\tPROBE\tLAST PROBE AT\tINTEGRITY"), "{text}");
+        assert!(
+            text.contains("BOUND SLOTS\tPROBE\tLAST PROBE AT\tINTEGRITY"),
+            "{text}"
+        );
         assert!(
             text.contains("EXTRACT_API_KEY\t402\t2026-09-19T08:15:00+00:00\tunusable"),
             "{text}"

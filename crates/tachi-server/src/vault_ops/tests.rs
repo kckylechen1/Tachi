@@ -2397,7 +2397,10 @@ async fn vault_list_is_a_secret_negative_account_health_board() {
         .find(|row| row["name"] == "DEEPSEEK_API_KEY")
         .expect("DeepSeek row");
     assert_eq!(deepseek["secret_type"], "api_key");
-    assert_eq!(deepseek["bound_slots"], serde_json::json!(["EXTRACT_API_KEY"]));
+    assert_eq!(
+        deepseek["bound_slots"],
+        serde_json::json!(["EXTRACT_API_KEY"])
+    );
     assert_eq!(deepseek["last_probe_class"], "402");
     assert_eq!(deepseek["last_probe_at"], "2026-09-19T08:15:00+00:00");
     assert_eq!(deepseek["alias_integrity"], "unusable");
@@ -2425,14 +2428,35 @@ async fn vault_list_is_a_secret_negative_account_health_board() {
     assert_eq!(legacy["last_probe_class"], "unknown");
     assert!(legacy["last_probe_at"].is_null());
 
-    assert!(!listed.contains(secret_sentinel), "secret value leaked: {listed}");
-    assert!(!listed.contains("another-secret-never-list"), "secret value leaked: {listed}");
-    assert!(!listed.contains(&account_fingerprint), "full fingerprint leaked: {listed}");
+    assert!(
+        !listed.contains(secret_sentinel),
+        "secret value leaked: {listed}"
+    );
+    assert!(
+        !listed.contains("another-secret-never-list"),
+        "secret value leaked: {listed}"
+    );
+    assert!(
+        !listed.contains(&account_fingerprint),
+        "full fingerprint leaked: {listed}"
+    );
     if let Some(auth_ref) = auth_ref {
-        assert!(!listed.contains(&auth_ref), "custody reference leaked: {listed}");
+        assert!(
+            !listed.contains(&auth_ref),
+            "custody reference leaked: {listed}"
+        );
     }
-    for forbidden_field in ["encrypted_value", "nonce", "secret_length", "metadata", "last_error"] {
-        assert!(!listed.contains(forbidden_field), "forbidden field leaked: {listed}");
+    for forbidden_field in [
+        "encrypted_value",
+        "nonce",
+        "secret_length",
+        "metadata",
+        "last_error",
+    ] {
+        assert!(
+            !listed.contains(forbidden_field),
+            "forbidden field leaked: {listed}"
+        );
     }
 }
 

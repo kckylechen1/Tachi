@@ -43,19 +43,15 @@ fn account_bindings(store: &memcore::MemoryStore) -> Result<Vec<AccountBinding>,
         if account.status != memcore::vault::accounts::ACCOUNT_STATUS_ACTIVE {
             continue;
         }
-        let Some(custody) = memcore::db::get_account_custody(
-            store.connection(),
-            &account.account_id,
-        )
-        .map_err(|error| format!("Failed to read provider account custody: {error}"))?
+        let Some(custody) =
+            memcore::db::get_account_custody(store.connection(), &account.account_id)
+                .map_err(|error| format!("Failed to read provider account custody: {error}"))?
         else {
             continue;
         };
-        let aliases = memcore::db::list_provider_account_aliases(
-            store.connection(),
-            &account.account_id,
-        )
-        .map_err(|error| format!("Failed to list provider account aliases: {error}"))?;
+        let aliases =
+            memcore::db::list_provider_account_aliases(store.connection(), &account.account_id)
+                .map_err(|error| format!("Failed to list provider account aliases: {error}"))?;
         bindings.push(AccountBinding {
             account,
             custody,
@@ -109,11 +105,11 @@ fn last_probe_class(health: Option<&VaultKeyHealth>) -> &'static str {
     if health.disabled {
         return "disabled";
     }
-    if health
-        .last_error
-        .as_deref()
-        .is_some_and(|error| error.to_ascii_lowercase().contains("empty assistant content"))
-    {
+    if health.last_error.as_deref().is_some_and(|error| {
+        error
+            .to_ascii_lowercase()
+            .contains("empty assistant content")
+    }) {
         return "empty_content";
     }
 
@@ -178,9 +174,9 @@ fn alias_integrity(
     if !is_model_provider_account(&entry.name) {
         return "unusable";
     }
-    if health.is_some_and(|health| {
-        crate::vault_ops::unusable_skip_class(health, Utc::now()).is_some()
-    }) {
+    if health
+        .is_some_and(|health| crate::vault_ops::unusable_skip_class(health, Utc::now()).is_some())
+    {
         return "unusable";
     }
     if bound_slots
@@ -267,11 +263,7 @@ pub(crate) fn build_vault_list_payload(
             object.insert(
                 "last_probe_at".to_string(),
                 health
-                    .and_then(|row| {
-                        row.last_attempt
-                            .as_deref()
-                            .or(row.last_success.as_deref())
-                    })
+                    .and_then(|row| row.last_attempt.as_deref().or(row.last_success.as_deref()))
                     .map_or(serde_json::Value::Null, |value| json!(value)),
             );
             object.insert(
@@ -290,10 +282,7 @@ pub(crate) fn build_vault_list_payload(
                     "provider_kind".to_string(),
                     json!(&binding.account.provider_kind),
                 );
-                object.insert(
-                    "account_id".to_string(),
-                    json!(&binding.account.account_id),
-                );
+                object.insert("account_id".to_string(), json!(&binding.account.account_id));
             }
         }
         payload.push(row);
@@ -333,11 +322,7 @@ pub(crate) async fn handle_vault_list(
             &server.tachi_home_dir(),
             params.secret_type.as_deref(),
             runtime_available,
-            |logical_name, key_id| {
-                server
-                    .llm
-                    .has_provider_secret_binding(logical_name, key_id)
-            },
+            |logical_name, key_id| server.llm.has_provider_secret_binding(logical_name, key_id),
         )
     })?;
     serde_json::to_string(&resp).map_err(|e| format!("serialize: {e}"))
