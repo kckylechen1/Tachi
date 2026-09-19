@@ -119,12 +119,13 @@ fn configured_logical_name(
     matching_accounts: &[&AccountBinding],
     rotation_prefixes: &BTreeSet<String>,
 ) -> String {
-    let custody_targets = matching_accounts
+    let mut custody_targets = matching_accounts
         .iter()
-        .map(|binding| binding.custody.custody_target.as_str())
-        .collect::<BTreeSet<_>>();
-    if let [target] = custody_targets.iter().copied().collect::<Vec<_>>().as_slice() {
-        return (*target).to_string();
+        .map(|binding| binding.custody.custody_target.as_str());
+    if let Some(target) = custody_targets.next() {
+        if custody_targets.all(|candidate| candidate == target) {
+            return target.to_string();
+        }
     }
     if let Some((prefix, _)) = tachi_llm::parse_rotation_member_name(entry_name) {
         if rotation_prefixes.contains(prefix) {
@@ -152,20 +153,21 @@ fn health_updated_at(health: &VaultKeyHealth) -> Option<chrono::DateTime<chrono:
 
 fn selected_health<'a>(health: &[&'a VaultKeyHealth]) -> Option<&'a VaultKeyHealth> {
     let now = Utc::now();
-    let candidates = health
+    let unusable = health
         .iter()
         .copied()
         .filter(|row| crate::vault_ops::unusable_skip_class(row, now).is_some())
-        .collect::<Vec<_>>();
-    let candidates = if candidates.is_empty() {
-        health.to_vec()
-    } else {
-        candidates
-    };
-    candidates.into_iter().max_by(|left, right| {
-        health_updated_at(left)
-            .cmp(&health_updated_at(right))
-            .then_with(|| left.updated_at.cmp(&right.updated_at))
+        .max_by(|left, right| {
+            health_updated_at(left)
+                .cmp(&health_updated_at(right))
+                .then_with(|| left.updated_at.cmp(&right.updated_at))
+        });
+    unusable.or_else(|| {
+        health.iter().copied().max_by(|left, right| {
+            health_updated_at(left)
+                .cmp(&health_updated_at(right))
+                .then_with(|| left.updated_at.cmp(&right.updated_at))
+        })
     })
 }
 
