@@ -145,7 +145,7 @@ impl ToolProfile {
     }
 
     pub(crate) fn uses_delegate_allow_list(self) -> bool {
-        self.delegate_minimal
+        self.delegate_minimal && !self.standard_minimal
     }
 
     pub fn as_str(self) -> String {

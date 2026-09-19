@@ -185,6 +185,149 @@ async fn delegate_profile_exposes_staff_status_but_denies_recursive_staffing() {
     }
 }
 
+#[tokio::test]
+async fn additive_worker_projection_matches_its_call_time_policy() {
+    fn action_names(
+        tools: &[rmcp::model::Tool],
+        tool_name: &str,
+    ) -> std::collections::BTreeSet<String> {
+        tools
+            .iter()
+            .find(|tool| tool.name.as_ref() == tool_name)
+            .unwrap_or_else(|| panic!("missing projected tool {tool_name}"))
+            .input_schema["properties"]["action"]["enum"]
+            .as_array()
+            .unwrap_or_else(|| panic!("missing projected action enum for {tool_name}"))
+            .iter()
+            .map(|action| {
+                action
+                    .as_str()
+                    .expect("projected action must be a string")
+                    .to_string()
+            })
+            .collect()
+    }
+
+    fn projected(profile: tachi_hub::ToolProfile) -> Vec<rmcp::model::Tool> {
+        let tools = crate::server_handler::prepare_native_tool_definitions(
+            super::tool_profile_router_coverage::native_route_definitions(),
+        );
+        crate::server_handler::project_tool_definitions(tools, Some(profile), None)
+    }
+
+    let worker = tachi_hub::parse_tool_profile("delegate+operate")
+        .expect("additive Worker selector should parse");
+    let worker_tools = tokio::task::spawn_blocking(move || projected(worker))
+        .await
+        .expect("project additive Worker tools");
+    let worker_names = worker_tools
+        .iter()
+        .map(|tool| tool.name.as_ref())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        worker_names,
+        std::collections::BTreeSet::from([
+            "tachi_a2a",
+            "tachi_gh",
+            "tachi_memory",
+            "tachi_staff",
+            "tachi_task",
+        ])
+    );
+    assert_eq!(
+        action_names(&worker_tools, "tachi_staff"),
+        std::collections::BTreeSet::from(["status".to_string()])
+    );
+    assert_eq!(
+        action_names(&worker_tools, "tachi_gh"),
+        std::collections::BTreeSet::from([
+            "issue_freshness_scan".to_string(),
+            "issue_list".to_string(),
+            "issue_read".to_string(),
+            "pr_comments".to_string(),
+            "pr_list".to_string(),
+            "pr_read".to_string(),
+            "pr_review_digest".to_string(),
+            "pr_status".to_string(),
+            "repo_view".to_string(),
+        ])
+    );
+
+    let server = make_server();
+    server.set_tool_profile(Some(worker));
+    for (tool, action) in [("tachi_staff", "start"), ("tachi_gh", "safe_merge")] {
+        let result = call_tool_on_server(
+            server.clone(),
+            tool,
+            Some(serde_json::Map::from_iter([(
+                "action".to_string(),
+                serde_json::json!(action),
+            )])),
+        )
+        .await
+        .expect("denied additive Worker action should return a tool result");
+        let message = result
+            .content
+            .first()
+            .and_then(|content| content.as_text())
+            .map(|text| text.text.as_str())
+            .unwrap_or("");
+        assert_eq!(result.is_error, Some(true), "{tool}:{action}: {message}");
+        assert!(
+            message.contains("not allowed"),
+            "{tool}:{action}: {message}"
+        );
+    }
+
+    let lead_worker = tachi_hub::parse_tool_profile("standard+delegate")
+        .expect("additive Lead selector should parse");
+    let (lead_worker_tools, standard_tools) = tokio::task::spawn_blocking(move || {
+        (
+            projected(lead_worker),
+            projected(tachi_hub::ToolProfile::standard()),
+        )
+    })
+    .await
+    .expect("project additive and ordinary Lead tools");
+    for tool in ["tachi_staff", "tachi_gh"] {
+        assert_eq!(
+            action_names(&lead_worker_tools, tool),
+            action_names(&standard_tools, tool),
+            "standard allow-list precedence must govern {tool} schemas"
+        );
+    }
+    assert!(action_names(&lead_worker_tools, "tachi_staff").contains("start"));
+    assert!(action_names(&lead_worker_tools, "tachi_gh").contains("safe_merge"));
+
+    let (prepared, admin_tools) = tokio::task::spawn_blocking(|| {
+        let prepared = crate::server_handler::prepare_native_tool_definitions(
+            super::tool_profile_router_coverage::native_route_definitions(),
+        );
+        let admin_tools = crate::server_handler::project_tool_definitions(
+            prepared.clone(),
+            Some(tachi_hub::ToolProfile::admin()),
+            None,
+        );
+        (prepared, admin_tools)
+    })
+    .await
+    .expect("project admin tools");
+    for tool_name in ["tachi_staff", "tachi_gh"] {
+        let before = prepared
+            .iter()
+            .find(|tool| tool.name.as_ref() == tool_name)
+            .expect("prepared admin tool");
+        let after = admin_tools
+            .iter()
+            .find(|tool| tool.name.as_ref() == tool_name)
+            .expect("projected admin tool");
+        assert_eq!(
+            before.input_schema, after.input_schema,
+            "admin {tool_name} schema must remain unchanged"
+        );
+    }
+}
+
 /// #1319-C2: `action='dispatch'` was removed from `tachi_task` wholesale
 /// (the worker launch lifecycle left Task). It must now be rejected for a
 /// delegate worker at the param-parse layer — no profile, not even admin,

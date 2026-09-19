@@ -349,9 +349,62 @@ fn stdio_proxy_profile_is_forwarded_once_and_denies_attachment_before_handler() 
             .expect("profile-denied call should return an MCP error result");
             assert!(result.is_error.unwrap_or(false));
             assert!(
-                first_text(&result).contains("ToolProfile 'observe'"),
-                "profile must be bound at initialize before the attachment handler: {result:?}"
+                first_text(&result).contains("tool not found"),
+                "hidden route must be refused before proxy dispatch: {result:?}"
             );
+        }
+
+        let expected_names = vec![
+            "tachi_a2a".to_string(),
+            "tachi_gh".to_string(),
+            "tachi_memory".to_string(),
+            "tachi_staff".to_string(),
+            "tachi_task".to_string(),
+        ];
+        for raw_profile in [
+            "standard",
+            "lead",
+            "delegate",
+            "worker",
+            "coordinate",
+            "delegate+operate",
+            "standard+delegate",
+        ] {
+            let profile = tachi_hub::parse_tool_profile(raw_profile)
+                .unwrap_or_else(|| panic!("profile {raw_profile} should parse"));
+            let proxy = StdioProxyServer {
+                adapter_started_at: chrono::Utc::now(),
+                tool_profile: Some(profile),
+                resolved_agent_identity: Default::default(),
+                daemon: std::sync::Arc::new(std::sync::RwLock::new(daemon.clone())),
+                app_home: tachi_home.clone(),
+                global_db_path: global.clone(),
+                project_db_path: None,
+                client_project: None,
+            };
+            let mut names = list_tools_via_stdio_proxy(proxy.clone())
+                .await
+                .unwrap_or_else(|error| panic!("{raw_profile} tools/list failed: {error}"))
+                .tools
+                .into_iter()
+                .map(|tool| tool.name.into_owned())
+                .collect::<Vec<_>>();
+            names.sort();
+            assert_eq!(names, expected_names, "stdio profile {raw_profile}");
+
+            for hidden in ["runtime_info", "tachi_briefing"] {
+                let result =
+                    call_tool_via_stdio_proxy(proxy.clone(), hidden, serde_json::Map::new())
+                        .await
+                        .unwrap_or_else(|error| {
+                            panic!("{raw_profile} hidden call {hidden} failed: {error}")
+                        });
+                assert_eq!(result.is_error, Some(true), "{raw_profile}:{hidden}");
+                assert!(
+                    first_text(&result).contains("tool not found"),
+                    "{raw_profile}:{hidden}: {result:?}"
+                );
+            }
         }
 
         let default_proxy = StdioProxyServer {
@@ -386,14 +439,7 @@ fn stdio_proxy_profile_is_forwarded_once_and_denies_attachment_before_handler() 
             .collect::<Vec<_>>();
         default_names.sort();
         assert_eq!(
-            default_names,
-            vec![
-                "tachi_a2a".to_string(),
-                "tachi_gh".to_string(),
-                "tachi_memory".to_string(),
-                "tachi_staff".to_string(),
-                "tachi_task".to_string(),
-            ],
+            default_names, expected_names,
             "missing proxy profile must not inherit the broader daemon profile"
         );
         (ct, daemon_task)
@@ -1549,21 +1595,17 @@ fn stdio_proxy_env_gate_accepts_common_truthy_values() {
 }
 
 #[test]
-fn proxy_maps_zero_arg_briefing_to_project_memory_briefing() {
+fn proxy_no_longer_rewrites_retired_briefing_route() {
     let request = rmcp::model::CallToolRequestParams::new("tachi_briefing");
 
-    let mapped = prepare_proxy_tool_call(request, Some("Sigil-abc123")).expect("mapped");
+    let unchanged =
+        prepare_proxy_tool_call(request, Some("Sigil-abc123")).expect("preflight succeeds");
 
-    assert_eq!(mapped.name.as_ref(), "tachi_memory");
-    let args = mapped.arguments.expect("briefing args");
-    assert_eq!(args["action"], serde_json::json!("briefing"));
-    assert_eq!(args["format"], serde_json::json!("markdown"));
-    assert_eq!(args["compact"], serde_json::json!(true));
-    assert_eq!(args["project"], serde_json::json!("Sigil-abc123"));
-    assert!(args["query"]
-        .as_str()
-        .expect("query")
-        .contains("Sigil-abc123"));
+    assert_eq!(unchanged.name.as_ref(), "tachi_briefing");
+    let arguments = unchanged.arguments.unwrap_or_default();
+    for rewritten in ["action", "format", "compact", "project", "query"] {
+        assert!(!arguments.contains_key(rewritten), "{rewritten}");
+    }
 }
 
 // #1041 B1: the stdio proxy's `prepare_proxy_tool_call` is a Preflight hop
@@ -1910,6 +1952,28 @@ async fn http_mcp_call_tool(
     parse_http_mcp_payload(&body, id)
 }
 
+async fn http_mcp_list_tools(
+    client: &reqwest::Client,
+    url: &str,
+    headers: reqwest::header::HeaderMap,
+    id: i64,
+) -> serde_json::Value {
+    let response = client
+        .post(url)
+        .headers(headers)
+        .json(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "tools/list",
+            "params": {},
+        }))
+        .send()
+        .await
+        .expect("send HTTP MCP tools/list");
+    let body = response.text().await.expect("tools/list body");
+    parse_http_mcp_payload(&body, id)
+}
+
 fn http_tool_text(response: &serde_json::Value) -> String {
     let content = response["result"]["content"]
         .as_array()
@@ -1965,7 +2029,7 @@ fn http_direct_connect_header_identity_binds_profile_and_project() {
         let server = crate::MemoryServer::new(global.clone(), None).expect("daemon server");
         let (daemon, ct, daemon_task) = spawn_test_http_daemon(server, &global).await;
         let headers = http_headers(&[
-            (crate::session_identity::HEADER_PROFILE, "ops"),
+            (crate::session_identity::HEADER_PROFILE, "standard"),
             (crate::session_identity::HEADER_CLIENT, "codex-http-test"),
             (crate::session_identity::HEADER_PROJECT, project_name),
         ]);
@@ -1973,28 +2037,39 @@ fn http_direct_connect_header_identity_binds_profile_and_project() {
         assert!(init.get("error").is_none(), "initialize failed: {init:#}");
         http_mcp_initialized(&client, &daemon.url, session_headers.clone()).await;
 
-        let runtime = http_mcp_call_tool(
-            &client,
-            &daemon.url,
-            session_headers.clone(),
-            2,
-            "runtime_info",
-            serde_json::Map::new(),
-        )
-        .await;
-        assert!(
-            runtime["result"]["isError"] != serde_json::json!(true),
-            "runtime_info failed: {runtime:#}"
-        );
-        let runtime_text = http_tool_text(&runtime);
-        let runtime_json: serde_json::Value =
-            serde_json::from_str(&runtime_text).expect("runtime_info JSON");
+        let listed = http_mcp_list_tools(&client, &daemon.url, session_headers.clone(), 2).await;
+        let names = listed["result"]["tools"]
+            .as_array()
+            .expect("tools/list tools")
+            .iter()
+            .filter_map(|tool| tool["name"].as_str())
+            .collect::<std::collections::BTreeSet<_>>();
         assert_eq!(
-            runtime_json["runtime"]["tool_profile"],
-            "observe+remember+operate"
+            names,
+            std::collections::BTreeSet::from([
+                "tachi_a2a",
+                "tachi_gh",
+                "tachi_memory",
+                "tachi_staff",
+                "tachi_task",
+            ])
         );
-        assert_eq!(runtime_json["runtime"]["session_client"], "codex-http-test");
-        assert_eq!(runtime_json["runtime"]["session_project"], project_name);
+
+        for (id, hidden) in [(3, "runtime_info"), (4, "tachi_briefing")] {
+            let denied = http_mcp_call_tool(
+                &client,
+                &daemon.url,
+                session_headers.clone(),
+                id,
+                hidden,
+                serde_json::Map::new(),
+            )
+            .await;
+            assert!(
+                http_tool_text(&denied).contains("tool not found"),
+                "standard HTTP direct call should hide {hidden}: {denied:#}"
+            );
+        }
 
         for (id, scope, summary) in [
             (
@@ -2012,7 +2087,7 @@ fn http_direct_connect_header_identity_binds_profile_and_project() {
                 &client,
                 &daemon.url,
                 session_headers.clone(),
-                if scope == "global" { 3 } else { 4 },
+                if scope == "global" { 5 } else { 6 },
                 "tachi_memory",
                 serde_json::Map::from_iter([
                     ("action".to_string(), serde_json::json!("save")),
@@ -2041,8 +2116,8 @@ fn http_direct_connect_header_identity_binds_profile_and_project() {
         let search = http_mcp_call_tool(
             &client,
             &daemon.url,
-            session_headers,
-            5,
+            session_headers.clone(),
+            7,
             "tachi_memory",
             serde_json::Map::from_iter([
                 ("action".to_string(), serde_json::json!("search")),
@@ -2088,7 +2163,7 @@ fn http_direct_connect_header_identity_binds_profile_and_project() {
 }
 
 #[test]
-fn http_direct_connect_rejects_admin_profile_without_authorization_policy() {
+fn http_direct_connect_rejects_privileged_profile_without_authorization_policy() {
     let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
@@ -2105,17 +2180,121 @@ fn http_direct_connect_rejects_admin_profile_without_authorization_policy() {
     let (ct, daemon_task) = rt.block_on(async {
         let server = crate::MemoryServer::new(global.clone(), None).expect("daemon server");
         let (daemon, ct, daemon_task) = spawn_test_http_daemon(server, &global).await;
-        let headers = http_headers(&[(crate::session_identity::HEADER_PROFILE, "admin")]);
+        for profile in [
+            "ops",
+            "operate",
+            "runtime",
+            "openclaw",
+            "hermes",
+            "adapter",
+            "delegate+operate",
+            "admin",
+            "full",
+            "emergency",
+        ] {
+            let headers = http_headers(&[(crate::session_identity::HEADER_PROFILE, profile)]);
+            let (_client, _session_headers, init) =
+                http_mcp_initialize(&daemon.url, headers, None).await;
+            let error = init.get("error").unwrap_or_else(|| {
+                panic!("privileged profile {profile} initialize should fail: {init:#}")
+            });
+            let message = error["message"].as_str().unwrap_or_default();
+            assert!(
+                message.contains("requires explicit authorization"),
+                "unexpected {profile} rejection: {init:#}"
+            );
+        }
+        let headers =
+            http_headers(&[(crate::session_identity::HEADER_PROFILE, "unknown-principal")]);
         let (_client, _session_headers, init) =
             http_mcp_initialize(&daemon.url, headers, None).await;
-        let error = init
-            .get("error")
-            .unwrap_or_else(|| panic!("admin initialize should fail: {init:#}"));
-        let message = error["message"].as_str().unwrap_or_default();
+        let message = init["error"]["message"].as_str().unwrap_or_default();
         assert!(
-            message.contains("requires explicit authorization"),
-            "unexpected admin rejection: {init:#}"
+            message.contains("unknown HTTP direct-connect Tachi profile"),
+            "unknown HTTP profile must fail closed: {init:#}"
         );
+        (ct, daemon_task)
+    });
+
+    ct.cancel();
+    rt.block_on(daemon_task).expect("daemon task");
+}
+
+#[test]
+fn http_direct_connect_ordinary_profiles_have_exact_facades_and_hide_retired_routes() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let tachi_home = temp.path().join("home");
+    let global = tachi_home.join("global/memory.db");
+    std::fs::create_dir_all(global.parent().expect("global parent")).expect("global parent");
+    let _tachi_home = EnvRestore::set_path("TACHI_HOME", &tachi_home);
+    let _sigil_home = EnvRestore::remove("SIGIL_HOME");
+    let _app_home = EnvRestore::remove("TACHI_APP_HOME");
+
+    let rt = test_runtime();
+    let (ct, daemon_task) = rt.block_on(async {
+        let server = crate::MemoryServer::new(global.clone(), None).expect("daemon server");
+        let (daemon, ct, daemon_task) = spawn_test_http_daemon(server, &global).await;
+        let expected = std::collections::BTreeSet::from([
+            "tachi_a2a",
+            "tachi_gh",
+            "tachi_memory",
+            "tachi_staff",
+            "tachi_task",
+        ]);
+
+        for profile in [
+            None,
+            Some("standard"),
+            Some("lead"),
+            Some("delegate"),
+            Some("worker"),
+            Some("coordinate"),
+            Some("standard+delegate"),
+        ] {
+            let profile_label = profile.unwrap_or("missing/default");
+            let headers = profile.map_or_else(
+                || http_headers(&[]),
+                |value| http_headers(&[(crate::session_identity::HEADER_PROFILE, value)]),
+            );
+            let (client, session_headers, init) =
+                http_mcp_initialize(&daemon.url, headers, None).await;
+            assert!(
+                init.get("error").is_none(),
+                "initialize {profile_label} failed: {init:#}"
+            );
+            http_mcp_initialized(&client, &daemon.url, session_headers.clone()).await;
+
+            let listed =
+                http_mcp_list_tools(&client, &daemon.url, session_headers.clone(), 2).await;
+            let names = listed["result"]["tools"]
+                .as_array()
+                .expect("tools/list tools")
+                .iter()
+                .filter_map(|tool| tool["name"].as_str())
+                .collect::<std::collections::BTreeSet<_>>();
+            assert_eq!(names, expected, "unexpected HTTP tools for {profile_label}");
+
+            for (id, hidden) in [(3, "runtime_info"), (4, "tachi_briefing")] {
+                let denied = http_mcp_call_tool(
+                    &client,
+                    &daemon.url,
+                    session_headers.clone(),
+                    id,
+                    hidden,
+                    serde_json::Map::new(),
+                )
+                .await;
+                assert!(
+                    http_tool_text(&denied).contains("tool not found"),
+                    "{profile_label} HTTP direct call should hide {hidden}: {denied:#}"
+                );
+            }
+        }
+
         (ct, daemon_task)
     });
 
@@ -2302,7 +2481,7 @@ fn http_direct_connect_same_db_alias_write_normalizes_to_bound_identity() {
         let server = crate::MemoryServer::new(global.clone(), None).expect("daemon server");
         let (daemon, ct, daemon_task) = spawn_test_http_daemon(server, &global).await;
         let headers = http_headers(&[
-            (crate::session_identity::HEADER_PROFILE, "ops"),
+            (crate::session_identity::HEADER_PROFILE, "standard"),
             (crate::session_identity::HEADER_PROJECT, bound_name.as_str()),
         ]);
         let (client, session_headers, init) = http_mcp_initialize(&daemon.url, headers, None).await;
@@ -2312,7 +2491,7 @@ fn http_direct_connect_same_db_alias_write_normalizes_to_bound_identity() {
         let save = http_mcp_call_tool(
             &client,
             &daemon.url,
-            session_headers.clone(),
+            session_headers,
             2,
             "tachi_memory",
             serde_json::Map::from_iter([
@@ -2337,23 +2516,6 @@ fn http_direct_connect_same_db_alias_write_normalizes_to_bound_identity() {
         assert!(
             save.get("error").is_none() && save["result"]["isError"] != serde_json::json!(true),
             "same-DB alias write failed: {save:#}"
-        );
-
-        let runtime = http_mcp_call_tool(
-            &client,
-            &daemon.url,
-            session_headers,
-            3,
-            "runtime_info",
-            serde_json::Map::new(),
-        )
-        .await;
-        let runtime_json: serde_json::Value =
-            serde_json::from_str(&http_tool_text(&runtime)).expect("runtime_info JSON");
-        assert_eq!(
-            runtime_json["runtime"]["session_project"],
-            serde_json::json!(&bound_name),
-            "immutable HTTP binding must remain the legacy identity"
         );
         (ct, daemon_task)
     });

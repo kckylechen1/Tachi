@@ -82,24 +82,22 @@ Relevant checks:
 
 ## Canonical Keep Set
 
-These tools are the public surface to optimize around. They should be small,
-well-documented, and allowed in `standard` unless a security reason says
-otherwise.
+These five facades are the complete ordinary Lead/Worker discovery surface.
+Action policy still distinguishes Lead from Worker permissions.
 
 | Tool | Role | Notes |
 | --- | --- | --- |
-| `tachi_tools` | discovery | Must stay visible so agents stop guessing tool names. |
-| `runtime_info` | routing identity | Cheap route/profile self-check. |
-| `tachi_status` | health | Session-start health and readiness signal. |
 | `tachi_memory` | memory facade | Canonical search/get/save/extract/briefing/checkpoint/alerts surface. |
 | `tachi_task` | task lifecycle facade | Historical (2026-07-07 base) plan/dispatch/complete/status/board/wait surface, since narrowed further — `dispatch`/`cancel`/`wait` were removed by #1319-C2 and `plan`/`cycle_plan`/`recommend`/`refine_issues`/`merge`/`ux_matrix` were retired by #1683 C1a. Current action set lives in `TachiTaskAction::PRIMARY`, not in this historical row. |
-| `tachi_tune` | route/recall tuning | Extracted from task/memory in #1426. Admin/operator only — never part of the standard keep-set. |
-| `tachi_verify` | verification ledger | Keep as evidence ledger for dispatch and safe-merge workflows. |
-| `tachi_wiki` | wiki facade | Canonical wiki search/browse/read/write facade. |
-| `tachi_skill` | skill facade | Canonical discover/run facade (the retired `bundle`/`loadout` actions were deleted by #1690 C3). |
-| `tachi_web_search` | web search intake | Keep only as a compatibility intake where a host lacks web search; #1467 leaves research reasoning with the host model. |
-| `vault_status` | safe credential readiness | Read-only status only; write/get vault tools stay out of daily profiles. |
 | `tachi_gh` | GitHub/evidence facade | Keep if GitHub remains part of ship/evidence workflows; move duplicated task PR actions here. |
+| `tachi_staff` | staffing facade | Lead may start/cancel; Worker is restricted to status. |
+| `tachi_a2a` | advisory messaging facade | Canonical bounded agent-to-agent messaging surface. |
+
+Diagnostics and residual facades such as `tachi_tools`, `runtime_info`,
+`tachi_status`, `tachi_verify`, `tachi_wiki`, `tachi_skill`,
+`tachi_web_search`, `vault_status`, and `tachi_tune` remain physically
+registered only for explicit Ops/admin compatibility. They are not ordinary
+daily discovery, and this contraction does not claim their deletion.
 
 `tachi_save` and `tachi_briefing` were convenience shorthands, both retired
 and removed from current profile allow-lists. Their canonical replacements are

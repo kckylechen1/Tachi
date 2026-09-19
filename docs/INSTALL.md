@@ -499,7 +499,11 @@ normal agents should see their current repo project DB plus global memory.
 
 ## Available MCP Tools
 
-Once connected, Tachi exposes a profile-filtered MCP surface. The full `admin` catalog is intentionally large; most hosts should use `standard`, `coordinate`, or `operate` so agents see a compact task-focused surface.
+Once connected, ordinary/default Lead and Worker sessions expose exactly
+`tachi_memory`, `tachi_task`, `tachi_staff`, `tachi_gh`, and `tachi_a2a`.
+The remaining inventory in this section documents retained routes for explicit
+Ops/admin compatibility or operator CLI workflows; those routes are not daily
+or default discovery, and retaining them does not mean they were deleted.
 
 ### Core Memory
 
@@ -541,7 +545,7 @@ State primitives (`set_state`, `get_state`) were retired/internalized off the MC
 surface in #757 for the same reason — there is no facade equivalent for raw
 KV state.
 
-`runtime_info`
+`runtime_info` (explicit Ops/admin compatibility only)
 
 ### Extraction & Ingestion
 
@@ -676,13 +680,16 @@ The public `tachi_dispatch(action='recommend')` surface is retired. Surviving in
 
 ### Facade & Delegation
 
-`tachi_memory`, `tachi_web_search`, `tachi_task`, `tachi_browse`, `tachi_unstick`, `tachi_verify`
+Ordinary/default discovery is exactly `tachi_memory`, `tachi_task`,
+`tachi_staff`, `tachi_gh`, and `tachi_a2a`.
 
-*(Compatibility/read-only helpers are kept behind the admin profile; daily agent surfaces should use the facade tools above.)*
+*Compatibility/read-only helpers such as `tachi_web_search`, `tachi_browse`,
+`tachi_unstick`, and `tachi_verify` remain only on explicit Ops/admin surfaces.*
 
 ### Wiki System
 
-`wiki_lint`, `tachi_wiki`, `tachi_wiki_write`, `tachi_wiki_search`, `tachi_browse`
+Explicit Ops/admin compatibility only: `wiki_lint`, `tachi_wiki`,
+`tachi_wiki_write`, `tachi_wiki_search`, `tachi_browse`.
 
 ### Utilities
 
@@ -721,7 +728,9 @@ tachi --profile standard
 TACHI_PROFILE=claude-code tachi
 ```
 
-If no profile is specified, Tachi defaults to `standard`. Set `TACHI_PROFILE=admin` only for maintenance sessions that need the full low-level catalog.
+If no profile is specified, Tachi defaults to `standard`. Local process-selected
+`admin` is only for explicitly authorized maintenance sessions that need the
+full low-level catalog. HTTP caller metadata cannot authorize Ops/admin.
 
 For source-tree MCP debugging, `TACHI_DISABLE_STDIO_PROXY=1` forces a stdio
 process to serve locally instead of forwarding to a compatible running daemon.
@@ -739,7 +748,7 @@ not by itself disable reuse of an existing compatible daemon.
 | `tachi_memory(action="save")` fails | Ensure `VOYAGE_API_KEY` is set (required for embedding) |
 | Search returns no results | Memory store is empty — save some memories first |
 | Database locked errors | Only one Tachi instance should access each database file |
-| Profile blocks a needed tool | Set `TACHI_PROFILE=admin` temporarily, or add the tool name to `TACHI_EXTRA_TOOLS` |
+| Profile blocks a needed tool | Use an explicitly authorized local Ops/admin maintenance session; HTTP profile metadata cannot self-authorize privileged access. |
 
 ---
 

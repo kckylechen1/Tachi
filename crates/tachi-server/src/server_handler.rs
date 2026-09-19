@@ -312,44 +312,33 @@ fn narrow_gated_action_schemas(
                 )));
             }
             "tachi_staff" => {
-                if profile == tachi_hub::ToolProfile::delegate() {
-                    let allowed: Vec<&str> = tachi_params::TACHI_STAFF_ACTIONS
-                        .iter()
-                        .copied()
-                        .filter(|action| {
-                            tachi_hub::facade_action_allowed(
-                                "tachi_staff",
-                                Some(action),
-                                Some(profile),
-                            )
-                        })
-                        .collect();
-                    narrow_action_enum_property(
-                        tool,
-                        &allowed,
-                        "Required staffing action allowed by the active profile.",
-                    );
-                }
+                let allowed: Vec<&str> = tachi_params::TACHI_STAFF_ACTIONS
+                    .iter()
+                    .copied()
+                    .filter(|action| {
+                        tachi_hub::facade_action_allowed("tachi_staff", Some(action), Some(profile))
+                    })
+                    .collect();
+                narrow_action_enum_property(
+                    tool,
+                    &allowed,
+                    "Required staffing action allowed by the active profile.",
+                );
             }
             "tachi_gh" => {
-                if profile == tachi_hub::ToolProfile::delegate() {
-                    let allowed: Vec<&str> = tachi_params::TACHI_GH_ACTIONS
-                        .iter()
-                        .copied()
-                        .filter(|action| {
-                            tachi_hub::facade_action_allowed(
-                                "tachi_gh",
-                                Some(action),
-                                Some(profile),
-                            )
-                        })
-                        .collect();
-                    narrow_action_enum_property(
-                        tool,
-                        &allowed,
-                        "Required GitHub action allowed by the active profile.",
-                    );
-                }
+                seed_action_enum_property(tool, tachi_params::TACHI_GH_ACTIONS);
+                let allowed: Vec<&str> = tachi_params::TACHI_GH_ACTIONS
+                    .iter()
+                    .copied()
+                    .filter(|action| {
+                        tachi_hub::facade_action_allowed("tachi_gh", Some(action), Some(profile))
+                    })
+                    .collect();
+                narrow_action_enum_property(
+                    tool,
+                    &allowed,
+                    "Required GitHub action allowed by the active profile.",
+                );
             }
             "tachi_a2a" => {
                 let allowed: Vec<&str> = tachi_params::TACHI_A2A_ACTIONS
@@ -1047,20 +1036,36 @@ fn header_string_result(
 }
 
 fn parse_http_tool_profile(raw: &str) -> Result<tachi_hub::ToolProfile, rmcp::ErrorData> {
+    let requests_privileged_surface = raw.split([',', '+']).map(str::trim).any(|token| {
+        matches!(
+            token.to_ascii_lowercase().as_str(),
+            "operate"
+                | "runtime"
+                | "openclaw"
+                | "hermes"
+                | "adapter"
+                | "ops"
+                | "admin"
+                | "full"
+                | "emergency"
+        )
+    });
+    if requests_privileged_surface {
+        return Err(rmcp::ErrorData::invalid_params(
+            format!(
+                "HTTP direct-connect profile '{raw}' requires explicit authorization that caller-supplied profile metadata cannot provide; select Ops/admin only from a trusted local process configuration"
+            ),
+            None,
+        ));
+    }
     let profile = tachi_hub::parse_tool_profile(raw).ok_or_else(|| {
         rmcp::ErrorData::invalid_params(
             format!(
-                "unknown HTTP direct-connect Tachi profile '{raw}'; expected standard/lead, delegate/worker, observe, remember, coordinate, operate/ops, or a compatible host alias"
+                "unknown HTTP direct-connect Tachi profile '{raw}'; expected standard/lead, delegate/worker, observe, remember, coordinate, or a compatible ordinary host alias"
             ),
             None,
         )
     })?;
-    if profile.as_str() == "admin" {
-        return Err(rmcp::ErrorData::invalid_params(
-            "HTTP direct-connect profile 'admin' requires explicit authorization; #495 must wire profile claims to an authorization policy before admin can be accepted over HTTP",
-            None,
-        ));
-    }
     Ok(profile)
 }
 

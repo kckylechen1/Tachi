@@ -649,9 +649,10 @@ mod tests {
     }
 
     #[test]
-    fn f3_missing_action_on_non_gated_tool_is_not_profile_gated() {
-        // tachi_unstick has no action concept; tool-level visibility is enough.
-        assert!(facade_action_allowed(
+    fn f3_hidden_non_gated_tool_stays_denied_for_delegate() {
+        // tachi_unstick has no action concept, but it is no longer in the
+        // Worker product surface. The Worker policy must not restore it.
+        assert!(!facade_action_allowed(
             "tachi_unstick",
             None,
             Some(ToolProfile::delegate())
@@ -753,12 +754,10 @@ mod tests {
         ));
     }
 
-    /// Unrestricted tools on the delegate allow-list keep working regardless
-    /// of what's in the (irrelevant) action arg — this is the "no action
-    /// concept" carve-out, distinct from a real gated facade with an
-    /// unrecognized action.
+    /// Retained no-action compatibility routes are no longer on the Worker
+    /// allow-list. The action gate must not make a hidden route callable.
     #[test]
-    fn f919_delegate_no_action_concept_tools_stay_allowed() {
+    fn f919_delegate_no_action_compatibility_tools_stay_denied() {
         let profile = Some(ToolProfile::delegate());
         for tool in [
             "tachi_tools",
@@ -766,8 +765,8 @@ mod tests {
             "tachi_web_search",
             "tachi_unstick",
         ] {
-            assert!(facade_action_allowed(tool, None, profile));
-            assert!(facade_action_allowed(tool, Some("whatever"), profile));
+            assert!(!facade_action_allowed(tool, None, profile));
+            assert!(!facade_action_allowed(tool, Some("whatever"), profile));
         }
     }
 

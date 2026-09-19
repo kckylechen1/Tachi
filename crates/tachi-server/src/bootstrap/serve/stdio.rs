@@ -732,10 +732,11 @@ impl rmcp::ServerHandler for StdioProxyServer {
     {
         async move {
             crate::server_handler::require_legacy_session(&context.meta)?;
-            if request.name.as_ref() == "runtime_info" {
-                if !tachi_hub::tool_visible("runtime_info", self.tool_profile, None) {
-                    return Ok(crate::server_handler::tool_not_found_result("runtime_info").into());
-                }
+            let requested_name = request.name.as_ref();
+            if !tachi_hub::tool_visible(requested_name, self.tool_profile, None) {
+                return Ok(crate::server_handler::tool_not_found_result(requested_name).into());
+            }
+            if requested_name == "runtime_info" {
                 return Ok(self.runtime_info_result().await.into());
             }
             let request = prepare_proxy_tool_call(request, self.client_project.as_deref())?;
@@ -786,25 +787,6 @@ fn prepare_proxy_tool_call(
     mut request: rmcp::model::CallToolRequestParams,
     client_project: Option<&str>,
 ) -> Result<rmcp::model::CallToolRequestParams, rmcp::ErrorData> {
-    if request.name.as_ref() == "tachi_briefing" {
-        let mut args = serde_json::Map::new();
-        args.insert("action".to_string(), serde_json::json!("briefing"));
-        args.insert("format".to_string(), serde_json::json!("markdown"));
-        args.insert("compact".to_string(), serde_json::json!(true));
-        if let Some(project) = client_project {
-            args.insert("project".to_string(), serde_json::json!(project));
-            args.insert(
-                "query".to_string(),
-                serde_json::json!(format!(
-                    "{project} current task recent decisions blockers next steps"
-                )),
-            );
-        }
-        request.name = "tachi_memory".into();
-        request.arguments = Some(args);
-        return Ok(request);
-    }
-
     if let Some(project) = client_project {
         crate::session_identity::enforce_session_project(
             request.name.as_ref(),

@@ -29,7 +29,7 @@ Tachi is a single-binary, local-first memory and coordination backend for AI age
 - **Encrypted local vault** for API keys and secrets
 - **Agent coordination** via handoff, kanban, and pub/sub (Ghost Whispers)
 - **Skill packs and capability hub** — register once, use from any agent
-- **Workflow control plane** — `tachi_task`, `tachi_staff`, `tachi_verify`, `tachi_gh`
+- **Five-facade product surface** — `tachi_memory`, `tachi_task`, `tachi_staff`, `tachi_gh`, `tachi_a2a`
 - **Continuity memory** — typed events, pattern projections, outcome labels, and project-cycle context
 - **Lifecycle closure** — GitHub issues/PRs, docs/specs, wiki, memory, verification, and release notes in one loop
 
@@ -294,7 +294,7 @@ Every memory carries a free-text `domain` field (e.g. `"code-review"`, `"persona
 Local-first secret storage: Argon2id KDF + AES-256-GCM, per-secret nonces, auto-lock after inactivity, brute-force protection, per-secret agent ACLs, and multi-key rotation. Project-local agents can resolve Vault secrets via `.tachi/vault.env` aliases. `tachi vault exec --require NAME -- <cmd>` runs a child process with Vault-delivered credentials (Vault only fills env names the caller did not already set); by default it refuses to spawn a credential-less child if the Vault is unavailable, and `--allow-unauthenticated` opts back into running with the inherited environment. See [`docs/INSTALL.md`](docs/INSTALL.md).
 
 ### 6. Tachi Hub & Skill Packs
-Register MCP servers, skills, and toolchains once; any connected agent can discover and call them. `pack_register` / `pack_project` install curated skill collections and project them to Claude, Cursor, Codex, Gemini, and OpenCode formats. `tachi_skill(action="discover"|"run")` is the canonical skill facade; standalone `run_skill` is retired (by #1690/#757); `hub_discover` remains the hub discovery route.
+Register MCP servers, skills, and toolchains once and project them to supported hosts. `pack_register` / `pack_project`, `tachi_skill(action="discover"|"run")`, and `hub_discover` are retained explicit Ops/admin compatibility routes, not part of ordinary Lead/Worker discovery. Standalone `run_skill` is retired (by #1690/#757).
 
 Read-only diagnostics help keep those surfaces aligned:
 
@@ -344,13 +344,13 @@ Tachi is not only a memory store; it is becoming the durable control plane for a
 - **`tachi_task`** — guide work from issue intake through docs/specs,
   dispatch recommendations, PR handoff, release notes, and close-loop writes.
 - **`tachi_staff`** — external staffing exception (`action='start'`/`'status'`) for durable/remote worker launch when no native subagent applies; requires a typed `staffing_reason`.
-- **`tachi_verify`** — record background verification evidence (tests, type checks, safe-merge gates) under `.tachi/runs/<flow_id>/verification.json`.
+- **`tachi_verify`** — retained Ops/admin compatibility route for recording background verification evidence under `.tachi/runs/<flow_id>/verification.json`; it is not in ordinary Lead/Worker discovery.
 - **`tachi_gh`** — read issues/PRs, post comments, digest review state, and
   run safe-merge checks with lifecycle/verification evidence.
 
 ### 10. Neural Foundry & Wiki
-- **Foundry** — server-owned context lifecycle: `recall_context`, `capture_session`, `compact_context`, `section_build`, `compact_rollup`, `compact_session_memory`, plus agent evolution proposals.
-- **Wiki** — durable knowledge pages maintained by agents: `tachi_wiki`, `tachi_browse`, `tachi_wiki_write`, `tachi_wiki_search`, `wiki_lint`.
+- **Foundry** — explicit Ops/admin compatibility routes for server-owned context lifecycle: `recall_context`, `capture_session`, `compact_context`, `section_build`, `compact_rollup`, `compact_session_memory`, plus agent evolution proposals.
+- **Wiki** — explicit Ops/admin compatibility routes for durable knowledge: `tachi_wiki`, `tachi_browse`, `tachi_wiki_write`, `tachi_wiki_search`, `wiki_lint`. These retained routes are not part of ordinary Lead/Worker discovery.
 
 ### 11. Portable Memory Kernel
 `portable-kernel` is the current Cargo facade over `memcore` with Tachi's admin features disabled. `portable-server` exposes that kernel over MCP stdio or loopback HTTP without linking Tachi's operator surfaces. Owner ruling #1195 retains these packages as candidate boundaries for a future ZeroClaw-native memory module, but no direct ZeroClaw Cargo integration has landed. Historically, the split was introduced for HyperTachi and HyperMemory convergence; that fork is no longer the target consumer. A **portable kernel manifest** (`docs/engineering/architecture/kernel-surface-v1.fixture.json`) freezes the durable schema, recall primitives, vector/FTS fallback behavior, and readiness diagnostics as a product-agnostic contract. A manifest global-DB write-guard runs at startup; `TACHI_BYPASS_MANIFEST=1` skips that guard for development or crash recovery.
@@ -369,7 +369,10 @@ Tachi exposes a filtered MCP surface based on `TACHI_PROFILE`. The full `admin` 
 | `delegate` | Exactly the same five facades as Lead. Worker action policy permits status/read operations but denies recursive staffing and GitHub mutation. | Bounded Worker sessions. |
 | `admin` / `emergency` | Full retained catalog. Selecting it does not mean those compatibility routes were physically deleted from narrower profiles. | Explicit maintenance, development, governance, and emergency sessions. |
 
-Host aliases are resolved automatically: `lead`, `claude`, `claude-code`, `codex`, `cursor`, `trae`, `windsurf`, `ide`, `antigravity`, `companion`, `copilot`, `coach`, `workflow` → `standard`; `worker`, `subagent`, `delegate` → `delegate`; `openclaw`, `hermes`, `runtime`, `adapter`, `ops` → `operate`; `admin`, `full`, `emergency` → `admin`. Legacy `observe`, `remember`, and `coordinate` selectors keep their action permissions but discovery is confined to the five product facades. Privileged admin/emergency names cannot be combined with another selector.
+Host aliases are resolved automatically: `lead`, `claude`, `claude-code`, `codex`, `cursor`, `trae`, `windsurf`, `ide`, `antigravity`, `companion`, `copilot`, `coach`, `workflow` → `standard`; `worker`, `subagent`, `delegate` → `delegate`; `openclaw`, `hermes`, `runtime`, `adapter`, `ops` → `operate`; `admin`, `full`, `emergency` → `admin`. Legacy `observe`, `remember` (retired as a native tool alias), and `coordinate` selectors keep their action permissions but discovery is confined to the five product facades. Privileged admin/emergency names cannot be combined with another selector.
+
+Ops/admin aliases are trusted local process configuration only. HTTP
+direct-connect caller metadata cannot self-authorize an Ops/admin surface.
 
 If no profile is set, Tachi defaults to `standard` (since v1.0.1).
 
