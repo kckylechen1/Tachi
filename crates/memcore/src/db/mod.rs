@@ -82,6 +82,7 @@ pub mod store_profile;
 pub mod vault_accounts;
 #[cfg(feature = "admin")]
 mod vault_db;
+mod verified_admissions;
 #[cfg(feature = "admin")]
 mod virtual_capability;
 

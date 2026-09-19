@@ -220,8 +220,9 @@ pub struct AgentIdentity {
     pub created_at: String,
 }
 
-/// Persisted admission state. `Verified` is readable but has no public writer
-/// until the trusted #1170 verification adapter exists.
+/// Persisted admission state. Callers can inspect `Verified`, but public
+/// admission inputs cannot select it; the only writer consumes a bounded
+/// receipt produced behind tachi-server's trusted verifier port.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdmissionState {
     SelfAsserted,

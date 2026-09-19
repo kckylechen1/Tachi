@@ -192,6 +192,7 @@ mod vault_ops;
 pub mod vault_test_api;
 mod vector_backfill;
 mod vector_sweep;
+mod verified_admission;
 mod verify_ops;
 mod web_search_ops;
 mod wiki_ops;

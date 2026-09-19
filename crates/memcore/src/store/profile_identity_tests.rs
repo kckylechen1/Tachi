@@ -100,6 +100,7 @@ const PRODUCT_TABLES: &[&str] = &[
     "session_claims",
     "agent_identities",
     "identity_admissions",
+    "identity_admission_verification_receipts",
     "a2a_envelopes",
     "a2a_delivery_receipts",
 ];

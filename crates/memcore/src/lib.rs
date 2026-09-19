@@ -250,6 +250,11 @@ pub use db::session_claims::{
     SessionClaimsGc, UnverifiedAdmissionState, WorkClaim, WorkClaimHandoff,
     WorkClaimHandoffRequest, WorkClaimHeartbeat, WorkClaimMode,
 };
+#[cfg(feature = "admin")]
+pub use db::verified_admissions::{
+    get_verified_admission_receipt, has_fresh_verified_admission, record_verified_admission,
+    NewVerifiedAdmission, VerifiedAdmissionReceipt, VerifiedAdmissionWriteOutcome,
+};
 pub use db::{anchor_id, anchor_path, AnchorKind};
 pub use db::{
     is_memory_db_filename, migrate_legacy_filename_if_present, resolve_memory_db_read_path,

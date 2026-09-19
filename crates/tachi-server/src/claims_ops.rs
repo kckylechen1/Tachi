@@ -1076,6 +1076,49 @@ mod tests {
     }
 
     #[test]
+    fn public_task_fields_cannot_upgrade_remote_self_report_to_verified() {
+        let server = make_server();
+        admit_agent_connection(&server, Some("agent.remote".to_string()), false)
+            .expect("remote self-report remains unavailable");
+        let parsed: crate::tool_params::TachiTaskParams = serde_json::from_value(
+            serde_json::json!({
+                "action": "claim",
+                "issue_ref": "org/repo#1938",
+                "branch": "lane/1938-public-bypass",
+                "claim_role": "executor",
+                "claim_mode": "writable",
+                "worktree_path": "/tmp/claim-public-bypass",
+                "claim_scope": ["crates/tachi-server/src/claims_ops.rs"],
+                "expected_head": "817a673f",
+                "lease_expires_at": "2030-01-01T00:00:00Z",
+                "admission_state": "verified",
+                "hostname": "trusted-looking-host",
+                "carrier": "trusted-looking-carrier",
+                "model": "trusted-looking-model"
+            }),
+        )
+        .expect("legacy params ignore unknown fields");
+
+        let error = handle_task_claim(&server, &parsed)
+            .expect_err("public/model input must not upgrade admission state");
+        assert!(error.contains("admission unavailable"), "{error}");
+        server
+            .with_global_store_read(|store| {
+                let verified: i64 = store
+                    .connection()
+                    .query_row(
+                        "SELECT COUNT(*) FROM identity_admissions WHERE state='verified'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .map_err(|error| error.to_string())?;
+                assert_eq!(verified, 0, "public bypass attempt must write no verified row");
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
     fn board_explicitly_marks_github_unavailable() {
         let board = work_claim_board(&make_server()).expect("board");
         assert_eq!(board["github_state"], "unavailable");
