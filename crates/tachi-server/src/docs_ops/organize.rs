@@ -547,9 +547,11 @@ impl AuthorizedDocs {
                 identity.canonical = path.to_path_buf();
                 Ok(identity)
             })();
-            validation.map_err(|error: String| {
+            let identity = validation.map_err(|error: String| {
                 format!("New file published but final validation failed; source retained: {error}")
-            })
+            })?;
+            self.sync_directory(parent, &parent_identity, "published destination parent")?;
+            Ok(identity)
         })();
         drop(file);
         match result {
@@ -601,16 +603,26 @@ impl AuthorizedDocs {
                 temporary.display()
             )
         })?;
-        let write_result = file
-            .write_all(content.as_bytes())
-            .and_then(|_| file.sync_all());
+        let write_result = (|| {
+            #[cfg(test)]
+            if run_organize_test_hook(OrganizeTestPoint::ExistingFileWriteFailure, path) {
+                file.write_all(&content.as_bytes()[..content.len().min(8)])
+                    .map_err(|error| error.to_string())?;
+                return Err(
+                    "Failed to write temporary file: injected partial write failure".to_string(),
+                );
+            }
+            file.write_all(content.as_bytes()).map_err(|error| {
+                format!("Failed to write temporary file '{}': {error}", temporary.display())
+            })?;
+            file.sync_all().map_err(|error| {
+                format!("Failed to sync temporary file '{}': {error}", temporary.display())
+            })
+        })();
         drop(file);
         if let Err(error) = write_result {
             let _ = self.remove_created_file(&temporary);
-            return Err(format!(
-                "Failed to write temporary file '{}': {error}",
-                temporary.display()
-            ));
+            return Err(error);
         }
         let (temporary_identity, temporary_metadata) =
             PhysicalIdentity::capture(&temporary, "temporary update file")?;
@@ -641,10 +653,16 @@ impl AuthorizedDocs {
             false,
             "temporary update file",
         )?;
+        #[cfg(test)]
+        if run_organize_test_hook(OrganizeTestPoint::ExistingFileRenameFailure, path) {
+            self.remove_created_file(&temporary)?;
+            return Err("Failed to replace file: injected rename failure".to_string());
+        }
         fs::rename(&temporary, path).map_err(|error| {
             let _ = self.remove_created_file(&temporary);
             format!("Failed to replace file '{}': {error}", path.display())
         })?;
+        self.sync_directory(parent, &parent_identity, "updated file parent")?;
         self.revalidate_roots()?;
         self.revalidate_object(parent, &parent_identity, true, "destination parent")?;
         let (updated, metadata) = PhysicalIdentity::capture(path, "updated file")?;
@@ -669,8 +687,13 @@ impl AuthorizedDocs {
         let parent_identity = self.ensure_existing_directory(parent)?;
         self.revalidate_object(parent, &parent_identity, true, "source parent")?;
         self.revalidate_object(path, expected, false, "source before removal")?;
+        #[cfg(test)]
+        if run_organize_test_hook(OrganizeTestPoint::SourceRemovalFailure, path) {
+            return Err("Failed to remove source file: injected removal failure".to_string());
+        }
         fs::remove_file(path)
             .map_err(|error| format!("Failed to remove source file {}: {error}", path.display()))?;
+        self.sync_directory(parent, &parent_identity, "source parent after removal")?;
         self.revalidate_roots()?;
         self.revalidate_object(parent, &parent_identity, true, "source parent")?;
         if fs::symlink_metadata(path).is_ok() {
@@ -698,6 +721,13 @@ impl AuthorizedDocs {
     ) -> Result<(), String> {
         self.revalidate_roots()?;
         self.revalidate_object(source, source_identity, false, "rename source")?;
+        let source_parent = source.parent().ok_or_else(|| {
+            format!(
+                "Refusing Wiki organize: protected invariant: rename source '{}' has no parent",
+                source.display()
+            )
+        })?;
+        let source_parent_identity = self.ensure_existing_directory(source_parent)?;
         let parent = destination.parent().ok_or_else(|| {
             format!(
                 "Refusing Wiki organize: protected invariant: rename destination '{}' has no parent",
@@ -725,6 +755,10 @@ impl AuthorizedDocs {
             true,
             "destination parent before rename",
         )?;
+        #[cfg(test)]
+        if run_organize_test_hook(OrganizeTestPoint::RenameFileFailure, destination) {
+            return Err("Failed to rename file: injected archive failure".to_string());
+        }
         fs::rename(source, destination).map_err(|error| {
             format!(
                 "Failed to rename '{}' -> '{}': {error}",
@@ -732,7 +766,31 @@ impl AuthorizedDocs {
                 destination.display()
             )
         })?;
+        self.sync_directory(
+            source_parent,
+            &source_parent_identity,
+            "rename source parent",
+        )?;
+        if source_parent != parent {
+            self.sync_directory(parent, destination_parent, "rename destination parent")?;
+        }
         self.revalidate_object(destination, source_identity, false, "renamed destination")?;
+        Ok(())
+    }
+
+    fn sync_directory(
+        &self,
+        path: &Path,
+        expected: &PhysicalIdentity,
+        label: &str,
+    ) -> Result<(), String> {
+        self.revalidate_roots()?;
+        self.revalidate_object(path, expected, true, label)?;
+        File::open(path)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|error| format!("Failed to sync {label} '{}': {error}", path.display()))?;
+        self.revalidate_roots()?;
+        self.revalidate_object(path, expected, true, label)?;
         Ok(())
     }
 
@@ -996,6 +1054,10 @@ pub(crate) enum OrganizeTestPoint {
     NewFilePublished,
     NewFileWriteFailure,
     NewFileSyncFailure,
+    ExistingFileWriteFailure,
+    ExistingFileRenameFailure,
+    RenameFileFailure,
+    SourceRemovalFailure,
 }
 
 #[cfg(not(test))]
@@ -1313,35 +1375,45 @@ pub(crate) async fn handle_wiki_organize(
             .any(|sub| relative_str.starts_with(sub));
 
         // 提取或预测分类
-        let (target_category_path, title, summary) = if let Some(ref fm) = fm_opt {
+        let classification = if let Some(ref fm) = fm_opt {
             if let Some(ref cat) = fm.category {
                 let cat_rel = cat.strip_prefix("docs/").unwrap_or(cat);
                 if standard_subdirs
                     .iter()
                     .any(|sub| cat_rel.starts_with(sub) || format!("{}/", cat_rel).starts_with(sub))
                 {
-                    // 使用已有的合法 category
-                    let standard_cat = format!("docs/{}", cat_rel);
-                    (
-                        standard_cat,
-                        fm.title.clone().unwrap_or_else(|| {
-                            relative_path
-                                .file_stem()
-                                .unwrap()
-                                .to_string_lossy()
-                                .to_string()
-                        }),
-                        fm.summary.clone().unwrap_or_default(),
-                    )
+                    None
                 } else {
                     // 原 category 不合法，调用 LLM
-                    classify_and_extract_metadata(server, &relative_str, &content).await
+                    Some(classify_and_extract_metadata(server, &relative_str, &content).await)
                 }
             } else {
-                classify_and_extract_metadata(server, &relative_str, &content).await
+                Some(classify_and_extract_metadata(server, &relative_str, &content).await)
             }
         } else {
-            classify_and_extract_metadata(server, &relative_str, &content).await
+            Some(classify_and_extract_metadata(server, &relative_str, &content).await)
+        };
+        let (target_category_path, title, summary) = if let Some(ref classified) = classification {
+            (
+                classified.category_path.clone(),
+                classified.title.clone(),
+                classified.summary.clone(),
+            )
+        } else {
+            let fm = fm_opt.as_ref().expect("existing category requires frontmatter");
+            let cat = fm.category.as_ref().expect("existing category was validated");
+            let cat_rel = cat.strip_prefix("docs/").unwrap_or(cat);
+            (
+                format!("docs/{}", cat_rel),
+                fm.title.clone().unwrap_or_else(|| {
+                    relative_path
+                        .file_stem()
+                        .expect("markdown path has a file stem")
+                        .to_string_lossy()
+                        .to_string()
+                }),
+                fm.summary.clone().unwrap_or_default(),
+            )
         };
 
         // 解析标准分类路径为相对于 docs/ 的路径
@@ -1364,11 +1436,20 @@ pub(crate) async fn handle_wiki_organize(
             summary: Some(summary),
             category: Some(dest_rel_dir.to_string()),
             organize: Some(true),
+            model_invocation_v1: None,
             other_fields: Vec::new(),
         });
 
         // 保证 category 正确且同步
         fm.category = Some(dest_rel_dir.to_string());
+        if let Some(classified) = classification {
+            fm.title = Some(classified.title);
+            fm.summary = Some(classified.summary);
+            // A heuristic replacement deliberately clears stale model
+            // provenance; an accepted model result installs its exact typed
+            // receipt before final bytes are assembled.
+            fm.model_invocation_v1 = classified.provenance.model_invocation_json()?;
+        }
 
         // 就地任务状态检测与勾选
         let (new_body, task_modified) = sync_tasks_in_content(server, body);

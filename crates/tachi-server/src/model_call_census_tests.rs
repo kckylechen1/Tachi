@@ -636,16 +636,15 @@ fn model_call_registry() -> Vec<ModelCallRecord> {
             RecorderRunDirectory,
             Owned1536,
         ),
-        record_with_successor(
+        record(
             "docs_classify_extract_metadata",
             "docs_ops/classify.rs",
             "classify_and_extract_metadata",
-            CallExtractLlm,
             CallExtractLlmWithReceipt,
             1,
-            "docs organize filesystem mutation metadata",
+            "docs organize filesystem mutation metadata with atomic frontmatter receipt",
             DocsResearchDerivedMetadata,
-            Owned1537,
+            Covered1522,
         ),
         record_with_successor(
             "enrichment_flush_generate_summary",

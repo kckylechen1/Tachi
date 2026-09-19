@@ -1,9 +1,15 @@
+pub(super) const MODEL_INVOCATION_FRONTMATTER_KEY: &str = "tachi_model_invocation_v1";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Frontmatter {
     pub(super) title: Option<String>,
     pub(super) summary: Option<String>,
     pub(super) category: Option<String>,
     pub(super) organize: Option<bool>,
+    /// Compact JSON for the closed `model-invocation-v1` receipt. This is a
+    /// first-class field because the legacy generic-scalar codec quotes and
+    /// escapes JSON, which cannot round-trip nested receipt bytes exactly.
+    pub(super) model_invocation_v1: Option<String>,
     pub(super) other_fields: Vec<(String, String)>,
 }
 
@@ -35,6 +41,7 @@ pub(super) fn parse_frontmatter(content: &str) -> (Option<Frontmatter>, &str) {
     let mut summary = None;
     let mut category = None;
     let mut organize = None;
+    let mut model_invocation_v1 = None;
     let mut other_fields = Vec::new();
 
     for i in 1..end_idx {
@@ -65,6 +72,7 @@ pub(super) fn parse_frontmatter(content: &str) -> (Option<Frontmatter>, &str) {
                 "organize" => {
                     organize = Some(val_clean.parse::<bool>().unwrap_or(true));
                 }
+                MODEL_INVOCATION_FRONTMATTER_KEY => model_invocation_v1 = Some(val_clean),
                 _ => other_fields.push((key, val_clean)),
             }
         }
@@ -107,6 +115,7 @@ pub(super) fn parse_frontmatter(content: &str) -> (Option<Frontmatter>, &str) {
             summary,
             category,
             organize,
+            model_invocation_v1,
             other_fields,
         }),
         rest,
@@ -128,6 +137,12 @@ pub(super) fn serialize_frontmatter(fm: &Frontmatter) -> String {
     }
     if let Some(org) = fm.organize {
         s.push_str(&format!("organize: {}\n", org));
+    }
+    if let Some(ref invocation) = fm.model_invocation_v1 {
+        s.push_str(&format!(
+            "{}: {}\n",
+            MODEL_INVOCATION_FRONTMATTER_KEY, invocation
+        ));
     }
     for (k, v) in &fm.other_fields {
         if v.contains(' ') || v.contains(':') || v.contains('"') || v.contains('\'') {
@@ -160,6 +175,7 @@ mod tests {
             summary: None,
             category: None,
             organize: None,
+            model_invocation_v1: None,
             other_fields: Vec::new(),
         }
     }
@@ -182,6 +198,7 @@ mod tests {
                 summary: Some(value.into()),
                 category: Some(value.into()),
                 organize: Some(false),
+                model_invocation_v1: None,
                 other_fields: vec![
                     ("z-last".into(), value.into()),
                     ("a-first".into(), "kept".into()),
@@ -237,5 +254,20 @@ mod tests {
         assert!(serialize_representable_frontmatter(&fm).is_err());
         fm.other_fields = vec![("bad:key".into(), "value".into())];
         assert!(serialize_representable_frontmatter(&fm).is_err());
+    }
+
+    #[test]
+    fn model_invocation_json_round_trips_as_reserved_unquoted_scalar() {
+        let mut fm = empty_header();
+        fm.model_invocation_v1 = Some(
+            r#"{"schema":"model-invocation-v1","lane":"extract","degraded":false}"#
+                .to_string(),
+        );
+        let serialized = serialize_representable_frontmatter(&fm).unwrap();
+        assert_eq!(
+            serialized,
+            "---\ntachi_model_invocation_v1: {\"schema\":\"model-invocation-v1\",\"lane\":\"extract\",\"degraded\":false}\n---\n"
+        );
+        assert_eq!(parse_frontmatter(&serialized), (Some(fm), ""));
     }
 }
