@@ -43,11 +43,15 @@ type ProbeDbResult = (
     Option<LatestFailedJob>,
 );
 
-pub(crate) fn probe_db(path: &Path) -> Result<ProbeDbResult, String> {
+pub(crate) fn probe_db(path: &Path, expected_role: Option<&str>) -> Result<ProbeDbResult, String> {
     let path_str = path
         .to_str()
         .ok_or_else(|| format!("non-utf8 path: {}", path.display()))?;
-    let store = MemoryStore::open_read_only(path_str).map_err(|e| format!("open: {e}"))?;
+    let store = match expected_role {
+        Some(role) => MemoryStore::open_read_only_with_label(path_str, role),
+        None => MemoryStore::open_read_only(path_str),
+    }
+    .map_err(|e| format!("open: {e}"))?;
     let conn = store.connection();
     let hist = job_status_histogram(conn, 30).map_err(|e| format!("histogram: {e}"))?;
     let stuck = count_stuck_in_progress(conn).unwrap_or(0);

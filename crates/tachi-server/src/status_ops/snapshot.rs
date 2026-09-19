@@ -161,7 +161,22 @@ fn collect_snapshot_inner(
             ));
             continue;
         }
-        match probe_db(&path) {
+        // The health probe must use the same project-role claim as normal
+        // named-project reads. An unlabelled read accepts an old stamp and
+        // can report a DB as healthy while every real project call refuses it.
+        let expected_role = if entry.role == DbRole::Global {
+            Some("global".to_string())
+        } else if crate::path_utils::manifest_db_is_project_protected(entry) {
+            crate::path_utils::plan_c_project_root_from_local_db(&path)
+                .and_then(|root| crate::path_utils::plan_c_dir_name_from_root(&root))
+                .or_else(|| {
+                    crate::path_utils::canonical_project_scope_hint(&entry.scope_hint)
+                        .map(str::to_string)
+                })
+        } else {
+            None
+        };
+        match probe_db(&path, expected_role.as_deref()) {
             Ok((
                 hist,
                 stuck,

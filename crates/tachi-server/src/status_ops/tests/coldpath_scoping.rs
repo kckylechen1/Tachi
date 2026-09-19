@@ -103,6 +103,70 @@ fn default_scope_with_no_project_db_probes_only_global() {
     assert_eq!(snapshot.dbs[0].path, global_db.to_str().unwrap());
 }
 
+fn assert_status_reports_project_role_conflict(manifest_role: DbRole) {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let app_home = dir.path().join("home");
+    let global_db = app_home.join("global/memory.db");
+    std::fs::create_dir_all(global_db.parent().unwrap()).expect("global dir");
+    drop(MemoryStore::open_with_label(global_db.to_str().unwrap(), "global").expect("global DB"));
+
+    let repo = dir.path().join("Quant_Analyzer_2026");
+    let project_db = repo.join(".tachi/tachi-memory.db");
+    std::fs::create_dir_all(project_db.parent().unwrap()).expect("project dir");
+    let old_role = "Quant_Analyzer_2026-a5c4bf5d";
+    drop(
+        MemoryStore::open_with_label(project_db.to_str().unwrap(), old_role)
+            .expect("old project DB"),
+    );
+    let current_role =
+        crate::path_utils::plan_c_dir_name_from_root(&repo).expect("current project identity");
+    assert_ne!(current_role, old_role, "fixture must have role drift");
+
+    let mut project_entry = entry(&project_db, manifest_role);
+    project_entry.scope_hint = format!("project:{current_role}");
+    Manifest {
+        schema_version: crate::manifest::MANIFEST_SCHEMA_VERSION,
+        generated_at: chrono::Utc::now().to_rfc3339(),
+        comment: String::new(),
+        dbs: vec![entry(&global_db, DbRole::Global), project_entry],
+    }
+    .save(&app_home.join("manifest.json"))
+    .expect("manifest");
+
+    let snapshot = collect_snapshot_scoped(&app_home, &global_db, Some(&project_db), false);
+    let project = snapshot
+        .dbs
+        .iter()
+        .find(|db| db.path == project_db.to_string_lossy())
+        .expect("project status");
+    let error = project
+        .error
+        .as_deref()
+        .expect("role conflict must be visible");
+    assert!(error.contains("store role conflict"), "{error}");
+    assert!(error.contains(&current_role), "{error}");
+    assert!(error.contains(old_role), "{error}");
+    let global = snapshot
+        .dbs
+        .iter()
+        .find(|db| db.path == global_db.to_string_lossy())
+        .expect("global status");
+    assert!(
+        global.error.is_none(),
+        "global control should remain readable"
+    );
+}
+
+#[test]
+fn status_reports_project_role_conflict_instead_of_healthy_probe() {
+    assert_status_reports_project_role_conflict(DbRole::Project);
+}
+
+#[test]
+fn status_reports_project_role_conflict_for_legacy_unknown_role() {
+    assert_status_reports_project_role_conflict(DbRole::Unknown);
+}
+
 #[cfg(unix)]
 fn file_identity(path: &std::path::Path) -> (u64, u64) {
     use std::os::unix::fs::MetadataExt;
