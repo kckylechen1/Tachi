@@ -655,7 +655,17 @@ pub fn handoff_work_claim(
             params![claim_id],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?)),
         ).optional()?;
-        let Some((Some(from_identity), state, version, session_client, issue_ref, flow_id, dispatch_id, branch)) = existing else {
+        let Some((
+            Some(from_identity),
+            state,
+            version,
+            session_client,
+            issue_ref,
+            flow_id,
+            dispatch_id,
+            branch,
+        )) = existing
+        else {
             return match existing {
                 Some(_) => Err(MemoryError::WorkClaimIncompatibleState(format!(
                     "claim {claim_id} has no proven identity"
@@ -738,9 +748,18 @@ pub fn handoff_work_claim(
              declared_file_scope=?7, expected_head=?8, lease_expires_at=?9, state='active', \
              orphaned_at=NULL, heartbeat_at=?10, transition_version=transition_version+1 \
              WHERE claim_id=?1 AND transition_version=?2 AND state IN ('active','orphaned')",
-            params![claim_id, expected_version, successor.agent_identity_id, successor.role,
-                successor.mode.as_str(), successor.worktree_path, successor.declared_file_scope,
-                successor.expected_head, successor.lease_expires_at, now],
+            params![
+                claim_id,
+                expected_version,
+                successor.agent_identity_id,
+                successor.role,
+                successor.mode.as_str(),
+                successor.worktree_path,
+                successor.declared_file_scope,
+                successor.expected_head,
+                successor.lease_expires_at,
+                now
+            ],
         )?;
         if changed != 1 {
             return Err(MemoryError::WorkClaimConflict(format!(
@@ -1502,11 +1521,7 @@ mod tests {
     fn release_by_claim_id_rejects_v21_work_claim_alias() {
         let mut conn = open_conn();
         identity(&conn, "agent-v21-claim-id");
-        insert_work_claim(
-            &conn,
-            &work_claim("claim-v21-direct", "agent-v21-claim-id"),
-        )
-        .unwrap();
+        insert_work_claim(&conn, &work_claim("claim-v21-direct", "agent-v21-claim-id")).unwrap();
 
         let err = release_claim(
             &mut conn,
@@ -2472,9 +2487,8 @@ mod tests {
             [],
         )
         .unwrap();
-        let recovered =
-            handoff_work_claim(&conn, "auth-handoff", "agent-intruder", 0, &successor)
-                .expect("an admitted successor may recover an orphaned claim");
+        let recovered = handoff_work_claim(&conn, "auth-handoff", "agent-intruder", 0, &successor)
+            .expect("an admitted successor may recover an orphaned claim");
         assert_eq!(recovered.from_agent_identity_id, "agent-holder");
         assert_eq!(recovered.to_agent_identity_id, "agent-intruder");
         assert_eq!(recovered.transition_version, 1);

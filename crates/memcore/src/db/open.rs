@@ -541,10 +541,7 @@ fn normalize_trigger_sql(sql: &str) -> String {
         .join(" ")
 }
 
-fn expected_verified_admission_trigger(
-    name: *const c_char,
-    table: *const c_char,
-) -> bool {
+fn expected_verified_admission_trigger(name: *const c_char, table: *const c_char) -> bool {
     if name.is_null() || table.is_null() {
         return false;
     }

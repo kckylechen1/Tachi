@@ -787,12 +787,11 @@ pub(crate) fn run_data_migrations_in_tx(
     report.delivery_spine_schema_objects_created =
         apply_versioned_migration(conn, "v36_delivery_spine", migrate_v36_delivery_spine)?
             .unwrap_or(0);
-    report.verified_admission_schema_objects_created = apply_versioned_migration(
-        conn,
-        "v37_verified_agent_admissions",
-        |conn| migrate_v37_verified_agent_admissions(conn, profile),
-    )?
-    .unwrap_or(0);
+    report.verified_admission_schema_objects_created =
+        apply_versioned_migration(conn, "v37_verified_agent_admissions", |conn| {
+            migrate_v37_verified_agent_admissions(conn, profile)
+        })?
+        .unwrap_or(0);
 
     Ok(report)
 }
@@ -1900,11 +1899,8 @@ mod tests {
     fn stamped_current_v37_missing_append_only_trigger_fails_closed_without_repair() {
         let (mut conn, tmp) = open_test_db();
         run_data_migrations(&mut conn, "global", tmp.path()).expect("current v37 fixture");
-        conn.execute(
-            "DROP TRIGGER identity_verification_receipts_no_update",
-            [],
-        )
-        .unwrap();
+        conn.execute("DROP TRIGGER identity_verification_receipts_no_update", [])
+            .unwrap();
 
         let error = validate_current_schema_integrity(&conn)
             .expect_err("current schema without a v37 append-only trigger must refuse");

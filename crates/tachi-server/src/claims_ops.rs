@@ -171,8 +171,7 @@ pub(crate) fn handle_task_heartbeat(
     let transition_version = params
         .transition_version
         .ok_or_else(|| "transition_version is required".to_string())?;
-    let lease_expires_at =
-        task_required(params.lease_expires_at.clone(), "lease_expires_at")?;
+    let lease_expires_at = task_required(params.lease_expires_at.clone(), "lease_expires_at")?;
     let receipt = crate::verified_admission::with_current_admission_write(server, |conn| {
         memcore::heartbeat_work_claim(
             conn,
@@ -1085,8 +1084,8 @@ mod tests {
         let server = make_server();
         admit_agent_connection(&server, Some("agent.remote".to_string()), false)
             .expect("remote self-report remains unavailable");
-        let parsed: crate::tool_params::TachiTaskParams = serde_json::from_value(
-            serde_json::json!({
+        let parsed: crate::tool_params::TachiTaskParams =
+            serde_json::from_value(serde_json::json!({
                 "action": "claim",
                 "issue_ref": "org/repo#1938",
                 "branch": "lane/1938-public-bypass",
@@ -1100,9 +1099,8 @@ mod tests {
                 "hostname": "trusted-looking-host",
                 "carrier": "trusted-looking-carrier",
                 "model": "trusted-looking-model"
-            }),
-        )
-        .expect("legacy params ignore unknown fields");
+            }))
+            .expect("legacy params ignore unknown fields");
 
         let error = handle_task_claim(&server, &parsed)
             .expect_err("public/model input must not upgrade admission state");
@@ -1117,7 +1115,10 @@ mod tests {
                         |row| row.get(0),
                     )
                     .map_err(|error| error.to_string())?;
-                assert_eq!(verified, 0, "public bypass attempt must write no verified row");
+                assert_eq!(
+                    verified, 0,
+                    "public bypass attempt must write no verified row"
+                );
                 Ok(())
             })
             .unwrap();

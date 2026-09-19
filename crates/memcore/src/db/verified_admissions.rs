@@ -708,7 +708,10 @@ mod tests {
             ),
         ] {
             let error = conn.execute(&sql, []).expect_err(label);
-            assert!(error.to_string().contains("append-only"), "{label}: {error}");
+            assert!(
+                error.to_string().contains("append-only"),
+                "{label}: {error}"
+            );
         }
         let preserved: (String, String) = conn
             .query_row(
@@ -718,7 +721,10 @@ mod tests {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .unwrap();
-        assert_eq!(preserved, ("verified".to_string(), "connection-v".to_string()));
+        assert_eq!(
+            preserved,
+            ("verified".to_string(), "connection-v".to_string())
+        );
     }
 
     #[test]
@@ -757,8 +763,18 @@ mod tests {
                          'agent_identity:remote_admission', ?7, 'attestation:device:mutant',
                          '2026-09-19T00:00:00Z', '2099-01-01T00:00:00Z', ?8, ?9, ?10,
                          'verified', '2026-09-19T00:00:00Z')",
-                params![receipt, admission, identity, connection, issuer, domain,
-                    "c".repeat(64), nonce, key, "d".repeat(64)],
+                params![
+                    receipt,
+                    admission,
+                    identity,
+                    connection,
+                    issuer,
+                    domain,
+                    "c".repeat(64),
+                    nonce,
+                    key,
+                    "d".repeat(64)
+                ],
             )
         };
         for (label, result) in [
@@ -816,7 +832,10 @@ mod tests {
             ),
         ] {
             let error = result.expect_err(label);
-            assert!(error.to_string().contains("append-only"), "{label}: {error}");
+            assert!(
+                error.to_string().contains("append-only"),
+                "{label}: {error}"
+            );
         }
 
         conn.execute(
@@ -841,9 +860,27 @@ mod tests {
             "revocation table must expose no hidden rowid replacement target"
         );
         for (label, revocation_id, admission, issuer, nonce) in [
-            ("revocation_id", "revocation-a", &admission_b, "issuer-b", "unique-b"),
-            ("admission_id", "revocation-admission", &admission_a, "issuer-x", "unique-x"),
-            ("issuer-nonce", "revocation-nonce", &admission_b, "issuer-a", "revocation-nonce-a"),
+            (
+                "revocation_id",
+                "revocation-a",
+                &admission_b,
+                "issuer-b",
+                "unique-b",
+            ),
+            (
+                "admission_id",
+                "revocation-admission",
+                &admission_a,
+                "issuer-x",
+                "unique-x",
+            ),
+            (
+                "issuer-nonce",
+                "revocation-nonce",
+                &admission_b,
+                "issuer-a",
+                "revocation-nonce-a",
+            ),
         ] {
             let error = conn
                 .execute(
@@ -855,7 +892,10 @@ mod tests {
                     params![revocation_id, admission, issuer, "f".repeat(64), nonce],
                 )
                 .expect_err(label);
-            assert!(error.to_string().contains("append-only"), "{label}: {error}");
+            assert!(
+                error.to_string().contains("append-only"),
+                "{label}: {error}"
+            );
         }
         assert!(!has_current_verified_admission(
             &conn,

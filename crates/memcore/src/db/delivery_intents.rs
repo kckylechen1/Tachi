@@ -825,8 +825,15 @@ pub fn reject_or_block(
                  revision = ?5, updated_at = ?6,
                  active_claim_key = NULL, claimed_by = NULL, claim_expires_at = NULL
              WHERE delivery_id = ?1 AND revision = ?7",
-            params![delivery_id, next_state.as_str(), blocker_class, next_retry_at,
-                next_revision, now, intent.revision],
+            params![
+                delivery_id,
+                next_state.as_str(),
+                blocker_class,
+                next_retry_at,
+                next_revision,
+                now,
+                intent.revision
+            ],
         )?;
         if updated == 0 {
             return Err(MemoryError::DeliveryRevisionConflict(format!(
@@ -1526,8 +1533,15 @@ fn transition_to_claimed(
                  attempt_count = attempt_count + 1, revision = ?5, updated_at = ?6,
                  next_retry_at = NULL, blocker_class = NULL
              WHERE delivery_id = ?1 AND revision = ?7",
-            params![intent.delivery_id, request.claim_key, request.caller.host_identity,
-                claim_expires_at, next_revision, now, intent.revision],
+            params![
+                intent.delivery_id,
+                request.claim_key,
+                request.caller.host_identity,
+                claim_expires_at,
+                next_revision,
+                now,
+                intent.revision
+            ],
         )?;
         if updated == 0 {
             return Err(MemoryError::DeliveryRevisionConflict(format!(
