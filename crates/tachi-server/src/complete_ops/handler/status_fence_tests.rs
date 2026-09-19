@@ -145,6 +145,7 @@ fn status_fence_child() {
                 exec_env_ref: None,
                 launch_spec_digest: None,
                 backend_name: "fixture".into(),
+                backend_metadata: None,
                 backend_metadata_digest: None,
             },
         )

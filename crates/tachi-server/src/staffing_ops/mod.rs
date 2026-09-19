@@ -340,7 +340,7 @@ pub(crate) mod tests {
         std::fs::write(
             &worker,
             format!(
-                "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  printf 'codex-cli 0.144.1\\n'\n  exit 0\nfi\ncount=0\nwhile [ ! -e \"$0.release\" ] && [ \"$count\" -lt 200 ]; do\n  /bin/sleep 0.05\n  count=$((count + 1))\ndone\n[ -e \"$0.release\" ] || exit 98\nprintf 'staff fake worker\\n'\nexit {exit_code}\n"
+                "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  printf 'codex-cli 0.144.1\\n'\n  exit 0\nfi\nif [ \"$1\" = \"login\" ] && [ \"$2\" = \"status\" ]; then\n  printf 'Logged in using hermetic fixture\\n'\n  exit 0\nfi\nprintf '%s\\n' \"$$\" > \"$0.pid\"\ncount=0\nwhile [ ! -e \"$0.release\" ] && [ \"$count\" -lt 200 ]; do\n  /bin/sleep 0.05\n  count=$((count + 1))\ndone\n[ -e \"$0.release\" ] || exit 98\nprintf 'staff fake worker\\n'\nexit {exit_code}\n"
             ),
         )
         .expect("write fake codex worker");
@@ -1037,6 +1037,34 @@ pub(crate) mod tests {
             status["result_written"], true,
             "terminal outcome retains result receipt"
         );
+        let managed_identity = status["managed_run_identity"]
+            .as_object()
+            .expect("Codex Staff canary uses the canonical managed receipt spine");
+        assert_eq!(managed_identity["backend_kind"], "managed_subprocess");
+        assert_eq!(managed_identity["backend_name"], "codex");
+        assert_eq!(managed_identity["adapter"], "codex_cli");
+        assert_eq!(managed_identity["adapter_version"], "0.144.1");
+        assert_eq!(managed_identity["host_os"], std::env::consts::OS);
+        assert_eq!(managed_identity["host_arch"], std::env::consts::ARCH);
+        assert_eq!(
+            managed_identity["candidate_sha"],
+            crate::build_info::GIT_SHA
+        );
+        assert_eq!(
+            managed_identity["verification_evidence"],
+            serde_json::json!([
+                "executable_available",
+                "account_available",
+                "server_minted_launch_spec"
+            ])
+        );
+        let serialized_identity = serde_json::to_string(managed_identity).expect("identity JSON");
+        for secret_shaped_key in ["credential", "token", "account_id", "email"] {
+            assert!(
+                !serialized_identity.contains(secret_shaped_key),
+                "managed canary receipt must remain secret-negative: {serialized_identity}"
+            );
+        }
         assert_eq!(
             status["run_dir"],
             run_dir.to_string_lossy().as_ref(),
@@ -1099,6 +1127,104 @@ pub(crate) mod tests {
             status["route_decision_id"].as_str(),
             Some(decision.route_decision_id.as_str()),
             "the evidence stamp must retain the fast child's terminal receipt"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[allow(clippy::await_holding_lock)] // serializes process-global fake-worker environment through terminal cleanup
+    async fn managed_codex_cancel_confirms_owned_process_termination() {
+        let _environment = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let temp_home = tempfile::tempdir().expect("temp tachi home");
+        let temp_runs = tempfile::tempdir().expect("temp canonical run root");
+        let temp_bin = tempfile::tempdir().expect("temp fake worker bin");
+        write_fake_worker(temp_bin.path(), 0);
+        let joined_path = std::env::join_paths(
+            std::iter::once(temp_bin.path().to_path_buf())
+                .chain(std::env::split_paths(std::ffi::OsStr::new(
+                    "/usr/bin:/bin:/usr/sbin:/sbin",
+                ))),
+        )
+        .expect("join fake-worker PATH");
+        let _home = crate::test_support::EnvRestore::set_path("TACHI_HOME", temp_home.path());
+        let _runs = crate::test_support::EnvRestore::set_path("TACHI_RUN_ROOT", temp_runs.path());
+        let _path = crate::test_support::EnvRestore::set_os("PATH", &joined_path);
+        let _git_environment = isolate_staff_repository_environment();
+        let _registry_home = crate::test_support::EnvRestore::set_path("HOME", temp_home.path());
+        let repository = StaffRepositoryFixture::new(temp_home.path());
+        let _cwd = CurrentDirGuard::set(&repository.repo);
+        let temp_worktrees = tempfile::tempdir().expect("isolated Staff worktrees");
+        let _worktrees = crate::test_support::EnvRestore::set_path(
+            "TACHI_WORKTREES_ROOT",
+            temp_worktrees.path(),
+        );
+        let server = test_server();
+
+        let raw = staff_start(&server, staff_request("tachi"))
+            .await
+            .expect("managed Codex Staff start is accepted");
+        let _cleanup_guard = StaffCleanupGuard::arm(&raw);
+        let accepted: Value = serde_json::from_str(&raw).expect("accepted response JSON");
+        let dispatch_id = accepted["dispatch_id"].as_str().expect("dispatch id");
+        let run_dir = dispatch_runs_root().join(dispatch_id);
+        let pid_path = temp_bin.path().join("codex.pid");
+        for _ in 0..200 {
+            if pid_path.is_file() && server.managed_run_controls.contains(dispatch_id) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        let child_pid: libc::pid_t = std::fs::read_to_string(&pid_path)
+            .expect("managed Codex worker wrote its PID")
+            .trim()
+            .parse()
+            .expect("numeric managed Codex PID");
+        // SAFETY: signal 0 is a non-mutating existence probe for this fixture's
+        // freshly spawned child.
+        assert_eq!(unsafe { libc::kill(child_pid, 0) }, 0);
+
+        let status: Value = serde_json::from_str(
+            &staff_status(
+                &server,
+                StaffStatusRequest {
+                    dispatch_id: dispatch_id.to_string(),
+                },
+            )
+            .await
+            .expect("managed Codex status"),
+        )
+        .expect("managed Codex status JSON");
+        let revision = status["status_revision"]
+            .as_u64()
+            .expect("managed status revision");
+        let cancellation: Value = serde_json::from_str(
+            &staff_cancel(
+                &server,
+                StaffCancelRequest {
+                    dispatch_id: dispatch_id.to_string(),
+                    expected_status_revision: revision,
+                },
+            )
+            .await
+            .expect("managed Codex cancellation response"),
+        )
+        .expect("managed Codex cancellation JSON");
+        assert_eq!(cancellation["receipt"], "cancellation_confirmed");
+        assert_eq!(
+            cancellation["termination_proof"],
+            "unix_process_group_absent"
+        );
+        let (terminal, _) = wait_for_staff_terminal(&run_dir).await;
+        assert_eq!(terminal_staff_state(&terminal), "TASK_STATE_CANCELED");
+        assert_eq!(terminal["managed_run_identity"]["backend_name"], "codex");
+        // SAFETY: the PID is the fixture child observed above; ESRCH proves the
+        // authoritative process-group termination happened before the receipt.
+        assert_eq!(unsafe { libc::kill(child_pid, 0) }, -1);
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH)
         );
     }
 
@@ -2514,6 +2640,17 @@ pub(crate) mod tests {
             "the accepting controller epoch is recorded"
         );
         assert_eq!(identity["lifecycle_mode"], "TachiManagedBatch");
+        assert_eq!(identity["backend_kind"], "managed_subprocess");
+        assert_eq!(identity["backend_name"], "custom");
+        assert_eq!(identity["adapter"], "custom");
+        assert_eq!(identity["adapter_version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(identity["host_os"], std::env::consts::OS);
+        assert_eq!(identity["host_arch"], std::env::consts::ARCH);
+        assert_eq!(identity["candidate_sha"], crate::build_info::GIT_SHA);
+        assert_eq!(
+            identity["verification_evidence"],
+            serde_json::json!(["server_minted_launch_spec"])
+        );
         assert_eq!(identity["managed_run_id"], dispatch_id);
         assert_eq!(identity["work_claim_ref"], Value::Null);
         let identity_serialized =
@@ -2779,10 +2916,14 @@ pub(crate) mod tests {
             // ── hostile / out-of-boundary fields: must fail loudly ──────────
             "cwd": "/evil/absolute/path",
             "command": ["rm", "-rf", "/"],
+            "env": {"PATH": "/evil/bin"},
             "transport": "acpx",
             "harness_transport": "acpx",
+            "credential": "superuser",
             "credentials": ["superuser"],
             "credential_profiles": ["superuser"],
+            "account": "attacker-account",
+            "provider": "attacker-provider",
             "sandbox": "danger-full-access",
             "allowed_tools": ["Bash(rm*)"],
             "allowed_mcp_servers": ["evil-mcp"],

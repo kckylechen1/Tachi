@@ -167,9 +167,9 @@ type ManagedControlRegistration = (
 
 fn managed_custom_control_required(
     origin: ManagedControlOrigin,
-    managed_custom_eligible: bool,
+    managed_backend_eligible: bool,
 ) -> bool {
-    managed_custom_eligible && origin == ManagedControlOrigin::StaffFacade
+    managed_backend_eligible && origin == ManagedControlOrigin::StaffFacade
 }
 
 /// The only dispatch production doorway that may create managed cancellation
@@ -179,9 +179,9 @@ fn register_managed_custom_control(
     server: &MemoryServer,
     dispatch_id: &str,
     origin: ManagedControlOrigin,
-    managed_custom_eligible: bool,
+    managed_backend_eligible: bool,
 ) -> Result<Option<ManagedControlRegistration>, String> {
-    if !managed_custom_control_required(origin, managed_custom_eligible) {
+    if !managed_custom_control_required(origin, managed_backend_eligible) {
         return Ok(None);
     }
     server.managed_run_controls.register(dispatch_id).map(Some)
@@ -455,10 +455,11 @@ fn carrier_execution_grant(
     carrier_grant
 }
 
-/// Mints the adapter-only custom subprocess contract after the server has
-/// admitted the resolved assignment and execution grant. Bootstrap mechanics
-/// may reach this owner, but the backend receives only the resulting spec.
-fn mint_custom_launch_spec(
+/// Mints the adapter-only managed subprocess contract after the server has
+/// admitted the resolved assignment and execution grant. The existing custom
+/// fake and the one admitted real Codex canary share this boundary; no other
+/// provider is widened into the managed lifecycle here.
+fn mint_managed_launch_spec(
     assignment: &tachi_params::ResolvedStaffAssignment,
     grant: &tachi_params::ExecutionGrant,
     command: &[String],
@@ -466,21 +467,25 @@ fn mint_custom_launch_spec(
     harness_transport: &str,
     harness_server_url: &Option<String>,
 ) -> Result<tachi_params::LaunchSpec, String> {
-    let launch = tachi_dispatch::build_custom_launch(
-        &tachi_dispatch::DispatchLaunchParams {
-            cwd: grant
-                .allowed_cwd
-                .as_ref()
-                .map(|cwd| cwd.to_string_lossy().into_owned()),
-            model: assignment.selected_model.clone(),
-            permission_profile: grant.permission_profile.clone(),
-            allowed_tools: grant.allowed_tools.clone(),
-            max_turns: grant.max_turns,
-            sandbox: grant.sandbox.clone(),
-            command: command.to_vec(),
-        },
-        prompt,
-    )?;
+    let params = tachi_dispatch::DispatchLaunchParams {
+        cwd: grant
+            .allowed_cwd
+            .as_ref()
+            .map(|cwd| cwd.to_string_lossy().into_owned()),
+        model: assignment.selected_model.clone(),
+        permission_profile: grant.permission_profile.clone(),
+        allowed_tools: grant.allowed_tools.clone(),
+        max_turns: grant.max_turns,
+        sandbox: grant.sandbox.clone(),
+        command: command.to_vec(),
+    };
+    let launch = match assignment.selected_backend.as_str() {
+        "custom" => tachi_dispatch::build_custom_launch(&params, prompt),
+        "codex" => tachi_dispatch::build_codex_launch(&params, prompt, None),
+        backend => Err(format!(
+            "managed_backend_not_admitted: backend '{backend}' has no managed LaunchSpec adapter"
+        )),
+    }?;
     let mut spec = launch.into_launch_spec(
         assignment.selected_backend.clone(),
         prompt,
@@ -492,17 +497,108 @@ fn mint_custom_launch_spec(
     Ok(spec)
 }
 
-fn validate_custom_launch_spec_timeout(
+fn validate_managed_launch_spec_timeout(
     spec: &tachi_params::LaunchSpec,
     canonical_timeout_secs: u64,
 ) -> Result<(), String> {
     if spec.timeout_secs != canonical_timeout_secs {
         return Err(
-            "server-minted custom LaunchSpec timeout diverged from the canonical execution grant"
+            "server-minted managed LaunchSpec timeout diverged from the canonical execution grant"
                 .to_string(),
         );
     }
     Ok(())
+}
+
+/// Secret-negative prerequisite check and evidence for the single real
+/// managed adapter admitted by #1937. Output is never persisted: only the
+/// exit status is observed, so account identity and credentials cannot leak
+/// into the canonical receipt.
+async fn managed_backend_metadata(
+    origin: ManagedControlOrigin,
+    assignment: &tachi_params::ResolvedStaffAssignment,
+) -> Result<Option<Value>, String> {
+    if origin != ManagedControlOrigin::StaffFacade {
+        return Ok(None);
+    }
+
+    let (adapter, adapter_version, verification_evidence) =
+        match assignment.selected_backend.as_str() {
+            "custom" => (
+                "custom",
+                env!("CARGO_PKG_VERSION").to_string(),
+                vec!["server_minted_launch_spec"],
+            ),
+            "codex" => {
+                const ACCOUNT_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+                if crate::build_info::GIT_SHA.len() != 40
+                    || !crate::build_info::GIT_SHA
+                        .bytes()
+                        .all(|byte| byte.is_ascii_hexdigit())
+                {
+                    return Err(
+                        "managed_backend_candidate_unavailable: exact candidate SHA is unavailable"
+                            .to_string(),
+                    );
+                }
+                let mut probe = tokio::process::Command::new("codex");
+                probe
+                    .args(["login", "status"])
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .kill_on_drop(true);
+                let mut child = probe.spawn().map_err(|_| {
+                    "managed_backend_executable_unavailable: codex executable is unavailable"
+                        .to_string()
+                })?;
+                let status = match tokio::time::timeout(ACCOUNT_PROBE_TIMEOUT, child.wait()).await {
+                    Ok(Ok(status)) => status,
+                    Ok(Err(_)) => {
+                        return Err(
+                            "managed_backend_account_unavailable: codex account probe failed"
+                                .to_string(),
+                        )
+                    }
+                    Err(_) => {
+                        let _ = child.kill().await;
+                        return Err(
+                            "managed_backend_account_unavailable: codex account probe timed out"
+                                .to_string(),
+                        );
+                    }
+                };
+                if !status.success() {
+                    return Err(
+                        "managed_backend_account_unavailable: codex account is unavailable"
+                            .to_string(),
+                    );
+                }
+                let version = tachi_dispatch::probe_backend_version("codex").ok_or_else(|| {
+                    "managed_backend_version_unavailable: codex version is unavailable".to_string()
+                })?;
+                (
+                    "codex_cli",
+                    version,
+                    vec![
+                        "executable_available",
+                        "account_available",
+                        "server_minted_launch_spec",
+                    ],
+                )
+            }
+            _ => return Ok(None),
+        };
+
+    Ok(Some(json!({
+        "contract_id": "managed_backend_receipt/v1",
+        "backend": assignment.selected_backend,
+        "adapter": adapter,
+        "adapter_version": adapter_version,
+        "host_os": std::env::consts::OS,
+        "host_arch": std::env::consts::ARCH,
+        "candidate_sha": crate::build_info::GIT_SHA,
+        "verification_evidence": verification_evidence,
+    })))
 }
 
 /// #971 review-fix (F3): output of the guarded post-BOARD-FIRST-init
@@ -518,7 +614,7 @@ enum PostInitDispatchOutcome {
 /// carried out of the guarded `async` block in one bundle.
 struct ReadyDispatch {
     execution: DispatchExecution,
-    managed_custom_eligible: bool,
+    managed_backend_eligible: bool,
     execution_backend_name: Option<&'static str>,
     execution_backend_metadata: Option<Value>,
     acpx_enabled: bool,
@@ -602,6 +698,12 @@ async fn launch_canonical_dispatch(
         mut mechanics,
         auto_staff_exec_env,
     } = start;
+
+    // Real managed adapters refuse before any run artifact or worker spawn if
+    // their executable/account prerequisites are unavailable. The custom fake
+    // receives the same closed receipt shape without a provider probe.
+    let managed_backend_metadata =
+        managed_backend_metadata(managed_control_origin, &resolved_assignment).await?;
 
     // 0a. Resolve the execution-environment binding through the fail-safe gate
     // (#894 S1) before ANY workspace/preflight/spawn work. env_id → cwd from the
@@ -1016,9 +1118,11 @@ async fn launch_canonical_dispatch(
         let plan_generated_at = plan_stage_outcome.plan_generated_at;
         let carrier_execution_grant =
             carrier_execution_grant(&execution_grant, managed_worktree_authority.is_some());
-        let custom_launch_spec = (resolved_assignment.selected_backend == "custom")
+        let managed_launch_spec = (resolved_assignment.selected_backend == "custom"
+            || (managed_control_origin == ManagedControlOrigin::StaffFacade
+                && resolved_assignment.selected_backend == "codex"))
             .then(|| {
-                mint_custom_launch_spec(
+                mint_managed_launch_spec(
                     &resolved_assignment,
                     &carrier_execution_grant,
                     &command,
@@ -1028,10 +1132,10 @@ async fn launch_canonical_dispatch(
                 )
             })
             .transpose()?;
-        if let Some(spec) = custom_launch_spec.as_ref() {
-            validate_custom_launch_spec_timeout(spec, timeout_secs_for_status)?;
+        if let Some(spec) = managed_launch_spec.as_ref() {
+            validate_managed_launch_spec_timeout(spec, timeout_secs_for_status)?;
         }
-        let managed_authority_refs = custom_launch_spec.as_ref().map(|spec| {
+        let managed_authority_refs = managed_launch_spec.as_ref().map(|spec| {
             crate::managed_run_epoch::ManagedAuthorityRefs {
                 execution_grant_ref: carrier_execution_grant.grant_id.clone(),
                 exec_env_ref: carrier_execution_grant.env_id.clone(),
@@ -1044,7 +1148,7 @@ async fn launch_canonical_dispatch(
         // 5. Build execution backend
         let PreparedDispatchBackend {
             mut execution,
-            managed_custom_eligible,
+            managed_backend_eligible,
             execution_backend_name,
             execution_backend_metadata,
             acpx_enabled,
@@ -1059,7 +1163,8 @@ async fn launch_canonical_dispatch(
             grant: &carrier_execution_grant,
             command: &command,
             prompt: &prompt,
-            custom_launch_spec: custom_launch_spec.as_ref(),
+            managed_launch_spec: managed_launch_spec.as_ref(),
+            managed_backend_metadata: managed_backend_metadata.as_ref(),
             prompt_md_path: &prompt_md_path,
             mcp_config_path: mcp_config_path.as_ref(),
             v2,
@@ -1134,7 +1239,7 @@ async fn launch_canonical_dispatch(
 
         Ok(PostInitDispatchOutcome::Ready(Box::new(ReadyDispatch {
             execution,
-            managed_custom_eligible,
+            managed_backend_eligible,
             execution_backend_name,
             execution_backend_metadata,
             acpx_enabled,
@@ -1150,7 +1255,7 @@ async fn launch_canonical_dispatch(
 
     let ReadyDispatch {
         execution,
-        managed_custom_eligible,
+        managed_backend_eligible,
         execution_backend_name,
         execution_backend_metadata,
         acpx_enabled,
@@ -1182,13 +1287,13 @@ async fn launch_canonical_dispatch(
 
     // Register managed-custom control before task scheduling.
     let managed_ephemeral_credential_cleanup =
-        managed_custom_control_required(managed_control_origin, managed_custom_eligible)
+        managed_custom_control_required(managed_control_origin, managed_backend_eligible)
             .then_some(ManagedEphemeralCredentialCleanupObligation::Required);
     let managed_registration = match register_managed_custom_control(
         server,
         &dispatch_id,
         managed_control_origin,
-        managed_custom_eligible,
+        managed_backend_eligible,
     ) {
         Ok(registration) => registration,
         Err(error) => {
@@ -1207,9 +1312,10 @@ async fn launch_canonical_dispatch(
         }
     };
     let (mut execution, managed_run_guard) = if let Some((receiver, guard)) = managed_registration {
-        // Durable identity refs for the run about to be launched. Refs and
-        // one-way digests only; the LaunchSpec/identity-receipt payloads
-        // themselves are never persisted into the receipt spine.
+        // Durable identity refs for the run about to be launched. Authority
+        // payloads remain refs/digests only; the only concrete backend data is
+        // the closed secret-negative provenance/prerequisite receipt minted
+        // above (never command, cwd, environment, credentials, or probe output).
         let identity_input = crate::managed_run_epoch::ManagedRunIdentityInput {
             controller_epoch_id: server.controller_epoch.clone(),
             assignment_ref: resolved_assignment.assignment_id.clone(),
@@ -1226,9 +1332,16 @@ async fn launch_canonical_dispatch(
             launch_spec_digest: managed_authority_refs
                 .as_ref()
                 .and_then(|refs| refs.launch_spec_digest.clone()),
-            backend_name: execution_backend_name
-                .unwrap_or("unknown_backend")
-                .to_string(),
+            backend_name: if execution_backend_metadata.is_some()
+                && matches!(resolved_assignment.selected_backend.as_str(), "custom" | "codex")
+            {
+                resolved_assignment.selected_backend.clone()
+            } else {
+                execution_backend_name
+                    .unwrap_or("unknown_backend")
+                    .to_string()
+            },
+            backend_metadata: execution_backend_metadata.clone(),
             backend_metadata_digest: execution_backend_metadata
                 .as_ref()
                 .and_then(|metadata| serde_json::to_vec(metadata).ok())

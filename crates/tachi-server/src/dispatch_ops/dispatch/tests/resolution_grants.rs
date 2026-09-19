@@ -218,7 +218,7 @@ fn managed_custom_registration_uses_prepared_execution_eligibility() {
     let backend = include_str!("../backend.rs");
     for concrete_branch_guard in [
         "matches!(&execution, DispatchExecution::Subprocess(_))",
-        "ctx.custom_launch_spec.is_some()",
+        "ctx.managed_launch_spec.is_some()",
         "!acpx_enabled",
         "!native_acp_enabled",
     ] {
@@ -227,6 +227,36 @@ fn managed_custom_registration_uses_prepared_execution_eligibility() {
             "prepared eligibility is missing {concrete_branch_guard}"
         );
     }
+}
+
+#[test]
+fn managed_codex_canary_reuses_one_launch_kernel_and_receipt_spine() {
+    let dispatch = include_str!("../../dispatch.rs");
+    let backend = include_str!("../backend.rs");
+    let execution = include_str!("../execution.rs");
+
+    assert_eq!(
+        dispatch.matches("spawn_background_dispatch(").count(),
+        1,
+        "custom and Codex adapters must converge before the one background launch kernel"
+    );
+    assert_eq!(
+        execution
+            .matches("write_status_json_for_terminal(")
+            .count(),
+        1,
+        "managed adapters must retain one canonical terminal receipt writer"
+    );
+    assert!(
+        backend.contains("\"codex\" if ctx.managed_launch_spec.is_some()")
+            && backend.contains("\"custom\" =>")
+            && backend.matches("build_command_from_launch_spec(").count() == 3,
+        "exactly custom plus the one Codex canary must consume the shared LaunchSpec adapter"
+    );
+    assert!(
+        !backend.contains("run_managed_codex") && !dispatch.contains("spawn_managed_codex"),
+        "the canary must not introduce a provider-specific launcher or lifecycle"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
