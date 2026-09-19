@@ -195,12 +195,7 @@ pub(crate) fn handle_tachi_delivery(
         TachiDeliveryAction::Dismiss => {
             let delivery_id = required(params.delivery_id.clone(), "delivery_id")?;
             let intent = crate::verified_admission::with_current_admission_write(server, |conn| {
-                dismiss_delivery(
-                    conn,
-                    &delivery_id,
-                    &caller,
-                    params.expected_revision,
-                )
+                dismiss_delivery(conn, &delivery_id, &caller, params.expected_revision)
             })?;
             Ok(json!({
                 "status": "completed",

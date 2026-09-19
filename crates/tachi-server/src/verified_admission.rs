@@ -185,10 +185,11 @@ fn validate_verified_evidence(
         evidence.evidence_ref.as_str(),
         evidence.nonce.as_str(),
     ];
-    if persisted_text.iter().any(|value| {
-        !valid_bound_field(value) || tachi_lesson_forge::contains_secret_like(value)
-    }) || memcore::catalog::endpoint::endpoint_credential_leak(evidence.evidence_ref.as_str())
-        .is_some()
+    if persisted_text
+        .iter()
+        .any(|value| !valid_bound_field(value) || tachi_lesson_forge::contains_secret_like(value))
+        || memcore::catalog::endpoint::endpoint_credential_leak(evidence.evidence_ref.as_str())
+            .is_some()
     {
         return Err("verified admission evidence contains invalid or secret-like material".into());
     }
@@ -204,7 +205,9 @@ fn validate_verified_evidence(
     if evidence.expires_at <= now {
         return Err("verified admission evidence is expired".to_string());
     }
-    let lifetime = evidence.expires_at.signed_duration_since(evidence.issued_at);
+    let lifetime = evidence
+        .expires_at
+        .signed_duration_since(evidence.issued_at);
     if lifetime <= Duration::zero() || lifetime > MAX_VERIFIED_EVIDENCE_LIFETIME {
         return Err("verified admission evidence lifetime exceeds the bounded window".to_string());
     }
@@ -494,10 +497,7 @@ pub(crate) struct VerifiedRevocationEvidence {
 }
 
 pub(crate) trait TrustedRevocationVerifier {
-    fn verify_revocation(
-        &self,
-        admission_id: &str,
-    ) -> Result<VerifiedRevocationEvidence, String>;
+    fn verify_revocation(&self, admission_id: &str) -> Result<VerifiedRevocationEvidence, String>;
 }
 
 pub(crate) fn revoke_verified_admission(
@@ -714,7 +714,10 @@ mod tests {
         assert!(matches!(first, VerifiedAdmissionWriteOutcome::Created(_)));
         let receipt = first.receipt();
         assert_eq!(receipt.connection_id, "placement/runner-alpha/connection-7");
-        assert_eq!(receipt.verification_method, memcore::VERIFIED_ADMISSION_METHOD);
+        assert_eq!(
+            receipt.verification_method,
+            memcore::VERIFIED_ADMISSION_METHOD
+        );
 
         let replay = admit_verified_agent_connection_at(
             &server,
@@ -790,11 +793,7 @@ mod tests {
             &verifier(evidence(Utc::now())),
         )
         .unwrap();
-        let admission_id = stable_receipt_ids(
-            "issuer.device-trust.alpha",
-            "production-wrappers",
-        )
-        .0;
+        let admission_id = stable_receipt_ids("issuer.device-trust.alpha", "production-wrappers").0;
         revoke_verified_admission(
             &server,
             &admission_id,
@@ -874,14 +873,11 @@ mod tests {
             &verifier(evidence(Utc::now())),
         )
         .unwrap();
-        let admission_id = stable_receipt_ids(
-            "issuer.device-trust.alpha",
-            "claim-revocation-race",
-        )
-        .0;
+        let admission_id =
+            stable_receipt_ids("issuer.device-trust.alpha", "claim-revocation-race").0;
         let locker = uncommitted_revocation(&server, &admission_id, "claim-race");
-        let params: crate::tool_params::TachiTaskParams = serde_json::from_value(
-            serde_json::json!({
+        let params: crate::tool_params::TachiTaskParams =
+            serde_json::from_value(serde_json::json!({
                 "action": "claim",
                 "branch": "lane/revocation-race",
                 "claim_role": "executor",
@@ -890,9 +886,8 @@ mod tests {
                 "claim_scope": ["src/lib.rs"],
                 "expected_head": "head",
                 "lease_expires_at": "2099-01-01T00:00:00Z"
-            }),
-        )
-        .unwrap();
+            }))
+            .unwrap();
         let error = std::thread::scope(|scope| {
             let (started_tx, started_rx) = std::sync::mpsc::channel();
             let server = &server;
@@ -955,22 +950,18 @@ mod tests {
                 .map_err(|error| error.to_string())
             })
             .unwrap();
-        let admission_id = stable_receipt_ids(
-            "issuer.device-trust.alpha",
-            "delivery-revocation-race",
-        )
-        .0;
+        let admission_id =
+            stable_receipt_ids("issuer.device-trust.alpha", "delivery-revocation-race").0;
         let locker = uncommitted_revocation(&server, &admission_id, "delivery-race");
-        let params: crate::tool_params::TachiDeliveryParams = serde_json::from_value(
-            serde_json::json!({
+        let params: crate::tool_params::TachiDeliveryParams =
+            serde_json::from_value(serde_json::json!({
                 "action": "claim_ready_delivery",
                 "agent_identity_id": "agent.remote.alpha",
                 "host_identity": "agent.remote.alpha",
                 "claim_key": "delivery-race-claim",
                 "lease_seconds": 300
-            }),
-        )
-        .unwrap();
+            }))
+            .unwrap();
         let error = std::thread::scope(|scope| {
             let (started_tx, started_rx) = std::sync::mpsc::channel();
             let server = &server;
@@ -1024,7 +1015,10 @@ mod tests {
             at,
         )
         .expect_err("same idempotency key with changed digest must conflict");
-        assert!(digest_error.contains("idempotency conflict"), "{digest_error}");
+        assert!(
+            digest_error.contains("idempotency conflict"),
+            "{digest_error}"
+        );
 
         let mut moved_request = request("same-key");
         moved_request.connection_id = "placement/runner-beta/connection-8".into();
@@ -1038,14 +1032,22 @@ mod tests {
             at,
         )
         .expect_err("fresh evidence cannot replay one key onto another connection");
-        assert!(connection_error.contains("idempotency conflict"), "{connection_error}");
+        assert!(
+            connection_error.contains("idempotency conflict"),
+            "{connection_error}"
+        );
         assert_eq!(verified_count(&server), 1);
     }
 
     #[test]
     fn wrong_binding_freshness_policy_and_overlong_evidence_write_nothing() {
         let at = now();
-        let cases: Vec<(&str, VerifiedAdmissionRequest, VerifiedAdmissionEvidence, &str)> = vec![
+        let cases: Vec<(
+            &str,
+            VerifiedAdmissionRequest,
+            VerifiedAdmissionEvidence,
+            &str,
+        )> = vec![
             (
                 "expired",
                 request("expired"),
@@ -1158,13 +1160,9 @@ mod tests {
         ];
         for (label, request, evidence, expected) in cases {
             let server = make_server();
-            let error = admit_verified_agent_connection_at(
-                &server,
-                &request,
-                &verifier(evidence),
-                at,
-            )
-            .expect_err(label);
+            let error =
+                admit_verified_agent_connection_at(&server, &request, &verifier(evidence), at)
+                    .expect_err(label);
             assert!(error.contains(expected), "{label}: {error}");
             assert_eq!(verified_count(&server), 0, "{label}");
         }
@@ -1224,8 +1222,8 @@ mod tests {
         .expect("evidence is fresh at mint time");
         require_current_verified_admission(&server)
             .expect_err("authoritative read clock must reject post-mint expiry");
-        let claim_params: crate::tool_params::TachiTaskParams = serde_json::from_value(
-            serde_json::json!({
+        let claim_params: crate::tool_params::TachiTaskParams =
+            serde_json::from_value(serde_json::json!({
                 "action": "claim",
                 "branch": "lane/expired",
                 "claim_role": "executor",
@@ -1234,9 +1232,8 @@ mod tests {
                 "claim_scope": ["src/lib.rs"],
                 "expected_head": "head",
                 "lease_expires_at": "2099-01-01T00:00:00Z"
-            }),
-        )
-        .unwrap();
+            }))
+            .unwrap();
         let claim_error = crate::claims_ops::handle_task_claim(&server, &claim_params)
             .expect_err("WorkClaim authority must not outlive verified evidence");
         assert!(claim_error.contains("expired, revoked"), "{claim_error}");
@@ -1322,7 +1319,10 @@ mod tests {
                     at,
                 )
             });
-            vec![first.join().unwrap().unwrap(), second.join().unwrap().unwrap()]
+            vec![
+                first.join().unwrap().unwrap(),
+                second.join().unwrap().unwrap(),
+            ]
         });
         assert_eq!(
             outcomes
