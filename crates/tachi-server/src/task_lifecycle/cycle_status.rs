@@ -45,13 +45,10 @@ pub(crate) async fn handle_task_cycle_status(
         .map(crate::verify_ops::read_verification_ledger)
         .transpose()?
         .flatten();
-    // #1454 F6: the readiness verdict is the authority-aware gate result, not
-    // the raw ledger `overall`. Best server-known head: the GitHub head the
-    // server wrote into status.json::github (safe_merge/link_pr observed it),
-    // else the receipt-store head; with neither, `unverified` (fail-closed
-    // display — never caller-passed).
+    // The readiness verdict is the claim-bound gate result, not the raw
+    // caller-asserted ledger `overall`.
     let verification_verdict =
-        verification_verdict(server, flow_id.as_deref(), &status, verification.as_ref())?;
+        verification_verdict(server, flow_id.as_deref(), verification.as_ref())?;
     let close_loop = run_dir
         .as_ref()
         .map(|dir| read_json_file(&dir.join("close_loop.json")))
@@ -575,18 +572,11 @@ fn drift_item(kind: &str, detail: &str, action: &str) -> Value {
     })
 }
 
-/// #1454 F6: authority-aware verification verdict for the cycle view.
-///
-/// Best server-known head for the flow: the GitHub head the server itself
-/// wrote into `status.json::github::head_sha` (safe_merge/link_pr observed
-/// it from GitHub), else the receipt-store head (the server observed it at
-/// run time). With neither, the verdict is `unverified` — fail-closed
-/// display, never the caller-asserted ledger `overall`. `None` means no
-/// ledger exists (callers keep their missing-verification coaching).
+/// Authority-aware verification verdict for the cycle view. The active
+/// WorkClaim owns the evaluated head. `None` means no ledger exists.
 fn verification_verdict(
     server: &MemoryServer,
     flow_id: Option<&str>,
-    status: &Value,
     ledger: Option<&Value>,
 ) -> Result<Option<String>, String> {
     let Some(flow_id) = flow_id else {
@@ -595,25 +585,16 @@ fn verification_verdict(
     if ledger.is_none() {
         return Ok(None);
     }
-    let home = server.tachi_home_dir();
-    let head = status
-        .get("github")
-        .and_then(|github| github.get("head_sha"))
-        .and_then(Value::as_str)
-        .filter(|sha| !sha.trim().is_empty())
-        .map(str::to_string)
-        .or_else(|| crate::verify_ops::best_receipt_head(&home, flow_id));
-    let Some(head) = head else {
-        return Ok(Some("unverified".to_string()));
-    };
-    match crate::verify_ops::evaluate_verification_gate(Some(flow_id), &head, &home)? {
-        Some(gate) => Ok(Some(
+    match crate::verify_ops::evaluate_verification_gate(server, Some(flow_id)) {
+        Ok(Some(gate)) => Ok(Some(
             gate.get("overall")
                 .and_then(Value::as_str)
                 .unwrap_or("unverified")
                 .to_string(),
         )),
-        None => Ok(Some("unverified".to_string())),
+        Ok(None) => Ok(Some("unverified".to_string())),
+        Err(err) if err.starts_with("verification_claim_") => Ok(Some("unverified".to_string())),
+        Err(err) => Err(err),
     }
 }
 

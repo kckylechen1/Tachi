@@ -48,9 +48,8 @@
 //!    [`super::ledger::record_server_run_item`] with `source:
 //!    server_run:<kind>` as display-only metadata; the gate reads the receipt
 //!    store, never the ledger `source` string (#1454 F1).
-//! 8. G3: the run RESPONSE's top-level `overall` is the gate overall
-//!    (evaluated with the just-observed head); the raw ledger value moves to
-//!    the `ledger_overall` detail field.
+//! 8. The run RESPONSE's top-level `overall` is the gate overall bound to the
+//!    active claim; the raw ledger value moves to `ledger_overall` detail.
 //!
 //! Per-flow serialization is a minimal in-process guard (a static
 //! `HashSet<String>` of in-flight flow ids); a second concurrent run for the
@@ -60,7 +59,6 @@ use super::receipt_store::write_run_receipt;
 use super::storage::now;
 use super::*;
 use crate::server_state::MemoryServer;
-use memcore::ClaimState;
 use std::collections::HashSet;
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
@@ -964,21 +962,13 @@ fn resolve_flow_worktree(
     server: &MemoryServer,
     flow_id: &str,
 ) -> Result<(PathBuf, String), String> {
-    let claims = server.with_global_store_read(|store| {
-        memcore::list_claims(store.connection(), Some(ClaimState::Active))
-            .map_err(|err| err.to_string())
+    let claim = super::gate::resolve_active_verification_claim(server, flow_id).map_err(|err| {
+        if err.starts_with("verification_claim_missing:") {
+            format!("verification run requires an active claim with a worktree for flow {flow_id}")
+        } else {
+            err
+        }
     })?;
-    let mut matching = claims
-        .iter()
-        .filter(|claim| claim.flow_id.as_deref() == Some(flow_id));
-    let claim = matching.next().ok_or_else(|| {
-        format!("verification run requires an active claim with a worktree for flow {flow_id}")
-    })?;
-    // Count canonical active matches before inspecting their usable fields.
-    // Heartbeat order is presence evidence, never authority to select a tree.
-    if matching.next().is_some() {
-        return Err(format!("verification_claim_ambiguous: flow {flow_id}"));
-    }
     let worktree = claim
         .worktree_path
         .as_deref()
@@ -988,12 +978,7 @@ fn resolve_flow_worktree(
             format!("verification run requires an active claim with a worktree for flow {flow_id}")
         })?;
     reject_server_root_claim(&worktree)?;
-    let expected_head = claim
-        .expected_head
-        .as_deref()
-        .filter(|head| !head.trim().is_empty())
-        .ok_or_else(|| format!("verification_claim_expected_head_missing: flow {flow_id}"))?;
-    Ok((worktree, expected_head.to_string()))
+    Ok((worktree, claim.expected_head))
 }
 
 // ─── Entry point ─────────────────────────────────────────────────────────────
@@ -1204,10 +1189,9 @@ async fn run_with_runner<R: CheckRunner>(
     raw["log_path"] = json!(log_path.display().to_string());
     raw["duration_ms"] = json!(outcome.duration_ms);
     raw["ran_at"] = json!(ran_at);
-    // #1454 G3: the run response's top-level `overall` is the GATE overall
-    // evaluated with the just-observed head; the raw ledger value moves to
-    // `ledger_overall` (caller-asserted display detail, never authority).
-    let gate = evaluate_verification_gate(Some(flow_id), &source_head, &tachi_home)?;
+    // The run response's top-level `overall` is the claim-bound gate verdict;
+    // the raw ledger value is caller-asserted display detail, never authority.
+    let gate = evaluate_verification_gate(server, Some(flow_id))?;
     raw["ledger_overall"] = raw["verification"]["overall"].clone();
     raw["overall"] = match &gate {
         Some(g) => g

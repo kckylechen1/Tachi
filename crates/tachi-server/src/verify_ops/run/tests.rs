@@ -445,11 +445,9 @@ async fn run_exit_zero_writes_server_run_item_and_gate_passes() {
         "log path must name the run: {}",
         raw["log_path"]
     );
-    // #1454 G3: the run response's top-level `overall` is the UNIFIED gate
-    // verdict evaluated with the just-observed head — after only an fmt
-    // receipt the gate is pending (missing canonical kinds), so `overall` is
-    // `pending` even though the single item passed; the raw ledger value
-    // moves to the `ledger_overall` detail.
+    // The run response's top-level `overall` is the claim-bound gate verdict.
+    // After only an fmt receipt it is pending on the missing canonical kinds,
+    // while the raw ledger value remains `ledger_overall` detail.
     assert_eq!(raw["overall"], "pending");
     assert_eq!(raw["ledger_overall"], "passed");
     assert_eq!(raw["gate"]["overall"], "pending");
@@ -512,7 +510,7 @@ async fn run_exit_zero_writes_server_run_item_and_gate_passes() {
     // via the store test helper (the integration seam the dispatch allows),
     // then re-evaluate.
     seed_other_canonical_kinds(&server, flow_id, runner.head_sha, "fmt");
-    let gate = crate::verify_ops::evaluate_verification_gate(Some(flow_id), runner.head_sha, &home)
+    let gate = crate::verify_ops::evaluate_verification_gate(&server, Some(flow_id))
         .unwrap()
         .unwrap();
     assert_eq!(gate["overall"], "passed");
@@ -718,7 +716,7 @@ async fn run_tree_mutation_mid_run_records_failed_tree_mutation_during_run() {
     assert_eq!(receipt["copy_clean_after"], false);
 
     // The gate classifies the mutated-run receipt as failed — never passed.
-    let gate = crate::verify_ops::evaluate_verification_gate(Some(flow_id), runner.head_sha, &home)
+    let gate = crate::verify_ops::evaluate_verification_gate(&server, Some(flow_id))
         .unwrap()
         .unwrap();
     assert_eq!(gate["overall"], "failed");
@@ -811,7 +809,7 @@ async fn run_canonical_set_completeness_single_kind_pending_naming_missing_kinds
     .expect("run completes");
 
     let home = server.tachi_home_dir();
-    let gate = crate::verify_ops::evaluate_verification_gate(Some(flow_id), runner.head_sha, &home)
+    let gate = crate::verify_ops::evaluate_verification_gate(&server, Some(flow_id))
         .unwrap()
         .unwrap();
     assert_eq!(gate["overall"], "pending");
@@ -1443,7 +1441,7 @@ async fn integration_fmt_run_uses_detached_copy_from_linked_worktree_and_cleans_
     // The other six kinds are seeded via the store test helper (the
     // dispatch-allowed integration seam); the fmt kind is the REAL run.
     seed_other_canonical_kinds(&server, flow_id, &expected_head, "fmt");
-    let gate = crate::verify_ops::evaluate_verification_gate(Some(flow_id), &expected_head, &home)
+    let gate = crate::verify_ops::evaluate_verification_gate(&server, Some(flow_id))
         .unwrap()
         .unwrap();
     assert_eq!(
