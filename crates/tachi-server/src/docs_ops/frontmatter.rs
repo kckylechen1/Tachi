@@ -260,8 +260,7 @@ mod tests {
     fn model_invocation_json_round_trips_as_reserved_unquoted_scalar() {
         let mut fm = empty_header();
         fm.model_invocation_v1 = Some(
-            r#"{"schema":"model-invocation-v1","lane":"extract","degraded":false}"#
-                .to_string(),
+            r#"{"schema":"model-invocation-v1","lane":"extract","degraded":false}"#.to_string(),
         );
         let serialized = serialize_representable_frontmatter(&fm).unwrap();
         assert_eq!(

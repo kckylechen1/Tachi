@@ -613,10 +613,16 @@ impl AuthorizedDocs {
                 );
             }
             file.write_all(content.as_bytes()).map_err(|error| {
-                format!("Failed to write temporary file '{}': {error}", temporary.display())
+                format!(
+                    "Failed to write temporary file '{}': {error}",
+                    temporary.display()
+                )
             })?;
             file.sync_all().map_err(|error| {
-                format!("Failed to sync temporary file '{}': {error}", temporary.display())
+                format!(
+                    "Failed to sync temporary file '{}': {error}",
+                    temporary.display()
+                )
             })
         })();
         drop(file);
@@ -1400,8 +1406,13 @@ pub(crate) async fn handle_wiki_organize(
                 classified.summary.clone(),
             )
         } else {
-            let fm = fm_opt.as_ref().expect("existing category requires frontmatter");
-            let cat = fm.category.as_ref().expect("existing category was validated");
+            let fm = fm_opt
+                .as_ref()
+                .expect("existing category requires frontmatter");
+            let cat = fm
+                .category
+                .as_ref()
+                .expect("existing category was validated");
             let cat_rel = cat.strip_prefix("docs/").unwrap_or(cat);
             (
                 format!("docs/{}", cat_rel),

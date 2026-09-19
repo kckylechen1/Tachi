@@ -52,7 +52,10 @@ impl MockDocsClassifier {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind mock docs classifier");
-        let port = listener.local_addr().expect("mock classifier address").port();
+        let port = listener
+            .local_addr()
+            .expect("mock classifier address")
+            .port();
         let task = tokio::spawn(async move {
             axum::serve(listener, app)
                 .await
@@ -121,7 +124,10 @@ fn receipt_from_document(content: &str) -> Option<Value> {
 }
 
 fn assert_model_document(content: &str, title: &str, summary: &str, category: &str) {
-    assert!(content.contains(&format!("title: \"{title}\"")), "{content}");
+    assert!(
+        content.contains(&format!("title: \"{title}\"")),
+        "{content}"
+    );
     assert!(
         content.contains(&format!("summary: \"{summary}\"")),
         "{content}"
@@ -167,7 +173,11 @@ async fn model_classified_moved_and_in_place_documents_persist_matching_receipts
     let workspace = DocsWorktree::new();
     let docs = workspace.docs_path();
     let moved_source = docs.join("scattered.md");
-    fs::write(&moved_source, "# Old heading\nDurable body sentinel moved.\n").unwrap();
+    fs::write(
+        &moved_source,
+        "# Old heading\nDurable body sentinel moved.\n",
+    )
+    .unwrap();
     let in_place = docs.join("engineering/devops/in-place.md");
     fs::create_dir_all(in_place.parent().unwrap()).unwrap();
     fs::write(
@@ -227,7 +237,11 @@ async fn invalid_truncated_and_unsafe_model_outputs_never_create_clean_provenanc
         ("invalid-json", "not-json".to_string(), "stop"),
         (
             "unsafe-category",
-            model_response("docs/../../outside", "Unsafe model title", "Unsafe model summary"),
+            model_response(
+                "docs/../../outside",
+                "Unsafe model title",
+                "Unsafe model summary",
+            ),
             "stop",
         ),
         (
@@ -257,7 +271,10 @@ async fn invalid_truncated_and_unsafe_model_outputs_never_create_clean_provenanc
             .join("engineering/debugging")
             .join(format!("debug-fix-{label}.md"));
         let content = fs::read_to_string(destination).unwrap();
-        assert!(receipt_from_document(&content).is_none(), "{label}: {content}");
+        assert!(
+            receipt_from_document(&content).is_none(),
+            "{label}: {content}"
+        );
         assert!(!content.contains("model title"), "{label}: {content}");
         assert_eq!(classifier.request_count(), 1, "{label}");
     }
@@ -319,9 +336,7 @@ async fn model_move_write_failure_preserves_source_and_archived_destination() {
     fs::write(&destination, "old destination bytes").unwrap();
     fs::File::open(&destination)
         .unwrap()
-        .set_times(
-            fs::FileTimes::new().set_modified(std::time::SystemTime::UNIX_EPOCH),
-        )
+        .set_times(fs::FileTimes::new().set_modified(std::time::SystemTime::UNIX_EPOCH))
         .unwrap();
     let _model_mode = crate::docs_ops::enable_model_classification_for_test();
     let _hook = crate::docs_ops::set_new_file_test_hook(
@@ -377,11 +392,13 @@ async fn model_in_place_rename_failure_preserves_original_complete_document() {
 
     assert!(error.contains("injected rename failure"), "{error}");
     assert_eq!(fs::read_to_string(&source).unwrap(), original);
-    assert!(!fs::read_dir(source.parent().unwrap()).unwrap().any(|entry| entry
+    assert!(!fs::read_dir(source.parent().unwrap())
         .unwrap()
-        .file_name()
-        .to_string_lossy()
-        .contains("tachi-organize")));
+        .any(|entry| entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .contains("tachi-organize")));
 }
 
 #[cfg(unix)]
@@ -408,9 +425,7 @@ async fn archive_rename_failure_preserves_both_source_and_destination() {
     fs::write(&destination, "old destination bytes").unwrap();
     fs::File::open(&destination)
         .unwrap()
-        .set_times(
-            fs::FileTimes::new().set_modified(std::time::SystemTime::UNIX_EPOCH),
-        )
+        .set_times(fs::FileTimes::new().set_modified(std::time::SystemTime::UNIX_EPOCH))
         .unwrap();
     let archive = docs.join("archive/archive-note.md");
     let _model_mode = crate::docs_ops::enable_model_classification_for_test();

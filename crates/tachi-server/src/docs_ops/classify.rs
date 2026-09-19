@@ -82,9 +82,7 @@ Respond ONLY with a JSON object. No markdown wrapping except the raw JSON conten
             if response.invocation.completion_status()
                 == tachi_llm::CompletionStatusV1::Truncated =>
         {
-            tracing::warn!(
-                "[wiki_organize] LLM classification was truncated; falling back"
-            );
+            tracing::warn!("[wiki_organize] LLM classification was truncated; falling back");
             fallback_metadata(source_path, content)
         }
         Ok(response) => match parse_model_classification(&response.value) {
@@ -143,9 +141,15 @@ fn normalize_model_category(category: &str) -> Result<String, String> {
                 && matches!(
                     leaf.as_str(),
                     "architecture" | "devops" | "code-review" | "debugging"
-                ) => true,
+                ) =>
+        {
+            true
+        }
         [family, name, ..]
-            if matches!(family.as_str(), "product" | "agent") && !name.is_empty() => true,
+            if matches!(family.as_str(), "product" | "agent") && !name.is_empty() =>
+        {
+            true
+        }
         _ => false,
     };
     if !allowed || relative.contains('\\') {
