@@ -437,14 +437,20 @@ async fn heuristic_routing_preserves_authored_metadata_without_model_provenance(
     let destination = docs.join("product/test_product/authored-prd.md");
     let content = fs::read_to_string(destination).unwrap();
     assert!(!source.exists());
-    assert!(content.contains("title: \"Authored product title\""), "{content}");
+    assert!(
+        content.contains("title: \"Authored product title\""),
+        "{content}"
+    );
     assert!(
         content.contains("summary: \"Authored product summary\""),
         "{content}"
     );
     assert!(receipt_from_document(&content).is_none(), "{content}");
     assert!(!content.contains("title: \"authored prd\""), "{content}");
-    assert!(!content.contains("summary: \"Heuristic body heading\""), "{content}");
+    assert!(
+        !content.contains("summary: \"Heuristic body heading\""),
+        "{content}"
+    );
 }
 
 #[tokio::test]
@@ -1395,13 +1401,9 @@ async fn receipted_organize_false_task_sync_rejects_revision_overflow_before_wri
     fs::write(&path, &original).unwrap();
 
     for dry_run in [true, false] {
-        let error = crate::docs_ops::handle_wiki_organize(
-            &server,
-            docs.to_str().unwrap(),
-            dry_run,
-        )
-        .await
-        .expect_err("revision overflow must fail before preview or publication");
+        let error = crate::docs_ops::handle_wiki_organize(&server, docs.to_str().unwrap(), dry_run)
+            .await
+            .expect_err("revision overflow must fail before preview or publication");
         assert!(error.contains("receipt revision overflow"), "{error}");
         assert_eq!(fs::read_to_string(&path).unwrap(), original);
     }
