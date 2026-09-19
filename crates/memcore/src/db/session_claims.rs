@@ -33,7 +33,7 @@
 //! GC ever runs (the `ON CONFLICT` target `upsert_or_heartbeat_claim` upserts
 //! on — see that function's doc comment).
 
-use rusqlite::{params, Connection, OptionalExtension, Transaction};
+use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::error::{MemoryError, WorkClaimTransitionReason};
 
