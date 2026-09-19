@@ -699,8 +699,9 @@ async fn older_model_source_is_archived_with_receipt_bound_to_archive_path() {
         .set_times(fs::FileTimes::new().set_modified(std::time::SystemTime::UNIX_EPOCH))
         .unwrap();
     let destination = docs.join("product/acme/older.md");
+    let destination_bytes = "---\ntitle: \"Newer destination\"\ncategory: \"product/acme\"\norganize: false\n---\nnewer destination body\n";
     fs::create_dir_all(destination.parent().unwrap()).unwrap();
-    fs::write(&destination, "newer destination body\n").unwrap();
+    fs::write(&destination, destination_bytes).unwrap();
     let _model_mode = crate::docs_ops::enable_model_classification_for_test();
 
     crate::docs_ops::handle_wiki_organize(&server, docs.to_str().unwrap(), false)
@@ -708,10 +709,7 @@ async fn older_model_source_is_archived_with_receipt_bound_to_archive_path() {
         .expect("archive older classified source");
 
     assert!(!source.exists());
-    assert_eq!(
-        fs::read_to_string(&destination).unwrap(),
-        "newer destination body\n"
-    );
+    assert_eq!(fs::read_to_string(&destination).unwrap(), destination_bytes);
     let archived = fs::read_to_string(docs.join("archive/older.md")).unwrap();
     assert!(archived.contains("older model source body"), "{archived}");
     assert_model_document(
