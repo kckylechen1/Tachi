@@ -1250,8 +1250,7 @@ impl Drop for DirectorySyncTraceGuard {
 }
 
 #[cfg(test)]
-pub(crate) fn capture_directory_sync_trace(
-) -> (DirectorySyncTraceGuard, Arc<Mutex<Vec<String>>>) {
+pub(crate) fn capture_directory_sync_trace() -> (DirectorySyncTraceGuard, Arc<Mutex<Vec<String>>>) {
     let owner = Arc::new(());
     let events = Arc::new(Mutex::new(Vec::new()));
     let mut slot = directory_sync_trace()
@@ -2201,6 +2200,10 @@ pub(crate) async fn handle_wiki_organize(
 
     let index_content = index_lines.join("\n");
     let index_path = canonical_root.join("_index.md");
+    // Document/archive publications above are already committed. The final
+    // index is derived and recoverable by rerunning organize, so only this
+    // final index write is warning-only; traversal, reads, and containment
+    // failures used to build it still propagate before this point.
     if dry_run {
         let existing = match authorized.optional_file(&index_path)? {
             Some((identity, _)) => authorized.read_text(&index_path, &identity)?,
@@ -2209,10 +2212,6 @@ pub(crate) async fn handle_wiki_organize(
         if existing != index_content {
             log_messages.push("[dry-run] Would rebuild docs/_index.md".to_string());
         }
-    // Document/archive publications above are already committed. The final
-    // index is derived and recoverable by rerunning organize, so only this
-    // final index write is warning-only; traversal, reads, and containment
-    // failures used to build it still propagate before this point.
     } else if let Some((identity, _)) = authorized.optional_file(&index_path)? {
         if let Err(error) = authorized.write_existing_file(&index_path, &identity, &index_content) {
             log_messages.push(format!("WARN: failed to write _index.md: {error}"));
