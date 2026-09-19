@@ -207,7 +207,18 @@ fn normalize_model_category(category: &str) -> Result<String, String> {
 }
 
 fn is_canonical_taxonomy_name(name: &str) -> bool {
-    !name.trim().is_empty() && name.trim() == name && name.to_lowercase() == name
+    let bytes = name.as_bytes();
+    !bytes.is_empty()
+        && (bytes[0].is_ascii_lowercase() || bytes[0].is_ascii_digit())
+        && (bytes[bytes.len() - 1].is_ascii_lowercase()
+            || bytes[bytes.len() - 1].is_ascii_digit())
+        && bytes
+            .iter()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-')
+        && !matches!(name, "con" | "prn" | "aux" | "nul")
+        && !(bytes.len() == 4
+            && (&bytes[..3] == b"com" || &bytes[..3] == b"lpt")
+            && matches!(bytes[3], b'1'..=b'9'))
 }
 
 fn normalize_model_scalar(
@@ -307,15 +318,22 @@ mod tests {
 
     #[test]
     fn model_metadata_validation_distinguishes_safe_and_unsafe_outputs() {
-        let safe = r#"{"category_path":" docs/product/hyperion/ ","title":"Hyperion Design","summary":"A bounded summary"}"#;
-        assert_eq!(
-            parse_model_classification(safe).unwrap(),
-            (
-                "docs/product/hyperion".to_string(),
-                "Hyperion Design".to_string(),
-                "A bounded summary".to_string(),
-            )
-        );
+        for (category, expected) in [
+            (" docs/product/hyperion/ ", "docs/product/hyperion"),
+            ("docs/agent/agent-47", "docs/agent/agent-47"),
+        ] {
+            let safe = format!(
+                r#"{{"category_path":"{category}","title":"Hyperion Design","summary":"A bounded summary"}}"#
+            );
+            assert_eq!(
+                parse_model_classification(&safe).unwrap(),
+                (
+                    expected.to_string(),
+                    "Hyperion Design".to_string(),
+                    "A bounded summary".to_string(),
+                )
+            );
+        }
 
         for unsafe_response in [
             r#"{"category_path":"docs/../outside","title":"Safe","summary":"Safe"}"#,
@@ -325,6 +343,12 @@ mod tests {
             r#"{"category_path":"docs/product/Hyperion","title":"Safe","summary":"Safe"}"#,
             r#"{"category_path":"docs/product/hyperion/decisions","title":"Safe","summary":"Safe"}"#,
             r#"{"category_path":"docs/agent/   ","title":"Safe","summary":"Safe"}"#,
+            r#"{"category_path":"docs/product/two words","title":"Safe","summary":"Safe"}"#,
+            r#"{"category_path":"docs/product/name_with_underscore","title":"Safe","summary":"Safe"}"#,
+            r#"{"category_path":"docs/product/-leading","title":"Safe","summary":"Safe"}"#,
+            r#"{"category_path":"docs/product/trailing-","title":"Safe","summary":"Safe"}"#,
+            r#"{"category_path":"docs/product/con","title":"Safe","summary":"Safe"}"#,
+            r#"{"category_path":"docs/agent/lpt9","title":"Safe","summary":"Safe"}"#,
         ] {
             assert!(
                 parse_model_classification(unsafe_response).is_err(),

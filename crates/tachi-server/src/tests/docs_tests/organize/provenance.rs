@@ -172,6 +172,50 @@ fn binding_matches(receipt: &Value, payload: &str, object_id: &str, revision: i6
         && receipt["revision"].as_i64() == Some(revision)
 }
 
+fn valid_bound_receipt(
+    category: &str,
+    title: &str,
+    summary: &str,
+    object_id: &str,
+    revision: i64,
+) -> Value {
+    json!({
+        "schema": "model-invocation-v1",
+        "lane": "extract",
+        "engine_kind": "provider_http",
+        "effective_provider": "mock-provider",
+        "effective_model": "mock-docs-classifier-v1",
+        "effective_version": null,
+        "fallback_chain": [],
+        "degraded": false,
+        "completion_status": "complete",
+        "prompt_tokens": 11,
+        "completion_tokens": 7,
+        "total_tokens": 18,
+        "latency_ms": 1,
+        "content_hash": independent_content_hash(&canonical_payload(category, title, summary)),
+        "memory_id": object_id,
+        "revision": revision,
+    })
+}
+
+fn document_with_receipt(
+    title: &str,
+    summary: &str,
+    category: &str,
+    organize: bool,
+    receipt: &Value,
+    body: &str,
+) -> String {
+    format!(
+        "---\ntitle: {}\nsummary: {}\ncategory: {}\norganize: {organize}\n{PROVENANCE_PREFIX}{}\n---\n{body}",
+        serde_json::to_string(title).unwrap(),
+        serde_json::to_string(summary).unwrap(),
+        serde_json::to_string(category).unwrap(),
+        receipt
+    )
+}
+
 fn assert_model_document(
     content: &str,
     title: &str,
@@ -303,9 +347,23 @@ async fn heuristic_reclassification_replaces_fields_and_removes_stale_model_prov
     let workspace = DocsWorktree::new();
     let docs = workspace.docs_path();
     let source = docs.join("debug-fix.md");
+    let stale_receipt = valid_bound_receipt(
+        "legacy",
+        "Stale model title",
+        "Stale model summary",
+        "docs/debug-fix.md",
+        4,
+    );
     fs::write(
         &source,
-        "---\ntitle: \"Stale model title\"\nsummary: \"Stale model summary\"\norganize: true\ntachi_model_invocation_v1: {\"schema\":\"model-invocation-v1\",\"effective_model\":\"stale-model\"}\n---\n# Heuristic body\n",
+        document_with_receipt(
+            "Stale model title",
+            "Stale model summary",
+            "legacy",
+            true,
+            &stale_receipt,
+            "# Heuristic body\n",
+        ),
     )
     .unwrap();
 
@@ -318,7 +376,7 @@ async fn heuristic_reclassification_replaces_fields_and_removes_stale_model_prov
     assert!(content.contains("title: \"debug fix\""), "{content}");
     assert!(content.contains("summary: \"Heuristic body\""), "{content}");
     assert!(receipt_from_document(&content).is_none(), "{content}");
-    assert!(!content.contains("stale-model"), "{content}");
+    assert!(!content.contains("mock-docs-classifier-v1"), "{content}");
 }
 
 #[tokio::test]
@@ -824,8 +882,8 @@ async fn mkdir_and_created_parent_sync_failures_never_delete_source() {
         ),
         (
             "parent-sync",
-            crate::docs_ops::OrganizeTestPoint::DirectoryParentSyncFailure,
-            "injected sync failure",
+            crate::docs_ops::OrganizeTestPoint::DirectorySyncFailure,
+            "injected directory sync failure",
         ),
     ] {
         let classifier = MockDocsClassifier::start(
@@ -845,9 +903,14 @@ async fn mkdir_and_created_parent_sync_failures_never_delete_source() {
         let original = format!("directory failure body {label}\n");
         fs::write(&source, &original).unwrap();
         let _model_mode = crate::docs_ops::enable_model_classification_for_test();
+        let hook_path = if label == "parent-sync" {
+            docs.join("product")
+        } else {
+            docs.join("product/newspace")
+        };
         crate::docs_ops::set_organize_test_hook(
             point,
-            docs.join("product/newspace"),
+            hook_path,
             Box::new(|| {}),
         );
 
@@ -862,6 +925,66 @@ async fn mkdir_and_created_parent_sync_failures_never_delete_source() {
             .join(format!("directory-{label}.md"))
             .exists());
     }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn retry_reproves_parent_sync_after_directory_creation_sync_failure() {
+    let classifier = MockDocsClassifier::start(
+        &model_response(
+            "docs/product/retry-space",
+            "Retry Directory Title",
+            "Retry directory summary",
+        ),
+        MockFinishReason::named("stop"),
+    )
+    .await;
+    let mut server = make_server();
+    install_classifier(&mut server, &classifier);
+    let workspace = DocsWorktree::new();
+    let docs = workspace.docs_path().canonicalize().unwrap();
+    let source = docs.join("retry-directory.md");
+    fs::write(&source, "retry body\n").unwrap();
+    let destination = docs.join("product/retry-space/retry-directory.md");
+    let _model_mode = crate::docs_ops::enable_model_classification_for_test();
+    crate::docs_ops::set_organize_test_hook(
+        crate::docs_ops::OrganizeTestPoint::DirectorySyncFailure,
+        docs.join("product"),
+        Box::new(|| {}),
+    );
+
+    let error = crate::docs_ops::handle_wiki_organize(&server, docs.to_str().unwrap(), false)
+        .await
+        .expect_err("first parent sync must fail after mkdir");
+    assert!(error.contains("injected directory sync failure"), "{error}");
+    assert!(docs.join("product/retry-space").is_dir());
+    assert!(source.exists());
+    assert!(!destination.exists());
+
+    let destination_sync_observed = Arc::new(Mutex::new(false));
+    let observed = Arc::clone(&destination_sync_observed);
+    crate::docs_ops::set_organize_test_hook(
+        crate::docs_ops::OrganizeTestPoint::DirectorySyncCompleted,
+        docs.join("product/retry-space"),
+        Box::new(move || {
+            *observed.lock().expect("record completed directory sync") = true;
+        }),
+    );
+    crate::docs_ops::handle_wiki_organize(&server, docs.to_str().unwrap(), false)
+        .await
+        .expect("retry must re-prove the existing directory chain");
+
+    assert!(*destination_sync_observed.lock().unwrap());
+    assert!(!source.exists());
+    assert_model_document(
+        &fs::read_to_string(destination).unwrap(),
+        "Retry Directory Title",
+        "Retry directory summary",
+        "product/retry-space",
+        "docs/product/retry-space/retry-directory.md",
+        1,
+    );
 }
 
 #[cfg(unix)]
@@ -895,7 +1018,7 @@ async fn post_rename_destination_sync_failure_stops_before_source_parent_sync() 
         .unwrap();
     let _model_mode = crate::docs_ops::enable_model_classification_for_test();
     crate::docs_ops::set_organize_test_hook(
-        crate::docs_ops::OrganizeTestPoint::RenameDestinationParentSyncFailure,
+        crate::docs_ops::OrganizeTestPoint::DirectorySyncFailure,
         docs.join("archive"),
         Box::new(|| {}),
     );
@@ -905,7 +1028,8 @@ async fn post_rename_destination_sync_failure_stops_before_source_parent_sync() 
         .expect_err("destination-parent sync fault must abort before source deletion durability");
 
     assert!(
-        error.contains("Failed to sync rename destination parent: injected sync failure"),
+        error.contains("Failed to sync rename destination parent")
+            && error.contains("injected directory sync failure"),
         "{error}"
     );
     assert_eq!(fs::read_to_string(&source).unwrap(), source_bytes);
@@ -964,4 +1088,286 @@ async fn drifted_prior_binding_fails_before_conflict_mutation() {
         drifted_destination
     );
     assert!(!docs.join("archive/b.md").exists());
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn accepted_category_drift_fails_closed_in_preview_and_apply() {
+    for dry_run in [true, false] {
+        let server = make_server();
+        let workspace = DocsWorktree::new();
+        let docs = workspace.docs_path().canonicalize().unwrap();
+        let path = docs.join("engineering/devops/drift.md");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let receipt = valid_bound_receipt(
+            "engineering/devops",
+            "Original title",
+            "Original summary",
+            "docs/engineering/devops/drift.md",
+            3,
+        );
+        let valid = document_with_receipt(
+            "Original title",
+            "Original summary",
+            "engineering/devops",
+            true,
+            &receipt,
+            "accepted-category body\n",
+        );
+        let drifted = valid.replacen("Original title", "Drifted title", 1);
+        fs::write(&path, &drifted).unwrap();
+
+        let error = crate::docs_ops::handle_wiki_organize(
+            &server,
+            docs.to_str().unwrap(),
+            dry_run,
+        )
+        .await
+        .expect_err("accepted-category metadata drift must fail closed");
+
+        assert!(error.contains("content binding does not match"), "{error}");
+        assert_eq!(fs::read_to_string(path).unwrap(), drifted);
+    }
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn accepted_category_in_place_normalization_rebinds_payload_and_revision() {
+    let server = make_server();
+    let workspace = DocsWorktree::new();
+    let docs = workspace.docs_path().canonicalize().unwrap();
+    let path = docs.join("engineering/devops/normalized.md");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let receipt = valid_bound_receipt(
+        "docs/engineering/devops",
+        "Normalized title",
+        "Normalized summary",
+        "docs/engineering/devops/normalized.md",
+        5,
+    );
+    fs::write(
+        &path,
+        document_with_receipt(
+            "Normalized title",
+            "Normalized summary",
+            "docs/engineering/devops",
+            true,
+            &receipt,
+            "in-place body\n",
+        ),
+    )
+    .unwrap();
+
+    crate::docs_ops::handle_wiki_organize(&server, docs.to_str().unwrap(), false)
+        .await
+        .expect("normalize accepted-category frontmatter");
+
+    assert_model_document(
+        &fs::read_to_string(path).unwrap(),
+        "Normalized title",
+        "Normalized summary",
+        "engineering/devops",
+        "docs/engineering/devops/normalized.md",
+        6,
+    );
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn accepted_category_move_rebinds_final_path_and_revision_without_model_call() {
+    let server = make_server();
+    let workspace = DocsWorktree::new();
+    let docs = workspace.docs_path().canonicalize().unwrap();
+    let source = docs.join("scattered-receipted.md");
+    let receipt = valid_bound_receipt(
+        "product/acme",
+        "Existing model title",
+        "Existing model summary",
+        "docs/scattered-receipted.md",
+        7,
+    );
+    fs::write(
+        &source,
+        document_with_receipt(
+            "Existing model title",
+            "Existing model summary",
+            "product/acme",
+            true,
+            &receipt,
+            "move body\n",
+        ),
+    )
+    .unwrap();
+
+    crate::docs_ops::handle_wiki_organize(&server, docs.to_str().unwrap(), false)
+        .await
+        .expect("move existing receipted document");
+
+    assert!(!source.exists());
+    assert_model_document(
+        &fs::read_to_string(docs.join("product/acme/scattered-receipted.md")).unwrap(),
+        "Existing model title",
+        "Existing model summary",
+        "product/acme",
+        "docs/product/acme/scattered-receipted.md",
+        8,
+    );
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn source_newer_conflict_rebinds_receipted_predecessor_to_archive() {
+    let server = make_server();
+    let workspace = DocsWorktree::new();
+    let docs = workspace.docs_path().canonicalize().unwrap();
+    let source = docs.join("conflicted.md");
+    fs::write(
+        &source,
+        "---\ntitle: \"Replacement title\"\nsummary: \"Replacement summary\"\ncategory: \"product/acme\"\norganize: true\n---\nreplacement body\n",
+    )
+    .unwrap();
+    let destination = docs.join("product/acme/conflicted.md");
+    fs::create_dir_all(destination.parent().unwrap()).unwrap();
+    let predecessor = valid_bound_receipt(
+        "product/acme",
+        "Predecessor title",
+        "Predecessor summary",
+        "docs/product/acme/conflicted.md",
+        9,
+    );
+    fs::write(
+        &destination,
+        document_with_receipt(
+            "Predecessor title",
+            "Predecessor summary",
+            "product/acme",
+            true,
+            &predecessor,
+            "predecessor body\n",
+        ),
+    )
+    .unwrap();
+    fs::File::open(&destination)
+        .unwrap()
+        .set_times(fs::FileTimes::new().set_modified(std::time::SystemTime::UNIX_EPOCH))
+        .unwrap();
+
+    crate::docs_ops::handle_wiki_organize(&server, docs.to_str().unwrap(), false)
+        .await
+        .expect("archive receipted predecessor");
+
+    let replacement = fs::read_to_string(&destination).unwrap();
+    assert!(replacement.contains("replacement body"), "{replacement}");
+    assert!(receipt_from_document(&replacement).is_none(), "{replacement}");
+    assert_model_document(
+        &fs::read_to_string(docs.join("archive/conflicted.md")).unwrap(),
+        "Predecessor title",
+        "Predecessor summary",
+        "product/acme",
+        "docs/archive/conflicted.md",
+        10,
+    );
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn malformed_or_incomplete_prior_receipts_fail_closed_before_rewrite() {
+    let base = valid_bound_receipt(
+        "engineering/devops",
+        "Strict title",
+        "Strict summary",
+        "docs/engineering/devops/strict.md",
+        2,
+    );
+    let mut cases = Vec::new();
+    let mut missing_lane = base.clone();
+    missing_lane.as_object_mut().unwrap().remove("lane");
+    cases.push(("missing-lane", missing_lane));
+    let mut wrong_lane = base.clone();
+    wrong_lane["lane"] = json!("distill");
+    cases.push(("wrong-lane", wrong_lane));
+    let mut unknown_field = base.clone();
+    unknown_field["forged"] = json!(true);
+    cases.push(("unknown-field", unknown_field));
+    let mut unknown_completion = base.clone();
+    unknown_completion["completion_status"] = json!("unknown");
+    cases.push(("unknown-completion", unknown_completion));
+    let mut absent_model = base.clone();
+    absent_model["effective_model"] = Value::Null;
+    cases.push(("absent-model", absent_model));
+    let mut invalid_tokens = base;
+    invalid_tokens["prompt_tokens"] = json!("eleven");
+    cases.push(("invalid-token-type", invalid_tokens));
+
+    for (label, receipt) in cases {
+        let server = make_server();
+        let workspace = DocsWorktree::new();
+        let docs = workspace.docs_path().canonicalize().unwrap();
+        let path = docs.join("engineering/devops/strict.md");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let original = document_with_receipt(
+            "Strict title",
+            "Strict summary",
+            "engineering/devops",
+            true,
+            &receipt,
+            "strict body\n",
+        );
+        fs::write(&path, &original).unwrap();
+
+        let error = crate::docs_ops::handle_wiki_organize(
+            &server,
+            docs.to_str().unwrap(),
+            false,
+        )
+        .await
+        .expect_err("malformed prior receipt must fail closed");
+
+        assert!(error.contains("existing model receipt"), "{label}: {error}");
+        assert_eq!(fs::read_to_string(path).unwrap(), original, "{label}");
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn index_write_failure_is_reported_as_recoverable_after_document_publication() {
+    let server = make_server();
+    let workspace = DocsWorktree::new();
+    let docs = workspace.docs_path().canonicalize().unwrap();
+    let source = docs.join("debug-index-failure.md");
+    fs::write(&source, "# Published document\n").unwrap();
+    let index = docs.join("_index.md");
+    let old_index = "old recoverable index bytes\n";
+    fs::write(&index, old_index).unwrap();
+    crate::docs_ops::set_organize_test_hook(
+        crate::docs_ops::OrganizeTestPoint::ExistingFileWriteFailure,
+        index.clone(),
+        Box::new(|| {}),
+    );
+
+    let result = crate::docs_ops::handle_wiki_organize(
+        &server,
+        docs.to_str().unwrap(),
+        false,
+    )
+    .await
+    .expect("derived index failure remains warning-only");
+    let result: Value = serde_json::from_str(&result).unwrap();
+
+    assert!(
+        result["log"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry
+                .as_str()
+                .is_some_and(|entry| entry.contains("WARN: failed to write _index.md"))),
+        "{result}"
+    );
+    assert_eq!(fs::read_to_string(index).unwrap(), old_index);
+    assert!(!source.exists());
+    assert!(docs
+        .join("engineering/debugging/debug-index-failure.md")
+        .exists());
 }
