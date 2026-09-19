@@ -40,9 +40,14 @@
 
 use crate::authority::{version_components, TransportKind, WorkspaceAuthority};
 use std::collections::HashMap;
+use std::io::Read;
 use std::path::PathBuf;
+use std::process::Stdio;
 use std::sync::{Mutex, OnceLock};
-use std::time::SystemTime;
+use std::time::{Duration, Instant, SystemTime};
+
+const VERSION_OUTPUT_MAX_BYTES: usize = 4 * 1024;
+const CANONICAL_VERSION_MAX_BYTES: usize = 64;
 
 /// The outcome of an executed kill-test. Only [`CertificationResult::Pass`]
 /// certifies anything; a recorded `Fail` is kept deliberately expressible so a
@@ -177,14 +182,23 @@ pub fn versions_match(actual: &str, certified: &str) -> bool {
     }
 }
 
-/// Pull the version token out of a `--version` line: `codex-cli 0.144.1` ->
-/// `0.144.1`. Requires at least two dotted numeric components, so a stray `1` or
-/// a binary name never passes for a version.
+/// Pull the version token out of a `--version` line and return only its bounded
+/// numeric representation: `codex-cli v0.144.1+host-label` -> `0.144.1`.
+/// Requires at least two dotted numeric components, so a stray `1`, a binary
+/// name, or an unbounded version-shaped payload never enters a receipt.
 pub fn parse_version_output(output: &str) -> Option<String> {
-    output
-        .split_whitespace()
-        .find(|token| version_components(token).is_some_and(|parts| parts.len() >= 2))
-        .map(|token| token.trim_start_matches('v').to_string())
+    output.split_whitespace().find_map(|token| {
+        let parts = version_components(token)?;
+        if parts.len() < 2 {
+            return None;
+        }
+        let canonical = parts
+            .iter()
+            .map(u64::to_string)
+            .collect::<Vec<_>>()
+            .join(".");
+        (canonical.len() <= CANONICAL_VERSION_MAX_BYTES).then_some(canonical)
+    })
 }
 
 // ─── The runtime version gate ────────────────────────────────────────────────
@@ -241,28 +255,59 @@ fn binary_identity(program: &std::path::Path) -> BinaryIdentity {
     )
 }
 
-/// `<program> --version`, on a leash: a vendor binary that hangs must not hang
-/// the dispatch, so the probe runs on a worker thread and a timeout resolves to
-/// `None` (fail closed), not to a wait.
+/// `<program> --version`, on a leash. The parent retains the child handle,
+/// bounds both output streams, and joins the readers after the child exits. A
+/// timeout kills and reaps the child before returning `None`; no detached probe
+/// process or reader thread survives the refusal.
 fn run_version_probe(program: &std::path::Path) -> Option<String> {
-    const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+    run_version_probe_with_timeout(program, Duration::from_secs(5))
+}
 
-    let (tx, rx) = std::sync::mpsc::channel();
-    let program = program.to_path_buf();
-    std::thread::spawn(move || {
-        let output = std::process::Command::new(&program)
-            .arg("--version")
-            .output();
-        let _ = tx.send(output);
-    });
+fn read_version_probe_stream(mut stream: impl Read) -> Option<Vec<u8>> {
+    let mut bytes = Vec::with_capacity(VERSION_OUTPUT_MAX_BYTES + 1);
+    stream
+        .by_ref()
+        .take((VERSION_OUTPUT_MAX_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    (bytes.len() <= VERSION_OUTPUT_MAX_BYTES).then_some(bytes)
+}
 
-    let output = rx.recv_timeout(PROBE_TIMEOUT).ok()?.ok()?;
-    if !output.status.success() {
+fn run_version_probe_with_timeout(program: &std::path::Path, timeout: Duration) -> Option<String> {
+    let mut child = std::process::Command::new(program)
+        .arg("--version")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .ok()?;
+    let stdout = child.stdout.take()?;
+    let stderr = child.stderr.take()?;
+    let stdout_reader = std::thread::spawn(move || read_version_probe_stream(stdout));
+    let stderr_reader = std::thread::spawn(move || read_version_probe_stream(stderr));
+
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Ok(None) | Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+        }
+    };
+    let stdout = stdout_reader.join().ok()??;
+    let stderr = stderr_reader.join().ok()??;
+
+    if !status?.success() {
         return None;
     }
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = String::from_utf8_lossy(&stdout);
     parse_version_output(&stdout)
-        .or_else(|| parse_version_output(&String::from_utf8_lossy(&output.stderr)))
+        .or_else(|| parse_version_output(&String::from_utf8_lossy(&stderr)))
 }
 
 /// First `program` on `PATH` — the same resolution `Command::new("codex")` does,
@@ -280,6 +325,48 @@ fn which(program: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    struct VersionProbeFixture {
+        root: PathBuf,
+        program: PathBuf,
+    }
+
+    #[cfg(unix)]
+    impl VersionProbeFixture {
+        fn new(script: &str) -> Self {
+            use std::os::unix::fs::PermissionsExt;
+            use std::sync::atomic::{AtomicU64, Ordering};
+
+            static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
+            let root = std::env::temp_dir().join(format!(
+                "tachi-version-probe-{}-{}",
+                std::process::id(),
+                NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::fs::create_dir(&root).expect("create version probe fixture");
+            let program = root.join("probe");
+            std::fs::write(&program, script).expect("write version probe fixture");
+            let mut permissions = std::fs::metadata(&program)
+                .expect("version probe fixture metadata")
+                .permissions();
+            permissions.set_mode(0o700);
+            std::fs::set_permissions(&program, permissions)
+                .expect("make version probe fixture executable");
+            Self { root, program }
+        }
+
+        fn pid_path(&self) -> PathBuf {
+            self.root.join("probe.pid")
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for VersionProbeFixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
 
     /// The checked-in receipt file, read at compile time.
     const RECEIPT_FILE: &str = include_str!("../certifications/codex-cli.toml");
@@ -464,9 +551,73 @@ mod tests {
             parse_version_output("codex-cli v0.144.1\n").as_deref(),
             Some("0.144.1")
         );
+        assert_eq!(
+            parse_version_output("codex-cli 0.144.1+fixture-account-secret").as_deref(),
+            Some("0.144.1"),
+            "only bounded numeric components may leave the version probe"
+        );
         // A bare integer is not a version; a name is not a version.
         assert_eq!(parse_version_output("codex 1"), None);
         assert_eq!(parse_version_output("no version here"), None);
+        let unbounded = format!("codex {}", vec!["1"; 40].join("."));
+        assert_eq!(
+            parse_version_output(&unbounded),
+            None,
+            "unbounded component lists are not receipt-safe versions"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn version_probe_canonicalizes_hostile_stdout_and_stderr() {
+        let fixture = VersionProbeFixture::new(
+            "#!/bin/sh\nprintf 'fixture-stdout-secret\\n'\nprintf 'codex-cli 0.144.1+fixture-stderr-secret\\n' >&2\n",
+        );
+        assert_eq!(
+            run_version_probe_with_timeout(&fixture.program, Duration::from_secs(1)).as_deref(),
+            Some("0.144.1"),
+            "raw stdout/stderr labels must not survive the probe boundary"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn version_probe_timeout_kills_and_reaps_the_owned_child() {
+        let fixture = VersionProbeFixture::new(
+            "#!/bin/sh\nprintf '%s\\n' \"$$\" > \"$0.pid\"\nwhile :; do :; done\n",
+        );
+        assert_eq!(
+            run_version_probe_with_timeout(&fixture.program, Duration::from_millis(500)),
+            None,
+            "a hanging version probe must fail closed"
+        );
+        let pid = std::fs::read_to_string(fixture.pid_path())
+            .expect("hanging fixture published its PID")
+            .trim()
+            .to_string();
+        let alive = std::process::Command::new("kill")
+            .args(["-0", &pid])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .expect("probe child liveness check");
+        assert!(
+            !alive.success(),
+            "timed-out version probe PID {pid} survived return"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn version_probe_refuses_output_beyond_the_capture_bound() {
+        let fixture = VersionProbeFixture::new(
+            "#!/bin/sh\ni=0\nwhile [ \"$i\" -lt 5000 ]; do printf x; i=$((i + 1)); done\nprintf ' 0.144.1\\n'\n",
+        );
+        assert_eq!(
+            run_version_probe_with_timeout(&fixture.program, Duration::from_secs(1)),
+            None,
+            "oversized output must fail closed rather than enter an unbounded capture"
+        );
     }
 
     /// `0.9.0` is NOT newer than `0.144.1`, even though it is as a string. This

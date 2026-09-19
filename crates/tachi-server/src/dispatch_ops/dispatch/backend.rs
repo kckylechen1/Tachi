@@ -585,5 +585,57 @@ mod tests {
             !unavailable.contains("fixture-account-secret"),
             "account probe output must never enter the refusal receipt"
         );
+
+        std::fs::write(
+            &codex_path,
+            "#!/bin/sh\nif [ \"$1\" = login ]; then printf '%s\\n' \"$$\" > \"$0.pid\"; while :; do :; done; fi\nprintf 'codex-cli 0.144.1\\n'\n",
+        )
+        .expect("write hanging account fixture");
+        let timed_out = super::super::probe_codex_account(std::time::Duration::from_millis(500))
+            .await
+            .expect_err("a hanging account probe must fail closed");
+        assert_eq!(
+            timed_out,
+            "managed_backend_account_unavailable: codex account probe timed out"
+        );
+        let account_pid: libc::pid_t = std::fs::read_to_string(
+            empty_bin.path().join("codex.pid"),
+        )
+        .expect("hanging account fixture published its PID")
+        .trim()
+        .parse()
+        .expect("numeric account probe PID");
+        // SAFETY: signal 0 is a non-mutating liveness probe for the child that
+        // the timeout path must already have killed and reaped.
+        assert_eq!(unsafe { libc::kill(account_pid, 0) }, -1);
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH)
+        );
+
+        std::fs::write(
+            &codex_path,
+            "#!/bin/sh\nif [ \"$1\" = login ]; then printf 'fixture-account-secret' >&2; exit 0; fi\nprintf 'codex-cli 0.144.1+fixture-version-stdout-secret\\n'\nprintf 'codex-cli 0.144.1+fixture-version-stderr-secret\\n' >&2\n",
+        )
+        .expect("write hostile successful version fixture");
+        let metadata = super::super::managed_backend_metadata(
+            super::super::ManagedControlOrigin::StaffFacade,
+            &codex,
+        )
+        .await
+        .expect("successful prerequisites")
+        .expect("managed Codex metadata");
+        assert_eq!(metadata["adapter_version"], "0.144.1");
+        let serialized = serde_json::to_string(&metadata).expect("metadata JSON");
+        for secret_marker in [
+            "fixture-account-secret",
+            "fixture-version-stdout-secret",
+            "fixture-version-stderr-secret",
+        ] {
+            assert!(
+                !serialized.contains(secret_marker),
+                "raw probe output must not enter managed metadata: {serialized}"
+            );
+        }
     }
 }
