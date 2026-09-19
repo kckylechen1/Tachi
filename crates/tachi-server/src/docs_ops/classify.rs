@@ -15,7 +15,7 @@ pub(super) struct ClassifiedMetadata {
 
 #[derive(Debug, Clone)]
 pub(super) enum ClassificationProvenance {
-    Model(tachi_llm::PersistedModelInvocationReceiptV1),
+    Model(Box<tachi_llm::PersistedModelInvocationReceiptV1>),
     Heuristic,
 }
 
@@ -92,7 +92,7 @@ Respond ONLY with a JSON object. No markdown wrapping except the raw JSON conten
                 category_path,
                 title,
                 summary,
-                provenance: ClassificationProvenance::Model(response.invocation),
+                provenance: ClassificationProvenance::Model(Box::new(response.invocation)),
             },
             Err(error) => {
                 tracing::warn!(
