@@ -241,9 +241,7 @@ fn managed_codex_canary_reuses_one_launch_kernel_and_receipt_spine() {
         "custom and Codex adapters must converge before the one background launch kernel"
     );
     assert_eq!(
-        execution
-            .matches("write_status_json_for_terminal(")
-            .count(),
+        execution.matches("write_status_json_for_terminal(").count(),
         1,
         "managed adapters must retain one canonical terminal receipt writer"
     );

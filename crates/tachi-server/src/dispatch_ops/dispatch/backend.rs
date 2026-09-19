@@ -172,14 +172,12 @@ pub(super) fn prepare_dispatch_backend(
                 ctx.prompt,
                 ctx.mcp_config_path,
             )?,
-            "codex" if ctx.managed_launch_spec.is_some() => {
-                build_command_from_launch_spec(
-                    ctx.managed_launch_spec.ok_or_else(|| {
-                        "codex managed backend requires a server-minted LaunchSpec".to_string()
-                    })?,
-                    "codex",
-                )?
-            }
+            "codex" if ctx.managed_launch_spec.is_some() => build_command_from_launch_spec(
+                ctx.managed_launch_spec.ok_or_else(|| {
+                    "codex managed backend requires a server-minted LaunchSpec".to_string()
+                })?,
+                "codex",
+            )?,
             "codex" => build_codex_command(
                 ctx.assignment,
                 ctx.grant,
@@ -195,14 +193,12 @@ pub(super) fn prepare_dispatch_backend(
                 ctx.mcp_config_path,
             )?,
             "kimi" => build_kimi_command(ctx.assignment, ctx.grant, ctx.command, ctx.prompt)?,
-            "custom" => {
-                build_command_from_launch_spec(
-                    ctx.managed_launch_spec.ok_or_else(|| {
-                        "custom backend requires a server-minted LaunchSpec".to_string()
-                    })?,
-                    "custom",
-                )?
-            }
+            "custom" => build_command_from_launch_spec(
+                ctx.managed_launch_spec.ok_or_else(|| {
+                    "custom backend requires a server-minted LaunchSpec".to_string()
+                })?,
+                "custom",
+            )?,
             "opencode" => {
                 build_opencode_command(ctx.assignment, ctx.grant, ctx.command, ctx.prompt)?
             }

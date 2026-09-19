@@ -1141,13 +1141,11 @@ pub(crate) mod tests {
         let temp_runs = tempfile::tempdir().expect("temp canonical run root");
         let temp_bin = tempfile::tempdir().expect("temp fake worker bin");
         write_fake_worker(temp_bin.path(), 0);
-        let joined_path = std::env::join_paths(
-            std::iter::once(temp_bin.path().to_path_buf())
-                .chain(std::env::split_paths(std::ffi::OsStr::new(
-                    "/usr/bin:/bin:/usr/sbin:/sbin",
-                ))),
-        )
-        .expect("join fake-worker PATH");
+        let joined_path =
+            std::env::join_paths(std::iter::once(temp_bin.path().to_path_buf()).chain(
+                std::env::split_paths(std::ffi::OsStr::new("/usr/bin:/bin:/usr/sbin:/sbin")),
+            ))
+            .expect("join fake-worker PATH");
         let _home = crate::test_support::EnvRestore::set_path("TACHI_HOME", temp_home.path());
         let _runs = crate::test_support::EnvRestore::set_path("TACHI_RUN_ROOT", temp_runs.path());
         let _path = crate::test_support::EnvRestore::set_os("PATH", &joined_path);

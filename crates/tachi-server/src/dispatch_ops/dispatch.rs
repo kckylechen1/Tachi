@@ -1333,8 +1333,10 @@ async fn launch_canonical_dispatch(
                 .as_ref()
                 .and_then(|refs| refs.launch_spec_digest.clone()),
             backend_name: if execution_backend_metadata.is_some()
-                && matches!(resolved_assignment.selected_backend.as_str(), "custom" | "codex")
-            {
+                && matches!(
+                    resolved_assignment.selected_backend.as_str(),
+                    "custom" | "codex"
+                ) {
                 resolved_assignment.selected_backend.clone()
             } else {
                 execution_backend_name
