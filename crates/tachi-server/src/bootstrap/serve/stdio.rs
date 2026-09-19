@@ -539,10 +539,10 @@ impl StdioProxyServer {
             })
         })
         .transpose()?;
+        let admitted_profile = self
+            .tool_profile
+            .unwrap_or_else(tachi_hub::default_tool_profile);
         if let Some(requested_profile) = requested_profile {
-            let admitted_profile = self
-                .tool_profile
-                .unwrap_or_else(tachi_hub::default_tool_profile);
             if admitted_profile != requested_profile {
                 return Err(rmcp::ErrorData::invalid_params(
                     format!(
@@ -594,7 +594,7 @@ impl StdioProxyServer {
 
         Ok(StdioRequestIdentity {
             client_project: self.client_project.clone(),
-            tool_profile: self.tool_profile,
+            tool_profile: Some(admitted_profile),
             client,
             agent_identity,
         })

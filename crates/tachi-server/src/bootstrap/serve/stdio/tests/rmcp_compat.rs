@@ -593,13 +593,14 @@ fn modern_stdio_rejects_identity_drift_and_malformed_metadata_before_dispatch() 
 }
 
 #[test]
-fn modern_stdio_explicit_standard_matches_implicit_process_default() {
+fn modern_stdio_implicit_default_stays_standard_against_admin_daemon() {
     let temp = tempfile::tempdir().expect("tempdir");
     with_tachi_home(temp.path(), || {
         let global = temp.path().join("global/memory.db");
         let _agent_env = EnvRestore::remove(crate::session_identity::ENV_AGENT_IDENTITY);
         test_runtime().block_on(async {
             let server = crate::MemoryServer::new(global.clone(), None).expect("server");
+            server.set_tool_profile(Some(tachi_hub::ToolProfile::admin()));
             let (daemon, cancel, task) = spawn_test_http_daemon(server, &global).await;
             let proxy = identity_probe_proxy();
             assert!(proxy.tool_profile.is_none(), "fixture must use process default");
@@ -610,10 +611,34 @@ fn modern_stdio_explicit_standard_matches_implicit_process_default() {
                 &[
                     json!({
                         "jsonrpc":"2.0", "id":45, "method":"tools/list",
+                        "params":{"_meta":modern_meta(json!({}))}
+                    }),
+                    json!({
+                        "jsonrpc":"2.0", "id":46, "method":"tools/list",
                         "params":{"_meta":modern_meta(json!({"tachiProfile":"standard"}))}
                     }),
                     json!({
-                        "jsonrpc":"2.0", "id":46, "method":"tools/call", "params":{
+                        "jsonrpc":"2.0", "id":47, "method":"tools/call", "params":{
+                            "_meta":modern_meta(json!({})),
+                            "name":"tachi_memory", "arguments":{
+                                "action":"save", "scope":"global",
+                                "id":"stdio-default-profile-archive",
+                                "text":"standard requests must not inherit admin",
+                                "summary":"default profile authority",
+                                "path":"/tests/modern-stdio-profile", "category":"fact", "force":true
+                            }
+                        }
+                    }),
+                    json!({
+                        "jsonrpc":"2.0", "id":48, "method":"tools/call", "params":{
+                            "_meta":modern_meta(json!({"tachiProfile":"standard"})),
+                            "name":"archive_memory", "arguments":{
+                                "id":"stdio-default-profile-archive"
+                            }
+                        }
+                    }),
+                    json!({
+                        "jsonrpc":"2.0", "id":49, "method":"tools/call", "params":{
                             "_meta":modern_meta(json!({"tachiProfile":"observe"})),
                             "name":"tachi_memory", "arguments":{
                                 "action":"save", "scope":"global",
@@ -627,18 +652,47 @@ fn modern_stdio_explicit_standard_matches_implicit_process_default() {
                 ],
             )
             .await;
-            assert!(responses[0].get("error").is_none(), "{:#}", responses[0]);
-            assert_eq!(responses[0]["result"]["resultType"], "complete");
-            let tools = responses[0]["result"]["tools"]
-                .as_array()
-                .expect("standard tools array");
-            assert!(tools.iter().any(|tool| tool["name"] == "tachi_memory"));
-            assert!(
-                !tools.iter().any(|tool| tool["name"] == "tachi_agent_eval"),
-                "implicit default must retain the standard surface: {:#}",
-                responses[0]
+            for response in &responses[..2] {
+                assert!(response.get("error").is_none(), "{response:#}");
+                assert_eq!(response["result"]["resultType"], "complete");
+                let tools = response["result"]["tools"]
+                    .as_array()
+                    .expect("standard tools array");
+                assert!(tools.iter().any(|tool| tool["name"] == "tachi_memory"));
+                assert!(
+                    !tools.iter().any(|tool| tool["name"] == "archive_memory"),
+                    "implicit default must not inherit the daemon's admin surface: {response:#}"
+                );
+            }
+            assert_eq!(responses[2]["result"]["resultType"], "complete");
+            assert_ne!(
+                responses[2]["result"]["isError"],
+                json!(true),
+                "{:#}",
+                responses[2]
             );
-            assert_eq!(responses[1]["error"]["code"], -32602, "{:#}", responses[1]);
+            assert_eq!(
+                responses[3]["result"]["isError"],
+                json!(true),
+                "{:#}",
+                responses[3]
+            );
+            assert!(
+                http_tool_text(&responses[3]).contains("tool not found"),
+                "{:#}",
+                responses[3]
+            );
+            assert_eq!(
+                memory_archived_value(&global, "stdio-default-profile-archive"),
+                0,
+                "standard modern request must not gain admin archive authority"
+            );
+            assert_eq!(
+                responses[4]["error"]["code"],
+                -32602,
+                "{:#}",
+                responses[4]
+            );
             assert_eq!(memory_id_count(&global, "stdio-default-profile-drift"), 0);
 
             cancel.cancel();
@@ -719,6 +773,58 @@ fn modern_stdio_forwards_validated_client_and_agent_per_request_without_stickine
                 observer.forwarded_agent_identity(),
                 crate::cli_client::ProxyIdentityForward::Header("agent.legacy-session".to_string())
             );
+
+            cancel.cancel();
+            task.await.expect("daemon task");
+        });
+    });
+}
+
+#[test]
+fn modern_stdio_omitted_agent_identity_reresolves_process_binding_per_call() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    with_tachi_home(temp.path(), || {
+        let global = temp.path().join("global/memory.db");
+        test_runtime().block_on(async {
+            let server = crate::MemoryServer::new(global.clone(), None).expect("server");
+            let (daemon, cancel, task) = spawn_test_http_daemon(server, &global).await;
+            let proxy = identity_probe_proxy();
+            *proxy.daemon.write().expect("proxy daemon lock") = daemon;
+            let request = json!({
+                "jsonrpc":"2.0", "id":52, "method":"tools/call", "params":{
+                    "_meta":modern_meta(json!({})),
+                    "name":"tachi_a2a", "arguments":{"action":"status"}
+                }
+            });
+
+            let first = {
+                let _agent_env = EnvRestore::set(
+                    crate::session_identity::ENV_AGENT_IDENTITY,
+                    "agent.env-first",
+                );
+                stdio_responses(proxy.clone(), std::slice::from_ref(&request)).await
+            };
+            let second = {
+                let _agent_env = EnvRestore::set(
+                    crate::session_identity::ENV_AGENT_IDENTITY,
+                    "agent.env-second",
+                );
+                stdio_responses(proxy, std::slice::from_ref(&request)).await
+            };
+
+            for (response, expected) in [
+                (&first[0], "agent.env-first"),
+                (&second[0], "agent.env-second"),
+            ] {
+                assert_eq!(
+                    response["result"]["resultType"],
+                    "complete",
+                    "{response:#}"
+                );
+                let body: serde_json::Value = serde_json::from_str(&http_tool_text(response))
+                    .expect("A2A status JSON");
+                assert_eq!(body["actor_agent_identity_id"], expected, "{body:#}");
+            }
 
             cancel.cancel();
             task.await.expect("daemon task");
