@@ -1503,7 +1503,7 @@ mod tests {
         let mut conn = open_conn();
         identity(&conn, "agent-v21-claim-id");
         insert_work_claim(
-            &mut conn,
+            &conn,
             &work_claim("claim-v21-direct", "agent-v21-claim-id"),
         )
         .unwrap();
@@ -1562,7 +1562,7 @@ mod tests {
         identity(&conn, "agent-v21-dispatch");
         let mut claim = work_claim("claim-v21-dispatch", "agent-v21-dispatch");
         claim.dispatch_id = Some("dispatch-v21-only".to_string());
-        insert_work_claim(&mut conn, &claim).unwrap();
+        insert_work_claim(&conn, &claim).unwrap();
 
         let err = release_claim(
             &mut conn,
@@ -1589,7 +1589,7 @@ mod tests {
         let mut v21 = work_claim("claim-v21-mixed", "agent-v21-mixed");
         v21.dispatch_id = Some("dispatch-mixed".to_string());
         v21.created_at = "2030-01-01T00:00:00Z".to_string();
-        insert_work_claim(&mut conn, &v21).unwrap();
+        insert_work_claim(&conn, &v21).unwrap();
 
         let mut legacy = new_claim("claim-legacy-mixed", "org/repo#legacy-mixed");
         legacy.dispatch_id = Some("dispatch-mixed".to_string());
@@ -2046,7 +2046,7 @@ mod tests {
             UnverifiedAdmissionState::SelfAsserted,
         )
         .unwrap();
-        insert_work_claim(&mut conn, &work_claim("claim-a", "agent-a")).unwrap();
+        insert_work_claim(&conn, &work_claim("claim-a", "agent-a")).unwrap();
         crate::db::exec_env::insert_exec_env(
             &conn,
             &crate::db::exec_env::NewExecEnvLease {
@@ -2082,7 +2082,7 @@ mod tests {
             "stale bind version must not overwrite the first binding"
         );
         assert_eq!(
-            release_work_claim(&mut conn, "claim-a", "agent-a", 1, "explicit").unwrap(),
+            release_work_claim(&conn, "claim-a", "agent-a", 1, "explicit").unwrap(),
             2
         );
         assert_eq!(
@@ -2117,7 +2117,7 @@ mod tests {
 
     #[test]
     fn incompatible_or_missing_holder_links_refuse_with_distinct_evidence() {
-        let mut conn = open_conn();
+        let conn = open_conn();
         crate::db::exec_env::insert_exec_env(
             &conn,
             &crate::db::exec_env::NewExecEnvLease {
@@ -2153,7 +2153,7 @@ mod tests {
         )
         .unwrap();
         identity(&conn, "agent-b");
-        insert_work_claim(&mut conn, &work_claim("claim-b", "agent-b")).unwrap();
+        insert_work_claim(&conn, &work_claim("claim-b", "agent-b")).unwrap();
         conn.execute(
             "UPDATE exec_envs SET agent_identity_id='agent-b', claim_id='claim-b' WHERE env_id='env-b'",
             [],
@@ -2176,9 +2176,9 @@ mod tests {
 
     #[test]
     fn reverse_only_holder_link_is_contradictory_not_legacy_not_applicable() {
-        let mut conn = open_conn();
+        let conn = open_conn();
         identity(&conn, "agent-reverse");
-        insert_work_claim(&mut conn, &work_claim("claim-reverse", "agent-reverse")).unwrap();
+        insert_work_claim(&conn, &work_claim("claim-reverse", "agent-reverse")).unwrap();
         crate::db::exec_env::insert_exec_env(
             &conn,
             &crate::db::exec_env::NewExecEnvLease {
@@ -2208,15 +2208,15 @@ mod tests {
 
     #[test]
     fn forward_claim_with_different_reverse_claim_is_contradictory() {
-        let mut conn = open_conn();
+        let conn = open_conn();
         identity(&conn, "agent-forward");
         identity(&conn, "agent-reverse-other");
-        insert_work_claim(&mut conn, &work_claim("claim-forward", "agent-forward")).unwrap();
+        insert_work_claim(&conn, &work_claim("claim-forward", "agent-forward")).unwrap();
         let mut reverse_other = work_claim("claim-reverse-other", "agent-reverse-other");
         reverse_other.issue_ref = Some("org/repo#1253-other".into());
         reverse_other.worktree_path = "/wt/1253-other".into();
         reverse_other.declared_file_scope = "crates/memcore/src/db/other.rs".into();
-        insert_work_claim(&mut conn, &reverse_other).unwrap();
+        insert_work_claim(&conn, &reverse_other).unwrap();
         crate::db::exec_env::insert_exec_env(
             &conn,
             &crate::db::exec_env::NewExecEnvLease {
@@ -2256,7 +2256,7 @@ mod tests {
 
     #[test]
     fn work_claim_collision_matrix_keeps_read_only_and_disjoint_writes_but_protects_orphans() {
-        let mut conn = open_conn();
+        let conn = open_conn();
         for identity_id in [
             "agent-ro-a",
             "agent-ro-b",
@@ -2275,29 +2275,29 @@ mod tests {
         read_only_a.mode = WorkClaimMode::ReadOnly;
         read_only_a.worktree_path = String::new();
         read_only_a.declared_file_scope = r#"["crates/one/**"]"#.into();
-        insert_work_claim(&mut conn, &read_only_a).unwrap();
+        insert_work_claim(&conn, &read_only_a).unwrap();
 
         let mut read_only_b = work_claim("ro-b", "agent-ro-b");
         read_only_b.mode = WorkClaimMode::ReadOnly;
         read_only_b.worktree_path = String::new();
         read_only_b.declared_file_scope = r#"["crates/one/**"]"#.into();
-        insert_work_claim(&mut conn, &read_only_b).unwrap();
+        insert_work_claim(&conn, &read_only_b).unwrap();
 
         let mut write_a = work_claim("write-a", "agent-write-a");
         write_a.worktree_path = "/worktrees/a".into();
         write_a.declared_file_scope = r#"["crates/a/**"]"#.into();
-        insert_work_claim(&mut conn, &write_a).unwrap();
+        insert_work_claim(&conn, &write_a).unwrap();
 
         let mut write_b = work_claim("write-b", "agent-write-b");
         write_b.worktree_path = "/worktrees/b".into();
         write_b.declared_file_scope = r#"["crates/b/**"]"#.into();
-        insert_work_claim(&mut conn, &write_b).unwrap();
+        insert_work_claim(&conn, &write_b).unwrap();
 
         let mut scope_conflict = work_claim("scope-conflict", "agent-scope-conflict");
         scope_conflict.worktree_path = "/worktrees/c".into();
         scope_conflict.declared_file_scope = r#"["crates/a/subtree/**"]"#.into();
         assert!(matches!(
-            insert_work_claim(&mut conn, &scope_conflict),
+            insert_work_claim(&conn, &scope_conflict),
             Err(MemoryError::WorkClaimConflict(_))
         ));
 
@@ -2305,7 +2305,7 @@ mod tests {
         path_conflict.worktree_path = "/worktrees/a/nested".into();
         path_conflict.declared_file_scope = r#"["crates/c/**"]"#.into();
         assert!(matches!(
-            insert_work_claim(&mut conn, &path_conflict),
+            insert_work_claim(&conn, &path_conflict),
             Err(MemoryError::WorkClaimConflict(_))
         ));
 
@@ -2314,7 +2314,7 @@ mod tests {
         head_conflict.worktree_path = String::new();
         head_conflict.expected_head = "different-head".into();
         assert!(matches!(
-            insert_work_claim(&mut conn, &head_conflict),
+            insert_work_claim(&conn, &head_conflict),
             Err(MemoryError::WorkClaimConflict(_))
         ));
 
@@ -2322,7 +2322,7 @@ mod tests {
         orphaned.issue_ref = Some("org/repo#orphan".into());
         orphaned.worktree_path = "/worktrees/orphan".into();
         orphaned.declared_file_scope = r#"["crates/orphan/**"]"#.into();
-        insert_work_claim(&mut conn, &orphaned).unwrap();
+        insert_work_claim(&conn, &orphaned).unwrap();
         conn.execute(
             "UPDATE session_claims SET state='orphaned' WHERE claim_id='orphaned'",
             [],
@@ -2333,14 +2333,14 @@ mod tests {
         takeover.worktree_path = "/worktrees/orphan".into();
         takeover.declared_file_scope = r#"["crates/orphan/**"]"#.into();
         assert!(matches!(
-            insert_work_claim(&mut conn, &takeover),
+            insert_work_claim(&conn, &takeover),
             Err(MemoryError::WorkClaimConflict(_))
         ));
     }
 
     #[test]
     fn writable_work_claims_collide_on_one_tree_across_issue_boundaries() {
-        let mut conn = open_conn();
+        let conn = open_conn();
         for identity_id in ["agent-tree-a", "agent-tree-b", "agent-tree-none"] {
             identity(&conn, identity_id);
         }
@@ -2349,13 +2349,13 @@ mod tests {
         first.issue_ref = Some("org/repo#tree-a".into());
         first.worktree_path = "/worktrees/canonical-shared".into();
         first.declared_file_scope = r#"["crates/a/**"]"#.into();
-        insert_work_claim(&mut conn, &first).unwrap();
+        insert_work_claim(&conn, &first).unwrap();
 
         let mut different_issue = work_claim("tree-b", "agent-tree-b");
         different_issue.issue_ref = Some("org/repo#tree-b".into());
         different_issue.worktree_path = first.worktree_path.clone();
         different_issue.declared_file_scope = r#"["crates/b/**"]"#.into();
-        let different_issue_error = insert_work_claim(&mut conn, &different_issue)
+        let different_issue_error = insert_work_claim(&conn, &different_issue)
             .expect_err("different issues cannot own the same writable physical tree");
         assert!(matches!(
             different_issue_error,
@@ -2372,7 +2372,7 @@ mod tests {
         no_issue.issue_ref = None;
         no_issue.worktree_path = first.worktree_path.clone();
         no_issue.declared_file_scope = r#"["crates/no-issue/**"]"#.into();
-        let no_issue_error = insert_work_claim(&mut conn, &no_issue)
+        let no_issue_error = insert_work_claim(&conn, &no_issue)
             .expect_err("an unscoped claim cannot own an already-held writable physical tree");
         assert!(matches!(no_issue_error, MemoryError::WorkClaimConflict(_)));
         assert!(
@@ -2385,19 +2385,19 @@ mod tests {
 
     #[test]
     fn work_claim_refuses_an_empty_serialized_scope() {
-        let mut conn = open_conn();
+        let conn = open_conn();
         identity(&conn, "agent-empty-scope");
         let mut claim = work_claim("empty-scope", "agent-empty-scope");
         claim.declared_file_scope = "[]".into();
         assert!(matches!(
-            insert_work_claim(&mut conn, &claim),
+            insert_work_claim(&conn, &claim),
             Err(MemoryError::InvalidArg(_))
         ));
     }
 
     #[test]
     fn work_claim_transition_authorization_is_holder_enforced_and_typed() {
-        let mut conn = open_conn();
+        let conn = open_conn();
         identity(&conn, "agent-holder");
         identity(&conn, "agent-intruder");
 
@@ -2405,9 +2405,9 @@ mod tests {
         heartbeat.issue_ref = Some("org/repo#auth-heartbeat".into());
         heartbeat.mode = WorkClaimMode::ReadOnly;
         heartbeat.worktree_path = String::new();
-        insert_work_claim(&mut conn, &heartbeat).unwrap();
+        insert_work_claim(&conn, &heartbeat).unwrap();
         let heartbeat_error = heartbeat_work_claim(
-            &mut conn,
+            &conn,
             "auth-heartbeat",
             "agent-intruder",
             0,
@@ -2426,9 +2426,9 @@ mod tests {
         release.issue_ref = Some("org/repo#auth-release".into());
         release.mode = WorkClaimMode::ReadOnly;
         release.worktree_path = String::new();
-        insert_work_claim(&mut conn, &release).unwrap();
+        insert_work_claim(&conn, &release).unwrap();
         let release_error =
-            release_work_claim(&mut conn, "auth-release", "agent-intruder", 0, "intruder")
+            release_work_claim(&conn, "auth-release", "agent-intruder", 0, "intruder")
                 .expect_err("non-holder release must be refused");
         assert!(matches!(
             release_error,
@@ -2442,7 +2442,7 @@ mod tests {
         handoff.issue_ref = Some("org/repo#auth-handoff".into());
         handoff.mode = WorkClaimMode::ReadOnly;
         handoff.worktree_path = String::new();
-        insert_work_claim(&mut conn, &handoff).unwrap();
+        insert_work_claim(&conn, &handoff).unwrap();
         let successor = WorkClaimHandoffRequest {
             agent_identity_id: "agent-intruder".into(),
             role: "executor".into(),
@@ -2453,7 +2453,7 @@ mod tests {
             lease_expires_at: "2030-01-02T00:00:00Z".into(),
         };
         let handoff_error =
-            handoff_work_claim(&mut conn, "auth-handoff", "agent-intruder", 0, &successor)
+            handoff_work_claim(&conn, "auth-handoff", "agent-intruder", 0, &successor)
                 .expect_err("non-holder active handoff must be refused");
         assert!(matches!(
             handoff_error,
@@ -2473,7 +2473,7 @@ mod tests {
         )
         .unwrap();
         let recovered =
-            handoff_work_claim(&mut conn, "auth-handoff", "agent-intruder", 0, &successor)
+            handoff_work_claim(&conn, "auth-handoff", "agent-intruder", 0, &successor)
                 .expect("an admitted successor may recover an orphaned claim");
         assert_eq!(recovered.from_agent_identity_id, "agent-holder");
         assert_eq!(recovered.to_agent_identity_id, "agent-intruder");
@@ -2482,7 +2482,7 @@ mod tests {
 
     #[test]
     fn work_claim_heartbeat_and_handoff_are_versioned_and_never_auto_take_over() {
-        let mut conn = open_conn();
+        let conn = open_conn();
         for identity_id in [
             "agent-heartbeat",
             "agent-handoff-from",
@@ -2494,9 +2494,9 @@ mod tests {
 
         let mut heartbeat = work_claim("heartbeat", "agent-heartbeat");
         heartbeat.issue_ref = Some("org/repo#heartbeat".into());
-        insert_work_claim(&mut conn, &heartbeat).unwrap();
+        insert_work_claim(&conn, &heartbeat).unwrap();
         let receipt = heartbeat_work_claim(
-            &mut conn,
+            &conn,
             "heartbeat",
             "agent-heartbeat",
             0,
@@ -2507,7 +2507,7 @@ mod tests {
         assert_eq!(receipt.lease_expires_at, "2026-07-20T00:00:00Z");
         assert!(matches!(
             heartbeat_work_claim(
-                &mut conn,
+                &conn,
                 "heartbeat",
                 "agent-heartbeat",
                 0,
@@ -2515,10 +2515,10 @@ mod tests {
             ),
             Err(MemoryError::WorkClaimConflict(_))
         ));
-        release_work_claim(&mut conn, "heartbeat", "agent-heartbeat", 1, "done").unwrap();
+        release_work_claim(&conn, "heartbeat", "agent-heartbeat", 1, "done").unwrap();
         assert!(matches!(
             heartbeat_work_claim(
-                &mut conn,
+                &conn,
                 "heartbeat",
                 "agent-heartbeat",
                 2,
@@ -2528,7 +2528,7 @@ mod tests {
         ));
         assert!(matches!(
             heartbeat_work_claim(
-                &mut conn,
+                &conn,
                 "missing",
                 "agent-heartbeat",
                 0,
@@ -2538,7 +2538,7 @@ mod tests {
         ));
         let mut orphaned_heartbeat = work_claim("orphaned-heartbeat", "agent-heartbeat");
         orphaned_heartbeat.issue_ref = Some("org/repo#orphaned-heartbeat".into());
-        insert_work_claim(&mut conn, &orphaned_heartbeat).unwrap();
+        insert_work_claim(&conn, &orphaned_heartbeat).unwrap();
         conn.execute(
             "UPDATE session_claims SET state='orphaned' WHERE claim_id='orphaned-heartbeat'",
             [],
@@ -2546,7 +2546,7 @@ mod tests {
         .unwrap();
         assert!(matches!(
             heartbeat_work_claim(
-                &mut conn,
+                &conn,
                 "orphaned-heartbeat",
                 "agent-heartbeat",
                 0,
@@ -2559,7 +2559,7 @@ mod tests {
         handoff.issue_ref = Some("org/repo#handoff".into());
         handoff.worktree_path = "/worktrees/handoff".into();
         handoff.declared_file_scope = r#"["crates/handoff/**"]"#.into();
-        insert_work_claim(&mut conn, &handoff).unwrap();
+        insert_work_claim(&conn, &handoff).unwrap();
         conn.execute(
             "UPDATE session_claims SET state='orphaned' WHERE claim_id='handoff'",
             [],
@@ -2575,11 +2575,11 @@ mod tests {
             lease_expires_at: "2026-07-20T00:00:00Z".into(),
         };
         assert!(matches!(
-            handoff_work_claim(&mut conn, "handoff", "agent-handoff-to", 7, &successor),
+            handoff_work_claim(&conn, "handoff", "agent-handoff-to", 7, &successor),
             Err(MemoryError::WorkClaimConflict(_))
         ));
         let handoff_result =
-            handoff_work_claim(&mut conn, "handoff", "agent-handoff-to", 0, &successor).unwrap();
+            handoff_work_claim(&conn, "handoff", "agent-handoff-to", 0, &successor).unwrap();
         assert_eq!(handoff_result.from_agent_identity_id, "agent-handoff-from");
         assert_eq!(handoff_result.to_agent_identity_id, "agent-handoff-to");
         let handed_off = get_claim(&conn, "handoff").unwrap().unwrap();
@@ -2594,13 +2594,13 @@ mod tests {
         blocker.issue_ref = Some("org/repo#handoff-conflict".into());
         blocker.worktree_path = "/worktrees/blocker".into();
         blocker.declared_file_scope = r#"["crates/blocker/**"]"#.into();
-        insert_work_claim(&mut conn, &blocker).unwrap();
+        insert_work_claim(&conn, &blocker).unwrap();
         let mut source = work_claim("handoff-conflict", "agent-handoff-from");
         source.issue_ref = Some("org/repo#handoff-conflict".into());
         source.mode = WorkClaimMode::ReadOnly;
         source.worktree_path = String::new();
         source.declared_file_scope = r#"["crates/source/**"]"#.into();
-        insert_work_claim(&mut conn, &source).unwrap();
+        insert_work_claim(&conn, &source).unwrap();
         let conflicting_successor = WorkClaimHandoffRequest {
             agent_identity_id: "agent-handoff-from".into(),
             role: "executor".into(),
@@ -2612,7 +2612,7 @@ mod tests {
         };
         assert!(matches!(
             handoff_work_claim(
-                &mut conn,
+                &conn,
                 "handoff-conflict",
                 "agent-handoff-from",
                 0,
@@ -2630,12 +2630,12 @@ mod tests {
 
     #[test]
     fn handoff_refuses_an_empty_serialized_scope() {
-        let mut conn = open_conn();
+        let conn = open_conn();
         identity(&conn, "agent-empty-handoff-from");
         identity(&conn, "agent-empty-handoff-to");
         let mut claim = work_claim("empty-handoff", "agent-empty-handoff-from");
         claim.issue_ref = Some("org/repo#empty-handoff".into());
-        insert_work_claim(&mut conn, &claim).unwrap();
+        insert_work_claim(&conn, &claim).unwrap();
 
         let successor = WorkClaimHandoffRequest {
             agent_identity_id: "agent-empty-handoff-to".into(),
@@ -2648,7 +2648,7 @@ mod tests {
         };
         assert!(matches!(
             handoff_work_claim(
-                &mut conn,
+                &conn,
                 "empty-handoff",
                 "agent-empty-handoff-to",
                 0,

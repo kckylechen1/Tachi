@@ -382,7 +382,7 @@ mod tests {
                 )
                 .map_err(|error| error.to_string())?;
                 insert_work_claim(
-                    store.connection_mut(),
+                    store.connection(),
                     &NewWorkClaim {
                         claim_id: "claim-1".to_string(),
                         agent_identity_id: "agent-1".to_string(),

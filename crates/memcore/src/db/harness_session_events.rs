@@ -1339,7 +1339,7 @@ mod tests {
         )
         .unwrap();
         insert_work_claim(
-            &mut conn,
+            &conn,
             &NewWorkClaim {
                 claim_id: "claim-1".into(),
                 agent_identity_id: "agent-1".into(),
@@ -2329,7 +2329,7 @@ mod tests {
     fn stale_host_admission_is_refused_without_journaling() {
         let (mut conn, selector) = seeded();
         crate::db::session_claims::release_work_claim(
-            &mut conn,
+            &conn,
             "claim-1",
             "agent-1",
             0,

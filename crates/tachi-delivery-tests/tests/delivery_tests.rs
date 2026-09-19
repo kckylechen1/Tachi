@@ -69,7 +69,7 @@ fn seed_claim(server: &DeliveryTestServer, dispatch_id: &str) {
     server
         .with_global_store(|store| {
             insert_work_claim(
-                store.connection_mut(),
+                store.connection(),
                 &NewWorkClaim {
                     claim_id: format!("claim-{dispatch_id}"),
                     agent_identity_id: "agent-requester".to_string(),
@@ -635,7 +635,7 @@ async fn attached_terminal_event_mints_a_delivery_intent() {
             )
             .map_err(|error| error.to_string())?;
             insert_work_claim(
-                store.connection_mut(),
+                store.connection(),
                 &NewWorkClaim {
                     claim_id: "claim-attached".to_string(),
                     agent_identity_id: "agent-requester".to_string(),
