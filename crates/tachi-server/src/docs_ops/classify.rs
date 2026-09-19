@@ -46,9 +46,9 @@ impl ClassifiedMetadata {
                     .unwrap_or(&self.category_path);
                 let payload = canonical_model_payload(category, &self.title, &self.summary)?;
                 let bound = invocation.bound_to_content(&payload, object_id, revision);
-                serde_json::to_string(&bound)
-                    .map(Some)
-                    .map_err(|error| format!("serialize bound docs classification invocation: {error}"))
+                serde_json::to_string(&bound).map(Some).map_err(|error| {
+                    format!("serialize bound docs classification invocation: {error}")
+                })
             }
             ClassificationProvenance::Heuristic => Ok(None),
         }

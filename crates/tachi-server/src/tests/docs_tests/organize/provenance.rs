@@ -60,7 +60,8 @@ impl MockDocsClassifier {
                             choice_object.insert("finish_reason".to_string(), Value::Null);
                         }
                         MockFinishReason::Named(reason) => {
-                            choice_object.insert("finish_reason".to_string(), Value::String(reason));
+                            choice_object
+                                .insert("finish_reason".to_string(), Value::String(reason));
                         }
                     }
                     Json(json!({

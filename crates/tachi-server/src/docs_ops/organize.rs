@@ -1,6 +1,4 @@
-use super::classify::{
-    canonical_model_payload, classify_and_extract_metadata, ClassifiedMetadata,
-};
+use super::classify::{canonical_model_payload, classify_and_extract_metadata, ClassifiedMetadata};
 use super::frontmatter::{parse_frontmatter, serialize_representable_frontmatter, Frontmatter};
 use super::paths::{is_archive_dir, is_markdown_file};
 use super::tasks::sync_tasks_in_content;
@@ -287,7 +285,8 @@ impl AuthorizedDocs {
             )
         })?;
         let value = relative.to_str().ok_or_else(|| {
-            "Refusing Wiki organize: protected invariant: document identity is not UTF-8".to_string()
+            "Refusing Wiki organize: protected invariant: document identity is not UTF-8"
+                .to_string()
         })?;
         Ok(value.replace('\\', "/"))
     }
@@ -436,7 +435,9 @@ impl AuthorizedDocs {
         }
         #[cfg(test)]
         if run_organize_test_hook(OrganizeTestPoint::DirectoryParentSyncFailure, path) {
-            return Err("Failed to sync created directory parent: injected sync failure".to_string());
+            return Err(
+                "Failed to sync created directory parent: injected sync failure".to_string(),
+            );
         }
         self.sync_directory(parent, &parent_identity, "created directory parent")?;
         self.revalidate_object(path, &identity, true, "created directory")?;
@@ -1324,8 +1325,7 @@ fn next_model_receipt_revision(
         .and_then(serde_json::Value::as_str);
     let prior_object_id = receipt.get("memory_id").and_then(serde_json::Value::as_str);
     let prior_revision = receipt.get("revision").and_then(serde_json::Value::as_i64);
-    if receipt.get("schema").and_then(serde_json::Value::as_str)
-        != Some("model-invocation-v1")
+    if receipt.get("schema").and_then(serde_json::Value::as_str) != Some("model-invocation-v1")
         || prior_hash.is_none()
         || prior_object_id != Some(object_id)
         || prior_revision.is_none_or(|revision| revision < 1)
@@ -1347,8 +1347,7 @@ fn next_model_receipt_revision(
             .to_string()
     })?;
     let payload = canonical_model_payload(category, title, summary)?;
-    let expected_hash =
-        tachi_llm::PersistedModelInvocationReceiptV1::content_hash_for(&payload);
+    let expected_hash = tachi_llm::PersistedModelInvocationReceiptV1::content_hash_for(&payload);
     if prior_hash != Some(expected_hash.as_str()) {
         return Err(
             "Refusing Wiki organize: protected invariant: existing model receipt content binding does not match its category/title/summary"
@@ -1373,8 +1372,8 @@ fn render_persisted_document(
 ) -> Result<String, String> {
     let mut frontmatter = frontmatter.clone();
     if let Some(classified) = classification {
-        frontmatter.model_invocation_v1 = classified
-            .bound_model_invocation_json(object_id, model_revision.unwrap_or(1))?;
+        frontmatter.model_invocation_v1 =
+            classified.bound_model_invocation_json(object_id, model_revision.unwrap_or(1))?;
     }
     Ok(format!(
         "{}{}",
@@ -1637,8 +1636,7 @@ pub(crate) async fn handle_wiki_organize(
 
         // 就地任务状态检测与勾选
         let (new_body, task_modified) = sync_tasks_in_content(server, body);
-        let preview_content =
-            render_preview_document(&fm, classification.as_ref(), &new_body)?;
+        let preview_content = render_preview_document(&fm, classification.as_ref(), &new_body)?;
 
         if task_modified {
             synced_count += 1;
@@ -1729,10 +1727,7 @@ pub(crate) async fn handle_wiki_organize(
                         .as_ref()
                         .is_some_and(|classified| classified.is_model_derived())
                     {
-                        Some(authorized.read_text(
-                            &dest_path,
-                            &dest_identity,
-                        )?)
+                        Some(authorized.read_text(&dest_path, &dest_identity)?)
                     } else {
                         None
                     };
@@ -1772,11 +1767,8 @@ pub(crate) async fn handle_wiki_organize(
                         authorized.unique_archive_target(&archive_dir, &stem)?;
 
                     let object_id = authorized.repo_relative_document_id(&archive_path)?;
-                    let model_revision = model_revision_for_publication(
-                        classification.as_ref(),
-                        None,
-                        &object_id,
-                    )?;
+                    let model_revision =
+                        model_revision_for_publication(classification.as_ref(), None, &object_id)?;
                     let final_content = render_persisted_document(
                         &fm,
                         classification.as_ref(),
@@ -1795,11 +1787,8 @@ pub(crate) async fn handle_wiki_organize(
             } else {
                 // 无同名冲突，直接写新路径，删旧路径
                 let object_id = authorized.repo_relative_document_id(&dest_path)?;
-                let model_revision = model_revision_for_publication(
-                    classification.as_ref(),
-                    None,
-                    &object_id,
-                )?;
+                let model_revision =
+                    model_revision_for_publication(classification.as_ref(), None, &object_id)?;
                 let final_content = render_persisted_document(
                     &fm,
                     classification.as_ref(),
