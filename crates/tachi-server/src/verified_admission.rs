@@ -93,6 +93,25 @@ fn validate_verified_evidence(
     if evidence.verification_scope != request.verification_scope {
         return Err("verified admission evidence binds the wrong scope".to_string());
     }
+    let persisted_text = [
+        request.agent_identity_id.as_str(),
+        request.connection_id.as_str(),
+        request.idempotency_key.as_str(),
+        evidence.issuer_id.as_str(),
+        evidence.verification_method.as_str(),
+        evidence.verification_version.as_str(),
+        evidence.trust_domain.as_str(),
+        evidence.verification_scope.as_str(),
+        evidence.evidence_ref.as_str(),
+        evidence.nonce.as_str(),
+    ];
+    if persisted_text
+        .iter()
+        .any(|value| tachi_lesson_forge::contains_secret_like(value))
+        || memcore::catalog::endpoint::endpoint_credential_leak(&evidence.evidence_ref).is_some()
+    {
+        return Err("verified admission evidence contains secret-like material".to_string());
+    }
     if evidence.issued_at > now {
         return Err("verified admission evidence is not yet valid".to_string());
     }
@@ -377,6 +396,14 @@ mod tests {
                     ..evidence()
                 },
                 "revoked",
+            ),
+            (
+                "secret-like-reference",
+                VerifiedAdmissionEvidence {
+                    evidence_ref: "https://user:password@attestor.invalid/evidence/7".into(),
+                    ..evidence()
+                },
+                "secret-like material",
             ),
         ];
 
