@@ -908,11 +908,7 @@ async fn mkdir_and_created_parent_sync_failures_never_delete_source() {
         } else {
             docs.join("product/newspace")
         };
-        crate::docs_ops::set_organize_test_hook(
-            point,
-            hook_path,
-            Box::new(|| {}),
-        );
+        crate::docs_ops::set_organize_test_hook(point, hook_path, Box::new(|| {}));
 
         let error = crate::docs_ops::handle_wiki_organize(&server, docs.to_str().unwrap(), false)
             .await
@@ -962,20 +958,33 @@ async fn retry_reproves_parent_sync_after_directory_creation_sync_failure() {
     assert!(source.exists());
     assert!(!destination.exists());
 
-    let destination_sync_observed = Arc::new(Mutex::new(false));
-    let observed = Arc::clone(&destination_sync_observed);
     crate::docs_ops::set_organize_test_hook(
-        crate::docs_ops::OrganizeTestPoint::DirectorySyncCompleted,
-        docs.join("product/retry-space"),
-        Box::new(move || {
-            *observed.lock().expect("record completed directory sync") = true;
-        }),
+        crate::docs_ops::OrganizeTestPoint::DirectorySyncFailure,
+        docs.join("product"),
+        Box::new(|| {}),
     );
+    let retry_error =
+        crate::docs_ops::handle_wiki_organize(&server, docs.to_str().unwrap(), false)
+            .await
+            .expect_err("retry must attempt the previously failed ancestor sync again");
+    assert!(
+        retry_error.contains("injected directory sync failure"),
+        "{retry_error}"
+    );
+    assert!(source.exists());
+    assert!(!destination.exists());
+
+    let (_trace_guard, sync_trace) = crate::docs_ops::capture_directory_sync_trace();
     crate::docs_ops::handle_wiki_organize(&server, docs.to_str().unwrap(), false)
         .await
         .expect("retry must re-prove the existing directory chain");
 
-    assert!(*destination_sync_observed.lock().unwrap());
+    assert!(sync_trace
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|event| event
+            == &format!("existing directory parent:{}", docs.join("product").display())));
     assert!(!source.exists());
     assert_model_document(
         &fs::read_to_string(destination).unwrap(),
@@ -1022,6 +1031,7 @@ async fn post_rename_destination_sync_failure_stops_before_source_parent_sync() 
         docs.join("archive"),
         Box::new(|| {}),
     );
+    let (_trace_guard, sync_trace) = crate::docs_ops::capture_directory_sync_trace();
 
     let error = crate::docs_ops::handle_wiki_organize(&server, docs.to_str().unwrap(), false)
         .await
@@ -1031,6 +1041,21 @@ async fn post_rename_destination_sync_failure_stops_before_source_parent_sync() 
         error.contains("Failed to sync rename destination parent")
             && error.contains("injected directory sync failure"),
         "{error}"
+    );
+    let rename_syncs = sync_trace
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|event| event.starts_with("rename "))
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(
+        rename_syncs,
+        vec![format!(
+            "rename destination parent:{}",
+            docs.join("archive").display()
+        )],
+        "source-parent sync must not be attempted before destination-parent durability"
     );
     assert_eq!(fs::read_to_string(&source).unwrap(), source_bytes);
     assert!(!destination.exists());
@@ -1117,13 +1142,9 @@ async fn accepted_category_drift_fails_closed_in_preview_and_apply() {
         let drifted = valid.replacen("Original title", "Drifted title", 1);
         fs::write(&path, &drifted).unwrap();
 
-        let error = crate::docs_ops::handle_wiki_organize(
-            &server,
-            docs.to_str().unwrap(),
-            dry_run,
-        )
-        .await
-        .expect_err("accepted-category metadata drift must fail closed");
+        let error = crate::docs_ops::handle_wiki_organize(&server, docs.to_str().unwrap(), dry_run)
+            .await
+            .expect_err("accepted-category metadata drift must fail closed");
 
         assert!(error.contains("content binding does not match"), "{error}");
         assert_eq!(fs::read_to_string(path).unwrap(), drifted);
@@ -1258,7 +1279,10 @@ async fn source_newer_conflict_rebinds_receipted_predecessor_to_archive() {
 
     let replacement = fs::read_to_string(&destination).unwrap();
     assert!(replacement.contains("replacement body"), "{replacement}");
-    assert!(receipt_from_document(&replacement).is_none(), "{replacement}");
+    assert!(
+        receipt_from_document(&replacement).is_none(),
+        "{replacement}"
+    );
     assert_model_document(
         &fs::read_to_string(docs.join("archive/conflicted.md")).unwrap(),
         "Predecessor title",
@@ -1298,6 +1322,15 @@ async fn malformed_or_incomplete_prior_receipts_fail_closed_before_rewrite() {
     let mut invalid_tokens = base;
     invalid_tokens["prompt_tokens"] = json!("eleven");
     cases.push(("invalid-token-type", invalid_tokens));
+    let mut out_of_range_tokens = valid_bound_receipt(
+        "engineering/devops",
+        "Strict title",
+        "Strict summary",
+        "docs/engineering/devops/strict.md",
+        2,
+    );
+    out_of_range_tokens["prompt_tokens"] = json!(u64::MAX);
+    cases.push(("out-of-range-token", out_of_range_tokens));
 
     for (label, receipt) in cases {
         let server = make_server();
@@ -1315,13 +1348,9 @@ async fn malformed_or_incomplete_prior_receipts_fail_closed_before_rewrite() {
         );
         fs::write(&path, &original).unwrap();
 
-        let error = crate::docs_ops::handle_wiki_organize(
-            &server,
-            docs.to_str().unwrap(),
-            false,
-        )
-        .await
-        .expect_err("malformed prior receipt must fail closed");
+        let error = crate::docs_ops::handle_wiki_organize(&server, docs.to_str().unwrap(), false)
+            .await
+            .expect_err("malformed prior receipt must fail closed");
 
         assert!(error.contains("existing model receipt"), "{label}: {error}");
         assert_eq!(fs::read_to_string(path).unwrap(), original, "{label}");
@@ -1346,23 +1375,15 @@ async fn index_write_failure_is_reported_as_recoverable_after_document_publicati
         Box::new(|| {}),
     );
 
-    let result = crate::docs_ops::handle_wiki_organize(
-        &server,
-        docs.to_str().unwrap(),
-        false,
-    )
-    .await
-    .expect("derived index failure remains warning-only");
+    let result = crate::docs_ops::handle_wiki_organize(&server, docs.to_str().unwrap(), false)
+        .await
+        .expect("derived index failure remains warning-only");
     let result: Value = serde_json::from_str(&result).unwrap();
 
     assert!(
-        result["log"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|entry| entry
-                .as_str()
-                .is_some_and(|entry| entry.contains("WARN: failed to write _index.md"))),
+        result["log"].as_array().unwrap().iter().any(|entry| entry
+            .as_str()
+            .is_some_and(|entry| entry.contains("WARN: failed to write _index.md"))),
         "{result}"
     );
     assert_eq!(fs::read_to_string(index).unwrap(), old_index);

@@ -210,8 +210,7 @@ fn is_canonical_taxonomy_name(name: &str) -> bool {
     let bytes = name.as_bytes();
     !bytes.is_empty()
         && (bytes[0].is_ascii_lowercase() || bytes[0].is_ascii_digit())
-        && (bytes[bytes.len() - 1].is_ascii_lowercase()
-            || bytes[bytes.len() - 1].is_ascii_digit())
+        && (bytes[bytes.len() - 1].is_ascii_lowercase() || bytes[bytes.len() - 1].is_ascii_digit())
         && bytes
             .iter()
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-')

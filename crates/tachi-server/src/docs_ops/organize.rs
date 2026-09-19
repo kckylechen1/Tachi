@@ -68,6 +68,12 @@ impl PhysicalIdentity {
             self.canonical == actual.canonical
         }
     }
+
+    fn relocated_to(&self, path: &Path) -> Self {
+        let mut relocated = self.clone();
+        relocated.canonical = path.to_path_buf();
+        relocated
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -579,10 +585,14 @@ impl AuthorizedDocs {
             let validation = (|| {
                 self.revalidate_roots()?;
                 self.revalidate_object(parent, &parent_identity, true, "destination parent")?;
-                self.revalidate_object(path, &staged_identity, false, "published new file")?;
-                let mut identity = staged_identity.clone();
-                identity.canonical = path.to_path_buf();
-                Ok(identity)
+                let published_identity = staged_identity.relocated_to(path);
+                self.revalidate_object(
+                    path,
+                    &published_identity,
+                    false,
+                    "published new file",
+                )?;
+                Ok(published_identity)
             })();
             let identity = validation.map_err(|error: String| {
                 format!("New file published but final validation failed; source retained: {error}")
@@ -826,7 +836,12 @@ impl AuthorizedDocs {
                 "rename source parent",
             )?;
         }
-        self.revalidate_object(destination, source_identity, false, "renamed destination")?;
+        self.revalidate_object(
+            destination,
+            &source_identity.relocated_to(destination),
+            false,
+            "renamed destination",
+        )?;
         Ok(())
     }
 
@@ -838,6 +853,8 @@ impl AuthorizedDocs {
     ) -> Result<(), String> {
         self.revalidate_roots()?;
         self.revalidate_object(path, expected, true, label)?;
+        #[cfg(test)]
+        record_directory_sync(label, path);
         sync_directory_entry(path)
             .map_err(|error| format!("Failed to sync {label} '{}': {error}", path.display()))?;
         self.revalidate_roots()?;
@@ -920,8 +937,6 @@ fn sync_directory_entry(path: &Path) -> std::io::Result<()> {
         "durable directory synchronization is unsupported on this platform",
     ));
 
-    #[cfg(test)]
-    run_organize_test_hook(OrganizeTestPoint::DirectorySyncCompleted, path);
     Ok(())
 }
 
@@ -1140,7 +1155,7 @@ fn acquire_organize_apply_lock(authorized: &AuthorizedDocs) -> Result<OrganizeAp
         .share_mode(0);
     let file = options.open(&lock_path).map_err(|error| {
         format!(
-            "Refusing Wiki organize: acquire exclusive docs apply lock '{}': {error}",
+            "Refusing Wiki organize: docs apply lock '{}' is already held or unavailable: {error}",
             lock_path.display()
         )
     })?;
@@ -1179,7 +1194,6 @@ pub(crate) enum OrganizeTestPoint {
     ExistingFileRenameFailure,
     DirectoryCreateFailure,
     DirectorySyncFailure,
-    DirectorySyncCompleted,
     RenameFileFailure,
     SourceRemovalFailure,
 }
@@ -1206,6 +1220,61 @@ struct OrganizeTestHook {
 fn organize_test_hook() -> &'static Mutex<Option<OrganizeTestHook>> {
     static HOOK: OnceLock<Mutex<Option<OrganizeTestHook>>> = OnceLock::new();
     HOOK.get_or_init(|| Mutex::new(None))
+}
+
+#[cfg(test)]
+type DirectorySyncTrace = (Arc<()>, Arc<Mutex<Vec<String>>>);
+
+#[cfg(test)]
+fn directory_sync_trace() -> &'static Mutex<Option<DirectorySyncTrace>> {
+    static TRACE: OnceLock<Mutex<Option<DirectorySyncTrace>>> = OnceLock::new();
+    TRACE.get_or_init(|| Mutex::new(None))
+}
+
+#[cfg(test)]
+pub(crate) struct DirectorySyncTraceGuard(Arc<()>);
+
+#[cfg(test)]
+impl Drop for DirectorySyncTraceGuard {
+    fn drop(&mut self) {
+        let mut slot = directory_sync_trace()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if slot
+            .as_ref()
+            .is_some_and(|(owner, _)| Arc::ptr_eq(owner, &self.0))
+        {
+            *slot = None;
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn capture_directory_sync_trace(
+) -> (DirectorySyncTraceGuard, Arc<Mutex<Vec<String>>>) {
+    let owner = Arc::new(());
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let mut slot = directory_sync_trace()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    assert!(slot.is_none(), "directory sync trace already installed");
+    *slot = Some((owner.clone(), events.clone()));
+    (DirectorySyncTraceGuard(owner), events)
+}
+
+#[cfg(test)]
+fn record_directory_sync(label: &str, path: &Path) {
+    let events = directory_sync_trace()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .as_ref()
+        .map(|(_, events)| events.clone());
+    if let Some(events) = events {
+        events
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(format!("{label}:{}", path.display()));
+    }
 }
 
 #[cfg(test)]
@@ -1366,9 +1435,9 @@ struct ExistingModelInvocationReceiptV1 {
     fallback_chain: Vec<String>,
     degraded: bool,
     completion_status: String,
-    prompt_tokens: Option<u64>,
-    completion_tokens: Option<u64>,
-    total_tokens: Option<u64>,
+    prompt_tokens: Option<i64>,
+    completion_tokens: Option<i64>,
+    total_tokens: Option<i64>,
     latency_ms: Option<u64>,
     content_hash: String,
     memory_id: String,
@@ -1478,6 +1547,14 @@ fn validated_existing_model_receipt(
             )
         })
         || receipt.completion_status != "complete"
+        || [
+            receipt.prompt_tokens,
+            receipt.completion_tokens,
+            receipt.total_tokens,
+        ]
+        .into_iter()
+        .flatten()
+        .any(|tokens| tokens < 0)
         || receipt.memory_id != object_id
         || receipt.revision < 1
     {
@@ -1487,8 +1564,7 @@ fn validated_existing_model_receipt(
         );
     }
     let payload = canonical_payload_from_frontmatter(frontmatter)?;
-    let expected_hash =
-        tachi_llm::PersistedModelInvocationReceiptV1::content_hash_for(&payload);
+    let expected_hash = tachi_llm::PersistedModelInvocationReceiptV1::content_hash_for(&payload);
     if receipt.content_hash != expected_hash {
         return Err(
             "Refusing Wiki organize: protected invariant: existing model receipt content binding does not match its category/title/summary"
@@ -1845,12 +1921,12 @@ pub(crate) async fn handle_wiki_organize(
             ));
         } else {
             if dry_run {
-                if let Some((dest_identity, dest_metadata)) = authorized.optional_file(&dest_path)? {
-                    let destination_content =
-                        authorized.read_text(&dest_path, &dest_identity)?;
+                if let Some((dest_identity, dest_metadata)) =
+                    authorized.optional_file(&dest_path)?
+                {
+                    let destination_content = authorized.read_text(&dest_path, &dest_identity)?;
                     let (destination_frontmatter, _) = parse_frontmatter(&destination_content);
-                    let destination_object_id =
-                        authorized.repo_relative_document_id(&dest_path)?;
+                    let destination_object_id = authorized.repo_relative_document_id(&dest_path)?;
                     let destination_receipt = validated_existing_model_receipt(
                         destination_frontmatter.as_ref(),
                         &destination_object_id,
@@ -2133,6 +2209,10 @@ pub(crate) async fn handle_wiki_organize(
         if existing != index_content {
             log_messages.push("[dry-run] Would rebuild docs/_index.md".to_string());
         }
+    // Document/archive publications above are already committed. The final
+    // index is derived and recoverable by rerunning organize, so only this
+    // final index write is warning-only; traversal, reads, and containment
+    // failures used to build it still propagate before this point.
     } else if let Some((identity, _)) = authorized.optional_file(&index_path)? {
         if let Err(error) = authorized.write_existing_file(&index_path, &identity, &index_content) {
             log_messages.push(format!("WARN: failed to write _index.md: {error}"));
