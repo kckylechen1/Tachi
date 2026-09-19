@@ -2,7 +2,7 @@ use super::*;
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const GH_AGENT_ID: &str = "tachi_gh_ops";
 const MAX_GH_OUTPUT_CHARS: usize = 50_000;
@@ -222,6 +222,48 @@ pub(in crate::gh_ops) fn build_gh_command_for_resolved_credential(
     cmd.env("NO_COLOR", "1");
 
     cmd
+}
+
+/// Run one read-only `gh` JSON command under a caller-owned wall-clock bound.
+///
+/// This is the shared production read path for hot-path GitHub observations:
+/// command resolution, credential materialization, process execution, and
+/// JSON decoding are all inside the timeout, and `kill_on_drop` prevents a
+/// timed-out child from becoming an orphan. Callers supply only `gh` argv;
+/// credential and environment hardening remain centralized here.
+pub(in crate::gh_ops) async fn run_gh_json_bounded(
+    server: &MemoryServer,
+    args: Vec<String>,
+    timeout: Duration,
+    context: &str,
+) -> Result<Value, String> {
+    let server = server.clone();
+    let timed = tokio::time::timeout(timeout, async {
+        let (cmd, token) = tokio::task::spawn_blocking(move || build_gh_command(&server))
+            .await
+            .map_err(|error| format!("prepare `gh` command task failed: {error}"))??;
+        let mut cmd = tokio::process::Command::from(cmd);
+        cmd.args(args).kill_on_drop(true);
+        let output = cmd
+            .output()
+            .await
+            .map_err(|error| format!("failed to execute `gh`: {error}"))?;
+        Ok::<(std::process::Output, String), String>((output, token))
+    })
+    .await
+    .map_err(|_| format!("{context} timed out after {timeout:?}"))?;
+    let (output, token) = timed?;
+
+    let stdout = sanitize_output(&String::from_utf8_lossy(&output.stdout), &token);
+    let stderr = sanitize_output(&String::from_utf8_lossy(&output.stderr), &token);
+    if !output.status.success() {
+        return Err(format!(
+            "{context} failed (exit {}): {}",
+            output.status.code().unwrap_or(-1),
+            stderr.chars().take(500).collect::<String>()
+        ));
+    }
+    serde_json::from_str(&stdout).map_err(|error| format!("parse {context} JSON: {error}"))
 }
 
 #[cfg(test)]

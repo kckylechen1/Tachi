@@ -19,24 +19,19 @@
 //! Schema lives in this crate (not memcore's DDL) because the typed
 //! assertion vocabulary is defined here and memcore cannot depend on it;
 //! `tachi-params` already carries the rusqlite edge for the taskintent
-//! ingest adapter. The store owns a connection handed to it — the
-//! `MemoryStore` integration seam is a later slice, mirroring how
-//! `taskintent::memcore_ingest` takes a `Connection`.
+//! ingest adapter. The store owns a typed connection handed to it; the
+//! production server binds that API to its existing global SQLite file, so
+//! no second CurrentTruth database or projection authority is introduced.
 //!
-//! # Trust boundary and integration status (#1696 scope)
+//! # Trust boundary and integration status
 //!
 //! **The store trusts its caller.** `authority_class`, `review_state`, and
 //! `issuer` are data fields the caller supplies; this library performs
-//! structural validation only. The semantic admission gate — who may append
-//! which authority class, against which live identity — is the
-//! server-integration admission surface and is deliberately OUT of this
-//! leaf: #1696's verification list ships the store, fixtures, reducer
-//! tests, and the #1693 consumer FIXTURE (discrimination 11), with no
-//! production caller. The follow-up slices that consume this seam must
-//! interpose that admission surface before any untrusted caller reaches
-//! `append`. `tachi_events` remains the collect-only observation ledger;
-//! bridging observations into assertions is a later slice, not a second
-//! authority here.
+//! structural validation only. The production GitHub refresh integration
+//! therefore constructs assertions exclusively through the typed adapter
+//! minting seam before calling this API; no untrusted assertion payload is
+//! accepted from the facade. `tachi_events` remains the collect-only
+//! observation ledger and is not a second CurrentTruth authority.
 
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -506,6 +501,70 @@ impl CurrentTruthSqliteStore {
         recorded_at: &str,
         unavailable_reason: Option<&str>,
     ) -> Result<(), CurrentTruthStoreError> {
+        Self::validate_refresh(repo, fresh, last_fresh_revision, last_fresh_at, recorded_at)?;
+        // One transaction: the staleness check and the upsert commit
+        // atomically, so a concurrent writer on the same file cannot
+        // interleave an older record over a newer one.
+        let transaction = self.conn.unchecked_transaction()?;
+        Self::record_refresh_in(
+            &transaction,
+            repo,
+            fresh,
+            last_fresh_revision,
+            last_fresh_at,
+            recorded_at,
+            unavailable_reason,
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Atomically append one fresh adapter observation and advance its
+    /// refresh posture. A contradiction, stale attempt, or SQLite failure
+    /// rolls back both the assertion batch and posture, so consumers can
+    /// never observe assertions stamped by a different refresh revision.
+    pub fn append_all_and_record_refresh(
+        &self,
+        assertions: &[AssertionV1],
+        repo: &str,
+        last_fresh_revision: &str,
+        last_fresh_at: &str,
+        recorded_at: &str,
+    ) -> Result<usize, CurrentTruthStoreError> {
+        Self::validate_refresh(
+            repo,
+            true,
+            Some(last_fresh_revision),
+            Some(last_fresh_at),
+            recorded_at,
+        )?;
+        let transaction = self.conn.unchecked_transaction()?;
+        let mut appended = 0;
+        for assertion in assertions {
+            if Self::append_in(&transaction, assertion)? == AppendOutcome::Appended {
+                appended += 1;
+            }
+        }
+        Self::record_refresh_in(
+            &transaction,
+            repo,
+            true,
+            Some(last_fresh_revision),
+            Some(last_fresh_at),
+            recorded_at,
+            None,
+        )?;
+        transaction.commit()?;
+        Ok(appended)
+    }
+
+    fn validate_refresh(
+        repo: &str,
+        fresh: bool,
+        last_fresh_revision: Option<&str>,
+        last_fresh_at: Option<&str>,
+        recorded_at: &str,
+    ) -> Result<(), CurrentTruthStoreError> {
         if chrono::DateTime::parse_from_rfc3339(recorded_at).is_err() {
             return Err(CurrentTruthStoreError::MalformedObservedAt(
                 recorded_at.to_string(),
@@ -527,10 +586,19 @@ impl CurrentTruthSqliteStore {
                 return Err(CurrentTruthStoreError::MalformedObservedAt(at.to_string()));
             }
         }
-        // One transaction: the staleness check and the upsert commit
-        // atomically, so a concurrent writer on the same file cannot
-        // interleave an older record over a newer one.
-        let transaction = self.conn.unchecked_transaction()?;
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_refresh_in(
+        transaction: &rusqlite::Transaction<'_>,
+        repo: &str,
+        fresh: bool,
+        last_fresh_revision: Option<&str>,
+        last_fresh_at: Option<&str>,
+        recorded_at: &str,
+        unavailable_reason: Option<&str>,
+    ) -> Result<(), CurrentTruthStoreError> {
         let existing: Option<RefreshPostureRowV1> = transaction
             .query_row(
                 "SELECT fresh, last_fresh_revision, last_fresh_at, last_attempt_at,
@@ -581,7 +649,6 @@ impl CurrentTruthSqliteStore {
                 unavailable_reason
             ],
         )?;
-        transaction.commit()?;
         Ok(())
     }
 

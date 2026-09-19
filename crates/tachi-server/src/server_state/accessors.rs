@@ -165,6 +165,18 @@ impl MemoryServer {
         self.db.project_db_path_buf()
     }
 
+    /// Run one operation against the single CurrentTruth authority bound to
+    /// this server's global product database.
+    pub(crate) fn with_current_truth_store<T>(
+        &self,
+        f: impl FnOnce(
+            &tachi_params::current_truth::store::CurrentTruthSqliteStore,
+        ) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let store = lock_or_recover(&self.current_truth, "current_truth");
+        f(&store)
+    }
+
     pub(crate) fn global_vec_available(&self) -> bool {
         self.db.global_vec_available
     }

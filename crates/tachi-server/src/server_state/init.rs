@@ -233,6 +233,11 @@ impl MemoryServer {
         let global_store =
             MemoryStore::open_with_label_and_context(global_db_str, "global", &global_open_ctx)?
                 .with_kernel_policy(kernel_policy.clone());
+        // #1696: bind the already-defined CurrentTruth tables/API to the
+        // product's existing global SQLite file. No second DB, truth store,
+        // predicate, or schema version is introduced by the live adapter.
+        let current_truth =
+            tachi_params::current_truth::store::CurrentTruthSqliteStore::open(global_db_str)?;
         let read_pool_size = configured_memory_read_pool_size();
         // Same label as the write store two lines up (tachi#1569): the read
         // pool's handles must not disagree with it about which store this is.
@@ -353,6 +358,7 @@ impl MemoryServer {
             controller_epoch: crate::managed_run_epoch::mint_controller_epoch(),
             startup_reconciliation: Arc::new(std::sync::OnceLock::new()),
             db,
+            current_truth: Arc::new(StdMutex::new(current_truth)),
             llm,
             llm_recorder,
             pipeline_enabled,
