@@ -354,7 +354,10 @@ async fn session_spine_mutation_profile_gate_runs_at_real_tools_call_boundary() 
         .map(|text| text.text.as_str())
         .unwrap_or("");
     assert_eq!(denied.is_error, Some(true));
-    assert!(denied_message.contains("tool not found"), "{denied_message}");
+    assert!(
+        denied_message.contains("tool not found"),
+        "{denied_message}"
+    );
 
     let admitted = call("admin").await;
     let admitted_message = admitted

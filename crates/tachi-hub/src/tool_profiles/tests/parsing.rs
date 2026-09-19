@@ -41,10 +41,7 @@ fn profile_parsing_maps_host_aliases() {
         Some(ToolProfile::standard())
     );
     assert_eq!(parse_tool_profile("admin"), Some(ToolProfile::admin()));
-    assert_eq!(
-        parse_tool_profile("emergency"),
-        Some(ToolProfile::admin())
-    );
+    assert_eq!(parse_tool_profile("emergency"), Some(ToolProfile::admin()));
 }
 
 #[test]

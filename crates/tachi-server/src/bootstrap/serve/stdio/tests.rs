@@ -1989,7 +1989,10 @@ fn http_direct_connect_header_identity_binds_profile_and_project() {
         let runtime_text = http_tool_text(&runtime);
         let runtime_json: serde_json::Value =
             serde_json::from_str(&runtime_text).expect("runtime_info JSON");
-        assert_eq!(runtime_json["runtime"]["tool_profile"], "observe+remember+operate");
+        assert_eq!(
+            runtime_json["runtime"]["tool_profile"],
+            "observe+remember+operate"
+        );
         assert_eq!(runtime_json["runtime"]["session_client"], "codex-http-test");
         assert_eq!(runtime_json["runtime"]["session_project"], project_name);
 

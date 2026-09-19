@@ -31,8 +31,8 @@ pub fn parse_tool_profile(raw: &str) -> Option<ToolProfile> {
         let token_profile = match token.to_ascii_lowercase().as_str() {
             "observe" | "read" | "reader" => ToolProfile::observe(),
             "remember" | "write" | "writer" | "agent" => ToolProfile::remember(),
-            "standard" | "lead" | "ide" | "cursor" | "trae" | "windsurf"
-            | "antigravity" | "claude" | "claude-code" | "codex" => ToolProfile::standard(),
+            "standard" | "lead" | "ide" | "cursor" | "trae" | "windsurf" | "antigravity"
+            | "claude" | "claude-code" | "codex" => ToolProfile::standard(),
             "delegate" | "worker" | "subagent" => ToolProfile::delegate(),
             "coordinate" => ToolProfile::coordinate(),
             "companion" | "copilot" | "coach" | "workflow" => ToolProfile::standard(),

@@ -234,10 +234,7 @@ fn explicit_ops_and_admin_profiles_retain_diagnostic_routes() {
         Some(parse_tool_profile("ops").expect("explicit Ops profile")),
         None,
     );
-    let ops_names: Vec<String> = ops
-        .into_iter()
-        .map(|tool| tool.name.into_owned())
-        .collect();
+    let ops_names: Vec<String> = ops.into_iter().map(|tool| tool.name.into_owned()).collect();
     assert_eq!(
         ops_names,
         vec![

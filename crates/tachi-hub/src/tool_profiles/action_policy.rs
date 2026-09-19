@@ -395,11 +395,7 @@ mod tests {
             Some("cancel"),
             profile
         ));
-        assert!(facade_action_allowed(
-            "tachi_gh",
-            Some("pr_read"),
-            profile
-        ));
+        assert!(facade_action_allowed("tachi_gh", Some("pr_read"), profile));
         assert!(!facade_action_allowed(
             "tachi_gh",
             Some("safe_merge"),
@@ -416,7 +412,11 @@ mod tests {
             profile
         ));
         assert!(!facade_action_allowed("tachi_skill", Some("run"), profile));
-        assert!(!facade_action_allowed("tachi_wiki", Some("search"), profile));
+        assert!(!facade_action_allowed(
+            "tachi_wiki",
+            Some("search"),
+            profile
+        ));
 
         assert!(facade_action_allowed(
             "tachi_memory",
