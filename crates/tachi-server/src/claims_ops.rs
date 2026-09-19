@@ -119,9 +119,6 @@ fn task_identity(server: &MemoryServer, asserted: Option<String>) -> Result<Stri
             "AgentIdentity admission unavailable; remote identity has no #1170 proof".to_string(),
         );
     }
-    if admission == "verified" {
-        crate::verified_admission::require_current_verified_admission(server)?;
-    }
     let identity = identity.ok_or_else(|| {
         "AgentIdentity admission unavailable; remote identity has no #1170 proof".to_string()
     })?;
@@ -157,8 +154,8 @@ pub(crate) fn handle_task_claim(
         lease_expires_at: task_required(params.lease_expires_at.clone(), "lease_expires_at")?,
         created_at: String::new(),
     };
-    server.with_global_store(|store| {
-        memcore::insert_work_claim(store.connection_mut(), &claim).map_err(|err| err.to_string())
+    crate::verified_admission::with_current_admission_write(server, |conn| {
+        memcore::insert_work_claim(conn, &claim)
     })?;
     Ok(
         serde_json::json!({"status":"completed","action":"claim","claim_id":claim_id,"transition_version":0}),
@@ -170,17 +167,20 @@ pub(crate) fn handle_task_heartbeat(
     params: &crate::tool_params::TachiTaskParams,
 ) -> Result<serde_json::Value, String> {
     let caller_identity_id = task_identity(server, params.agent_identity_id.clone())?;
-    let receipt = server.with_global_store(|store| {
+    let claim_id = task_required(params.claim_id.clone(), "claim_id")?;
+    let transition_version = params
+        .transition_version
+        .ok_or_else(|| "transition_version is required".to_string())?;
+    let lease_expires_at =
+        task_required(params.lease_expires_at.clone(), "lease_expires_at")?;
+    let receipt = crate::verified_admission::with_current_admission_write(server, |conn| {
         memcore::heartbeat_work_claim(
-            store.connection_mut(),
-            &task_required(params.claim_id.clone(), "claim_id")?,
+            conn,
+            &claim_id,
             &caller_identity_id,
-            params
-                .transition_version
-                .ok_or_else(|| "transition_version is required".to_string())?,
-            &task_required(params.lease_expires_at.clone(), "lease_expires_at")?,
+            transition_version,
+            &lease_expires_at,
         )
-        .map_err(|err| err.to_string())
     })?;
     Ok(
         serde_json::json!({"status":"completed","action":"heartbeat","claim_id":receipt.claim_id,"transition_version":receipt.transition_version,"lease_expires_at":receipt.lease_expires_at}),
@@ -203,17 +203,18 @@ pub(crate) fn handle_task_handoff(
         expected_head: task_required(params.expected_head.clone(), "expected_head")?,
         lease_expires_at: task_required(params.lease_expires_at.clone(), "lease_expires_at")?,
     };
-    let receipt = server.with_global_store(|store| {
+    let claim_id = task_required(params.claim_id.clone(), "claim_id")?;
+    let transition_version = params
+        .transition_version
+        .ok_or_else(|| "transition_version is required".to_string())?;
+    let receipt = crate::verified_admission::with_current_admission_write(server, |conn| {
         memcore::handoff_work_claim(
-            store.connection_mut(),
-            &task_required(params.claim_id.clone(), "claim_id")?,
+            conn,
+            &claim_id,
             &caller_identity_id,
-            params
-                .transition_version
-                .ok_or_else(|| "transition_version is required".to_string())?,
+            transition_version,
             &successor,
         )
-        .map_err(|err| err.to_string())
     })?;
     Ok(
         serde_json::json!({"status":"completed","action":"handoff","claim_id":receipt.claim_id,"transition_version":receipt.transition_version,"to_agent_identity_id":receipt.to_agent_identity_id}),
@@ -226,20 +227,21 @@ pub(crate) fn handle_task_release(
 ) -> Result<serde_json::Value, String> {
     let caller_identity_id = task_identity(server, params.agent_identity_id.clone())?;
     let claim_id = task_required(params.claim_id.clone(), "claim_id")?;
-    let version = server.with_global_store(|store| {
+    let transition_version = params
+        .transition_version
+        .ok_or_else(|| "transition_version is required".to_string())?;
+    let release_reason = params
+        .release_reason
+        .as_deref()
+        .unwrap_or("explicit_release");
+    let version = crate::verified_admission::with_current_admission_write(server, |conn| {
         memcore::release_work_claim(
-            store.connection_mut(),
+            conn,
             &claim_id,
             &caller_identity_id,
-            params
-                .transition_version
-                .ok_or_else(|| "transition_version is required".to_string())?,
-            params
-                .release_reason
-                .as_deref()
-                .unwrap_or("explicit_release"),
+            transition_version,
+            release_reason,
         )
-        .map_err(|err| err.to_string())
     })?;
     Ok(
         serde_json::json!({"status":"completed","action":"release","claim_id":claim_id,"transition_version":version}),

@@ -93,7 +93,8 @@ pub(crate) use common::normalize_sqlite_as_of;
 pub use common::{normalize_utc_iso, normalize_utc_iso_or_now, now_utc_iso, row_to_entry};
 #[cfg(feature = "admin")]
 pub use verified_admissions::{
-    get_verified_admission_receipt, has_current_verified_admission, VerifiedAdmissionReceipt,
+    get_verified_admission_receipt, has_current_verified_admission,
+    with_current_verified_admission_write, VerifiedAdmissionBinding, VerifiedAdmissionReceipt,
     VERIFIED_ADMISSION_METHOD, VERIFIED_ADMISSION_SCOPE, VERIFIED_ADMISSION_VERSION,
 };
 pub use daily_pipeline::{

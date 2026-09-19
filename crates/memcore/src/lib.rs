@@ -252,7 +252,8 @@ pub use db::session_claims::{
 };
 #[cfg(feature = "admin")]
 pub use db::{
-    get_verified_admission_receipt, has_current_verified_admission, VerifiedAdmissionReceipt,
+    get_verified_admission_receipt, has_current_verified_admission,
+    with_current_verified_admission_write, VerifiedAdmissionBinding, VerifiedAdmissionReceipt,
     VERIFIED_ADMISSION_METHOD, VERIFIED_ADMISSION_SCOPE, VERIFIED_ADMISSION_VERSION,
 };
 pub use db::{anchor_id, anchor_path, AnchorKind};

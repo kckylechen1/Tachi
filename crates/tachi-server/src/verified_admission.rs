@@ -264,7 +264,7 @@ fn persist_verified_admission(
     server: &MemoryServer,
     request: &VerifiedAdmissionRequest,
     evidence: &VerifiedAdmissionEvidence,
-    verified_at: DateTime<Utc>,
+    authoritative_now: impl FnOnce() -> DateTime<Utc>,
 ) -> Result<VerifiedAdmissionWriteOutcome, String> {
     let (admission_id, receipt_id) =
         stable_receipt_ids(&evidence.issuer_id, &request.idempotency_key);
@@ -274,6 +274,11 @@ fn persist_verified_admission(
             .connection_mut()
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| error.to_string())?;
+        // Freshness is authoritative only after the persistence write lock is
+        // held. Verification and lock acquisition may both block long enough
+        // for otherwise valid evidence to expire.
+        let verified_at = authoritative_now();
+        validate_verified_evidence(request, evidence, verified_at)?;
         if let Some(existing) = find_receipt_by_idempotency(
             &tx,
             &evidence.issuer_id,
@@ -295,6 +300,20 @@ fn persist_verified_admission(
             .map_err(|error| error.to_string())?;
         if nonce_used {
             return Err("verified admission nonce replay".to_string());
+        }
+        let connection_already_admitted: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM identity_admissions
+                 WHERE agent_identity_id=?1 AND connection_id=?2)",
+                params![request.agent_identity_id, request.connection_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        if connection_already_admitted {
+            return Err(
+                "AgentIdentity connection already has an append-only admission; verified admission requires a new connection"
+                    .to_string(),
+            );
         }
         let verified_at = verified_at.to_rfc3339();
         tx.execute(
@@ -359,7 +378,7 @@ pub(crate) fn admit_verified_agent_connection(
     request: &VerifiedAdmissionRequest,
     verifier: &dyn TrustedAdmissionVerifier,
 ) -> Result<(), String> {
-    admit_verified_agent_connection_at(server, request, verifier, Utc::now()).map(|_| ())
+    admit_verified_agent_connection_with_clock(server, request, verifier, Utc::now).map(|_| ())
 }
 
 fn admit_verified_agent_connection_at(
@@ -368,9 +387,17 @@ fn admit_verified_agent_connection_at(
     verifier: &dyn TrustedAdmissionVerifier,
     now: DateTime<Utc>,
 ) -> Result<VerifiedAdmissionWriteOutcome, String> {
+    admit_verified_agent_connection_with_clock(server, request, verifier, || now)
+}
+
+fn admit_verified_agent_connection_with_clock(
+    server: &MemoryServer,
+    request: &VerifiedAdmissionRequest,
+    verifier: &dyn TrustedAdmissionVerifier,
+    authoritative_now: impl FnOnce() -> DateTime<Utc>,
+) -> Result<VerifiedAdmissionWriteOutcome, String> {
     let evidence = verifier.verify(request)?;
-    validate_verified_evidence(request, &evidence, now)?;
-    let outcome = persist_verified_admission(server, request, &evidence, now)?;
+    let outcome = persist_verified_admission(server, request, &evidence, authoritative_now)?;
     let receipt = outcome.receipt();
     server.set_verified_work_claim_connection(VerifiedAdmissionContext {
         admission_id: receipt.admission_id.clone(),
@@ -407,6 +434,52 @@ pub(crate) fn require_current_verified_admission(server: &MemoryServer) -> Resul
         Ok(())
     } else {
         Err("verified admission is expired, revoked, or no longer bound to this connection".into())
+    }
+}
+
+/// Serialize a mutation with the durable authority check for the current
+/// host admission. A committed revocation therefore either precedes the
+/// check (and refuses the write) or follows the committed mutation; there is
+/// no check/revoke/write gap. Explicit local SelfAsserted admissions retain
+/// their existing local-only mutation path.
+pub(crate) fn with_current_admission_write<T>(
+    server: &MemoryServer,
+    operation: impl FnOnce(&rusqlite::Connection) -> Result<T, memcore::MemoryError>,
+) -> Result<T, String> {
+    let (_, _, state) = server
+        .work_claim_connection()
+        .ok_or_else(|| "AgentIdentity admission is unavailable; initialize first".to_string())?;
+    match state.as_str() {
+        "self_asserted" => server.with_global_store(|store| {
+            operation(store.connection()).map_err(|error| error.to_string())
+        }),
+        "verified" => {
+            let context = server
+                .verified_work_claim_connection()
+                .ok_or_else(|| "verified admission context is unavailable".to_string())?;
+            let binding = memcore::VerifiedAdmissionBinding {
+                admission_id: context.admission_id,
+                agent_identity_id: context.agent_identity_id,
+                connection_id: context.connection_id,
+                issuer_id: context.issuer_id,
+                verification_method: context.verification_method,
+                verification_version: context.verification_version,
+                trust_domain: context.trust_domain,
+                verification_scope: context.verification_scope,
+            };
+            server.with_global_store(|store| {
+                memcore::with_current_verified_admission_write(
+                    store.connection(),
+                    &binding,
+                    operation,
+                )
+                .map_err(|error| error.to_string())
+            })
+        }
+        "rejected" => Err("AgentIdentity admission rejected".to_string()),
+        _ => Err(
+            "AgentIdentity admission unavailable; remote identity has no #1170 proof".to_string(),
+        ),
     }
 }
 
@@ -517,6 +590,21 @@ mod tests {
         }
     }
 
+    struct DelayedVerifier {
+        evidence: VerifiedAdmissionEvidence,
+        delay: std::time::Duration,
+    }
+
+    impl TrustedAdmissionVerifier for DelayedVerifier {
+        fn verify(
+            &self,
+            _request: &VerifiedAdmissionRequest,
+        ) -> Result<VerifiedAdmissionEvidence, String> {
+            std::thread::sleep(self.delay);
+            Ok(self.evidence.clone())
+        }
+    }
+
     struct FakeRevocation(VerifiedRevocationEvidence);
 
     impl TrustedRevocationVerifier for FakeRevocation {
@@ -585,6 +673,33 @@ mod tests {
             .unwrap()
     }
 
+    fn uncommitted_revocation(
+        server: &MemoryServer,
+        admission_id: &str,
+        nonce: &str,
+    ) -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open(server.global_db_path_buf()).unwrap();
+        conn.busy_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON; BEGIN IMMEDIATE")
+            .unwrap();
+        conn.execute(
+            "INSERT INTO identity_admission_verification_revocations
+             (revocation_id, admission_id, issuer_id, evidence_digest, evidence_ref, nonce, revoked_at)
+             VALUES (?1, ?2, 'issuer.device-trust.alpha', ?3,
+                     'attestation:device-envelope:concurrent-revocation', ?4, ?5)",
+            params![
+                format!("revocation-{nonce}"),
+                admission_id,
+                "c".repeat(64),
+                nonce,
+                Utc::now().to_rfc3339(),
+            ],
+        )
+        .unwrap();
+        conn
+    }
+
     #[test]
     fn trusted_verifier_writes_bound_secret_negative_receipt_and_exact_replay() {
         let server = make_server();
@@ -646,6 +761,243 @@ mod tests {
                 Ok(())
             })
             .unwrap();
+    }
+
+    #[test]
+    fn production_wrappers_use_authoritative_clock_and_append_revocation() {
+        let expired_server = make_server();
+        let at = Utc::now();
+        let mut expiring = evidence(at);
+        expiring.issued_at = at - Duration::minutes(1);
+        expiring.expires_at = at + Duration::milliseconds(100);
+        let error = admit_verified_agent_connection(
+            &expired_server,
+            &request("production-expiry"),
+            &DelayedVerifier {
+                evidence: expiring,
+                delay: std::time::Duration::from_millis(250),
+            },
+        )
+        .expect_err("evidence expiring during verification must not be persisted");
+        assert!(error.contains("expired"), "{error}");
+        assert_eq!(verified_count(&expired_server), 0);
+        assert!(expired_server.verified_work_claim_connection().is_none());
+
+        let server = make_server();
+        admit_verified_agent_connection(
+            &server,
+            &request("production-wrappers"),
+            &verifier(evidence(Utc::now())),
+        )
+        .unwrap();
+        let admission_id = stable_receipt_ids(
+            "issuer.device-trust.alpha",
+            "production-wrappers",
+        )
+        .0;
+        revoke_verified_admission(
+            &server,
+            &admission_id,
+            &FakeRevocation(VerifiedRevocationEvidence {
+                admission_id: admission_id.clone(),
+                issuer_id: "issuer.device-trust.alpha".into(),
+                evidence_digest: format!("{:x}", Sha256::digest(b"production-revocation")),
+                evidence_ref: VerifiedEvidenceRef::attestation(
+                    "device-envelope",
+                    "production-revocation",
+                )
+                .unwrap(),
+                nonce: "production-revocation-nonce".into(),
+                revoked_at: Utc::now(),
+            }),
+        )
+        .unwrap();
+        require_current_verified_admission(&server)
+            .expect_err("production revocation wrapper must remove authority");
+    }
+
+    #[test]
+    fn append_only_existing_connection_requires_new_connection() {
+        let server = make_server();
+        let at = now();
+        server
+            .with_global_store(|store| {
+                store
+                    .connection()
+                    .execute(
+                        "INSERT INTO agent_identities (agent_identity_id, created_at)
+                         VALUES (?1, ?2)",
+                        params!["agent.remote.alpha", at.to_rfc3339()],
+                    )
+                    .map_err(|error| error.to_string())?;
+                memcore::record_unverified_admission(
+                    store.connection(),
+                    "admission-bootstrap-unavailable",
+                    "agent.remote.alpha",
+                    "placement/runner-alpha/connection-7",
+                    memcore::UnverifiedAdmissionState::Unavailable,
+                )
+                .map_err(|error| error.to_string())
+            })
+            .unwrap();
+        let error = admit_verified_agent_connection_at(
+            &server,
+            &request("upgrade-existing-connection"),
+            &verifier(evidence(at)),
+            at,
+        )
+        .expect_err("append-only connection history cannot be upgraded in place");
+        assert!(error.contains("requires a new connection"), "{error}");
+        assert_eq!(verified_count(&server), 0);
+        let state: String = server
+            .with_global_store_read(|store| {
+                store
+                    .connection()
+                    .query_row(
+                        "SELECT state FROM identity_admissions
+                         WHERE admission_id='admission-bootstrap-unavailable'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .map_err(|error| error.to_string())
+            })
+            .unwrap();
+        assert_eq!(state, "unavailable");
+    }
+
+    #[test]
+    fn committed_revocation_wins_before_work_claim_mutation_on_independent_connection() {
+        let server = make_server();
+        admit_verified_agent_connection(
+            &server,
+            &request("claim-revocation-race"),
+            &verifier(evidence(Utc::now())),
+        )
+        .unwrap();
+        let admission_id = stable_receipt_ids(
+            "issuer.device-trust.alpha",
+            "claim-revocation-race",
+        )
+        .0;
+        let locker = uncommitted_revocation(&server, &admission_id, "claim-race");
+        let params: crate::tool_params::TachiTaskParams = serde_json::from_value(
+            serde_json::json!({
+                "action": "claim",
+                "branch": "lane/revocation-race",
+                "claim_role": "executor",
+                "claim_mode": "writable",
+                "worktree_path": "/tmp/revocation-race",
+                "claim_scope": ["src/lib.rs"],
+                "expected_head": "head",
+                "lease_expires_at": "2099-01-01T00:00:00Z"
+            }),
+        )
+        .unwrap();
+        let error = std::thread::scope(|scope| {
+            let (started_tx, started_rx) = std::sync::mpsc::channel();
+            let worker = scope.spawn(|| {
+                started_tx.send(()).unwrap();
+                crate::claims_ops::handle_task_claim(&server, &params)
+            });
+            started_rx.recv().unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            locker.execute_batch("COMMIT").unwrap();
+            worker
+                .join()
+                .unwrap()
+                .expect_err("committed revocation must win before claim insertion")
+        });
+        assert!(error.contains("expired, revoked"), "{error}");
+        let claims: i64 = server
+            .with_global_store_read(|store| {
+                store
+                    .connection()
+                    .query_row("SELECT COUNT(*) FROM session_claims", [], |row| row.get(0))
+                    .map_err(|error| error.to_string())
+            })
+            .unwrap();
+        assert_eq!(claims, 0);
+    }
+
+    #[test]
+    fn committed_revocation_wins_before_delivery_mutation_on_independent_connection() {
+        let server = make_server();
+        admit_verified_agent_connection(
+            &server,
+            &request("delivery-revocation-race"),
+            &verifier(evidence(Utc::now())),
+        )
+        .unwrap();
+        server
+            .with_global_store(|store| {
+                memcore::mint_delivery_intent(
+                    store.connection(),
+                    &memcore::NewDeliveryIntent {
+                        idempotency_key: "delivery-revocation-race".into(),
+                        execution_source: memcore::DeliveryExecutionSource::ManagedDispatch,
+                        execution_ref: "dispatch-revocation-race".into(),
+                        terminal_receipt_revision: 1,
+                        work_claim_id: None,
+                        result_ref: "artifact://revocation-race/result".into(),
+                        result_revision: 1,
+                        payload_digest: "sha256-revocation-race".into(),
+                        visibility_class: memcore::DeliveryVisibilityClass::Public,
+                        delivery_policy: memcore::DeliveryPolicy::ReturnToCurrentCall,
+                        protocol_capability: "result-ref-v1".into(),
+                        requester: memcore::DeliveryRequesterBinding::default(),
+                        expires_at: None,
+                        correction: false,
+                    },
+                )
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+            })
+            .unwrap();
+        let admission_id = stable_receipt_ids(
+            "issuer.device-trust.alpha",
+            "delivery-revocation-race",
+        )
+        .0;
+        let locker = uncommitted_revocation(&server, &admission_id, "delivery-race");
+        let params: crate::tool_params::TachiDeliveryParams = serde_json::from_value(
+            serde_json::json!({
+                "action": "claim_ready_delivery",
+                "agent_identity_id": "agent.remote.alpha",
+                "host_identity": "agent.remote.alpha",
+                "claim_key": "delivery-race-claim",
+                "lease_seconds": 300
+            }),
+        )
+        .unwrap();
+        let error = std::thread::scope(|scope| {
+            let (started_tx, started_rx) = std::sync::mpsc::channel();
+            let worker = scope.spawn(|| {
+                started_tx.send(()).unwrap();
+                crate::delivery_ops::handle_tachi_delivery(&server, params)
+            });
+            started_rx.recv().unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            locker.execute_batch("COMMIT").unwrap();
+            worker
+                .join()
+                .unwrap()
+                .expect_err("committed revocation must win before delivery claim")
+        });
+        assert!(error.contains("expired, revoked"), "{error}");
+        let state: (String, i64) = server
+            .with_global_store_read(|store| {
+                store
+                    .connection()
+                    .query_row(
+                        "SELECT delivery_state, attempt_count FROM delivery_intents
+                         WHERE idempotency_key='delivery-revocation-race'",
+                        [],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .map_err(|error| error.to_string())
+            })
+            .unwrap();
+        assert_eq!(state, ("ready".to_string(), 0));
     }
 
     #[test]

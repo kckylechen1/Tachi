@@ -55,7 +55,7 @@ CREATE TABLE identity_admission_verification_receipts (
     UNIQUE (issuer_id, trust_domain, nonce),
     FOREIGN KEY (admission_id, agent_identity_id, connection_id)
         REFERENCES identity_admissions(admission_id, agent_identity_id, connection_id)
-)
+) WITHOUT ROWID
 "#;
 
 const RECEIPTS_IDENTITY_INDEX_SQL: &str = r#"
@@ -80,7 +80,7 @@ CREATE TABLE identity_admission_verification_revocations (
     nonce TEXT NOT NULL,
     revoked_at TEXT NOT NULL,
     UNIQUE (issuer_id, nonce)
-)
+) WITHOUT ROWID
 "#;
 
 const REVOCATIONS_ADMISSION_INDEX_SQL: &str = r#"
@@ -134,7 +134,16 @@ CREATE TRIGGER identity_verified_admissions_no_replace
 BEFORE INSERT ON identity_admissions
 WHEN EXISTS (
     SELECT 1 FROM identity_admissions
-    WHERE admission_id = NEW.admission_id AND state = 'verified'
+    WHERE state = 'verified'
+      AND (
+          rowid = NEW.rowid
+          OR admission_id = NEW.admission_id
+          OR (
+              NEW.agent_identity_id IS NOT NULL
+              AND agent_identity_id = NEW.agent_identity_id
+              AND connection_id = NEW.connection_id
+          )
+      )
 )
 BEGIN
     SELECT RAISE(ABORT, 'verified identity admissions are append-only');
@@ -145,6 +154,21 @@ const ADMISSION_NO_UPDATE_SQL: &str = r#"
 CREATE TRIGGER identity_verified_admissions_no_update
 BEFORE UPDATE ON identity_admissions
 WHEN OLD.state = 'verified'
+  OR NEW.state = 'verified'
+  OR EXISTS (
+      SELECT 1 FROM identity_admissions
+      WHERE state = 'verified'
+        AND rowid != OLD.rowid
+        AND (
+            rowid = NEW.rowid
+            OR admission_id = NEW.admission_id
+            OR (
+                NEW.agent_identity_id IS NOT NULL
+                AND agent_identity_id = NEW.agent_identity_id
+                AND connection_id = NEW.connection_id
+            )
+        )
+  )
 BEGIN
     SELECT RAISE(ABORT, 'verified identity admissions are append-only');
 END
@@ -270,6 +294,22 @@ const CANONICAL_OBJECTS: &[(&str, &str, &str, &str)] = &[
     ),
 ];
 
+/// Exact receipt coordinates a trusted consumer must present when a verified
+/// remote identity authorizes a write. Constructing this value grants no
+/// authority: the write gate resolves every field against current durable
+/// state inside the same SQLite transaction as the mutation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedAdmissionBinding {
+    pub admission_id: String,
+    pub agent_identity_id: String,
+    pub connection_id: String,
+    pub issuer_id: String,
+    pub verification_method: String,
+    pub verification_version: String,
+    pub trust_domain: String,
+    pub verification_scope: String,
+}
+
 /// Immutable public/read-side receipt for a verified admission.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedAdmissionReceipt {
@@ -387,6 +427,38 @@ pub fn has_current_verified_admission(
     Ok(found)
 }
 
+/// Serialize a verified-authority check with the write it authorizes.
+///
+/// `BEGIN IMMEDIATE` is acquired before the current receipt is read. A
+/// concurrent revocation therefore commits either before this check (and the
+/// write is refused) or after this transaction commits; it can never land
+/// between a successful check and the mutation.
+pub fn with_current_verified_admission_write<T>(
+    conn: &Connection,
+    binding: &VerifiedAdmissionBinding,
+    write: impl FnOnce(&Connection) -> Result<T, MemoryError>,
+) -> Result<T, MemoryError> {
+    super::common::with_composable_write(conn, |conn| {
+        if !has_current_verified_admission(
+            conn,
+            &binding.admission_id,
+            &binding.agent_identity_id,
+            &binding.connection_id,
+            &binding.issuer_id,
+            &binding.verification_method,
+            &binding.verification_version,
+            &binding.trust_domain,
+            &binding.verification_scope,
+        )? {
+            return Err(MemoryError::InvalidArg(
+                "verified admission is expired, revoked, or no longer bound to this connection"
+                    .to_string(),
+            ));
+        }
+        write(conn)
+    })
+}
+
 pub(crate) fn expected_verified_admission_trigger(
     name: &str,
 ) -> Option<(&'static str, &'static str, &'static str)> {
@@ -479,6 +551,56 @@ mod tests {
         conn
     }
 
+    fn insert_admission(conn: &Connection, suffix: &str) -> (String, String, String) {
+        let identity = format!("agent-{suffix}");
+        let admission = format!("admission-{suffix}");
+        let connection = format!("connection-{suffix}");
+        conn.execute(
+            "INSERT INTO agent_identities (agent_identity_id, created_at) VALUES (?1, '2026-09-19T00:00:00Z')",
+            [&identity],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO identity_admissions
+             (admission_id, agent_identity_id, connection_id, state, created_at)
+             VALUES (?1, ?2, ?3, 'verified', '2026-09-19T00:00:00Z')",
+            params![admission, identity, connection],
+        )
+        .unwrap();
+        (admission, identity, connection)
+    }
+
+    fn insert_receipt(conn: &Connection, suffix: &str) -> (String, String, String, String) {
+        let (admission, identity, connection) = insert_admission(conn, suffix);
+        let receipt = format!("receipt-{suffix}");
+        conn.execute(
+            "INSERT INTO identity_admission_verification_receipts
+             (receipt_id, admission_id, agent_identity_id, connection_id, issuer_id,
+              verification_method, verification_version, trust_domain, verification_scope,
+              evidence_digest, evidence_ref, evidence_issued_at, evidence_expires_at, nonce,
+              idempotency_key, request_digest, current_state, verified_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, 'device-envelope', 'v1', ?6,
+                     'agent_identity:remote_admission', ?7, ?8,
+                     '2026-09-19T00:00:00Z', '2099-01-01T00:00:00Z', ?9, ?10, ?11,
+                     'verified', '2026-09-19T00:00:00Z')",
+            params![
+                receipt,
+                admission,
+                identity,
+                connection,
+                format!("issuer-{suffix}"),
+                format!("workspace:{suffix}"),
+                "a".repeat(64),
+                format!("attestation:device:{suffix}"),
+                format!("nonce-{suffix}"),
+                format!("key-{suffix}"),
+                "b".repeat(64),
+            ],
+        )
+        .unwrap();
+        (receipt, admission, identity, connection)
+    }
+
     #[test]
     fn replace_update_and_delete_cannot_rewrite_verified_history() {
         let conn = open_conn();
@@ -532,6 +654,233 @@ mod tests {
             )
             .unwrap();
         assert_eq!(evidence_ref, "attestation:device:one");
+
+        let admission_rowid: i64 = conn
+            .query_row(
+                "SELECT rowid FROM identity_admissions WHERE admission_id='admission-v'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        conn.execute(
+            "INSERT INTO agent_identities (agent_identity_id, created_at)
+             VALUES ('agent-source', '2026-09-19T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO identity_admissions
+             (admission_id, agent_identity_id, connection_id, state, created_at)
+             VALUES ('admission-source', 'agent-source', 'connection-source', 'self_asserted',
+                     '2026-09-19T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        for (label, sql) in [
+            (
+                "hidden-rowid insert replacement",
+                format!(
+                    "INSERT OR REPLACE INTO identity_admissions
+                     (rowid, admission_id, agent_identity_id, connection_id, state, created_at)
+                     VALUES ({admission_rowid}, 'admission-rowid-mutant', 'agent-source',
+                             'connection-rowid-mutant', 'unavailable', '2026-09-19T00:00:00Z')"
+                ),
+            ),
+            (
+                "admission-id victim update replacement",
+                "UPDATE OR REPLACE identity_admissions SET admission_id='admission-v'
+                 WHERE admission_id='admission-source'"
+                    .to_string(),
+            ),
+            (
+                "identity-connection victim update replacement",
+                "UPDATE OR REPLACE identity_admissions
+                 SET agent_identity_id='agent-v', connection_id='connection-v'
+                 WHERE admission_id='admission-source'"
+                    .to_string(),
+            ),
+            (
+                "hidden-rowid victim update replacement",
+                format!(
+                    "UPDATE OR REPLACE identity_admissions SET rowid={admission_rowid}
+                     WHERE admission_id='admission-source'"
+                ),
+            ),
+        ] {
+            let error = conn.execute(&sql, []).expect_err(label);
+            assert!(error.to_string().contains("append-only"), "{label}: {error}");
+        }
+        let preserved: (String, String) = conn
+            .query_row(
+                "SELECT state, connection_id FROM identity_admissions
+                 WHERE admission_id='admission-v'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(preserved, ("verified".to_string(), "connection-v".to_string()));
+    }
+
+    #[test]
+    fn every_receipt_and_revocation_replace_target_is_append_only() {
+        let conn = open_conn();
+        let (_, admission_a, identity_a, connection_a) = insert_receipt(&conn, "a");
+        let (_, admission_b, identity_b, connection_b) = insert_receipt(&conn, "b");
+        let (admission_c, identity_c, connection_c) = insert_admission(&conn, "c");
+        let (admission_d, identity_d, connection_d) = insert_admission(&conn, "d");
+        let (admission_e, identity_e, connection_e) = insert_admission(&conn, "e");
+
+        assert!(
+            conn.query_row(
+                "SELECT rowid FROM identity_admission_verification_receipts LIMIT 1",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .is_err(),
+            "receipt table must expose no hidden rowid replacement target"
+        );
+        let receipt_insert = |receipt: &str,
+                              admission: &str,
+                              identity: &str,
+                              connection: &str,
+                              issuer: &str,
+                              domain: &str,
+                              nonce: &str,
+                              key: &str| {
+            conn.execute(
+                "INSERT OR REPLACE INTO identity_admission_verification_receipts
+                 (receipt_id, admission_id, agent_identity_id, connection_id, issuer_id,
+                  verification_method, verification_version, trust_domain, verification_scope,
+                  evidence_digest, evidence_ref, evidence_issued_at, evidence_expires_at, nonce,
+                  idempotency_key, request_digest, current_state, verified_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, 'device-envelope', 'v1', ?6,
+                         'agent_identity:remote_admission', ?7, 'attestation:device:mutant',
+                         '2026-09-19T00:00:00Z', '2099-01-01T00:00:00Z', ?8, ?9, ?10,
+                         'verified', '2026-09-19T00:00:00Z')",
+                params![receipt, admission, identity, connection, issuer, domain,
+                    "c".repeat(64), nonce, key, "d".repeat(64)],
+            )
+        };
+        for (label, result) in [
+            (
+                "receipt_id",
+                receipt_insert(
+                    "receipt-a",
+                    &admission_c,
+                    &identity_c,
+                    &connection_c,
+                    "issuer-c",
+                    "workspace:c",
+                    "nonce-c",
+                    "key-c",
+                ),
+            ),
+            (
+                "admission_id",
+                receipt_insert(
+                    "receipt-admission-mutant",
+                    &admission_a,
+                    &identity_a,
+                    &connection_a,
+                    "issuer-admission-mutant",
+                    "workspace:admission-mutant",
+                    "nonce-admission-mutant",
+                    "key-admission-mutant",
+                ),
+            ),
+            (
+                "issuer-idempotency",
+                receipt_insert(
+                    "receipt-idempotency-mutant",
+                    &admission_d,
+                    &identity_d,
+                    &connection_d,
+                    "issuer-a",
+                    "workspace:idempotency-mutant",
+                    "nonce-idempotency-mutant",
+                    "key-a",
+                ),
+            ),
+            (
+                "issuer-domain-nonce",
+                receipt_insert(
+                    "receipt-nonce-mutant",
+                    &admission_e,
+                    &identity_e,
+                    &connection_e,
+                    "issuer-a",
+                    "workspace:a",
+                    "nonce-a",
+                    "key-nonce-mutant",
+                ),
+            ),
+        ] {
+            let error = result.expect_err(label);
+            assert!(error.to_string().contains("append-only"), "{label}: {error}");
+        }
+
+        conn.execute(
+            "INSERT INTO identity_admission_verification_revocations
+             (revocation_id, admission_id, issuer_id, evidence_digest, evidence_ref, nonce, revoked_at)
+             VALUES ('revocation-a', ?1, 'issuer-a', ?2, 'attestation:device:revoke-a',
+                     'revocation-nonce-a', '2026-09-19T00:00:00Z')",
+            params![admission_a, "e".repeat(64)],
+        )
+        .unwrap();
+        assert!(
+            conn.execute(
+                "INSERT OR REPLACE INTO identity_admission_verification_revocations
+                 (rowid, revocation_id, admission_id, issuer_id, evidence_digest, evidence_ref,
+                  nonce, revoked_at)
+                 VALUES (1, 'revocation-rowid-mutant', ?1, 'issuer-b', ?2,
+                         'attestation:device:rowid-mutant', 'revocation-rowid-mutant',
+                         '2026-09-19T00:00:00Z')",
+                params![admission_b, "f".repeat(64)],
+            )
+            .is_err(),
+            "revocation table must expose no hidden rowid replacement target"
+        );
+        for (label, revocation_id, admission, issuer, nonce) in [
+            ("revocation_id", "revocation-a", &admission_b, "issuer-b", "unique-b"),
+            ("admission_id", "revocation-admission", &admission_a, "issuer-x", "unique-x"),
+            ("issuer-nonce", "revocation-nonce", &admission_b, "issuer-a", "revocation-nonce-a"),
+        ] {
+            let error = conn
+                .execute(
+                    "INSERT OR REPLACE INTO identity_admission_verification_revocations
+                     (revocation_id, admission_id, issuer_id, evidence_digest, evidence_ref, nonce,
+                      revoked_at)
+                     VALUES (?1, ?2, ?3, ?4, 'attestation:device:revocation-mutant', ?5,
+                             '2026-09-19T00:00:00Z')",
+                    params![revocation_id, admission, issuer, "f".repeat(64), nonce],
+                )
+                .expect_err(label);
+            assert!(error.to_string().contains("append-only"), "{label}: {error}");
+        }
+        assert!(!has_current_verified_admission(
+            &conn,
+            &admission_a,
+            &identity_a,
+            &connection_a,
+            "issuer-a",
+            VERIFIED_ADMISSION_METHOD,
+            VERIFIED_ADMISSION_VERSION,
+            "workspace:a",
+            VERIFIED_ADMISSION_SCOPE,
+        )
+        .unwrap());
+        assert!(has_current_verified_admission(
+            &conn,
+            &admission_b,
+            &identity_b,
+            &connection_b,
+            "issuer-b",
+            VERIFIED_ADMISSION_METHOD,
+            VERIFIED_ADMISSION_VERSION,
+            "workspace:b",
+            VERIFIED_ADMISSION_SCOPE,
+        )
+        .unwrap());
     }
 
     #[test]
