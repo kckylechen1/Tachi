@@ -389,6 +389,18 @@ mod tests {
             cross_backend.contains("does not authorize the selected"),
             "LaunchSpec backend identity is an authority fence: {cross_backend}"
         );
+        let codex_assignment = assignment("codex", "codex", None);
+        let reverse_cross_backend = prepared_command(
+            &codex_assignment,
+            &custom_grant,
+            Some(&custom_launch_spec),
+            &["poisoned-command".to_string()],
+        )
+        .expect_err("Codex must not consume a custom adapter LaunchSpec");
+        assert!(
+            reverse_cross_backend.contains("does not authorize the selected"),
+            "the backend identity fence must reject both mismatch directions: {reverse_cross_backend}"
+        );
         let custom = prepared_command(
             &custom_assignment,
             &grant("/legacy-bootstrap-poison"),
@@ -588,26 +600,55 @@ mod tests {
 
         std::fs::write(
             &codex_path,
-            "#!/bin/sh\nif [ \"$1\" = login ]; then printf '%s\\n' \"$$\" > \"$0.pid\"; while :; do :; done; fi\nprintf 'codex-cli 0.144.1\\n'\n",
+            "#!/bin/sh\nif [ \"$1\" = login ]; then if IFS= read -r daemon_input; then exit 91; fi; exit 0; fi\nprintf 'codex-cli 0.144.1\\n'\n",
+        )
+        .expect("write stdin-isolation account fixture");
+        super::super::probe_codex_account(
+            &codex_path,
+            std::time::Duration::from_millis(500),
+        )
+        .await
+        .expect("account probe must observe EOF instead of daemon stdin");
+
+        std::fs::write(
+            &codex_path,
+            "#!/bin/sh\nif [ \"$1\" = login ]; then printf '%s\\n' \"$$\" > \"$0.pid\"; /bin/sh -c 'printf \"%s\\n\" \"$$\" > \"$1\"; while :; do :; done' sh \"$0.descendant.pid\" & while [ ! -s \"$0.descendant.pid\" ]; do :; done; while :; do :; done; fi\nprintf 'codex-cli 0.144.1\\n'\n",
         )
         .expect("write hanging account fixture");
-        let timed_out = super::super::probe_codex_account(std::time::Duration::from_millis(500))
-            .await
-            .expect_err("a hanging account probe must fail closed");
+        let timed_out = super::super::probe_codex_account(
+            &codex_path,
+            std::time::Duration::from_millis(500),
+        )
+        .await
+        .expect_err("a hanging account probe must fail closed");
         assert_eq!(
             timed_out,
             "managed_backend_account_unavailable: codex account probe timed out"
         );
-        let account_pid: libc::pid_t = std::fs::read_to_string(
-            empty_bin.path().join("codex.pid"),
-        )
-        .expect("hanging account fixture published its PID")
-        .trim()
-        .parse()
-        .expect("numeric account probe PID");
-        // SAFETY: signal 0 is a non-mutating liveness probe for the child that
-        // the timeout path must already have killed and reaped.
-        assert_eq!(unsafe { libc::kill(account_pid, 0) }, -1);
+        let account_pid: libc::pid_t =
+            std::fs::read_to_string(empty_bin.path().join("codex.pid"))
+                .expect("hanging account fixture published its PID")
+                .trim()
+                .parse()
+                .expect("numeric account probe PID");
+        let descendant_pid: libc::pid_t =
+            std::fs::read_to_string(empty_bin.path().join("codex.descendant.pid"))
+                .expect("hanging account fixture published its descendant PID")
+                .trim()
+                .parse()
+                .expect("numeric account descendant PID");
+        for pid in [account_pid, descendant_pid] {
+            // SAFETY: signal 0 is a non-mutating liveness probe for a fixture
+            // process that the canonical group cleanup must have reaped.
+            assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
+            assert_eq!(
+                std::io::Error::last_os_error().raw_os_error(),
+                Some(libc::ESRCH)
+            );
+        }
+        // SAFETY: the fixture root was launched as its owned process-group
+        // leader; ESRCH is the authoritative group-absence proof.
+        assert_eq!(unsafe { libc::kill(-account_pid, 0) }, -1);
         assert_eq!(
             std::io::Error::last_os_error().raw_os_error(),
             Some(libc::ESRCH)
@@ -615,9 +656,9 @@ mod tests {
 
         std::fs::write(
             &codex_path,
-            "#!/bin/sh\nif [ \"$1\" = login ]; then printf 'fixture-account-secret' >&2; exit 0; fi\nprintf 'codex-cli 0.144.1+fixture-version-stdout-secret\\n'\nprintf 'codex-cli 0.144.1+fixture-version-stderr-secret\\n' >&2\n",
+            "#!/bin/sh\nif [ \"$1\" = login ]; then printf 'fixture-account-secret' >&2; exit 0; fi\nprintf 'fixture-version-stdout-secret\\n'\nprintf 'codex-cli 0.144.1+fixture-version-stderr-secret\\n' >&2\n",
         )
-        .expect("write hostile successful version fixture");
+        .expect("write hostile successful stderr-only version fixture");
         let metadata = super::super::managed_backend_metadata(
             super::super::ManagedControlOrigin::StaffFacade,
             &codex,

@@ -340,7 +340,7 @@ pub(crate) mod tests {
         std::fs::write(
             &worker,
             format!(
-                "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  printf 'codex-cli 0.144.1+fixture-version-stdout-secret\\n'\n  printf 'codex-cli 0.144.1+fixture-version-stderr-secret\\n' >&2\n  exit 0\nfi\nif [ \"$1\" = \"login\" ] && [ \"$2\" = \"status\" ]; then\n  printf 'Logged in using hermetic fixture\\n'\n  exit 0\nfi\nprintf '%s\\n' \"$$\" > \"$0.pid\"\ncount=0\nwhile [ ! -e \"$0.release\" ] && [ \"$count\" -lt 200 ]; do\n  /bin/sleep 0.05\n  count=$((count + 1))\ndone\n[ -e \"$0.release\" ] || exit 98\nprintf 'staff fake worker\\n'\nexit {exit_code}\n"
+                "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  printf 'fixture-version-stdout-secret\\n'\n  printf 'codex-cli 0.144.1+fixture-version-stderr-secret\\n' >&2\n  exit 0\nfi\nif [ \"$1\" = \"login\" ] && [ \"$2\" = \"status\" ]; then\n  printf 'Logged in using hermetic fixture\\n'\n  exit 0\nfi\nprintf '%s\\n' \"$$\" > \"$0.pid\"\ncount=0\nwhile [ ! -e \"$0.release\" ] && [ \"$count\" -lt 200 ]; do\n  /bin/sleep 0.05\n  count=$((count + 1))\ndone\n[ -e \"$0.release\" ] || exit 98\nprintf 'staff fake worker\\n'\nexit {exit_code}\n"
             ),
         )
         .expect("write fake codex worker");
@@ -2974,10 +2974,7 @@ pub(crate) mod tests {
             ("cwd", serde_json::json!("/attacker-cwd")),
             ("env", serde_json::json!({"PATH": "/attacker-bin"})),
             ("credential", serde_json::json!("attacker-credential")),
-            (
-                "credentials",
-                serde_json::json!(["attacker-credential"]),
-            ),
+            ("credentials", serde_json::json!(["attacker-credential"])),
             (
                 "credential_profiles",
                 serde_json::json!(["attacker-profile"]),
@@ -2998,8 +2995,7 @@ pub(crate) mod tests {
             let error = serde_json::from_value::<StaffStartRequest>(hostile)
                 .expect_err("each execution-authority field must fail on its own");
             assert!(
-                error.to_string().contains("unknown field")
-                    && error.to_string().contains(field),
+                error.to_string().contains("unknown field") && error.to_string().contains(field),
                 "hostile field {field} must be independently rejected: {error}"
             );
         }

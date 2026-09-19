@@ -511,40 +511,88 @@ fn validate_managed_launch_spec_timeout(
 }
 
 /// Probe the existing Codex CLI account without capturing or persisting its
-/// output. The child is owned until exit; timeout termination is awaited before
-/// this function returns, so a refused prerequisite cannot survive outside the
-/// managed lifecycle.
-async fn probe_codex_account(timeout: Duration) -> Result<(), String> {
-    let mut probe = tokio::process::Command::new("codex");
+/// output. The probe reuses the managed subprocess process-group ownership
+/// kernel, including escape containment and terminal group-absence proof, so a
+/// refused prerequisite cannot survive outside the managed lifecycle.
+#[cfg(not(unix))]
+async fn probe_codex_account(program: &Path, timeout: Duration) -> Result<(), String> {
+    let _ = (program, timeout);
+    Err(
+        "managed_backend_account_unavailable: process-tree cleanup is unavailable on this host"
+            .to_string(),
+    )
+}
+
+#[cfg(unix)]
+async fn probe_codex_account(program: &Path, timeout: Duration) -> Result<(), String> {
+    let mut probe = tokio::process::Command::new(program);
     probe
         .args(["login", "status"])
+        .kill_on_drop(false);
+    if !crate::dispatch_ops::subprocess::configure_required_postflight_containment(&mut probe) {
+        return Err(
+            "managed_backend_account_unavailable: process-tree containment is unavailable on this host"
+                .to_string(),
+        );
+    }
+    probe
+        .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .kill_on_drop(true);
+        .stderr(std::process::Stdio::null());
+    crate::dispatch_ops::subprocess::configure_process_group(&mut probe);
     let mut child = probe.spawn().map_err(|_| {
         "managed_backend_executable_unavailable: codex executable is unavailable".to_string()
     })?;
-    let status = match tokio::time::timeout(timeout, child.wait()).await {
-        Ok(Ok(status)) => status,
-        Ok(Err(_)) => {
-            let _ = child.kill().await;
+    let child_pid = child.id();
+    let mut process_group =
+        crate::dispatch_ops::subprocess::ManagedProcessGroupGuard::arm(child_pid);
+    let root_exit =
+        crate::dispatch_ops::subprocess::wait_for_owned_root_exit(child_pid, timeout).await;
+    let (status, liveness) = crate::dispatch_ops::subprocess::terminate_reap_and_prove(
+        &mut child,
+        &mut process_group,
+        true,
+    )
+    .await;
+    let cleanup_confirmed = matches!(
+        liveness,
+        crate::exec_env_postflight::RunnerLivenessEvidence::ConfirmedReaped { .. }
+    );
+    let status = match status {
+        Ok(status) if cleanup_confirmed => status,
+        _ => {
+            return Err(
+                "managed_backend_account_unavailable: codex account probe cleanup was not confirmed"
+                    .to_string(),
+            )
+        }
+    };
+    match root_exit {
+        Ok(true) => {}
+        Ok(false) => {
+            return Err(
+                "managed_backend_account_unavailable: codex account probe timed out".to_string(),
+            )
+        }
+        Err(_) => {
             return Err(
                 "managed_backend_account_unavailable: codex account probe failed".to_string(),
             )
         }
-        Err(_) => {
-            let _ = child.kill().await;
-            return Err(
-                "managed_backend_account_unavailable: codex account probe timed out".to_string(),
-            );
-        }
-    };
+    }
     if !status.success() {
         return Err(
             "managed_backend_account_unavailable: codex account is unavailable".to_string(),
         );
     }
     Ok(())
+}
+
+fn resolve_managed_backend_executable(program: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|directory| directory.join(program))
+        .find(|candidate| candidate.is_file())
 }
 
 /// Secret-negative prerequisite check and evidence for the single real
@@ -578,7 +626,11 @@ async fn managed_backend_metadata(
                             .to_string(),
                     );
                 }
-                probe_codex_account(ACCOUNT_PROBE_TIMEOUT).await?;
+                let executable = resolve_managed_backend_executable("codex").ok_or_else(|| {
+                    "managed_backend_executable_unavailable: codex executable is unavailable"
+                        .to_string()
+                })?;
+                probe_codex_account(&executable, ACCOUNT_PROBE_TIMEOUT).await?;
                 let version = tachi_dispatch::probe_backend_version("codex").ok_or_else(|| {
                     "managed_backend_version_unavailable: codex version is unavailable".to_string()
                 })?;
