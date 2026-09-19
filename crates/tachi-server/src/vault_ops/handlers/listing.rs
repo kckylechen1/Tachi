@@ -380,10 +380,7 @@ pub(crate) fn build_vault_list_payload(
                 "bound_slots".to_string(),
                 json!(claims.slots.iter().collect::<Vec<_>>()),
             );
-            object.insert(
-                "last_probe_class".to_string(),
-                json!(probe_class),
-            );
+            object.insert("last_probe_class".to_string(), json!(probe_class));
             object.insert(
                 "last_probe_at".to_string(),
                 probe_at.map_or(serde_json::Value::Null, |value| json!(value)),
@@ -649,7 +646,10 @@ mod tests {
         let observation = probe_observation(Some(&unknown));
         assert_eq!(observation.0, "unknown");
         assert_eq!(observation.1.as_deref(), Some(at(2).to_rfc3339().as_str()));
-        assert_eq!(unknown.last_error.as_deref(), Some("RAW_PROVIDER_BODY_SENTINEL"));
+        assert_eq!(
+            unknown.last_error.as_deref(),
+            Some("RAW_PROVIDER_BODY_SENTINEL")
+        );
 
         let first_unknown = record_key_outcome(
             None,
@@ -763,10 +763,7 @@ mod tests {
         let account = entry("DEEPSEEK_API_KEY");
         let detected_conflict = binding_claims(
             "DEEPSEEK_API_KEY",
-            &HashMap::from([(
-                "EXTRACT_API_KEY".to_string(),
-                "OPENAI_API_KEY".to_string(),
-            )]),
+            &HashMap::from([("EXTRACT_API_KEY".to_string(), "OPENAI_API_KEY".to_string())]),
             &HashMap::from([(
                 "EXTRACT_API_KEY".to_string(),
                 BTreeSet::from(["DEEPSEEK_API_KEY".to_string()]),
@@ -777,10 +774,7 @@ mod tests {
             BTreeSet::from(["EXTRACT_API_KEY".to_string()])
         );
         let claims = BindingClaims {
-            slots: BTreeSet::from([
-                "EXTRACT_API_KEY".to_string(),
-                "SUMMARY_API_KEY".to_string(),
-            ]),
+            slots: BTreeSet::from(["EXTRACT_API_KEY".to_string(), "SUMMARY_API_KEY".to_string()]),
             conflicts: BTreeSet::new(),
         };
         let one_binding = HashMap::from([(
@@ -883,7 +877,10 @@ mod tests {
                 configured_logical_name(member, &[], &rotations),
                 "DEEPSEEK_API_KEY"
             );
-            assert_eq!(claims.slots, BTreeSet::from(["EXTRACT_API_KEY".to_string()]));
+            assert_eq!(
+                claims.slots,
+                BTreeSet::from(["EXTRACT_API_KEY".to_string()])
+            );
             assert_eq!(
                 alias_integrity(
                     &entry(member),
