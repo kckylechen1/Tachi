@@ -453,7 +453,10 @@ fn run_version_probe_with_timeout(program: &std::path::Path, timeout: Duration) 
 }
 
 #[cfg(not(unix))]
-fn run_version_probe_with_timeout(_program: &std::path::Path, _timeout: Duration) -> Option<String> {
+fn run_version_probe_with_timeout(
+    _program: &std::path::Path,
+    _timeout: Duration,
+) -> Option<String> {
     // The managed canary refuses before spawn on hosts where this crate cannot
     // own and prove termination of the prerequisite process tree.
     None
@@ -752,7 +755,9 @@ mod tests {
             .unwrap_or_else(|error| panic!("fixture did not publish {}: {error}", path.display()))
             .trim()
             .parse()
-            .unwrap_or_else(|error| panic!("fixture PID in {} was invalid: {error}", path.display()))
+            .unwrap_or_else(|error| {
+                panic!("fixture PID in {} was invalid: {error}", path.display())
+            })
     }
 
     #[cfg(unix)]
@@ -864,9 +869,8 @@ mod tests {
         use std::sync::Arc;
 
         let second_reader_joined = Arc::new(AtomicBool::new(false));
-        let stdout_reader = std::thread::spawn(|| -> Option<Vec<u8>> {
-            panic!("injected stdout reader panic")
-        });
+        let stdout_reader =
+            std::thread::spawn(|| -> Option<Vec<u8>> { panic!("injected stdout reader panic") });
         let joined = Arc::clone(&second_reader_joined);
         let stderr_reader = std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(25));

@@ -603,34 +603,28 @@ mod tests {
             "#!/bin/sh\nif [ \"$1\" = login ]; then if IFS= read -r daemon_input; then exit 91; fi; exit 0; fi\nprintf 'codex-cli 0.144.1\\n'\n",
         )
         .expect("write stdin-isolation account fixture");
-        super::super::probe_codex_account(
-            &codex_path,
-            std::time::Duration::from_millis(500),
-        )
-        .await
-        .expect("account probe must observe EOF instead of daemon stdin");
+        super::super::probe_codex_account(&codex_path, std::time::Duration::from_millis(500))
+            .await
+            .expect("account probe must observe EOF instead of daemon stdin");
 
         std::fs::write(
             &codex_path,
             "#!/bin/sh\nif [ \"$1\" = login ]; then printf '%s\\n' \"$$\" > \"$0.pid\"; /bin/sh -c 'printf \"%s\\n\" \"$$\" > \"$1\"; while :; do :; done' sh \"$0.descendant.pid\" & while [ ! -s \"$0.descendant.pid\" ]; do :; done; while :; do :; done; fi\nprintf 'codex-cli 0.144.1\\n'\n",
         )
         .expect("write hanging account fixture");
-        let timed_out = super::super::probe_codex_account(
-            &codex_path,
-            std::time::Duration::from_millis(500),
-        )
-        .await
-        .expect_err("a hanging account probe must fail closed");
+        let timed_out =
+            super::super::probe_codex_account(&codex_path, std::time::Duration::from_millis(500))
+                .await
+                .expect_err("a hanging account probe must fail closed");
         assert_eq!(
             timed_out,
             "managed_backend_account_unavailable: codex account probe timed out"
         );
-        let account_pid: libc::pid_t =
-            std::fs::read_to_string(empty_bin.path().join("codex.pid"))
-                .expect("hanging account fixture published its PID")
-                .trim()
-                .parse()
-                .expect("numeric account probe PID");
+        let account_pid: libc::pid_t = std::fs::read_to_string(empty_bin.path().join("codex.pid"))
+            .expect("hanging account fixture published its PID")
+            .trim()
+            .parse()
+            .expect("numeric account probe PID");
         let descendant_pid: libc::pid_t =
             std::fs::read_to_string(empty_bin.path().join("codex.descendant.pid"))
                 .expect("hanging account fixture published its descendant PID")

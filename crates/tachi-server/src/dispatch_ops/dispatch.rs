@@ -526,9 +526,7 @@ async fn probe_codex_account(program: &Path, timeout: Duration) -> Result<(), St
 #[cfg(unix)]
 async fn probe_codex_account(program: &Path, timeout: Duration) -> Result<(), String> {
     let mut probe = tokio::process::Command::new(program);
-    probe
-        .args(["login", "status"])
-        .kill_on_drop(false);
+    probe.args(["login", "status"]).kill_on_drop(false);
     if !crate::dispatch_ops::subprocess::configure_required_postflight_containment(&mut probe) {
         return Err(
             "managed_backend_account_unavailable: process-tree containment is unavailable on this host"
@@ -560,12 +558,10 @@ async fn probe_codex_account(program: &Path, timeout: Duration) -> Result<(), St
     );
     let status = match status {
         Ok(status) if cleanup_confirmed => status,
-        _ => {
-            return Err(
-                "managed_backend_account_unavailable: codex account probe cleanup was not confirmed"
-                    .to_string(),
-            )
-        }
+        _ => return Err(
+            "managed_backend_account_unavailable: codex account probe cleanup was not confirmed"
+                .to_string(),
+        ),
     };
     match root_exit {
         Ok(true) => {}
