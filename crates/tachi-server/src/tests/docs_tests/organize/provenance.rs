@@ -23,6 +23,13 @@ impl MockFinishReason {
     }
 }
 
+#[derive(Clone)]
+enum MockResponseModel {
+    Missing,
+    Null,
+    Named(String),
+}
+
 struct MockDocsClassifier {
     llm: LlmClient,
     requests: Arc<Mutex<Vec<Value>>>,
@@ -37,6 +44,19 @@ impl Drop for MockDocsClassifier {
 
 impl MockDocsClassifier {
     async fn start(content: &str, finish_reason: MockFinishReason) -> Self {
+        Self::start_with_model(
+            content,
+            finish_reason,
+            MockResponseModel::Named("mock-docs-classifier-v1".to_string()),
+        )
+        .await
+    }
+
+    async fn start_with_model(
+        content: &str,
+        finish_reason: MockFinishReason,
+        response_model: MockResponseModel,
+    ) -> Self {
         let content = content.to_string();
         let requests = Arc::new(Mutex::new(Vec::new()));
         let captured_requests = Arc::clone(&requests);
@@ -45,6 +65,7 @@ impl MockDocsClassifier {
             post(move |Json(request): Json<Value>| {
                 let content = content.clone();
                 let finish_reason = finish_reason.clone();
+                let response_model = response_model.clone();
                 captured_requests
                     .lock()
                     .expect("capture docs classification request")
@@ -64,12 +85,20 @@ impl MockDocsClassifier {
                                 .insert("finish_reason".to_string(), Value::String(reason));
                         }
                     }
-                    Json(json!({
+                    let mut response = json!({
                         "choices": [choice],
                         "usage": {"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18},
-                        "model": "mock-docs-classifier-v1",
-                    }))
-                    .into_response()
+                    });
+                    match response_model {
+                        MockResponseModel::Missing => {}
+                        MockResponseModel::Null => {
+                            response["model"] = Value::Null;
+                        }
+                        MockResponseModel::Named(model) => {
+                            response["model"] = Value::String(model);
+                        }
+                    }
+                    Json(response).into_response()
                 }
             }),
         );
@@ -465,6 +494,58 @@ async fn invalid_truncated_and_unsafe_model_outputs_never_create_clean_provenanc
             "{label}: {content}"
         );
         assert!(!content.contains("model title"), "{label}: {content}");
+        assert_eq!(classifier.request_count(), 1, "{label}");
+    }
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn missing_null_or_blank_response_model_falls_back_without_self_invalidating_receipt() {
+    for (label, response_model) in [
+        ("missing", MockResponseModel::Missing),
+        ("null", MockResponseModel::Null),
+        ("blank", MockResponseModel::Named("   ".to_string())),
+    ] {
+        let classifier = MockDocsClassifier::start_with_model(
+            &model_response(
+                "docs/product/acme",
+                "Identityless model title",
+                "Identityless model summary",
+            ),
+            MockFinishReason::named("stop"),
+            response_model,
+        )
+        .await;
+        let mut server = make_server();
+        install_classifier(&mut server, &classifier);
+        let workspace = DocsWorktree::new();
+        let docs = workspace.docs_path();
+        let filename = format!("debug-fix-model-{label}.md");
+        let source = docs.join(&filename);
+        fs::write(&source, "# Identity fallback body\n").unwrap();
+        let _model_mode = crate::docs_ops::enable_model_classification_for_test();
+
+        crate::docs_ops::handle_wiki_organize(&server, docs.to_str().unwrap(), false)
+            .await
+            .expect("identityless model response follows heuristic fallback policy");
+
+        let destination = docs.join("engineering/debugging").join(filename);
+        let first = fs::read_to_string(&destination).unwrap();
+        assert!(receipt_from_document(&first).is_none(), "{label}: {first}");
+        assert!(!first.contains("Identityless model title"), "{label}: {first}");
+
+        crate::docs_ops::handle_wiki_organize(&server, docs.to_str().unwrap(), true)
+            .await
+            .expect("fallback document must remain valid in preview");
+        crate::docs_ops::handle_wiki_organize(&server, docs.to_str().unwrap(), false)
+            .await
+            .expect("fallback document must remain valid on repeat apply");
+
+        let repeated = fs::read_to_string(destination).unwrap();
+        assert!(
+            receipt_from_document(&repeated).is_none(),
+            "{label}: {repeated}"
+        );
         assert_eq!(classifier.request_count(), 1, "{label}");
     }
 }

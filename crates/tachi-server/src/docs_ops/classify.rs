@@ -132,6 +132,21 @@ Respond ONLY with a JSON object. No markdown wrapping except the raw JSON conten
             );
             fallback_metadata(source_path, content)
         }
+        Ok(response)
+            if response
+                .invocation
+                .effective_provider()
+                .is_none_or(|provider| provider.trim().is_empty())
+                || response
+                    .invocation
+                    .effective_model()
+                    .is_none_or(|model| model.trim().is_empty()) =>
+        {
+            tracing::warn!(
+                "[wiki_organize] LLM classification lacked durable provider/model identity; falling back"
+            );
+            fallback_metadata(source_path, content)
+        }
         Ok(response) => match parse_model_classification(&response.value) {
             Ok((category_path, title, summary)) => ClassifiedMetadata {
                 category_path,
