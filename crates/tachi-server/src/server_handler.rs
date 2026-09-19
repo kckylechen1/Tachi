@@ -11,7 +11,9 @@ use crate::shared_defs::{
 use crate::utils::{lock_or_recover, stable_hash};
 use chrono::Utc;
 use memcore::{AuthorityLevel, EffectScope, TachiEventRecord};
-use rmcp::model::{InitializeRequestParams, InitializeResult, ServerCapabilities, ServerInfo};
+use rmcp::model::{
+    InitializeRequestParams, InitializeResult, RequestMetaObject, ServerCapabilities, ServerInfo,
+};
 use rmcp::service::{RequestContext, RoleServer};
 use rmcp::ServerHandler;
 use std::future::Future;
@@ -28,23 +30,6 @@ pub(crate) fn current_exposed_tool_patterns() -> Option<Vec<String>> {
                 .filter(|patterns| !patterns.is_empty())
         })
         .clone()
-}
-
-/// RMCP routes complete inline metadata statelessly even with an old version.
-/// Require initialize-time identity/project admission before tool access.
-pub(crate) fn require_legacy_session(
-    meta: &rmcp::model::RequestMetaObject,
-) -> Result<(), rmcp::ErrorData> {
-    if meta
-        .missing_required_keys(&rmcp::model::ProtocolVersion::V_2026_07_28)
-        .is_empty()
-    {
-        return Err(rmcp::ErrorData::invalid_request(
-            "legacy MCP initialize session required; inline requests are disabled",
-            None,
-        ));
-    }
-    Ok(())
 }
 
 fn tool_not_found_result(tool_name: &str) -> rmcp::model::CallToolResult {
@@ -708,6 +693,25 @@ impl MemoryServer {
         context: &RequestContext<RoleServer>,
     ) -> Result<(), rmcp::ErrorData> {
         let identity = http_session_identity(request, context);
+        self.apply_resolved_request_identity(identity, context)
+    }
+
+    fn clone_for_modern_request(
+        &self,
+        context: &RequestContext<RoleServer>,
+    ) -> Result<Self, rmcp::ErrorData> {
+        validate_modern_identity_headers(context)?;
+        let request_server = self.clone_for_mcp_session();
+        let identity = request_identity(Some(&context.meta), context);
+        request_server.apply_resolved_request_identity(identity, context)?;
+        Ok(request_server)
+    }
+
+    fn apply_resolved_request_identity(
+        &self,
+        identity: HttpSessionIdentity,
+        context: &RequestContext<RoleServer>,
+    ) -> Result<(), rmcp::ErrorData> {
         if let Some(err) = identity.project_error.as_deref() {
             return Err(rmcp::ErrorData::invalid_params(
                 format!("malformed X-Tachi-Project identity: {err}"),
@@ -801,6 +805,13 @@ fn http_session_identity(
     } else {
         Some(&context.meta)
     };
+    request_identity(meta, context)
+}
+
+fn request_identity(
+    meta: Option<&RequestMetaObject>,
+    context: &RequestContext<RoleServer>,
+) -> HttpSessionIdentity {
     let mut identity = identity_from_initialize_meta(meta);
     if let Some(parts) = context.extensions.get::<axum::http::request::Parts>() {
         identity.profile =
@@ -864,6 +875,75 @@ fn http_session_identity(
         );
     }
     identity
+}
+
+fn validate_modern_identity_headers(
+    context: &RequestContext<RoleServer>,
+) -> Result<(), rmcp::ErrorData> {
+    let Some(parts) = context.extensions.get::<axum::http::request::Parts>() else {
+        return Ok(());
+    };
+    for (header, canonical_meta, alias_meta) in [
+        (
+            crate::session_identity::HEADER_PROFILE,
+            crate::session_identity::META_PROFILE,
+            "tachi.profile",
+        ),
+        (
+            crate::session_identity::HEADER_CLIENT,
+            crate::session_identity::META_CLIENT,
+            "tachi.client",
+        ),
+        (
+            crate::session_identity::HEADER_AGENT_IDENTITY,
+            crate::session_identity::META_AGENT_IDENTITY,
+            "tachi.agentIdentity",
+        ),
+        (
+            crate::session_identity::HEADER_PROJECT,
+            crate::session_identity::META_PROJECT,
+            "tachi.project",
+        ),
+        (
+            crate::session_identity::HEADER_WORKSPACE_ROOT,
+            crate::session_identity::META_WORKSPACE_ROOT,
+            "tachi.workspaceRoot",
+        ),
+    ] {
+        let header_value = header_string_result(parts, header).map_err(|error| {
+            rmcp::ErrorData::invalid_params(format!("malformed {header} identity: {error}"), None)
+        })?;
+        let meta_value = aliased_meta_string_result(&context.meta, canonical_meta, alias_meta)
+            .map_err(|error| rmcp::ErrorData::invalid_params(error, None))?;
+        if let (Some(header_value), Some(meta_value)) = (&header_value, &meta_value)
+            && header_value != meta_value
+        {
+            return Err(rmcp::ErrorData::header_mismatch(
+                format!(
+                    "{header} header identity ({header_value}) does not match request _meta identity ({meta_value})"
+                ),
+                None,
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn aliased_meta_string_result(
+    meta: &RequestMetaObject,
+    canonical: &str,
+    alias: &str,
+) -> Result<Option<String>, String> {
+    let canonical_value = meta_string_result(meta, canonical)?;
+    let alias_value = meta_string_result(meta, alias)?;
+    if let (Some(canonical_value), Some(alias_value)) = (&canonical_value, &alias_value)
+        && canonical_value != alias_value
+    {
+        return Err(format!(
+            "conflicting request _meta identities: {canonical} ({canonical_value}) does not match {alias} ({alias_value})"
+        ));
+    }
+    Ok(canonical_value.or(alias_value))
 }
 
 /// Extract session identity fields from MCP initialize `_meta` (#732).
@@ -1018,29 +1098,27 @@ impl ServerHandler for MemoryServer {
     fn supported_protocol_versions(
         &self,
     ) -> std::borrow::Cow<'static, [rmcp::model::ProtocolVersion]> {
-        // Identity and project binding still use the legacy initialize lifecycle.
-        // Modern per-request admission belongs to the separate MCP-2026 adapter.
-        std::borrow::Cow::Borrowed(rmcp::model::ProtocolVersion::known_up_to(
-            &rmcp::model::ProtocolVersion::V_2025_11_25,
-        ))
+        std::borrow::Cow::Borrowed(crate::mcp_peer::supported_protocol_versions())
     }
 
     async fn discover(
         &self,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<rmcp::model::DiscoverResult, rmcp::ErrorData> {
-        Err(rmcp::ErrorData::method_not_found::<
-            rmcp::model::DiscoverRequestMethod,
-        >())
+        crate::mcp_peer::McpPeerMode::from_context(&context)?.require_modern()?;
+        Ok(rmcp::model::DiscoverResult::from_server_info(
+            crate::mcp_peer::supported_protocol_versions().to_vec(),
+            self.get_info(),
+        ))
     }
 
-    // Preserve the SDK's legacy empty results while closing its inline defaults.
+    // Preserve the SDK's empty inherited results in both implemented modes.
     async fn complete(
         &self,
         _request: rmcp::model::CompleteRequestParams,
         context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
     ) -> Result<rmcp::model::CompleteResult, rmcp::ErrorData> {
-        require_legacy_session(&context.meta)?;
+        crate::mcp_peer::McpPeerMode::from_context(&context)?;
         Ok(Default::default())
     }
 
@@ -1049,7 +1127,7 @@ impl ServerHandler for MemoryServer {
         _request: Option<rmcp::model::PaginatedRequestParams>,
         context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
     ) -> Result<rmcp::model::ListPromptsResult, rmcp::ErrorData> {
-        require_legacy_session(&context.meta)?;
+        crate::mcp_peer::McpPeerMode::from_context(&context)?;
         Ok(Default::default())
     }
 
@@ -1058,7 +1136,7 @@ impl ServerHandler for MemoryServer {
         _request: Option<rmcp::model::PaginatedRequestParams>,
         context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
     ) -> Result<rmcp::model::ListResourcesResult, rmcp::ErrorData> {
-        require_legacy_session(&context.meta)?;
+        crate::mcp_peer::McpPeerMode::from_context(&context)?;
         Ok(Default::default())
     }
 
@@ -1067,7 +1145,7 @@ impl ServerHandler for MemoryServer {
         _request: Option<rmcp::model::PaginatedRequestParams>,
         context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
     ) -> Result<rmcp::model::ListResourceTemplatesResult, rmcp::ErrorData> {
-        require_legacy_session(&context.meta)?;
+        crate::mcp_peer::McpPeerMode::from_context(&context)?;
         Ok(Default::default())
     }
 
@@ -1082,6 +1160,7 @@ impl ServerHandler for MemoryServer {
         context: RequestContext<RoleServer>,
     ) -> impl Future<Output = Result<InitializeResult, rmcp::ErrorData>> + Send + '_ {
         async move {
+            crate::mcp_peer::reject_modern_initialize(&request)?;
             let info = self.negotiate_initialize(&request)?;
             self.apply_http_session_identity(&request, &context)?;
             context.peer.set_peer_info(request);
@@ -1096,20 +1175,27 @@ impl ServerHandler for MemoryServer {
     ) -> impl Future<Output = Result<rmcp::model::ListToolsResult, rmcp::ErrorData>> + Send + '_
     {
         async move {
-            require_legacy_session(&context.meta)?;
-            let all_native = self.tool_router.list_all();
+            let mode = crate::mcp_peer::McpPeerMode::from_context(&context)?;
+            let request_server = match mode {
+                crate::mcp_peer::McpPeerMode::Legacy => None,
+                crate::mcp_peer::McpPeerMode::Modern20260728 => {
+                    Some(self.clone_for_modern_request(&context)?)
+                }
+            };
+            let server = request_server.as_ref().unwrap_or(self);
+            let all_native = server.tool_router.list_all();
             let mut tools = prepare_native_tool_definitions(all_native);
 
             // Add proxy tools from registered MCP servers
             let proxy_snapshot =
-                lock_or_recover(&self.tool_discovery.proxy_tools, "proxy_tools").clone();
-            let mcp_tool_exposure_mode = self.tool_discovery.mcp_tool_exposure_mode;
+                lock_or_recover(&server.tool_discovery.proxy_tools, "proxy_tools").clone();
+            let mcp_tool_exposure_mode = server.tool_discovery.mcp_tool_exposure_mode;
             let skill_tool_defs_snapshot =
-                lock_or_recover(&self.tool_discovery.skill_tool_defs, "skill_tool_defs").clone();
+                lock_or_recover(&server.tool_discovery.skill_tool_defs, "skill_tool_defs").clone();
 
             for (server_name, server_tools) in proxy_snapshot {
                 let cap_id = format!("mcp:{server_name}");
-                let cap = match self.get_capability(&cap_id) {
+                let cap = match server.get_capability(&cap_id) {
                     Ok(cap) if cap.enabled => cap,
                     _ => continue,
                 };
@@ -1150,7 +1236,7 @@ impl ServerHandler for MemoryServer {
             let env_patterns = current_exposed_tool_patterns();
             tools = project_tool_definitions(
                 tools,
-                self.active_tool_profile(),
+                server.active_tool_profile(),
                 env_patterns.as_deref(),
             );
 
@@ -1168,16 +1254,23 @@ impl ServerHandler for MemoryServer {
     ) -> impl Future<Output = Result<rmcp::model::CallToolResponse, rmcp::ErrorData>> + Send + '_
     {
         async move {
-            require_legacy_session(&context.meta)?;
+            let mode = crate::mcp_peer::McpPeerMode::from_context(&context)?;
+            let request_server = match mode {
+                crate::mcp_peer::McpPeerMode::Legacy => None,
+                crate::mcp_peer::McpPeerMode::Modern20260728 => {
+                    Some(self.clone_for_modern_request(&context)?)
+                }
+            };
+            let server = request_server.as_ref().unwrap_or(self);
             // Idle reaper: every tool call (including ones a stdio child
             // forwards to this daemon) counts as activity, so an idle daemon is
             // genuinely unused and safe to self-terminate.
-            self.touch_activity();
+            server.touch_activity();
             let name_owned = params.name.as_ref().to_string();
             let name = name_owned.as_str();
             let env_patterns = current_exposed_tool_patterns();
 
-            let active_profile = self.active_tool_profile();
+            let active_profile = server.active_tool_profile();
             let visible = tachi_hub::tool_visible(name, active_profile, env_patterns.as_deref());
 
             if !visible {
@@ -1201,10 +1294,10 @@ impl ServerHandler for MemoryServer {
                 return Ok(tool_action_denied_result(name, action_label, &profile_label).into());
             }
 
-            let bound_project = self.session_project();
+            let bound_project = server.session_project();
             if let Some(project) = bound_project.as_deref() {
                 crate::session_identity::enforce_server_session_project(
-                    self,
+                    server,
                     name,
                     &mut params.arguments,
                     project,
@@ -1238,12 +1331,12 @@ impl ServerHandler for MemoryServer {
                 // each MCP session clone; `check_session_rate_limit` keys burst
                 // windows by that id so sessions sharing the process-global
                 // RateLimiter do not inherit each other's counters.
-                self.check_session_rate_limit(name, &args_hash)?
+                server.check_session_rate_limit(name, &args_hash)?
             };
 
             // ─── Phantom Tools: cache invalidation on write ops ──────────
             if CACHE_INVALIDATING_TOOLS.contains(&name) {
-                self.tool_cache_lock().clear();
+                server.tool_cache_lock().clear();
             }
 
             // ─── Phantom Tools: check cache for read-only tools ──────────
@@ -1266,7 +1359,7 @@ impl ServerHandler for MemoryServer {
 
                 // Check cache
                 let cached_hit = {
-                    let cache = self.tool_cache_lock();
+                    let cache = server.tool_cache_lock();
                     if let Some(cached) = cache.get(&key) {
                         if cached.created_at.elapsed() < TOOL_CACHE_TTL {
                             Some(cached.result.clone())
@@ -1278,14 +1371,16 @@ impl ServerHandler for MemoryServer {
                     }
                 };
                 if let Some(mut hit) = cached_hit {
-                    self.cache_hits
+                    server
+                        .cache_hits
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     if let Some(warn) = stuck_warning.clone() {
                         hit.content.push(rmcp::model::ContentBlock::text(warn));
                     }
                     return Ok(hit.into());
                 }
-                self.cache_misses
+                server
+                    .cache_misses
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 Some(key)
             } else {
@@ -1299,23 +1394,23 @@ impl ServerHandler for MemoryServer {
 
             let mut result = {
                 // 1. Native tools first (highest priority)
-                if self.tool_router.has_route(name) {
+                if server.tool_router.has_route(name) {
                     let context =
-                        rmcp::handler::server::tool::ToolCallContext::new(self, params, context);
-                    match self.tool_router.call(context).await {
+                        rmcp::handler::server::tool::ToolCallContext::new(server, params, context);
+                    match server.tool_router.call(context).await {
                         Ok(rmcp::model::CallToolResponse::Complete(result)) => Ok(result),
                         Ok(_) => Err(rmcp::ErrorData::internal_error(
-                            "Native tools require a complete result in the legacy protocol profile",
+                            "Tachi tools require a complete synchronous result",
                             None,
                         )),
                         Err(error) => Err(error),
                     }
                 }
                 // 2. Skill tools (tachi_skill_*)
-                else if lock_or_recover(&self.tool_discovery.skill_tools, "skill_tools")
+                else if lock_or_recover(&server.tool_discovery.skill_tools, "skill_tools")
                     .contains_key(name)
                 {
-                    let exposure = self.tool_discovery.mcp_tool_exposure_mode;
+                    let exposure = server.tool_discovery.mcp_tool_exposure_mode;
                     if exposure == McpToolExposureMode::Gateway {
                         Err(rmcp::ErrorData::invalid_params(
                             "Direct skill tools are disabled for gateway mode; use tachi_skill(action='run')"
@@ -1323,16 +1418,16 @@ impl ServerHandler for MemoryServer {
                             None,
                         ))
                     } else {
-                        self.call_skill_tool(name, params.arguments).await
+                        server.call_skill_tool(name, params.arguments).await
                     }
                 }
                 // 3. Proxy tools (server__tool pattern)
                 else if let Some((server_name, tool_name)) = {
                     let proxy_tools =
-                        lock_or_recover(&self.tool_discovery.proxy_tools, "proxy_tools");
+                        lock_or_recover(&server.tool_discovery.proxy_tools, "proxy_tools");
                     split_proxy_tool_name(name, proxy_tools.keys().map(String::as_str))
                 } {
-                    let exposure_mode = self.proxy_tool_exposure_mode_for_server(&server_name)?;
+                    let exposure_mode = server.proxy_tool_exposure_mode_for_server(&server_name)?;
                     if exposure_mode == McpToolExposureMode::Gateway {
                         Err(rmcp::ErrorData::invalid_params(
                             format!(
@@ -1342,7 +1437,8 @@ impl ServerHandler for MemoryServer {
                             None,
                         ))
                     } else {
-                        self.proxy_call_internal(&server_name, &tool_name, params.arguments)
+                        server
+                            .proxy_call_internal(&server_name, &tool_name, params.arguments)
                             .await
                     }
                 } else {
@@ -1352,7 +1448,7 @@ impl ServerHandler for MemoryServer {
 
             // ─── Dead Letter Queue: capture failures ─────────────────────
             if let Err(ref err) = result {
-                let is_native = self.tool_router.has_route(&tool_name_owned);
+                let is_native = server.tool_router.has_route(&tool_name_owned);
                 if should_enqueue_dlq(&tool_name_owned, tool_args_for_dlq.as_ref(), is_native) {
                     let error_str = format!("{}", err);
                     let category = categorize_error(&error_str);
@@ -1370,14 +1466,14 @@ impl ServerHandler for MemoryServer {
                     };
 
                     {
-                        let mut dlq = self.dead_letters_lock();
+                        let mut dlq = server.dead_letters_lock();
                         push_dead_letter_with_limits(&mut dlq, dl, Utc::now());
                     }
                 } else {
                     let error_category = categorize_error(&err.to_string());
                     let reason = dlq_capture_refusal_reason(&tool_name_owned, is_native);
                     if let Err(signal_error) = record_dlq_capture_refused(
-                        self,
+                        server,
                         &tool_name_owned,
                         action_arg.as_deref(),
                         reason,
@@ -1401,7 +1497,7 @@ impl ServerHandler for MemoryServer {
             // ─── Phantom Tools: store result in cache ────────────────────
             if let (Some(key), Ok(ref res)) = (&cache_key, &result) {
                 if tool_result_can_be_cached(res) {
-                    let mut cache = self.tool_cache_lock();
+                    let mut cache = server.tool_cache_lock();
                     // Evict expired entries when cache exceeds cap
                     if cache.len() >= TOOL_CACHE_MAX_ENTRIES {
                         cache.retain(|_, v| v.created_at.elapsed() < TOOL_CACHE_TTL);

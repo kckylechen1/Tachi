@@ -563,6 +563,7 @@ mod tests {
 
         let mut http_config = StreamableHttpServerConfig::default();
         http_config.legacy_session_mode = true;
+        http_config.stateless_protocol_metadata_required = true;
         http_config.cancellation_token = ct.child_token();
 
         let service = StreamableHttpService::new(

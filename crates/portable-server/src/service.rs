@@ -719,6 +719,24 @@ impl ServerHandler for PortableServer {
         ))
     }
 
+    async fn initialize(
+        &self,
+        request: rmcp::model::InitializeRequestParams,
+        context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
+    ) -> Result<rmcp::model::InitializeResult, rmcp::ErrorData> {
+        if request.protocol_version >= rmcp::model::ProtocolVersion::V_2026_07_28 {
+            return Err(rmcp::ErrorData::unsupported_protocol_version(
+                request.protocol_version,
+                rmcp::model::ProtocolVersion::known_up_to(
+                    &rmcp::model::ProtocolVersion::V_2025_11_25,
+                ),
+            ));
+        }
+        let info = self.negotiate_initialize(&request)?;
+        context.peer.set_peer_info(request);
+        Ok(info)
+    }
+
     async fn discover(
         &self,
         _context: rmcp::service::RequestContext<rmcp::service::RoleServer>,

@@ -144,6 +144,7 @@ mod managed_run_control;
 mod managed_run_epoch;
 mod manifest;
 mod mcp_connection;
+mod mcp_peer;
 mod mcp_pool;
 mod mcp_proxy;
 mod memory_ops;

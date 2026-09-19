@@ -78,7 +78,9 @@ async fn run(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let local_addr = listener.local_addr()?;
     let health_server = server.clone();
-    let http_config = StreamableHttpServerConfig::default().with_legacy_session_mode(true);
+    let http_config = StreamableHttpServerConfig::default()
+        .with_legacy_session_mode(true)
+        .with_stateless_protocol_metadata_required(true);
 
     let mcp_service = StreamableHttpService::new(
         move || Ok(server.clone()),
@@ -325,6 +327,36 @@ mod tests {
         let (listener, local_addr) = bind_loopback(0).await.expect("bind ephemeral port");
         let task = tokio::spawn(run(listener, boot()));
         let client = reqwest::Client::new();
+
+        let modern_initialize = client
+            .post(format!("http://{local_addr}/mcp"))
+            .header("mcp-protocol-version", "2026-07-28")
+            .header(
+                reqwest::header::ACCEPT,
+                "application/json, text/event-stream",
+            )
+            .json(&serde_json::json!({
+                "jsonrpc":"2.0", "id":2, "method":"initialize", "params":{
+                    "protocolVersion":"2026-07-28", "capabilities":{},
+                    "clientInfo":{"name":"incapable-peer-probe", "version":"1"}
+                }
+            }))
+            .send()
+            .await
+            .expect("modern initialize");
+        let text = modern_initialize
+            .text()
+            .await
+            .expect("modern initialize body");
+        let payload = text
+            .lines()
+            .find_map(|line| line.strip_prefix("data:"))
+            .unwrap_or(&text);
+        let body: serde_json::Value =
+            serde_json::from_str(payload).expect("modern initialize JSON");
+        assert_eq!(body["error"]["code"], -32022, "{body:#}");
+        assert!(body.get("result").is_none(), "{body:#}");
+
         for (version, code) in [("2026-07-28", -32022), ("2025-11-25", -32600)] {
             for (method, extra) in [
                 ("server/discover", serde_json::json!({})),

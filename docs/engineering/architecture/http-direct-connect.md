@@ -33,27 +33,36 @@ do HTTP. Target shape for Claude Code / Codex-class hosts:
 
 ## Protocol compatibility (RMCP 3.3, #1891)
 
-The daemon, stdio proxy, and portable server explicitly support MCP versions
-through `2025-11-25`. Upgrading the SDK does not enable the `2026-07-28`
-stateless lifecycle. Legacy `initialize` negotiates an older client's version;
-a newer version offered through that legacy handshake negotiates down to
-`2025-11-25`. Modern inline requests fail with `UNSUPPORTED_PROTOCOL_VERSION`
-before tool dispatch. A handler guard also rejects the inline
-lifecycle when its metadata selects an older version: otherwise RMCP can route
-that request statelessly and bypass initialize-time binding. Discovery returns
-`METHOD_NOT_FOUND` so Auto clients can fall back to initialize. Legacy tool
-responses omit `resultType`.
+The daemon and stdio proxy implement two explicit peer modes. Legacy peers
+retain `initialize`, `notifications/initialized`, and HTTP session behavior
+through `2025-11-25`; legacy tool responses omit `resultType`. Modern peers use
+RMCP 3.3's actual `2026-07-28` `server/discover` lifecycle, typed capabilities,
+per-request client metadata, `resultType`, and stateless HTTP routing. A peer
+that explicitly sends `2026-07-28` through the removed `initialize` lifecycle
+gets `UNSUPPORTED_PROTOCOL_VERSION` rather than a successful downgrade to
+`2025-11-25`. The portable server remains intentionally legacy-only and fails
+the same modern initialize explicitly.
+
+Modern HTTP requests carry matching `Mcp-Protocol-Version`, `Mcp-Method`, and,
+where applicable, `Mcp-Name` / `Mcp-Param-*` routing headers. RMCP rejects
+missing or conflicting standard headers and body metadata before handler
+dispatch. Tachi additionally rejects conflicts between an `X-Tachi-*` identity
+header and its request `_meta` twin before tool dispatch. Modern identity and
+admission are applied to a request-local server clone; they never replace the
+legacy session binding or become protocol-session authority. Inline metadata
+that selects a legacy version is still rejected because it cannot bypass the
+legacy initialize/session adapter.
 
 RMCP 3.x delivers wire initialize `_meta` through `RequestContext.meta`.
 The adapters read it there, retaining typed initialize params only for direct
 in-process calls. Existing header precedence, project binding, self-asserted
 identity, profile filtering and retry rules remain in force.
 
-Modern per-request admission and the Tasks bridge remain separate work under
+The MCP Tasks bridge remains separate work under
 [#1531](https://github.com/kckylechen1/tachi/issues/1531). Neither a new SDK type
-nor a protocol negotiation grants execution authority or durable task storage.
-No database migration or live configuration change is required by this SDK
-upgrade; rollback is reverting the compatibility change before deployment.
+nor protocol negotiation grants execution authority or durable task storage.
+No database migration or live configuration change is required; rollback is
+reverting the compatibility change before deployment.
 
 ## Auth posture (v1 decision)
 
@@ -66,16 +75,18 @@ upgrade; rollback is reverting the compatibility change before deployment.
 
 ## Client identity (not env)
 
-HTTP has no per-process env. Send identity at **initialize**:
+HTTP has no per-process env. Legacy peers send identity at **initialize**;
+modern peers send it in each request:
 
-| Field | Header | Initialize meta |
+| Field | Header | MCP `_meta` |
 |---|---|---|
 | Project binding | `X-Tachi-Project` | `tachiProject` (alias `tachi.project`) |
 | Tool profile | `X-Tachi-Profile` | `tachiProfile` |
 | Client label | `X-Tachi-Client` | `tachiClient` |
 | Agent identity | `X-Tachi-Agent-Identity` | `tachiAgentIdentity` (alias `tachi.agentIdentity`) |
 
-Headers win over meta when both are present. Project must resolve via
+For compatibility, headers win over initialize metadata in legacy mode. Modern
+header and request-metadata identities must agree. Project must resolve via
 `resolve_named_project_db_path` (same as stdio).
 
 A valid, explicit AgentIdentity assertion on this loopback-only transport is

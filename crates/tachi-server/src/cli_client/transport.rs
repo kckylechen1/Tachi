@@ -19,7 +19,8 @@ const DAEMON_CALL_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// How the stdio proxy / CLI should stamp `X-Tachi-Agent-Identity` on a
 /// daemon hop. `AutoEnv` is the CLI default (read process env). The proxy
-/// resolves once at initialize so `_meta` wins and blank/illegal stay omit.
+/// resolves legacy identity once at initialize and modern identity per request,
+/// so `_meta` wins and blank/illegal values stay omitted in either mode.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ProxyIdentityForward {
     AutoEnv,
