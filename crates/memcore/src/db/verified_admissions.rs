@@ -294,6 +294,34 @@ const CANONICAL_OBJECTS: &[(&str, &str, &str, &str)] = &[
     ),
 ];
 
+const CANONICAL_UNIQUE_INDEXES: &[(&str, &[&str])] = &[
+    (
+        "identity_admissions",
+        &[
+            "idx_identity_admissions_verified_binding",
+            "sqlite_autoindex_identity_admissions_1",
+            "sqlite_autoindex_identity_admissions_2",
+        ],
+    ),
+    (
+        "identity_admission_verification_receipts",
+        &[
+            "sqlite_autoindex_identity_admission_verification_receipts_1",
+            "sqlite_autoindex_identity_admission_verification_receipts_2",
+            "sqlite_autoindex_identity_admission_verification_receipts_3",
+            "sqlite_autoindex_identity_admission_verification_receipts_4",
+        ],
+    ),
+    (
+        "identity_admission_verification_revocations",
+        &[
+            "sqlite_autoindex_identity_admission_verification_revocations_1",
+            "sqlite_autoindex_identity_admission_verification_revocations_2",
+            "sqlite_autoindex_identity_admission_verification_revocations_3",
+        ],
+    ),
+];
+
 /// Exact receipt coordinates a trusted consumer must present when a verified
 /// remote identity authorizes a write. Constructing this value grants no
 /// authority: the write gate resolves every field against current durable
@@ -533,6 +561,23 @@ pub(crate) fn validate_verified_admission_schema(conn: &Connection) -> Result<()
         }) {
             return Err(MemoryError::InvalidArg(format!(
                 "incomplete v37 verified admission schema: trigger '{name}' is missing or non-canonical"
+            )));
+        }
+    }
+    for (table, expected_indexes) in CANONICAL_UNIQUE_INDEXES.iter().copied() {
+        let mut statement = conn.prepare(
+            "SELECT name FROM pragma_index_list(?1) WHERE \"unique\"=1 ORDER BY name",
+        )?;
+        let indexes = statement
+            .query_map([table], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        if indexes.len() != expected_indexes.len()
+            || indexes
+                .iter()
+                .any(|name| !expected_indexes.contains(&name.as_str()))
+        {
+            return Err(MemoryError::InvalidArg(format!(
+                "incomplete v37 verified admission schema: table '{table}' has unexpected unique conflict targets"
             )));
         }
     }
@@ -935,5 +980,43 @@ mod tests {
         let error = validate_verified_admission_schema(&conn)
             .expect_err("same-name non-canonical trigger must fail closed");
         assert!(error.to_string().contains("missing or non-canonical"));
+    }
+
+    #[test]
+    fn schema_validation_rejects_additional_unique_conflict_targets() {
+        let conn = open_conn();
+        for (index, table, column) in [
+            (
+                "unexpected_identity_admission_unique",
+                "identity_admissions",
+                "created_at",
+            ),
+            (
+                "unexpected_verified_receipt_unique",
+                "identity_admission_verification_receipts",
+                "evidence_ref",
+            ),
+            (
+                "unexpected_verified_revocation_unique",
+                "identity_admission_verification_revocations",
+                "evidence_ref",
+            ),
+        ] {
+            conn.execute_batch(&format!(
+                "CREATE UNIQUE INDEX {index} ON {table}({column})"
+            ))
+            .unwrap();
+            let error = validate_verified_admission_schema(&conn)
+                .expect_err("an additional OR REPLACE victim target must fail closed");
+            assert!(
+                error
+                    .to_string()
+                    .contains("unexpected unique conflict targets"),
+                "{table}: {error}"
+            );
+            conn.execute_batch(&format!("DROP INDEX {index}"))
+                .unwrap();
+        }
+        validate_verified_admission_schema(&conn).unwrap();
     }
 }

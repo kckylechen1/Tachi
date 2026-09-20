@@ -290,6 +290,24 @@ fn persist_verified_admission(
             if existing.request_digest != request_digest {
                 return Err("verified admission idempotency conflict".to_string());
             }
+            if !memcore::has_current_verified_admission(
+                &tx,
+                &existing.admission_id,
+                &existing.agent_identity_id,
+                &existing.connection_id,
+                &existing.issuer_id,
+                &existing.verification_method,
+                &existing.verification_version,
+                &existing.trust_domain,
+                &existing.verification_scope,
+            )
+            .map_err(|error| error.to_string())?
+            {
+                return Err(
+                    "verified admission historical replay is expired, revoked, or no longer current"
+                        .to_string(),
+                );
+            }
             tx.commit().map_err(|error| error.to_string())?;
             return Ok(VerifiedAdmissionWriteOutcome::Replayed(existing));
         }
@@ -816,6 +834,101 @@ mod tests {
     }
 
     #[test]
+    fn revoked_exact_replay_cannot_reactivate_runtime_context() {
+        let server = make_server();
+        let at = now();
+        let request = request("revoked-replay");
+        let evidence = evidence(at);
+        let admitted = admit_verified_agent_connection_at(
+            &server,
+            &request,
+            &verifier(evidence.clone()),
+            at,
+        )
+        .unwrap();
+        let admission_id = admitted.receipt().admission_id.clone();
+        revoke_verified_admission_at(
+            &server,
+            &admission_id,
+            &FakeRevocation(VerifiedRevocationEvidence {
+                admission_id,
+                issuer_id: "issuer.device-trust.alpha".into(),
+                evidence_digest: format!("{:x}", Sha256::digest(b"revoked-replay")),
+                evidence_ref: VerifiedEvidenceRef::attestation(
+                    "device-envelope",
+                    "revoked-replay",
+                )
+                .unwrap(),
+                nonce: "revoked-replay-nonce".into(),
+                revoked_at: at,
+            }),
+            at,
+        )
+        .unwrap();
+        server.set_work_claim_connection(
+            Some("agent.remote.alpha".into()),
+            "placement/runner-alpha/connection-7".into(),
+            "unavailable".into(),
+        );
+
+        let error = admit_verified_agent_connection_at(
+            &server,
+            &request,
+            &verifier(evidence),
+            at + Duration::seconds(1),
+        )
+        .expect_err("historical replay must not reactivate revoked authority");
+        assert!(error.contains("historical replay"), "{error}");
+        assert!(server.verified_work_claim_connection().is_none());
+        assert_eq!(
+            server.work_claim_connection().unwrap().2,
+            "unavailable",
+            "failed replay must preserve the non-verified runtime state"
+        );
+    }
+
+    #[test]
+    fn persistence_clock_is_sampled_after_waiting_for_the_write_lock() {
+        let server = make_server();
+        let at = now();
+        let mut expiring = evidence(at);
+        expiring.expires_at = at + Duration::minutes(1);
+        let locker = rusqlite::Connection::open(server.global_db_path_buf()).unwrap();
+        locker.execute_batch("BEGIN IMMEDIATE").unwrap();
+
+        let error = std::thread::scope(|scope| {
+            let (clock_tx, clock_rx) = std::sync::mpsc::channel();
+            let server = &server;
+            let worker = scope.spawn(move || {
+                admit_verified_agent_connection_with_clock(
+                    server,
+                    &request("lock-wait-expiry"),
+                    &verifier(expiring),
+                    || {
+                        clock_tx.send(()).unwrap();
+                        at + Duration::minutes(2)
+                    },
+                )
+            });
+            assert!(
+                clock_rx
+                    .recv_timeout(std::time::Duration::from_millis(100))
+                    .is_err(),
+                "authoritative clock must not be sampled while BEGIN IMMEDIATE is blocked"
+            );
+            locker.execute_batch("COMMIT").unwrap();
+            clock_rx.recv().unwrap();
+            worker
+                .join()
+                .unwrap()
+                .expect_err("evidence expired while waiting for the persistence lock")
+        });
+        assert!(error.contains("expired"), "{error}");
+        assert_eq!(verified_count(&server), 0);
+        assert!(server.verified_work_claim_connection().is_none());
+    }
+
+    #[test]
     fn append_only_existing_connection_requires_new_connection() {
         let server = make_server();
         let at = now();
@@ -862,6 +975,41 @@ mod tests {
             })
             .unwrap();
         assert_eq!(state, "unavailable");
+
+        let mut new_request = request("new-connection-readmission");
+        new_request.connection_id = "placement/runner-alpha/connection-8".into();
+        let mut new_evidence = evidence(at);
+        new_evidence.connection_id = new_request.connection_id.clone();
+        new_evidence.nonce = "nonce-alpha-8".into();
+        new_evidence.evidence_ref =
+            VerifiedEvidenceRef::attestation("device-envelope", "alpha-8").unwrap();
+        let admitted = admit_verified_agent_connection_at(
+            &server,
+            &new_request,
+            &verifier(new_evidence),
+            at,
+        )
+        .expect("the same identity may be verified on a genuinely new connection");
+        assert_eq!(
+            admitted.receipt().connection_id,
+            "placement/runner-alpha/connection-8"
+        );
+        require_current_verified_admission(&server).unwrap();
+        assert_eq!(verified_count(&server), 1);
+        let original_state: String = server
+            .with_global_store_read(|store| {
+                store
+                    .connection()
+                    .query_row(
+                        "SELECT state FROM identity_admissions
+                         WHERE admission_id='admission-bootstrap-unavailable'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .map_err(|error| error.to_string())
+            })
+            .unwrap();
+        assert_eq!(original_state, "unavailable");
     }
 
     #[test]
@@ -897,7 +1045,6 @@ mod tests {
                 crate::claims_ops::handle_task_claim(server, params)
             });
             started_rx.recv().unwrap();
-            std::thread::sleep(std::time::Duration::from_millis(300));
             locker.execute_batch("COMMIT").unwrap();
             worker
                 .join()
@@ -970,7 +1117,6 @@ mod tests {
                 crate::delivery_ops::handle_tachi_delivery(server, params)
             });
             started_rx.recv().unwrap();
-            std::thread::sleep(std::time::Duration::from_millis(300));
             locker.execute_batch("COMMIT").unwrap();
             worker
                 .join()
@@ -1299,8 +1445,137 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_exact_requests_create_once_and_replay_once() {
+    fn revocation_blocks_every_work_claim_and_delivery_mutation() {
         let server = make_server();
+        let at = now();
+        let admitted = admit_verified_agent_connection_at(
+            &server,
+            &request("all-mutations-revoked"),
+            &verifier(evidence(at)),
+            at,
+        )
+        .unwrap();
+        let claim_params: crate::tool_params::TachiTaskParams =
+            serde_json::from_value(serde_json::json!({
+                "action": "claim",
+                "branch": "lane/all-mutations",
+                "claim_role": "executor",
+                "claim_mode": "writable",
+                "worktree_path": "/tmp/all-mutations",
+                "claim_scope": ["src/lib.rs"],
+                "expected_head": "head",
+                "lease_expires_at": "2099-01-01T00:00:00Z"
+            }))
+            .unwrap();
+        let claim = crate::claims_ops::handle_task_claim(&server, &claim_params).unwrap();
+        let claim_id = claim["claim_id"].as_str().unwrap().to_string();
+
+        let admission_id = admitted.receipt().admission_id.clone();
+        revoke_verified_admission_at(
+            &server,
+            &admission_id,
+            &FakeRevocation(VerifiedRevocationEvidence {
+                admission_id,
+                issuer_id: "issuer.device-trust.alpha".into(),
+                evidence_digest: format!("{:x}", Sha256::digest(b"all-mutations-revoked")),
+                evidence_ref: VerifiedEvidenceRef::attestation(
+                    "device-envelope",
+                    "all-mutations-revoked",
+                )
+                .unwrap(),
+                nonce: "all-mutations-revoked-nonce".into(),
+                revoked_at: at,
+            }),
+            at,
+        )
+        .unwrap();
+
+        let heartbeat: crate::tool_params::TachiTaskParams =
+            serde_json::from_value(serde_json::json!({
+                "action": "heartbeat",
+                "claim_id": claim_id,
+                "transition_version": 0,
+                "lease_expires_at": "2099-01-02T00:00:00Z"
+            }))
+            .unwrap();
+        let handoff: crate::tool_params::TachiTaskParams =
+            serde_json::from_value(serde_json::json!({
+                "action": "handoff",
+                "claim_id": claim_id,
+                "transition_version": 0,
+                "claim_role": "executor",
+                "claim_mode": "writable",
+                "worktree_path": "/tmp/all-mutations-next",
+                "claim_scope": ["src/lib.rs"],
+                "expected_head": "next-head",
+                "lease_expires_at": "2099-01-02T00:00:00Z"
+            }))
+            .unwrap();
+        let release: crate::tool_params::TachiTaskParams =
+            serde_json::from_value(serde_json::json!({
+                "action": "release",
+                "claim_id": claim_id,
+                "transition_version": 0,
+                "release_reason": "test"
+            }))
+            .unwrap();
+        for (label, result) in [
+            (
+                "heartbeat",
+                crate::claims_ops::handle_task_heartbeat(&server, &heartbeat),
+            ),
+            (
+                "handoff",
+                crate::claims_ops::handle_task_handoff(&server, &handoff),
+            ),
+            (
+                "release",
+                crate::claims_ops::handle_task_release(&server, &release),
+            ),
+        ] {
+            let error = result.expect_err(label);
+            assert!(error.contains("expired, revoked"), "{label}: {error}");
+        }
+
+        for action in [
+            "claim_ready_delivery",
+            "ack_delivered",
+            "reject_or_block",
+            "resume_requester_operation",
+            "dismiss",
+        ] {
+            let params: crate::tool_params::TachiDeliveryParams =
+                serde_json::from_value(serde_json::json!({
+                    "action": action,
+                    "agent_identity_id": "agent.remote.alpha",
+                    "host_identity": "agent.remote.alpha"
+                }))
+                .unwrap();
+            let error = crate::delivery_ops::handle_tachi_delivery(&server, params)
+                .expect_err("revoked delivery authority must fail before mutation");
+            assert!(error.contains("expired, revoked"), "{action}: {error}");
+        }
+
+        let persisted: (String, i64) = server
+            .with_global_store_read(|store| {
+                store
+                    .connection()
+                    .query_row(
+                        "SELECT state, transition_version FROM session_claims WHERE claim_id=?1",
+                        [&claim_id],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .map_err(|error| error.to_string())
+            })
+            .unwrap();
+        assert_eq!(persisted, ("active".to_string(), 0));
+    }
+
+    #[test]
+    fn independent_connections_create_once_and_replay_once() {
+        let server = make_server();
+        let peer = MemoryServer::new(server.global_db_path_buf(), server.project_db_path_buf())
+            .expect("open independent server connection");
         let at = now();
         let outcomes = std::thread::scope(|scope| {
             let first = scope.spawn(|| {
@@ -1313,7 +1588,7 @@ mod tests {
             });
             let second = scope.spawn(|| {
                 admit_verified_agent_connection_at(
-                    &server,
+                    &peer,
                     &request("concurrent"),
                     &verifier(evidence(at)),
                     at,
@@ -1339,5 +1614,7 @@ mod tests {
             1
         );
         assert_eq!(verified_count(&server), 1);
+        assert!(server.verified_work_claim_connection().is_some());
+        assert!(peer.verified_work_claim_connection().is_some());
     }
 }

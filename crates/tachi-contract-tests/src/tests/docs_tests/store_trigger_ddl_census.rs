@@ -464,9 +464,15 @@ const EXEMPTIONS: &[Exemption<'static>] = &[
     Exemption {
         path: "crates/memcore/src/db/migrations.rs",
         basis: ExemptionBasis::DeclaredByReviewerNotProven {
-            signed_by: "tachi#1443 census lane (agent), bodies NOT read 2026-07-26",
+            signed_by: "Amp implementation lane, affected bodies read 2026-09-20",
         },
         sites: &[
+            Site {
+                symbol: "stamped_current_v37_missing_append_only_trigger_fails_closed_without_repair",
+                trigger: "IDENTITY_VERIFICATION_RECEIPTS_NO_UPDATE",
+                ddl: "bf78f824b898c946",
+                occurrences: 1,
+            },
             Site {
                 symbol:
                     "stamped_current_with_missing_search_generation_trigger_is_refused_without_repair",
@@ -484,6 +490,24 @@ const EXEMPTIONS: &[Exemption<'static>] = &[
                 symbol: "stamped_v23_with_missing_guards_is_refused_even_with_migration_authority",
                 trigger: "MEMORIES_RESERVED_REFS_UPDATE_GUARD",
                 ddl: "07bdacf9fb6a3723",
+                occurrences: 1,
+            },
+            Site {
+                symbol: "stamped_v36_db_adds_verified_receipts_without_rewriting_admission_history",
+                trigger: "IDENTITY_VERIFIED_ADMISSIONS_NO_DELETE",
+                ddl: "9205a371ccee164f",
+                occurrences: 1,
+            },
+            Site {
+                symbol: "stamped_v36_db_adds_verified_receipts_without_rewriting_admission_history",
+                trigger: "IDENTITY_VERIFIED_ADMISSIONS_NO_REPLACE",
+                ddl: "d2d977d8db3c4414",
+                occurrences: 1,
+            },
+            Site {
+                symbol: "stamped_v36_db_adds_verified_receipts_without_rewriting_admission_history",
+                trigger: "IDENTITY_VERIFIED_ADMISSIONS_NO_UPDATE",
+                ddl: "67bc9c164078a9a9",
                 occurrences: 1,
             },
             Site {
@@ -511,16 +535,17 @@ const EXEMPTIONS: &[Exemption<'static>] = &[
                 occurrences: 1,
             },
         ],
-        reason: "v22-to-current migration tests; the pinned digests are the migration's \
-                 own canonical DDL. Enclosing symbols: \
+        reason: "migration tests; the pinned digests are canonical DDL or deliberate \
+                 DROP statements used to build or damage a migration fixture. Affected \
+                 bodies read 2026-09-20. Enclosing symbols include \
+                 stamped_current_v37_missing_append_only_trigger_fails_closed_without_repair, \
+                 stamped_v36_db_adds_verified_receipts_without_rewriting_admission_history, \
                  v22_to_current_installs_reserved_reference_guards_and_scored_count, \
                  v23_guard_install_failure_rolls_back_triggers_sentinel_and_stamp, \
                  stamped_v23_with_missing_guards_is_refused_even_with_migration_authority, \
                  stamped_current_with_missing_search_generation_trigger_is_refused_without_repair. \
-                 Enclosing symbols extracted mechanically; bodies NOT read. This \
-                 file names a store doorway and does not arm the migration \
-                 token, so nothing here is machine-provable — it is a \
-                 declaration.",
+                 This file names a store doorway and does not arm the migration token, \
+                 so nothing here is machine-provable — it is a declaration.",
     },
     Exemption {
         path: "crates/memcore/src/db/open.rs",
@@ -916,6 +941,87 @@ const EXEMPTIONS: &[Exemption<'static>] = &[
                  so NoStoreDoorwayInFile cannot prove the exemption.",
     },
     Exemption {
+        path: "crates/memcore/src/db/verified_admissions.rs",
+        basis: ExemptionBasis::DeclaredByReviewerNotProven {
+            signed_by: "Amp implementation lane, bodies read 2026-09-20",
+        },
+        sites: &[
+            Site {
+                symbol: "ADMISSION_NO_DELETE_SQL",
+                trigger: "IDENTITY_VERIFIED_ADMISSIONS_NO_DELETE",
+                ddl: "08c2b035632d4481",
+                occurrences: 1,
+            },
+            Site {
+                symbol: "ADMISSION_NO_REPLACE_SQL",
+                trigger: "IDENTITY_VERIFIED_ADMISSIONS_NO_REPLACE",
+                ddl: "f06d74f1424e949a",
+                occurrences: 1,
+            },
+            Site {
+                symbol: "ADMISSION_NO_UPDATE_SQL",
+                trigger: "IDENTITY_VERIFIED_ADMISSIONS_NO_UPDATE",
+                ddl: "eec4e6bfa5215e06",
+                occurrences: 1,
+            },
+            Site {
+                symbol: "RECEIPT_NO_DELETE_SQL",
+                trigger: "IDENTITY_VERIFICATION_RECEIPTS_NO_DELETE",
+                ddl: "b48f7e0336c4678b",
+                occurrences: 1,
+            },
+            Site {
+                symbol: "RECEIPT_NO_REPLACE_SQL",
+                trigger: "IDENTITY_VERIFICATION_RECEIPTS_NO_REPLACE",
+                ddl: "812e8a5c97baef0c",
+                occurrences: 1,
+            },
+            Site {
+                symbol: "RECEIPT_NO_UPDATE_SQL",
+                trigger: "IDENTITY_VERIFICATION_RECEIPTS_NO_UPDATE",
+                ddl: "c065e050eb5f8647",
+                occurrences: 1,
+            },
+            Site {
+                symbol: "REVOCATION_NO_DELETE_SQL",
+                trigger: "IDENTITY_VERIFICATION_REVOCATIONS_NO_DELETE",
+                ddl: "339f0d2dcdd01f67",
+                occurrences: 1,
+            },
+            Site {
+                symbol: "REVOCATION_NO_REPLACE_SQL",
+                trigger: "IDENTITY_VERIFICATION_REVOCATIONS_NO_REPLACE",
+                ddl: "efca07df81a8af85",
+                occurrences: 1,
+            },
+            Site {
+                symbol: "REVOCATION_NO_UPDATE_SQL",
+                trigger: "IDENTITY_VERIFICATION_REVOCATIONS_NO_UPDATE",
+                ddl: "593477431c8ac8f3",
+                occurrences: 1,
+            },
+            Site {
+                symbol: "schema_validation_rejects_same_name_trigger_drift",
+                trigger: "IDENTITY_VERIFICATION_RECEIPTS_NO_UPDATE",
+                ddl: "023a0b505415c3a9",
+                occurrences: 1,
+            },
+            Site {
+                symbol: "schema_validation_rejects_same_name_trigger_drift",
+                trigger: "IDENTITY_VERIFICATION_RECEIPTS_NO_UPDATE",
+                ddl: "f3572365ab9e5f67",
+                occurrences: 1,
+            },
+        ],
+        reason: "the nine module-scope constants are v37's canonical production \
+                 append-only trigger definitions. \
+                 schema_validation_rejects_same_name_trigger_drift deliberately drops \
+                 and replaces one trigger on an unguarded in-memory connection to prove \
+                 byte-canonical validation fails closed. Bodies read 2026-09-20. The \
+                 test module also names raw connection doorways, so this is declared \
+                 rather than assigned an inapplicable machine proof.",
+    },
+    Exemption {
         path: "crates/memcore/src/store/memory_lifecycle.rs",
         basis: ExemptionBasis::DeclaredByReviewerNotProven {
             signed_by: "tachi#1443 census lane (agent), body NOT read 2026-07-26",
@@ -1012,6 +1118,37 @@ const EXEMPTIONS: &[Exemption<'static>] = &[
                  stamp_v22_without_v23_guards, \
                  read_only_existing_schema_compat_opens_stamped_older_without_write_authority). \
                  Enclosing symbols extracted mechanically; bodies NOT read.",
+    },
+    Exemption {
+        path: "crates/memcore/src/store/profile_identity_tests.rs",
+        basis: ExemptionBasis::DeclaredByReviewerNotProven {
+            signed_by: "Amp implementation lane, body read 2026-09-20",
+        },
+        sites: &[
+            Site {
+                symbol: "production_open_authorizer_migrates_v36_verified_admission_inventory",
+                trigger: "IDENTITY_VERIFIED_ADMISSIONS_NO_DELETE",
+                ddl: "9205a371ccee164f",
+                occurrences: 1,
+            },
+            Site {
+                symbol: "production_open_authorizer_migrates_v36_verified_admission_inventory",
+                trigger: "IDENTITY_VERIFIED_ADMISSIONS_NO_REPLACE",
+                ddl: "d2d977d8db3c4414",
+                occurrences: 1,
+            },
+            Site {
+                symbol: "production_open_authorizer_migrates_v36_verified_admission_inventory",
+                trigger: "IDENTITY_VERIFIED_ADMISSIONS_NO_UPDATE",
+                ddl: "67bc9c164078a9a9",
+                occurrences: 1,
+            },
+        ],
+        reason: "production_open_authorizer_migrates_v36_verified_admission_inventory \
+                 drops three v37 triggers on an unguarded fixture connection to model a \
+                 v36 database, then exercises the production MemoryStore open/migrate path \
+                 and canonical inventory. Body read 2026-09-20. The file names store \
+                 doorways, so this fixture is declared rather than machine-proven.",
     },
     Exemption {
         path: "crates/memcore/src/store/vault/tests/vault_failure_injection.rs",
