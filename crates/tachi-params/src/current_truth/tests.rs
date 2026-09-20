@@ -1919,6 +1919,102 @@ fn equal_attempt_refresh_cannot_overwrite_committed_posture() {
     assert_eq!(posture.unavailable_reason.as_deref(), Some("first-outage"));
 }
 
+/// Different subject slices may complete at the same attempt instant. Their
+/// aggregate posture is ordered by subject identity, while conflicting
+/// repository visibility resolves restrictively and independent of arrival
+/// order. A denied attempt does not advance the visibility observation time.
+#[test]
+fn equal_attempt_subject_aggregate_and_visibility_ties_are_deterministic() {
+    fn write(store: &CurrentTruthSqliteStore, reverse: bool) {
+        let mut writes = vec![
+            (
+                "issue:100",
+                true,
+                Some("r100"),
+                Some("2026-08-26T11:59:00Z"),
+                None,
+                Some(VisibilityClassV1::Public),
+            ),
+            (
+                "issue:101",
+                false,
+                None,
+                None,
+                Some("issue-101-debt"),
+                Some(VisibilityClassV1::Private),
+            ),
+        ];
+        if reverse {
+            writes.reverse();
+        }
+        for (subject, fresh, revision, fresh_at, reason, visibility) in writes {
+            store
+                .record_subject_refresh(
+                    REPO,
+                    subject,
+                    fresh,
+                    revision,
+                    fresh_at,
+                    "2026-08-26T12:00:00Z",
+                    reason,
+                    visibility,
+                )
+                .unwrap();
+        }
+    }
+
+    let forward = open_store();
+    let reverse = open_store();
+    write(&forward, false);
+    write(&reverse, true);
+    let forward_posture = forward.refresh_posture_row(REPO).unwrap().unwrap();
+    let reverse_posture = reverse.refresh_posture_row(REPO).unwrap().unwrap();
+    assert_eq!(forward_posture, reverse_posture);
+    assert!(!forward_posture.fresh);
+    assert_eq!(
+        forward_posture.repository_visibility,
+        Some(VisibilityClassV1::Private)
+    );
+
+    forward
+        .record_subject_refresh(
+            REPO,
+            "issue:101",
+            false,
+            None,
+            None,
+            "2026-08-26T13:00:00Z",
+            Some("denied"),
+            None,
+        )
+        .unwrap();
+    assert_eq!(
+        forward
+            .refresh_posture_row(REPO)
+            .unwrap()
+            .unwrap()
+            .repository_visibility_at
+            .as_deref(),
+        Some("2026-08-26T12:00:00Z")
+    );
+    forward
+        .record_subject_refresh(
+            REPO,
+            "issue:102",
+            true,
+            Some("r102"),
+            Some("2026-08-26T12:30:00Z"),
+            "2026-08-26T12:30:00Z",
+            None,
+            Some(VisibilityClassV1::Public),
+        )
+        .unwrap();
+    assert_eq!(
+        forward.repository_visibility(REPO).unwrap(),
+        Some(VisibilityClassV1::Public)
+    );
+}
+
 // ── Review round 4 fixes ───────────────────────────────────────────────────
 
 /// An inadmissible row sharing an id with an admitted assertion never

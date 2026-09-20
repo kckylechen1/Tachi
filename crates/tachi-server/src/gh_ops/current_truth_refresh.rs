@@ -34,6 +34,7 @@ mod graphql;
 use graphql::{parse_graphql_bundle, GITHUB_REFRESH_QUERY};
 
 const CURRENT_TRUTH_GH_TIMEOUT: Duration = Duration::from_secs(6);
+const CURRENT_TRUTH_HANDLER_FLOOR: Duration = Duration::from_secs(6);
 
 const REASON_UNAVAILABLE: &str = "github_read_unavailable";
 const REASON_MALFORMED: &str = "github_data_malformed";
@@ -112,7 +113,7 @@ impl BoundedGithubRefreshReader for ServerBoundedGithubRefreshReader<'_> {
 /// immutable observation to the existing reconciliation seam.
 struct ProductionGithubRefreshAdapter {
     outcome: RefreshOutcomeV1,
-    repository_private: bool,
+    repository_visibility: Option<VisibilityClassV1>,
 }
 
 impl ProductionGithubRefreshAdapter {
@@ -122,20 +123,7 @@ impl ProductionGithubRefreshAdapter {
         issue_number: u64,
     ) -> ProductionGithubRefreshAdapter {
         let reader = ServerBoundedGithubRefreshReader { server };
-        Self::load_from_with_floor(&reader, repo, issue_number, CURRENT_TRUTH_GH_TIMEOUT).await
-    }
-
-    async fn load_from_with_floor(
-        reader: &dyn BoundedGithubRefreshReader,
-        repo: &str,
-        issue_number: u64,
-        floor: Duration,
-    ) -> ProductionGithubRefreshAdapter {
-        let ((), adapter) = tokio::join!(
-            tokio::time::sleep(floor),
-            Self::load_from(reader, repo, issue_number),
-        );
-        adapter
+        Self::load_from(&reader, repo, issue_number).await
     }
 
     async fn load_from(
@@ -145,23 +133,26 @@ impl ProductionGithubRefreshAdapter {
     ) -> ProductionGithubRefreshAdapter {
         let bundle = match reader.repository_slice(repo, issue_number).await {
             Ok(bundle) => bundle,
-            Err(_) => return Self::unavailable(repo, LoadFailure::Unavailable, false),
+            Err(_) => return Self::unavailable(repo, LoadFailure::Unavailable, None),
         };
         let visibility = match parse_visibility(&bundle.visibility) {
             Ok(visibility) => visibility,
-            Err(failure) => return Self::unavailable(repo, failure, false),
+            Err(failure) => return Self::unavailable(repo, failure, None),
         };
-        let repository_private = visibility == VisibilityClassV1::Private;
         match load_repository_state(repo, issue_number, visibility, bundle) {
             Ok(state) => Self {
                 outcome: RefreshOutcomeV1::Fresh(Box::new(state)),
-                repository_private,
+                repository_visibility: Some(visibility),
             },
-            Err(failure) => Self::unavailable(repo, failure, repository_private),
+            Err(failure) => Self::unavailable(repo, failure, Some(visibility)),
         }
     }
 
-    fn unavailable(repo: &str, failure: LoadFailure, repository_private: bool) -> Self {
+    fn unavailable(
+        repo: &str,
+        failure: LoadFailure,
+        repository_visibility: Option<VisibilityClassV1>,
+    ) -> Self {
         Self {
             outcome: RefreshOutcomeV1::Unavailable {
                 repo: repo.to_string(),
@@ -169,8 +160,12 @@ impl ProductionGithubRefreshAdapter {
                 // subjects have the same external error posture.
                 reason: failure.reason().to_string(),
             },
-            repository_private,
+            repository_visibility,
         }
+    }
+
+    fn repository_private(&self) -> bool {
+        self.repository_visibility == Some(VisibilityClassV1::Private)
     }
 }
 
@@ -460,33 +455,65 @@ struct ConsumedRefresh {
     fresh: bool,
 }
 
+#[cfg(test)]
 fn apply_refresh_and_consume(
     store: &CurrentTruthSqliteStore,
     adapter: &dyn GithubRefreshAdapter,
     repo: &str,
     attempted_at: &str,
 ) -> Result<ConsumedRefresh, String> {
+    apply_subject_refresh_and_consume(
+        store,
+        adapter,
+        repo,
+        &format!("{repo}#issue:42"),
+        None,
+        attempted_at,
+    )
+}
+
+fn apply_subject_refresh_and_consume(
+    store: &CurrentTruthSqliteStore,
+    adapter: &dyn GithubRefreshAdapter,
+    repo: &str,
+    subject_token: &str,
+    repository_visibility: Option<VisibilityClassV1>,
+    attempted_at: &str,
+) -> Result<ConsumedRefresh, String> {
     let (outcome, assertions) = reconcile_refresh(adapter, repo);
-    let mut fresh = false;
     match outcome {
         RefreshOutcomeV1::Fresh(state) => {
             if refresh_is_stale(store, &state, &assertions)? {
-                record_unavailable(store, repo, attempted_at, REASON_STALE)?;
+                record_unavailable(
+                    store,
+                    repo,
+                    subject_token,
+                    attempted_at,
+                    REASON_STALE,
+                    repository_visibility,
+                )?;
             } else {
-                match store.append_all_and_record_refresh(
+                match store.append_all_and_record_subject_refresh(
                     &assertions,
                     repo,
+                    subject_token,
                     &state.refresh_revision,
                     &state.refreshed_at,
                     attempted_at,
+                    repository_visibility,
                 ) {
-                    Ok(_) => {
-                        fresh = true;
-                    }
+                    Ok(_) => {}
                     Err(
                         tachi_params::current_truth::store::CurrentTruthStoreError::ContradictsExistingRevision(_),
                     ) => {
-                        record_unavailable(store, repo, attempted_at, REASON_CONTRADICTORY)?;
+                        record_unavailable(
+                            store,
+                            repo,
+                            subject_token,
+                            attempted_at,
+                            REASON_CONTRADICTORY,
+                            repository_visibility,
+                        )?;
                     }
                     Err(
                         tachi_params::current_truth::store::CurrentTruthStoreError::StaleRefreshRecord {
@@ -502,7 +529,14 @@ fn apply_refresh_and_consume(
             }
         }
         RefreshOutcomeV1::Unavailable { reason, .. } => {
-            record_unavailable(store, repo, attempted_at, &reason)?;
+            record_unavailable(
+                store,
+                repo,
+                subject_token,
+                attempted_at,
+                &reason,
+                repository_visibility,
+            )?;
         }
     }
 
@@ -540,19 +574,30 @@ fn apply_refresh_and_consume(
     );
     let work_statuses = model.items.iter().map(status_view).collect();
     Ok(ConsumedRefresh {
+        fresh: view.posture.fresh,
         view,
         work_statuses,
-        fresh,
     })
 }
 
 fn record_unavailable(
     store: &CurrentTruthSqliteStore,
     repo: &str,
+    subject_token: &str,
     attempted_at: &str,
     reason: &str,
+    repository_visibility: Option<VisibilityClassV1>,
 ) -> Result<(), String> {
-    match store.record_refresh(repo, false, None, None, attempted_at, Some(reason)) {
+    match store.record_subject_refresh(
+        repo,
+        subject_token,
+        false,
+        None,
+        None,
+        attempted_at,
+        Some(reason),
+        repository_visibility,
+    ) {
         Ok(())
         | Err(tachi_params::current_truth::store::CurrentTruthStoreError::StaleRefreshRecord {
             ..
@@ -625,6 +670,30 @@ pub(in crate::gh_ops) async fn handle_current_truth_refresh(
     server: &MemoryServer,
     params: &TachiGhParams,
 ) -> Result<String, String> {
+    handle_current_truth_refresh_with_floor(server, params, CURRENT_TRUTH_HANDLER_FLOOR).await
+}
+
+async fn handle_current_truth_refresh_with_floor(
+    server: &MemoryServer,
+    params: &TachiGhParams,
+    floor: Duration,
+) -> Result<String, String> {
+    // A single minimum completion floor covers the complete handler:
+    // bounded network read and JSON decode, persistence, reduction, consumer
+    // projection, and response serialization. It is an upper-shape
+    // hardening measure, not a claim of statistical latency equality for
+    // operations that exceed the floor.
+    let ((), result) = tokio::join!(
+        tokio::time::sleep(floor),
+        handle_current_truth_refresh_unpadded(server, params),
+    );
+    result
+}
+
+async fn handle_current_truth_refresh_unpadded(
+    server: &MemoryServer,
+    params: &TachiGhParams,
+) -> Result<String, String> {
     let repo = super::router::required_repo(params, "current_truth_refresh")?;
     let issue_number = params
         .number
@@ -633,18 +702,29 @@ pub(in crate::gh_ops) async fn handle_current_truth_refresh(
     let attempted_at = chrono::Utc::now().to_rfc3339();
     let adapter = ProductionGithubRefreshAdapter::load(server, &repo, issue_number).await;
     let (consumed, private_history) = server.with_current_truth_store(|store| {
-        let consumed = apply_refresh_and_consume(store, &adapter, &repo, &attempted_at)?;
-        let private_history = !store
-            .private_subject_tokens(&repo)
+        let consumed = apply_subject_refresh_and_consume(
+            store,
+            &adapter,
+            &repo,
+            &format!("{repo}#issue:{issue_number}"),
+            adapter.repository_visibility,
+            &attempted_at,
+        )?;
+        let private_history = store
+            .repository_visibility(&repo)
             .map_err(|error| error.to_string())?
-            .is_empty();
+            == Some(VisibilityClassV1::Private)
+            || !store
+                .private_subject_tokens(&repo)
+                .map_err(|error| error.to_string())?
+                .is_empty();
         Ok((consumed, private_history))
     })?;
 
     serialize_refresh_response(
         &repo,
         &consumed,
-        adapter.repository_private || private_history,
+        adapter.repository_private() || private_history,
         &attempted_at,
     )
 }
@@ -853,7 +933,7 @@ mod tests {
                 }],
                 observations: vec![],
             })),
-            repository_private: false,
+            repository_visibility: Some(VisibilityClassV1::Public),
         }
     }
 
@@ -994,6 +1074,59 @@ mod tests {
         assert_eq!(state.pull_requests[0].linked_issues, vec![42]);
     }
 
+    #[test]
+    fn malformed_cross_reference_source_fails_closed_instead_of_minting_empty_linkage() {
+        fn raw(source: Value) -> Value {
+            json!({"data": {"repository": {
+                "visibility": "PUBLIC",
+                "issueOrPullRequest": {
+                    "__typename": "Issue",
+                    "number": 42,
+                    "state": "OPEN",
+                    "updatedAt": "2026-09-01T00:00:00Z",
+                    "timelineItems": {
+                        "pageInfo": {"hasNextPage": false},
+                        "nodes": [{
+                            "__typename": "CrossReferencedEvent",
+                            "id": "event-malformed",
+                            "createdAt": "2026-09-02T00:00:00Z",
+                            "source": source
+                        }]
+                    }
+                }
+            }}})
+        }
+
+        for source in [
+            Value::Null,
+            json!("not-an-object"),
+            json!({}),
+            json!({"__typename": null}),
+            json!({"__typename": "UnknownTypedSource"}),
+        ] {
+            assert!(matches!(
+                parse_graphql_bundle("owner/repo", 42, &raw(source)),
+                Err(LoadFailure::Malformed)
+            ));
+        }
+        let mut missing = raw(json!({"__typename": "Issue"}));
+        missing
+            .pointer_mut("/data/repository/issueOrPullRequest/timelineItems/nodes/0")
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .remove("source");
+        assert!(matches!(
+            parse_graphql_bundle("owner/repo", 42, &missing),
+            Err(LoadFailure::Malformed)
+        ));
+
+        let valid_non_pr =
+            parse_graphql_bundle("owner/repo", 42, &raw(json!({"__typename": "Issue"}))).unwrap();
+        assert!(valid_non_pr.timeline.is_empty());
+        assert!(valid_non_pr.pull_requests.is_empty());
+    }
+
     #[tokio::test]
     async fn production_adapter_reopen_is_append_only() {
         let mut reopened = cross_reference(7);
@@ -1066,14 +1199,16 @@ mod tests {
         older_other_issue.refresh_revision = "independent-refresh-43".to_string();
         let older_other_issue = ProductionGithubRefreshAdapter {
             outcome: RefreshOutcomeV1::Fresh(Box::new(older_other_issue)),
-            repository_private: false,
+            repository_visibility: Some(VisibilityClassV1::Public),
         };
         let store = CurrentTruthSqliteStore::open_in_memory().unwrap();
         apply_refresh_and_consume(&store, &newer, "owner/repo", "2026-09-04T01:00:00Z").unwrap();
-        let result = apply_refresh_and_consume(
+        let result = apply_subject_refresh_and_consume(
             &store,
             &older_other_issue,
             "owner/repo",
+            "owner/repo#issue:43",
+            older_other_issue.repository_visibility,
             "2026-09-05T01:00:00Z",
         )
         .unwrap();
@@ -1085,6 +1220,94 @@ mod tests {
             .subjects
             .iter()
             .any(|subject| subject.subject_token == "owner/repo#issue:43"));
+    }
+
+    #[tokio::test]
+    async fn successful_sibling_issue_refresh_cannot_clear_merged_relation_debt() {
+        let issue_a_open = adapter_for(issue("OPEN", "2026-09-01T00:00:00Z"), vec![], vec![]).await;
+        let issue_a_merged = adapter_for(
+            issue("OPEN", "2026-09-02T00:00:00Z"),
+            vec![cross_reference(7)],
+            vec![(
+                7,
+                pr(
+                    7,
+                    "MERGED",
+                    "2026-09-02T00:00:00Z",
+                    Some("merge00000000000000000000000000000000007"),
+                ),
+            )],
+        )
+        .await;
+        let mut issue_b_state =
+            fresh(&adapter_for(issue("OPEN", "2026-09-03T00:00:00Z"), vec![], vec![]).await);
+        issue_b_state.issues[0].number = 43;
+        issue_b_state.issues[0].snapshot_revision =
+            visibility_bound_revision("issue", "issue-43", VisibilityClassV1::Public);
+        issue_b_state.refresh_revision = "issue-43-refresh".to_string();
+        let issue_b = ProductionGithubRefreshAdapter {
+            outcome: RefreshOutcomeV1::Fresh(Box::new(issue_b_state)),
+            repository_visibility: Some(VisibilityClassV1::Public),
+        };
+
+        let store = CurrentTruthSqliteStore::open_in_memory().unwrap();
+        apply_subject_refresh_and_consume(
+            &store,
+            &issue_a_open,
+            "owner/repo",
+            "owner/repo#issue:42",
+            issue_a_open.repository_visibility,
+            "2026-09-01T01:00:00Z",
+        )
+        .unwrap();
+        let debt = apply_subject_refresh_and_consume(
+            &store,
+            &issue_a_merged,
+            "owner/repo",
+            "owner/repo#issue:42",
+            issue_a_merged.repository_visibility,
+            "2026-09-02T01:00:00Z",
+        )
+        .unwrap();
+        assert!(!debt.fresh);
+
+        let after_b = apply_subject_refresh_and_consume(
+            &store,
+            &issue_b,
+            "owner/repo",
+            "owner/repo#issue:43",
+            issue_b.repository_visibility,
+            "2026-09-03T01:00:00Z",
+        )
+        .unwrap();
+        assert!(!after_b.fresh);
+        assert_eq!(
+            after_b.view.posture.unavailable_reason.as_deref(),
+            Some(REASON_REVERT_UNAVAILABLE)
+        );
+        assert_eq!(after_b.view.health.repos_with_refresh_debt, 1);
+        let issue_a = after_b
+            .view
+            .subjects
+            .iter()
+            .find(|subject| subject.subject_token == "owner/repo#issue:42")
+            .unwrap();
+        assert_eq!(
+            issue_a.open_action.as_ref().unwrap().kind,
+            tachi_params::current_truth::types::OpenActionKindV1::RefreshUnavailableSource
+        );
+        assert!(!store
+            .assertions_for_repo("owner/repo")
+            .unwrap()
+            .iter()
+            .any(|assertion| {
+                assertion.predicate == PredicateV1::PrMerged
+                    || (assertion.predicate == PredicateV1::ImplementationPresent
+                        && matches!(
+                            assertion.value,
+                            tachi_params::current_truth::types::AssertionValueV1::CommitSha(_)
+                        ))
+            }));
     }
 
     #[test]
@@ -1123,9 +1346,15 @@ mod tests {
             apply_refresh_and_consume(&store, &public, "owner/repo", "2026-09-01T00:30:00Z")
                 .unwrap();
         assert_eq!(before.view.subjects.len(), 1);
-        let result =
-            apply_refresh_and_consume(&store, &adapter, "owner/repo", "2026-09-01T01:00:00Z")
-                .unwrap();
+        let result = apply_subject_refresh_and_consume(
+            &store,
+            &adapter,
+            "owner/repo",
+            "owner/repo#issue:42",
+            adapter.repository_visibility,
+            "2026-09-01T01:00:00Z",
+        )
+        .unwrap();
         assert!(result.fresh);
         assert!(result.view.subjects.is_empty());
         assert_eq!(result.view.health.conflicted_predicates, 0);
@@ -1135,7 +1364,7 @@ mod tests {
         let response = serialize_refresh_response(
             "owner/repo",
             &result,
-            adapter.repository_private,
+            adapter.repository_private(),
             "2026-09-01T01:00:00Z",
         )
         .unwrap();
@@ -1161,6 +1390,79 @@ mod tests {
         )
         .unwrap();
         assert_eq!(response, denied_response);
+    }
+
+    #[tokio::test]
+    async fn failed_private_refresh_then_denied_read_durably_hides_public_history() {
+        let public = adapter_for(issue("OPEN", "2026-09-01T00:00:00Z"), vec![], vec![]).await;
+        let private_reader = FixtureReader {
+            visibility: Some(Ok(json!({"visibility": "PRIVATE"}))),
+            issue: Some(Ok(issue("OPEN", "2026-09-02T00:00:00Z"))),
+            timeline: BTreeMap::from([(1, Ok(json!([cross_reference(7)])))]),
+            prs: BTreeMap::from([(
+                7,
+                Ok(pr(
+                    7,
+                    "MERGED",
+                    "2026-09-02T00:00:00Z",
+                    Some("merge00000000000000000000000000000000007"),
+                )),
+            )]),
+            ..FixtureReader::default()
+        };
+        let private_failed =
+            ProductionGithubRefreshAdapter::load_from(&private_reader, "owner/repo", 42).await;
+        let denied_reader = FixtureReader {
+            visibility: Some(Err("not found or denied".to_string())),
+            ..FixtureReader::default()
+        };
+        let denied =
+            ProductionGithubRefreshAdapter::load_from(&denied_reader, "owner/repo", 42).await;
+        let store = CurrentTruthSqliteStore::open_in_memory().unwrap();
+
+        apply_subject_refresh_and_consume(
+            &store,
+            &public,
+            "owner/repo",
+            "owner/repo#issue:42",
+            Some(VisibilityClassV1::Public),
+            "2026-09-01T01:00:00Z",
+        )
+        .unwrap();
+        let after_private_failure = apply_subject_refresh_and_consume(
+            &store,
+            &private_failed,
+            "owner/repo",
+            "owner/repo#issue:42",
+            private_failed.repository_visibility,
+            "2026-09-02T01:00:00Z",
+        )
+        .unwrap();
+        assert!(after_private_failure.view.subjects.is_empty());
+        let after_denied = apply_subject_refresh_and_consume(
+            &store,
+            &denied,
+            "owner/repo",
+            "owner/repo#issue:42",
+            denied.repository_visibility,
+            "2026-09-03T01:00:00Z",
+        )
+        .unwrap();
+
+        assert_eq!(
+            store.repository_visibility("owner/repo").unwrap(),
+            Some(VisibilityClassV1::Private)
+        );
+        assert!(after_denied.view.subjects.is_empty());
+        assert!(after_denied.work_statuses.is_empty());
+        let response =
+            serialize_refresh_response("owner/repo", &after_denied, true, "2026-09-03T01:00:00Z")
+                .unwrap();
+        assert!(!response.contains("issue:42"));
+        assert!(!response.contains("github-issue"));
+        let response: Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(response["work_status"], json!([]));
+        assert_eq!(response["posture"]["last_fresh_revision"], Value::Null);
     }
 
     #[tokio::test]
@@ -1304,7 +1606,7 @@ esac
         };
         let private_malformed =
             ProductionGithubRefreshAdapter::load_from(&private_malformed, "owner/repo", 42).await;
-        assert!(private_malformed.repository_private);
+        assert!(private_malformed.repository_private());
         let attempted_at = "2026-09-01T01:00:00Z";
         let denied_consumed = apply_refresh_and_consume(
             &CurrentTruthSqliteStore::open_in_memory().unwrap(),
@@ -1324,58 +1626,75 @@ esac
             serialize_refresh_response(
                 "owner/repo",
                 &denied_consumed,
-                denied.repository_private,
+                denied.repository_private(),
                 attempted_at,
             )
             .unwrap(),
             serialize_refresh_response(
                 "owner/repo",
                 &private_malformed_consumed,
-                private_malformed.repository_private,
+                private_malformed.repository_private(),
                 attempted_at,
             )
             .unwrap(),
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
-    async fn denied_and_private_refreshes_have_one_call_and_the_same_timing_floor() {
-        let denied_reader = FixtureReader {
-            visibility: Some(Err("denied".to_string())),
-            ..FixtureReader::default()
-        };
-        let private_reader = FixtureReader {
-            visibility: Some(Ok(json!({"visibility": "PRIVATE"}))),
-            issue: Some(Ok(issue("OPEN", "2026-09-01T00:00:00Z"))),
-            ..FixtureReader::default()
+    #[allow(clippy::await_holding_lock)]
+    async fn full_handler_private_and_denied_paths_share_one_call_and_a_minimum_floor() {
+        let _lock = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let bin = tempfile::tempdir().unwrap();
+        let mode = bin.path().join("mode");
+        let calls = bin.path().join("calls");
+        let script = format!(
+            r#"#!/bin/sh
+echo call >> '{}'
+if [ "$(cat '{}')" = private ]; then
+  echo '{{"data":{{"repository":{{"visibility":"PRIVATE","issueOrPullRequest":{{"__typename":"Issue","number":42,"state":"OPEN","updatedAt":"2026-09-01T00:00:00Z","timelineItems":{{"pageInfo":{{"hasNextPage":false}},"nodes":[]}}}}}}}}}}'
+else
+  exit 1
+fi
+"#,
+            calls.display(),
+            mode.display(),
+        );
+        write_executable(&bin.path().join("gh"), &script);
+        let _path = PathEnvGuard::prepend(bin.path());
+        let server = crate::tests::make_server();
+        let params = TachiGhParams {
+            action: "current_truth_refresh".to_string(),
+            repo: Some("owner/repo".to_string()),
+            number: Some(42),
+            ..TachiGhParams::default()
         };
         let floor = Duration::from_millis(30);
 
-        let denied_started = std::time::Instant::now();
-        let denied = ProductionGithubRefreshAdapter::load_from_with_floor(
-            &denied_reader,
-            "owner/repo",
-            42,
-            floor,
-        )
-        .await;
-        let denied_elapsed = denied_started.elapsed();
+        std::fs::write(&mode, "private").unwrap();
         let private_started = std::time::Instant::now();
-        let private = ProductionGithubRefreshAdapter::load_from_with_floor(
-            &private_reader,
-            "owner/repo",
-            42,
-            floor,
-        )
-        .await;
+        let private = handle_current_truth_refresh_with_floor(&server, &params, floor)
+            .await
+            .unwrap();
         let private_elapsed = private_started.elapsed();
+        std::fs::write(&mode, "denied").unwrap();
+        let denied_started = std::time::Instant::now();
+        let denied = handle_current_truth_refresh_with_floor(&server, &params, floor)
+            .await
+            .unwrap();
+        let denied_elapsed = denied_started.elapsed();
 
-        assert_eq!(denied_reader.calls.lock().unwrap().as_slice(), ["slice"]);
-        assert_eq!(private_reader.calls.lock().unwrap().as_slice(), ["slice"]);
-        assert!(denied_elapsed >= floor);
         assert!(private_elapsed >= floor);
-        assert!(!denied.repository_private);
-        assert!(private.repository_private);
+        assert!(denied_elapsed >= floor);
+        assert_eq!(std::fs::read_to_string(calls).unwrap().lines().count(), 2);
+        let mut private: Value = serde_json::from_str(&private).unwrap();
+        let mut denied: Value = serde_json::from_str(&denied).unwrap();
+        private["posture"]["last_attempt_at"] = Value::Null;
+        denied["posture"]["last_attempt_at"] = Value::Null;
+        assert_eq!(private, denied);
+        assert_eq!(denied["work_status"], json!([]));
     }
 
     #[tokio::test]
@@ -1386,7 +1705,7 @@ esac
             Some("other00000000000000000000000000000000007".to_string());
         let contradictory = ProductionGithubRefreshAdapter {
             outcome: RefreshOutcomeV1::Fresh(Box::new(contradictory_state)),
-            repository_private: false,
+            repository_visibility: Some(VisibilityClassV1::Public),
         };
         let store = CurrentTruthSqliteStore::open_in_memory().unwrap();
         apply_refresh_and_consume(&store, &production, "owner/repo", "2026-09-01T01:00:00Z")

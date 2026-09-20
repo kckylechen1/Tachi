@@ -804,19 +804,27 @@ pub(crate) fn install_current_truth_schema(conn: &Connection) -> Result<(), Memo
         );
 
         CREATE TABLE IF NOT EXISTS current_truth_refresh (
-            repo TEXT PRIMARY KEY,
-            fresh INTEGER NOT NULL,
+            repo TEXT NOT NULL,
+            subject_token TEXT NOT NULL,
+            fresh INTEGER NOT NULL CHECK (fresh IN (0, 1)),
             last_fresh_revision TEXT,
             last_fresh_at TEXT,
             last_attempt_at TEXT NOT NULL,
-            unavailable_reason TEXT
+            unavailable_reason TEXT,
+            repository_visibility TEXT CHECK (repository_visibility IN ('public', 'private')),
+            repository_visibility_at TEXT,
+            PRIMARY KEY (repo, subject_token)
         );",
     )
 }
 
-/// Refuse a current product schema whose CurrentTruth objects or immutable
-/// ingestion-key constraint drifted from the v37 contract.
+/// Refuse a current product schema when any CurrentTruth table column, key,
+/// constraint, or explicit index target drifts from the canonical v37 DDL.
+/// Comparing all five stored object definitions also prevents a validator
+/// success followed by a consumer query failure on a missing field.
 pub fn validate_current_truth_schema(conn: &Connection) -> Result<(), MemoryError> {
+    let canonical = Connection::open_in_memory()?;
+    install_current_truth_schema(&canonical)?;
     for (object_type, name) in [
         ("table", "current_truth_assertions"),
         ("index", "idx_ct_assertions_subject"),
@@ -824,34 +832,28 @@ pub fn validate_current_truth_schema(conn: &Connection) -> Result<(), MemoryErro
         ("table", "current_truth_projection"),
         ("table", "current_truth_refresh"),
     ] {
-        let present = conn
+        let expected: String = canonical.query_row(
+            "SELECT COALESCE(sql, '') FROM main.sqlite_schema
+             WHERE type = ?1 AND name = ?2",
+            params![object_type, name],
+            |row| row.get(0),
+        )?;
+        let actual: Option<String> = conn
             .query_row(
-                "SELECT 1 FROM main.sqlite_schema WHERE type = ?1 AND name = ?2",
+                "SELECT COALESCE(sql, '') FROM main.sqlite_schema
+                 WHERE type = ?1 AND name = ?2",
                 params![object_type, name],
-                |_| Ok(()),
+                |row| row.get(0),
             )
             .optional()?;
-        if present.is_none() {
+        let Some(actual) = actual else {
             return Err(MemoryError::InvalidArg(format!(
                 "incomplete v37 CurrentTruth schema: required {object_type} '{name}' is missing"
             )));
-        }
-    }
-
-    let assertion_sql: String = conn.query_row(
-        "SELECT COALESCE(sql, '') FROM main.sqlite_schema
-         WHERE type = 'table' AND name = 'current_truth_assertions'",
-        [],
-        |row| row.get(0),
-    )?;
-    for clause in [
-        "content_digest TEXT NOT NULL",
-        "recorded_at TEXT NOT NULL DEFAULT ''",
-        "UNIQUE (subject_repo, subject_kind, subject_id, predicate, authority, issuer, source_id, source_revision)",
-    ] {
-        if !normalize_schema_sql(&assertion_sql).contains(&normalize_schema_sql(clause)) {
+        };
+        if normalize_schema_sql(&actual) != normalize_schema_sql(&expected) {
             return Err(MemoryError::InvalidArg(format!(
-                "incomplete v37 CurrentTruth schema: current_truth_assertions is missing canonical clause {clause:?}"
+                "drifted v37 CurrentTruth schema: {object_type} '{name}' does not match canonical columns, keys, constraints, and targets"
             )));
         }
     }

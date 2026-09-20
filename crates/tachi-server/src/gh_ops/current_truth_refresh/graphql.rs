@@ -106,11 +106,19 @@ pub(super) fn parse_graphql_bundle(
                 "created_at": node.get("createdAt").and_then(Value::as_str).ok_or(LoadFailure::Malformed)?,
             })),
             Some("CrossReferencedEvent") => {
-                let Some(source) = node.get("source").and_then(Value::as_object) else {
-                    continue;
-                };
-                if source.get("__typename").and_then(Value::as_str) != Some("PullRequest") {
-                    continue;
+                // GitHub declares CrossReferencedEvent.source non-null. A
+                // missing/malformed source therefore means the bounded typed
+                // relation set is not authoritative; never normalize it into
+                // an empty linkage set. A well-formed Issue source is a valid
+                // non-PR relation and may be ignored by this adapter.
+                let source = node
+                    .get("source")
+                    .and_then(Value::as_object)
+                    .ok_or(LoadFailure::Malformed)?;
+                match source.get("__typename").and_then(Value::as_str) {
+                    Some("Issue") => continue,
+                    Some("PullRequest") => {}
+                    _ => return Err(LoadFailure::Malformed),
                 }
                 let source_repo = source
                     .get("repository")

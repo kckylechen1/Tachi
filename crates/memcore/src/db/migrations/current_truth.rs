@@ -48,19 +48,87 @@ mod tests {
     }
 
     #[test]
-    fn v37_validator_refuses_missing_ingestion_uniqueness() {
+    fn v37_validator_refuses_every_consumer_field_key_constraint_and_index_drift() {
+        let field_cases = [
+            ("current_truth_assertions", "assertion_id"),
+            ("current_truth_assertions", "subject_repo"),
+            ("current_truth_assertions", "subject_kind"),
+            ("current_truth_assertions", "subject_id"),
+            ("current_truth_assertions", "predicate"),
+            ("current_truth_assertions", "value_json"),
+            ("current_truth_assertions", "issuer"),
+            ("current_truth_assertions", "authority"),
+            ("current_truth_assertions", "source_id"),
+            ("current_truth_assertions", "source_revision"),
+            ("current_truth_assertions", "observed_at"),
+            ("current_truth_assertions", "effective_at"),
+            ("current_truth_assertions", "supersedes"),
+            ("current_truth_assertions", "evidence_json"),
+            ("current_truth_assertions", "review_state"),
+            ("current_truth_assertions", "visibility"),
+            ("current_truth_assertions", "content_digest"),
+            ("current_truth_assertions", "recorded_at"),
+            ("current_truth_projection", "repo"),
+            ("current_truth_projection", "generation"),
+            ("current_truth_projection", "built_at"),
+            ("current_truth_projection", "view_json"),
+            ("current_truth_refresh", "repo"),
+            ("current_truth_refresh", "subject_token"),
+            ("current_truth_refresh", "fresh"),
+            ("current_truth_refresh", "last_fresh_revision"),
+            ("current_truth_refresh", "last_fresh_at"),
+            ("current_truth_refresh", "last_attempt_at"),
+            ("current_truth_refresh", "unavailable_reason"),
+            ("current_truth_refresh", "repository_visibility"),
+            ("current_truth_refresh", "repository_visibility_at"),
+        ];
+        for (object, field) in field_cases {
+            assert_drift_refused(object, field, &format!("drift_{field}"));
+        }
+        for (object, target, replacement) in [
+            (
+                "idx_ct_assertions_subject",
+                "subject_repo, subject_kind, subject_id",
+                "subject_kind, subject_repo, subject_id",
+            ),
+            ("idx_ct_assertions_predicate", "predicate", "subject_repo"),
+            (
+                "current_truth_assertions",
+                "UNIQUE (subject_repo, subject_kind, subject_id, predicate,",
+                "UNIQUE (subject_repo, subject_kind, predicate, subject_id,",
+            ),
+            (
+                "current_truth_refresh",
+                "CHECK (fresh IN (0, 1))",
+                "CHECK (fresh IN (0, 1, 2))",
+            ),
+            (
+                "current_truth_refresh",
+                "CHECK (repository_visibility IN ('public', 'private'))",
+                "CHECK (repository_visibility IN ('public', 'private', 'unknown'))",
+            ),
+            (
+                "current_truth_refresh",
+                "PRIMARY KEY (repo, subject_token)",
+                "PRIMARY KEY (subject_token, repo)",
+            ),
+        ] {
+            assert_drift_refused(object, target, replacement);
+        }
+    }
+
+    fn assert_drift_refused(object: &str, target: &str, replacement: &str) {
         let conn = Connection::open_in_memory().unwrap();
         migrate_v37_current_truth(&conn, StoreProfile::TachiFull).unwrap();
         conn.execute_batch("PRAGMA writable_schema = ON;").unwrap();
-        conn.execute(
-            "UPDATE sqlite_schema
-             SET sql = replace(sql, ?1, '')
-             WHERE type = 'table' AND name = 'current_truth_assertions'",
-            ["UNIQUE (subject_repo, subject_kind, subject_id, predicate,\n                    authority, issuer, source_id, source_revision)"],
-        )
-        .unwrap();
+        let changed = conn
+            .execute(
+                "UPDATE sqlite_schema SET sql = replace(sql, ?1, ?2) WHERE name = ?3",
+                rusqlite::params![target, replacement, object],
+            )
+            .unwrap();
+        assert_eq!(changed, 1, "drift fixture must target {object}.{target}");
         conn.execute_batch("PRAGMA writable_schema = OFF;").unwrap();
-        crate::db::schema::validate_current_truth_schema(&conn)
-            .expect_err("drifted immutable ingestion key must fail closed");
+        crate::db::schema::validate_current_truth_schema(&conn).unwrap_err();
     }
 }

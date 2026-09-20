@@ -137,17 +137,25 @@ const PROJECTION_SCHEMA_SQL: &str = r#"
 
 const REFRESH_SCHEMA_SQL: &str = r#"
         -- Operational refresh posture metadata (#1696): staleness and
-        -- refresh-debt bookkeeping. Not a truth source; never feeds the
-        -- reducer.
+        -- refresh-debt bookkeeping, scoped to the subject slice actually
+        -- covered by one bounded source read. Repository visibility is
+        -- restrictive access metadata, not a truth assertion; neither field
+        -- feeds the reducer.
         CREATE TABLE IF NOT EXISTS current_truth_refresh (
-            repo                 TEXT PRIMARY KEY,
-            fresh                INTEGER NOT NULL,
+            repo                 TEXT NOT NULL,
+            subject_token        TEXT NOT NULL,
+            fresh                INTEGER NOT NULL CHECK (fresh IN (0, 1)),
             last_fresh_revision  TEXT,
             last_fresh_at        TEXT,
             last_attempt_at      TEXT NOT NULL,
-            unavailable_reason   TEXT
+            unavailable_reason   TEXT,
+            repository_visibility TEXT CHECK (repository_visibility IN ('public', 'private')),
+            repository_visibility_at TEXT,
+            PRIMARY KEY (repo, subject_token)
         );
 "#;
+
+const REPOSITORY_REFRESH_SCOPE: &str = "__repository__";
 
 /// SQLite-backed CurrentTruth store over a caller-owned connection.
 pub struct CurrentTruthSqliteStore {
@@ -516,6 +524,34 @@ impl CurrentTruthSqliteStore {
         recorded_at: &str,
         unavailable_reason: Option<&str>,
     ) -> Result<(), CurrentTruthStoreError> {
+        self.record_subject_refresh(
+            repo,
+            REPOSITORY_REFRESH_SCOPE,
+            fresh,
+            last_fresh_revision,
+            last_fresh_at,
+            recorded_at,
+            unavailable_reason,
+            None,
+        )
+    }
+
+    /// Record one refresh attempt for the exact subject slice covered by the
+    /// bounded source read. A successful sibling slice cannot clear this
+    /// subject's debt. `repository_visibility` is the visibility observed by
+    /// this attempt; `None` preserves any last-known restrictive value.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_subject_refresh(
+        &self,
+        repo: &str,
+        subject_token: &str,
+        fresh: bool,
+        last_fresh_revision: Option<&str>,
+        last_fresh_at: Option<&str>,
+        recorded_at: &str,
+        unavailable_reason: Option<&str>,
+        repository_visibility: Option<VisibilityClassV1>,
+    ) -> Result<(), CurrentTruthStoreError> {
         Self::validate_refresh(repo, fresh, last_fresh_revision, last_fresh_at, recorded_at)?;
         // One transaction: the staleness check and the upsert commit
         // atomically, so a concurrent writer on the same file cannot
@@ -524,11 +560,13 @@ impl CurrentTruthSqliteStore {
         Self::record_refresh_in(
             &transaction,
             repo,
+            subject_token,
             fresh,
             last_fresh_revision,
             last_fresh_at,
             recorded_at,
             unavailable_reason,
+            repository_visibility,
         )?;
         transaction.commit()?;
         Ok(())
@@ -545,6 +583,30 @@ impl CurrentTruthSqliteStore {
         last_fresh_revision: &str,
         last_fresh_at: &str,
         recorded_at: &str,
+    ) -> Result<usize, CurrentTruthStoreError> {
+        self.append_all_and_record_subject_refresh(
+            assertions,
+            repo,
+            REPOSITORY_REFRESH_SCOPE,
+            last_fresh_revision,
+            last_fresh_at,
+            recorded_at,
+            None,
+        )
+    }
+
+    /// Atomically append one fresh subject-slice observation and advance only
+    /// that slice's posture.
+    #[allow(clippy::too_many_arguments)]
+    pub fn append_all_and_record_subject_refresh(
+        &self,
+        assertions: &[AssertionV1],
+        repo: &str,
+        subject_token: &str,
+        last_fresh_revision: &str,
+        last_fresh_at: &str,
+        recorded_at: &str,
+        repository_visibility: Option<VisibilityClassV1>,
     ) -> Result<usize, CurrentTruthStoreError> {
         Self::validate_refresh(
             repo,
@@ -563,11 +625,13 @@ impl CurrentTruthSqliteStore {
         Self::record_refresh_in(
             &transaction,
             repo,
+            subject_token,
             true,
             Some(last_fresh_revision),
             Some(last_fresh_at),
             recorded_at,
             None,
+            repository_visibility,
         )?;
         transaction.commit()?;
         Ok(appended)
@@ -608,18 +672,21 @@ impl CurrentTruthSqliteStore {
     fn record_refresh_in(
         transaction: &rusqlite::Transaction<'_>,
         repo: &str,
+        subject_token: &str,
         fresh: bool,
         last_fresh_revision: Option<&str>,
         last_fresh_at: Option<&str>,
         recorded_at: &str,
         unavailable_reason: Option<&str>,
+        repository_visibility: Option<VisibilityClassV1>,
     ) -> Result<(), CurrentTruthStoreError> {
         let existing: Option<RefreshPostureRowV1> = transaction
             .query_row(
                 "SELECT fresh, last_fresh_revision, last_fresh_at, last_attempt_at,
-                        unavailable_reason
-                 FROM current_truth_refresh WHERE repo = ?1",
-                params![repo],
+                        unavailable_reason, repository_visibility,
+                        repository_visibility_at
+                 FROM current_truth_refresh WHERE repo = ?1 AND subject_token = ?2",
+                params![repo, subject_token],
                 |row| {
                     Ok(RefreshPostureRowV1 {
                         fresh: row.get::<_, i64>(0)? != 0,
@@ -627,6 +694,11 @@ impl CurrentTruthSqliteStore {
                         last_fresh_at: row.get(2)?,
                         last_attempt_at: row.get(3)?,
                         unavailable_reason: row.get(4)?,
+                        repository_visibility: row
+                            .get::<_, Option<String>>(5)?
+                            .as_deref()
+                            .map(parse_visibility),
+                        repository_visibility_at: row.get(6)?,
                     })
                 },
             )
@@ -642,26 +714,96 @@ impl CurrentTruthSqliteStore {
                 });
             }
         }
+
+        // Visibility is repository-scoped metadata supplied by every
+        // successful repository object read. Preserve its own observation
+        // instant so a later denied attempt cannot make an old value appear
+        // newer. Equal-instant disagreement resolves restrictively to
+        // private, independent of arrival order.
+        let mut known_visibility: Option<(VisibilityClassV1, String)> = {
+            let mut statement = transaction.prepare(
+                "SELECT repository_visibility, repository_visibility_at
+                 FROM current_truth_refresh
+                 WHERE repo = ?1 AND repository_visibility IS NOT NULL
+                       AND repository_visibility_at IS NOT NULL",
+            )?;
+            let candidates = statement
+                .query_map(params![repo], |row| {
+                    let token: String = row.get(0)?;
+                    Ok((parse_visibility(&token), row.get::<_, String>(1)?))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            candidates.into_iter().max_by(
+                |(left_visibility, left_at), (right_visibility, right_at)| {
+                    super::types::ordering_instant(left_at)
+                        .cmp(&super::types::ordering_instant(right_at))
+                        .then_with(|| {
+                            usize::from(*left_visibility == VisibilityClassV1::Private).cmp(
+                                &usize::from(*right_visibility == VisibilityClassV1::Private),
+                            )
+                        })
+                },
+            )
+        };
+        if let Some(incoming) = repository_visibility {
+            known_visibility = match known_visibility {
+                None => Some((incoming, recorded_at.to_string())),
+                Some((current, current_at)) => {
+                    match super::types::ordering_instant(recorded_at)
+                        .cmp(&super::types::ordering_instant(&current_at))
+                    {
+                        std::cmp::Ordering::Greater => Some((incoming, recorded_at.to_string())),
+                        std::cmp::Ordering::Equal => Some((
+                            if current == VisibilityClassV1::Private
+                                || incoming == VisibilityClassV1::Private
+                            {
+                                VisibilityClassV1::Private
+                            } else {
+                                VisibilityClassV1::Public
+                            },
+                            current_at,
+                        )),
+                        std::cmp::Ordering::Less => Some((current, current_at)),
+                    }
+                }
+            };
+        }
+        if let Some((visibility, visibility_at)) = known_visibility.as_ref() {
+            transaction.execute(
+                "UPDATE current_truth_refresh
+                 SET repository_visibility = ?2, repository_visibility_at = ?3
+                 WHERE repo = ?1",
+                params![repo, visibility_token(*visibility), visibility_at],
+            )?;
+        }
         transaction.execute(
             "INSERT INTO current_truth_refresh (
-                repo, fresh, last_fresh_revision, last_fresh_at,
-                last_attempt_at, unavailable_reason
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-             ON CONFLICT(repo) DO UPDATE SET
+                repo, subject_token, fresh, last_fresh_revision, last_fresh_at,
+                last_attempt_at, unavailable_reason, repository_visibility,
+                repository_visibility_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT(repo, subject_token) DO UPDATE SET
                 fresh = excluded.fresh,
                 last_fresh_revision = COALESCE(excluded.last_fresh_revision,
                                                current_truth_refresh.last_fresh_revision),
                 last_fresh_at = COALESCE(excluded.last_fresh_at,
                                          current_truth_refresh.last_fresh_at),
                 last_attempt_at = excluded.last_attempt_at,
-                unavailable_reason = excluded.unavailable_reason",
+                unavailable_reason = excluded.unavailable_reason,
+                repository_visibility = excluded.repository_visibility,
+                repository_visibility_at = excluded.repository_visibility_at",
             params![
                 repo,
+                subject_token,
                 fresh as i64,
                 last_fresh_revision,
                 last_fresh_at,
                 recorded_at,
-                unavailable_reason
+                unavailable_reason,
+                known_visibility
+                    .as_ref()
+                    .map(|(visibility, _)| visibility_token(*visibility)),
+                known_visibility.as_ref().map(|(_, at)| at)
             ],
         )?;
         Ok(())
@@ -672,31 +814,117 @@ impl CurrentTruthSqliteStore {
         &self,
         repo: &str,
     ) -> Result<Option<RefreshPostureRowV1>, CurrentTruthStoreError> {
-        let row = self
-            .conn
-            .query_row(
-                "SELECT fresh, last_fresh_revision, last_fresh_at, last_attempt_at,
-                        unavailable_reason
-                 FROM current_truth_refresh WHERE repo = ?1",
-                params![repo],
-                |row| {
-                    Ok(RefreshPostureRowV1 {
-                        fresh: row.get::<_, i64>(0)? != 0,
-                        last_fresh_revision: row.get(1)?,
-                        last_fresh_at: row.get(2)?,
-                        last_attempt_at: row.get(3)?,
-                        unavailable_reason: row.get(4)?,
-                    })
-                },
+        let mut statement = self.conn.prepare(
+            "SELECT subject_token, fresh, last_fresh_revision, last_fresh_at,
+                    last_attempt_at, unavailable_reason, repository_visibility,
+                    repository_visibility_at
+             FROM current_truth_refresh WHERE repo = ?1
+             ORDER BY last_attempt_at DESC, subject_token ASC",
+        )?;
+        let mut rows = statement
+            .query_map(params![repo], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    RefreshPostureRowV1 {
+                        fresh: row.get::<_, i64>(1)? != 0,
+                        last_fresh_revision: row.get(2)?,
+                        last_fresh_at: row.get(3)?,
+                        last_attempt_at: row.get(4)?,
+                        unavailable_reason: row.get(5)?,
+                        repository_visibility: row
+                            .get::<_, Option<String>>(6)?
+                            .as_deref()
+                            .map(parse_visibility),
+                        repository_visibility_at: row.get(7)?,
+                    },
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        // Aggregate equal-attempt ties by stable subject identity. Within one
+        // subject equal attempts are rejected (first committer wins); across
+        // independently covered subjects this order makes the repo posture
+        // deterministic regardless of arrival order.
+        rows.sort_by(|(left_subject, left), (right_subject, right)| {
+            super::types::ordering_instant(&right.last_attempt_at)
+                .cmp(&super::types::ordering_instant(&left.last_attempt_at))
+                .then_with(|| left_subject.cmp(right_subject))
+        });
+        let Some((_, newest)) = rows.first() else {
+            return Ok(None);
+        };
+        if rows.len() == 1 {
+            return Ok(Some(newest.clone()));
+        }
+
+        let fresh = rows.iter().all(|(_, row)| row.fresh);
+        let unavailable_reason = rows
+            .iter()
+            .find(|(_, row)| !row.fresh)
+            .and_then(|(_, row)| row.unavailable_reason.clone());
+        let repository_visibility = if rows
+            .iter()
+            .any(|(_, row)| row.repository_visibility == Some(VisibilityClassV1::Private))
+        {
+            Some(VisibilityClassV1::Private)
+        } else if rows
+            .iter()
+            .any(|(_, row)| row.repository_visibility == Some(VisibilityClassV1::Public))
+        {
+            Some(VisibilityClassV1::Public)
+        } else {
+            None
+        };
+        let repository_visibility_at = rows
+            .iter()
+            .filter_map(|(_, row)| row.repository_visibility_at.as_deref())
+            .max_by_key(|at| super::types::ordering_instant(at))
+            .map(str::to_string);
+        let last_fresh_at = rows
+            .iter()
+            .filter_map(|(_, row)| row.last_fresh_at.as_deref())
+            .max_by_key(|at| super::types::ordering_instant(at))
+            .map(str::to_string);
+        let revisions = rows
+            .iter()
+            .filter_map(|(subject, row)| {
+                row.last_fresh_revision
+                    .as_deref()
+                    .map(|revision| (subject, revision))
+            })
+            .collect::<Vec<_>>();
+        let last_fresh_revision = (!revisions.is_empty()).then(|| {
+            let basis = serde_json::json!({ "subject_revisions": revisions });
+            format!(
+                "subject-set:{}",
+                memcore::canonical_digest::canonical_json_digest_hex(&basis)
             )
-            .optional()?;
-        Ok(row)
+        });
+        Ok(Some(RefreshPostureRowV1 {
+            fresh,
+            last_fresh_revision,
+            last_fresh_at,
+            last_attempt_at: newest.last_attempt_at.clone(),
+            unavailable_reason,
+            repository_visibility,
+            repository_visibility_at,
+        }))
+    }
+
+    /// Last known repository visibility, independent from whether a refresh
+    /// was admissible as fresh truth.
+    pub fn repository_visibility(
+        &self,
+        repo: &str,
+    ) -> Result<Option<VisibilityClassV1>, CurrentTruthStoreError> {
+        Ok(self
+            .refresh_posture_row(repo)?
+            .and_then(|row| row.repository_visibility))
     }
 
     /// Refresh-debt count over all repositories (content-free health).
     pub fn refresh_debt_repos(&self) -> Result<usize, CurrentTruthStoreError> {
         let count: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM current_truth_refresh WHERE fresh = 0",
+            "SELECT COUNT(DISTINCT repo) FROM current_truth_refresh WHERE fresh = 0",
             [],
             |row| row.get(0),
         )?;
@@ -762,6 +990,10 @@ pub struct RefreshPostureRowV1 {
     pub last_fresh_at: Option<String>,
     pub last_attempt_at: String,
     pub unavailable_reason: Option<String>,
+    #[serde(default, skip_serializing)]
+    pub repository_visibility: Option<VisibilityClassV1>,
+    #[serde(default, skip_serializing)]
+    pub repository_visibility_at: Option<String>,
 }
 
 /// The canonical generation digest binding a projection to its exact
