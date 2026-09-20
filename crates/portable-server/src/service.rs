@@ -692,12 +692,16 @@ impl PortableServer {
     }
 }
 
-/// RMCP routes complete inline metadata statelessly even with an old version.
-/// Keep the portable lifecycle aligned without depending on the full server.
+/// Inline client context cannot borrow a previously initialized legacy session.
+/// Reject partial or malformed context too, while retaining ordinary legacy metadata.
 fn require_legacy_session(meta: &rmcp::model::RequestMetaObject) -> Result<(), rmcp::ErrorData> {
-    if meta
-        .missing_required_keys(&rmcp::model::ProtocolVersion::V_2026_07_28)
-        .is_empty()
+    if [
+        "io.modelcontextprotocol/protocolVersion",
+        "io.modelcontextprotocol/clientCapabilities",
+        "io.modelcontextprotocol/clientInfo",
+    ]
+    .iter()
+    .any(|key| meta.0.contains_key(*key))
     {
         return Err(rmcp::ErrorData::invalid_request(
             "legacy MCP initialize session required; inline requests are disabled",
@@ -816,6 +820,8 @@ impl ServerHandler for PortableServer {
 
 #[cfg(test)]
 mod tests {
+    mod protocol_boundaries;
+
     use super::*;
 
     fn boot(policy: Option<Arc<dyn DecayPolicy>>, name: &str) -> PortableServer {
