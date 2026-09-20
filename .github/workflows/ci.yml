@@ -290,6 +290,7 @@ jobs:
              exit 1
            fi
           python3 .github/scripts/runner_scan_diagnostics_test.py
+          python3 -m unittest discover -s .github/scripts -p "test_ci_acceptance.py" -v
 
       - name: Runner workspace cleanup
         # #1865: no checkout residue survives a failed or cancelled job.
@@ -323,35 +324,63 @@ jobs:
         run: bash .github/scripts/runner_hygiene.sh preflight 60
 
       - name: Setup Rust
+        id: rust_setup
         uses: ./.github/actions/setup-rust
 
+      - name: Record executed candidate identity
+        if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' }}
+        env:
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before || '' }}
+        run: |
+          printf 'requested_head=%s\nbase=%s\n' "$PR_HEAD_SHA" "$PR_BASE_SHA"
+          printf 'checkout_sha=%s\ncheckout_tree=%s\n' "$(git rev-parse HEAD)" "$(git rev-parse 'HEAD^{tree}')"
+
       - name: Check release version sync
+        id: release_versions
+        if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' }}
         run: python3 scripts/check_release_versions.py
 
       - name: Test nextest census contracts
+        id: nextest_contracts
+        if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' }}
         run: python3 -m unittest scripts.test_nextest_census scripts.test_nextest_known_reds scripts.test_nextest_slow_diff
 
       - name: Test Rust setup source contracts
+        id: setup_contracts
+        if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' }}
         run: python3 -m unittest discover -s .github/actions/setup-rust -v
 
       - name: Run clippy
+        id: clippy
+        if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' }}
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: Check formatting
+        id: fmt
+        if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' }}
         run: cargo fmt --all --check
 
       - name: Install cargo-audit
+        id: audit_install
+        if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' }}
         run: cargo install cargo-audit --version 0.22.2 --locked --quiet
 
       - name: Run cargo audit
+        id: audit
+        if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' && steps.audit_install.outcome == 'success' }}
         run: cargo audit --deny warnings
 
       - name: Install cargo-nextest
+        id: nextest_install
+        if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' }}
         # get.nextest.rs is unreachable from this runner's network (DNS blocked);
         # taiki-e/install-action pulls a prebuilt binary from GitHub Releases.
         uses: taiki-e/install-action@c295c25a8d3df7288fa86db860a4f8062bf76ad8 # releases/nextest snapshot 2026-07-25
 
       - name: Run workspace tests
+        id: workspace_tests
+        if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' && steps.nextest_install.outcome == 'success' }}
         run: cargo nextest run --workspace --locked --profile ci
 
       - name: Archive nextest JUnit timing report
@@ -365,19 +394,27 @@ jobs:
         # same actions/* first-party family as checkout/setup-node (pinned to
         # the v4.6.2 commit, matching the upload-artifact major already used by
         # release-cli-binaries.yml) -- no new third-party action introduced.
-        if: always()
+        # A successful run must publish its report. A failed compile may have
+        # no report: preserve that primary failure, without inventing a second
+        # test failure. Failed runs with a report still upload their diagnostics.
+        if: >-
+          ${{ !cancelled() && (steps.workspace_tests.outcome == 'success' ||
+              (steps.workspace_tests.outcome == 'failure' && hashFiles('target/nextest/ci/junit.xml') != '')) }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: nextest-junit-report
           path: target/nextest/ci/junit.xml
-          # A missing report means the junit config is dead, not that there was
-          # nothing to archive -- fail loudly instead of degrading silently.
+          # In particular, success without a JUnit report remains a failure.
           if-no-files-found: error
 
       - name: Verify portable-kernel feature boundary
+        id: portable
+        if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' }}
         run: cargo test -p portable-kernel --features portable-contract-test --locked
 
       - name: Run doc tests
+        id: doctests
+        if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' }}
         run: cargo test --workspace --locked --doc
 
       - name: Runner workspace cleanup
@@ -565,6 +602,42 @@ jobs:
         # #1865: the cleanup wipes the whole workspace (including the
         # multi-GB full-history .git) so nothing squats between jobs; the
         # next checkout rebuilds it from scratch.
+        if: always()
+        shell: bash
+        run: bash .github/scripts/runner_hygiene.sh cleanup
+
+
+  acceptance:
+    name: acceptance
+    needs: [build-seat-setup, rust, physical-db-identity-windows, node, gitleaks]
+    # Aggregate CI only; review/canary/owner approval remain separate gates.
+    # This job must inspect failed/skipped dependencies, without admitting forks.
+    if: >-
+      always() && (
+        ((github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
+        github.actor == github.repository_owner &&
+        github.triggering_actor == github.repository_owner) ||
+        (github.event_name == 'pull_request' &&
+        github.event.pull_request.head.repo.full_name == github.repository &&
+        github.event.pull_request.user.login == github.repository_owner &&
+        github.actor == github.repository_owner &&
+        github.triggering_actor == github.repository_owner)
+      )
+    runs-on: [self-hosted, tachi-acceptance]
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Runner disk preflight (light lane)
+        shell: bash
+        run: bash .github/scripts/runner_hygiene.sh preflight 10
+
+      - name: Evaluate required CI evidence
+        env:
+          CI_NEEDS_JSON: ${{ toJSON(needs) }}
+        run: python3 .github/scripts/ci_acceptance.py
+
+      - name: Runner workspace cleanup
         if: always()
         shell: bash
         run: bash .github/scripts/runner_hygiene.sh cleanup
