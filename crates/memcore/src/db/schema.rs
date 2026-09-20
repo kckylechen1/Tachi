@@ -762,7 +762,7 @@ pub(crate) fn validate_harness_session_spine_schema(conn: &Connection) -> Result
     Ok(())
 }
 
-/// Canonical v37 installer for CurrentTruth's existing assertion, projection,
+/// Canonical v38 installer for CurrentTruth's existing assertion, projection,
 /// and refresh-posture tables. Production databases acquire this schema only
 /// through memcore's versioned migration transaction; the CurrentTruth typed
 /// store never installs it during an ordinary server open.
@@ -819,7 +819,7 @@ pub(crate) fn install_current_truth_schema(conn: &Connection) -> Result<(), Memo
 }
 
 /// Refuse a current product schema when any CurrentTruth table column, key,
-/// constraint, or explicit index target drifts from the canonical v37 DDL.
+/// constraint, or explicit index target drifts from the canonical v38 DDL.
 /// Comparing all five stored object definitions also prevents a validator
 /// success followed by a consumer query failure on a missing field.
 /// Compatibility is intentionally limited to the canonical installer output
@@ -851,12 +851,12 @@ pub fn validate_current_truth_schema(conn: &Connection) -> Result<(), MemoryErro
             .optional()?;
         let Some(actual) = actual else {
             return Err(MemoryError::InvalidArg(format!(
-                "incomplete v37 CurrentTruth schema: required {object_type} '{name}' is missing"
+                "incomplete v38 CurrentTruth schema: required {object_type} '{name}' is missing"
             )));
         };
         if normalize_schema_sql(&actual) != normalize_schema_sql(&expected) {
             return Err(MemoryError::InvalidArg(format!(
-                "drifted v37 CurrentTruth schema: {object_type} '{name}' does not match canonical columns, keys, constraints, and targets"
+                "drifted v38 CurrentTruth schema: {object_type} '{name}' does not match canonical columns, keys, constraints, and targets"
             )));
         }
     }

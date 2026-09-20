@@ -1,4 +1,4 @@
-//! v37: install CurrentTruth's existing schema through the canonical product
+//! v38: install CurrentTruth's existing schema through the canonical product
 //! migration boundary before the production adapter opens its typed handle.
 
 use rusqlite::Connection;
@@ -6,7 +6,7 @@ use rusqlite::Connection;
 use crate::db::StoreProfile;
 use crate::error::MemoryError;
 
-pub(super) fn migrate_v37_current_truth(
+pub(super) fn migrate_v38_current_truth(
     conn: &Connection,
     profile: StoreProfile,
 ) -> Result<usize, MemoryError> {
@@ -24,17 +24,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn v37_installs_current_truth_only_for_product_stores() {
+    fn v38_installs_current_truth_only_for_product_stores() {
         let product = Connection::open_in_memory().unwrap();
         assert_eq!(
-            migrate_v37_current_truth(&product, StoreProfile::TachiFull).unwrap(),
+            migrate_v38_current_truth(&product, StoreProfile::TachiFull).unwrap(),
             5
         );
         crate::db::schema::validate_current_truth_schema(&product).unwrap();
 
         let portable = Connection::open_in_memory().unwrap();
         assert_eq!(
-            migrate_v37_current_truth(&portable, StoreProfile::PortableKernel).unwrap(),
+            migrate_v38_current_truth(&portable, StoreProfile::PortableKernel).unwrap(),
             0
         );
         let count: i64 = portable
@@ -48,7 +48,7 @@ mod tests {
     }
 
     #[test]
-    fn v37_validator_refuses_every_consumer_field_key_constraint_and_index_drift() {
+    fn v38_validator_refuses_every_consumer_field_key_constraint_and_index_drift() {
         let field_cases = [
             ("current_truth_assertions", "assertion_id"),
             ("current_truth_assertions", "subject_repo"),
@@ -118,9 +118,9 @@ mod tests {
     }
 
     #[test]
-    fn v37_validator_compatibility_is_formatting_only() {
+    fn v38_validator_compatibility_is_formatting_only() {
         let conn = Connection::open_in_memory().unwrap();
-        migrate_v37_current_truth(&conn, StoreProfile::TachiFull).unwrap();
+        migrate_v38_current_truth(&conn, StoreProfile::TachiFull).unwrap();
         conn.execute_batch("PRAGMA writable_schema = ON;").unwrap();
         assert_eq!(
             conn.execute(
@@ -139,7 +139,7 @@ mod tests {
 
     fn assert_drift_refused(object: &str, target: &str, replacement: &str) {
         let conn = Connection::open_in_memory().unwrap();
-        migrate_v37_current_truth(&conn, StoreProfile::TachiFull).unwrap();
+        migrate_v38_current_truth(&conn, StoreProfile::TachiFull).unwrap();
         conn.execute_batch("PRAGMA writable_schema = ON;").unwrap();
         let changed = conn
             .execute(

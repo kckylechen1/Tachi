@@ -33,4 +33,5 @@ This file contains carrier-neutral rules that every contributor and harness must
 - Non-trivial delivery, review, or acceptance: [`dispatch-lifecycle.md`](docs/engineering/architecture/dispatch-lifecycle.md).
 - Issue creation, disposition, or closure: [`issue-portfolio-governance.md`](docs/engineering/architecture/issue-portfolio-governance.md).
 - SQLite trigger-based failure injection: [`test-failure-injection.md`](docs/engineering/operations/test-failure-injection.md).
+- Actions quota or runner failures: [`actions-capacity.md`](docs/engineering/operations/actions-capacity.md).
 - Product-domain changes: read the owning architecture document. Current typed issue, ref, test, deployment, and runtime objects outrank summaries and stale prose.

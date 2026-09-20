@@ -39,7 +39,30 @@ impl MemoryServer {
                 agent_identity_id,
                 connection_id,
                 admission,
+                verified: None,
             });
+    }
+
+    pub(crate) fn set_verified_work_claim_connection(
+        &self,
+        context: super::runtime::VerifiedAdmissionContext,
+    ) {
+        self.agent_runtime_write().work_claim_connection =
+            Some(super::runtime::WorkClaimConnection {
+                agent_identity_id: Some(context.agent_identity_id.clone()),
+                connection_id: context.connection_id.clone(),
+                admission: "verified".to_string(),
+                verified: Some(context),
+            });
+    }
+
+    pub(crate) fn verified_work_claim_connection(
+        &self,
+    ) -> Option<super::runtime::VerifiedAdmissionContext> {
+        self.agent_runtime_read()
+            .work_claim_connection
+            .as_ref()
+            .and_then(|connection| connection.verified.clone())
     }
 
     pub(crate) fn work_claim_connection(&self) -> Option<(Option<String>, String, String)> {
