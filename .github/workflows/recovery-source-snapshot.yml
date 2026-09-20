@@ -22,7 +22,7 @@ jobs:
     runs-on: [self-hosted, tachi-acceptance]
     timeout-minutes: 12
     env:
-      SNAPSHOT_OUT: ${{ runner.temp }}/tachi-recovery-source-${{ github.run_id }}-${{ github.run_attempt }}
+      SNAPSHOT_NAME: tachi-recovery-source-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         id: checkout
@@ -56,7 +56,7 @@ jobs:
               'pr1952': '5db4021315781d20d482e6f0871875c028d4d2c3',
               'pr1954': '943aab9d6bc4afe9b1d99f2ba385ff6bf1c6c068',
           }
-          out = Path(os.environ['SNAPSHOT_OUT'])
+          out = Path(os.environ['RUNNER_TEMP']) / os.environ['SNAPSHOT_NAME']
           out.mkdir(mode=0o700, exist_ok=False)
           subprocess.run(['git', 'fetch', '--no-tags', '--depth=1', 'origin', *refs.values()], check=True, timeout=420)
           manifest = {'schema': 'tachi.recovery.source_snapshot.v1', 'repository': 'kckylechen1/tachi', 'execution': False, 'sources': {}}
@@ -79,7 +79,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: recovery-source-snapshot
-          path: ${{ env.SNAPSHOT_OUT }}/
+          path: ${{ runner.temp }}/${{ env.SNAPSHOT_NAME }}/
           retention-days: 1
           compression-level: 0
           if-no-files-found: error
@@ -93,8 +93,8 @@ jobs:
           import os
           from pathlib import Path
           import shutil
-          target = Path(os.environ['SNAPSHOT_OUT'])
           parent = Path(os.environ['RUNNER_TEMP']).resolve()
+          target = parent / os.environ['SNAPSHOT_NAME']
           expected = 'tachi-recovery-source-' + os.environ['GITHUB_RUN_ID'] + '-' + os.environ['GITHUB_RUN_ATTEMPT']
           if target.parent.resolve() != parent or target.name != expected or target.is_symlink():
               raise RuntimeError('refuse unowned snapshot cleanup')
