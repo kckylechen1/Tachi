@@ -1,6 +1,6 @@
 use crate::provider_config::parse_vault_alias;
 use memcore::vault::{SECRET_TYPE_API_KEY, SECRET_TYPE_JSON_BLOB};
-use memcore::{AccountClass, AuthMode, FingerprintKey, ProviderAccount};
+use memcore::{AccountClass, AuthMode, CustodyKind, FingerprintKey, ProviderAccount};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -100,19 +100,25 @@ struct ClassifiedCandidate {
     intended_slot_binds: BTreeSet<String>,
 }
 
-#[derive(Debug)]
 struct AccountInventory {
     accounts: Vec<ProviderAccount>,
-    aliases: HashMap<String, HashSet<String>>,
-    custody_targets: HashMap<String, String>,
+    lane_slot_bindings: HashMap<String, HashSet<String>>,
+    custody: HashMap<String, AccountCustodyEvidence>,
+    member_fingerprints: HashMap<String, BTreeSet<String>>,
+}
+
+struct AccountCustodyEvidence {
+    kind: CustodyKind,
+    target: String,
 }
 
 impl AccountInventory {
     fn empty() -> Self {
         Self {
             accounts: Vec::new(),
-            aliases: HashMap::new(),
-            custody_targets: HashMap::new(),
+            lane_slot_bindings: HashMap::new(),
+            custody: HashMap::new(),
+            member_fingerprints: HashMap::new(),
         }
     }
 }
@@ -334,34 +340,40 @@ fn build_plan_from_classified(
     notes: Vec<DiscoveryNote>,
     inventory: &AccountInventory,
 ) -> PlanReport {
-    let mut groups: BTreeMap<(String, String), Vec<usize>> = BTreeMap::new();
+    let mut groups: BTreeMap<(String, String, String), Vec<usize>> = BTreeMap::new();
     for (index, candidate) in candidates.iter().enumerate() {
         if candidate.classification != "known" {
             continue;
         }
-        let (Some(kind), Some(account_fp)) = (
+        let (Some(kind), Some(account_id), Some(account_fp)) = (
             candidate.provider_kind.as_ref(),
+            candidate.account_id.as_ref(),
             candidate.account_fingerprint.as_ref(),
         ) else {
             continue;
         };
         groups
-            .entry((kind.clone(), account_fp.clone()))
+            .entry((kind.clone(), account_id.clone(), account_fp.clone()))
             .or_default()
             .push(index);
     }
 
     let mut actions = Vec::new();
-    for ((provider_kind, account_fingerprint), indices) in groups {
-        let key_fingerprint = candidates[indices[0]]
-            .key_fingerprint
-            .clone()
+    for ((provider_kind, account_id, account_fingerprint), indices) in groups {
+        let key_fingerprint = indices
+            .iter()
+            .filter_map(|index| candidates[*index].key_fingerprint.as_ref())
+            .min()
+            .cloned()
             .expect("known API-key candidates are fingerprinted");
-        let account_id = candidates[indices[0]]
-            .account_id
-            .clone()
-            .expect("known API-key candidates resolve an account id");
-        let account_action = candidates[indices[0]].planned_action;
+        let account_actions: BTreeSet<Option<&'static str>> = indices
+            .iter()
+            .map(|index| candidates[*index].planned_action)
+            .collect();
+        if account_actions.len() != 1 {
+            continue;
+        }
+        let account_action = account_actions.iter().next().copied().flatten();
         if let Some(action) = account_action {
             actions.push(IntakePlanAction {
                 action: action.to_string(),
@@ -373,20 +385,34 @@ fn build_plan_from_classified(
             });
         }
 
-        let intended_slots: BTreeSet<String> = indices
-            .iter()
-            .flat_map(|index| candidates[*index].intended_slot_binds.iter().cloned())
-            .collect();
-        let existing_aliases = inventory.aliases.get(&account_id);
-        for slot in intended_slots {
-            if existing_aliases.is_some_and(|aliases| aliases.contains(&slot)) {
+        let mut intended_slots: BTreeMap<String, String> = BTreeMap::new();
+        for index in &indices {
+            let candidate = &candidates[*index];
+            let candidate_fingerprint = candidate
+                .key_fingerprint
+                .as_ref()
+                .expect("known API-key candidates are fingerprinted");
+            for slot in &candidate.intended_slot_binds {
+                intended_slots
+                    .entry(slot.clone())
+                    .and_modify(|fingerprint| {
+                        if candidate_fingerprint.as_str() < fingerprint.as_str() {
+                            fingerprint.clone_from(candidate_fingerprint);
+                        }
+                    })
+                    .or_insert_with(|| candidate_fingerprint.clone());
+            }
+        }
+        let existing_bindings = inventory.lane_slot_bindings.get(&account_id);
+        for (slot, slot_fingerprint) in intended_slots {
+            if existing_bindings.is_some_and(|bindings| bindings.contains(&slot)) {
                 continue;
             }
             actions.push(IntakePlanAction {
                 action: ACTION_BIND_SLOT.to_string(),
                 provider_kind: provider_kind.clone(),
                 account_id: account_id.clone(),
-                key_fingerprint: key_fingerprint.clone(),
+                key_fingerprint: slot_fingerprint,
                 account_fingerprint: account_fingerprint.clone(),
                 slot: Some(slot),
             });
@@ -434,27 +460,34 @@ fn classify_candidates(
         };
         let key_fingerprint = fp_key.key_fingerprint(provider_kind, candidate.raw.value.trim());
         let account_fingerprint = fp_key.account_fingerprint_from_members([&key_fingerprint]);
-        candidate.key_fingerprint = Some(key_fingerprint);
+        candidate.key_fingerprint = Some(key_fingerprint.clone());
         candidate.account_fingerprint = Some(account_fingerprint.clone());
-        let exact: Vec<&ProviderAccount> = inventory
+        let matching_accounts: Vec<&ProviderAccount> = inventory
             .accounts
             .iter()
             .filter(|account| {
                 account.provider_kind == provider_kind
-                    && account.account_fingerprint == account_fingerprint
                     && account_is_eligible(account, account_class)
+                    && (account.account_fingerprint == account_fingerprint
+                        || current_member_fingerprints(account, inventory, fp_key)
+                            .is_some_and(|members| members.contains(&key_fingerprint)))
             })
             .collect();
-        if let [account] = exact.as_slice() {
+        if let [account] = matching_accounts.as_slice() {
             candidate.account_id = Some(account.account_id.clone());
+            candidate.account_fingerprint = Some(account.account_fingerprint.clone());
             continue;
         }
-        if exact.len() > 1 {
+        if matching_accounts.len() > 1 {
             candidate.classification = "ambiguous";
             continue;
         }
 
-        let canonical = candidate.canonical_key;
+        let Some(canonical) = candidate.canonical_key else {
+            candidate.account_id = Some(planned_account_id(provider_kind, &account_fingerprint));
+            candidate.planned_action = Some(ACTION_CREATE_ACCOUNT);
+            continue;
+        };
         let rotating: Vec<&ProviderAccount> = inventory
             .accounts
             .iter()
@@ -462,10 +495,9 @@ fn classify_candidates(
                 account.provider_kind == provider_kind
                     && account_is_eligible(account, account_class)
                     && inventory
-                        .custody_targets
+                        .custody
                         .get(&account.account_id)
-                        .map(String::as_str)
-                        == canonical
+                        .is_some_and(|custody| custody.target == canonical)
             })
             .collect();
         match rotating.as_slice() {
@@ -514,6 +546,20 @@ fn classify_candidates(
         }
     }
     candidates
+}
+
+fn current_member_fingerprints<'a>(
+    account: &ProviderAccount,
+    inventory: &'a AccountInventory,
+    fp_key: &FingerprintKey,
+) -> Option<&'a BTreeSet<String>> {
+    let custody = inventory.custody.get(&account.account_id)?;
+    if custody.kind != CustodyKind::VaultRotationPool {
+        return None;
+    }
+    let members = inventory.member_fingerprints.get(&account.account_id)?;
+    (fp_key.account_fingerprint_from_members(members) == account.account_fingerprint)
+        .then_some(members)
 }
 
 fn account_is_eligible(account: &ProviderAccount, expected_class: AccountClass) -> bool {
@@ -725,28 +771,60 @@ fn account_inventory(
     }
     let store = open_cli_store_read_only(&global_db_path.to_path_buf())?;
     let accounts = memcore::db::list_provider_accounts(store.connection())?;
-    let mut aliases = HashMap::new();
-    let mut custody_targets = HashMap::new();
+    let mut lane_slot_bindings = HashMap::new();
+    let mut custody = HashMap::new();
+    let mut member_fingerprints = HashMap::new();
     for account in &accounts {
-        aliases.insert(
+        lane_slot_bindings.insert(
             account.account_id.clone(),
             memcore::db::list_provider_account_aliases(store.connection(), &account.account_id)?
                 .into_iter()
-                .filter(|alias| !alias.retired)
+                .filter(|alias| !alias.retired && alias.source_kind == "lane_slot")
                 .map(|alias| alias.alias_name)
                 .collect(),
         );
-        if let Some(custody) =
+        if let Some(account_custody) =
             memcore::db::get_account_custody(store.connection(), &account.account_id)?
         {
-            custody_targets.insert(account.account_id.clone(), custody.custody_target);
+            custody.insert(
+                account.account_id.clone(),
+                AccountCustodyEvidence {
+                    kind: account_custody.custody_kind,
+                    target: account_custody.custody_target,
+                },
+            );
+        }
+        let events =
+            memcore::db::list_provider_account_events(store.connection(), &account.account_id)?;
+        if let Some(members) = events
+            .iter()
+            .rev()
+            .filter(|event| event.revision == account.revision)
+            .find_map(|event| member_fingerprints_from_evidence(&event.evidence))
+        {
+            member_fingerprints.insert(account.account_id.clone(), members);
         }
     }
     Ok(AccountInventory {
         accounts,
-        aliases,
-        custody_targets,
+        lane_slot_bindings,
+        custody,
+        member_fingerprints,
     })
+}
+
+fn member_fingerprints_from_evidence(evidence: &str) -> Option<BTreeSet<String>> {
+    let parsed: serde_json::Value = serde_json::from_str(evidence).ok()?;
+    let values = parsed.get("member_fingerprints")?.as_array()?;
+    let members: BTreeSet<String> = values
+        .iter()
+        .map(|value| value.as_str())
+        .collect::<Option<Vec<_>>>()?
+        .into_iter()
+        .filter(|fingerprint| fingerprint.starts_with("fp1:"))
+        .map(str::to_string)
+        .collect();
+    (!members.is_empty() && members.len() == values.len()).then_some(members)
 }
 
 fn discover_env_values(env_home: &Path, cwd: &Path) -> Vec<(PathBuf, String, String)> {
@@ -946,6 +1024,58 @@ mod tests {
         .expect("custody");
     }
 
+    fn insert_rotation_pool_account(
+        store: &memcore::MemoryStore,
+        account_id: &str,
+        provider_kind: &str,
+        members: &[&str],
+        custody_target: &str,
+    ) {
+        let fp_key = FingerprintKey::derive_from_master_key(&MASTER);
+        let member_fingerprints: Vec<String> = members
+            .iter()
+            .map(|secret| fp_key.key_fingerprint(provider_kind, secret))
+            .collect();
+        let account_fingerprint =
+            fp_key.account_fingerprint_from_members(&member_fingerprints);
+        let auth_ref = format!("va1:{account_id}");
+        memcore::db::insert_provider_account(
+            store.connection(),
+            &memcore::NewProviderAccount::api_key_pool(
+                account_id,
+                provider_kind,
+                &auth_ref,
+                account_fingerprint,
+                memcore::AccountClass::ModelApi,
+            ),
+        )
+        .expect("account");
+        memcore::db::insert_account_custody(
+            store.connection(),
+            &auth_ref,
+            account_id,
+            memcore::CustodyKind::VaultRotationPool,
+            custody_target,
+        )
+        .expect("custody");
+        memcore::db::append_provider_account_event(
+            store.connection(),
+            &memcore::NewProviderAccountEvent::new(
+                account_id,
+                1,
+                memcore::vault::accounts::EVENT_KIND_FINGERPRINT_OBSERVED,
+            )
+            .with_evidence(
+                serde_json::json!({
+                    "member_count": member_fingerprints.len(),
+                    "member_fingerprints": member_fingerprints,
+                })
+                .to_string(),
+            ),
+        )
+        .expect("member evidence");
+    }
+
     fn assert_ineligible_exact_account_is_not_reused(
         configure: impl FnOnce(&mut memcore::NewProviderAccount),
     ) {
@@ -1021,6 +1151,8 @@ mod tests {
         assert!(!encoded_actions.contains("EXTRACT_API_KEY2"));
         assert!(encoded.contains("fp1:"));
         assert!(encoded.contains("fpa1:"));
+        let human = render_plan_human(&report);
+        assert!(!human.contains(secret), "human plan leaked secret: {human}");
     }
 
     #[test]
@@ -1435,6 +1567,240 @@ mod tests {
     }
 
     #[test]
+    fn same_voyage_value_rotates_both_custody_accounts_order_independently() {
+        let home = tempfile::tempdir().expect("home");
+        let cwd = tempfile::tempdir().expect("cwd");
+        let db_path = home.path().join(".tachi/global/tachi-global.db");
+        std::fs::create_dir_all(db_path.parent().expect("parent")).expect("mkdir");
+        let store = memcore::MemoryStore::open(db_path.to_str().expect("utf8")).expect("store");
+        insert_custodied_api_account(
+            &store,
+            "account-voyage-embeddings",
+            "voyage",
+            "old-embeddings",
+            "VOYAGE_API_KEY",
+        );
+        insert_custodied_api_account(
+            &store,
+            "account-voyage-rerank",
+            "voyage",
+            "old-rerank",
+            "VOYAGE_RERANK_API_KEY",
+        );
+        drop(store);
+        let env_path = cwd.path().join(".env");
+        write_file(
+            &env_path,
+            "VOYAGE_API_KEY=same-new-value\nVOYAGE_RERANK_API_KEY=same-new-value\n",
+        );
+
+        let first = plan(home.path(), cwd.path(), &db_path);
+        write_file(
+            &env_path,
+            "VOYAGE_RERANK_API_KEY=same-new-value\nVOYAGE_API_KEY=same-new-value\n",
+        );
+        let second = plan(home.path(), cwd.path(), &db_path);
+
+        for report in [&first, &second] {
+            let rotations: Vec<&str> = report
+                .actions
+                .iter()
+                .filter(|action| action.action == ACTION_ROTATE_ACCOUNT)
+                .map(|action| action.account_id.as_str())
+                .collect();
+            assert_eq!(
+                rotations,
+                vec!["account-voyage-embeddings", "account-voyage-rerank"],
+                "{report:#?}"
+            );
+            assert_eq!(report.actions.len(), 2, "{report:#?}");
+        }
+        assert_eq!(first.plan_digest, second.plan_digest);
+    }
+
+    #[test]
+    fn missing_canonical_custody_never_rotates_custodyless_account() {
+        let home = tempfile::tempdir().expect("home");
+        let cwd = tempfile::tempdir().expect("cwd");
+        let db_path = home.path().join(".tachi/global/tachi-global.db");
+        std::fs::create_dir_all(db_path.parent().expect("parent")).expect("mkdir");
+        let store = memcore::MemoryStore::open(db_path.to_str().expect("utf8")).expect("store");
+        let fp_key = FingerprintKey::derive_from_master_key(&MASTER);
+        let old_member = fp_key.key_fingerprint("deepseek", "old-fixture");
+        let old_account_fp = fp_key.account_fingerprint_from_members([old_member]);
+        memcore::db::insert_provider_account(
+            store.connection(),
+            &memcore::NewProviderAccount::api_key_pool(
+                "account-without-custody",
+                "deepseek",
+                "va1:missing-custody",
+                old_account_fp,
+                memcore::AccountClass::ModelApi,
+            ),
+        )
+        .expect("account");
+        drop(store);
+        write_file(
+            &cwd.path().join(".env"),
+            "EXTRACT_API_KEY2=new-fixture\nEXTRACT_BASE_URL=https://api.deepseek.com\n",
+        );
+
+        let report = plan(home.path(), cwd.path(), &db_path);
+
+        assert!(report
+            .actions
+            .iter()
+            .all(|action| action.account_id != "account-without-custody"));
+        assert_eq!(
+            report
+                .actions
+                .iter()
+                .filter(|action| action.action == ACTION_CREATE_ACCOUNT)
+                .count(),
+            1,
+            "{report:#?}"
+        );
+        assert!(report.actions.iter().any(|action| {
+            action.action == ACTION_BIND_SLOT && action.slot.as_deref() == Some("EXTRACT_API_KEY")
+        }));
+    }
+
+    #[test]
+    fn config_env_alias_does_not_suppress_missing_lane_slot_binding() {
+        let home = tempfile::tempdir().expect("home");
+        let cwd = tempfile::tempdir().expect("cwd");
+        let db_path = home.path().join(".tachi/global/tachi-global.db");
+        std::fs::create_dir_all(db_path.parent().expect("parent")).expect("mkdir");
+        let store = memcore::MemoryStore::open(db_path.to_str().expect("utf8")).expect("store");
+        insert_custodied_api_account(
+            &store,
+            "account-deepseek",
+            "deepseek",
+            "same-fixture",
+            "DEEPSEEK_API_KEY",
+        );
+        memcore::db::record_provider_account_alias(
+            store.connection(),
+            "account-deepseek",
+            "DISTILL_API_KEY",
+            "config_env",
+        )
+        .expect("config alias");
+        drop(store);
+        write_file(
+            &cwd.path().join(".env"),
+            "DISTILL_API_KEY=same-fixture\nDISTILL_BASE_URL=https://api.deepseek.com\n",
+        );
+
+        let without_binding = plan(home.path(), cwd.path(), &db_path);
+        assert_eq!(without_binding.actions.len(), 1, "{without_binding:#?}");
+        assert_eq!(without_binding.actions[0].action, ACTION_BIND_SLOT);
+        assert_eq!(
+            without_binding.actions[0].slot.as_deref(),
+            Some("DISTILL_API_KEY")
+        );
+
+        let store = memcore::MemoryStore::open(db_path.to_str().expect("utf8")).expect("store");
+        memcore::db::record_provider_account_alias(
+            store.connection(),
+            "account-deepseek",
+            "DISTILL_API_KEY",
+            "lane_slot",
+        )
+        .expect("slot binding");
+        drop(store);
+
+        let with_binding = plan(home.path(), cwd.path(), &db_path);
+        assert!(with_binding.actions.is_empty(), "{with_binding:#?}");
+    }
+
+    #[test]
+    fn unchanged_rotation_pool_member_is_a_noop() {
+        let home = tempfile::tempdir().expect("home");
+        let cwd = tempfile::tempdir().expect("cwd");
+        let db_path = home.path().join(".tachi/global/tachi-global.db");
+        std::fs::create_dir_all(db_path.parent().expect("parent")).expect("mkdir");
+        let store = memcore::MemoryStore::open(db_path.to_str().expect("utf8")).expect("store");
+        insert_rotation_pool_account(
+            &store,
+            "account-deepseek-pool",
+            "deepseek",
+            &["member-a", "member-b"],
+            "DEEPSEEK_API_KEY",
+        );
+        drop(store);
+        write_file(
+            &cwd.path().join(".env"),
+            "DEEPSEEK_API_KEY=member-a\n",
+        );
+
+        let report = plan(home.path(), cwd.path(), &db_path);
+
+        assert!(report.actions.is_empty(), "{report:#?}");
+        let candidate = report
+            .candidates
+            .iter()
+            .find(|candidate| candidate.logical_name == "DEEPSEEK_API_KEY")
+            .expect("candidate");
+        assert_eq!(candidate.account_id.as_deref(), Some("account-deepseek-pool"));
+    }
+
+    #[test]
+    fn unchanged_rotation_pool_member_binds_missing_lane_slot() {
+        let home = tempfile::tempdir().expect("home");
+        let cwd = tempfile::tempdir().expect("cwd");
+        let db_path = home.path().join(".tachi/global/tachi-global.db");
+        std::fs::create_dir_all(db_path.parent().expect("parent")).expect("mkdir");
+        let store = memcore::MemoryStore::open(db_path.to_str().expect("utf8")).expect("store");
+        insert_rotation_pool_account(
+            &store,
+            "account-deepseek-pool",
+            "deepseek",
+            &["member-a", "member-b"],
+            "DEEPSEEK_API_KEY",
+        );
+        drop(store);
+        write_file(
+            &cwd.path().join(".env"),
+            "DISTILL_API_KEY=member-a\nDISTILL_BASE_URL=https://api.deepseek.com\n",
+        );
+
+        let report = plan(home.path(), cwd.path(), &db_path);
+
+        assert_eq!(report.actions.len(), 1, "{report:#?}");
+        assert_eq!(report.actions[0].action, ACTION_BIND_SLOT);
+        assert_eq!(report.actions[0].account_id, "account-deepseek-pool");
+        assert_eq!(report.actions[0].slot.as_deref(), Some("DISTILL_API_KEY"));
+    }
+
+    #[test]
+    fn changed_rotation_pool_value_rotates_existing_account() {
+        let home = tempfile::tempdir().expect("home");
+        let cwd = tempfile::tempdir().expect("cwd");
+        let db_path = home.path().join(".tachi/global/tachi-global.db");
+        std::fs::create_dir_all(db_path.parent().expect("parent")).expect("mkdir");
+        let store = memcore::MemoryStore::open(db_path.to_str().expect("utf8")).expect("store");
+        insert_rotation_pool_account(
+            &store,
+            "account-deepseek-pool",
+            "deepseek",
+            &["member-a", "member-b"],
+            "DEEPSEEK_API_KEY",
+        );
+        drop(store);
+        write_file(
+            &cwd.path().join(".env"),
+            "DEEPSEEK_API_KEY=replacement-member\n",
+        );
+
+        let report = plan(home.path(), cwd.path(), &db_path);
+
+        assert_eq!(report.actions.len(), 1, "{report:#?}");
+        assert_eq!(report.actions[0].action, ACTION_ROTATE_ACCOUNT);
+        assert_eq!(report.actions[0].account_id, "account-deepseek-pool");
+    }
+
+    #[test]
     fn conflicting_rotation_sightings_are_order_independent_and_action_free() {
         let home = tempfile::tempdir().expect("home");
         let cwd = tempfile::tempdir().expect("cwd");
@@ -1521,6 +1887,107 @@ mod tests {
         assert!(report.candidates.is_empty());
         assert!(report.actions.is_empty());
         assert_eq!(report.notes[0].code, "unsupported_source");
+    }
+
+    #[test]
+    fn plan_is_read_only_without_explicit_artifact_write() {
+        let home = tempfile::tempdir().expect("home");
+        let cwd = tempfile::tempdir().expect("cwd");
+        let db_path = home.path().join(".tachi/global/tachi-global.db");
+        std::fs::create_dir_all(db_path.parent().expect("parent")).expect("mkdir");
+        let store = memcore::MemoryStore::open(db_path.to_str().expect("utf8")).expect("store");
+        insert_custodied_api_account(
+            &store,
+            "account-deepseek",
+            "deepseek",
+            "same-fixture",
+            "DEEPSEEK_API_KEY",
+        );
+        drop(store);
+        let env_path = cwd.path().join(".env");
+        write_file(&env_path, "DEEPSEEK_API_KEY=same-fixture\n");
+        let db_before = std::fs::read(&db_path).expect("db before");
+        let env_before = std::fs::read(&env_path).expect("env before");
+
+        let report = plan(home.path(), cwd.path(), &db_path);
+
+        assert!(report.actions.is_empty(), "{report:#?}");
+        assert_eq!(std::fs::read(&db_path).expect("db after"), db_before);
+        assert_eq!(std::fs::read(&env_path).expect("env after"), env_before);
+        assert!(!cwd.path().join(".tachi/intake-plan.json").exists());
+    }
+
+    #[test]
+    fn env_parser_uses_caller_bytes_without_reopening_attribution_path() {
+        let dir = tempfile::tempdir().expect("dir");
+        let path = dir.path().join(".env");
+        write_file(&path, "ON_DISK_API_KEY=from-disk\n");
+
+        let parsed = parse_env_content(&path, "IN_HAND_API_KEY=from-hand\n");
+
+        assert_eq!(
+            parsed,
+            vec![(
+                path,
+                "IN_HAND_API_KEY".to_string(),
+                "from-hand".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn env_parser_strips_matching_quotes_and_source_paths_are_deduplicated() {
+        let home = tempfile::tempdir().expect("home");
+        let path = home.path().join(".env");
+        let parsed = parse_env_content(
+            &path,
+            "DOUBLE_API_KEY=\"same-fixture\"\nSINGLE_API_KEY='same-fixture'\nPLAIN_API_KEY=same-fixture\n",
+        );
+        assert!(parsed
+            .iter()
+            .all(|(_, _, value)| value == "same-fixture"));
+
+        let paths = env_source_paths(home.path(), home.path());
+        let unique: HashSet<&PathBuf> = paths.iter().collect();
+        assert_eq!(paths.len(), unique.len(), "duplicate paths: {paths:#?}");
+    }
+
+    #[test]
+    fn codex_host_reads_inert_metadata_but_never_reports_auth_bytes() {
+        let home = tempfile::tempdir().expect("home");
+        let cwd = tempfile::tempdir().expect("cwd");
+        let secret = "codex-session-fixture-secret";
+        let raw = format!(r#"{{"tokens":{{"access":"{secret}"}}}}"#);
+        write_file(&home.path().join(".codex/auth.json"), &raw);
+
+        let report = discover_report(
+            home.path(),
+            cwd.path(),
+            &home.path().join("missing.db"),
+            HostFilter::Codex,
+            Vec::new(),
+            None,
+        )
+        .expect("codex discovery");
+
+        let candidate = report
+            .candidates
+            .iter()
+            .find(|candidate| candidate.logical_name == "codex.auth")
+            .expect("codex metadata candidate");
+        assert_eq!(candidate.secret_type, SECRET_TYPE_JSON_BLOB);
+        assert_eq!(candidate.classification, "unknown");
+        let json = serde_json::to_string(&report).expect("json");
+        let human = render_discovery_human(&report);
+        for forbidden in [raw.as_str(), secret] {
+            assert!(!json.contains(forbidden), "JSON leaked Codex auth: {json}");
+            assert!(
+                !human.contains(forbidden),
+                "human report leaked Codex auth: {human}"
+            );
+        }
+        let plan = build_plan(report);
+        assert!(plan.actions.is_empty(), "{plan:#?}");
     }
 
     #[test]
