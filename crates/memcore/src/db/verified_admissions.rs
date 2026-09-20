@@ -604,7 +604,7 @@ fn validate_identity_admission_conflict_policy(conn: &Connection) -> Result<(), 
     )?;
     if normalize_schema_sql(&table_sql)
         .to_ascii_uppercase()
-        .contains("ON CONFLICT")
+        .contains("CONFLICT")
     {
         return Err(MemoryError::InvalidArg(
             "incomplete v37 verified admission schema: identity_admissions has a non-canonical conflict policy"
@@ -1193,12 +1193,20 @@ mod tests {
 
     #[test]
     fn schema_validation_rejects_replace_conflict_policy_on_canonical_target() {
-        let conn = open_with_identity_admission_constraint(
-            "UNIQUE(agent_identity_id, connection_id) ON CONFLICT REPLACE",
-            false,
-        );
-        let error = validate_verified_admission_schema(&conn)
-            .expect_err("canonical columns with replacement policy must fail closed");
-        assert!(error.to_string().contains("non-canonical conflict policy"));
+        for policy in [
+            "ON CONFLICT REPLACE",
+            "ON /* comments cannot hide policy tokens */ CONFLICT REPLACE",
+        ] {
+            let conn = open_with_identity_admission_constraint(
+                &format!("UNIQUE(agent_identity_id, connection_id) {policy}"),
+                false,
+            );
+            let error = validate_verified_admission_schema(&conn)
+                .expect_err("canonical columns with replacement policy must fail closed");
+            assert!(
+                error.to_string().contains("non-canonical conflict policy"),
+                "{policy}: {error}"
+            );
+        }
     }
 }
