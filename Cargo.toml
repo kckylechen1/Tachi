@@ -168,4 +168,4 @@ rand = "0.8"
 # rustls crypto provider — ring instead of aws-lc-rs to avoid the large
 # aws-lc-sys C/C++ compile in cold builds. reqwest uses rustls-no-provider,
 # so we install ring ourselves before constructing HTTPS clients.
-rustls = { version = "0.23", default-features = false, features = ["ring", "tls12", "std"] }
+rustls = { version = "0.23.45", default-features = false, features = ["ring", "tls12", "std"] }
