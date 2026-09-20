@@ -2,10 +2,12 @@ use super::*;
 
 #[tokio::test]
 async fn safe_merge_dry_run_ready_does_not_call_pr_merge() {
+    let server = test_server();
     let client = MockGhClient::new()
         .with_pr("o/r", ready_pr())
         .with_checks("o/r", 42, vec![]);
     let out = handle_github_safe_merge(
+        &server,
         &client,
         "o/r",
         42,
@@ -50,10 +52,12 @@ async fn safe_merge_dry_run_ready_does_not_call_pr_merge() {
 
 #[tokio::test]
 async fn safe_merge_ready_executes_merge_when_not_dry_run() {
+    let server = test_server();
     let client = MockGhClient::new()
         .with_pr("o/r", ready_pr())
         .with_checks("o/r", 42, vec![]);
     let out = handle_github_safe_merge(
+        &server,
         &client,
         "o/r",
         42,
@@ -91,10 +95,12 @@ async fn safe_merge_ready_executes_merge_when_not_dry_run() {
 
 #[tokio::test]
 async fn safe_merge_observes_already_merged_pr_without_blocking() {
+    let server = test_server();
     let client = MockGhClient::new()
         .with_pr("o/r", already_merged_pr())
         .with_checks("o/r", 42, vec![]);
     let out = handle_github_safe_merge(
+        &server,
         &client,
         "o/r",
         42,
@@ -132,8 +138,10 @@ async fn safe_merge_observes_already_merged_pr_without_blocking() {
 
 #[tokio::test]
 async fn safe_merge_reports_head_sha_mismatch_from_merge_client() {
+    let server = test_server();
     let client = MockGhClient::new().with_pr("o/r", ready_pr());
     let out = handle_github_safe_merge(
+        &server,
         &client,
         "o/r",
         42,
@@ -154,10 +162,12 @@ async fn safe_merge_reports_head_sha_mismatch_from_merge_client() {
 
 #[tokio::test]
 async fn safe_merge_blocked_does_not_call_pr_merge_even_when_not_dry_run() {
+    let server = test_server();
     let client = MockGhClient::new()
         .with_pr("o/r", blocked_draft_pr())
         .with_checks("o/r", 42, vec![]);
     let out = handle_github_safe_merge(
+        &server,
         &client,
         "o/r",
         42,
@@ -181,10 +191,12 @@ async fn safe_merge_blocked_does_not_call_pr_merge_even_when_not_dry_run() {
 
 #[tokio::test]
 async fn safe_merge_pending_emits_checks_polled() {
+    let server = test_server();
     let client = MockGhClient::new()
         .with_pr("o/r", pending_pr())
         .with_checks("o/r", 42, vec![]);
     let out = handle_github_safe_merge(
+        &server,
         &client,
         "o/r",
         42,
@@ -206,6 +218,7 @@ async fn safe_merge_pending_emits_checks_polled() {
 
 #[tokio::test]
 async fn safe_merge_skipped_checks_waits_and_labels_check_state() {
+    let server = test_server();
     let client = MockGhClient::new()
         .with_pr("o/r", skipped_checks_pr())
         .with_checks(
@@ -218,6 +231,7 @@ async fn safe_merge_skipped_checks_waits_and_labels_check_state() {
             }],
         );
     let out = handle_github_safe_merge(
+        &server,
         &client,
         "o/r",
         42,

@@ -169,42 +169,34 @@ pub(crate) async fn handle_task_link_pr(
 
 /// #1454 F6: authority-aware verification verdict for pr_handoff.
 ///
-/// `None` → no ledger. `Some("unverified")` → ledger exists but no
-/// server-known head is resolvable (fail-closed display). Otherwise the gate
-/// verdict for the best server-known head: the GitHub head the server wrote
-/// into `status.json::github::head_sha` when present, else the receipt-store
-/// head. The caller-supplied `params.head_sha` is never consulted.
+/// `None` → no ledger. Otherwise the verdict is evaluated against the unique
+/// active WorkClaim's expected head; caller and GitHub status heads do not
+/// select verification authority.
 fn pr_handoff_verification_verdict(
+    server: &MemoryServer,
     flow_id: &str,
-    status: &Value,
     ledger: Option<&Value>,
 ) -> Result<Option<String>, String> {
     if ledger.is_none() {
         return Ok(None);
     }
-    let home = crate::path_utils::tachi_home();
-    let head = status
-        .get("github")
-        .and_then(|github| github.get("head_sha"))
-        .and_then(Value::as_str)
-        .filter(|sha| !sha.trim().is_empty())
-        .map(str::to_string)
-        .or_else(|| crate::verify_ops::best_receipt_head(&home, flow_id));
-    let Some(head) = head else {
-        return Ok(Some("unverified".to_string()));
-    };
-    match crate::verify_ops::evaluate_verification_gate(Some(flow_id), &head, &home)? {
-        Some(gate) => Ok(Some(
+    match crate::verify_ops::evaluate_verification_gate(server, Some(flow_id)) {
+        Ok(Some(gate)) => Ok(Some(
             gate.get("overall")
                 .and_then(Value::as_str)
                 .unwrap_or("unverified")
                 .to_string(),
         )),
-        None => Ok(Some("unverified".to_string())),
+        Ok(None) => Ok(Some("unverified".to_string())),
+        Err(err) if err.starts_with("verification_claim_") => Ok(Some("unverified".to_string())),
+        Err(err) => Err(err),
     }
 }
 
-pub(crate) fn handle_task_pr_handoff(params: &TachiTaskParams) -> Result<String, String> {
+pub(crate) fn handle_task_pr_handoff(
+    server: &MemoryServer,
+    params: &TachiTaskParams,
+) -> Result<String, String> {
     let started = std::time::Instant::now();
     let flow_id = params
         .flow_id
@@ -231,15 +223,10 @@ pub(crate) fn handle_task_pr_handoff(params: &TachiTaskParams) -> Result<String,
         .unwrap_or_else(|| json!({ "status": "unknown", "dispatch_allowed": true }));
     let verification = crate::verify_ops::read_verification_ledger(flow_id)?;
     let after_verification = started.elapsed();
-    // #1454 F6: the pr_handoff readiness verdict is the authority-aware gate
-    // result, never the raw ledger `overall`. Best server-known head: the
-    // GitHub head the server wrote into status.json::github (present when a
-    // PR was already linked/observed), else the receipt-store head; with
-    // neither, `unverified` (fail-closed — a caller-asserted "passed" ledger
-    // must not make the handoff look green). The ledger remains visible as a
-    // detail row in the PR body.
+    // The pr_handoff readiness verdict is claim-bound gate output, never the
+    // raw ledger `overall`. The ledger remains visible as PR-body detail.
     let verification_verdict =
-        pr_handoff_verification_verdict(flow_id, &status, verification.as_ref())?;
+        pr_handoff_verification_verdict(server, flow_id, verification.as_ref())?;
     let verification_overall = verification_verdict;
     let branch = params
         .branch

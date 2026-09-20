@@ -59,6 +59,55 @@ pub fn normalize_utc_iso_or_now(ts: &str) -> String {
     normalize_utc_iso(ts).unwrap_or_else(|_| now_utc_iso())
 }
 
+/// Run one write atomically, composing with a transaction the caller already
+/// owns. A top-level call takes the SQLite write lock before its first read;
+/// a nested call uses a savepoint and leaves the caller's transaction open.
+pub(crate) fn with_composable_write<T>(
+    conn: &Connection,
+    write: impl FnOnce(&Connection) -> Result<T, MemoryError>,
+) -> Result<T, MemoryError> {
+    const SAVEPOINT: &str = "memcore_composable_write";
+    let owns_transaction = conn.is_autocommit();
+    if owns_transaction {
+        conn.execute_batch("BEGIN IMMEDIATE")?;
+    }
+    if let Err(error) = conn.execute_batch(&format!("SAVEPOINT {SAVEPOINT}")) {
+        if owns_transaction {
+            let _ = conn.execute_batch("ROLLBACK");
+        }
+        return Err(error.into());
+    }
+
+    let result = write(conn);
+    match result {
+        Ok(value) => {
+            if let Err(error) = conn.execute_batch(&format!("RELEASE {SAVEPOINT}")) {
+                let _ = conn.execute_batch(&format!("ROLLBACK TO {SAVEPOINT}"));
+                let _ = conn.execute_batch(&format!("RELEASE {SAVEPOINT}"));
+                if owns_transaction {
+                    let _ = conn.execute_batch("ROLLBACK");
+                }
+                return Err(error.into());
+            }
+            if owns_transaction {
+                if let Err(error) = conn.execute_batch("COMMIT") {
+                    let _ = conn.execute_batch("ROLLBACK");
+                    return Err(error.into());
+                }
+            }
+            Ok(value)
+        }
+        Err(error) => {
+            let _ = conn.execute_batch(&format!("ROLLBACK TO {SAVEPOINT}"));
+            let _ = conn.execute_batch(&format!("RELEASE {SAVEPOINT}"));
+            if owns_transaction {
+                let _ = conn.execute_batch("ROLLBACK");
+            }
+            Err(error)
+        }
+    }
+}
+
 fn json_string_array_column(row: &rusqlite::Row<'_>, entry_id: &str, column: &str) -> Vec<String> {
     let raw = match row.get::<_, String>(column) {
         Ok(raw) => raw,

@@ -695,50 +695,50 @@ pub fn ack_delivered(
     // State + event write atomically, and the update is CAS-guarded on the
     // revision it read: a concurrent writer cannot slip between the check
     // and the write.
-    let tx = conn.unchecked_transaction()?;
-    let updated = tx.execute(
-        "UPDATE delivery_intents
-         SET delivery_state = 'delivered', delivered_at = ?2, revision = ?3,
-             active_claim_key = NULL, claimed_by = NULL, claim_expires_at = NULL,
-             blocker_class = NULL, next_retry_at = NULL, updated_at = ?2
-         WHERE delivery_id = ?1 AND revision = ?4",
-        params![delivery_id, now, next_revision, intent.revision],
-    )?;
-    if updated == 0 {
-        return Err(MemoryError::DeliveryRevisionConflict(format!(
-            "intent {delivery_id} moved during ack (expected revision {})",
-            intent.revision
-        )));
-    }
-    if let Err(error) = append_event(
-        &tx,
-        delivery_id,
-        &ack_event_id,
-        DeliveryEventKind::Delivered,
-        Some(intent.revision),
-        Some("requester acknowledged delivery"),
-        None,
-        &caller.host_identity,
-        &now,
-    ) {
-        // Ack-key cross-intent collision at the global partial-unique index
-        // (SQLite names the columns, not the index) is the same frozen law
-        // as claims: typed conflict, transaction rolled back, nothing
-        // written.
-        let message = error.to_string();
-        if matches!(error, MemoryError::Sqlite(_))
-            && (message.contains("UNIQUE constraint failed: delivery_events.event_id")
-                || message.contains("idx_delivery_events_ack_key_global"))
-        {
-            return Err(MemoryError::DeliveryIdempotencyConflict(format!(
-                "ack_key '{ack_key}' was recorded concurrently elsewhere"
+    super::common::with_composable_write(conn, |conn| {
+        let updated = conn.execute(
+            "UPDATE delivery_intents
+             SET delivery_state = 'delivered', delivered_at = ?2, revision = ?3,
+                 active_claim_key = NULL, claimed_by = NULL, claim_expires_at = NULL,
+                 blocker_class = NULL, next_retry_at = NULL, updated_at = ?2
+             WHERE delivery_id = ?1 AND revision = ?4",
+            params![delivery_id, now, next_revision, intent.revision],
+        )?;
+        if updated == 0 {
+            return Err(MemoryError::DeliveryRevisionConflict(format!(
+                "intent {delivery_id} moved during ack (expected revision {})",
+                intent.revision
             )));
         }
-        return Err(error);
-    }
-    tx.commit()?;
-    Ok(DeliveryAckOutcome::Acknowledged {
-        revision: next_revision,
+        if let Err(error) = append_event(
+            conn,
+            delivery_id,
+            &ack_event_id,
+            DeliveryEventKind::Delivered,
+            Some(intent.revision),
+            Some("requester acknowledged delivery"),
+            None,
+            &caller.host_identity,
+            &now,
+        ) {
+            // Ack-key cross-intent collision at the global partial-unique index
+            // (SQLite names the columns, not the index) is the same frozen law
+            // as claims: typed conflict, transaction rolled back, nothing
+            // written.
+            let message = error.to_string();
+            if matches!(error, MemoryError::Sqlite(_))
+                && (message.contains("UNIQUE constraint failed: delivery_events.event_id")
+                    || message.contains("idx_delivery_events_ack_key_global"))
+            {
+                return Err(MemoryError::DeliveryIdempotencyConflict(format!(
+                    "ack_key '{ack_key}' was recorded concurrently elsewhere"
+                )));
+            }
+            return Err(error);
+        }
+        Ok(DeliveryAckOutcome::Acknowledged {
+            revision: next_revision,
+        })
     })
 }
 
@@ -818,45 +818,46 @@ pub fn reject_or_block(
         None
     };
     let next_revision = intent.revision + 1;
-    let tx = conn.unchecked_transaction()?;
-    let updated = tx.execute(
-        "UPDATE delivery_intents
-         SET delivery_state = ?2, blocker_class = ?3, next_retry_at = ?4,
-             revision = ?5, updated_at = ?6,
-             active_claim_key = NULL, claimed_by = NULL, claim_expires_at = NULL
-         WHERE delivery_id = ?1 AND revision = ?7",
-        params![
+    super::common::with_composable_write(conn, |conn| {
+        let updated = conn.execute(
+            "UPDATE delivery_intents
+             SET delivery_state = ?2, blocker_class = ?3, next_retry_at = ?4,
+                 revision = ?5, updated_at = ?6,
+                 active_claim_key = NULL, claimed_by = NULL, claim_expires_at = NULL
+             WHERE delivery_id = ?1 AND revision = ?7",
+            params![
+                delivery_id,
+                next_state.as_str(),
+                blocker_class,
+                next_retry_at,
+                next_revision,
+                now,
+                intent.revision
+            ],
+        )?;
+        if updated == 0 {
+            return Err(MemoryError::DeliveryRevisionConflict(format!(
+                "intent {delivery_id} moved during reject_or_block (expected revision {})",
+                intent.revision
+            )));
+        }
+        append_event(
+            conn,
             delivery_id,
-            next_state.as_str(),
-            blocker_class,
-            next_retry_at,
-            next_revision,
-            now,
-            intent.revision
-        ],
-    )?;
-    if updated == 0 {
-        return Err(MemoryError::DeliveryRevisionConflict(format!(
-            "intent {delivery_id} moved during reject_or_block (expected revision {})",
-            intent.revision
-        )));
-    }
-    append_event(
-        &tx,
-        delivery_id,
-        &format!("reject:{}:{now}", next_state.as_str()),
-        if retryable {
-            DeliveryEventKind::RetryScheduled
-        } else {
-            DeliveryEventKind::Blocked
-        },
-        Some(intent.revision),
-        detail,
-        None,
-        &caller.host_identity,
-        &now,
-    )?;
-    tx.commit()?;
+            &format!("reject:{}:{now}", next_state.as_str()),
+            if retryable {
+                DeliveryEventKind::RetryScheduled
+            } else {
+                DeliveryEventKind::Blocked
+            },
+            Some(intent.revision),
+            detail,
+            None,
+            &caller.host_identity,
+            &now,
+        )?;
+        Ok(())
+    })?;
     find_intent_by_id(conn, delivery_id)?
         .ok_or_else(|| MemoryError::Internal("blocked delivery intent not found".to_string()))
 }
@@ -929,31 +930,31 @@ fn rearm_blocked_intents_for_caller(
     }
     for intent in intents {
         let next_revision = intent.revision + 1;
-        let tx = conn.unchecked_transaction()?;
-        let updated = tx.execute(
-            "UPDATE delivery_intents
-             SET delivery_state = 'ready', ready_at = ?2, revision = ?3, updated_at = ?2,
-                 blocker_class = NULL, next_retry_at = NULL,
-                 active_claim_key = NULL, claimed_by = NULL, claim_expires_at = NULL
-             WHERE delivery_id = ?1 AND delivery_state = 'blocked' AND revision = ?4",
-            params![intent.delivery_id, now, next_revision, intent.revision],
-        )?;
-        if updated == 0 {
-            tx.rollback()?;
-            continue;
-        }
-        append_event(
-            &tx,
-            &intent.delivery_id,
-            &format!("rearm:{}:{next_revision}", intent.delivery_id),
-            DeliveryEventKind::TransitionDebt,
-            Some(intent.revision),
-            Some("requester affirmatively re-armed a blocked delivery after reconnect"),
-            None,
-            &caller.host_identity,
-            now,
-        )?;
-        tx.commit()?;
+        super::common::with_composable_write(conn, |conn| {
+            let updated = conn.execute(
+                "UPDATE delivery_intents
+                 SET delivery_state = 'ready', ready_at = ?2, revision = ?3, updated_at = ?2,
+                     blocker_class = NULL, next_retry_at = NULL,
+                     active_claim_key = NULL, claimed_by = NULL, claim_expires_at = NULL
+                 WHERE delivery_id = ?1 AND delivery_state = 'blocked' AND revision = ?4",
+                params![intent.delivery_id, now, next_revision, intent.revision],
+            )?;
+            if updated == 0 {
+                return Ok(());
+            }
+            append_event(
+                conn,
+                &intent.delivery_id,
+                &format!("rearm:{}:{next_revision}", intent.delivery_id),
+                DeliveryEventKind::TransitionDebt,
+                Some(intent.revision),
+                Some("requester affirmatively re-armed a blocked delivery after reconnect"),
+                None,
+                &caller.host_identity,
+                now,
+            )?;
+            Ok(())
+        })?;
     }
     Ok(())
 }
@@ -1000,33 +1001,34 @@ pub fn dismiss_delivery(
         }
     }
     let next_revision = intent.revision + 1;
-    let tx = conn.unchecked_transaction()?;
-    let updated = tx.execute(
-        "UPDATE delivery_intents
-         SET delivery_state = 'dismissed', dismissed_at = ?2, revision = ?3,
-             updated_at = ?2, active_claim_key = NULL, claimed_by = NULL,
-             claim_expires_at = NULL, blocker_class = NULL, next_retry_at = NULL
-         WHERE delivery_id = ?1 AND revision = ?4",
-        params![delivery_id, now, next_revision, intent.revision],
-    )?;
-    if updated == 0 {
-        return Err(MemoryError::DeliveryRevisionConflict(format!(
-            "intent {delivery_id} moved during dismiss (expected revision {})",
-            intent.revision
-        )));
-    }
-    append_event(
-        &tx,
-        delivery_id,
-        &format!("dismissed:{delivery_id}:{next_revision}"),
-        DeliveryEventKind::Dismissed,
-        Some(intent.revision),
-        Some("delivery dismissed; execution evidence and adjudication unchanged"),
-        None,
-        &caller.agent_identity_id,
-        &now,
-    )?;
-    tx.commit()?;
+    super::common::with_composable_write(conn, |conn| {
+        let updated = conn.execute(
+            "UPDATE delivery_intents
+             SET delivery_state = 'dismissed', dismissed_at = ?2, revision = ?3,
+                 updated_at = ?2, active_claim_key = NULL, claimed_by = NULL,
+                 claim_expires_at = NULL, blocker_class = NULL, next_retry_at = NULL
+             WHERE delivery_id = ?1 AND revision = ?4",
+            params![delivery_id, now, next_revision, intent.revision],
+        )?;
+        if updated == 0 {
+            return Err(MemoryError::DeliveryRevisionConflict(format!(
+                "intent {delivery_id} moved during dismiss (expected revision {})",
+                intent.revision
+            )));
+        }
+        append_event(
+            conn,
+            delivery_id,
+            &format!("dismissed:{delivery_id}:{next_revision}"),
+            DeliveryEventKind::Dismissed,
+            Some(intent.revision),
+            Some("delivery dismissed; execution evidence and adjudication unchanged"),
+            None,
+            &caller.agent_identity_id,
+            &now,
+        )?;
+        Ok(())
+    })?;
     find_intent_by_id(conn, delivery_id)?
         .ok_or_else(|| MemoryError::Internal("dismissed delivery intent not found".to_string()))
 }
@@ -1483,33 +1485,32 @@ fn release_expired_claim(
     now: &str,
 ) -> Result<(), MemoryError> {
     let next_revision = intent.revision + 1;
-    let tx = conn.unchecked_transaction()?;
-    let updated = tx.execute(
-        "UPDATE delivery_intents
-         SET delivery_state = 'ready', ready_at = ?2, revision = ?3, updated_at = ?2,
-             active_claim_key = NULL, claimed_by = NULL, claim_expires_at = NULL
-         WHERE delivery_id = ?1 AND delivery_state = 'requester_queued' AND revision = ?4",
-        params![intent.delivery_id, now, next_revision, intent.revision],
-    )?;
-    if updated == 0 {
-        // The claim was settled concurrently (acked or re-written): its
-        // release receipt would contradict the row — write nothing.
-        tx.rollback()?;
-        return Ok(());
-    }
-    append_event(
-        &tx,
-        &intent.delivery_id,
-        &format!("claim_expired:{}:{next_revision}", intent.delivery_id),
-        DeliveryEventKind::ClaimExpired,
-        Some(intent.revision),
-        Some("claim expired without acknowledgement; the same intent is re-claimable"),
-        None,
-        "tachi",
-        now,
-    )?;
-    tx.commit()?;
-    Ok(())
+    super::common::with_composable_write(conn, |conn| {
+        let updated = conn.execute(
+            "UPDATE delivery_intents
+             SET delivery_state = 'ready', ready_at = ?2, revision = ?3, updated_at = ?2,
+                 active_claim_key = NULL, claimed_by = NULL, claim_expires_at = NULL
+             WHERE delivery_id = ?1 AND delivery_state = 'requester_queued' AND revision = ?4",
+            params![intent.delivery_id, now, next_revision, intent.revision],
+        )?;
+        if updated == 0 {
+            // The claim was settled concurrently (acked or re-written): its
+            // release receipt would contradict the row — write nothing.
+            return Ok(());
+        }
+        append_event(
+            conn,
+            &intent.delivery_id,
+            &format!("claim_expired:{}:{next_revision}", intent.delivery_id),
+            DeliveryEventKind::ClaimExpired,
+            Some(intent.revision),
+            Some("claim expired without acknowledgement; the same intent is re-claimable"),
+            None,
+            "tachi",
+            now,
+        )?;
+        Ok(())
+    })
 }
 
 fn transition_to_claimed(
@@ -1524,74 +1525,75 @@ fn transition_to_claimed(
     // State change + canonical receipts land atomically: a claim is never
     // observable as a bare state write without its event(s), so replay
     // resolution can always trust the ledger.
-    let tx = conn.unchecked_transaction()?;
-    let updated = tx.execute(
-        "UPDATE delivery_intents
-         SET delivery_state = 'requester_queued',
-             active_claim_key = ?2, claimed_by = ?3, claim_expires_at = ?4,
-             attempt_count = attempt_count + 1, revision = ?5, updated_at = ?6,
-             next_retry_at = NULL, blocker_class = NULL
-         WHERE delivery_id = ?1 AND revision = ?7",
-        params![
-            intent.delivery_id,
-            request.claim_key,
-            request.caller.host_identity,
-            claim_expires_at,
-            next_revision,
-            now,
-            intent.revision
-        ],
-    )?;
-    if updated == 0 {
-        return Err(MemoryError::DeliveryRevisionConflict(format!(
-            "intent {} moved during claim (expected revision {})",
-            intent.delivery_id, intent.revision
-        )));
-    }
-    if let Err(error) = append_event(
-        &tx,
-        &intent.delivery_id,
-        &format!("claim:{}", request.claim_key),
-        DeliveryEventKind::Claimed,
-        Some(intent.revision),
-        Some(&format!("claimed by {}", request.caller.host_identity)),
-        None,
-        &request.caller.host_identity,
-        now,
-    ) {
-        // The global partial-unique index on claim keys is the race
-        // backstop for the pre-transaction replay check: a concurrent
-        // claim of the same key on a different intent loses here, inside
-        // its own transaction, as a typed conflict.
-        // SQLite reports the violated columns, not the partial-index name:
-        // the per-intent UNIQUE names both columns, the global guards name
-        // event_id alone.
-        let message = error.to_string();
-        if matches!(error, MemoryError::Sqlite(_))
-            && (message.contains("UNIQUE constraint failed: delivery_events.event_id")
-                || message.contains("idx_delivery_events_claim_key_global"))
-        {
-            return Err(MemoryError::DeliveryIdempotencyConflict(format!(
-                "claim_key '{}' was claimed concurrently elsewhere",
-                request.claim_key
+    super::common::with_composable_write(conn, |conn| {
+        let updated = conn.execute(
+            "UPDATE delivery_intents
+             SET delivery_state = 'requester_queued',
+                 active_claim_key = ?2, claimed_by = ?3, claim_expires_at = ?4,
+                 attempt_count = attempt_count + 1, revision = ?5, updated_at = ?6,
+                 next_retry_at = NULL, blocker_class = NULL
+             WHERE delivery_id = ?1 AND revision = ?7",
+            params![
+                intent.delivery_id,
+                request.claim_key,
+                request.caller.host_identity,
+                claim_expires_at,
+                next_revision,
+                now,
+                intent.revision
+            ],
+        )?;
+        if updated == 0 {
+            return Err(MemoryError::DeliveryRevisionConflict(format!(
+                "intent {} moved during claim (expected revision {})",
+                intent.delivery_id, intent.revision
             )));
         }
-        return Err(error);
-    }
-    if reopen {
-        append_event(
-            &tx,
+        if let Err(error) = append_event(
+            conn,
             &intent.delivery_id,
-            &format!("debt:claim:{}", request.claim_key),
-            DeliveryEventKind::TransitionDebt,
+            &format!("claim:{}", request.claim_key),
+            DeliveryEventKind::Claimed,
             Some(intent.revision),
-            Some("delivery re-entered requester_queued from retrying (reopen-like transition)"),
+            Some(&format!("claimed by {}", request.caller.host_identity)),
             None,
             &request.caller.host_identity,
             now,
-        )?;
-    }
-    tx.commit()?;
+        ) {
+            // The global partial-unique index on claim keys is the race
+            // backstop for the pre-transaction replay check: a concurrent
+            // claim of the same key on a different intent loses here, inside
+            // its own transaction, as a typed conflict.
+            // SQLite reports the violated columns, not the partial-index name:
+            // the per-intent UNIQUE names both columns, the global guards name
+            // event_id alone.
+            let message = error.to_string();
+            if matches!(error, MemoryError::Sqlite(_))
+                && (message.contains("UNIQUE constraint failed: delivery_events.event_id")
+                    || message.contains("idx_delivery_events_claim_key_global"))
+            {
+                return Err(MemoryError::DeliveryIdempotencyConflict(format!(
+                    "claim_key '{}' was claimed concurrently elsewhere",
+                    request.claim_key
+                )));
+            }
+            return Err(error);
+        }
+        if reopen {
+            append_event(
+                conn,
+                &intent.delivery_id,
+                &format!("debt:claim:{}", request.claim_key),
+                DeliveryEventKind::TransitionDebt,
+                Some(intent.revision),
+                Some("delivery re-entered requester_queued from retrying (reopen-like transition)"),
+                None,
+                &request.caller.host_identity,
+                now,
+            )?;
+        }
+        Ok(())
+    })?;
     let claimed = find_intent_by_id(conn, &intent.delivery_id)?
         .ok_or_else(|| MemoryError::Internal("claimed delivery intent not found".to_string()))?;
     Ok(DeliveryClaimOutcome::Claimed(
