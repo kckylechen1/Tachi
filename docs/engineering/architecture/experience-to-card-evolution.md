@@ -1,6 +1,6 @@
 # Experience → Tachi: the vendor-keyed card-evolution loop (#534 first cut)
 
-**Status:** historical design with its first-cut vaccination wire landed by PR #738. Live implementation status and remaining gaps are reconciled in [`dispatch-lifecycle.md`](./dispatch-lifecycle.md); the broader model-router direction in Part II is superseded where it conflicts with #1467.
+**Status:** historical design with its first-cut vaccination wire landed by PR #738. Current card authority lives in [`model-card-authoring-guide.md`](./model-card-authoring-guide.md); current delivery/review procedure lives in [`dispatch-lifecycle.md`](./dispatch-lifecycle.md). The broader model-router direction in Part II is superseded where it conflicts with #1467 or either current document.
 
 ## Problem
 
@@ -86,17 +86,17 @@ The end state is Tachi as a **model router**: given a task, Tachi picks the vend
 ### Card ontology (four fields)
 
 1. **Capability** (擅长什么) — routing score per task-type; the hexagon's machine-readable form.
-2. **Failure modes** (哪会出错) — error signatures + risk gates. High-severity domains change routing *topology*, not just vendor choice: security work routes to "mandatory dual-track + cross-vendor adversarial review," never merely to a different model.
+2. **Failure modes** (哪会出错) — error signatures + risk gates. Under the current delivery policy, security and comparable high-risk work require independent different-model exact-candidate review. Extra lanes or cross-vendor review are optional defense-in-depth unless the owner freezes them for that delivery.
 3. **Constraint interface** (怎么约束) — the layered carriers, ordered by durability (proven 2026-07-05): prompt-layer (decays) < one-line config (`personality=pragmatic`) < packet clauses (per-dispatch injection from the card) < structural gates (scripts/CI — cannot be ignored).
 4. **Constraint efficacy** (约束有效性) — the novel field: *which constraint layer actually works for which failure mode, per vendor*. Evidence: glm's false-`Closes` is NOT prompt-fixable (the adjudication comment sat on the issue; it violated it anyway) — only structural gates (leader independent verification + review gate) catch it. codex's parking urge WAS prompt-fixable (remap mandate=ledger onto the base prompt's own end-to-end vocabulary). Same disease class, different models need different medicine layers — this mapping is the card's most valuable content.
 
 ### Storage split (three layers, don't merge them)
 
-- **Declaration** (vendor, lanes, tool whitelist, forbidden domains) → TOML seed files (serde-native, commentable, matches `config.toml`/`agents/*.toml` precedent).
+- **Declaration** (vendor, lanes, tool whitelist, forbidden domains) → reviewed Markdown in the governed card source. TOML is runtime configuration, not a competing declaration authority.
 - **Evidence** (eval rows, signatures, timestamps) → SQLite (append-only, temporal, `(vendor, role)`-queryable). Never a file.
 - **Projection** (hexagon, current top-N clauses) → computed at render/assembly time, never persisted as truth. The hexagon is for human routing intuition; the machine consumes signatures and clauses.
 
-TOML is the birth certificate, the DB is the medical record, the hexagon is the health report — the report is always computed from the record, never hand-edited.
+The reviewed declaration is the birth certificate, the DB is the medical record, and the hexagon is the health report — the report is always computed from the declaration and record, never hand-edited.
 
 ### Hexagon axes (grown from evidence, not invented)
 

@@ -104,8 +104,8 @@ Legacy `agent` dispatch remains supported, but lifecycle agents should prefer
 > #1675. This section is retained as historical record.
 
 > **Authority pointer (2026-08-10).** Owner ruling #1202 governs what an MBIT
-> card *is*: see `dispatch-lifecycle.md` §4.2 "Storage split — three layers,
-> never merged" (declaration / evidence / projection). MBIT and other
+> card *is*: see `model-card-authoring-guide.md` §Authority and storage
+> (declaration / evidence / projection). MBIT and other
 > statistical summaries are **derived evidence and projection only** — never a
 > persisted second authority, and never a routing baseline in their own right.
 > This section, written later (2026-07-20), described MBIT as a first-class

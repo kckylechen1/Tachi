@@ -14,6 +14,16 @@ A model card is a **routing artifact**: the thing a leader reads in the 30 secon
 
 Write for the reader mid-dispatch: **routing decision first, evidence after**. Every claim must be specific enough to be challengeable and carry its evidence ref.
 
+### Authority and storage
+
+Owner ruling #1202 defines three separate truth species:
+
+- **Declaration** — reviewed Markdown card declarations in the governed card source. An author or evaluator may propose a change; the owner or delegated adjudicator approves it. TOML may configure runtime profiles, but it is not a competing card declaration.
+- **Evidence** — append-only, attributed eval rows, signatures, timestamps, and adjudication references in SQLite. Evidence can support a declaration change; recording it does not make it policy.
+- **Projection** — current routing excerpts, counter-clauses, and statistical summaries computed from reviewed declarations plus evidence. A projection is reproducible output, never a persisted second authority.
+
+Keep engineering precedent, user preferences, Soul state, and lane-card operational evidence in their owning stores even when they share proposal/review/apply machinery.
+
 ## 2. The seat pipeline
 
 Three seats, separable but combinable:
@@ -72,4 +82,4 @@ Plus two bookkeeping sections: **eval evidence rows** (one line per adjudicated 
 4. New signature candidates filed as aggregates on the umbrella issue, never into frozen seeds.
 5. The leader spot-verifies a sample against source data before landing. Cards land in the card store; index updated; the report preserved alongside.
 
-Related: `experience-to-card-evolution.md` (the projection machinery these cards feed), `dispatch-lifecycle.md` (where cards sit in the dispatch loop), #534 (taxonomy umbrella), #735/#738 (vendor-keyed evidence + vaccination projection), #734 Part C (the growth loop this guide is the manual half of).
+Related: `experience-to-card-evolution.md` (historical design and the projection machinery these cards feed), `dispatch-lifecycle.md` (delivery and review procedure), #534 (taxonomy umbrella), #735/#738 (vendor-keyed evidence + vaccination projection), #734 Part C (the growth loop this guide is the manual half of).
