@@ -25,12 +25,12 @@ The target split is:
 ## Principles
 
 1. Agent-facing tools stay tiny.
-   - Default agent surface should be a narrow `observe + remember` kernel, not the full MCP catalog
+   - Default Lead and Worker discovery is exactly `tachi_memory`, `tachi_task`, `tachi_staff`, `tachi_gh`, and `tachi_a2a`, not a bundle-shaped catalog
 2. Runtime hooks stay explicit.
    - `recall_context`, `capture_session`, and later `compact_context` are runtime/adapter APIs, not part of the ordinary IDE default
 3. Capability selection is **retired as a first-class layer** (#1690 C3 delete list: "skill recommendation and auto-selection").
    - These APIs are retired and deleted end-to-end: `recommend_capability`, `recommend_skill`, `recommend_toolchain`, `prepare_capability_bundle`, and `skill_evolve`; the router rejects them as unknown tools
-   - `tachi_skill(action="discover"|"run")` is the canonical skill workflow; `bundle`/`loadout`/`from_pattern` actions are retired
+   - `tachi_skill(action="discover"|"run")` is retained only for explicit Ops/admin compatibility; ordinary agents use their host-native skill loader; `bundle`/`loadout`/`from_pattern` actions are retired
    - a dispatch's skills resolve only from the explicit `skills` parameter plus the profile's static reviewed skill list; internal dispatch-profile recommendation consumes the DecisionFactLedger and abstains when no usable evidence exists
    - raw hub / pack / vc governance tools should not leak into ordinary agent surfaces
 4. Workflow tools are not kernel primitives.
