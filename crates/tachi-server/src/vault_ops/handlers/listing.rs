@@ -40,17 +40,32 @@ fn normalized_alias_source(
     by_slot
 }
 
-fn effective_vault_alias_bindings(resolved_home: &Path) -> HashMap<String, EnvAliasClaims> {
-    let mut configured = normalized_alias_source(
-        crate::provider_config::collect_config_env_values(Some(resolved_home)),
-    );
+fn reconcile_alias_sources(
+    mut configured: HashMap<String, EnvAliasClaims>,
+    process: HashMap<String, EnvAliasClaims>,
+) -> HashMap<String, EnvAliasClaims> {
     // Process environment wins over config.env by normalized lane-slot name.
     // Preserve all raw process claims that normalize to one slot so a padded
-    // duplicate cannot be hidden by HashMap iteration order.
-    for (slot, claims) in normalized_alias_source(std::env::vars()) {
+    // duplicate, including one competing with config.env, cannot be hidden by
+    // HashMap iteration order or source precedence.
+    for (slot, mut claims) in process {
+        if let Some(config_claims) = configured.get(&slot) {
+            claims
+                .source_names
+                .extend(config_claims.source_names.iter().cloned());
+        }
         configured.insert(slot, claims);
     }
     configured
+}
+
+fn effective_vault_alias_bindings(resolved_home: &Path) -> HashMap<String, EnvAliasClaims> {
+    reconcile_alias_sources(
+        normalized_alias_source(crate::provider_config::collect_config_env_values(Some(
+            resolved_home,
+        ))),
+        normalized_alias_source(std::env::vars()),
+    )
 }
 
 fn account_bindings(
@@ -301,11 +316,13 @@ fn cached_probe_slot(name: &str) -> Option<&'static str> {
 fn cached_probe_class(
     probe: &crate::status_ops::status_health::ProviderProbeResult,
 ) -> &'static str {
-    if probe.message.as_deref().is_some_and(|message| {
-        message
-            .to_ascii_lowercase()
-            .contains("empty assistant content")
-    }) {
+    if probe.status != "ok"
+        && probe.message.as_deref().is_some_and(|message| {
+            message
+                .to_ascii_lowercase()
+                .contains("empty assistant content")
+        })
+    {
         return "empty_content";
     }
     match probe.status.as_str() {
@@ -1142,6 +1159,23 @@ mod tests {
         );
         assert_eq!(
             normalized_claims.conflicts,
+            BTreeSet::from(["EXTRACT_API_KEY".to_string()])
+        );
+
+        let cross_source = reconcile_alias_sources(
+            normalized_alias_source([(
+                "EXTRACT_API_KEY".to_string(),
+                "vault:DEEPSEEK_API_KEY".to_string(),
+            )]),
+            normalized_alias_source([(
+                " EXTRACT_API_KEY ".to_string(),
+                "vault:DEEPSEEK_API_KEY".to_string(),
+            )]),
+        );
+        let cross_source_claims =
+            binding_claims("DEEPSEEK_API_KEY", &cross_source, &HashMap::new());
+        assert_eq!(
+            cross_source_claims.conflicts,
             BTreeSet::from(["EXTRACT_API_KEY".to_string()])
         );
 
