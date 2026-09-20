@@ -45,13 +45,12 @@ query($owner:String!,$name:String!,$number:Int!){
   }
 }"#;
 
-pub(super) fn parse_graphql_bundle(
-    repo: &str,
-    issue_number: u64,
-    value: &Value,
-) -> Result<GithubReadBundle, GithubReadFailure> {
-    let raw_repository = value.pointer("/data/repository").and_then(Value::as_object);
-    let repository_visibility = raw_repository
+/// Parse only the typed repository visibility, independently of issue data
+/// and GraphQL errors. Failure callers may retain restrictions, not fresh truth.
+pub(super) fn repository_visibility(value: &Value) -> Option<super::VisibilityClassV1> {
+    value
+        .pointer("/data/repository")
+        .and_then(Value::as_object)
         .and_then(|repository| repository.get("visibility"))
         .and_then(Value::as_str)
         .and_then(|visibility| match visibility {
@@ -60,7 +59,16 @@ pub(super) fn parse_graphql_bundle(
                 Some(super::VisibilityClassV1::Private)
             }
             _ => None,
-        });
+        })
+}
+
+pub(super) fn parse_graphql_bundle(
+    repo: &str,
+    issue_number: u64,
+    value: &Value,
+) -> Result<GithubReadBundle, GithubReadFailure> {
+    let raw_repository = value.pointer("/data/repository").and_then(Value::as_object);
+    let repository_visibility = repository_visibility(value);
     let fail = |failure| GithubReadFailure::new(failure, repository_visibility);
 
     match value.get("errors") {

@@ -30,6 +30,8 @@ use tachi_params::work_read_model::{
 };
 
 mod graphql;
+#[cfg(all(test, unix))]
+mod partial_error_tests;
 
 use graphql::{parse_graphql_bundle, GITHUB_REFRESH_QUERY};
 
@@ -109,7 +111,7 @@ impl BoundedGithubRefreshReader for ServerBoundedGithubRefreshReader<'_> {
         let (owner, name) = repo
             .split_once('/')
             .ok_or_else(|| GithubReadFailure::new(LoadFailure::Malformed, None))?;
-        let value = run_gh_json_bounded(
+        let value = run_gh_json_observed_bounded(
             self.server,
             vec![
                 "api".to_string(),
@@ -127,7 +129,15 @@ impl BoundedGithubRefreshReader for ServerBoundedGithubRefreshReader<'_> {
             "gh current truth GraphQL read",
         )
         .await
-        .map_err(|_| GithubReadFailure::new(LoadFailure::Unavailable, None))?;
+        .map_err(|failure| {
+            // A failed command cannot mint fresh truth or relax access. Its
+            // independently valid restrictive observation must still survive.
+            let visibility = failure
+                .observed_json()
+                .and_then(graphql::repository_visibility)
+                .filter(|visibility| *visibility == VisibilityClassV1::Private);
+            GithubReadFailure::new(LoadFailure::Unavailable, visibility)
+        })?;
         parse_graphql_bundle(repo, number, &value)
     }
 }
