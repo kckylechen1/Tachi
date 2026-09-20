@@ -259,6 +259,7 @@ fn canonical_bound_receipt_wire(
         ),
         serde_json::to_string(&hash).unwrap(),
         serde_json::to_string(object_id).unwrap(),
+        revision = revision,
     )
 }
 
@@ -1892,6 +1893,52 @@ async fn subtree_organize_keeps_routing_relative_and_receipt_identity_repo_relat
         .expect("reapply an already positioned subtree document");
     assert_eq!(fs::read_to_string(path).unwrap(), normalized);
     assert!(!subtree.join("archive/subtree.md").exists());
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn equivalent_receipt_whitespace_is_a_true_in_place_no_op() {
+    let server = make_server();
+    let workspace = DocsWorktree::new();
+    let docs = workspace.docs_path().canonicalize().unwrap();
+    let path = docs.join("engineering/devops/receipt-whitespace.md");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let canonical = canonical_bound_receipt_wire(
+        "engineering/devops",
+        "Whitespace title",
+        "Whitespace summary",
+        "docs/engineering/devops/receipt-whitespace.md",
+        6,
+    );
+    let receipt = canonical.replacen("{\"schema\"", "{ \"schema\"", 1);
+    assert_ne!(receipt, canonical);
+    let original = document_with_raw_receipt(
+        "Whitespace title",
+        "Whitespace summary",
+        "engineering/devops",
+        true,
+        &receipt,
+        "whitespace body",
+    );
+    fs::write(&path, &original).unwrap();
+
+    crate::docs_ops::handle_wiki_organize(&server, docs.to_str().unwrap(), true)
+        .await
+        .expect("preview equivalent retained receipt whitespace");
+    assert_eq!(fs::read_to_string(&path).unwrap(), original);
+
+    crate::docs_ops::handle_wiki_organize(&server, docs.to_str().unwrap(), false)
+        .await
+        .expect("apply must not normalize receipt wire without a revision");
+    assert_eq!(fs::read_to_string(&path).unwrap(), original);
+    assert_model_document(
+        &original,
+        "Whitespace title",
+        "Whitespace summary",
+        "engineering/devops",
+        "docs/engineering/devops/receipt-whitespace.md",
+        6,
+    );
 }
 
 #[tokio::test]

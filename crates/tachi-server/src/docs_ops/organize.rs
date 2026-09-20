@@ -1567,11 +1567,12 @@ pub(crate) async fn handle_wiki_organize(
 
         // 如果物理路径不需要移动 (即已经在标准目录，且目的地一致)
         if is_already_categorized && path == dest_path {
+            let publication_changes_bytes = classification.is_some() || preview_content != content;
             let model_revision = if publication_has_model_receipt(
                 classification.as_ref(),
                 existing_receipt.as_ref(),
             ) {
-                if classification.is_none() && preview_content == content {
+                if !publication_changes_bytes {
                     existing_receipt.as_ref().map(|receipt| receipt.revision)
                 } else {
                     Some(next_receipt_revision(existing_receipt.iter())?)
@@ -1586,6 +1587,12 @@ pub(crate) async fn handle_wiki_organize(
                         relative_str
                     ));
                 }
+                continue;
+            }
+            // A valid retained receipt may use noncanonical but equivalent
+            // JSON whitespace. Do not rewrite those bytes through the typed
+            // serializer unless another document change commits a revision.
+            if !publication_changes_bytes {
                 continue;
             }
             // 只写入可能更新后的内容（就地勾选/Frontmatter 补齐）
