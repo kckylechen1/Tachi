@@ -1,10 +1,15 @@
-use super::classify::{canonical_model_payload, classify_and_extract_metadata, ClassifiedMetadata};
-use super::frontmatter::{parse_frontmatter, serialize_representable_frontmatter, Frontmatter};
-use super::paths::{is_archive_dir, is_markdown_file};
+use super::classify::classify_and_extract_metadata;
+use super::frontmatter::{parse_frontmatter, Frontmatter};
+use super::paths::{
+    canonical_accepted_category, canonical_relative_path, is_archive_dir, is_markdown_file,
+};
+use super::receipt::{
+    next_receipt_revision, publication_has_model_receipt, render_persisted_document,
+    render_preview_document, validated_existing_model_receipt,
+};
 use super::tasks::sync_tasks_in_content;
 use crate::server_state::MemoryServer;
-use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::json;
 use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
@@ -293,11 +298,7 @@ impl AuthorizedDocs {
                 path.display()
             )
         })?;
-        let value = relative.to_str().ok_or_else(|| {
-            "Refusing Wiki organize: protected invariant: document identity is not UTF-8"
-                .to_string()
-        })?;
-        Ok(value.replace('\\', "/"))
+        canonical_relative_path(relative)
     }
 
     fn optional_file(
@@ -803,6 +804,7 @@ impl AuthorizedDocs {
             true,
             "destination parent before rename",
         )?;
+        self.sync_file_bytes(source, source_identity, "rename source file")?;
         #[cfg(test)]
         if run_organize_test_hook(OrganizeTestPoint::RenameFileFailure, destination) {
             return Err("Failed to rename file: injected archive failure".to_string());
@@ -840,6 +842,63 @@ impl AuthorizedDocs {
         Ok(())
     }
 
+    fn sync_file_bytes(
+        &self,
+        path: &Path,
+        expected: &PhysicalIdentity,
+        label: &str,
+    ) -> Result<(), String> {
+        self.revalidate_roots()?;
+        self.revalidate_object(path, expected, false, label)?;
+        let mut options = OpenOptions::new();
+        options.read(true).write(true);
+        #[cfg(unix)]
+        options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
+        let file = options.open(path).map_err(|error| {
+            format!(
+                "Failed to open {label} '{}' for durable rename: {error}",
+                path.display()
+            )
+        })?;
+        let metadata = file.metadata().map_err(|error| {
+            format!(
+                "Failed to inspect {label} '{}' before durable rename: {error}",
+                path.display()
+            )
+        })?;
+        #[cfg(unix)]
+        let opened_identity = PhysicalIdentity {
+            dev: metadata.dev(),
+            ino: metadata.ino(),
+            canonical: path.to_path_buf(),
+        };
+        #[cfg(not(unix))]
+        let opened_identity = PhysicalIdentity {
+            canonical: path.canonicalize().map_err(|error| {
+                format!("Failed to canonicalize {label} before durable rename: {error}")
+            })?,
+        };
+        if !opened_identity.matches(expected) {
+            return Err(format!(
+                "Refusing Wiki organize: protected invariant: {label} '{}' changed before byte sync",
+                path.display()
+            ));
+        }
+        #[cfg(test)]
+        record_directory_sync(&format!("attempt {label}"), path);
+        #[cfg(test)]
+        if run_organize_test_hook(OrganizeTestPoint::RenameSourceSyncFailure, path) {
+            return Err(format!("Failed to sync {label}: injected file sync failure"));
+        }
+        file.sync_all()
+            .map_err(|error| format!("Failed to sync {label} '{}': {error}", path.display()))?;
+        #[cfg(test)]
+        record_directory_sync(&format!("complete {label}"), path);
+        self.revalidate_roots()?;
+        self.revalidate_object(path, expected, false, label)?;
+        Ok(())
+    }
+
     fn sync_directory(
         &self,
         path: &Path,
@@ -849,9 +908,11 @@ impl AuthorizedDocs {
         self.revalidate_roots()?;
         self.revalidate_object(path, expected, true, label)?;
         #[cfg(test)]
-        record_directory_sync(label, path);
+        record_directory_sync(&format!("attempt {label}"), path);
         sync_directory_entry(path)
             .map_err(|error| format!("Failed to sync {label} '{}': {error}", path.display()))?;
+        #[cfg(test)]
+        record_directory_sync(&format!("complete {label}"), path);
         self.revalidate_roots()?;
         self.revalidate_object(path, expected, true, label)?;
         Ok(())
@@ -915,8 +976,10 @@ fn sync_directory_entry(path: &Path) -> std::io::Result<()> {
         // Windows exposes no documented directory equivalent of POSIX fsync;
         // FlushFileBuffers is documented for file/volume handles, not
         // directory handles. Do not issue the known-invalid File::open call or
-        // claim an undocumented flush. File bytes are synced before namespace
-        // operations, and the ordered revalidation below remains mandatory.
+        // claim an undocumented flush. New/replaced files are synced while
+        // open for writing, and rename-only sources are explicitly synced
+        // before their namespace operation. Ordered directory revalidation
+        // remains mandatory but is not Unix-equivalent crash durability.
         let metadata = fs::metadata(path)?;
         if !metadata.is_dir() {
             return Err(std::io::Error::new(
@@ -1190,6 +1253,7 @@ pub(crate) enum OrganizeTestPoint {
     DirectoryCreateFailure,
     DirectorySyncFailure,
     RenameFileFailure,
+    RenameSourceSyncFailure,
     SourceRemovalFailure,
 }
 
@@ -1337,6 +1401,23 @@ pub(crate) fn set_new_file_test_hook(
 }
 
 #[cfg(test)]
+pub(crate) fn rename_file_for_test(
+    dir_path: &str,
+    source: &Path,
+    destination: &Path,
+) -> Result<(), String> {
+    let authorized = AuthorizedDocs::bind(dir_path)?;
+    let (source_identity, _) = authorized
+        .optional_file(source)?
+        .ok_or_else(|| format!("test rename source '{}' is missing", source.display()))?;
+    let parent = destination
+        .parent()
+        .ok_or_else(|| format!("test rename destination '{}' has no parent", destination.display()))?;
+    let parent_identity = authorized.ensure_existing_directory(parent)?;
+    authorized.rename_file(source, &source_identity, destination, &parent_identity)
+}
+
+#[cfg(test)]
 fn run_organize_test_hook(point: OrganizeTestPoint, path: &Path) -> bool {
     let action = {
         let mut slot = organize_test_hook()
@@ -1415,226 +1496,6 @@ fn collect_markdown_files(
     }
     markdown.sort_by(|left, right| left.0.cmp(&right.0));
     Ok(markdown)
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct ExistingModelInvocationReceiptV1 {
-    schema: String,
-    lane: String,
-    engine_kind: String,
-    effective_provider: Option<String>,
-    effective_model: Option<String>,
-    effective_version: Option<String>,
-    fallback_chain: Vec<String>,
-    degraded: bool,
-    completion_status: String,
-    prompt_tokens: Option<i64>,
-    completion_tokens: Option<i64>,
-    total_tokens: Option<i64>,
-    latency_ms: Option<u64>,
-    content_hash: String,
-    memory_id: String,
-    revision: i64,
-}
-
-impl ExistingModelInvocationReceiptV1 {
-    fn rebound_json(
-        &self,
-        frontmatter: &Frontmatter,
-        object_id: &str,
-        revision: i64,
-    ) -> Result<String, String> {
-        let payload = canonical_payload_from_frontmatter(frontmatter)?;
-        let mut rebound = self.clone();
-        rebound.content_hash =
-            tachi_llm::PersistedModelInvocationReceiptV1::content_hash_for(&payload);
-        rebound.memory_id = object_id.to_string();
-        rebound.revision = revision;
-        serde_json::to_string(&rebound)
-            .map_err(|error| format!("serialize rebound docs classification invocation: {error}"))
-    }
-}
-
-fn canonical_payload_from_frontmatter(frontmatter: &Frontmatter) -> Result<String, String> {
-    let category = frontmatter.category.as_deref().ok_or_else(|| {
-        "Refusing Wiki organize: protected invariant: bound model receipt has no category"
-            .to_string()
-    })?;
-    let title = frontmatter.title.as_deref().ok_or_else(|| {
-        "Refusing Wiki organize: protected invariant: bound model receipt has no title".to_string()
-    })?;
-    let summary = frontmatter.summary.as_deref().ok_or_else(|| {
-        "Refusing Wiki organize: protected invariant: bound model receipt has no summary"
-            .to_string()
-    })?;
-    canonical_model_payload(category, title, summary)
-}
-
-fn validated_existing_model_receipt(
-    frontmatter: Option<&Frontmatter>,
-    object_id: &str,
-) -> Result<Option<ExistingModelInvocationReceiptV1>, String> {
-    let Some(frontmatter) = frontmatter else {
-        return Ok(None);
-    };
-    let Some(receipt_json) = frontmatter.model_invocation_v1.as_deref() else {
-        return Ok(None);
-    };
-    let value: Value = serde_json::from_str(receipt_json).map_err(|error| {
-        format!(
-            "Refusing Wiki organize: protected invariant: existing model receipt is not valid JSON: {error}"
-        )
-    })?;
-    let object = value.as_object().ok_or_else(|| {
-        "Refusing Wiki organize: protected invariant: existing model receipt is not an object"
-            .to_string()
-    })?;
-    for field in [
-        "schema",
-        "lane",
-        "engine_kind",
-        "effective_provider",
-        "effective_model",
-        "effective_version",
-        "fallback_chain",
-        "degraded",
-        "completion_status",
-        "prompt_tokens",
-        "completion_tokens",
-        "total_tokens",
-        "latency_ms",
-        "content_hash",
-        "memory_id",
-        "revision",
-    ] {
-        if !object.contains_key(field) {
-            return Err(format!(
-                "Refusing Wiki organize: protected invariant: existing model receipt is incomplete (missing {field})"
-            ));
-        }
-    }
-    let receipt: ExistingModelInvocationReceiptV1 = serde_json::from_value(value).map_err(|error| {
-        format!(
-            "Refusing Wiki organize: protected invariant: existing model receipt violates the closed model-invocation-v1 wire contract: {error}"
-        )
-    })?;
-    let nonblank_identity = |identity: &Option<String>| {
-        identity
-            .as_deref()
-            .is_some_and(|value| !value.trim().is_empty() && value.trim() == value)
-    };
-    if receipt.schema != tachi_llm::MODEL_INVOCATION_SCHEMA_V1
-        || receipt.lane != "extract"
-        || receipt.engine_kind != "provider_http"
-        || !nonblank_identity(&receipt.effective_provider)
-        || !nonblank_identity(&receipt.effective_model)
-        || receipt
-            .effective_version
-            .as_deref()
-            .is_some_and(|value| value.trim().is_empty() || value.trim() != value)
-        || receipt.fallback_chain.len() > 4
-        || receipt.fallback_chain.iter().any(|step| {
-            !matches!(
-                step.as_str(),
-                "provider_http_fallback" | "claude_cli_to_provider_http"
-            )
-        })
-        || receipt.completion_status != "complete"
-        || [
-            receipt.prompt_tokens,
-            receipt.completion_tokens,
-            receipt.total_tokens,
-        ]
-        .into_iter()
-        .flatten()
-        .any(|tokens| tokens < 0)
-        || receipt.memory_id != object_id
-        || receipt.revision < 1
-    {
-        return Err(
-            "Refusing Wiki organize: protected invariant: existing model receipt provenance or binding identity is invalid"
-                .to_string(),
-        );
-    }
-    let payload = canonical_payload_from_frontmatter(frontmatter)?;
-    let expected_hash = tachi_llm::PersistedModelInvocationReceiptV1::content_hash_for(&payload);
-    if receipt.content_hash != expected_hash {
-        return Err(
-            "Refusing Wiki organize: protected invariant: existing model receipt content binding does not match its category/title/summary"
-                .to_string(),
-        );
-    }
-    Ok(Some(receipt))
-}
-
-fn next_receipt_revision<'a>(
-    receipts: impl IntoIterator<Item = &'a ExistingModelInvocationReceiptV1>,
-) -> Result<i64, String> {
-    receipts
-        .into_iter()
-        .map(|receipt| receipt.revision)
-        .max()
-        .unwrap_or(0)
-        .checked_add(1)
-        .ok_or_else(|| {
-            "Refusing Wiki organize: protected invariant: model receipt revision overflow"
-                .to_string()
-        })
-}
-
-fn publication_has_model_receipt(
-    classification: Option<&ClassifiedMetadata>,
-    existing_receipt: Option<&ExistingModelInvocationReceiptV1>,
-) -> bool {
-    classification
-        .map(ClassifiedMetadata::is_model_derived)
-        .unwrap_or(existing_receipt.is_some())
-}
-
-fn render_persisted_document(
-    frontmatter: &Frontmatter,
-    classification: Option<&ClassifiedMetadata>,
-    existing_receipt: Option<&ExistingModelInvocationReceiptV1>,
-    body: &str,
-    object_id: &str,
-    model_revision: Option<i64>,
-) -> Result<String, String> {
-    let mut frontmatter = frontmatter.clone();
-    if let Some(classified) = classification {
-        frontmatter.model_invocation_v1 =
-            classified.bound_model_invocation_json(object_id, model_revision.unwrap_or(1))?;
-    } else if let Some(receipt) = existing_receipt {
-        frontmatter.model_invocation_v1 = Some(receipt.rebound_json(
-            &frontmatter,
-            object_id,
-            model_revision.ok_or_else(|| {
-                "Refusing Wiki organize: protected invariant: surviving model receipt has no committed revision"
-                    .to_string()
-            })?,
-        )?);
-    }
-    Ok(format!(
-        "{}{}",
-        serialize_representable_frontmatter(&frontmatter)?,
-        body
-    ))
-}
-
-fn render_preview_document(
-    frontmatter: &Frontmatter,
-    classification: Option<&ClassifiedMetadata>,
-    body: &str,
-) -> Result<String, String> {
-    let mut frontmatter = frontmatter.clone();
-    if let Some(classified) = classification {
-        frontmatter.model_invocation_v1 = classified.unbound_model_invocation_json()?;
-    }
-    Ok(format!(
-        "{}{}",
-        serialize_representable_frontmatter(&frontmatter)?,
-        body
-    ))
 }
 
 /// 执行 docs 整理与索引生成的核心主流程
@@ -1724,12 +1585,15 @@ pub(crate) async fn handle_wiki_organize(
         let relative_path = path
             .strip_prefix(&canonical_root)
             .map_err(|e| format!("Strip prefix failed: {e}"))?;
-        let relative_str = relative_path.to_string_lossy().replace('\\', "/");
 
         let content = authorized.read_text(&path, &source_identity)?;
 
         let (fm_opt, body) = parse_frontmatter(&content);
         let source_object_id = authorized.repo_relative_document_id(&path)?;
+        let relative_str = source_object_id
+            .strip_prefix("docs/")
+            .unwrap_or(&source_object_id)
+            .to_string();
         // A receipt is an active integrity claim, even when the existing
         // category means no new model call is needed. Validate it before
         // dry-run planning, task sync, conflict handling, or any mutation.
@@ -1798,21 +1662,14 @@ pub(crate) async fn handle_wiki_organize(
             .any(|sub| relative_str.starts_with(sub));
 
         // 提取或预测分类
-        let classification = if let Some(ref fm) = fm_opt {
-            if let Some(ref cat) = fm.category {
-                let cat_rel = cat.strip_prefix("docs/").unwrap_or(cat);
-                if standard_subdirs
-                    .iter()
-                    .any(|sub| cat_rel.starts_with(sub) || format!("{}/", cat_rel).starts_with(sub))
-                {
-                    None
-                } else {
-                    // 原 category 不合法，调用 LLM
-                    Some(classify_and_extract_metadata(server, &relative_str, &content).await)
-                }
-            } else {
-                Some(classify_and_extract_metadata(server, &relative_str, &content).await)
-            }
+        let accepted_category = fm_opt
+            .as_ref()
+            .and_then(|fm| fm.category.as_deref())
+            .map(canonical_accepted_category)
+            .transpose()?
+            .flatten();
+        let classification = if accepted_category.is_some() {
+            None
         } else {
             Some(classify_and_extract_metadata(server, &relative_str, &content).await)
         };
@@ -1826,11 +1683,9 @@ pub(crate) async fn handle_wiki_organize(
             let fm = fm_opt
                 .as_ref()
                 .expect("existing category requires frontmatter");
-            let cat = fm
-                .category
-                .as_ref()
+            let cat_rel = accepted_category
+                .as_deref()
                 .expect("existing category was validated");
-            let cat_rel = cat.strip_prefix("docs/").unwrap_or(cat);
             (
                 format!("docs/{}", cat_rel),
                 fm.title.clone().unwrap_or_else(|| {
@@ -2180,11 +2035,11 @@ pub(crate) async fn handle_wiki_organize(
                 index_lines.push(format!("## {}", title));
                 for (path, identity) in paths {
                     let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                    let relative_url = path
-                        .strip_prefix(&canonical_root)
-                        .unwrap()
-                        .to_string_lossy()
-                        .replace('\\', "/");
+                    let relative_url = canonical_relative_path(
+                        path.strip_prefix(&canonical_root).map_err(|error| {
+                            format!("Refusing Wiki organize: index path is not docs-relative: {error}")
+                        })?,
+                    )?;
 
                     let file_content = authorized.read_text(&path, &identity)?;
                     let (fm_opt, _) = parse_frontmatter(&file_content);

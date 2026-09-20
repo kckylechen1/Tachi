@@ -1109,7 +1109,7 @@ async fn retry_reproves_parent_sync_after_directory_creation_sync_failure() {
 
     assert!(sync_trace.lock().unwrap().iter().any(|event| event
         == &format!(
-            "existing directory parent:{}",
+            "complete existing directory parent:{}",
             docs.join("product").display()
         )));
     assert!(!source.exists());
@@ -1173,13 +1173,16 @@ async fn post_rename_destination_sync_failure_stops_before_source_parent_sync() 
         .lock()
         .unwrap()
         .iter()
-        .filter(|event| event.starts_with("rename "))
+        .filter(|event| {
+            event.contains("rename destination parent")
+                || event.contains("rename source parent")
+        })
         .cloned()
         .collect::<Vec<_>>();
     assert_eq!(
         rename_syncs,
         vec![format!(
-            "rename destination parent:{}",
+            "attempt rename destination parent:{}",
             docs.join("archive").display()
         )],
         "source-parent sync must not be attempted before destination-parent durability"
@@ -1190,6 +1193,184 @@ async fn post_rename_destination_sync_failure_stops_before_source_parent_sync() 
         fs::read_to_string(docs.join("archive/a-rename-sync.md")).unwrap(),
         "old destination moved to archive\n"
     );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn rename_only_archive_syncs_verified_file_bytes_before_namespace_change() {
+    let classifier = MockDocsClassifier::start(
+        &model_response(
+            "docs/product/acme",
+            "File Sync Title",
+            "File sync summary",
+        ),
+        MockFinishReason::named("stop"),
+    )
+    .await;
+    let mut server = make_server();
+    install_classifier(&mut server, &classifier);
+    let workspace = DocsWorktree::new();
+    let docs = workspace.docs_path().canonicalize().unwrap();
+    let source = docs.join("a-file-sync.md");
+    fs::write(&source, "replacement source\n").unwrap();
+    let destination = docs.join("product/acme/a-file-sync.md");
+    fs::create_dir_all(destination.parent().unwrap()).unwrap();
+    let predecessor = "unreceipted predecessor bytes\n";
+    fs::write(&destination, predecessor).unwrap();
+    fs::File::open(&destination)
+        .unwrap()
+        .set_times(fs::FileTimes::new().set_modified(std::time::SystemTime::UNIX_EPOCH))
+        .unwrap();
+    let _model_mode = crate::docs_ops::enable_model_classification_for_test();
+    crate::docs_ops::set_organize_test_hook(
+        crate::docs_ops::OrganizeTestPoint::RenameSourceSyncFailure,
+        destination.clone(),
+        Box::new(|| {}),
+    );
+    let (_trace_guard, sync_trace) = crate::docs_ops::capture_directory_sync_trace();
+
+    let error = crate::docs_ops::handle_wiki_organize(&server, docs.to_str().unwrap(), false)
+        .await
+        .expect_err("rename-only predecessor byte-sync failure must stop before rename");
+
+    assert!(
+        error.contains("Failed to sync rename source file")
+            && error.contains("injected file sync failure"),
+        "{error}"
+    );
+    let rename_events = sync_trace
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|event| event.contains("rename "))
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(
+        rename_events,
+        vec![format!(
+            "attempt rename source file:{}",
+            destination.display()
+        )]
+    );
+    assert_eq!(fs::read_to_string(&source).unwrap(), "replacement source\n");
+    assert_eq!(fs::read_to_string(&destination).unwrap(), predecessor);
+    assert!(!docs.join("archive/a-file-sync.md").exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn successful_cross_directory_rename_traces_file_then_destination_then_source() {
+    let classifier = MockDocsClassifier::start(
+        &model_response(
+            "docs/product/acme",
+            "Cross Rename Title",
+            "Cross rename summary",
+        ),
+        MockFinishReason::named("stop"),
+    )
+    .await;
+    let mut server = make_server();
+    install_classifier(&mut server, &classifier);
+    let workspace = DocsWorktree::new();
+    let docs = workspace.docs_path().canonicalize().unwrap();
+    let source = docs.join("a-cross-rename.md");
+    fs::write(&source, "replacement source\n").unwrap();
+    let destination = docs.join("product/acme/a-cross-rename.md");
+    fs::create_dir_all(destination.parent().unwrap()).unwrap();
+    fs::write(&destination, "cross predecessor\n").unwrap();
+    fs::File::open(&destination)
+        .unwrap()
+        .set_times(fs::FileTimes::new().set_modified(std::time::SystemTime::UNIX_EPOCH))
+        .unwrap();
+    let _model_mode = crate::docs_ops::enable_model_classification_for_test();
+    let (_trace_guard, sync_trace) = crate::docs_ops::capture_directory_sync_trace();
+
+    crate::docs_ops::handle_wiki_organize(&server, docs.to_str().unwrap(), false)
+        .await
+        .expect("cross-directory archive rename must complete durability sequence");
+
+    let rename_events = sync_trace
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|event| event.contains("rename "))
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(
+        rename_events,
+        vec![
+            format!("attempt rename source file:{}", destination.display()),
+            format!("complete rename source file:{}", destination.display()),
+            format!(
+                "attempt rename destination parent:{}",
+                docs.join("archive").display()
+            ),
+            format!(
+                "complete rename destination parent:{}",
+                docs.join("archive").display()
+            ),
+            format!(
+                "attempt rename source parent:{}",
+                docs.join("product/acme").display()
+            ),
+            format!(
+                "complete rename source parent:{}",
+                docs.join("product/acme").display()
+            ),
+        ]
+    );
+    assert_eq!(
+        fs::read_to_string(docs.join("archive/a-cross-rename.md")).unwrap(),
+        "cross predecessor\n"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn successful_same_directory_rename_traces_one_completed_namespace_sync() {
+    let workspace = DocsWorktree::new();
+    let docs = workspace.docs_path().canonicalize().unwrap();
+    let directory = docs.join("engineering/devops");
+    fs::create_dir_all(&directory).unwrap();
+    let source = directory.join("same-source.md");
+    let destination = directory.join("same-destination.md");
+    fs::write(&source, "same-directory bytes\n").unwrap();
+    let (_trace_guard, sync_trace) = crate::docs_ops::capture_directory_sync_trace();
+
+    crate::docs_ops::rename_file_for_test(
+        docs.to_str().unwrap(),
+        &source,
+        &destination,
+    )
+    .expect("same-directory rename must complete one namespace sync");
+
+    let rename_events = sync_trace
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|event| event.contains("rename "))
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(
+        rename_events,
+        vec![
+            format!("attempt rename source file:{}", source.display()),
+            format!("complete rename source file:{}", source.display()),
+            format!(
+                "attempt rename source and destination parent:{}",
+                directory.display()
+            ),
+            format!(
+                "complete rename source and destination parent:{}",
+                directory.display()
+            ),
+        ]
+    );
+    assert!(!source.exists());
+    assert_eq!(fs::read_to_string(destination).unwrap(), "same-directory bytes\n");
 }
 
 #[tokio::test]
@@ -1310,14 +1491,126 @@ async fn accepted_category_in_place_normalization_rebinds_payload_and_revision()
         .await
         .expect("normalize accepted-category frontmatter");
 
+    let normalized = fs::read_to_string(&path).unwrap();
     assert_model_document(
-        &fs::read_to_string(path).unwrap(),
+        &normalized,
         "Normalized title",
         "Normalized summary",
         "engineering/devops",
         "docs/engineering/devops/normalized.md",
         6,
     );
+
+    crate::docs_ops::handle_wiki_organize(&server, docs.to_str().unwrap(), false)
+        .await
+        .expect("canonical category spelling must remain stable on reapply");
+    assert_eq!(fs::read_to_string(path).unwrap(), normalized);
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn accepted_category_aliases_fail_closed_before_preview_or_apply() {
+    for (label, category) in [
+        ("repeated", "engineering//devops"),
+        ("dot", "engineering/./devops"),
+    ] {
+        for dry_run in [true, false] {
+            let server = make_server();
+            let workspace = DocsWorktree::new();
+            let docs = workspace.docs_path().canonicalize().unwrap();
+            let path = docs.join(format!("engineering/devops/{label}-{dry_run}.md"));
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let object_id = format!("docs/engineering/devops/{label}-{dry_run}.md");
+            let receipt = valid_bound_receipt(
+                category,
+                "Alias title",
+                "Alias summary",
+                &object_id,
+                3,
+            );
+            let original = document_with_receipt(
+                "Alias title",
+                "Alias summary",
+                category,
+                true,
+                &receipt,
+                "alias body\n",
+            );
+            fs::write(&path, &original).unwrap();
+
+            let error =
+                crate::docs_ops::handle_wiki_organize(&server, docs.to_str().unwrap(), dry_run)
+                    .await
+                    .expect_err("ambiguous accepted-category alias must fail closed");
+
+            assert!(error.contains("ambiguous path spelling"), "{label}: {error}");
+            assert_eq!(fs::read_to_string(path).unwrap(), original);
+        }
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn literal_backslash_document_is_rejected_while_nested_components_remain_distinct() {
+    {
+        let server = make_server();
+        let workspace = DocsWorktree::new();
+        let docs = workspace.docs_path().canonicalize().unwrap();
+        let ambiguous = docs.join("a\\b.md");
+        let original = "literal backslash filename\n";
+        fs::write(&ambiguous, original).unwrap();
+
+        for dry_run in [true, false] {
+            let error =
+                crate::docs_ops::handle_wiki_organize(&server, docs.to_str().unwrap(), dry_run)
+                    .await
+                    .expect_err("literal backslash identity must be rejected, never rewritten");
+            assert!(error.contains("ambiguous path component"), "{error}");
+            assert_eq!(fs::read_to_string(&ambiguous).unwrap(), original);
+        }
+    }
+
+    {
+        let server = make_server();
+        let workspace = DocsWorktree::new();
+        let docs = workspace.docs_path().canonicalize().unwrap();
+        let nested = docs.join("engineering/devops/a/b.md");
+        fs::create_dir_all(nested.parent().unwrap()).unwrap();
+        let receipt = valid_bound_receipt(
+            "engineering/devops",
+            "Nested title",
+            "Nested summary",
+            "docs/engineering/devops/a/b.md",
+            4,
+        );
+        fs::write(
+            &nested,
+            document_with_receipt(
+                "Nested title",
+                "Nested summary",
+                "engineering/devops",
+                true,
+                &receipt,
+                "nested body\n",
+            ),
+        )
+        .unwrap();
+
+        crate::docs_ops::handle_wiki_organize(&server, docs.to_str().unwrap(), false)
+            .await
+            .expect("nested components have an injective canonical identity");
+
+        assert!(!nested.exists());
+        assert_model_document(
+            &fs::read_to_string(docs.join("engineering/devops/b.md")).unwrap(),
+            "Nested title",
+            "Nested summary",
+            "engineering/devops",
+            "docs/engineering/devops/b.md",
+            5,
+        );
+    }
 }
 
 #[tokio::test]
@@ -1526,6 +1819,30 @@ async fn malformed_or_incomplete_prior_receipts_fail_closed_before_rewrite() {
     let mut wrong_lane = base.clone();
     wrong_lane["lane"] = json!("distill");
     cases.push(("wrong-lane", wrong_lane));
+    let mut wrong_schema = base.clone();
+    wrong_schema["schema"] = json!("model-invocation-v2");
+    cases.push(("wrong-schema", wrong_schema));
+    let mut wrong_engine = base.clone();
+    wrong_engine["engine_kind"] = json!("claude_cli");
+    cases.push(("wrong-engine", wrong_engine));
+    let mut blank_provider = base.clone();
+    blank_provider["effective_provider"] = json!(" ");
+    cases.push(("blank-provider", blank_provider));
+    let mut blank_version = base.clone();
+    blank_version["effective_version"] = json!("");
+    cases.push(("blank-version", blank_version));
+    let mut unknown_fallback = base.clone();
+    unknown_fallback["fallback_chain"] = json!(["unbounded-provider-label"]);
+    cases.push(("unknown-fallback", unknown_fallback));
+    let mut excessive_fallback = base.clone();
+    excessive_fallback["fallback_chain"] = json!([
+        "provider_http_fallback",
+        "provider_http_fallback",
+        "provider_http_fallback",
+        "provider_http_fallback",
+        "provider_http_fallback"
+    ]);
+    cases.push(("excessive-fallback", excessive_fallback));
     let mut unknown_field = base.clone();
     unknown_field["forged"] = json!(true);
     cases.push(("unknown-field", unknown_field));
@@ -1535,9 +1852,45 @@ async fn malformed_or_incomplete_prior_receipts_fail_closed_before_rewrite() {
     let mut absent_model = base.clone();
     absent_model["effective_model"] = Value::Null;
     cases.push(("absent-model", absent_model));
+    let mut blank_model = base.clone();
+    blank_model["effective_model"] = json!("");
+    cases.push(("blank-model", blank_model));
+    let mut invalid_degraded = base.clone();
+    invalid_degraded["degraded"] = json!("false");
+    cases.push(("invalid-degraded-type", invalid_degraded));
+    let mut invalid_latency_type = base.clone();
+    invalid_latency_type["latency_ms"] = json!("1");
+    cases.push(("invalid-latency-type", invalid_latency_type));
     let mut invalid_tokens = base;
     invalid_tokens["prompt_tokens"] = json!("eleven");
     cases.push(("invalid-token-type", invalid_tokens));
+    let mut negative_tokens = valid_bound_receipt(
+        "engineering/devops",
+        "Strict title",
+        "Strict summary",
+        "docs/engineering/devops/strict.md",
+        2,
+    );
+    negative_tokens["completion_tokens"] = json!(-1);
+    cases.push(("negative-token", negative_tokens));
+    let mut invalid_latency = valid_bound_receipt(
+        "engineering/devops",
+        "Strict title",
+        "Strict summary",
+        "docs/engineering/devops/strict.md",
+        2,
+    );
+    invalid_latency["latency_ms"] = json!(-1);
+    cases.push(("negative-latency", invalid_latency));
+    let mut zero_revision = valid_bound_receipt(
+        "engineering/devops",
+        "Strict title",
+        "Strict summary",
+        "docs/engineering/devops/strict.md",
+        1,
+    );
+    zero_revision["revision"] = json!(0);
+    cases.push(("zero-revision", zero_revision));
     let mut out_of_range_tokens = valid_bound_receipt(
         "engineering/devops",
         "Strict title",
