@@ -65,12 +65,8 @@ fn write_passed_verification(server: &crate::MemoryServer, flow_id: &str, head_s
     .expect("write verification");
     // The cycle verdict is claim-bound gate output over the server-owned
     // receipt store. Seed both authority sources so this happy path is green.
-    crate::claims_ops::admit_agent_connection(
-        server,
-        Some("agent.cycle-status".into()),
-        true,
-    )
-    .expect("local admission");
+    crate::claims_ops::admit_agent_connection(server, Some("agent.cycle-status".into()), true)
+        .expect("local admission");
     let claim_params: crate::TachiTaskParams = serde_json::from_value(json!({
         "action": "claim",
         "flow_id": flow_id,

@@ -67,11 +67,7 @@ fn gate_server(home: &std::path::Path) -> MemoryServer {
         .expect("gate test server")
 }
 
-fn seed_gate_claim(
-    server: &MemoryServer,
-    flow_id: &str,
-    expected_head: &str,
-) -> serde_json::Value {
+fn seed_gate_claim(server: &MemoryServer, flow_id: &str, expected_head: &str) -> serde_json::Value {
     crate::claims_ops::admit_agent_connection(server, Some("agent.gate".to_string()), true)
         .expect("local admission");
     let params: crate::TachiTaskParams = serde_json::from_value(json!({
@@ -199,7 +195,11 @@ fn gate_refuses_missing_ambiguous_and_headless_claim_authority() {
     for malformed in [None, Some("   ")] {
         let flow_id = format!(
             "flow_gate-{}-head",
-            if malformed.is_none() { "missing" } else { "blank" }
+            if malformed.is_none() {
+                "missing"
+            } else {
+                "blank"
+            }
         );
         write_gate_ledger(&flow_id);
         let claim = seed_gate_claim(&server, &flow_id, "admitted-head");
@@ -873,8 +873,7 @@ fn f1691_verify_identity_spine_distinguishes_facts_evidence_verdicts() {
     // bound to the diverged head is stale for the evaluated head.
     let mut nextest = valid_receipt("nextest", "candidate_sha");
     nextest["flow_id"] = json!(flow_id);
-    seed_run_receipt_for_test(home.path(), flow_id, "nextest", &nextest)
-        .expect("seed receipt");
+    seed_run_receipt_for_test(home.path(), flow_id, "nextest", &nextest).expect("seed receipt");
     let rebind = handoff_gate_claim(
         &server,
         claim["claim_id"].as_str().unwrap(),

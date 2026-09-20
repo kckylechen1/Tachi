@@ -51,9 +51,7 @@ pub(crate) async fn handle_task_release_note(
     // The release note's verification headline is claim-bound gate output,
     // never the raw caller-asserted ledger `overall`.
     let verification_verdict = match flow_id {
-        Some(flow_id) => {
-            release_note_verification_verdict(server, flow_id, verification.as_ref())?
-        }
+        Some(flow_id) => release_note_verification_verdict(server, flow_id, verification.as_ref())?,
         None => None,
     };
     let release_note = build_release_note_markdown(
@@ -453,14 +451,13 @@ mod tests {
 
         // The claim head is authoritative even without GitHub or receipts;
         // absent receipts remain pending, never raw-ledger green.
-        let verdict = release_note_verification_verdict(&server, flow_id, Some(&ledger))
-            .expect("verdict");
+        let verdict =
+            release_note_verification_verdict(&server, flow_id, Some(&ledger)).expect("verdict");
         assert_eq!(verdict.as_deref(), Some("pending"));
 
         // No ledger → None (callers keep their missing-verification copy).
         std::fs::remove_file(run_dir.join("verification.json")).expect("remove ledger");
-        let verdict =
-            release_note_verification_verdict(&server, flow_id, None).expect("verdict");
+        let verdict = release_note_verification_verdict(&server, flow_id, None).expect("verdict");
         assert_eq!(verdict, None);
         std::fs::write(
             run_dir.join("verification.json"),
@@ -469,8 +466,8 @@ mod tests {
         .expect("restore ledger");
 
         // Only an fmt receipt → gate `pending` (missing kinds).
-        let verdict = release_note_verification_verdict(&server, flow_id, Some(&ledger))
-            .expect("verdict");
+        let verdict =
+            release_note_verification_verdict(&server, flow_id, Some(&ledger)).expect("verdict");
         assert_eq!(verdict.as_deref(), Some("pending"));
 
         // The full canonical receipt set at the claim head → gate `passed`.
@@ -478,8 +475,8 @@ mod tests {
             seed_run_receipt_for_test(&home, flow_id, kind, &receipt(kind, head))
                 .expect("seed receipt");
         }
-        let verdict = release_note_verification_verdict(&server, flow_id, Some(&ledger))
-            .expect("verdict");
+        let verdict =
+            release_note_verification_verdict(&server, flow_id, Some(&ledger)).expect("verdict");
         assert_eq!(verdict.as_deref(), Some("passed"));
 
         if let Some(v) = original {
