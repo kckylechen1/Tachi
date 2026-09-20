@@ -33,7 +33,7 @@
 //! GC ever runs (the `ON CONFLICT` target `upsert_or_heartbeat_claim` upserts
 //! on — see that function's doc comment).
 
-use rusqlite::{params, Connection, OptionalExtension, Transaction};
+use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::error::{MemoryError, WorkClaimTransitionReason};
 
@@ -220,26 +220,6 @@ pub struct AgentIdentity {
     pub created_at: String,
 }
 
-/// Persisted admission state. `Verified` is readable but has no public writer
-/// until the trusted #1170 verification adapter exists.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AdmissionState {
-    SelfAsserted,
-    Verified,
-    Rejected,
-    Unavailable,
-}
-impl AdmissionState {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::SelfAsserted => "self_asserted",
-            Self::Verified => "verified",
-            Self::Rejected => "rejected",
-            Self::Unavailable => "unavailable",
-        }
-    }
-}
-
 /// Public admission inputs deliberately exclude `verified`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnverifiedAdmissionState {
@@ -247,12 +227,12 @@ pub enum UnverifiedAdmissionState {
     Rejected,
     Unavailable,
 }
-impl From<UnverifiedAdmissionState> for AdmissionState {
-    fn from(value: UnverifiedAdmissionState) -> Self {
-        match value {
-            UnverifiedAdmissionState::SelfAsserted => Self::SelfAsserted,
-            UnverifiedAdmissionState::Rejected => Self::Rejected,
-            UnverifiedAdmissionState::Unavailable => Self::Unavailable,
+impl UnverifiedAdmissionState {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::SelfAsserted => "self_asserted",
+            Self::Rejected => "rejected",
+            Self::Unavailable => "unavailable",
         }
     }
 }
@@ -292,7 +272,7 @@ pub fn record_unverified_admission(
             "admission id, identity id, and connection id are required".into(),
         ));
     }
-    conn.execute("INSERT INTO identity_admissions (admission_id,agent_identity_id,connection_id,state,created_at) VALUES (?1,?2,?3,?4,?5)", params![admission_id, agent_identity_id, connection_id, AdmissionState::from(state).as_str(), normalize_utc_iso_or_now("")])?;
+    conn.execute("INSERT INTO identity_admissions (admission_id,agent_identity_id,connection_id,state,created_at) VALUES (?1,?2,?3,?4,?5)", params![admission_id, agent_identity_id, connection_id, state.as_str(), normalize_utc_iso_or_now("")])?;
     Ok(())
 }
 
@@ -421,7 +401,7 @@ fn row_to_claim(row: &rusqlite::Row<'_>) -> Result<SessionClaim, rusqlite::Error
 
 /// Inserts a v21 WorkClaim. Empty holder fields are refused rather than
 /// silently producing an identity-unavailable row.
-pub fn insert_work_claim(conn: &mut Connection, claim: &NewWorkClaim) -> Result<(), MemoryError> {
+pub fn insert_work_claim(conn: &Connection, claim: &NewWorkClaim) -> Result<(), MemoryError> {
     if [
         claim.agent_identity_id.as_str(),
         claim.role.as_str(),
@@ -436,17 +416,6 @@ pub fn insert_work_claim(conn: &mut Connection, claim: &NewWorkClaim) -> Result<
         ));
     }
     require_non_empty_declared_scope(&claim.declared_file_scope)?;
-    let known_identity: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM agent_identities WHERE agent_identity_id=?1)",
-        params![claim.agent_identity_id],
-        |r| r.get(0),
-    )?;
-    if !known_identity {
-        return Err(MemoryError::WorkClaimIncompatibleState(format!(
-            "unknown agent identity {}",
-            claim.agent_identity_id
-        )));
-    }
     if claim.mode == WorkClaimMode::Writable && claim.worktree_path.trim().is_empty() {
         return Err(MemoryError::InvalidArg(
             "writable WorkClaim worktree path is required".into(),
@@ -457,23 +426,34 @@ pub fn insert_work_claim(conn: &mut Connection, claim: &NewWorkClaim) -> Result<
     } else {
         normalize_utc_iso_or_now(&claim.created_at)
     };
-    let tx = conn.transaction()?;
-    reject_work_claim_collision(&tx, claim)?;
-    // v20 binaries resolve their exact active-claim upsert through the legacy
-    // identity triple. v21 claims use a claim-specific compatibility key so
-    // the legacy uniqueness constraint cannot serialize disjoint same-issue
-    // work that the role/mode admission checks permit.
-    let legacy_session_client = format!("work-claim:{}", claim.claim_id);
-    tx.execute("INSERT INTO session_claims (claim_id, session_client, issue_ref, flow_id, dispatch_id, branch, worktree_path, declared_file_scope, agent_identity_id, role, mode, expected_head, lease_expires_at, transition_version, state, created_at, heartbeat_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,0,'active',?14,?14)", params![claim.claim_id, legacy_session_client, claim.issue_ref, claim.flow_id, claim.dispatch_id, claim.branch, claim.worktree_path, claim.declared_file_scope, claim.agent_identity_id, claim.role, claim.mode.as_str(), claim.expected_head, claim.lease_expires_at, created])?;
-    tx.commit()?;
-    Ok(())
+    super::common::with_composable_write(conn, |conn| {
+        let known_identity: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM agent_identities WHERE agent_identity_id=?1)",
+            params![claim.agent_identity_id],
+            |row| row.get(0),
+        )?;
+        if !known_identity {
+            return Err(MemoryError::WorkClaimIncompatibleState(format!(
+                "unknown agent identity {}",
+                claim.agent_identity_id
+            )));
+        }
+        reject_work_claim_collision(conn, claim)?;
+        // v20 binaries resolve their exact active-claim upsert through the legacy
+        // identity triple. v21 claims use a claim-specific compatibility key so
+        // the legacy uniqueness constraint cannot serialize disjoint same-issue
+        // work that the role/mode admission checks permit.
+        let legacy_session_client = format!("work-claim:{}", claim.claim_id);
+        conn.execute("INSERT INTO session_claims (claim_id, session_client, issue_ref, flow_id, dispatch_id, branch, worktree_path, declared_file_scope, agent_identity_id, role, mode, expected_head, lease_expires_at, transition_version, state, created_at, heartbeat_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,0,'active',?14,?14)", params![claim.claim_id, legacy_session_client, claim.issue_ref, claim.flow_id, claim.dispatch_id, claim.branch, claim.worktree_path, claim.declared_file_scope, claim.agent_identity_id, claim.role, claim.mode.as_str(), claim.expected_head, claim.lease_expires_at, created])?;
+        Ok(())
+    })
 }
 
 fn reject_work_claim_collision(
-    tx: &Transaction<'_>,
+    conn: &Connection,
     incoming: &NewWorkClaim,
 ) -> Result<(), MemoryError> {
-    let mut statement = tx.prepare(
+    let mut statement = conn.prepare(
         "SELECT claim_id, issue_ref, mode, worktree_path, declared_file_scope, expected_head
          FROM session_claims
          WHERE state IN ('active', 'orphaned') AND claim_id != ?1",
@@ -588,7 +568,7 @@ fn paths_overlap(left: &str, right: &str) -> bool {
 /// Compare-and-swap release. A stale version is a typed conflict; orphaned
 /// claims require this explicit path and can never be released by expiry.
 pub fn heartbeat_work_claim(
-    conn: &mut Connection,
+    conn: &Connection,
     claim_id: &str,
     caller_identity_id: &str,
     expected_version: i64,
@@ -599,247 +579,251 @@ pub fn heartbeat_work_claim(
             "WorkClaim lease expiry is required".into(),
         ));
     }
-    let tx = conn.transaction()?;
-    let existing: Option<(Option<String>, String, i64)> = tx
-        .query_row(
+    super::common::with_composable_write(conn, |conn| {
+        let existing: Option<(Option<String>, String, i64)> = conn
+            .query_row(
             "SELECT agent_identity_id, state, transition_version FROM session_claims WHERE claim_id=?1",
             params![claim_id],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()?;
-    let Some((holder_identity_id, state, version)) = existing else {
-        return Err(MemoryError::NotFound(format!("claim {claim_id}")));
-    };
-    if state != "active" {
-        return Err(MemoryError::WorkClaimIncompatibleState(format!(
-            "claim {claim_id} is {state}; only active claims can heartbeat"
-        )));
-    }
-    if version != expected_version {
-        return Err(MemoryError::WorkClaimConflict(format!(
-            "claim {claim_id} is at version {version}, expected {expected_version}"
-        )));
-    }
-    let holder_identity_id = holder_identity_id.ok_or_else(|| {
-        MemoryError::WorkClaimIncompatibleState(format!("claim {claim_id} has no proven identity"))
-    })?;
-    if holder_identity_id != caller_identity_id {
-        return Err(MemoryError::WorkClaimTransitionRefused {
-            reason: WorkClaimTransitionReason::HolderMismatch,
+        let Some((holder_identity_id, state, version)) = existing else {
+            return Err(MemoryError::NotFound(format!("claim {claim_id}")));
+        };
+        if state != "active" {
+            return Err(MemoryError::WorkClaimIncompatibleState(format!(
+                "claim {claim_id} is {state}; only active claims can heartbeat"
+            )));
+        }
+        if version != expected_version {
+            return Err(MemoryError::WorkClaimConflict(format!(
+                "claim {claim_id} is at version {version}, expected {expected_version}"
+            )));
+        }
+        let holder_identity_id = holder_identity_id.ok_or_else(|| {
+            MemoryError::WorkClaimIncompatibleState(format!(
+                "claim {claim_id} has no proven identity"
+            ))
+        })?;
+        if holder_identity_id != caller_identity_id {
+            return Err(MemoryError::WorkClaimTransitionRefused {
+                reason: WorkClaimTransitionReason::HolderMismatch,
+                claim_id: claim_id.to_string(),
+                holder_identity_id,
+                caller_identity_id: caller_identity_id.to_string(),
+            });
+        }
+        let now = normalize_utc_iso_or_now("");
+        let changed = conn.execute(
+            "UPDATE session_claims SET heartbeat_at=?3, lease_expires_at=?4, \
+             transition_version=transition_version+1 \
+             WHERE claim_id=?1 AND state='active' AND transition_version=?2",
+            params![claim_id, expected_version, now, lease_expires_at],
+        )?;
+        if changed != 1 {
+            return Err(MemoryError::WorkClaimConflict(format!(
+                "claim {claim_id} changed while heartbeating"
+            )));
+        }
+        Ok(WorkClaimHeartbeat {
             claim_id: claim_id.to_string(),
-            holder_identity_id,
-            caller_identity_id: caller_identity_id.to_string(),
-        });
-    }
-    let now = normalize_utc_iso_or_now("");
-    let changed = tx.execute(
-        "UPDATE session_claims SET heartbeat_at=?3, lease_expires_at=?4, \
-         transition_version=transition_version+1 \
-         WHERE claim_id=?1 AND state='active' AND transition_version=?2",
-        params![claim_id, expected_version, now, lease_expires_at],
-    )?;
-    if changed != 1 {
-        return Err(MemoryError::WorkClaimConflict(format!(
-            "claim {claim_id} changed while heartbeating"
-        )));
-    }
-    tx.commit()?;
-    Ok(WorkClaimHeartbeat {
-        claim_id: claim_id.to_string(),
-        lease_expires_at: lease_expires_at.to_string(),
-        transition_version: expected_version + 1,
+            lease_expires_at: lease_expires_at.to_string(),
+            transition_version: expected_version + 1,
+        })
     })
 }
 
 /// Explicitly transfer an active or orphaned claim after a version check.
 /// This is intentionally not an automatic takeover path.
 pub fn handoff_work_claim(
-    conn: &mut Connection,
+    conn: &Connection,
     claim_id: &str,
     caller_identity_id: &str,
     expected_version: i64,
     successor: &WorkClaimHandoffRequest,
 ) -> Result<WorkClaimHandoff, MemoryError> {
     require_non_empty_declared_scope(&successor.declared_file_scope)?;
-    let tx = conn.transaction()?;
-    let existing: Option<WorkClaimHandoffRow> = tx.query_row(
-        "SELECT agent_identity_id, state, transition_version, session_client, issue_ref, flow_id, dispatch_id, branch \
-         FROM session_claims WHERE claim_id=?1",
-        params![claim_id],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?)),
-    ).optional()?;
-    let Some((
-        Some(from_identity),
-        state,
-        version,
-        session_client,
-        issue_ref,
-        flow_id,
-        dispatch_id,
-        branch,
-    )) = existing
-    else {
-        return match existing {
-            Some(_) => Err(MemoryError::WorkClaimIncompatibleState(format!(
-                "claim {claim_id} has no proven identity"
-            ))),
-            None => Err(MemoryError::NotFound(format!("claim {claim_id}"))),
-        };
-    };
-    if !matches!(state.as_str(), "active" | "orphaned") {
-        return Err(MemoryError::WorkClaimIncompatibleState(format!(
-            "claim {claim_id} is {state}"
-        )));
-    }
-    if version != expected_version {
-        return Err(MemoryError::WorkClaimConflict(format!(
-            "claim {claim_id} is at version {version}, expected {expected_version}"
-        )));
-    }
-    if successor.agent_identity_id != caller_identity_id {
-        return Err(MemoryError::WorkClaimIncompatibleState(format!(
-            "handoff successor {} does not match admitted caller {caller_identity_id}",
-            successor.agent_identity_id
-        )));
-    }
-    if state == "active" && from_identity != caller_identity_id {
-        return Err(MemoryError::WorkClaimTransitionRefused {
-            reason: WorkClaimTransitionReason::HolderMismatch,
-            claim_id: claim_id.to_string(),
-            holder_identity_id: from_identity,
-            caller_identity_id: caller_identity_id.to_string(),
-        });
-    }
-    let known_successor: bool = tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM agent_identities WHERE agent_identity_id=?1)",
-        params![successor.agent_identity_id],
-        |row| row.get(0),
-    )?;
-    if !known_successor {
-        return Err(MemoryError::WorkClaimIncompatibleState(format!(
-            "unknown successor identity {}",
-            successor.agent_identity_id
-        )));
-    }
-    let collision_candidate = NewWorkClaim {
-        claim_id: claim_id.to_string(),
-        agent_identity_id: successor.agent_identity_id.clone(),
-        session_client,
-        issue_ref,
-        flow_id,
-        dispatch_id,
-        branch,
-        worktree_path: successor.worktree_path.clone(),
-        declared_file_scope: successor.declared_file_scope.clone(),
-        role: successor.role.clone(),
-        mode: successor.mode,
-        expected_head: successor.expected_head.clone(),
-        lease_expires_at: successor.lease_expires_at.clone(),
-        created_at: String::new(),
-    };
     if successor.mode == WorkClaimMode::Writable && successor.worktree_path.trim().is_empty() {
         return Err(MemoryError::InvalidArg(
             "writable WorkClaim worktree path is required".into(),
         ));
     }
-    reject_work_claim_collision(&tx, &collision_candidate)?;
-    let env_id: Option<String> = tx.query_row(
-        "SELECT exec_env_id FROM session_claims WHERE claim_id=?1",
-        params![claim_id],
-        |row| row.get(0),
-    )?;
-    if let Some(env_id) = env_id {
-        let env_matches: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM exec_envs WHERE env_id=?1 AND claim_id=?2 AND agent_identity_id=?3)",
-            params![env_id, claim_id, from_identity], |row| row.get(0),
-        )?;
-        if !env_matches {
-            return Err(MemoryError::WorkClaimConflict(format!(
-                "claim {claim_id} has contradictory exec env binding {env_id}"
+    super::common::with_composable_write(conn, |conn| {
+        let existing: Option<WorkClaimHandoffRow> = conn.query_row(
+            "SELECT agent_identity_id, state, transition_version, session_client, issue_ref, flow_id, dispatch_id, branch \
+             FROM session_claims WHERE claim_id=?1",
+            params![claim_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?)),
+        ).optional()?;
+        let Some((
+            Some(from_identity),
+            state,
+            version,
+            session_client,
+            issue_ref,
+            flow_id,
+            dispatch_id,
+            branch,
+        )) = existing
+        else {
+            return match existing {
+                Some(_) => Err(MemoryError::WorkClaimIncompatibleState(format!(
+                    "claim {claim_id} has no proven identity"
+                ))),
+                None => Err(MemoryError::NotFound(format!("claim {claim_id}"))),
+            };
+        };
+        if !matches!(state.as_str(), "active" | "orphaned") {
+            return Err(MemoryError::WorkClaimIncompatibleState(format!(
+                "claim {claim_id} is {state}"
             )));
         }
-        tx.execute("UPDATE exec_envs SET agent_identity_id=?2 WHERE env_id=?1 AND claim_id=?3 AND agent_identity_id=?4", params![env_id, successor.agent_identity_id, claim_id, from_identity])?;
-    }
-    let now = normalize_utc_iso_or_now("");
-    let changed = tx.execute(
-        "UPDATE session_claims SET agent_identity_id=?3, role=?4, mode=?5, worktree_path=?6, \
-         declared_file_scope=?7, expected_head=?8, lease_expires_at=?9, state='active', \
-         orphaned_at=NULL, heartbeat_at=?10, transition_version=transition_version+1 \
-         WHERE claim_id=?1 AND transition_version=?2 AND state IN ('active','orphaned')",
-        params![
-            claim_id,
-            expected_version,
-            successor.agent_identity_id,
-            successor.role,
-            successor.mode.as_str(),
-            successor.worktree_path,
-            successor.declared_file_scope,
-            successor.expected_head,
-            successor.lease_expires_at,
-            now
-        ],
-    )?;
-    if changed != 1 {
-        return Err(MemoryError::WorkClaimConflict(format!(
-            "claim {claim_id} changed while handing off"
-        )));
-    }
-    tx.commit()?;
-    Ok(WorkClaimHandoff {
-        claim_id: claim_id.to_string(),
-        from_agent_identity_id: from_identity,
-        to_agent_identity_id: successor.agent_identity_id.clone(),
-        transition_version: expected_version + 1,
+        if version != expected_version {
+            return Err(MemoryError::WorkClaimConflict(format!(
+                "claim {claim_id} is at version {version}, expected {expected_version}"
+            )));
+        }
+        if successor.agent_identity_id != caller_identity_id {
+            return Err(MemoryError::WorkClaimIncompatibleState(format!(
+                "handoff successor {} does not match admitted caller {caller_identity_id}",
+                successor.agent_identity_id
+            )));
+        }
+        if state == "active" && from_identity != caller_identity_id {
+            return Err(MemoryError::WorkClaimTransitionRefused {
+                reason: WorkClaimTransitionReason::HolderMismatch,
+                claim_id: claim_id.to_string(),
+                holder_identity_id: from_identity,
+                caller_identity_id: caller_identity_id.to_string(),
+            });
+        }
+        let known_successor: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM agent_identities WHERE agent_identity_id=?1)",
+            params![successor.agent_identity_id],
+            |row| row.get(0),
+        )?;
+        if !known_successor {
+            return Err(MemoryError::WorkClaimIncompatibleState(format!(
+                "unknown successor identity {}",
+                successor.agent_identity_id
+            )));
+        }
+        let collision_candidate = NewWorkClaim {
+            claim_id: claim_id.to_string(),
+            agent_identity_id: successor.agent_identity_id.clone(),
+            session_client,
+            issue_ref,
+            flow_id,
+            dispatch_id,
+            branch,
+            worktree_path: successor.worktree_path.clone(),
+            declared_file_scope: successor.declared_file_scope.clone(),
+            role: successor.role.clone(),
+            mode: successor.mode,
+            expected_head: successor.expected_head.clone(),
+            lease_expires_at: successor.lease_expires_at.clone(),
+            created_at: String::new(),
+        };
+        reject_work_claim_collision(conn, &collision_candidate)?;
+        let env_id: Option<String> = conn.query_row(
+            "SELECT exec_env_id FROM session_claims WHERE claim_id=?1",
+            params![claim_id],
+            |row| row.get(0),
+        )?;
+        if let Some(env_id) = env_id {
+            let env_matches: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM exec_envs WHERE env_id=?1 AND claim_id=?2 AND agent_identity_id=?3)",
+                params![env_id, claim_id, from_identity], |row| row.get(0),
+            )?;
+            if !env_matches {
+                return Err(MemoryError::WorkClaimConflict(format!(
+                    "claim {claim_id} has contradictory exec env binding {env_id}"
+                )));
+            }
+            conn.execute("UPDATE exec_envs SET agent_identity_id=?2 WHERE env_id=?1 AND claim_id=?3 AND agent_identity_id=?4", params![env_id, successor.agent_identity_id, claim_id, from_identity])?;
+        }
+        let now = normalize_utc_iso_or_now("");
+        let changed = conn.execute(
+            "UPDATE session_claims SET agent_identity_id=?3, role=?4, mode=?5, worktree_path=?6, \
+             declared_file_scope=?7, expected_head=?8, lease_expires_at=?9, state='active', \
+             orphaned_at=NULL, heartbeat_at=?10, transition_version=transition_version+1 \
+             WHERE claim_id=?1 AND transition_version=?2 AND state IN ('active','orphaned')",
+            params![
+                claim_id,
+                expected_version,
+                successor.agent_identity_id,
+                successor.role,
+                successor.mode.as_str(),
+                successor.worktree_path,
+                successor.declared_file_scope,
+                successor.expected_head,
+                successor.lease_expires_at,
+                now
+            ],
+        )?;
+        if changed != 1 {
+            return Err(MemoryError::WorkClaimConflict(format!(
+                "claim {claim_id} changed while handing off"
+            )));
+        }
+        Ok(WorkClaimHandoff {
+            claim_id: claim_id.to_string(),
+            from_agent_identity_id: from_identity,
+            to_agent_identity_id: successor.agent_identity_id.clone(),
+            transition_version: expected_version + 1,
+        })
     })
 }
 
 pub fn release_work_claim(
-    conn: &mut Connection,
+    conn: &Connection,
     claim_id: &str,
     caller_identity_id: &str,
     expected_version: i64,
     reason: &str,
 ) -> Result<i64, MemoryError> {
-    let tx = conn.transaction()?;
-    let present: Option<(Option<String>, String, i64)> = tx
-        .query_row(
-            "SELECT agent_identity_id, state, transition_version FROM session_claims WHERE claim_id=?1",
-            params![claim_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )
-        .optional()?;
-    let Some((holder_identity_id, state, version)) = present else {
-        return Err(MemoryError::NotFound(format!("claim {claim_id}")));
-    };
-    if !matches!(state.as_str(), "active" | "orphaned") {
-        return Err(MemoryError::WorkClaimIncompatibleState(format!(
-            "claim {claim_id} is {state}"
-        )));
-    }
-    if version != expected_version {
-        return Err(MemoryError::WorkClaimConflict(format!(
-            "claim {claim_id} is at version {version}, expected {expected_version}"
-        )));
-    }
-    let holder_identity_id = holder_identity_id.ok_or_else(|| {
-        MemoryError::WorkClaimIncompatibleState(format!("claim {claim_id} has no proven identity"))
-    })?;
-    if holder_identity_id != caller_identity_id {
-        return Err(MemoryError::WorkClaimTransitionRefused {
-            reason: WorkClaimTransitionReason::HolderMismatch,
-            claim_id: claim_id.to_string(),
-            holder_identity_id,
-            caller_identity_id: caller_identity_id.to_string(),
-        });
-    }
-    let changed = tx.execute("UPDATE session_claims SET state='released', released_at=?4, release_reason=?3, transition_version=transition_version+1 WHERE claim_id=?1 AND transition_version=?2 AND state IN ('active','orphaned')", params![claim_id, expected_version, reason, normalize_utc_iso_or_now("")])?;
-    if changed != 1 {
-        return Err(MemoryError::WorkClaimConflict(format!(
-            "claim {claim_id} changed while releasing"
-        )));
-    }
-    tx.commit()?;
-    Ok(expected_version + 1)
+    super::common::with_composable_write(conn, |conn| {
+        let present: Option<(Option<String>, String, i64)> = conn
+            .query_row(
+                "SELECT agent_identity_id, state, transition_version FROM session_claims WHERE claim_id=?1",
+                params![claim_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        let Some((holder_identity_id, state, version)) = present else {
+            return Err(MemoryError::NotFound(format!("claim {claim_id}")));
+        };
+        if !matches!(state.as_str(), "active" | "orphaned") {
+            return Err(MemoryError::WorkClaimIncompatibleState(format!(
+                "claim {claim_id} is {state}"
+            )));
+        }
+        if version != expected_version {
+            return Err(MemoryError::WorkClaimConflict(format!(
+                "claim {claim_id} is at version {version}, expected {expected_version}"
+            )));
+        }
+        let holder_identity_id = holder_identity_id.ok_or_else(|| {
+            MemoryError::WorkClaimIncompatibleState(format!(
+                "claim {claim_id} has no proven identity"
+            ))
+        })?;
+        if holder_identity_id != caller_identity_id {
+            return Err(MemoryError::WorkClaimTransitionRefused {
+                reason: WorkClaimTransitionReason::HolderMismatch,
+                claim_id: claim_id.to_string(),
+                holder_identity_id,
+                caller_identity_id: caller_identity_id.to_string(),
+            });
+        }
+        let changed = conn.execute("UPDATE session_claims SET state='released', released_at=?4, release_reason=?3, transition_version=transition_version+1 WHERE claim_id=?1 AND transition_version=?2 AND state IN ('active','orphaned')", params![claim_id, expected_version, reason, normalize_utc_iso_or_now("")])?;
+        if changed != 1 {
+            return Err(MemoryError::WorkClaimConflict(format!(
+                "claim {claim_id} changed while releasing"
+            )));
+        }
+        Ok(expected_version + 1)
+    })
 }
 
 /// Atomically bind a claim and ExecEnv, refusing unproved identities, stale
@@ -1537,11 +1521,7 @@ mod tests {
     fn release_by_claim_id_rejects_v21_work_claim_alias() {
         let mut conn = open_conn();
         identity(&conn, "agent-v21-claim-id");
-        insert_work_claim(
-            &mut conn,
-            &work_claim("claim-v21-direct", "agent-v21-claim-id"),
-        )
-        .unwrap();
+        insert_work_claim(&conn, &work_claim("claim-v21-direct", "agent-v21-claim-id")).unwrap();
 
         let err = release_claim(
             &mut conn,
@@ -1597,7 +1577,7 @@ mod tests {
         identity(&conn, "agent-v21-dispatch");
         let mut claim = work_claim("claim-v21-dispatch", "agent-v21-dispatch");
         claim.dispatch_id = Some("dispatch-v21-only".to_string());
-        insert_work_claim(&mut conn, &claim).unwrap();
+        insert_work_claim(&conn, &claim).unwrap();
 
         let err = release_claim(
             &mut conn,
@@ -1624,7 +1604,7 @@ mod tests {
         let mut v21 = work_claim("claim-v21-mixed", "agent-v21-mixed");
         v21.dispatch_id = Some("dispatch-mixed".to_string());
         v21.created_at = "2030-01-01T00:00:00Z".to_string();
-        insert_work_claim(&mut conn, &v21).unwrap();
+        insert_work_claim(&conn, &v21).unwrap();
 
         let mut legacy = new_claim("claim-legacy-mixed", "org/repo#legacy-mixed");
         legacy.dispatch_id = Some("dispatch-mixed".to_string());
@@ -2081,7 +2061,7 @@ mod tests {
             UnverifiedAdmissionState::SelfAsserted,
         )
         .unwrap();
-        insert_work_claim(&mut conn, &work_claim("claim-a", "agent-a")).unwrap();
+        insert_work_claim(&conn, &work_claim("claim-a", "agent-a")).unwrap();
         crate::db::exec_env::insert_exec_env(
             &conn,
             &crate::db::exec_env::NewExecEnvLease {
@@ -2117,7 +2097,7 @@ mod tests {
             "stale bind version must not overwrite the first binding"
         );
         assert_eq!(
-            release_work_claim(&mut conn, "claim-a", "agent-a", 1, "explicit").unwrap(),
+            release_work_claim(&conn, "claim-a", "agent-a", 1, "explicit").unwrap(),
             2
         );
         assert_eq!(
@@ -2152,7 +2132,7 @@ mod tests {
 
     #[test]
     fn incompatible_or_missing_holder_links_refuse_with_distinct_evidence() {
-        let mut conn = open_conn();
+        let conn = open_conn();
         crate::db::exec_env::insert_exec_env(
             &conn,
             &crate::db::exec_env::NewExecEnvLease {
@@ -2188,7 +2168,7 @@ mod tests {
         )
         .unwrap();
         identity(&conn, "agent-b");
-        insert_work_claim(&mut conn, &work_claim("claim-b", "agent-b")).unwrap();
+        insert_work_claim(&conn, &work_claim("claim-b", "agent-b")).unwrap();
         conn.execute(
             "UPDATE exec_envs SET agent_identity_id='agent-b', claim_id='claim-b' WHERE env_id='env-b'",
             [],
@@ -2211,9 +2191,9 @@ mod tests {
 
     #[test]
     fn reverse_only_holder_link_is_contradictory_not_legacy_not_applicable() {
-        let mut conn = open_conn();
+        let conn = open_conn();
         identity(&conn, "agent-reverse");
-        insert_work_claim(&mut conn, &work_claim("claim-reverse", "agent-reverse")).unwrap();
+        insert_work_claim(&conn, &work_claim("claim-reverse", "agent-reverse")).unwrap();
         crate::db::exec_env::insert_exec_env(
             &conn,
             &crate::db::exec_env::NewExecEnvLease {
@@ -2243,15 +2223,15 @@ mod tests {
 
     #[test]
     fn forward_claim_with_different_reverse_claim_is_contradictory() {
-        let mut conn = open_conn();
+        let conn = open_conn();
         identity(&conn, "agent-forward");
         identity(&conn, "agent-reverse-other");
-        insert_work_claim(&mut conn, &work_claim("claim-forward", "agent-forward")).unwrap();
+        insert_work_claim(&conn, &work_claim("claim-forward", "agent-forward")).unwrap();
         let mut reverse_other = work_claim("claim-reverse-other", "agent-reverse-other");
         reverse_other.issue_ref = Some("org/repo#1253-other".into());
         reverse_other.worktree_path = "/wt/1253-other".into();
         reverse_other.declared_file_scope = "crates/memcore/src/db/other.rs".into();
-        insert_work_claim(&mut conn, &reverse_other).unwrap();
+        insert_work_claim(&conn, &reverse_other).unwrap();
         crate::db::exec_env::insert_exec_env(
             &conn,
             &crate::db::exec_env::NewExecEnvLease {
@@ -2291,7 +2271,7 @@ mod tests {
 
     #[test]
     fn work_claim_collision_matrix_keeps_read_only_and_disjoint_writes_but_protects_orphans() {
-        let mut conn = open_conn();
+        let conn = open_conn();
         for identity_id in [
             "agent-ro-a",
             "agent-ro-b",
@@ -2310,29 +2290,29 @@ mod tests {
         read_only_a.mode = WorkClaimMode::ReadOnly;
         read_only_a.worktree_path = String::new();
         read_only_a.declared_file_scope = r#"["crates/one/**"]"#.into();
-        insert_work_claim(&mut conn, &read_only_a).unwrap();
+        insert_work_claim(&conn, &read_only_a).unwrap();
 
         let mut read_only_b = work_claim("ro-b", "agent-ro-b");
         read_only_b.mode = WorkClaimMode::ReadOnly;
         read_only_b.worktree_path = String::new();
         read_only_b.declared_file_scope = r#"["crates/one/**"]"#.into();
-        insert_work_claim(&mut conn, &read_only_b).unwrap();
+        insert_work_claim(&conn, &read_only_b).unwrap();
 
         let mut write_a = work_claim("write-a", "agent-write-a");
         write_a.worktree_path = "/worktrees/a".into();
         write_a.declared_file_scope = r#"["crates/a/**"]"#.into();
-        insert_work_claim(&mut conn, &write_a).unwrap();
+        insert_work_claim(&conn, &write_a).unwrap();
 
         let mut write_b = work_claim("write-b", "agent-write-b");
         write_b.worktree_path = "/worktrees/b".into();
         write_b.declared_file_scope = r#"["crates/b/**"]"#.into();
-        insert_work_claim(&mut conn, &write_b).unwrap();
+        insert_work_claim(&conn, &write_b).unwrap();
 
         let mut scope_conflict = work_claim("scope-conflict", "agent-scope-conflict");
         scope_conflict.worktree_path = "/worktrees/c".into();
         scope_conflict.declared_file_scope = r#"["crates/a/subtree/**"]"#.into();
         assert!(matches!(
-            insert_work_claim(&mut conn, &scope_conflict),
+            insert_work_claim(&conn, &scope_conflict),
             Err(MemoryError::WorkClaimConflict(_))
         ));
 
@@ -2340,7 +2320,7 @@ mod tests {
         path_conflict.worktree_path = "/worktrees/a/nested".into();
         path_conflict.declared_file_scope = r#"["crates/c/**"]"#.into();
         assert!(matches!(
-            insert_work_claim(&mut conn, &path_conflict),
+            insert_work_claim(&conn, &path_conflict),
             Err(MemoryError::WorkClaimConflict(_))
         ));
 
@@ -2349,7 +2329,7 @@ mod tests {
         head_conflict.worktree_path = String::new();
         head_conflict.expected_head = "different-head".into();
         assert!(matches!(
-            insert_work_claim(&mut conn, &head_conflict),
+            insert_work_claim(&conn, &head_conflict),
             Err(MemoryError::WorkClaimConflict(_))
         ));
 
@@ -2357,7 +2337,7 @@ mod tests {
         orphaned.issue_ref = Some("org/repo#orphan".into());
         orphaned.worktree_path = "/worktrees/orphan".into();
         orphaned.declared_file_scope = r#"["crates/orphan/**"]"#.into();
-        insert_work_claim(&mut conn, &orphaned).unwrap();
+        insert_work_claim(&conn, &orphaned).unwrap();
         conn.execute(
             "UPDATE session_claims SET state='orphaned' WHERE claim_id='orphaned'",
             [],
@@ -2368,14 +2348,14 @@ mod tests {
         takeover.worktree_path = "/worktrees/orphan".into();
         takeover.declared_file_scope = r#"["crates/orphan/**"]"#.into();
         assert!(matches!(
-            insert_work_claim(&mut conn, &takeover),
+            insert_work_claim(&conn, &takeover),
             Err(MemoryError::WorkClaimConflict(_))
         ));
     }
 
     #[test]
     fn writable_work_claims_collide_on_one_tree_across_issue_boundaries() {
-        let mut conn = open_conn();
+        let conn = open_conn();
         for identity_id in ["agent-tree-a", "agent-tree-b", "agent-tree-none"] {
             identity(&conn, identity_id);
         }
@@ -2384,13 +2364,13 @@ mod tests {
         first.issue_ref = Some("org/repo#tree-a".into());
         first.worktree_path = "/worktrees/canonical-shared".into();
         first.declared_file_scope = r#"["crates/a/**"]"#.into();
-        insert_work_claim(&mut conn, &first).unwrap();
+        insert_work_claim(&conn, &first).unwrap();
 
         let mut different_issue = work_claim("tree-b", "agent-tree-b");
         different_issue.issue_ref = Some("org/repo#tree-b".into());
         different_issue.worktree_path = first.worktree_path.clone();
         different_issue.declared_file_scope = r#"["crates/b/**"]"#.into();
-        let different_issue_error = insert_work_claim(&mut conn, &different_issue)
+        let different_issue_error = insert_work_claim(&conn, &different_issue)
             .expect_err("different issues cannot own the same writable physical tree");
         assert!(matches!(
             different_issue_error,
@@ -2407,7 +2387,7 @@ mod tests {
         no_issue.issue_ref = None;
         no_issue.worktree_path = first.worktree_path.clone();
         no_issue.declared_file_scope = r#"["crates/no-issue/**"]"#.into();
-        let no_issue_error = insert_work_claim(&mut conn, &no_issue)
+        let no_issue_error = insert_work_claim(&conn, &no_issue)
             .expect_err("an unscoped claim cannot own an already-held writable physical tree");
         assert!(matches!(no_issue_error, MemoryError::WorkClaimConflict(_)));
         assert!(
@@ -2420,19 +2400,19 @@ mod tests {
 
     #[test]
     fn work_claim_refuses_an_empty_serialized_scope() {
-        let mut conn = open_conn();
+        let conn = open_conn();
         identity(&conn, "agent-empty-scope");
         let mut claim = work_claim("empty-scope", "agent-empty-scope");
         claim.declared_file_scope = "[]".into();
         assert!(matches!(
-            insert_work_claim(&mut conn, &claim),
+            insert_work_claim(&conn, &claim),
             Err(MemoryError::InvalidArg(_))
         ));
     }
 
     #[test]
     fn work_claim_transition_authorization_is_holder_enforced_and_typed() {
-        let mut conn = open_conn();
+        let conn = open_conn();
         identity(&conn, "agent-holder");
         identity(&conn, "agent-intruder");
 
@@ -2440,9 +2420,9 @@ mod tests {
         heartbeat.issue_ref = Some("org/repo#auth-heartbeat".into());
         heartbeat.mode = WorkClaimMode::ReadOnly;
         heartbeat.worktree_path = String::new();
-        insert_work_claim(&mut conn, &heartbeat).unwrap();
+        insert_work_claim(&conn, &heartbeat).unwrap();
         let heartbeat_error = heartbeat_work_claim(
-            &mut conn,
+            &conn,
             "auth-heartbeat",
             "agent-intruder",
             0,
@@ -2461,9 +2441,9 @@ mod tests {
         release.issue_ref = Some("org/repo#auth-release".into());
         release.mode = WorkClaimMode::ReadOnly;
         release.worktree_path = String::new();
-        insert_work_claim(&mut conn, &release).unwrap();
+        insert_work_claim(&conn, &release).unwrap();
         let release_error =
-            release_work_claim(&mut conn, "auth-release", "agent-intruder", 0, "intruder")
+            release_work_claim(&conn, "auth-release", "agent-intruder", 0, "intruder")
                 .expect_err("non-holder release must be refused");
         assert!(matches!(
             release_error,
@@ -2477,7 +2457,7 @@ mod tests {
         handoff.issue_ref = Some("org/repo#auth-handoff".into());
         handoff.mode = WorkClaimMode::ReadOnly;
         handoff.worktree_path = String::new();
-        insert_work_claim(&mut conn, &handoff).unwrap();
+        insert_work_claim(&conn, &handoff).unwrap();
         let successor = WorkClaimHandoffRequest {
             agent_identity_id: "agent-intruder".into(),
             role: "executor".into(),
@@ -2488,7 +2468,7 @@ mod tests {
             lease_expires_at: "2030-01-02T00:00:00Z".into(),
         };
         let handoff_error =
-            handoff_work_claim(&mut conn, "auth-handoff", "agent-intruder", 0, &successor)
+            handoff_work_claim(&conn, "auth-handoff", "agent-intruder", 0, &successor)
                 .expect_err("non-holder active handoff must be refused");
         assert!(matches!(
             handoff_error,
@@ -2507,9 +2487,8 @@ mod tests {
             [],
         )
         .unwrap();
-        let recovered =
-            handoff_work_claim(&mut conn, "auth-handoff", "agent-intruder", 0, &successor)
-                .expect("an admitted successor may recover an orphaned claim");
+        let recovered = handoff_work_claim(&conn, "auth-handoff", "agent-intruder", 0, &successor)
+            .expect("an admitted successor may recover an orphaned claim");
         assert_eq!(recovered.from_agent_identity_id, "agent-holder");
         assert_eq!(recovered.to_agent_identity_id, "agent-intruder");
         assert_eq!(recovered.transition_version, 1);
@@ -2517,7 +2496,7 @@ mod tests {
 
     #[test]
     fn work_claim_heartbeat_and_handoff_are_versioned_and_never_auto_take_over() {
-        let mut conn = open_conn();
+        let conn = open_conn();
         for identity_id in [
             "agent-heartbeat",
             "agent-handoff-from",
@@ -2529,9 +2508,9 @@ mod tests {
 
         let mut heartbeat = work_claim("heartbeat", "agent-heartbeat");
         heartbeat.issue_ref = Some("org/repo#heartbeat".into());
-        insert_work_claim(&mut conn, &heartbeat).unwrap();
+        insert_work_claim(&conn, &heartbeat).unwrap();
         let receipt = heartbeat_work_claim(
-            &mut conn,
+            &conn,
             "heartbeat",
             "agent-heartbeat",
             0,
@@ -2542,7 +2521,7 @@ mod tests {
         assert_eq!(receipt.lease_expires_at, "2026-07-20T00:00:00Z");
         assert!(matches!(
             heartbeat_work_claim(
-                &mut conn,
+                &conn,
                 "heartbeat",
                 "agent-heartbeat",
                 0,
@@ -2550,10 +2529,10 @@ mod tests {
             ),
             Err(MemoryError::WorkClaimConflict(_))
         ));
-        release_work_claim(&mut conn, "heartbeat", "agent-heartbeat", 1, "done").unwrap();
+        release_work_claim(&conn, "heartbeat", "agent-heartbeat", 1, "done").unwrap();
         assert!(matches!(
             heartbeat_work_claim(
-                &mut conn,
+                &conn,
                 "heartbeat",
                 "agent-heartbeat",
                 2,
@@ -2563,7 +2542,7 @@ mod tests {
         ));
         assert!(matches!(
             heartbeat_work_claim(
-                &mut conn,
+                &conn,
                 "missing",
                 "agent-heartbeat",
                 0,
@@ -2573,7 +2552,7 @@ mod tests {
         ));
         let mut orphaned_heartbeat = work_claim("orphaned-heartbeat", "agent-heartbeat");
         orphaned_heartbeat.issue_ref = Some("org/repo#orphaned-heartbeat".into());
-        insert_work_claim(&mut conn, &orphaned_heartbeat).unwrap();
+        insert_work_claim(&conn, &orphaned_heartbeat).unwrap();
         conn.execute(
             "UPDATE session_claims SET state='orphaned' WHERE claim_id='orphaned-heartbeat'",
             [],
@@ -2581,7 +2560,7 @@ mod tests {
         .unwrap();
         assert!(matches!(
             heartbeat_work_claim(
-                &mut conn,
+                &conn,
                 "orphaned-heartbeat",
                 "agent-heartbeat",
                 0,
@@ -2594,7 +2573,7 @@ mod tests {
         handoff.issue_ref = Some("org/repo#handoff".into());
         handoff.worktree_path = "/worktrees/handoff".into();
         handoff.declared_file_scope = r#"["crates/handoff/**"]"#.into();
-        insert_work_claim(&mut conn, &handoff).unwrap();
+        insert_work_claim(&conn, &handoff).unwrap();
         conn.execute(
             "UPDATE session_claims SET state='orphaned' WHERE claim_id='handoff'",
             [],
@@ -2610,11 +2589,11 @@ mod tests {
             lease_expires_at: "2026-07-20T00:00:00Z".into(),
         };
         assert!(matches!(
-            handoff_work_claim(&mut conn, "handoff", "agent-handoff-to", 7, &successor),
+            handoff_work_claim(&conn, "handoff", "agent-handoff-to", 7, &successor),
             Err(MemoryError::WorkClaimConflict(_))
         ));
         let handoff_result =
-            handoff_work_claim(&mut conn, "handoff", "agent-handoff-to", 0, &successor).unwrap();
+            handoff_work_claim(&conn, "handoff", "agent-handoff-to", 0, &successor).unwrap();
         assert_eq!(handoff_result.from_agent_identity_id, "agent-handoff-from");
         assert_eq!(handoff_result.to_agent_identity_id, "agent-handoff-to");
         let handed_off = get_claim(&conn, "handoff").unwrap().unwrap();
@@ -2629,13 +2608,13 @@ mod tests {
         blocker.issue_ref = Some("org/repo#handoff-conflict".into());
         blocker.worktree_path = "/worktrees/blocker".into();
         blocker.declared_file_scope = r#"["crates/blocker/**"]"#.into();
-        insert_work_claim(&mut conn, &blocker).unwrap();
+        insert_work_claim(&conn, &blocker).unwrap();
         let mut source = work_claim("handoff-conflict", "agent-handoff-from");
         source.issue_ref = Some("org/repo#handoff-conflict".into());
         source.mode = WorkClaimMode::ReadOnly;
         source.worktree_path = String::new();
         source.declared_file_scope = r#"["crates/source/**"]"#.into();
-        insert_work_claim(&mut conn, &source).unwrap();
+        insert_work_claim(&conn, &source).unwrap();
         let conflicting_successor = WorkClaimHandoffRequest {
             agent_identity_id: "agent-handoff-from".into(),
             role: "executor".into(),
@@ -2647,7 +2626,7 @@ mod tests {
         };
         assert!(matches!(
             handoff_work_claim(
-                &mut conn,
+                &conn,
                 "handoff-conflict",
                 "agent-handoff-from",
                 0,
@@ -2665,12 +2644,12 @@ mod tests {
 
     #[test]
     fn handoff_refuses_an_empty_serialized_scope() {
-        let mut conn = open_conn();
+        let conn = open_conn();
         identity(&conn, "agent-empty-handoff-from");
         identity(&conn, "agent-empty-handoff-to");
         let mut claim = work_claim("empty-handoff", "agent-empty-handoff-from");
         claim.issue_ref = Some("org/repo#empty-handoff".into());
-        insert_work_claim(&mut conn, &claim).unwrap();
+        insert_work_claim(&conn, &claim).unwrap();
 
         let successor = WorkClaimHandoffRequest {
             agent_identity_id: "agent-empty-handoff-to".into(),
@@ -2683,7 +2662,7 @@ mod tests {
         };
         assert!(matches!(
             handoff_work_claim(
-                &mut conn,
+                &conn,
                 "empty-handoff",
                 "agent-empty-handoff-to",
                 0,

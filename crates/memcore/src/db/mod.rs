@@ -82,6 +82,7 @@ pub mod store_profile;
 pub mod vault_accounts;
 #[cfg(feature = "admin")]
 mod vault_db;
+mod verified_admissions;
 #[cfg(feature = "admin")]
 mod virtual_capability;
 
@@ -108,6 +109,14 @@ pub use dispatch_outcomes::{
     list_outcome_ids_for_dispatch, list_outcomes_by_issue_ref, list_outcomes_by_vendor_window,
     outcome_exists_for_dispatch, upsert_outcome, upsert_outcome_reconciling_terminal_placeholder,
     DispatchOutcomeRow, NewDispatchOutcome, OutcomeEvidenceClass,
+};
+#[cfg(test)]
+pub(crate) use verified_admissions::install_verified_admission_schema;
+#[cfg(feature = "admin")]
+pub use verified_admissions::{
+    get_verified_admission_receipt, has_current_verified_admission,
+    with_current_verified_admission_write, VerifiedAdmissionBinding, VerifiedAdmissionReceipt,
+    VERIFIED_ADMISSION_METHOD, VERIFIED_ADMISSION_SCOPE, VERIFIED_ADMISSION_VERSION,
 };
 // The three raw-`Connection` constructors are gated with the accessor pair on
 // `MemoryStore` (#1585): a bare connection is a raw-SQL bypass

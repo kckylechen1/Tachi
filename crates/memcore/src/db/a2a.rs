@@ -806,6 +806,36 @@ mod tests {
         }
     }
 
+    fn historical_verified_identity_fixture(
+        store: &MemoryStore,
+        id: &str,
+        admission: &str,
+        created_at: &str,
+    ) {
+        insert_agent_identity(
+            store.connection(),
+            &AgentIdentity {
+                agent_identity_id: id.to_string(),
+                display_name: None,
+                seat: None,
+                capability_json: None,
+                created_at: "2026-08-12T00:00:00Z".to_string(),
+            },
+        )
+        .expect("identity");
+        // Seed historical evidence in its original immutable state. This
+        // test-only row grants neither current verified authority nor locality.
+        store
+            .connection()
+            .execute(
+                "INSERT INTO identity_admissions
+                    (admission_id, agent_identity_id, connection_id, state, created_at)
+                 VALUES (?1, ?2, ?3, 'verified', ?4)",
+                params![admission, id, format!("connection-{admission}"), created_at],
+            )
+            .expect("test-only historical verified admission fixture");
+    }
+
     fn transition_actor(agent_identity_id: &str, admission_id: &str) -> A2aTransitionActor {
         A2aTransitionActor {
             agent_identity_id: agent_identity_id.to_string(),
@@ -816,19 +846,12 @@ mod tests {
     #[test]
     fn historical_admission_is_offline_eligible_and_preserves_exact_assurance() {
         let store = store();
-        identity(
+        historical_verified_identity_fixture(
             &store,
             "recipient",
             "admission-verified",
-            UnverifiedAdmissionState::SelfAsserted,
+            &crate::db::now_utc_iso(),
         );
-        store
-            .connection()
-            .execute(
-                "UPDATE identity_admissions SET state='verified' WHERE admission_id='admission-verified'",
-                [],
-            )
-            .expect("test-only trusted admission fixture");
 
         assert!(
             resolve_a2a_recipient_eligibility(store.connection(), "recipient")
@@ -1368,19 +1391,12 @@ mod tests {
             "admission-issuer",
             UnverifiedAdmissionState::SelfAsserted,
         );
-        identity(
+        historical_verified_identity_fixture(
             &store,
             "recipient",
             "admission-recipient-old",
-            UnverifiedAdmissionState::SelfAsserted,
+            "2026-08-10T00:00:00.000Z",
         );
-        store
-            .connection()
-            .execute(
-                "UPDATE identity_admissions SET state='verified',created_at='2026-08-10T00:00:00.000Z' WHERE admission_id='admission-recipient-old'",
-                [],
-            )
-            .unwrap();
         record_unverified_admission(
             store.connection(),
             "admission-recipient-new",

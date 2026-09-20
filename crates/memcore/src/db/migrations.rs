@@ -68,6 +68,8 @@
 //!   resolution: main had already taken v31/v32 for the A2A mailbox pair.
 //! - v35: rebuild the shipped v34 intervention and capability-advertisement
 //!   tables with persisted capability provenance and a closed JSON boundary.
+//! - v36: durable delivery intent and append-only delivery event spine (#1679).
+//! - v37: immutable, secret-negative verified AgentIdentity admission receipts (#1938).
 //!
 //! ## Schema version stamp (#984)
 //!
@@ -111,7 +113,7 @@ use super::common::now_utc_iso;
 ///
 /// See the module doc comment ("Schema version stamp (#984)") for what this
 /// counts and when to bump it.
-pub const EXPECTED_SCHEMA_VERSION: u32 = 36;
+pub const EXPECTED_SCHEMA_VERSION: u32 = 37;
 
 mod a2a_body_retention;
 mod basic;
@@ -134,6 +136,7 @@ mod pack_retire;
 mod sentinel;
 mod session_claims_identity;
 mod symbolic_fts;
+mod verified_admissions;
 
 use a2a_body_retention::*;
 use basic::*;
@@ -161,6 +164,7 @@ pub(in crate::db) use session_claims_identity::dedupe_session_claims_identity_co
 use session_claims_identity::*;
 pub use symbolic_fts::rebuild_memories_symbolic_fts;
 use symbolic_fts::*;
+use verified_admissions::*;
 
 const MIGRATION_NS: &str = "migrations";
 const SANITY_QUARANTINE_FRACTION: f64 = 0.5;
@@ -206,6 +210,7 @@ pub(crate) const MIGRATION_SENTINEL_KEYS: &[&str] = &[
     "v34_harness_session_spine",
     "v35_harness_session_spine_receipts",
     "v36_delivery_spine",
+    "v37_verified_agent_admissions",
 ];
 
 #[derive(Debug, Default, Clone, serde::Serialize)]
@@ -248,6 +253,7 @@ pub struct MigrationReport {
     pub harness_session_attachments_schema_objects_created: usize,
     pub harness_session_spine_schema_objects_created: usize,
     pub harness_session_spine_receipt_tables_rebuilt: usize,
+    pub verified_admission_schema_objects_created: usize,
 }
 
 #[cfg(test)]
@@ -360,6 +366,7 @@ pub(crate) fn validate_current_schema_integrity(conn: &Connection) -> Result<(),
     )?;
     if product_schema > 0 {
         crate::db::schema::validate_a2a_mailbox_schema(conn)?;
+        crate::db::verified_admissions::validate_verified_admission_schema(conn)?;
     }
     Ok(())
 }
@@ -780,6 +787,11 @@ pub(crate) fn run_data_migrations_in_tx(
     report.delivery_spine_schema_objects_created =
         apply_versioned_migration(conn, "v36_delivery_spine", migrate_v36_delivery_spine)?
             .unwrap_or(0);
+    report.verified_admission_schema_objects_created =
+        apply_versioned_migration(conn, "v37_verified_agent_admissions", |conn| {
+            migrate_v37_verified_agent_admissions(conn, profile)
+        })?
+        .unwrap_or(0);
 
     Ok(report)
 }
@@ -1616,6 +1628,16 @@ mod tests {
         .unwrap_or(false)
     }
 
+    fn trigger_present(conn: &Connection, name: &str) -> bool {
+        conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name = ?1",
+            params![name],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|n| n > 0)
+        .unwrap_or(false)
+    }
+
     fn query_plan(conn: &Connection, sql: &str) -> Vec<String> {
         let mut stmt = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
         let rows = stmt.query_map([], |row| row.get::<_, String>(3)).unwrap();
@@ -1742,6 +1764,54 @@ mod tests {
     }
 
     #[test]
+    fn stamped_v36_db_adds_verified_receipts_without_rewriting_admission_history() {
+        let (mut conn, tmp) = open_test_db();
+        run_data_migrations(&mut conn, "global", tmp.path()).expect("build current fixture");
+        conn.execute_batch(
+            "DROP TABLE identity_admission_verification_revocations;
+             DROP TABLE identity_admission_verification_receipts;
+             DROP INDEX idx_identity_admissions_verified_binding;
+             DROP TRIGGER identity_verified_admissions_no_replace;
+             DROP TRIGGER identity_verified_admissions_no_update;
+             DROP TRIGGER identity_verified_admissions_no_delete;
+             DELETE FROM hard_state
+              WHERE namespace = 'migrations' AND key = 'v37_verified_agent_admissions';
+             INSERT INTO agent_identities (agent_identity_id, display_name, created_at)
+              VALUES ('agent-before-v37', 'legacy self assertion', '2026-09-18T00:00:00Z');
+             INSERT INTO identity_admissions
+              (admission_id, agent_identity_id, connection_id, state, created_at)
+              VALUES ('admission-before-v37', 'agent-before-v37', 'connection-before-v37',
+                      'self_asserted', '2026-09-18T00:00:00Z');",
+        )
+        .unwrap();
+        write_schema_version(&conn, 36).unwrap();
+
+        let report = run_data_migrations(&mut conn, "global", tmp.path())
+            .expect("a stamped v36 database must receive v37");
+
+        assert_eq!(report.verified_admission_schema_objects_created, 14);
+        assert_eq!(read_schema_version(&conn).unwrap(), EXPECTED_SCHEMA_VERSION);
+        let preserved: (String, String, String) = conn
+            .query_row(
+                "SELECT admission_id, state, created_at FROM identity_admissions
+                 WHERE agent_identity_id = 'agent-before-v37'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            preserved,
+            (
+                "admission-before-v37".to_string(),
+                "self_asserted".to_string(),
+                "2026-09-18T00:00:00Z".to_string(),
+            )
+        );
+        assert!(was_run(&conn, "v37_verified_agent_admissions").unwrap());
+        validate_current_schema_integrity(&conn).expect("the completed v37 shape is valid");
+    }
+
+    #[test]
     fn stamped_v30_db_migrates_the_v33_attachment_ledger_before_restamping() {
         let (mut conn, tmp) = open_test_db();
         write_schema_version(&conn, 30).unwrap();
@@ -1795,13 +1865,15 @@ mod tests {
             .expect("the shipped v34 database must upgrade and reopen");
 
         assert_eq!(report.harness_session_spine_receipt_tables_rebuilt, 2);
-        // v36 (delivery spine) is already current in this fixture: its
-        // sentinel survives, so the reopen re-runs only the v35 rebuild.
-        assert_eq!(read_schema_version(&conn).unwrap(), 36);
+        // v36/v37 are already current in this fixture: their sentinels survive,
+        // so the reopen re-runs only the v35 rebuild.
+        assert_eq!(read_schema_version(&conn).unwrap(), EXPECTED_SCHEMA_VERSION);
         assert!(was_run(&conn, "v34_harness_session_spine").unwrap());
         assert!(was_run(&conn, "v35_harness_session_spine_receipts").unwrap());
         assert!(was_run(&conn, "v36_delivery_spine").unwrap());
+        assert!(was_run(&conn, "v37_verified_agent_admissions").unwrap());
         assert_eq!(report.delivery_spine_schema_objects_created, 0);
+        assert_eq!(report.verified_admission_schema_objects_created, 0);
         validate_current_schema_integrity(&conn).expect("the completed v35 shape is valid");
     }
 
@@ -1820,6 +1892,24 @@ mod tests {
         assert!(!index_present(
             &conn,
             "idx_harness_session_attachments_claim"
+        ));
+    }
+
+    #[test]
+    fn stamped_current_v37_missing_append_only_trigger_fails_closed_without_repair() {
+        let (mut conn, tmp) = open_test_db();
+        run_data_migrations(&mut conn, "global", tmp.path()).expect("current v37 fixture");
+        conn.execute("DROP TRIGGER identity_verification_receipts_no_update", [])
+            .unwrap();
+
+        let error = validate_current_schema_integrity(&conn)
+            .expect_err("current schema without a v37 append-only trigger must refuse");
+        assert!(error
+            .to_string()
+            .contains("identity_verification_receipts_no_update"));
+        assert!(!trigger_present(
+            &conn,
+            "identity_verification_receipts_no_update"
         ));
     }
 

@@ -36,6 +36,19 @@ pub(crate) struct WorkClaimConnection {
     pub(crate) agent_identity_id: Option<String>,
     pub(crate) connection_id: String,
     pub(crate) admission: String,
+    pub(crate) verified: Option<VerifiedAdmissionContext>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct VerifiedAdmissionContext {
+    pub(crate) admission_id: String,
+    pub(crate) agent_identity_id: String,
+    pub(crate) connection_id: String,
+    pub(crate) issuer_id: String,
+    pub(crate) verification_method: String,
+    pub(crate) verification_version: String,
+    pub(crate) trust_domain: String,
+    pub(crate) verification_scope: String,
 }
 
 /// Bounded channel capacity for enrichment batcher
