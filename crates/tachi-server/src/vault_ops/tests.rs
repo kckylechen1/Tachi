@@ -2559,6 +2559,24 @@ async fn vault_list_is_a_secret_negative_account_health_board() {
         replacement_sentinel,
         "api_key",
     );
+    server
+        .with_global_store(|store| {
+            let now = chrono::Utc::now().to_rfc3339();
+            store
+                .vault_set_rotation(&memcore::vault::VaultKeyRotation {
+                    prefix: "DEEPSEEK_API_KEY".to_string(),
+                    current_index: 1,
+                    total_keys: 2,
+                    rotation_strategy: "round_robin".to_string(),
+                    created_at: now.clone(),
+                    updated_at: now,
+                })
+                .map_err(|error| error.to_string())
+        })
+        .expect("seed invalid replacement generation");
+    let refresh_error = crate::provider_config::materialize_for_server(&server)
+        .expect_err("invalid replacement generation must fail provider refresh");
+    assert!(refresh_error.contains("DEEPSEEK_API_KEY"), "{refresh_error}");
     let replaced = handle_vault_list(&server, VaultListParams { secret_type: None })
         .await
         .expect("list after unpublished replacement");
