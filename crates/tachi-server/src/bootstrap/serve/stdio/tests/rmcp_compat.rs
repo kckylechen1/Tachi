@@ -2,6 +2,65 @@
 use super::*;
 use serde_json::json;
 
+#[derive(Clone)]
+struct LegacyProxyFixture;
+
+impl rmcp::ServerHandler for LegacyProxyFixture {
+    fn supported_protocol_versions(
+        &self,
+    ) -> std::borrow::Cow<'static, [rmcp::model::ProtocolVersion]> {
+        std::borrow::Cow::Borrowed(rmcp::model::ProtocolVersion::known_up_to(
+            &rmcp::model::ProtocolVersion::V_2024_11_05,
+        ))
+    }
+
+    fn get_info(&self) -> rmcp::model::ServerInfo {
+        rmcp::model::ServerInfo::new(
+            rmcp::model::ServerCapabilities::builder()
+                .enable_tools()
+                .build(),
+        )
+    }
+
+    async fn call_tool(
+        &self,
+        request: rmcp::model::CallToolRequestParams,
+        _context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
+    ) -> Result<rmcp::model::CallToolResponse, rmcp::ErrorData> {
+        let result = match request.name.as_ref() {
+            "succeed" => rmcp::model::CallToolResult::success(vec![
+                rmcp::model::ContentBlock::text("legacy upstream success"),
+            ]),
+            "tool_error" => rmcp::model::CallToolResult::error(vec![
+                rmcp::model::ContentBlock::text("legacy upstream tool error"),
+            ]),
+            other => rmcp::model::CallToolResult::error(vec![rmcp::model::ContentBlock::text(
+                format!("unknown legacy fixture tool: {other}"),
+            )]),
+        };
+        Ok(result.into())
+    }
+}
+
+async fn install_legacy_proxy_fixture(
+    server: &crate::MemoryServer,
+    server_name: &str,
+) -> tokio::task::JoinHandle<()> {
+    use rmcp::ServiceExt;
+
+    let (server_io, client_io) = tokio::io::duplex(16384);
+    let upstream = tokio::spawn(async move {
+        let service = LegacyProxyFixture
+            .serve(server_io)
+            .await
+            .expect("start legacy upstream");
+        let _ = service.waiting().await;
+    });
+    let client = ().serve(client_io).await.expect("initialize legacy upstream");
+    server.pool.install_test_connection(server_name, client);
+    upstream
+}
+
 fn modern_meta(extra: serde_json::Value) -> serde_json::Value {
     let mut meta = serde_json::Map::from_iter([
         (
@@ -327,6 +386,7 @@ fn dual_era_conformance_matrix_covers_stdio_and_http() {
                 .send()
                 .await
                 .expect("identity conflict");
+            assert_eq!(identity_conflict.status(), reqwest::StatusCode::OK);
             let identity_conflict = parse_http_mcp_payload(
                 &identity_conflict.text().await.expect("identity conflict body"),
                 24,
@@ -419,6 +479,28 @@ fn dual_era_conformance_matrix_covers_stdio_and_http() {
                 }}
             })).await;
             assert_eq!(stdio_partial["error"]["code"], -32602);
+
+            let stdio_without_client_info = stdio_first_response(json!({
+                "jsonrpc":"2.0", "id":36, "method":"server/discover",
+                "params":{"_meta":{
+                    "io.modelcontextprotocol/protocolVersion":"2026-07-28",
+                    "io.modelcontextprotocol/clientCapabilities":{}
+                }}
+            })).await;
+            assert_eq!(
+                stdio_without_client_info["result"]["resultType"],
+                "complete"
+            );
+
+            let stdio_malformed_client_info = stdio_first_response(json!({
+                "jsonrpc":"2.0", "id":37, "method":"server/discover",
+                "params":{"_meta":{
+                    "io.modelcontextprotocol/protocolVersion":"2026-07-28",
+                    "io.modelcontextprotocol/clientCapabilities":{},
+                    "io.modelcontextprotocol/clientInfo":{"name":0,"version":"1"}
+                }}
+            })).await;
+            assert_eq!(stdio_malformed_client_info["error"]["code"], -32602);
 
             let stdio_modern_initialize = stdio_first_response(json!({
                 "jsonrpc":"2.0", "id":33, "method":"initialize", "params":{
@@ -634,7 +716,7 @@ fn modern_stdio_implicit_default_stays_standard_against_admin_daemon() {
                     }),
                     json!({
                         "jsonrpc":"2.0", "id":48, "method":"tools/call", "params":{
-                            "_meta":modern_meta(json!({"tachiProfile":"standard"})),
+                            "_meta":modern_meta(json!({})),
                             "name":"archive_memory", "arguments":{
                                 "id":"stdio-default-profile-archive"
                             }
@@ -642,6 +724,14 @@ fn modern_stdio_implicit_default_stays_standard_against_admin_daemon() {
                     }),
                     json!({
                         "jsonrpc":"2.0", "id":49, "method":"tools/call", "params":{
+                            "_meta":modern_meta(json!({"tachiProfile":"standard"})),
+                            "name":"archive_memory", "arguments":{
+                                "id":"stdio-default-profile-archive"
+                            }
+                        }
+                    }),
+                    json!({
+                        "jsonrpc":"2.0", "id":50, "method":"tools/call", "params":{
                             "_meta":modern_meta(json!({"tachiProfile":"observe"})),
                             "name":"tachi_memory", "arguments":{
                                 "action":"save", "scope":"global",
@@ -674,27 +764,23 @@ fn modern_stdio_implicit_default_stays_standard_against_admin_daemon() {
                 "{:#}",
                 responses[2]
             );
-            assert_eq!(
-                responses[3]["result"]["isError"],
-                json!(true),
-                "{:#}",
-                responses[3]
-            );
-            assert!(
-                http_tool_text(&responses[3]).contains("tool not found"),
-                "{:#}",
-                responses[3]
-            );
+            for response in &responses[3..5] {
+                assert_eq!(response["result"]["isError"], json!(true), "{response:#}");
+                assert!(
+                    http_tool_text(response).contains("tool not found"),
+                    "{response:#}"
+                );
+            }
             assert_eq!(
                 memory_archived_value(&global, "stdio-default-profile-archive"),
                 0,
                 "standard modern request must not gain admin archive authority"
             );
             assert_eq!(
-                responses[4]["error"]["code"],
+                responses[5]["error"]["code"],
                 -32602,
                 "{:#}",
-                responses[4]
+                responses[5]
             );
             assert_eq!(memory_id_count(&global, "stdio-default-profile-drift"), 0);
 
@@ -917,7 +1003,7 @@ fn direct_stdio_is_legacy_only_and_modern_rejection_cannot_mutate() {
 
             server.set_tool_profile(Some(tachi_hub::ToolProfile::admin()));
             let rejected = [
-                json!({
+                (json!({
                     "jsonrpc":"2.0", "id":69, "method":"tools/call", "params":{
                         "_meta":modern_meta(json!({"tachiProfile":"observe"})),
                         "name":"tachi_memory", "arguments":{
@@ -926,8 +1012,8 @@ fn direct_stdio_is_legacy_only_and_modern_rejection_cannot_mutate() {
                             "path":"/tests/direct-stdio", "category":"fact", "force":true
                         }
                     }
-                }),
-                json!({
+                }), -32022),
+                (json!({
                     "jsonrpc":"2.0", "id":70, "method":"tools/call", "params":{
                         "_meta":modern_meta(json!({
                             "tachiAgentIdentity":"agent.direct-canonical",
@@ -939,18 +1025,71 @@ fn direct_stdio_is_legacy_only_and_modern_rejection_cannot_mutate() {
                             "path":"/tests/direct-stdio", "category":"fact", "force":true
                         }
                     }
-                }),
+                }), -32022),
+                (json!({
+                    "jsonrpc":"2.0", "id":71, "method":"tools/call", "params":{
+                        "_meta":{
+                            "io.modelcontextprotocol/protocolVersion":"2026-07-28"
+                        },
+                        "name":"tachi_memory", "arguments":{
+                            "action":"save", "scope":"global", "id":"direct-modern-partial",
+                            "text":"must not dispatch", "summary":"direct stdio is legacy only",
+                            "path":"/tests/direct-stdio", "category":"fact", "force":true
+                        }
+                    }
+                }), -32602),
+                (json!({
+                    "jsonrpc":"2.0", "id":72, "method":"tools/call", "params":{
+                        "_meta":modern_meta(json!({"tachiClient":"direct-valid-client"})),
+                        "name":"tachi_memory", "arguments":{
+                            "action":"save", "scope":"global", "id":"direct-modern-valid-client",
+                            "text":"must not dispatch", "summary":"direct stdio is legacy only",
+                            "path":"/tests/direct-stdio", "category":"fact", "force":true
+                        }
+                    }
+                }), -32022),
+                (json!({
+                    "jsonrpc":"2.0", "id":73, "method":"tools/call", "params":{
+                        "_meta":modern_meta(json!({"tachiClient":0})),
+                        "name":"tachi_memory", "arguments":{
+                            "action":"save", "scope":"global", "id":"direct-modern-malformed-client",
+                            "text":"must not dispatch", "summary":"direct stdio is legacy only",
+                            "path":"/tests/direct-stdio", "category":"fact", "force":true
+                        }
+                    }
+                }), -32022),
+                (json!({
+                    "jsonrpc":"2.0", "id":74, "method":"server/discover", "params":{
+                        "_meta":{
+                            "io.modelcontextprotocol/protocolVersion":"2026-07-28",
+                            "io.modelcontextprotocol/clientCapabilities":{},
+                            "io.modelcontextprotocol/clientInfo":{"name":0,"version":"1"}
+                        }
+                    }
+                }), -32602),
             ];
-            for request in rejected {
+            for (request, expected_code) in rejected {
                 let response = stdio_responses(
                     server.clone_for_mcp_session(),
                     std::slice::from_ref(&request),
                 )
                 .await;
-                assert_eq!(response[0]["error"]["code"], -32022, "{:#}", response[0]);
+                assert_eq!(
+                    response[0]["error"]["code"],
+                    expected_code,
+                    "{:#}",
+                    response[0]
+                );
             }
-            assert_eq!(memory_id_count(&global, "direct-modern-profile-drift"), 0);
-            assert_eq!(memory_id_count(&global, "direct-modern-alias-conflict"), 0);
+            for id in [
+                "direct-modern-profile-drift",
+                "direct-modern-alias-conflict",
+                "direct-modern-partial",
+                "direct-modern-valid-client",
+                "direct-modern-malformed-client",
+            ] {
+                assert_eq!(memory_id_count(&global, id), 0, "{id}");
+            }
         });
     });
 }
@@ -993,6 +1132,116 @@ fn modern_http_list_results_include_required_cache_metadata() {
             }
             cancel.cancel();
             task.await.expect("daemon task");
+        });
+    });
+}
+
+#[test]
+fn modern_http_hydrates_legacy_proxy_success_and_tool_error_results() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    with_tachi_home(temp.path(), || {
+        let global = temp.path().join("global/memory.db");
+        test_runtime().block_on(async {
+            let server_name = "legacy-result-fixture";
+            let capability_id = format!("mcp:{server_name}");
+            let server = crate::MemoryServer::new(global.clone(), None).expect("server");
+            server.set_tool_profile(Some(tachi_hub::ToolProfile::admin()));
+            let mut capability = crate::tests::make_mcp_capability(&capability_id, 1);
+            capability.definition = json!({
+                "transport":"stdio", "command":"unused-test-connection",
+                "tool_exposure":"flatten", "max_concurrency":1
+            })
+            .to_string();
+            capability.exposure_mode = "direct".to_string();
+            server
+                .with_global_store(|store| {
+                    store
+                        .hub_register(&capability)
+                        .map_err(|error| error.to_string())?;
+                    store
+                        .set_sandbox_policy(
+                            &capability_id,
+                            "process",
+                            "[]",
+                            "[]",
+                            "[]",
+                            "[]",
+                            5_000,
+                            5_000,
+                            1,
+                            true,
+                        )
+                        .map_err(|error| error.to_string())
+                })
+                .expect("register legacy proxy fixture");
+            let tools: Vec<rmcp::model::Tool> = ["succeed", "tool_error"]
+                .into_iter()
+                .map(|name| {
+                    serde_json::from_value(json!({
+                        "name":name, "description":format!("legacy fixture {name}"),
+                        "inputSchema":{"type":"object","additionalProperties":true}
+                    }))
+                    .expect("legacy fixture tool")
+                })
+                .collect();
+            server.cache_proxy_tools(server_name, tools);
+            let upstream = install_legacy_proxy_fixture(&server, server_name).await;
+            let (daemon, cancel, task) =
+                spawn_test_http_daemon(server.clone(), &global).await;
+
+            let (legacy_client, legacy_headers, _) =
+                http_mcp_initialize(&daemon.url, http_headers(&[]), None).await;
+            http_mcp_initialized(&legacy_client, &daemon.url, legacy_headers.clone()).await;
+            for (id, tool_name, is_error) in [
+                (75, "succeed", false),
+                (76, "tool_error", true),
+            ] {
+                let legacy = http_mcp_call_tool(
+                    &legacy_client,
+                    &daemon.url,
+                    legacy_headers.clone(),
+                    id,
+                    &format!("{server_name}__{tool_name}"),
+                    serde_json::Map::new(),
+                )
+                .await;
+                assert!(legacy["result"].get("resultType").is_none(), "{legacy:#}");
+                if is_error {
+                    assert_eq!(legacy["result"]["isError"], true, "{legacy:#}");
+                } else {
+                    assert_ne!(legacy["result"]["isError"], true, "{legacy:#}");
+                }
+            }
+
+            let modern_client = reqwest::Client::new();
+            for (id, tool_name, is_error) in [
+                (77, "succeed", false),
+                (78, "tool_error", true),
+            ] {
+                let modern = modern_http_tool_call(
+                    &modern_client,
+                    &daemon.url,
+                    id,
+                    &format!("{server_name}__{tool_name}"),
+                    json!({}),
+                    json!({}),
+                )
+                .await;
+                assert_eq!(modern["result"]["resultType"], "complete", "{modern:#}");
+                if is_error {
+                    assert_eq!(modern["result"]["isError"], true, "{modern:#}");
+                } else {
+                    assert_ne!(modern["result"]["isError"], true, "{modern:#}");
+                }
+            }
+
+            cancel.cancel();
+            task.await.expect("daemon task");
+            assert!(server.pool.remove_connection(server_name));
+            tokio::time::timeout(std::time::Duration::from_secs(30), upstream)
+                .await
+                .expect("legacy upstream exit deadline")
+                .expect("legacy upstream task");
         });
     });
 }
@@ -1148,6 +1397,39 @@ fn modern_http_concurrent_requests_isolate_project_profile_actor_and_work_claim(
                 assert!(response.get("error").is_none(), "{response:#}");
                 assert_eq!(response["result"]["resultType"], "complete");
             }
+
+            let (remember_coordinate_op, coordinate_op) = tokio::join!(
+                modern_http_tool_call(
+                    &client,
+                    &daemon.url,
+                    79,
+                    "tachi_handoff",
+                    identity_a(),
+                    json!({"action":"promote_issue"})
+                ),
+                modern_http_tool_call(
+                    &client,
+                    &daemon.url,
+                    80,
+                    "tachi_handoff",
+                    identity_b(),
+                    json!({"action":"promote_issue"})
+                )
+            );
+            assert_eq!(
+                remember_coordinate_op["result"]["isError"],
+                true,
+                "{remember_coordinate_op:#}"
+            );
+            assert!(
+                http_tool_text(&remember_coordinate_op).contains("tool not found"),
+                "remember must not gain the coordinate tool surface: {remember_coordinate_op:#}"
+            );
+            assert_eq!(coordinate_op["result"]["isError"], true, "{coordinate_op:#}");
+            assert!(
+                !http_tool_text(&coordinate_op).contains("tool not found"),
+                "coordinate request must reach the coordinate-only handler: {coordinate_op:#}"
+            );
 
             let connection = rusqlite::Connection::open(&global).expect("open global DB");
             for (issue_ref, expected_client, expected_agent, expected_role) in [

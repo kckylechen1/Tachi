@@ -57,7 +57,9 @@ header and its request `_meta` twin before tool dispatch. Modern identity and
 admission are applied to a request-local server clone; they never replace the
 legacy session binding or become protocol-session authority. Inline metadata
 that selects a legacy version is still rejected because it cannot bypass the
-legacy initialize/session adapter.
+legacy initialize/session adapter. Modern `clientInfo` is optional, but when
+present it must be a valid typed MCP `Implementation`; malformed values fail
+before discovery or tool dispatch.
 
 RMCP 3.x delivers wire initialize `_meta` through `RequestContext.meta`.
 The adapters read it there, retaining typed initialize params only for direct
@@ -94,6 +96,12 @@ modern peers send it in each request:
 For compatibility, headers win over initialize metadata in legacy mode. Modern
 header and request-metadata identities must agree. Project must resolve via
 `resolve_named_project_db_path` (same as stdio).
+
+Standard MCP protocol/routing header conflicts are rejected by RMCP at the
+HTTP transport boundary with status 400. A conflict between otherwise valid
+`X-Tachi-*` and request `_meta` identity reaches Tachi's application boundary
+and returns JSON-RPC `HEADER_MISMATCH` (`-32020`) in a normal HTTP 200 MCP
+response; clients must inspect the JSON-RPC envelope in both cases.
 
 For modern stdio, per-request project and profile metadata may only repeat the
 project and profile admitted when the adapter process started; omission keeps

@@ -1569,7 +1569,17 @@ impl ServerHandler for MemoryServer {
                 (other, _) => other,
             };
 
-            result.map(Into::into)
+            result.map(|mut result| {
+                // Native constructors already carry this discriminator, but a
+                // directly exposed legacy MCP upstream does not. Hydrate at
+                // the final modern HTTP boundary after every dispatch path.
+                if mode == crate::mcp_peer::McpPeerMode::Modern20260728 {
+                    result
+                        .result_type
+                        .get_or_insert(rmcp::model::ResultType::COMPLETE);
+                }
+                result.into()
+            })
         }
     }
 }

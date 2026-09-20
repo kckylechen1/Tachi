@@ -41,6 +41,14 @@ impl McpPeerMode {
                     None,
                 ));
             }
+            if meta.0.contains_key(META_CLIENT_INFO) && context.client_info().is_none() {
+                return Err(rmcp::ErrorData::invalid_params(
+                    format!(
+                        "request _meta field {META_CLIENT_INFO} is present but malformed"
+                    ),
+                    None,
+                ));
+            }
             // Read the typed SDK values rather than treating key presence as
             // capability proof. `missing_required_keys` already rejected a
             // malformed capability object; clientInfo remains optional.
