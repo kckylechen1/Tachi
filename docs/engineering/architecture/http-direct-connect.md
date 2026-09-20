@@ -43,6 +43,12 @@ gets `UNSUPPORTED_PROTOCOL_VERSION` rather than a successful downgrade to
 `2025-11-25`. The portable server remains intentionally legacy-only and fails
 the same modern initialize explicitly.
 
+The normal stdio adapter is the proxy above. The debugging-only direct route
+selected by `TACHI_DISABLE_STDIO_PROXY=1` remains legacy-only: because it has
+neither the proxy's process-bound admission gate nor HTTP transport headers, it
+returns typed `UNSUPPORTED_PROTOCOL_VERSION` for modern discovery, listing,
+completion, and tool calls rather than accepting request metadata as authority.
+
 Modern HTTP requests carry matching `Mcp-Protocol-Version`, `Mcp-Method`, and,
 where applicable, `Mcp-Name` / `Mcp-Param-*` routing headers. RMCP rejects
 missing or conflicting standard headers and body metadata before handler
@@ -145,7 +151,7 @@ the compatibility path, not a failure of HTTP migration.
 | Actor | Behavior |
 |---|---|
 | **Legacy HTTP client (through 2025-11-25)** | Connection drops / JSON-RPC **`-32000`** (or transport error). Wait until `/health` is `ok`, then **re-run `initialize`** to get a new `mcp-session-id`. |
-| **Modern HTTP client (2026-07-28)** | The request fails with a transport error. Wait until `/health` is `ok`, run `server/discover` again when capability refresh is needed, then retry the stateless request with the same validated per-request metadata and routing headers. Do **not** call `initialize`: explicit modern initialize is rejected by design and modern requests never carry an `mcp-session-id`. |
+| **Modern HTTP client (2026-07-28)** | The request fails with a transport error. Wait until `/health` is `ok`, then run `server/discover` again when capability refresh is needed. Retry a stateless request with the same validated per-request metadata and routing headers only when the failure is known to be `BeforeDispatch`; after a timeout or other ambiguous post-dispatch failure, do not replay automatically because a mutation may already have committed. Do **not** call `initialize`: explicit modern initialize is rejected by design and modern requests never carry an `mcp-session-id`. |
 | **stdio adapter** | Host respawns the pipe; adapter re-attaches to (or re-spawns) the daemon. Unrelated to HTTP session ids. |
 | **Idle reaper** | Daemon may exit after idle timeout and auto-respawn on next need; use the matching legacy-session or modern-stateless reconnect row above. |
 

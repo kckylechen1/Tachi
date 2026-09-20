@@ -935,6 +935,29 @@ fn validate_modern_identity_headers(
     Ok(())
 }
 
+fn reject_modern_direct_stdio(
+    mode: crate::mcp_peer::McpPeerMode,
+    context: &RequestContext<RoleServer>,
+) -> Result<(), rmcp::ErrorData> {
+    // The direct debugging route has neither the stdio proxy's process-bound
+    // admission gate nor HTTP transport headers. It remains deliberately
+    // legacy rather than accepting request assertions as process authority.
+    if mode == crate::mcp_peer::McpPeerMode::Modern20260728
+        && context
+            .extensions
+            .get::<axum::http::request::Parts>()
+            .is_none()
+    {
+        return Err(rmcp::ErrorData::unsupported_protocol_version(
+            rmcp::model::ProtocolVersion::V_2026_07_28,
+            rmcp::model::ProtocolVersion::known_up_to(
+                &rmcp::model::ProtocolVersion::V_2025_11_25,
+            ),
+        ));
+    }
+    Ok(())
+}
+
 /// Extract session identity fields from MCP initialize `_meta` (#732).
 /// Headers still win when both are present (applied after this helper).
 fn assign_explicit_agent_identity(
@@ -1082,7 +1105,8 @@ impl ServerHandler for MemoryServer {
         &self,
         context: RequestContext<RoleServer>,
     ) -> Result<rmcp::model::DiscoverResult, rmcp::ErrorData> {
-        crate::mcp_peer::McpPeerMode::from_context(&context)?.require_modern()?;
+        let mode = crate::mcp_peer::McpPeerMode::from_context(&context)?.require_modern()?;
+        reject_modern_direct_stdio(mode, &context)?;
         Ok(rmcp::model::DiscoverResult::from_server_info(
             crate::mcp_peer::supported_protocol_versions().to_vec(),
             self.get_info(),
@@ -1095,7 +1119,8 @@ impl ServerHandler for MemoryServer {
         _request: rmcp::model::CompleteRequestParams,
         context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
     ) -> Result<rmcp::model::CompleteResult, rmcp::ErrorData> {
-        crate::mcp_peer::McpPeerMode::from_context(&context)?;
+        let mode = crate::mcp_peer::McpPeerMode::from_context(&context)?;
+        reject_modern_direct_stdio(mode, &context)?;
         Ok(Default::default())
     }
 
@@ -1104,8 +1129,14 @@ impl ServerHandler for MemoryServer {
         _request: Option<rmcp::model::PaginatedRequestParams>,
         context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
     ) -> Result<rmcp::model::ListPromptsResult, rmcp::ErrorData> {
-        crate::mcp_peer::McpPeerMode::from_context(&context)?;
-        Ok(Default::default())
+        let mode = crate::mcp_peer::McpPeerMode::from_context(&context)?;
+        reject_modern_direct_stdio(mode, &context)?;
+        let mut result = rmcp::model::ListPromptsResult::default();
+        if mode == crate::mcp_peer::McpPeerMode::Modern20260728 {
+            result.ttl_ms = Some(0);
+            result.cache_scope = Some(rmcp::model::CacheScope::Private);
+        }
+        Ok(result)
     }
 
     async fn list_resources(
@@ -1113,8 +1144,14 @@ impl ServerHandler for MemoryServer {
         _request: Option<rmcp::model::PaginatedRequestParams>,
         context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
     ) -> Result<rmcp::model::ListResourcesResult, rmcp::ErrorData> {
-        crate::mcp_peer::McpPeerMode::from_context(&context)?;
-        Ok(Default::default())
+        let mode = crate::mcp_peer::McpPeerMode::from_context(&context)?;
+        reject_modern_direct_stdio(mode, &context)?;
+        let mut result = rmcp::model::ListResourcesResult::default();
+        if mode == crate::mcp_peer::McpPeerMode::Modern20260728 {
+            result.ttl_ms = Some(0);
+            result.cache_scope = Some(rmcp::model::CacheScope::Private);
+        }
+        Ok(result)
     }
 
     async fn list_resource_templates(
@@ -1122,8 +1159,14 @@ impl ServerHandler for MemoryServer {
         _request: Option<rmcp::model::PaginatedRequestParams>,
         context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
     ) -> Result<rmcp::model::ListResourceTemplatesResult, rmcp::ErrorData> {
-        crate::mcp_peer::McpPeerMode::from_context(&context)?;
-        Ok(Default::default())
+        let mode = crate::mcp_peer::McpPeerMode::from_context(&context)?;
+        reject_modern_direct_stdio(mode, &context)?;
+        let mut result = rmcp::model::ListResourceTemplatesResult::default();
+        if mode == crate::mcp_peer::McpPeerMode::Modern20260728 {
+            result.ttl_ms = Some(0);
+            result.cache_scope = Some(rmcp::model::CacheScope::Private);
+        }
+        Ok(result)
     }
 
     fn get_info(&self) -> ServerInfo {
@@ -1153,6 +1196,7 @@ impl ServerHandler for MemoryServer {
     {
         async move {
             let mode = crate::mcp_peer::McpPeerMode::from_context(&context)?;
+            reject_modern_direct_stdio(mode, &context)?;
             let request_server = match mode {
                 crate::mcp_peer::McpPeerMode::Legacy => None,
                 crate::mcp_peer::McpPeerMode::Modern20260728 => {
@@ -1217,10 +1261,15 @@ impl ServerHandler for MemoryServer {
                 env_patterns.as_deref(),
             );
 
-            Ok(rmcp::model::ListToolsResult {
+            let mut result = rmcp::model::ListToolsResult {
                 tools,
                 ..Default::default()
-            })
+            };
+            if mode == crate::mcp_peer::McpPeerMode::Modern20260728 {
+                result.ttl_ms = Some(0);
+                result.cache_scope = Some(rmcp::model::CacheScope::Private);
+            }
+            Ok(result)
         }
     }
 
@@ -1232,6 +1281,7 @@ impl ServerHandler for MemoryServer {
     {
         async move {
             let mode = crate::mcp_peer::McpPeerMode::from_context(&context)?;
+            reject_modern_direct_stdio(mode, &context)?;
             let request_server = match mode {
                 crate::mcp_peer::McpPeerMode::Legacy => None,
                 crate::mcp_peer::McpPeerMode::Modern20260728 => {

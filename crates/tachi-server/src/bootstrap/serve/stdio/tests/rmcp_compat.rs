@@ -32,7 +32,7 @@ async fn stdio_first_response(request: serde_json::Value) -> serde_json::Value {
 }
 
 async fn stdio_responses(
-    proxy: StdioProxyServer,
+    handler: impl rmcp::ServerHandler + 'static,
     requests: &[serde_json::Value],
 ) -> Vec<serde_json::Value> {
     use rmcp::ServiceExt;
@@ -40,7 +40,7 @@ async fn stdio_responses(
 
     let (server_io, client_io) = tokio::io::duplex(32768);
     let server = tokio::spawn(async move {
-        match proxy.serve(server_io).await {
+        match handler.serve(server_io).await {
             Ok(service) => {
                 let _ = service.waiting().await;
             }
@@ -55,6 +55,9 @@ async fn stdio_responses(
             .write_all(format!("{request}\n").as_bytes())
             .await
             .expect("write stdio request");
+        if request.get("id").is_none() {
+            continue;
+        }
         let mut line = String::new();
         tokio::time::timeout(
             std::time::Duration::from_secs(30),
@@ -821,6 +824,173 @@ fn modern_stdio_omitted_agent_identity_reresolves_process_binding_per_call() {
                 assert_eq!(body["actor_agent_identity_id"], expected, "{body:#}");
             }
 
+            cancel.cancel();
+            task.await.expect("daemon task");
+        });
+    });
+}
+
+#[test]
+fn proxy_restores_modern_result_envelopes_and_preserves_legacy_shape() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    with_tachi_home(temp.path(), || {
+        let global = temp.path().join("global/memory.db");
+        test_runtime().block_on(async {
+            let server = crate::MemoryServer::new(global.clone(), None).expect("server");
+            let (daemon, cancel, task) = spawn_test_http_daemon(server, &global).await;
+            let proxy = identity_probe_proxy();
+            *proxy.daemon.write().expect("proxy daemon lock") = daemon.clone();
+
+            let modern = stdio_responses(
+                proxy.clone(),
+                &[
+                    json!({"jsonrpc":"2.0", "id":60, "method":"tools/list", "params":{"_meta":modern_meta(json!({}))}}),
+                    json!({"jsonrpc":"2.0", "id":61, "method":"prompts/list", "params":{"_meta":modern_meta(json!({}))}}),
+                    json!({"jsonrpc":"2.0", "id":62, "method":"resources/list", "params":{"_meta":modern_meta(json!({}))}}),
+                    json!({"jsonrpc":"2.0", "id":63, "method":"resources/templates/list", "params":{"_meta":modern_meta(json!({}))}}),
+                    json!({
+                        "jsonrpc":"2.0", "id":64, "method":"tools/call", "params":{
+                            "_meta":modern_meta(json!({})), "name":"tachi_memory",
+                            "arguments":{"action":"search", "query":"result envelope", "scope":"global"}
+                        }
+                    }),
+                ],
+            )
+            .await;
+            for response in &modern[..4] {
+                assert_eq!(response["result"]["resultType"], "complete", "{response:#}");
+                assert_eq!(response["result"]["ttlMs"], 0, "{response:#}");
+                assert_eq!(response["result"]["cacheScope"], "private", "{response:#}");
+            }
+            assert_eq!(modern[4]["result"]["resultType"], "complete", "{:#}", modern[4]);
+
+            let legacy = stdio_responses(
+                proxy,
+                &[
+                    json!({
+                        "jsonrpc":"2.0", "id":65, "method":"initialize", "params":{
+                            "protocolVersion":"2025-11-25", "capabilities":{},
+                            "clientInfo":{"name":"legacy-result-shape", "version":"1"}
+                        }
+                    }),
+                    json!({"jsonrpc":"2.0", "method":"notifications/initialized"}),
+                    json!({"jsonrpc":"2.0", "id":66, "method":"tools/list", "params":{}}),
+                    json!({
+                        "jsonrpc":"2.0", "id":67, "method":"tools/call", "params":{
+                            "name":"tachi_memory",
+                            "arguments":{"action":"search", "query":"legacy result envelope", "scope":"global"}
+                        }
+                    }),
+                ],
+            )
+            .await;
+            for response in &legacy[1..] {
+                assert!(response["result"].get("resultType").is_none(), "{response:#}");
+                assert!(response["result"].get("ttlMs").is_none(), "{response:#}");
+                assert!(response["result"].get("cacheScope").is_none(), "{response:#}");
+            }
+
+            cancel.cancel();
+            task.await.expect("daemon task");
+        });
+    });
+}
+
+#[test]
+fn direct_stdio_is_legacy_only_and_modern_rejection_cannot_mutate() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    with_tachi_home(temp.path(), || {
+        let global = temp.path().join("global/memory.db");
+        test_runtime().block_on(async {
+            let server = crate::MemoryServer::new(global.clone(), None).expect("server");
+            let legacy = stdio_responses(
+                server.clone_for_mcp_session(),
+                &[json!({
+                    "jsonrpc":"2.0", "id":68, "method":"initialize", "params":{
+                        "protocolVersion":"2025-11-25", "capabilities":{},
+                        "clientInfo":{"name":"direct-legacy", "version":"1"}
+                    }
+                })],
+            )
+            .await;
+            assert_eq!(legacy[0]["result"]["protocolVersion"], "2025-11-25");
+
+            server.set_tool_profile(Some(tachi_hub::ToolProfile::admin()));
+            let rejected = [
+                json!({
+                    "jsonrpc":"2.0", "id":69, "method":"tools/call", "params":{
+                        "_meta":modern_meta(json!({"tachiProfile":"observe"})),
+                        "name":"tachi_memory", "arguments":{
+                            "action":"save", "scope":"global", "id":"direct-modern-profile-drift",
+                            "text":"must not dispatch", "summary":"direct stdio is legacy only",
+                            "path":"/tests/direct-stdio", "category":"fact", "force":true
+                        }
+                    }
+                }),
+                json!({
+                    "jsonrpc":"2.0", "id":70, "method":"tools/call", "params":{
+                        "_meta":modern_meta(json!({
+                            "tachiAgentIdentity":"agent.direct-canonical",
+                            "tachi.agentIdentity":"agent.direct-alias"
+                        })),
+                        "name":"tachi_memory", "arguments":{
+                            "action":"save", "scope":"global", "id":"direct-modern-alias-conflict",
+                            "text":"must not dispatch", "summary":"direct stdio is legacy only",
+                            "path":"/tests/direct-stdio", "category":"fact", "force":true
+                        }
+                    }
+                }),
+            ];
+            for request in rejected {
+                let response = stdio_responses(
+                    server.clone_for_mcp_session(),
+                    std::slice::from_ref(&request),
+                )
+                .await;
+                assert_eq!(response[0]["error"]["code"], -32022, "{:#}", response[0]);
+            }
+            assert_eq!(memory_id_count(&global, "direct-modern-profile-drift"), 0);
+            assert_eq!(memory_id_count(&global, "direct-modern-alias-conflict"), 0);
+        });
+    });
+}
+
+#[test]
+fn modern_http_list_results_include_required_cache_metadata() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    with_tachi_home(temp.path(), || {
+        let global = temp.path().join("global/memory.db");
+        test_runtime().block_on(async {
+            let server = crate::MemoryServer::new(global.clone(), None).expect("server");
+            let (daemon, cancel, task) = spawn_test_http_daemon(server, &global).await;
+            let client = reqwest::Client::new();
+            for (id, method) in [
+                (71, "tools/list"),
+                (72, "prompts/list"),
+                (73, "resources/list"),
+                (74, "resources/templates/list"),
+            ] {
+                let response = client
+                    .post(&daemon.url)
+                    .headers(http_headers(&[
+                        ("mcp-protocol-version", "2026-07-28"),
+                        ("mcp-method", method),
+                    ]))
+                    .json(&json!({
+                        "jsonrpc":"2.0", "id":id, "method":method,
+                        "params":{"_meta":modern_meta(json!({}))}
+                    }))
+                    .send()
+                    .await
+                    .expect("modern HTTP list request");
+                let body = parse_http_mcp_payload(
+                    &response.text().await.expect("modern HTTP list body"),
+                    id,
+                );
+                assert_eq!(body["result"]["resultType"], "complete", "{method}: {body:#}");
+                assert_eq!(body["result"]["ttlMs"], 0, "{method}: {body:#}");
+                assert_eq!(body["result"]["cacheScope"], "private", "{method}: {body:#}");
+            }
             cancel.cancel();
             task.await.expect("daemon task");
         });

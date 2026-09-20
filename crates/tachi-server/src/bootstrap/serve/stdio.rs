@@ -800,8 +800,13 @@ impl rmcp::ServerHandler for StdioProxyServer {
         _request: Option<rmcp::model::PaginatedRequestParams>,
         context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
     ) -> Result<rmcp::model::ListPromptsResult, rmcp::ErrorData> {
-        crate::mcp_peer::McpPeerMode::from_context(&context)?;
-        Ok(Default::default())
+        let mode = crate::mcp_peer::McpPeerMode::from_context(&context)?;
+        let mut result = rmcp::model::ListPromptsResult::default();
+        if mode == crate::mcp_peer::McpPeerMode::Modern20260728 {
+            result.ttl_ms = Some(0);
+            result.cache_scope = Some(rmcp::model::CacheScope::Private);
+        }
+        Ok(result)
     }
 
     async fn list_resources(
@@ -809,8 +814,13 @@ impl rmcp::ServerHandler for StdioProxyServer {
         _request: Option<rmcp::model::PaginatedRequestParams>,
         context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
     ) -> Result<rmcp::model::ListResourcesResult, rmcp::ErrorData> {
-        crate::mcp_peer::McpPeerMode::from_context(&context)?;
-        Ok(Default::default())
+        let mode = crate::mcp_peer::McpPeerMode::from_context(&context)?;
+        let mut result = rmcp::model::ListResourcesResult::default();
+        if mode == crate::mcp_peer::McpPeerMode::Modern20260728 {
+            result.ttl_ms = Some(0);
+            result.cache_scope = Some(rmcp::model::CacheScope::Private);
+        }
+        Ok(result)
     }
 
     async fn list_resource_templates(
@@ -818,8 +828,13 @@ impl rmcp::ServerHandler for StdioProxyServer {
         _request: Option<rmcp::model::PaginatedRequestParams>,
         context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
     ) -> Result<rmcp::model::ListResourceTemplatesResult, rmcp::ErrorData> {
-        crate::mcp_peer::McpPeerMode::from_context(&context)?;
-        Ok(Default::default())
+        let mode = crate::mcp_peer::McpPeerMode::from_context(&context)?;
+        let mut result = rmcp::model::ListResourceTemplatesResult::default();
+        if mode == crate::mcp_peer::McpPeerMode::Modern20260728 {
+            result.ttl_ms = Some(0);
+            result.cache_scope = Some(rmcp::model::CacheScope::Private);
+        }
+        Ok(result)
     }
 
     fn get_info(&self) -> rmcp::model::ServerInfo {
@@ -841,14 +856,14 @@ impl rmcp::ServerHandler for StdioProxyServer {
             let mode = crate::mcp_peer::McpPeerMode::from_context(&context)?;
             let identity = self.resolve_request_identity(mode, &context.meta)?;
             let current = self.current_daemon();
-            match crate::cli_client::list_daemon_tools_with_profile(
+            let mut result = match crate::cli_client::list_daemon_tools_with_profile(
                 &current,
                 request.clone(),
                 identity.tool_profile,
             )
             .await
             {
-                Ok(result) => Ok(result),
+                Ok(result) => result,
                 // BeforeDispatch = the request never reached the daemon; safe to
                 // re-resolve and retry (list_tools is read-only regardless).
                 Err(err) if err.allows_in_process_fallback() => {
@@ -859,12 +874,25 @@ impl rmcp::ServerHandler for StdioProxyServer {
                             identity.tool_profile,
                         )
                         .await
-                        .map_err(daemon_error_data),
-                        None => Err(daemon_error_data(err)),
+                        .map_err(daemon_error_data)?,
+                        None => return Err(daemon_error_data(err)),
                     }
                 }
-                Err(err) => Err(daemon_error_data(err)),
+                Err(err) => return Err(daemon_error_data(err)),
+            };
+            if mode == crate::mcp_peer::McpPeerMode::Modern20260728 {
+                // The internal daemon client uses the retained legacy initialize
+                // lifecycle, which strips modern response metadata. Restore it
+                // only at the outer modern adapter boundary.
+                result
+                    .result_type
+                    .get_or_insert(rmcp::model::ResultType::COMPLETE);
+                result.ttl_ms.get_or_insert(0);
+                result
+                    .cache_scope
+                    .get_or_insert(rmcp::model::CacheScope::Private);
             }
+            Ok(result)
         }
     }
 
@@ -882,7 +910,7 @@ impl rmcp::ServerHandler for StdioProxyServer {
             }
             let request = prepare_proxy_tool_call(request, identity.client_project.as_deref())?;
             let current = self.current_daemon();
-            match crate::cli_client::call_daemon_tool_raw_with_profile_and_identity(
+            let mut result = match crate::cli_client::call_daemon_tool_raw_with_profile_and_identity(
                 &current,
                 request.clone(),
                 identity.client_project.as_deref(),
@@ -892,7 +920,7 @@ impl rmcp::ServerHandler for StdioProxyServer {
             )
             .await
             {
-                Ok(result) => Ok(result),
+                Ok(result) => result,
                 // Only BeforeDispatch is safe to retry: the request never reached
                 // the daemon, so a re-resolved retry cannot duplicate a write.
                 // AfterDispatch (timeout / post-handshake failure) must surface
@@ -909,14 +937,21 @@ impl rmcp::ServerHandler for StdioProxyServer {
                                 identity.agent_identity,
                             )
                             .await
-                            .map_err(daemon_error_data)
+                            .map_err(daemon_error_data)?
                         }
-                        None => Err(daemon_error_data(err)),
+                        None => return Err(daemon_error_data(err)),
                     }
                 }
-                Err(err) => Err(daemon_error_data(err)),
+                Err(err) => return Err(daemon_error_data(err)),
+            };
+            if mode == crate::mcp_peer::McpPeerMode::Modern20260728 {
+                // See list_tools: the inner legacy hop cannot preserve this
+                // discriminator for the outer modern peer.
+                result
+                    .result_type
+                    .get_or_insert(rmcp::model::ResultType::COMPLETE);
             }
-            .map(Into::into)
+            Ok(result.into())
         }
     }
 }

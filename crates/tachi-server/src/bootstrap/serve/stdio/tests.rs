@@ -63,7 +63,7 @@ async fn spawn_test_http_daemon(
     http_config.cancellation_token = ct.child_token();
 
     let service = StreamableHttpService::new(
-        move || Ok(server.clone()),
+        move || Ok(server.clone_for_mcp_session()),
         std::sync::Arc::new(LocalSessionManager::default()),
         http_config,
     );
