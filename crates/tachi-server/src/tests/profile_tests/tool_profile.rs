@@ -298,26 +298,43 @@ async fn additive_worker_projection_matches_its_call_time_policy() {
     }
     assert!(action_names(&lead_worker_tools, "tachi_staff").contains("start"));
     assert!(action_names(&lead_worker_tools, "tachi_gh").contains("safe_merge"));
-    for tool in &standard_tools {
-        let description = tool.description.as_deref().unwrap_or_default();
-        let input_schema = serde_json::to_string(&tool.input_schema)
-            .expect("ordinary projected input schema must serialize");
-        for residual in [
-            "runtime_info",
-            "tachi_component",
-            "tachi_skill",
-            "tachi_status",
-            "tachi_tools",
-            "tachi_unstick",
-            "tachi_verify",
-            "tachi_web_search",
-            "tachi_wiki",
-        ] {
-            assert!(
-                !description.contains(residual) && !input_schema.contains(residual),
-                "ordinary {} definition advertises residual route {residual}; description={description}; input_schema={input_schema}",
-                tool.name,
-            );
+    let ordinary_tool_names = standard_tools
+        .iter()
+        .map(|tool| tool.name.as_ref().to_string())
+        .collect::<std::collections::BTreeSet<_>>();
+    let ordinary_action_names = ordinary_tool_names
+        .iter()
+        .flat_map(|tool_name| action_names(&standard_tools, tool_name))
+        .collect::<std::collections::BTreeSet<_>>();
+    let registered_route_names = tokio::task::spawn_blocking(|| {
+        crate::server_handler::prepare_native_tool_definitions(
+            super::tool_profile_router_coverage::native_route_definitions(),
+        )
+        .into_iter()
+        .map(|tool| tool.name.into_owned())
+        .collect::<std::collections::BTreeSet<_>>()
+    })
+    .await
+    .expect("collect registered route names");
+    let residual_route_names = registered_route_names
+        .into_iter()
+        .filter(|name| !ordinary_tool_names.contains(name) && !ordinary_action_names.contains(name))
+        .collect::<std::collections::BTreeSet<_>>();
+    for (profile, tools) in [
+        ("Lead", standard_tools.as_slice()),
+        ("Worker", worker_tools.as_slice()),
+    ] {
+        for tool in tools {
+            let description = tool.description.as_deref().unwrap_or_default();
+            let input_schema = serde_json::to_string(&tool.input_schema)
+                .expect("ordinary projected input schema must serialize");
+            for residual in &residual_route_names {
+                assert!(
+                    !description.contains(residual) && !input_schema.contains(residual),
+                    "ordinary {profile} {} definition advertises residual route {residual}; description={description}; input_schema={input_schema}",
+                    tool.name,
+                );
+            }
         }
     }
 

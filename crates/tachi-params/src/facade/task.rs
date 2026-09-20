@@ -154,9 +154,9 @@ pub struct TachiTaskParams {
     /// [action=complete] Structured subagent eval records.
     #[serde(default)]
     pub subagents: Vec<TachiSubagentEvalParams>,
-    /// [action=complete] `eval_run_id`s from the #1066 mirror eval intake
-    /// (`tachi_agent_eval` register/observe/adjudicate) to project into this
-    /// completion's eval row. Only rows that are ADJUDICATED and
+    /// [action=complete] `eval_run_id`s from the #1066 host-adapter mirror
+    /// eval intake to project into this completion's eval row. Only rows that
+    /// are ADJUDICATED and
     /// evidence-usable (and not a self-eval) are projected; unresolved or
     /// ineligible ids are silently skipped — this never fails the
     /// completion. Additive/optional — an empty/omitted array is

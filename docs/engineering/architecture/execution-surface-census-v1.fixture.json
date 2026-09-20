@@ -9,32 +9,32 @@
   "provisional_budgets": {
     "profiles": {
       "admin": {
-        "max_total_input_schema_bytes": 142536,
-        "max_total_tool_definition_bytes": 173902,
+        "max_total_input_schema_bytes": 142500,
+        "max_total_tool_definition_bytes": 173866,
         "max_visible_tools": 83,
         "rationale": "Exact live observed #1691 census for admin after profile-specific tools/list narrowing; any regrowth requires explicit adjudication.; #1454 server-run tachi_verify surface (action=run, +check_kind/+timeout_secs props; +1131 schema bytes / +1365 tool-definition bytes per profile) re-pinned after the rebase onto 53939b5b5 (main #1690/#1691 retirements); #1322 declared_file_scope on tachi_staff, including its exact serialized schema bytes; any further regrowth requires explicit adjudication.; #1861 vault_set explicit rebind property re-pinned to the exact live admin surface; #1679 adds the tachi_delivery seam (6 actions, +1771 schema bytes / +2198 tool-def bytes, coordinate+admin visibility only) for the durable delivery spine; #1679 re-measured after the delivery seam action field became a closed wire enum (denominator matches tachi_a2a)"
       },
       "coordinate": {
-        "max_total_input_schema_bytes": 49268,
-        "max_total_tool_definition_bytes": 53561,
+        "max_total_input_schema_bytes": 49232,
+        "max_total_tool_definition_bytes": 53525,
         "max_visible_tools": 5,
         "rationale": "Exact live observed #1935 coordinate compatibility census after contraction to the five product facades; any regrowth requires explicit adjudication."
       },
       "delegate": {
-        "max_total_input_schema_bytes": 49060,
-        "max_total_tool_definition_bytes": 53286,
+        "max_total_input_schema_bytes": 49024,
+        "max_total_tool_definition_bytes": 53250,
         "max_visible_tools": 5,
         "rationale": "Exact live observed #1935 Worker census for the five product facades with Worker-safe action schemas; any regrowth requires explicit adjudication."
       },
       "operate": {
-        "max_total_input_schema_bytes": 87869,
-        "max_total_tool_definition_bytes": 101590,
+        "max_total_input_schema_bytes": 87833,
+        "max_total_tool_definition_bytes": 101554,
         "max_visible_tools": 39,
         "rationale": "Exact live observed #1691 census for operate after profile-specific tools/list narrowing; #1678 session-spine mutation policy narrows the operate action surface; any regrowth requires explicit adjudication."
       },
       "standard": {
-        "max_total_input_schema_bytes": 49268,
-        "max_total_tool_definition_bytes": 53561,
+        "max_total_input_schema_bytes": 49232,
+        "max_total_tool_definition_bytes": 53525,
         "max_visible_tools": 5,
         "rationale": "Exact live observed #1935 Lead/default census after contraction to the five product facades; any regrowth requires explicit adjudication."
       }
@@ -42,7 +42,7 @@
     "status": "provisional",
     "surfaces": {
       "admin.tachi_task": {
-        "max_input_schema_bytes": 25735,
+        "max_input_schema_bytes": 25699,
         "max_top_level_properties": 65,
         "rationale": "Exact live observed #1687 C1c operator tachi_task schema; zero headroom."
       },
@@ -57,7 +57,7 @@
         "rationale": "Exact live observed #1689 post-action-retirement tachi_memory schema; zero headroom."
       },
       "standard.tachi_task": {
-        "max_input_schema_bytes": 24481,
+        "max_input_schema_bytes": 24445,
         "max_top_level_properties": 65,
         "rationale": "Exact live observed #1687 C1c tachi_task schema; zero headroom."
       }
@@ -190,8 +190,8 @@
     },
     "profiles": {
       "admin": {
-        "total_input_schema_bytes": 142536,
-        "total_tool_definition_bytes": 173902,
+        "total_input_schema_bytes": 142500,
+        "total_tool_definition_bytes": 173866,
         "visible_tool_count": 83,
         "visible_tools": [
           "archive_memory",
@@ -280,8 +280,8 @@
         ]
       },
       "coordinate": {
-        "total_input_schema_bytes": 49268,
-        "total_tool_definition_bytes": 53561,
+        "total_input_schema_bytes": 49232,
+        "total_tool_definition_bytes": 53525,
         "visible_tool_count": 5,
         "visible_tools": [
           "tachi_a2a",
@@ -292,8 +292,8 @@
         ]
       },
       "delegate": {
-        "total_input_schema_bytes": 49060,
-        "total_tool_definition_bytes": 53286,
+        "total_input_schema_bytes": 49024,
+        "total_tool_definition_bytes": 53250,
         "visible_tool_count": 5,
         "visible_tools": [
           "tachi_a2a",
@@ -304,8 +304,8 @@
         ]
       },
       "operate": {
-        "total_input_schema_bytes": 87869,
-        "total_tool_definition_bytes": 101590,
+        "total_input_schema_bytes": 87833,
+        "total_tool_definition_bytes": 101554,
         "visible_tool_count": 39,
         "visible_tools": [
           "archive_memory",
@@ -350,8 +350,8 @@
         ]
       },
       "standard": {
-        "total_input_schema_bytes": 49268,
-        "total_tool_definition_bytes": 53561,
+        "total_input_schema_bytes": 49232,
+        "total_tool_definition_bytes": 53525,
         "visible_tool_count": 5,
         "visible_tools": [
           "tachi_a2a",
@@ -518,7 +518,7 @@
             ]
           },
           "tachi_task": {
-            "input_schema_bytes": 25735,
+            "input_schema_bytes": 25699,
             "property_count": 65,
             "property_names": [
               "__tachi_project_explicit",
@@ -612,7 +612,7 @@
             ]
           },
           "tachi_task": {
-            "input_schema_bytes": 24481,
+            "input_schema_bytes": 24445,
             "property_count": 65,
             "property_names": [
               "__tachi_project_explicit",
@@ -832,7 +832,7 @@
           ]
         },
         "tachi_task": {
-          "input_schema_bytes": 24481,
+          "input_schema_bytes": 24445,
           "property_count": 65,
           "property_names": [
             "__tachi_project_explicit",

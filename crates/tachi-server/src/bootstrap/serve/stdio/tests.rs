@@ -517,6 +517,7 @@ fn stdio_process_selected_ops_proxy_lists_and_calls_through_production_session_c
     rt.block_on(daemon_task).expect("daemon task");
 }
 
+#[cfg(unix)]
 #[test]
 fn vault_cli_operator_actions_select_ops_through_real_daemon_session() {
     let _guard = crate::utils::global_test_lock()
