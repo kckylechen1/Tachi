@@ -46,6 +46,20 @@ async fn spawn_test_http_daemon(
     CancellationToken,
     tokio::task::JoinHandle<()>,
 ) {
+    spawn_test_http_daemon_with_client_observer(server, global_db_path, None).await
+}
+
+type ClientHeaderObservations = std::sync::Arc<std::sync::Mutex<Vec<Option<String>>>>;
+
+async fn spawn_test_http_daemon_with_client_observer(
+    server: crate::MemoryServer,
+    global_db_path: &Path,
+    client_observer: Option<ClientHeaderObservations>,
+) -> (
+    crate::cli_client::DaemonInfo,
+    CancellationToken,
+    tokio::task::JoinHandle<()>,
+) {
     use rmcp::transport::streamable_http_server::{
         session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
     };
@@ -67,7 +81,29 @@ async fn spawn_test_http_daemon(
         std::sync::Arc::new(LocalSessionManager::default()),
         http_config,
     );
-    let router = axum::Router::new().nest_service("/mcp", service);
+    let router =
+        axum::Router::new()
+            .nest_service("/mcp", service)
+            .layer(axum::middleware::from_fn(
+                move |request: axum::extract::Request, next: axum::middleware::Next| {
+                    let observer = client_observer.clone();
+                    async move {
+                        if request.method() == axum::http::Method::POST {
+                            if let Some(observer) = observer {
+                                observer.lock().expect("client header observations").push(
+                                    request
+                                        .headers()
+                                        .get(crate::session_identity::HEADER_CLIENT)
+                                        .map(|value| {
+                                            value.to_str().expect("client header UTF-8").to_string()
+                                        }),
+                                );
+                            }
+                        }
+                        next.run(request).await
+                    }
+                },
+            ));
     let handle = tokio::spawn(async move {
         let _ = axum::serve(listener, router)
             .with_graceful_shutdown(async move { ct_shutdown.cancelled_owned().await })

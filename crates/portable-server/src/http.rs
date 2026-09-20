@@ -321,6 +321,29 @@ mod tests {
         assert_eq!(degraded["db_ready"], false);
     }
 
+    fn jsonrpc_response(text: &str, id: i64) -> serde_json::Value {
+        if let Ok(body) = serde_json::from_str::<serde_json::Value>(text) {
+            assert_eq!(body["id"], id, "unexpected response id: {body}");
+            return body;
+        }
+        // SSE may start with an empty priming event. Decode every nonempty
+        // data frame, then select the requested JSON-RPC response by id.
+        let frames: Vec<serde_json::Value> = text
+            .lines()
+            .filter_map(|line| line.strip_prefix("data:"))
+            .map(str::trim)
+            .filter(|data| !data.is_empty())
+            .map(|data| serde_json::from_str(data).expect("SSE JSON-RPC data"))
+            .filter(|body: &serde_json::Value| body["id"] == id)
+            .collect();
+        assert_eq!(
+            frames.len(),
+            1,
+            "expected one response for id {id}: {text:?}"
+        );
+        frames.into_iter().next().expect("matched response")
+    }
+
     #[tokio::test]
     async fn modern_protocol_is_rejected_by_portable_http_adapter() {
         install_tls_provider();
@@ -344,16 +367,13 @@ mod tests {
             .send()
             .await
             .expect("modern initialize");
+        let modern_status = modern_initialize.status();
         let text = modern_initialize
             .text()
             .await
             .expect("modern initialize body");
-        let payload = text
-            .lines()
-            .find_map(|line| line.strip_prefix("data:"))
-            .unwrap_or(&text);
-        let body: serde_json::Value =
-            serde_json::from_str(payload).expect("modern initialize JSON");
+        assert_eq!(modern_status, reqwest::StatusCode::OK);
+        let body = jsonrpc_response(&text, 2);
         assert_eq!(body["error"]["code"], -32022, "{body:#}");
         assert!(body.get("result").is_none(), "{body:#}");
 
@@ -398,12 +418,7 @@ mod tests {
                 .await
                 .expect("modern request");
                 let text = response.text().await.expect("error response body");
-                let payload = text
-                    .lines()
-                    .find_map(|line| line.strip_prefix("data:"))
-                    .unwrap_or(&text);
-                let body: serde_json::Value = serde_json::from_str(payload)
-                    .unwrap_or_else(|error| panic!("{method} {version}: {error}; {text}"));
+                let body = jsonrpc_response(&text, 1);
                 let expected = if method == "server/discover" && version == "2025-11-25" {
                     -32601
                 } else {

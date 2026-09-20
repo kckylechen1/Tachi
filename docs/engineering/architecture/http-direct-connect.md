@@ -102,7 +102,9 @@ Standard MCP protocol/routing header conflicts are rejected by RMCP at the
 HTTP transport boundary with status 400. A conflict between otherwise valid
 `X-Tachi-*` and request `_meta` identity reaches Tachi's application boundary
 and returns JSON-RPC `HEADER_MISMATCH` (`-32020`) in a normal HTTP 200 MCP
-response; clients must inspect the JSON-RPC envelope in both cases.
+response; clients must inspect the JSON-RPC envelope in both cases. Modern
+`INVALID_PARAMS` (`-32602`), including malformed present `clientInfo` or identity
+metadata, maps to HTTP 400. Legacy application JSON-RPC errors retain HTTP 200.
 
 For modern stdio, per-request project and profile metadata may only repeat the
 project and profile admitted when the adapter process started; omission keeps

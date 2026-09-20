@@ -778,7 +778,8 @@ impl rmcp::ServerHandler for StdioProxyServer {
         &self,
         context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
     ) -> Result<rmcp::model::DiscoverResult, rmcp::ErrorData> {
-        crate::mcp_peer::McpPeerMode::from_context(&context)?.require_modern()?;
+        let mode = crate::mcp_peer::McpPeerMode::from_context(&context)?.require_modern()?;
+        self.resolve_request_identity(mode, &context.meta)?;
         Ok(rmcp::model::DiscoverResult::from_server_info(
             crate::mcp_peer::supported_protocol_versions().to_vec(),
             self.get_info(),
@@ -791,7 +792,10 @@ impl rmcp::ServerHandler for StdioProxyServer {
         _request: rmcp::model::CompleteRequestParams,
         context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
     ) -> Result<rmcp::model::CompleteResult, rmcp::ErrorData> {
-        crate::mcp_peer::McpPeerMode::from_context(&context)?;
+        let mode = crate::mcp_peer::McpPeerMode::from_context(&context)?;
+        if mode == crate::mcp_peer::McpPeerMode::Modern20260728 {
+            self.resolve_request_identity(mode, &context.meta)?;
+        }
         Ok(Default::default())
     }
 
@@ -803,6 +807,7 @@ impl rmcp::ServerHandler for StdioProxyServer {
         let mode = crate::mcp_peer::McpPeerMode::from_context(&context)?;
         let mut result = rmcp::model::ListPromptsResult::default();
         if mode == crate::mcp_peer::McpPeerMode::Modern20260728 {
+            self.resolve_request_identity(mode, &context.meta)?;
             result.ttl_ms = Some(0);
             result.cache_scope = Some(rmcp::model::CacheScope::Private);
         }
@@ -817,6 +822,7 @@ impl rmcp::ServerHandler for StdioProxyServer {
         let mode = crate::mcp_peer::McpPeerMode::from_context(&context)?;
         let mut result = rmcp::model::ListResourcesResult::default();
         if mode == crate::mcp_peer::McpPeerMode::Modern20260728 {
+            self.resolve_request_identity(mode, &context.meta)?;
             result.ttl_ms = Some(0);
             result.cache_scope = Some(rmcp::model::CacheScope::Private);
         }
@@ -831,6 +837,7 @@ impl rmcp::ServerHandler for StdioProxyServer {
         let mode = crate::mcp_peer::McpPeerMode::from_context(&context)?;
         let mut result = rmcp::model::ListResourceTemplatesResult::default();
         if mode == crate::mcp_peer::McpPeerMode::Modern20260728 {
+            self.resolve_request_identity(mode, &context.meta)?;
             result.ttl_ms = Some(0);
             result.cache_scope = Some(rmcp::model::CacheScope::Private);
         }
@@ -910,40 +917,41 @@ impl rmcp::ServerHandler for StdioProxyServer {
             }
             let request = prepare_proxy_tool_call(request, identity.client_project.as_deref())?;
             let current = self.current_daemon();
-            let mut result = match crate::cli_client::call_daemon_tool_raw_with_profile_and_identity(
-                &current,
-                request.clone(),
-                identity.client_project.as_deref(),
-                identity.tool_profile,
-                identity.client.as_deref(),
-                identity.agent_identity.clone(),
-            )
-            .await
-            {
-                Ok(result) => result,
-                // Only BeforeDispatch is safe to retry: the request never reached
-                // the daemon, so a re-resolved retry cannot duplicate a write.
-                // AfterDispatch (timeout / post-handshake failure) must surface
-                // as-is to avoid replaying a possibly-applied write.
-                Err(err) if err.allows_in_process_fallback() => {
-                    match self.refresh_daemon(&current.url, &identity).await {
-                        Some(fresh) => {
-                            crate::cli_client::call_daemon_tool_raw_with_profile_and_identity(
-                                &fresh,
-                                request,
-                                identity.client_project.as_deref(),
-                                identity.tool_profile,
-                                identity.client.as_deref(),
-                                identity.agent_identity,
-                            )
-                            .await
-                            .map_err(daemon_error_data)?
+            let mut result =
+                match crate::cli_client::call_daemon_tool_raw_with_profile_and_identity(
+                    &current,
+                    request.clone(),
+                    identity.client_project.as_deref(),
+                    identity.tool_profile,
+                    identity.client.as_deref(),
+                    identity.agent_identity.clone(),
+                )
+                .await
+                {
+                    Ok(result) => result,
+                    // Only BeforeDispatch is safe to retry: the request never reached
+                    // the daemon, so a re-resolved retry cannot duplicate a write.
+                    // AfterDispatch (timeout / post-handshake failure) must surface
+                    // as-is to avoid replaying a possibly-applied write.
+                    Err(err) if err.allows_in_process_fallback() => {
+                        match self.refresh_daemon(&current.url, &identity).await {
+                            Some(fresh) => {
+                                crate::cli_client::call_daemon_tool_raw_with_profile_and_identity(
+                                    &fresh,
+                                    request,
+                                    identity.client_project.as_deref(),
+                                    identity.tool_profile,
+                                    identity.client.as_deref(),
+                                    identity.agent_identity,
+                                )
+                                .await
+                                .map_err(daemon_error_data)?
+                            }
+                            None => return Err(daemon_error_data(err)),
                         }
-                        None => return Err(daemon_error_data(err)),
                     }
-                }
-                Err(err) => return Err(daemon_error_data(err)),
-            };
+                    Err(err) => return Err(daemon_error_data(err)),
+                };
             if mode == crate::mcp_peer::McpPeerMode::Modern20260728 {
                 // See list_tools: the inner legacy hop cannot preserve this
                 // discriminator for the outer modern peer.

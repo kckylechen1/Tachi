@@ -43,9 +43,7 @@ impl McpPeerMode {
             }
             if meta.0.contains_key(META_CLIENT_INFO) && meta.client_info().is_none() {
                 return Err(rmcp::ErrorData::invalid_params(
-                    format!(
-                        "request _meta field {META_CLIENT_INFO} is present but malformed"
-                    ),
+                    format!("request _meta field {META_CLIENT_INFO} is present but malformed"),
                     None,
                 ));
             }

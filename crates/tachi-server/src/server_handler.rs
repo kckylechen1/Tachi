@@ -950,9 +950,7 @@ fn reject_modern_direct_stdio(
     {
         return Err(rmcp::ErrorData::unsupported_protocol_version(
             rmcp::model::ProtocolVersion::V_2026_07_28,
-            rmcp::model::ProtocolVersion::known_up_to(
-                &rmcp::model::ProtocolVersion::V_2025_11_25,
-            ),
+            rmcp::model::ProtocolVersion::known_up_to(&rmcp::model::ProtocolVersion::V_2025_11_25),
         ));
     }
     Ok(())
@@ -1107,6 +1105,7 @@ impl ServerHandler for MemoryServer {
     ) -> Result<rmcp::model::DiscoverResult, rmcp::ErrorData> {
         let mode = crate::mcp_peer::McpPeerMode::from_context(&context)?.require_modern()?;
         reject_modern_direct_stdio(mode, &context)?;
+        validate_modern_identity_headers(&context)?;
         Ok(rmcp::model::DiscoverResult::from_server_info(
             crate::mcp_peer::supported_protocol_versions().to_vec(),
             self.get_info(),
@@ -1121,6 +1120,9 @@ impl ServerHandler for MemoryServer {
     ) -> Result<rmcp::model::CompleteResult, rmcp::ErrorData> {
         let mode = crate::mcp_peer::McpPeerMode::from_context(&context)?;
         reject_modern_direct_stdio(mode, &context)?;
+        if mode == crate::mcp_peer::McpPeerMode::Modern20260728 {
+            validate_modern_identity_headers(&context)?;
+        }
         Ok(Default::default())
     }
 
@@ -1133,6 +1135,7 @@ impl ServerHandler for MemoryServer {
         reject_modern_direct_stdio(mode, &context)?;
         let mut result = rmcp::model::ListPromptsResult::default();
         if mode == crate::mcp_peer::McpPeerMode::Modern20260728 {
+            validate_modern_identity_headers(&context)?;
             result.ttl_ms = Some(0);
             result.cache_scope = Some(rmcp::model::CacheScope::Private);
         }
@@ -1148,6 +1151,7 @@ impl ServerHandler for MemoryServer {
         reject_modern_direct_stdio(mode, &context)?;
         let mut result = rmcp::model::ListResourcesResult::default();
         if mode == crate::mcp_peer::McpPeerMode::Modern20260728 {
+            validate_modern_identity_headers(&context)?;
             result.ttl_ms = Some(0);
             result.cache_scope = Some(rmcp::model::CacheScope::Private);
         }
@@ -1163,6 +1167,7 @@ impl ServerHandler for MemoryServer {
         reject_modern_direct_stdio(mode, &context)?;
         let mut result = rmcp::model::ListResourceTemplatesResult::default();
         if mode == crate::mcp_peer::McpPeerMode::Modern20260728 {
+            validate_modern_identity_headers(&context)?;
             result.ttl_ms = Some(0);
             result.cache_scope = Some(rmcp::model::CacheScope::Private);
         }

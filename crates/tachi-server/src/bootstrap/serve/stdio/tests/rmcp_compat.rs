@@ -15,11 +15,15 @@ impl rmcp::ServerHandler for LegacyProxyFixture {
     }
 
     fn get_info(&self) -> rmcp::model::ServerInfo {
-        rmcp::model::ServerInfo::new(
+        let mut info = rmcp::model::ServerInfo::new(
             rmcp::model::ServerCapabilities::builder()
                 .enable_tools()
                 .build(),
-        )
+        );
+        // RMCP uses get_info's version as its legacy initialize fallback.
+        // Keep that declaration consistent with this fixture's support ceiling.
+        info.protocol_version = rmcp::model::ProtocolVersion::V_2024_11_05;
+        info
     }
 
     async fn call_tool(
@@ -28,12 +32,16 @@ impl rmcp::ServerHandler for LegacyProxyFixture {
         _context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
     ) -> Result<rmcp::model::CallToolResponse, rmcp::ErrorData> {
         let result = match request.name.as_ref() {
-            "succeed" => rmcp::model::CallToolResult::success(vec![
-                rmcp::model::ContentBlock::text("legacy upstream success"),
-            ]),
-            "tool_error" => rmcp::model::CallToolResult::error(vec![
-                rmcp::model::ContentBlock::text("legacy upstream tool error"),
-            ]),
+            "succeed" => {
+                rmcp::model::CallToolResult::success(vec![rmcp::model::ContentBlock::text(
+                    "legacy upstream success",
+                )])
+            }
+            "tool_error" => {
+                rmcp::model::CallToolResult::error(vec![rmcp::model::ContentBlock::text(
+                    "legacy upstream tool error",
+                )])
+            }
             other => rmcp::model::CallToolResult::error(vec![rmcp::model::ContentBlock::text(
                 format!("unknown legacy fixture tool: {other}"),
             )]),
@@ -450,6 +458,7 @@ fn dual_era_conformance_matrix_covers_stdio_and_http() {
                 .headers(http_headers(&[
                     ("mcp-protocol-version", "2026-07-28"),
                     ("mcp-method", "resources/subscribe"),
+                    ("mcp-name", "tachi://legacy-only"),
                 ]))
                 .json(&json!({
                     "jsonrpc":"2.0", "id":27, "method":"resources/subscribe",
@@ -460,7 +469,7 @@ fn dual_era_conformance_matrix_covers_stdio_and_http() {
                 &legacy_route.text().await.expect("legacy route body"),
                 27,
             );
-            assert_eq!(legacy_route["error"]["code"], -32601);
+            assert_eq!(legacy_route["error"]["code"], -32601, "{legacy_route:#}");
 
             // Stdio legacy, modern, partial, and explicit-modern-initialize rows.
             let stdio_legacy = stdio_first_response(json!({
@@ -590,11 +599,7 @@ fn modern_client_info_is_validated_from_each_http_and_initialized_stdio_request(
                         }),
                         true,
                     ),
-                    (
-                        "valid",
-                        modern_meta(json!({})),
-                        true,
-                    ),
+                    ("valid", modern_meta(json!({})), true),
                     (
                         "malformed",
                         modern_meta(json!({
@@ -630,7 +635,15 @@ fn modern_client_info_is_validated_from_each_http_and_initialized_stdio_request(
                     .send()
                     .await
                     .expect("modern HTTP clientInfo request");
-                assert_eq!(response.status(), reqwest::StatusCode::OK);
+                assert_eq!(
+                    response.status(),
+                    if accepted {
+                        reqwest::StatusCode::OK
+                    } else {
+                        reqwest::StatusCode::BAD_REQUEST
+                    },
+                    "{label}: exact modern INVALID_PARAMS HTTP mapping"
+                );
                 let payload = parse_http_mcp_payload(
                     &response.text().await.expect("modern HTTP clientInfo body"),
                     request_id,
@@ -671,7 +684,11 @@ fn modern_client_info_is_validated_from_each_http_and_initialized_stdio_request(
                 let responses = stdio_responses(proxy, &requests).await;
                 assert_eq!(responses[0]["result"]["protocolVersion"], "2025-11-25");
                 if accepted {
-                    assert!(responses[1].get("error").is_none(), "{label}: {:#}", responses[1]);
+                    assert!(
+                        responses[1].get("error").is_none(),
+                        "{label}: {:#}",
+                        responses[1]
+                    );
                     assert_eq!(responses[1]["result"]["resultType"], "complete");
                     assert_eq!(memory_id_count(&global, &memory_id), 1, "{label}");
                 } else {
@@ -917,10 +934,15 @@ fn modern_stdio_forwards_validated_client_and_agent_per_request_without_stickine
     let temp = tempfile::tempdir().expect("tempdir");
     with_tachi_home(temp.path(), || {
         let global = temp.path().join("global/memory.db");
+        let worktree = temp.path().join("stdio-worktree");
+        std::fs::create_dir(&worktree).expect("create owned worktree fixture");
         let _agent_env = EnvRestore::remove(crate::session_identity::ENV_AGENT_IDENTITY);
         test_runtime().block_on(async {
             let server = crate::MemoryServer::new(global.clone(), None).expect("server");
-            let (daemon, cancel, task) = spawn_test_http_daemon(server, &global).await;
+            let client_headers = ClientHeaderObservations::default();
+            let (daemon, cancel, task) = spawn_test_http_daemon_with_client_observer(
+                server, &global, Some(client_headers.clone())
+            ).await;
             let proxy = identity_probe_proxy();
             *proxy.daemon.write().expect("proxy daemon lock") = daemon;
             *proxy
@@ -941,7 +963,7 @@ fn modern_stdio_forwards_validated_client_and_agent_per_request_without_stickine
                             })),
                             "name":"tachi_task", "arguments":{
                                 "action":"claim", "issue_ref":"owner/repo#1939-stdio",
-                                "branch":"identity-test", "worktree_path":"",
+                                "branch":"identity-test", "worktree_path":worktree,
                                 "claim_scope":["crates/tachi-server/src/bootstrap/serve/stdio.rs"],
                                 "claim_role":"executor", "claim_mode":"writable",
                                 "expected_head":"stdio-head",
@@ -963,22 +985,37 @@ fn modern_stdio_forwards_validated_client_and_agent_per_request_without_stickine
                 "{:#}",
                 responses[0]
             );
+            assert_ne!(
+                responses[0]["result"]["isError"], true,
+                "claim failed: {:#}",
+                responses[0]
+            );
             let omitted = http_tool_text(&responses[1]);
             assert!(omitted.contains("admission rejected"), "{:#}", responses[1]);
             assert!(!omitted.contains("agent.modern-stdio"), "{omitted}");
 
-            let (session_client, agent_identity): (String, String) = rusqlite::Connection::open(
+            let claim: serde_json::Value = serde_json::from_str(&http_tool_text(&responses[0]))
+                .expect("claim response JSON");
+            let claim_id = claim["claim_id"].as_str().expect("returned claim id");
+            let (session_client, agent_identity, role, stored_path): (String, String, String, String) = rusqlite::Connection::open(
                 &global,
             )
             .expect("open global DB")
             .query_row(
-                "SELECT session_client, agent_identity_id FROM session_claims WHERE issue_ref = ?1",
-                ["owner/repo#1939-stdio"],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                "SELECT session_client, agent_identity_id, role, worktree_path FROM session_claims WHERE claim_id = ?1 AND issue_ref = ?2",
+                [claim_id, "owner/repo#1939-stdio"],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .expect("modern stdio work claim");
-            assert_eq!(session_client, "modern-stdio-client");
+            assert_eq!(session_client, format!("work-claim:{claim_id}"));
             assert_eq!(agent_identity, "agent.modern-stdio");
+            assert_eq!(role, "executor");
+            assert_eq!(stored_path, std::fs::canonicalize(&worktree).expect("canonical worktree").to_string_lossy());
+            // session_claims.session_client is a v20 compatibility key, not
+            // the request label. Observe the real outbound HTTP header instead.
+            let mut observed_clients = client_headers.lock().expect("client headers").clone();
+            observed_clients.dedup();
+            assert_eq!(observed_clients, vec![Some("modern-stdio-client".to_string()), None]);
             assert_eq!(
                 observer.forwarded_agent_identity(),
                 crate::cli_client::ProxyIdentityForward::Header("agent.legacy-session".to_string())
@@ -1248,9 +1285,15 @@ fn modern_http_list_results_include_required_cache_metadata() {
                     &response.text().await.expect("modern HTTP list body"),
                     id,
                 );
-                assert_eq!(body["result"]["resultType"], "complete", "{method}: {body:#}");
+                assert_eq!(
+                    body["result"]["resultType"], "complete",
+                    "{method}: {body:#}"
+                );
                 assert_eq!(body["result"]["ttlMs"], 0, "{method}: {body:#}");
-                assert_eq!(body["result"]["cacheScope"], "private", "{method}: {body:#}");
+                assert_eq!(
+                    body["result"]["cacheScope"], "private",
+                    "{method}: {body:#}"
+                );
             }
             cancel.cancel();
             task.await.expect("daemon task");
@@ -1308,8 +1351,7 @@ fn modern_http_hydrates_legacy_proxy_success_and_tool_error_results() {
                 .collect();
             server.cache_proxy_tools(server_name, tools);
             let upstream = install_legacy_proxy_fixture(&server, server_name).await;
-            let (daemon, cancel, task) =
-                spawn_test_http_daemon(server.clone(), &global).await;
+            let (daemon, cancel, task) = spawn_test_http_daemon(server.clone(), &global).await;
 
             let (legacy_client, legacy_headers, _) =
                 http_mcp_initialize(&daemon.url, http_headers(&[]), None).await;
@@ -1337,12 +1379,14 @@ fn modern_http_hydrates_legacy_proxy_success_and_tool_error_results() {
             }
 
             let modern_client = reqwest::Client::new();
+            let success_name = format!("{server_name}__succeed");
+            let error_name = format!("{server_name}__tool_error");
             let (modern_success, modern_tool_error) = tokio::join!(
                 modern_http_tool_call(
                     &modern_client,
                     &daemon.url,
                     77,
-                    &format!("{server_name}__succeed"),
+                    &success_name,
                     json!({}),
                     json!({}),
                 ),
@@ -1350,19 +1394,17 @@ fn modern_http_hydrates_legacy_proxy_success_and_tool_error_results() {
                     &modern_client,
                     &daemon.url,
                     78,
-                    &format!("{server_name}__tool_error"),
+                    &error_name,
                     json!({}),
                     json!({}),
                 )
             );
             assert_eq!(
-                modern_success["result"]["resultType"],
-                "complete",
+                modern_success["result"]["resultType"], "complete",
                 "{modern_success:#}"
             );
             assert_ne!(
-                modern_success["result"]["isError"],
-                true,
+                modern_success["result"]["isError"], true,
                 "{modern_success:#}"
             );
             assert_eq!(
@@ -1371,13 +1413,11 @@ fn modern_http_hydrates_legacy_proxy_success_and_tool_error_results() {
                 "{modern_success:#}"
             );
             assert_eq!(
-                modern_tool_error["result"]["resultType"],
-                "complete",
+                modern_tool_error["result"]["resultType"], "complete",
                 "{modern_tool_error:#}"
             );
             assert_eq!(
-                modern_tool_error["result"]["isError"],
-                true,
+                modern_tool_error["result"]["isError"], true,
                 "{modern_tool_error:#}"
             );
             assert_eq!(
@@ -1518,9 +1558,11 @@ fn modern_http_concurrent_requests_isolate_project_profile_actor_and_work_claim(
             assert_eq!(memory_id_count(&global, "http-isolation-b"), 0);
 
             let claim_args = |issue_ref: &str, scope: &str, role: &str| {
+                let worktree = temp.path().join(format!("http-worktree-{role}"));
+                std::fs::create_dir(&worktree).expect("create independent worktree fixture");
                 json!({
                     "action":"claim", "issue_ref":issue_ref,
-                    "branch":format!("identity-{role}"), "worktree_path":"",
+                    "branch":format!("identity-{role}"), "worktree_path":worktree,
                     "claim_scope":[scope], "claim_role":role, "claim_mode":"writable",
                     "expected_head":format!("head-{role}"),
                     "lease_expires_at":"2030-01-01T00:00:00Z"
@@ -1546,6 +1588,7 @@ fn modern_http_concurrent_requests_isolate_project_profile_actor_and_work_claim(
             );
             for response in [&claim_a, &claim_b] {
                 assert!(response.get("error").is_none(), "{response:#}");
+                assert_ne!(response["result"]["isError"], true, "claim failed: {response:#}");
                 assert_eq!(response["result"]["resultType"], "complete");
             }
 
@@ -1583,29 +1626,31 @@ fn modern_http_concurrent_requests_isolate_project_profile_actor_and_work_claim(
                 "coordinate request must reach and execute the coordinate-only handler: {coordinate_op:#}"
             );
 
+            let (runtime_a, runtime_b) = tokio::join!(
+                modern_http_tool_call(&client, &daemon.url, 81, "runtime_info", identity_a(), json!({})),
+                modern_http_tool_call(&client, &daemon.url, 82, "runtime_info", identity_b(), json!({})),
+            );
             let connection = rusqlite::Connection::open(&global).expect("open global DB");
-            for (issue_ref, expected_client, expected_agent, expected_role) in [
-                (
-                    "owner/repo#1939-http-a",
-                    "http-client-a",
-                    "agent.http-a",
-                    "executor-a",
-                ),
-                (
-                    "owner/repo#1939-http-b",
-                    "http-client-b",
-                    "agent.http-b",
-                    "executor-b",
-                ),
+            for (issue_ref, expected_client, expected_agent, expected_role, claim_response, runtime_response) in [
+                ("owner/repo#1939-http-a", "http-client-a", "agent.http-a", "executor-a", &claim_a, &runtime_a),
+                ("owner/repo#1939-http-b", "http-client-b", "agent.http-b", "executor-b", &claim_b, &runtime_b),
             ] {
-                let actual: (String, String, String) = connection
+                let claim: serde_json::Value = serde_json::from_str(&http_tool_text(claim_response))
+                    .expect("claim response JSON");
+                let claim_id = claim["claim_id"].as_str().expect("returned claim id");
+                let actual: (String, String, String, String) = connection
                     .query_row(
-                        "SELECT session_client, agent_identity_id, role FROM session_claims WHERE issue_ref = ?1",
-                        [issue_ref],
-                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                        "SELECT session_client, agent_identity_id, role, worktree_path FROM session_claims WHERE claim_id = ?1 AND issue_ref = ?2",
+                        [claim_id, issue_ref],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
                     )
                     .expect("request-local work claim authority");
-                assert_eq!(actual, (expected_client.into(), expected_agent.into(), expected_role.into()));
+                let expected_path = std::fs::canonicalize(temp.path().join(format!("http-worktree-{expected_role}")))
+                    .expect("canonical worktree").to_string_lossy().into_owned();
+                assert_eq!(actual, (format!("work-claim:{claim_id}"), expected_agent.into(), expected_role.into(), expected_path));
+                let runtime: serde_json::Value = serde_json::from_str(&http_tool_text(runtime_response))
+                    .expect("runtime response JSON");
+                assert_eq!(runtime["runtime"]["session_client"], expected_client);
             }
             drop(connection);
 
@@ -1894,3 +1939,5 @@ fn inherited_stdio_proxy_methods_reject_inline_wire_requests() {
         });
     });
 }
+
+mod request_boundaries;
