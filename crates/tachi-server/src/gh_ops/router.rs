@@ -171,6 +171,7 @@ pub(crate) async fn handle_tachi_gh(
                 .transpose()?;
             let holder_gate = |worktree: &str| worktree_holder_gate(server, worktree);
             let out = handle_github_safe_merge_with_holder_gate(
+                server,
                 &client,
                 &target.repo,
                 target.number,
@@ -238,6 +239,7 @@ pub(crate) async fn handle_tachi_gh(
             )?;
             let client = gh_client_for_server(server)?;
             handle_github_safe_merge_with_holder_gate(
+                server,
                 &client,
                 &target.repo,
                 target.number,
@@ -255,7 +257,7 @@ pub(crate) async fn handle_tachi_gh(
         }
         "pr_handoff" => {
             let task_params = lifecycle_task_params(&params)?;
-            crate::task_lifecycle::handle_task_pr_handoff(&task_params)
+            crate::task_lifecycle::handle_task_pr_handoff(server, &task_params)
         }
         "release_note" => {
             let task_params = lifecycle_task_params(&params)?;

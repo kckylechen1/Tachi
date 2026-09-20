@@ -1,7 +1,48 @@
 use super::ledger::read_verification_ledger;
 use super::receipt_store::read_run_receipts;
 use super::*;
-use std::path::Path;
+use memcore::ClaimState;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct VerificationClaimBinding {
+    pub claim_id: String,
+    pub transition_version: i64,
+    pub expected_head: String,
+    pub worktree_path: Option<String>,
+}
+
+/// Resolve the one active WorkClaim that owns verification for `flow_id`.
+/// Heartbeat order is presence evidence, never selection authority.
+pub(super) fn resolve_active_verification_claim(
+    server: &MemoryServer,
+    flow_id: &str,
+) -> Result<VerificationClaimBinding, String> {
+    let claims = server.with_global_store_read(|store| {
+        memcore::list_claims(store.connection(), Some(ClaimState::Active))
+            .map_err(|err| err.to_string())
+    })?;
+    let mut matching = claims
+        .into_iter()
+        .filter(|claim| claim.flow_id.as_deref() == Some(flow_id));
+    let claim = matching
+        .next()
+        .ok_or_else(|| format!("verification_claim_missing: flow {flow_id}"))?;
+    if matching.next().is_some() {
+        return Err(format!("verification_claim_ambiguous: flow {flow_id}"));
+    }
+    let expected_head = claim
+        .expected_head
+        .as_deref()
+        .filter(|head| !head.trim().is_empty())
+        .ok_or_else(|| format!("verification_claim_expected_head_missing: flow {flow_id}"))?
+        .to_string();
+    Ok(VerificationClaimBinding {
+        claim_id: claim.claim_id,
+        transition_version: claim.transition_version,
+        expected_head,
+        worktree_path: claim.worktree_path,
+    })
+}
 
 /// #1454 F1/G2: a receipt is tree-bound when the run executed in the
 /// SERVER-OWNED detached copy (`executed_in_detached_copy`), the copy was
@@ -82,12 +123,12 @@ fn classify_receipt(receipt: &Value, head_sha: &str) -> (&'static str, Option<St
 ///
 /// `Ok(None)` means no ledger exists for the flow; callers (safe-merge,
 /// status) treat that as `verification:missing` / display `unverified`.
-/// `tachi_home` is the server's global data root (receipts live under
-/// `<tachi-home>/verify-receipts`).
+/// Once a ledger exists, evaluation requires exactly one active WorkClaim and
+/// binds the verdict to that claim's id, transition revision, and nonblank
+/// expected head. No caller supplies the evaluated SHA.
 pub(crate) fn evaluate_verification_gate(
+    server: &MemoryServer,
     flow_id: Option<&str>,
-    current_head_sha: &str,
-    tachi_home: &Path,
 ) -> Result<Option<Value>, String> {
     let Some(flow_id) = flow_id else {
         return Ok(None);
@@ -95,6 +136,8 @@ pub(crate) fn evaluate_verification_gate(
     let Some(ledger) = read_verification_ledger(flow_id)? else {
         return Ok(None);
     };
+    let claim = resolve_active_verification_claim(server, flow_id)?;
+    let current_head_sha = claim.expected_head.as_str();
     let items = ledger
         .get("items")
         .and_then(Value::as_array)
@@ -117,6 +160,9 @@ pub(crate) fn evaluate_verification_gate(
             "overall": "not_required",
             "required_total": 0,
             "current_head_sha": current_head_sha,
+            "expected_head": current_head_sha,
+            "claim_id": claim.claim_id,
+            "claim_transition_version": claim.transition_version,
             "passed": [],
             "failed": [],
             "pending": [],
@@ -127,7 +173,7 @@ pub(crate) fn evaluate_verification_gate(
         })));
     }
 
-    let receipts = read_run_receipts(tachi_home, flow_id)?;
+    let receipts = read_run_receipts(&server.tachi_home_dir(), flow_id)?;
     let mut by_kind: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
     for receipt in receipts {
         if let Some(kind) = receipt.get("kind").and_then(Value::as_str) {
@@ -180,6 +226,9 @@ pub(crate) fn evaluate_verification_gate(
         "overall": overall,
         "required_total": passed.len() + failed.len() + pending.len() + stale.len(),
         "current_head_sha": current_head_sha,
+        "expected_head": current_head_sha,
+        "claim_id": claim.claim_id,
+        "claim_transition_version": claim.transition_version,
         "passed": passed,
         "failed": failed,
         "pending": pending,

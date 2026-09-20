@@ -45,13 +45,13 @@ pub(crate) async fn handle_task_cycle_status(
         .map(crate::verify_ops::read_verification_ledger)
         .transpose()?
         .flatten();
-    // #1454 F6: the readiness verdict is the authority-aware gate result, not
-    // the raw ledger `overall`. Best server-known head: the GitHub head the
-    // server wrote into status.json::github (safe_merge/link_pr observed it),
-    // else the receipt-store head; with neither, `unverified` (fail-closed
-    // display — never caller-passed).
-    let verification_verdict =
-        verification_verdict(server, flow_id.as_deref(), &status, verification.as_ref())?;
+    // The readiness verdict is the claim-bound gate result, not the raw
+    // caller-asserted ledger `overall`.
+    let verification_snapshot =
+        verification_snapshot(server, flow_id.as_deref(), verification.as_ref())?;
+    let verification_verdict = verification_snapshot
+        .as_ref()
+        .map(|gate| gate.verdict.as_str());
     let close_loop = run_dir
         .as_ref()
         .map(|dir| read_json_file(&dir.join("close_loop.json")))
@@ -109,7 +109,7 @@ pub(crate) async fn handle_task_cycle_status(
         &status,
         issue_ref.as_deref(),
         pr_ref.as_deref(),
-        verification_verdict.as_deref(),
+        verification_verdict,
         release_note_present,
         close_loop.as_ref(),
     );
@@ -121,7 +121,10 @@ pub(crate) async fn handle_task_cycle_status(
         pr_ref.as_deref(),
         &linked_docs,
         &linked_specs,
-        verification_verdict.as_deref(),
+        verification_verdict,
+        verification_snapshot
+            .as_ref()
+            .and_then(|gate| gate.expected_head.as_deref()),
         verification.as_ref(),
         &status,
         result_present,
@@ -138,7 +141,7 @@ pub(crate) async fn handle_task_cycle_status(
         pr_ref.as_deref(),
         &linked_docs,
         &linked_specs,
-        verification_verdict.as_deref(),
+        verification_verdict,
         merge_state.as_deref(),
         release_note_present,
         close_loop.as_ref(),
@@ -452,6 +455,7 @@ fn spec_drift(
     linked_docs: &[String],
     linked_specs: &[String],
     verification_verdict: Option<&str>,
+    verification_head: Option<&str>,
     verification: Option<&Value>,
     status: &Value,
     result_present: bool,
@@ -525,13 +529,15 @@ fn spec_drift(
                 ));
             }
         }
-        let verification_head = verification.and_then(|ledger| ledger.get("head_sha"));
         let github_head = status
             .get("github")
             .and_then(|github| github.get("head_sha"))
             .and_then(Value::as_str);
-        if let (Some(Value::String(v_head)), Some(g_head)) = (verification_head, github_head) {
-            if v_head != g_head {
+        // An open PR must match the same claim head used by the gate. After
+        // merge its historical head does not invalidate an explicit rebind;
+        // failed/pending/stale verification still produces drift above.
+        if let (Some(v_head), Some(g_head)) = (verification_head, github_head) {
+            if merge_state != Some("merged") && v_head != g_head {
                 drift.push(drift_item(
                     "verification_head_mismatch",
                     &format!(
@@ -575,46 +581,44 @@ fn drift_item(kind: &str, detail: &str, action: &str) -> Value {
     })
 }
 
-/// #1454 F6: authority-aware verification verdict for the cycle view.
-///
-/// Best server-known head for the flow: the GitHub head the server itself
-/// wrote into `status.json::github::head_sha` (safe_merge/link_pr observed
-/// it from GitHub), else the receipt-store head (the server observed it at
-/// run time). With neither, the verdict is `unverified` — fail-closed
-/// display, never the caller-asserted ledger `overall`. `None` means no
-/// ledger exists (callers keep their missing-verification coaching).
-fn verification_verdict(
+/// Both fields come from one claim-bound gate evaluation. Caller ledger
+/// fields are display data and must not determine readiness or head drift.
+struct VerificationSnapshot {
+    verdict: String,
+    expected_head: Option<String>,
+}
+
+/// `None` means no flow ledger exists. Invalid claim authority stays unverified
+/// and supplies no head for the PR comparison.
+fn verification_snapshot(
     server: &MemoryServer,
     flow_id: Option<&str>,
-    status: &Value,
     ledger: Option<&Value>,
-) -> Result<Option<String>, String> {
+) -> Result<Option<VerificationSnapshot>, String> {
     let Some(flow_id) = flow_id else {
         return Ok(None);
     };
     if ledger.is_none() {
         return Ok(None);
     }
-    let home = server.tachi_home_dir();
-    let head = status
-        .get("github")
-        .and_then(|github| github.get("head_sha"))
-        .and_then(Value::as_str)
-        .filter(|sha| !sha.trim().is_empty())
-        .map(str::to_string)
-        .or_else(|| crate::verify_ops::best_receipt_head(&home, flow_id));
-    let Some(head) = head else {
-        return Ok(Some("unverified".to_string()));
+    let gate = match crate::verify_ops::evaluate_verification_gate(server, Some(flow_id)) {
+        Ok(gate) => gate,
+        Err(err) if err.starts_with("verification_claim_") => None,
+        Err(err) => return Err(err),
     };
-    match crate::verify_ops::evaluate_verification_gate(Some(flow_id), &head, &home)? {
-        Some(gate) => Ok(Some(
-            gate.get("overall")
-                .and_then(Value::as_str)
-                .unwrap_or("unverified")
-                .to_string(),
-        )),
-        None => Ok(Some("unverified".to_string())),
-    }
+    Ok(Some(VerificationSnapshot {
+        verdict: gate
+            .as_ref()
+            .and_then(|gate| gate.get("overall"))
+            .and_then(Value::as_str)
+            .unwrap_or("unverified")
+            .to_string(),
+        expected_head: gate
+            .as_ref()
+            .and_then(|gate| gate.get("expected_head"))
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    }))
 }
 
 fn next_action(
