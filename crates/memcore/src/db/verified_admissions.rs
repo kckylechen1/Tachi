@@ -8,6 +8,9 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::error::MemoryError;
 
+#[cfg(test)]
+mod rowid_tests;
+
 pub const VERIFIED_ADMISSION_METHOD: &str = "device-envelope";
 pub const VERIFIED_ADMISSION_VERSION: &str = "v1";
 pub const VERIFIED_ADMISSION_SCOPE: &str = "agent_identity:remote_admission";
@@ -504,7 +507,34 @@ pub(crate) fn expected_verified_admission_trigger(
         .find(|(canonical, _, _)| name.eq_ignore_ascii_case(canonical))
 }
 
+// The append-only triggers address SQLite's physical rowid. An explicit
+// alias column, including a generated column hidden from table_info, changes
+// that meaning. Inspect main explicitly so a TEMP namesake cannot attest it.
+const IDENTITY_ADMISSION_ROWID_LAYOUT_SQL: &str = r#"
+SELECT EXISTS (
+    SELECT 1 FROM pragma_table_list
+    WHERE schema = 'main' AND name = 'identity_admissions'
+      AND type = 'table' AND wr = 0
+) AND NOT EXISTS (
+    SELECT 1 FROM pragma_table_xinfo('identity_admissions', 'main')
+    WHERE name COLLATE NOCASE IN ('rowid', 'oid', '_rowid_')
+)
+"#;
+
+fn validate_identity_admission_rowid_layout(conn: &Connection) -> Result<(), MemoryError> {
+    let canonical: bool =
+        conn.query_row(IDENTITY_ADMISSION_ROWID_LAYOUT_SQL, [], |row| row.get(0))?;
+    if !canonical {
+        return Err(MemoryError::InvalidArg(
+            "incomplete v37 verified admission schema: identity_admissions has a non-canonical rowid layout"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn install_verified_admission_schema(conn: &Connection) -> Result<(), MemoryError> {
+    validate_identity_admission_rowid_layout(conn)?;
     for (object_type, name, _, sql) in CANONICAL_OBJECTS.iter().copied() {
         let present: bool = conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM main.sqlite_schema WHERE type=?1 AND name=?2)",
@@ -529,8 +559,8 @@ pub(crate) fn install_verified_admission_schema(conn: &Connection) -> Result<(),
 }
 
 fn normalize_schema_sql(sql: &str) -> String {
-    sql.trim_end_matches(|ch: char| ch == ';' || ch.is_whitespace())
-        .split_whitespace()
+    sql.trim_end_matches(|ch: char| ch == ';' || ch.is_ascii_whitespace())
+        .split_ascii_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
 }
@@ -615,6 +645,7 @@ fn validate_identity_admission_conflict_policy(conn: &Connection) -> Result<(), 
 }
 
 pub(crate) fn validate_verified_admission_schema(conn: &Connection) -> Result<(), MemoryError> {
+    validate_identity_admission_rowid_layout(conn)?;
     for (object_type, name, table, canonical_sql) in CANONICAL_OBJECTS.iter().copied() {
         let found: Option<(String, String)> = conn
             .query_row(
