@@ -122,9 +122,10 @@ fn handoff_gate_claim(
     crate::claims_ops::handle_task_handoff(server, &params).expect("claim handoff")
 }
 
-/// #1112 discriminator: the evaluated SHA comes from the active WorkClaim,
-/// never from the caller. This is RED on the pre-fix signature because the
-/// forged caller SHA makes matching claim receipts look stale.
+/// #1112 positive control: the evaluated SHA and revision come from the
+/// active WorkClaim. Receipt-head mismatch and explicit-rebind tests below
+/// discriminate incorrect head selection at runtime; a signature change alone
+/// is not runtime RED evidence.
 #[test]
 fn gate_uses_claim_binding_instead_of_caller_sha() {
     let _guard = crate::utils::global_test_lock()
