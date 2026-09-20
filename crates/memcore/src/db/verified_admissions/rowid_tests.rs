@@ -164,7 +164,10 @@ fn shadowed_rowid_is_a_real_recursive_off_replacement_bypass() {
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
-    assert_eq!(rows, vec![("source".to_string(), "self_asserted".to_string())]);
+    assert_eq!(
+        rows,
+        vec![("source".to_string(), "self_asserted".to_string())]
+    );
     assert!(validate_verified_admission_schema(&conn).is_err());
 }
 

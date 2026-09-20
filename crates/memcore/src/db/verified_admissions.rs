@@ -1127,10 +1127,8 @@ mod tests {
                 "evidence_ref",
             ),
         ] {
-            conn.execute_batch(&format!(
-                "CREATE UNIQUE INDEX {index} ON {table}({column})"
-            ))
-            .unwrap();
+            conn.execute_batch(&format!("CREATE UNIQUE INDEX {index} ON {table}({column})"))
+                .unwrap();
             let error = validate_verified_admission_schema(&conn)
                 .expect_err("an additional OR REPLACE victim target must fail closed");
             assert!(
@@ -1139,8 +1137,7 @@ mod tests {
                     .contains("unexpected unique conflict targets"),
                 "{table}: {error}"
             );
-            conn.execute_batch(&format!("DROP INDEX {index}"))
-                .unwrap();
+            conn.execute_batch(&format!("DROP INDEX {index}")).unwrap();
         }
         validate_verified_admission_schema(&conn).unwrap();
     }

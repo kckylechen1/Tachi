@@ -65,9 +65,7 @@ fn install_before_revocation_insert_hook(hook: impl FnOnce() + 'static) {
 }
 
 #[cfg(test)]
-fn install_after_current_authority_hook(
-    hook: impl FnOnce(&rusqlite::Connection) + 'static,
-) {
+fn install_after_current_authority_hook(hook: impl FnOnce(&rusqlite::Connection) + 'static) {
     AFTER_CURRENT_AUTHORITY_HOOK.with(|slot| {
         assert!(
             slot.replace(Some(Box::new(hook))).is_none(),
@@ -691,9 +689,16 @@ mod tests {
     use sha2::{Digest, Sha256};
 
     use super::*;
-    use crate::tests::make_server;
 
     const RAW_SECRET: &str = "raw-attestation-secret-must-not-persist";
+
+    fn make_server() -> crate::tests::TestServer {
+        let server = crate::tests::make_server();
+        // Exercise delivery authority through its admitted product profile,
+        // matching the existing delivery seam fixture.
+        server.set_tool_profile(Some(tachi_hub::ToolProfile::coordinate()));
+        server
+    }
 
     #[derive(Clone)]
     struct FakeVerifier {
@@ -811,10 +816,7 @@ mod tests {
     fn create_claim(server: &MemoryServer, label: &str) -> String {
         let receipt =
             crate::claims_ops::handle_task_claim(server, &task_claim_params(label)).unwrap();
-        receipt["claim_id"]
-            .as_str()
-            .unwrap()
-            .to_string()
+        receipt["claim_id"].as_str().unwrap().to_string()
     }
 
     fn delivery_caller() -> memcore::DeliveryCaller {
@@ -855,11 +857,7 @@ mod tests {
             .unwrap()
     }
 
-    fn claim_delivery_direct(
-        server: &MemoryServer,
-        delivery_id: &str,
-        claim_key: &str,
-    ) {
+    fn claim_delivery_direct(server: &MemoryServer, delivery_id: &str, claim_key: &str) {
         server
             .with_global_store(|store| {
                 memcore::claim_ready_delivery(
@@ -1055,13 +1053,9 @@ mod tests {
         let at = now();
         let request = request("revoked-replay");
         let evidence = evidence(at);
-        let admitted = admit_verified_agent_connection_at(
-            &server,
-            &request,
-            &verifier(evidence.clone()),
-            at,
-        )
-        .unwrap();
+        let admitted =
+            admit_verified_agent_connection_at(&server, &request, &verifier(evidence.clone()), at)
+                .unwrap();
         let admission_id = admitted.receipt().admission_id.clone();
         revoke_verified_admission_at(
             &server,
@@ -1070,11 +1064,8 @@ mod tests {
                 admission_id: admission_id.clone(),
                 issuer_id: "issuer.device-trust.alpha".into(),
                 evidence_digest: format!("{:x}", Sha256::digest(b"revoked-replay")),
-                evidence_ref: VerifiedEvidenceRef::attestation(
-                    "device-envelope",
-                    "revoked-replay",
-                )
-                .unwrap(),
+                evidence_ref: VerifiedEvidenceRef::attestation("device-envelope", "revoked-replay")
+                    .unwrap(),
                 nonce: "revoked-replay-nonce".into(),
                 revoked_at: at,
             }),
@@ -1110,13 +1101,8 @@ mod tests {
         let request = request("expired-replay");
         let mut expiring = evidence(at);
         expiring.expires_at = at + Duration::seconds(1);
-        admit_verified_agent_connection_at(
-            &server,
-            &request,
-            &verifier(expiring.clone()),
-            at,
-        )
-        .unwrap();
+        admit_verified_agent_connection_at(&server, &request, &verifier(expiring.clone()), at)
+            .unwrap();
         server.set_work_claim_connection(
             Some("agent.remote.alpha".into()),
             "placement/runner-alpha/connection-7".into(),
@@ -1242,13 +1228,9 @@ mod tests {
         new_evidence.nonce = "nonce-alpha-8".into();
         new_evidence.evidence_ref =
             VerifiedEvidenceRef::attestation("device-envelope", "alpha-8").unwrap();
-        let admitted = admit_verified_agent_connection_at(
-            &server,
-            &new_request,
-            &verifier(new_evidence),
-            at,
-        )
-        .expect("the same identity may be verified on a genuinely new connection");
+        let admitted =
+            admit_verified_agent_connection_at(&server, &new_request, &verifier(new_evidence), at)
+                .expect("the same identity may be verified on a genuinely new connection");
         assert_eq!(
             admitted.receipt().connection_id,
             "placement/runner-alpha/connection-8"
@@ -1307,9 +1289,9 @@ mod tests {
                 });
                 crate::claims_ops::handle_task_claim(server, params)
             });
-            before_write_rx
-                .recv()
-                .expect("claim reached the checkpoint immediately before its authority transaction");
+            before_write_rx.recv().expect(
+                "claim reached the checkpoint immediately before its authority transaction",
+            );
             attempt_write_tx.send(()).unwrap();
             locker.execute_batch("COMMIT").unwrap();
             worker
@@ -1974,23 +1956,11 @@ mod tests {
 
         let claimable_id = mint_delivery(&server, "revoked-claim").delivery_id;
         let acknowledgeable_id = mint_delivery(&server, "revoked-ack").delivery_id;
-        claim_delivery_direct(
-            &server,
-            &acknowledgeable_id,
-            "revoked-ack-seed-claim",
-        );
+        claim_delivery_direct(&server, &acknowledgeable_id, "revoked-ack-seed-claim");
         let rejectable_id = mint_delivery(&server, "revoked-reject").delivery_id;
-        claim_delivery_direct(
-            &server,
-            &rejectable_id,
-            "revoked-reject-seed-claim",
-        );
+        claim_delivery_direct(&server, &rejectable_id, "revoked-reject-seed-claim");
         let resumable_id = mint_delivery(&server, "revoked-resume").delivery_id;
-        claim_delivery_direct(
-            &server,
-            &resumable_id,
-            "revoked-resume-seed-claim",
-        );
+        claim_delivery_direct(&server, &resumable_id, "revoked-resume-seed-claim");
         server
             .with_global_store(|store| {
                 memcore::reject_or_block(
@@ -2024,7 +1994,7 @@ mod tests {
                          ORDER BY delivery_id",
                     )
                     .map_err(|error| error.to_string())?;
-                statement
+                let rows = statement
                     .query_map(
                         params![
                             &delivery_ids[0],
@@ -2033,13 +2003,12 @@ mod tests {
                             &delivery_ids[3],
                             &delivery_ids[4]
                         ],
-                        |row| {
-                            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
-                        },
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
                     )
                     .map_err(|error| error.to_string())?
                     .collect::<Result<Vec<_>, _>>()
-                    .map_err(|error| error.to_string())
+                    .map_err(|error| error.to_string());
+                rows
             })
             .unwrap();
 
@@ -2190,7 +2159,7 @@ mod tests {
                          ORDER BY delivery_id",
                     )
                     .map_err(|error| error.to_string())?;
-                statement
+                let rows = statement
                     .query_map(
                         params![
                             &delivery_ids[0],
@@ -2199,13 +2168,12 @@ mod tests {
                             &delivery_ids[3],
                             &delivery_ids[4]
                         ],
-                        |row| {
-                            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
-                        },
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
                     )
                     .map_err(|error| error.to_string())?
                     .collect::<Result<Vec<_>, _>>()
-                    .map_err(|error| error.to_string())
+                    .map_err(|error| error.to_string());
+                rows
             })
             .unwrap();
         assert_eq!(delivery_after, delivery_before);

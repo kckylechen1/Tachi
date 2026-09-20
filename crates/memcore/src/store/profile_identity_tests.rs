@@ -354,7 +354,7 @@ fn production_reopen_rejects_altered_identity_admission_conflict_target() {
                  ON identity_admissions(connection_id);",
         )
         .expect("replace the canonical historical conflict target offline");
-        crate::db::verified_admissions::install_verified_admission_schema(&conn)
+        crate::db::install_verified_admission_schema(&conn)
             .expect("restore every canonical v37 object around the altered historical table");
     }
 

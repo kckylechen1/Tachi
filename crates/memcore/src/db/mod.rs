@@ -110,6 +110,8 @@ pub use dispatch_outcomes::{
     outcome_exists_for_dispatch, upsert_outcome, upsert_outcome_reconciling_terminal_placeholder,
     DispatchOutcomeRow, NewDispatchOutcome, OutcomeEvidenceClass,
 };
+#[cfg(test)]
+pub(crate) use verified_admissions::install_verified_admission_schema;
 #[cfg(feature = "admin")]
 pub use verified_admissions::{
     get_verified_admission_receipt, has_current_verified_admission,
