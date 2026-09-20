@@ -57,6 +57,14 @@ async fn install_legacy_proxy_fixture(
         let _ = service.waiting().await;
     });
     let client = ().serve(client_io).await.expect("initialize legacy upstream");
+    assert_eq!(
+        client
+            .peer()
+            .peer_info()
+            .expect("legacy upstream server info")
+            .protocol_version,
+        rmcp::model::ProtocolVersion::V_2024_11_05
+    );
     server.pool.install_test_connection(server_name, client);
     upstream
 }
@@ -557,6 +565,120 @@ fn dual_era_conformance_matrix_covers_stdio_and_http() {
                 ),
                 "modern request identity must not replace legacy session authority"
             );
+
+            cancel.cancel();
+            task.await.expect("daemon task");
+        });
+    });
+}
+
+#[test]
+fn modern_client_info_is_validated_from_each_http_and_initialized_stdio_request() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    with_tachi_home(temp.path(), || {
+        let global = temp.path().join("global/memory.db");
+        test_runtime().block_on(async {
+            let server = crate::MemoryServer::new(global.clone(), None).expect("server");
+            let (daemon, cancel, task) = spawn_test_http_daemon(server, &global).await;
+            let client_info_cases = || {
+                vec![
+                    (
+                        "absent",
+                        json!({
+                            "io.modelcontextprotocol/protocolVersion":"2026-07-28",
+                            "io.modelcontextprotocol/clientCapabilities":{}
+                        }),
+                        true,
+                    ),
+                    (
+                        "valid",
+                        modern_meta(json!({})),
+                        true,
+                    ),
+                    (
+                        "malformed",
+                        modern_meta(json!({
+                            "io.modelcontextprotocol/clientInfo":{"name":0,"version":"1"}
+                        })),
+                        false,
+                    ),
+                ]
+            };
+
+            let client = reqwest::Client::new();
+            for (offset, (label, meta, accepted)) in client_info_cases().into_iter().enumerate() {
+                let memory_id = format!("client-info-http-{label}");
+                let request_id = 90 + offset as i64;
+                let response = client
+                    .post(&daemon.url)
+                    .headers(http_headers(&[
+                        ("mcp-protocol-version", "2026-07-28"),
+                        ("mcp-method", "tools/call"),
+                        ("mcp-name", "tachi_memory"),
+                    ]))
+                    .json(&json!({
+                        "jsonrpc":"2.0", "id":request_id, "method":"tools/call",
+                        "params":{
+                            "_meta":meta, "name":"tachi_memory", "arguments":{
+                                "action":"save", "scope":"global", "id":memory_id,
+                                "text":"modern HTTP clientInfo validation",
+                                "summary":"clientInfo wire discriminator",
+                                "path":"/tests/client-info", "category":"fact", "force":true
+                            }
+                        }
+                    }))
+                    .send()
+                    .await
+                    .expect("modern HTTP clientInfo request");
+                assert_eq!(response.status(), reqwest::StatusCode::OK);
+                let payload = parse_http_mcp_payload(
+                    &response.text().await.expect("modern HTTP clientInfo body"),
+                    request_id,
+                );
+                if accepted {
+                    assert!(payload.get("error").is_none(), "{label}: {payload:#}");
+                    assert_eq!(payload["result"]["resultType"], "complete", "{payload:#}");
+                    assert_eq!(memory_id_count(&global, &memory_id), 1, "{label}");
+                } else {
+                    assert_eq!(payload["error"]["code"], -32602, "{payload:#}");
+                    assert_eq!(memory_id_count(&global, &memory_id), 0, "{label}");
+                }
+            }
+
+            for (offset, (label, meta, accepted)) in client_info_cases().into_iter().enumerate() {
+                let memory_id = format!("client-info-initialized-stdio-{label}");
+                let proxy = identity_probe_proxy();
+                *proxy.daemon.write().expect("proxy daemon lock") = daemon.clone();
+                let requests = vec![
+                    json!({
+                        "jsonrpc":"2.0", "id":100 + offset, "method":"initialize", "params":{
+                            "protocolVersion":"2025-11-25", "capabilities":{},
+                            "clientInfo":{"name":"legacy-before-modern", "version":"1"}
+                        }
+                    }),
+                    json!({"jsonrpc":"2.0", "method":"notifications/initialized"}),
+                    json!({
+                        "jsonrpc":"2.0", "id":110 + offset, "method":"tools/call", "params":{
+                            "_meta":meta, "name":"tachi_memory", "arguments":{
+                                "action":"save", "scope":"global", "id":memory_id,
+                                "text":"initialized stdio clientInfo validation",
+                                "summary":"clientInfo wire discriminator",
+                                "path":"/tests/client-info", "category":"fact", "force":true
+                            }
+                        }
+                    }),
+                ];
+                let responses = stdio_responses(proxy, &requests).await;
+                assert_eq!(responses[0]["result"]["protocolVersion"], "2025-11-25");
+                if accepted {
+                    assert!(responses[1].get("error").is_none(), "{label}: {:#}", responses[1]);
+                    assert_eq!(responses[1]["result"]["resultType"], "complete");
+                    assert_eq!(memory_id_count(&global, &memory_id), 1, "{label}");
+                } else {
+                    assert_eq!(responses[1]["error"]["code"], -32602, "{:#}", responses[1]);
+                    assert_eq!(memory_id_count(&global, &memory_id), 0, "{label}");
+                }
+            }
 
             cancel.cancel();
             task.await.expect("daemon task");
@@ -1192,9 +1314,9 @@ fn modern_http_hydrates_legacy_proxy_success_and_tool_error_results() {
             let (legacy_client, legacy_headers, _) =
                 http_mcp_initialize(&daemon.url, http_headers(&[]), None).await;
             http_mcp_initialized(&legacy_client, &daemon.url, legacy_headers.clone()).await;
-            for (id, tool_name, is_error) in [
-                (75, "succeed", false),
-                (76, "tool_error", true),
+            for (id, tool_name, is_error, expected_text) in [
+                (75, "succeed", false, "legacy upstream success"),
+                (76, "tool_error", true, "legacy upstream tool error"),
             ] {
                 let legacy = http_mcp_call_tool(
                     &legacy_client,
@@ -1206,6 +1328,7 @@ fn modern_http_hydrates_legacy_proxy_success_and_tool_error_results() {
                 )
                 .await;
                 assert!(legacy["result"].get("resultType").is_none(), "{legacy:#}");
+                assert_eq!(http_tool_text(&legacy), expected_text, "{legacy:#}");
                 if is_error {
                     assert_eq!(legacy["result"]["isError"], true, "{legacy:#}");
                 } else {
@@ -1214,26 +1337,54 @@ fn modern_http_hydrates_legacy_proxy_success_and_tool_error_results() {
             }
 
             let modern_client = reqwest::Client::new();
-            for (id, tool_name, is_error) in [
-                (77, "succeed", false),
-                (78, "tool_error", true),
-            ] {
-                let modern = modern_http_tool_call(
+            let (modern_success, modern_tool_error) = tokio::join!(
+                modern_http_tool_call(
                     &modern_client,
                     &daemon.url,
-                    id,
-                    &format!("{server_name}__{tool_name}"),
+                    77,
+                    &format!("{server_name}__succeed"),
+                    json!({}),
+                    json!({}),
+                ),
+                modern_http_tool_call(
+                    &modern_client,
+                    &daemon.url,
+                    78,
+                    &format!("{server_name}__tool_error"),
                     json!({}),
                     json!({}),
                 )
-                .await;
-                assert_eq!(modern["result"]["resultType"], "complete", "{modern:#}");
-                if is_error {
-                    assert_eq!(modern["result"]["isError"], true, "{modern:#}");
-                } else {
-                    assert_ne!(modern["result"]["isError"], true, "{modern:#}");
-                }
-            }
+            );
+            assert_eq!(
+                modern_success["result"]["resultType"],
+                "complete",
+                "{modern_success:#}"
+            );
+            assert_ne!(
+                modern_success["result"]["isError"],
+                true,
+                "{modern_success:#}"
+            );
+            assert_eq!(
+                http_tool_text(&modern_success),
+                "legacy upstream success",
+                "{modern_success:#}"
+            );
+            assert_eq!(
+                modern_tool_error["result"]["resultType"],
+                "complete",
+                "{modern_tool_error:#}"
+            );
+            assert_eq!(
+                modern_tool_error["result"]["isError"],
+                true,
+                "{modern_tool_error:#}"
+            );
+            assert_eq!(
+                http_tool_text(&modern_tool_error),
+                "legacy upstream tool error",
+                "{modern_tool_error:#}"
+            );
 
             cancel.cancel();
             task.await.expect("daemon task");
@@ -1427,8 +1578,9 @@ fn modern_http_concurrent_requests_isolate_project_profile_actor_and_work_claim(
             );
             assert_eq!(coordinate_op["result"]["isError"], true, "{coordinate_op:#}");
             assert!(
-                !http_tool_text(&coordinate_op).contains("tool not found"),
-                "coordinate request must reach the coordinate-only handler: {coordinate_op:#}"
+                http_tool_text(&coordinate_op)
+                    .contains("memo_id is required when action='promote_issue'"),
+                "coordinate request must reach and execute the coordinate-only handler: {coordinate_op:#}"
             );
 
             let connection = rusqlite::Connection::open(&global).expect("open global DB");

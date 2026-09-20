@@ -59,7 +59,8 @@ legacy session binding or become protocol-session authority. Inline metadata
 that selects a legacy version is still rejected because it cannot bypass the
 legacy initialize/session adapter. Modern `clientInfo` is optional, but when
 present it must be a valid typed MCP `Implementation`; malformed values fail
-before discovery or tool dispatch.
+before discovery or tool dispatch. Validation decodes the current request
+metadata directly and never substitutes an initialized peer's `clientInfo`.
 
 RMCP 3.x delivers wire initialize `_meta` through `RequestContext.meta`.
 The adapters read it there, retaining typed initialize params only for direct

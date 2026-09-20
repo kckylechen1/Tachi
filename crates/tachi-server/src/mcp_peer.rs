@@ -41,7 +41,7 @@ impl McpPeerMode {
                     None,
                 ));
             }
-            if meta.0.contains_key(META_CLIENT_INFO) && context.client_info().is_none() {
+            if meta.0.contains_key(META_CLIENT_INFO) && meta.client_info().is_none() {
                 return Err(rmcp::ErrorData::invalid_params(
                     format!(
                         "request _meta field {META_CLIENT_INFO} is present but malformed"
@@ -50,12 +50,12 @@ impl McpPeerMode {
                 ));
             }
             // Read the typed SDK values rather than treating key presence as
-            // capability proof. `missing_required_keys` already rejected a
-            // malformed capability object; clientInfo remains optional.
+            // capability proof. Decode optional clientInfo directly from this
+            // request: `context.client_info()` may fall back to initialized
+            // peer info when request metadata is not required.
             let _client_capabilities = context
                 .client_capabilities()
                 .expect("validated modern client capabilities");
-            let _client_info = context.client_info();
             return Ok(Self::Modern20260728);
         }
 
