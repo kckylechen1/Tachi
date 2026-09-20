@@ -305,6 +305,12 @@ type VersionProbeReaderResult = Option<Vec<u8>>;
 type VersionProbeReaderJob = Box<dyn FnOnce() -> VersionProbeReaderResult + Send + 'static>;
 #[cfg(unix)]
 type VersionProbeReaderHandle = std::thread::JoinHandle<VersionProbeReaderResult>;
+#[cfg(unix)]
+type VersionProbeReaderSpawner<'a> = dyn FnMut(
+    &'static str,
+    VersionProbeReaderJob,
+) -> std::io::Result<VersionProbeReaderHandle>
+    + 'a;
 
 #[cfg(unix)]
 #[derive(Default)]
@@ -434,10 +440,7 @@ impl OwnedVersionProbe {
         stdout: std::process::ChildStdout,
         stderr: std::process::ChildStderr,
         deadline: Instant,
-        spawn: &mut impl FnMut(
-            &'static str,
-            VersionProbeReaderJob,
-        ) -> std::io::Result<VersionProbeReaderHandle>,
+        spawn: &mut VersionProbeReaderSpawner<'_>,
     ) -> std::io::Result<()> {
         self.readers.stdout = Some(spawn(
             "tachi-version-stdout",
@@ -485,21 +488,15 @@ impl Drop for OwnedVersionProbe {
 
 #[cfg(unix)]
 fn run_version_probe_with_timeout(program: &std::path::Path, timeout: Duration) -> Option<String> {
-    run_version_probe_with_timeout_and_spawner(
-        program,
-        timeout,
-        &mut spawn_version_probe_reader,
-    )
+    let mut spawn_reader = spawn_version_probe_reader;
+    run_version_probe_with_timeout_and_spawner(program, timeout, &mut spawn_reader)
 }
 
 #[cfg(unix)]
 fn run_version_probe_with_timeout_and_spawner(
     program: &std::path::Path,
     timeout: Duration,
-    spawn_reader: &mut impl FnMut(
-        &'static str,
-        VersionProbeReaderJob,
-    ) -> std::io::Result<VersionProbeReaderHandle>,
+    spawn_reader: &mut VersionProbeReaderSpawner<'_>,
 ) -> Option<String> {
     use std::os::unix::process::CommandExt;
 

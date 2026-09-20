@@ -11,9 +11,7 @@
 /// the command is wrapped with `sandbox-exec`; on supported Linux ABIs a
 /// seccomp filter inherited across fork/exec denies group/session escape.
 #[cfg(target_os = "macos")]
-pub fn configure_process_group_escape_containment(
-    command: &mut std::process::Command,
-) -> bool {
+pub fn configure_process_group_escape_containment(command: &mut std::process::Command) -> bool {
     const PROFILE: &str = "(version 1)(allow default)(deny process-info-setcontrol)";
     let program = command.get_program().to_os_string();
     let args = command
@@ -51,9 +49,7 @@ pub fn configure_process_group_escape_containment(
     target_os = "linux",
     any(target_arch = "x86_64", target_arch = "aarch64")
 ))]
-pub fn configure_process_group_escape_containment(
-    command: &mut std::process::Command,
-) -> bool {
+pub fn configure_process_group_escape_containment(command: &mut std::process::Command) -> bool {
     use std::os::unix::process::CommandExt;
 
     // SAFETY: the closure runs after fork and before exec. It performs only
@@ -166,15 +162,11 @@ fn install_linux_process_group_escape_filter() -> std::io::Result<()> {
     target_os = "linux",
     not(any(target_arch = "x86_64", target_arch = "aarch64"))
 ))]
-pub fn configure_process_group_escape_containment(
-    _command: &mut std::process::Command,
-) -> bool {
+pub fn configure_process_group_escape_containment(_command: &mut std::process::Command) -> bool {
     false
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-pub fn configure_process_group_escape_containment(
-    _command: &mut std::process::Command,
-) -> bool {
+pub fn configure_process_group_escape_containment(_command: &mut std::process::Command) -> bool {
     false
 }
