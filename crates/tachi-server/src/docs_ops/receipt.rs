@@ -100,11 +100,16 @@ pub(super) fn validated_existing_model_receipt(
             ));
         }
     }
-    let receipt: ExistingModelInvocationReceiptV1 = serde_json::from_value(value).map_err(|error| {
-        format!(
-            "Refusing Wiki organize: protected invariant: existing model receipt violates the closed model-invocation-v1 wire contract: {error}"
-        )
-    })?;
+    // Decode the closed wire type from the original bytes, not from `value`.
+    // A Value map has already collapsed duplicate JSON keys, which would let
+    // the final duplicate silently override a conflicting provenance or
+    // binding field before serde's duplicate-field checks can reject it.
+    let receipt: ExistingModelInvocationReceiptV1 =
+        serde_json::from_str(receipt_json).map_err(|error| {
+            format!(
+                "Refusing Wiki organize: protected invariant: existing model receipt violates the closed model-invocation-v1 wire contract: {error}"
+            )
+        })?;
     let nonblank_identity = |identity: &Option<String>| {
         identity
             .as_deref()

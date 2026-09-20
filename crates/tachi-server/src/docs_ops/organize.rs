@@ -25,12 +25,12 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::SystemTime;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct PhysicalIdentity {
+pub(super) struct PhysicalIdentity {
     #[cfg(unix)]
-    dev: u64,
+    pub(super) dev: u64,
     #[cfg(unix)]
-    ino: u64,
-    canonical: PathBuf,
+    pub(super) ino: u64,
+    pub(super) canonical: PathBuf,
 }
 
 impl PhysicalIdentity {
@@ -63,7 +63,7 @@ impl PhysicalIdentity {
         Ok((identity, metadata))
     }
 
-    fn matches(&self, actual: &Self) -> bool {
+    pub(super) fn matches(&self, actual: &Self) -> bool {
         #[cfg(unix)]
         {
             self.dev == actual.dev && self.ino == actual.ino
@@ -74,7 +74,7 @@ impl PhysicalIdentity {
         }
     }
 
-    fn relocated_to(&self, path: &Path) -> Self {
+    pub(super) fn relocated_to(&self, path: &Path) -> Self {
         let mut relocated = self.clone();
         relocated.canonical = path.to_path_buf();
         relocated
@@ -82,7 +82,7 @@ impl PhysicalIdentity {
 }
 
 #[derive(Debug, Clone)]
-struct AuthorizedDocs {
+pub(super) struct AuthorizedDocs {
     worktree_root: PathBuf,
     docs_root: PathBuf,
     requested_root: PathBuf,
@@ -175,7 +175,7 @@ impl AuthorizedDocs {
         Ok(authorized)
     }
 
-    fn revalidate_roots(&self) -> Result<(), String> {
+    pub(super) fn revalidate_roots(&self) -> Result<(), String> {
         self.revalidate_object(
             &self.worktree_root,
             &self.worktree_identity,
@@ -200,7 +200,7 @@ impl AuthorizedDocs {
         Ok(())
     }
 
-    fn revalidate_object(
+    pub(super) fn revalidate_object(
         &self,
         path: &Path,
         expected: &PhysicalIdentity,
@@ -301,7 +301,7 @@ impl AuthorizedDocs {
         canonical_relative_path(relative)
     }
 
-    fn optional_file(
+    pub(super) fn optional_file(
         &self,
         path: &Path,
     ) -> Result<Option<(PhysicalIdentity, fs::Metadata)>, String> {
@@ -479,7 +479,10 @@ impl AuthorizedDocs {
         }
     }
 
-    fn ensure_existing_directory(&self, path: &Path) -> Result<PhysicalIdentity, String> {
+    pub(super) fn ensure_existing_directory(
+        &self,
+        path: &Path,
+    ) -> Result<PhysicalIdentity, String> {
         self.revalidate_roots()?;
         self.validate_contained_path(path)?;
         let (identity, metadata) = PhysicalIdentity::capture(path, "directory")?;
@@ -761,163 +764,6 @@ impl AuthorizedDocs {
         self.remove_file(path, &identity)
     }
 
-    fn rename_file(
-        &self,
-        source: &Path,
-        source_identity: &PhysicalIdentity,
-        destination: &Path,
-        destination_parent: &PhysicalIdentity,
-    ) -> Result<(), String> {
-        self.revalidate_roots()?;
-        self.revalidate_object(source, source_identity, false, "rename source")?;
-        let source_parent = source.parent().ok_or_else(|| {
-            format!(
-                "Refusing Wiki organize: protected invariant: rename source '{}' has no parent",
-                source.display()
-            )
-        })?;
-        let source_parent_identity = self.ensure_existing_directory(source_parent)?;
-        let parent = destination.parent().ok_or_else(|| {
-            format!(
-                "Refusing Wiki organize: protected invariant: rename destination '{}' has no parent",
-                destination.display()
-            )
-        })?;
-        self.revalidate_object(
-            parent,
-            destination_parent,
-            true,
-            "destination parent before rename",
-        )?;
-        if self.optional_file(destination)?.is_some() || fs::symlink_metadata(destination).is_ok() {
-            return Err(format!(
-                "Refusing Wiki organize: protected invariant: rename destination '{}' is not empty",
-                destination.display()
-            ));
-        }
-        run_organize_test_hook(OrganizeTestPoint::DestinationParentReady, parent);
-        self.revalidate_roots()?;
-        self.revalidate_object(source, source_identity, false, "rename source")?;
-        self.revalidate_object(
-            parent,
-            destination_parent,
-            true,
-            "destination parent before rename",
-        )?;
-        self.sync_file_bytes(source, source_identity, "rename source file")?;
-        #[cfg(test)]
-        if run_organize_test_hook(OrganizeTestPoint::RenameFileFailure, destination) {
-            return Err("Failed to rename file: injected archive failure".to_string());
-        }
-        fs::rename(source, destination).map_err(|error| {
-            format!(
-                "Failed to rename '{}' -> '{}': {error}",
-                source.display(),
-                destination.display()
-            )
-        })?;
-        if source_parent == parent {
-            self.sync_directory(
-                source_parent,
-                &source_parent_identity,
-                "rename source and destination parent",
-            )?;
-        } else {
-            self.sync_directory(parent, destination_parent, "rename destination parent")?;
-            // The destination entry is durable before the source deletion is
-            // made durable. Reversing these fsyncs can lose both names after
-            // a crash even though rename returned successfully.
-            self.sync_directory(
-                source_parent,
-                &source_parent_identity,
-                "rename source parent",
-            )?;
-        }
-        self.revalidate_object(
-            destination,
-            &source_identity.relocated_to(destination),
-            false,
-            "renamed destination",
-        )?;
-        Ok(())
-    }
-
-    fn sync_file_bytes(
-        &self,
-        path: &Path,
-        expected: &PhysicalIdentity,
-        label: &str,
-    ) -> Result<(), String> {
-        self.revalidate_roots()?;
-        self.revalidate_object(path, expected, false, label)?;
-        let mut options = OpenOptions::new();
-        options.read(true).write(true);
-        #[cfg(unix)]
-        options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
-        let file = options.open(path).map_err(|error| {
-            format!(
-                "Failed to open {label} '{}' for durable rename: {error}",
-                path.display()
-            )
-        })?;
-        let metadata = file.metadata().map_err(|error| {
-            format!(
-                "Failed to inspect {label} '{}' before durable rename: {error}",
-                path.display()
-            )
-        })?;
-        #[cfg(unix)]
-        let opened_identity = PhysicalIdentity {
-            dev: metadata.dev(),
-            ino: metadata.ino(),
-            canonical: path.to_path_buf(),
-        };
-        #[cfg(not(unix))]
-        let opened_identity = PhysicalIdentity {
-            canonical: path.canonicalize().map_err(|error| {
-                format!("Failed to canonicalize {label} before durable rename: {error}")
-            })?,
-        };
-        if !opened_identity.matches(expected) {
-            return Err(format!(
-                "Refusing Wiki organize: protected invariant: {label} '{}' changed before byte sync",
-                path.display()
-            ));
-        }
-        #[cfg(test)]
-        record_directory_sync(&format!("attempt {label}"), path);
-        #[cfg(test)]
-        if run_organize_test_hook(OrganizeTestPoint::RenameSourceSyncFailure, path) {
-            return Err(format!("Failed to sync {label}: injected file sync failure"));
-        }
-        file.sync_all()
-            .map_err(|error| format!("Failed to sync {label} '{}': {error}", path.display()))?;
-        #[cfg(test)]
-        record_directory_sync(&format!("complete {label}"), path);
-        self.revalidate_roots()?;
-        self.revalidate_object(path, expected, false, label)?;
-        Ok(())
-    }
-
-    fn sync_directory(
-        &self,
-        path: &Path,
-        expected: &PhysicalIdentity,
-        label: &str,
-    ) -> Result<(), String> {
-        self.revalidate_roots()?;
-        self.revalidate_object(path, expected, true, label)?;
-        #[cfg(test)]
-        record_directory_sync(&format!("attempt {label}"), path);
-        sync_directory_entry(path)
-            .map_err(|error| format!("Failed to sync {label} '{}': {error}", path.display()))?;
-        #[cfg(test)]
-        record_directory_sync(&format!("complete {label}"), path);
-        self.revalidate_roots()?;
-        self.revalidate_object(path, expected, true, label)?;
-        Ok(())
-    }
-
     fn unique_archive_target(
         &self,
         archive_dir: &Path,
@@ -960,42 +806,6 @@ impl AuthorizedDocs {
             }
         }
     }
-}
-
-fn sync_directory_entry(path: &Path) -> std::io::Result<()> {
-    #[cfg(test)]
-    if run_organize_test_hook(OrganizeTestPoint::DirectorySyncFailure, path) {
-        return Err(std::io::Error::other("injected directory sync failure"));
-    }
-
-    #[cfg(unix)]
-    File::open(path)?.sync_all()?;
-
-    #[cfg(windows)]
-    {
-        // Windows exposes no documented directory equivalent of POSIX fsync;
-        // FlushFileBuffers is documented for file/volume handles, not
-        // directory handles. Do not issue the known-invalid File::open call or
-        // claim an undocumented flush. New/replaced files are synced while
-        // open for writing, and rename-only sources are explicitly synced
-        // before their namespace operation. Ordered directory revalidation
-        // remains mandatory but is not Unix-equivalent crash durability.
-        let metadata = fs::metadata(path)?;
-        if !metadata.is_dir() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "directory synchronization target is not a directory",
-            ));
-        }
-    }
-
-    #[cfg(not(any(unix, windows)))]
-    return Err(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        "durable directory synchronization is unsupported on this platform",
-    ));
-
-    Ok(())
 }
 
 fn find_worktree_root_from(start: &Path) -> Result<PathBuf, String> {
@@ -1321,7 +1131,7 @@ pub(crate) fn capture_directory_sync_trace() -> (DirectorySyncTraceGuard, Arc<Mu
 }
 
 #[cfg(test)]
-fn record_directory_sync(label: &str, path: &Path) {
+pub(super) fn record_directory_sync(label: &str, path: &Path) {
     let events = directory_sync_trace()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -1418,7 +1228,7 @@ pub(crate) fn rename_file_for_test(
 }
 
 #[cfg(test)]
-fn run_organize_test_hook(point: OrganizeTestPoint, path: &Path) -> bool {
+pub(super) fn run_organize_test_hook(point: OrganizeTestPoint, path: &Path) -> bool {
     let action = {
         let mut slot = organize_test_hook()
             .lock()
@@ -1794,6 +1604,11 @@ pub(crate) async fn handle_wiki_organize(
                 {
                     let destination_content = authorized.read_text(&dest_path, &dest_identity)?;
                     let (destination_frontmatter, _) = parse_frontmatter(&destination_content);
+                    canonical_accepted_category(
+                        destination_frontmatter
+                            .as_ref()
+                            .and_then(|frontmatter| frontmatter.category.as_deref()),
+                    )?;
                     let destination_object_id = authorized.repo_relative_document_id(&dest_path)?;
                     let destination_receipt = validated_existing_model_receipt(
                         destination_frontmatter.as_ref(),
@@ -1858,6 +1673,11 @@ pub(crate) async fn handle_wiki_organize(
                 let destination_content = authorized.read_text(&dest_path, &dest_identity)?;
                 let (destination_frontmatter, destination_body) =
                     parse_frontmatter(&destination_content);
+                canonical_accepted_category(
+                    destination_frontmatter
+                        .as_ref()
+                        .and_then(|frontmatter| frontmatter.category.as_deref()),
+                )?;
                 let destination_object_id = authorized.repo_relative_document_id(&dest_path)?;
                 let destination_receipt = validated_existing_model_receipt(
                     destination_frontmatter.as_ref(),
@@ -2136,7 +1956,7 @@ mod tests {
     #[test]
     fn windows_directory_sync_policy_accepts_a_real_directory() {
         let sandbox = tempfile::tempdir().expect("create directory sync sandbox");
-        super::sync_directory_entry(sandbox.path())
+        super::super::durability::sync_directory_entry(sandbox.path())
             .expect("apply the explicit Windows directory sync policy");
     }
 }

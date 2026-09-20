@@ -254,6 +254,22 @@ fn document_with_receipt(
     )
 }
 
+fn document_with_raw_receipt(
+    title: &str,
+    summary: &str,
+    category: &str,
+    organize: bool,
+    receipt: &str,
+    body: &str,
+) -> String {
+    format!(
+        "---\ntitle: {}\nsummary: {}\ncategory: {}\norganize: {organize}\n{PROVENANCE_PREFIX}{receipt}\n---\n{body}",
+        serde_json::to_string(title).unwrap(),
+        serde_json::to_string(summary).unwrap(),
+        serde_json::to_string(category).unwrap(),
+    )
+}
+
 fn assert_model_document(
     content: &str,
     title: &str,
@@ -1804,6 +1820,54 @@ async fn source_newer_conflict_rebinds_receipted_predecessor_to_archive() {
 
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
+async fn source_newer_conflict_rejects_predecessor_category_alias_before_preview_or_apply() {
+    for dry_run in [true, false] {
+        let server = make_server();
+        let workspace = DocsWorktree::new();
+        let docs = workspace.docs_path().canonicalize().unwrap();
+        let source = docs.join("conflicted-alias.md");
+        let source_content = "---\ntitle: \"Replacement\"\nsummary: \"Replacement summary\"\ncategory: \"product/acme\"\norganize: true\n---\nreplacement body\n";
+        fs::write(&source, source_content).unwrap();
+        let destination = docs.join("product/acme/conflicted-alias.md");
+        fs::create_dir_all(destination.parent().unwrap()).unwrap();
+        let predecessor = valid_bound_receipt(
+            "product//acme",
+            "Predecessor",
+            "Predecessor summary",
+            "docs/product/acme/conflicted-alias.md",
+            4,
+        );
+        let destination_content = document_with_receipt(
+            "Predecessor",
+            "Predecessor summary",
+            "product//acme",
+            true,
+            &predecessor,
+            "predecessor body\n",
+        );
+        fs::write(&destination, &destination_content).unwrap();
+        fs::File::open(&destination)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(std::time::SystemTime::UNIX_EPOCH))
+            .unwrap();
+
+        let error =
+            crate::docs_ops::handle_wiki_organize(&server, docs.to_str().unwrap(), dry_run)
+                .await
+                .expect_err("conflict predecessor aliases must fail closed");
+
+        assert!(error.contains("canonical category path"), "{error}");
+        assert_eq!(fs::read_to_string(&source).unwrap(), source_content);
+        assert_eq!(
+            fs::read_to_string(&destination).unwrap(),
+            destination_content
+        );
+        assert!(!docs.join("archive/conflicted-alias.md").exists());
+    }
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn malformed_or_incomplete_prior_receipts_fail_closed_before_rewrite() {
     let base = valid_bound_receipt(
         "engineering/devops",
@@ -1923,6 +1987,63 @@ async fn malformed_or_incomplete_prior_receipts_fail_closed_before_rewrite() {
 
         assert!(error.contains("existing model receipt"), "{label}: {error}");
         assert_eq!(fs::read_to_string(path).unwrap(), original, "{label}");
+    }
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn duplicate_prior_receipt_fields_fail_closed_before_preview_or_rewrite() {
+    let base = valid_bound_receipt(
+        "engineering/devops",
+        "Duplicate title",
+        "Duplicate summary",
+        "docs/engineering/devops/duplicate.md",
+        2,
+    )
+    .to_string();
+    let cases = [
+        (
+            "completion-status",
+            base.replace(
+                "\"completion_status\":\"complete\"",
+                "\"completion_status\":\"truncated\",\"completion_status\":\"complete\"",
+            ),
+        ),
+        (
+            "binding-memory-id",
+            base.replace(
+                "\"memory_id\":\"docs/engineering/devops/duplicate.md\"",
+                "\"memory_id\":\"docs/forged.md\",\"memory_id\":\"docs/engineering/devops/duplicate.md\"",
+            ),
+        ),
+    ];
+
+    for (label, receipt) in cases {
+        assert_ne!(receipt, base, "fixture must contain a duplicate {label}");
+        for dry_run in [true, false] {
+            let server = make_server();
+            let workspace = DocsWorktree::new();
+            let docs = workspace.docs_path().canonicalize().unwrap();
+            let path = docs.join("engineering/devops/duplicate.md");
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let original = document_with_raw_receipt(
+                "Duplicate title",
+                "Duplicate summary",
+                "engineering/devops",
+                true,
+                &receipt,
+                "duplicate body\n",
+            );
+            fs::write(&path, &original).unwrap();
+
+            let error =
+                crate::docs_ops::handle_wiki_organize(&server, docs.to_str().unwrap(), dry_run)
+                    .await
+                    .expect_err("duplicate prior receipt fields must fail closed");
+
+            assert!(error.contains("closed model-invocation-v1"), "{label}: {error}");
+            assert_eq!(fs::read_to_string(path).unwrap(), original, "{label}");
+        }
     }
 }
 
