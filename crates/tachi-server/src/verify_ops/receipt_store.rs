@@ -103,28 +103,6 @@ pub(super) fn read_run_receipts(home: &Path, flow_id: &str) -> Result<Vec<Value>
     Ok(receipts)
 }
 
-/// Best server-known head for a flow: the `head_sha` of the most recent
-/// receipt (`ran_at` max). Used by display consumers (status/board/
-/// cycle_status/pr_handoff) when no GitHub head is available — the F6
-/// "receipt-store head for the flow" branch. Never a caller field.
-pub(crate) fn best_receipt_head(home: &Path, flow_id: &str) -> Option<String> {
-    let receipts = read_run_receipts(home, flow_id).ok()?;
-    receipts
-        .iter()
-        .max_by(|a, b| {
-            let a_ran = a.get("ran_at").and_then(Value::as_str).unwrap_or("");
-            let b_ran = b.get("ran_at").and_then(Value::as_str).unwrap_or("");
-            a_ran.cmp(b_ran)
-        })
-        .and_then(|receipt| {
-            receipt
-                .get("head_sha")
-                .and_then(Value::as_str)
-                .filter(|sha| !sha.is_empty())
-                .map(str::to_string)
-        })
-}
-
 /// #1454 F1 test seam: seed a receipt into the server-owned store exactly as
 /// the executor would write it. Discriminators that previously forged ledger
 /// JSON fixtures to mint authority now prove the boundary by seeding THIS

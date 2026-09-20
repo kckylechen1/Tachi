@@ -294,6 +294,8 @@ pub fn facade_action_required_bundle(tool_name: &str, action: &str) -> Option<To
             | "pr_comments"
             | "pr_review_digest"
             | "pr_status" => Some(ToolBundle::Observe),
+            // #1696 refresh reads GitHub but writes durable local truth/posture.
+            "current_truth_refresh" => Some(ToolBundle::Remember),
             "issue_create" | "issue_comment" | "issue_label" | "pr_comment" | "safe_merge"
             | "ship" | "link_pr" | "pr_handoff" | "release_note" | "close_loop" => {
                 Some(ToolBundle::Coordinate)
@@ -323,6 +325,45 @@ pub fn facade_action_required_bundle(tool_name: &str, action: &str) -> Option<To
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn current_truth_refresh_requires_remember_and_preserves_unknown_action_denial() {
+        assert_eq!(
+            facade_action_required_bundle("tachi_gh", "current_truth_refresh"),
+            Some(ToolBundle::Remember)
+        );
+        assert!(!facade_action_allowed(
+            "tachi_gh",
+            Some("current_truth_refresh"),
+            Some(ToolProfile::observe())
+        ));
+        for profile in [
+            ToolProfile::coordinate(),
+            ToolProfile::standard(),
+            ToolProfile::admin(),
+        ] {
+            assert!(facade_action_allowed(
+                "tachi_gh",
+                Some("current_truth_refresh"),
+                Some(profile)
+            ));
+        }
+        assert_eq!(
+            facade_action_required_bundle("tachi_gh", "unknown_current_truth_action"),
+            None
+        );
+        for profile in [
+            ToolProfile::observe(),
+            ToolProfile::remember(),
+            ToolProfile::coordinate(),
+        ] {
+            assert!(!facade_action_allowed(
+                "tachi_gh",
+                Some("unknown_current_truth_action"),
+                Some(profile)
+            ));
+        }
+    }
 
     #[test]
     fn f1751_a2a_profiles_split_status_from_respond_and_fail_closed() {

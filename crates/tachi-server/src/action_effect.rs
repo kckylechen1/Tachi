@@ -287,7 +287,11 @@ pub(crate) fn facade_action_effect(
                 "pr_comments",
                 "pr_status",
             ],
-            &["issue_freshness_scan", "pr_review_digest"],
+            &[
+                "issue_freshness_scan",
+                "current_truth_refresh",
+                "pr_review_digest",
+            ],
             &[
                 "issue_create",
                 "issue_comment",

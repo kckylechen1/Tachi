@@ -29,54 +29,28 @@ pub(crate) async fn read_issue_snapshot_bounded(
     issue_number: u64,
 ) -> Result<Value, String> {
     validate_repo(repo)?;
-    let issue_number_str = issue_number.to_string();
     // #1071 fix-round checkpoint 7: `build_gh_command` (which resolves `gh`
     // via a synchronous `which gh` shell-out and reads the vault token) used
     // to run BEFORE `ANCHOR_GH_TIMEOUT` started, so a stall in either of
     // those steps was completely unbounded — exactly the class of hang this
     // function exists to prevent (see module doc's `gh auth status` anecdote).
-    // Moving it inside the timed future puts the whole "resolve command,
-    // spawn, await output" sequence under one bound.
-    let timed = tokio::time::timeout(ANCHOR_GH_TIMEOUT, async {
-        let (cmd, token) = build_gh_command(server)?;
-        let mut cmd = tokio::process::Command::from(cmd);
-        cmd.args(["issue", "view", &issue_number_str])
-            .args(["--repo", repo])
-            .args([
-                "--json",
-                "number,title,state,body,labels,milestone,updatedAt,comments",
-            ])
-            .kill_on_drop(true);
-        let output = cmd
-            .output()
-            .await
-            .map_err(|e| format!("failed to execute `gh`: {e}"))?;
-        Ok::<(std::process::Output, String), String>((output, token))
-    })
+    // `run_gh_json_bounded` keeps that whole sequence under one bound while
+    // sharing the exact same hardened path with CurrentTruth refresh reads.
+    run_gh_json_bounded(
+        server,
+        vec![
+            "issue".to_string(),
+            "view".to_string(),
+            issue_number.to_string(),
+            "--repo".to_string(),
+            repo.to_string(),
+            "--json".to_string(),
+            "number,title,state,body,labels,milestone,updatedAt,comments".to_string(),
+        ],
+        ANCHOR_GH_TIMEOUT,
+        "gh issue view",
+    )
     .await
-    .map_err(|_| {
-        format!(
-            "gh issue view timed out after {:?} — treating anchor as unresolved, not hanging",
-            ANCHOR_GH_TIMEOUT
-        )
-    })?;
-    let (output, token) = timed?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let sanitized_stdout = sanitize_output(&stdout, &token);
-    let sanitized_stderr = sanitize_output(&stderr, &token);
-
-    if !output.status.success() {
-        return Err(format!(
-            "gh failed (exit {}): {}",
-            output.status.code().unwrap_or(-1),
-            sanitized_stderr.chars().take(500).collect::<String>()
-        ));
-    }
-
-    serde_json::from_str(&sanitized_stdout)
-        .map_err(|e| format!("parse `gh issue view` JSON: {e} — raw: {sanitized_stdout}"))
 }
 
 pub(in crate::gh_ops) async fn handle_gh_issue_read(

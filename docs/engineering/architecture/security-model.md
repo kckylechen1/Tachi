@@ -52,8 +52,10 @@ only") are honor-system.
 Stance today: worktree isolation + concurrent-tree discipline + review gate before
 merge (safe_merge/verify). Stance later: sandbox-enforced scopes (macOS sandbox
 profiles / container worktrees) — tracked as a gap, not promised.
-The merge gate is the real wall: nothing a worker writes reaches main without a
-fresh different-model review and verification evidence (#516 pipeline hardens this).
+The merge gate is the real wall: this trust-boundary work is high-risk and requires
+fresh independent different-model exact-candidate review plus risk-specific
+verification evidence (#516 pipeline hardens this). Lower-risk changes follow the
+repository's risk-class policy rather than inheriting this security requirement.
 
 **T3 — Malicious or compromised MCP upstream.** An upstream tool's OUTPUT is
 injectable content aimed at whichever agent called it; a hostile server can also
@@ -84,9 +86,10 @@ product decision to revisit.
 
 **T7 — Eval/routing poisoning.** Workers self-report; a lying worker inflates its
 own route.
-Stance: eval rows record verdicts from the REVIEW lane (different model), not the
-worker's self-report (review discipline is law); route changes go through proposals
-with `confirm=true` human application — the scheduler learns, but the owner ratifies.
+Stance: eval rows record independently checked outcomes, not the worker's
+self-report. Routing and agent-authority changes are high-risk, so their review lane
+uses a different model; route changes go through proposals with `confirm=true`
+human application — the scheduler learns, but the owner ratifies.
 
 **T8 — Recursive-dispatch resource exhaustion.** A worker that itself dispatches
 children (self-dispatch, or a chain of workers each dispatching the next) can
@@ -113,8 +116,10 @@ follow-up hardening, not part of this gate.
    them only as card-whitelisted, per-dispatch, audit-logged leases.
 2. Trust is minted only at the owner's local CLI; no MCP-surface path may
    auto-approve capabilities, keys, or route changes.
-3. Nothing merges to a default branch without different-model review evidence and
-   verification checks (goal/* included at campaign close).
+3. High-risk changes do not merge to a default branch without independent
+   different-model exact-candidate review and risk-specific verification. Ordinary
+   and low-risk changes follow `dispatch-lifecycle.md` (goal/* included at campaign
+   close).
 4. Every GitHub write and every key lease is attributable in the audit log.
 5. Review/verify gates fail CLOSED (missing/stale/unparseable evidence = blocked).
 6. Open-web read and write authority never coexist on one worker: research
