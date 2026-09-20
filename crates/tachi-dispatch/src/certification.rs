@@ -45,6 +45,8 @@ use std::io::Read;
 use std::path::PathBuf;
 #[cfg(unix)]
 use std::process::Stdio;
+#[cfg(unix)]
+use std::sync::mpsc;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime};
 #[cfg(unix)]
@@ -244,6 +246,27 @@ pub fn probe_backend_version(backend: &str) -> Option<String> {
     version
 }
 
+/// Closed prerequisite verdict for the one account-bearing backend probe.
+/// Probe output never crosses this boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackendAccountProbe {
+    Available,
+    ExecutableUnavailable,
+    AccountUnavailable,
+    TimedOut,
+    CleanupUnconfirmed,
+}
+
+/// Check the existing Codex CLI account through the same bounded, contained
+/// process owner used by the version prerequisite. No caller-supplied command,
+/// environment, working directory, or credential enters this boundary.
+pub fn probe_codex_account(timeout: Duration) -> BackendAccountProbe {
+    let Some(program) = which("codex") else {
+        return BackendAccountProbe::ExecutableUnavailable;
+    };
+    run_account_probe_with_timeout(&program, timeout)
+}
+
 type BinaryIdentity = (PathBuf, Option<SystemTime>, u64);
 
 #[allow(clippy::type_complexity)]
@@ -263,9 +286,10 @@ fn binary_identity(program: &std::path::Path) -> BinaryIdentity {
 }
 
 /// `<program> --version`, on a leash. The parent retains the child handle,
-/// bounds both output streams, and joins both readers on every outcome. A
-/// timeout kills and reaps the owned process group before returning `None`; no
-/// probe process or reader thread survives the refusal.
+/// bounds both output streams, and joins both readers after confirmed cleanup.
+/// If cleanup cannot be confirmed within its own deadline, an already-running
+/// reaper thread retains every process and reader handle until cleanup really
+/// completes; the caller fails closed without blocking indefinitely.
 fn run_version_probe(program: &std::path::Path) -> Option<String> {
     run_version_probe_with_timeout(program, Duration::from_secs(5))
 }
@@ -402,18 +426,28 @@ fn probe_process_group_absent(pid: u32) -> bool {
 }
 
 #[cfg(unix)]
-fn wait_for_probe_process_group_absence(pid: u32) -> bool {
-    let deadline = Instant::now() + PROBE_CLEANUP_TIMEOUT;
-    loop {
-        if probe_process_group_absent(pid) {
-            return true;
-        }
-        if Instant::now() >= deadline {
-            return false;
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
+#[derive(Clone, Copy)]
+struct VersionProbeCleanupOps {
+    signal: fn(u32, libc::c_int) -> bool,
+    group_absent: fn(u32) -> bool,
+    try_wait: fn(
+        &mut std::process::Child,
+    ) -> std::io::Result<Option<std::process::ExitStatus>>,
 }
+
+#[cfg(unix)]
+fn try_wait_probe_root(
+    child: &mut std::process::Child,
+) -> std::io::Result<Option<std::process::ExitStatus>> {
+    child.try_wait()
+}
+
+#[cfg(unix)]
+const VERSION_PROBE_CLEANUP_OPS: VersionProbeCleanupOps = VersionProbeCleanupOps {
+    signal: signal_probe_process_group,
+    group_absent: probe_process_group_absent,
+    try_wait: try_wait_probe_root,
+};
 
 #[cfg(unix)]
 struct OwnedVersionProbe {
@@ -457,45 +491,178 @@ impl OwnedVersionProbe {
         self.readers.join_all()
     }
 
-    fn terminate_reap_and_prove(&mut self) -> Option<std::process::ExitStatus> {
+    fn terminate_reap_and_prove(
+        &mut self,
+        deadline: Instant,
+        ops: VersionProbeCleanupOps,
+    ) -> Option<std::process::ExitStatus> {
         if self.root_reaped {
             return None;
         }
-        let signal_confirmed = signal_probe_process_group(self.pid, libc::SIGKILL);
-        let status = self.child.wait();
-        // As in the managed-run guard, asking wait to reap permanently ends
-        // signalling authority even if wait itself reports an error.
-        self.root_reaped = true;
-        let group_absent = wait_for_probe_process_group_absence(self.pid);
-        if !signal_confirmed || !group_absent {
-            return None;
+        let signal_confirmed = (ops.signal)(self.pid, libc::SIGKILL);
+        loop {
+            // Keep the leader unreaped until its group is absent. That reserves
+            // the numeric PGID while cleanup still has signalling authority.
+            if (ops.group_absent)(self.pid) {
+                match (ops.try_wait)(&mut self.child) {
+                    Ok(Some(status)) => {
+                        self.root_reaped = true;
+                        return signal_confirmed.then_some(status);
+                    }
+                    Ok(None) | Err(_) => {}
+                }
+            }
+            if Instant::now() >= deadline {
+                return None;
+            }
+            std::thread::sleep(Duration::from_millis(10));
         }
-        status.ok()
+    }
+
+    fn cleanup_until_confirmed(mut self) {
+        while !self.root_reaped {
+            let _ = signal_probe_process_group(self.pid, libc::SIGKILL);
+            if probe_process_group_absent(self.pid) {
+                if let Ok(Some(_)) = self.child.try_wait() {
+                    self.root_reaped = true;
+                    break;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        // Process-tree cleanup comes first so inherited pipes close before all
+        // successfully-created readers are joined.
+        let _ = self.readers.join_all();
     }
 }
 
 #[cfg(unix)]
-impl Drop for OwnedVersionProbe {
-    fn drop(&mut self) {
-        if !self.root_reaped {
-            let _ = self.terminate_reap_and_prove();
+struct VersionProbeCleanupOwner {
+    sender: Option<mpsc::SyncSender<OwnedVersionProbe>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+#[cfg(unix)]
+impl VersionProbeCleanupOwner {
+    fn start() -> std::io::Result<Self> {
+        let (sender, receiver) = mpsc::sync_channel::<OwnedVersionProbe>(1);
+        let thread = std::thread::Builder::new()
+            .name("tachi-prerequisite-reaper".to_string())
+            .spawn(move || {
+                if let Ok(probe) = receiver.recv() {
+                    probe.cleanup_until_confirmed();
+                }
+            })?;
+        Ok(Self {
+            sender: Some(sender),
+            thread: Some(thread),
+        })
+    }
+
+    fn finish(mut self) {
+        drop(self.sender.take());
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
         }
-        // Process-tree cleanup comes first so inherited pipes close before
-        // every successfully-created reader is joined, including on unwind.
-        let _ = self.readers.join_all();
+    }
+
+    fn retain_until_confirmed(mut self, probe: OwnedVersionProbe) {
+        let sender = self
+            .sender
+            .take()
+            .expect("prerequisite cleanup sender must exist");
+        // The receiver performs no fallible setup and cannot exit before this
+        // send. Its pre-spawn creation is the refusal boundary that guarantees
+        // a live child always has an owner even when bounded cleanup expires.
+        if let Err(failed) = sender.send(probe) {
+            // The receiver has no fallible work before recv, so this branch is
+            // unreachable in ordinary operation. If the owner thread itself
+            // was externally lost, retain ownership here rather than dropping
+            // a live child handle.
+            failed.0.cleanup_until_confirmed();
+        }
+        // Deliberately detach: the reaper now owns the child and readers and
+        // may outlive this failed prerequisite without blocking its caller.
+        drop(self.thread.take());
+    }
+}
+
+#[cfg(unix)]
+struct VersionProbeGuard {
+    probe: Option<OwnedVersionProbe>,
+    cleanup: Option<VersionProbeCleanupOwner>,
+}
+
+#[cfg(unix)]
+impl VersionProbeGuard {
+    fn new(child: std::process::Child, cleanup: VersionProbeCleanupOwner) -> Self {
+        Self {
+            probe: Some(OwnedVersionProbe::new(child)),
+            cleanup: Some(cleanup),
+        }
+    }
+
+    fn probe_mut(&mut self) -> &mut OwnedVersionProbe {
+        self.probe.as_mut().expect("owned prerequisite probe")
+    }
+
+    fn into_confirmed(mut self) -> OwnedVersionProbe {
+        let probe = self.probe.take().expect("confirmed prerequisite probe");
+        self.cleanup
+            .take()
+            .expect("prerequisite cleanup owner")
+            .finish();
+        probe
+    }
+}
+
+#[cfg(unix)]
+impl Drop for VersionProbeGuard {
+    fn drop(&mut self) {
+        if let Some(probe) = self.probe.take() {
+            self.cleanup
+                .take()
+                .expect("live prerequisite probe must retain cleanup owner")
+                .retain_until_confirmed(probe);
+        } else if let Some(cleanup) = self.cleanup.take() {
+            cleanup.finish();
+        }
     }
 }
 
 #[cfg(unix)]
 fn run_version_probe_with_timeout(program: &std::path::Path, timeout: Duration) -> Option<String> {
     let mut spawn_reader = spawn_version_probe_reader;
-    run_version_probe_with_timeout_and_spawner(program, timeout, &mut spawn_reader)
+    run_version_probe_with_timeout_and_spawner_and_cleanup(
+        program,
+        timeout,
+        PROBE_CLEANUP_TIMEOUT,
+        VERSION_PROBE_CLEANUP_OPS,
+        &mut spawn_reader,
+    )
 }
 
 #[cfg(unix)]
 fn run_version_probe_with_timeout_and_spawner(
     program: &std::path::Path,
     timeout: Duration,
+    spawn_reader: &mut VersionProbeReaderSpawner<'_>,
+) -> Option<String> {
+    run_version_probe_with_timeout_and_spawner_and_cleanup(
+        program,
+        timeout,
+        PROBE_CLEANUP_TIMEOUT,
+        VERSION_PROBE_CLEANUP_OPS,
+        spawn_reader,
+    )
+}
+
+#[cfg(unix)]
+fn run_version_probe_with_timeout_and_spawner_and_cleanup(
+    program: &std::path::Path,
+    timeout: Duration,
+    cleanup_timeout: Duration,
+    cleanup_ops: VersionProbeCleanupOps,
     spawn_reader: &mut VersionProbeReaderSpawner<'_>,
 ) -> Option<String> {
     use std::os::unix::process::CommandExt;
@@ -511,18 +678,26 @@ fn run_version_probe_with_timeout_and_spawner(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .process_group(0);
-    let child = command.spawn().ok()?;
-    let mut owned = OwnedVersionProbe::new(child);
-    let stdout = owned.child.stdout.take()?;
-    let stderr = owned.child.stderr.take()?;
+    let cleanup = VersionProbeCleanupOwner::start().ok()?;
+    let child = match command.spawn() {
+        Ok(child) => child,
+        Err(_) => {
+            cleanup.finish();
+            return None;
+        }
+    };
+    let mut guard = VersionProbeGuard::new(child, cleanup);
+    let stdout = guard.probe_mut().child.stdout.take()?;
+    let stderr = guard.probe_mut().child.stderr.take()?;
     set_nonblocking(&stdout).ok()?;
     set_nonblocking(&stderr).ok()?;
-    owned
+    guard
+        .probe_mut()
         .spawn_readers(stdout, stderr, deadline, spawn_reader)
         .ok()?;
 
     let root_exited = loop {
-        match observe_probe_root_exit_without_reap(owned.pid) {
+        match observe_probe_root_exit_without_reap(guard.probe_mut().pid) {
             Ok(true) => break true,
             Ok(false) if Instant::now() < deadline => {
                 std::thread::sleep(Duration::from_millis(10));
@@ -530,15 +705,79 @@ fn run_version_probe_with_timeout_and_spawner(
             Ok(false) | Err(_) => break false,
         }
     };
-    let status = owned.terminate_reap_and_prove();
+    let status = guard
+        .probe_mut()
+        .terminate_reap_and_prove(Instant::now() + cleanup_timeout, cleanup_ops);
+    if status.is_none() {
+        return None;
+    }
+    let mut owned = guard.into_confirmed();
     let (stdout, stderr) = owned.join_readers()?;
 
-    if !root_exited || !status?.success() {
+    if !root_exited || !status.expect("confirmed status").success() {
         return None;
     }
     let stdout = String::from_utf8_lossy(&stdout);
     parse_version_output(&stdout)
         .or_else(|| parse_version_output(&String::from_utf8_lossy(&stderr)))
+}
+
+#[cfg(unix)]
+fn run_account_probe_with_timeout(
+    program: &std::path::Path,
+    timeout: Duration,
+) -> BackendAccountProbe {
+    use std::os::unix::process::CommandExt;
+
+    let deadline = Instant::now() + timeout;
+    let mut command = std::process::Command::new(program);
+    command.args(["login", "status"]);
+    if !crate::configure_process_group_escape_containment(&mut command) {
+        return BackendAccountProbe::CleanupUnconfirmed;
+    }
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .process_group(0);
+    let cleanup = match VersionProbeCleanupOwner::start() {
+        Ok(cleanup) => cleanup,
+        Err(_) => return BackendAccountProbe::CleanupUnconfirmed,
+    };
+    let child = match command.spawn() {
+        Ok(child) => child,
+        Err(_) => {
+            cleanup.finish();
+            return BackendAccountProbe::ExecutableUnavailable;
+        }
+    };
+    let mut guard = VersionProbeGuard::new(child, cleanup);
+    let root_exited = loop {
+        match observe_probe_root_exit_without_reap(guard.probe_mut().pid) {
+            Ok(true) => break true,
+            Ok(false) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Ok(false) | Err(_) => break false,
+        }
+    };
+    let status = guard
+        .probe_mut()
+        .terminate_reap_and_prove(
+            Instant::now() + PROBE_CLEANUP_TIMEOUT,
+            VERSION_PROBE_CLEANUP_OPS,
+        );
+    let Some(status) = status else {
+        return BackendAccountProbe::CleanupUnconfirmed;
+    };
+    let _owned = guard.into_confirmed();
+    if !root_exited {
+        BackendAccountProbe::TimedOut
+    } else if !status.success() {
+        BackendAccountProbe::AccountUnavailable
+    } else {
+        BackendAccountProbe::Available
+    }
 }
 
 #[cfg(not(unix))]
@@ -549,6 +788,14 @@ fn run_version_probe_with_timeout(
     // The managed canary refuses before spawn on hosts where this crate cannot
     // own and prove termination of the prerequisite process tree.
     None
+}
+
+#[cfg(not(unix))]
+fn run_account_probe_with_timeout(
+    _program: &std::path::Path,
+    _timeout: Duration,
+) -> BackendAccountProbe {
+    BackendAccountProbe::CleanupUnconfirmed
 }
 
 /// First `program` on `PATH` — the same resolution `Command::new("codex")` does,
@@ -883,6 +1130,47 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[test]
+    fn account_probe_stdin_is_isolated_from_readable_parent_fd_zero() {
+        const CHILD_ENV: &str = "TACHI_ACCOUNT_PROBE_STDIN_CHILD";
+        if std::env::var_os(CHILD_ENV).is_some() {
+            let fixture = VersionProbeFixture::new(
+                "#!/bin/sh\nif IFS= read -r daemon_input; then exit 91; fi\nexit 0\n",
+            );
+            let codex = fixture.root.join("codex");
+            std::fs::hard_link(&fixture.program, &codex).expect("install account probe fixture");
+            std::env::set_var("PATH", &fixture.root);
+            assert_eq!(
+                probe_codex_account(Duration::from_secs(1)),
+                BackendAccountProbe::Available,
+                "the account probe must observe EOF instead of readable parent stdin"
+            );
+            return;
+        }
+
+        use std::io::Write;
+        let mut child = std::process::Command::new(
+            std::env::current_exe().expect("resolve current test binary"),
+        )
+        .arg("account_probe_stdin_is_isolated_from_readable_parent_fd_zero")
+        .arg("--nocapture")
+        .env(CHILD_ENV, "1")
+        .stdin(Stdio::piped())
+        .spawn()
+        .expect("spawn readable-stdin account test child");
+        child
+            .stdin
+            .take()
+            .expect("account test child stdin")
+            .write_all(b"hostile-daemon-protocol-input\n")
+            .expect("supply readable parent fd zero");
+        assert!(
+            child.wait().expect("wait for account test child").success(),
+            "the account discriminator failed with readable fd zero"
+        );
+    }
+
+    #[cfg(unix)]
     fn fixture_pid(path: &std::path::Path) -> libc::pid_t {
         std::fs::read_to_string(path)
             .unwrap_or_else(|error| panic!("fixture did not publish {}: {error}", path.display()))
@@ -895,13 +1183,108 @@ mod tests {
 
     #[cfg(unix)]
     fn assert_pid_absent(pid: libc::pid_t) {
-        // SAFETY: signal 0 is a non-mutating probe for the fixture PID.
-        assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
-        assert_eq!(
-            std::io::Error::last_os_error().raw_os_error(),
-            Some(libc::ESRCH),
-            "fixture PID {pid} survived probe return"
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            // SAFETY: signal 0 is a non-mutating probe for the fixture PID.
+            if unsafe { libc::kill(pid, 0) } == -1
+                && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+            {
+                return;
+            }
+            if Instant::now() >= deadline {
+                panic!("fixture PID {pid} remained present after cleanup handoff");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[cfg(unix)]
+    fn cleanup_signal_failure(_pid: u32, _signal: libc::c_int) -> bool {
+        false
+    }
+
+    #[cfg(unix)]
+    fn cleanup_group_absence_failure(_pid: u32) -> bool {
+        false
+    }
+
+    #[cfg(unix)]
+    fn cleanup_wait_stall(
+        _child: &mut std::process::Child,
+    ) -> std::io::Result<Option<std::process::ExitStatus>> {
+        Ok(None)
+    }
+
+    #[cfg(unix)]
+    fn cleanup_wait_error(
+        _child: &mut std::process::Child,
+    ) -> std::io::Result<Option<std::process::ExitStatus>> {
+        Err(std::io::Error::other("injected root wait error"))
+    }
+
+    #[cfg(unix)]
+    fn assert_cleanup_fault_is_bounded(ops: VersionProbeCleanupOps) {
+        let fixture = VersionProbeFixture::new(
+            "#!/bin/sh\nprintf '%s\\n' \"$$\" > \"$0.pid\"\nwhile :; do :; done\n",
         );
+        let started = Instant::now();
+        let mut spawn_reader = spawn_version_probe_reader;
+        assert_eq!(
+            run_version_probe_with_timeout_and_spawner_and_cleanup(
+                &fixture.program,
+                Duration::from_millis(500),
+                Duration::from_millis(100),
+                ops,
+                &mut spawn_reader,
+            ),
+            None
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "faulted prerequisite cleanup exceeded its total caller wall-clock bound"
+        );
+        wait_for_fixture_file(&fixture.pid_path());
+        let pid = fixture_pid(&fixture.pid_path());
+        // Returning above is allowed only because the pre-created reaper owns
+        // the live child and eventually establishes authoritative ESRCH.
+        assert_pid_absent(pid);
+        assert_process_group_absent(pid);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn version_probe_signal_failure_transfers_cleanup_ownership_within_deadline() {
+        assert_cleanup_fault_is_bounded(VersionProbeCleanupOps {
+            signal: cleanup_signal_failure,
+            ..VERSION_PROBE_CLEANUP_OPS
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn version_probe_root_wait_stall_transfers_cleanup_ownership_within_deadline() {
+        assert_cleanup_fault_is_bounded(VersionProbeCleanupOps {
+            try_wait: cleanup_wait_stall,
+            ..VERSION_PROBE_CLEANUP_OPS
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn version_probe_root_wait_error_transfers_cleanup_ownership_within_deadline() {
+        assert_cleanup_fault_is_bounded(VersionProbeCleanupOps {
+            try_wait: cleanup_wait_error,
+            ..VERSION_PROBE_CLEANUP_OPS
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn version_probe_group_absence_failure_transfers_ownership_within_deadline() {
+        assert_cleanup_fault_is_bounded(VersionProbeCleanupOps {
+            group_absent: cleanup_group_absence_failure,
+            ..VERSION_PROBE_CLEANUP_OPS
+        });
     }
 
     #[cfg(unix)]
@@ -970,6 +1353,10 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn version_probe_denies_setsid_escape_that_retains_inherited_pipes() {
+        assert!(
+            std::path::Path::new("/usr/bin/setsid").is_file(),
+            "setsid escape discriminator requires /usr/bin/setsid"
+        );
         let fixture = VersionProbeFixture::new(
             "#!/bin/sh\nprintf '%s\\n' \"$$\" > \"$0.pid\"\n/usr/bin/setsid /bin/sh -c 'printf \"%s\\n\" \"$$\" > \"$1\"; while :; do :; done' sh \"$0.escaped.pid\" &\nescape=$!\nwait \"$escape\"\nprintf '%s\\n' \"$?\" > \"$0.escape.status\"\nprintf 'codex-cli 0.144.1\\n'\n",
         );
@@ -993,6 +1380,10 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn version_probe_denies_setsid_escape_that_closes_inherited_pipes() {
+        assert!(
+            std::path::Path::new("/usr/bin/setsid").is_file(),
+            "setsid escape discriminator requires /usr/bin/setsid"
+        );
         let fixture = VersionProbeFixture::new(
             "#!/bin/sh\nprintf '%s\\n' \"$$\" > \"$0.pid\"\n/usr/bin/setsid /bin/sh -c 'printf \"%s\\n\" \"$$\" > \"$1\"; exec </dev/null >/dev/null 2>/dev/null; while :; do :; done' sh \"$0.escaped.pid\" &\nescape=$!\ni=0\nwhile kill -0 \"$escape\" 2>/dev/null && [ ! -s \"$0.escaped.pid\" ] && [ \"$i\" -lt 100 ]; do /bin/sleep 0.01; i=$((i + 1)); done\nif ! kill -0 \"$escape\" 2>/dev/null; then wait \"$escape\"; printf '%s\\n' \"$?\" > \"$0.escape.status\"; fi\nprintf 'codex-cli 0.144.1\\n'\n",
         );
@@ -1174,13 +1565,17 @@ mod tests {
             ),
             None
         );
-        assert!(
-            first_reader_joined.load(Ordering::SeqCst),
-            "the first reader must be joined after second-reader spawn failure"
-        );
         let pid = fixture_pid(&pid_path);
         assert_pid_absent(pid);
         assert_process_group_absent(pid);
+        let join_deadline = Instant::now() + Duration::from_secs(1);
+        while !first_reader_joined.load(Ordering::SeqCst) && Instant::now() < join_deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            first_reader_joined.load(Ordering::SeqCst),
+            "the cleanup owner must join the first reader after second-reader spawn failure"
+        );
     }
 
     #[cfg(unix)]
@@ -1219,13 +1614,17 @@ mod tests {
             );
         }));
         assert!(unwind.is_err(), "the injected spawn panic must unwind");
-        assert!(
-            first_reader_joined.load(Ordering::SeqCst),
-            "the owner must join its first reader during unwind"
-        );
         let pid = fixture_pid(&pid_path);
         assert_pid_absent(pid);
         assert_process_group_absent(pid);
+        let join_deadline = Instant::now() + Duration::from_secs(1);
+        while !first_reader_joined.load(Ordering::SeqCst) && Instant::now() < join_deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            first_reader_joined.load(Ordering::SeqCst),
+            "the cleanup owner must join its first reader after unwind"
+        );
     }
 
     #[cfg(unix)]

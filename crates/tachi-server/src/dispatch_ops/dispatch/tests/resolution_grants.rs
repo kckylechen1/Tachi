@@ -215,6 +215,48 @@ fn managed_custom_registration_uses_prepared_execution_eligibility() {
         !managed_custom_control_required(ManagedControlOrigin::DirectHandle, true),
         "direct custom execution must remain outside Staff lifecycle ownership"
     );
+    let contained = crate::exec_env_postflight::compile_postflight_applicability(
+        tachi_dispatch::WorkspaceAuthority::ReadOnly,
+        None,
+    );
+    assert_eq!(
+        validate_managed_codex_containment(
+            ManagedControlOrigin::StaffFacade,
+            "codex",
+            true,
+            &contained,
+        ),
+        Ok(())
+    );
+    let uncontained = crate::exec_env_postflight::compile_postflight_applicability(
+        tachi_dispatch::WorkspaceAuthority::WorkspaceWrite,
+        None,
+    );
+    assert_eq!(
+        validate_managed_codex_containment(
+            ManagedControlOrigin::StaffFacade,
+            "codex",
+            true,
+            &uncontained,
+        ),
+        Err("managed Codex requires postflight containment")
+    );
+    for (origin, backend, prepared_eligible) in [
+        (ManagedControlOrigin::DirectHandle, "codex", true),
+        (ManagedControlOrigin::StaffFacade, "custom", true),
+        (ManagedControlOrigin::StaffFacade, "codex", false),
+    ] {
+        assert!(
+            validate_managed_codex_containment(
+                origin,
+                backend,
+                prepared_eligible,
+                &uncontained,
+            )
+            .is_ok(),
+            "only the Staff-owned managed Codex branch receives mandatory containment admission"
+        );
+    }
     let backend = include_str!("../backend.rs");
     for concrete_branch_guard in [
         "matches!(&execution, DispatchExecution::Subprocess(_))",

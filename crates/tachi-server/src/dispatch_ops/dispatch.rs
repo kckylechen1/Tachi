@@ -172,6 +172,25 @@ fn managed_custom_control_required(
     managed_backend_eligible && origin == ManagedControlOrigin::StaffFacade
 }
 
+fn validate_managed_codex_containment(
+    origin: ManagedControlOrigin,
+    backend: &str,
+    managed_backend_eligible: bool,
+    postflight: &crate::exec_env_postflight::PostflightApplicability,
+) -> Result<(), &'static str> {
+    let admitted =
+        managed_backend_eligible && origin == ManagedControlOrigin::StaffFacade && backend == "codex";
+    if admitted
+        && matches!(
+            postflight,
+            crate::exec_env_postflight::PostflightApplicability::NotApplicable
+        )
+    {
+        return Err("managed Codex requires postflight containment");
+    }
+    Ok(())
+}
+
 /// The only dispatch production doorway that may create managed cancellation
 /// control. Eligibility is prepared by the concrete backend; the Staff facade
 /// is the only caller that owns the resulting child lifecycle.
@@ -510,87 +529,6 @@ fn validate_managed_launch_spec_timeout(
     Ok(())
 }
 
-/// Probe the existing Codex CLI account without capturing or persisting its
-/// output. The probe reuses the managed subprocess process-group ownership
-/// kernel, including escape containment and terminal group-absence proof, so a
-/// refused prerequisite cannot survive outside the managed lifecycle.
-#[cfg(not(unix))]
-async fn probe_codex_account(program: &Path, timeout: Duration) -> Result<(), String> {
-    let _ = (program, timeout);
-    Err(
-        "managed_backend_account_unavailable: process-tree cleanup is unavailable on this host"
-            .to_string(),
-    )
-}
-
-#[cfg(unix)]
-async fn probe_codex_account(program: &Path, timeout: Duration) -> Result<(), String> {
-    let mut probe = tokio::process::Command::new(program);
-    probe.args(["login", "status"]).kill_on_drop(false);
-    if !crate::dispatch_ops::subprocess::configure_required_postflight_containment(&mut probe) {
-        return Err(
-            "managed_backend_account_unavailable: process-tree containment is unavailable on this host"
-                .to_string(),
-        );
-    }
-    probe
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-    crate::dispatch_ops::subprocess::configure_process_group(&mut probe);
-    let mut child = probe.spawn().map_err(|_| {
-        "managed_backend_executable_unavailable: codex executable is unavailable".to_string()
-    })?;
-    let child_pid = child.id();
-    let mut process_group =
-        crate::dispatch_ops::subprocess::ManagedProcessGroupGuard::arm(child_pid);
-    let root_exit =
-        crate::dispatch_ops::subprocess::wait_for_owned_root_exit(child_pid, timeout).await;
-    let (status, liveness) = crate::dispatch_ops::subprocess::terminate_reap_and_prove(
-        &mut child,
-        &mut process_group,
-        true,
-    )
-    .await;
-    let cleanup_confirmed = matches!(
-        liveness,
-        crate::exec_env_postflight::RunnerLivenessEvidence::ConfirmedReaped { .. }
-    );
-    let status = match status {
-        Ok(status) if cleanup_confirmed => status,
-        _ => return Err(
-            "managed_backend_account_unavailable: codex account probe cleanup was not confirmed"
-                .to_string(),
-        ),
-    };
-    match root_exit {
-        Ok(true) => {}
-        Ok(false) => {
-            return Err(
-                "managed_backend_account_unavailable: codex account probe timed out".to_string(),
-            )
-        }
-        Err(_) => {
-            return Err(
-                "managed_backend_account_unavailable: codex account probe failed".to_string(),
-            )
-        }
-    }
-    if !status.success() {
-        return Err(
-            "managed_backend_account_unavailable: codex account is unavailable".to_string(),
-        );
-    }
-    Ok(())
-}
-
-fn resolve_managed_backend_executable(program: &str) -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path)
-        .map(|directory| directory.join(program))
-        .find(|candidate| candidate.is_file())
-}
-
 /// Secret-negative prerequisite check and evidence for the single real
 /// managed adapter admitted by #1937. Raw probe output is never persisted;
 /// only closed verdict names and the bounded canonical numeric version cross
@@ -622,11 +560,33 @@ async fn managed_backend_metadata(
                             .to_string(),
                     );
                 }
-                let executable = resolve_managed_backend_executable("codex").ok_or_else(|| {
-                    "managed_backend_executable_unavailable: codex executable is unavailable"
-                        .to_string()
-                })?;
-                probe_codex_account(&executable, ACCOUNT_PROBE_TIMEOUT).await?;
+                match tachi_dispatch::probe_codex_account(ACCOUNT_PROBE_TIMEOUT) {
+                    tachi_dispatch::BackendAccountProbe::Available => {}
+                    tachi_dispatch::BackendAccountProbe::ExecutableUnavailable => {
+                        return Err(
+                            "managed_backend_executable_unavailable: codex executable is unavailable"
+                                .to_string(),
+                        );
+                    }
+                    tachi_dispatch::BackendAccountProbe::AccountUnavailable => {
+                        return Err(
+                            "managed_backend_account_unavailable: codex account is unavailable"
+                                .to_string(),
+                        );
+                    }
+                    tachi_dispatch::BackendAccountProbe::TimedOut => {
+                        return Err(
+                            "managed_backend_account_unavailable: codex account probe timed out"
+                                .to_string(),
+                        );
+                    }
+                    tachi_dispatch::BackendAccountProbe::CleanupUnconfirmed => {
+                        return Err(
+                            "managed_backend_account_unavailable: codex account probe cleanup was not confirmed"
+                                .to_string(),
+                        );
+                    }
+                }
                 let version = tachi_dispatch::probe_backend_version("codex").ok_or_else(|| {
                     "managed_backend_version_unavailable: codex version is unavailable".to_string()
                 })?;
@@ -1339,6 +1299,30 @@ async fn launch_canonical_dispatch(
     #[cfg(test)]
     managed_materialization_barrier::pause_after_managed_credential_materialization(&workspace_dir);
 
+    let postflight_applicability = crate::exec_env_postflight::compile_postflight_applicability(
+        effective_contract.workspace_authority,
+        mechanics.declared_file_scope.as_deref(),
+    );
+    if let Err(error) = validate_managed_codex_containment(
+        managed_control_origin,
+        &resolved_assignment.selected_backend,
+        managed_backend_eligible,
+        &postflight_applicability,
+    ) {
+        let _ = server.with_global_store(|store| {
+            cleanup_ephemeral_credential_materializations(store, &workspace_dir, false)
+        });
+        release_flow_dispatch_slot(flow_dispatch_slot);
+        close_kanban_row_on_early_exit(
+            server,
+            &dispatch_id,
+            "managed Codex containment admission",
+            request.project.as_deref(),
+        )
+        .await;
+        return Err(format!("{error}; zero worker process was spawned"));
+    }
+
     // Register managed-custom control before task scheduling.
     let managed_ephemeral_credential_cleanup =
         managed_custom_control_required(managed_control_origin, managed_backend_eligible)
@@ -1475,10 +1459,6 @@ async fn launch_canonical_dispatch(
     // Pre-spawn preimage is retained in parent-owned memory and never exposed
     // through a same-UID worker-writable filesystem path.
     // A required preimage failure fails closed immediately BEFORE spawning the worker.
-    let postflight_applicability = crate::exec_env_postflight::compile_postflight_applicability(
-        effective_contract.workspace_authority,
-        mechanics.declared_file_scope.as_deref(),
-    );
     let (postflight_gate, postflight_dispatch_lease) = match postflight_applicability {
         crate::exec_env_postflight::PostflightApplicability::Required(contract) => {
             let lease_path = match required_postflight_workspace(&env_resolution) {
