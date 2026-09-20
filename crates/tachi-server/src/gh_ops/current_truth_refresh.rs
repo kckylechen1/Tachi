@@ -43,7 +43,7 @@ const REASON_STALE: &str = "github_data_stale";
 const REASON_CONTRADICTORY: &str = "github_data_contradictory_revision";
 const REASON_REVERT_UNAVAILABLE: &str = "github_revert_relation_unavailable";
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LoadFailure {
     Unavailable,
     Malformed,
@@ -62,9 +62,24 @@ impl LoadFailure {
     }
 }
 
+#[derive(Debug)]
+struct GithubReadFailure {
+    failure: LoadFailure,
+    repository_visibility: Option<VisibilityClassV1>,
+}
+
+impl GithubReadFailure {
+    fn new(failure: LoadFailure, repository_visibility: Option<VisibilityClassV1>) -> Self {
+        Self {
+            failure,
+            repository_visibility,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct GithubReadBundle {
-    visibility: Value,
+    visibility: VisibilityClassV1,
     issue: Value,
     timeline: Vec<Value>,
     pull_requests: BTreeMap<u64, Value>,
@@ -73,7 +88,11 @@ struct GithubReadBundle {
 
 #[async_trait]
 trait BoundedGithubRefreshReader: Send + Sync {
-    async fn repository_slice(&self, repo: &str, number: u64) -> Result<GithubReadBundle, String>;
+    async fn repository_slice(
+        &self,
+        repo: &str,
+        number: u64,
+    ) -> Result<GithubReadBundle, GithubReadFailure>;
 }
 
 struct ServerBoundedGithubRefreshReader<'a> {
@@ -82,10 +101,14 @@ struct ServerBoundedGithubRefreshReader<'a> {
 
 #[async_trait]
 impl BoundedGithubRefreshReader for ServerBoundedGithubRefreshReader<'_> {
-    async fn repository_slice(&self, repo: &str, number: u64) -> Result<GithubReadBundle, String> {
+    async fn repository_slice(
+        &self,
+        repo: &str,
+        number: u64,
+    ) -> Result<GithubReadBundle, GithubReadFailure> {
         let (owner, name) = repo
             .split_once('/')
-            .ok_or_else(|| "validated repository lost owner/name shape".to_string())?;
+            .ok_or_else(|| GithubReadFailure::new(LoadFailure::Malformed, None))?;
         let value = run_gh_json_bounded(
             self.server,
             vec![
@@ -103,8 +126,9 @@ impl BoundedGithubRefreshReader for ServerBoundedGithubRefreshReader<'_> {
             CURRENT_TRUTH_GH_TIMEOUT,
             "gh current truth GraphQL read",
         )
-        .await?;
-        parse_graphql_bundle(repo, number, &value).map_err(|failure| failure.reason().to_string())
+        .await
+        .map_err(|_| GithubReadFailure::new(LoadFailure::Unavailable, None))?;
+        parse_graphql_bundle(repo, number, &value)
     }
 }
 
@@ -133,12 +157,11 @@ impl ProductionGithubRefreshAdapter {
     ) -> ProductionGithubRefreshAdapter {
         let bundle = match reader.repository_slice(repo, issue_number).await {
             Ok(bundle) => bundle,
-            Err(_) => return Self::unavailable(repo, LoadFailure::Unavailable, None),
+            Err(failure) => {
+                return Self::unavailable(repo, failure.failure, failure.repository_visibility)
+            }
         };
-        let visibility = match parse_visibility(&bundle.visibility) {
-            Ok(visibility) => visibility,
-            Err(failure) => return Self::unavailable(repo, failure, None),
-        };
+        let visibility = bundle.visibility;
         match load_repository_state(repo, issue_number, visibility, bundle) {
             Ok(state) => Self {
                 outcome: RefreshOutcomeV1::Fresh(Box::new(state)),
@@ -236,6 +259,7 @@ fn load_repository_state(
     Ok(state)
 }
 
+#[cfg(test)]
 fn parse_visibility(value: &Value) -> Result<VisibilityClassV1, LoadFailure> {
     match value.get("visibility").and_then(Value::as_str) {
         Some("PUBLIC") | Some("public") => Ok(VisibilityClassV1::Public),
@@ -480,18 +504,22 @@ fn apply_subject_refresh_and_consume(
     repository_visibility: Option<VisibilityClassV1>,
     attempted_at: &str,
 ) -> Result<ConsumedRefresh, String> {
+    // Commit restrictive repository metadata before any downstream truth
+    // work whenever a posture row already exists. This makes a public→private
+    // observation durable even if assertion/posture processing later fails.
+    // A first observation has no row yet; it is recorded after that attempt
+    // creates one.
+    let visibility_needs_row = match repository_visibility {
+        Some(visibility) => !store
+            .record_repository_visibility(repo, visibility, attempted_at)
+            .map_err(|error| error.to_string())?,
+        None => false,
+    };
     let (outcome, assertions) = reconcile_refresh(adapter, repo);
     match outcome {
         RefreshOutcomeV1::Fresh(state) => {
             if refresh_is_stale(store, &state, &assertions)? {
-                record_unavailable(
-                    store,
-                    repo,
-                    subject_token,
-                    attempted_at,
-                    REASON_STALE,
-                    repository_visibility,
-                )?;
+                record_unavailable(store, repo, subject_token, attempted_at, REASON_STALE)?;
             } else {
                 match store.append_all_and_record_subject_refresh(
                     &assertions,
@@ -500,7 +528,6 @@ fn apply_subject_refresh_and_consume(
                     &state.refresh_revision,
                     &state.refreshed_at,
                     attempted_at,
-                    repository_visibility,
                 ) {
                     Ok(_) => {}
                     Err(
@@ -512,7 +539,6 @@ fn apply_subject_refresh_and_consume(
                             subject_token,
                             attempted_at,
                             REASON_CONTRADICTORY,
-                            repository_visibility,
                         )?;
                     }
                     Err(
@@ -529,15 +555,18 @@ fn apply_subject_refresh_and_consume(
             }
         }
         RefreshOutcomeV1::Unavailable { reason, .. } => {
-            record_unavailable(
-                store,
-                repo,
-                subject_token,
-                attempted_at,
-                &reason,
-                repository_visibility,
-            )?;
+            record_unavailable(store, repo, subject_token, attempted_at, &reason)?;
         }
+    }
+
+    // Visibility has independent ordering from subject posture. If no row
+    // existed before this attempt, persist it now that posture created one.
+    // A denied attempt has no observation and cannot erase a known value.
+    if visibility_needs_row {
+        let visibility = repository_visibility.expect("checked visibility observation");
+        store
+            .record_repository_visibility(repo, visibility, attempted_at)
+            .map_err(|error| error.to_string())?;
     }
 
     // The public tachi_gh action has no private-read grant. It always mints
@@ -586,7 +615,6 @@ fn record_unavailable(
     subject_token: &str,
     attempted_at: &str,
     reason: &str,
-    repository_visibility: Option<VisibilityClassV1>,
 ) -> Result<(), String> {
     match store.record_subject_refresh(
         repo,
@@ -596,7 +624,6 @@ fn record_unavailable(
         None,
         attempted_at,
         Some(reason),
-        repository_visibility,
     ) {
         Ok(())
         | Err(tachi_params::current_truth::store::CurrentTruthStoreError::StaleRefreshRecord {
@@ -679,14 +706,18 @@ async fn handle_current_truth_refresh_with_floor(
     floor: Duration,
 ) -> Result<String, String> {
     // A single minimum completion floor covers the complete handler:
-    // bounded network read and JSON decode, persistence, reduction, consumer
-    // projection, and response serialization. It is an upper-shape
-    // hardening measure, not a claim of statistical latency equality for
-    // operations that exceed the floor.
-    let ((), result) = tokio::join!(
-        tokio::time::sleep(floor),
-        handle_current_truth_refresh_unpadded(server, params),
-    );
+    // command execution, post-command JSON decode, persistence, reduction,
+    // consumer projection, and response serialization. The command timeout
+    // bounds only the subprocess wait; this floor is neither a timeout nor a
+    // claim of statistical latency equality for work that exceeds it.
+    complete_with_floor(floor, handle_current_truth_refresh_unpadded(server, params)).await
+}
+
+async fn complete_with_floor<T>(
+    floor: Duration,
+    operation: impl std::future::Future<Output = T>,
+) -> T {
+    let ((), result) = tokio::join!(tokio::time::sleep(floor), operation);
     result
 }
 
@@ -699,6 +730,10 @@ async fn handle_current_truth_refresh_unpadded(
         .number
         .ok_or("current_truth_refresh requires issue 'number'")?;
     validate_repo(&repo)?;
+    // GitHub owner/repository identity is ASCII case-insensitive. One stable
+    // spelling prevents privacy, debt, and subject history from splitting
+    // across caller-selected casing.
+    let repo = repo.to_ascii_lowercase();
     let attempted_at = chrono::Utc::now().to_rfc3339();
     let adapter = ProductionGithubRefreshAdapter::load(server, &repo, issue_number).await;
     let (consumed, private_history) = server.with_current_truth_store(|store| {
@@ -811,26 +846,40 @@ mod tests {
             &self,
             _repo: &str,
             _number: u64,
-        ) -> Result<GithubReadBundle, String> {
+        ) -> Result<GithubReadBundle, GithubReadFailure> {
             self.calls.lock().unwrap().push("slice".to_string());
-            let visibility = self
+            let visibility_value = self
                 .visibility
                 .clone()
-                .unwrap_or_else(|| Ok(json!({"visibility": "PUBLIC"})))?;
-            let issue = self.issue.clone().expect("issue fixture")?;
+                .unwrap_or_else(|| Ok(json!({"visibility": "PUBLIC"})))
+                .map_err(|_| GithubReadFailure::new(LoadFailure::Unavailable, None))?;
+            let visibility = parse_visibility(&visibility_value)
+                .map_err(|failure| GithubReadFailure::new(failure, None))?;
+            let issue =
+                self.issue.clone().expect("issue fixture").map_err(|_| {
+                    GithubReadFailure::new(LoadFailure::Unavailable, Some(visibility))
+                })?;
             let timeline = self
                 .timeline
                 .get(&1)
                 .cloned()
-                .unwrap_or_else(|| Ok(json!([])))?
+                .unwrap_or_else(|| Ok(json!([])))
+                .map_err(|_| GithubReadFailure::new(LoadFailure::Unavailable, Some(visibility)))?
                 .as_array()
                 .cloned()
-                .ok_or_else(|| "timeline fixture must be an array".to_string())?;
+                .ok_or_else(|| GithubReadFailure::new(LoadFailure::Malformed, Some(visibility)))?;
             let pull_requests = self
                 .prs
                 .iter()
-                .map(|(number, value)| Ok((*number, value.clone()?)))
-                .collect::<Result<BTreeMap<_, _>, String>>()?;
+                .map(|(number, value)| {
+                    Ok((
+                        *number,
+                        value.clone().map_err(|_| {
+                            GithubReadFailure::new(LoadFailure::Unavailable, Some(visibility))
+                        })?,
+                    ))
+                })
+                .collect::<Result<BTreeMap<_, _>, GithubReadFailure>>()?;
             Ok(GithubReadBundle {
                 visibility,
                 issue,
@@ -1106,7 +1155,10 @@ mod tests {
         ] {
             assert!(matches!(
                 parse_graphql_bundle("owner/repo", 42, &raw(source)),
-                Err(LoadFailure::Malformed)
+                Err(GithubReadFailure {
+                    failure: LoadFailure::Malformed,
+                    ..
+                })
             ));
         }
         let mut missing = raw(json!({"__typename": "Issue"}));
@@ -1118,13 +1170,88 @@ mod tests {
             .remove("source");
         assert!(matches!(
             parse_graphql_bundle("owner/repo", 42, &missing),
-            Err(LoadFailure::Malformed)
+            Err(GithubReadFailure {
+                failure: LoadFailure::Malformed,
+                ..
+            })
         ));
 
         let valid_non_pr =
             parse_graphql_bundle("owner/repo", 42, &raw(json!({"__typename": "Issue"}))).unwrap();
         assert!(valid_non_pr.timeline.is_empty());
         assert!(valid_non_pr.pull_requests.is_empty());
+    }
+
+    #[test]
+    fn graphql_envelope_and_nonclosing_pr_fields_are_validated_before_skipping() {
+        fn raw(source: Value) -> Value {
+            json!({"data": {"repository": {
+                "visibility": "PRIVATE",
+                "issueOrPullRequest": {
+                    "__typename": "Issue",
+                    "number": 42,
+                    "state": "OPEN",
+                    "updatedAt": "2026-09-01T00:00:00Z",
+                    "timelineItems": {
+                        "pageInfo": {"hasNextPage": false},
+                        "nodes": [{
+                            "__typename": "CrossReferencedEvent",
+                            "id": "event-7",
+                            "createdAt": "2026-09-02T00:00:00Z",
+                            "source": source
+                        }]
+                    }
+                }
+            }}})
+        }
+        fn valid_nonclosing_pr() -> Value {
+            json!({
+                "__typename": "PullRequest",
+                "number": 7,
+                "state": "OPEN",
+                "updatedAt": "2026-09-02T00:00:00Z",
+                "headRefOid": "head000000000000000000000000000000000007",
+                "baseRefOid": "base000000000000000000000000000000000007",
+                "mergeCommit": null,
+                "repository": {"nameWithOwner": "owner/repo"},
+                "closingIssuesReferences": {
+                    "pageInfo": {"hasNextPage": false},
+                    "nodes": []
+                }
+            })
+        }
+
+        for field in ["state", "updatedAt", "headRefOid", "baseRefOid"] {
+            let mut source = valid_nonclosing_pr();
+            source[field] = Value::Null;
+            let failure = parse_graphql_bundle("owner/repo", 42, &raw(source)).unwrap_err();
+            assert_eq!(failure.failure, LoadFailure::Malformed, "field {field}");
+            assert_eq!(
+                failure.repository_visibility,
+                Some(VisibilityClassV1::Private),
+                "restrictive visibility survives malformed field {field}"
+            );
+        }
+        let mut malformed_merge = valid_nonclosing_pr();
+        malformed_merge["mergeCommit"] = json!({});
+        assert_eq!(
+            parse_graphql_bundle("owner/repo", 42, &raw(malformed_merge))
+                .unwrap_err()
+                .failure,
+            LoadFailure::Malformed
+        );
+
+        let mut wrong_errors = raw(valid_nonclosing_pr());
+        wrong_errors["errors"] = json!({"message": "wrong envelope type"});
+        let failure = parse_graphql_bundle("owner/repo", 42, &wrong_errors).unwrap_err();
+        assert_eq!(failure.failure, LoadFailure::Malformed);
+        assert_eq!(
+            failure.repository_visibility,
+            Some(VisibilityClassV1::Private)
+        );
+        wrong_errors["errors"] = json!([]);
+        parse_graphql_bundle("owner/repo", 42, &wrong_errors)
+            .expect("an empty GraphQL errors array is valid");
     }
 
     #[tokio::test]
@@ -1466,6 +1593,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stale_and_equal_private_observations_survive_subject_posture_refusal() {
+        let public = adapter_for(issue("OPEN", "2026-09-01T00:00:00Z"), vec![], vec![]).await;
+        let denied_reader = FixtureReader {
+            visibility: Some(Err("denied".to_string())),
+            ..FixtureReader::default()
+        };
+        let denied =
+            ProductionGithubRefreshAdapter::load_from(&denied_reader, "owner/repo", 42).await;
+        let private_malformed_reader = FixtureReader {
+            visibility: Some(Ok(json!({"visibility": "PRIVATE"}))),
+            issue: Some(Ok(json!({"number": 42, "state": "UNKNOWN"}))),
+            ..FixtureReader::default()
+        };
+        let private_malformed =
+            ProductionGithubRefreshAdapter::load_from(&private_malformed_reader, "owner/repo", 42)
+                .await;
+
+        for private_attempt_at in ["2026-09-01T11:00:00Z", "2026-09-01T12:00:00Z"] {
+            let store = CurrentTruthSqliteStore::open_in_memory().unwrap();
+            apply_subject_refresh_and_consume(
+                &store,
+                &public,
+                "owner/repo",
+                "owner/repo#issue:42",
+                public.repository_visibility,
+                "2026-09-01T10:00:00Z",
+            )
+            .unwrap();
+            apply_subject_refresh_and_consume(
+                &store,
+                &denied,
+                "owner/repo",
+                "owner/repo#issue:42",
+                denied.repository_visibility,
+                "2026-09-01T12:00:00Z",
+            )
+            .unwrap();
+            let consumed = apply_subject_refresh_and_consume(
+                &store,
+                &private_malformed,
+                "owner/repo",
+                "owner/repo#issue:42",
+                private_malformed.repository_visibility,
+                private_attempt_at,
+            )
+            .unwrap();
+
+            let posture = store.refresh_posture_row("OWNER/REPO").unwrap().unwrap();
+            assert_eq!(
+                posture.repository_visibility,
+                Some(VisibilityClassV1::Private)
+            );
+            assert!(consumed.view.subjects.is_empty());
+            assert_eq!(posture.last_attempt_at, "2026-09-01T12:00:00Z");
+            assert_eq!(
+                posture.unavailable_reason.as_deref(),
+                Some(REASON_UNAVAILABLE),
+                "the later/equal first committer keeps subject posture"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn production_and_fake_adapters_mint_canonically_equivalent_assertions() {
         let production = adapter_for(
             issue("OPEN", "2026-09-01T00:00:00Z"),
@@ -1643,7 +1833,7 @@ esac
     #[cfg(unix)]
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
-    async fn full_handler_private_and_denied_paths_share_one_call_and_a_minimum_floor() {
+    async fn full_handler_private_and_denied_paths_share_one_call_and_content_free_shape() {
         let _lock = crate::utils::global_test_lock()
             .lock()
             .unwrap_or_else(|error| error.into_inner());
@@ -1671,23 +1861,15 @@ fi
             number: Some(42),
             ..TachiGhParams::default()
         };
-        let floor = Duration::from_millis(30);
-
         std::fs::write(&mode, "private").unwrap();
-        let private_started = std::time::Instant::now();
-        let private = handle_current_truth_refresh_with_floor(&server, &params, floor)
+        let private = handle_current_truth_refresh_with_floor(&server, &params, Duration::ZERO)
             .await
             .unwrap();
-        let private_elapsed = private_started.elapsed();
         std::fs::write(&mode, "denied").unwrap();
-        let denied_started = std::time::Instant::now();
-        let denied = handle_current_truth_refresh_with_floor(&server, &params, floor)
+        let denied = handle_current_truth_refresh_with_floor(&server, &params, Duration::ZERO)
             .await
             .unwrap();
-        let denied_elapsed = denied_started.elapsed();
 
-        assert!(private_elapsed >= floor);
-        assert!(denied_elapsed >= floor);
         assert_eq!(std::fs::read_to_string(calls).unwrap().lines().count(), 2);
         let mut private: Value = serde_json::from_str(&private).unwrap();
         let mut denied: Value = serde_json::from_str(&denied).unwrap();
@@ -1695,6 +1877,171 @@ fi
         denied["posture"]["last_attempt_at"] = Value::Null;
         assert_eq!(private, denied);
         assert_eq!(denied["work_status"], json!([]));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn complete_handler_floor_holds_an_immediate_operation_until_deadline() {
+        let floor = Duration::from_secs(6);
+        let task = tokio::spawn(complete_with_floor(floor, async { "complete" }));
+        tokio::task::yield_now().await;
+        assert!(
+            !task.is_finished(),
+            "an immediate operation must still wait"
+        );
+
+        tokio::time::advance(floor - Duration::from_millis(1)).await;
+        tokio::task::yield_now().await;
+        assert!(
+            !task.is_finished(),
+            "the floor must hold before its deadline"
+        );
+
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert_eq!(task.await.unwrap(), "complete");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn raw_private_parse_failures_survive_mixed_case_then_denied_reads() {
+        let _lock = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let bin = tempfile::tempdir().unwrap();
+        let mode = bin.path().join("mode");
+        let payload = bin.path().join("payload");
+        let script = format!(
+            r#"#!/bin/sh
+if [ "$(cat '{}')" = denied ]; then
+  exit 1
+fi
+cat '{}'
+"#,
+            mode.display(),
+            payload.display(),
+        );
+        write_executable(&bin.path().join("gh"), &script);
+        let _path = PathEnvGuard::prepend(bin.path());
+        let public = json!({"data": {"repository": {
+            "visibility": "PUBLIC",
+            "issueOrPullRequest": {
+                "__typename": "Issue",
+                "number": 42,
+                "state": "OPEN",
+                "updatedAt": "2026-09-01T00:00:00Z",
+                "timelineItems": {
+                    "pageInfo": {"hasNextPage": false},
+                    "nodes": []
+                }
+            }
+        }}});
+        let private_null = json!({"data": {"repository": {
+            "visibility": "PRIVATE",
+            "issueOrPullRequest": null
+        }}});
+        let private_malformed = json!({"data": {"repository": {
+            "visibility": "PRIVATE",
+            "issueOrPullRequest": {
+                "__typename": "Issue",
+                "number": 42,
+                "state": "OPEN",
+                "updatedAt": "2026-09-02T00:00:00Z",
+                "timelineItems": {
+                    "pageInfo": {"hasNextPage": false},
+                    "nodes": [{
+                        "__typename": "CrossReferencedEvent",
+                        "id": "event-malformed-private",
+                        "createdAt": "2026-09-02T00:00:00Z",
+                        "source": {
+                            "__typename": "PullRequest",
+                            "number": 7,
+                            "state": null,
+                            "updatedAt": "2026-09-02T00:00:00Z",
+                            "headRefOid": "head000000000000000000000000000000000007",
+                            "baseRefOid": "base000000000000000000000000000000000007",
+                            "mergeCommit": null,
+                            "repository": {"nameWithOwner": "owner/repo"},
+                            "closingIssuesReferences": {
+                                "pageInfo": {"hasNextPage": false},
+                                "nodes": []
+                            }
+                        }
+                    }]
+                }
+            }
+        }}});
+
+        for private_failure in [private_null, private_malformed] {
+            let server = crate::tests::make_server();
+            std::fs::write(&mode, "payload").unwrap();
+            std::fs::write(&payload, public.to_string()).unwrap();
+            let public_response = handle_current_truth_refresh_with_floor(
+                &server,
+                &TachiGhParams {
+                    action: "current_truth_refresh".to_string(),
+                    repo: Some("Owner/Repo".to_string()),
+                    number: Some(42),
+                    ..TachiGhParams::default()
+                },
+                Duration::ZERO,
+            )
+            .await
+            .unwrap();
+            let public_response: Value = serde_json::from_str(&public_response).unwrap();
+            assert_eq!(public_response["repo"], json!("owner/repo"));
+            assert_eq!(public_response["fresh"], json!(true));
+            assert_eq!(
+                public_response["work_status"][0]["work_token"],
+                json!("owner/repo#issue:42")
+            );
+
+            std::fs::write(&payload, private_failure.to_string()).unwrap();
+            let private_response = handle_current_truth_refresh_with_floor(
+                &server,
+                &TachiGhParams {
+                    action: "current_truth_refresh".to_string(),
+                    repo: Some("OWNER/repo".to_string()),
+                    number: Some(42),
+                    ..TachiGhParams::default()
+                },
+                Duration::ZERO,
+            )
+            .await
+            .unwrap();
+            assert!(!private_response.contains("issue:42"));
+
+            std::fs::write(&mode, "denied").unwrap();
+            let denied_response = handle_current_truth_refresh_with_floor(
+                &server,
+                &TachiGhParams {
+                    action: "current_truth_refresh".to_string(),
+                    repo: Some("owner/REPO".to_string()),
+                    number: Some(42),
+                    ..TachiGhParams::default()
+                },
+                Duration::ZERO,
+            )
+            .await
+            .unwrap();
+            assert!(!denied_response.contains("issue:42"));
+            let denied_response: Value = serde_json::from_str(&denied_response).unwrap();
+            assert_eq!(denied_response["repo"], json!("owner/repo"));
+            assert_eq!(denied_response["fresh"], json!(false));
+            assert_eq!(denied_response["work_status"], json!([]));
+
+            server
+                .with_current_truth_store(|store| {
+                    assert_eq!(
+                        store.repository_visibility("OWNER/Repo").unwrap(),
+                        Some(VisibilityClassV1::Private)
+                    );
+                    assert_eq!(store.refresh_debt_repos().unwrap(), 1);
+                    assert_eq!(store.assertion_count("OWNER/Repo").unwrap(), 3);
+                    Ok(())
+                })
+                .unwrap();
+            std::fs::write(&mode, "payload").unwrap();
+        }
     }
 
     #[tokio::test]

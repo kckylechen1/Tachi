@@ -1957,9 +1957,13 @@ fn equal_attempt_subject_aggregate_and_visibility_ties_are_deterministic() {
                     fresh_at,
                     "2026-08-26T12:00:00Z",
                     reason,
-                    visibility,
                 )
                 .unwrap();
+            if let Some(visibility) = visibility {
+                store
+                    .record_repository_visibility(REPO, visibility, "2026-08-26T12:00:00Z")
+                    .unwrap();
+            }
         }
     }
 
@@ -1985,7 +1989,6 @@ fn equal_attempt_subject_aggregate_and_visibility_ties_are_deterministic() {
             None,
             "2026-08-26T13:00:00Z",
             Some("denied"),
-            None,
         )
         .unwrap();
     assert_eq!(
@@ -2006,12 +2009,99 @@ fn equal_attempt_subject_aggregate_and_visibility_ties_are_deterministic() {
             Some("2026-08-26T12:30:00Z"),
             "2026-08-26T12:30:00Z",
             None,
-            Some(VisibilityClassV1::Public),
         )
+        .unwrap();
+    forward
+        .record_repository_visibility(REPO, VisibilityClassV1::Public, "2026-08-26T12:30:00Z")
         .unwrap();
     assert_eq!(
         forward.repository_visibility(REPO).unwrap(),
         Some(VisibilityClassV1::Public)
+    );
+}
+
+/// Subject posture and repository visibility have independent ordering.
+/// A later denied posture cannot suppress an earlier-started private
+/// observation that is newer than the last visibility observation; equal
+/// visibility instants resolve restrictively even when posture rejects them.
+#[test]
+fn stale_and_equal_subject_attempts_still_reconcile_restrictive_visibility() {
+    let store = CurrentTruthSqliteStore::open_in_memory().unwrap();
+    store
+        .record_subject_refresh(
+            REPO,
+            "kckylechen1/tachi#issue:100",
+            true,
+            Some("public-r1"),
+            Some("2026-08-26T10:00:00Z"),
+            "2026-08-26T10:00:00Z",
+            None,
+        )
+        .unwrap();
+    store
+        .record_repository_visibility(REPO, VisibilityClassV1::Public, "2026-08-26T10:00:00Z")
+        .unwrap();
+    store
+        .record_subject_refresh(
+            REPO,
+            "kckylechen1/tachi#issue:100",
+            false,
+            None,
+            None,
+            "2026-08-26T12:00:00Z",
+            Some("denied"),
+        )
+        .unwrap();
+
+    assert!(matches!(
+        store.record_subject_refresh(
+            "KCKYLECHEN1/TACHI",
+            "KCKYLECHEN1/TACHI#ISSUE:100",
+            false,
+            None,
+            None,
+            "2026-08-26T11:00:00Z",
+            Some("late-private-result"),
+        ),
+        Err(CurrentTruthStoreError::StaleRefreshRecord { .. })
+    ));
+    store
+        .record_repository_visibility(
+            "KCKYLECHEN1/TACHI",
+            VisibilityClassV1::Private,
+            "2026-08-26T11:00:00Z",
+        )
+        .unwrap();
+    assert_eq!(
+        store.repository_visibility(REPO).unwrap(),
+        Some(VisibilityClassV1::Private)
+    );
+
+    assert!(matches!(
+        store.record_subject_refresh(
+            REPO,
+            "kckylechen1/tachi#issue:100",
+            true,
+            Some("same-time-success"),
+            Some("2026-08-26T12:00:00Z"),
+            "2026-08-26T12:00:00Z",
+            None,
+        ),
+        Err(CurrentTruthStoreError::StaleRefreshRecord { .. })
+    ));
+    store
+        .record_repository_visibility(REPO, VisibilityClassV1::Private, "2026-08-26T12:00:00Z")
+        .unwrap();
+    let posture = store.refresh_posture_row(REPO).unwrap().unwrap();
+    assert!(!posture.fresh, "truth/posture remains first-committer-wins");
+    assert_eq!(posture.unavailable_reason.as_deref(), Some("denied"));
+    assert_eq!(
+        posture.repository_visibility,
+        Some(VisibilityClassV1::Private)
+    );
+    assert_eq!(
+        posture.repository_visibility_at.as_deref(),
+        Some("2026-08-26T12:00:00Z")
     );
 }
 

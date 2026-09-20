@@ -822,6 +822,9 @@ pub(crate) fn install_current_truth_schema(conn: &Connection) -> Result<(), Memo
 /// constraint, or explicit index target drifts from the canonical v37 DDL.
 /// Comparing all five stored object definitions also prevents a validator
 /// success followed by a consumer query failure on a missing field.
+/// Compatibility is intentionally limited to the canonical installer output
+/// with formatting-only ASCII whitespace differences. Semantically similar
+/// alternate SQLite spellings are refused rather than guessed equivalent.
 pub fn validate_current_truth_schema(conn: &Connection) -> Result<(), MemoryError> {
     let canonical = Connection::open_in_memory()?;
     install_current_truth_schema(&canonical)?;

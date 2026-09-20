@@ -117,6 +117,26 @@ mod tests {
         }
     }
 
+    #[test]
+    fn v37_validator_compatibility_is_formatting_only() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate_v37_current_truth(&conn, StoreProfile::TachiFull).unwrap();
+        conn.execute_batch("PRAGMA writable_schema = ON;").unwrap();
+        assert_eq!(
+            conn.execute(
+                "UPDATE sqlite_schema
+                 SET sql = replace(sql, 'CREATE TABLE', 'CREATE    TABLE')
+                 WHERE name = 'current_truth_refresh'",
+                [],
+            )
+            .unwrap(),
+            1
+        );
+        conn.execute_batch("PRAGMA writable_schema = OFF;").unwrap();
+        crate::db::schema::validate_current_truth_schema(&conn)
+            .expect("ASCII-whitespace-only formatting remains compatible");
+    }
+
     fn assert_drift_refused(object: &str, target: &str, replacement: &str) {
         let conn = Connection::open_in_memory().unwrap();
         migrate_v37_current_truth(&conn, StoreProfile::TachiFull).unwrap();
