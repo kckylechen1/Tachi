@@ -211,6 +211,7 @@ const TEMPLATE_IDENTITY_SOURCE_BLOBS: &[&[u8]] = &[
     embedded_template_source!("/../memcore/src/db/store_profile.rs"),
     embedded_template_source!("/../memcore/src/db/schema.rs"),
     embedded_template_source!("/../memcore/src/db/schema/ddl.rs"),
+    embedded_template_source!("/../memcore/src/db/verified_admissions.rs"),
     embedded_template_source!("/../memcore/src/db/migrations.rs"),
     embedded_template_source!("/../memcore/src/db/migrations/a2a_body_retention.rs"),
     embedded_template_source!("/../memcore/src/db/migrations/basic.rs"),
@@ -237,6 +238,7 @@ const TEMPLATE_IDENTITY_SOURCE_BLOBS: &[&[u8]] = &[
     embedded_template_source!("/../memcore/src/db/migrations/sentinel.rs"),
     embedded_template_source!("/../memcore/src/db/migrations/session_claims_identity.rs"),
     embedded_template_source!("/../memcore/src/db/migrations/symbolic_fts.rs"),
+    embedded_template_source!("/../memcore/src/db/migrations/verified_admissions.rs"),
 ];
 
 fn extend_template_cache_fingerprint(hash: &mut u64, bytes: &[u8]) {
@@ -883,6 +885,35 @@ fn template_cache_fingerprint_uses_only_compiled_image_inputs() {
         assert!(
             identity_source_list.contains(&embedded_path),
             "migration module {module} is missing from the compiled template fingerprint"
+        );
+    }
+}
+
+#[test]
+fn template_cache_fingerprint_tracks_verified_admission_schema_inputs() {
+    let schema_sources: &[(&str, &[u8])] = &[
+        (
+            "verified admission DDL",
+            embedded_template_source!("/../memcore/src/db/verified_admissions.rs"),
+        ),
+        (
+            "verified admission migration",
+            embedded_template_source!("/../memcore/src/db/migrations/verified_admissions.rs"),
+        ),
+    ];
+    for (label, source) in schema_sources {
+        let index = TEMPLATE_IDENTITY_SOURCE_BLOBS
+            .iter()
+            .position(|blob| *blob == *source)
+            .unwrap_or_else(|| panic!("{label} is missing from the template fingerprint"));
+        let mut changed_source = source.to_vec();
+        changed_source.extend_from_slice(b"\n// template schema fingerprint discriminator\n");
+        let mut changed_sources = TEMPLATE_IDENTITY_SOURCE_BLOBS.to_vec();
+        changed_sources[index] = &changed_source;
+        assert_ne!(
+            template_cache_fingerprint(),
+            template_cache_fingerprint_for_sources(&changed_sources),
+            "changing {label} must change the template fingerprint"
         );
     }
 }
