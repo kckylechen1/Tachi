@@ -1400,10 +1400,11 @@ pub(crate) async fn handle_wiki_organize(
 
         let (fm_opt, body) = parse_frontmatter(&content);
         let source_object_id = authorized.repo_relative_document_id(&path)?;
-        let relative_str = source_object_id
-            .strip_prefix("docs/")
-            .unwrap_or(&source_object_id)
-            .to_string();
+        // Routing and logs remain relative to the requested organize root;
+        // receipt identity is independently bound to the final repo-relative
+        // object path. Conflating these breaks in-place detection for a docs
+        // subtree such as docs/guides.
+        let relative_str = canonical_relative_path(relative_path)?;
         // A receipt is an active integrity claim, even when the existing
         // category means no new model call is needed. Validate it before
         // dry-run planning, task sync, conflict handling, or any mutation.
@@ -1604,11 +1605,12 @@ pub(crate) async fn handle_wiki_organize(
                 {
                     let destination_content = authorized.read_text(&dest_path, &dest_identity)?;
                     let (destination_frontmatter, _) = parse_frontmatter(&destination_content);
-                    canonical_accepted_category(
-                        destination_frontmatter
-                            .as_ref()
-                            .and_then(|frontmatter| frontmatter.category.as_deref()),
-                    )?;
+                    if let Some(category) = destination_frontmatter
+                        .as_ref()
+                        .and_then(|frontmatter| frontmatter.category.as_deref())
+                    {
+                        canonical_accepted_category(category)?;
+                    }
                     let destination_object_id = authorized.repo_relative_document_id(&dest_path)?;
                     let destination_receipt = validated_existing_model_receipt(
                         destination_frontmatter.as_ref(),
@@ -1673,11 +1675,12 @@ pub(crate) async fn handle_wiki_organize(
                 let destination_content = authorized.read_text(&dest_path, &dest_identity)?;
                 let (destination_frontmatter, destination_body) =
                     parse_frontmatter(&destination_content);
-                canonical_accepted_category(
-                    destination_frontmatter
-                        .as_ref()
-                        .and_then(|frontmatter| frontmatter.category.as_deref()),
-                )?;
+                if let Some(category) = destination_frontmatter
+                    .as_ref()
+                    .and_then(|frontmatter| frontmatter.category.as_deref())
+                {
+                    canonical_accepted_category(category)?;
+                }
                 let destination_object_id = authorized.repo_relative_document_id(&dest_path)?;
                 let destination_receipt = validated_existing_model_receipt(
                     destination_frontmatter.as_ref(),

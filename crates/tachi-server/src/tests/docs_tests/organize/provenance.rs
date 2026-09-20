@@ -1762,6 +1762,60 @@ async fn accepted_category_move_rebinds_final_path_and_revision_without_model_ca
 
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
+async fn subtree_organize_keeps_routing_relative_and_receipt_identity_repo_relative() {
+    let server = make_server();
+    let workspace = DocsWorktree::new();
+    let docs = workspace.docs_path().canonicalize().unwrap();
+    let subtree = docs.join("guides");
+    let path = subtree.join("engineering/devops/subtree.md");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let receipt = valid_bound_receipt(
+        "engineering/devops",
+        "Subtree title",
+        "Subtree summary",
+        "docs/guides/engineering/devops/subtree.md",
+        6,
+    );
+    let original = document_with_receipt(
+        "Subtree title",
+        "Subtree summary",
+        "engineering/devops",
+        true,
+        &receipt,
+        "subtree body\n",
+    );
+    fs::write(&path, &original).unwrap();
+
+    crate::docs_ops::handle_wiki_organize(&server, subtree.to_str().unwrap(), true)
+        .await
+        .expect("preview an already positioned subtree document");
+    assert_eq!(fs::read_to_string(&path).unwrap(), original);
+    assert!(!subtree.join("archive/subtree.md").exists());
+
+    crate::docs_ops::handle_wiki_organize(&server, subtree.to_str().unwrap(), false)
+        .await
+        .expect("apply an already positioned subtree document");
+    assert!(path.exists());
+    assert!(!subtree.join("archive/subtree.md").exists());
+    let normalized = fs::read_to_string(&path).unwrap();
+    assert_model_document(
+        &normalized,
+        "Subtree title",
+        "Subtree summary",
+        "engineering/devops",
+        "docs/guides/engineering/devops/subtree.md",
+        6,
+    );
+
+    crate::docs_ops::handle_wiki_organize(&server, subtree.to_str().unwrap(), false)
+        .await
+        .expect("reapply an already positioned subtree document");
+    assert_eq!(fs::read_to_string(path).unwrap(), normalized);
+    assert!(!subtree.join("archive/subtree.md").exists());
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn source_newer_conflict_rebinds_receipted_predecessor_to_archive() {
     let server = make_server();
     let workspace = DocsWorktree::new();
