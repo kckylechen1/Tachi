@@ -125,6 +125,23 @@ impl McpClientPool {
             .remove(server_name)
             .is_some()
     }
+
+    #[cfg(test)]
+    pub(crate) fn install_test_connection(
+        &self,
+        server_name: &str,
+        client: rmcp::service::RunningService<rmcp::service::RoleClient, ()>,
+    ) {
+        lock_or_recover(&self.state, "mcp_pool.state")
+            .connections
+            .insert(
+                server_name.to_string(),
+                ChildConnection {
+                    client,
+                    last_used: Instant::now(),
+                },
+            );
+    }
 }
 
 // ─── MCP Pool Proxy Methods on MemoryServer ──────────────────────────────────
