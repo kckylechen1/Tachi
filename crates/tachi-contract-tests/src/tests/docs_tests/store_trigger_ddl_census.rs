@@ -1143,12 +1143,34 @@ const EXEMPTIONS: &[Exemption<'static>] = &[
                 ddl: "67bc9c164078a9a9",
                 occurrences: 1,
             },
+            Site {
+                symbol: "production_reopen_rejects_altered_identity_admission_conflict_target",
+                trigger: "IDENTITY_VERIFIED_ADMISSIONS_NO_DELETE",
+                ddl: "9205a371ccee164f",
+                occurrences: 1,
+            },
+            Site {
+                symbol: "production_reopen_rejects_altered_identity_admission_conflict_target",
+                trigger: "IDENTITY_VERIFIED_ADMISSIONS_NO_REPLACE",
+                ddl: "d2d977d8db3c4414",
+                occurrences: 1,
+            },
+            Site {
+                symbol: "production_reopen_rejects_altered_identity_admission_conflict_target",
+                trigger: "IDENTITY_VERIFIED_ADMISSIONS_NO_UPDATE",
+                ddl: "67bc9c164078a9a9",
+                occurrences: 1,
+            },
         ],
         reason: "production_open_authorizer_migrates_v36_verified_admission_inventory \
                  drops three v37 triggers on an unguarded fixture connection to model a \
                  v36 database, then exercises the production MemoryStore open/migrate path \
-                 and canonical inventory. Body read 2026-09-20. The file names store \
-                 doorways, so this fixture is declared rather than machine-proven.",
+                 and canonical inventory. \
+                 production_reopen_rejects_altered_identity_admission_conflict_target \
+                 removes the same triggers while rebuilding an offline fixture, restores \
+                 canonical v37 objects, and proves production reopen rejects the altered \
+                 historical conflict target. Bodies read 2026-09-20. The file names store \
+                 doorways, so these fixtures are declared rather than machine-proven.",
     },
     Exemption {
         path: "crates/memcore/src/store/vault/tests/vault_failure_injection.rs",

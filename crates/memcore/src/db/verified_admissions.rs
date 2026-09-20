@@ -294,33 +294,41 @@ const CANONICAL_OBJECTS: &[(&str, &str, &str, &str)] = &[
     ),
 ];
 
-const CANONICAL_UNIQUE_INDEXES: &[(&str, &[&str])] = &[
+type CanonicalConflictTarget = (&'static str, &'static [&'static str]);
+
+const CANONICAL_UNIQUE_CONFLICT_TARGETS: &[(&str, &[CanonicalConflictTarget])] = &[
     (
         "identity_admissions",
         &[
-            "idx_identity_admissions_verified_binding",
-            "sqlite_autoindex_identity_admissions_1",
-            "sqlite_autoindex_identity_admissions_2",
+            ("c", &["admission_id", "agent_identity_id", "connection_id"]),
+            ("pk", &["admission_id"]),
+            ("u", &["agent_identity_id", "connection_id"]),
         ],
     ),
     (
         "identity_admission_verification_receipts",
         &[
-            "sqlite_autoindex_identity_admission_verification_receipts_1",
-            "sqlite_autoindex_identity_admission_verification_receipts_2",
-            "sqlite_autoindex_identity_admission_verification_receipts_3",
-            "sqlite_autoindex_identity_admission_verification_receipts_4",
+            ("pk", &["receipt_id"]),
+            ("u", &["admission_id"]),
+            ("u", &["issuer_id", "idempotency_key"]),
+            ("u", &["issuer_id", "trust_domain", "nonce"]),
         ],
     ),
     (
         "identity_admission_verification_revocations",
         &[
-            "sqlite_autoindex_identity_admission_verification_revocations_1",
-            "sqlite_autoindex_identity_admission_verification_revocations_2",
-            "sqlite_autoindex_identity_admission_verification_revocations_3",
+            ("pk", &["revocation_id"]),
+            ("u", &["admission_id"]),
+            ("u", &["issuer_id", "nonce"]),
         ],
     ),
 ];
+
+#[derive(Debug, PartialEq, Eq)]
+struct UniqueConflictTarget {
+    origin: String,
+    columns: Vec<String>,
+}
 
 /// Exact receipt coordinates a trusted consumer must present when a verified
 /// remote identity authorizes a write. Constructing this value grants no
@@ -527,6 +535,85 @@ fn normalize_schema_sql(sql: &str) -> String {
         .join(" ")
 }
 
+fn unique_conflict_targets(
+    conn: &Connection,
+    table: &str,
+) -> Result<Vec<UniqueConflictTarget>, MemoryError> {
+    let mut statement = conn.prepare(
+        "SELECT name, origin, partial FROM pragma_index_list(?1) \
+         WHERE \"unique\"=1 ORDER BY name",
+    )?;
+    let indexes = statement
+        .query_map([table], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, bool>(2)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    indexes
+        .into_iter()
+        .map(|(name, origin, partial)| {
+            if partial {
+                return Err(MemoryError::InvalidArg(format!(
+                    "incomplete v37 verified admission schema: table '{table}' has a partial unique conflict target"
+                )));
+            }
+            let mut columns = conn.prepare(
+                "SELECT name, coll, desc FROM pragma_index_xinfo(?1) \
+                 WHERE key=1 ORDER BY seqno",
+            )?;
+            let columns = columns
+                .query_map([name], |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, bool>(2)?,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            let mut canonical_columns = Vec::with_capacity(columns.len());
+            for (column, collation, descending) in columns {
+                let Some(column) = column else {
+                    return Err(MemoryError::InvalidArg(format!(
+                        "incomplete v37 verified admission schema: table '{table}' has an expression unique conflict target"
+                    )));
+                };
+                if collation.as_deref() != Some("BINARY") || descending {
+                    return Err(MemoryError::InvalidArg(format!(
+                        "incomplete v37 verified admission schema: table '{table}' has a non-canonical unique conflict target"
+                    )));
+                }
+                canonical_columns.push(column);
+            }
+            Ok(UniqueConflictTarget {
+                origin,
+                columns: canonical_columns,
+            })
+        })
+        .collect()
+}
+
+fn validate_identity_admission_conflict_policy(conn: &Connection) -> Result<(), MemoryError> {
+    let table_sql: String = conn.query_row(
+        "SELECT COALESCE(sql, '') FROM main.sqlite_schema \
+         WHERE type='table' AND name='identity_admissions'",
+        [],
+        |row| row.get(0),
+    )?;
+    if normalize_schema_sql(&table_sql)
+        .to_ascii_uppercase()
+        .contains("ON CONFLICT")
+    {
+        return Err(MemoryError::InvalidArg(
+            "incomplete v37 verified admission schema: identity_admissions has a non-canonical conflict policy"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_verified_admission_schema(conn: &Connection) -> Result<(), MemoryError> {
     for (object_type, name, table, canonical_sql) in CANONICAL_OBJECTS.iter().copied() {
         let found: Option<(String, String)> = conn
@@ -564,17 +651,24 @@ pub(crate) fn validate_verified_admission_schema(conn: &Connection) -> Result<()
             )));
         }
     }
-    for (table, expected_indexes) in CANONICAL_UNIQUE_INDEXES.iter().copied() {
-        let mut statement = conn.prepare(
-            "SELECT name FROM pragma_index_list(?1) WHERE \"unique\"=1 ORDER BY name",
-        )?;
-        let indexes = statement
-            .query_map([table], |row| row.get::<_, String>(0))?
-            .collect::<Result<Vec<_>, _>>()?;
-        if indexes.len() != expected_indexes.len()
-            || indexes
-                .iter()
-                .any(|name| !expected_indexes.contains(&name.as_str()))
+    validate_identity_admission_conflict_policy(conn)?;
+    for (table, expected_targets) in CANONICAL_UNIQUE_CONFLICT_TARGETS.iter().copied() {
+        let targets = unique_conflict_targets(conn, table)?;
+        if targets.len() != expected_targets.len()
+            || expected_targets.iter().any(|(origin, columns)| {
+                targets
+                    .iter()
+                    .filter(|target| {
+                        target.origin == *origin
+                            && target
+                                .columns
+                                .iter()
+                                .map(String::as_str)
+                                .eq(columns.iter().copied())
+                    })
+                    .count()
+                    != 1
+            })
         {
             return Err(MemoryError::InvalidArg(format!(
                 "incomplete v37 verified admission schema: table '{table}' has unexpected unique conflict targets"
@@ -1018,5 +1112,93 @@ mod tests {
                 .unwrap();
         }
         validate_verified_admission_schema(&conn).unwrap();
+    }
+
+    fn open_with_identity_admission_constraint(
+        constraint: &str,
+        recursive_triggers: bool,
+    ) -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(&format!(
+            "PRAGMA foreign_keys=ON;
+             PRAGMA recursive_triggers={};
+             CREATE TABLE agent_identities (
+                 agent_identity_id TEXT PRIMARY KEY,
+                 created_at TEXT NOT NULL
+             );
+             CREATE TABLE identity_admissions (
+                 admission_id TEXT PRIMARY KEY,
+                 agent_identity_id TEXT,
+                 connection_id TEXT NOT NULL,
+                 state TEXT NOT NULL,
+                 rejection_evidence TEXT,
+                 created_at TEXT NOT NULL DEFAULT '',
+                 {constraint}
+             );",
+            i64::from(recursive_triggers)
+        ))
+        .unwrap();
+        install_verified_admission_schema(&conn).unwrap();
+        conn
+    }
+
+    #[test]
+    fn schema_validation_rejects_altered_or_reordered_identity_conflict_targets() {
+        for recursive_triggers in [false, true] {
+            for target in ["created_at", "connection_id, agent_identity_id"] {
+                let conn = open_with_identity_admission_constraint(
+                    &format!("UNIQUE({target})"),
+                    recursive_triggers,
+                );
+                if !recursive_triggers && target == "created_at" {
+                    conn.execute_batch(
+                        "INSERT INTO agent_identities (agent_identity_id, created_at)
+                         VALUES ('agent-victim', '2026-09-20T00:00:00Z'),
+                                ('agent-replacement', '2026-09-20T00:00:00Z');
+                         INSERT INTO identity_admissions
+                             (admission_id, agent_identity_id, connection_id, state, created_at)
+                         VALUES ('admission-victim', 'agent-victim', 'connection-victim',
+                                 'verified', 'shared-conflict-value');
+                         INSERT OR REPLACE INTO identity_admissions
+                             (admission_id, agent_identity_id, connection_id, state, created_at)
+                         VALUES ('admission-replacement', 'agent-replacement',
+                                 'connection-replacement', 'self_asserted',
+                                 'shared-conflict-value');",
+                    )
+                    .expect("the name-only schema admits the recursive_triggers=OFF victim delete");
+                    let victim_survives: bool = conn
+                        .query_row(
+                            "SELECT EXISTS(SELECT 1 FROM identity_admissions
+                             WHERE admission_id='admission-victim')",
+                            [],
+                            |row| row.get(0),
+                        )
+                        .unwrap();
+                    assert!(
+                        !victim_survives,
+                        "the altered conflict target is a real append-only bypass"
+                    );
+                }
+                let error = validate_verified_admission_schema(&conn)
+                    .expect_err("autoindex names must not substitute for canonical targets");
+                assert!(
+                    error
+                        .to_string()
+                        .contains("unexpected unique conflict targets"),
+                    "recursive_triggers={recursive_triggers}, target={target}: {error}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn schema_validation_rejects_replace_conflict_policy_on_canonical_target() {
+        let conn = open_with_identity_admission_constraint(
+            "UNIQUE(agent_identity_id, connection_id) ON CONFLICT REPLACE",
+            false,
+        );
+        let error = validate_verified_admission_schema(&conn)
+            .expect_err("canonical columns with replacement policy must fail closed");
+        assert!(error.to_string().contains("non-canonical conflict policy"));
     }
 }

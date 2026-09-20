@@ -314,6 +314,62 @@ fn production_open_authorizer_migrates_v36_verified_admission_inventory() {
 }
 
 #[test]
+fn production_reopen_rejects_altered_identity_admission_conflict_target() {
+    let dir = temp_dir("v37-altered-conflict-target");
+    let path = db_in(&dir, "memory.db");
+    drop(
+        MemoryStore::open_with_context(&path, &deny(StoreProfile::TachiFull))
+            .expect("fresh full create"),
+    );
+    {
+        let conn = raw(&path);
+        conn.execute_batch(
+            "PRAGMA foreign_keys=OFF;
+             DROP TABLE identity_admission_verification_revocations;
+             DROP TABLE identity_admission_verification_receipts;
+             DROP INDEX idx_identity_admissions_verified_binding;
+             DROP TRIGGER identity_verified_admissions_no_replace;
+             DROP TRIGGER identity_verified_admissions_no_update;
+             DROP TRIGGER identity_verified_admissions_no_delete;
+             CREATE TABLE identity_admissions_altered (
+                 admission_id TEXT PRIMARY KEY,
+                 agent_identity_id TEXT,
+                 connection_id TEXT NOT NULL,
+                 state TEXT NOT NULL CHECK (
+                     state IN ('self_asserted', 'verified', 'rejected', 'unavailable')
+                 ),
+                 rejection_evidence TEXT,
+                 created_at TEXT NOT NULL DEFAULT '',
+                 UNIQUE(created_at)
+             );
+             INSERT INTO identity_admissions_altered
+                 (admission_id, agent_identity_id, connection_id, state,
+                  rejection_evidence, created_at)
+                 SELECT admission_id, agent_identity_id, connection_id, state,
+                        rejection_evidence, created_at
+                 FROM identity_admissions;
+             DROP TABLE identity_admissions;
+             ALTER TABLE identity_admissions_altered RENAME TO identity_admissions;
+             CREATE INDEX idx_identity_admissions_connection
+                 ON identity_admissions(connection_id);",
+        )
+        .expect("replace the canonical historical conflict target offline");
+        crate::db::verified_admissions::install_verified_admission_schema(&conn)
+            .expect("restore every canonical v37 object around the altered historical table");
+    }
+
+    let error = MemoryStore::open_with_context(&path, &deny(StoreProfile::TachiFull))
+        .err()
+        .expect("current production reopen must reject an altered conflict target");
+    assert!(
+        error
+            .to_string()
+            .contains("unexpected unique conflict targets"),
+        "{error}"
+    );
+}
+
+#[test]
 fn full_tachi_refuses_portable_store() {
     let dir = temp_dir("refuse-portable");
     let path = db_in(&dir, "memory.db");
