@@ -5,6 +5,11 @@ pieces that already exist (#458 vault broker, #476 seat scoping, #515 front door
 ToolProfile/card authority, hub review gate, audit log). Product gate: this document
 must be true before Tachi ships as a product.
 
+Delivery procedure is owned by [`dispatch-lifecycle.md`](./dispatch-lifecycle.md),
+including review qualification, scoped addenda, and evidence attribution. The
+2026-09-20 alignment below changes those references only; it does not re-certify
+the dated runtime inventory or relax any credential, containment, or data boundary.
+
 ## The sentence that must have an answer
 
 Tachi stores every API key the owner has AND dispatches arbitrary-vendor agents with
@@ -52,8 +57,12 @@ only") are honor-system.
 Stance today: worktree isolation + concurrent-tree discipline + review gate before
 merge (safe_merge/verify). Stance later: sandbox-enforced scopes (macOS sandbox
 profiles / container worktrees) — tracked as a gap, not promised.
-The merge gate is the real wall: nothing a worker writes reaches main without a
-fresh different-model review and verification evidence (#516 pipeline hardens this).
+The merge gate is the integration wall: non-trivial worker changes reach main only
+with attributable independent review bound to the current candidate and required
+verification evidence. Dispatch §2.4 defines review qualification; containment and
+other high-risk changes require verified different-model or accountable independent
+human review. Dispatch §2.5 defines when a scoped addendum is sufficient. This
+integration gate is not a substitute for runtime containment (#516 hardens the pipeline).
 
 **T3 — Malicious or compromised MCP upstream.** An upstream tool's OUTPUT is
 injectable content aimed at whichever agent called it; a hostile server can also
@@ -84,9 +93,11 @@ product decision to revisit.
 
 **T7 — Eval/routing poisoning.** Workers self-report; a lying worker inflates its
 own route.
-Stance: eval rows record verdicts from the REVIEW lane (different model), not the
-worker's self-report (review discipline is law); route changes go through proposals
-with `confirm=true` human application — the scheduler learns, but the owner ratifies.
+Stance: eval rows retain attributable independent review and executed evidence, not
+an implementer's self-graded approval. Reviewer qualification and honestly unknown
+model identity follow dispatch §2.4; unknown is never certified diversity. Route
+changes still go through proposals with `confirm=true` human application — the
+scheduler learns, but the owner ratifies.
 
 **T8 — Recursive-dispatch resource exhaustion.** A worker that itself dispatches
 children (self-dispatch, or a chain of workers each dispatching the next) can
@@ -113,8 +124,10 @@ follow-up hardening, not part of this gate.
    them only as card-whitelisted, per-dispatch, audit-logged leases.
 2. Trust is minted only at the owner's local CLI; no MCP-surface path may
    auto-approve capabilities, keys, or route changes.
-3. Nothing merges to a default branch without different-model review evidence and
-   verification checks (goal/* included at campaign close).
+3. Default-branch integration requires the current-candidate independent review
+   qualification and applicable verification defined by dispatch §2.4–§2.6
+   (goal/* included at campaign close); high-risk changes require verified
+   different-model or accountable independent human review. No self-approval.
 4. Every GitHub write and every key lease is attributable in the audit log.
 5. Review/verify gates fail CLOSED (missing/stale/unparseable evidence = blocked).
 6. Open-web read and write authority never coexist on one worker: research

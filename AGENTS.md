@@ -7,6 +7,7 @@ The current owner instruction outranks remembered material and stale summaries. 
 ## Read the owning canon
 
 - Delivery scope, review independence, evidence reuse, acceptance, and recovery: [`dispatch-lifecycle.md`](docs/engineering/architecture/dispatch-lifecycle.md). Its current delivery rules supersede older routing/review summaries; historical incidents are evidence, not additional gates.
+- Actions quota, runner readiness, and bounded reruns: [`actions-capacity.md`](docs/engineering/operations/actions-capacity.md). Cost controls never waive required evidence.
 - Issue parentage and protected closure: [`issue-portfolio-governance.md`](docs/engineering/architecture/issue-portfolio-governance.md).
 - SQLite trigger-based failure injection: [`test-failure-injection.md`](docs/engineering/operations/test-failure-injection.md), before writing such fixtures.
 
@@ -29,6 +30,7 @@ Read only what the task needs. Current typed issue, ref, test, deployment, and r
 
 ## Delivery rules
 
+- When delivery rules change, update the owning canon and affected instruction adapters, active design summaries, and runbooks in the same bounded PR. Link to the canon instead of maintaining independent copies; distinguish branch changes from merged policy.
 - One bounded contract produces one reviewable delivery. Reuse the existing issue/PR instead of creating a ticket for each repair. Record the acceptance plan before final evidence collection.
 - Every non-trivial change receives an attributable independent read-only review. Review independence, risk-based model diversity, human review, and honest unknown-model handling are defined in dispatch §2.4. Implementers do not certify their own review; policy changes do not exempt themselves.
 - Review the actual candidate. Mechanical follow-ups may receive a scoped review addendum; semantic changes require the affected invariant to be reviewed again. Old evidence keeps its original SHA and never silently becomes evidence for a new tree.

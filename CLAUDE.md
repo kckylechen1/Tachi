@@ -10,6 +10,8 @@
 ## Claude/OpenCode mechanism mapping
 
 - Use the harness's native subagents for ordinary local scouting, implementation, and independent review. Tachi staffing is only for the exceptions named in `AGENTS.md`; Tachi may still record native-worker outcomes.
+- Apply the review qualification and scoped-addendum rules in [`dispatch-lifecycle.md` §2.4–§2.5](docs/engineering/architecture/dispatch-lifecycle.md#24-lane-selection-and-review-diversity). An unknown model is recorded as unknown, not inferred from the carrier; the adapter cannot waive high-risk review or certify itself.
+- For Actions quota or runner blockage, use [`actions-capacity.md`](docs/engineering/operations/actions-capacity.md). Do not repeatedly push or rerun an unchanged blocked candidate, change billing, or relabel unexecuted checks as passed.
 - Select routes from the live tool schema and current skill registry. Do not hard-code model or vendor assignments here. Capacity failure changes the route, not the frozen contract, evidence head, or authority ceiling.
 - Treat transitional Tachi-owned process/session supervision code as implementation state, not the target architecture. Reconcile the current disposition of #757 and current code before changing that boundary.
 - For issue work, read `issue-portfolio-governance.md`; do not derive execution from stale issue bodies or labels, and never close protected umbrellas from this adapter.
