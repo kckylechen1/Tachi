@@ -509,7 +509,7 @@ fn spec_drift(
         drift.push(drift_item(
             "missing_verification",
             "Cycle has a linked PR but no Tachi verification ledger.",
-            "Record required checks with tachi_verify before safe_merge or close_loop.",
+            "Run the required checks and record their evidence before safe_merge or close_loop.",
         ));
     }
     // #1454 F6: readiness flags follow the authority-aware verdict. A
@@ -644,7 +644,8 @@ fn next_action(
     }
     match verification_verdict {
         None => {
-            return "Record required verification with tachi_verify before PR gate.".to_string()
+            return "Run the required checks and record their evidence before the PR gate."
+                .to_string()
         }
         Some("passed") => {}
         Some(other) => return format!("Resolve verification state `{other}` before PR gate."),

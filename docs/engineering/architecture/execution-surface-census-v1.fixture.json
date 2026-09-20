@@ -10,19 +10,19 @@
     "profiles": {
       "admin": {
         "max_total_input_schema_bytes": 142519,
-        "max_total_tool_definition_bytes": 173879,
+        "max_total_tool_definition_bytes": 173885,
         "max_visible_tools": 83,
         "rationale": "Exact live observed #1691 census for admin after profile-specific tools/list narrowing; any regrowth requires explicit adjudication.; #1454 server-run tachi_verify surface (action=run, +check_kind/+timeout_secs props; +1131 schema bytes / +1365 tool-definition bytes per profile) re-pinned after the rebase onto 53939b5b5 (main #1690/#1691 retirements); #1322 declared_file_scope on tachi_staff, including its exact serialized schema bytes; any further regrowth requires explicit adjudication.; #1861 vault_set explicit rebind property re-pinned to the exact live admin surface; #1679 adds the tachi_delivery seam (6 actions, +1771 schema bytes / +2198 tool-def bytes, coordinate+admin visibility only) for the durable delivery spine; #1679 re-measured after the delivery seam action field became a closed wire enum (denominator matches tachi_a2a)"
       },
       "coordinate": {
         "max_total_input_schema_bytes": 49251,
-        "max_total_tool_definition_bytes": 53538,
+        "max_total_tool_definition_bytes": 53544,
         "max_visible_tools": 5,
         "rationale": "Exact live observed #1935 coordinate compatibility census after contraction to the five product facades; any regrowth requires explicit adjudication."
       },
       "delegate": {
         "max_total_input_schema_bytes": 49043,
-        "max_total_tool_definition_bytes": 53263,
+        "max_total_tool_definition_bytes": 53269,
         "max_visible_tools": 5,
         "rationale": "Exact live observed #1935 Worker census for the five product facades with Worker-safe action schemas; any regrowth requires explicit adjudication."
       },
@@ -34,7 +34,7 @@
       },
       "standard": {
         "max_total_input_schema_bytes": 49251,
-        "max_total_tool_definition_bytes": 53538,
+        "max_total_tool_definition_bytes": 53544,
         "max_visible_tools": 5,
         "rationale": "Exact live observed #1935 Lead/default census after contraction to the five product facades; any regrowth requires explicit adjudication."
       }
@@ -191,7 +191,7 @@
     "profiles": {
       "admin": {
         "total_input_schema_bytes": 142519,
-        "total_tool_definition_bytes": 173879,
+        "total_tool_definition_bytes": 173885,
         "visible_tool_count": 83,
         "visible_tools": [
           "archive_memory",
@@ -281,7 +281,7 @@
       },
       "coordinate": {
         "total_input_schema_bytes": 49251,
-        "total_tool_definition_bytes": 53538,
+        "total_tool_definition_bytes": 53544,
         "visible_tool_count": 5,
         "visible_tools": [
           "tachi_a2a",
@@ -293,7 +293,7 @@
       },
       "delegate": {
         "total_input_schema_bytes": 49043,
-        "total_tool_definition_bytes": 53263,
+        "total_tool_definition_bytes": 53269,
         "visible_tool_count": 5,
         "visible_tools": [
           "tachi_a2a",
@@ -351,7 +351,7 @@
       },
       "standard": {
         "total_input_schema_bytes": 49251,
-        "total_tool_definition_bytes": 53538,
+        "total_tool_definition_bytes": 53544,
         "visible_tool_count": 5,
         "visible_tools": [
           "tachi_a2a",

@@ -670,6 +670,7 @@ fn annotate_bound_project_schema(tool: &mut rmcp::model::Tool) {
 struct HttpSessionIdentity {
     profile: Option<String>,
     client: Option<String>,
+    internal_proxy_token: Option<String>,
     agent_identity_id: Option<String>,
     /// Present-but-blank/illegal `tachiAgentIdentity` / `X-Tachi-Agent-Identity`
     /// must not collapse to "absent" and fall through to process env (#1761).
@@ -761,10 +762,12 @@ impl MemoryServer {
                 None,
             ));
         }
+        let trusted_internal_proxy =
+            self.admits_internal_proxy_token(identity.internal_proxy_token.as_deref());
         let profile = identity
             .profile
             .as_deref()
-            .map(parse_http_tool_profile)
+            .map(|raw| parse_http_tool_profile(raw, trusted_internal_proxy))
             .transpose()?;
         // A direct HTTP/proxy session that does not assert a profile must not
         // inherit a daemon-wide Ops/admin profile. Local stdio keeps the
@@ -846,6 +849,8 @@ fn http_session_identity(
             header_string(parts, crate::session_identity::HEADER_PROFILE).or(identity.profile);
         identity.client =
             header_string(parts, crate::session_identity::HEADER_CLIENT).or(identity.client);
+        identity.internal_proxy_token =
+            header_string(parts, crate::session_identity::HEADER_INTERNAL_PROXY_TOKEN);
         match header_string_result(parts, crate::session_identity::HEADER_AGENT_IDENTITY) {
             Ok(Some(value)) => {
                 if let Err(err) = assign_explicit_agent_identity(&mut identity, value) {
@@ -1035,7 +1040,10 @@ fn header_string_result(
     }
 }
 
-fn parse_http_tool_profile(raw: &str) -> Result<tachi_hub::ToolProfile, rmcp::ErrorData> {
+fn parse_http_tool_profile(
+    raw: &str,
+    trusted_internal_proxy: bool,
+) -> Result<tachi_hub::ToolProfile, rmcp::ErrorData> {
     let requests_privileged_surface = raw.split([',', '+']).map(str::trim).any(|token| {
         matches!(
             token.to_ascii_lowercase().as_str(),
@@ -1050,7 +1058,7 @@ fn parse_http_tool_profile(raw: &str) -> Result<tachi_hub::ToolProfile, rmcp::Er
                 | "emergency"
         )
     });
-    if requests_privileged_surface {
+    if requests_privileged_surface && !trusted_internal_proxy {
         return Err(rmcp::ErrorData::invalid_params(
             format!(
                 "HTTP direct-connect profile '{raw}' requires explicit authorization that caller-supplied profile metadata cannot provide; select Ops/admin only from a trusted local process configuration"
@@ -2328,6 +2336,7 @@ mod tests {
     fn named_project_wins_over_workspace_root_when_both_present() {
         let identity = HttpSessionIdentity {
             profile: None,
+            internal_proxy_token: None,
             client: None,
             agent_identity_id: None,
             agent_identity_error: None,
@@ -2347,6 +2356,7 @@ mod tests {
     fn workspace_root_used_only_when_project_absent() {
         let identity = HttpSessionIdentity {
             profile: None,
+            internal_proxy_token: None,
             client: None,
             agent_identity_id: None,
             agent_identity_error: None,

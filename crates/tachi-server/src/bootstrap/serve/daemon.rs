@@ -43,6 +43,8 @@ pub(super) async fn serve_http_daemon(
             return Err(format!("tachi daemon singleton lock unavailable: {e}").into());
         }
     };
+    let internal_proxy_token = uuid::Uuid::new_v4().simple().to_string();
+    server.set_daemon_proxy_token(internal_proxy_token.clone());
 
     // S1 startup reconciliation: singleton ownership is PROVEN, so this
     // controller incarnation now scans the runs root it owns. Terminal
@@ -428,6 +430,7 @@ pub(super) async fn serve_http_daemon(
         "started_at": Utc::now().to_rfc3339(),
         "version": crate::build_info::PKG_VERSION,
         "git_sha": crate::build_info::GIT_SHA,
+        "internal_proxy_token": internal_proxy_token,
     });
     if let Some(parent) = pid_path.parent() {
         let _ = tokio::fs::create_dir_all(parent).await;

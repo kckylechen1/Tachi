@@ -11,6 +11,7 @@ fn daemon(global: Option<&Path>, project: Option<&Path>) -> crate::cli_client::D
         project_db: project.map(|path| path.display().to_string()),
         version: Some(env!("CARGO_PKG_VERSION").to_string()),
         pid: Some(std::process::id() as i64),
+        internal_proxy_token: None,
     }
 }
 
@@ -56,13 +57,15 @@ async fn spawn_test_http_daemon(
     let local_addr = listener.local_addr().expect("local addr");
     let ct = CancellationToken::new();
     let ct_shutdown = ct.clone();
+    let internal_proxy_token = uuid::Uuid::new_v4().simple().to_string();
+    server.set_daemon_proxy_token(internal_proxy_token.clone());
 
     let mut http_config = StreamableHttpServerConfig::default();
     http_config.legacy_session_mode = true;
     http_config.cancellation_token = ct.child_token();
 
     let service = StreamableHttpService::new(
-        move || Ok(server.clone()),
+        move || Ok(server.clone_for_mcp_session()),
         std::sync::Arc::new(LocalSessionManager::default()),
         http_config,
     );
@@ -80,6 +83,7 @@ async fn spawn_test_http_daemon(
             project_db: None,
             version: Some(env!("CARGO_PKG_VERSION").to_string()),
             pid: Some(std::process::id() as i64),
+            internal_proxy_token: Some(internal_proxy_token),
         },
         ct,
         handle,
@@ -366,9 +370,22 @@ fn stdio_proxy_profile_is_forwarded_once_and_denies_attachment_before_handler() 
             "lead",
             "delegate",
             "worker",
+            "observe",
+            "read",
+            "reader",
+            "remember",
+            "write",
+            "writer",
+            "agent",
             "coordinate",
+            "observe+remember",
+            "remember+observe",
+            "reader+writer",
+            "coordinate+observe",
+            "observe+coordinate",
             "delegate+operate",
             "standard+delegate",
+            "delegate+standard",
         ] {
             let profile = tachi_hub::parse_tool_profile(raw_profile)
                 .unwrap_or_else(|| panic!("profile {raw_profile} should parse"));
@@ -448,6 +465,56 @@ fn stdio_proxy_profile_is_forwarded_once_and_denies_attachment_before_handler() 
         ct.cancel();
         daemon_task.await.expect("daemon task");
     });
+}
+
+#[test]
+fn stdio_process_selected_ops_proxy_lists_and_calls_through_production_session_clone() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let temp = tempfile::tempdir().expect("tempdir");
+    let tachi_home = temp.path().join("home");
+    let global = tachi_home.join("global/memory.db");
+    std::fs::create_dir_all(global.parent().expect("global parent")).expect("global parent");
+    let _tachi_home = EnvRestore::set_path("TACHI_HOME", &tachi_home);
+    let _sigil_home = EnvRestore::remove("SIGIL_HOME");
+    let _app_home = EnvRestore::remove("TACHI_APP_HOME");
+
+    let rt = test_runtime();
+    let (ct, daemon_task) = rt.block_on(async {
+        let server = crate::MemoryServer::new(global.clone(), None).expect("daemon server");
+        let (daemon, ct, daemon_task) = spawn_test_http_daemon(server, &global).await;
+        let proxy = StdioProxyServer {
+            adapter_started_at: chrono::Utc::now(),
+            tool_profile: Some(tachi_hub::ToolProfile::operate()),
+            resolved_agent_identity: Default::default(),
+            daemon: std::sync::Arc::new(std::sync::RwLock::new(daemon)),
+            app_home: tachi_home,
+            global_db_path: global,
+            project_db_path: None,
+            client_project: None,
+        };
+
+        let listed = list_tools_via_stdio_proxy(proxy.clone())
+            .await
+            .expect("process-selected Ops tools/list must traverse HTTP proxy");
+        let names = listed
+            .tools
+            .iter()
+            .map(|tool| tool.name.as_ref())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(names.len(), 39, "Ops must retain its frozen broad surface");
+        assert!(names.contains("tachi_status"), "Ops list: {names:?}");
+        assert!(names.contains("runtime_info"), "Ops list: {names:?}");
+
+        let status = call_tool_via_stdio_proxy(proxy, "tachi_status", serde_json::Map::new())
+            .await
+            .expect("process-selected Ops call must traverse HTTP proxy");
+        assert_ne!(status.is_error, Some(true), "Ops status call: {status:?}");
+        (ct, daemon_task)
+    });
+    ct.cancel();
+    rt.block_on(daemon_task).expect("daemon task");
 }
 
 fn write_repo_project_manifest(tachi_home: &Path, db_paths: &[&Path]) {
@@ -1166,6 +1233,7 @@ fn stdio_proxy_runtime_info_reflects_pid_file_changes_not_cached_snapshot() {
             project_db: None,
             version: Some("0.0.0-stale-cache".to_string()),
             pid: Some(9999),
+            internal_proxy_token: None,
         };
         let proxy = StdioProxyServer {
             adapter_started_at: chrono::Utc::now(),
@@ -1271,6 +1339,7 @@ fn stdio_proxy_runtime_info_reports_unreachable_when_daemon_absent() {
             project_db: None,
             version: Some(env!("CARGO_PKG_VERSION").to_string()),
             pid: Some(4242),
+            internal_proxy_token: None,
         };
         let proxy = StdioProxyServer {
             adapter_started_at: chrono::Utc::now(),
@@ -1342,7 +1411,7 @@ fn stdio_proxy_archives_global_row_with_bound_project() {
         let (daemon, ct, daemon_task) = spawn_test_http_daemon(server, &global).await;
         let proxy = StdioProxyServer {
             adapter_started_at: chrono::Utc::now(),
-            tool_profile: None,
+            tool_profile: Some(tachi_hub::ToolProfile::admin()),
             daemon: std::sync::Arc::new(std::sync::RwLock::new(daemon)),
             app_home: tachi_home.clone(),
             global_db_path: global.clone(),
@@ -2204,6 +2273,21 @@ fn http_direct_connect_rejects_privileged_profile_without_authorization_policy()
                 "unexpected {profile} rejection: {init:#}"
             );
         }
+        let guessed_headers = http_headers(&[
+            (crate::session_identity::HEADER_PROFILE, "ops"),
+            (
+                crate::session_identity::HEADER_INTERNAL_PROXY_TOKEN,
+                "caller-guessed-capability",
+            ),
+        ]);
+        let (_client, _session_headers, guessed) =
+            http_mcp_initialize(&daemon.url, guessed_headers, None).await;
+        assert!(
+            guessed["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("requires explicit authorization")),
+            "a caller-guessed proxy capability must not authorize Ops: {guessed:#}"
+        );
         let headers =
             http_headers(&[(crate::session_identity::HEADER_PROFILE, "unknown-principal")]);
         let (_client, _session_headers, init) =
@@ -2252,8 +2336,21 @@ fn http_direct_connect_ordinary_profiles_have_exact_facades_and_hide_retired_rou
             Some("lead"),
             Some("delegate"),
             Some("worker"),
+            Some("observe"),
+            Some("read"),
+            Some("reader"),
+            Some("remember"),
+            Some("write"),
+            Some("writer"),
+            Some("agent"),
             Some("coordinate"),
+            Some("observe+remember"),
+            Some("remember+observe"),
+            Some("reader+writer"),
+            Some("coordinate+observe"),
+            Some("observe+coordinate"),
             Some("standard+delegate"),
+            Some("delegate+standard"),
         ] {
             let profile_label = profile.unwrap_or("missing/default");
             let headers = profile.map_or_else(

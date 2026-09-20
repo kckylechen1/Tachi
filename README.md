@@ -308,9 +308,9 @@ tachi skill-surface status --host claude,codex,gemini,cursor,antigravity
 ### 7. Agent Coordination
 - **Ghost Whispers** — persistent topic-based pub/sub between agents (`ghost_publish`, `ghost_subscribe`, `ghost_ack`, `ghost_reflect`, `ghost_promote`).
 - **Kanban** — cross-agent cards with `ack` / `progress` / `result` states (the legacy `post_card`/`check_inbox`/`update_card` routes are retired — kanban is reached through `tachi_task` board actions / internal handlers).
-- **Handoff issue promotion** — create/link a GitHub issue from an existing handoff memo (`tachi_handoff(action='promote_issue')`). #1099: the older `handoff_leave`/`handoff_check` memo-passing routes are retired — use `tachi_a2a(action='respond')` for same-host advisory messaging, or `tachi_task(action='handoff')` for a structured task baton.
+- **Handoff issue promotion** — ordinary sessions use `tachi_a2a(action='respond')` for same-host advisory messaging or `tachi_task(action='handoff')` for a structured task baton. The retained `tachi_handoff(action='promote_issue')` route is explicit Ops/admin compatibility only; #1099 retired its older `leave`/`check` actions.
 
-> Ghost and Kanban tools are native `admin`-profile surfaces (not bundled into `standard`/`coordinate`). Most agents coordinate through the `tachi_handoff`, `tachi_gh(action='close_loop')`, and `tachi_task` facades instead.
+> Ghost tools and residual Kanban routes are native `admin`-profile surfaces. Ordinary agents coordinate through `tachi_a2a`, `tachi_gh`, and `tachi_task`.
 
 ### 8. Continuity & Project Lifecycle Memory
 Continuity is the layer above raw recall. Tachi records typed project events,

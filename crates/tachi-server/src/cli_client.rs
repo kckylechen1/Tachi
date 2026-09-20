@@ -101,6 +101,7 @@ mod tests {
             project_db: project.map(|path| path.display().to_string()),
             version: Some(env!("CARGO_PKG_VERSION").to_string()),
             pid: Some(std::process::id() as i64),
+            internal_proxy_token: None,
         }
     }
 
@@ -183,6 +184,7 @@ mod tests {
             project_db: None,
             version: version.map(str::to_string),
             pid: Some(1234),
+            internal_proxy_token: None,
         }
     }
 

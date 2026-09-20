@@ -19,7 +19,7 @@ fn legacy_http_initialize_meta_survives_wire_dispatch() {
                     "tachiClient": "legacy-meta-client",
                     "tachiProject": project_name,
                     "tachiAgentIdentity": "agent.legacy.meta",
-                    "tachiProfile": "ops"
+                    "tachiProfile": "standard"
                 })),
             )
             .await;
@@ -27,20 +27,23 @@ fn legacy_http_initialize_meta_survives_wire_dispatch() {
             assert_eq!(init["result"]["protocolVersion"], "2024-11-05");
             assert!(headers.contains_key("mcp-session-id"));
             http_mcp_initialized(&client, &daemon.url, headers.clone()).await;
-            let runtime = http_mcp_call_tool(
-                &client,
-                &daemon.url,
-                headers.clone(),
-                2,
-                "runtime_info",
-                serde_json::Map::new(),
-            )
-            .await;
-            assert!(runtime["result"].get("resultType").is_none(), "{runtime:#}");
-            let body: serde_json::Value =
-                serde_json::from_str(&http_tool_text(&runtime)).expect("runtime JSON");
-            assert_eq!(body["runtime"]["session_client"], "legacy-meta-client");
-            assert_eq!(body["runtime"]["session_project"], project_name);
+            let listed = http_mcp_list_tools(&client, &daemon.url, headers.clone(), 2).await;
+            let names = listed["result"]["tools"]
+                .as_array()
+                .expect("legacy tools/list result")
+                .iter()
+                .filter_map(|tool| tool["name"].as_str())
+                .collect::<std::collections::BTreeSet<_>>();
+            assert_eq!(
+                names,
+                std::collections::BTreeSet::from([
+                    "tachi_a2a",
+                    "tachi_gh",
+                    "tachi_memory",
+                    "tachi_staff",
+                    "tachi_task",
+                ])
+            );
             let a2a = http_mcp_call_tool(
                 &client,
                 &daemon.url,

@@ -688,6 +688,7 @@ async fn spawn_receipt_http_daemon(
             project_db: None,
             version: Some(env!("CARGO_PKG_VERSION").to_string()),
             pid: Some(std::process::id() as i64),
+            internal_proxy_token: None,
         },
         ct,
         handle,

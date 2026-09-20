@@ -226,9 +226,10 @@ compatibility routes remain physically registered for explicit Ops/admin use.
    Move self-tuning actions to an admin-only `tachi_tune` or equivalent before
    deleting duplicate action aliases.
 7. **DONE — introduce action-level filtering for delegates.**
-   Delegates now use action-scoped `tachi_task` and `tachi_skill`; the direct
-   `tachi_complete` and `run_skill` routes are retired. `tachi_unstick` remains
-   the explicit worker-safe rescue surface.
+   Delegates discover exactly the five product facades and use their
+   action-scoped Worker policy. The direct route `tachi_complete` is retired;
+   `run_skill` is retired too. `tachi_skill` and `tachi_unstick` remain only for
+   explicit Ops/admin compatibility.
 8. **Decide admin facade shape.**
    Either keep admin as full bypass for emergency use only, or replace it with
    explicit admin facades (`tachi_admin`, `tachi_hub`, `tachi_vault`) and a

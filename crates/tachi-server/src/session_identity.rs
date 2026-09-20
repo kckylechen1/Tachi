@@ -16,6 +16,12 @@ use rmcp::model::JsonObject;
 pub(crate) const HEADER_PROFILE: &str = "x-tachi-profile";
 pub(crate) const HEADER_CLIENT: &str = "x-tachi-client";
 pub(crate) const HEADER_AGENT_IDENTITY: &str = "x-tachi-agent-identity";
+/// Per-daemon capability carried only by trusted local CLI/stdio-proxy hops.
+/// It is minted at daemon startup, persisted in the owner-only discovery
+/// receipt, and never accepted from MCP initialize metadata. Possessing this
+/// capability authorizes a process-selected Ops profile; profile metadata by
+/// itself remains an untrusted assertion.
+pub(crate) const HEADER_INTERNAL_PROXY_TOKEN: &str = "x-tachi-internal-proxy-token";
 /// Process-env twin of [`HEADER_AGENT_IDENTITY`] / [`META_AGENT_IDENTITY`].
 /// Stdio hosts (Cursor `mcp.json`) cannot set initialize `_meta`; they can
 /// stamp this on `tachi serve`. Absent/invalid stays absent — never minted

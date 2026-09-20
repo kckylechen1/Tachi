@@ -562,13 +562,13 @@ pub(super) fn host_lifecycle_contract() -> Value {
         "steps": [
             {
                 "phase": "before_session",
-                "tool": "tachi_status + tachi_memory.briefing or tachi_event.context",
+                "tool": "tachi_memory.briefing + tachi_memory.alerts",
                 "writes": false,
                 "purpose": "load runtime identity, project briefing, active flow hints, and profile guidance"
             },
             {
                 "phase": "before_prompt",
-                "tool": "tachi_event.context + tachi_task.status (nested cycle view) when flow_id/issue_ref/pr_ref exists",
+                "tool": "tachi_memory.briefing + tachi_task.status (nested cycle view) when flow_id/issue_ref/pr_ref exists",
                 "writes": false,
                 "purpose": "attach compact memory, linked docs/specs, unresolved criteria, and host instruction packet"
             },

@@ -298,6 +298,26 @@ async fn additive_worker_projection_matches_its_call_time_policy() {
     }
     assert!(action_names(&lead_worker_tools, "tachi_staff").contains("start"));
     assert!(action_names(&lead_worker_tools, "tachi_gh").contains("safe_merge"));
+    for tool in &standard_tools {
+        let description = tool.description.as_deref().unwrap_or_default();
+        for residual in [
+            "runtime_info",
+            "tachi_component",
+            "tachi_skill",
+            "tachi_status",
+            "tachi_tools",
+            "tachi_unstick",
+            "tachi_verify",
+            "tachi_web_search",
+            "tachi_wiki",
+        ] {
+            assert!(
+                !description.contains(residual),
+                "ordinary {} schema advertises residual route {residual}: {description}",
+                tool.name
+            );
+        }
+    }
 
     let (prepared, admin_tools) = tokio::task::spawn_blocking(|| {
         let prepared = crate::server_handler::prepare_native_tool_definitions(

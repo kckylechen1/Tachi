@@ -48,7 +48,7 @@ async fn tachi_memory_briefing_includes_recent_verification_gates() {
     // shared `markup_text` helper, so its underscore appears escaped.
     assert!(body.contains("[unverified (caller-asserted: failed)] `flow\\_briefing-verification`"));
     assert!(body.contains("`kckylechen1/tachi#209`"));
-    assert!(body.contains("tachi_verify(action='board')"));
+    assert!(body.contains("tachi_task(action='status')"));
     if let Some(original) = original {
         std::env::set_var("TACHI_RUN_ROOT", original);
     } else {

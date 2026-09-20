@@ -61,6 +61,56 @@ fn explicit_remember_surface_excludes_admin_tools() {
 }
 
 #[test]
+fn every_legacy_ordinary_selector_discovers_exactly_the_five_facades() {
+    let expected = vec![
+        "tachi_memory".to_string(),
+        "tachi_task".to_string(),
+        "tachi_staff".to_string(),
+        "tachi_gh".to_string(),
+        "tachi_a2a".to_string(),
+    ];
+    for raw in [
+        "observe",
+        "read",
+        "reader",
+        "remember",
+        "write",
+        "writer",
+        "agent",
+        "coordinate",
+        "observe+remember",
+        "remember+observe",
+        "reader+writer",
+        "agent+read",
+        "coordinate+observe",
+        "observe+coordinate",
+    ] {
+        let profile = parse_tool_profile(raw)
+            .unwrap_or_else(|| panic!("legacy ordinary selector {raw} should parse"));
+        let names = filter_tool_defs(
+            vec![
+                test_tool("tachi_memory"),
+                test_tool("tachi_task"),
+                test_tool("tachi_staff"),
+                test_tool("tachi_gh"),
+                test_tool("tachi_a2a"),
+                test_tool("runtime_info"),
+                test_tool("tachi_status"),
+                test_tool("tachi_verify"),
+                test_tool("tachi_skill"),
+                test_tool("hub_register"),
+            ],
+            Some(profile),
+            None,
+        )
+        .into_iter()
+        .map(|tool| tool.name.into_owned())
+        .collect::<Vec<_>>();
+        assert_eq!(names, expected, "legacy selector {raw}");
+    }
+}
+
+#[test]
 fn omitted_profile_defaults_to_standard_surface() {
     let filtered = filter_tool_defs(
         vec![
