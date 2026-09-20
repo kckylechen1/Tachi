@@ -1036,8 +1036,7 @@ mod tests {
             .iter()
             .map(|secret| fp_key.key_fingerprint(provider_kind, secret))
             .collect();
-        let account_fingerprint =
-            fp_key.account_fingerprint_from_members(&member_fingerprints);
+        let account_fingerprint = fp_key.account_fingerprint_from_members(&member_fingerprints);
         let auth_ref = format!("va1:{account_id}");
         memcore::db::insert_provider_account(
             store.connection(),
@@ -1729,10 +1728,7 @@ mod tests {
             "DEEPSEEK_API_KEY",
         );
         drop(store);
-        write_file(
-            &cwd.path().join(".env"),
-            "DEEPSEEK_API_KEY=member-a\n",
-        );
+        write_file(&cwd.path().join(".env"), "DEEPSEEK_API_KEY=member-a\n");
 
         let report = plan(home.path(), cwd.path(), &db_path);
 
@@ -1742,7 +1738,10 @@ mod tests {
             .iter()
             .find(|candidate| candidate.logical_name == "DEEPSEEK_API_KEY")
             .expect("candidate");
-        assert_eq!(candidate.account_id.as_deref(), Some("account-deepseek-pool"));
+        assert_eq!(
+            candidate.account_id.as_deref(),
+            Some("account-deepseek-pool")
+        );
     }
 
     #[test]
@@ -1927,11 +1926,7 @@ mod tests {
 
         assert_eq!(
             parsed,
-            vec![(
-                path,
-                "IN_HAND_API_KEY".to_string(),
-                "from-hand".to_string()
-            )]
+            vec![(path, "IN_HAND_API_KEY".to_string(), "from-hand".to_string())]
         );
     }
 
@@ -1943,9 +1938,7 @@ mod tests {
             &path,
             "DOUBLE_API_KEY=\"same-fixture\"\nSINGLE_API_KEY='same-fixture'\nPLAIN_API_KEY=same-fixture\n",
         );
-        assert!(parsed
-            .iter()
-            .all(|(_, _, value)| value == "same-fixture"));
+        assert!(parsed.iter().all(|(_, _, value)| value == "same-fixture"));
 
         let paths = env_source_paths(home.path(), home.path());
         let unique: HashSet<&PathBuf> = paths.iter().collect();
