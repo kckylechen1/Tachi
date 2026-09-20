@@ -237,6 +237,31 @@ fn valid_bound_receipt(
     })
 }
 
+fn canonical_bound_receipt_wire(
+    category: &str,
+    title: &str,
+    summary: &str,
+    object_id: &str,
+    revision: i64,
+) -> String {
+    let hash = independent_content_hash(&canonical_payload(category, title, summary));
+    format!(
+        concat!(
+            "{{\"schema\":\"model-invocation-v1\",",
+            "\"lane\":\"extract\",\"engine_kind\":\"provider_http\",",
+            "\"effective_provider\":\"mock-provider\",",
+            "\"effective_model\":\"mock-docs-classifier-v1\",",
+            "\"effective_version\":null,\"fallback_chain\":[],",
+            "\"degraded\":false,\"completion_status\":\"complete\",",
+            "\"prompt_tokens\":11,\"completion_tokens\":7,\"total_tokens\":18,",
+            "\"latency_ms\":1,\"content_hash\":{},\"memory_id\":{},",
+            "\"revision\":{revision}}}"
+        ),
+        serde_json::to_string(&hash).unwrap(),
+        serde_json::to_string(object_id).unwrap(),
+    )
+}
+
 fn document_with_receipt(
     title: &str,
     summary: &str,
@@ -1685,6 +1710,60 @@ async fn receipted_organize_false_task_sync_rebinds_each_committed_publication()
 
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
+async fn organize_false_task_sync_preserves_a_bound_category_alias_as_non_routing_metadata() {
+    let server = make_server();
+    insert_resolved_card(&server, "alias-task");
+    let workspace = DocsWorktree::new();
+    let docs = workspace.docs_path().canonicalize().unwrap();
+    let path = docs.join("product/acme/alias-task.md");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let receipt = valid_bound_receipt(
+        "product//acme",
+        "Alias task",
+        "Alias task summary",
+        "docs/product/acme/alias-task.md",
+        21,
+    );
+    let original = document_with_receipt(
+        "Alias task",
+        "Alias task summary",
+        "product//acme",
+        false,
+        &receipt,
+        "- [ ] Finish <!-- tachi:alias-task -->\n",
+    );
+    fs::write(&path, &original).unwrap();
+
+    crate::docs_ops::handle_wiki_organize(&server, docs.to_str().unwrap(), true)
+        .await
+        .expect("preview the non-routing alias task publication");
+    assert_eq!(fs::read_to_string(&path).unwrap(), original);
+
+    crate::docs_ops::handle_wiki_organize(&server, docs.to_str().unwrap(), false)
+        .await
+        .expect("publish task state without normalizing an opted-out category");
+    let published = fs::read_to_string(&path).unwrap();
+    assert!(
+        published.contains("- [x] Finish <!-- tachi:alias-task -->"),
+        "{published}"
+    );
+    assert_model_document(
+        &published,
+        "Alias task",
+        "Alias task summary",
+        "product//acme",
+        "docs/product/acme/alias-task.md",
+        22,
+    );
+
+    crate::docs_ops::handle_wiki_organize(&server, docs.to_str().unwrap(), false)
+        .await
+        .expect("reapply the opted-out task document without another publication");
+    assert_eq!(fs::read_to_string(path).unwrap(), published);
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn receipted_organize_false_task_sync_rejects_revision_overflow_before_write() {
     let server = make_server();
     insert_resolved_card(&server, "overflow-task");
@@ -1769,20 +1848,20 @@ async fn subtree_organize_keeps_routing_relative_and_receipt_identity_repo_relat
     let subtree = docs.join("guides");
     let path = subtree.join("engineering/devops/subtree.md");
     fs::create_dir_all(path.parent().unwrap()).unwrap();
-    let receipt = valid_bound_receipt(
+    let receipt = canonical_bound_receipt_wire(
         "engineering/devops",
         "Subtree title",
         "Subtree summary",
         "docs/guides/engineering/devops/subtree.md",
         6,
     );
-    let original = document_with_receipt(
+    let original = document_with_raw_receipt(
         "Subtree title",
         "Subtree summary",
         "engineering/devops",
         true,
         &receipt,
-        "subtree body\n",
+        "subtree body",
     );
     fs::write(&path, &original).unwrap();
 
@@ -1798,6 +1877,7 @@ async fn subtree_organize_keeps_routing_relative_and_receipt_identity_repo_relat
     assert!(path.exists());
     assert!(!subtree.join("archive/subtree.md").exists());
     let normalized = fs::read_to_string(&path).unwrap();
+    assert_eq!(normalized, original, "the first apply must be a true no-op");
     assert_model_document(
         &normalized,
         "Subtree title",
@@ -2098,6 +2178,137 @@ async fn duplicate_prior_receipt_fields_fail_closed_before_preview_or_rewrite() 
             assert!(error.contains("closed model-invocation-v1"), "{label}: {error}");
             assert_eq!(fs::read_to_string(path).unwrap(), original, "{label}");
         }
+    }
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn duplicate_raw_reserved_headers_fail_before_preview_or_apply() {
+    let receipt = valid_bound_receipt(
+        "engineering/devops",
+        "Retained title",
+        "Retained summary",
+        "docs/engineering/devops/duplicate-header.md",
+        3,
+    );
+    let valid = document_with_receipt(
+        "Retained title",
+        "Retained summary",
+        "engineering/devops",
+        true,
+        &receipt,
+        "duplicate header body\n",
+    );
+    let cases = [
+        (
+            "title",
+            valid.replacen(
+                "title: \"Retained title\"",
+                "title: \"Forged title\"\ntitle: \"Retained title\"",
+                1,
+            ),
+        ),
+        (
+            "summary",
+            valid.replacen(
+                "summary: \"Retained summary\"",
+                "summary: \"Forged summary\"\nsummary: \"Retained summary\"",
+                1,
+            ),
+        ),
+        (
+            "category",
+            valid.replacen(
+                "category: \"engineering/devops\"",
+                "category: \"product//acme\"\ncategory: \"engineering/devops\"",
+                1,
+            ),
+        ),
+        (
+            "tachi_model_invocation_v1",
+            valid.replacen(
+                PROVENANCE_PREFIX,
+                &format!("{PROVENANCE_PREFIX}{{}}\n{PROVENANCE_PREFIX}"),
+                1,
+            ),
+        ),
+    ];
+
+    for (field, original) in cases {
+        assert_ne!(original, valid, "fixture must duplicate {field}");
+        for dry_run in [true, false] {
+            let server = make_server();
+            let workspace = DocsWorktree::new();
+            let docs = workspace.docs_path().canonicalize().unwrap();
+            let path = docs.join("engineering/devops/duplicate-header.md");
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, &original).unwrap();
+
+            let error =
+                crate::docs_ops::handle_wiki_organize(&server, docs.to_str().unwrap(), dry_run)
+                    .await
+                    .expect_err("duplicate raw reserved headers must fail closed");
+
+            assert!(
+                error.contains("duplicate reserved frontmatter field"),
+                "{field}: {error}"
+            );
+            assert!(error.contains(field), "{field}: {error}");
+            assert_eq!(fs::read_to_string(path).unwrap(), original, "{field}");
+        }
+    }
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn duplicate_raw_receipt_on_conflict_destination_fails_before_mutation() {
+    for dry_run in [true, false] {
+        let server = make_server();
+        let workspace = DocsWorktree::new();
+        let docs = workspace.docs_path().canonicalize().unwrap();
+        let source = docs.join("duplicate-destination.md");
+        let source_content = "---\ntitle: \"Replacement\"\nsummary: \"Replacement summary\"\ncategory: \"product/acme\"\norganize: true\n---\nreplacement body\n";
+        fs::write(&source, source_content).unwrap();
+        let destination = docs.join("product/acme/duplicate-destination.md");
+        fs::create_dir_all(destination.parent().unwrap()).unwrap();
+        let receipt = valid_bound_receipt(
+            "product/acme",
+            "Predecessor",
+            "Predecessor summary",
+            "docs/product/acme/duplicate-destination.md",
+            8,
+        );
+        let valid_destination = document_with_receipt(
+            "Predecessor",
+            "Predecessor summary",
+            "product/acme",
+            true,
+            &receipt,
+            "predecessor body\n",
+        );
+        let destination_content = valid_destination.replacen(
+            PROVENANCE_PREFIX,
+            &format!("{PROVENANCE_PREFIX}{{}}\n{PROVENANCE_PREFIX}"),
+            1,
+        );
+        fs::write(&destination, &destination_content).unwrap();
+
+        let error =
+            crate::docs_ops::handle_wiki_organize(&server, docs.to_str().unwrap(), dry_run)
+                .await
+                .expect_err("duplicate destination receipt headers must fail closed");
+
+        assert!(
+            error.contains("duplicate reserved frontmatter field"),
+            "{error}"
+        );
+        assert!(error.contains("tachi_model_invocation_v1"), "{error}");
+        assert_eq!(fs::read_to_string(&source).unwrap(), source_content);
+        assert_eq!(
+            fs::read_to_string(&destination).unwrap(),
+            destination_content
+        );
+        assert!(!docs.join("archive/duplicate-destination.md").exists());
     }
 }
 

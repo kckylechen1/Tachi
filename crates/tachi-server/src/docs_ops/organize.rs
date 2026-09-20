@@ -1398,7 +1398,7 @@ pub(crate) async fn handle_wiki_organize(
 
         let content = authorized.read_text(&path, &source_identity)?;
 
-        let (fm_opt, body) = parse_frontmatter(&content);
+        let (fm_opt, body) = parse_frontmatter(&content)?;
         let source_object_id = authorized.repo_relative_document_id(&path)?;
         // Routing and logs remain relative to the requested organize root;
         // receipt identity is independently bound to the final repo-relative
@@ -1414,6 +1414,10 @@ pub(crate) async fn handle_wiki_organize(
         // 检查 organize 逃生舱
         if let Some(ref fm) = fm_opt {
             if fm.organize == Some(false) {
+                // `organize: false` opts out of routing and taxonomy
+                // normalization, including accepted-category canonicalization.
+                // A task-only publication still validates and rebinds the
+                // exact category bytes covered by an existing receipt.
                 log_messages.push(format!(
                     "Skipped '{}': organize is explicitly set to false",
                     relative_str
@@ -1482,7 +1486,7 @@ pub(crate) async fn handle_wiki_organize(
         let classification = if accepted_category.is_some() {
             None
         } else {
-            Some(classify_and_extract_metadata(server, &relative_str, &content).await)
+            Some(classify_and_extract_metadata(server, &relative_str, &content, body).await)
         };
         let (target_category_path, title, summary) = if let Some(ref classified) = classification {
             (
@@ -1604,7 +1608,7 @@ pub(crate) async fn handle_wiki_organize(
                     authorized.optional_file(&dest_path)?
                 {
                     let destination_content = authorized.read_text(&dest_path, &dest_identity)?;
-                    let (destination_frontmatter, _) = parse_frontmatter(&destination_content);
+                    let (destination_frontmatter, _) = parse_frontmatter(&destination_content)?;
                     if let Some(category) = destination_frontmatter
                         .as_ref()
                         .and_then(|frontmatter| frontmatter.category.as_deref())
@@ -1674,7 +1678,7 @@ pub(crate) async fn handle_wiki_organize(
             if let Some((dest_identity, meta_dest)) = destination {
                 let destination_content = authorized.read_text(&dest_path, &dest_identity)?;
                 let (destination_frontmatter, destination_body) =
-                    parse_frontmatter(&destination_content);
+                    parse_frontmatter(&destination_content)?;
                 if let Some(category) = destination_frontmatter
                     .as_ref()
                     .and_then(|frontmatter| frontmatter.category.as_deref())
@@ -1865,7 +1869,7 @@ pub(crate) async fn handle_wiki_organize(
                     )?;
 
                     let file_content = authorized.read_text(&path, &identity)?;
-                    let (fm_opt, _) = parse_frontmatter(&file_content);
+                    let (fm_opt, _) = parse_frontmatter(&file_content)?;
 
                     let doc_title = fm_opt
                         .as_ref()

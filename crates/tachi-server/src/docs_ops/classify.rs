@@ -89,10 +89,11 @@ pub(super) async fn classify_and_extract_metadata(
     server: &MemoryServer,
     source_path: &str,
     content: &str,
+    body: &str,
 ) -> ClassifiedMetadata {
     #[cfg(test)]
     if !MODEL_CLASSIFICATION_ENABLED.load(Ordering::SeqCst) {
-        return fallback_metadata(source_path, content);
+        return fallback_metadata(source_path, body);
     }
 
     let system_prompt = "You are an expert software engineer organizing a project wiki/documentation. \
@@ -130,7 +131,7 @@ Respond ONLY with a JSON object. No markdown wrapping except the raw JSON conten
             tracing::warn!(
                 "[wiki_organize] LLM classification lacked an explicit complete status; falling back"
             );
-            fallback_metadata(source_path, content)
+            fallback_metadata(source_path, body)
         }
         Ok(response)
             if response
@@ -145,7 +146,7 @@ Respond ONLY with a JSON object. No markdown wrapping except the raw JSON conten
             tracing::warn!(
                 "[wiki_organize] LLM classification lacked durable provider/model identity; falling back"
             );
-            fallback_metadata(source_path, content)
+            fallback_metadata(source_path, body)
         }
         Ok(response) => match parse_model_classification(&response.value) {
             Ok((category_path, title, summary)) => ClassifiedMetadata {
@@ -159,7 +160,7 @@ Respond ONLY with a JSON object. No markdown wrapping except the raw JSON conten
                     "[wiki_organize] LLM classification rejected: {}; falling back",
                     error
                 );
-                fallback_metadata(source_path, content)
+                fallback_metadata(source_path, body)
             }
         },
         Err(error) => {
@@ -167,7 +168,7 @@ Respond ONLY with a JSON object. No markdown wrapping except the raw JSON conten
                 "[wiki_organize] LLM classification error: {}; falling back",
                 error
             );
-            fallback_metadata(source_path, content)
+            fallback_metadata(source_path, body)
         }
     }
 }
@@ -251,7 +252,7 @@ fn normalize_model_scalar(
     Ok(value.to_string())
 }
 
-fn fallback_metadata(source_path: &str, content: &str) -> ClassifiedMetadata {
+fn fallback_metadata(source_path: &str, body: &str) -> ClassifiedMetadata {
     let path = Path::new(source_path);
     let stem = path
         .file_stem()
@@ -259,7 +260,6 @@ fn fallback_metadata(source_path: &str, content: &str) -> ClassifiedMetadata {
         .unwrap_or("untitled");
     let title = stem.replace(['-', '_'], " ");
 
-    let (_, body) = super::frontmatter::parse_frontmatter(content);
     let first_line = body
         .lines()
         .find(|line| !line.trim().is_empty())
