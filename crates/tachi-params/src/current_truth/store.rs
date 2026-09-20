@@ -629,6 +629,39 @@ impl CurrentTruthSqliteStore {
         last_fresh_at: &str,
         recorded_at: &str,
     ) -> Result<usize, CurrentTruthStoreError> {
+        self.append_subject_refresh_and_consume(
+            assertions,
+            repo,
+            subject_token,
+            last_fresh_revision,
+            last_fresh_at,
+            recorded_at,
+            None,
+            |_, appended| Ok(appended),
+        )
+    }
+
+    /// Commit fresh assertions, subject posture and observed visibility only
+    /// after complete consumption succeeds. A consumer failure rolls back all
+    /// of this attempt, allowing its original timestamp to record refresh debt
+    /// without weakening first-committer ordering. Restrictive observations
+    /// should also be recorded independently before entering this boundary.
+    /// The callback shares the transaction and must not start another one.
+    #[allow(clippy::too_many_arguments)]
+    pub fn append_subject_refresh_and_consume<T, E>(
+        &self,
+        assertions: &[AssertionV1],
+        repo: &str,
+        subject_token: &str,
+        last_fresh_revision: &str,
+        last_fresh_at: &str,
+        recorded_at: &str,
+        repository_visibility: Option<VisibilityClassV1>,
+        consume: impl FnOnce(&Self, usize) -> Result<T, E>,
+    ) -> Result<T, E>
+    where
+        E: From<CurrentTruthStoreError>,
+    {
         Self::validate_refresh(
             repo,
             true,
@@ -636,7 +669,10 @@ impl CurrentTruthSqliteStore {
             Some(last_fresh_at),
             recorded_at,
         )?;
-        let transaction = self.conn.unchecked_transaction()?;
+        let transaction = self
+            .conn
+            .unchecked_transaction()
+            .map_err(CurrentTruthStoreError::from)?;
         let mut appended = 0;
         for assertion in assertions {
             if Self::append_in(&transaction, assertion)? == AppendOutcome::Appended {
@@ -653,8 +689,12 @@ impl CurrentTruthSqliteStore {
             recorded_at,
             None,
         )?;
-        transaction.commit()?;
-        Ok(appended)
+        if let Some(visibility) = repository_visibility {
+            Self::record_repository_visibility_in(&transaction, repo, visibility, recorded_at)?;
+        }
+        let consumed = consume(self, appended)?;
+        transaction.commit().map_err(CurrentTruthStoreError::from)?;
+        Ok(consumed)
     }
 
     fn validate_refresh(
@@ -789,13 +829,29 @@ impl CurrentTruthSqliteStore {
         repository_visibility: VisibilityClassV1,
         observed_at: &str,
     ) -> Result<bool, CurrentTruthStoreError> {
+        let transaction = self.conn.unchecked_transaction()?;
+        let updated = Self::record_repository_visibility_in(
+            &transaction,
+            repo,
+            repository_visibility,
+            observed_at,
+        )?;
+        transaction.commit()?;
+        Ok(updated)
+    }
+
+    fn record_repository_visibility_in(
+        conn: &Connection,
+        repo: &str,
+        repository_visibility: VisibilityClassV1,
+        observed_at: &str,
+    ) -> Result<bool, CurrentTruthStoreError> {
         if chrono::DateTime::parse_from_rfc3339(observed_at).is_err() {
             return Err(CurrentTruthStoreError::MalformedObservedAt(
                 observed_at.to_string(),
             ));
         }
-        let transaction = self.conn.unchecked_transaction()?;
-        let mut statement = transaction.prepare(
+        let mut statement = conn.prepare(
             "SELECT repository_visibility, repository_visibility_at
              FROM current_truth_refresh
              WHERE repo = ?1 COLLATE NOCASE AND repository_visibility IS NOT NULL
@@ -840,13 +896,12 @@ impl CurrentTruthSqliteStore {
                 }
             }
         };
-        let matched_existing_row = transaction.execute(
+        let matched_existing_row = conn.execute(
             "UPDATE current_truth_refresh
              SET repository_visibility = ?2, repository_visibility_at = ?3
              WHERE repo = ?1 COLLATE NOCASE",
             params![repo, visibility_token(visibility), visibility_at],
         )? > 0;
-        transaction.commit()?;
         Ok(matched_existing_row)
     }
 

@@ -1284,13 +1284,21 @@ const EXEMPTIONS: &[Exemption<'static>] = &[
     Exemption {
         path: "crates/tachi-server/src/gh_ops/current_truth_refresh/partial_error_tests.rs",
         basis: ExemptionBasis::Proven(MachineProof::NoStoreDoorwayInFile),
-        sites: &[Site {
-            symbol: "privacy_metadata_and_debt_write_failures_keep_the_denied_public_shape",
-            trigger: "FAIL_PRIVATE_REFRESH_DEBT",
-            ddl: "2e341130d78a0382",
-            occurrences: 1,
-        }],
-        reason: "the real refresh-handler fixture installs its debt-update abort through with_unrestricted_fixture_connection on the private database file, then proves public unavailable shape without falsely claiming the failed debt write persisted. This file contains no guarded store doorway.",
+        sites: &[
+            Site {
+                symbol: "privacy_metadata_and_debt_write_failures_keep_the_denied_public_shape",
+                trigger: "FAIL_PRIVATE_REFRESH_DEBT",
+                ddl: "2e341130d78a0382",
+                occurrences: 1,
+            },
+            Site {
+                symbol: "public_visibility_rolls_back_if_downstream_consumer_fails",
+                trigger: "FAIL_PUBLIC_VISIBILITY_CONSUMER",
+                ddl: "5b5378085d6f7e54",
+                occurrences: 1,
+            },
+        ],
+        reason: "the real refresh-handler fixture installs its debt-update abort through with_unrestricted_fixture_connection on the private database file, then proves public unavailable shape without falsely claiming the failed debt write persisted. The downstream-consumer fault also uses that unrestricted fixture connection and proves the PUBLIC relaxation and authority-row fault roll back together. This file contains no guarded store doorway.",
     },
     Exemption {
         path: "crates/tachi-server/src/mcp_pool/proxy.rs",

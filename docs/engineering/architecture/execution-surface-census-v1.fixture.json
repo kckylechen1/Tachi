@@ -4,21 +4,21 @@
   "observation": {
     "date": "2026-08-30",
     "revision": "92cce8d8eab119ca128dc724fab48886519d2d54",
-    "scope": "native composed MemoryServer router after production profile, A2A, sticky-retirement action-schema, bound-project, and annotation transforms plus the #1733 trusted-local ACP attachment fields (tachi_agent_eval attach_session/get_attachment, merged via #1738), the #1678 attached-session receipt-spine fields (ingest_session_event, get_session_state, mark_session_connection, reconnect_session, advertise_session_capabilities, request_intervention, record_intervention_result), and the #1678 coordinate/operate mutation-action projection; #1853 omitted vault secret types use name-based inference; environment exposure override unset; #1861 vault_set exposes an explicit fail-closed rebind boolean"
+    "scope": "native composed MemoryServer router after production profile, A2A, sticky-retirement action-schema, bound-project, and annotation transforms plus the #1733 trusted-local ACP attachment fields (tachi_agent_eval attach_session/get_attachment, merged via #1738), the #1678 attached-session receipt-spine fields (ingest_session_event, get_session_state, mark_session_connection, reconnect_session, advertise_session_capabilities, request_intervention, record_intervention_result), and the #1678 coordinate/operate mutation-action projection; #1853 omitted vault secret types use name-based inference; environment exposure override unset; #1861 vault_set exposes an explicit fail-closed rebind boolean; #1696 adds current_truth_refresh to tachi_gh and its exact affected profile/schema totals"
   },
   "provisional_budgets": {
     "profiles": {
       "admin": {
-        "max_total_input_schema_bytes": 142519,
-        "max_total_tool_definition_bytes": 173879,
+        "max_total_input_schema_bytes": 142546,
+        "max_total_tool_definition_bytes": 174217,
         "max_visible_tools": 83,
-        "rationale": "Exact live observed #1691 census for admin after profile-specific tools/list narrowing; any regrowth requires explicit adjudication.; #1454 server-run tachi_verify surface (action=run, +check_kind/+timeout_secs props; +1131 schema bytes / +1365 tool-definition bytes per profile) re-pinned after the rebase onto 53939b5b5 (main #1690/#1691 retirements); #1322 declared_file_scope on tachi_staff, including its exact serialized schema bytes; any further regrowth requires explicit adjudication.; #1861 vault_set explicit rebind property re-pinned to the exact live admin surface; #1679 adds the tachi_delivery seam (6 actions, +1771 schema bytes / +2198 tool-def bytes, coordinate+admin visibility only) for the durable delivery spine; #1679 re-measured after the delivery seam action field became a closed wire enum (denominator matches tachi_a2a)"
+        "rationale": "Exact live observed #1691 census for admin after profile-specific tools/list narrowing; any regrowth requires explicit adjudication.; #1454 server-run tachi_verify surface (action=run, +check_kind/+timeout_secs props; +1131 schema bytes / +1365 tool-definition bytes per profile) re-pinned after the rebase onto 53939b5b5 (main #1690/#1691 retirements); #1322 declared_file_scope on tachi_staff, including its exact serialized schema bytes; any further regrowth requires explicit adjudication.; #1861 vault_set explicit rebind property re-pinned to the exact live admin surface; #1679 adds the tachi_delivery seam (6 actions, +1771 schema bytes / +2198 tool-def bytes, coordinate+admin visibility only) for the durable delivery spine; #1679 re-measured after the delivery seam action field became a closed wire enum (denominator matches tachi_a2a); #1696 authorizes tachi_gh current_truth_refresh (+27 schema bytes / +338 tool-definition bytes), remeasured with no additional growth budget."
       },
       "coordinate": {
-        "max_total_input_schema_bytes": 96919,
-        "max_total_tool_definition_bytes": 110836,
+        "max_total_input_schema_bytes": 96946,
+        "max_total_tool_definition_bytes": 111174,
         "max_visible_tools": 30,
-        "rationale": "Exact live observed #1691 census for coordinate after profile-specific tools/list narrowing; any regrowth requires explicit adjudication.; #1454 server-run tachi_verify surface (action=run, +check_kind/+timeout_secs props; +1131 schema bytes / +1365 tool-definition bytes per profile) re-pinned after the rebase onto 53939b5b5 (main #1690/#1691 retirements); #1322 declared_file_scope on tachi_staff, including its exact serialized schema bytes; #1678 session-spine mutation policy narrows coordinate tachi_agent_eval schema; any further regrowth requires explicit adjudication.; #1679 adds the tachi_delivery seam (6 actions, +1771 schema bytes / +2198 tool-def bytes, coordinate+admin visibility only) for the durable delivery spine; #1679 re-measured after the delivery seam action field became a closed wire enum (denominator matches tachi_a2a)"
+        "rationale": "Exact live observed #1691 census for coordinate after profile-specific tools/list narrowing; any regrowth requires explicit adjudication.; #1454 server-run tachi_verify surface (action=run, +check_kind/+timeout_secs props; +1131 schema bytes / +1365 tool-definition bytes per profile) re-pinned after the rebase onto 53939b5b5 (main #1690/#1691 retirements); #1322 declared_file_scope on tachi_staff, including its exact serialized schema bytes; #1678 session-spine mutation policy narrows coordinate tachi_agent_eval schema; any further regrowth requires explicit adjudication.; #1679 adds the tachi_delivery seam (6 actions, +1771 schema bytes / +2198 tool-def bytes, coordinate+admin visibility only) for the durable delivery spine; #1679 re-measured after the delivery seam action field became a closed wire enum (denominator matches tachi_a2a); #1696 authorizes tachi_gh current_truth_refresh (+27 schema bytes / +338 tool-definition bytes), remeasured with no additional growth budget."
       },
       "delegate": {
         "max_total_input_schema_bytes": 38713,
@@ -33,10 +33,10 @@
         "rationale": "Exact live observed #1691 census for operate after profile-specific tools/list narrowing; #1678 session-spine mutation policy narrows the operate action surface; any regrowth requires explicit adjudication."
       },
       "standard": {
-        "max_total_input_schema_bytes": 56795,
-        "max_total_tool_definition_bytes": 65811,
+        "max_total_input_schema_bytes": 56822,
+        "max_total_tool_definition_bytes": 66149,
         "max_visible_tools": 15,
-        "rationale": "Exact live observed #1691 census for standard after profile-specific tools/list narrowing; any regrowth requires explicit adjudication.; #1454 server-run tachi_verify surface (action=run, +check_kind/+timeout_secs props; +1131 schema bytes / +1365 tool-definition bytes per profile) re-pinned after the rebase onto 53939b5b5 (main #1690/#1691 retirements); any further regrowth requires explicit adjudication."
+        "rationale": "Exact live observed #1691 census for standard after profile-specific tools/list narrowing; any regrowth requires explicit adjudication.; #1454 server-run tachi_verify surface (action=run, +check_kind/+timeout_secs props; +1131 schema bytes / +1365 tool-definition bytes per profile) re-pinned after the rebase onto 53939b5b5 (main #1690/#1691 retirements); any further regrowth requires explicit adjudication.; #1696 authorizes tachi_gh current_truth_refresh (+27 schema bytes / +338 tool-definition bytes), remeasured with no additional growth budget."
       }
     },
     "status": "provisional",
@@ -47,9 +47,9 @@
         "rationale": "Exact live observed #1687 C1c operator tachi_task schema; zero headroom."
       },
       "standard.tachi_gh": {
-        "max_input_schema_bytes": 11983,
+        "max_input_schema_bytes": 12010,
         "max_top_level_properties": 57,
-        "rationale": "Exact live observed #1713 tachi_gh schema after close_loop relocation; zero headroom."
+        "rationale": "Exact live observed #1713 tachi_gh schema after close_loop relocation; zero headroom. #1696 current_truth_refresh is the authorized twentieth action (+27 bytes); exact cap retains zero headroom."
       },
       "standard.tachi_memory": {
         "max_input_schema_bytes": 7736,
@@ -88,9 +88,10 @@
         ]
       },
       "tachi_gh": {
-        "action_count": 19,
+        "action_count": 20,
         "actions": [
           "close_loop",
+          "current_truth_refresh",
           "issue_comment",
           "issue_create",
           "issue_freshness_scan",
@@ -190,8 +191,8 @@
     },
     "profiles": {
       "admin": {
-        "total_input_schema_bytes": 142519,
-        "total_tool_definition_bytes": 173879,
+        "total_input_schema_bytes": 142546,
+        "total_tool_definition_bytes": 174217,
         "visible_tool_count": 83,
         "visible_tools": [
           "archive_memory",
@@ -280,8 +281,8 @@
         ]
       },
       "coordinate": {
-        "total_input_schema_bytes": 96919,
-        "total_tool_definition_bytes": 110836,
+        "total_input_schema_bytes": 96946,
+        "total_tool_definition_bytes": 111174,
         "visible_tool_count": 30,
         "visible_tools": [
           "extract_facts",
@@ -380,8 +381,8 @@
         ]
       },
       "standard": {
-        "total_input_schema_bytes": 56795,
-        "total_tool_definition_bytes": 65811,
+        "total_input_schema_bytes": 56822,
+        "total_tool_definition_bytes": 66149,
         "visible_tool_count": 15,
         "visible_tools": [
           "peer_query",
@@ -782,7 +783,7 @@
           ]
         },
         "tachi_gh": {
-          "input_schema_bytes": 11983,
+          "input_schema_bytes": 12010,
           "property_count": 57,
           "property_names": [
             "action",

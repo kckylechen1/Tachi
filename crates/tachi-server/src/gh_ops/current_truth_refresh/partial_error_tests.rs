@@ -479,3 +479,271 @@ async fn corrupt_private_history_without_posture_retains_new_repository_restrict
             .unwrap();
     }
 }
+
+async fn seed_private_repo_with_public_sibling(fixture: &GhFixture, server: &MemoryServer) {
+    let mut sibling = complete_payload("PUBLIC");
+    sibling["data"]["repository"]["issueOrPullRequest"]["number"] = json!(43);
+    fixture.respond(&sibling, 0);
+    let response = handle_current_truth_refresh_with_floor(
+        server,
+        &TachiGhParams {
+            action: "current_truth_refresh".to_string(),
+            repo: Some("owner/repo".to_string()),
+            number: Some(43),
+            ..TachiGhParams::default()
+        },
+        Duration::ZERO,
+    )
+    .await
+    .unwrap();
+    assert!(response.contains("owner/repo#issue:43"));
+    fixture.respond(&complete_payload("PUBLIC"), 0);
+    assert_eq!(refresh(server, "owner/repo").await["fresh"], json!(true));
+    fixture.respond(&complete_payload("PRIVATE"), 0);
+    assert_private_response(&refresh(server, "owner/repo").await);
+}
+
+fn assert_private_repository_and_hidden_sibling(server: &MemoryServer) {
+    server
+        .with_current_truth_store(|store| {
+            assert_eq!(
+                store.repository_visibility("owner/repo").unwrap(),
+                Some(VisibilityClassV1::Private),
+                "failed PUBLIC observation must not relax known PRIVATE metadata"
+            );
+            let view = consumer::read_view(
+                store,
+                "owner/repo",
+                CallerAuthorizationV1 {
+                    sees_private: false,
+                },
+            )
+            .unwrap();
+            assert!(
+                view.subjects.is_empty(),
+                "independent historical PUBLIC sibling must remain hidden"
+            );
+            assert!(!view.posture.fresh, "failed attempt must not remain fresh");
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn failed_public_payloads_cannot_relax_private_repository() {
+    let _lock = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let fixture = GhFixture::new();
+    for failure in [
+        "errors",
+        "malformed",
+        "incomplete",
+        "stale",
+        "contradictory",
+    ] {
+        let server = crate::tests::make_server();
+        seed_private_repo_with_public_sibling(&fixture, &server).await;
+        let mut payload = complete_payload("PUBLIC");
+        match failure {
+            "errors" => payload["errors"] = json!([{"message":"private-public-error-canary"}]),
+            "malformed" => {
+                payload["data"]["repository"]["issueOrPullRequest"]["state"] = Value::Null
+            }
+            "incomplete" => {
+                payload["data"]["repository"]["issueOrPullRequest"]["timelineItems"]["pageInfo"]
+                    ["hasNextPage"] = json!(true)
+            }
+            "stale" => {
+                payload["data"]["repository"]["issueOrPullRequest"]["updatedAt"] =
+                    json!("2026-08-01T00:00:00Z")
+            }
+            "contradictory" => {
+                crate::test_support::with_unrestricted_fixture_connection(&server.global_db_path_buf(), |conn| {
+                assert_eq!(conn.execute("UPDATE current_truth_assertions SET content_digest = 'contradictory-fixture' WHERE assertion_id = (SELECT assertion_id FROM current_truth_assertions WHERE visibility = 'public' AND subject_id = '42' ORDER BY assertion_id LIMIT 1)", [])?, 1);
+                Ok(())
+            }).unwrap();
+            }
+            _ => unreachable!(),
+        }
+        fixture.respond(&payload, 0);
+        let response = refresh(&server, "owner/repo").await;
+        assert_private_repository_and_hidden_sibling(&server);
+        server
+            .with_current_truth_store(|store| {
+                let expected_reason = match failure {
+                    "errors" => REASON_UNAVAILABLE,
+                    "malformed" => REASON_MALFORMED,
+                    "incomplete" => REASON_INCOMPLETE,
+                    "stale" => REASON_STALE,
+                    "contradictory" => REASON_CONTRADICTORY,
+                    _ => unreachable!(),
+                };
+                assert_eq!(
+                    store
+                        .refresh_posture_row("owner/repo")
+                        .unwrap()
+                        .unwrap()
+                        .unavailable_reason
+                        .as_deref(),
+                    Some(expected_reason),
+                    "the fixture must reach its intended failure branch"
+                );
+                Ok(())
+            })
+            .unwrap();
+        assert_private_response(&response);
+        fixture.respond_bytes(b"", 1);
+        let mut denied = refresh(&server, "owner/repo").await;
+        let mut response = response;
+        response["posture"]["last_attempt_at"] = Value::Null;
+        denied["posture"]["last_attempt_at"] = Value::Null;
+        assert_eq!(
+            response, denied,
+            "{failure} must have the entire denied response shape"
+        );
+    }
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn complete_public_with_corrupt_private_history_cannot_relax_repository() {
+    let _lock = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let fixture = GhFixture::new();
+    for field in ["predicate", "value_json", "subject_id"] {
+        let server = crate::tests::make_server();
+        seed_private_repo_with_public_sibling(&fixture, &server).await;
+        crate::test_support::with_unrestricted_fixture_connection(&server.global_db_path_buf(), |conn| {
+            let value = if field == "subject_id" { "CAST(X'FF' AS TEXT)" } else { "'private-public-corruption-canary'" };
+            assert_eq!(conn.execute(&format!("UPDATE current_truth_assertions SET {field} = {value} WHERE assertion_id = (SELECT assertion_id FROM current_truth_assertions WHERE visibility = 'private' ORDER BY assertion_id LIMIT 1)"), [])?, 1);
+            Ok(())
+        }).unwrap();
+        fixture.respond(&complete_payload("PUBLIC"), 0);
+        let response = refresh(&server, "owner/repo").await;
+        assert_private_repository_and_hidden_sibling(&server);
+        assert_private_response(&response);
+        assert!(!response
+            .to_string()
+            .contains("private-public-corruption-canary"));
+        fixture.respond_bytes(b"", 1);
+        let mut denied = refresh(&server, "owner/repo").await;
+        let mut response = response;
+        response["posture"]["last_attempt_at"] = Value::Null;
+        denied["posture"]["last_attempt_at"] = Value::Null;
+        assert_eq!(response, denied);
+    }
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn completed_fresh_public_may_relax_repository_without_revealing_private_subjects() {
+    let _lock = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let fixture = GhFixture::new();
+    let server = crate::tests::make_server();
+    seed_private_repo_with_public_sibling(&fixture, &server).await;
+    fixture.respond(&complete_payload("PUBLIC"), 0);
+    // Private subject history still makes the public handler receipt opaque.
+    assert_private_response(&refresh(&server, "owner/repo").await);
+    server
+        .with_current_truth_store(|store| {
+            assert_eq!(
+                store.repository_visibility("owner/repo").unwrap(),
+                Some(VisibilityClassV1::Public)
+            );
+            let view = consumer::read_view(
+                store,
+                "owner/repo",
+                CallerAuthorizationV1 {
+                    sees_private: false,
+                },
+            )
+            .unwrap();
+            assert!(view.posture.fresh);
+            assert_eq!(
+                view.subjects
+                    .iter()
+                    .map(|s| s.subject_token.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["owner/repo#issue:43"]
+            );
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn public_visibility_rolls_back_if_downstream_consumer_fails() {
+    let _lock = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let fixture = GhFixture::new();
+    let server = crate::tests::make_server();
+    seed_private_repo_with_public_sibling(&fixture, &server).await;
+    let before = server
+        .with_current_truth_store(|store| Ok(store.assertions_for_repo("owner/repo").unwrap()))
+        .unwrap();
+    crate::test_support::with_unrestricted_fixture_connection(&server.global_db_path_buf(), |conn| {
+        // This sanctioned second connection injects a read failure only once
+        // PUBLIC is provisionally written, after successful source ingest.
+        conn.execute_batch("CREATE TRIGGER fail_public_visibility_consumer AFTER UPDATE OF repository_visibility ON current_truth_refresh
+            WHEN NEW.repository_visibility = 'public'
+            BEGIN UPDATE current_truth_assertions SET predicate = 'private-consumer-fault-canary'
+                WHERE assertion_id = (SELECT assertion_id FROM current_truth_assertions WHERE visibility = 'public' AND subject_id = '43' ORDER BY assertion_id LIMIT 1); END;")
+    }).unwrap();
+    fixture.respond(&complete_payload("PUBLIC"), 0);
+    let response = refresh(&server, "owner/repo").await;
+    assert_private_repository_and_hidden_sibling(&server);
+    assert_private_response(&response);
+    assert!(!response
+        .to_string()
+        .contains("private-consumer-fault-canary"));
+    server.with_current_truth_store(|store| {
+        assert_eq!(store.assertions_for_repo("owner/repo").unwrap(), before, "failed visibility transaction must roll back the injected authority-row mutation too");
+        Ok(())
+    }).unwrap();
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn late_public_attempt_cannot_borrow_another_attempts_fresh_posture() {
+    let _lock = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let fixture = GhFixture::new();
+    let server = crate::tests::make_server();
+    seed_private_repo_with_public_sibling(&fixture, &server).await;
+    crate::test_support::with_unrestricted_fixture_connection(&server.global_db_path_buf(), |conn| {
+        assert_eq!(conn.execute("UPDATE current_truth_refresh SET last_attempt_at = '2099-01-01T00:00:00Z' WHERE subject_token = 'owner/repo#issue:42'", [])?, 1);
+        Ok(())
+    }).unwrap();
+    fixture.respond(&complete_payload("PUBLIC"), 0);
+    assert_private_response(&refresh(&server, "owner/repo").await);
+    server
+        .with_current_truth_store(|store| {
+            let posture = store.refresh_posture_row("owner/repo").unwrap().unwrap();
+            assert!(posture.fresh, "preserve the later committed posture");
+            assert_eq!(posture.last_attempt_at, "2099-01-01T00:00:00Z");
+            assert_eq!(
+                posture.repository_visibility,
+                Some(VisibilityClassV1::Private)
+            );
+            assert!(consumer::read_view(
+                store,
+                "owner/repo",
+                CallerAuthorizationV1 {
+                    sees_private: false
+                }
+            )
+            .unwrap()
+            .subjects
+            .is_empty());
+            Ok(())
+        })
+        .unwrap();
+}

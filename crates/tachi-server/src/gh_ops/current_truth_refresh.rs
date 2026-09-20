@@ -20,7 +20,7 @@ use tachi_params::current_truth::refresh::{
     SnapshotIssueStateV1, SnapshotIssueV1, SnapshotObservationKindV1, SnapshotObservationV1,
     SnapshotPrStateV1, SnapshotPrV1, GITHUB_SNAPSHOT_ISSUER, GITHUB_SNAPSHOT_SOURCE_ID,
 };
-use tachi_params::current_truth::store::CurrentTruthSqliteStore;
+use tachi_params::current_truth::store::{CurrentTruthSqliteStore, CurrentTruthStoreError};
 use tachi_params::current_truth::types::{
     ordering_instant, AssertionV1, AuthorityClassV1, PredicateV1, VisibilityClassV1,
 };
@@ -487,6 +487,29 @@ struct ConsumedRefresh {
     view: CurrentTruthViewV1,
     work_statuses: Vec<tachi_params::work_read_model::WorkStatusRowV1>,
     fresh: bool,
+    repository_private: bool,
+}
+
+// Preserve the consumer error inside the public handler boundary while the
+// store owns transaction rollback and typed SQLite failures.
+enum RefreshConsumptionError {
+    Store(CurrentTruthStoreError),
+    Consumer(String),
+}
+
+impl RefreshConsumptionError {
+    fn into_message(self) -> String {
+        match self {
+            Self::Store(error) => error.to_string(),
+            Self::Consumer(error) => error,
+        }
+    }
+}
+
+impl From<CurrentTruthStoreError> for RefreshConsumptionError {
+    fn from(error: CurrentTruthStoreError) -> Self {
+        Self::Store(error)
+    }
 }
 
 #[cfg(test)]
@@ -519,7 +542,9 @@ fn apply_subject_refresh_and_consume(
     // observation durable even if assertion/posture processing later fails.
     // A first observation has no row yet; it is recorded after that attempt
     // creates one.
-    let visibility_needs_row = match repository_visibility {
+    let restrictive_visibility =
+        repository_visibility.filter(|visibility| *visibility == VisibilityClassV1::Private);
+    let visibility_needs_row = match restrictive_visibility {
         Some(visibility) => !store
             .record_repository_visibility(repo, visibility, attempted_at)
             .map_err(|error| error.to_string())?,
@@ -531,18 +556,23 @@ fn apply_subject_refresh_and_consume(
             if refresh_is_stale(store, &state, &assertions)? {
                 record_unavailable(store, repo, subject_token, attempted_at, REASON_STALE)?;
             } else {
-                match store.append_all_and_record_subject_refresh(
+                match store.append_subject_refresh_and_consume(
                     &assertions,
                     repo,
                     subject_token,
                     &state.refresh_revision,
                     &state.refreshed_at,
                     attempted_at,
+                    repository_visibility,
+                    |store, _| {
+                        consume_refresh(store, repo, attempted_at)
+                            .map_err(RefreshConsumptionError::Consumer)
+                    },
                 ) {
-                    Ok(_) => {}
-                    Err(
-                        tachi_params::current_truth::store::CurrentTruthStoreError::ContradictsExistingRevision(_),
-                    ) => {
+                    Ok(consumed) => return Ok(consumed),
+                    Err(RefreshConsumptionError::Store(
+                        CurrentTruthStoreError::ContradictsExistingRevision(_),
+                    )) => {
                         record_unavailable(
                             store,
                             repo,
@@ -551,16 +581,14 @@ fn apply_subject_refresh_and_consume(
                             REASON_CONTRADICTORY,
                         )?;
                     }
-                    Err(
-                        tachi_params::current_truth::store::CurrentTruthStoreError::StaleRefreshRecord {
-                            ..
-                        },
-                    ) => {
+                    Err(RefreshConsumptionError::Store(
+                        CurrentTruthStoreError::StaleRefreshRecord { .. },
+                    )) => {
                         // A later-started attempt already committed. This
                         // transaction rolled back, so consume that newer
                         // posture without letting the late result regress it.
                     }
-                    Err(error) => return Err(error.to_string()),
+                    Err(error) => return Err(error.into_message()),
                 }
             }
         }
@@ -573,12 +601,22 @@ fn apply_subject_refresh_and_consume(
     // existed before this attempt, persist it now that posture created one.
     // A denied attempt has no observation and cannot erase a known value.
     if visibility_needs_row {
-        let visibility = repository_visibility.expect("checked visibility observation");
+        let visibility = restrictive_visibility.expect("checked restrictive observation");
         store
             .record_repository_visibility(repo, visibility, attempted_at)
             .map_err(|error| error.to_string())?;
     }
 
+    // Unavailable/stale/contradictory/late results consume the existing
+    // restriction; none may borrow another attempt's fresh posture to relax it.
+    consume_refresh(store, repo, attempted_at)
+}
+
+fn consume_refresh(
+    store: &CurrentTruthSqliteStore,
+    repo: &str,
+    attempted_at: &str,
+) -> Result<ConsumedRefresh, String> {
     // The public tachi_gh action has no private-read grant. It always mints
     // the consumer view under `sees_private=false`; private subjects are SQL
     // filtered before decode, and health/status counts cover only that set.
@@ -612,7 +650,16 @@ fn apply_subject_refresh_and_consume(
         &ProjectionOptions::try_new(attempted_at).map_err(|error| error.to_string())?,
     );
     let work_statuses = model.items.iter().map(status_view).collect();
+    let repository_private = store
+        .repository_visibility(repo)
+        .map_err(|error| error.to_string())?
+        == Some(VisibilityClassV1::Private)
+        || !store
+            .private_subject_tokens(repo)
+            .map_err(|error| error.to_string())?
+            .is_empty();
     Ok(ConsumedRefresh {
+        repository_private,
         fresh: view.posture.fresh,
         view,
         work_statuses,
@@ -635,10 +682,7 @@ fn record_unavailable(
         attempted_at,
         Some(reason),
     ) {
-        Ok(())
-        | Err(tachi_params::current_truth::store::CurrentTruthStoreError::StaleRefreshRecord {
-            ..
-        }) => Ok(()),
+        Ok(()) | Err(CurrentTruthStoreError::StaleRefreshRecord { .. }) => Ok(()),
         Err(error) => Err(error.to_string()),
     }
 }
@@ -771,7 +815,10 @@ async fn handle_current_truth_refresh_unpadded(
                 // A first failed attempt just created its posture row. Reuse
                 // the original independent visibility ordering to attach the
                 // observed restriction, even when private identity is corrupt.
-                if let Some(visibility) = adapter.repository_visibility {
+                if let Some(visibility) = adapter
+                    .repository_visibility
+                    .filter(|visibility| *visibility == VisibilityClassV1::Private)
+                {
                     store
                         .record_repository_visibility(&repo, visibility, &attempted_at)
                         .map_err(|error| error.to_string())?;
@@ -779,27 +826,19 @@ async fn handle_current_truth_refresh_unpadded(
                 return Ok(None);
             }
         };
-        // A typed PRIVATE observation already establishes non-disclosure;
-        // never require another private identity decode to recognize it.
-        let repository_private = adapter.repository_private()
-            || store
-                .repository_visibility(&repo)
-                .map_err(|error| error.to_string())?
-                == Some(VisibilityClassV1::Private)
-            || !store
-                .private_subject_tokens(&repo)
-                .map_err(|error| error.to_string())?
-                .is_empty();
-        Ok(Some((consumed, repository_private)))
+        Ok(Some(consumed))
     });
 
     // Store/metadata failures are unavailable at this public boundary too.
     // A failed debt write cannot claim durable persistence, and its error
     // shape must not reveal whether inaccessible history exists.
     match consumed {
-        Ok(Some((consumed, repository_private))) => {
-            serialize_refresh_response(&repo, &consumed, repository_private, &attempted_at)
-        }
+        Ok(Some(consumed)) => serialize_refresh_response(
+            &repo,
+            &consumed,
+            adapter.repository_private() || consumed.repository_private,
+            &attempted_at,
+        ),
         Ok(None) | Err(_) => serialize_unavailable_refresh_response(&repo, &attempted_at),
     }
 }

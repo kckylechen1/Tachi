@@ -69,7 +69,13 @@ pub(super) fn parse_graphql_bundle(
 ) -> Result<GithubReadBundle, GithubReadFailure> {
     let raw_repository = value.pointer("/data/repository").and_then(Value::as_object);
     let repository_visibility = repository_visibility(value);
-    let fail = |failure| GithubReadFailure::new(failure, repository_visibility);
+    let fail = |failure| {
+        GithubReadFailure::new(
+            failure,
+            repository_visibility
+                .filter(|visibility| *visibility == super::VisibilityClassV1::Private),
+        )
+    };
 
     match value.get("errors") {
         None => {}
