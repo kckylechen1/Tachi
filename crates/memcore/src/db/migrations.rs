@@ -70,6 +70,7 @@
 //!   tables with persisted capability provenance and a closed JSON boundary.
 //! - v36: durable delivery intent and append-only delivery event spine (#1679).
 //! - v37: immutable, secret-negative verified AgentIdentity admission receipts (#1938).
+//! - v38: canonical CurrentTruth assertion, projection, and refresh inventory (#1696).
 //!
 //! ## Schema version stamp (#984)
 //!
@@ -113,11 +114,12 @@ use super::common::now_utc_iso;
 ///
 /// See the module doc comment ("Schema version stamp (#984)") for what this
 /// counts and when to bump it.
-pub const EXPECTED_SCHEMA_VERSION: u32 = 37;
+pub const EXPECTED_SCHEMA_VERSION: u32 = 38;
 
 mod a2a_body_retention;
 mod basic;
 mod cross_db;
+mod current_truth;
 mod delivery_spine;
 mod dispatch_adjudications;
 mod dispatch_outcomes_attribution_basis;
@@ -141,6 +143,7 @@ mod verified_admissions;
 use a2a_body_retention::*;
 use basic::*;
 use cross_db::*;
+use current_truth::*;
 use delivery_spine::*;
 use dispatch_adjudications::*;
 use dispatch_outcomes_attribution_basis::*;
@@ -211,6 +214,7 @@ pub(crate) const MIGRATION_SENTINEL_KEYS: &[&str] = &[
     "v35_harness_session_spine_receipts",
     "v36_delivery_spine",
     "v37_verified_agent_admissions",
+    "v38_current_truth",
 ];
 
 #[derive(Debug, Default, Clone, serde::Serialize)]
@@ -246,6 +250,7 @@ pub struct MigrationReport {
     pub typo_fallback_attribution_columns_added: usize,
     pub wiki_recovery_schema_objects_created: usize,
     pub delivery_spine_schema_objects_created: usize,
+    pub current_truth_schema_objects_created: usize,
     pub memory_outbox_schema_objects_created: usize,
     pub memory_outbox_destination_apply_schema_objects_created: usize,
     pub a2a_mailbox_schema_objects_created: usize,
@@ -367,6 +372,7 @@ pub(crate) fn validate_current_schema_integrity(conn: &Connection) -> Result<(),
     if product_schema > 0 {
         crate::db::schema::validate_a2a_mailbox_schema(conn)?;
         crate::db::verified_admissions::validate_verified_admission_schema(conn)?;
+        crate::db::schema::validate_current_truth_schema(conn)?;
     }
     Ok(())
 }
@@ -790,6 +796,11 @@ pub(crate) fn run_data_migrations_in_tx(
     report.verified_admission_schema_objects_created =
         apply_versioned_migration(conn, "v37_verified_agent_admissions", |conn| {
             migrate_v37_verified_agent_admissions(conn, profile)
+        })?
+        .unwrap_or(0);
+    report.current_truth_schema_objects_created =
+        apply_versioned_migration(conn, "v38_current_truth", |conn| {
+            migrate_v38_current_truth(conn, profile)
         })?
         .unwrap_or(0);
 
@@ -1768,14 +1779,17 @@ mod tests {
         let (mut conn, tmp) = open_test_db();
         run_data_migrations(&mut conn, "global", tmp.path()).expect("build current fixture");
         conn.execute_batch(
-            "DROP TABLE identity_admission_verification_revocations;
+            "DROP TABLE current_truth_assertions;
+             DROP TABLE current_truth_projection;
+             DROP TABLE current_truth_refresh;
+             DROP TABLE identity_admission_verification_revocations;
              DROP TABLE identity_admission_verification_receipts;
              DROP INDEX idx_identity_admissions_verified_binding;
              DROP TRIGGER identity_verified_admissions_no_replace;
              DROP TRIGGER identity_verified_admissions_no_update;
              DROP TRIGGER identity_verified_admissions_no_delete;
              DELETE FROM hard_state
-              WHERE namespace = 'migrations' AND key = 'v37_verified_agent_admissions';
+              WHERE namespace = 'migrations' AND key IN ('v37_verified_agent_admissions', 'v38_current_truth');
              INSERT INTO agent_identities (agent_identity_id, display_name, created_at)
               VALUES ('agent-before-v37', 'legacy self assertion', '2026-09-18T00:00:00Z');
              INSERT INTO identity_admissions
@@ -1808,6 +1822,9 @@ mod tests {
             )
         );
         assert!(was_run(&conn, "v37_verified_agent_admissions").unwrap());
+        assert_eq!(report.current_truth_schema_objects_created, 5);
+        assert!(was_run(&conn, "v38_current_truth").unwrap());
+        crate::db::schema::validate_current_truth_schema(&conn).unwrap();
         validate_current_schema_integrity(&conn).expect("the completed v37 shape is valid");
     }
 
@@ -1865,8 +1882,8 @@ mod tests {
             .expect("the shipped v34 database must upgrade and reopen");
 
         assert_eq!(report.harness_session_spine_receipt_tables_rebuilt, 2);
-        // v36/v37 are already current in this fixture: their sentinels survive,
-        // so the reopen re-runs only the v35 rebuild.
+        // v36/v37/v38 are already current in this fixture: their sentinels
+        // survive, so the reopen re-runs only the v35 rebuild.
         assert_eq!(read_schema_version(&conn).unwrap(), EXPECTED_SCHEMA_VERSION);
         assert!(was_run(&conn, "v34_harness_session_spine").unwrap());
         assert!(was_run(&conn, "v35_harness_session_spine_receipts").unwrap());
@@ -1874,6 +1891,8 @@ mod tests {
         assert!(was_run(&conn, "v37_verified_agent_admissions").unwrap());
         assert_eq!(report.delivery_spine_schema_objects_created, 0);
         assert_eq!(report.verified_admission_schema_objects_created, 0);
+        assert!(was_run(&conn, "v38_current_truth").unwrap());
+        assert_eq!(report.current_truth_schema_objects_created, 0);
         validate_current_schema_integrity(&conn).expect("the completed v35 shape is valid");
     }
 

@@ -4201,6 +4201,8 @@ fn snapshot_minting_is_fail_closed() {
             last_fresh_at: Some(READ_AT.to_string()),
             last_attempt_at: READ_AT.to_string(),
             unavailable_reason: None,
+            repository_visibility: None,
+            repository_visibility_at: None,
         },
         subjects: vec![],
         health: crate::current_truth::projection::ProjectionHealthV1::default(),

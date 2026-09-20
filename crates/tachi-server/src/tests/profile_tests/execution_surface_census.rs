@@ -290,7 +290,7 @@ fn live_execution_surface_matches_fixture_and_provisional_budgets() {
     assert!(!actions.iter().any(|action| action == "dispatch"));
     assert_eq!(
         observed["canonical_action_inventories"]["tachi_gh"]["action_count"],
-        json!(19)
+        json!(20)
     );
     assert!(!observed["registered_native_tools"]["tools"]
         .as_array()

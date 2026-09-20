@@ -330,7 +330,9 @@ pub use sandbox_access::{evaluate_sandbox_access, path_matches_pattern};
 pub(crate) use schema::init_private_schema_with_label_mut;
 #[cfg(test)]
 pub(crate) use schema::install_reserved_reference_guard;
-pub use schema::{init_schema, init_schema_with_label_mut, SchemaInitOutcome};
+pub use schema::{
+    init_schema, init_schema_with_label_mut, validate_current_truth_schema, SchemaInitOutcome,
+};
 pub use search_generation::{bump_search_generation, search_generation};
 pub use sqlite_extensions::enable_simple_auto_extension;
 pub use sqlite_vec::{register_sqlite_vec, serialize_f32, try_load_sqlite_vec};
