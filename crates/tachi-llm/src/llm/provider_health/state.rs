@@ -115,6 +115,10 @@ impl ProviderHealthSnapshot {
 #[derive(Default)]
 pub(in crate::llm) struct ProviderState {
     pub(in crate::llm) secrets: HashMap<String, Vec<ProviderSecret>>,
+    /// Opaque generation of the durable source that supplied `secrets`.
+    /// Consumers compare it with their own metadata-only source snapshot;
+    /// plaintext never participates in generation checks.
+    pub(in crate::llm) source_generation: Option<u64>,
     /// Vault-sourced lane URL/model overrides share the same state lock as
     /// provider pools so one materialization publication has one linearization
     /// point for both runtime surfaces.

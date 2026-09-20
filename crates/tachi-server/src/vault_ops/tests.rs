@@ -2381,9 +2381,17 @@ async fn vault_list_is_a_secret_negative_account_health_board() {
     .await
     .expect("set legacy fixture");
 
-    let probed_at = chrono::DateTime::parse_from_rfc3339("2026-09-19T08:15:00Z")
-        .expect("fixed timestamp")
-        .with_timezone(&chrono::Utc);
+    let probed_at = server
+        .with_global_store_read(|store| {
+            let entry = store
+                .vault_get_entry("DEEPSEEK_API_KEY")
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "DeepSeek fixture missing".to_string())?;
+            chrono::DateTime::parse_from_rfc3339(&entry.updated_at)
+                .map(|at| at.with_timezone(&chrono::Utc) + chrono::Duration::seconds(1))
+                .map_err(|error| error.to_string())
+        })
+        .expect("derive post-entry probe timestamp");
     let exhausted = record_key_outcome(
         None,
         "DEEPSEEK_API_KEY",
@@ -2463,7 +2471,7 @@ async fn vault_list_is_a_secret_negative_account_health_board() {
         serde_json::json!(["EXTRACT_API_KEY"])
     );
     assert_eq!(deepseek["last_probe_class"], "402");
-    assert_eq!(deepseek["last_probe_at"], "2026-09-19T08:15:00+00:00");
+    assert_eq!(deepseek["last_probe_at"], probed_at.to_rfc3339());
     assert_eq!(deepseek["alias_integrity"], "unusable");
     assert_eq!(deepseek["provider_kind"], "deepseek");
     assert!(deepseek["account_id"].as_str().is_some());
@@ -2475,7 +2483,10 @@ async fn vault_list_is_a_secret_negative_account_health_board() {
         .find(|row| row["name"] == "ANTHROPIC_API_KEY")
         .expect("typed unknown row");
     assert_eq!(anthropic["last_probe_class"], "unknown");
-    assert_eq!(anthropic["last_probe_at"], "2026-09-19T08:18:00+00:00");
+    assert_eq!(
+        anthropic["last_probe_at"],
+        (probed_at + chrono::Duration::minutes(3)).to_rfc3339()
+    );
 
     let (account_fingerprint, auth_ref) = server
         .with_global_store_read(|store| {
@@ -2536,6 +2547,33 @@ async fn vault_list_is_a_secret_negative_account_health_board() {
             "forbidden field leaked: {listed}"
         );
     }
+
+    // Model a same-name replacement whose provider refresh did not publish:
+    // the runtime still contains the old member identity and old successful
+    // cache generation, while the durable row has a newer generation. Listing
+    // must fail closed without comparing plaintext or issuing another probe.
+    let replacement_sentinel = "replacement-secret-must-not-list";
+    plant_vault_secret(
+        &server,
+        "DEEPSEEK_API_KEY",
+        replacement_sentinel,
+        "api_key",
+    );
+    let replaced = handle_vault_list(&server, VaultListParams { secret_type: None })
+        .await
+        .expect("list after unpublished replacement");
+    let replaced_body: serde_json::Value =
+        serde_json::from_str(&replaced).expect("replacement list JSON");
+    let replaced_deepseek = replaced_body["credentials"]
+        .as_array()
+        .expect("credentials")
+        .iter()
+        .find(|row| row["name"] == "DEEPSEEK_API_KEY")
+        .expect("replaced DeepSeek row");
+    assert_eq!(replaced_deepseek["last_probe_class"], "unknown");
+    assert!(replaced_deepseek["last_probe_at"].is_null());
+    assert_eq!(replaced_deepseek["alias_integrity"], "unknown");
+    assert!(!replaced.contains(replacement_sentinel), "{replaced}");
 
     handle_vault_lock(&server).await.expect("lock Vault");
     let locked = handle_vault_list(&server, VaultListParams { secret_type: None })

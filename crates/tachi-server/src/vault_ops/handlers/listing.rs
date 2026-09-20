@@ -16,39 +16,63 @@ struct AccountBinding {
     aliases: Vec<memcore::vault::accounts::ProviderAccountAlias>,
 }
 
-fn effective_vault_alias_bindings(resolved_home: &Path) -> HashMap<String, String> {
-    let mut configured = crate::provider_config::collect_config_env_values(Some(resolved_home));
-    configured.extend(std::env::vars());
+#[derive(Clone, Default)]
+struct EnvAliasClaims {
+    source_names: BTreeSet<String>,
+    targets: BTreeSet<String>,
+}
 
-    let mut by_slot = HashMap::new();
-    for (slot, value) in configured {
-        if !crate::vault_ops::is_lane_slot_secret_name(&slot) {
+fn normalized_alias_source(
+    values: impl IntoIterator<Item = (String, String)>,
+) -> HashMap<String, EnvAliasClaims> {
+    let mut by_slot: HashMap<String, EnvAliasClaims> = HashMap::new();
+    for (raw_slot, value) in values {
+        let slot = raw_slot.trim();
+        if !crate::vault_ops::is_lane_slot_secret_name(slot) {
             continue;
         }
+        let claims = by_slot.entry(slot.to_string()).or_default();
+        claims.source_names.insert(raw_slot);
         if let Some(target) = tachi_llm::parse_vault_alias(&value) {
-            by_slot.insert(slot.trim().to_string(), target.to_string());
+            claims.targets.insert(target.to_string());
         }
     }
     by_slot
 }
 
-fn account_bindings(store: &memcore::MemoryStore) -> Result<Vec<AccountBinding>, String> {
+fn effective_vault_alias_bindings(resolved_home: &Path) -> HashMap<String, EnvAliasClaims> {
+    let mut configured = normalized_alias_source(
+        crate::provider_config::collect_config_env_values(Some(resolved_home)),
+    );
+    // Process environment wins over config.env by normalized lane-slot name.
+    // Preserve all raw process claims that normalize to one slot so a padded
+    // duplicate cannot be hidden by HashMap iteration order.
+    for (slot, claims) in normalized_alias_source(std::env::vars()) {
+        configured.insert(slot, claims);
+    }
+    configured
+}
+
+fn account_bindings(
+    transaction: &memcore::store::vault::VaultTransaction<'_>,
+) -> Result<Vec<AccountBinding>, String> {
     let mut bindings = Vec::new();
-    let accounts = memcore::db::list_provider_accounts(store.connection())
+    let accounts = transaction
+        .list_provider_accounts()
         .map_err(|error| format!("Failed to list provider accounts: {error}"))?;
     for account in accounts {
         if account.status != memcore::vault::accounts::ACCOUNT_STATUS_ACTIVE {
             continue;
         }
-        let Some(custody) =
-            memcore::db::get_account_custody(store.connection(), &account.account_id)
-                .map_err(|error| format!("Failed to read provider account custody: {error}"))?
+        let Some(custody) = transaction
+            .get_account_custody(&account.account_id)
+            .map_err(|error| format!("Failed to read provider account custody: {error}"))?
         else {
             continue;
         };
-        let aliases =
-            memcore::db::list_provider_account_aliases(store.connection(), &account.account_id)
-                .map_err(|error| format!("Failed to list provider account aliases: {error}"))?;
+        let aliases = transaction
+            .list_provider_account_aliases(&account.account_id)
+            .map_err(|error| format!("Failed to list provider account aliases: {error}"))?;
         bindings.push(AccountBinding {
             account,
             custody,
@@ -67,8 +91,16 @@ fn custody_contains_entry(custody: &AccountCustody, entry_name: &str) -> bool {
     }
 }
 
-fn account_alias_targets(bindings: &[AccountBinding]) -> HashMap<String, BTreeSet<String>> {
-    let mut by_slot: HashMap<String, BTreeSet<String>> = HashMap::new();
+#[derive(Clone, Eq, Ord, PartialEq, PartialOrd)]
+struct AccountAliasClaim {
+    account_id: String,
+    custody_target: String,
+}
+
+fn account_alias_targets(
+    bindings: &[AccountBinding],
+) -> HashMap<String, BTreeSet<AccountAliasClaim>> {
+    let mut by_slot: HashMap<String, BTreeSet<AccountAliasClaim>> = HashMap::new();
     for binding in bindings {
         for alias in &binding.aliases {
             let slot = alias.alias_name.trim();
@@ -76,7 +108,10 @@ fn account_alias_targets(bindings: &[AccountBinding]) -> HashMap<String, BTreeSe
                 by_slot
                     .entry(slot.to_string())
                     .or_default()
-                    .insert(binding.custody.custody_target.clone());
+                    .insert(AccountAliasClaim {
+                        account_id: binding.account.account_id.clone(),
+                        custody_target: binding.custody.custody_target.clone(),
+                    });
             }
         }
     }
@@ -91,8 +126,8 @@ struct BindingClaims {
 
 fn binding_claims(
     target: &str,
-    env_targets: &HashMap<String, String>,
-    account_targets: &HashMap<String, BTreeSet<String>>,
+    env_targets: &HashMap<String, EnvAliasClaims>,
+    account_targets: &HashMap<String, BTreeSet<AccountAliasClaim>>,
 ) -> BindingClaims {
     let mut claims = BindingClaims::default();
     let slots = env_targets
@@ -100,13 +135,27 @@ fn binding_claims(
         .chain(account_targets.keys())
         .collect::<BTreeSet<_>>();
     for slot in slots {
-        let mut targets = account_targets.get(slot).cloned().unwrap_or_default();
-        if let Some(env_target) = env_targets.get(slot) {
-            targets.insert(env_target.clone());
+        let env = env_targets.get(slot);
+        let accounts = account_targets.get(slot);
+        let mut targets = env
+            .into_iter()
+            .flat_map(|claims| claims.targets.iter().cloned())
+            .collect::<BTreeSet<_>>();
+        if let Some(accounts) = accounts {
+            targets.extend(accounts.iter().map(|claim| claim.custody_target.clone()));
         }
         if targets.contains(target) {
             claims.slots.insert(slot.clone());
-            if targets.len() > 1 {
+            let normalized_env_collision =
+                env.is_some_and(|claims| claims.source_names.len() > 1);
+            let env_blocks_account_alias = env.is_some_and(|claims| claims.targets.is_empty())
+                && accounts.is_some_and(|claims| !claims.is_empty());
+            let ambiguous_account_owner = accounts.is_some_and(|claims| claims.len() > 1);
+            if targets.len() > 1
+                || normalized_env_collision
+                || env_blocks_account_alias
+                || ambiguous_account_owner
+            {
                 claims.conflicts.insert(slot.clone());
             }
         }
@@ -151,6 +200,16 @@ fn health_updated_at(health: &VaultKeyHealth) -> Option<chrono::DateTime<chrono:
     chrono::DateTime::parse_from_rfc3339(&health.updated_at).ok()
 }
 
+fn timestamp_at(value: &str) -> Option<chrono::DateTime<chrono::FixedOffset>> {
+    chrono::DateTime::parse_from_rfc3339(value).ok()
+}
+
+fn health_is_current_for_entry(health: &VaultKeyHealth, entry: &VaultEntry) -> bool {
+    health_updated_at(health)
+        .zip(timestamp_at(&entry.updated_at))
+        .is_some_and(|(health_at, entry_at)| health_at >= entry_at)
+}
+
 fn selected_health<'a>(health: &[&'a VaultKeyHealth]) -> Option<&'a VaultKeyHealth> {
     let now = Utc::now();
     let unusable = health
@@ -186,11 +245,17 @@ fn probe_observation(health: Option<&VaultKeyHealth>) -> (&'static str, Option<S
         .and_then(|value| value.get(EVIDENCE_AT_FIELD))
         .and_then(serde_json::Value::as_str)
         .map(str::to_string);
+    let empty_content = health.last_error.as_deref().is_some_and(|error| {
+        error
+            .to_ascii_lowercase()
+            .contains("empty assistant content")
+    });
     if let Some(class) = match (evidence, outcome) {
         (Some(EvidenceKind::Probed), Some("success")) => Some("ok"),
-        (Some(EvidenceKind::Probed), Some("auth_failed")) => Some("401"),
+        (Some(EvidenceKind::Probed), Some("auth_failed")) => Some("auth_failed"),
         (Some(_), Some("exhausted")) => Some("402"),
         (Some(_), Some("rate_limited")) => Some("rate_limited"),
+        (Some(_), Some("error")) if empty_content => Some("empty_content"),
         (Some(_), Some("error")) => Some("error"),
         (Some(_), Some("unknown")) => Some("unknown"),
         (Some(EvidenceKind::SelfReported), Some("success")) => Some("ok"),
@@ -202,11 +267,7 @@ fn probe_observation(health: Option<&VaultKeyHealth>) -> (&'static str, Option<S
 
     let class = if health.disabled {
         "disabled"
-    } else if health.last_error.as_deref().is_some_and(|error| {
-        error
-            .to_ascii_lowercase()
-            .contains("empty assistant content")
-    }) {
+    } else if empty_content {
         "empty_content"
     } else if health.auth_failed || health.status == HEALTH_STATUS_AUTH_FAILED {
         "auth_failed"
@@ -227,6 +288,93 @@ fn probe_observation(health: Option<&VaultKeyHealth>) -> (&'static str, Option<S
             .or(health.last_success.as_deref())
             .map(str::to_string),
     )
+}
+
+fn cached_probe_slot(name: &str) -> Option<&'static str> {
+    match name {
+        "chat_extract" => Some("EXTRACT_API_KEY"),
+        "chat_distill" => Some("DISTILL_API_KEY"),
+        _ => None,
+    }
+}
+
+fn cached_probe_class(
+    probe: &crate::status_ops::status_health::ProviderProbeResult,
+) -> &'static str {
+    if probe.message.as_deref().is_some_and(|message| {
+        message
+            .to_ascii_lowercase()
+            .contains("empty assistant content")
+    }) {
+        return "empty_content";
+    }
+    match probe.status.as_str() {
+        "ok" => "ok",
+        "auth_failed" => "auth_failed",
+        "rate_limited" => "rate_limited",
+        "failed" | "timeout" => "error",
+        _ => "unknown",
+    }
+}
+
+fn latest_probe_observation(
+    health: &[&VaultKeyHealth],
+    entry: &VaultEntry,
+    bound_slots: &BTreeSet<String>,
+    probe_cache: Option<&crate::status_ops::status_health::ProviderProbeCache>,
+) -> (&'static str, Option<String>) {
+    let selected = selected_health(health);
+    let health_observation = probe_observation(selected);
+    if selected.is_some_and(|row| {
+        crate::vault_ops::unusable_skip_class(row, Utc::now()).is_some()
+    }) {
+        return health_observation;
+    }
+
+    let entry_at = timestamp_at(&entry.updated_at);
+    let mut observations = Vec::new();
+    if let (class, Some(at)) = health_observation {
+        if timestamp_at(&at)
+            .zip(entry_at)
+            .is_some_and(|(observed_at, entry_at)| observed_at >= entry_at)
+        {
+            observations.push((class, at));
+        }
+    }
+    if let Some(cache) = probe_cache {
+        if timestamp_at(&cache.last_probe_at)
+            .zip(entry_at)
+            .is_some_and(|(observed_at, entry_at)| observed_at >= entry_at)
+        {
+            observations.extend(cache.probes.iter().filter_map(|probe| {
+                let slot = cached_probe_slot(&probe.name)?;
+                bound_slots.contains(slot).then(|| {
+                    (
+                        cached_probe_class(probe),
+                        cache.last_probe_at.clone(),
+                    )
+                })
+            }));
+        }
+    }
+    observations.sort_by(|left, right| {
+        timestamp_at(&left.1)
+            .cmp(&timestamp_at(&right.1))
+            .then_with(|| left.0.cmp(right.0))
+    });
+    let Some((newest_class, newest_at)) = observations.last().cloned() else {
+        return ("unknown", None);
+    };
+    if observations
+        .iter()
+        .rev()
+        .take_while(|(_, at)| at == &newest_at)
+        .any(|(class, _)| *class != newest_class)
+    {
+        ("unknown", Some(newest_at))
+    } else {
+        (newest_class, Some(newest_at))
+    }
 }
 
 fn health_is_unusable(health: &[&VaultKeyHealth]) -> bool {
@@ -257,9 +405,13 @@ fn alias_integrity(
     secret_type: &str,
     health: &[&VaultKeyHealth],
     claims: &BindingClaims,
+    runtime_generation_current: bool,
     runtime_bindings: Option<&HashMap<String, BTreeSet<String>>>,
 ) -> &'static str {
     if claims.slots.is_empty() {
+        return "unknown";
+    }
+    if !runtime_generation_current {
         return "unknown";
     }
     let Some(runtime_bindings) = runtime_bindings else {
@@ -311,10 +463,34 @@ pub(crate) fn build_vault_list_payload(
     requested_secret_type: Option<&str>,
     runtime_health: HashMap<String, HashMap<String, VaultKeyHealth>>,
     runtime_bindings: Option<&HashMap<String, BTreeSet<String>>>,
+    runtime_source_generation: Option<u64>,
+    probe_cache: Option<&crate::status_ops::status_health::ProviderProbeCache>,
 ) -> Result<serde_json::Value, String> {
-    let mut entries = store
+    let transaction = store
+        .begin_vault_read_transaction_shared()
+        .map_err(|error| format!("Failed to begin Vault list snapshot: {error}"))?;
+    let entries = transaction
         .vault_list_entries()
         .map_err(|error| format!("Failed to list secrets: {error}"))?;
+    let health_rows = transaction
+        .vault_list_key_health(None)
+        .map_err(|error| format!("Failed to list Vault key health: {error}"))?;
+    let rotations = transaction
+        .vault_list_rotations()
+        .map_err(|error| format!("Failed to list Vault rotations: {error}"))?;
+    let account_bindings = account_bindings(&transaction)?;
+    transaction
+        .commit()
+        .map_err(|error| format!("Failed to finish Vault list snapshot: {error}"))?;
+    let current_generation = crate::vault_ops::vault_materialization_acl_revision_from_rows(
+        &entries,
+        &rotations,
+        &health_rows,
+    )
+    .contents;
+    let runtime_generation_current = runtime_source_generation == Some(current_generation);
+
+    let mut entries = entries;
     if let Some(secret_type) = requested_secret_type {
         let want = normalize_secret_type(secret_type);
         entries.retain(|entry| {
@@ -322,21 +498,14 @@ pub(crate) fn build_vault_list_payload(
         });
     }
 
-    let health_rows = store
-        .vault_list_key_health(None)
-        .map_err(|error| format!("Failed to list Vault key health: {error}"))?;
     let health_by_logical = crate::vault_ops::access::health_snapshot::merge_provider_key_health(
         health_rows,
         runtime_health,
     );
-    let rotations = store
-        .vault_list_rotations()
-        .map_err(|error| format!("Failed to list Vault rotations: {error}"))?;
     let rotation_prefixes = rotations
         .into_iter()
         .map(|rotation| rotation.prefix)
         .collect::<BTreeSet<_>>();
-    let account_bindings = account_bindings(store)?;
     let env_targets = effective_vault_alias_bindings(resolved_home);
     let account_targets = account_alias_targets(&account_bindings);
     let mut payload = Vec::with_capacity(entries.len());
@@ -372,8 +541,12 @@ pub(crate) fn build_vault_list_payload(
                 &logical_name,
                 &entry.name,
                 &claims.slots,
-            );
-            let (probe_class, probe_at) = probe_observation(selected_health(&health));
+            )
+            .into_iter()
+            .filter(|row| health_is_current_for_entry(row, &entry))
+            .collect::<Vec<_>>();
+            let (probe_class, probe_at) =
+                latest_probe_observation(&health, &entry, &claims.slots, probe_cache);
 
             let object = row.as_object_mut().expect("vault list rows are objects");
             object.insert(
@@ -393,6 +566,7 @@ pub(crate) fn build_vault_list_payload(
                     secret_type,
                     &health,
                     &claims,
+                    runtime_generation_current,
                     runtime_bindings,
                 )),
             );
@@ -435,15 +609,19 @@ pub(crate) async fn handle_vault_list(
     }
 
     let runtime_available = server.vault_read().key.is_some();
-    let (runtime_health, runtime_bindings) = if runtime_available {
-        (
-            server.llm.provider_health_memory_snapshot(),
-            Some(server.llm.provider_secret_bindings_snapshot()),
-        )
+    let (runtime_health, runtime_bindings, runtime_source_generation) = if runtime_available {
+        let (health, bindings, generation) = server.llm.provider_health_board_snapshot();
+        (health, Some(bindings), generation)
     } else {
-        (Default::default(), None)
+        (Default::default(), None, None)
     };
     let resolved_home = server.tachi_home_dir();
+    let global_db_path = server.global_db_path_buf();
+    let probe_cache = crate::status_ops::status_health::read_provider_probe_cache(
+        &resolved_home,
+        &global_db_path,
+    )
+    .filter(|cache| !cache.is_stale());
     let resp = server.with_global_store_read(move |store| {
         build_vault_list_payload(
             store,
@@ -451,6 +629,8 @@ pub(crate) async fn handle_vault_list(
             params.secret_type.as_deref(),
             runtime_health,
             runtime_bindings.as_ref(),
+            runtime_source_generation,
+            probe_cache.as_ref(),
         )
     })?;
     serde_json::to_string(&resp).map_err(|e| format!("serialize: {e}"))
@@ -620,15 +800,29 @@ mod tests {
         }
     }
 
+    fn env_claim(raw_name: &str, target: &str) -> EnvAliasClaims {
+        EnvAliasClaims {
+            source_names: BTreeSet::from([raw_name.to_string()]),
+            targets: BTreeSet::from([target.to_string()]),
+        }
+    }
+
+    fn account_claim(account_id: &str, target: &str) -> AccountAliasClaim {
+        AccountAliasClaim {
+            account_id: account_id.to_string(),
+            custody_target: target.to_string(),
+        }
+    }
+
     #[test]
     fn typed_unknown_stays_unknown_with_its_evidence_timestamp_and_no_raw_error() {
         let prior = record_key_outcome(
             None,
             "OPENAI_API_KEY",
             "OPENAI_API_KEY",
-            TypedOutcome::Error,
+            TypedOutcome::Success,
             EvidenceKind::Probed,
-            Some("RAW_PROVIDER_BODY_SENTINEL"),
+            None,
             at(1),
         )
         .health;
@@ -646,10 +840,7 @@ mod tests {
         let observation = probe_observation(Some(&unknown));
         assert_eq!(observation.0, "unknown");
         assert_eq!(observation.1.as_deref(), Some(at(2).to_rfc3339().as_str()));
-        assert_eq!(
-            unknown.last_error.as_deref(),
-            Some("RAW_PROVIDER_BODY_SENTINEL")
-        );
+        assert_eq!(unknown.last_success.as_deref(), Some(at(1).to_rfc3339().as_str()));
 
         let first_unknown = record_key_outcome(
             None,
@@ -664,6 +855,20 @@ mod tests {
         let observation = probe_observation(Some(&first_unknown));
         assert_eq!(observation.0, "unknown");
         assert_eq!(observation.1.as_deref(), Some(at(3).to_rfc3339().as_str()));
+
+        let raw_error = record_key_outcome(
+            None,
+            "RAW_ERROR_API_KEY",
+            "RAW_ERROR_API_KEY",
+            TypedOutcome::Error,
+            EvidenceKind::Probed,
+            Some("RAW_PROVIDER_BODY_SENTINEL"),
+            at(4),
+        )
+        .health;
+        assert_eq!(probe_observation(Some(&raw_error)).0, "error");
+        assert!(!format!("{:?}", probe_observation(Some(&raw_error)))
+            .contains("RAW_PROVIDER_BODY_SENTINEL"));
     }
 
     #[test]
@@ -739,12 +944,38 @@ mod tests {
             at(2),
         )
         .health;
+        let second_persisted = record_key_outcome(
+            None,
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_API_KEY",
+            TypedOutcome::Success,
+            EvidenceKind::Probed,
+            None,
+            at(4),
+        )
+        .health;
+        let older_memory = record_key_outcome(
+            None,
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_API_KEY",
+            TypedOutcome::AuthFailed,
+            EvidenceKind::Probed,
+            None,
+            at(3),
+        )
+        .health;
         let merged = crate::vault_ops::access::health_snapshot::merge_provider_key_health(
-            vec![persisted],
-            HashMap::from([(
-                "OPENAI_API_KEY".to_string(),
-                HashMap::from([("OPENAI_API_KEY".to_string(), current)]),
-            )]),
+            vec![persisted, second_persisted],
+            HashMap::from([
+                (
+                    "OPENAI_API_KEY".to_string(),
+                    HashMap::from([("OPENAI_API_KEY".to_string(), current)]),
+                ),
+                (
+                    "ANTHROPIC_API_KEY".to_string(),
+                    HashMap::from([("ANTHROPIC_API_KEY".to_string(), older_memory)]),
+                ),
+            ]),
         );
         let rows = relevant_health(
             &merged,
@@ -756,6 +987,176 @@ mod tests {
         let observation = probe_observation(selected_health(&rows));
         assert_eq!(observation.0, "ok");
         assert_eq!(observation.1.as_deref(), Some(at(2).to_rfc3339().as_str()));
+        let second = relevant_health(
+            &merged,
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_API_KEY",
+            &BTreeSet::new(),
+        );
+        let observation = probe_observation(selected_health(&second));
+        assert_eq!(observation.0, "ok");
+        assert_eq!(observation.1.as_deref(), Some(at(4).to_rfc3339().as_str()));
+    }
+
+    #[test]
+    fn probe_projection_preserves_typed_classes_without_inventing_http_status() {
+        for reason in ["provider returned HTTP 401", "provider returned HTTP 403"] {
+            let health = record_key_outcome(
+                None,
+                "DEEPSEEK_API_KEY",
+                "DEEPSEEK_API_KEY",
+                TypedOutcome::AuthFailed,
+                EvidenceKind::Probed,
+                Some(reason),
+                at(1),
+            )
+            .health;
+            let observation = probe_observation(Some(&health));
+            assert_eq!(observation.0, "auth_failed");
+            assert!(!format!("{observation:?}").contains(reason));
+        }
+
+        let empty = record_key_outcome(
+            None,
+            "EXTRACT_API_KEY",
+            "DEEPSEEK_API_KEY",
+            TypedOutcome::Error,
+            EvidenceKind::SelfReported,
+            Some("Empty assistant content: RAW_BODY_SENTINEL"),
+            at(2),
+        )
+        .health;
+        assert_eq!(probe_observation(Some(&empty)).0, "empty_content");
+
+        let rate_limited = record_key_outcome(
+            None,
+            "EXTRACT_API_KEY",
+            "DEEPSEEK_API_KEY",
+            TypedOutcome::RateLimited {
+                retry_after_secs: None,
+            },
+            EvidenceKind::SelfReported,
+            None,
+            at(3),
+        )
+        .health;
+        assert_eq!(probe_observation(Some(&rate_limited)).0, "rate_limited");
+
+        let no_evidence = new_key_health("EXTRACT_API_KEY", "DEEPSEEK_API_KEY", at(4));
+        assert_eq!(probe_observation(Some(&no_evidence)), ("unknown", None));
+    }
+
+    #[test]
+    fn newer_doctor_empty_content_replaces_older_success_without_exposing_message() {
+        let health = record_key_outcome(
+            None,
+            "EXTRACT_API_KEY",
+            "DEEPSEEK_API_KEY",
+            TypedOutcome::Success,
+            EvidenceKind::Probed,
+            None,
+            at(1),
+        )
+        .health;
+        let cache = crate::status_ops::status_health::ProviderProbeCache {
+            last_probe_at: at(2).to_rfc3339(),
+            ttl_seconds: 60,
+            probes: vec![crate::status_ops::status_health::ProviderProbeResult {
+                name: "chat_extract".to_string(),
+                status: "failed".to_string(),
+                message: Some("Empty assistant content: RAW_BODY_SENTINEL".to_string()),
+            }],
+            rotation_groups: Vec::new(),
+        };
+        let account = entry("DEEPSEEK_API_KEY");
+        let rows = vec![&health];
+        let observation = latest_probe_observation(
+            &rows,
+            &account,
+            &BTreeSet::from(["EXTRACT_API_KEY".to_string()]),
+            Some(&cache),
+        );
+        assert_eq!(observation.0, "empty_content");
+        assert_eq!(observation.1.as_deref(), Some(at(2).to_rfc3339().as_str()));
+        assert!(!format!("{observation:?}").contains("RAW_BODY_SENTINEL"));
+    }
+
+    #[test]
+    fn entry_replacement_invalidates_older_health_and_runtime_generation() {
+        let mut replacement = entry("DEEPSEEK_API_KEY");
+        replacement.updated_at = at(3).to_rfc3339();
+        let old_success = record_key_outcome(
+            None,
+            "EXTRACT_API_KEY",
+            "DEEPSEEK_API_KEY",
+            TypedOutcome::Success,
+            EvidenceKind::Probed,
+            None,
+            at(2),
+        )
+        .health;
+        assert!(!health_is_current_for_entry(&old_success, &replacement));
+
+        let claims = BindingClaims {
+            slots: BTreeSet::from(["EXTRACT_API_KEY".to_string()]),
+            conflicts: BTreeSet::new(),
+        };
+        let stale_cache = HashMap::from([(
+            "EXTRACT_API_KEY".to_string(),
+            BTreeSet::from(["DEEPSEEK_API_KEY".to_string()]),
+        )]);
+        assert_eq!(
+            alias_integrity(
+                &replacement,
+                "DEEPSEEK_API_KEY",
+                memcore::vault::SECRET_TYPE_API_KEY,
+                &[],
+                &claims,
+                false,
+                Some(&stale_cache),
+            ),
+            "unknown"
+        );
+        assert_eq!(
+            latest_probe_observation(&[], &replacement, &claims.slots, None),
+            ("unknown", None)
+        );
+    }
+
+    #[test]
+    fn normalized_slot_collisions_and_same_target_account_owners_fail_closed() {
+        let normalized = normalized_alias_source([
+            (
+                "EXTRACT_API_KEY".to_string(),
+                "vault:DEEPSEEK_API_KEY".to_string(),
+            ),
+            (
+                " EXTRACT_API_KEY ".to_string(),
+                " vault:OPENAI_API_KEY ".to_string(),
+            ),
+        ]);
+        let normalized_claims = binding_claims(
+            "DEEPSEEK_API_KEY",
+            &normalized,
+            &HashMap::new(),
+        );
+        assert_eq!(
+            normalized_claims.conflicts,
+            BTreeSet::from(["EXTRACT_API_KEY".to_string()])
+        );
+
+        let accounts = HashMap::from([(
+            "EXTRACT_API_KEY".to_string(),
+            BTreeSet::from([
+                account_claim("account-a", "DEEPSEEK_API_KEY"),
+                account_claim("account-b", "DEEPSEEK_API_KEY"),
+            ]),
+        )]);
+        let account_claims = binding_claims("DEEPSEEK_API_KEY", &HashMap::new(), &accounts);
+        assert_eq!(
+            account_claims.conflicts,
+            BTreeSet::from(["EXTRACT_API_KEY".to_string()])
+        );
     }
 
     #[test]
@@ -763,10 +1164,13 @@ mod tests {
         let account = entry("DEEPSEEK_API_KEY");
         let detected_conflict = binding_claims(
             "DEEPSEEK_API_KEY",
-            &HashMap::from([("EXTRACT_API_KEY".to_string(), "OPENAI_API_KEY".to_string())]),
             &HashMap::from([(
                 "EXTRACT_API_KEY".to_string(),
-                BTreeSet::from(["DEEPSEEK_API_KEY".to_string()]),
+                env_claim("EXTRACT_API_KEY", "OPENAI_API_KEY"),
+            )]),
+            &HashMap::from([(
+                "EXTRACT_API_KEY".to_string(),
+                BTreeSet::from([account_claim("deepseek-main", "DEEPSEEK_API_KEY")]),
             )]),
         );
         assert_eq!(
@@ -788,6 +1192,7 @@ mod tests {
                 memcore::vault::SECRET_TYPE_API_KEY,
                 &[],
                 &claims,
+                true,
                 Some(&one_binding),
             ),
             "absent"
@@ -810,6 +1215,7 @@ mod tests {
                 memcore::vault::SECRET_TYPE_API_KEY,
                 &[],
                 &claims,
+                true,
                 Some(&all_bindings),
             ),
             "resolved"
@@ -826,6 +1232,7 @@ mod tests {
                 memcore::vault::SECRET_TYPE_API_KEY,
                 &[],
                 &conflicting,
+                true,
                 Some(&all_bindings),
             ),
             "unknown"
@@ -837,6 +1244,7 @@ mod tests {
                 memcore::vault::SECRET_TYPE_OAUTH_TOKEN,
                 &[],
                 &claims,
+                false,
                 None,
             ),
             "unknown",
@@ -849,6 +1257,7 @@ mod tests {
                 memcore::vault::SECRET_TYPE_API_KEY,
                 &[],
                 &claims,
+                true,
                 Some(&HashMap::new()),
             ),
             "unknown",
@@ -861,7 +1270,7 @@ mod tests {
         let rotations = BTreeSet::from(["DEEPSEEK_API_KEY".to_string()]);
         let env = HashMap::from([(
             "EXTRACT_API_KEY".to_string(),
-            "DEEPSEEK_API_KEY".to_string(),
+            env_claim("EXTRACT_API_KEY", "DEEPSEEK_API_KEY"),
         )]);
         let claims = binding_claims("DEEPSEEK_API_KEY", &env, &HashMap::new());
         let runtime = HashMap::from([(
@@ -888,6 +1297,7 @@ mod tests {
                     memcore::vault::SECRET_TYPE_API_KEY,
                     &[],
                     &claims,
+                    true,
                     Some(&runtime),
                 ),
                 "resolved"

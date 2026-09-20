@@ -41,6 +41,7 @@ impl super::super::LlmClient {
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         state.secrets.insert(name.to_string(), entries);
+        state.source_generation = None;
         state.indices.remove(name);
         true
     }
@@ -108,6 +109,7 @@ impl super::super::LlmClient {
             replacement,
             retained_logical_names,
             self.provider_health_memory_snapshot(),
+            None,
             lane_config_overlay,
             commit_companion_projection,
         )
@@ -118,6 +120,7 @@ impl super::super::LlmClient {
         replacement: HashMap<String, Vec<ProviderSecret>>,
         retained_logical_names: &HashSet<String>,
         health_baseline: HashMap<String, HashMap<String, VaultKeyHealth>>,
+        source_generation: Option<u64>,
         lane_config_overlay: Option<LaneConfigOverlay>,
         commit_companion_projection: P,
     ) -> Result<usize, String>
@@ -128,6 +131,7 @@ impl super::super::LlmClient {
             replacement,
             retained_logical_names,
             health_baseline,
+            source_generation,
             lane_config_overlay,
             None,
             commit_companion_projection,
@@ -139,6 +143,7 @@ impl super::super::LlmClient {
         replacement: HashMap<String, Vec<ProviderSecret>>,
         retained_logical_names: &HashSet<String>,
         health_baseline: HashMap<String, HashMap<String, VaultKeyHealth>>,
+        source_generation: Option<u64>,
         lane_config_overlay: Option<LaneConfigOverlay>,
         before_companion_commit: Option<Box<dyn FnOnce() + Send>>,
         commit_companion_projection: P,
@@ -180,6 +185,7 @@ impl super::super::LlmClient {
         let previous = std::mem::take(&mut *state);
         let mut next = ProviderState {
             secrets: replacement,
+            source_generation,
             lane_config_overlay: lane_config_overlay
                 .unwrap_or_else(|| previous.lane_config_overlay.clone()),
             cooldowns: previous.cooldowns.clone(),
@@ -240,6 +246,7 @@ impl super::super::LlmClient {
             replacement,
             retained_logical_names,
             self.provider_health_memory_snapshot(),
+            None,
             lane_config_overlay,
             Some(Box::new(before_companion_commit)),
             commit_companion_projection,
@@ -288,6 +295,7 @@ impl super::super::LlmClient {
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         state.secrets.clear();
+        state.source_generation = None;
         state.cooldowns.clear();
         state.indices.clear();
         if clear_lane_config_overlay {
@@ -316,14 +324,22 @@ impl super::super::LlmClient {
             .len()
     }
 
-    /// Snapshot the live provider cache's logical-name-to-key-id bindings.
-    /// This exposes identity metadata only, never key material.
-    pub fn provider_secret_bindings_snapshot(&self) -> HashMap<String, BTreeSet<String>> {
+    /// Snapshot health, logical-name-to-key-id bindings, and the opaque source
+    /// generation under one lock. This exposes identity metadata only, never
+    /// key material, and prevents a health board from combining two runtime
+    /// generations.
+    pub fn provider_health_board_snapshot(
+        &self,
+    ) -> (
+        HashMap<String, HashMap<String, VaultKeyHealth>>,
+        HashMap<String, BTreeSet<String>>,
+        Option<u64>,
+    ) {
         let state = self
             .provider_state
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        state
+        let bindings = state
             .secrets
             .iter()
             .map(|(logical_name, entries)| {
@@ -332,18 +348,8 @@ impl super::super::LlmClient {
                     entries.iter().map(|entry| entry.key_id.clone()).collect(),
                 )
             })
-            .collect()
-    }
-
-    /// Whether the live provider cache binds one logical env name to one
-    /// concrete Vault key id. This exposes identity only, never key material.
-    pub fn has_provider_secret_binding(&self, logical_name: &str, key_id: &str) -> bool {
-        self.provider_state
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .secrets
-            .get(logical_name)
-            .is_some_and(|entries| entries.iter().any(|entry| entry.key_id == key_id))
+            .collect();
+        (state.health.clone(), bindings, state.source_generation)
     }
 
     #[cfg(test)]
