@@ -2579,6 +2579,17 @@ async fn vault_list_is_a_secret_negative_account_health_board() {
     let refresh_error = crate::provider_config::materialize_for_server(&server)
         .expect_err("invalid replacement generation must fail provider refresh");
     assert!(refresh_error.contains("DEEPSEEK_API_KEY"), "{refresh_error}");
+    // Complete an old request after both the same-name replacement and the
+    // failed refresh. Its timestamp is newest, but its health came from the
+    // still-published old credential generation and must not attach to K2.
+    server.llm.record_provider_key_result(
+        "DEEPSEEK_API_KEY",
+        "DEEPSEEK_API_KEY",
+        Some(200),
+        None,
+        None,
+        None,
+    );
     let replaced = handle_vault_list(&server, VaultListParams { secret_type: None })
         .await
         .expect("list after unpublished replacement");
