@@ -3725,3 +3725,5 @@ fn link_membership_follows_the_canonical_row_not_a_public_duplicate() {
     );
     assert_eq!(link.visibility, VisibilityClassV1::Private);
 }
+
+mod projection_compat;

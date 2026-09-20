@@ -2189,7 +2189,7 @@ pub(crate) fn rebuild_a2a_mailbox_to_v32(conn: &Connection) -> Result<(), Memory
 /// `sqlite_schema.sql` can be compared against a canonical clause without the
 /// comparison depending on the formatting SQLite echoed back.
 fn normalize_schema_sql(sql: &str) -> String {
-    sql.split_whitespace().collect::<Vec<_>>().join(" ")
+    sql.split_ascii_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// Canonical v28 installer. Production callers reach this only through the

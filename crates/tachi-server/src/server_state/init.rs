@@ -689,7 +689,7 @@ mod tests {
         let home = temp.path().join("home");
 
         // Seed a canonically stamped current product DB, then model the exact
-        // pre-v37 state an existing deployment presents to server startup.
+        // pre-v38 state an existing deployment presents to server startup.
         drop(
             MemoryServer::new_with_migration_authority_and_home(
                 global_db.clone(),
@@ -705,10 +705,10 @@ mod tests {
              DROP TABLE current_truth_projection;
              DROP TABLE current_truth_refresh;
              DELETE FROM hard_state
-              WHERE namespace = 'migrations' AND key = 'v37_current_truth';
-             PRAGMA user_version = 36;",
+              WHERE namespace = 'migrations' AND key = 'v38_current_truth';
+             PRAGMA user_version = 37;",
         )
-        .expect("downgrade fixture to canonical v36");
+        .expect("downgrade fixture to canonical v37");
         let before_denied_open = sqlite_schema(&conn);
         drop(conn);
 
@@ -720,7 +720,7 @@ mod tests {
         );
         assert!(
             denied.is_err(),
-            "ordinary startup must refuse the pending v37 migration"
+            "ordinary startup must refuse the pending v38 migration"
         );
         let conn = Connection::open(&global_db).expect("inspect denied startup");
         assert_eq!(
@@ -744,7 +744,7 @@ mod tests {
                 global_db.clone(),
                 None,
                 MigrationAuthority::Allow {
-                    approved_by: "test:current-truth-v37".to_string(),
+                    approved_by: "test:current-truth-v38".to_string(),
                 },
                 home.clone(),
             )
@@ -763,7 +763,7 @@ mod tests {
         assert_eq!(
             conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
-            37
+            38
         );
         drop(conn);
 
@@ -774,7 +774,7 @@ mod tests {
                 MigrationAuthority::Deny,
                 home,
             )
-            .expect("current v37 DB reopens without migration authority"),
+            .expect("current v38 DB reopens without migration authority"),
         );
     }
 }

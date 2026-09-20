@@ -1779,14 +1779,17 @@ mod tests {
         let (mut conn, tmp) = open_test_db();
         run_data_migrations(&mut conn, "global", tmp.path()).expect("build current fixture");
         conn.execute_batch(
-            "DROP TABLE identity_admission_verification_revocations;
+            "DROP TABLE current_truth_assertions;
+             DROP TABLE current_truth_projection;
+             DROP TABLE current_truth_refresh;
+             DROP TABLE identity_admission_verification_revocations;
              DROP TABLE identity_admission_verification_receipts;
              DROP INDEX idx_identity_admissions_verified_binding;
              DROP TRIGGER identity_verified_admissions_no_replace;
              DROP TRIGGER identity_verified_admissions_no_update;
              DROP TRIGGER identity_verified_admissions_no_delete;
              DELETE FROM hard_state
-              WHERE namespace = 'migrations' AND key = 'v37_verified_agent_admissions';
+              WHERE namespace = 'migrations' AND key IN ('v37_verified_agent_admissions', 'v38_current_truth');
              INSERT INTO agent_identities (agent_identity_id, display_name, created_at)
               VALUES ('agent-before-v37', 'legacy self assertion', '2026-09-18T00:00:00Z');
              INSERT INTO identity_admissions
@@ -1819,6 +1822,9 @@ mod tests {
             )
         );
         assert!(was_run(&conn, "v37_verified_agent_admissions").unwrap());
+        assert_eq!(report.current_truth_schema_objects_created, 5);
+        assert!(was_run(&conn, "v38_current_truth").unwrap());
+        crate::db::schema::validate_current_truth_schema(&conn).unwrap();
         validate_current_schema_integrity(&conn).expect("the completed v37 shape is valid");
     }
 

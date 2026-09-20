@@ -1187,6 +1187,17 @@ const EXEMPTIONS: &[Exemption<'static>] = &[
                  cannot reach a guarded MemoryStore connection from here.",
     },
     Exemption {
+        path: "crates/tachi-params/src/current_truth/tests/projection_compat.rs",
+        basis: ExemptionBasis::Proven(MachineProof::NoStoreDoorwayInFile),
+        sites: &[Site {
+            symbol: "mixed_case_projection_insert_failure_rolls_back_entire_rewrite",
+            trigger: "FAIL_PROJECTION_INSERT",
+            ddl: "88c1c19f866d3357",
+            occurrences: 1,
+        }],
+        reason: "the projection fixture opens a separate direct SQLite connection on its private database, installs an insertion abort, then calls the real CurrentTruth write API and verifies both legacy projections and all immutable assertion columns survived. No guarded store doorway is present in this file.",
+    },
+    Exemption {
         path: "crates/tachi-server/src/bootstrap/wiki_corpus/apply.rs",
         basis: ExemptionBasis::DeclaredByReviewerNotProven {
             signed_by: "Codex Luna, bodies read 2026-08-01",
@@ -1269,6 +1280,17 @@ const EXEMPTIONS: &[Exemption<'static>] = &[
             occurrences: 1,
         }],
         reason: "the test opens a second direct rusqlite::Connection on the file-backed server DB and installs the trigger before exercising DaemonQuarantineSink; body read 2026-08-27. The file also uses guarded store connections for setup/assertions, so no machine proof applies.",
+    },
+    Exemption {
+        path: "crates/tachi-server/src/gh_ops/current_truth_refresh/partial_error_tests.rs",
+        basis: ExemptionBasis::Proven(MachineProof::NoStoreDoorwayInFile),
+        sites: &[Site {
+            symbol: "privacy_metadata_and_debt_write_failures_keep_the_denied_public_shape",
+            trigger: "FAIL_PRIVATE_REFRESH_DEBT",
+            ddl: "2e341130d78a0382",
+            occurrences: 1,
+        }],
+        reason: "the real refresh-handler fixture installs its debt-update abort through with_unrestricted_fixture_connection on the private database file, then proves public unavailable shape without falsely claiming the failed debt write persisted. This file contains no guarded store doorway.",
     },
     Exemption {
         path: "crates/tachi-server/src/mcp_pool/proxy.rs",

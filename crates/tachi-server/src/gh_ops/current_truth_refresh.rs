@@ -746,32 +746,87 @@ async fn handle_current_truth_refresh_unpadded(
     let repo = repo.to_ascii_lowercase();
     let attempted_at = chrono::Utc::now().to_rfc3339();
     let adapter = ProductionGithubRefreshAdapter::load(server, &repo, issue_number).await;
-    let (consumed, private_history) = server.with_current_truth_store(|store| {
-        let consumed = apply_subject_refresh_and_consume(
+    let subject_token = format!("{repo}#issue:{issue_number}");
+    let consumed = server.with_current_truth_store(|store| {
+        // Keep failed reductions inside this public boundary. Decode errors
+        // may carry private row values, and failure must establish debt without
+        // first decoding the same potentially corrupt identity for privacy.
+        let consumed = match apply_subject_refresh_and_consume(
             store,
             &adapter,
             &repo,
-            &format!("{repo}#issue:{issue_number}"),
+            &subject_token,
             adapter.repository_visibility,
             &attempted_at,
-        )?;
-        let private_history = store
-            .repository_visibility(&repo)
-            .map_err(|error| error.to_string())?
-            == Some(VisibilityClassV1::Private)
+        ) {
+            Ok(consumed) => consumed,
+            Err(_) => {
+                record_unavailable(
+                    store,
+                    &repo,
+                    &subject_token,
+                    &attempted_at,
+                    REASON_UNAVAILABLE,
+                )?;
+                // A first failed attempt just created its posture row. Reuse
+                // the original independent visibility ordering to attach the
+                // observed restriction, even when private identity is corrupt.
+                if let Some(visibility) = adapter.repository_visibility {
+                    store
+                        .record_repository_visibility(&repo, visibility, &attempted_at)
+                        .map_err(|error| error.to_string())?;
+                }
+                return Ok(None);
+            }
+        };
+        // A typed PRIVATE observation already establishes non-disclosure;
+        // never require another private identity decode to recognize it.
+        let repository_private = adapter.repository_private()
+            || store
+                .repository_visibility(&repo)
+                .map_err(|error| error.to_string())?
+                == Some(VisibilityClassV1::Private)
             || !store
                 .private_subject_tokens(&repo)
                 .map_err(|error| error.to_string())?
                 .is_empty();
-        Ok((consumed, private_history))
-    })?;
+        Ok(Some((consumed, repository_private)))
+    });
 
-    serialize_refresh_response(
-        &repo,
-        &consumed,
-        adapter.repository_private() || private_history,
-        &attempted_at,
-    )
+    // Store/metadata failures are unavailable at this public boundary too.
+    // A failed debt write cannot claim durable persistence, and its error
+    // shape must not reveal whether inaccessible history exists.
+    match consumed {
+        Ok(Some((consumed, repository_private))) => {
+            serialize_refresh_response(&repo, &consumed, repository_private, &attempted_at)
+        }
+        Ok(None) | Err(_) => serialize_unavailable_refresh_response(&repo, &attempted_at),
+    }
+}
+
+fn serialize_unavailable_refresh_response(
+    repo: &str,
+    attempted_at: &str,
+) -> Result<String, String> {
+    serde_json::to_string(&json!({
+        "tool": "tachi_gh_current_truth_refresh",
+        "repo": repo,
+        "fresh": false,
+        "posture": {
+            "fresh": false,
+            "last_fresh_revision": null,
+            "last_fresh_at": null,
+            "last_attempt_at": attempted_at,
+            "unavailable_reason": REASON_UNAVAILABLE,
+        },
+        "visible_health": {
+            "conflicted_predicates": 0,
+            "stale_handoff_claims": 0,
+            "repos_with_refresh_debt": 1,
+        },
+        "work_status": [],
+    }))
+    .map_err(|error| format!("serialize current truth refresh: {error}"))
 }
 
 fn serialize_refresh_response(
@@ -786,25 +841,7 @@ fn serialize_refresh_response(
         // unprivileged facade receipt must not confirm that private subjects
         // exist. Its shape is the same content-free unavailable posture used
         // when GitHub cannot be read.
-        return serde_json::to_string(&json!({
-            "tool": "tachi_gh_current_truth_refresh",
-            "repo": repo,
-            "fresh": false,
-            "posture": {
-                "fresh": false,
-                "last_fresh_revision": null,
-                "last_fresh_at": null,
-                "last_attempt_at": attempted_at,
-                "unavailable_reason": REASON_UNAVAILABLE,
-            },
-            "visible_health": {
-                "conflicted_predicates": 0,
-                "stale_handoff_claims": 0,
-                "repos_with_refresh_debt": 1,
-            },
-            "work_status": [],
-        }))
-        .map_err(|error| format!("serialize current truth refresh: {error}"));
+        return serialize_unavailable_refresh_response(repo, attempted_at);
     }
 
     let statuses = consumed

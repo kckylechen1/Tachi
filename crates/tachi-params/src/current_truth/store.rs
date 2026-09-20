@@ -475,7 +475,8 @@ impl CurrentTruthSqliteStore {
     /// Write (replace) the disposable projection for one repository.
     /// `generation` binds the projection to the exact assertion set it was
     /// built from; `built_at` is caller-supplied (this module reads no
-    /// clock).
+    /// clock). Legacy mixed-case keys are replaced together: a failed insert
+    /// restores every prior projection row and never changes assertion history.
     pub fn write_projection(
         &self,
         repo: &str,
@@ -484,39 +485,45 @@ impl CurrentTruthSqliteStore {
         view_json: &str,
     ) -> Result<(), CurrentTruthStoreError> {
         let repo = repo.to_ascii_lowercase();
-        self.conn.execute(
+        let transaction = self.conn.unchecked_transaction()?;
+        transaction.execute(
+            "DELETE FROM current_truth_projection WHERE repo = ?1 COLLATE NOCASE",
+            params![repo],
+        )?;
+        transaction.execute(
             "INSERT INTO current_truth_projection (repo, generation, built_at, view_json)
-             VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(repo) DO UPDATE SET
-                generation = excluded.generation,
-                built_at = excluded.built_at,
-                view_json = excluded.view_json",
+             VALUES (?1, ?2, ?3, ?4)",
             params![repo, generation, built_at, view_json],
         )?;
+        transaction.commit()?;
         Ok(())
     }
 
-    /// Read the stored projection for one repository, if present.
+    /// Read the stored projection for one repository, if unambiguous. Multiple
+    /// legacy case variants are a cache miss, never a choice by insertion order
+    /// or timestamp. Callers can rebuild from the unchanged assertion authority.
     pub fn read_projection(
         &self,
         repo: &str,
     ) -> Result<Option<StoredProjectionV1>, CurrentTruthStoreError> {
-        let row = self
-            .conn
-            .query_row(
-                "SELECT generation, built_at, view_json
-                 FROM current_truth_projection WHERE repo = ?1 COLLATE NOCASE",
-                params![repo],
-                |row| {
-                    Ok(StoredProjectionV1 {
-                        generation: row.get(0)?,
-                        built_at: row.get(1)?,
-                        view_json: row.get(2)?,
-                    })
-                },
-            )
-            .optional()?;
-        Ok(row)
+        let mut statement = self.conn.prepare(
+            "SELECT generation, built_at, view_json
+             FROM current_truth_projection WHERE repo = ?1 COLLATE NOCASE LIMIT 2",
+        )?;
+        let mut rows = statement.query(params![repo])?;
+        let Some(row) = rows.next()? else {
+            return Ok(None);
+        };
+        let projection = StoredProjectionV1 {
+            generation: row.get(0)?,
+            built_at: row.get(1)?,
+            view_json: row.get(2)?,
+        };
+        Ok(if rows.next()?.is_some() {
+            None
+        } else {
+            Some(projection)
+        })
     }
 
     /// Drop the disposable projection for one repository. Never touches the

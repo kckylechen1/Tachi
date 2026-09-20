@@ -59,9 +59,7 @@ pub(in crate::gh_ops) async fn run_gh_json_observed_bounded(
         Ok::<(std::process::Output, String), String>((output, token))
     })
     .await
-    .map_err(|_| {
-        GhJsonReadFailure::unobserved(format!("{context} timed out after {timeout:?}"))
-    })?;
+    .map_err(|_| GhJsonReadFailure::unobserved(format!("{context} timed out after {timeout:?}")))?;
     let (output, token) = timed.map_err(GhJsonReadFailure::unobserved)?;
     decode_output(output, &token, context)
 }
@@ -86,9 +84,8 @@ fn decode_output(
         });
     }
     let stdout = sanitize_output(&String::from_utf8_lossy(&output.stdout), token);
-    serde_json::from_str(&stdout).map_err(|error| {
-        GhJsonReadFailure::unobserved(format!("parse {context} JSON: {error}"))
-    })
+    serde_json::from_str(&stdout)
+        .map_err(|error| GhJsonReadFailure::unobserved(format!("parse {context} JSON: {error}")))
 }
 
 #[cfg(all(test, unix))]
@@ -138,7 +135,11 @@ mod tests {
             &b"{} {}"[..],
         ] {
             let failure = decode_output(
-                output(1, stdout, br#"{"data":{"repository":{"visibility":"PRIVATE"}}}"#),
+                output(
+                    1,
+                    stdout,
+                    br#"{"data":{"repository":{"visibility":"PRIVATE"}}}"#,
+                ),
                 "",
                 "fixture",
             )

@@ -216,6 +216,7 @@ const TEMPLATE_IDENTITY_SOURCE_BLOBS: &[&[u8]] = &[
     embedded_template_source!("/../memcore/src/db/migrations/a2a_body_retention.rs"),
     embedded_template_source!("/../memcore/src/db/migrations/basic.rs"),
     embedded_template_source!("/../memcore/src/db/migrations/cross_db.rs"),
+    embedded_template_source!("/../memcore/src/db/migrations/current_truth.rs"),
     embedded_template_source!("/../memcore/src/db/migrations/dispatch_adjudications.rs"),
     embedded_template_source!(
         "/../memcore/src/db/migrations/dispatch_outcomes_attribution_basis.rs"
@@ -899,6 +900,14 @@ fn template_cache_fingerprint_tracks_verified_admission_schema_inputs() {
         (
             "verified admission migration",
             embedded_template_source!("/../memcore/src/db/migrations/verified_admissions.rs"),
+        ),
+        (
+            "CurrentTruth DDL",
+            embedded_template_source!("/../memcore/src/db/schema.rs"),
+        ),
+        (
+            "CurrentTruth migration",
+            embedded_template_source!("/../memcore/src/db/migrations/current_truth.rs"),
         ),
     ];
     for (label, source) in schema_sources {
