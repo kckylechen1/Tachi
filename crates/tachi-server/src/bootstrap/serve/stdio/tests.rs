@@ -517,6 +517,69 @@ fn stdio_process_selected_ops_proxy_lists_and_calls_through_production_session_c
     rt.block_on(daemon_task).expect("daemon task");
 }
 
+#[test]
+fn vault_cli_operator_actions_select_ops_through_real_daemon_session() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let temp = tempfile::tempdir().expect("tempdir");
+    let tachi_home = temp.path().join("home");
+    let global = tachi_home.join("global/memory.db");
+    let password_file = temp.path().join("vault-password");
+    let password = "correct horse battery staple";
+    std::fs::create_dir_all(global.parent().expect("global parent")).expect("global parent");
+    crate::utils::write_owner_only_file_atomic(&password_file, password.as_bytes())
+        .expect("write owner-only password fixture");
+    crate::bootstrap::vault_cli::vault_init_with_password(&global, password.to_string())
+        .expect("initialize vault fixture");
+    let _tachi_home = EnvRestore::set_path("TACHI_HOME", &tachi_home);
+    let _sigil_home = EnvRestore::remove("SIGIL_HOME");
+    let _app_home = EnvRestore::remove("TACHI_APP_HOME");
+
+    let rt = test_runtime();
+    let (ct, daemon_task) = rt.block_on(async {
+        let server = crate::MemoryServer::new(global.clone(), None).expect("daemon server");
+        let (daemon, ct, daemon_task) = spawn_test_http_daemon(server, &global).await;
+        let port = daemon
+            .url
+            .strip_prefix("http://127.0.0.1:")
+            .and_then(|rest| rest.split('/').next())
+            .and_then(|value| value.parse::<u16>().ok())
+            .expect("test daemon URL port");
+        let pid_path = crate::daemon_lock::scoped_daemon_pid_path(&tachi_home, &global);
+        crate::utils::write_json_file_owner_only(
+            &pid_path,
+            &serde_json::json!({
+                "pid": std::process::id(),
+                "port": port,
+                "url": daemon.url,
+                "global_db": global.display().to_string(),
+                "version": env!("CARGO_PKG_VERSION"),
+                "internal_proxy_token": daemon.internal_proxy_token,
+            }),
+        )
+        .expect("write daemon discovery receipt");
+
+        for action in [
+            tachi_bootstrap::cli::VaultAction::Status,
+            tachi_bootstrap::cli::VaultAction::Lock,
+            tachi_bootstrap::cli::VaultAction::Unlock {
+                stdin_password: false,
+                keychain: false,
+                password_file: Some(password_file),
+                insecure_password_file: false,
+            },
+        ] {
+            crate::bootstrap::vault_cli::run_vault_command(&global, &tachi_home, action)
+                .await
+                .expect("explicit Vault CLI action must select authorized Ops profile");
+        }
+        (ct, daemon_task)
+    });
+    ct.cancel();
+    rt.block_on(daemon_task).expect("daemon task");
+}
+
 fn write_repo_project_manifest(tachi_home: &Path, db_paths: &[&Path]) {
     let entries = db_paths
         .iter()

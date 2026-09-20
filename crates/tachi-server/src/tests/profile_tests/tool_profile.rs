@@ -300,6 +300,8 @@ async fn additive_worker_projection_matches_its_call_time_policy() {
     assert!(action_names(&lead_worker_tools, "tachi_gh").contains("safe_merge"));
     for tool in &standard_tools {
         let description = tool.description.as_deref().unwrap_or_default();
+        let input_schema = serde_json::to_string(&tool.input_schema)
+            .expect("ordinary projected input schema must serialize");
         for residual in [
             "runtime_info",
             "tachi_component",
@@ -312,9 +314,9 @@ async fn additive_worker_projection_matches_its_call_time_policy() {
             "tachi_wiki",
         ] {
             assert!(
-                !description.contains(residual),
-                "ordinary {} schema advertises residual route {residual}: {description}",
-                tool.name
+                !description.contains(residual) && !input_schema.contains(residual),
+                "ordinary {} definition advertises residual route {residual}; description={description}; input_schema={input_schema}",
+                tool.name,
             );
         }
     }

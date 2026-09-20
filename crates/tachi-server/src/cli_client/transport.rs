@@ -192,11 +192,12 @@ pub(crate) async fn call_daemon_tool(
 
 /// Call a daemon tool with an optional, typed profile bound at MCP initialize.
 ///
-/// Ordinary CLI and proxy calls use [`call_daemon_tool`] and therefore inherit
-/// the daemon's default profile. The override exists for narrow trusted CLI
+/// Ordinary CLI calls use [`call_daemon_tool`] and therefore receive the
+/// default profile. The override exists for trusted local proxy and CLI
 /// maintenance flows whose required native tool is deliberately absent from
-/// the standard facade tray. The daemon still parses and authorizes the
-/// profile; in particular, HTTP direct-connect continues to reject `admin`.
+/// the standard facade tray. The daemon still authenticates privileged
+/// profiles with its owner-only per-process capability; profile metadata alone
+/// remains insufficient.
 pub(crate) async fn call_daemon_tool_with_profile(
     info: &DaemonInfo,
     tool_name: &str,
