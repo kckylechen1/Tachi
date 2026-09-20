@@ -1,0 +1,103 @@
+name: Recovery source snapshot
+
+on:
+  push:
+    branches: [recovery/20260920-source-snapshot]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: recovery-source-snapshot
+  cancel-in-progress: false
+
+jobs:
+  snapshot:
+    if: >-
+      github.event_name == 'push' &&
+      github.repository == 'kckylechen1/tachi' &&
+      github.ref == 'refs/heads/recovery/20260920-source-snapshot' &&
+      github.actor == github.repository_owner &&
+      github.triggering_actor == github.repository_owner
+    runs-on: [self-hosted, tachi-acceptance]
+    timeout-minutes: 12
+    env:
+      SNAPSHOT_OUT: ${{ runner.temp }}/tachi-recovery-source-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        id: checkout
+
+      - name: Verify disposable runner workspace
+        run: bash .github/scripts/runner_hygiene.sh preflight 10
+
+      - name: Archive fixed owner-controlled commits without executing their code
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import subprocess
+
+          refs = {
+              'main': '817a673f45c8bcdef14c5ff8bf89d84ffc05aeba',
+              'pr1933': '2040d265486c2045dfd0d002e968d8d4ba2317fb',
+              'pr1942': 'f50fdd27204ac4eacc08b4700200f05d548be951',
+              'pr1943': '4d0d14c68a83fe41dc1a563bb3c34db86a741e15',
+              'pr1944': '6607171d3c9645b04415063ef8ce7a6dbc931d6d',
+              'pr1945': '9bf18ed6d3dcb6d1d459a115ceabf42ad9bb54f9',
+              'pr1946': 'bc8e766083f13038e7c1524c4d94bcd9ecfec51b',
+              'pr1947': '73b6210fe88f9cd921b9d1711ae47fbf80f8de71',
+              'pr1948': '3290aee39824166d6fb1bb9b41005697921bdb91',
+              'pr1949': '094896ada8422ce235ba0bbf2bd3eb94094ce3bb',
+              'pr1950': 'e83f34cb9d5f9f7b72c6258235c6cf3c9faa746d',
+              'pr1951': 'dfe5f43c582bd5a50a94b9266638a4d59273abf6',
+              'pr1952': '5db4021315781d20d482e6f0871875c028d4d2c3',
+              'pr1954': '943aab9d6bc4afe9b1d99f2ba385ff6bf1c6c068',
+          }
+          out = Path(os.environ['SNAPSHOT_OUT'])
+          out.mkdir(mode=0o700, exist_ok=False)
+          subprocess.run(['git', 'fetch', '--no-tags', '--depth=1', 'origin', *refs.values()], check=True, timeout=420)
+          manifest = {'schema': 'tachi.recovery.source_snapshot.v1', 'repository': 'kckylechen1/tachi', 'execution': False, 'sources': {}}
+          for name, sha in refs.items():
+              actual = subprocess.check_output(['git', 'rev-parse', sha + '^{commit}'], text=True).strip()
+              if actual != sha:
+                  raise RuntimeError('source identity mismatch')
+              tree = subprocess.check_output(['git', 'rev-parse', sha + '^{tree}'], text=True).strip()
+              archive = out / (name + '.tar.gz')
+              subprocess.run(['git', 'archive', '--format=tar.gz', '--output=' + str(archive), sha], check=True, timeout=40)
+              digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+              manifest['sources'][name] = {'head': sha, 'tree': tree, 'archive': archive.name, 'sha256': digest, 'bytes': archive.stat().st_size}
+          if sum(row['bytes'] for row in manifest['sources'].values()) > 256 * 1024 * 1024:
+              raise RuntimeError('source snapshot exceeds bounded artifact size')
+          (out / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n', encoding='utf-8')
+          print(json.dumps(manifest, indent=2))
+          PY
+
+      - name: Retain private source snapshot for this recovery session
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: recovery-source-snapshot
+          path: ${{ env.SNAPSHOT_OUT }}/
+          retention-days: 1
+          compression-level: 0
+          if-no-files-found: error
+
+      - name: Dispose owned runner workspace
+        if: always() && steps.checkout.outcome == 'success'
+        shell: bash
+        run: |
+          bash .github/scripts/runner_hygiene.sh cleanup
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          import shutil
+          target = Path(os.environ['SNAPSHOT_OUT'])
+          parent = Path(os.environ['RUNNER_TEMP']).resolve()
+          expected = 'tachi-recovery-source-' + os.environ['GITHUB_RUN_ID'] + '-' + os.environ['GITHUB_RUN_ATTEMPT']
+          if target.parent.resolve() != parent or target.name != expected or target.is_symlink():
+              raise RuntimeError('refuse unowned snapshot cleanup')
+          if target.exists():
+              shutil.rmtree(target)
+          PY
