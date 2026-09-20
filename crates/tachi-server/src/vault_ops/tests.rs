@@ -2446,6 +2446,8 @@ async fn vault_list_is_a_secret_negative_account_health_board() {
                 .map_err(|error| error.to_string())
         })
         .expect("seed exact-identity and unknown health");
+    crate::provider_config::materialize_for_server(&server)
+        .expect("publish one coherent credential and health generation");
     server.llm.record_provider_key_result(
         "EXTRACT_API_KEY",
         "DEEPSEEK_API_KEY",

@@ -96,15 +96,16 @@ pub(crate) fn admitted_provider_env_keys() -> HashSet<String> {
 pub(crate) fn filter_model_provider_pools(
     pools: HashMap<String, Vec<ProviderSecret>>,
 ) -> HashMap<String, Vec<ProviderSecret>> {
-    let allowed = provider_env_keys();
     pools
         .into_iter()
-        .filter(|(name, _)| {
-            allowed.contains(name)
-                || parse_rotation_member_name(name)
-                    .is_some_and(|(prefix, _)| allowed.contains(prefix))
-        })
+        .filter(|(name, _)| is_model_provider_pool_name(name))
         .collect()
+}
+
+pub(crate) fn is_model_provider_pool_name(name: &str) -> bool {
+    let allowed = provider_env_keys();
+    allowed.contains(name)
+        || parse_rotation_member_name(name).is_some_and(|(prefix, _)| allowed.contains(prefix))
 }
 
 /// Syntactic API-key names admitted by both unlocked-server and Keychain
@@ -123,12 +124,14 @@ struct VaultSourceLoad {
 fn vault_api_key_pool_load_from_server(server: &MemoryServer) -> Result<VaultSourceLoad, String> {
     let scan = crate::vault_ops::load_validated_unlocked_api_key_secret_pools_with_drops(server)?;
     let source_generation = Some(scan.acl_revision.contents);
+    let source_health_generation = scan.acl_revision.health.clone();
     Ok(VaultSourceLoad {
         load: tachi_llm::DurableVaultLoad {
             pools: scan.pools,
             listed_drops: scan.dropped,
             availability: VaultSourceAvailability::Readable,
             source_generation,
+            source_health_generation,
         },
         lane_config_values: scan.lane_config_values,
         acl_revision: Some(scan.acl_revision),
@@ -180,12 +183,18 @@ fn durable_load_from_keychain_scan(
     let mut listed_drops = scan.dropped;
     promote_configured_rotation_prefix_drops(&mut listed_drops, &pools, &scan.rotation_prefixes);
     let source_generation = scan.acl_revision.as_ref().map(|revision| revision.contents);
+    let source_health_generation = scan
+        .acl_revision
+        .as_ref()
+        .map(|revision| revision.health.clone())
+        .unwrap_or_default();
     VaultSourceLoad {
         load: tachi_llm::DurableVaultLoad {
             pools,
             listed_drops,
             availability,
             source_generation,
+            source_health_generation,
         },
         lane_config_values: scan.lane_config_values,
         acl_revision: scan.acl_revision,
@@ -1199,7 +1208,9 @@ fn write_env_catalog_projection(
     Ok(summary)
 }
 
-/// Parse `~/.tachi/config.env` (and peers) into key → value (non-empty values only).
+/// Parse `~/.tachi/config.env` (and peers) into raw key/value claims. Raw keys
+/// and duplicate claims are preserved so security surfaces can detect names
+/// that collide only after normalization.
 ///
 /// `resolved_home`, when given, is unioned into the scan locations alongside
 /// every existing one — additive only, nothing below is removed. #1096
@@ -1212,7 +1223,7 @@ fn write_env_catalog_projection(
 /// resolve to two different homes. Passing `Some(server.tachi_home_dir())`
 /// from the `status` call site closes that gap without touching the other
 /// call sites (which keep passing `None` and are byte-for-byte unchanged).
-pub fn collect_config_env_values(resolved_home: Option<&Path>) -> HashMap<String, String> {
+pub(crate) fn collect_config_env_claims(resolved_home: Option<&Path>) -> Vec<(String, String)> {
     let mut paths = Vec::new();
     if let Some(home) = dirs::home_dir() {
         paths.push(home.join(".tachi").join("config.env"));
@@ -1227,26 +1238,36 @@ pub fn collect_config_env_values(resolved_home: Option<&Path>) -> HashMap<String
         paths.push(home.join("config.env"));
     }
 
-    let mut values = HashMap::new();
+    let mut values = Vec::new();
     for path in paths {
         let Ok(raw) = std::fs::read_to_string(path) else {
             continue;
         };
         for line in raw.lines() {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with('#') {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
                 continue;
             }
             if let Some((key, value)) = line.split_once('=') {
-                let key = key.trim().to_string();
+                let key = key.to_string();
                 let value = value.trim().to_string();
-                if !key.is_empty() && !value.is_empty() {
-                    values.insert(key, value);
+                if !key.trim().is_empty() && !value.is_empty() {
+                    values.push((key, value));
                 }
             }
         }
     }
     values
+}
+
+/// Effective key → value view used by legacy consumers. Exact normalized keys
+/// keep the existing last-claim-wins behavior; callers that need collision
+/// evidence use [`collect_config_env_claims`].
+pub fn collect_config_env_values(resolved_home: Option<&Path>) -> HashMap<String, String> {
+    collect_config_env_claims(resolved_home)
+        .into_iter()
+        .map(|(key, value)| (key.trim().to_string(), value))
+        .collect()
 }
 
 #[cfg(test)]
@@ -1677,6 +1698,7 @@ mod tests {
                     pools,
                     availability: VaultSourceAvailability::Readable,
                     source_generation: None,
+                    source_health_generation: HashMap::new(),
                     listed_drops: drops,
                 })
             },
@@ -2050,6 +2072,7 @@ mod tests {
                     pools: HashMap::new(),
                     listed_drops: HashMap::new(),
                     source_generation: None,
+                    source_health_generation: HashMap::new(),
                     availability: if paths_equal(path, &default_db) {
                         VaultSourceAvailability::Readable
                     } else {

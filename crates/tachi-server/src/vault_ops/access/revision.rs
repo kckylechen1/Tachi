@@ -12,6 +12,21 @@ pub(crate) struct VaultMaterializationRevision {
     pub health: HashMap<(String, String), u64>,
 }
 
+pub(crate) fn vault_key_health_revision(row: &VaultKeyHealth) -> u64 {
+    let mut observation = std::collections::hash_map::DefaultHasher::new();
+    row.status.hash(&mut observation);
+    row.cooldown_until.hash(&mut observation);
+    row.last_success.hash(&mut observation);
+    row.last_attempt.hash(&mut observation);
+    row.last_error.hash(&mut observation);
+    row.error_count.hash(&mut observation);
+    row.auth_failed.hash(&mut observation);
+    row.disabled.hash(&mut observation);
+    row.metadata.hash(&mut observation);
+    row.updated_at.hash(&mut observation);
+    observation.finish()
+}
+
 pub(crate) fn vault_materialization_acl_revision_from_rows(
     entries: &[VaultEntry],
     rotations: &[VaultKeyRotation],
@@ -40,20 +55,9 @@ pub(crate) fn vault_materialization_acl_revision_from_rows(
 
     let mut health = HashMap::with_capacity(key_health.len());
     for row in key_health {
-        let mut observation = std::collections::hash_map::DefaultHasher::new();
-        row.status.hash(&mut observation);
-        row.cooldown_until.hash(&mut observation);
-        row.last_success.hash(&mut observation);
-        row.last_attempt.hash(&mut observation);
-        row.last_error.hash(&mut observation);
-        row.error_count.hash(&mut observation);
-        row.auth_failed.hash(&mut observation);
-        row.disabled.hash(&mut observation);
-        row.metadata.hash(&mut observation);
-        row.updated_at.hash(&mut observation);
         health.insert(
             (row.logical_name.clone(), row.key_id.clone()),
-            observation.finish(),
+            vault_key_health_revision(row),
         );
     }
     VaultMaterializationRevision {

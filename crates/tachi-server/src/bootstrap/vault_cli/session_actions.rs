@@ -180,12 +180,6 @@ pub(super) async fn run_session_action(
                 .vault_get_config()
                 .map_err(|e| format!("vault_get_config: {e}"))?
                 .ok_or("Vault not initialized. Run `tachi vault init` first.")?;
-            let probe_cache = crate::status_ops::status_health::read_provider_probe_cache(
-                app_home,
-                global_db_path,
-            )
-            .filter(|cache| !cache.is_stale());
-
             let payload = crate::vault_ops::build_vault_list_payload(
                 &store,
                 app_home,
@@ -193,7 +187,7 @@ pub(super) async fn run_session_action(
                 Default::default(),
                 None,
                 None,
-                probe_cache.as_ref(),
+                &Default::default(),
             )?;
             super::output::print_vault_list_output(&payload.to_string())?;
             Ok(())

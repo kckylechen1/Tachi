@@ -86,6 +86,7 @@ pub struct ProviderMaterializationSnapshot {
     resolved_pools: HashMap<String, Vec<ProviderSecret>>,
     retained_logical_names: HashSet<String>,
     source_generation: Option<u64>,
+    source_health_generation: HashMap<(String, String), u64>,
     report: MaterializeReport,
 }
 
@@ -133,6 +134,7 @@ impl ProviderMaterializationSnapshot {
             resolved_pools,
             retained_logical_names,
             source_generation,
+            source_health_generation,
             report: _,
         } = self;
         llm.publish_provider_secret_pools_with_health_baseline(
@@ -140,6 +142,7 @@ impl ProviderMaterializationSnapshot {
             &retained_logical_names,
             health_baseline,
             source_generation,
+            source_health_generation,
             lane_config_overlay,
             commit_companion_projection,
         )?;
@@ -333,6 +336,8 @@ pub struct DurableVaultLoad {
     /// pools. `None` means callers must not claim generation-current runtime
     /// bindings.
     pub source_generation: Option<u64>,
+    /// Metadata-only digests of health rows captured with this source load.
+    pub source_health_generation: HashMap<(String, String), u64>,
     /// Vault secret names listed in this scan but not admitted to `pools`.
     pub listed_drops: HashMap<String, AliasSkipClass>,
 }
@@ -346,6 +351,7 @@ impl DurableVaultLoad {
             pools,
             availability,
             source_generation: None,
+            source_health_generation: HashMap::new(),
             listed_drops: HashMap::new(),
         }
     }
@@ -422,6 +428,7 @@ where
         load.availability,
         &load.listed_drops,
         load.source_generation,
+        load.source_health_generation,
         None,
     )?;
     let (snapshot, lane_config_overlay, companion_projection) = prepare_runtime_snapshot(snapshot)?;
@@ -456,6 +463,7 @@ where
         availability,
         &HashMap::new(),
         None,
+        HashMap::new(),
         after_missing_alias_snapshot,
     )?;
     let report = snapshot.report.clone();
@@ -470,6 +478,7 @@ fn prepare_provider_materialization_under_guard<I, S>(
     availability: VaultSourceAvailability,
     listed_drops: &HashMap<String, AliasSkipClass>,
     source_generation: Option<u64>,
+    source_health_generation: HashMap<(String, String), u64>,
     mut after_missing_alias_snapshot: Option<Box<dyn FnOnce() + Send>>,
 ) -> Result<ProviderMaterializationSnapshot, String>
 where
@@ -582,6 +591,7 @@ where
         resolved_pools,
         retained_logical_names,
         source_generation,
+        source_health_generation,
         report,
     })
 }
@@ -1843,6 +1853,7 @@ mod tests {
                 pools: HashMap::new(),
                 availability: VaultSourceAvailability::Readable,
                 source_generation: None,
+                source_health_generation: HashMap::new(),
                 listed_drops,
             })
         })
@@ -1879,13 +1890,22 @@ mod tests {
                 pools,
                 availability: VaultSourceAvailability::Readable,
                 source_generation: Some(41),
+                source_health_generation: HashMap::from([(
+                    (key.to_string(), key.to_string()),
+                    73,
+                )]),
                 listed_drops: HashMap::new(),
             })
         })
         .expect("materialize generation fixture");
 
-        let (_health, bindings, generation) = llm.provider_health_board_snapshot();
+        let (_health, bindings, generation, health_generation) =
+            llm.provider_health_board_snapshot();
         assert_eq!(generation, Some(41));
+        assert_eq!(
+            health_generation.get(&(key.to_string(), key.to_string())),
+            Some(&73)
+        );
         assert_eq!(
             bindings.get(key),
             Some(&std::collections::BTreeSet::from([key.to_string()]))

@@ -119,6 +119,10 @@ pub(in crate::llm) struct ProviderState {
     /// Consumers compare it with their own metadata-only source snapshot;
     /// plaintext never participates in generation checks.
     pub(in crate::llm) source_generation: Option<u64>,
+    /// Metadata-only digests of the health rows captured with the durable
+    /// source generation. Runtime outcomes do not update this map because
+    /// they cannot prove which credential generation produced the result.
+    pub(in crate::llm) source_health_generation: HashMap<(String, String), u64>,
     /// Vault-sourced lane URL/model overrides share the same state lock as
     /// provider pools so one materialization publication has one linearization
     /// point for both runtime surfaces.
