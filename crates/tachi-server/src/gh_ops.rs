@@ -23,6 +23,7 @@ type GhPrCommentsBundle = (Vec<Value>, Vec<Value>, Vec<Value>);
 
 mod ci_watch;
 mod comments;
+mod current_truth_refresh;
 mod handoff;
 mod issue_freshness;
 mod issues;
@@ -46,6 +47,7 @@ mod safe_merge_tests;
 #[cfg(test)]
 mod ship_tests;
 
+use self::current_truth_refresh::handle_current_truth_refresh;
 use self::handoff::{handle_gh_handoff_draft, handle_gh_handoff_publish, handle_gh_handoff_repair};
 use self::issues::*;
 use self::labels::*;
