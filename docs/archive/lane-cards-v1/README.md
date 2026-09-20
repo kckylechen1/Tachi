@@ -23,7 +23,8 @@ Both are portable, importable, and shareable — cards are part of Tachi's porta
 The proposed #534 import path was never the runtime authority. The current
 design keeps reviewed Markdown declarations in the governed dispatch-ledger,
 append-only evidence in SQLite, and computed projections in Tachi's read-only
-mirror. See `docs/engineering/architecture/dispatch-lifecycle.md` §4.2.
+mirror. See `docs/engineering/architecture/model-card-authoring-guide.md`
+§Authority and storage.
 
 ## Schema `tachi-lane-card/v1`
 

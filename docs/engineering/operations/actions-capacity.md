@@ -3,7 +3,7 @@
 Status: operational guidance for the delivery doctrine. Checked: 2026-09-20.
 Owner request: “然后你记得给 agent md，文档这些都更新一下。然后好像我的 minutes 不够了。”
 
-[`dispatch-lifecycle.md` §2.6–§2.7](../architecture/dispatch-lifecycle.md#26-acceptance-plan-and-result-semantics)
+[`dispatch-lifecycle.md` §8–§9](../architecture/dispatch-lifecycle.md#8-acceptance-evidence)
 owns acceptance and authority. This runbook diagnoses capacity; it neither changes
 billing nor waives a required check. Read live job and billing evidence before acting.
 
@@ -67,8 +67,9 @@ visibility; request a redacted usage/status screenshot, not a token or payment d
   additional run only after identifying its exact obsolete candidate and ownership;
   never indiscriminately cancel unrelated active work or discard retained evidence.
 - While a failure cause is unchanged, stop manual reruns. Once readiness is restored,
-  collect the missing evidence on the intended candidate; a changed head is not
-  entitled to the earlier head's results without the canon's equivalence process.
+  collect the missing evidence on the intended candidate. A changed head needs a
+  fresh review verdict and acceptance for that object; earlier results retain their
+  original candidate attribution.
 - Use an existing admitted self-hosted execution seat for appropriate work. New
   runners, trust-label changes, toolchain provisioning, or spending changes require
   their corresponding authorization. Do not expose owner credentials to PR code.

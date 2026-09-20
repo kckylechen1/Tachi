@@ -7,12 +7,6 @@ public Homebrew tap publish installable binaries. That path is documented in
 [`release-distribution.md`](./release-distribution.md) (#728 / #758 / #874).
 `ship` opens PRs; it does **not** update formulas or restart daemons.
 
-Delivery procedure follows [`dispatch-lifecycle.md`](./dispatch-lifecycle.md).
-The 2026-09-20 alignment below updates the design's review, acceptance, and recovery
-steps; it is not a claim that every planned ship mechanism is implemented. The
-dated inventory remains historical. This tool design does not prohibit an
-owner-authorized session from delivering a bounded PR through GitHub directly.
-
 ## The problem
 
 Shipping a finished contract (issue / frozen spec → branch → PR) is fixed-cost ceremony:
@@ -33,20 +27,20 @@ The goal: **any agent, any harness, presses `ship` once — Tachi does the rest.
 
 ## The principle: model drives, code executes
 
-The executor of a ship is a **cheap dispatched worker** (deepseek-flash / haiku tier,
-routed by dispatch profile card) that follows the **ship skill SOP**. All determinism
-lives in the mechanical tools the worker calls (`tachi_gh`, `tachi_verify`, `tachi_task`);
-the worker contributes no judgment beyond following the checklist and reacting to failures
-(a red suite, a missing base branch, a review BLOCK). This split is deliberate:
+The executor of a ship is the **mechanical ship pipeline**. The coordinating model
+retains judgment and may use a bounded helper only under the current delivery policy.
+All determinism lives in the mechanical tools (`tachi_gh`, `tachi_verify`,
+`tachi_task`); the pipeline contributes no judgment beyond applying typed state
+transitions for failures (a red suite, a missing base branch, a review BLOCK). This
+split is deliberate:
 
 - The ceremony must not consume expensive-tier tokens — that is the whole point.
-  A leader agent at high reasoning effort pressing `ship` hands off everything below
-  its judgment line.
-- The worker is disposable and re-dispatchable: state lives in
-  `.tachi/runs/<flow_id>/ship.json` and the verify ledger, never in the worker's context.
-  A crashed ship is re-dispatched and resumes from recorded state.
-- Judgment-dense steps (adversarial review) are NOT the ship worker's job — it dispatches
-  them to the right profile and consumes the structured verdict.
+  A coordinator pressing `ship` hands mechanical work below its judgment line to code.
+- Pipeline state lives in `.tachi/runs/<flow_id>/ship.json` and the verify ledger,
+  never only in model context. A crashed invocation resumes from recorded state.
+- Judgment-dense steps are NOT recursively delegated by the ship pipeline. The
+  coordinator obtains any risk-required review and verification, then the pipeline
+  validates and consumes that exact-candidate evidence.
 
 ## What already exists (inventory, verified 2026-07-05)
 
@@ -77,38 +71,32 @@ Nothing here is replaced. `ship` composes these; it invents no parallel infrastr
 terminal state. Review-lane callers that require inline verdicts (codex two-layer
 completion trap) pass `wait=true`.
 
-### The pipeline (what the ship worker executes)
+### The pipeline
 
 Given `issue` + current branch (or worktree) + optional `base`:
 
 1. **Bind contract.** `intake` the issue → flow_id; refuse to ship from the base branch;
    refuse if no commits exist against the base.
-2. **Freeze the acceptance plan.** Enumerate every applicable check, matrix member,
-   platform, and real canary before final collection. `ci.yml` and
-   `.github/acceptance-plan.json` define automated obligations; review and canaries
-   remain separate. Do not reduce the plan to an illustrative suite/clippy/gitleaks trio.
-3. **Independent review.** After narrow discriminators and candidate stabilization,
-   obtain an attributable read-only reviewer under dispatch §2.4. Ordinary changes
-   may use an attributable unknown-model reviewer without claiming model diversity;
-   high-risk changes require verified different-model or accountable independent
-   human review. Record the structured findings, dispositions, and current head.
-   Changed candidates follow §2.5's scoped-addendum and affected-invariant rules.
-4. **Verify.** Execute the frozen plan on the stable candidate and record actual
-   head/tree, platform, commands, and results through the existing evidence path.
-   Do not repeat a full run merely to copy its log. Record candidate, baseline,
-   infrastructure, and unexecuted gaps separately; any unmet required item blocks
-   acceptance. A blocked delivery may be published as a Draft PR with explicit
-   gaps, but is not accepted or merge-ready. See the
-   [capacity runbook](../operations/actions-capacity.md) before retrying quota failures.
+2. **Seed verification.** `tachi_verify(start)` with the required checks for this repo
+   (suite, clippy, gitleaks — repo-configurable).
+3. **Verify.** The coordinator or an approved runner executes the required checks once
+   on the candidate and records results via `tachi_verify(record)`. Red suite → ship
+   halts in `verify_failed`, reports, and does not open a PR.
+4. **Review when required.** Apply `dispatch-lifecycle.md` risk classification. Low-risk
+   non-semantic work has no mandatory independent review. Ordinary changes require an
+   independent read-only exact-candidate reviewer; a different model is preferred.
+   High-risk changes require a different-model reviewer whose effective identity is
+   proven by launcher or route evidence. The coordinator obtains the structured verdict
+   (see frozen constraints); the ship pipeline validates it against the candidate and
+   records it when required. A required BLOCK verdict or missing proof halts in
+   `review_blocked`.
 5. **Open the PR.** Contract mode: PR body generated from `git log <base>..HEAD`
    (commit list + verification tail + honest `Not-tested` section) — zero caller prose.
    Push branch, `pr create`, `link_pr` back to the flow.
-6. **Record.** Preserve the actual delivery and acceptance states separately.
-   `complete` records the outcome; opening a PR alone must not imply accepted,
-   merged, deployed, or owner-closed state.
-7. **Reap only when authorized and safe.** Use the existing ownership and holder
-   checks before reclaiming a linked worktree (#484). A terminal or blocked result
-   alone never authorizes deleting dirty/untracked work or another lane's workspace.
+6. **Record.** `complete` writes the eval row (feeds route evolution); ship.json reaches
+   `shipped`.
+7. **Reap.** If shipping from a linked worktree, remove it on terminal state
+   (the reclaim-on-terminal-state hook shared with the disk governor, #484).
 
 `safe_merge` stays a separate, human-triggered (or campaign-close) act. Ship opens;
 the adjudicator merges. Ship never merges to the default branch.
@@ -178,12 +166,12 @@ A multi-contract campaign (umbrella issue) gets an integration branch `goal/<iss
   gate is decorative.
 - **Fail loud, never degrade silently.** Ledger DB down → ship fails with an Ops
   incident report; it does not fall back to ungated shipping.
-- **Authority comes from the card.** Every pipeline step is bounded by the dispatch
-  profile's authority flags; the ship worker runs the delegate tool profile and cannot
-  dispatch sub-workers (no recursion).
-- **Ship never weakens a gate.** No flag skips verification or review; the only bypass
-  is the human running the mechanical `tachi_gh ship` with explicit prose — which is
-  visible in the ledger as a manual ship.
+- **Authority is fixed before execution.** Every pipeline step is bounded by the
+  approved caller/profile authority. The mechanical pipeline cannot dispatch workers
+  or widen authority (no recursion).
+- **Ship never weakens a gate.** No flag skips required verification or review. A human
+  running the mechanical `tachi_gh ship` with explicit prose is visible in the ledger
+  as a manual ship, but does not satisfy missing risk-required evidence.
 - **One contract, one branch, one PR.** Ship refuses on the base branch, refuses empty
   commit ranges, and never opens a second PR for a branch that already has one open
   (it reports the existing PR instead).
@@ -200,10 +188,11 @@ A multi-contract campaign (umbrella issue) gets an integration branch `goal/<iss
 
 ## Open questions
 
-- Cross-repository plan discovery remains a design question; Tachi's current plan
-  and workflow already define its own automated checks. Do not invent a second list.
-- Unknown-model routing is resolved by dispatch §2.4, not by guessing a model from
-  the harness name. High-risk diversity gaps require qualified independent human
-  review or a verifiably different-model route.
-- Automatic staging of dirty leftovers is not authorized by this design. Preserve
-  ownership and explicit file scope; refuse or isolate rather than silently batching.
+- Required-check set per repo: hardcode the tachi trio (suite/clippy/gitleaks) first, or
+  read from repo config at Phase 2? (Leaning: hardcode first, config when a second repo
+  needs it.)
+- Reviewer routing when the implementer model is unknown (manual branches): if the
+  change's risk class requires different-model review, resolve and record identity
+  before routing; otherwise that diversity gate remains incomplete.
+- Whether `ship` on a dirty tree should auto-commit leftovers (leaning NO: refuse and
+  list them — silent batching hides scope creep).

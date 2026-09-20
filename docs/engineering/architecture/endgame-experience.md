@@ -53,13 +53,15 @@ features.
 
 ### 2. The crew is the product
 Work is done by seats — implementer, independent reviewer, verifier, mechanical
-clerk — with implementation and independent review kept separate. Review
-qualification, risk-based model diversity, and current-candidate addenda follow
-[`dispatch-lifecycle.md` §2.4–§2.6](./dispatch-lifecycle.md#24-lane-selection-and-review-diversity),
-not a second policy in this experience document. No self-report is trusted without
-independent verification (自报勿信), and a non-trivial change is delivered as a
-reviewable PR rather than self-approved into main. The seats are the product; any
-particular model staffing them is not. The leader seat is a *role*: its
+clerk — enforcing the invariants that were proven in live operation:
+when review is required, implementation and review never share a seat. High-risk
+security, credentials, identity/authority, egress, and merge/release-gate changes
+also require different models; ordinary behavior changes prefer but do not require
+that diversity, and low-risk non-semantic edits need only proportional checks.
+Cross-vendor routing remains optional defense-in-depth. No self-report is trusted
+without independent verification (自报勿信), and change lands only as a reviewable
+PR (呈单即止). The seats are the product; any particular model staffing them is
+not. The leader seat is a *role*: its
 judgment is fed by the precedent store (pillar 4), so swapping the leader model
 preserves the judging.
 
