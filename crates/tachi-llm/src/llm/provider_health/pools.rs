@@ -42,7 +42,6 @@ impl super::super::LlmClient {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         state.secrets.insert(name.to_string(), entries);
         state.source_generation = None;
-        state.source_health_generation.clear();
         state.indices.remove(name);
         true
     }
@@ -111,7 +110,6 @@ impl super::super::LlmClient {
             retained_logical_names,
             self.provider_health_memory_snapshot(),
             None,
-            HashMap::new(),
             lane_config_overlay,
             commit_companion_projection,
         )
@@ -123,7 +121,6 @@ impl super::super::LlmClient {
         retained_logical_names: &HashSet<String>,
         health_baseline: HashMap<String, HashMap<String, VaultKeyHealth>>,
         source_generation: Option<u64>,
-        source_health_generation: HashMap<(String, String), u64>,
         lane_config_overlay: Option<LaneConfigOverlay>,
         commit_companion_projection: P,
     ) -> Result<usize, String>
@@ -135,7 +132,6 @@ impl super::super::LlmClient {
             retained_logical_names,
             health_baseline,
             source_generation,
-            source_health_generation,
             lane_config_overlay,
             None,
             commit_companion_projection,
@@ -148,7 +144,6 @@ impl super::super::LlmClient {
         retained_logical_names: &HashSet<String>,
         health_baseline: HashMap<String, HashMap<String, VaultKeyHealth>>,
         source_generation: Option<u64>,
-        source_health_generation: HashMap<(String, String), u64>,
         lane_config_overlay: Option<LaneConfigOverlay>,
         before_companion_commit: Option<Box<dyn FnOnce() + Send>>,
         commit_companion_projection: P,
@@ -191,7 +186,6 @@ impl super::super::LlmClient {
         let mut next = ProviderState {
             secrets: replacement,
             source_generation,
-            source_health_generation,
             lane_config_overlay: lane_config_overlay
                 .unwrap_or_else(|| previous.lane_config_overlay.clone()),
             cooldowns: previous.cooldowns.clone(),
@@ -253,7 +247,6 @@ impl super::super::LlmClient {
             retained_logical_names,
             self.provider_health_memory_snapshot(),
             None,
-            HashMap::new(),
             lane_config_overlay,
             Some(Box::new(before_companion_commit)),
             commit_companion_projection,
@@ -303,7 +296,6 @@ impl super::super::LlmClient {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         state.secrets.clear();
         state.source_generation = None;
-        state.source_health_generation.clear();
         state.cooldowns.clear();
         state.indices.clear();
         if clear_lane_config_overlay {
@@ -342,7 +334,6 @@ impl super::super::LlmClient {
         HashMap<String, HashMap<String, VaultKeyHealth>>,
         HashMap<String, BTreeSet<String>>,
         Option<u64>,
-        HashMap<(String, String), u64>,
     ) {
         let state = self
             .provider_state
@@ -358,12 +349,7 @@ impl super::super::LlmClient {
                 )
             })
             .collect();
-        (
-            state.health.clone(),
-            bindings,
-            state.source_generation,
-            state.source_health_generation.clone(),
-        )
+        (state.health.clone(), bindings, state.source_generation)
     }
 
     #[cfg(test)]

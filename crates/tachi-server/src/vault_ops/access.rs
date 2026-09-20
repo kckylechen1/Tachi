@@ -17,8 +17,7 @@ pub(crate) mod health_snapshot;
 use health_snapshot::merged_provider_key_health;
 mod revision;
 pub(crate) use revision::{
-    vault_key_health_revision, vault_materialization_acl_revision_from_rows,
-    VaultMaterializationRevision,
+    vault_materialization_acl_revision_from_rows, VaultMaterializationRevision,
 };
 
 #[derive(Debug)]

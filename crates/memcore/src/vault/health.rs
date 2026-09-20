@@ -68,6 +68,11 @@ pub const EVIDENCE_KIND_FIELD: &str = "evidence_kind";
 pub const EVIDENCE_AT_FIELD: &str = "evidence_at";
 /// `metadata` JSON field carrying the [`TypedOutcome`] the evidence produced.
 pub const EVIDENCE_OUTCOME_FIELD: &str = "evidence_outcome";
+/// `metadata` JSON field carrying the metadata-only credential generation
+/// captured when the request selected its secret. Absence means provenance is
+/// unprovable and readers must fail closed rather than attach the outcome to a
+/// same-name replacement.
+pub const EVIDENCE_CREDENTIAL_GENERATION_FIELD: &str = "credential_generation";
 
 /// Default cooldown when a rate-limit report carries no `Retry-After`.
 const DEFAULT_RATE_LIMIT_COOLDOWN_SECS: u64 = 60;
@@ -255,6 +260,32 @@ pub fn record_key_outcome(
     reason: Option<&str>,
     now: DateTime<Utc>,
 ) -> KeyOutcomeWrite {
+    record_key_outcome_for_generation(
+        existing,
+        logical_name,
+        key_id,
+        outcome,
+        evidence,
+        reason,
+        now,
+        None,
+    )
+}
+
+/// Record one outcome with the credential generation captured at selection.
+/// Callers that cannot carry that provenance use [`record_key_outcome`], which
+/// deliberately clears any generation inherited from an older row.
+#[allow(clippy::too_many_arguments)]
+pub fn record_key_outcome_for_generation(
+    existing: Option<&VaultKeyHealth>,
+    logical_name: &str,
+    key_id: &str,
+    outcome: TypedOutcome,
+    evidence: EvidenceKind,
+    reason: Option<&str>,
+    now: DateTime<Utc>,
+    credential_generation: Option<u64>,
+) -> KeyOutcomeWrite {
     let mut health = match existing {
         Some(existing) => {
             let mut health = existing.clone();
@@ -316,7 +347,13 @@ pub fn record_key_outcome(
 
     health.last_attempt = Some(now_iso.clone());
     health.updated_at = now_iso.clone();
-    health.metadata = stamp_evidence(&health.metadata, outcome, evidence, &now_iso);
+    health.metadata = stamp_evidence(
+        &health.metadata,
+        outcome,
+        evidence,
+        &now_iso,
+        credential_generation,
+    );
 
     KeyOutcomeWrite {
         health,
@@ -334,6 +371,7 @@ fn stamp_evidence(
     outcome: TypedOutcome,
     evidence: EvidenceKind,
     now_iso: &str,
+    credential_generation: Option<u64>,
 ) -> String {
     let mut object = match serde_json::from_str::<Value>(metadata) {
         Ok(Value::Object(object)) => object,
@@ -351,7 +389,24 @@ fn stamp_evidence(
         EVIDENCE_AT_FIELD.to_string(),
         Value::String(now_iso.to_string()),
     );
+    if let Some(generation) = credential_generation {
+        object.insert(
+            EVIDENCE_CREDENTIAL_GENERATION_FIELD.to_string(),
+            Value::Number(generation.into()),
+        );
+    } else {
+        object.remove(EVIDENCE_CREDENTIAL_GENERATION_FIELD);
+    }
     Value::Object(object).to_string()
+}
+
+/// Read observation-time credential provenance from a health row. Missing,
+/// malformed, and legacy metadata are all unprovable rather than guessed.
+pub fn credential_generation_from_metadata(metadata: &str) -> Option<u64> {
+    serde_json::from_str::<Value>(metadata)
+        .ok()?
+        .get(EVIDENCE_CREDENTIAL_GENERATION_FIELD)?
+        .as_u64()
 }
 
 #[cfg(test)]
@@ -680,6 +735,41 @@ mod tests {
         assert_eq!(
             parsed[EVIDENCE_OUTCOME_FIELD],
             Value::String("success".into())
+        );
+    }
+
+    #[test]
+    fn credential_generation_is_observation_bound_and_unproven_writes_clear_it() {
+        let proven = record_key_outcome_for_generation(
+            None,
+            "EXTRACT_API_KEY",
+            "DEEPSEEK_API_KEY",
+            TypedOutcome::Success,
+            EvidenceKind::Probed,
+            None,
+            at(1),
+            Some(41),
+        )
+        .health;
+        assert_eq!(
+            credential_generation_from_metadata(&proven.metadata),
+            Some(41)
+        );
+
+        let unproven = record_key_outcome(
+            Some(&proven),
+            "EXTRACT_API_KEY",
+            "DEEPSEEK_API_KEY",
+            TypedOutcome::AuthFailed,
+            EvidenceKind::SelfReported,
+            None,
+            at(2),
+        )
+        .health;
+        assert_eq!(
+            credential_generation_from_metadata(&unproven.metadata),
+            None,
+            "a caller without request-start provenance must not inherit an older generation"
         );
     }
 

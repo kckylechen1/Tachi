@@ -58,6 +58,7 @@ impl super::super::LlmClient {
                         logical_name: (*key).to_string(),
                         key_id: entry.key_id,
                         value: entry.value.trim().to_string(),
+                        credential_generation: state.source_generation,
                     }
                 })
                 .filter(|entry| !entry.value.is_empty())
@@ -84,6 +85,7 @@ impl super::super::LlmClient {
                         logical_name: (*key).to_string(),
                         key_id: (*key).to_string(),
                         value,
+                        credential_generation: None,
                     })
             })
         })
@@ -126,13 +128,17 @@ impl super::super::LlmClient {
             .provider_state
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let pool_value = state.secrets.get(logical_name).and_then(|entries| {
-            entries
-                .iter()
-                .find(|entry| entry.key_id == key_id)
-                .map(|entry| entry.value.trim().to_string())
-                .filter(|value| !value.is_empty())
-        });
+        let pool_value = state
+            .secrets
+            .get(logical_name)
+            .and_then(|entries| {
+                entries
+                    .iter()
+                    .find(|entry| entry.key_id == key_id)
+                    .map(|entry| entry.value.trim().to_string())
+                    .filter(|value| !value.is_empty())
+            })
+            .map(|value| (value, state.source_generation));
         drop(state);
 
         pool_value
@@ -143,11 +149,13 @@ impl super::super::LlmClient {
                     .filter(|value| !crate::provider_names::is_vault_alias(value))
                     .map(|value| value.trim().to_string())
                     .filter(|value| !value.is_empty())
+                    .map(|value| (value, None))
             })
-            .map(|value| SelectedProviderSecret {
+            .map(|(value, credential_generation)| SelectedProviderSecret {
                 logical_name: logical_name.to_string(),
                 key_id: key_id.to_string(),
                 value,
+                credential_generation,
             })
     }
 
@@ -177,6 +185,7 @@ impl super::super::LlmClient {
                     logical_name: (*key).to_string(),
                     key_id: entry.key_id.clone(),
                     value: entry.value.trim().to_string(),
+                    credential_generation: state.source_generation,
                 })
             })
         });
@@ -200,6 +209,7 @@ impl super::super::LlmClient {
                         logical_name: (*key).to_string(),
                         key_id: (*key).to_string(),
                         value,
+                        credential_generation: None,
                     })
             })
         })

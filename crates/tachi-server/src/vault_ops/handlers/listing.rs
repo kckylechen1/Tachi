@@ -5,8 +5,8 @@ use std::path::Path;
 use chrono::Utc;
 use memcore::vault::accounts::{AccountCustody, CustodyKind, ProviderAccount};
 use memcore::vault::health::{
-    EvidenceKind, EVIDENCE_AT_FIELD, EVIDENCE_OUTCOME_FIELD, HEALTH_STATUS_AUTH_FAILED,
-    HEALTH_STATUS_EXHAUSTED, HEALTH_STATUS_OK,
+    credential_generation_from_metadata, EvidenceKind, EVIDENCE_AT_FIELD,
+    EVIDENCE_OUTCOME_FIELD, HEALTH_STATUS_AUTH_FAILED, HEALTH_STATUS_EXHAUSTED, HEALTH_STATUS_OK,
 };
 use memcore::vault::{VaultEntry, VaultKeyHealth};
 
@@ -230,15 +230,25 @@ fn health_updated_at(health: &VaultKeyHealth) -> Option<chrono::DateTime<chrono:
 fn health_is_attributed(
     health: &VaultKeyHealth,
     runtime_generation_current: bool,
-    source_health_generation: &HashMap<(String, String), u64>,
+    current_generation: u64,
 ) -> bool {
     runtime_generation_current
-        && source_health_generation
-            .get(&(health.logical_name.clone(), health.key_id.clone()))
-            .is_some_and(|expected| {
-                *expected
-                    == crate::vault_ops::access::vault_key_health_revision(health)
-            })
+        && credential_generation_from_metadata(&health.metadata) == Some(current_generation)
+}
+
+fn reconcile_health_evidence<'a>(
+    relevant: Vec<&'a VaultKeyHealth>,
+    runtime_generation_current: bool,
+    current_generation: u64,
+) -> (Vec<&'a VaultKeyHealth>, bool) {
+    let uncertain = relevant
+        .iter()
+        .any(|row| !health_is_attributed(row, runtime_generation_current, current_generation));
+    let attributed = relevant
+        .into_iter()
+        .filter(|row| health_is_attributed(row, runtime_generation_current, current_generation))
+        .collect();
+    (attributed, uncertain)
 }
 
 fn selected_health<'a>(health: &[&'a VaultKeyHealth]) -> Option<&'a VaultKeyHealth> {
@@ -321,6 +331,17 @@ fn probe_observation(health: Option<&VaultKeyHealth>) -> (&'static str, Option<S
     )
 }
 
+fn safe_probe_observation(
+    health: &[&VaultKeyHealth],
+    uncertain_health: bool,
+) -> (&'static str, Option<String>) {
+    if health_is_unusable(health) || !uncertain_health {
+        probe_observation(selected_health(health))
+    } else {
+        ("unknown", None)
+    }
+}
+
 fn health_is_unusable(health: &[&VaultKeyHealth]) -> bool {
     let now = Utc::now();
     health
@@ -347,6 +368,7 @@ fn alias_integrity(
     logical_name: &str,
     secret_type: &str,
     health: &[&VaultKeyHealth],
+    uncertain_health: bool,
     claims: &BindingClaims,
     ambiguous_custody_owners: bool,
     runtime_generation_current: bool,
@@ -374,7 +396,13 @@ fn alias_integrity(
     {
         return "fenced";
     }
-    if !is_model_provider_account(logical_name) || health_is_unusable(health) {
+    if health_is_unusable(health) {
+        return "unusable";
+    }
+    if uncertain_health {
+        return "unknown";
+    }
+    if !is_model_provider_account(logical_name) {
         return "unusable";
     }
 
@@ -408,7 +436,6 @@ pub(crate) fn build_vault_list_payload(
     runtime_health: HashMap<String, HashMap<String, VaultKeyHealth>>,
     runtime_bindings: Option<&HashMap<String, BTreeSet<String>>>,
     runtime_source_generation: Option<u64>,
-    source_health_generation: &HashMap<(String, String), u64>,
 ) -> Result<serde_json::Value, String> {
     let transaction = store
         .begin_vault_read_transaction_shared()
@@ -484,22 +511,18 @@ pub(crate) fn build_vault_list_payload(
             let ambiguous_custody_owners = custody_owners
                 .get(&logical_name)
                 .is_some_and(|owners| owners.len() > 1);
-            let health = relevant_health(
+            let relevant_health = relevant_health(
                 &health_by_logical,
                 &logical_name,
                 &entry.name,
                 &claims.slots,
-            )
-            .into_iter()
-            .filter(|row| {
-                health_is_attributed(
-                    row,
-                    runtime_generation_current,
-                    source_health_generation,
-                )
-            })
-            .collect::<Vec<_>>();
-            let (probe_class, probe_at) = probe_observation(selected_health(&health));
+            );
+            let (health, uncertain_health) = reconcile_health_evidence(
+                relevant_health,
+                runtime_generation_current,
+                current_generation,
+            );
+            let (probe_class, probe_at) = safe_probe_observation(&health, uncertain_health);
 
             let object = row.as_object_mut().expect("vault list rows are objects");
             object.insert(
@@ -518,6 +541,7 @@ pub(crate) fn build_vault_list_payload(
                     &logical_name,
                     secret_type,
                     &health,
+                    uncertain_health,
                     &claims,
                     ambiguous_custody_owners,
                     runtime_generation_current,
@@ -563,14 +587,12 @@ pub(crate) async fn handle_vault_list(
     }
 
     let runtime_available = server.vault_read().key.is_some();
-    let (runtime_health, runtime_bindings, runtime_source_generation, source_health_generation) =
-        if runtime_available {
-            let (health, bindings, generation, health_generation) =
-                server.llm.provider_health_board_snapshot();
-            (health, Some(bindings), generation, health_generation)
-        } else {
-            (Default::default(), None, None, Default::default())
-        };
+    let (runtime_health, runtime_bindings, runtime_source_generation) = if runtime_available {
+        let (health, bindings, generation) = server.llm.provider_health_board_snapshot();
+        (health, Some(bindings), generation)
+    } else {
+        (Default::default(), None, None)
+    };
     let resolved_home = server.tachi_home_dir();
     let resp = server.with_global_store_read(move |store| {
         build_vault_list_payload(
@@ -580,7 +602,6 @@ pub(crate) async fn handle_vault_list(
             runtime_health,
             runtime_bindings.as_ref(),
             runtime_source_generation,
-            &source_health_generation,
         )
     })?;
     serde_json::to_string(&resp).map_err(|e| format!("serialize: {e}"))
@@ -914,6 +935,113 @@ mod tests {
     }
 
     #[test]
+    fn newer_memory_and_persisted_account_vetoes_cannot_reveal_older_slot_success() {
+        let generation = 73;
+        let slot_success = memcore::vault::health::record_key_outcome_for_generation(
+            None,
+            "EXTRACT_API_KEY",
+            "DEEPSEEK_API_KEY",
+            TypedOutcome::Success,
+            EvidenceKind::Probed,
+            None,
+            at(1),
+            Some(generation),
+        )
+        .health;
+        let account_auth_failed = memcore::vault::health::record_key_outcome_for_generation(
+            None,
+            "DEEPSEEK_API_KEY",
+            "DEEPSEEK_API_KEY",
+            TypedOutcome::AuthFailed,
+            EvidenceKind::Probed,
+            None,
+            at(2),
+            Some(generation),
+        )
+        .health;
+        let memory_merged = crate::vault_ops::access::health_snapshot::merge_provider_key_health(
+            vec![slot_success.clone()],
+            HashMap::from([(
+                "DEEPSEEK_API_KEY".to_string(),
+                HashMap::from([(
+                    "DEEPSEEK_API_KEY".to_string(),
+                    account_auth_failed,
+                )]),
+            )]),
+        );
+        let rows = relevant_health(
+            &memory_merged,
+            "DEEPSEEK_API_KEY",
+            "DEEPSEEK_API_KEY",
+            &BTreeSet::from(["EXTRACT_API_KEY".to_string()]),
+        );
+        let (attributed, uncertain) = reconcile_health_evidence(rows, true, generation);
+        assert!(!uncertain);
+        assert_eq!(safe_probe_observation(&attributed, uncertain).0, "auth_failed");
+
+        let account_exhausted = memcore::vault::health::record_key_outcome_for_generation(
+            None,
+            "DEEPSEEK_API_KEY",
+            "DEEPSEEK_API_KEY",
+            TypedOutcome::Exhausted,
+            EvidenceKind::Probed,
+            None,
+            at(3),
+            Some(generation),
+        )
+        .health;
+        let persisted = HashMap::from([
+            (
+                "EXTRACT_API_KEY".to_string(),
+                HashMap::from([("DEEPSEEK_API_KEY".to_string(), slot_success.clone())]),
+            ),
+            (
+                "DEEPSEEK_API_KEY".to_string(),
+                HashMap::from([("DEEPSEEK_API_KEY".to_string(), account_exhausted)]),
+            ),
+        ]);
+        let rows = relevant_health(
+            &persisted,
+            "DEEPSEEK_API_KEY",
+            "DEEPSEEK_API_KEY",
+            &BTreeSet::from(["EXTRACT_API_KEY".to_string()]),
+        );
+        let (attributed, uncertain) = reconcile_health_evidence(rows, true, generation);
+        assert!(!uncertain);
+        assert_eq!(safe_probe_observation(&attributed, uncertain).0, "402");
+
+        let unproven_veto = record_key_outcome(
+            None,
+            "DEEPSEEK_API_KEY",
+            "DEEPSEEK_API_KEY",
+            TypedOutcome::AuthFailed,
+            EvidenceKind::Probed,
+            None,
+            at(4),
+        )
+        .health;
+        let mixed = HashMap::from([
+            (
+                "EXTRACT_API_KEY".to_string(),
+                HashMap::from([("DEEPSEEK_API_KEY".to_string(), slot_success)]),
+            ),
+            (
+                "DEEPSEEK_API_KEY".to_string(),
+                HashMap::from([("DEEPSEEK_API_KEY".to_string(), unproven_veto)]),
+            ),
+        ]);
+        let rows = relevant_health(
+            &mixed,
+            "DEEPSEEK_API_KEY",
+            "DEEPSEEK_API_KEY",
+            &BTreeSet::from(["EXTRACT_API_KEY".to_string()]),
+        );
+        let (attributed, uncertain) = reconcile_health_evidence(rows, true, generation);
+        assert!(uncertain);
+        assert_eq!(safe_probe_observation(&attributed, uncertain), ("unknown", None));
+    }
+
+    #[test]
     fn newer_memory_health_replaces_only_the_same_complete_identity() {
         let persisted = record_key_outcome(
             None,
@@ -1065,7 +1193,7 @@ mod tests {
     fn entry_replacement_invalidates_older_health_and_runtime_generation() {
         let mut replacement = entry("DEEPSEEK_API_KEY");
         replacement.updated_at = at(3).to_rfc3339();
-        let old_success = record_key_outcome(
+        let old_success = memcore::vault::health::record_key_outcome_for_generation(
             None,
             "EXTRACT_API_KEY",
             "DEEPSEEK_API_KEY",
@@ -1073,9 +1201,10 @@ mod tests {
             EvidenceKind::Probed,
             None,
             at(2),
+            Some(41),
         )
         .health;
-        let late_old_success = record_key_outcome(
+        let late_old_success = memcore::vault::health::record_key_outcome_for_generation(
             Some(&old_success),
             "EXTRACT_API_KEY",
             "DEEPSEEK_API_KEY",
@@ -1083,31 +1212,13 @@ mod tests {
             EvidenceKind::Probed,
             None,
             at(4),
+            Some(41),
         )
         .health;
-        let source_health_generation = HashMap::from([(
-            (
-                old_success.logical_name.clone(),
-                old_success.key_id.clone(),
-            ),
-            crate::vault_ops::access::vault_key_health_revision(&old_success),
-        )]);
-        assert!(health_is_attributed(
-            &old_success,
-            true,
-            &source_health_generation,
-        ));
+        assert!(health_is_attributed(&old_success, true, 41));
         assert!(health_updated_at(&late_old_success) > Some(at(3).fixed_offset()));
-        assert!(!health_is_attributed(
-            &late_old_success,
-            true,
-            &source_health_generation,
-        ));
-        assert!(!health_is_attributed(
-            &late_old_success,
-            false,
-            &source_health_generation,
-        ));
+        assert!(!health_is_attributed(&late_old_success, true, 42));
+        assert!(!health_is_attributed(&late_old_success, false, 41));
 
         let claims = BindingClaims {
             slots: BTreeSet::from(["EXTRACT_API_KEY".to_string()]),
@@ -1123,6 +1234,7 @@ mod tests {
                 "DEEPSEEK_API_KEY",
                 memcore::vault::SECRET_TYPE_API_KEY,
                 &[],
+                false,
                 &claims,
                 false,
                 false,
@@ -1282,6 +1394,7 @@ mod tests {
                 "DEEPSEEK_API_KEY",
                 memcore::vault::SECRET_TYPE_API_KEY,
                 &[],
+                false,
                 &claims,
                 true,
                 true,
@@ -1338,6 +1451,7 @@ mod tests {
                 "DEEPSEEK_API_KEY",
                 memcore::vault::SECRET_TYPE_API_KEY,
                 &[],
+                false,
                 &claims,
                 false,
                 true,
@@ -1362,6 +1476,7 @@ mod tests {
                 "DEEPSEEK_API_KEY",
                 memcore::vault::SECRET_TYPE_API_KEY,
                 &[],
+                false,
                 &claims,
                 false,
                 true,
@@ -1380,6 +1495,7 @@ mod tests {
                 "DEEPSEEK_API_KEY",
                 memcore::vault::SECRET_TYPE_API_KEY,
                 &[],
+                false,
                 &conflicting,
                 false,
                 true,
@@ -1393,6 +1509,7 @@ mod tests {
                 "DEEPSEEK_API_KEY",
                 memcore::vault::SECRET_TYPE_OAUTH_TOKEN,
                 &[],
+                false,
                 &claims,
                 false,
                 false,
@@ -1407,6 +1524,7 @@ mod tests {
                 "DEEPSEEK_API_KEY",
                 memcore::vault::SECRET_TYPE_API_KEY,
                 &[],
+                false,
                 &claims,
                 false,
                 true,
@@ -1448,6 +1566,7 @@ mod tests {
                     "DEEPSEEK_API_KEY",
                     memcore::vault::SECRET_TYPE_API_KEY,
                     &[],
+                    false,
                     &claims,
                     false,
                     true,
@@ -1477,6 +1596,7 @@ mod tests {
                 member,
                 memcore::vault::SECRET_TYPE_API_KEY,
                 &[],
+                false,
                 &claims,
                 false,
                 true,

@@ -12,7 +12,7 @@ pub(crate) struct VaultMaterializationRevision {
     pub health: HashMap<(String, String), u64>,
 }
 
-pub(crate) fn vault_key_health_revision(row: &VaultKeyHealth) -> u64 {
+fn vault_key_health_revision(row: &VaultKeyHealth) -> u64 {
     let mut observation = std::collections::hash_map::DefaultHasher::new();
     row.status.hash(&mut observation);
     row.cooldown_until.hash(&mut observation);

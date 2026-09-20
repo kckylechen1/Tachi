@@ -124,14 +124,12 @@ struct VaultSourceLoad {
 fn vault_api_key_pool_load_from_server(server: &MemoryServer) -> Result<VaultSourceLoad, String> {
     let scan = crate::vault_ops::load_validated_unlocked_api_key_secret_pools_with_drops(server)?;
     let source_generation = Some(scan.acl_revision.contents);
-    let source_health_generation = scan.acl_revision.health.clone();
     Ok(VaultSourceLoad {
         load: tachi_llm::DurableVaultLoad {
             pools: scan.pools,
             listed_drops: scan.dropped,
             availability: VaultSourceAvailability::Readable,
             source_generation,
-            source_health_generation,
         },
         lane_config_values: scan.lane_config_values,
         acl_revision: Some(scan.acl_revision),
@@ -183,18 +181,12 @@ fn durable_load_from_keychain_scan(
     let mut listed_drops = scan.dropped;
     promote_configured_rotation_prefix_drops(&mut listed_drops, &pools, &scan.rotation_prefixes);
     let source_generation = scan.acl_revision.as_ref().map(|revision| revision.contents);
-    let source_health_generation = scan
-        .acl_revision
-        .as_ref()
-        .map(|revision| revision.health.clone())
-        .unwrap_or_default();
     VaultSourceLoad {
         load: tachi_llm::DurableVaultLoad {
             pools,
             listed_drops,
             availability,
             source_generation,
-            source_health_generation,
         },
         lane_config_values: scan.lane_config_values,
         acl_revision: scan.acl_revision,
@@ -1698,7 +1690,6 @@ mod tests {
                     pools,
                     availability: VaultSourceAvailability::Readable,
                     source_generation: None,
-                    source_health_generation: HashMap::new(),
                     listed_drops: drops,
                 })
             },
@@ -2072,7 +2063,6 @@ mod tests {
                     pools: HashMap::new(),
                     listed_drops: HashMap::new(),
                     source_generation: None,
-                    source_health_generation: HashMap::new(),
                     availability: if paths_equal(path, &default_db) {
                         VaultSourceAvailability::Readable
                     } else {

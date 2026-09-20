@@ -381,6 +381,7 @@ impl LlmClient {
     ) -> ProviderAuthProbeResult {
         self.probe_member_auth_inner(descriptor, logical_name, key_id, None, None)
             .await
+            .0
     }
 
     /// Probe one named credential and record the verdict as that member's
@@ -402,10 +403,15 @@ impl LlmClient {
         logical_name: &str,
         key_id: &str,
     ) -> (ProviderAuthProbeResult, Option<VaultKeyHealth>) {
-        let result = self
+        let (result, credential_generation) = self
             .probe_member_auth_inner(descriptor, logical_name, key_id, None, None)
             .await;
-        let health = self.record_probe_result(logical_name, key_id, result.auth_class);
+        let health = self.record_probe_result(
+            logical_name,
+            key_id,
+            result.auth_class,
+            credential_generation,
+        );
         (result, health)
     }
 
@@ -418,10 +424,15 @@ impl LlmClient {
         key_id: &str,
         endpoint: &str,
     ) -> (ProviderAuthProbeResult, Option<VaultKeyHealth>) {
-        let result = self
+        let (result, credential_generation) = self
             .probe_member_auth_inner(descriptor, logical_name, key_id, Some(endpoint), None)
             .await;
-        let health = self.record_probe_result(logical_name, key_id, result.auth_class);
+        let health = self.record_probe_result(
+            logical_name,
+            key_id,
+            result.auth_class,
+            credential_generation,
+        );
         (result, health)
     }
 
@@ -431,6 +442,7 @@ impl LlmClient {
         logical_name: &str,
         key_id: &str,
         auth_class: ProviderAuthProbeClass,
+        credential_generation: Option<u64>,
     ) -> Option<VaultKeyHealth> {
         let outcome = probe_health_outcome(auth_class)?;
         let member = SelectedProviderSecret {
@@ -439,6 +451,7 @@ impl LlmClient {
             // The recorder never reads the value; a health write is about the
             // member's identity, never its secret.
             value: String::new(),
+            credential_generation,
         };
         // Unattributed: an auth probe is a deliberate, non-generating request
         // about a *credential*, and its outcomes are auth-class by
@@ -461,18 +474,24 @@ impl LlmClient {
         key_id: &str,
         endpoint_override: Option<&str>,
         resolution_override: Option<(&str, SocketAddr)>,
-    ) -> ProviderAuthProbeResult {
+    ) -> (ProviderAuthProbeResult, Option<u64>) {
         let selected = self.member_secret_readonly(logical_name, key_id);
-        self.probe_target_inner(
-            ProbeTarget::from_descriptor(descriptor),
-            // A member probe is about a credential, not about a lane's model.
-            "",
-            None,
-            selected,
-            endpoint_override,
-            resolution_override,
+        let credential_generation = selected
+            .as_ref()
+            .and_then(|secret| secret.credential_generation);
+        (
+            self.probe_target_inner(
+                ProbeTarget::from_descriptor(descriptor),
+                // A member probe is about a credential, not about a lane's model.
+                "",
+                None,
+                selected,
+                endpoint_override,
+                resolution_override,
+            )
+            .await,
+            credential_generation,
         )
-        .await
     }
 
     /// One probe request against one already-admitted target with one already

@@ -663,6 +663,10 @@ pub(in crate::llm) struct SelectedProviderSecret {
     pub(in crate::llm) logical_name: String,
     pub(in crate::llm) key_id: String,
     pub(in crate::llm) value: String,
+    /// Metadata-only generation of the durable credential snapshot from which
+    /// `value` was selected. `None` means the observation cannot safely be
+    /// attached to a Vault row after a same-name replacement.
+    pub(in crate::llm) credential_generation: Option<u64>,
 }
 
 #[derive(Clone, Copy)]

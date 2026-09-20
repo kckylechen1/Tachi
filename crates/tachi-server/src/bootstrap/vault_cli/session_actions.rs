@@ -187,7 +187,6 @@ pub(super) async fn run_session_action(
                 Default::default(),
                 None,
                 None,
-                &Default::default(),
             )?;
             super::output::print_vault_list_output(&payload.to_string())?;
             Ok(())

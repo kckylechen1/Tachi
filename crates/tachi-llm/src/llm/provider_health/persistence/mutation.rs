@@ -53,7 +53,7 @@ impl super::super::super::LlmClient {
             .get(&selected.logical_name)
             .and_then(|members| members.get(&selected.key_id))
             .cloned();
-        let write = memcore::vault::health::record_key_outcome(
+        let write = memcore::vault::health::record_key_outcome_for_generation(
             existing.as_ref(),
             &selected.logical_name,
             &selected.key_id,
@@ -61,6 +61,7 @@ impl super::super::super::LlmClient {
             evidence,
             reason,
             now,
+            selected.credential_generation,
         );
 
         if let Some(cooldown_until) = write.cooldown_until {
@@ -179,6 +180,11 @@ impl super::super::super::LlmClient {
             logical_name: logical_name.to_string(),
             key_id: key_id.to_string(),
             value: String::new(),
+            credential_generation: self
+                .provider_state
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .source_generation,
         };
         self.mark_secret_rate_limited(&selected, retry_after, DeploymentAttribution::Unattributed);
         if let Some(health) = self.read_key_health_entry(&selected.logical_name, &selected.key_id) {
@@ -227,6 +233,11 @@ impl super::super::super::LlmClient {
             logical_name: logical_name.to_string(),
             key_id: key_id.to_string(),
             value: String::new(),
+            credential_generation: self
+                .provider_state
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .source_generation,
         };
         self.mark_secret_auth_failed(
             &selected,
@@ -279,7 +290,25 @@ impl super::super::super::LlmClient {
             logical_name: logical_name.to_string(),
             key_id: key_id.to_string(),
             value: String::new(),
+            credential_generation: None,
         };
+        self.record_selected_provider_key_result(
+            selected,
+            status_code,
+            outcome,
+            retry_after,
+            reason,
+        )
+    }
+
+    fn record_selected_provider_key_result(
+        &self,
+        selected: SelectedProviderSecret,
+        status_code: Option<u16>,
+        outcome: Option<&str>,
+        retry_after: Option<u64>,
+        reason: Option<&str>,
+    ) -> VaultKeyHealth {
         // #1680 D6: the status/outcome ladder this function used to carry is
         // now `TypedOutcome::classify`, shared with the CLI/MCP channel that
         // had drifted from it. The wire contract is unchanged; the outcome is
@@ -323,10 +352,10 @@ impl super::super::super::LlmClient {
                 );
             }
         }
-        self.read_key_health_entry(logical_name, key_id)
+        self.read_key_health_entry(&selected.logical_name, &selected.key_id)
             .unwrap_or_else(|| VaultKeyHealth {
-                logical_name: logical_name.to_string(),
-                key_id: key_id.to_string(),
+                logical_name: selected.logical_name,
+                key_id: selected.key_id,
                 ..VaultKeyHealth::default()
             })
     }
@@ -347,6 +376,31 @@ impl super::super::super::LlmClient {
             outcome,
             retry_after,
             reason,
+        );
+        self.persist_key_health_now(&health);
+        health
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn record_provider_key_result_for_generation_tests(
+        &self,
+        logical_name: &str,
+        key_id: &str,
+        status_code: Option<u16>,
+        credential_generation: u64,
+    ) -> VaultKeyHealth {
+        let health = self.record_selected_provider_key_result(
+            SelectedProviderSecret {
+                logical_name: logical_name.to_string(),
+                key_id: key_id.to_string(),
+                value: String::new(),
+                credential_generation: Some(credential_generation),
+            },
+            status_code,
+            None,
+            None,
+            None,
         );
         self.persist_key_health_now(&health);
         health
