@@ -1856,7 +1856,7 @@ async fn source_newer_conflict_rejects_predecessor_category_alias_before_preview
                 .await
                 .expect_err("conflict predecessor aliases must fail closed");
 
-        assert!(error.contains("canonical category path"), "{error}");
+        assert!(error.contains("ambiguous path spelling"), "{error}");
         assert_eq!(fs::read_to_string(&source).unwrap(), source_content);
         assert_eq!(
             fs::read_to_string(&destination).unwrap(),
