@@ -891,8 +891,16 @@ mod tests {
         let _lock = crate::utils::global_test_lock()
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let _extract = crate::test_support::EnvRestore::remove("EXTRACT_API_KEY");
         let temp = tempfile::tempdir().expect("temp");
+        // Listing unions claims from HOME, TACHI_HOME, cwd, and process slots.
+        // This custody fixture supplies its only binding through account metadata.
+        let _home = crate::test_support::EnvRestore::set_path("HOME", temp.path());
+        let _tachi_home = crate::test_support::EnvRestore::set_path("TACHI_HOME", temp.path());
+        let _cwd = crate::test_support::CwdRestore::set(temp.path());
+        let _slots = tachi_llm::LANE_SLOT_SECRET_NAMES
+            .iter()
+            .map(|name| crate::test_support::EnvRestore::remove(name))
+            .collect::<Vec<_>>();
         let store = memcore::MemoryStore::open(temp.path().join("memory.db").to_str().unwrap())
             .expect("store");
         store
