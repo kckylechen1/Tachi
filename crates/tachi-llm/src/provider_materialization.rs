@@ -86,6 +86,7 @@ pub struct ProviderMaterializationSnapshot {
     resolved_pools: HashMap<String, Vec<ProviderSecret>>,
     retained_logical_names: HashSet<String>,
     source_generation: Option<u64>,
+    listed_drops: HashMap<String, AliasSkipClass>,
     report: MaterializeReport,
 }
 
@@ -133,13 +134,14 @@ impl ProviderMaterializationSnapshot {
             resolved_pools,
             retained_logical_names,
             source_generation,
+            listed_drops,
             report: _,
         } = self;
         llm.publish_provider_secret_pools_with_health_baseline(
             resolved_pools,
             &retained_logical_names,
             health_baseline,
-            source_generation,
+            (source_generation, listed_drops),
             lane_config_overlay,
             commit_companion_projection,
         )?;
@@ -329,7 +331,7 @@ where
 pub struct DurableVaultLoad {
     pub pools: HashMap<String, Vec<ProviderSecret>>,
     pub availability: VaultSourceAvailability,
-    /// Opaque metadata-only generation of the durable rows that supplied the
+    /// Opaque generation of the durable rows that supplied the
     /// pools. `None` means callers must not claim generation-current runtime
     /// bindings.
     pub source_generation: Option<u64>,
@@ -582,6 +584,7 @@ where
         resolved_pools,
         retained_logical_names,
         source_generation,
+        listed_drops: listed_drops.clone(),
         report,
     })
 }
@@ -1884,7 +1887,8 @@ mod tests {
         })
         .expect("materialize generation fixture");
 
-        let (_health, bindings, generation) = llm.provider_health_board_snapshot();
+        let (_health, bindings, generation, drops) = llm.provider_health_board_snapshot();
+        assert!(drops.is_empty());
         assert_eq!(generation, Some(41));
         assert_eq!(
             bindings.get(key),

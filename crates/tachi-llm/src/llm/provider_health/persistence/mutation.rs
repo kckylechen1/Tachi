@@ -334,11 +334,12 @@ impl super::super::super::LlmClient {
                 reason.as_deref(),
                 DeploymentAttribution::Unattributed,
             ),
-            TypedOutcome::AuthFailed => self.mark_secret_auth_failed(
-                &selected,
-                reason.as_deref(),
-                DeploymentAttribution::Unattributed,
-            ),
+            TypedOutcome::AuthFailed | TypedOutcome::ProbedUnauthorized => self
+                .mark_secret_auth_failed(
+                    &selected,
+                    reason.as_deref(),
+                    DeploymentAttribution::Unattributed,
+                ),
             TypedOutcome::Success => {
                 self.mark_secret_success(&selected, DeploymentAttribution::Unattributed)
             }

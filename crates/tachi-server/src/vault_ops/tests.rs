@@ -2572,12 +2572,7 @@ async fn vault_list_is_a_secret_negative_account_health_board() {
     // cache generation, while the durable row has a newer generation. Listing
     // must fail closed without comparing plaintext or issuing another probe.
     let replacement_sentinel = "replacement-secret-must-not-list";
-    plant_vault_secret(
-        &server,
-        "DEEPSEEK_API_KEY",
-        replacement_sentinel,
-        "api_key",
-    );
+    plant_vault_secret(&server, "DEEPSEEK_API_KEY", replacement_sentinel, "api_key");
     server
         .with_global_store(|store| {
             let now = chrono::Utc::now().to_rfc3339();
@@ -2595,7 +2590,10 @@ async fn vault_list_is_a_secret_negative_account_health_board() {
         .expect("seed invalid replacement generation");
     let refresh_error = crate::provider_config::materialize_for_server(&server)
         .expect_err("invalid replacement generation must fail provider refresh");
-    assert!(refresh_error.contains("DEEPSEEK_API_KEY"), "{refresh_error}");
+    assert!(
+        refresh_error.contains("DEEPSEEK_API_KEY"),
+        "{refresh_error}"
+    );
     // Complete an old request after both the same-name replacement and the
     // failed refresh. Its timestamp is newest, but its health came from the
     // still-published old credential generation and must not attach to K2.
@@ -2640,7 +2638,210 @@ async fn vault_list_is_a_secret_negative_account_health_board() {
 
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
+async fn vault_list_empty_drop_is_current_generation_only_and_locked_unknown() {
+    let _lock = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let _alias = EnvRestore::set("EXTRACT_API_KEY", "vault:DEEPSEEK_API_KEY");
+    let temp = tempfile::tempdir().unwrap();
+    let server = MemoryServer::new(temp.path().join("memory.db"), None).unwrap();
+    handle_vault_init(
+        &server,
+        VaultInitParams {
+            password: "synthetic-empty-password".into(),
+        },
+    )
+    .await
+    .unwrap();
+    plant_vault_secret(&server, "DEEPSEEK_API_KEY", "", "api_key");
+    crate::provider_config::materialize_for_server(&server).expect("materialize empty drop");
+    let list = |body: String| -> String {
+        let value: serde_json::Value = serde_json::from_str(&body).unwrap();
+        value["credentials"][0]["alias_integrity"]
+            .as_str()
+            .unwrap()
+            .into()
+    };
+    assert_eq!(
+        list(
+            handle_vault_list(&server, VaultListParams { secret_type: None })
+                .await
+                .unwrap()
+        ),
+        "empty"
+    );
+    plant_vault_secret(
+        &server,
+        "DEEPSEEK_API_KEY",
+        "synthetic-replacement-not-empty",
+        "api_key",
+    );
+    assert_eq!(
+        list(
+            handle_vault_list(&server, VaultListParams { secret_type: None })
+                .await
+                .unwrap()
+        ),
+        "unknown",
+        "stale empty evidence"
+    );
+    crate::provider_config::materialize_for_server(&server).expect("materialize nonempty");
+    assert_eq!(
+        list(
+            handle_vault_list(&server, VaultListParams { secret_type: None })
+                .await
+                .unwrap()
+        ),
+        "resolved",
+        "replacement positive control"
+    );
+    plant_vault_secret(&server, "DEEPSEEK_API_KEY", "", "api_key");
+    crate::provider_config::materialize_for_server(&server).unwrap();
+    handle_vault_lock(&server).await.unwrap();
+    assert_eq!(
+        list(
+            handle_vault_list(&server, VaultListParams { secret_type: None })
+                .await
+                .unwrap()
+        ),
+        "unknown",
+        "locked never certifies empty"
+    );
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn vault_list_real_probe_401_is_distinct_from_403_and_self_report() {
+    let _lock = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let _persist = EnvRestore::set("TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST", "0");
+    let _alias = EnvRestore::set("EXTRACT_API_KEY", "vault:DEEPSEEK_API_KEY");
+    let mut observations = Vec::new();
+    for status in [401, 403] {
+        let temp = tempfile::tempdir().unwrap();
+        let server = MemoryServer::new(temp.path().join("memory.db"), None).unwrap();
+        handle_vault_init(
+            &server,
+            VaultInitParams {
+                password: "synthetic-probe-password".into(),
+            },
+        )
+        .await
+        .unwrap();
+        plant_vault_secret(
+            &server,
+            "DEEPSEEK_API_KEY",
+            "synthetic-probe-only-secret",
+            "api_key",
+        );
+        crate::provider_config::materialize_for_server(&server).unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count_handler = count.clone();
+        let router = axum::Router::new().route(
+            "/models",
+            axum::routing::get(move |headers: axum::http::HeaderMap| {
+                let count = count_handler.clone();
+                async move {
+                    assert_eq!(
+                        headers.get("authorization").unwrap(),
+                        "Bearer synthetic-probe-only-secret"
+                    );
+                    count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    (
+                        axum::http::StatusCode::from_u16(status).unwrap(),
+                        "RAW_PROBE_BODY_MUST_NOT_LEAK",
+                    )
+                }
+            }),
+        );
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let shutdown = cancel.clone();
+        let task = tokio::spawn(async move {
+            axum::serve(listener, router)
+                .with_graceful_shutdown(shutdown.cancelled_owned())
+                .await
+                .unwrap();
+        });
+        let (probe, health) = server
+            .llm
+            .probe_member_auth_and_record_with_endpoint_for_tests(
+                tachi_llm::auth_probe_descriptor_for_provider_kind("deepseek").unwrap(),
+                "DEEPSEEK_API_KEY",
+                "DEEPSEEK_API_KEY",
+                &format!("http://{address}/models"),
+            )
+            .await;
+        cancel.cancel();
+        task.await.unwrap();
+        assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            probe.auth_class,
+            tachi_llm::ProviderAuthProbeClass::AuthFailed
+        );
+        assert!(health.unwrap().auth_failed);
+        server
+            .llm
+            .await_provider_health_persistence()
+            .await
+            .expect("real probe persistence terminal");
+        let persisted = server
+            .with_global_store_read(|store| {
+                store
+                    .vault_get_key_health("DEEPSEEK_API_KEY", "DEEPSEEK_API_KEY")
+                    .map_err(|e| e.to_string())
+            })
+            .unwrap()
+            .unwrap();
+        assert!(persisted.auth_failed);
+        assert_eq!(persisted.status, "auth_failed");
+        let body = handle_vault_list(&server, VaultListParams { secret_type: None })
+            .await
+            .unwrap();
+        assert!(!body.contains("RAW_PROBE_BODY_MUST_NOT_LEAK"));
+        assert!(!body.contains("synthetic-probe-only-secret"));
+        let listed: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(listed["credentials"][0]["alias_integrity"], "unusable");
+        observations.push(
+            listed["credentials"][0]["last_probe_class"]
+                .as_str()
+                .unwrap()
+                .to_owned(),
+        );
+        let generation = server.llm.provider_health_board_snapshot().2.unwrap();
+        server.llm.record_provider_key_result_for_generation_tests(
+            "DEEPSEEK_API_KEY",
+            "DEEPSEEK_API_KEY",
+            Some(status),
+            generation,
+        );
+        let body = handle_vault_list(&server, VaultListParams { secret_type: None })
+            .await
+            .unwrap();
+        let reported: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(
+            reported["credentials"][0]["last_probe_class"], "auth_failed",
+            "self report is not exact probe authority"
+        );
+    }
+    assert_eq!(observations, ["401", "auth_failed"]);
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn vault_list_rejects_persisted_late_old_health_after_rematerialize_and_restart() {
+    assert_late_old_health_after_rematerialize_and_restart(false).await;
+}
+
+#[tokio::test]
+async fn vault_list_same_timestamp_replacement_rejects_late_old_health_after_restart() {
+    assert_late_old_health_after_rematerialize_and_restart(true).await;
+}
+
+#[allow(clippy::await_holding_lock)]
+async fn assert_late_old_health_after_rematerialize_and_restart(same_metadata: bool) {
     let _lock = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -2677,12 +2878,32 @@ async fn vault_list_rejects_persisted_late_old_health_after_rematerialize_and_re
         .2
         .expect("K1 generation");
 
-    plant_vault_secret(
-        &server,
-        "DEEPSEEK_API_KEY",
-        "generation-k2",
-        "api_key",
-    );
+    let previous_entry = server
+        .with_global_store(|store| {
+            store
+                .vault_get_entry("DEEPSEEK_API_KEY")
+                .map_err(|error| error.to_string())
+        })
+        .expect("read synthetic K1")
+        .expect("K1 row");
+    plant_vault_secret(&server, "DEEPSEEK_API_KEY", "generation-k2", "api_key");
+    if same_metadata {
+        server.with_global_store(|store| {
+            store.connection().execute(
+                "UPDATE vault_entries SET updated_at = ?1, description = ?2 WHERE name = ?3",
+                rusqlite::params![previous_entry.updated_at, previous_entry.description, previous_entry.name],
+            ).map_err(|error| error.to_string())?;
+            let replacement = store.vault_get_entry("DEEPSEEK_API_KEY")
+                .map_err(|error| error.to_string())?.expect("K2 row");
+            let mut only_ciphertext_changed = previous_entry.clone();
+            only_ciphertext_changed.encrypted_value = replacement.encrypted_value.clone();
+            only_ciphertext_changed.nonce = replacement.nonce.clone();
+            assert_eq!(serde_json::to_value(&replacement).unwrap(), serde_json::to_value(&only_ciphertext_changed).unwrap());
+            assert_ne!(replacement.encrypted_value, previous_entry.encrypted_value);
+            assert_ne!(replacement.nonce, previous_entry.nonce);
+            Ok(())
+        }).expect("freeze identical metadata to model same-millisecond replacement");
+    }
     let late = server.llm.record_provider_key_result_for_generation_tests(
         "DEEPSEEK_API_KEY",
         "DEEPSEEK_API_KEY",
@@ -2700,7 +2921,9 @@ async fn vault_list_rejects_persisted_late_old_health_after_rematerialize_and_re
         .provider_health_board_snapshot()
         .2
         .expect("K2 generation");
-    assert_ne!(k1_generation, k2_generation);
+    if !same_metadata {
+        assert_ne!(k1_generation, k2_generation);
+    }
     let listed = handle_vault_list(&server, VaultListParams { secret_type: None })
         .await
         .expect("list K2 after successful materialization");
@@ -2743,6 +2966,7 @@ async fn vault_list_rejects_persisted_late_old_health_after_rematerialize_and_re
     assert_eq!(restarted_row["last_probe_class"], "unknown");
     assert!(restarted_row["last_probe_at"].is_null());
     assert_eq!(restarted_row["alias_integrity"], "unknown");
+    assert_ne!(k1_generation, k2_generation);
 }
 
 #[tokio::test]

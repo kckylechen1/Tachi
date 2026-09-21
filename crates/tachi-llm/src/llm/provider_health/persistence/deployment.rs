@@ -72,6 +72,7 @@ pub(in crate::llm) fn deployment_outcome_for(outcome: TypedOutcome) -> Option<De
             retry_after: retry_after_secs.map(RetryAfter::DeltaSeconds),
         }),
         TypedOutcome::AuthFailed
+        | TypedOutcome::ProbedUnauthorized
         | TypedOutcome::Exhausted
         | TypedOutcome::Error
         | TypedOutcome::Unknown => None,

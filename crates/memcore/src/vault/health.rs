@@ -68,7 +68,7 @@ pub const EVIDENCE_KIND_FIELD: &str = "evidence_kind";
 pub const EVIDENCE_AT_FIELD: &str = "evidence_at";
 /// `metadata` JSON field carrying the [`TypedOutcome`] the evidence produced.
 pub const EVIDENCE_OUTCOME_FIELD: &str = "evidence_outcome";
-/// `metadata` JSON field carrying the metadata-only credential generation
+/// `metadata` JSON field carrying the opaque credential generation
 /// captured when the request selected its secret. Absence means provenance is
 /// unprovable and readers must fail closed rather than attach the outcome to a
 /// same-name replacement.
@@ -125,6 +125,9 @@ pub enum TypedOutcome {
     Success,
     /// The provider rejected the credential (401/403).
     AuthFailed,
+    /// An HTTP 401 observed by the non-generating auth probe. Safety state is
+    /// still auth_failed; only trustworthy probe evidence keeps this detail.
+    ProbedUnauthorized,
     /// The provider throttled this credential (429 / explicit report).
     RateLimited { retry_after_secs: Option<u64> },
     /// The credential is out of quota/credit (402 / explicit report).
@@ -177,6 +180,7 @@ impl TypedOutcome {
         match self {
             Self::Success => "success",
             Self::AuthFailed => "auth_failed",
+            Self::ProbedUnauthorized => "401",
             Self::RateLimited { .. } => "rate_limited",
             Self::Exhausted => "exhausted",
             Self::Error => "error",
@@ -188,7 +192,7 @@ impl TypedOutcome {
     /// reason of its own. `None` means "leave whatever is there alone".
     fn default_reason(self) -> Option<String> {
         match self {
-            Self::AuthFailed => Some("auth failure".to_string()),
+            Self::AuthFailed | Self::ProbedUnauthorized => Some("auth failure".to_string()),
             Self::Exhausted => Some("key exhausted".to_string()),
             Self::RateLimited { retry_after_secs } => Some(format!(
                 "rate limited; retry after {}s",
@@ -315,7 +319,7 @@ pub fn record_key_outcome_for_generation(
             health.error_count = 0;
             clear_cooldown = true;
         }
-        TypedOutcome::AuthFailed => {
+        TypedOutcome::AuthFailed | TypedOutcome::ProbedUnauthorized => {
             health.status = HEALTH_STATUS_AUTH_FAILED.to_string();
             health.auth_failed = true;
             health.cooldown_until = None;
@@ -383,7 +387,14 @@ fn stamp_evidence(
     );
     object.insert(
         EVIDENCE_OUTCOME_FIELD.to_string(),
-        Value::String(outcome.as_str().to_string()),
+        Value::String(
+            if outcome == TypedOutcome::ProbedUnauthorized && evidence != EvidenceKind::Probed {
+                "auth_failed"
+            } else {
+                outcome.as_str()
+            }
+            .to_string(),
+        ),
     );
     object.insert(
         EVIDENCE_AT_FIELD.to_string(),

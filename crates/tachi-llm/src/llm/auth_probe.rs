@@ -357,6 +357,7 @@ impl LlmClient {
             resolution_override,
         )
         .await
+        .0
     }
 
     /// Probe **one named credential** — a single `(logical_name, key_id)` pool
@@ -403,7 +404,7 @@ impl LlmClient {
         logical_name: &str,
         key_id: &str,
     ) -> (ProviderAuthProbeResult, Option<VaultKeyHealth>) {
-        let (result, credential_generation) = self
+        let (result, credential_generation, observed_401) = self
             .probe_member_auth_inner(descriptor, logical_name, key_id, None, None)
             .await;
         let health = self.record_probe_result(
@@ -411,6 +412,7 @@ impl LlmClient {
             key_id,
             result.auth_class,
             credential_generation,
+            observed_401,
         );
         (result, health)
     }
@@ -424,7 +426,7 @@ impl LlmClient {
         key_id: &str,
         endpoint: &str,
     ) -> (ProviderAuthProbeResult, Option<VaultKeyHealth>) {
-        let (result, credential_generation) = self
+        let (result, credential_generation, observed_401) = self
             .probe_member_auth_inner(descriptor, logical_name, key_id, Some(endpoint), None)
             .await;
         let health = self.record_probe_result(
@@ -432,6 +434,7 @@ impl LlmClient {
             key_id,
             result.auth_class,
             credential_generation,
+            observed_401,
         );
         (result, health)
     }
@@ -443,8 +446,13 @@ impl LlmClient {
         key_id: &str,
         auth_class: ProviderAuthProbeClass,
         credential_generation: Option<u64>,
+        observed_401: bool,
     ) -> Option<VaultKeyHealth> {
-        let outcome = probe_health_outcome(auth_class)?;
+        let outcome = if observed_401 && auth_class == ProviderAuthProbeClass::AuthFailed {
+            TypedOutcome::ProbedUnauthorized
+        } else {
+            probe_health_outcome(auth_class)?
+        };
         let member = SelectedProviderSecret {
             logical_name: logical_name.to_string(),
             key_id: key_id.to_string(),
@@ -474,13 +482,13 @@ impl LlmClient {
         key_id: &str,
         endpoint_override: Option<&str>,
         resolution_override: Option<(&str, SocketAddr)>,
-    ) -> (ProviderAuthProbeResult, Option<u64>) {
+    ) -> (ProviderAuthProbeResult, Option<u64>, bool) {
         let selected = self.member_secret_readonly(logical_name, key_id);
         let credential_generation = selected
             .as_ref()
             .and_then(|secret| secret.credential_generation);
-        (
-            self.probe_target_inner(
+        let (result, observed_401) = self
+            .probe_target_inner(
                 ProbeTarget::from_descriptor(descriptor),
                 // A member probe is about a credential, not about a lane's model.
                 "",
@@ -489,9 +497,8 @@ impl LlmClient {
                 endpoint_override,
                 resolution_override,
             )
-            .await,
-            credential_generation,
-        )
+            .await;
+        (result, credential_generation, observed_401)
     }
 
     /// One probe request against one already-admitted target with one already
@@ -513,16 +520,21 @@ impl LlmClient {
         selected: Option<SelectedProviderSecret>,
         endpoint_override: Option<&str>,
         resolution_override: Option<(&str, SocketAddr)>,
-    ) -> ProviderAuthProbeResult {
+    ) -> (ProviderAuthProbeResult, bool) {
         let started = Instant::now();
-        let result = |auth_class, selected_model_present, model_count| ProviderAuthProbeResult {
-            provider_family: target.family,
-            provider_host: target.safe_host.to_string(),
-            effective_model: effective_model.to_string(),
-            auth_class,
-            selected_model_present,
-            model_count,
-            latency_ms: elapsed_millis(started),
+        let result = |auth_class, selected_model_present, model_count| {
+            (
+                ProviderAuthProbeResult {
+                    provider_family: target.family,
+                    provider_host: target.safe_host.to_string(),
+                    effective_model: effective_model.to_string(),
+                    auth_class,
+                    selected_model_present,
+                    model_count,
+                    latency_ms: elapsed_millis(started),
+                },
+                false,
+            )
         };
 
         if !target.configuration_valid {
@@ -570,7 +582,15 @@ impl LlmClient {
             return result(ProviderAuthProbeClass::RedirectRefused, None, None);
         }
         match status.as_u16() {
-            401 | 403 => return result(ProviderAuthProbeClass::AuthFailed, None, None),
+            // Preserve exact status only inside the observation-to-writer
+            // path. The public probe auth classification remains unchanged.
+            401 => {
+                return (
+                    result(ProviderAuthProbeClass::AuthFailed, None, None).0,
+                    true,
+                )
+            }
+            403 => return result(ProviderAuthProbeClass::AuthFailed, None, None),
             402 => return result(ProviderAuthProbeClass::ProviderExhausted, None, None),
             429 => return result(ProviderAuthProbeClass::RateLimited, None, None),
             500..=599 => return result(ProviderAuthProbeClass::Transient, None, None),
