@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "scope": "automated_ci_only",
+  "required_jobs": [
+    "build-seat-setup",
+    "rust",
+    "physical-db-identity-windows",
+    "node",
+    "gitleaks"
+  ]
+}

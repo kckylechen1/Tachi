@@ -44,9 +44,10 @@ pub const RETIRED_EVIDENCE_SOURCE_SKIP_REASON: &str = "retired_evidence_source";
 
 /// The zero-signal fallback reason of the legacy `/eval`-memory scorer. Kept
 /// ONLY for that path: the #1202 owner ruling
-/// (`docs/engineering/architecture/dispatch-lifecycle.md` §4.2) demoted MBIT to
-/// derived evidence, so a routing answer whose only stated ground is "the MBIT
-/// card fits" is exactly what design D7 forbids on the ledger path.
+/// (`docs/engineering/architecture/model-card-authoring-guide.md`, "Authority
+/// and storage") demoted MBIT to derived evidence, so a routing answer whose
+/// only stated ground is "the MBIT card fits" is exactly what design D7 forbids
+/// on the ledger path.
 pub const BASELINE_MBIT_FIT_REASON: &str = "baseline_mbit_fit";
 
 /// A candidate the ledger has no usable row about. Deliberately NOT a fit

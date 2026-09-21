@@ -74,8 +74,8 @@ async fn tachi_task_brief_uses_wiki_hits_for_debug_checklist() {
     assert_eq!(
         json["suggested_next_tools"],
         json!([
-            "tachi_wiki(action='search')",
-            "tachi_skill(action='discover')",
+            "tachi_memory(action='search')",
+            "tachi_memory(action='alerts')",
             "tachi_task(action='brief')",
             "tachi_task(action='board')"
         ])

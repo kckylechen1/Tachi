@@ -23,6 +23,11 @@ pub(crate) struct MemoryServer {
     pub(crate) startup_reconciliation:
         Arc<std::sync::OnceLock<crate::managed_run_epoch::StartupReconciliation>>,
     pub(crate) db: DbRuntime,
+    /// The existing CurrentTruth assertion/reduction store, opened against
+    /// the same global SQLite file as the product runtime. This is a distinct
+    /// typed API/connection, not a second database or shadow authority.
+    pub(crate) current_truth:
+        Arc<StdMutex<tachi_params::current_truth::store::CurrentTruthSqliteStore>>,
     pub(crate) llm: Arc<tachi_llm::LlmClient>,
     /// Bounded LLM-call recorder for foundry runs. Writes the `prompt.md` /
     /// `result.md` / `status.json` artifact triple per call under

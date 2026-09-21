@@ -185,7 +185,7 @@ where
 
 /// Dispatch one trusted CLI maintenance operation through an `operate`
 /// profile MCP session. This is intentionally not caller-configurable: the
-/// local cards reconciler uses it for `archive_memory`, which is hidden from
+/// local cards reconciler and explicit operator CLI commands use it for routes hidden from
 /// the standard tray but must still be executed by the canonical daemon
 /// writer. The daemon's default profile and every ordinary CLI call remain
 /// unchanged.
@@ -339,6 +339,7 @@ where
 
 #[cfg(test)]
 mod tests {
+    mod operator_cli;
     use super::{
         cli_tool_allows_read_fallback, daemon_forward_named_project, named_project_forward_notice,
     };
@@ -560,9 +561,12 @@ mod tests {
         let local_addr = listener.local_addr().expect("local addr");
         let ct = CancellationToken::new();
         let ct_shutdown = ct.clone();
+        let token = uuid::Uuid::new_v4().simple().to_string();
+        server.set_daemon_proxy_token(token.clone());
 
         let mut http_config = StreamableHttpServerConfig::default();
         http_config.legacy_session_mode = true;
+        http_config.stateless_protocol_metadata_required = true;
         http_config.cancellation_token = ct.child_token();
 
         let service = StreamableHttpService::new(
@@ -584,6 +588,7 @@ mod tests {
                 project_db: None,
                 version: Some(env!("CARGO_PKG_VERSION").to_string()),
                 pid: Some(std::process::id() as i64),
+                internal_proxy_token: Some(token),
             },
             ct,
             handle,
@@ -663,6 +668,7 @@ mod tests {
                     "global_db": global.display().to_string(),
                     "project_db": serde_json::Value::Null,
                     "version": env!("CARGO_PKG_VERSION"),
+                    "internal_proxy_token": daemon_info.internal_proxy_token,
                 })
                 .to_string(),
             )
@@ -797,6 +803,7 @@ mod tests {
                     "global_db": global.display().to_string(),
                     "project_db": serde_json::Value::Null,
                     "version": env!("CARGO_PKG_VERSION"),
+                    "internal_proxy_token": daemon_info.internal_proxy_token,
                 })
                 .to_string(),
             )
@@ -956,6 +963,7 @@ mod tests {
                     "global_db": global.display().to_string(),
                     "project_db": serde_json::Value::Null,
                     "version": env!("CARGO_PKG_VERSION"),
+                    "internal_proxy_token": daemon_info.internal_proxy_token,
                 })
                 .to_string(),
             )
@@ -1108,6 +1116,7 @@ mod tests {
                     "global_db": global.display().to_string(),
                     "project_db": serde_json::Value::Null,
                     "version": env!("CARGO_PKG_VERSION"),
+                    "internal_proxy_token": daemon_info.internal_proxy_token,
                 })
                 .to_string(),
             )
@@ -1124,12 +1133,13 @@ mod tests {
             args.insert("text".to_string(), serde_json::json!(saved_text));
             args.insert("project".to_string(), serde_json::json!(cli_project_name));
 
-            let result = dispatch_cli_tool(
+            let result = dispatch_cli_operate_tool_with_migration_authority(
                 "tachi_wiki_write",
                 args,
                 &global,
                 None, // no --project-db: exactly the ticket's CLI shape
                 &tachi_home,
+                &memcore::MigrationAuthority::Deny,
                 |server, args_map| async move {
                     // In-process fallback. The daemon-forward path should
                     // handle this before we ever get here; reaching the

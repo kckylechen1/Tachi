@@ -431,11 +431,20 @@ struct StdioProxyServer {
     global_db_path: PathBuf,
     project_db_path: Option<PathBuf>,
     client_project: Option<String>,
-    /// Set at MCP initialize: `_meta` identity wins, env is fallback only
-    /// when the key is absent, blank/illegal omit the header (#1761).
-    /// `None` means initialize has not run yet — transport reads env.
+    /// Set only by legacy MCP initialize: `_meta` identity wins, env is
+    /// fallback only when the key is absent, blank/illegal omit the header
+    /// (#1761). Modern identity is resolved per request and never written
+    /// here. `None` means legacy initialize has not run — transport reads env.
     resolved_agent_identity:
         std::sync::Arc<std::sync::Mutex<Option<crate::cli_client::ProxyIdentityForward>>>,
+}
+
+#[derive(Clone)]
+struct StdioRequestIdentity {
+    client_project: Option<String>,
+    tool_profile: Option<tachi_hub::ToolProfile>,
+    client: Option<String>,
+    agent_identity: crate::cli_client::ProxyIdentityForward,
 }
 
 impl StdioProxyServer {
@@ -449,18 +458,19 @@ impl StdioProxyServer {
             .unwrap_or(crate::cli_client::ProxyIdentityForward::AutoEnv)
     }
 
-    fn capture_initialize_identity(&self, request: &rmcp::model::InitializeRequestParams) {
-        let (explicit_key_present, explicit_raw) =
-            request.meta.as_ref().map_or((false, None), |meta| {
-                match meta
-                    .0
-                    .get(crate::session_identity::META_AGENT_IDENTITY)
-                    .or_else(|| meta.0.get("tachi.agentIdentity"))
-                {
-                    Some(value) => (true, value.as_str()),
-                    None => (false, None),
-                }
-            });
+    fn resolve_legacy_agent_identity(
+        meta: Option<&rmcp::model::RequestMetaObject>,
+    ) -> crate::cli_client::ProxyIdentityForward {
+        let (explicit_key_present, explicit_raw) = meta.map_or((false, None), |meta| {
+            match meta
+                .0
+                .get(crate::session_identity::META_AGENT_IDENTITY)
+                .or_else(|| meta.0.get("tachi.agentIdentity"))
+            {
+                Some(value) => (true, value.as_str()),
+                None => (false, None),
+            }
+        });
         let resolved = crate::session_identity::resolve_proxy_agent_identity(
             explicit_raw,
             explicit_key_present,
@@ -468,7 +478,7 @@ impl StdioProxyServer {
                 .ok()
                 .as_deref(),
         );
-        let choice = match resolved {
+        match resolved {
             Some(value) => crate::cli_client::ProxyIdentityForward::Header(value),
             None => {
                 if explicit_key_present {
@@ -477,11 +487,117 @@ impl StdioProxyServer {
                     crate::cli_client::ProxyIdentityForward::AutoEnv
                 }
             }
-        };
+        }
+    }
+
+    fn capture_initialize_identity(&self, request: &rmcp::model::InitializeRequestParams) {
+        let choice = Self::resolve_legacy_agent_identity(request.meta.as_ref());
         *self
             .resolved_agent_identity
             .lock()
             .expect("stdio proxy identity lock poisoned") = Some(choice);
+    }
+
+    fn resolve_request_identity(
+        &self,
+        mode: crate::mcp_peer::McpPeerMode,
+        meta: &rmcp::model::RequestMetaObject,
+    ) -> Result<StdioRequestIdentity, rmcp::ErrorData> {
+        if mode == crate::mcp_peer::McpPeerMode::Legacy {
+            return Ok(StdioRequestIdentity {
+                client_project: self.client_project.clone(),
+                tool_profile: self.tool_profile,
+                client: None,
+                agent_identity: self.forwarded_agent_identity(),
+            });
+        }
+
+        let project = crate::session_identity::aliased_meta_identity_string(
+            meta,
+            crate::session_identity::META_PROJECT,
+            "tachi.project",
+        )
+        .map_err(stdio_identity_error)?;
+        require_stdio_binding_agreement(
+            "project",
+            project.as_deref(),
+            self.client_project.as_deref(),
+        )?;
+
+        let requested_profile = crate::session_identity::aliased_meta_identity_string(
+            meta,
+            crate::session_identity::META_PROFILE,
+            "tachi.profile",
+        )
+        .map_err(stdio_identity_error)?
+        .map(|raw| {
+            tachi_hub::parse_tool_profile(&raw).ok_or_else(|| {
+                rmcp::ErrorData::invalid_params(
+                    format!("unknown modern stdio request profile '{raw}'"),
+                    None,
+                )
+            })
+        })
+        .transpose()?;
+        let admitted_profile = self
+            .tool_profile
+            .unwrap_or_else(tachi_hub::default_tool_profile);
+        if let Some(requested_profile) = requested_profile {
+            if admitted_profile != requested_profile {
+                return Err(rmcp::ErrorData::invalid_params(
+                    format!(
+                        "modern stdio request profile '{}' does not match process-admitted profile '{}'",
+                        requested_profile.as_str(),
+                        admitted_profile.as_str()
+                    ),
+                    None,
+                ));
+            }
+        }
+
+        let client = crate::session_identity::aliased_meta_identity_string(
+            meta,
+            crate::session_identity::META_CLIENT,
+            "tachi.client",
+        )
+        .map_err(stdio_identity_error)?;
+        if let Some(client) = client.as_deref() {
+            http::HeaderValue::from_str(client).map_err(|error| {
+                rmcp::ErrorData::invalid_params(
+                    format!("invalid modern stdio request client label: {error}"),
+                    None,
+                )
+            })?;
+        }
+
+        let agent_identity = crate::session_identity::aliased_meta_identity_string(
+            meta,
+            crate::session_identity::META_AGENT_IDENTITY,
+            "tachi.agentIdentity",
+        )
+        .map_err(stdio_identity_error)?;
+        let agent_identity = match agent_identity {
+            Some(value) if crate::session_identity::valid_agent_identity_assertion(&value) => {
+                crate::cli_client::ProxyIdentityForward::Header(value)
+            }
+            Some(_) => {
+                return Err(rmcp::ErrorData::invalid_params(
+                    "invalid modern stdio request AgentIdentity assertion",
+                    None,
+                ));
+            }
+            // Absence is request-local too: it cannot inherit another modern
+            // request's metadata. Preserve the longstanding stdio process
+            // binding by resolving TACHI_AGENT_IDENTITY on this outbound call.
+            None => crate::cli_client::ProxyIdentityForward::AutoEnv,
+        };
+
+        Ok(StdioRequestIdentity {
+            client_project: self.client_project.clone(),
+            tool_profile: Some(admitted_profile),
+            client,
+            agent_identity,
+        })
     }
 
     fn current_daemon(&self) -> crate::cli_client::DaemonInfo {
@@ -493,20 +609,24 @@ impl StdioProxyServer {
 
     /// Re-resolve the daemon after a BeforeDispatch (transport) failure. The
     /// request never reached the daemon, so it may have restarted on a new
-    /// ephemeral port or died. Reuse the EXACT startup path
+    /// ephemeral port, rotated its local capability, or died. Reuse the EXACT startup path
     /// (`ensure_stdio_proxy_daemon`: version-compatible discovery +
     /// stale-replace + auto-spawn) so a self-healed daemon is never one startup
     /// would have rejected, then apply startup's project-context gate so a
     /// project-scoped request is never rerouted to a daemon that can't preserve
-    /// this project. Persist the fresh endpoint so later calls skip the dead URL.
+    /// this project. Persist the fresh connection identity for later calls.
     /// Returns None when nothing compatible is reachable, so the caller surfaces
     /// the original error.
-    async fn refresh_daemon(&self, stale_url: &str) -> Option<crate::cli_client::DaemonInfo> {
+    async fn refresh_daemon(
+        &self,
+        stale: &crate::cli_client::DaemonInfo,
+        identity: &StdioRequestIdentity,
+    ) -> Option<crate::cli_client::DaemonInfo> {
         let fresh = ensure_stdio_proxy_daemon(
             &self.app_home,
             &self.global_db_path,
             self.project_db_path.as_deref(),
-            self.client_project.as_deref(),
+            identity.client_project.as_deref(),
         )
         .await?;
         if !proxy_can_preserve_project_context(
@@ -514,21 +634,22 @@ impl StdioProxyServer {
             &self.app_home,
             &self.global_db_path,
             self.project_db_path.as_deref(),
-            self.client_project.as_deref(),
+            identity.client_project.as_deref(),
         ) {
             // A same-global daemon that can't preserve this project would
             // misroute writes; refuse it and surface the original error.
             return None;
         }
-        if fresh.url == stale_url {
-            // Same endpoint resolved again; retrying it would fail identically.
+        if fresh.url == stale.url && fresh.internal_proxy_token == stale.internal_proxy_token {
+            // An unchanged connection identity would fail identically. A daemon
+            // can restart on the same port with a newly minted capability.
             return None;
         }
         let mut guard = self.daemon.write().unwrap_or_else(|e| e.into_inner());
         *guard = fresh.clone();
         eprintln!(
-            "[stdio-proxy] self-healed daemon endpoint: {stale_url} -> {}",
-            fresh.url
+            "[stdio-proxy] self-healed daemon connection: {} -> {}",
+            stale.url, fresh.url
         );
         Some(fresh)
     }
@@ -602,15 +723,35 @@ impl StdioProxyServer {
     }
 }
 
+fn stdio_identity_error(message: String) -> rmcp::ErrorData {
+    rmcp::ErrorData::invalid_params(message, None)
+}
+
+fn require_stdio_binding_agreement(
+    field: &str,
+    requested: Option<&str>,
+    admitted: Option<&str>,
+) -> Result<(), rmcp::ErrorData> {
+    let Some(requested) = requested else {
+        return Ok(());
+    };
+    if admitted == Some(requested) {
+        return Ok(());
+    }
+    Err(rmcp::ErrorData::invalid_params(
+        format!(
+            "modern stdio request {field} '{requested}' does not match process-admitted {field} '{}'",
+            admitted.unwrap_or("<unbound>")
+        ),
+        None,
+    ))
+}
+
 impl rmcp::ServerHandler for StdioProxyServer {
     fn supported_protocol_versions(
         &self,
     ) -> std::borrow::Cow<'static, [rmcp::model::ProtocolVersion]> {
-        // Identity and project binding still use the legacy initialize lifecycle.
-        // Modern per-request admission belongs to the separate MCP-2026 adapter.
-        std::borrow::Cow::Borrowed(rmcp::model::ProtocolVersion::known_up_to(
-            &rmcp::model::ProtocolVersion::V_2025_11_25,
-        ))
+        std::borrow::Cow::Borrowed(crate::mcp_peer::supported_protocol_versions())
     }
 
     fn initialize(
@@ -620,6 +761,7 @@ impl rmcp::ServerHandler for StdioProxyServer {
     ) -> impl Future<Output = Result<rmcp::model::InitializeResult, rmcp::ErrorData>> + Send + '_
     {
         async move {
+            crate::mcp_peer::reject_modern_initialize(&request)?;
             let info = self.negotiate_initialize(&request)?;
             // Wire metadata lives in the context in RMCP 3.x; retain typed
             // params only for direct in-process callers.
@@ -635,20 +777,26 @@ impl rmcp::ServerHandler for StdioProxyServer {
 
     async fn discover(
         &self,
-        _context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
+        context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
     ) -> Result<rmcp::model::DiscoverResult, rmcp::ErrorData> {
-        Err(rmcp::ErrorData::method_not_found::<
-            rmcp::model::DiscoverRequestMethod,
-        >())
+        let mode = crate::mcp_peer::McpPeerMode::from_context(&context)?.require_modern()?;
+        self.resolve_request_identity(mode, &context.meta)?;
+        Ok(rmcp::model::DiscoverResult::from_server_info(
+            crate::mcp_peer::supported_protocol_versions().to_vec(),
+            self.get_info(),
+        ))
     }
 
-    // Preserve the SDK's legacy empty results while closing its inline defaults.
+    // Preserve the SDK's empty inherited results in both implemented modes.
     async fn complete(
         &self,
         _request: rmcp::model::CompleteRequestParams,
         context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
     ) -> Result<rmcp::model::CompleteResult, rmcp::ErrorData> {
-        crate::server_handler::require_legacy_session(&context.meta)?;
+        let mode = crate::mcp_peer::McpPeerMode::from_context(&context)?;
+        if mode == crate::mcp_peer::McpPeerMode::Modern20260728 {
+            self.resolve_request_identity(mode, &context.meta)?;
+        }
         Ok(Default::default())
     }
 
@@ -657,8 +805,14 @@ impl rmcp::ServerHandler for StdioProxyServer {
         _request: Option<rmcp::model::PaginatedRequestParams>,
         context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
     ) -> Result<rmcp::model::ListPromptsResult, rmcp::ErrorData> {
-        crate::server_handler::require_legacy_session(&context.meta)?;
-        Ok(Default::default())
+        let mode = crate::mcp_peer::McpPeerMode::from_context(&context)?;
+        let mut result = rmcp::model::ListPromptsResult::default();
+        if mode == crate::mcp_peer::McpPeerMode::Modern20260728 {
+            self.resolve_request_identity(mode, &context.meta)?;
+            result.ttl_ms = Some(0);
+            result.cache_scope = Some(rmcp::model::CacheScope::Private);
+        }
+        Ok(result)
     }
 
     async fn list_resources(
@@ -666,8 +820,14 @@ impl rmcp::ServerHandler for StdioProxyServer {
         _request: Option<rmcp::model::PaginatedRequestParams>,
         context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
     ) -> Result<rmcp::model::ListResourcesResult, rmcp::ErrorData> {
-        crate::server_handler::require_legacy_session(&context.meta)?;
-        Ok(Default::default())
+        let mode = crate::mcp_peer::McpPeerMode::from_context(&context)?;
+        let mut result = rmcp::model::ListResourcesResult::default();
+        if mode == crate::mcp_peer::McpPeerMode::Modern20260728 {
+            self.resolve_request_identity(mode, &context.meta)?;
+            result.ttl_ms = Some(0);
+            result.cache_scope = Some(rmcp::model::CacheScope::Private);
+        }
+        Ok(result)
     }
 
     async fn list_resource_templates(
@@ -675,8 +835,14 @@ impl rmcp::ServerHandler for StdioProxyServer {
         _request: Option<rmcp::model::PaginatedRequestParams>,
         context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
     ) -> Result<rmcp::model::ListResourceTemplatesResult, rmcp::ErrorData> {
-        crate::server_handler::require_legacy_session(&context.meta)?;
-        Ok(Default::default())
+        let mode = crate::mcp_peer::McpPeerMode::from_context(&context)?;
+        let mut result = rmcp::model::ListResourceTemplatesResult::default();
+        if mode == crate::mcp_peer::McpPeerMode::Modern20260728 {
+            self.resolve_request_identity(mode, &context.meta)?;
+            result.ttl_ms = Some(0);
+            result.cache_scope = Some(rmcp::model::CacheScope::Private);
+        }
+        Ok(result)
     }
 
     fn get_info(&self) -> rmcp::model::ServerInfo {
@@ -695,32 +861,46 @@ impl rmcp::ServerHandler for StdioProxyServer {
     ) -> impl Future<Output = Result<rmcp::model::ListToolsResult, rmcp::ErrorData>> + Send + '_
     {
         async move {
-            crate::server_handler::require_legacy_session(&context.meta)?;
+            let mode = crate::mcp_peer::McpPeerMode::from_context(&context)?;
+            let identity = self.resolve_request_identity(mode, &context.meta)?;
             let current = self.current_daemon();
-            match crate::cli_client::list_daemon_tools_with_profile(
+            let mut result = match crate::cli_client::list_daemon_tools_with_profile(
                 &current,
                 request.clone(),
-                self.tool_profile,
+                identity.tool_profile,
             )
             .await
             {
-                Ok(result) => Ok(result),
+                Ok(result) => result,
                 // BeforeDispatch = the request never reached the daemon; safe to
                 // re-resolve and retry (list_tools is read-only regardless).
                 Err(err) if err.allows_in_process_fallback() => {
-                    match self.refresh_daemon(&current.url).await {
+                    match self.refresh_daemon(&current, &identity).await {
                         Some(fresh) => crate::cli_client::list_daemon_tools_with_profile(
                             &fresh,
                             request,
-                            self.tool_profile,
+                            identity.tool_profile,
                         )
                         .await
-                        .map_err(daemon_error_data),
-                        None => Err(daemon_error_data(err)),
+                        .map_err(daemon_error_data)?,
+                        None => return Err(daemon_error_data(err)),
                     }
                 }
-                Err(err) => Err(daemon_error_data(err)),
+                Err(err) => return Err(daemon_error_data(err)),
+            };
+            if mode == crate::mcp_peer::McpPeerMode::Modern20260728 {
+                // The internal daemon client uses the retained legacy initialize
+                // lifecycle, which strips modern response metadata. Restore it
+                // only at the outer modern adapter boundary.
+                result
+                    .result_type
+                    .get_or_insert(rmcp::model::ResultType::COMPLETE);
+                result.ttl_ms.get_or_insert(0);
+                result
+                    .cache_scope
+                    .get_or_insert(rmcp::model::CacheScope::Private);
             }
+            Ok(result)
         }
     }
 
@@ -731,46 +911,60 @@ impl rmcp::ServerHandler for StdioProxyServer {
     ) -> impl Future<Output = Result<rmcp::model::CallToolResponse, rmcp::ErrorData>> + Send + '_
     {
         async move {
-            crate::server_handler::require_legacy_session(&context.meta)?;
-            if request.name.as_ref() == "runtime_info" {
+            let mode = crate::mcp_peer::McpPeerMode::from_context(&context)?;
+            let identity = self.resolve_request_identity(mode, &context.meta)?;
+            let requested_name = request.name.as_ref();
+            if !tachi_hub::tool_visible(requested_name, identity.tool_profile, None) {
+                return Ok(crate::server_handler::tool_not_found_result(requested_name).into());
+            }
+            if requested_name == "runtime_info" {
                 return Ok(self.runtime_info_result().await.into());
             }
-            let request = prepare_proxy_tool_call(request, self.client_project.as_deref())?;
+            let request = prepare_proxy_tool_call(request, identity.client_project.as_deref())?;
             let current = self.current_daemon();
-            let identity = self.forwarded_agent_identity();
-            match crate::cli_client::call_daemon_tool_raw_with_profile_and_identity(
-                &current,
-                request.clone(),
-                self.client_project.as_deref(),
-                self.tool_profile,
-                identity.clone(),
-            )
-            .await
-            {
-                Ok(result) => Ok(result),
-                // Only BeforeDispatch is safe to retry: the request never reached
-                // the daemon, so a re-resolved retry cannot duplicate a write.
-                // AfterDispatch (timeout / post-handshake failure) must surface
-                // as-is to avoid replaying a possibly-applied write.
-                Err(err) if err.allows_in_process_fallback() => {
-                    match self.refresh_daemon(&current.url).await {
-                        Some(fresh) => {
-                            crate::cli_client::call_daemon_tool_raw_with_profile_and_identity(
-                                &fresh,
-                                request,
-                                self.client_project.as_deref(),
-                                self.tool_profile,
-                                identity,
-                            )
-                            .await
-                            .map_err(daemon_error_data)
+            let mut result =
+                match crate::cli_client::call_daemon_tool_raw_with_profile_and_identity(
+                    &current,
+                    request.clone(),
+                    identity.client_project.as_deref(),
+                    identity.tool_profile,
+                    identity.client.as_deref(),
+                    identity.agent_identity.clone(),
+                )
+                .await
+                {
+                    Ok(result) => result,
+                    // Only BeforeDispatch is safe to retry: the request never reached
+                    // the daemon, so a re-resolved retry cannot duplicate a write.
+                    // AfterDispatch (timeout / post-handshake failure) must surface
+                    // as-is to avoid replaying a possibly-applied write.
+                    Err(err) if err.allows_in_process_fallback() => {
+                        match self.refresh_daemon(&current, &identity).await {
+                            Some(fresh) => {
+                                crate::cli_client::call_daemon_tool_raw_with_profile_and_identity(
+                                    &fresh,
+                                    request,
+                                    identity.client_project.as_deref(),
+                                    identity.tool_profile,
+                                    identity.client.as_deref(),
+                                    identity.agent_identity,
+                                )
+                                .await
+                                .map_err(daemon_error_data)?
+                            }
+                            None => return Err(daemon_error_data(err)),
                         }
-                        None => Err(daemon_error_data(err)),
                     }
-                }
-                Err(err) => Err(daemon_error_data(err)),
+                    Err(err) => return Err(daemon_error_data(err)),
+                };
+            if mode == crate::mcp_peer::McpPeerMode::Modern20260728 {
+                // See list_tools: the inner legacy hop cannot preserve this
+                // discriminator for the outer modern peer.
+                result
+                    .result_type
+                    .get_or_insert(rmcp::model::ResultType::COMPLETE);
             }
-            .map(Into::into)
+            Ok(result.into())
         }
     }
 }
@@ -783,25 +977,6 @@ fn prepare_proxy_tool_call(
     mut request: rmcp::model::CallToolRequestParams,
     client_project: Option<&str>,
 ) -> Result<rmcp::model::CallToolRequestParams, rmcp::ErrorData> {
-    if request.name.as_ref() == "tachi_briefing" {
-        let mut args = serde_json::Map::new();
-        args.insert("action".to_string(), serde_json::json!("briefing"));
-        args.insert("format".to_string(), serde_json::json!("markdown"));
-        args.insert("compact".to_string(), serde_json::json!(true));
-        if let Some(project) = client_project {
-            args.insert("project".to_string(), serde_json::json!(project));
-            args.insert(
-                "query".to_string(),
-                serde_json::json!(format!(
-                    "{project} current task recent decisions blockers next steps"
-                )),
-            );
-        }
-        request.name = "tachi_memory".into();
-        request.arguments = Some(args);
-        return Ok(request);
-    }
-
     if let Some(project) = client_project {
         crate::session_identity::enforce_session_project(
             request.name.as_ref(),

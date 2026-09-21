@@ -82,24 +82,22 @@ Relevant checks:
 
 ## Canonical Keep Set
 
-These tools are the public surface to optimize around. They should be small,
-well-documented, and allowed in `standard` unless a security reason says
-otherwise.
+These five facades are the complete ordinary Lead/Worker discovery surface.
+Action policy still distinguishes Lead from Worker permissions.
 
 | Tool | Role | Notes |
 | --- | --- | --- |
-| `tachi_tools` | discovery | Must stay visible so agents stop guessing tool names. |
-| `runtime_info` | routing identity | Cheap route/profile self-check. |
-| `tachi_status` | health | Session-start health and readiness signal. |
 | `tachi_memory` | memory facade | Canonical search/get/save/extract/briefing/checkpoint/alerts surface. |
 | `tachi_task` | task lifecycle facade | Historical (2026-07-07 base) plan/dispatch/complete/status/board/wait surface, since narrowed further — `dispatch`/`cancel`/`wait` were removed by #1319-C2 and `plan`/`cycle_plan`/`recommend`/`refine_issues`/`merge`/`ux_matrix` were retired by #1683 C1a. Current action set lives in `TachiTaskAction::PRIMARY`, not in this historical row. |
-| `tachi_tune` | route/recall tuning | Extracted from task/memory in #1426. Admin/operator only — never part of the standard keep-set. |
-| `tachi_verify` | verification ledger | Keep as evidence ledger for dispatch and safe-merge workflows. |
-| `tachi_wiki` | wiki facade | Canonical wiki search/browse/read/write facade. |
-| `tachi_skill` | skill facade | Canonical discover/run facade (the retired `bundle`/`loadout` actions were deleted by #1690 C3). |
-| `tachi_web_search` | web search intake | Keep only as a compatibility intake where a host lacks web search; #1467 leaves research reasoning with the host model. |
-| `vault_status` | safe credential readiness | Read-only status only; write/get vault tools stay out of daily profiles. |
 | `tachi_gh` | GitHub/evidence facade | Keep if GitHub remains part of ship/evidence workflows; move duplicated task PR actions here. |
+| `tachi_staff` | staffing facade | Lead may start/cancel; Worker is restricted to status. |
+| `tachi_a2a` | advisory messaging facade | Canonical bounded agent-to-agent messaging surface. |
+
+Diagnostics and residual facades such as `tachi_tools`, `runtime_info`,
+`tachi_status`, `tachi_verify`, `tachi_wiki`, `tachi_skill`,
+`tachi_web_search`, `vault_status`, and `tachi_tune` remain physically
+registered only for explicit Ops/admin compatibility. They are not ordinary
+daily discovery, and this contraction does not claim their deletion.
 
 `tachi_save` and `tachi_briefing` were convenience shorthands, both retired
 and removed from current profile allow-lists. Their canonical replacements are
@@ -133,7 +131,7 @@ delete wrappers.
 | `tachi_wiki_search` | Direct wiki search remains live in observe patterns at `patterns.rs:4`; the CLI map routes both `tachi_wiki_search` and the retired `wiki_search` alias to `tachi_wiki(action="search")` at `tool_map.rs:20`. | `tachi_wiki(action="search")` | Fold/delete candidate; not retired. | Migrate tests/docs before a separate deletion leaf. |
 | `wiki_search` | **DONE:** Retired and removed from MCP tool router and observe patterns. | `tachi_wiki(action="search")` | Hard-retired alias. | — |
 | `tachi_wiki_write` | Direct wiki write remains in remember patterns at `patterns.rs:40`; CLI map routes `tachi_wiki_write` and `wiki_write` to `tachi_wiki(action="write")` at `tool_map.rs:21`. | `tachi_wiki(action="write")` | Fold/delete candidate. | Same wiki alias leaf. |
-| `tachi_browse` | Facade read tool remains in observe patterns at `patterns.rs:23`. | `tachi_wiki(action="browse")` if browse stays a wiki action. | Fold candidate, but not first cut. | Confirm delegate dogfood before removing; delegate currently exposes `tachi_browse`. |
+| `tachi_browse` | Facade read tool remains registered for explicit Ops/admin compatibility but is absent from ordinary Lead/Worker discovery. | `tachi_wiki(action="browse")` if browse stays a wiki action. | Fold candidate, but not first cut. | Decide physical retirement separately; profile hiding is not deletion. |
 
 ### Batch B: Retire Direct Kanban Tools
 
@@ -192,20 +190,19 @@ runtime escape hatches.
 
 ### Batch F: Worker Escape Hatches After Action-Level Filtering
 
-Action-level filtering resolved the former facade/profile mismatch. The
-`delegate` profile now includes `tachi_task` and `tachi_skill`, while typed
-action policy admits only the worker-safe task and skill actions. The retired
-direct completion and skill routes cannot be restored by profile selection;
-`tachi_unstick` remains the explicit worker self-rescue surface.
+Action-level filtering resolves the facade/profile mismatch. Lead and Worker
+discovery now expose only the five product facades; Worker action policy keeps
+recursive staffing and GitHub mutation denied. Retained diagnostic and
+compatibility routes remain physically registered for explicit Ops/admin use.
 
 | Surface | Current evidence | Decision | Remaining work |
 | --- | --- | --- | --- |
 | `tachi_complete` (retired) | The direct route is retired; delegates complete work through the action-scoped `tachi_task(action="complete")` path. | Retired (executed). | None. |
-| `tachi_unstick` | The delegate and observe bundles still expose this dedicated self-rescue route. | Keep as worker self-rescue. | Decide only if an equivalent worker-safe facade action is added. |
-| `run_skill` (retired) | The direct route is retired; delegates execute reviewed skills through action-scoped `tachi_skill(action="run")`. | Retired (executed; skills are static reviewed now). | None. |
-| `tachi_event` | The delegate bundle still exposes continuity events. | Keep while continuity events are worker-facing. | Decide whether event append/query folds into memory/task. |
-| `runtime_info` and `tachi_tools` | Standard and delegate bundles retain readiness/discovery surfaces; unknown-tool errors route users to `tachi_tools`. | Keep. | None. |
-| `tachi_verify` | Standard retains the verification ledger required by dispatch law. | Keep. | None until verification evidence is absorbed elsewhere. |
+| `tachi_unstick` | The route remains registered but is absent from ordinary Lead/Worker discovery. | Retain for explicit Ops/admin compatibility; do not claim deletion. | Decide physical retirement separately. |
+| `run_skill` (retired) | The direct route is retired; `tachi_skill` is also absent from ordinary Lead/Worker discovery. | Retired (executed; skills are static reviewed now). | None. |
+| `tachi_event` | The route remains registered but is absent from ordinary Lead/Worker discovery. | Retain for explicit Ops/admin compatibility; do not claim deletion. | Decide whether event append/query folds into memory/task. |
+| `runtime_info` and `tachi_tools` | Routes remain registered but ordinary Lead/Worker discovery no longer exposes them. | Retain for explicit Ops/admin compatibility; do not claim deletion. | Decide physical retirement separately. |
+| `tachi_verify` | The route remains registered for explicit Ops/admin compatibility; verification law does not require model-facing default discovery. | Retain outside ordinary profiles. | None until verification evidence is absorbed elsewhere. |
 
 ## Proposed Leaf Queue
 
@@ -229,9 +226,10 @@ direct completion and skill routes cannot be restored by profile selection;
    Move self-tuning actions to an admin-only `tachi_tune` or equivalent before
    deleting duplicate action aliases.
 7. **DONE — introduce action-level filtering for delegates.**
-   Delegates now use action-scoped `tachi_task` and `tachi_skill`; the direct
-   `tachi_complete` and `run_skill` routes are retired. `tachi_unstick` remains
-   the explicit worker-safe rescue surface.
+   Delegates discover exactly the five product facades and use their
+   action-scoped Worker policy. The direct route `tachi_complete` is retired;
+   `run_skill` is retired too. `tachi_skill` and `tachi_unstick` remain only for
+   explicit Ops/admin compatibility.
 8. **Decide admin facade shape.**
    Either keep admin as full bypass for emergency use only, or replace it with
    explicit admin facades (`tachi_admin`, `tachi_hub`, `tachi_vault`) and a

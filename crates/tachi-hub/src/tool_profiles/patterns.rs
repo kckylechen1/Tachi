@@ -87,64 +87,23 @@ pub const OPERATE_TOOL_PATTERNS: &[&str] = &[
     "vault_status",
 ];
 
-/// Standard profile allow-list. Intersected with all bundles so the IDE/CLI
-/// tool tray stays small and focused on daily facade entrypoints.
+/// Ordinary Lead profile allow-list. The five product facades are the complete
+/// default model-facing surface; diagnostics remain on explicit Ops/admin
+/// profiles without claiming that their registered routes were deleted.
 pub const STANDARD_MINIMAL_TOOL_PATTERNS: &[&str] = &[
-    "tachi_a2a",
-    // Active tool discovery for the current profile
-    "tachi_tools",
-    // Runtime identity / DB routing self-check for embedded clients
-    "runtime_info",
-    // Health check: daemon status, vector coverage, foundry queue
-    "tachi_status",
-    // Work/control ledger. Tachi-owned dispatch is admin-only; ordinary
-    // delegation uses the host harness's native subagent.
-    "tachi_task",
-    // Background verification evidence ledger for runners and safe_merge.
-    "tachi_verify",
-    // Unified memory facade (search / save / extract_facts)
     "tachi_memory",
-    // Live web search. Keep in standard because some agents lack host search,
-    // and future wiki/research ledger flows need one canonical search intake.
-    "tachi_web_search",
-    // Wiki facade (search / browse / write)
-    "tachi_wiki",
-    // Skill facade (discover + run)
-    "tachi_skill",
-    // Vault session unlock/lock must work against the default daemon profile —
-    // CLI `tachi vault unlock` depends on it (#979).
-    "vault_unlock",
-    "vault_lock",
-    // Vault status (read-only, safe in standard)
-    "vault_status",
-    // GitHub facade (token checked at call time, not at list time)
+    "tachi_task",
+    "tachi_staff",
     "tachi_gh",
-    // Peer-publication broker (#1016 S1): advisory read-only peer awareness.
-    "peer_query",
+    "tachi_a2a",
 ];
 
-/// Delegate profile allow-list. For worker agents spawned by tachi_dispatch.
-///
-/// F3 (#495/#913): `tachi_task` is now on the list; recursive `dispatch` is
-/// denied by [`super::action_policy::facade_action_allowed`] (plan/complete/
-/// status/board/wait/briefing/doc_index only). `tachi_skill` is limited to
-/// discover/run/bundle by the same gate.
+/// Worker profile allow-list. Discovery matches the Lead product surface;
+/// action policy still denies recursive staffing and GitHub mutation.
 pub const DELEGATE_MINIMAL_TOOL_PATTERNS: &[&str] = &[
-    "tachi_a2a",
-    "tachi_tools",
-    "runtime_info",
-    // Unified memory facade (daily actions only under action policy)
     "tachi_memory",
-    "tachi_web_search",
-    // Wiki facade (search/browse/read under action policy)
-    "tachi_wiki",
-    // Self-rescue when stuck
-    "tachi_unstick",
-    // Task facade — action policy denies dispatch/recommend/merge/…
     "tachi_task",
-    // Canonical skill workflow facade (discover/run under action policy)
-    "tachi_skill",
-    // Peer-publication broker (#1016 S1): a worker lane reads a peer's advisory
-    // presence to avoid colliding blind. Read-only; no write path exists.
-    "peer_query",
+    "tachi_staff",
+    "tachi_gh",
+    "tachi_a2a",
 ];

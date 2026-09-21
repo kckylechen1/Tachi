@@ -27,6 +27,29 @@ impl MemoryServer {
         self.agent_runtime_read().tool_profile
     }
 
+    pub(crate) fn set_daemon_proxy_token(&self, token: String) {
+        self.agent_runtime_write().daemon_proxy_token = Some(token);
+    }
+
+    pub(crate) fn admits_internal_proxy_token(&self, claimed: Option<&str>) -> bool {
+        let runtime = self.agent_runtime_read();
+        let (Some(expected), Some(claimed)) = (runtime.daemon_proxy_token.as_deref(), claimed)
+        else {
+            return false;
+        };
+        if expected.len() != claimed.len() {
+            return false;
+        }
+        expected
+            .as_bytes()
+            .iter()
+            .zip(claimed.as_bytes())
+            .fold(0_u8, |difference, (left, right)| {
+                difference | (left ^ right)
+            })
+            == 0
+    }
+
     pub(crate) fn set_session_identity(
         &self,
         client: Option<String>,

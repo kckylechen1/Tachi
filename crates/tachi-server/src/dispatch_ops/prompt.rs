@@ -276,12 +276,12 @@ pub(crate) async fn assemble_resolved_prompt_with_trace(
             render_skill_invocation_contract(skill_id, &cap, &def)
         } else {
             format!(
-                "### {skill_id}\n- registry_status: missing\n- instruction: If `tachi_skill` is available, first run `tachi_skill(action='discover', query='{skill_id}')`; otherwise continue with the task route and report that the skill capability was unavailable."
+                "### {skill_id}\n- registry_status: missing\n- instruction: Use the host's native skill loader if it provides `{skill_id}`; otherwise continue with the task route and report that the skill capability was unavailable."
             )
         };
         let section = skill_budget.admit(&section).unwrap_or_else(|| {
             format!(
-                "### {skill_id}\n- embedded_contract: omitted by the skill input budget; use `tachi_skill(action='run', skill_id='{skill_id}')` when available."
+                "### {skill_id}\n- embedded_contract: omitted by the skill input budget; use the host's native skill loader when available."
             )
         });
         skill_sections.push(section);
@@ -289,7 +289,7 @@ pub(crate) async fn assemble_resolved_prompt_with_trace(
     if !skill_sections.is_empty() {
         parts.push("## Required skill invocation".to_string());
         parts.push(
-            "Before starting substantive work, apply these skills in order. If the child agent has Tachi MCP, prefer `tachi_skill(action='run', skill_id=...)`; otherwise use the embedded contract below. Start your worker output with `Using skills: <ids>` and follow each skill's hard stops and done condition."
+            "Before starting substantive work, apply these skills in order through the host's native skill loader or the embedded contract below. Start your worker output with `Using skills: <ids>` and follow each skill's hard stops and done condition."
                 .to_string(),
         );
         parts.extend(skill_sections);

@@ -1,21 +1,29 @@
+use std::collections::BTreeSet;
+
+pub(super) const MODEL_INVOCATION_FRONTMATTER_KEY: &str = "tachi_model_invocation_v1";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Frontmatter {
     pub(super) title: Option<String>,
     pub(super) summary: Option<String>,
     pub(super) category: Option<String>,
     pub(super) organize: Option<bool>,
+    /// Compact JSON for the closed `model-invocation-v1` receipt. This is a
+    /// first-class field because the legacy generic-scalar codec quotes and
+    /// escapes JSON, which cannot round-trip nested receipt bytes exactly.
+    pub(super) model_invocation_v1: Option<String>,
     pub(super) other_fields: Vec<(String, String)>,
 }
 
 /// 解析 Markdown 文件的 Frontmatter 和正文
-pub(super) fn parse_frontmatter(content: &str) -> (Option<Frontmatter>, &str) {
+pub(super) fn parse_frontmatter(content: &str) -> Result<(Option<Frontmatter>, &str), String> {
     if !content.starts_with("---") {
-        return (None, content);
+        return Ok((None, content));
     }
 
     let lines: Vec<&str> = content.lines().collect();
     if lines.is_empty() || lines[0] != "---" {
-        return (None, content);
+        return Ok((None, content));
     }
 
     let mut end_idx = None;
@@ -28,14 +36,16 @@ pub(super) fn parse_frontmatter(content: &str) -> (Option<Frontmatter>, &str) {
 
     let end_idx = match end_idx {
         Some(idx) => idx,
-        None => return (None, content),
+        None => return Ok((None, content)),
     };
 
     let mut title = None;
     let mut summary = None;
     let mut category = None;
     let mut organize = None;
+    let mut model_invocation_v1 = None;
     let mut other_fields = Vec::new();
+    let mut reserved_fields = BTreeSet::new();
 
     for i in 1..end_idx {
         let line = lines[i];
@@ -44,6 +54,15 @@ pub(super) fn parse_frontmatter(content: &str) -> (Option<Frontmatter>, &str) {
         }
         if let Some(pos) = line.find(':') {
             let key = line[..pos].trim().to_string();
+            if matches!(
+                key.as_str(),
+                "title" | "summary" | "category" | "organize" | MODEL_INVOCATION_FRONTMATTER_KEY
+            ) && !reserved_fields.insert(key.clone())
+            {
+                return Err(format!(
+                    "Refusing Wiki organize: protected invariant: duplicate reserved frontmatter field '{key}'"
+                ));
+            }
             let val = line[pos + 1..].trim();
             // 去除两端引号
             let val_clean = if (val.starts_with('"') && val.ends_with('"'))
@@ -65,6 +84,7 @@ pub(super) fn parse_frontmatter(content: &str) -> (Option<Frontmatter>, &str) {
                 "organize" => {
                     organize = Some(val_clean.parse::<bool>().unwrap_or(true));
                 }
+                MODEL_INVOCATION_FRONTMATTER_KEY => model_invocation_v1 = Some(val_clean),
                 _ => other_fields.push((key, val_clean)),
             }
         }
@@ -101,16 +121,17 @@ pub(super) fn parse_frontmatter(content: &str) -> (Option<Frontmatter>, &str) {
         ""
     };
 
-    (
+    Ok((
         Some(Frontmatter {
             title,
             summary,
             category,
             organize,
+            model_invocation_v1,
             other_fields,
         }),
         rest,
-    )
+    ))
 }
 
 /// 序列化 Frontmatter 结构为 Markdown 头部
@@ -129,6 +150,12 @@ pub(super) fn serialize_frontmatter(fm: &Frontmatter) -> String {
     if let Some(org) = fm.organize {
         s.push_str(&format!("organize: {}\n", org));
     }
+    if let Some(ref invocation) = fm.model_invocation_v1 {
+        s.push_str(&format!(
+            "{}: {}\n",
+            MODEL_INVOCATION_FRONTMATTER_KEY, invocation
+        ));
+    }
     for (k, v) in &fm.other_fields {
         if v.contains(' ') || v.contains(':') || v.contains('"') || v.contains('\'') {
             s.push_str(&format!("{}: \"{}\"\n", k, v.replace('"', "\\\"")));
@@ -143,7 +170,7 @@ pub(super) fn serialize_frontmatter(fm: &Frontmatter) -> String {
 /// Refuse a write when the existing codec cannot preserve the proposed header.
 pub(super) fn serialize_representable_frontmatter(fm: &Frontmatter) -> Result<String, String> {
     let serialized = serialize_frontmatter(fm);
-    let (parsed, remainder) = parse_frontmatter(&serialized);
+    let (parsed, remainder) = parse_frontmatter(&serialized)?;
     if parsed.as_ref() != Some(fm) || !remainder.is_empty() {
         return Err("Refusing Wiki organize: protected invariant: frontmatter serialization must preserve all fields without leaking into the document body".to_string());
     }
@@ -160,6 +187,7 @@ mod tests {
             summary: None,
             category: None,
             organize: None,
+            model_invocation_v1: None,
             other_fields: Vec::new(),
         }
     }
@@ -182,6 +210,7 @@ mod tests {
                 summary: Some(value.into()),
                 category: Some(value.into()),
                 organize: Some(false),
+                model_invocation_v1: None,
                 other_fields: vec![
                     ("z-last".into(), value.into()),
                     ("a-first".into(), "kept".into()),
@@ -192,10 +221,10 @@ mod tests {
                 serialize_representable_frontmatter(&fm).unwrap(),
                 serialized
             );
-            assert_eq!(parse_frontmatter(&serialized), (Some(fm), ""));
+            assert_eq!(parse_frontmatter(&serialized).unwrap(), (Some(fm), ""));
         }
         let legacy = "---\ntitle: \"literal\\n\"\nsummary: '!tag-like'\ncategory: product\norganize: false\nz: second\na: first\n---\nbody\n";
-        let (fm, body) = parse_frontmatter(legacy);
+        let (fm, body) = parse_frontmatter(legacy).unwrap();
         let fm = fm.unwrap();
         assert_eq!(fm.title.as_deref(), Some(r"literal\n"));
         assert_eq!(fm.summary.as_deref(), Some("!tag-like"));
@@ -237,5 +266,37 @@ mod tests {
         assert!(serialize_representable_frontmatter(&fm).is_err());
         fm.other_fields = vec![("bad:key".into(), "value".into())];
         assert!(serialize_representable_frontmatter(&fm).is_err());
+    }
+
+    #[test]
+    fn model_invocation_json_round_trips_as_reserved_unquoted_scalar() {
+        let mut fm = empty_header();
+        fm.model_invocation_v1 = Some(
+            r#"{"schema":"model-invocation-v1","lane":"extract","degraded":false}"#.to_string(),
+        );
+        let serialized = serialize_representable_frontmatter(&fm).unwrap();
+        assert_eq!(
+            serialized,
+            "---\ntachi_model_invocation_v1: {\"schema\":\"model-invocation-v1\",\"lane\":\"extract\",\"degraded\":false}\n---\n"
+        );
+        assert_eq!(parse_frontmatter(&serialized).unwrap(), (Some(fm), ""));
+    }
+
+    #[test]
+    fn duplicate_reserved_fields_fail_before_the_later_value_can_win() {
+        for key in [
+            "title",
+            "summary",
+            "category",
+            "organize",
+            MODEL_INVOCATION_FRONTMATTER_KEY,
+        ] {
+            let content = format!("---\n{key}: first\n{key}: second\n---\nbody\n");
+            let error = parse_frontmatter(&content).unwrap_err();
+            assert!(error.contains("duplicate reserved frontmatter field"));
+            assert!(error.contains(key));
+            assert!(!error.contains("first"));
+            assert!(!error.contains("second"));
+        }
     }
 }

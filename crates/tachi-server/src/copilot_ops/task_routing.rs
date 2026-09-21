@@ -258,20 +258,12 @@ pub(super) fn sop(id: &str, name: &str, reason: &str, activation_hint: &str) -> 
 }
 
 pub(super) fn build_tool_plan(intent: &str) -> Vec<Value> {
-    let mut plan = vec![
-        json!({
-            "step": "brief",
-            "tool": "tachi_memory",
-            "action": "briefing",
-            "when": "before starting non-trivial work",
-        }),
-        json!({
-            "step": "discover_sop",
-            "tool": "tachi_skill",
-            "action": "discover",
-            "when": "when selected_sops includes a skill not already active in the host",
-        }),
-    ];
+    let mut plan = vec![json!({
+        "step": "brief",
+        "tool": "tachi_memory",
+        "action": "briefing",
+        "when": "before starting non-trivial work",
+    })];
 
     match intent {
         // #1683 C1a retired tachi_task action='plan'; planning itself is the
@@ -285,8 +277,8 @@ pub(super) fn build_tool_plan(intent: &str) -> Vec<Value> {
         })),
         "fix_request" | "test_request" => plan.push(json!({
             "step": "progress_check",
-            "tool": "tachi_unstick",
-            "action": "check",
+            "tool": "tachi_memory",
+            "action": "alerts",
             "when": "after repeated failed attempts or unclear root cause",
         })),
         _ => {}

@@ -311,7 +311,7 @@ organize: true
     assert_eq!(fs::read_dir(outside.path()).unwrap().count(), 1);
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(clippy::await_holding_lock)]
 async fn test_docs_organize_concurrent_apply_refuses_docs_lock() {
@@ -357,6 +357,9 @@ async fn test_docs_organize_concurrent_apply_refuses_docs_lock() {
 
     let error = concurrent.expect_err("concurrent organize apply must refuse the docs lock");
     assert!(error.contains("already held"), "{error}");
+    crate::docs_ops::handle_wiki_organize(&server, docs_path.to_string_lossy().as_ref(), false)
+        .await
+        .expect("apply lock must be released when the owner completes");
 }
 
 #[cfg(unix)]

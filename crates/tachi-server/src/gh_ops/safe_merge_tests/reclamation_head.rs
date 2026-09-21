@@ -264,6 +264,8 @@ async fn run_private_case(case: &str) {
     let flow = "flow_private_reclamation";
     write_verification(&root.join("runs"), flow, "passed", &pr.head_sha);
     seed_full_passed_set(&root.join("home/.tachi"), flow, &pr.head_sha, None);
+    let server = verification_server(&root.join("home/.tachi"));
+    seed_verification_claim(&server, flow, &pr.head_sha);
     let client = MockGhClient::new()
         .with_pr("o/r", pr)
         .with_checks("o/r", 42, vec![]);
@@ -274,6 +276,7 @@ async fn run_private_case(case: &str) {
         Some(wt.to_str().unwrap())
     };
     let result = handle_github_safe_merge_with_holder_gate(
+        &server,
         &client,
         "o/r",
         42,
@@ -541,6 +544,8 @@ async fn run_mapping_case(case: &str) {
     let flow = "flow_private_mapping";
     write_verification(&root.join("runs"), flow, "passed", &head);
     seed_full_passed_set(&root.join("home/.tachi"), flow, &head, None);
+    let server = verification_server(&root.join("home/.tachi"));
+    seed_verification_claim(&server, flow, &head);
     let mut pr = ready_pr();
     pr.head_sha = head;
     pr.head_ref = if case == "no_branch" {
@@ -552,6 +557,7 @@ async fn run_mapping_case(case: &str) {
         .with_pr("o/r", pr)
         .with_checks("o/r", 42, vec![]);
     let result = handle_github_safe_merge_with_holder_gate(
+        &server,
         &client,
         "o/r",
         42,

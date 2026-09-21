@@ -54,12 +54,14 @@ features.
 ### 2. The crew is the product
 Work is done by seats — implementer, independent reviewer, verifier, mechanical
 clerk — enforcing the invariants that were proven in live operation:
-implementation and review never share a seat or model; the different-model
-boundary applies equally to security, credentials, identity/authority, egress,
-and merge/release gates, while cross-vendor routing remains optional defense-in-depth; no
-self-report is trusted without independent verification (自报勿信), and change
-lands only as a reviewable PR (呈单即止). The seats are the product; any
-particular model staffing them is not. The leader seat is a *role*: its
+when review is required, implementation and review never share a seat. High-risk
+security, credentials, identity/authority, egress, and merge/release-gate changes
+also require different models; ordinary behavior changes prefer but do not require
+that diversity, and low-risk non-semantic edits need only proportional checks.
+Cross-vendor routing remains optional defense-in-depth. No self-report is trusted
+without independent verification (自报勿信), and change lands only as a reviewable
+PR (呈单即止). The seats are the product; any particular model staffing them is
+not. The leader seat is a *role*: its
 judgment is fed by the precedent store (pillar 4), so swapping the leader model
 preserves the judging.
 

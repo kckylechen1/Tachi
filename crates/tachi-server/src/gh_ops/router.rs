@@ -92,6 +92,7 @@ pub(crate) async fn handle_tachi_gh(
             .await
         }
         "issue_freshness_scan" => handle_issue_freshness_scan(server, &params).await,
+        "current_truth_refresh" => handle_current_truth_refresh(server, &params).await,
         "pr_comment" => {
             let target = resolve_tachi_gh_pr_target(&params, "pr_comment")?;
             handle_gh_comment(
@@ -170,6 +171,7 @@ pub(crate) async fn handle_tachi_gh(
                 .transpose()?;
             let holder_gate = |worktree: &str| worktree_holder_gate(server, worktree);
             let out = handle_github_safe_merge_with_holder_gate(
+                server,
                 &client,
                 &target.repo,
                 target.number,
@@ -237,6 +239,7 @@ pub(crate) async fn handle_tachi_gh(
             )?;
             let client = gh_client_for_server(server)?;
             handle_github_safe_merge_with_holder_gate(
+                server,
                 &client,
                 &target.repo,
                 target.number,
@@ -254,7 +257,7 @@ pub(crate) async fn handle_tachi_gh(
         }
         "pr_handoff" => {
             let task_params = lifecycle_task_params(&params)?;
-            crate::task_lifecycle::handle_task_pr_handoff(&task_params)
+            crate::task_lifecycle::handle_task_pr_handoff(server, &task_params)
         }
         "release_note" => {
             let task_params = lifecycle_task_params(&params)?;
@@ -280,7 +283,7 @@ pub(crate) async fn handle_tachi_gh(
             Box::pin(handle_gh_handoff_repair(server, repo, number)).await
         }
         other => Err(format!(
-            "Unknown action '{}'. Expected: repo_view, issue_list, issue_read, issue_create, issue_comment, issue_label, issue_freshness_scan, pr_list, pr_read, pr_comments, pr_comment, pr_review_digest, safe_merge, ship, close_loop, link_pr, pr_status, pr_handoff, release_note, handoff_draft, handoff_publish, handoff_repair",
+            "Unknown action '{}'. Expected: repo_view, issue_list, issue_read, issue_create, issue_comment, issue_label, issue_freshness_scan, current_truth_refresh, pr_list, pr_read, pr_comments, pr_comment, pr_review_digest, safe_merge, ship, close_loop, link_pr, pr_status, pr_handoff, release_note, handoff_draft, handoff_publish, handoff_repair",
             other
         )),
     }?;
@@ -680,7 +683,7 @@ fn safe_merge_reclaimed_worktree(envelope: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn required_repo(params: &TachiGhParams, action: &str) -> Result<String, String> {
+pub(super) fn required_repo(params: &TachiGhParams, action: &str) -> Result<String, String> {
     params
         .repo
         .as_deref()

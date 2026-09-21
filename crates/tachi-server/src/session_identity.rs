@@ -11,11 +11,18 @@
 //! #495 and is OUT OF SCOPE for the #809 fix. Until #495 lands, treat this
 //! module as "unbound-write rejection", NOT a complete identity spine.
 
-use rmcp::model::JsonObject;
+use rmcp::model::{JsonObject, RequestMetaObject};
 
 pub(crate) const HEADER_PROFILE: &str = "x-tachi-profile";
 pub(crate) const HEADER_CLIENT: &str = "x-tachi-client";
 pub(crate) const HEADER_AGENT_IDENTITY: &str = "x-tachi-agent-identity";
+/// Per-daemon capability carried only by trusted local CLI/stdio-proxy hops.
+/// It is minted at daemon startup, persisted in the owner-only discovery
+/// receipt, and never accepted from MCP initialize metadata. Possessing this
+/// capability authorizes an explicitly process-selected privileged profile
+/// (Ops or Admin/emergency); profile metadata alone remains untrusted, and
+/// possession of the capability never selects a privileged profile implicitly.
+pub(crate) const HEADER_INTERNAL_PROXY_TOKEN: &str = "x-tachi-internal-proxy-token";
 /// Process-env twin of [`HEADER_AGENT_IDENTITY`] / [`META_AGENT_IDENTITY`].
 /// Stdio hosts (Cursor `mcp.json`) cannot set initialize `_meta`; they can
 /// stamp this on `tachi serve`. Absent/invalid stays absent — never minted
@@ -481,6 +488,46 @@ pub(crate) fn reject_unbound_cross_project_write(
 pub(crate) fn normalize_identity_value(value: &str) -> Option<String> {
     let trimmed = value.trim();
     (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+/// Read one identity value from request metadata without collapsing a
+/// present-but-malformed declaration into absence.
+pub(crate) fn meta_identity_string(
+    meta: &RequestMetaObject,
+    key: &str,
+) -> Result<Option<String>, String> {
+    match meta.0.get(key) {
+        None => Ok(None),
+        Some(value) => {
+            let raw = value
+                .as_str()
+                .ok_or_else(|| format!("_meta.{key} must be a string"))?;
+            normalize_identity_value(raw)
+                .map(Some)
+                .ok_or_else(|| format!("_meta.{key} is blank"))
+        }
+    }
+}
+
+/// Resolve canonical and dotted-alias request identities without precedence:
+/// two declarations must agree exactly after whitespace normalization.
+pub(crate) fn aliased_meta_identity_string(
+    meta: &RequestMetaObject,
+    canonical: &str,
+    alias: &str,
+) -> Result<Option<String>, String> {
+    let canonical_value = meta_identity_string(meta, canonical)?;
+    let alias_value = meta_identity_string(meta, alias)?;
+    if let Some((canonical_value, alias_value)) = canonical_value
+        .as_ref()
+        .zip(alias_value.as_ref())
+        .filter(|(canonical_value, alias_value)| canonical_value != alias_value)
+    {
+        return Err(format!(
+            "conflicting request _meta identities: {canonical} ({canonical_value}) does not match {alias} ({alias_value})"
+        ));
+    }
+    Ok(canonical_value.or(alias_value))
 }
 
 pub(crate) fn valid_agent_identity_assertion(value: &str) -> bool {

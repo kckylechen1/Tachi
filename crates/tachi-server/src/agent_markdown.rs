@@ -309,7 +309,7 @@ mod tests {
             .count();
         assert_eq!(gate_rows, 3);
         assert!(compact.contains("### Verification gates"));
-        assert!(compact.contains("tachi_verify(action='board')"));
+        assert!(compact.contains("tachi_task(action='status')"));
     }
 
     #[test]
