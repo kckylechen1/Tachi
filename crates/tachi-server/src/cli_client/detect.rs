@@ -15,6 +15,9 @@ pub(crate) struct DaemonInfo {
     pub project_db: Option<String>,
     pub version: Option<String>,
     pub pid: Option<i64>,
+    /// Owner-only per-daemon capability used by local proxy transports. Never
+    /// print or expose this value in caller-visible diagnostics.
+    pub internal_proxy_token: Option<String>,
 }
 
 /// Why a daemon probe returned nothing. Used by the stdio `Missing` path so the
@@ -179,6 +182,10 @@ async fn detect_daemon_from_pid_path(pid_path: &Path) -> Result<DaemonInfo, Daem
                 .and_then(|value| value.as_str())
                 .map(str::to_string),
             pid: i64::try_from(pid).ok(),
+            internal_proxy_token: parsed
+                .get("internal_proxy_token")
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
         }),
         _ => Err(DaemonProbeFailure::TcpProbeRefused {
             path: pid_path.to_path_buf(),
@@ -324,6 +331,7 @@ mod tests {
             project_db: project.map(str::to_string),
             version: version.map(str::to_string),
             pid: Some(1),
+            internal_proxy_token: None,
         }
     }
 
@@ -510,6 +518,35 @@ mod tests {
                 port,
             }
         );
+    }
+
+    #[tokio::test]
+    async fn detect_from_pid_path_loads_internal_proxy_capability() {
+        let dir = TempDir::new().expect("tempdir");
+        let pid_path = dir.path().join("daemon.pid");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        std::fs::write(
+            &pid_path,
+            serde_json::to_string(&json!({
+                "pid": std::process::id(),
+                "port": port,
+                "internal_proxy_token": "owner-only-test-capability",
+            }))
+            .expect("json"),
+        )
+        .expect("write pid");
+
+        let info = detect_daemon_from_pid_path(&pid_path)
+            .await
+            .expect("live daemon discovery");
+        assert_eq!(
+            info.internal_proxy_token.as_deref(),
+            Some("owner-only-test-capability")
+        );
+        drop(listener);
     }
 
     /// Composition: scoped pid TCP-refused + legacy absent must report

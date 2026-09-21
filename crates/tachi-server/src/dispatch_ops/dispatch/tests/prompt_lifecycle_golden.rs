@@ -47,7 +47,6 @@ Bullet list: done / blocked / next.
   - skill:waza-tachi: Start from briefing, then save decisions/checkpoints around meaningful milestones.
 - tool_plan:
   - tachi_memory(briefing): before starting non-trivial work
-  - tachi_skill(discover): when selected_sops includes a skill not already active in the host
   - tachi_memory(checkpoint): before handoff or after a meaningful milestone
 
 ## Dispatch profile
@@ -64,11 +63,11 @@ Bullet list: done / blocked / next.
 
 ## Required skill invocation
 
-Before starting substantive work, apply these skills in order. If the child agent has Tachi MCP, prefer `tachi_skill(action='run', skill_id=...)`; otherwise use the embedded contract below. Start your worker output with `Using skills: <ids>` and follow each skill's hard stops and done condition.
+Before starting substantive work, apply these skills in order through the host's native skill loader or the embedded contract below. Start your worker output with `Using skills: <ids>` and follow each skill's hard stops and done condition.
 
 ### typed-skill
 - registry_status: missing
-- instruction: If `tachi_skill` is available, first run `tachi_skill(action='discover', query='typed-skill')`; otherwise continue with the task route and report that the skill capability was unavailable.
+- instruction: Use the host's native skill loader if it provides `typed-skill`; otherwise continue with the task route and report that the skill capability was unavailable.
 
 
 

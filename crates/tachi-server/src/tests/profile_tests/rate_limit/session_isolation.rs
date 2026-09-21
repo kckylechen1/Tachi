@@ -17,7 +17,14 @@ fn isolation_args() -> serde_json::Map<String, serde_json::Value> {
 
 async fn call_tool_rate_limit_outcome(server: MemoryServer) -> &'static str {
     match call_tool_on_server(server, "runtime_info", Some(isolation_args())).await {
-        Ok(_) => "ok",
+        Ok(result) => {
+            assert_ne!(
+                result.is_error,
+                Some(true),
+                "rate-limit success must be a real tool success: {result:?}"
+            );
+            "ok"
+        }
         Err(err) if err.message.contains("Loop detected") => "rate_limited",
         Err(err) => panic!("unexpected call_tool error: {}", err.message),
     }
@@ -26,6 +33,7 @@ async fn call_tool_rate_limit_outcome(server: MemoryServer) -> &'static str {
 #[tokio::test]
 async fn rate_limit_burst_does_not_bleed_across_mcp_session_clones() {
     let base = make_server();
+    base.set_tool_profile(Some(tachi_hub::ToolProfile::operate()));
     let session_a = base.clone_for_mcp_session();
     let session_b = base.clone_for_mcp_session();
 
@@ -68,6 +76,7 @@ async fn rate_limit_burst_does_not_bleed_across_mcp_session_clones() {
 #[tokio::test]
 async fn rate_limit_concurrent_session_receipt_harness() {
     let base = make_server();
+    base.set_tool_profile(Some(tachi_hub::ToolProfile::operate()));
     let session_a = base.clone_for_mcp_session();
     let session_b = base.clone_for_mcp_session();
     let sessions = [session_a, session_b];

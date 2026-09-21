@@ -48,13 +48,10 @@ pub(crate) async fn handle_task_release_note(
         Some(flow_id) => crate::verify_ops::read_verification_ledger(flow_id)?,
         None => None,
     };
-    // #1454 G3: the release note's verification HEADLINE is the gate verdict
-    // with the best server-known head (github head → receipt-store head →
-    // `unverified`), never the raw caller-asserted ledger `overall`.
+    // The release note's verification headline is claim-bound gate output,
+    // never the raw caller-asserted ledger `overall`.
     let verification_verdict = match flow_id {
-        Some(flow_id) => {
-            release_note_verification_verdict(server, flow_id, &status, verification.as_ref())?
-        }
+        Some(flow_id) => release_note_verification_verdict(server, flow_id, verification.as_ref())?,
         None => None,
     };
     let release_note = build_release_note_markdown(
@@ -290,41 +287,26 @@ pub(super) fn build_release_note_markdown(
     body
 }
 
-/// #1454 G3: authority-aware verification verdict for the release note —
-/// the same head resolution the cycle view and pr_handoff use. The best
-/// server-known head is the GitHub head the server itself wrote into
-/// `status.json::github::head_sha` (safe_merge/link_pr observed it from
-/// GitHub), else the receipt-store head (the server observed it at run
-/// time). With neither, the verdict is `unverified` (fail-closed — never the
-/// raw caller-asserted ledger `overall`). `None` means no ledger exists.
+/// Authority-aware verification verdict for the release note. The active
+/// WorkClaim owns the evaluated head; `None` means no ledger exists.
 fn release_note_verification_verdict(
     server: &MemoryServer,
     flow_id: &str,
-    status: &Value,
     ledger: Option<&Value>,
 ) -> Result<Option<String>, String> {
     if ledger.is_none() {
         return Ok(None);
     }
-    let home = server.tachi_home_dir();
-    let head = status
-        .get("github")
-        .and_then(|github| github.get("head_sha"))
-        .and_then(Value::as_str)
-        .filter(|sha| !sha.trim().is_empty())
-        .map(str::to_string)
-        .or_else(|| crate::verify_ops::best_receipt_head(&home, flow_id));
-    let Some(head) = head else {
-        return Ok(Some("unverified".to_string()));
-    };
-    match crate::verify_ops::evaluate_verification_gate(Some(flow_id), &head, &home)? {
-        Some(gate) => Ok(Some(
+    match crate::verify_ops::evaluate_verification_gate(server, Some(flow_id)) {
+        Ok(Some(gate)) => Ok(Some(
             gate.get("overall")
                 .and_then(Value::as_str)
                 .unwrap_or("unverified")
                 .to_string(),
         )),
-        None => Ok(Some("unverified".to_string())),
+        Ok(None) => Ok(Some("unverified".to_string())),
+        Err(err) if err.starts_with("verification_claim_") => Ok(Some("unverified".to_string())),
+        Err(err) => Err(err),
     }
 }
 
@@ -337,10 +319,8 @@ pub(super) fn append_verification_summary(
         body.push_str("- No verification ledger attached.\n");
         return;
     };
-    // #1454 G3: the headline is the GATE verdict (with the best server-known
-    // head); the raw ledger `overall` (caller-asserted, never authority) is a
-    // detail row. `verdict == None` means no server-known head was
-    // resolvable → fail-closed `unverified` display.
+    // The headline is the claim-bound gate verdict; raw ledger `overall` is
+    // caller-asserted detail only. No verdict renders fail-closed unverified.
     let headline = verdict.unwrap_or("unverified");
     body.push_str(&format!("- Overall: `{headline}`\n"));
     if let Some(ledger_overall) = verification.get("overall").and_then(Value::as_str) {
@@ -427,15 +407,9 @@ mod tests {
         })
     }
 
-    fn status_with_github_head(head: &str) -> Value {
-        json!({
-            "github": { "head_sha": head, "repo": "org/repo", "pr_number": 1 },
-        })
-    }
-
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
-    async fn release_note_verdict_uses_gate_with_best_server_known_head() {
+    async fn release_note_verdict_uses_active_claim_head() {
         let _guard = crate::utils::global_test_lock()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -447,6 +421,22 @@ mod tests {
         let flow_id = "flow_release-note-verdict";
         let head = "abc123def456";
         let ledger = ledger_value("passed");
+        crate::claims_ops::admit_agent_connection(&server, Some("agent.release-note".into()), true)
+            .expect("local admission");
+        let claim_params: crate::TachiTaskParams = serde_json::from_value(json!({
+            "action": "claim",
+            "flow_id": flow_id,
+            "issue_ref": "org/repo#1",
+            "branch": "lane/release-note",
+            "claim_role": "reviewer",
+            "claim_mode": "read_only",
+            "worktree_path": "",
+            "claim_scope": ["crates/tachi-server/src/task_lifecycle/release_ux/release_note.rs"],
+            "expected_head": head,
+            "lease_expires_at": "2030-01-01T00:00:00Z",
+        }))
+        .expect("claim params");
+        crate::claims_ops::handle_task_claim(&server, &claim_params).expect("work claim");
         // The gate reads the ledger from DISK (`<runs-root>/<flow_id>/
         // verification.json`); the in-memory `ledger` passed to the verdict
         // is only the display value. Persist it like the release-note flow
@@ -459,17 +449,15 @@ mod tests {
         )
         .expect("write ledger");
 
-        // No server-known head (no github head, no receipts) → fail-closed
-        // `unverified`, never the raw ledger "passed".
+        // The claim head is authoritative even without GitHub or receipts;
+        // absent receipts remain pending, never raw-ledger green.
         let verdict =
-            release_note_verification_verdict(&server, flow_id, &json!({}), Some(&ledger))
-                .expect("verdict");
-        assert_eq!(verdict.as_deref(), Some("unverified"));
+            release_note_verification_verdict(&server, flow_id, Some(&ledger)).expect("verdict");
+        assert_eq!(verdict.as_deref(), Some("pending"));
 
         // No ledger → None (callers keep their missing-verification copy).
         std::fs::remove_file(run_dir.join("verification.json")).expect("remove ledger");
-        let verdict =
-            release_note_verification_verdict(&server, flow_id, &json!({}), None).expect("verdict");
+        let verdict = release_note_verification_verdict(&server, flow_id, None).expect("verdict");
         assert_eq!(verdict, None);
         std::fs::write(
             run_dir.join("verification.json"),
@@ -477,28 +465,18 @@ mod tests {
         )
         .expect("restore ledger");
 
-        // GitHub head + only an fmt receipt → gate `pending` (missing kinds).
-        let verdict = release_note_verification_verdict(
-            &server,
-            flow_id,
-            &status_with_github_head(head),
-            Some(&ledger),
-        )
-        .expect("verdict");
+        // Only an fmt receipt → gate `pending` (missing kinds).
+        let verdict =
+            release_note_verification_verdict(&server, flow_id, Some(&ledger)).expect("verdict");
         assert_eq!(verdict.as_deref(), Some("pending"));
 
-        // GitHub head + the FULL canonical receipt set → gate `passed`.
+        // The full canonical receipt set at the claim head → gate `passed`.
         for kind in crate::verify_ops::MERGE_REQUIRED_RUN_KINDS {
             seed_run_receipt_for_test(&home, flow_id, kind, &receipt(kind, head))
                 .expect("seed receipt");
         }
-        let verdict = release_note_verification_verdict(
-            &server,
-            flow_id,
-            &status_with_github_head(head),
-            Some(&ledger),
-        )
-        .expect("verdict");
+        let verdict =
+            release_note_verification_verdict(&server, flow_id, Some(&ledger)).expect("verdict");
         assert_eq!(verdict.as_deref(), Some("passed"));
 
         if let Some(v) = original {

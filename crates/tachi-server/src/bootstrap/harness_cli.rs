@@ -415,6 +415,12 @@ fn print_harness_report(report: &HarnessStatusReport) {
                 source.density_budget.bytes,
                 source.remediation_owner
             );
+            for carrier in &source.direct_consumers {
+                println!(
+                    "    direct {:<12} source={} {}",
+                    carrier, source.source, source.resolved_path
+                );
+            }
             for target in &source.targets {
                 let hash = target.hash.as_deref().unwrap_or("-");
                 let bytes = target

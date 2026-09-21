@@ -26,34 +26,52 @@ do HTTP. Target shape for Claude Code / Codex-class hosts:
 |---|---|
 | Loopback HTTP listener + `/mcp` | `bootstrap/serve/daemon.rs` (`127.0.0.1`) |
 | `/health` (status, transport, auth posture, reconnect) | same |
-| Session identity at `initialize` | headers `x-tachi-*` **or** meta `tachi*` |
+| Legacy-only session identity at `initialize` | headers `x-tachi-*` **or** meta `tachi*` |
 | Profile filter (admin refused without #495 policy) | `server_handler::parse_http_tool_profile` |
 | Read/write asymmetry | `session_identity` |
 | E2E tests | `bootstrap/serve/stdio/tests.rs` (`http_direct_connect_*`) |
 
 ## Protocol compatibility (RMCP 3.3, #1891)
 
-The daemon, stdio proxy, and portable server explicitly support MCP versions
-through `2025-11-25`. Upgrading the SDK does not enable the `2026-07-28`
-stateless lifecycle. Legacy `initialize` negotiates an older client's version;
-a newer version offered through that legacy handshake negotiates down to
-`2025-11-25`. Modern inline requests fail with `UNSUPPORTED_PROTOCOL_VERSION`
-before tool dispatch. A handler guard also rejects the inline
-lifecycle when its metadata selects an older version: otherwise RMCP can route
-that request statelessly and bypass initialize-time binding. Discovery returns
-`METHOD_NOT_FOUND` so Auto clients can fall back to initialize. Legacy tool
-responses omit `resultType`.
+The daemon and stdio proxy implement two explicit peer modes. Legacy peers
+retain `initialize`, `notifications/initialized`, and HTTP session behavior
+through `2025-11-25`; legacy tool responses omit `resultType`. Modern peers use
+RMCP 3.3's actual `2026-07-28` `server/discover` lifecycle, typed capabilities,
+per-request client metadata, `resultType`, and stateless HTTP routing. A peer
+that explicitly sends `2026-07-28` through the removed `initialize` lifecycle
+gets `UNSUPPORTED_PROTOCOL_VERSION` rather than a successful downgrade to
+`2025-11-25`. The portable server remains intentionally legacy-only and fails
+the same modern initialize explicitly.
+
+The normal stdio adapter is the proxy above. The debugging-only direct route
+selected by `TACHI_DISABLE_STDIO_PROXY=1` remains legacy-only: because it has
+neither the proxy's process-bound admission gate nor HTTP transport headers, it
+returns typed `UNSUPPORTED_PROTOCOL_VERSION` for modern discovery, listing,
+completion, and tool calls rather than accepting request metadata as authority.
+
+Modern HTTP requests carry matching `Mcp-Protocol-Version`, `Mcp-Method`, and,
+where applicable, `Mcp-Name` / `Mcp-Param-*` routing headers. RMCP rejects
+missing or conflicting standard headers and body metadata before handler
+dispatch. Tachi additionally rejects conflicts between an `X-Tachi-*` identity
+header and its request `_meta` twin before tool dispatch. Modern identity and
+admission are applied to a request-local server clone; they never replace the
+legacy session binding or become protocol-session authority. Inline metadata
+that selects a legacy version is still rejected because it cannot bypass the
+legacy initialize/session adapter. Modern `clientInfo` is optional, but when
+present it must be a valid typed MCP `Implementation`; malformed values fail
+before discovery or tool dispatch. Validation decodes the current request
+metadata directly and never substitutes an initialized peer's `clientInfo`.
 
 RMCP 3.x delivers wire initialize `_meta` through `RequestContext.meta`.
 The adapters read it there, retaining typed initialize params only for direct
 in-process calls. Existing header precedence, project binding, self-asserted
 identity, profile filtering and retry rules remain in force.
 
-Modern per-request admission and the Tasks bridge remain separate work under
+The MCP Tasks bridge remains separate work under
 [#1531](https://github.com/kckylechen1/tachi/issues/1531). Neither a new SDK type
-nor a protocol negotiation grants execution authority or durable task storage.
-No database migration or live configuration change is required by this SDK
-upgrade; rollback is reverting the compatibility change before deployment.
+nor protocol negotiation grants execution authority or durable task storage.
+No database migration or live configuration change is required; rollback is
+reverting the compatibility change before deployment.
 
 ## Auth posture (v1 decision)
 
@@ -66,23 +84,45 @@ upgrade; rollback is reverting the compatibility change before deployment.
 
 ## Client identity (not env)
 
-HTTP has no per-process env. Send identity at **initialize**:
+HTTP has no per-process env. Legacy peers send identity at **initialize**;
+modern peers send it in each request:
 
-| Field | Header | Initialize meta |
+| Field | Header | MCP `_meta` |
 |---|---|---|
 | Project binding | `X-Tachi-Project` | `tachiProject` (alias `tachi.project`) |
 | Tool profile | `X-Tachi-Profile` | `tachiProfile` |
 | Client label | `X-Tachi-Client` | `tachiClient` |
 | Agent identity | `X-Tachi-Agent-Identity` | `tachiAgentIdentity` (alias `tachi.agentIdentity`) |
 
-Headers win over meta when both are present. Project must resolve via
+For compatibility, headers win over initialize metadata in legacy mode. Modern
+header and request-metadata identities must agree. Project must resolve via
 `resolve_named_project_db_path` (same as stdio).
 
-A valid, explicit AgentIdentity assertion on this loopback-only transport is
-recorded as `self_asserted`, never `verified`. An absent assertion stays
-identity-less and rejected; the daemon process environment is not an identity
-fallback for HTTP clients. This is the local attribution posture frozen in
-`identity-workclaim-spine-v1.md`, not remote identity proof.
+Standard MCP protocol/routing header conflicts are rejected by RMCP at the
+HTTP transport boundary with status 400. A conflict between otherwise valid
+`X-Tachi-*` and request `_meta` identity reaches Tachi's application boundary
+and returns JSON-RPC `HEADER_MISMATCH` (`-32020`) in a normal HTTP 200 MCP
+response; clients must inspect the JSON-RPC envelope in both cases. Modern
+`INVALID_PARAMS` (`-32602`), including malformed present `clientInfo` or identity
+metadata, maps to HTTP 400. Legacy application JSON-RPC errors retain HTTP 200.
+
+For modern stdio, per-request project and profile metadata may only repeat the
+project and profile admitted when the adapter process started; omission keeps
+those process bindings, while any different declaration is rejected before a
+daemon call. Client labels and AgentIdentity assertions are validated and
+forwarded only for that request. Canonical and dotted aliases must agree, and
+an omitted later request never inherits an earlier modern request's identity.
+An omitted modern stdio AgentIdentity does retain the longstanding process
+binding: the adapter resolves `TACHI_AGENT_IDENTITY` afresh for that outbound
+call. Thus “request-local” forbids previous-request stickiness; it does not
+discard process configuration. A present malformed assertion is rejected and
+never falls through to that environment value.
+
+For direct HTTP, a valid, explicit AgentIdentity assertion on this loopback-only
+transport is recorded as `self_asserted`, never `verified`. An absent assertion
+stays identity-less and rejected; the daemon process environment is not an
+identity fallback for HTTP clients. This is the local attribution posture
+frozen in `identity-workclaim-spine-v1.md`, not remote identity proof.
 
 ### Claude Code / host config sketch
 
@@ -121,9 +161,10 @@ the compatibility path, not a failure of HTTP migration.
 
 | Actor | Behavior |
 |---|---|
-| **HTTP client** | Connection drops / JSON-RPC **`-32000`** (or transport error). **Re-run `initialize`** to get a new `mcp-session-id`. Wait until `/health` is `ok`. |
+| **Legacy HTTP client (through 2025-11-25)** | Connection drops / JSON-RPC **`-32000`** (or transport error). Wait until `/health` is `ok`, then **re-run `initialize`** to get a new `mcp-session-id`. |
+| **Modern HTTP client (2026-07-28)** | The request fails with a transport error. Wait until `/health` is `ok`, then run `server/discover` again when capability refresh is needed. Retry a stateless request with the same validated per-request metadata and routing headers only when the failure is known to be `BeforeDispatch`; after a timeout or other ambiguous post-dispatch failure, do not replay automatically because a mutation may already have committed. Do **not** call `initialize`: explicit modern initialize is rejected by design and modern requests never carry an `mcp-session-id`. |
 | **stdio adapter** | Host respawns the pipe; adapter re-attaches to (or re-spawns) the daemon. Unrelated to HTTP session ids. |
-| **Idle reaper** | Daemon may exit after idle timeout and auto-respawn on next need — same reconnect for HTTP. |
+| **Idle reaper** | Daemon may exit after idle timeout and auto-respawn on next need; use the matching legacy-session or modern-stateless reconnect row above. |
 
 `/health` advertises:
 
@@ -136,6 +177,9 @@ the compatibility path, not a failure of HTTP migration.
   }
 }
 ```
+
+The `/health.reconnect.on_disconnect` string above describes the retained
+legacy session adapter. It is not an instruction for a `2026-07-28` peer.
 
 ## Migration policy
 

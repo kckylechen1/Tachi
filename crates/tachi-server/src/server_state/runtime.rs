@@ -12,6 +12,10 @@ pub(crate) struct AgentRuntime {
     pub(crate) session_client: Option<String>,
     pub(crate) session_project: Option<String>,
     pub(crate) work_claim_connection: Option<WorkClaimConnection>,
+    /// Fresh per-daemon capability for admitting process-selected privileged
+    /// profiles over the internal stdio-proxy/CLI HTTP hop. Session clones
+    /// retain it, but caller-supplied MCP metadata can never set it.
+    pub(crate) daemon_proxy_token: Option<String>,
     /// #1251: the raw dispatch recursion-depth marker for THIS session, as it
     /// arrived over the wire (`HEADER_DISPATCH_DEPTH` in the daemon path, or
     /// the process's own `ENV_DISPATCH_DEPTH` in the CLI in-process path).
@@ -36,6 +40,19 @@ pub(crate) struct WorkClaimConnection {
     pub(crate) agent_identity_id: Option<String>,
     pub(crate) connection_id: String,
     pub(crate) admission: String,
+    pub(crate) verified: Option<VerifiedAdmissionContext>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct VerifiedAdmissionContext {
+    pub(crate) admission_id: String,
+    pub(crate) agent_identity_id: String,
+    pub(crate) connection_id: String,
+    pub(crate) issuer_id: String,
+    pub(crate) verification_method: String,
+    pub(crate) verification_version: String,
+    pub(crate) trust_domain: String,
+    pub(crate) verification_scope: String,
 }
 
 /// Bounded channel capacity for enrichment batcher

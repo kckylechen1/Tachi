@@ -159,7 +159,7 @@ mod setup_api_key_tests {
 }
 
 pub(super) const DEFAULT_STANDARD_PROFILE_NOTICE: &str =
-    "No profile specified; defaulting to 'standard'. Set TACHI_PROFILE=admin to restore legacy full surface (148 tools).";
+    "No profile specified; defaulting to the five-facade 'standard' Lead surface. Set TACHI_PROFILE=ops or admin only for explicit operator access.";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SetupItem {

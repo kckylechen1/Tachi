@@ -27,20 +27,20 @@ The goal: **any agent, any harness, presses `ship` once — Tachi does the rest.
 
 ## The principle: model drives, code executes
 
-The executor of a ship is a **cheap dispatched worker** (deepseek-flash / haiku tier,
-routed by dispatch profile card) that follows the **ship skill SOP**. All determinism
-lives in the mechanical tools the worker calls (`tachi_gh`, `tachi_verify`, `tachi_task`);
-the worker contributes no judgment beyond following the checklist and reacting to failures
-(a red suite, a missing base branch, a review BLOCK). This split is deliberate:
+The executor of a ship is the **mechanical ship pipeline**. The coordinating model
+retains judgment and may use a bounded helper only under the current delivery policy.
+All determinism lives in the mechanical tools (`tachi_gh`, `tachi_verify`,
+`tachi_task`); the pipeline contributes no judgment beyond applying typed state
+transitions for failures (a red suite, a missing base branch, a review BLOCK). This
+split is deliberate:
 
 - The ceremony must not consume expensive-tier tokens — that is the whole point.
-  A leader agent at high reasoning effort pressing `ship` hands off everything below
-  its judgment line.
-- The worker is disposable and re-dispatchable: state lives in
-  `.tachi/runs/<flow_id>/ship.json` and the verify ledger, never in the worker's context.
-  A crashed ship is re-dispatched and resumes from recorded state.
-- Judgment-dense steps (adversarial review) are NOT the ship worker's job — it dispatches
-  them to the right profile and consumes the structured verdict.
+  A coordinator pressing `ship` hands mechanical work below its judgment line to code.
+- Pipeline state lives in `.tachi/runs/<flow_id>/ship.json` and the verify ledger,
+  never only in model context. A crashed invocation resumes from recorded state.
+- Judgment-dense steps are NOT recursively delegated by the ship pipeline. The
+  coordinator obtains any risk-required review and verification, then the pipeline
+  validates and consumes that exact-candidate evidence.
 
 ## What already exists (inventory, verified 2026-07-05)
 
@@ -71,7 +71,7 @@ Nothing here is replaced. `ship` composes these; it invents no parallel infrastr
 terminal state. Review-lane callers that require inline verdicts (codex two-layer
 completion trap) pass `wait=true`.
 
-### The pipeline (what the ship worker executes)
+### The pipeline
 
 Given `issue` + current branch (or worktree) + optional `base`:
 
@@ -79,15 +79,17 @@ Given `issue` + current branch (or worktree) + optional `base`:
    refuse if no commits exist against the base.
 2. **Seed verification.** `tachi_verify(start)` with the required checks for this repo
    (suite, clippy, gitleaks — repo-configurable).
-3. **Verify.** Dispatch a test-runner worker to run the full suite ONCE; it records
-   results via `tachi_verify(record)`. Red suite → ship halts in `verify_failed`,
-   reports, does not open a PR.
-4. **Adversarial review.** Dispatch a reviewer via `recommend` routing (a different
-   model than the implementer; vendor diversity is optional defense-in-depth). The route
-   receipt must show a distinct model identity; a new session, profile alias, persona, or
-   reasoning-effort change on the same model does not count. The reviewer
-   returns a STRUCTURED verdict (see frozen constraints) which is recorded as a required
-   check in the verify ledger. BLOCK verdict → ship halts in `review_blocked`.
+3. **Verify.** The coordinator or an approved runner executes the required checks once
+   on the candidate and records results via `tachi_verify(record)`. Red suite → ship
+   halts in `verify_failed`, reports, and does not open a PR.
+4. **Review when required.** Apply `dispatch-lifecycle.md` risk classification. Low-risk
+   non-semantic work has no mandatory independent review. Ordinary changes require an
+   independent read-only exact-candidate reviewer; a different model is preferred.
+   High-risk changes require a different-model reviewer whose effective identity is
+   proven by launcher or route evidence. The coordinator obtains the structured verdict
+   (see frozen constraints); the ship pipeline validates it against the candidate and
+   records it when required. A required BLOCK verdict or missing proof halts in
+   `review_blocked`.
 5. **Open the PR.** Contract mode: PR body generated from `git log <base>..HEAD`
    (commit list + verification tail + honest `Not-tested` section) — zero caller prose.
    Push branch, `pr create`, `link_pr` back to the flow.
@@ -164,12 +166,12 @@ A multi-contract campaign (umbrella issue) gets an integration branch `goal/<iss
   gate is decorative.
 - **Fail loud, never degrade silently.** Ledger DB down → ship fails with an Ops
   incident report; it does not fall back to ungated shipping.
-- **Authority comes from the card.** Every pipeline step is bounded by the dispatch
-  profile's authority flags; the ship worker runs the delegate tool profile and cannot
-  dispatch sub-workers (no recursion).
-- **Ship never weakens a gate.** No flag skips verification or review; the only bypass
-  is the human running the mechanical `tachi_gh ship` with explicit prose — which is
-  visible in the ledger as a manual ship.
+- **Authority is fixed before execution.** Every pipeline step is bounded by the
+  approved caller/profile authority. The mechanical pipeline cannot dispatch workers
+  or widen authority (no recursion).
+- **Ship never weakens a gate.** No flag skips required verification or review. A human
+  running the mechanical `tachi_gh ship` with explicit prose is visible in the ledger
+  as a manual ship, but does not satisfy missing risk-required evidence.
 - **One contract, one branch, one PR.** Ship refuses on the base branch, refuses empty
   commit ranges, and never opens a second PR for a branch that already has one open
   (it reports the existing PR instead).
@@ -189,7 +191,8 @@ A multi-contract campaign (umbrella issue) gets an integration branch `goal/<iss
 - Required-check set per repo: hardcode the tachi trio (suite/clippy/gitleaks) first, or
   read from repo config at Phase 2? (Leaning: hardcode first, config when a second repo
   needs it.)
-- Reviewer routing when the implementer model is unknown (manual branches): resolve and
-  record it before routing; otherwise the different-model gate cannot be proven.
+- Reviewer routing when the implementer model is unknown (manual branches): if the
+  change's risk class requires different-model review, resolve and record identity
+  before routing; otherwise that diversity gate remains incomplete.
 - Whether `ship` on a dirty tree should auto-commit leftovers (leaning NO: refuse and
   list them — silent batching hides scope creep).

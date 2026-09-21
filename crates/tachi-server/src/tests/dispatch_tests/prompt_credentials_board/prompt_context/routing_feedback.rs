@@ -19,7 +19,7 @@ async fn dispatch_prompt_includes_task_route_overlay() {
         !prompt.contains("## Required skill invocation"),
         "empty skills must not auto-inject a skill-invocation section from task-selected SOPs: {prompt}"
     );
-    assert!(prompt.contains("tachi_unstick(check)"), "{prompt}");
+    assert!(prompt.contains("tachi_memory(alerts)"), "{prompt}");
 }
 
 #[tokio::test]

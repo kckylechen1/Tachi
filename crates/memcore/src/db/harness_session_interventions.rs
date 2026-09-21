@@ -884,7 +884,7 @@ mod tests {
         )
         .unwrap();
         insert_work_claim(
-            &mut conn,
+            &conn,
             &NewWorkClaim {
                 claim_id: "claim-1".into(),
                 agent_identity_id: "agent-1".into(),

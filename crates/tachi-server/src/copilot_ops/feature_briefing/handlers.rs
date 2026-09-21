@@ -194,8 +194,8 @@ pub(crate) async fn handle_tachi_task_brief(
         "debug_checklist": debug_checklist,
         "route_recommendation": route_rec,
         "suggested_next_tools": [
-            "tachi_wiki(action='search')",
-            "tachi_skill(action='discover')",
+            "tachi_memory(action='search')",
+            "tachi_memory(action='alerts')",
             "tachi_task(action='brief')",
             "tachi_task(action='board')"
         ],

@@ -60,6 +60,22 @@ async fn lifecycle_release_note_writes_flow_artifact_with_refs() {
         .expect("verification json"),
     )
     .expect("write verification");
+    crate::claims_ops::admit_agent_connection(&server, Some("agent.release-flow".into()), true)
+        .expect("local admission");
+    let claim_params: crate::TachiTaskParams = serde_json::from_value(json!({
+        "action": "claim",
+        "flow_id": flow_id,
+        "issue_ref": "kckylechen1/tachi#194",
+        "branch": "feat/task-intake-link-pr",
+        "claim_role": "reviewer",
+        "claim_mode": "read_only",
+        "worktree_path": "",
+        "claim_scope": ["crates/tachi-server/src/task_lifecycle/release_ux/release_note.rs"],
+        "expected_head": "release-note-head",
+        "lease_expires_at": "2030-01-01T00:00:00Z",
+    }))
+    .expect("claim params");
+    crate::claims_ops::handle_task_claim(&server, &claim_params).expect("work claim");
 
     let mut params = task_params("status");
     params.format = Some("json".to_string());
@@ -87,12 +103,9 @@ async fn lifecycle_release_note_writes_flow_artifact_with_refs() {
         "Merge state: `merged`",
         "spec: `docs/engineering/specs/dispatch-policy.md`",
         "doc: `docs/engineering/architecture/subagent-eval-system.md`",
-        // #1454 G3 re-anchor: the note's verification headline is the GATE
-        // verdict with the best server-known head. This flow has no GitHub
-        // head and no receipts in the server store — the fail-closed display
-        // is `unverified`, never the raw caller-asserted ledger "passed"
-        // (which stays visible as a detail row).
-        "Overall: `unverified`",
+        // The active claim supplies authority, but no receipts exist, so the
+        // headline is pending rather than raw caller-asserted green.
+        "Overall: `pending`",
         "Ledger overall (caller-asserted): `passed`",
         // #1454 O2 re-anchor: the caller-authored item NAME (command string)
         // renders through the shared `markup_text` helper — single-line

@@ -121,7 +121,7 @@ async fn retired_memory_claim_release_are_rejected_without_mutating_workclaim_ro
     server
         .with_global_store(|store| {
             memcore::insert_work_claim(
-                store.connection_mut(),
+                store.connection(),
                 &memcore::NewWorkClaim {
                     claim_id: "c2a1-canonical-workclaim".to_string(),
                     agent_identity_id: "agent.c2a1".to_string(),

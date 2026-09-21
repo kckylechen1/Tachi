@@ -83,7 +83,13 @@ pub(super) async fn call_daemon_vault_unlock(
         write_password_to_fifo_nonblocking(&writer_path, password)
     });
     let (call_result, writer_result) = tokio::join!(
-        crate::cli_client::call_daemon_tool(info, "vault_unlock", args, None),
+        crate::cli_client::call_daemon_tool_with_profile(
+            info,
+            "vault_unlock",
+            args,
+            None,
+            Some(tachi_hub::ToolProfile::operate()),
+        ),
         async {
             writer
                 .await

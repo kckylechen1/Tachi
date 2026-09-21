@@ -14,6 +14,7 @@ use super::*;
 /// 6. Return a JSON envelope the agent can render directly.
 #[cfg(test)]
 pub(crate) async fn handle_github_safe_merge<C: GhClient + ?Sized>(
+    server: &MemoryServer,
     client: &C,
     repo: &str,
     pr_number: u64,
@@ -26,6 +27,7 @@ pub(crate) async fn handle_github_safe_merge<C: GhClient + ?Sized>(
     reclaim_worktree: bool,
 ) -> Result<String, String> {
     handle_github_safe_merge_with_reclaimer(
+        server,
         client,
         repo,
         pr_number,
@@ -50,9 +52,10 @@ enum WorktreeReclaimer {
 }
 
 /// Server callers supply the durable holder gate from their live DB binding.
-/// The public test/helper entry point above remains ungated only because it
-/// has no runtime DB binding; production routing always calls this form.
+/// The test helper above uses the same server binding for verification but
+/// skips only the production worktree-holder reclamation gate.
 pub(crate) async fn handle_github_safe_merge_with_holder_gate<C: GhClient + ?Sized>(
+    server: &MemoryServer,
     client: &C,
     repo: &str,
     pr_number: u64,
@@ -66,6 +69,7 @@ pub(crate) async fn handle_github_safe_merge_with_holder_gate<C: GhClient + ?Siz
     holder_gate: &(dyn Fn(&str) -> Result<(), String> + Sync),
 ) -> Result<String, String> {
     handle_github_safe_merge_with_reclaimer(
+        server,
         client,
         repo,
         pr_number,
@@ -83,6 +87,7 @@ pub(crate) async fn handle_github_safe_merge_with_holder_gate<C: GhClient + ?Siz
 }
 
 async fn handle_github_safe_merge_with_reclaimer<C: GhClient + ?Sized>(
+    server: &MemoryServer,
     client: &C,
     repo: &str,
     pr_number: u64,
@@ -164,34 +169,17 @@ async fn handle_github_safe_merge_with_reclaimer<C: GhClient + ?Sized>(
         )
         .await;
     }
-    // #1454 F1/F4: the gate reads the server-owned receipt store under the
-    // canonical Tachi home (`path_utils::tachi_home()` — the same funnel
-    // `MemoryServer::tachi_home_dir()` froze at construction; pinned equal by
-    // memory_server_tachi_home_dir_matches_canonical_resolution).
-    let verification_home = crate::path_utils::tachi_home();
+    // #1112: the gate resolves the active WorkClaim and its expected head;
+    // the live PR head remains an independent consistency observation.
     let mut verification_gate =
-        match evaluate_verification_gate(flow_id, &pr.head_sha, &verification_home) {
-            Ok(gate) => gate,
-            Err(err) if flow_id.is_some() => Some(json!({
-                "flow_id": flow_id,
-                "overall": "failed",
-                "required_total": 0,
-                "current_head_sha": pr.head_sha,
-                "passed": [],
-                "failed": [],
-                "pending": [],
-                "stale": [],
-                "waiting_on": [],
-                "reasons": ["verification:invalid"],
-                "error": err,
-            })),
-            Err(err) => return Err(err),
-        };
+        evaluate_safe_merge_verification_gate(server, flow_id, &pr.head_sha)?;
+    bind_gate_to_live_pr_head(verification_gate.as_mut(), &pr.head_sha);
     if verification_gate.is_none() && !tests_run.is_empty() {
         if let Some(fid) = flow_id {
             record_tests_run_verification(fid, repo, pr_number, &pr.head_sha, tests_run)?;
             verification_gate =
-                evaluate_verification_gate(flow_id, &pr.head_sha, &verification_home)?;
+                evaluate_safe_merge_verification_gate(server, flow_id, &pr.head_sha)?;
+            bind_gate_to_live_pr_head(verification_gate.as_mut(), &pr.head_sha);
         }
     }
     if verification_gate.is_none()
@@ -439,6 +427,61 @@ async fn handle_github_safe_merge_with_reclaimer<C: GhClient + ?Sized>(
         "reclamation": reclamation,
     }))
     .map_err(|e| format!("serialize: {e}"))
+}
+
+fn evaluate_safe_merge_verification_gate(
+    server: &MemoryServer,
+    flow_id: Option<&str>,
+    observed_pr_head: &str,
+) -> Result<Option<Value>, String> {
+    match evaluate_verification_gate(server, flow_id) {
+        Ok(gate) => Ok(gate),
+        Err(err) if flow_id.is_some() => Ok(Some(json!({
+            "flow_id": flow_id,
+            "overall": "failed",
+            "required_total": 0,
+            "current_head_sha": null,
+            "observed_pr_head_sha": observed_pr_head,
+            "passed": [],
+            "failed": [],
+            "pending": [],
+            "stale": [],
+            "waiting_on": [],
+            "reasons": ["verification:invalid"],
+            "error": err,
+        }))),
+        Err(err) => Err(err),
+    }
+}
+
+fn bind_gate_to_live_pr_head(gate: Option<&mut Value>, live_pr_head: &str) {
+    let Some(gate) = gate else {
+        return;
+    };
+    gate["observed_pr_head_sha"] = json!(live_pr_head);
+    let Some(claim_head) = gate
+        .get("current_head_sha")
+        .and_then(Value::as_str)
+        .filter(|head| !head.trim().is_empty())
+    else {
+        return;
+    };
+    if claim_head == live_pr_head {
+        return;
+    }
+    if gate.get("overall").and_then(Value::as_str) != Some("failed") {
+        gate["overall"] = json!("pending");
+    }
+    let waiting_on = gate
+        .get_mut("waiting_on")
+        .and_then(Value::as_array_mut)
+        .expect("verification gate waiting_on array");
+    if !waiting_on
+        .iter()
+        .any(|reason| reason == "verification:claim_head_mismatch")
+    {
+        waiting_on.push(json!("verification:claim_head_mismatch"));
+    }
 }
 
 async fn handle_already_merged_pr(

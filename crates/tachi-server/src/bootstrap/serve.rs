@@ -914,7 +914,7 @@ fn build_server_state(
         let profile = tachi_hub::parse_tool_profile(raw_profile).ok_or_else(
             || -> Box<dyn std::error::Error> {
                 format!(
-                    "unknown tool profile '{raw_profile}'; expected observe | remember | coordinate | operate | delegate | admin or a compatible host alias"
+                    "unknown tool profile '{raw_profile}'; expected standard/lead | delegate/worker | observe | remember | coordinate | operate/ops | admin/emergency or a compatible host alias"
                 )
                 .into()
             },

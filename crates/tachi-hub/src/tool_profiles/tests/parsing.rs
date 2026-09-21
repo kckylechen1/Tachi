@@ -3,6 +3,7 @@ use super::*;
 #[test]
 fn profile_parsing_maps_host_aliases() {
     // IDE + CLI → standard
+    assert_eq!(parse_tool_profile("lead"), Some(ToolProfile::standard()));
     assert_eq!(parse_tool_profile("codex"), Some(ToolProfile::standard()));
     assert_eq!(parse_tool_profile("cursor"), Some(ToolProfile::standard()));
     assert_eq!(
@@ -33,17 +34,14 @@ fn profile_parsing_maps_host_aliases() {
     assert_eq!(parse_tool_profile("hermes"), Some(ToolProfile::operate()));
     assert_eq!(
         parse_tool_profile("companion"),
-        Some(
-            ToolProfile::remember()
-                .merge(ToolProfile::coordinate())
-                .merge(ToolProfile::operate())
-        )
+        Some(ToolProfile::standard())
     );
     assert_eq!(
         parse_tool_profile("workflow"),
-        Some(ToolProfile::coordinate().merge(ToolProfile::operate()))
+        Some(ToolProfile::standard())
     );
     assert_eq!(parse_tool_profile("admin"), Some(ToolProfile::admin()));
+    assert_eq!(parse_tool_profile("emergency"), Some(ToolProfile::admin()));
 }
 
 #[test]
@@ -56,6 +54,61 @@ fn profile_parsing_supports_additive_surface_tokens() {
         parse_tool_profile("remember+operate"),
         Some(ToolProfile::remember().merge(ToolProfile::operate()))
     );
+}
+
+#[test]
+fn additive_minimal_profiles_have_one_consistent_precedence_policy() {
+    let worker_ops = parse_tool_profile("delegate+operate").expect("additive Worker profile");
+    assert_eq!(worker_ops.as_str(), "delegate");
+    assert!(!facade_action_allowed(
+        "tachi_staff",
+        Some("start"),
+        Some(worker_ops)
+    ));
+    assert!(!facade_action_allowed(
+        "tachi_gh",
+        Some("safe_merge"),
+        Some(worker_ops)
+    ));
+
+    let lead_worker = parse_tool_profile("standard+delegate").expect("additive Lead profile");
+    assert_eq!(lead_worker.as_str(), "standard");
+    for tool in [
+        "tachi_memory",
+        "tachi_task",
+        "tachi_staff",
+        "tachi_gh",
+        "tachi_a2a",
+    ] {
+        assert!(tool_visible(tool, Some(lead_worker), None), "{tool}");
+    }
+    assert!(!tool_visible("runtime_info", Some(lead_worker), None));
+    assert!(facade_action_allowed(
+        "tachi_staff",
+        Some("start"),
+        Some(lead_worker)
+    ));
+    assert!(facade_action_allowed(
+        "tachi_gh",
+        Some("safe_merge"),
+        Some(lead_worker)
+    ));
+}
+
+#[test]
+fn unknown_and_spoofed_profiles_cannot_select_a_broad_surface() {
+    for raw in [
+        "unknown-principal",
+        "worker+admin",
+        "lead,full",
+        "ops+emergency",
+    ] {
+        assert_eq!(
+            parse_tool_profile(raw),
+            None,
+            "'{raw}' must not resolve to a broad profile"
+        );
+    }
 }
 
 #[test]
