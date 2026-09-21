@@ -131,6 +131,11 @@ struct InstructionSurfaceDeclaration {
     adapter_version: String,
     density_budget: DensityBudget,
     remediation_owner: String,
+    /// Carriers that consume `source` at its declared path without a
+    /// separately rendered projection. The path is intentionally implicit:
+    /// direct consumption cannot be redirected onto another surface.
+    #[serde(default)]
+    direct_consumers: Vec<Carrier>,
     targets: Vec<InstructionTargetDeclaration>,
 }
 
@@ -194,6 +199,7 @@ pub(super) struct InstructionSourceStatus {
     pub(super) bytes: Option<u64>,
     #[serde(skip)]
     pub(super) content: Option<String>,
+    pub(super) direct_consumers: Vec<String>,
     pub(super) targets: Vec<InstructionTargetStatus>,
 }
 
@@ -299,6 +305,9 @@ pub(super) fn scan_instruction_manifest(
         .surfaces
         .sort_by(|left, right| left.id.cmp(&right.id));
     for surface in &mut manifest.surfaces {
+        surface
+            .direct_consumers
+            .sort_by(|left, right| left.as_str().cmp(right.as_str()));
         surface.targets.sort_by(|left, right| {
             left.carrier
                 .as_str()
@@ -421,6 +430,11 @@ pub(super) fn scan_instruction_manifest(
             hash: source_status.hash,
             bytes: source_status.bytes,
             content: source_status.content,
+            direct_consumers: surface
+                .direct_consumers
+                .into_iter()
+                .map(|carrier| carrier.as_str().to_string())
+                .collect(),
             targets,
         });
     }
@@ -507,6 +521,17 @@ fn validate_manifest(manifest: &InstructionManifestDocument) -> Result<(), Strin
                 "remediation owner for surface '{}' must not be empty",
                 surface.id
             ));
+        }
+
+        let mut direct_consumers = BTreeSet::new();
+        for carrier in &surface.direct_consumers {
+            if !direct_consumers.insert(carrier.as_str()) {
+                return Err(format!(
+                    "duplicate direct consumer '{}' for surface '{}'",
+                    carrier.as_str(),
+                    surface.id
+                ));
+            }
         }
 
         let mut targets = BTreeSet::new();
@@ -882,6 +907,40 @@ mod tests {
     }
 
     #[test]
+    fn direct_consumers_are_typed_sorted_and_bound_to_their_source() {
+        let (root, manifest_path) = fixture("direct-consumers");
+        std::fs::write(root.join("AGENTS.md"), "public\n").expect("source");
+        std::fs::write(root.join("CLAUDE.md"), "private\n").expect("source");
+
+        let mut manifest = base_manifest();
+        manifest["surfaces"][0]["direct_consumers"] = json!(["codex", "claude"]);
+        manifest["surfaces"][0]["targets"] = json!([]);
+        manifest["surfaces"][1]["direct_consumers"] = json!(["codex"]);
+        manifest["surfaces"][1]["targets"] = json!([]);
+        write_manifest(&manifest_path, &manifest);
+
+        let report = scan_instruction_manifest(&manifest_path).expect("direct consumers");
+        let value = serde_json::to_value(report).expect("status JSON");
+        assert_eq!(value["sources"][0]["direct_consumers"], json!(["codex"]));
+        assert_eq!(
+            value["sources"][1]["direct_consumers"],
+            json!(["claude", "codex"])
+        );
+        assert_eq!(value["sources"][0]["source"], "AGENTS.md");
+        assert_eq!(value["sources"][1]["source"], "CLAUDE.md");
+        assert!(
+            value["sources"]
+                .as_array()
+                .expect("sources")
+                .iter()
+                .all(|source| source.get("direct_path").is_none()),
+            "direct consumption must not expose a redirectable alias path"
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn required_source_must_not_escape_the_declared_root() {
         let (root, manifest_path) = fixture("required-source-escape");
         let mut manifest = base_manifest();
@@ -986,6 +1045,15 @@ mod tests {
         let error = scan_instruction_manifest(&manifest_path).unwrap_err();
         assert!(
             error.contains("expected `source-owned` or `carrier-owned`"),
+            "{error}"
+        );
+
+        manifest = base_manifest();
+        manifest["surfaces"][0]["direct_consumers"] = json!(["claude", "claude"]);
+        write_manifest(&manifest_path, &manifest);
+        let error = scan_instruction_manifest(&manifest_path).unwrap_err();
+        assert!(
+            error.contains("duplicate direct consumer 'claude'"),
             "{error}"
         );
 

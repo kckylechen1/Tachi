@@ -17,6 +17,9 @@
         "bytes": 8192
       },
       "remediation_owner": "repository-owner",
+      "direct_consumers": [
+        "codex"
+      ],
       "targets": []
     },
     {
@@ -30,6 +33,9 @@
         "bytes": 3072
       },
       "remediation_owner": "carrier-manual-owner",
+      "direct_consumers": [
+        "claude"
+      ],
       "targets": []
     }
   ]
