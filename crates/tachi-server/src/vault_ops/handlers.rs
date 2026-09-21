@@ -37,7 +37,9 @@ mod secrets;
 
 pub(crate) use self::health::handle_vault_record_key_result;
 pub(crate) use self::lifecycle::{handle_vault_init, handle_vault_lock, handle_vault_unlock};
-pub(crate) use self::listing::{handle_vault_list, handle_vault_remove, handle_vault_status};
+pub(crate) use self::listing::{
+    build_vault_list_payload, handle_vault_list, handle_vault_remove, handle_vault_status,
+};
 pub(crate) use self::pool::{
     handle_vault_lease_api_key, handle_vault_set_api_key_pool, handle_vault_setup_rotation,
 };

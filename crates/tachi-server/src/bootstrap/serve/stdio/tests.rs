@@ -61,6 +61,22 @@ async fn spawn_test_http_daemon_with_client_observer(
     CancellationToken,
     tokio::task::JoinHandle<()>,
 ) {
+    spawn_test_http_daemon_with_observers(server, global_db_path, client_observer, None).await
+}
+
+type ToolResponseObservations =
+    std::sync::Arc<std::sync::Mutex<Vec<(String, Option<String>, String)>>>;
+
+async fn spawn_test_http_daemon_with_observers(
+    server: crate::MemoryServer,
+    global_db_path: &Path,
+    client_observer: Option<ClientHeaderObservations>,
+    response_observer: Option<ToolResponseObservations>,
+) -> (
+    crate::cli_client::DaemonInfo,
+    CancellationToken,
+    tokio::task::JoinHandle<()>,
+) {
     use rmcp::transport::streamable_http_server::{
         session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
     };
@@ -90,6 +106,7 @@ async fn spawn_test_http_daemon_with_client_observer(
             .layer(axum::middleware::from_fn(
                 move |request: axum::extract::Request, next: axum::middleware::Next| {
                     let observer = client_observer.clone();
+                    let response_observer = response_observer.clone();
                     async move {
                         if request.method() == axum::http::Method::POST {
                             if let Some(observer) = observer {
@@ -103,7 +120,44 @@ async fn spawn_test_http_daemon_with_client_observer(
                                 );
                             }
                         }
-                        next.run(request).await
+                        if let Some(observer) = response_observer {
+                            let profile = request
+                                .headers()
+                                .get(crate::session_identity::HEADER_PROFILE)
+                                .map(|value| value.to_str().unwrap().to_string());
+                            let (parts, body) = request.into_parts();
+                            let bytes = axum::body::to_bytes(body, 1024 * 1024)
+                                .await
+                                .expect("bounded request");
+                            let tool = serde_json::from_slice::<serde_json::Value>(&bytes)
+                                .ok()
+                                .and_then(|value| {
+                                    value["params"]["name"].as_str().map(str::to_owned)
+                                });
+                            let request = axum::extract::Request::from_parts(
+                                parts,
+                                axum::body::Body::from(bytes),
+                            );
+                            let response = next.run(request).await;
+                            if let Some(tool) = tool {
+                                let (parts, body) = response.into_parts();
+                                let bytes = axum::body::to_bytes(body, 1024 * 1024)
+                                    .await
+                                    .expect("bounded response");
+                                observer.lock().unwrap().push((
+                                    tool,
+                                    profile,
+                                    String::from_utf8(bytes.to_vec()).unwrap(),
+                                ));
+                                return axum::response::Response::from_parts(
+                                    parts,
+                                    axum::body::Body::from(bytes),
+                                );
+                            }
+                            response
+                        } else {
+                            next.run(request).await
+                        }
                     }
                 },
             ));
@@ -698,6 +752,139 @@ fn vault_cli_operator_actions_select_ops_through_real_daemon_session() {
     });
     ct.cancel();
     rt.block_on(daemon_task).expect("daemon task");
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn vault_cli_list_uses_authorized_daemon_health_without_metadata_fallback() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let temp = tempfile::tempdir().expect("temp");
+    let home = temp.path().join("home");
+    let global = home.join("global/memory.db");
+    std::fs::create_dir_all(global.parent().unwrap()).unwrap();
+    let _home = EnvRestore::set_path("TACHI_HOME", &home);
+    let _sigil = EnvRestore::remove("SIGIL_HOME");
+    let _app = EnvRestore::remove("TACHI_APP_HOME");
+    let _alias = EnvRestore::set("EXTRACT_API_KEY", "vault:DEEPSEEK_API_KEY");
+    let server = crate::MemoryServer::new(global.clone(), None).expect("server");
+    crate::vault_ops::handle_vault_init(
+        &server,
+        crate::vault_ops::VaultInitParams {
+            password: "synthetic-health-board-password".into(),
+        },
+    )
+    .await
+    .unwrap();
+    crate::vault_ops::handle_vault_set(
+        &server,
+        crate::vault_ops::VaultSetParams {
+            name: "DEEPSEEK_API_KEY".into(),
+            value: "synthetic-health-board-secret".into(),
+            secret_type: "api_key".into(),
+            description: "health fixture".into(),
+            agent_id: None,
+            allowed_agents: None,
+            enable_rotation: false,
+            rotation_strategy: None,
+            rebind: false,
+        },
+    )
+    .await
+    .unwrap();
+    crate::provider_config::materialize_for_server(&server).expect("materialize");
+    let generation = server.llm.provider_health_board_snapshot().2.unwrap();
+    let health = memcore::vault::health::record_key_outcome_for_generation(
+        None,
+        "DEEPSEEK_API_KEY",
+        "DEEPSEEK_API_KEY",
+        memcore::vault::health::TypedOutcome::Exhausted,
+        memcore::vault::health::EvidenceKind::Probed,
+        None,
+        chrono::Utc::now(),
+        Some(generation),
+    )
+    .health;
+    server
+        .with_global_store(|store| {
+            store
+                .vault_upsert_key_health(&health)
+                .map_err(|error| error.to_string())
+        })
+        .unwrap();
+    let observations = ToolResponseObservations::default();
+    let (daemon, cancel, task) =
+        spawn_test_http_daemon_with_observers(server, &global, None, Some(observations.clone()))
+            .await;
+    let port = reqwest::Url::parse(&daemon.url).unwrap().port().unwrap();
+    let pid_path = crate::daemon_lock::scoped_daemon_pid_path(&home, &global);
+    crate::utils::write_json_file_owner_only(&pid_path, &serde_json::json!({
+        "pid": std::process::id(), "port": port, "url": daemon.url, "global_db": global,
+        "version": env!("CARGO_PKG_VERSION"), "internal_proxy_token": daemon.internal_proxy_token,
+    })).unwrap();
+    for profile in [None, Some(tachi_hub::ToolProfile::operate())] {
+        let denied = crate::cli_client::call_daemon_tool_with_profile(
+            &daemon,
+            "vault_list",
+            serde_json::Map::new(),
+            None,
+            profile,
+        )
+        .await
+        .expect_err("only explicit Admin may list");
+        assert!(denied.to_string().contains("tool not found"));
+    }
+    observations.lock().unwrap().clear();
+    let result = crate::bootstrap::vault_cli::run_vault_command(
+        &global,
+        &home,
+        tachi_bootstrap::cli::VaultAction::List {
+            stdin_password: false,
+            keychain: false,
+            password_file: None,
+            insecure_password_file: false,
+        },
+    )
+    .await;
+    // A matching daemon that rejects dispatch must stay an error. Falling
+    // back here would turn its denied observation into a successful local list.
+    crate::utils::write_json_file_owner_only(&pid_path, &serde_json::json!({
+        "pid": std::process::id(), "port": port, "url": daemon.url, "global_db": global,
+        "version": env!("CARGO_PKG_VERSION"), "internal_proxy_token": uuid::Uuid::new_v4().simple().to_string(),
+    })).unwrap();
+    let denied = crate::bootstrap::vault_cli::run_vault_command(
+        &global,
+        &home,
+        tachi_bootstrap::cli::VaultAction::List {
+            stdin_password: false,
+            keychain: false,
+            password_file: None,
+            insecure_password_file: false,
+        },
+    )
+    .await;
+    cancel.cancel();
+    task.await.expect("daemon terminal");
+    result.expect("actual operator List");
+    assert!(
+        denied.is_err(),
+        "matching daemon denial must not become metadata fallback success"
+    );
+    let rows = observations.lock().unwrap();
+    assert_eq!(rows.len(), 1, "one List call");
+    assert_eq!(rows[0].0, "vault_list");
+    assert_eq!(
+        rows[0].1.as_deref(),
+        Some("admin"),
+        "List must reach health handler, response={}",
+        rows[0].2
+    );
+    assert!(
+        rows[0].2.contains("402"),
+        "real daemon response must carry observed health"
+    );
+    assert!(!rows[0].2.contains("synthetic-health-board-secret"));
 }
 
 fn write_repo_project_manifest(tachi_home: &Path, db_paths: &[&Path]) {

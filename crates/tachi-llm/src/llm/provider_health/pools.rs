@@ -1,8 +1,16 @@
 use super::*;
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 
 mod health_publication;
 use health_publication::{has_newly_unusable_health, preserve_newer_health_observations};
+
+/// Coherent metadata snapshot; no credential values cross this boundary.
+pub type ProviderHealthBoardSnapshot = (
+    HashMap<String, HashMap<String, VaultKeyHealth>>,
+    HashMap<String, BTreeSet<String>>,
+    Option<u64>,
+    HashMap<String, crate::AliasSkipClass>,
+);
 
 impl super::super::LlmClient {
     #[cfg(any(test, feature = "test-support"))]
@@ -41,6 +49,8 @@ impl super::super::LlmClient {
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         state.secrets.insert(name.to_string(), entries);
+        state.source_generation = None;
+        state.listed_drops.clear();
         state.indices.remove(name);
         true
     }
@@ -108,6 +118,7 @@ impl super::super::LlmClient {
             replacement,
             retained_logical_names,
             self.provider_health_memory_snapshot(),
+            (None, HashMap::new()),
             lane_config_overlay,
             commit_companion_projection,
         )
@@ -118,6 +129,7 @@ impl super::super::LlmClient {
         replacement: HashMap<String, Vec<ProviderSecret>>,
         retained_logical_names: &HashSet<String>,
         health_baseline: HashMap<String, HashMap<String, VaultKeyHealth>>,
+        source: (Option<u64>, HashMap<String, crate::AliasSkipClass>),
         lane_config_overlay: Option<LaneConfigOverlay>,
         commit_companion_projection: P,
     ) -> Result<usize, String>
@@ -128,9 +140,9 @@ impl super::super::LlmClient {
             replacement,
             retained_logical_names,
             health_baseline,
+            source,
             lane_config_overlay,
-            None,
-            commit_companion_projection,
+            (None, commit_companion_projection),
         )
     }
 
@@ -139,13 +151,15 @@ impl super::super::LlmClient {
         replacement: HashMap<String, Vec<ProviderSecret>>,
         retained_logical_names: &HashSet<String>,
         health_baseline: HashMap<String, HashMap<String, VaultKeyHealth>>,
+        source: (Option<u64>, HashMap<String, crate::AliasSkipClass>),
         lane_config_overlay: Option<LaneConfigOverlay>,
-        before_companion_commit: Option<Box<dyn FnOnce() + Send>>,
-        commit_companion_projection: P,
+        publication: (Option<Box<dyn FnOnce() + Send>>, P),
     ) -> Result<usize, String>
     where
         P: FnOnce() -> Result<(), String>,
     {
+        let (source_generation, listed_drops) = source;
+        let (before_companion_commit, commit_companion_projection) = publication;
         let loaded = replacement.len();
         let replacement_logical_names = replacement.keys().cloned().collect::<HashSet<_>>();
         let mut retained_members_by_logical = HashMap::new();
@@ -180,6 +194,8 @@ impl super::super::LlmClient {
         let previous = std::mem::take(&mut *state);
         let mut next = ProviderState {
             secrets: replacement,
+            source_generation,
+            listed_drops,
             lane_config_overlay: lane_config_overlay
                 .unwrap_or_else(|| previous.lane_config_overlay.clone()),
             cooldowns: previous.cooldowns.clone(),
@@ -240,9 +256,12 @@ impl super::super::LlmClient {
             replacement,
             retained_logical_names,
             self.provider_health_memory_snapshot(),
+            (None, HashMap::new()),
             lane_config_overlay,
-            Some(Box::new(before_companion_commit)),
-            commit_companion_projection,
+            (
+                Some(Box::new(before_companion_commit)),
+                commit_companion_projection,
+            ),
         )
     }
 
@@ -288,6 +307,8 @@ impl super::super::LlmClient {
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         state.secrets.clear();
+        state.source_generation = None;
+        state.listed_drops.clear();
         state.cooldowns.clear();
         state.indices.clear();
         if clear_lane_config_overlay {
@@ -314,6 +335,33 @@ impl super::super::LlmClient {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .secrets
             .len()
+    }
+
+    /// Snapshot health, logical-name-to-key-id bindings, and the opaque source
+    /// generation under one lock. This exposes identity metadata only, never
+    /// key material, and prevents a health board from combining two runtime
+    /// generations.
+    pub fn provider_health_board_snapshot(&self) -> ProviderHealthBoardSnapshot {
+        let state = self
+            .provider_state
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let bindings = state
+            .secrets
+            .iter()
+            .map(|(logical_name, entries)| {
+                (
+                    logical_name.clone(),
+                    entries.iter().map(|entry| entry.key_id.clone()).collect(),
+                )
+            })
+            .collect();
+        (
+            state.health.clone(),
+            bindings,
+            state.source_generation,
+            state.listed_drops.clone(),
+        )
     }
 
     #[cfg(test)]

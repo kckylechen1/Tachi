@@ -66,6 +66,7 @@ fn selected() -> SelectedProviderSecret {
         logical_name: KEY_ENV.to_string(),
         key_id: format!("{KEY_ENV}_1"),
         value: String::new(),
+        credential_generation: None,
     }
 }
 
