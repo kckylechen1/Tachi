@@ -456,3 +456,56 @@ fn print_receipt(version: &str, elapsed: std::time::Duration, matrix: &[(&'stati
     );
     println!("─── paste it, then update CODEX_CLI_RECEIPT to match ───\n");
 }
+
+/// A compatibility probe only: success can never mint a sandbox certificate.
+#[cfg(unix)]
+#[test]
+#[ignore = "explicit real CLI compatibility probe; not qualification"]
+fn codex_command_engine_smoke() {
+    let evidence_dir = PathBuf::from(
+        std::env::var_os("TACHI_CODEX_CERTIFICATION_EVIDENCE_DIR")
+            .expect("task-owned evidence directory"),
+    );
+    std::fs::create_dir_all(&evidence_dir).unwrap();
+    let home = PathBuf::from(std::env::var_os("HOME").expect("isolated HOME"));
+    assert!(home.starts_with(evidence_dir.parent().unwrap()));
+    let repo = evidence_dir.join("smoke-repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    run(Command::new("git").args(["init", "--quiet"]).arg(&repo));
+    let launch = build_codex_launch(&DispatchLaunchParams {
+        cwd:Some(repo.to_string_lossy().into_owned()), sandbox:Some("read-only".into()),
+        ..DispatchLaunchParams::default()
+    }, "Run exactly one shell command: pwd. Do not read any file, run other commands, or start agents. Return its output.", None).unwrap();
+    let mut command = Command::new(&launch.program);
+    command.args(&launch.args);
+    let output = bounded::run(command, std::time::Duration::from_secs(45), 256 * 1024).unwrap();
+    std::fs::write(evidence_dir.join("codex.stdout.jsonl"), &output.stdout).unwrap();
+    std::fs::write(evidence_dir.join("codex.stderr.log"), &output.stderr).unwrap();
+    assert!(output.group_absence_confirmed);
+    assert_eq!(output.refusal, None);
+    assert!(output.status.success());
+    let events: Vec<serde_json::Value> = std::str::from_utf8(&output.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert!(
+        events
+            .iter()
+            .all(|e| e["type"] != "error" && e["item"]["type"] != "error"),
+        "command engine reported an error"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| e["type"] == "item.completed"
+                && e["item"]["type"] == "command_execution"
+                && e["item"]["exit_code"] == 0
+                && e["item"]["aggregated_output"]
+                    .as_str()
+                    .is_some_and(|s| s.trim() == repo.to_string_lossy()))
+            .count(),
+        1,
+        "requires one actual successful pwd execution event, never model prose"
+    );
+}

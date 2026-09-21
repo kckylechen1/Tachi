@@ -255,6 +255,10 @@ pub fn build_codex_launch(
     // execution must retain the one owned group used for terminal proof.
     cmd.arg("--disable");
     cmd.arg("code_mode_host");
+    cmd.arg("--disable");
+    cmd.arg("unified_exec");
+    cmd.arg("--disable");
+    cmd.arg("code_mode");
 
     let profile = resolve_permission_profile(params)?;
     reject_non_claude_allowlist("codex", profile)?;
@@ -633,6 +637,10 @@ mod tests {
                 "--ephemeral",
                 "--disable",
                 "code_mode_host",
+                "--disable",
+                "unified_exec",
+                "--disable",
+                "code_mode",
                 "--sandbox",
                 "workspace-write",
                 "--json",
