@@ -40,6 +40,25 @@ fn proxy_env_agent_identity_header(raw: Option<&str>) -> Option<(HeaderName, Hea
     })
 }
 
+fn insert_internal_proxy_token(
+    headers: &mut HashMap<HeaderName, HeaderValue>,
+    info: &DaemonInfo,
+) -> Result<(), DaemonCallError> {
+    let Some(token) = info.internal_proxy_token.as_deref() else {
+        return Ok(());
+    };
+    let value = HeaderValue::from_str(token).map_err(|error| {
+        DaemonCallError::BeforeDispatch(format!(
+            "invalid internal proxy capability in daemon discovery receipt: {error}"
+        ))
+    })?;
+    headers.insert(
+        HeaderName::from_static(crate::session_identity::HEADER_INTERNAL_PROXY_TOKEN),
+        value,
+    );
+    Ok(())
+}
+
 /// Headroom added on top of a caller-supplied poll/control timeout so the
 /// outer RPC timeout comfortably outlives the daemon-side wait/control loop
 /// (which returns its own terminal payload — e.g. `"status":"timeout"` — as
@@ -174,11 +193,12 @@ pub(crate) async fn call_daemon_tool(
 
 /// Call a daemon tool with an optional, typed profile bound at MCP initialize.
 ///
-/// Ordinary CLI and proxy calls use [`call_daemon_tool`] and therefore inherit
-/// the daemon's default profile. The override exists for narrow trusted CLI
+/// Ordinary CLI calls use [`call_daemon_tool`] and therefore receive the
+/// default profile. The override exists for trusted local proxy and CLI
 /// maintenance flows whose required native tool is deliberately absent from
-/// the standard facade tray. The daemon still parses and authorizes the
-/// profile; in particular, HTTP direct-connect continues to reject `admin`.
+/// the standard facade tray. The daemon still authenticates privileged
+/// profiles with its owner-only per-process capability; profile metadata alone
+/// remains insufficient.
 pub(crate) async fn call_daemon_tool_with_profile(
     info: &DaemonInfo,
     tool_name: &str,
@@ -236,7 +256,7 @@ pub(crate) async fn call_daemon_tool_raw(
     params: CallToolRequestParams,
     proxy_project: Option<&str>,
 ) -> Result<rmcp::model::CallToolResult, DaemonCallError> {
-    call_daemon_tool_raw_with_phases(info, params, proxy_project)
+    call_daemon_tool_raw_with_phases(info, params, proxy_project, None)
         .await
         .0
 }
@@ -293,6 +313,7 @@ pub(crate) async fn call_daemon_tool_raw_with_phases(
     info: &DaemonInfo,
     params: CallToolRequestParams,
     proxy_project: Option<&str>,
+    profile: Option<tachi_hub::ToolProfile>,
 ) -> (
     Result<rmcp::model::CallToolResult, DaemonCallError>,
     DaemonCallPhaseTiming,
@@ -301,7 +322,7 @@ pub(crate) async fn call_daemon_tool_raw_with_phases(
         info,
         params,
         proxy_project,
-        None,
+        profile,
         None,
         ProxyIdentityForward::AutoEnv,
     )
@@ -392,6 +413,17 @@ async fn call_daemon_tool_raw_with_phases_and_profile(
                 );
             }
         }
+    }
+    if let Err(error) = insert_internal_proxy_token(&mut headers, info) {
+        let total_ms = elapsed_ms(started);
+        return (
+            Err(error),
+            DaemonCallPhaseTiming {
+                handshake_ms: 0,
+                call_ms: 0,
+                total_ms,
+            },
+        );
     }
     // #1251: forward this proxy process's OWN recursion depth to the daemon on
     // every call, over the same per-call header rail as X-Tachi-Project. The
@@ -519,16 +551,19 @@ pub(crate) async fn list_daemon_tools_with_profile(
     profile: Option<tachi_hub::ToolProfile>,
 ) -> Result<ListToolsResult, DaemonCallError> {
     let mut transport_config = StreamableHttpClientTransportConfig::with_uri(info.url.clone());
+    let mut headers = HashMap::new();
     if let Some(profile) = profile {
         let profile = profile.as_str();
         let value = HeaderValue::from_str(&profile).map_err(|error| {
             DaemonCallError::BeforeDispatch(format!("invalid proxy profile header value: {error}"))
         })?;
-        let mut headers = HashMap::new();
         headers.insert(
             HeaderName::from_static(crate::session_identity::HEADER_PROFILE),
             value,
         );
+    }
+    insert_internal_proxy_token(&mut headers, info)?;
+    if !headers.is_empty() {
         transport_config = transport_config.custom_headers(headers);
     }
     let transport = StreamableHttpClientTransport::from_config(transport_config);
@@ -745,6 +780,7 @@ mod tests {
             project_db: None,
             version: None,
             pid: None,
+            internal_proxy_token: None,
         }
     }
 

@@ -161,7 +161,7 @@ pub(crate) fn format_briefing(
         if !matches.is_empty() {
             out.push("\n### Component governance [AUTHORITY: GOVERNANCE REGISTRY]".to_string());
             out.push(
-                "_Declared registry only — stale/unknown are not memory truth. Use `tachi_component(action='show'|'plan')` for detail._"
+                "_Declared registry only — stale/unknown are not memory truth. Use `tachi_task(action='brief')` with the relevant issue or project context for detail._"
                     .to_string(),
             );
             let cap = if compact { 3 } else { 6 };
@@ -403,7 +403,7 @@ fn briefing_next_step(
                 .is_some_and(|s| matches!(s, "failed" | "pending" | "unverified"))
         })
     }) {
-        return "`tachi_verify(action='board')` to inspect background verification gates before merge."
+        return "`tachi_task(action='status')` to inspect lifecycle and verification state before merge."
             .to_string();
     }
     if component_governance
@@ -423,7 +423,7 @@ fn briefing_next_step(
             })
         })
     {
-        return "`tachi_component(action='show' or 'plan')` to inspect stale/blocked shared-component governance before cutover."
+        return "`tachi_task(action='brief')` to inspect stale or blocked shared-component context before cutover."
             .to_string();
     }
     let has_warnings = health_summary
@@ -448,7 +448,7 @@ fn briefing_next_step(
     }
     if wiki.as_array().is_some_and(|rows| !rows.is_empty()) {
         return format!(
-            "`tachi_wiki(action='search', query='{}')` for reusable lessons related to this briefing.",
+            "`tachi_memory(action='search', scope='all', query='{}')` for reusable lessons related to this briefing.",
             compact_text_line(query, 80).replace('\'', "")
         );
     }

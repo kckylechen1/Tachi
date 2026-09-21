@@ -11,6 +11,28 @@
 
 use serde_json::json;
 
+const RESIDUAL_ROUTE_NAMES: &[&str] = &[
+    "runtime_info",
+    "tachi_briefing",
+    "tachi_component",
+    "tachi_skill",
+    "tachi_status",
+    "tachi_tools",
+    "tachi_unstick",
+    "tachi_verify",
+    "tachi_web_search",
+    "tachi_wiki",
+];
+
+fn assert_ordinary_guidance_uses_only_product_facades(label: &str, guidance: &str) {
+    for route in RESIDUAL_ROUTE_NAMES {
+        assert!(
+            !guidance.contains(route),
+            "{label}: ordinary caller guidance names residual Ops/admin route {route}"
+        );
+    }
+}
+
 /// Scans `s` (the text immediately after an opening `(` that is already
 /// consumed) for the matching close paren, tracking nesting depth so a paren
 /// inside the call's own arguments (e.g. a task string mentioning `(P1)`)
@@ -77,6 +99,7 @@ fn staff_start_examples(guidance: &str) -> Vec<String> {
 }
 
 fn assert_guidance_contract(label: &str, guidance: &str) {
+    assert_ordinary_guidance_uses_only_product_facades(label, guidance);
     assert!(
         !guidance.contains("tachi_task(action='dispatch'")
             && !guidance.contains("tachi_task(action=\"dispatch\""),
@@ -98,6 +121,103 @@ fn assert_guidance_contract(label: &str, guidance: &str) {
              (task= and staffing_reason=): {example}"
         );
     }
+}
+
+#[test]
+fn active_ordinary_guidance_source_census_names_no_residual_routes() {
+    for (label, source) in [
+        (
+            "setup wizard rules",
+            include_str!("../../bootstrap/setup_wizard/agent_rules.rs"),
+        ),
+        (
+            "memory briefing",
+            include_str!("../../agent_markdown/briefing.rs"),
+        ),
+        (
+            "memory readiness answer",
+            include_str!("../../facade_memory_ops/readiness_ops.rs"),
+        ),
+        (
+            "task brief routing",
+            include_str!("../../copilot_ops/task_routing.rs"),
+        ),
+        (
+            "feature briefing",
+            include_str!("../../copilot_ops/feature_briefing/handlers.rs"),
+        ),
+        (
+            "dispatch prompt",
+            include_str!("../../dispatch_ops/prompt.rs"),
+        ),
+        (
+            "dispatch skill contract",
+            include_str!("../../dispatch_ops/prompt/skills.rs"),
+        ),
+        (
+            "cycle status guidance",
+            include_str!("../../task_lifecycle/cycle_status.rs"),
+        ),
+        (
+            "continuity guidance",
+            include_str!("../../continuity_ops/read_models.rs"),
+        ),
+        (
+            "wiki ambiguity guidance",
+            include_str!("../../agent_markdown/wiki.rs"),
+        ),
+        (
+            "rate-limit guidance",
+            include_str!("../../../../memory-server-runtime/src/lib.rs"),
+        ),
+    ] {
+        assert_ordinary_guidance_uses_only_product_facades(label, source);
+    }
+}
+
+#[test]
+fn current_user_docs_freeze_five_facades_and_label_retained_routes() {
+    let exact = "`tachi_memory`, `tachi_task`, `tachi_staff`, `tachi_gh`, and `tachi_a2a`";
+    for (label, doc) in [
+        ("README", include_str!("../../../../../README.md")),
+        ("INSTALL", include_str!("../../../../../docs/INSTALL.md")),
+    ] {
+        assert!(
+            doc.contains(exact),
+            "{label}: missing exact five-facade census"
+        );
+        assert!(
+            doc.contains("Ops/admin compatibility"),
+            "{label}: retained routes must be labelled Ops/admin compatibility"
+        );
+        assert!(
+            doc.contains("does not") && doc.contains("delete"),
+            "{label}: hiding retained routes must not claim physical deletion"
+        );
+    }
+
+    let chinese = include_str!("../../../../../README.zh-CN.md");
+    let classical = include_str!("../../../../../README.classical.md");
+    for (label, doc) in [("README.zh-CN", chinese), ("README.classical", classical)] {
+        for facade in [
+            "`tachi_memory`",
+            "`tachi_task`",
+            "`tachi_staff`",
+            "`tachi_gh`",
+            "`tachi_a2a`",
+        ] {
+            assert!(doc.contains(facade), "{label}: missing {facade}");
+        }
+        assert!(
+            doc.contains("Ops/admin"),
+            "{label}: missing Ops/admin label"
+        );
+    }
+
+    let death_list =
+        include_str!("../../../../../docs/engineering/architecture/mcp-surface-death-list.md");
+    assert!(death_list.contains("remain physically\nregistered only for explicit Ops/admin"));
+    assert!(death_list.contains("this contraction does not claim their deletion"));
 }
 
 #[test]

@@ -12,6 +12,10 @@ pub(crate) struct AgentRuntime {
     pub(crate) session_client: Option<String>,
     pub(crate) session_project: Option<String>,
     pub(crate) work_claim_connection: Option<WorkClaimConnection>,
+    /// Fresh per-daemon capability for admitting process-selected privileged
+    /// profiles over the internal stdio-proxy/CLI HTTP hop. Session clones
+    /// retain it, but caller-supplied MCP metadata can never set it.
+    pub(crate) daemon_proxy_token: Option<String>,
     /// #1251: the raw dispatch recursion-depth marker for THIS session, as it
     /// arrived over the wire (`HEADER_DISPATCH_DEPTH` in the daemon path, or
     /// the process's own `ENV_DISPATCH_DEPTH` in the CLI in-process path).

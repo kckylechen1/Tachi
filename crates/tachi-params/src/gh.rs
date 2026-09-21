@@ -220,8 +220,8 @@ pub struct TachiGhParams {
     #[serde(default)]
     pub since: Option<String>,
     /// #1285: campaign-handoff evidence references for action="handoff_publish"
-    /// (dual-written into the wiki mirror as typed `evidence_refs_v1`,
-    /// validated same as `tachi_wiki(action='write')`'s `references`).
+    /// (dual-written into the wiki mirror as typed `evidence_refs_v1` and
+    /// validated with the canonical wiki-reference rules).
     #[serde(default)]
     pub refs: Vec<String>,
     /// #1285: explicit issue number to supersede for action="handoff_publish".

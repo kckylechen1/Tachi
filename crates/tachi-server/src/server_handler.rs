@@ -32,9 +32,9 @@ pub(crate) fn current_exposed_tool_patterns() -> Option<Vec<String>> {
         .clone()
 }
 
-fn tool_not_found_result(tool_name: &str) -> rmcp::model::CallToolResult {
+pub(crate) fn tool_not_found_result(tool_name: &str) -> rmcp::model::CallToolResult {
     rmcp::model::CallToolResult::error(vec![rmcp::model::ContentBlock::text(format!(
-        "tool not found: '{tool_name}'. Call tachi_tools() or tools/list and use an exact visible tool name for the current TACHI_PROFILE."
+        "tool not found: '{tool_name}'. Call tools/list and use an exact visible tool name for the current TACHI_PROFILE."
     ))])
 }
 
@@ -45,7 +45,7 @@ fn tool_action_denied_result(
     profile_label: &str,
 ) -> rmcp::model::CallToolResult {
     rmcp::model::CallToolResult::error(vec![rmcp::model::ContentBlock::text(format!(
-        "action '{action}' on tool '{tool_name}' is not allowed for ToolProfile '{profile_label}'. Use a permitted action for this profile, or call tachi_tools() to inspect the active surface."
+        "action '{action}' on tool '{tool_name}' is not allowed for ToolProfile '{profile_label}'. Use a permitted action from tools/list for this profile."
     ))])
 }
 
@@ -295,6 +295,35 @@ fn narrow_gated_action_schemas(
                 tool.description = Some(std::borrow::Cow::Owned(format!(
                     "Task memory, policy, and ledger facade. Ordinary local delegation uses the host harness's native subagent.{action_summary} Sequencing and delegation decisions are the host model's job, not this facade. GitHub PR lifecycle is tachi_gh only.",
                 )));
+            }
+            "tachi_staff" => {
+                let allowed: Vec<&str> = tachi_params::TACHI_STAFF_ACTIONS
+                    .iter()
+                    .copied()
+                    .filter(|action| {
+                        tachi_hub::facade_action_allowed("tachi_staff", Some(action), Some(profile))
+                    })
+                    .collect();
+                narrow_action_enum_property(
+                    tool,
+                    &allowed,
+                    "Required staffing action allowed by the active profile.",
+                );
+            }
+            "tachi_gh" => {
+                seed_action_enum_property(tool, tachi_params::TACHI_GH_ACTIONS);
+                let allowed: Vec<&str> = tachi_params::TACHI_GH_ACTIONS
+                    .iter()
+                    .copied()
+                    .filter(|action| {
+                        tachi_hub::facade_action_allowed("tachi_gh", Some(action), Some(profile))
+                    })
+                    .collect();
+                narrow_action_enum_property(
+                    tool,
+                    &allowed,
+                    "Required GitHub action allowed by the active profile.",
+                );
             }
             "tachi_a2a" => {
                 let allowed: Vec<&str> = tachi_params::TACHI_A2A_ACTIONS
@@ -626,6 +655,7 @@ fn annotate_bound_project_schema(tool: &mut rmcp::model::Tool) {
 struct HttpSessionIdentity {
     profile: Option<String>,
     client: Option<String>,
+    internal_proxy_token: Option<String>,
     agent_identity_id: Option<String>,
     /// Present-but-blank/illegal `tachiAgentIdentity` / `X-Tachi-Agent-Identity`
     /// must not collapse to "absent" and fall through to process env (#1761).
@@ -736,11 +766,23 @@ impl MemoryServer {
                 None,
             ));
         }
+        let trusted_internal_proxy =
+            self.admits_internal_proxy_token(identity.internal_proxy_token.as_deref());
         let profile = identity
             .profile
             .as_deref()
-            .map(parse_http_tool_profile)
+            .map(|raw| parse_http_tool_profile(raw, trusted_internal_proxy))
             .transpose()?;
+        // A direct HTTP/proxy session that does not assert a profile must not
+        // inherit a daemon-wide Ops/admin profile. Local stdio keeps the
+        // explicitly configured process profile; only the per-connection HTTP
+        // boundary defaults missing identity to the narrow Lead surface.
+        let profile = profile.or_else(|| {
+            context
+                .extensions
+                .get::<axum::http::request::Parts>()
+                .map(|_| tachi_hub::default_tool_profile())
+        });
         let project = match project_binding_source(&identity) {
             ProjectBindingSource::Named(project) => {
                 let (canonical_project, _) = self
@@ -818,6 +860,8 @@ fn request_identity(
             header_string(parts, crate::session_identity::HEADER_PROFILE).or(identity.profile);
         identity.client =
             header_string(parts, crate::session_identity::HEADER_CLIENT).or(identity.client);
+        identity.internal_proxy_token =
+            header_string(parts, crate::session_identity::HEADER_INTERNAL_PROXY_TOKEN);
         match header_string_result(parts, crate::session_identity::HEADER_AGENT_IDENTITY) {
             Ok(Some(value)) => {
                 if let Err(err) = assign_explicit_agent_identity(&mut identity, value) {
@@ -1074,21 +1118,40 @@ fn header_string_result(
     }
 }
 
-fn parse_http_tool_profile(raw: &str) -> Result<tachi_hub::ToolProfile, rmcp::ErrorData> {
+fn parse_http_tool_profile(
+    raw: &str,
+    trusted_internal_proxy: bool,
+) -> Result<tachi_hub::ToolProfile, rmcp::ErrorData> {
+    let requests_privileged_surface = raw.split([',', '+']).map(str::trim).any(|token| {
+        matches!(
+            token.to_ascii_lowercase().as_str(),
+            "operate"
+                | "runtime"
+                | "openclaw"
+                | "hermes"
+                | "adapter"
+                | "ops"
+                | "admin"
+                | "full"
+                | "emergency"
+        )
+    });
+    if requests_privileged_surface && !trusted_internal_proxy {
+        return Err(rmcp::ErrorData::invalid_params(
+            format!(
+                "HTTP direct-connect profile '{raw}' requires explicit authorization that caller-supplied profile metadata cannot provide; select Ops/admin only from a trusted local process configuration"
+            ),
+            None,
+        ));
+    }
     let profile = tachi_hub::parse_tool_profile(raw).ok_or_else(|| {
         rmcp::ErrorData::invalid_params(
             format!(
-                "unknown HTTP direct-connect Tachi profile '{raw}'; expected standard, delegate, observe, remember, coordinate, operate, or a host alias"
+                "unknown HTTP direct-connect Tachi profile '{raw}'; expected standard/lead, delegate/worker, observe, remember, coordinate, or a compatible ordinary host alias"
             ),
             None,
         )
     })?;
-    if profile.as_str() == "admin" {
-        return Err(rmcp::ErrorData::invalid_params(
-            "HTTP direct-connect profile 'admin' requires explicit authorization; #495 must wire profile claims to an authorization policy before admin can be accepted over HTTP",
-            None,
-        ));
-    }
     Ok(profile)
 }
 
@@ -2067,31 +2130,18 @@ mod tests {
     }
 
     #[test]
-    fn delegate_wiki_schema_hides_write_only_properties() {
+    fn delegate_projection_excludes_residual_wiki_facade() {
         let projected = project_tool_definitions(
             native_tools(),
             Some(tachi_hub::ToolProfile::delegate()),
             None,
         );
-        let wiki_tool = projected
-            .iter()
-            .find(|tool| tool.name.as_ref() == "tachi_wiki")
-            .expect("tachi_wiki is exposed to delegate");
-        let properties = wiki_tool.input_schema["properties"]
-            .as_object()
-            .expect("properties map");
-        for write_field in ["title", "text", "summary", "keywords", "entities", "force"] {
-            assert!(
-                !properties.contains_key(write_field),
-                "write field {write_field} must not be present in delegate wiki schema"
-            );
-        }
-        for read_field in ["action", "query", "category", "path"] {
-            assert!(
-                properties.contains_key(read_field),
-                "read field {read_field} must be present in delegate wiki schema"
-            );
-        }
+        assert!(
+            projected
+                .iter()
+                .all(|tool| tool.name.as_ref() != "tachi_wiki"),
+            "tachi_wiki must not appear in Worker discovery"
+        );
     }
 
     #[test]
@@ -2424,6 +2474,7 @@ mod tests {
     fn named_project_wins_over_workspace_root_when_both_present() {
         let identity = HttpSessionIdentity {
             profile: None,
+            internal_proxy_token: None,
             client: None,
             agent_identity_id: None,
             agent_identity_error: None,
@@ -2443,6 +2494,7 @@ mod tests {
     fn workspace_root_used_only_when_project_absent() {
         let identity = HttpSessionIdentity {
             profile: None,
+            internal_proxy_token: None,
             client: None,
             agent_identity_id: None,
             agent_identity_error: None,

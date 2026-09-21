@@ -11,6 +11,7 @@ fn daemon(global: Option<&Path>, project: Option<&Path>) -> crate::cli_client::D
         project_db: project.map(|path| path.display().to_string()),
         version: Some(env!("CARGO_PKG_VERSION").to_string()),
         pid: Some(std::process::id() as i64),
+        internal_proxy_token: None,
     }
 }
 
@@ -70,6 +71,8 @@ async fn spawn_test_http_daemon_with_client_observer(
     let local_addr = listener.local_addr().expect("local addr");
     let ct = CancellationToken::new();
     let ct_shutdown = ct.clone();
+    let internal_proxy_token = uuid::Uuid::new_v4().simple().to_string();
+    server.set_daemon_proxy_token(internal_proxy_token.clone());
 
     let mut http_config = StreamableHttpServerConfig::default();
     http_config.legacy_session_mode = true;
@@ -117,6 +120,7 @@ async fn spawn_test_http_daemon_with_client_observer(
             project_db: None,
             version: Some(env!("CARGO_PKG_VERSION").to_string()),
             pid: Some(std::process::id() as i64),
+            internal_proxy_token: Some(internal_proxy_token),
         },
         ct,
         handle,
@@ -386,16 +390,314 @@ fn stdio_proxy_profile_is_forwarded_once_and_denies_attachment_before_handler() 
             .expect("profile-denied call should return an MCP error result");
             assert!(result.is_error.unwrap_or(false));
             assert!(
-                first_text(&result).contains("ToolProfile 'observe'"),
-                "profile must be bound at initialize before the attachment handler: {result:?}"
+                first_text(&result).contains("tool not found"),
+                "hidden route must be refused before proxy dispatch: {result:?}"
             );
         }
+
+        let expected_names = vec![
+            "tachi_a2a".to_string(),
+            "tachi_gh".to_string(),
+            "tachi_memory".to_string(),
+            "tachi_staff".to_string(),
+            "tachi_task".to_string(),
+        ];
+        for raw_profile in [
+            "standard",
+            "lead",
+            "delegate",
+            "worker",
+            "observe",
+            "read",
+            "reader",
+            "remember",
+            "write",
+            "writer",
+            "agent",
+            "coordinate",
+            "observe+remember",
+            "remember+observe",
+            "reader+writer",
+            "coordinate+observe",
+            "observe+coordinate",
+            "delegate+operate",
+            "standard+delegate",
+            "delegate+standard",
+        ] {
+            let profile = tachi_hub::parse_tool_profile(raw_profile)
+                .unwrap_or_else(|| panic!("profile {raw_profile} should parse"));
+            let proxy = StdioProxyServer {
+                adapter_started_at: chrono::Utc::now(),
+                tool_profile: Some(profile),
+                resolved_agent_identity: Default::default(),
+                daemon: std::sync::Arc::new(std::sync::RwLock::new(daemon.clone())),
+                app_home: tachi_home.clone(),
+                global_db_path: global.clone(),
+                project_db_path: None,
+                client_project: None,
+            };
+            let mut names = list_tools_via_stdio_proxy(proxy.clone())
+                .await
+                .unwrap_or_else(|error| panic!("{raw_profile} tools/list failed: {error}"))
+                .tools
+                .into_iter()
+                .map(|tool| tool.name.into_owned())
+                .collect::<Vec<_>>();
+            names.sort();
+            assert_eq!(names, expected_names, "stdio profile {raw_profile}");
+
+            for hidden in ["runtime_info", "tachi_briefing"] {
+                let result =
+                    call_tool_via_stdio_proxy(proxy.clone(), hidden, serde_json::Map::new())
+                        .await
+                        .unwrap_or_else(|error| {
+                            panic!("{raw_profile} hidden call {hidden} failed: {error}")
+                        });
+                assert_eq!(result.is_error, Some(true), "{raw_profile}:{hidden}");
+                assert!(
+                    first_text(&result).contains("tool not found"),
+                    "{raw_profile}:{hidden}: {result:?}"
+                );
+            }
+        }
+
+        let default_proxy = StdioProxyServer {
+            adapter_started_at: chrono::Utc::now(),
+            tool_profile: None,
+            resolved_agent_identity: Default::default(),
+            daemon: std::sync::Arc::new(std::sync::RwLock::new(daemon)),
+            app_home: tachi_home,
+            global_db_path: global,
+            project_db_path: None,
+            client_project: None,
+        };
+        let denied_runtime = call_tool_via_stdio_proxy(
+            default_proxy.clone(),
+            "runtime_info",
+            serde_json::Map::new(),
+        )
+        .await
+        .expect("default proxy diagnostic refusal should be an MCP result");
+        assert_eq!(denied_runtime.is_error, Some(true));
+        assert!(
+            first_text(&denied_runtime).contains("tool not found"),
+            "missing proxy profile must not call diagnostics: {denied_runtime:?}"
+        );
+
+        let mut default_names = list_tools_via_stdio_proxy(default_proxy)
+            .await
+            .expect("default proxy tools/list")
+            .tools
+            .into_iter()
+            .map(|tool| tool.name.into_owned())
+            .collect::<Vec<_>>();
+        default_names.sort();
+        assert_eq!(
+            default_names, expected_names,
+            "missing proxy profile must not inherit the broader daemon profile"
+        );
         (ct, daemon_task)
     });
     rt.block_on(async {
         ct.cancel();
         daemon_task.await.expect("daemon task");
     });
+}
+
+#[test]
+fn stdio_process_selected_ops_proxy_lists_and_calls_through_production_session_clone() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let temp = tempfile::tempdir().expect("tempdir");
+    let tachi_home = temp.path().join("home");
+    let global = tachi_home.join("global/memory.db");
+    std::fs::create_dir_all(global.parent().expect("global parent")).expect("global parent");
+    let _tachi_home = EnvRestore::set_path("TACHI_HOME", &tachi_home);
+    let _sigil_home = EnvRestore::remove("SIGIL_HOME");
+    let _app_home = EnvRestore::remove("TACHI_APP_HOME");
+
+    let rt = test_runtime();
+    let (ct, daemon_task) = rt.block_on(async {
+        let server = crate::MemoryServer::new(global.clone(), None).expect("daemon server");
+        let (daemon, ct, daemon_task) = spawn_test_http_daemon(server, &global).await;
+        let proxy = StdioProxyServer {
+            adapter_started_at: chrono::Utc::now(),
+            tool_profile: Some(tachi_hub::ToolProfile::operate()),
+            resolved_agent_identity: Default::default(),
+            daemon: std::sync::Arc::new(std::sync::RwLock::new(daemon)),
+            app_home: tachi_home,
+            global_db_path: global,
+            project_db_path: None,
+            client_project: None,
+        };
+
+        let listed = list_tools_via_stdio_proxy(proxy.clone())
+            .await
+            .expect("process-selected Ops tools/list must traverse HTTP proxy");
+        let names = listed
+            .tools
+            .iter()
+            .map(|tool| tool.name.as_ref())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(names.len(), 39, "Ops must retain its frozen broad surface");
+        assert!(names.contains("tachi_status"), "Ops list: {names:?}");
+        assert!(names.contains("runtime_info"), "Ops list: {names:?}");
+
+        let status = call_tool_via_stdio_proxy(proxy, "tachi_status", serde_json::Map::new())
+            .await
+            .expect("process-selected Ops call must traverse HTTP proxy");
+        assert_ne!(status.is_error, Some(true), "Ops status call: {status:?}");
+        (ct, daemon_task)
+    });
+    ct.cancel();
+    rt.block_on(daemon_task).expect("daemon task");
+}
+
+#[cfg(unix)]
+#[test]
+fn vault_cli_operator_actions_select_ops_through_real_daemon_session() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let temp = tempfile::tempdir().expect("tempdir");
+    let tachi_home = temp.path().join("home");
+    let global = tachi_home.join("global/memory.db");
+    let password_file = temp.path().join("vault-password");
+    let password = "correct horse battery staple";
+    std::fs::create_dir_all(global.parent().expect("global parent")).expect("global parent");
+    crate::utils::write_owner_only_file_atomic(&password_file, password.as_bytes())
+        .expect("write owner-only password fixture");
+    let key = crate::bootstrap::vault_cli::vault_init_with_password(&global, password.to_string())
+        .expect("initialize vault fixture");
+    crate::bootstrap::vault_cli::vault_upsert_secret_with_key(
+        &global,
+        &key,
+        "FIXTURE_API_KEY",
+        memcore::SECRET_TYPE_API_KEY,
+        "synthetic operator CLI fixture",
+        "synthetic-value-never-a-real-credential".into(),
+    )
+    .expect("seed synthetic API key");
+    let _tachi_home = EnvRestore::set_path("TACHI_HOME", &tachi_home);
+    let _sigil_home = EnvRestore::remove("SIGIL_HOME");
+    let _app_home = EnvRestore::remove("TACHI_APP_HOME");
+
+    let rt = test_runtime();
+    let (ct, daemon_task) = rt.block_on(async {
+        let server = crate::MemoryServer::new(global.clone(), None).expect("daemon server");
+        let (daemon, ct, daemon_task) = spawn_test_http_daemon(server, &global).await;
+        let port = daemon
+            .url
+            .strip_prefix("http://127.0.0.1:")
+            .and_then(|rest| rest.split('/').next())
+            .and_then(|value| value.parse::<u16>().ok())
+            .expect("test daemon URL port");
+        let pid_path = crate::daemon_lock::scoped_daemon_pid_path(&tachi_home, &global);
+        crate::utils::write_json_file_owner_only(
+            &pid_path,
+            &serde_json::json!({
+                "pid": std::process::id(),
+                "port": port,
+                "url": daemon.url,
+                "global_db": global.display().to_string(),
+                "version": env!("CARGO_PKG_VERSION"),
+                "internal_proxy_token": daemon.internal_proxy_token,
+            }),
+        )
+        .expect("write daemon discovery receipt");
+
+        for action in [
+            tachi_bootstrap::cli::VaultAction::Status,
+            tachi_bootstrap::cli::VaultAction::Lock,
+            tachi_bootstrap::cli::VaultAction::Unlock {
+                stdin_password: false,
+                keychain: false,
+                password_file: Some(password_file),
+                insecure_password_file: false,
+            },
+        ] {
+            crate::bootstrap::vault_cli::run_vault_command(&global, &tachi_home, action)
+                .await
+                .expect("explicit Vault CLI action must select authorized Ops profile");
+        }
+        let connection = rusqlite::Connection::open(&global).expect("fixture DB");
+        let access_count = || {
+            connection
+                .query_row(
+                    "SELECT access_count FROM vault_entries WHERE name='FIXTURE_API_KEY'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("lease access count")
+        };
+        // Unlock may warm provider caches; measure the lease independently of it.
+        let before_lease = access_count();
+        let lease_args =
+            serde_json::Map::from_iter([("name".into(), serde_json::json!("FIXTURE_API_KEY"))]);
+        for profile in [None, Some(tachi_hub::ToolProfile::operate())] {
+            let denied = crate::cli_client::call_daemon_tool_with_profile(
+                &daemon,
+                "vault_lease_api_key",
+                lease_args.clone(),
+                None,
+                profile,
+            )
+            .await
+            .expect_err("capability alone or Ops must not select Admin");
+            assert!(denied.to_string().contains("tool not found"), "{denied}");
+        }
+        let (_, _, denied) = http_mcp_initialize(
+            &daemon.url,
+            http_headers(&[(crate::session_identity::HEADER_PROFILE, "admin")]),
+            None,
+        )
+        .await;
+        assert_eq!(
+            denied["error"]["code"], -32602,
+            "Admin requires daemon capability: {denied}"
+        );
+        crate::bootstrap::vault_cli::run_vault_command(
+            &global,
+            &tachi_home,
+            tachi_bootstrap::cli::VaultAction::List {
+                stdin_password: false,
+                keychain: false,
+                password_file: None,
+                insecure_password_file: false,
+            },
+        )
+        .await
+        .expect("metadata list remains available through existing read fallback");
+        assert_eq!(
+            access_count(),
+            before_lease,
+            "denied requests and metadata-only List must not read the synthetic key"
+        );
+        crate::bootstrap::vault_cli::run_vault_command(
+            &global,
+            &tachi_home,
+            tachi_bootstrap::cli::VaultAction::Lease {
+                name: "FIXTURE_API_KEY".into(),
+                env_name: None,
+                stdin_password: false,
+                keychain: false,
+                password_file: None,
+                insecure_password_file: false,
+                json: true,
+            },
+        )
+        .await
+        .expect("explicit operator lease must reach authorized daemon");
+        assert_eq!(
+            access_count(),
+            before_lease + 1,
+            "exactly the explicitly authorized lease must read the synthetic key once"
+        );
+        (ct, daemon_task)
+    });
+    ct.cancel();
+    rt.block_on(daemon_task).expect("daemon task");
 }
 
 fn write_repo_project_manifest(tachi_home: &Path, db_paths: &[&Path]) {
@@ -963,7 +1265,7 @@ fn stdio_proxy_tachi_memory_search_rows_stay_objects_under_parallel_forwarding()
         let (daemon, ct, daemon_task) = spawn_test_http_daemon(server, &global).await;
         let proxy = StdioProxyServer {
             adapter_started_at: chrono::Utc::now(),
-            tool_profile: None,
+            tool_profile: Some(tachi_hub::ToolProfile::operate()),
             daemon: std::sync::Arc::new(std::sync::RwLock::new(daemon)),
             app_home: tachi_home.clone(),
             global_db_path: global.clone(),
@@ -1114,10 +1416,11 @@ fn stdio_proxy_runtime_info_reflects_pid_file_changes_not_cached_snapshot() {
             project_db: None,
             version: Some("0.0.0-stale-cache".to_string()),
             pid: Some(9999),
+            internal_proxy_token: None,
         };
         let proxy = StdioProxyServer {
             adapter_started_at: chrono::Utc::now(),
-            tool_profile: None,
+            tool_profile: Some(tachi_hub::ToolProfile::operate()),
             daemon: std::sync::Arc::new(std::sync::RwLock::new(stale_cached)),
             app_home: tachi_home.clone(),
             global_db_path: global.clone(),
@@ -1219,10 +1522,11 @@ fn stdio_proxy_runtime_info_reports_unreachable_when_daemon_absent() {
             project_db: None,
             version: Some(env!("CARGO_PKG_VERSION").to_string()),
             pid: Some(4242),
+            internal_proxy_token: None,
         };
         let proxy = StdioProxyServer {
             adapter_started_at: chrono::Utc::now(),
-            tool_profile: None,
+            tool_profile: Some(tachi_hub::ToolProfile::operate()),
             daemon: std::sync::Arc::new(std::sync::RwLock::new(cached_but_dead)),
             app_home: tachi_home.clone(),
             global_db_path: global.clone(),
@@ -1290,7 +1594,7 @@ fn stdio_proxy_archives_global_row_with_bound_project() {
         let (daemon, ct, daemon_task) = spawn_test_http_daemon(server, &global).await;
         let proxy = StdioProxyServer {
             adapter_started_at: chrono::Utc::now(),
-            tool_profile: None,
+            tool_profile: Some(tachi_hub::ToolProfile::admin()),
             daemon: std::sync::Arc::new(std::sync::RwLock::new(daemon)),
             app_home: tachi_home.clone(),
             global_db_path: global.clone(),
@@ -1543,21 +1847,17 @@ fn stdio_proxy_env_gate_accepts_common_truthy_values() {
 }
 
 #[test]
-fn proxy_maps_zero_arg_briefing_to_project_memory_briefing() {
+fn proxy_no_longer_rewrites_retired_briefing_route() {
     let request = rmcp::model::CallToolRequestParams::new("tachi_briefing");
 
-    let mapped = prepare_proxy_tool_call(request, Some("Sigil-abc123")).expect("mapped");
+    let unchanged =
+        prepare_proxy_tool_call(request, Some("Sigil-abc123")).expect("preflight succeeds");
 
-    assert_eq!(mapped.name.as_ref(), "tachi_memory");
-    let args = mapped.arguments.expect("briefing args");
-    assert_eq!(args["action"], serde_json::json!("briefing"));
-    assert_eq!(args["format"], serde_json::json!("markdown"));
-    assert_eq!(args["compact"], serde_json::json!(true));
-    assert_eq!(args["project"], serde_json::json!("Sigil-abc123"));
-    assert!(args["query"]
-        .as_str()
-        .expect("query")
-        .contains("Sigil-abc123"));
+    assert_eq!(unchanged.name.as_ref(), "tachi_briefing");
+    let arguments = unchanged.arguments.unwrap_or_default();
+    for rewritten in ["action", "format", "compact", "project", "query"] {
+        assert!(!arguments.contains_key(rewritten), "{rewritten}");
+    }
 }
 
 // #1041 B1: the stdio proxy's `prepare_proxy_tool_call` is a Preflight hop
@@ -1904,6 +2204,28 @@ async fn http_mcp_call_tool(
     parse_http_mcp_payload(&body, id)
 }
 
+async fn http_mcp_list_tools(
+    client: &reqwest::Client,
+    url: &str,
+    headers: reqwest::header::HeaderMap,
+    id: i64,
+) -> serde_json::Value {
+    let response = client
+        .post(url)
+        .headers(headers)
+        .json(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "tools/list",
+            "params": {},
+        }))
+        .send()
+        .await
+        .expect("send HTTP MCP tools/list");
+    let body = response.text().await.expect("tools/list body");
+    parse_http_mcp_payload(&body, id)
+}
+
 fn http_tool_text(response: &serde_json::Value) -> String {
     let content = response["result"]["content"]
         .as_array()
@@ -1959,7 +2281,7 @@ fn http_direct_connect_header_identity_binds_profile_and_project() {
         let server = crate::MemoryServer::new(global.clone(), None).expect("daemon server");
         let (daemon, ct, daemon_task) = spawn_test_http_daemon(server, &global).await;
         let headers = http_headers(&[
-            (crate::session_identity::HEADER_PROFILE, "delegate"),
+            (crate::session_identity::HEADER_PROFILE, "standard"),
             (crate::session_identity::HEADER_CLIENT, "codex-http-test"),
             (crate::session_identity::HEADER_PROJECT, project_name),
         ]);
@@ -1967,25 +2289,39 @@ fn http_direct_connect_header_identity_binds_profile_and_project() {
         assert!(init.get("error").is_none(), "initialize failed: {init:#}");
         http_mcp_initialized(&client, &daemon.url, session_headers.clone()).await;
 
-        let runtime = http_mcp_call_tool(
-            &client,
-            &daemon.url,
-            session_headers.clone(),
-            2,
-            "runtime_info",
-            serde_json::Map::new(),
-        )
-        .await;
-        assert!(
-            runtime["result"]["isError"] != serde_json::json!(true),
-            "runtime_info failed: {runtime:#}"
+        let listed = http_mcp_list_tools(&client, &daemon.url, session_headers.clone(), 2).await;
+        let names = listed["result"]["tools"]
+            .as_array()
+            .expect("tools/list tools")
+            .iter()
+            .filter_map(|tool| tool["name"].as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            names,
+            std::collections::BTreeSet::from([
+                "tachi_a2a",
+                "tachi_gh",
+                "tachi_memory",
+                "tachi_staff",
+                "tachi_task",
+            ])
         );
-        let runtime_text = http_tool_text(&runtime);
-        let runtime_json: serde_json::Value =
-            serde_json::from_str(&runtime_text).expect("runtime_info JSON");
-        assert_eq!(runtime_json["runtime"]["tool_profile"], "delegate");
-        assert_eq!(runtime_json["runtime"]["session_client"], "codex-http-test");
-        assert_eq!(runtime_json["runtime"]["session_project"], project_name);
+
+        for (id, hidden) in [(3, "runtime_info"), (4, "tachi_briefing")] {
+            let denied = http_mcp_call_tool(
+                &client,
+                &daemon.url,
+                session_headers.clone(),
+                id,
+                hidden,
+                serde_json::Map::new(),
+            )
+            .await;
+            assert!(
+                http_tool_text(&denied).contains("tool not found"),
+                "standard HTTP direct call should hide {hidden}: {denied:#}"
+            );
+        }
 
         for (id, scope, summary) in [
             (
@@ -2003,7 +2339,7 @@ fn http_direct_connect_header_identity_binds_profile_and_project() {
                 &client,
                 &daemon.url,
                 session_headers.clone(),
-                if scope == "global" { 3 } else { 4 },
+                if scope == "global" { 5 } else { 6 },
                 "tachi_memory",
                 serde_json::Map::from_iter([
                     ("action".to_string(), serde_json::json!("save")),
@@ -2032,8 +2368,8 @@ fn http_direct_connect_header_identity_binds_profile_and_project() {
         let search = http_mcp_call_tool(
             &client,
             &daemon.url,
-            session_headers,
-            5,
+            session_headers.clone(),
+            7,
             "tachi_memory",
             serde_json::Map::from_iter([
                 ("action".to_string(), serde_json::json!("search")),
@@ -2079,7 +2415,7 @@ fn http_direct_connect_header_identity_binds_profile_and_project() {
 }
 
 #[test]
-fn http_direct_connect_rejects_admin_profile_without_authorization_policy() {
+fn http_direct_connect_rejects_privileged_profile_without_authorization_policy() {
     let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
@@ -2096,17 +2432,149 @@ fn http_direct_connect_rejects_admin_profile_without_authorization_policy() {
     let (ct, daemon_task) = rt.block_on(async {
         let server = crate::MemoryServer::new(global.clone(), None).expect("daemon server");
         let (daemon, ct, daemon_task) = spawn_test_http_daemon(server, &global).await;
-        let headers = http_headers(&[(crate::session_identity::HEADER_PROFILE, "admin")]);
+        for profile in [
+            "ops",
+            "operate",
+            "runtime",
+            "openclaw",
+            "hermes",
+            "adapter",
+            "delegate+operate",
+            "admin",
+            "full",
+            "emergency",
+        ] {
+            let headers = http_headers(&[(crate::session_identity::HEADER_PROFILE, profile)]);
+            let (_client, _session_headers, init) =
+                http_mcp_initialize(&daemon.url, headers, None).await;
+            let error = init.get("error").unwrap_or_else(|| {
+                panic!("privileged profile {profile} initialize should fail: {init:#}")
+            });
+            let message = error["message"].as_str().unwrap_or_default();
+            assert!(
+                message.contains("requires explicit authorization"),
+                "unexpected {profile} rejection: {init:#}"
+            );
+        }
+        let guessed_headers = http_headers(&[
+            (crate::session_identity::HEADER_PROFILE, "ops"),
+            (
+                crate::session_identity::HEADER_INTERNAL_PROXY_TOKEN,
+                "caller-guessed-capability",
+            ),
+        ]);
+        let (_client, _session_headers, guessed) =
+            http_mcp_initialize(&daemon.url, guessed_headers, None).await;
+        assert!(
+            guessed["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("requires explicit authorization")),
+            "a caller-guessed proxy capability must not authorize Ops: {guessed:#}"
+        );
+        let headers =
+            http_headers(&[(crate::session_identity::HEADER_PROFILE, "unknown-principal")]);
         let (_client, _session_headers, init) =
             http_mcp_initialize(&daemon.url, headers, None).await;
-        let error = init
-            .get("error")
-            .unwrap_or_else(|| panic!("admin initialize should fail: {init:#}"));
-        let message = error["message"].as_str().unwrap_or_default();
+        let message = init["error"]["message"].as_str().unwrap_or_default();
         assert!(
-            message.contains("requires explicit authorization"),
-            "unexpected admin rejection: {init:#}"
+            message.contains("unknown HTTP direct-connect Tachi profile"),
+            "unknown HTTP profile must fail closed: {init:#}"
         );
+        (ct, daemon_task)
+    });
+
+    ct.cancel();
+    rt.block_on(daemon_task).expect("daemon task");
+}
+
+#[test]
+fn http_direct_connect_ordinary_profiles_have_exact_facades_and_hide_retired_routes() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let tachi_home = temp.path().join("home");
+    let global = tachi_home.join("global/memory.db");
+    std::fs::create_dir_all(global.parent().expect("global parent")).expect("global parent");
+    let _tachi_home = EnvRestore::set_path("TACHI_HOME", &tachi_home);
+    let _sigil_home = EnvRestore::remove("SIGIL_HOME");
+    let _app_home = EnvRestore::remove("TACHI_APP_HOME");
+
+    let rt = test_runtime();
+    let (ct, daemon_task) = rt.block_on(async {
+        let server = crate::MemoryServer::new(global.clone(), None).expect("daemon server");
+        let (daemon, ct, daemon_task) = spawn_test_http_daemon(server, &global).await;
+        let expected = std::collections::BTreeSet::from([
+            "tachi_a2a",
+            "tachi_gh",
+            "tachi_memory",
+            "tachi_staff",
+            "tachi_task",
+        ]);
+
+        for profile in [
+            None,
+            Some("standard"),
+            Some("lead"),
+            Some("delegate"),
+            Some("worker"),
+            Some("observe"),
+            Some("read"),
+            Some("reader"),
+            Some("remember"),
+            Some("write"),
+            Some("writer"),
+            Some("agent"),
+            Some("coordinate"),
+            Some("observe+remember"),
+            Some("remember+observe"),
+            Some("reader+writer"),
+            Some("coordinate+observe"),
+            Some("observe+coordinate"),
+            Some("standard+delegate"),
+            Some("delegate+standard"),
+        ] {
+            let profile_label = profile.unwrap_or("missing/default");
+            let headers = profile.map_or_else(
+                || http_headers(&[]),
+                |value| http_headers(&[(crate::session_identity::HEADER_PROFILE, value)]),
+            );
+            let (client, session_headers, init) =
+                http_mcp_initialize(&daemon.url, headers, None).await;
+            assert!(
+                init.get("error").is_none(),
+                "initialize {profile_label} failed: {init:#}"
+            );
+            http_mcp_initialized(&client, &daemon.url, session_headers.clone()).await;
+
+            let listed =
+                http_mcp_list_tools(&client, &daemon.url, session_headers.clone(), 2).await;
+            let names = listed["result"]["tools"]
+                .as_array()
+                .expect("tools/list tools")
+                .iter()
+                .filter_map(|tool| tool["name"].as_str())
+                .collect::<std::collections::BTreeSet<_>>();
+            assert_eq!(names, expected, "unexpected HTTP tools for {profile_label}");
+
+            for (id, hidden) in [(3, "runtime_info"), (4, "tachi_briefing")] {
+                let denied = http_mcp_call_tool(
+                    &client,
+                    &daemon.url,
+                    session_headers.clone(),
+                    id,
+                    hidden,
+                    serde_json::Map::new(),
+                )
+                .await;
+                assert!(
+                    http_tool_text(&denied).contains("tool not found"),
+                    "{profile_label} HTTP direct call should hide {hidden}: {denied:#}"
+                );
+            }
+        }
+
         (ct, daemon_task)
     });
 
@@ -2292,8 +2760,10 @@ fn http_direct_connect_same_db_alias_write_normalizes_to_bound_identity() {
     let (ct, daemon_task) = rt.block_on(async {
         let server = crate::MemoryServer::new(global.clone(), None).expect("daemon server");
         let (daemon, ct, daemon_task) = spawn_test_http_daemon(server, &global).await;
-        let headers =
-            http_headers(&[(crate::session_identity::HEADER_PROJECT, bound_name.as_str())]);
+        let headers = http_headers(&[
+            (crate::session_identity::HEADER_PROFILE, "standard"),
+            (crate::session_identity::HEADER_PROJECT, bound_name.as_str()),
+        ]);
         let (client, session_headers, init) = http_mcp_initialize(&daemon.url, headers, None).await;
         assert!(init.get("error").is_none(), "initialize failed: {init:#}");
         http_mcp_initialized(&client, &daemon.url, session_headers.clone()).await;
@@ -2301,7 +2771,7 @@ fn http_direct_connect_same_db_alias_write_normalizes_to_bound_identity() {
         let save = http_mcp_call_tool(
             &client,
             &daemon.url,
-            session_headers.clone(),
+            session_headers,
             2,
             "tachi_memory",
             serde_json::Map::from_iter([
@@ -2326,23 +2796,6 @@ fn http_direct_connect_same_db_alias_write_normalizes_to_bound_identity() {
         assert!(
             save.get("error").is_none() && save["result"]["isError"] != serde_json::json!(true),
             "same-DB alias write failed: {save:#}"
-        );
-
-        let runtime = http_mcp_call_tool(
-            &client,
-            &daemon.url,
-            session_headers,
-            3,
-            "runtime_info",
-            serde_json::Map::new(),
-        )
-        .await;
-        let runtime_json: serde_json::Value =
-            serde_json::from_str(&http_tool_text(&runtime)).expect("runtime_info JSON");
-        assert_eq!(
-            runtime_json["runtime"]["session_project"],
-            serde_json::json!(&bound_name),
-            "immutable HTTP binding must remain the legacy identity"
         );
         (ct, daemon_task)
     });
