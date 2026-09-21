@@ -150,6 +150,7 @@ fn modern_stdio_runtime_info_has_complete_envelope_and_legacy_shape_is_preserved
     with_tachi_home(temp.path(), || {
         test_runtime().block_on(async {
             let mut proxy = identity_probe_proxy();
+            proxy.tool_profile = Some(tachi_hub::ToolProfile::operate());
             proxy.app_home = temp.path().to_path_buf();
             proxy.global_db_path = temp.path().join("global/memory.db");
             let responses = stdio_responses(proxy, &[

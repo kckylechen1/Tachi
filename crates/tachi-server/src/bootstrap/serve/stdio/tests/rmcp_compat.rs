@@ -1,4 +1,5 @@
 //! Dual-era wire conformance for the RMCP 3.3 protocol adapter.
+mod capability_lifecycle;
 use super::*;
 use serde_json::json;
 
@@ -150,6 +151,19 @@ async fn stdio_responses(
         .expect("stdio server exit deadline")
         .expect("stdio server task");
     responses
+}
+
+fn privileged_fixture_client(daemon: &crate::cli_client::DaemonInfo) -> reqwest::Client {
+    reqwest::Client::builder()
+        .default_headers(http_headers(&[(
+            crate::session_identity::HEADER_INTERNAL_PROXY_TOKEN,
+            daemon
+                .internal_proxy_token
+                .as_deref()
+                .expect("fixture capability"),
+        )]))
+        .build()
+        .expect("fixture client")
 }
 
 async fn modern_http_tool_call(
@@ -415,7 +429,8 @@ fn dual_era_conformance_matrix_covers_stdio_and_http() {
             assert_eq!(memory_id_count(&global, "identity-conflict-write"), 0);
 
             // Modern identity is request-scoped; it cannot become session authority.
-            let first_runtime = client
+            let ops_client = privileged_fixture_client(&daemon);
+            let first_runtime = ops_client
                 .post(&daemon.url)
                 .headers(http_headers(&[
                     ("mcp-protocol-version", "2026-07-28"),
@@ -424,7 +439,7 @@ fn dual_era_conformance_matrix_covers_stdio_and_http() {
                 ]))
                 .json(&json!({
                     "jsonrpc":"2.0", "id":25, "method":"tools/call",
-                    "params":{"_meta":modern_meta(json!({"tachiClient":"request-a"})),
+                    "params":{"_meta":modern_meta(json!({"tachiClient":"request-a", "tachiProfile":"ops"})),
                         "name":"runtime_info", "arguments":{}}
                 }))
                 .send().await.expect("first runtime");
@@ -436,7 +451,7 @@ fn dual_era_conformance_matrix_covers_stdio_and_http() {
                 serde_json::from_str(&http_tool_text(&first_runtime)).expect("runtime JSON");
             assert_eq!(first_runtime["runtime"]["session_client"], "request-a");
 
-            let second_runtime = client
+            let second_runtime = ops_client
                 .post(&daemon.url)
                 .headers(http_headers(&[
                     ("mcp-protocol-version", "2026-07-28"),
@@ -445,7 +460,7 @@ fn dual_era_conformance_matrix_covers_stdio_and_http() {
                 ]))
                 .json(&json!({
                     "jsonrpc":"2.0", "id":26, "method":"tools/call",
-                    "params":{"_meta":modern_meta(json!({})), "name":"runtime_info", "arguments":{}}
+                    "params":{"_meta":modern_meta(json!({"tachiProfile":"ops"})), "name":"runtime_info", "arguments":{}}
                 }))
                 .send().await.expect("second runtime");
             let second_runtime = parse_http_mcp_payload(
@@ -1357,8 +1372,21 @@ fn modern_http_hydrates_legacy_proxy_success_and_tool_error_results() {
             let upstream = install_legacy_proxy_fixture(&server, server_name).await;
             let (daemon, cancel, task) = spawn_test_http_daemon(server.clone(), &global).await;
 
-            let (legacy_client, legacy_headers, _) =
-                http_mcp_initialize(&daemon.url, http_headers(&[]), None).await;
+            let (legacy_client, legacy_headers, _) = http_mcp_initialize(
+                &daemon.url,
+                http_headers(&[
+                    (crate::session_identity::HEADER_PROFILE, "admin"),
+                    (
+                        crate::session_identity::HEADER_INTERNAL_PROXY_TOKEN,
+                        daemon
+                            .internal_proxy_token
+                            .as_deref()
+                            .expect("fixture capability"),
+                    ),
+                ]),
+                None,
+            )
+            .await;
             http_mcp_initialized(&legacy_client, &daemon.url, legacy_headers.clone()).await;
             for (id, tool_name, is_error, expected_text) in [
                 (75, "succeed", false, "legacy upstream success"),
@@ -1382,7 +1410,7 @@ fn modern_http_hydrates_legacy_proxy_success_and_tool_error_results() {
                 }
             }
 
-            let modern_client = reqwest::Client::new();
+            let modern_client = privileged_fixture_client(&daemon);
             let success_name = format!("{server_name}__succeed");
             let error_name = format!("{server_name}__tool_error");
             let (modern_success, modern_tool_error) = tokio::join!(
@@ -1391,7 +1419,7 @@ fn modern_http_hydrates_legacy_proxy_success_and_tool_error_results() {
                     &daemon.url,
                     77,
                     &success_name,
-                    json!({}),
+                    json!({"tachiProfile":"admin"}),
                     json!({}),
                 ),
                 modern_http_tool_call(
@@ -1399,7 +1427,7 @@ fn modern_http_hydrates_legacy_proxy_success_and_tool_error_results() {
                     &daemon.url,
                     78,
                     &error_name,
-                    json!({}),
+                    json!({"tachiProfile":"admin"}),
                     json!({}),
                 )
             );
@@ -1624,15 +1652,16 @@ fn modern_http_concurrent_requests_isolate_project_profile_actor_and_work_claim(
                 "remember must not gain the coordinate tool surface: {remember_coordinate_op:#}"
             );
             assert_eq!(coordinate_op["result"]["isError"], true, "{coordinate_op:#}");
-            assert!(
-                http_tool_text(&coordinate_op)
-                    .contains("memo_id is required when action='promote_issue'"),
-                "coordinate request must reach and execute the coordinate-only handler: {coordinate_op:#}"
-            );
+            assert!(http_tool_text(&coordinate_op).contains("tool not found"), "ordinary Coordinate must not restore the hidden handoff facade: {coordinate_op:#}");
+            let privileged_client = privileged_fixture_client(&daemon);
+            let privileged_identity = |mut identity: serde_json::Value, profile: &str| { identity["tachiProfile"] = json!(profile); identity };
+            let authorized_op = modern_http_tool_call(&privileged_client, &daemon.url, 83, "tachi_handoff", privileged_identity(identity_b(), "admin"), json!({"action":"promote_issue"})).await;
+            assert_eq!(authorized_op["result"]["isError"], true, "{authorized_op:#}");
+            assert!(http_tool_text(&authorized_op).contains("memo_id is required when action='promote_issue'"), "explicit authorized Admin must still reach the retained handler: {authorized_op:#}");
 
             let (runtime_a, runtime_b) = tokio::join!(
-                modern_http_tool_call(&client, &daemon.url, 81, "runtime_info", identity_a(), json!({})),
-                modern_http_tool_call(&client, &daemon.url, 82, "runtime_info", identity_b(), json!({})),
+                modern_http_tool_call(&privileged_client, &daemon.url, 81, "runtime_info", privileged_identity(identity_a(), "ops"), json!({})),
+                modern_http_tool_call(&privileged_client, &daemon.url, 82, "runtime_info", privileged_identity(identity_b(), "ops"), json!({})),
             );
             let connection = rusqlite::Connection::open(&global).expect("open global DB");
             for (issue_ref, expected_client, expected_agent, expected_role, claim_response, runtime_response) in [

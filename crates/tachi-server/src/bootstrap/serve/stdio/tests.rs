@@ -568,8 +568,17 @@ fn vault_cli_operator_actions_select_ops_through_real_daemon_session() {
     std::fs::create_dir_all(global.parent().expect("global parent")).expect("global parent");
     crate::utils::write_owner_only_file_atomic(&password_file, password.as_bytes())
         .expect("write owner-only password fixture");
-    crate::bootstrap::vault_cli::vault_init_with_password(&global, password.to_string())
+    let key = crate::bootstrap::vault_cli::vault_init_with_password(&global, password.to_string())
         .expect("initialize vault fixture");
+    crate::bootstrap::vault_cli::vault_upsert_secret_with_key(
+        &global,
+        &key,
+        "FIXTURE_API_KEY",
+        memcore::SECRET_TYPE_API_KEY,
+        "synthetic operator CLI fixture",
+        "synthetic-value-never-a-real-credential".into(),
+    )
+    .expect("seed synthetic API key");
     let _tachi_home = EnvRestore::set_path("TACHI_HOME", &tachi_home);
     let _sigil_home = EnvRestore::remove("SIGIL_HOME");
     let _app_home = EnvRestore::remove("TACHI_APP_HOME");
@@ -612,6 +621,79 @@ fn vault_cli_operator_actions_select_ops_through_real_daemon_session() {
                 .await
                 .expect("explicit Vault CLI action must select authorized Ops profile");
         }
+        let connection = rusqlite::Connection::open(&global).expect("fixture DB");
+        let access_count = || {
+            connection
+                .query_row(
+                    "SELECT access_count FROM vault_entries WHERE name='FIXTURE_API_KEY'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("lease access count")
+        };
+        // Unlock may warm provider caches; measure the lease independently of it.
+        let before_lease = access_count();
+        let lease_args =
+            serde_json::Map::from_iter([("name".into(), serde_json::json!("FIXTURE_API_KEY"))]);
+        for profile in [None, Some(tachi_hub::ToolProfile::operate())] {
+            let denied = crate::cli_client::call_daemon_tool_with_profile(
+                &daemon,
+                "vault_lease_api_key",
+                lease_args.clone(),
+                None,
+                profile,
+            )
+            .await
+            .expect_err("capability alone or Ops must not select Admin");
+            assert!(denied.to_string().contains("tool not found"), "{denied}");
+        }
+        let (_, _, denied) = http_mcp_initialize(
+            &daemon.url,
+            http_headers(&[(crate::session_identity::HEADER_PROFILE, "admin")]),
+            None,
+        )
+        .await;
+        assert_eq!(
+            denied["error"]["code"], -32602,
+            "Admin requires daemon capability: {denied}"
+        );
+        crate::bootstrap::vault_cli::run_vault_command(
+            &global,
+            &tachi_home,
+            tachi_bootstrap::cli::VaultAction::List {
+                stdin_password: false,
+                keychain: false,
+                password_file: None,
+                insecure_password_file: false,
+            },
+        )
+        .await
+        .expect("metadata list remains available through existing read fallback");
+        assert_eq!(
+            access_count(),
+            before_lease,
+            "denied requests and metadata-only List must not read the synthetic key"
+        );
+        crate::bootstrap::vault_cli::run_vault_command(
+            &global,
+            &tachi_home,
+            tachi_bootstrap::cli::VaultAction::Lease {
+                name: "FIXTURE_API_KEY".into(),
+                env_name: None,
+                stdin_password: false,
+                keychain: false,
+                password_file: None,
+                insecure_password_file: false,
+                json: true,
+            },
+        )
+        .await
+        .expect("explicit operator lease must reach authorized daemon");
+        assert_eq!(
+            access_count(),
+            before_lease + 1,
+            "exactly the explicitly authorized lease must read the synthetic key once"
+        );
         (ct, daemon_task)
     });
     ct.cancel();

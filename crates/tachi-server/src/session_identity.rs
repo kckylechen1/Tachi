@@ -19,8 +19,9 @@ pub(crate) const HEADER_AGENT_IDENTITY: &str = "x-tachi-agent-identity";
 /// Per-daemon capability carried only by trusted local CLI/stdio-proxy hops.
 /// It is minted at daemon startup, persisted in the owner-only discovery
 /// receipt, and never accepted from MCP initialize metadata. Possessing this
-/// capability authorizes a process-selected Ops profile; profile metadata by
-/// itself remains an untrusted assertion.
+/// capability authorizes an explicitly process-selected privileged profile
+/// (Ops or Admin/emergency); profile metadata alone remains untrusted, and
+/// possession of the capability never selects a privileged profile implicitly.
 pub(crate) const HEADER_INTERNAL_PROXY_TOKEN: &str = "x-tachi-internal-proxy-token";
 /// Process-env twin of [`HEADER_AGENT_IDENTITY`] / [`META_AGENT_IDENTITY`].
 /// Stdio hosts (Cursor `mcp.json`) cannot set initialize `_meta`; they can

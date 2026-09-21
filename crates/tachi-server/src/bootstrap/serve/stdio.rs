@@ -609,17 +609,17 @@ impl StdioProxyServer {
 
     /// Re-resolve the daemon after a BeforeDispatch (transport) failure. The
     /// request never reached the daemon, so it may have restarted on a new
-    /// ephemeral port or died. Reuse the EXACT startup path
+    /// ephemeral port, rotated its local capability, or died. Reuse the EXACT startup path
     /// (`ensure_stdio_proxy_daemon`: version-compatible discovery +
     /// stale-replace + auto-spawn) so a self-healed daemon is never one startup
     /// would have rejected, then apply startup's project-context gate so a
     /// project-scoped request is never rerouted to a daemon that can't preserve
-    /// this project. Persist the fresh endpoint so later calls skip the dead URL.
+    /// this project. Persist the fresh connection identity for later calls.
     /// Returns None when nothing compatible is reachable, so the caller surfaces
     /// the original error.
     async fn refresh_daemon(
         &self,
-        stale_url: &str,
+        stale: &crate::cli_client::DaemonInfo,
         identity: &StdioRequestIdentity,
     ) -> Option<crate::cli_client::DaemonInfo> {
         let fresh = ensure_stdio_proxy_daemon(
@@ -640,15 +640,16 @@ impl StdioProxyServer {
             // misroute writes; refuse it and surface the original error.
             return None;
         }
-        if fresh.url == stale_url {
-            // Same endpoint resolved again; retrying it would fail identically.
+        if fresh.url == stale.url && fresh.internal_proxy_token == stale.internal_proxy_token {
+            // An unchanged connection identity would fail identically. A daemon
+            // can restart on the same port with a newly minted capability.
             return None;
         }
         let mut guard = self.daemon.write().unwrap_or_else(|e| e.into_inner());
         *guard = fresh.clone();
         eprintln!(
-            "[stdio-proxy] self-healed daemon endpoint: {stale_url} -> {}",
-            fresh.url
+            "[stdio-proxy] self-healed daemon connection: {} -> {}",
+            stale.url, fresh.url
         );
         Some(fresh)
     }
@@ -874,7 +875,7 @@ impl rmcp::ServerHandler for StdioProxyServer {
                 // BeforeDispatch = the request never reached the daemon; safe to
                 // re-resolve and retry (list_tools is read-only regardless).
                 Err(err) if err.allows_in_process_fallback() => {
-                    match self.refresh_daemon(&current.url, &identity).await {
+                    match self.refresh_daemon(&current, &identity).await {
                         Some(fresh) => crate::cli_client::list_daemon_tools_with_profile(
                             &fresh,
                             request,
@@ -938,7 +939,7 @@ impl rmcp::ServerHandler for StdioProxyServer {
                     // AfterDispatch (timeout / post-handshake failure) must surface
                     // as-is to avoid replaying a possibly-applied write.
                     Err(err) if err.allows_in_process_fallback() => {
-                        match self.refresh_daemon(&current.url, &identity).await {
+                        match self.refresh_daemon(&current, &identity).await {
                             Some(fresh) => {
                                 crate::cli_client::call_daemon_tool_raw_with_profile_and_identity(
                                     &fresh,

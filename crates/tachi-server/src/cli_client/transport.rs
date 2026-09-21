@@ -256,7 +256,7 @@ pub(crate) async fn call_daemon_tool_raw(
     params: CallToolRequestParams,
     proxy_project: Option<&str>,
 ) -> Result<rmcp::model::CallToolResult, DaemonCallError> {
-    call_daemon_tool_raw_with_phases(info, params, proxy_project)
+    call_daemon_tool_raw_with_phases(info, params, proxy_project, None)
         .await
         .0
 }
@@ -313,6 +313,7 @@ pub(crate) async fn call_daemon_tool_raw_with_phases(
     info: &DaemonInfo,
     params: CallToolRequestParams,
     proxy_project: Option<&str>,
+    profile: Option<tachi_hub::ToolProfile>,
 ) -> (
     Result<rmcp::model::CallToolResult, DaemonCallError>,
     DaemonCallPhaseTiming,
@@ -321,7 +322,7 @@ pub(crate) async fn call_daemon_tool_raw_with_phases(
         info,
         params,
         proxy_project,
-        None,
+        profile,
         None,
         ProxyIdentityForward::AutoEnv,
     )
