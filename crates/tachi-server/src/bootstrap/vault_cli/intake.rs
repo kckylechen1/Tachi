@@ -336,10 +336,53 @@ fn build_plan(discovery: DiscoveryReport) -> PlanReport {
 }
 
 fn build_plan_from_classified(
-    candidates: Vec<ClassifiedCandidate>,
+    mut candidates: Vec<ClassifiedCandidate>,
     notes: Vec<DiscoveryNote>,
     inventory: &AccountInventory,
 ) -> PlanReport {
+    // A canonical lane slot can name only one account target. Resolve conflicts
+    // before grouping by account, so distinct fresh accounts cannot each emit a
+    // binding for the same slot. Repeated sightings of the same target are safe.
+    let mut targets_by_slot: HashMap<String, BTreeSet<(String, String)>> = HashMap::new();
+    for candidate in &candidates {
+        if candidate.classification != "known" {
+            continue;
+        }
+        if let (Some(account_id), Some(account_fingerprint)) = (
+            candidate.account_id.as_ref(),
+            candidate.account_fingerprint.as_ref(),
+        ) {
+            for slot in &candidate.intended_slot_binds {
+                targets_by_slot
+                    .entry(slot.clone())
+                    .or_default()
+                    .insert((account_id.clone(), account_fingerprint.clone()));
+            }
+        }
+    }
+    let conflicted_targets: HashSet<_> = targets_by_slot
+        .into_values()
+        .filter(|targets| targets.len() > 1)
+        .flatten()
+        .collect();
+    for candidate in &mut candidates {
+        // Include canonical-key siblings without their own slot intent: they
+        // must not recreate an account rejected by the slot conflict above.
+        if candidate
+            .account_id
+            .as_ref()
+            .zip(candidate.account_fingerprint.as_ref())
+            .is_some_and(|(account_id, fingerprint)| {
+                conflicted_targets.contains(&(account_id.clone(), fingerprint.clone()))
+            })
+        {
+            candidate.classification = "ambiguous";
+            candidate.account_id = None;
+            candidate.planned_action = None;
+            candidate.intended_slot_binds.clear();
+        }
+    }
+
     let mut groups: BTreeMap<(String, String, String), Vec<usize>> = BTreeMap::new();
     for (index, candidate) in candidates.iter().enumerate() {
         if candidate.classification != "known" {
@@ -1191,6 +1234,85 @@ mod tests {
                 .count(),
             2
         );
+    }
+
+    #[test]
+    fn conflicting_fresh_accounts_for_one_slot_are_action_free_order_independently() {
+        for second_endpoint in ["api.deepseek.com", "api.siliconflow.cn"] {
+            let home = tempfile::tempdir().expect("home");
+            let cwd = tempfile::tempdir().expect("cwd");
+            let sources = [
+                home.path().join(".tachi/config.env"),
+                cwd.path().join(".env"),
+            ];
+            let sightings = [
+                "DEEPSEEK_API_KEY=first-fixture\nDISTILL_API_KEY2=first-fixture\nDISTILL_BASE_URL=https://api.deepseek.com\n"
+                    .to_string(),
+                format!(
+                    "DISTILL_API_KEY2=second-fixture\nDISTILL_BASE_URL=https://{second_endpoint}\n"
+                ),
+            ];
+            let mut digests = Vec::new();
+            for order in [[0, 1], [1, 0]] {
+                for (source, index) in sources.iter().zip(order) {
+                    write_file(source, &sightings[index]);
+                }
+                let report = plan(home.path(), cwd.path(), &home.path().join("missing.db"));
+                assert!(report.actions.is_empty(), "{report:#?}");
+                let candidates: Vec<_> = report
+                    .candidates
+                    .iter()
+                    .filter(|candidate| {
+                        matches!(
+                            candidate.logical_name.as_str(),
+                            "DISTILL_API_KEY2" | "DEEPSEEK_API_KEY"
+                        )
+                    })
+                    .collect();
+                assert_eq!(candidates.len(), 3);
+                for candidate in candidates {
+                    assert_eq!(candidate.classification, "ambiguous");
+                    assert!(candidate.account_id.is_none());
+                    assert!(candidate.intended_slot_binds.is_empty());
+                }
+                digests.push(report.plan_digest);
+            }
+            assert_eq!(digests[0], digests[1]);
+        }
+    }
+
+    #[test]
+    fn identical_fresh_account_for_one_slot_is_deduplicated_across_sources() {
+        let home = tempfile::tempdir().expect("home");
+        let cwd = tempfile::tempdir().expect("cwd");
+        for source in [
+            home.path().join(".tachi/config.env"),
+            cwd.path().join(".env"),
+        ] {
+            write_file(
+                &source,
+                "DISTILL_API_KEY2=same-fixture\nDISTILL_BASE_URL=https://api.deepseek.com\n",
+            );
+        }
+        let report = plan(home.path(), cwd.path(), &home.path().join("missing.db"));
+        assert_eq!(report.actions.len(), 2, "{report:#?}");
+        assert_eq!(report.actions[0].action, ACTION_CREATE_ACCOUNT);
+        assert_eq!(report.actions[1].action, ACTION_BIND_SLOT);
+        assert_eq!(report.actions[1].slot.as_deref(), Some("DISTILL_API_KEY"));
+        assert_eq!(report.actions[0].account_id, report.actions[1].account_id);
+        let candidates: Vec<_> = report
+            .candidates
+            .iter()
+            .filter(|candidate| candidate.logical_name == "DISTILL_API_KEY2")
+            .collect();
+        assert_eq!(candidates.len(), 2);
+        for candidate in candidates {
+            assert_eq!(candidate.classification, "known");
+            assert_eq!(
+                candidate.account_id.as_deref(),
+                Some(report.actions[0].account_id.as_str())
+            );
+        }
     }
 
     #[test]
