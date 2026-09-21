@@ -2292,6 +2292,27 @@ fn plant_vault_secret(server: &MemoryServer, name: &str, value: &str, secret_typ
     .unwrap_or_else(|e| panic!("plant {name}: {e}"));
 }
 
+// Call only while holding global_test_lock. Listing reconciles every config
+// location and lane slot, even when the server has an explicit database path.
+fn isolate_vault_list_environment() -> (
+    crate::test_support::CwdRestore,
+    Vec<EnvRestore>,
+    tempfile::TempDir,
+) {
+    let temp = tempfile::tempdir().expect("vault list environment");
+    let mut env = ["HOME", "TACHI_HOME", "SIGIL_HOME", "TACHI_APP_HOME"]
+        .into_iter()
+        .map(|name| EnvRestore::set_path(name, temp.path()))
+        .collect::<Vec<_>>();
+    env.extend(
+        tachi_llm::LANE_SLOT_SECRET_NAMES
+            .iter()
+            .map(|name| EnvRestore::remove(name)),
+    );
+    // Restore cwd and environment before removing their temporary directory.
+    (crate::test_support::CwdRestore::set(temp.path()), env, temp)
+}
+
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn vault_list_is_a_secret_negative_account_health_board() {
@@ -2300,6 +2321,7 @@ async fn vault_list_is_a_secret_negative_account_health_board() {
     let _lock = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _environment = isolate_vault_list_environment();
     let _binding = EnvRestore::set("EXTRACT_API_KEY", "  vault:DEEPSEEK_API_KEY  ");
     let db_path = crate::utils::test_fixture_path(format!(
         "memory-server-vault-health-board-{}.sqlite",
@@ -2642,6 +2664,7 @@ async fn vault_list_empty_drop_is_current_generation_only_and_locked_unknown() {
     let _lock = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|error| error.into_inner());
+    let _environment = isolate_vault_list_environment();
     let _alias = EnvRestore::set("EXTRACT_API_KEY", "vault:DEEPSEEK_API_KEY");
     let temp = tempfile::tempdir().unwrap();
     let server = MemoryServer::new(temp.path().join("memory.db"), None).unwrap();
@@ -2715,6 +2738,7 @@ async fn vault_list_real_probe_401_is_distinct_from_403_and_self_report() {
     let _lock = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|error| error.into_inner());
+    let _environment = isolate_vault_list_environment();
     let _persist = EnvRestore::set("TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST", "0");
     let _alias = EnvRestore::set("EXTRACT_API_KEY", "vault:DEEPSEEK_API_KEY");
     let mut observations = Vec::new();
@@ -2845,6 +2869,7 @@ async fn assert_late_old_health_after_rematerialize_and_restart(same_metadata: b
     let _lock = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _environment = isolate_vault_list_environment();
     let _binding = EnvRestore::set("EXTRACT_API_KEY", "vault:DEEPSEEK_API_KEY");
     let db_path = crate::utils::test_fixture_path(format!(
         "memory-server-vault-health-generation-{}.sqlite",
@@ -2975,6 +3000,7 @@ async fn vault_list_persisted_account_veto_precedes_older_slot_success_after_res
     let _lock = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _environment = isolate_vault_list_environment();
     let _binding = EnvRestore::set("EXTRACT_API_KEY", "vault:DEEPSEEK_API_KEY");
     let db_path = crate::utils::test_fixture_path(format!(
         "memory-server-vault-account-veto-{}.sqlite",
@@ -3065,6 +3091,7 @@ async fn vault_list_never_projects_identityless_doctor_cache_across_account_chan
     let _lock = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _environment = isolate_vault_list_environment();
     let _binding = EnvRestore::set("EXTRACT_API_KEY", "vault:DEEPSEEK_API_KEY");
     let db_path = crate::utils::test_fixture_path(format!(
         "memory-server-vault-identityless-cache-{}.sqlite",
