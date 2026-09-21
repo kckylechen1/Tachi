@@ -109,7 +109,7 @@ fn reject_delegate_skill_action(server: &MemoryServer, action: &str) -> Result<(
     if !tachi_hub::facade_action_allowed("tachi_skill", Some(action), server.active_tool_profile())
     {
         return Err(format!(
-            "tachi_skill(action='{action}') is not available to the active tool profile; delegate workers may use 'discover' or 'run'."
+            "tachi_skill(action='{action}') is not available to the active tool profile."
         ));
     }
     Ok(())

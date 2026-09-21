@@ -266,7 +266,9 @@ pub(crate) fn format_wiki_read_ambiguity(path: &str, count: u64, candidates: &[V
             "- `{candidate_path}`{store_badge}{artifact_badge} (id `{id}`)"
         ));
     }
-    out.push("\nUse `tachi_wiki(action=\"search\")` or read by a more specific path.".to_string());
+    out.push(
+        "\nUse `tachi_memory(action=\"search\", scope=\"all\")` or refine the query.".to_string(),
+    );
     out.join("\n")
 }
 

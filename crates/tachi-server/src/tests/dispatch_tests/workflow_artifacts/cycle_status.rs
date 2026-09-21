@@ -63,10 +63,24 @@ fn write_passed_verification(server: &crate::MemoryServer, flow_id: &str, head_s
         .expect("verification json"),
     )
     .expect("write verification");
-    // #1454 F1/G2/F6: the cycle verdict is the gate result over the
-    // server-owned receipt store, evaluated against the server-known GitHub
-    // head. Seed the full canonical receipt set (executor's G2 shape) so the
-    // happy path stays green (the ledger alone no longer mints "verified").
+    // The cycle verdict is claim-bound gate output over the server-owned
+    // receipt store. Seed both authority sources so this happy path is green.
+    crate::claims_ops::admit_agent_connection(server, Some("agent.cycle-status".into()), true)
+        .expect("local admission");
+    let claim_params: crate::TachiTaskParams = serde_json::from_value(json!({
+        "action": "claim",
+        "flow_id": flow_id,
+        "issue_ref": format!("kckylechen1/tachi#{flow_id}"),
+        "branch": format!("lane/{flow_id}"),
+        "claim_role": "reviewer",
+        "claim_mode": "read_only",
+        "worktree_path": "",
+        "claim_scope": ["crates/tachi-server/src/task_lifecycle/cycle_status.rs"],
+        "expected_head": head_sha,
+        "lease_expires_at": "2030-01-01T00:00:00Z",
+    }))
+    .expect("claim params");
+    crate::claims_ops::handle_task_claim(server, &claim_params).expect("work claim");
     let home = server.tachi_home_dir();
     for kind in crate::verify_ops::MERGE_REQUIRED_RUN_KINDS {
         let receipt = json!({
@@ -100,3 +114,4 @@ mod issue_lookup;
 mod next_action_field;
 mod spec_drift;
 mod validation;
+mod verification_head;

@@ -350,9 +350,14 @@ async fn run_secret_action_with_reader(
                 if let Some(env_name) = env_name {
                     args.insert("env_name".to_string(), serde_json::json!(env_name));
                 }
-                let out =
-                    crate::cli_client::call_daemon_tool(&info, "vault_lease_api_key", args, None)
-                        .await?;
+                let out = crate::cli_client::call_daemon_tool_with_profile(
+                    &info,
+                    "vault_lease_api_key",
+                    args,
+                    None,
+                    Some(tachi_hub::ToolProfile::admin()),
+                )
+                .await?;
                 print_lease_output(&out, json)?;
                 return Ok(());
             }

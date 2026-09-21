@@ -372,7 +372,13 @@ async fn record_daemon_call(
 ) -> RecordedDaemonCall {
     let start_unix_ms = unix_ms_now();
     let start_rel_ms = rel_ms(harness_epoch);
-    let (result, phases) = call_daemon_tool_raw_with_phases(&info, params, None).await;
+    let (result, phases) = call_daemon_tool_raw_with_phases(
+        &info,
+        params,
+        None,
+        (tool == "runtime_info").then(tachi_hub::ToolProfile::operate),
+    )
+    .await;
     let end_unix_ms = unix_ms_now();
     let end_rel_ms = rel_ms(harness_epoch);
     let (outcome, message_class) = classify_daemon_call_outcome(&result);
@@ -655,9 +661,12 @@ async fn spawn_receipt_http_daemon(
     let local_addr = listener.local_addr().expect("local addr");
     let ct = CancellationToken::new();
     let ct_shutdown = ct.clone();
+    let token = uuid::Uuid::new_v4().simple().to_string();
+    server.set_daemon_proxy_token(token.clone());
 
     let mut http_config = StreamableHttpServerConfig::default();
     http_config.legacy_session_mode = true;
+    http_config.stateless_protocol_metadata_required = true;
     http_config.cancellation_token = ct.child_token();
 
     // Fresh MCP session id per Streamable connection so concurrent callers do
@@ -688,6 +697,7 @@ async fn spawn_receipt_http_daemon(
             project_db: None,
             version: Some(env!("CARGO_PKG_VERSION").to_string()),
             pid: Some(std::process::id() as i64),
+            internal_proxy_token: Some(token),
         },
         ct,
         handle,

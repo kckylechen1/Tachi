@@ -19,7 +19,7 @@ fn profile_filter_and_env_whitelist_form_intersection() {
 }
 
 #[test]
-fn coordinate_surface_includes_memory_and_workflow_tools() {
+fn legacy_coordinate_selector_is_confined_to_product_facades() {
     let filtered = filter_tool_defs(
         vec![
             test_tool("tachi_memory"),
@@ -37,14 +37,7 @@ fn coordinate_surface_includes_memory_and_workflow_tools() {
         .into_iter()
         .map(|tool| tool.name.into_owned())
         .collect();
-    assert_eq!(
-        names,
-        vec![
-            "tachi_memory".to_string(),
-            "ingest_event".to_string(),
-            "tachi_verify".to_string()
-        ]
-    );
+    assert_eq!(names, vec!["tachi_memory".to_string()]);
 }
 
 #[test]
@@ -64,20 +57,75 @@ fn explicit_remember_surface_excludes_admin_tools() {
         .into_iter()
         .map(|tool| tool.name.into_owned())
         .collect();
-    assert_eq!(
-        names,
-        vec!["tachi_memory".to_string(), "ingest_event".to_string()]
-    );
+    assert_eq!(names, vec!["tachi_memory".to_string()]);
+}
+
+#[test]
+fn every_legacy_ordinary_selector_discovers_exactly_the_five_facades() {
+    let expected = vec![
+        "tachi_memory".to_string(),
+        "tachi_task".to_string(),
+        "tachi_staff".to_string(),
+        "tachi_gh".to_string(),
+        "tachi_a2a".to_string(),
+    ];
+    for raw in [
+        "observe",
+        "read",
+        "reader",
+        "remember",
+        "write",
+        "writer",
+        "agent",
+        "coordinate",
+        "observe+remember",
+        "remember+observe",
+        "reader+writer",
+        "agent+read",
+        "coordinate+observe",
+        "observe+coordinate",
+    ] {
+        let profile = parse_tool_profile(raw)
+            .unwrap_or_else(|| panic!("legacy ordinary selector {raw} should parse"));
+        let names = filter_tool_defs(
+            vec![
+                test_tool("tachi_memory"),
+                test_tool("tachi_task"),
+                test_tool("tachi_staff"),
+                test_tool("tachi_gh"),
+                test_tool("tachi_a2a"),
+                test_tool("runtime_info"),
+                test_tool("tachi_status"),
+                test_tool("tachi_verify"),
+                test_tool("tachi_skill"),
+                test_tool("hub_register"),
+            ],
+            Some(profile),
+            None,
+        )
+        .into_iter()
+        .map(|tool| tool.name.into_owned())
+        .collect::<Vec<_>>();
+        assert_eq!(names, expected, "legacy selector {raw}");
+    }
 }
 
 #[test]
 fn omitted_profile_defaults_to_standard_surface() {
     let filtered = filter_tool_defs(
         vec![
+            test_tool("tachi_memory"),
             test_tool("tachi_task"),
-            test_tool("search_memory"),
-            test_tool("save_memory"),
-            test_tool("hub_register"),
+            test_tool("tachi_staff"),
+            test_tool("tachi_gh"),
+            test_tool("tachi_a2a"),
+            test_tool("tachi_tools"),
+            test_tool("tachi_status"),
+            test_tool("tachi_verify"),
+            test_tool("tachi_web_search"),
+            test_tool("tachi_wiki"),
+            test_tool("tachi_skill"),
+            test_tool("vault_status"),
         ],
         None,
         None,
@@ -86,7 +134,16 @@ fn omitted_profile_defaults_to_standard_surface() {
         .into_iter()
         .map(|tool| tool.name.into_owned())
         .collect();
-    assert_eq!(names, vec!["tachi_task".to_string()]);
+    assert_eq!(
+        names,
+        vec![
+            "tachi_memory".to_string(),
+            "tachi_task".to_string(),
+            "tachi_staff".to_string(),
+            "tachi_gh".to_string(),
+            "tachi_a2a".to_string(),
+        ]
+    );
 }
 
 #[test]
@@ -97,7 +154,9 @@ fn standard_profile_restricts_to_allow_list() {
             test_tool("tachi_tools"),
             test_tool("runtime_info"),
             test_tool("tachi_status"),
+            test_tool("tachi_a2a"),
             test_tool("tachi_task"),
+            test_tool("tachi_staff"),
             test_tool("tachi_verify"),
             test_tool("tachi_agent_eval"),
             test_tool("tachi_memory"),
@@ -144,18 +203,10 @@ fn standard_profile_restricts_to_allow_list() {
     assert_eq!(
         names,
         vec![
-            "tachi_tools".to_string(),
-            "runtime_info".to_string(),
-            "tachi_status".to_string(),
+            "tachi_a2a".to_string(),
             "tachi_task".to_string(),
-            "tachi_verify".to_string(),
+            "tachi_staff".to_string(),
             "tachi_memory".to_string(),
-            "tachi_web_search".to_string(),
-            "tachi_wiki".to_string(),
-            "tachi_skill".to_string(),
-            "vault_unlock".to_string(),
-            "vault_lock".to_string(),
-            "vault_status".to_string(),
             "tachi_gh".to_string(),
         ]
     );
@@ -172,6 +223,9 @@ fn delegate_profile_restricts_to_allow_list() {
             test_tool("tachi_unstick"),
             // F3: task facade is on the list; dispatch gated by action policy
             test_tool("tachi_task"),
+            test_tool("tachi_staff"),
+            test_tool("tachi_gh"),
+            test_tool("tachi_a2a"),
             test_tool("tachi_skill"),
             // #517: standalone run_skill no longer on default delegate tray
             test_tool("run_skill"),
@@ -186,8 +240,6 @@ fn delegate_profile_restricts_to_allow_list() {
             test_tool("hub_discover"),
             test_tool("recall_context"),
             test_tool("search_memory"),
-            // GH tools should be excluded even with token:
-            test_tool("tachi_gh"),
             // Raw Vault tools must stay admin-only for delegates.
             test_tool("vault_get"),
             test_tool("vault_lease_api_key"),
@@ -205,15 +257,52 @@ fn delegate_profile_restricts_to_allow_list() {
         names,
         vec![
             "tachi_memory".to_string(),
-            "tachi_web_search".to_string(),
-            "tachi_wiki".to_string(),
-            "tachi_unstick".to_string(),
             "tachi_task".to_string(),
-            "tachi_skill".to_string(),
+            "tachi_staff".to_string(),
+            "tachi_gh".to_string(),
+            "tachi_a2a".to_string(),
         ]
     );
     assert!(
         !names.iter().any(|n| n == "run_skill"),
         "run_skill must not appear on default delegate tray (#517 soft-deprecate)"
     );
+}
+
+#[test]
+fn explicit_ops_and_admin_profiles_retain_diagnostic_routes() {
+    let tools = vec![
+        test_tool("tachi_memory"),
+        test_tool("runtime_info"),
+        test_tool("tachi_status"),
+        test_tool("vault_status"),
+        test_tool("hub_register"),
+    ];
+
+    let ops = filter_tool_defs(
+        tools.clone(),
+        Some(parse_tool_profile("ops").expect("explicit Ops profile")),
+        None,
+    );
+    let ops_names: Vec<String> = ops.into_iter().map(|tool| tool.name.into_owned()).collect();
+    assert_eq!(
+        ops_names,
+        vec![
+            "tachi_memory".to_string(),
+            "runtime_info".to_string(),
+            "tachi_status".to_string(),
+            "vault_status".to_string(),
+        ]
+    );
+
+    let admin = filter_tool_defs(
+        tools,
+        Some(parse_tool_profile("admin").expect("explicit admin profile")),
+        None,
+    );
+    let admin_names: Vec<String> = admin
+        .into_iter()
+        .map(|tool| tool.name.into_owned())
+        .collect();
+    assert!(admin_names.iter().any(|name| name == "hub_register"));
 }

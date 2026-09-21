@@ -116,18 +116,16 @@ async fn continuity_pattern_projection_stays_resolvable_by_key() {
     assert_eq!(patterns[0].metadata["projection_kind"], json!("pattern"));
 }
 
-/// Re-anchor of the deleted delegate-gate tests: the delegate profile gate
-/// survives and now admits exactly the surviving static surface — discover and
-/// run are callable, retired actions are blocked by the gate before the action
-/// switch.
+/// Ordinary Worker hides the skill facade; explicit local Ops retains the
+/// surviving discover/run behavior without resurrecting retired actions.
 #[tokio::test]
-async fn delegate_profile_gate_admits_discover_run_and_blocks_retired_actions() {
+async fn worker_hides_skill_while_ops_admits_discover_run_and_blocks_retired_actions() {
     let server = make_server();
     server.set_tool_profile(Some(
         tachi_hub::parse_tool_profile("delegate").expect("delegate profile should parse"),
     ));
 
-    for action in ["bundle", "loadout", "from_pattern"] {
+    for action in ["discover", "run", "bundle", "loadout", "from_pattern"] {
         let error = server
             .tachi_skill(Parameters(TachiSkillParams {
                 action: action.to_string(),
@@ -146,6 +144,25 @@ async fn delegate_profile_gate_admits_discover_run_and_blocks_retired_actions() 
         );
     }
 
+    server.set_tool_profile(Some(tachi_hub::ToolProfile::operate()));
+    for action in ["bundle", "loadout", "from_pattern"] {
+        let error = server
+            .tachi_skill(Parameters(TachiSkillParams {
+                action: action.into(),
+                query: None,
+                cap_type: None,
+                enabled_only: None,
+                limit: None,
+                skill_id: None,
+                args: None,
+            }))
+            .await
+            .expect_err("Ops cannot resurrect retired skill actions");
+        assert!(
+            error.contains("not available to the active tool profile"),
+            "{error}"
+        );
+    }
     let discover = server
         .tachi_skill(Parameters(TachiSkillParams {
             action: "discover".to_string(),
@@ -157,15 +174,11 @@ async fn delegate_profile_gate_admits_discover_run_and_blocks_retired_actions() 
             args: None,
         }))
         .await
-        .expect("delegate discover must stay available");
+        .expect("explicit Ops discover must stay available");
     let discover_json: Value = serde_json::from_str(&discover).expect("discover JSON");
     assert_eq!(discover_json["status"], json!("completed"));
 
-    // #1690 C5 repair (chosen option: extend, not narrow): the test name
-    // claims the delegate gate ADMITS run — so run must actually be invoked
-    // through the delegate profile, not merely assumed. A document skill
-    // exercises the full `execute_skill_prompt_with_receipt` path without an
-    // LLM call (deterministic, no provider dependency).
+    // A document skill exercises actual execution without a provider call.
     let mut doc_skill = make_skill_capability(
         "skill:delegate-gate-doc",
         "delegate-gate-doc",
@@ -195,7 +208,7 @@ async fn delegate_profile_gate_admits_discover_run_and_blocks_retired_actions() 
             args: Some(json!({})),
         }))
         .await
-        .expect("delegate run must be admitted by the gate");
+        .expect("explicit Ops run must be admitted by the gate");
     let run_json: Value = serde_json::from_str(&run).expect("run JSON");
     assert_eq!(run_json["status"], json!("completed"));
     assert_eq!(run_json["action"], json!("run"));

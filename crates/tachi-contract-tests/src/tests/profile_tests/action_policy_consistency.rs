@@ -72,3 +72,8 @@ fn f919_tachi_verify_actions_are_all_classified() {
         &tachi_params::TachiVerifyAction::all_wire_strings(),
     );
 }
+
+#[test]
+fn f1935_tachi_staff_actions_are_all_classified() {
+    assert_all_classified("tachi_staff", tachi_params::TACHI_STAFF_ACTIONS);
+}

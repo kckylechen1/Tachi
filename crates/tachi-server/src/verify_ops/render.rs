@@ -1,5 +1,4 @@
 use super::gate::evaluate_verification_gate;
-use super::receipt_store::best_receipt_head;
 use super::storage::markup_status;
 use super::*;
 use crate::agent_markdown::markup_text;
@@ -8,22 +7,18 @@ use serde_json::json;
 
 /// #1454 F6: status/board gate evaluation with a SERVER-KNOWN head.
 ///
-/// The best server-known head is the receipt-store head for the flow (the
-/// server observed it at run time). The caller-supplied `params.head_sha` is
-/// NEVER used for authority — a caller asserting a head would re-enable the
-/// looks-green lie. When no server-known head is resolvable the gate is
-/// `Ok(None)` and the display verdict falls back to `unverified` (fail-closed).
+/// The active WorkClaim is the evaluated-head authority. The caller-supplied
+/// `params.head_sha` is NEVER used for authority.
 pub(super) fn gate_for_status(
     server: &MemoryServer,
     params: &TachiVerifyParams,
     ledger: Option<&Value>,
 ) -> Result<Option<Value>, String> {
     if let (Some(flow_id), Some(_)) = (params.flow_id.as_deref(), ledger) {
-        let home = server.tachi_home_dir();
-        if let Some(head_sha) = best_receipt_head(&home, flow_id) {
-            evaluate_verification_gate(Some(flow_id), &head_sha, &home)
-        } else {
-            Ok(None)
+        match evaluate_verification_gate(server, Some(flow_id)) {
+            Ok(gate) => Ok(gate),
+            Err(err) if err.starts_with("verification_claim_") => Ok(None),
+            Err(err) => Err(err),
         }
     } else {
         Ok(None)

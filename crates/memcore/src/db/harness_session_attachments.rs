@@ -761,25 +761,54 @@ fn verify_host_admission(
     // connection id exposed by a host. In both forms the receipt must resolve
     // to the exact *current host* connection and identity; it never authorizes
     // the distinct worker that holds the WorkClaim.
-    let admission: Option<(String, String, String)> = conn
+    let admission: Option<(String, String, String, String)> = conn
         .query_row(
-            "SELECT agent_identity_id, connection_id, state
+            "SELECT admission_id, agent_identity_id, connection_id, state
              FROM identity_admissions
              WHERE (admission_id = ?1 OR connection_id = ?1)
              ORDER BY CASE WHEN admission_id = ?1 THEN 0 ELSE 1 END
              LIMIT 1",
             params![admission_receipt_ref],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
         .optional()?;
-    let Some((admitted_identity, connection_id, state)) = admission else {
+    let Some((admission_id, admitted_identity, connection_id, state)) = admission else {
         return Err(MemoryError::WorkClaimIncompatibleState(
             "ACP attachment admission receipt is missing".to_string(),
         ));
     };
+    let verified_is_current = if state == "verified" {
+        conn.query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM identity_admission_verification_receipts r
+                 WHERE r.admission_id=?1 AND r.agent_identity_id=?2 AND r.connection_id=?3
+                   AND r.verification_method=?4 AND r.verification_version=?5
+                   AND r.verification_scope=?6 AND r.issuer_id<>'' AND r.trust_domain<>''
+                   AND julianday(r.evidence_issued_at) <= julianday('now')
+                   AND julianday(r.evidence_expires_at) > julianday('now')
+                   AND NOT EXISTS (
+                       SELECT 1 FROM identity_admission_verification_revocations v
+                       WHERE v.admission_id=r.admission_id
+                   )
+             )",
+            params![
+                admission_id,
+                admitted_identity,
+                connection_id,
+                super::verified_admissions::VERIFIED_ADMISSION_METHOD,
+                super::verified_admissions::VERIFIED_ADMISSION_VERSION,
+                super::verified_admissions::VERIFIED_ADMISSION_SCOPE,
+            ],
+            |row| row.get::<_, bool>(0),
+        )?
+    } else {
+        true
+    };
     if admitted_identity != host.host_identity
         || connection_id != host.connection_id
         || !matches!(state.as_str(), "self_asserted" | "verified")
+        || (state == "verified" && admission_receipt_ref != admission_id)
+        || !verified_is_current
         || host.host_identity == worker_identity_id
     {
         return Err(MemoryError::WorkClaimTransitionRefused {

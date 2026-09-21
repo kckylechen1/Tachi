@@ -38,9 +38,9 @@ async fn tachi_memory_briefing_includes_recent_verification_gates() {
         .expect("briefing should succeed");
 
     assert!(body.contains("### Verification gates"));
-    // #1454 F6-adjudication: the board row leads with the gate verdict
-    // (`unverified` — no server-known receipt-store head) and appends the
-    // caller-asserted marker so a seeded `failed` ledger stays visibly
+    // The board row leads with the fail-closed gate verdict (`unverified` —
+    // no active claim authority) and appends the caller-asserted marker so a
+    // seeded `failed` ledger stays visibly
     // failed. Asserting both preserves this test's original guardian intent
     // (a failed ledger is visible on the briefing) under the F6 authority
     // contract (verdict from the gate, never caller prose).
@@ -48,7 +48,7 @@ async fn tachi_memory_briefing_includes_recent_verification_gates() {
     // shared `markup_text` helper, so its underscore appears escaped.
     assert!(body.contains("[unverified (caller-asserted: failed)] `flow\\_briefing-verification`"));
     assert!(body.contains("`kckylechen1/tachi#209`"));
-    assert!(body.contains("tachi_verify(action='board')"));
+    assert!(body.contains("tachi_task(action='status')"));
     if let Some(original) = original {
         std::env::set_var("TACHI_RUN_ROOT", original);
     } else {

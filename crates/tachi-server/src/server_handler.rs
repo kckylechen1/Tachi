@@ -11,7 +11,9 @@ use crate::shared_defs::{
 use crate::utils::{lock_or_recover, stable_hash};
 use chrono::Utc;
 use memcore::{AuthorityLevel, EffectScope, TachiEventRecord};
-use rmcp::model::{InitializeRequestParams, InitializeResult, ServerCapabilities, ServerInfo};
+use rmcp::model::{
+    InitializeRequestParams, InitializeResult, RequestMetaObject, ServerCapabilities, ServerInfo,
+};
 use rmcp::service::{RequestContext, RoleServer};
 use rmcp::ServerHandler;
 use std::future::Future;
@@ -30,26 +32,9 @@ pub(crate) fn current_exposed_tool_patterns() -> Option<Vec<String>> {
         .clone()
 }
 
-/// RMCP routes complete inline metadata statelessly even with an old version.
-/// Require initialize-time identity/project admission before tool access.
-pub(crate) fn require_legacy_session(
-    meta: &rmcp::model::RequestMetaObject,
-) -> Result<(), rmcp::ErrorData> {
-    if meta
-        .missing_required_keys(&rmcp::model::ProtocolVersion::V_2026_07_28)
-        .is_empty()
-    {
-        return Err(rmcp::ErrorData::invalid_request(
-            "legacy MCP initialize session required; inline requests are disabled",
-            None,
-        ));
-    }
-    Ok(())
-}
-
-fn tool_not_found_result(tool_name: &str) -> rmcp::model::CallToolResult {
+pub(crate) fn tool_not_found_result(tool_name: &str) -> rmcp::model::CallToolResult {
     rmcp::model::CallToolResult::error(vec![rmcp::model::ContentBlock::text(format!(
-        "tool not found: '{tool_name}'. Call tachi_tools() or tools/list and use an exact visible tool name for the current TACHI_PROFILE."
+        "tool not found: '{tool_name}'. Call tools/list and use an exact visible tool name for the current TACHI_PROFILE."
     ))])
 }
 
@@ -60,7 +45,7 @@ fn tool_action_denied_result(
     profile_label: &str,
 ) -> rmcp::model::CallToolResult {
     rmcp::model::CallToolResult::error(vec![rmcp::model::ContentBlock::text(format!(
-        "action '{action}' on tool '{tool_name}' is not allowed for ToolProfile '{profile_label}'. Use a permitted action for this profile, or call tachi_tools() to inspect the active surface."
+        "action '{action}' on tool '{tool_name}' is not allowed for ToolProfile '{profile_label}'. Use a permitted action from tools/list for this profile."
     ))])
 }
 
@@ -310,6 +295,35 @@ fn narrow_gated_action_schemas(
                 tool.description = Some(std::borrow::Cow::Owned(format!(
                     "Task memory, policy, and ledger facade. Ordinary local delegation uses the host harness's native subagent.{action_summary} Sequencing and delegation decisions are the host model's job, not this facade. GitHub PR lifecycle is tachi_gh only.",
                 )));
+            }
+            "tachi_staff" => {
+                let allowed: Vec<&str> = tachi_params::TACHI_STAFF_ACTIONS
+                    .iter()
+                    .copied()
+                    .filter(|action| {
+                        tachi_hub::facade_action_allowed("tachi_staff", Some(action), Some(profile))
+                    })
+                    .collect();
+                narrow_action_enum_property(
+                    tool,
+                    &allowed,
+                    "Required staffing action allowed by the active profile.",
+                );
+            }
+            "tachi_gh" => {
+                seed_action_enum_property(tool, tachi_params::TACHI_GH_ACTIONS);
+                let allowed: Vec<&str> = tachi_params::TACHI_GH_ACTIONS
+                    .iter()
+                    .copied()
+                    .filter(|action| {
+                        tachi_hub::facade_action_allowed("tachi_gh", Some(action), Some(profile))
+                    })
+                    .collect();
+                narrow_action_enum_property(
+                    tool,
+                    &allowed,
+                    "Required GitHub action allowed by the active profile.",
+                );
             }
             "tachi_a2a" => {
                 let allowed: Vec<&str> = tachi_params::TACHI_A2A_ACTIONS
@@ -641,6 +655,7 @@ fn annotate_bound_project_schema(tool: &mut rmcp::model::Tool) {
 struct HttpSessionIdentity {
     profile: Option<String>,
     client: Option<String>,
+    internal_proxy_token: Option<String>,
     agent_identity_id: Option<String>,
     /// Present-but-blank/illegal `tachiAgentIdentity` / `X-Tachi-Agent-Identity`
     /// must not collapse to "absent" and fall through to process env (#1761).
@@ -708,6 +723,25 @@ impl MemoryServer {
         context: &RequestContext<RoleServer>,
     ) -> Result<(), rmcp::ErrorData> {
         let identity = http_session_identity(request, context);
+        self.apply_resolved_request_identity(identity, context)
+    }
+
+    fn clone_for_modern_request(
+        &self,
+        context: &RequestContext<RoleServer>,
+    ) -> Result<Self, rmcp::ErrorData> {
+        validate_modern_identity_headers(context)?;
+        let request_server = self.clone_for_mcp_session();
+        let identity = request_identity(Some(&context.meta), context);
+        request_server.apply_resolved_request_identity(identity, context)?;
+        Ok(request_server)
+    }
+
+    fn apply_resolved_request_identity(
+        &self,
+        identity: HttpSessionIdentity,
+        context: &RequestContext<RoleServer>,
+    ) -> Result<(), rmcp::ErrorData> {
         if let Some(err) = identity.project_error.as_deref() {
             return Err(rmcp::ErrorData::invalid_params(
                 format!("malformed X-Tachi-Project identity: {err}"),
@@ -732,11 +766,23 @@ impl MemoryServer {
                 None,
             ));
         }
+        let trusted_internal_proxy =
+            self.admits_internal_proxy_token(identity.internal_proxy_token.as_deref());
         let profile = identity
             .profile
             .as_deref()
-            .map(parse_http_tool_profile)
+            .map(|raw| parse_http_tool_profile(raw, trusted_internal_proxy))
             .transpose()?;
+        // A direct HTTP/proxy session that does not assert a profile must not
+        // inherit a daemon-wide Ops/admin profile. Local stdio keeps the
+        // explicitly configured process profile; only the per-connection HTTP
+        // boundary defaults missing identity to the narrow Lead surface.
+        let profile = profile.or_else(|| {
+            context
+                .extensions
+                .get::<axum::http::request::Parts>()
+                .map(|_| tachi_hub::default_tool_profile())
+        });
         let project = match project_binding_source(&identity) {
             ProjectBindingSource::Named(project) => {
                 let (canonical_project, _) = self
@@ -801,12 +847,21 @@ fn http_session_identity(
     } else {
         Some(&context.meta)
     };
+    request_identity(meta, context)
+}
+
+fn request_identity(
+    meta: Option<&RequestMetaObject>,
+    context: &RequestContext<RoleServer>,
+) -> HttpSessionIdentity {
     let mut identity = identity_from_initialize_meta(meta);
     if let Some(parts) = context.extensions.get::<axum::http::request::Parts>() {
         identity.profile =
             header_string(parts, crate::session_identity::HEADER_PROFILE).or(identity.profile);
         identity.client =
             header_string(parts, crate::session_identity::HEADER_CLIENT).or(identity.client);
+        identity.internal_proxy_token =
+            header_string(parts, crate::session_identity::HEADER_INTERNAL_PROXY_TOKEN);
         match header_string_result(parts, crate::session_identity::HEADER_AGENT_IDENTITY) {
             Ok(Some(value)) => {
                 if let Err(err) = assign_explicit_agent_identity(&mut identity, value) {
@@ -866,6 +921,85 @@ fn http_session_identity(
     identity
 }
 
+fn validate_modern_identity_headers(
+    context: &RequestContext<RoleServer>,
+) -> Result<(), rmcp::ErrorData> {
+    let Some(parts) = context.extensions.get::<axum::http::request::Parts>() else {
+        return Ok(());
+    };
+    for (header, canonical_meta, alias_meta) in [
+        (
+            crate::session_identity::HEADER_PROFILE,
+            crate::session_identity::META_PROFILE,
+            "tachi.profile",
+        ),
+        (
+            crate::session_identity::HEADER_CLIENT,
+            crate::session_identity::META_CLIENT,
+            "tachi.client",
+        ),
+        (
+            crate::session_identity::HEADER_AGENT_IDENTITY,
+            crate::session_identity::META_AGENT_IDENTITY,
+            "tachi.agentIdentity",
+        ),
+        (
+            crate::session_identity::HEADER_PROJECT,
+            crate::session_identity::META_PROJECT,
+            "tachi.project",
+        ),
+        (
+            crate::session_identity::HEADER_WORKSPACE_ROOT,
+            crate::session_identity::META_WORKSPACE_ROOT,
+            "tachi.workspaceRoot",
+        ),
+    ] {
+        let header_value = header_string_result(parts, header).map_err(|error| {
+            rmcp::ErrorData::invalid_params(format!("malformed {header} identity: {error}"), None)
+        })?;
+        let meta_value = crate::session_identity::aliased_meta_identity_string(
+            &context.meta,
+            canonical_meta,
+            alias_meta,
+        )
+        .map_err(|error| rmcp::ErrorData::invalid_params(error, None))?;
+        if let Some((header_value, meta_value)) = header_value
+            .as_ref()
+            .zip(meta_value.as_ref())
+            .filter(|(header_value, meta_value)| header_value != meta_value)
+        {
+            return Err(rmcp::ErrorData::header_mismatch(
+                format!(
+                    "{header} header identity ({header_value}) does not match request _meta identity ({meta_value})"
+                ),
+                None,
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn reject_modern_direct_stdio(
+    mode: crate::mcp_peer::McpPeerMode,
+    context: &RequestContext<RoleServer>,
+) -> Result<(), rmcp::ErrorData> {
+    // The direct debugging route has neither the stdio proxy's process-bound
+    // admission gate nor HTTP transport headers. It remains deliberately
+    // legacy rather than accepting request assertions as process authority.
+    if mode == crate::mcp_peer::McpPeerMode::Modern20260728
+        && context
+            .extensions
+            .get::<axum::http::request::Parts>()
+            .is_none()
+    {
+        return Err(rmcp::ErrorData::unsupported_protocol_version(
+            rmcp::model::ProtocolVersion::V_2026_07_28,
+            rmcp::model::ProtocolVersion::known_up_to(&rmcp::model::ProtocolVersion::V_2025_11_25),
+        ));
+    }
+    Ok(())
+}
+
 /// Extract session identity fields from MCP initialize `_meta` (#732).
 /// Headers still win when both are present (applied after this helper).
 fn assign_explicit_agent_identity(
@@ -893,24 +1027,30 @@ fn identity_from_initialize_meta(
         .or_else(|| meta_string(meta, "tachi.profile"));
     identity.client = meta_string(meta, crate::session_identity::META_CLIENT)
         .or_else(|| meta_string(meta, "tachi.client"));
-    match meta_string_result(meta, crate::session_identity::META_AGENT_IDENTITY) {
+    match crate::session_identity::meta_identity_string(
+        meta,
+        crate::session_identity::META_AGENT_IDENTITY,
+    ) {
         Ok(Some(value)) => match assign_explicit_agent_identity(&mut identity, value) {
             Ok(()) => {}
             Err(err) => identity.agent_identity_error = Some(err),
         },
-        Ok(None) => match meta_string_result(meta, "tachi.agentIdentity") {
-            Ok(Some(value)) => match assign_explicit_agent_identity(&mut identity, value) {
-                Ok(()) => {}
+        Ok(None) => {
+            match crate::session_identity::meta_identity_string(meta, "tachi.agentIdentity") {
+                Ok(Some(value)) => match assign_explicit_agent_identity(&mut identity, value) {
+                    Ok(()) => {}
+                    Err(err) => identity.agent_identity_error = Some(err),
+                },
+                Ok(None) => {}
                 Err(err) => identity.agent_identity_error = Some(err),
-            },
-            Ok(None) => {}
-            Err(err) => identity.agent_identity_error = Some(err),
-        },
+            }
+        }
         Err(err) => identity.agent_identity_error = Some(err),
     }
-    match meta_string_result(meta, crate::session_identity::META_PROJECT) {
+    match crate::session_identity::meta_identity_string(meta, crate::session_identity::META_PROJECT)
+    {
         Ok(Some(value)) => identity.project = Some(value),
-        Ok(None) => match meta_string_result(meta, "tachi.project") {
+        Ok(None) => match crate::session_identity::meta_identity_string(meta, "tachi.project") {
             Ok(Some(value)) => identity.project = Some(value),
             Ok(None) => {}
             Err(err) => identity.project_error = Some(err),
@@ -924,13 +1064,18 @@ fn identity_from_initialize_meta(
     // fall through to the dotted alias when the canonical key is genuinely
     // ABSENT (a malformed canonical key is itself the caller's answer and
     // must not be masked by trying the alias next).
-    match meta_string_result(meta, crate::session_identity::META_WORKSPACE_ROOT) {
+    match crate::session_identity::meta_identity_string(
+        meta,
+        crate::session_identity::META_WORKSPACE_ROOT,
+    ) {
         Ok(Some(value)) => identity.workspace_root = Some(value),
-        Ok(None) => match meta_string_result(meta, "tachi.workspaceRoot") {
-            Ok(Some(value)) => identity.workspace_root = Some(value),
-            Ok(None) => {}
-            Err(err) => identity.workspace_root_error = Some(err),
-        },
+        Ok(None) => {
+            match crate::session_identity::meta_identity_string(meta, "tachi.workspaceRoot") {
+                Ok(Some(value)) => identity.workspace_root = Some(value),
+                Ok(None) => {}
+                Err(err) => identity.workspace_root_error = Some(err),
+            }
+        }
         Err(err) => identity.workspace_root_error = Some(err),
     }
     identity
@@ -941,29 +1086,6 @@ fn meta_string(meta: &rmcp::model::RequestMetaObject, key: &str) -> Option<Strin
         .get(key)
         .and_then(|value| value.as_str())
         .and_then(crate::session_identity::normalize_identity_value)
-}
-
-/// Presence-distinguishing twin of [`meta_string`] for `workspace_root`
-/// (review finding [3], #1207): `Ok(None)` means the key is genuinely
-/// absent; `Err` means it was present but unusable (wrong JSON type, or
-/// blank after trimming) — the caller must not collapse that into `Ok(None)`
-/// the way an absent key would be.
-fn meta_string_result(
-    meta: &rmcp::model::RequestMetaObject,
-    key: &str,
-) -> Result<Option<String>, String> {
-    match meta.0.get(key) {
-        None => Ok(None),
-        Some(value) => {
-            let raw = value
-                .as_str()
-                .ok_or_else(|| format!("_meta.{key} must be a string"))?;
-            match crate::session_identity::normalize_identity_value(raw) {
-                Some(v) => Ok(Some(v)),
-                None => Err(format!("_meta.{key} is blank")),
-            }
-        }
-    }
 }
 
 fn header_string(parts: &axum::http::request::Parts, name: &str) -> Option<String> {
@@ -996,21 +1118,40 @@ fn header_string_result(
     }
 }
 
-fn parse_http_tool_profile(raw: &str) -> Result<tachi_hub::ToolProfile, rmcp::ErrorData> {
+fn parse_http_tool_profile(
+    raw: &str,
+    trusted_internal_proxy: bool,
+) -> Result<tachi_hub::ToolProfile, rmcp::ErrorData> {
+    let requests_privileged_surface = raw.split([',', '+']).map(str::trim).any(|token| {
+        matches!(
+            token.to_ascii_lowercase().as_str(),
+            "operate"
+                | "runtime"
+                | "openclaw"
+                | "hermes"
+                | "adapter"
+                | "ops"
+                | "admin"
+                | "full"
+                | "emergency"
+        )
+    });
+    if requests_privileged_surface && !trusted_internal_proxy {
+        return Err(rmcp::ErrorData::invalid_params(
+            format!(
+                "HTTP direct-connect profile '{raw}' requires explicit authorization that caller-supplied profile metadata cannot provide; select Ops/admin only from a trusted local process configuration"
+            ),
+            None,
+        ));
+    }
     let profile = tachi_hub::parse_tool_profile(raw).ok_or_else(|| {
         rmcp::ErrorData::invalid_params(
             format!(
-                "unknown HTTP direct-connect Tachi profile '{raw}'; expected standard, delegate, observe, remember, coordinate, operate, or a host alias"
+                "unknown HTTP direct-connect Tachi profile '{raw}'; expected standard/lead, delegate/worker, observe, remember, coordinate, or a compatible ordinary host alias"
             ),
             None,
         )
     })?;
-    if profile.as_str() == "admin" {
-        return Err(rmcp::ErrorData::invalid_params(
-            "HTTP direct-connect profile 'admin' requires explicit authorization; #495 must wire profile claims to an authorization policy before admin can be accepted over HTTP",
-            None,
-        ));
-    }
     Ok(profile)
 }
 
@@ -1018,29 +1159,33 @@ impl ServerHandler for MemoryServer {
     fn supported_protocol_versions(
         &self,
     ) -> std::borrow::Cow<'static, [rmcp::model::ProtocolVersion]> {
-        // Identity and project binding still use the legacy initialize lifecycle.
-        // Modern per-request admission belongs to the separate MCP-2026 adapter.
-        std::borrow::Cow::Borrowed(rmcp::model::ProtocolVersion::known_up_to(
-            &rmcp::model::ProtocolVersion::V_2025_11_25,
-        ))
+        std::borrow::Cow::Borrowed(crate::mcp_peer::supported_protocol_versions())
     }
 
     async fn discover(
         &self,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<rmcp::model::DiscoverResult, rmcp::ErrorData> {
-        Err(rmcp::ErrorData::method_not_found::<
-            rmcp::model::DiscoverRequestMethod,
-        >())
+        let mode = crate::mcp_peer::McpPeerMode::from_context(&context)?.require_modern()?;
+        reject_modern_direct_stdio(mode, &context)?;
+        validate_modern_identity_headers(&context)?;
+        Ok(rmcp::model::DiscoverResult::from_server_info(
+            crate::mcp_peer::supported_protocol_versions().to_vec(),
+            self.get_info(),
+        ))
     }
 
-    // Preserve the SDK's legacy empty results while closing its inline defaults.
+    // Preserve the SDK's empty inherited results in both implemented modes.
     async fn complete(
         &self,
         _request: rmcp::model::CompleteRequestParams,
         context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
     ) -> Result<rmcp::model::CompleteResult, rmcp::ErrorData> {
-        require_legacy_session(&context.meta)?;
+        let mode = crate::mcp_peer::McpPeerMode::from_context(&context)?;
+        reject_modern_direct_stdio(mode, &context)?;
+        if mode == crate::mcp_peer::McpPeerMode::Modern20260728 {
+            validate_modern_identity_headers(&context)?;
+        }
         Ok(Default::default())
     }
 
@@ -1049,8 +1194,15 @@ impl ServerHandler for MemoryServer {
         _request: Option<rmcp::model::PaginatedRequestParams>,
         context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
     ) -> Result<rmcp::model::ListPromptsResult, rmcp::ErrorData> {
-        require_legacy_session(&context.meta)?;
-        Ok(Default::default())
+        let mode = crate::mcp_peer::McpPeerMode::from_context(&context)?;
+        reject_modern_direct_stdio(mode, &context)?;
+        let mut result = rmcp::model::ListPromptsResult::default();
+        if mode == crate::mcp_peer::McpPeerMode::Modern20260728 {
+            validate_modern_identity_headers(&context)?;
+            result.ttl_ms = Some(0);
+            result.cache_scope = Some(rmcp::model::CacheScope::Private);
+        }
+        Ok(result)
     }
 
     async fn list_resources(
@@ -1058,8 +1210,15 @@ impl ServerHandler for MemoryServer {
         _request: Option<rmcp::model::PaginatedRequestParams>,
         context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
     ) -> Result<rmcp::model::ListResourcesResult, rmcp::ErrorData> {
-        require_legacy_session(&context.meta)?;
-        Ok(Default::default())
+        let mode = crate::mcp_peer::McpPeerMode::from_context(&context)?;
+        reject_modern_direct_stdio(mode, &context)?;
+        let mut result = rmcp::model::ListResourcesResult::default();
+        if mode == crate::mcp_peer::McpPeerMode::Modern20260728 {
+            validate_modern_identity_headers(&context)?;
+            result.ttl_ms = Some(0);
+            result.cache_scope = Some(rmcp::model::CacheScope::Private);
+        }
+        Ok(result)
     }
 
     async fn list_resource_templates(
@@ -1067,8 +1226,15 @@ impl ServerHandler for MemoryServer {
         _request: Option<rmcp::model::PaginatedRequestParams>,
         context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
     ) -> Result<rmcp::model::ListResourceTemplatesResult, rmcp::ErrorData> {
-        require_legacy_session(&context.meta)?;
-        Ok(Default::default())
+        let mode = crate::mcp_peer::McpPeerMode::from_context(&context)?;
+        reject_modern_direct_stdio(mode, &context)?;
+        let mut result = rmcp::model::ListResourceTemplatesResult::default();
+        if mode == crate::mcp_peer::McpPeerMode::Modern20260728 {
+            validate_modern_identity_headers(&context)?;
+            result.ttl_ms = Some(0);
+            result.cache_scope = Some(rmcp::model::CacheScope::Private);
+        }
+        Ok(result)
     }
 
     fn get_info(&self) -> ServerInfo {
@@ -1082,6 +1248,7 @@ impl ServerHandler for MemoryServer {
         context: RequestContext<RoleServer>,
     ) -> impl Future<Output = Result<InitializeResult, rmcp::ErrorData>> + Send + '_ {
         async move {
+            crate::mcp_peer::reject_modern_initialize(&request)?;
             let info = self.negotiate_initialize(&request)?;
             self.apply_http_session_identity(&request, &context)?;
             context.peer.set_peer_info(request);
@@ -1096,20 +1263,28 @@ impl ServerHandler for MemoryServer {
     ) -> impl Future<Output = Result<rmcp::model::ListToolsResult, rmcp::ErrorData>> + Send + '_
     {
         async move {
-            require_legacy_session(&context.meta)?;
-            let all_native = self.tool_router.list_all();
+            let mode = crate::mcp_peer::McpPeerMode::from_context(&context)?;
+            reject_modern_direct_stdio(mode, &context)?;
+            let request_server = match mode {
+                crate::mcp_peer::McpPeerMode::Legacy => None,
+                crate::mcp_peer::McpPeerMode::Modern20260728 => {
+                    Some(self.clone_for_modern_request(&context)?)
+                }
+            };
+            let server = request_server.as_ref().unwrap_or(self);
+            let all_native = server.tool_router.list_all();
             let mut tools = prepare_native_tool_definitions(all_native);
 
             // Add proxy tools from registered MCP servers
             let proxy_snapshot =
-                lock_or_recover(&self.tool_discovery.proxy_tools, "proxy_tools").clone();
-            let mcp_tool_exposure_mode = self.tool_discovery.mcp_tool_exposure_mode;
+                lock_or_recover(&server.tool_discovery.proxy_tools, "proxy_tools").clone();
+            let mcp_tool_exposure_mode = server.tool_discovery.mcp_tool_exposure_mode;
             let skill_tool_defs_snapshot =
-                lock_or_recover(&self.tool_discovery.skill_tool_defs, "skill_tool_defs").clone();
+                lock_or_recover(&server.tool_discovery.skill_tool_defs, "skill_tool_defs").clone();
 
             for (server_name, server_tools) in proxy_snapshot {
                 let cap_id = format!("mcp:{server_name}");
-                let cap = match self.get_capability(&cap_id) {
+                let cap = match server.get_capability(&cap_id) {
                     Ok(cap) if cap.enabled => cap,
                     _ => continue,
                 };
@@ -1150,14 +1325,19 @@ impl ServerHandler for MemoryServer {
             let env_patterns = current_exposed_tool_patterns();
             tools = project_tool_definitions(
                 tools,
-                self.active_tool_profile(),
+                server.active_tool_profile(),
                 env_patterns.as_deref(),
             );
 
-            Ok(rmcp::model::ListToolsResult {
+            let mut result = rmcp::model::ListToolsResult {
                 tools,
                 ..Default::default()
-            })
+            };
+            if mode == crate::mcp_peer::McpPeerMode::Modern20260728 {
+                result.ttl_ms = Some(0);
+                result.cache_scope = Some(rmcp::model::CacheScope::Private);
+            }
+            Ok(result)
         }
     }
 
@@ -1168,16 +1348,24 @@ impl ServerHandler for MemoryServer {
     ) -> impl Future<Output = Result<rmcp::model::CallToolResponse, rmcp::ErrorData>> + Send + '_
     {
         async move {
-            require_legacy_session(&context.meta)?;
+            let mode = crate::mcp_peer::McpPeerMode::from_context(&context)?;
+            reject_modern_direct_stdio(mode, &context)?;
+            let request_server = match mode {
+                crate::mcp_peer::McpPeerMode::Legacy => None,
+                crate::mcp_peer::McpPeerMode::Modern20260728 => {
+                    Some(self.clone_for_modern_request(&context)?)
+                }
+            };
+            let server = request_server.as_ref().unwrap_or(self);
             // Idle reaper: every tool call (including ones a stdio child
             // forwards to this daemon) counts as activity, so an idle daemon is
             // genuinely unused and safe to self-terminate.
-            self.touch_activity();
+            server.touch_activity();
             let name_owned = params.name.as_ref().to_string();
             let name = name_owned.as_str();
             let env_patterns = current_exposed_tool_patterns();
 
-            let active_profile = self.active_tool_profile();
+            let active_profile = server.active_tool_profile();
             let visible = tachi_hub::tool_visible(name, active_profile, env_patterns.as_deref());
 
             if !visible {
@@ -1201,10 +1389,10 @@ impl ServerHandler for MemoryServer {
                 return Ok(tool_action_denied_result(name, action_label, &profile_label).into());
             }
 
-            let bound_project = self.session_project();
+            let bound_project = server.session_project();
             if let Some(project) = bound_project.as_deref() {
                 crate::session_identity::enforce_server_session_project(
-                    self,
+                    server,
                     name,
                     &mut params.arguments,
                     project,
@@ -1238,12 +1426,12 @@ impl ServerHandler for MemoryServer {
                 // each MCP session clone; `check_session_rate_limit` keys burst
                 // windows by that id so sessions sharing the process-global
                 // RateLimiter do not inherit each other's counters.
-                self.check_session_rate_limit(name, &args_hash)?
+                server.check_session_rate_limit(name, &args_hash)?
             };
 
             // ─── Phantom Tools: cache invalidation on write ops ──────────
             if CACHE_INVALIDATING_TOOLS.contains(&name) {
-                self.tool_cache_lock().clear();
+                server.tool_cache_lock().clear();
             }
 
             // ─── Phantom Tools: check cache for read-only tools ──────────
@@ -1266,7 +1454,7 @@ impl ServerHandler for MemoryServer {
 
                 // Check cache
                 let cached_hit = {
-                    let cache = self.tool_cache_lock();
+                    let cache = server.tool_cache_lock();
                     if let Some(cached) = cache.get(&key) {
                         if cached.created_at.elapsed() < TOOL_CACHE_TTL {
                             Some(cached.result.clone())
@@ -1278,14 +1466,16 @@ impl ServerHandler for MemoryServer {
                     }
                 };
                 if let Some(mut hit) = cached_hit {
-                    self.cache_hits
+                    server
+                        .cache_hits
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     if let Some(warn) = stuck_warning.clone() {
                         hit.content.push(rmcp::model::ContentBlock::text(warn));
                     }
                     return Ok(hit.into());
                 }
-                self.cache_misses
+                server
+                    .cache_misses
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 Some(key)
             } else {
@@ -1299,23 +1489,23 @@ impl ServerHandler for MemoryServer {
 
             let mut result = {
                 // 1. Native tools first (highest priority)
-                if self.tool_router.has_route(name) {
+                if server.tool_router.has_route(name) {
                     let context =
-                        rmcp::handler::server::tool::ToolCallContext::new(self, params, context);
-                    match self.tool_router.call(context).await {
+                        rmcp::handler::server::tool::ToolCallContext::new(server, params, context);
+                    match server.tool_router.call(context).await {
                         Ok(rmcp::model::CallToolResponse::Complete(result)) => Ok(result),
                         Ok(_) => Err(rmcp::ErrorData::internal_error(
-                            "Native tools require a complete result in the legacy protocol profile",
+                            "Tachi tools require a complete synchronous result",
                             None,
                         )),
                         Err(error) => Err(error),
                     }
                 }
                 // 2. Skill tools (tachi_skill_*)
-                else if lock_or_recover(&self.tool_discovery.skill_tools, "skill_tools")
+                else if lock_or_recover(&server.tool_discovery.skill_tools, "skill_tools")
                     .contains_key(name)
                 {
-                    let exposure = self.tool_discovery.mcp_tool_exposure_mode;
+                    let exposure = server.tool_discovery.mcp_tool_exposure_mode;
                     if exposure == McpToolExposureMode::Gateway {
                         Err(rmcp::ErrorData::invalid_params(
                             "Direct skill tools are disabled for gateway mode; use tachi_skill(action='run')"
@@ -1323,16 +1513,16 @@ impl ServerHandler for MemoryServer {
                             None,
                         ))
                     } else {
-                        self.call_skill_tool(name, params.arguments).await
+                        server.call_skill_tool(name, params.arguments).await
                     }
                 }
                 // 3. Proxy tools (server__tool pattern)
                 else if let Some((server_name, tool_name)) = {
                     let proxy_tools =
-                        lock_or_recover(&self.tool_discovery.proxy_tools, "proxy_tools");
+                        lock_or_recover(&server.tool_discovery.proxy_tools, "proxy_tools");
                     split_proxy_tool_name(name, proxy_tools.keys().map(String::as_str))
                 } {
-                    let exposure_mode = self.proxy_tool_exposure_mode_for_server(&server_name)?;
+                    let exposure_mode = server.proxy_tool_exposure_mode_for_server(&server_name)?;
                     if exposure_mode == McpToolExposureMode::Gateway {
                         Err(rmcp::ErrorData::invalid_params(
                             format!(
@@ -1342,7 +1532,8 @@ impl ServerHandler for MemoryServer {
                             None,
                         ))
                     } else {
-                        self.proxy_call_internal(&server_name, &tool_name, params.arguments)
+                        server
+                            .proxy_call_internal(&server_name, &tool_name, params.arguments)
                             .await
                     }
                 } else {
@@ -1352,7 +1543,7 @@ impl ServerHandler for MemoryServer {
 
             // ─── Dead Letter Queue: capture failures ─────────────────────
             if let Err(ref err) = result {
-                let is_native = self.tool_router.has_route(&tool_name_owned);
+                let is_native = server.tool_router.has_route(&tool_name_owned);
                 if should_enqueue_dlq(&tool_name_owned, tool_args_for_dlq.as_ref(), is_native) {
                     let error_str = format!("{}", err);
                     let category = categorize_error(&error_str);
@@ -1370,14 +1561,14 @@ impl ServerHandler for MemoryServer {
                     };
 
                     {
-                        let mut dlq = self.dead_letters_lock();
+                        let mut dlq = server.dead_letters_lock();
                         push_dead_letter_with_limits(&mut dlq, dl, Utc::now());
                     }
                 } else {
                     let error_category = categorize_error(&err.to_string());
                     let reason = dlq_capture_refusal_reason(&tool_name_owned, is_native);
                     if let Err(signal_error) = record_dlq_capture_refused(
-                        self,
+                        server,
                         &tool_name_owned,
                         action_arg.as_deref(),
                         reason,
@@ -1401,7 +1592,7 @@ impl ServerHandler for MemoryServer {
             // ─── Phantom Tools: store result in cache ────────────────────
             if let (Some(key), Ok(ref res)) = (&cache_key, &result) {
                 if tool_result_can_be_cached(res) {
-                    let mut cache = self.tool_cache_lock();
+                    let mut cache = server.tool_cache_lock();
                     // Evict expired entries when cache exceeds cap
                     if cache.len() >= TOOL_CACHE_MAX_ENTRIES {
                         cache.retain(|_, v| v.created_at.elapsed() < TOOL_CACHE_TTL);
@@ -1446,7 +1637,17 @@ impl ServerHandler for MemoryServer {
                 (other, _) => other,
             };
 
-            result.map(Into::into)
+            result.map(|mut result| {
+                // Native constructors already carry this discriminator, but a
+                // directly exposed legacy MCP upstream does not. Hydrate at
+                // the final modern HTTP boundary after every dispatch path.
+                if mode == crate::mcp_peer::McpPeerMode::Modern20260728 {
+                    result
+                        .result_type
+                        .get_or_insert(rmcp::model::ResultType::COMPLETE);
+                }
+                result.into()
+            })
         }
     }
 }
@@ -1929,31 +2130,18 @@ mod tests {
     }
 
     #[test]
-    fn delegate_wiki_schema_hides_write_only_properties() {
+    fn delegate_projection_excludes_residual_wiki_facade() {
         let projected = project_tool_definitions(
             native_tools(),
             Some(tachi_hub::ToolProfile::delegate()),
             None,
         );
-        let wiki_tool = projected
-            .iter()
-            .find(|tool| tool.name.as_ref() == "tachi_wiki")
-            .expect("tachi_wiki is exposed to delegate");
-        let properties = wiki_tool.input_schema["properties"]
-            .as_object()
-            .expect("properties map");
-        for write_field in ["title", "text", "summary", "keywords", "entities", "force"] {
-            assert!(
-                !properties.contains_key(write_field),
-                "write field {write_field} must not be present in delegate wiki schema"
-            );
-        }
-        for read_field in ["action", "query", "category", "path"] {
-            assert!(
-                properties.contains_key(read_field),
-                "read field {read_field} must be present in delegate wiki schema"
-            );
-        }
+        assert!(
+            projected
+                .iter()
+                .all(|tool| tool.name.as_ref() != "tachi_wiki"),
+            "tachi_wiki must not appear in Worker discovery"
+        );
     }
 
     #[test]
@@ -2286,6 +2474,7 @@ mod tests {
     fn named_project_wins_over_workspace_root_when_both_present() {
         let identity = HttpSessionIdentity {
             profile: None,
+            internal_proxy_token: None,
             client: None,
             agent_identity_id: None,
             agent_identity_error: None,
@@ -2305,6 +2494,7 @@ mod tests {
     fn workspace_root_used_only_when_project_absent() {
         let identity = HttpSessionIdentity {
             profile: None,
+            internal_proxy_token: None,
             client: None,
             agent_identity_id: None,
             agent_identity_error: None,

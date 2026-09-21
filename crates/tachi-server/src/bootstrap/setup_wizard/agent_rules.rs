@@ -10,7 +10,7 @@ pub(crate) fn agent_memory_rules_block() -> String {
 ## Tachi Memory Rules\n\n\
 ### Session start (non-trivial work)\n\
 - Call `tachi_memory` with `action=\"briefing\"`.\n\
-- Optionally `tachi_status` when DB health, vectors, or Foundry jobs may matter.\n\n\
+- Call `tachi_memory` with `action=\"alerts\"` when operational warnings may matter.\n\n\
 ### Project lifecycle (issue/PR/flow work)\n\
 - When a `flow_id`, `issue_ref`, or `pr_ref` exists, run `tachi_task` with `action=\"status\"` before PR handoff, release notes, or close-loop.\n\
 - Treat the nested `status.cycle` view as read-only lifecycle state; follow its `next_action`.\n\n\
@@ -29,7 +29,7 @@ pub(crate) fn agent_memory_rules_block() -> String {
 ### While working\n\
 - Stuck / repeated failures → `action=\"alerts\"` or `action=\"ask\"` before more patches.\n\
 - Never save secrets, tokens, or raw transcripts.\n\
-- Treat `tachi_status` warnings (keys, vector coverage, failed Foundry jobs) as active context.\n\
+- Treat warnings returned by `tachi_memory(action=\"alerts\")` as active context.\n\
 {AGENT_RULES_END}\n"
     )
 }

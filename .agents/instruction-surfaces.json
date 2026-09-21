@@ -14,22 +14,28 @@
       "adapter_version": "v1",
       "density_budget": {
         "name": "provisional-public-agents",
-        "bytes": 32768
+        "bytes": 8192
       },
       "remediation_owner": "repository-owner",
+      "direct_consumers": [
+        "codex"
+      ],
       "targets": []
     },
     {
-      "id": "claude-private-manual",
+      "id": "claude-adapter",
       "source": "CLAUDE.md",
       "audience": "carrier-private",
-      "tier": "expanded-manual",
+      "tier": "compressed-adapter",
       "adapter_version": "v1",
       "density_budget": {
-        "name": "provisional-claude-private-manual",
-        "bytes": 65536
+        "name": "provisional-claude-adapter",
+        "bytes": 3072
       },
       "remediation_owner": "carrier-manual-owner",
+      "direct_consumers": [
+        "claude"
+      ],
       "targets": []
     }
   ]

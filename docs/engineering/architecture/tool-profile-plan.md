@@ -25,12 +25,12 @@ The target split is:
 ## Principles
 
 1. Agent-facing tools stay tiny.
-   - Default agent surface should be a narrow `observe + remember` kernel, not the full MCP catalog
+   - Default Lead and Worker discovery is exactly `tachi_memory`, `tachi_task`, `tachi_staff`, `tachi_gh`, and `tachi_a2a`, not a bundle-shaped catalog
 2. Runtime hooks stay explicit.
    - `recall_context`, `capture_session`, and later `compact_context` are runtime/adapter APIs, not part of the ordinary IDE default
 3. Capability selection is **retired as a first-class layer** (#1690 C3 delete list: "skill recommendation and auto-selection").
    - These APIs are retired and deleted end-to-end: `recommend_capability`, `recommend_skill`, `recommend_toolchain`, `prepare_capability_bundle`, and `skill_evolve`; the router rejects them as unknown tools
-   - `tachi_skill(action="discover"|"run")` is the canonical skill workflow; `bundle`/`loadout`/`from_pattern` actions are retired
+   - `tachi_skill(action="discover"|"run")` is retained only for explicit Ops/admin compatibility; ordinary agents use their host-native skill loader; `bundle`/`loadout`/`from_pattern` actions are retired
    - a dispatch's skills resolve only from the explicit `skills` parameter plus the profile's static reviewed skill list; internal dispatch-profile recommendation consumes the DecisionFactLedger and abstains when no usable evidence exists
    - raw hub / pack / vc governance tools should not leak into ordinary agent surfaces
 4. Workflow tools are not kernel primitives.
@@ -46,32 +46,23 @@ The target split is:
 
 ## Implemented
 
-### Built-in additive bundles
+### Built-in role surfaces
 
-`Tachi` now understands additive surface bundles instead of mutually exclusive profiles:
+The bundle bits remain internal action-policy classification, but model-facing
+discovery now follows the Lead / Worker / Ops boundary:
 
-- `observe`
-  - static reviewed skill discovery
-  - read-only memory and graph inspection
-- `remember` (live additive profile/bundle; distinct from the retired native `remember` tool alias)
-  - `observe` +
-  - `save_memory` (retired name; canonical `tachi_memory(action="save")`)
-  - `extract_facts`
-  - `tachi_skill(action="run")`; standalone `run_skill` is retired by #1690
-- `coordinate`
-  - `remember` (not retired; live profile) +
-  - kanban / ghost / handoff collaboration tools
-- `operate`
-  - `remember` (not retired; live profile) +
-  - runtime hook primitives (`recall_context`, `capture_session`, `compact_*`, `section_build`)
-  - routed execution helpers (`hub_call`, `hub_disconnect`, `archive_memory`, `find_similar_memory`, `get_pipeline_status`, `sync_memories`, `wiki_lint`, `vault_unlock`/`vault_lock`/`vault_status`) — the proposal queue/review/project tools and `agent_register` this bundle used to route were retired under #757, superseded by the memory-line promotion path (#950, #534)
-- `admin`
-  - full surface, including hub governance, pack management, vault, sandbox, VC, and destructive operations
-
-There are also two curated minimal profiles for common hosts:
-
-- `standard` — default for IDE agents. Intersects the bundles with a daily agent-intent surface. `tachi_task(action='dispatch')` is removed from its advertised schema and denied at call time; ordinary delegation uses the host harness's native subagent. `tachi_arena` and `tachi_agent_eval` are no longer standard tools because mission persistence and native lifecycle/eval intake belong to internal/adapter surfaces. `tachi_web_search` remains because some hosts lack native search. The canonical list is `STANDARD_MINIMAL_TOOL_PATTERNS` in `crates/tachi-hub/src/tool_profiles/patterns.rs`.
-- `delegate` — for worker subagents spawned via the explicitly admitted staffing surface `tachi_staff(action='start')`. Its canonical source-owned surface has no recursive dispatch and no handoff.
+- `standard` / Lead — exactly `tachi_memory`, `tachi_task`, `tachi_staff`,
+  `tachi_gh`, and `tachi_a2a`.
+- `delegate` / Worker — the same five names; action policy allows bounded
+  status/read use while denying recursive staffing and GitHub mutation.
+- `operate` / Ops — an explicit non-default surface retaining runtime, status,
+  Vault-session, Foundry, and Hub diagnostics.
+- `admin` / `emergency` — the full retained catalog. Narrow-profile hiding is
+  not physical route deletion.
+- Legacy `observe`, `remember` (retired as a native tool alias), and `coordinate` selectors retain their
+  action-level bundle semantics but their discovery is confined to product
+  facades. `companion`, `copilot`, `coach`, and `workflow` are ordinary Lead
+  aliases rather than broad bundle combinations.
 
 Selection paths:
 
@@ -83,11 +74,10 @@ Selection paths:
 
 Host aliases expand to profile/bundle sets:
 
-- `codex`, `claude`, `claude-code`, `cursor`, `trae`, `windsurf`, `ide`, `antigravity` → `standard`
+- `lead`, `codex`, `claude`, `claude-code`, `cursor`, `trae`, `windsurf`, `ide`, `antigravity`, `companion`, `copilot`, `coach`, `workflow` → `standard`
 - `worker`, `subagent`, `delegate` → `delegate`
 - `openclaw`, `hermes`, `runtime`, `adapter`, `ops` → `operate`
-- `workflow` → `coordinate + operate`
-- `admin`, `full` → `admin`
+- `admin`, `full`, `emergency` → `admin` (only as a sole explicit token)
 
 ### OpenClaw extension surface
 
