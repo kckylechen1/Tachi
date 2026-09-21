@@ -178,8 +178,9 @@ fn validate_managed_codex_containment(
     managed_backend_eligible: bool,
     postflight: &crate::exec_env_postflight::PostflightApplicability,
 ) -> Result<(), &'static str> {
-    let admitted =
-        managed_backend_eligible && origin == ManagedControlOrigin::StaffFacade && backend == "codex";
+    let admitted = managed_backend_eligible
+        && origin == ManagedControlOrigin::StaffFacade
+        && backend == "codex";
     if admitted
         && matches!(
             postflight,
@@ -541,67 +542,69 @@ async fn managed_backend_metadata(
         return Ok(None);
     }
 
-    let (adapter, adapter_version, verification_evidence) =
-        match assignment.selected_backend.as_str() {
-            "custom" => (
-                "custom",
-                env!("CARGO_PKG_VERSION").to_string(),
-                vec!["server_minted_launch_spec"],
-            ),
-            "codex" => {
-                const ACCOUNT_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
-                if crate::build_info::GIT_SHA.len() != 40
-                    || !crate::build_info::GIT_SHA
-                        .bytes()
-                        .all(|byte| byte.is_ascii_hexdigit())
-                {
+    let (adapter, adapter_version, verification_evidence) = match assignment
+        .selected_backend
+        .as_str()
+    {
+        "custom" => (
+            "custom",
+            env!("CARGO_PKG_VERSION").to_string(),
+            vec!["server_minted_launch_spec"],
+        ),
+        "codex" => {
+            const ACCOUNT_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+            if crate::build_info::GIT_SHA.len() != 40
+                || !crate::build_info::GIT_SHA
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit())
+            {
+                return Err(
+                    "managed_backend_candidate_unavailable: exact candidate SHA is unavailable"
+                        .to_string(),
+                );
+            }
+            match tachi_dispatch::probe_codex_account(ACCOUNT_PROBE_TIMEOUT) {
+                tachi_dispatch::BackendAccountProbe::Available => {}
+                tachi_dispatch::BackendAccountProbe::ExecutableUnavailable => {
                     return Err(
-                        "managed_backend_candidate_unavailable: exact candidate SHA is unavailable"
+                        "managed_backend_executable_unavailable: codex executable is unavailable"
                             .to_string(),
                     );
                 }
-                match tachi_dispatch::probe_codex_account(ACCOUNT_PROBE_TIMEOUT) {
-                    tachi_dispatch::BackendAccountProbe::Available => {}
-                    tachi_dispatch::BackendAccountProbe::ExecutableUnavailable => {
-                        return Err(
-                            "managed_backend_executable_unavailable: codex executable is unavailable"
-                                .to_string(),
-                        );
-                    }
-                    tachi_dispatch::BackendAccountProbe::AccountUnavailable => {
-                        return Err(
-                            "managed_backend_account_unavailable: codex account is unavailable"
-                                .to_string(),
-                        );
-                    }
-                    tachi_dispatch::BackendAccountProbe::TimedOut => {
-                        return Err(
-                            "managed_backend_account_unavailable: codex account probe timed out"
-                                .to_string(),
-                        );
-                    }
-                    tachi_dispatch::BackendAccountProbe::CleanupUnconfirmed => {
-                        return Err(
+                tachi_dispatch::BackendAccountProbe::AccountUnavailable => {
+                    return Err(
+                        "managed_backend_account_unavailable: codex account is unavailable"
+                            .to_string(),
+                    );
+                }
+                tachi_dispatch::BackendAccountProbe::TimedOut => {
+                    return Err(
+                        "managed_backend_account_unavailable: codex account probe timed out"
+                            .to_string(),
+                    );
+                }
+                tachi_dispatch::BackendAccountProbe::CleanupUnconfirmed => {
+                    return Err(
                             "managed_backend_account_unavailable: codex account probe cleanup was not confirmed"
                                 .to_string(),
                         );
-                    }
                 }
-                let version = tachi_dispatch::probe_backend_version("codex").ok_or_else(|| {
-                    "managed_backend_version_unavailable: codex version is unavailable".to_string()
-                })?;
-                (
-                    "codex_cli",
-                    version,
-                    vec![
-                        "executable_available",
-                        "account_available",
-                        "server_minted_launch_spec",
-                    ],
-                )
             }
-            _ => return Ok(None),
-        };
+            let version = tachi_dispatch::probe_backend_version("codex").ok_or_else(|| {
+                "managed_backend_version_unavailable: codex version is unavailable".to_string()
+            })?;
+            (
+                "codex_cli",
+                version,
+                vec![
+                    "executable_available",
+                    "account_available",
+                    "server_minted_launch_spec",
+                ],
+            )
+        }
+        _ => return Ok(None),
+    };
 
     Ok(Some(json!({
         "contract_id": "managed_backend_receipt/v1",

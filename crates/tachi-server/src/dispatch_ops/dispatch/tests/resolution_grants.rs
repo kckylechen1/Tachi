@@ -247,13 +247,8 @@ fn managed_custom_registration_uses_prepared_execution_eligibility() {
         (ManagedControlOrigin::StaffFacade, "codex", false),
     ] {
         assert!(
-            validate_managed_codex_containment(
-                origin,
-                backend,
-                prepared_eligible,
-                &uncontained,
-            )
-            .is_ok(),
+            validate_managed_codex_containment(origin, backend, prepared_eligible, &uncontained,)
+                .is_ok(),
             "only the Staff-owned managed Codex branch receives mandatory containment admission"
         );
     }

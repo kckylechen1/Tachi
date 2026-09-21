@@ -614,14 +614,13 @@ mod tests {
             "#!/bin/sh\nif [ \"$1\" = login ]; then printf '%s\\n' \"$$\" > \"$0.pid\"; /bin/sh -c 'printf \"%s\\n\" \"$$\" > \"$1\"; while :; do :; done' sh \"$0.descendant.pid\" & while [ ! -s \"$0.descendant.pid\" ]; do :; done; while :; do :; done; fi\nprintf 'codex-cli 0.144.1\\n'\n",
         )
         .expect("write hanging account fixture");
-        let timed_out = match tachi_dispatch::probe_codex_account(
-            std::time::Duration::from_millis(500),
-        ) {
-            tachi_dispatch::BackendAccountProbe::TimedOut => {
-                "managed_backend_account_unavailable: codex account probe timed out".to_string()
-            }
-            outcome => panic!("a hanging account probe must fail closed: {outcome:?}"),
-        };
+        let timed_out =
+            match tachi_dispatch::probe_codex_account(std::time::Duration::from_millis(500)) {
+                tachi_dispatch::BackendAccountProbe::TimedOut => {
+                    "managed_backend_account_unavailable: codex account probe timed out".to_string()
+                }
+                outcome => panic!("a hanging account probe must fail closed: {outcome:?}"),
+            };
         assert_eq!(
             timed_out,
             "managed_backend_account_unavailable: codex account probe timed out"

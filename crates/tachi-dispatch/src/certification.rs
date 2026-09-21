@@ -48,9 +48,9 @@ use std::process::Stdio;
 #[cfg(unix)]
 use std::sync::mpsc;
 use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, SystemTime};
 #[cfg(unix)]
 use std::time::Instant;
+use std::time::{Duration, SystemTime};
 
 #[cfg(unix)]
 const VERSION_OUTPUT_MAX_BYTES: usize = 4 * 1024;
@@ -330,10 +330,7 @@ type VersionProbeReaderJob = Box<dyn FnOnce() -> VersionProbeReaderResult + Send
 #[cfg(unix)]
 type VersionProbeReaderHandle = std::thread::JoinHandle<VersionProbeReaderResult>;
 #[cfg(unix)]
-type VersionProbeReaderSpawner<'a> = dyn FnMut(
-    &'static str,
-    VersionProbeReaderJob,
-) -> std::io::Result<VersionProbeReaderHandle>
+type VersionProbeReaderSpawner<'a> = dyn FnMut(&'static str, VersionProbeReaderJob) -> std::io::Result<VersionProbeReaderHandle>
     + 'a;
 
 #[cfg(unix)]
@@ -370,7 +367,9 @@ fn spawn_version_probe_reader(
     name: &'static str,
     job: VersionProbeReaderJob,
 ) -> std::io::Result<VersionProbeReaderHandle> {
-    std::thread::Builder::new().name(name.to_string()).spawn(job)
+    std::thread::Builder::new()
+        .name(name.to_string())
+        .spawn(job)
 }
 
 #[cfg(unix)]
@@ -430,9 +429,7 @@ fn probe_process_group_absent(pid: u32) -> bool {
 struct VersionProbeCleanupOps {
     signal: fn(u32, libc::c_int) -> bool,
     group_absent: fn(u32) -> bool,
-    try_wait: fn(
-        &mut std::process::Child,
-    ) -> std::io::Result<Option<std::process::ExitStatus>>,
+    try_wait: fn(&mut std::process::Child) -> std::io::Result<Option<std::process::ExitStatus>>,
 }
 
 #[cfg(unix)]
@@ -453,7 +450,7 @@ const VERSION_PROBE_CLEANUP_OPS: VersionProbeCleanupOps = VersionProbeCleanupOps
 struct OwnedVersionProbe {
     child: std::process::Child,
     pid: u32,
-    root_reaped: bool,
+    root_status: Option<std::process::ExitStatus>,
     readers: VersionProbeReaders,
 }
 
@@ -464,7 +461,7 @@ impl OwnedVersionProbe {
         Self {
             child,
             pid,
-            root_reaped: false,
+            root_status: None,
             readers: VersionProbeReaders::default(),
         }
     }
@@ -496,20 +493,25 @@ impl OwnedVersionProbe {
         deadline: Instant,
         ops: VersionProbeCleanupOps,
     ) -> Option<std::process::ExitStatus> {
-        if self.root_reaped {
-            return None;
+        // Signal while the unreaped leader still reserves this numeric PGID.
+        // A zombie leader itself keeps kill(-pgid, 0) successful on macOS;
+        // requiring group absence before reaping would never finish.
+        if self.root_status.is_none() {
+            // A naturally exited zombie-only group may reject SIGKILL with
+            // EPERM on macOS. Neither success nor failure proves termination;
+            // the subsequent reap plus ESRCH observation is authoritative.
+            let _ = (ops.signal)(self.pid, libc::SIGKILL);
         }
-        let signal_confirmed = (ops.signal)(self.pid, libc::SIGKILL);
         loop {
-            // Keep the leader unreaped until its group is absent. That reserves
-            // the numeric PGID while cleanup still has signalling authority.
-            if (ops.group_absent)(self.pid) {
-                match (ops.try_wait)(&mut self.child) {
-                    Ok(Some(status)) => {
-                        self.root_reaped = true;
-                        return signal_confirmed.then_some(status);
-                    }
-                    Ok(None) | Err(_) => {}
+            if self.root_status.is_none() {
+                if let Ok(Some(status)) = (ops.try_wait)(&mut self.child) {
+                    self.root_status = Some(status);
+                }
+            }
+            if let Some(status) = self.root_status {
+                // After reap, only observe. Never signal a potentially reused PGID.
+                if (ops.group_absent)(self.pid) {
+                    return Some(status);
                 }
             }
             if Instant::now() >= deadline {
@@ -520,13 +522,15 @@ impl OwnedVersionProbe {
     }
 
     fn cleanup_until_confirmed(mut self) {
-        while !self.root_reaped {
-            let _ = signal_probe_process_group(self.pid, libc::SIGKILL);
-            if probe_process_group_absent(self.pid) {
-                if let Ok(Some(_)) = self.child.try_wait() {
-                    self.root_reaped = true;
-                    break;
+        loop {
+            if self.root_status.is_none() {
+                let _ = signal_probe_process_group(self.pid, libc::SIGKILL);
+                if let Ok(Some(status)) = self.child.try_wait() {
+                    self.root_status = Some(status);
                 }
+            }
+            if self.root_status.is_some() && probe_process_group_absent(self.pid) {
+                break;
             }
             std::thread::sleep(Duration::from_millis(10));
         }
@@ -642,7 +646,7 @@ fn run_version_probe_with_timeout(program: &std::path::Path, timeout: Duration) 
     )
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, test))]
 fn run_version_probe_with_timeout_and_spawner(
     program: &std::path::Path,
     timeout: Duration,
@@ -708,9 +712,7 @@ fn run_version_probe_with_timeout_and_spawner_and_cleanup(
     let status = guard
         .probe_mut()
         .terminate_reap_and_prove(Instant::now() + cleanup_timeout, cleanup_ops);
-    if status.is_none() {
-        return None;
-    }
+    status?;
     let mut owned = guard.into_confirmed();
     let (stdout, stderr) = owned.join_readers()?;
 
@@ -761,12 +763,10 @@ fn run_account_probe_with_timeout(
             Ok(false) | Err(_) => break false,
         }
     };
-    let status = guard
-        .probe_mut()
-        .terminate_reap_and_prove(
-            Instant::now() + PROBE_CLEANUP_TIMEOUT,
-            VERSION_PROBE_CLEANUP_OPS,
-        );
+    let status = guard.probe_mut().terminate_reap_and_prove(
+        Instant::now() + PROBE_CLEANUP_TIMEOUT,
+        VERSION_PROBE_CLEANUP_OPS,
+    );
     let Some(status) = status else {
         return BackendAccountProbe::CleanupUnconfirmed;
     };
@@ -856,6 +856,7 @@ mod tests {
             self.root.join("probe.escaped.pid")
         }
 
+        #[cfg(target_os = "linux")]
         fn escape_status_path(&self) -> PathBuf {
             self.root.join("probe.escape.status")
         }
@@ -1124,7 +1125,10 @@ mod tests {
             .write_all(b"hostile-daemon-protocol-input\n")
             .expect("supply readable parent fd zero");
         assert!(
-            child.wait().expect("wait for readable-stdin test child").success(),
+            child
+                .wait()
+                .expect("wait for readable-stdin test child")
+                .success(),
             "the nested discriminator failed with readable fd zero"
         );
     }
@@ -1249,6 +1253,32 @@ mod tests {
         // the live child and eventually establishes authoritative ESRCH.
         assert_pid_absent(pid);
         assert_process_group_absent(pid);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cleanup_of_reaped_root_never_signals_its_numeric_group_again() {
+        use std::os::unix::process::CommandExt;
+        fn forbidden_signal(_: u32, _: libc::c_int) -> bool {
+            panic!("a reaped numeric group must never be signalled");
+        }
+        let child = std::process::Command::new("/bin/sh")
+            .args(["-c", "exit 0"])
+            .process_group(0)
+            .spawn()
+            .expect("owned child");
+        let mut owned = OwnedVersionProbe::new(child);
+        owned.root_status = Some(owned.child.wait().expect("reap fixture"));
+        assert!(owned
+            .terminate_reap_and_prove(
+                Instant::now() + Duration::from_secs(1),
+                VersionProbeCleanupOps {
+                    signal: forbidden_signal,
+                    ..VERSION_PROBE_CLEANUP_OPS
+                }
+            )
+            .expect("reaped root plus absent group")
+            .success());
     }
 
     #[cfg(unix)]
