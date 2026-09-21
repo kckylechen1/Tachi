@@ -62,6 +62,175 @@ fn seed_receipts(flow_id: &str, kinds: &[(&str, Value)]) -> tempfile::TempDir {
     home
 }
 
+fn gate_server(home: &std::path::Path) -> MemoryServer {
+    MemoryServer::new_with_home_for_test(home.join("global.db"), None, home.to_path_buf())
+        .expect("gate test server")
+}
+
+fn seed_gate_claim(server: &MemoryServer, flow_id: &str, expected_head: &str) -> serde_json::Value {
+    crate::claims_ops::admit_agent_connection(server, Some("agent.gate".to_string()), true)
+        .expect("local admission");
+    let params: crate::TachiTaskParams = serde_json::from_value(json!({
+        "action": "claim",
+        "flow_id": flow_id,
+        "issue_ref": format!("org/repo#{flow_id}"),
+        "branch": format!("lane/{flow_id}"),
+        "claim_role": "reviewer",
+        "claim_mode": "read_only",
+        "worktree_path": "",
+        "claim_scope": ["crates/tachi-server/src/verify_ops/gate.rs"],
+        "expected_head": expected_head,
+        "lease_expires_at": "2030-01-01T00:00:00Z",
+    }))
+    .expect("claim params");
+    crate::claims_ops::handle_task_claim(server, &params).expect("work claim")
+}
+
+fn write_gate_ledger(flow_id: &str) {
+    let path = ledger_path_for_flow(flow_id).expect("ledger path");
+    write_json(
+        &path,
+        &json!({
+            "flow_id": flow_id,
+            "overall": "passed",
+            "items": [{"id":"fmt","status":"passed","required":true}],
+        }),
+    )
+    .expect("write ledger");
+}
+
+fn handoff_gate_claim(
+    server: &MemoryServer,
+    claim_id: &str,
+    flow_id: &str,
+    transition_version: i64,
+    expected_head: &str,
+) -> serde_json::Value {
+    let params: crate::TachiTaskParams = serde_json::from_value(json!({
+        "action": "handoff",
+        "claim_id": claim_id,
+        "transition_version": transition_version,
+        "flow_id": flow_id,
+        "claim_role": "reviewer",
+        "claim_mode": "read_only",
+        "worktree_path": "",
+        "claim_scope": ["crates/tachi-server/src/verify_ops/gate.rs"],
+        "expected_head": expected_head,
+        "lease_expires_at": "2030-01-02T00:00:00Z",
+    }))
+    .expect("handoff params");
+    crate::claims_ops::handle_task_handoff(server, &params).expect("claim handoff")
+}
+
+/// #1112 positive control: the evaluated SHA and revision come from the
+/// active WorkClaim. Receipt-head mismatch and explicit-rebind tests below
+/// discriminate incorrect head selection at runtime; a signature change alone
+/// is not runtime RED evidence.
+#[test]
+fn gate_uses_claim_binding_instead_of_caller_sha() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let runs = tempfile::tempdir().expect("run root");
+    let original = std::env::var_os("TACHI_RUN_ROOT");
+    std::env::set_var("TACHI_RUN_ROOT", runs.path());
+    let flow_id = "flow_claim-bound-gate";
+    let expected_head = "claim-head";
+    write_gate_ledger(flow_id);
+    let home = tempfile::tempdir().expect("receipt home");
+    let server = gate_server(home.path());
+    let claim = seed_gate_claim(&server, flow_id, expected_head);
+    for kind in MERGE_REQUIRED_RUN_KINDS {
+        let mut receipt = valid_receipt(kind, expected_head);
+        receipt["flow_id"] = json!(flow_id);
+        seed_run_receipt_for_test(home.path(), flow_id, kind, &receipt).expect("seed receipt");
+    }
+
+    let gate = evaluate_verification_gate(&server, Some(flow_id))
+        .expect("gate")
+        .expect("ledger");
+    assert_eq!(gate["overall"], "passed");
+    assert_eq!(gate["current_head_sha"], expected_head);
+    assert_eq!(gate["expected_head"], expected_head);
+    assert_eq!(gate["claim_id"], claim["claim_id"]);
+    assert_eq!(gate["claim_transition_version"], 0);
+
+    if let Some(value) = original {
+        std::env::set_var("TACHI_RUN_ROOT", value);
+    } else {
+        std::env::remove_var("TACHI_RUN_ROOT");
+    }
+}
+
+#[test]
+fn gate_refuses_missing_ambiguous_and_headless_claim_authority() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let runs = tempfile::tempdir().expect("run root");
+    let original = std::env::var_os("TACHI_RUN_ROOT");
+    std::env::set_var("TACHI_RUN_ROOT", runs.path());
+    let home = tempfile::tempdir().expect("receipt home");
+    let server = gate_server(home.path());
+
+    let missing_flow = "flow_gate-missing-claim";
+    write_gate_ledger(missing_flow);
+    let missing = evaluate_verification_gate(&server, Some(missing_flow))
+        .expect_err("a ledger without claim authority must refuse");
+    assert_eq!(
+        missing,
+        format!("verification_claim_missing: flow {missing_flow}")
+    );
+
+    let ambiguous_flow = "flow_gate-ambiguous-claim";
+    write_gate_ledger(ambiguous_flow);
+    seed_gate_claim(&server, ambiguous_flow, "head-a");
+    seed_gate_claim(&server, ambiguous_flow, "head-a");
+    let ambiguous = evaluate_verification_gate(&server, Some(ambiguous_flow))
+        .expect_err("multiple active claims must refuse");
+    assert_eq!(
+        ambiguous,
+        format!("verification_claim_ambiguous: flow {ambiguous_flow}")
+    );
+
+    for malformed in [None, Some("   ")] {
+        let flow_id = format!(
+            "flow_gate-{}-head",
+            if malformed.is_none() {
+                "missing"
+            } else {
+                "blank"
+            }
+        );
+        write_gate_ledger(&flow_id);
+        let claim = seed_gate_claim(&server, &flow_id, "admitted-head");
+        server
+            .with_global_store(|store| {
+                store
+                    .connection_mut()
+                    .execute(
+                        "UPDATE session_claims SET expected_head=?1 WHERE claim_id=?2",
+                        rusqlite::params![malformed, claim["claim_id"].as_str().unwrap()],
+                    )
+                    .map_err(|err| err.to_string())?;
+                Ok(())
+            })
+            .expect("inject malformed persisted head");
+        let error = evaluate_verification_gate(&server, Some(&flow_id))
+            .expect_err("missing/blank expected head must refuse");
+        assert_eq!(
+            error,
+            format!("verification_claim_expected_head_missing: flow {flow_id}")
+        );
+    }
+
+    if let Some(value) = original {
+        std::env::set_var("TACHI_RUN_ROOT", value);
+    } else {
+        std::env::remove_var("TACHI_RUN_ROOT");
+    }
+}
+
 /// #1454 gate tests: authority comes from the server-owned receipt store.
 /// Ledgers are display-only; the gate reads receipts (F1).
 
@@ -103,8 +272,10 @@ fn verification_gate_detects_failed_and_stale_receipts() {
         flow_id,
         &[("fmt", fmt), ("clippy", clippy), ("nextest", stale)],
     );
+    let server = gate_server(home.path());
+    seed_gate_claim(&server, flow_id, "abc");
 
-    let gate = evaluate_verification_gate(Some(flow_id), "abc", home.path())
+    let gate = evaluate_verification_gate(&server, Some(flow_id))
         .unwrap()
         .unwrap();
     assert_eq!(gate["overall"], "failed");
@@ -149,8 +320,10 @@ fn verification_gate_receipt_head_mismatch_is_stale() {
     let mut old = valid_receipt("fmt", "old");
     old["flow_id"] = json!(flow_id);
     let home = seed_receipts(flow_id, &[("fmt", old)]);
+    let server = gate_server(home.path());
+    seed_gate_claim(&server, flow_id, "abc");
 
-    let gate = evaluate_verification_gate(Some(flow_id), "abc", home.path())
+    let gate = evaluate_verification_gate(&server, Some(flow_id))
         .unwrap()
         .unwrap();
     assert_eq!(gate["overall"], "pending");
@@ -198,8 +371,10 @@ fn forge_discriminator_ledger_server_run_item_without_receipt_never_passes() {
     )
     .unwrap();
     let home = tempfile::tempdir().expect("empty receipt home");
+    let server = gate_server(home.path());
+    seed_gate_claim(&server, flow_id, "abc");
 
-    let gate = evaluate_verification_gate(Some(flow_id), "abc", home.path())
+    let gate = evaluate_verification_gate(&server, Some(flow_id))
         .unwrap()
         .unwrap();
     assert_eq!(
@@ -250,8 +425,10 @@ fn authority_boundary_receipt_in_store_accepted_same_json_in_ledger_not() {
         seed_run_receipt_for_test(home.path(), flow_id, kind, &valid_receipt(kind, "abc"))
             .expect("seed receipt");
     }
+    let server = gate_server(home.path());
+    seed_gate_claim(&server, flow_id, "abc");
 
-    let gate = evaluate_verification_gate(Some(flow_id), "abc", home.path())
+    let gate = evaluate_verification_gate(&server, Some(flow_id))
         .unwrap()
         .unwrap();
     assert_eq!(
@@ -263,7 +440,9 @@ fn authority_boundary_receipt_in_store_accepted_same_json_in_ledger_not() {
     // Flip the experiment: only the ledger copy exists (no receipt) — the
     // same bytes in the wrong location must not pass.
     let empty_home = tempfile::tempdir().expect("empty receipt home");
-    let gate = evaluate_verification_gate(Some(flow_id), "abc", empty_home.path())
+    let empty_server = gate_server(empty_home.path());
+    seed_gate_claim(&empty_server, flow_id, "abc");
+    let gate = evaluate_verification_gate(&empty_server, Some(flow_id))
         .unwrap()
         .unwrap();
     assert_eq!(
@@ -301,10 +480,12 @@ fn legacy_ledger_without_receipts_is_pending_missing() {
     )
     .unwrap();
     let home = tempfile::tempdir().expect("empty receipt home");
+    let server = gate_server(home.path());
+    seed_gate_claim(&server, flow_id, "abc");
 
     // A required ledger item without a receipt is pending with
     // verification:<kind>:missing — never passed (F1 authority boundary).
-    let gate = evaluate_verification_gate(Some(flow_id), "abc", home.path())
+    let gate = evaluate_verification_gate(&server, Some(flow_id))
         .unwrap()
         .unwrap();
     assert_eq!(gate["overall"], "pending");
@@ -345,8 +526,10 @@ fn verification_gate_receipt_without_head_sha_is_stale() {
     no_head["flow_id"] = json!(flow_id);
     no_head["head_sha"] = Value::Null;
     let home = seed_receipts(flow_id, &[("fmt", no_head)]);
+    let server = gate_server(home.path());
+    seed_gate_claim(&server, flow_id, "abc");
 
-    let gate = evaluate_verification_gate(Some(flow_id), "abc", home.path())
+    let gate = evaluate_verification_gate(&server, Some(flow_id))
         .unwrap()
         .unwrap();
     assert_eq!(gate["overall"], "pending");
@@ -388,7 +571,9 @@ fn all_optional_ledger_waits_on_verification_missing() {
     )
     .unwrap();
     let home = tempfile::tempdir().expect("empty receipt home");
-    let gate = evaluate_verification_gate(Some(flow_id), "abc", home.path())
+    let server = gate_server(home.path());
+    seed_gate_claim(&server, flow_id, "abc");
+    let gate = evaluate_verification_gate(&server, Some(flow_id))
         .unwrap()
         .unwrap();
     assert_eq!(gate["overall"], "not_required");
@@ -523,7 +708,8 @@ fn caller_authored_ledger_overall_is_normalized_at_board_briefing_markup_boundar
 
     // READ boundary: the board row's display verdict carries the fixed
     // marker, never the injected payload.
-    let rows = recent_verification_summaries(tmp.path(), 10);
+    let server = gate_server(tmp.path());
+    let rows = recent_verification_summaries(&server, 10);
     assert_eq!(rows.as_array().map(|r| r.len()).unwrap_or(0), 1);
     let row = &rows[0];
     assert_eq!(row["overall"], "unverified", "no receipts -> fail-closed");
@@ -638,11 +824,12 @@ fn f1691_verify_identity_spine_distinguishes_facts_evidence_verdicts() {
     std::env::set_var("TACHI_RUN_ROOT", tmp.path());
 
     let flow_id = "flow_spine_isolation";
+    let home = tempfile::tempdir().expect("receipt home");
+    let server = gate_server(home.path());
 
     // 1. Execution fact: executor self-reporting success does NOT produce
     // verification evidence — no ledger means no verdict at all.
-    let gate_before =
-        evaluate_verification_gate(Some(flow_id), "candidate_sha", tmp.path()).unwrap();
+    let gate_before = evaluate_verification_gate(&server, Some(flow_id)).unwrap();
     assert!(
         gate_before.is_none(),
         "no verification ledger must exist from mere execution self-report"
@@ -663,8 +850,9 @@ fn f1691_verify_identity_spine_distinguishes_facts_evidence_verdicts() {
         }),
     )
     .unwrap();
+    let claim = seed_gate_claim(&server, flow_id, "candidate_sha");
 
-    let gate_after = evaluate_verification_gate(Some(flow_id), "candidate_sha", tmp.path())
+    let gate_after = evaluate_verification_gate(&server, Some(flow_id))
         .unwrap()
         .expect("verification ledger present");
     assert_eq!(gate_after["overall"], "pending");
@@ -686,11 +874,21 @@ fn f1691_verify_identity_spine_distinguishes_facts_evidence_verdicts() {
     // bound to the diverged head is stale for the evaluated head.
     let mut nextest = valid_receipt("nextest", "candidate_sha");
     nextest["flow_id"] = json!(flow_id);
-    let home = seed_receipts(flow_id, &[("nextest", nextest)]);
+    seed_run_receipt_for_test(home.path(), flow_id, "nextest", &nextest).expect("seed receipt");
+    let rebind = handoff_gate_claim(
+        &server,
+        claim["claim_id"].as_str().unwrap(),
+        flow_id,
+        0,
+        "new_diverged_sha",
+    );
+    assert_eq!(rebind["transition_version"], 1);
 
-    let gate_stale = evaluate_verification_gate(Some(flow_id), "new_diverged_sha", home.path())
+    let gate_stale = evaluate_verification_gate(&server, Some(flow_id))
         .unwrap()
         .expect("verification evidence present");
+    assert_eq!(gate_stale["claim_transition_version"], 1);
+    assert_eq!(gate_stale["current_head_sha"], "new_diverged_sha");
     assert_eq!(gate_stale["overall"], "pending");
     assert!(
         gate_stale["waiting_on"]

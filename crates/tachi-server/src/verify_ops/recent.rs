@@ -1,8 +1,6 @@
 use super::gate::evaluate_verification_gate;
-use super::receipt_store::best_receipt_head;
 use super::storage::{markup_status, read_json};
 use super::*;
-use std::path::Path;
 
 fn parse_updated_at(value: &Value) -> Option<DateTime<Utc>> {
     value
@@ -12,12 +10,10 @@ fn parse_updated_at(value: &Value) -> Option<DateTime<Utc>> {
         .map(|dt| dt.with_timezone(&Utc))
 }
 
-/// #1454 F6: board rows publish the authority-aware gate verdict, never the
-/// raw ledger `overall`. Per flow: best server-known head = the receipt-store
-/// head; a flow with no receipts has no server-known head → the row verdict
-/// is `unverified` (fail-closed display). Ledger counts stay visible as
-/// detail rows; a gate evaluation error degrades to `unverified` for that
-/// row (a board must not fabricate readiness from a broken store).
+/// Board rows publish the claim-bound gate verdict, never the raw ledger
+/// `overall`. Missing or invalid claim authority is rendered `unverified`
+/// (fail-closed). Ledger counts stay visible as detail rows; a gate evaluation
+/// error also degrades to `unverified` so the board cannot fabricate readiness.
 ///
 /// #1454 F6-adjudication: the gate verdict stays PRIMARY, but a caller-
 /// asserted ledger `overall` that EXISTS and diverges from it is real signal
@@ -26,7 +22,7 @@ fn parse_updated_at(value: &Value) -> Option<DateTime<Utc>> {
 /// is absent or agrees, else `"{gate} (caller-asserted: {ledger_overall})"`
 /// (e.g. `unverified (caller-asserted: failed)`). Renderers use
 /// `overall_display`; JSON consumers keep `overall` as the machine verdict.
-pub(crate) fn recent_verification_summaries(tachi_home: &Path, limit: usize) -> Value {
+pub(crate) fn recent_verification_summaries(server: &MemoryServer, limit: usize) -> Value {
     let root = flow_runs_root();
     let Ok(read_dir) = std::fs::read_dir(root) else {
         return json!([]);
@@ -71,19 +67,17 @@ pub(crate) fn recent_verification_summaries(tachi_home: &Path, limit: usize) -> 
             })
             .count();
         let flow_id = ledger.get("flow_id").and_then(Value::as_str).unwrap_or("?");
-        // Authority verdict (F6): receipt-store head → gate; none → unverified.
-        let verdict = match best_receipt_head(tachi_home, flow_id) {
-            Some(head) => evaluate_verification_gate(Some(flow_id), &head, tachi_home)
-                .ok()
-                .flatten()
-                .and_then(|gate| {
-                    gate.get("overall")
-                        .and_then(Value::as_str)
-                        .map(str::to_string)
-                })
-                .unwrap_or_else(|| "unverified".to_string()),
-            None => "unverified".to_string(),
-        };
+        // Authority verdict (F6/#1112): active WorkClaim → gate. Missing,
+        // ambiguous, or malformed claim authority stays fail-closed here.
+        let verdict = evaluate_verification_gate(server, Some(flow_id))
+            .ok()
+            .flatten()
+            .and_then(|gate| {
+                gate.get("overall")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(|| "unverified".to_string());
         // F6-adjudication: a caller-asserted ledger `overall` that EXISTS and
         // diverges from the gate verdict is surfaced as a marker on the
         // display string (never folded into the machine `overall`).

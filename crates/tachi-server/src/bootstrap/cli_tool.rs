@@ -15,7 +15,8 @@ use std::path::PathBuf;
 use tachi_bootstrap::cli::Commands;
 
 use self::tool_dispatch::{
-    dispatch_cli_tool, dispatch_cli_tool_with_migration_authority, print_cli_tool_result,
+    dispatch_cli_operate_tool_with_migration_authority, dispatch_cli_tool,
+    dispatch_cli_tool_with_migration_authority, print_cli_tool_result,
 };
 
 pub(super) async fn run_cli_command(
@@ -403,12 +404,13 @@ pub(super) async fn run_cli_command(
                 args.insert("project".into(), json!(v));
             }
 
-            let body = dispatch_cli_tool(
+            let body = dispatch_cli_operate_tool_with_migration_authority(
                 "tachi_wiki_search",
                 args,
                 db_path,
                 project_db_path,
                 app_home,
+                &memcore::MigrationAuthority::Deny,
                 |server, args_map| {
                     Box::pin(async move {
                         let params: WikiSearchParams =
@@ -469,12 +471,13 @@ pub(super) async fn run_cli_command(
                 args.insert("force".into(), json!(true));
             }
 
-            let body = dispatch_cli_tool(
+            let body = dispatch_cli_operate_tool_with_migration_authority(
                 "tachi_wiki_write",
                 args,
                 db_path,
                 project_db_path,
                 app_home,
+                &memcore::MigrationAuthority::Deny,
                 |server, args_map| {
                     Box::pin(async move {
                         let params: WikiWriteParams =
@@ -499,12 +502,13 @@ pub(super) async fn run_cli_command(
                 args.insert("include_archived".into(), json!(true));
             }
 
-            let body = dispatch_cli_tool(
+            let body = dispatch_cli_operate_tool_with_migration_authority(
                 "list_memories",
                 args,
                 db_path,
                 project_db_path,
                 app_home,
+                &memcore::MigrationAuthority::Deny,
                 |server, args_map| {
                     Box::pin(async move {
                         let params: ListMemoriesParams =

@@ -7,27 +7,39 @@ use rmcp::model::Tool;
 
 pub fn parse_tool_profile(raw: &str) -> Option<ToolProfile> {
     let mut resolved: Option<ToolProfile> = None;
-
-    for token in raw
+    let tokens = raw
         .split([',', '+'])
         .map(str::trim)
         .filter(|token| !token.is_empty())
+        .collect::<Vec<_>>();
+
+    // Broad emergency access must be selected by one explicit privileged
+    // profile name. Reject additive strings such as `worker+admin` rather
+    // than allowing an ordinary or spoofed principal to widen its surface.
+    if tokens.len() != 1
+        && tokens.iter().any(|token| {
+            matches!(
+                token.to_ascii_lowercase().as_str(),
+                "admin" | "full" | "emergency"
+            )
+        })
     {
+        return None;
+    }
+
+    for token in tokens {
         let token_profile = match token.to_ascii_lowercase().as_str() {
             "observe" | "read" | "reader" => ToolProfile::observe(),
             "remember" | "write" | "writer" | "agent" => ToolProfile::remember(),
-            "standard" | "ide" | "cursor" | "trae" | "windsurf" | "antigravity" | "claude"
-            | "claude-code" | "codex" => ToolProfile::standard(),
+            "standard" | "lead" | "ide" | "cursor" | "trae" | "windsurf" | "antigravity"
+            | "claude" | "claude-code" | "codex" => ToolProfile::standard(),
             "delegate" | "worker" | "subagent" => ToolProfile::delegate(),
             "coordinate" => ToolProfile::coordinate(),
-            "companion" | "copilot" | "coach" => ToolProfile::remember()
-                .merge(ToolProfile::coordinate())
-                .merge(ToolProfile::operate()),
-            "workflow" => ToolProfile::coordinate().merge(ToolProfile::operate()),
+            "companion" | "copilot" | "coach" | "workflow" => ToolProfile::standard(),
             "operate" | "runtime" | "openclaw" | "hermes" | "adapter" | "ops" => {
                 ToolProfile::operate()
             }
-            "admin" | "full" => ToolProfile::admin(),
+            "admin" | "full" | "emergency" => ToolProfile::admin(),
             _ => return None,
         };
         resolved = Some(match resolved {
@@ -89,15 +101,21 @@ pub fn tool_visible(
         return true;
     }
 
-    // Curated minimal allow-lists: standard daily surface > delegate worker surface.
-    if profile.uses_standard_allow_list() {
-        if !matches_any_pattern(tool_name, STANDARD_MINIMAL_TOOL_PATTERNS.iter().copied()) {
-            return false;
-        }
-    } else if profile.uses_delegate_allow_list()
-        && !matches_any_pattern(tool_name, DELEGATE_MINIMAL_TOOL_PATTERNS.iter().copied())
+    // Every ordinary profile discovers the same five product facades. Legacy
+    // observe/remember/coordinate selectors preserve their narrower
+    // action-level permissions; bundle membership must not remove Staff/GH
+    // from discovery or reintroduce diagnostics. Only explicit Ops reaches
+    // the retained bundle-shaped compatibility surface below.
+    if profile.uses_standard_allow_list()
+        || profile.uses_delegate_allow_list()
+        || !profile.allows(ToolBundle::Operate)
     {
-        return false;
+        let patterns = if profile.uses_delegate_allow_list() {
+            DELEGATE_MINIMAL_TOOL_PATTERNS
+        } else {
+            STANDARD_MINIMAL_TOOL_PATTERNS
+        };
+        return matches_any_pattern(tool_name, patterns.iter().copied());
     }
 
     profile.allows(ToolBundle::Observe)

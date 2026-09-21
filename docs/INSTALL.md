@@ -499,7 +499,11 @@ normal agents should see their current repo project DB plus global memory.
 
 ## Available MCP Tools
 
-Once connected, Tachi exposes a profile-filtered MCP surface. The full `admin` catalog is intentionally large; most hosts should use `standard`, `coordinate`, or `operate` so agents see a compact task-focused surface.
+Once connected, ordinary/default Lead and Worker sessions expose exactly
+`tachi_memory`, `tachi_task`, `tachi_staff`, `tachi_gh`, and `tachi_a2a`.
+The remaining inventory in this section documents retained routes for explicit
+Ops/admin compatibility or operator CLI workflows; those routes are not daily
+or default discovery, and retaining them does not mean they were deleted.
 
 ### Core Memory
 
@@ -541,7 +545,7 @@ State primitives (`set_state`, `get_state`) were retired/internalized off the MC
 surface in #757 for the same reason — there is no facade equivalent for raw
 KV state.
 
-`runtime_info`
+`runtime_info` (explicit Ops/admin compatibility only)
 
 ### Extraction & Ingestion
 
@@ -574,7 +578,7 @@ not a model-facing Memory action and is not hidden inside `save`.
 
 ### Handoff
 
-`tachi_handoff(action='promote_issue')` — the only surviving handoff action. #1099 retired `handoff_leave`/`handoff_check`; use `tachi_a2a(action='respond')` instead. The retired `tachi_orchestrator` handoff route is no longer available.
+Explicit Ops/admin compatibility only: `tachi_handoff(action='promote_issue')` is the only surviving residual handoff action. #1099 retired `handoff_leave`/`handoff_check`; ordinary sessions use `tachi_a2a(action='respond')` or `tachi_task(action='handoff')`. The retired `tachi_orchestrator` handoff route is no longer available.
 
 ### Retired Kanban (Inter-Agent)
 
@@ -676,13 +680,16 @@ The public `tachi_dispatch(action='recommend')` surface is retired. Surviving in
 
 ### Facade & Delegation
 
-`tachi_memory`, `tachi_web_search`, `tachi_task`, `tachi_browse`, `tachi_unstick`, `tachi_verify`
+Ordinary/default discovery is exactly `tachi_memory`, `tachi_task`,
+`tachi_staff`, `tachi_gh`, and `tachi_a2a`.
 
-*(Compatibility/read-only helpers are kept behind the admin profile; daily agent surfaces should use the facade tools above.)*
+*Compatibility/read-only helpers such as `tachi_web_search`, `tachi_browse`,
+`tachi_unstick`, and `tachi_verify` remain only on explicit Ops/admin surfaces.*
 
 ### Wiki System
 
-`wiki_lint`, `tachi_wiki`, `tachi_wiki_write`, `tachi_wiki_search`, `tachi_browse`
+Explicit Ops/admin compatibility only: `wiki_lint`, `tachi_wiki`,
+`tachi_wiki_write`, `tachi_wiki_search`, `tachi_browse`.
 
 ### Utilities
 
@@ -697,21 +704,22 @@ model-facing Memory action.
 
 ## Tool Surface Selection
 
-Tachi does not need to expose the full tool catalog to every host. Use `--profile` or `TACHI_PROFILE` to select an additive surface bundle:
+Tachi does not need to expose the full tool catalog to every host. Use `--profile` or `TACHI_PROFILE` to select a role surface:
 
 | Profile | Exposed surface | Best for |
 |---|---|---|
-| `standard` | Daily agent-intent surface: `tachi_memory`, the non-dispatch actions of `tachi_task`, `tachi_verify`, `tachi_web_search`, `tachi_wiki`, `tachi_skill`, `tachi_gh`, `peer_query`, vault session/status tools, plus `runtime_info`, `tachi_status`, and `tachi_tools`. `tachi_staff` and manual native-eval intake are hidden. | IDE agents (Claude, Cursor, Codex, Windsurf, Trae, Antigravity). Ordinary delegation uses the host's native subagent. |
-| `coordinate` | the coordinate bundle layered on the live `remember` profile/bundle (not the retired native `remember` tool alias): adds advanced handoff/workflow/agents/staff tools. Tachi-owned staffing (`tachi_staff(action='start', task='review the API surface and write findings to result.md', staffing_reason='native_subagent_unavailable')`) remains operator-only. | Advanced coordination and adapter workflows. |
-| `operate` | the operate bundle layered on the live `remember` profile/bundle (not the retired native `remember` tool alias): adds Foundry lifecycle, `hub_call`, `vault_unlock`/`lock`/`status`, `wiki_lint`. | Runtime adapters and OpenClaw. |
-| `delegate` | Curated worker surface: `tachi_a2a`, `tachi_tools`, `runtime_info`, `tachi_memory`, `tachi_web_search`, `tachi_wiki(action='search'|'browse'|'read')`, `tachi_unstick`, `tachi_task`, `tachi_skill(action='discover'|'run')`, and read-only `peer_query`. | Worker subagents spawned via `tachi_staff(action='start')`. |
-| `admin` | Full catalog, including explicitly justified durable/remote Tachi dispatch. | Maintenance, development, and operator-approved execution exceptions. |
+| `standard` | Exactly `tachi_memory`, `tachi_task`, `tachi_staff`, `tachi_gh`, and `tachi_a2a`; facade action policy still applies. | Ordinary Lead sessions. |
+| `coordinate` | The same five-facade discovery surface with legacy coordinate action permissions. | Explicit coordination compatibility without diagnostic discovery. |
+| `operate` | Explicit non-default Ops surface retaining runtime, status, Vault-session, Foundry, and Hub diagnostics. | Runtime adapters and authorized Ops sessions. |
+| `delegate` | Exactly the same five facades as Lead; status/read actions remain available while recursive staffing and GitHub mutation stay denied. | Bounded Worker sessions. |
+| `admin` / `emergency` | Full retained catalog. Narrow-profile hiding does not physically delete compatibility routes. | Explicit maintenance, development, and emergency sessions. |
 
 Host aliases:
 
-- `codex`, `claude`, `claude-code`, `cursor`, `trae`, `windsurf`, `ide`, `antigravity` → `standard`
+- `lead`, `codex`, `claude`, `claude-code`, `cursor`, `trae`, `windsurf`, `ide`, `antigravity`, `companion`, `copilot`, `coach`, `workflow` → `standard`
 - `worker`, `subagent`, `delegate` → `delegate`
 - `openclaw`, `hermes`, `runtime`, `adapter`, `ops` → `operate`
+- `admin`, `full`, `emergency` → `admin` (must be selected alone)
 
 Examples:
 
@@ -720,7 +728,9 @@ tachi --profile standard
 TACHI_PROFILE=claude-code tachi
 ```
 
-If no profile is specified, Tachi defaults to `standard`. Set `TACHI_PROFILE=admin` only for maintenance sessions that need the full low-level catalog.
+If no profile is specified, Tachi defaults to `standard`. Local process-selected
+`admin` is only for explicitly authorized maintenance sessions that need the
+full low-level catalog. HTTP caller metadata cannot authorize Ops/admin.
 
 For source-tree MCP debugging, `TACHI_DISABLE_STDIO_PROXY=1` forces a stdio
 process to serve locally instead of forwarding to a compatible running daemon.
@@ -738,7 +748,7 @@ not by itself disable reuse of an existing compatible daemon.
 | `tachi_memory(action="save")` fails | Ensure `VOYAGE_API_KEY` is set (required for embedding) |
 | Search returns no results | Memory store is empty — save some memories first |
 | Database locked errors | Only one Tachi instance should access each database file |
-| Profile blocks a needed tool | Set `TACHI_PROFILE=admin` temporarily, or add the tool name to `TACHI_EXTRA_TOOLS` |
+| Profile blocks a needed tool | Use an explicitly authorized local Ops/admin maintenance session; HTTP profile metadata cannot self-authorize privileged access. |
 
 ---
 

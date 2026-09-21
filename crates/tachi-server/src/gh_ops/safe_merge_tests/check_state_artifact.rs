@@ -234,6 +234,7 @@ async fn safe_merge_dry_run_records_red_check_state_artifact_without_merge_or_re
     let mut policy = MergeGatePolicy::standard();
     policy.allow_missing_checks = true;
     let out = handle_github_safe_merge(
+        &test_server(),
         &client,
         "o/r",
         42,
@@ -317,6 +318,7 @@ async fn safe_merge_already_merged_dry_run_still_records_check_state_artifact() 
     let mut policy = MergeGatePolicy::strict();
     policy.allow_missing_checks = true;
     let out = handle_github_safe_merge(
+        &test_server(),
         &client,
         "o/r",
         42,
@@ -381,6 +383,7 @@ async fn safe_merge_dry_run_without_flow_id_reports_non_auditable_check_state() 
         )
         .with_checks("o/r", 42, checks);
     let out = handle_github_safe_merge(
+        &test_server(),
         &client,
         "o/r",
         42,
@@ -616,6 +619,7 @@ async fn safe_merge_dry_run_returns_ok_with_reader_error_marker_when_checks_list
         .with_checks_list_error(GhError::RateLimited("secondary rate limit".to_string()));
     let flow = "flow_dry-run-reader-error";
     let out = handle_github_safe_merge(
+        &test_server(),
         &client,
         "o/r",
         42,

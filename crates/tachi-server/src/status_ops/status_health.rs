@@ -135,10 +135,9 @@ pub(crate) fn canonical_key_for_env_name(name: &str) -> Option<&'static str> {
 /// belongs to — the entry's own key plus its aliases — or `None` when the name
 /// is not in the registry.
 ///
-/// This is what `intake`'s advisory alias-family label is derived from. It
-/// hands out the *names* rather than the `ApiKeyDef` so the registry row type
-/// stays inside this module: a caller that can see the row can start depending
-/// on fields the derived views deliberately do not expose.
+/// The external Vault tests use this projection to check alias-family behavior
+/// without exposing the internal registry row type through the test API.
+#[cfg(feature = "vault-test-api")]
 pub(crate) fn family_env_names_for_env_name(name: &str) -> Option<Vec<&'static str>> {
     registry_def_for_env_name(name).map(|def| {
         std::iter::once(def.key)

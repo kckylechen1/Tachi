@@ -7,6 +7,7 @@ async fn safe_merge_persists_status_and_event_when_flow_id_supplied() {
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let (home, tmp, original_home, original_runs) = with_verify_env();
+    let server = verification_server(home.path());
     let client = MockGhClient::new()
         .with_pr("o/r", ready_pr())
         .with_checks("o/r", 42, vec![]);
@@ -15,7 +16,9 @@ async fn safe_merge_persists_status_and_event_when_flow_id_supplied() {
     // ledger JSON alone, before safe_merge may reach ready.
     write_verification(tmp.path(), flow, "passed", "deadbeef");
     seed_full_passed_set(home.path(), flow, "deadbeef", None);
+    seed_verification_claim(&server, flow, "deadbeef");
     let out = handle_github_safe_merge(
+        &server,
         &client,
         "o/r",
         42,
@@ -59,11 +62,13 @@ async fn safe_merge_persists_pending_blocked_and_merged_flow_events() {
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let (home, tmp, original_home, original_runs) = with_verify_env();
+    let server = verification_server(home.path());
 
     let pending_client = MockGhClient::new()
         .with_pr("o/r", pending_pr())
         .with_checks("o/r", 42, vec![]);
     handle_github_safe_merge(
+        &server,
         &pending_client,
         "o/r",
         42,
@@ -90,6 +95,7 @@ async fn safe_merge_persists_pending_blocked_and_merged_flow_events() {
         .with_pr("o/r", blocked_draft_pr())
         .with_checks("o/r", 42, vec![]);
     handle_github_safe_merge(
+        &server,
         &blocked_client,
         "o/r",
         42,
@@ -125,7 +131,9 @@ async fn safe_merge_persists_pending_blocked_and_merged_flow_events() {
             .with_checks("o/r", 42, vec![]);
     write_verification(tmp.path(), "flow_merged-safe-merge", "passed", "deadbeef");
     seed_full_passed_set(home.path(), "flow_merged-safe-merge", "deadbeef", None);
+    seed_verification_claim(&server, "flow_merged-safe-merge", "deadbeef");
     handle_github_safe_merge(
+        &server,
         &merged_client,
         "o/r",
         42,
@@ -165,12 +173,14 @@ async fn safe_merge_persists_observed_merged_pr_without_overwriting_it_blocked()
     let tmp = tempfile::tempdir().unwrap();
     let original = std::env::var_os("TACHI_RUN_ROOT");
     std::env::set_var("TACHI_RUN_ROOT", tmp.path());
+    let server = test_server();
 
     let client = MockGhClient::new()
         .with_pr("o/r", already_merged_pr())
         .with_checks("o/r", 42, vec![]);
     let flow = "flow_observed-merged-safe-merge";
     handle_github_safe_merge(
+        &server,
         &client,
         "o/r",
         42,
@@ -208,10 +218,12 @@ async fn safe_merge_persists_observed_merged_pr_without_overwriting_it_blocked()
 
 #[tokio::test]
 async fn safe_merge_rejects_invalid_flow_id() {
+    let server = test_server();
     let client = MockGhClient::new()
         .with_pr("o/r", ready_pr())
         .with_checks("o/r", 42, vec![]);
     let err = handle_github_safe_merge(
+        &server,
         &client,
         "o/r",
         42,
@@ -230,8 +242,10 @@ async fn safe_merge_rejects_invalid_flow_id() {
 
 #[tokio::test]
 async fn safe_merge_propagates_pr_view_not_found() {
+    let server = test_server();
     let client = MockGhClient::new(); // no PRs registered
     let err = handle_github_safe_merge(
+        &server,
         &client,
         "o/r",
         42,

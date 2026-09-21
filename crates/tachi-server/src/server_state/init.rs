@@ -233,6 +233,13 @@ impl MemoryServer {
         let global_store =
             MemoryStore::open_with_label_and_context(global_db_str, "global", &global_open_ctx)?
                 .with_kernel_policy(kernel_policy.clone());
+        // #1696: memcore's admitted open above owns schema installation and
+        // migration. This second typed connection performs no DDL and refuses
+        // a missing/drifted CurrentTruth schema.
+        let current_truth =
+            tachi_params::current_truth::store::CurrentTruthSqliteStore::open_existing(
+                global_db_str,
+            )?;
         let read_pool_size = configured_memory_read_pool_size();
         // Same label as the write store two lines up (tachi#1569): the read
         // pool's handles must not disagree with it about which store this is.
@@ -353,6 +360,7 @@ impl MemoryServer {
             controller_epoch: crate::managed_run_epoch::mint_controller_epoch(),
             startup_reconciliation: Arc::new(std::sync::OnceLock::new()),
             db,
+            current_truth: Arc::new(StdMutex::new(current_truth)),
             llm,
             llm_recorder,
             pipeline_enabled,
@@ -426,6 +434,7 @@ impl MemoryServer {
                 session_client: None,
                 session_project: None,
                 work_claim_connection: None,
+                daemon_proxy_token: None,
                 session_dispatch_depth: None,
                 rate_limit_session_id: uuid::Uuid::new_v4().to_string(),
             })),
@@ -543,7 +552,8 @@ fn ensure_db_parent(path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
 mod tests {
     use super::MemoryServer;
     use chrono::Utc;
-    use memcore::MemoryEntry;
+    use memcore::{MemoryEntry, MigrationAuthority};
+    use rusqlite::Connection;
     use serde_json::json;
 
     fn test_entry(id: &str) -> MemoryEntry {
@@ -653,5 +663,119 @@ mod tests {
         let server = MemoryServer::new(global_db, None).expect("server construction");
 
         assert_eq!(server.tachi_home_dir(), crate::path_utils::tachi_home());
+    }
+
+    #[test]
+    fn current_truth_schema_obeys_server_migration_authority() {
+        fn sqlite_schema(conn: &Connection) -> Vec<(String, String, Option<String>)> {
+            let mut statement = conn
+                .prepare(
+                    "SELECT type, name, sql FROM sqlite_master
+                     WHERE name NOT LIKE 'sqlite_%'
+                     ORDER BY type, name",
+                )
+                .unwrap();
+            statement
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        }
+
+        let _lock = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let global_db = temp.path().join("global/memory.db");
+        let home = temp.path().join("home");
+
+        // Seed a canonically stamped current product DB, then model the exact
+        // pre-v38 state an existing deployment presents to server startup.
+        drop(
+            MemoryServer::new_with_migration_authority_and_home(
+                global_db.clone(),
+                None,
+                MigrationAuthority::Deny,
+                home.clone(),
+            )
+            .expect("seed current product DB"),
+        );
+        let conn = Connection::open(&global_db).expect("open seeded DB");
+        conn.execute_batch(
+            "DROP TABLE current_truth_assertions;
+             DROP TABLE current_truth_projection;
+             DROP TABLE current_truth_refresh;
+             DELETE FROM hard_state
+              WHERE namespace = 'migrations' AND key = 'v38_current_truth';
+             PRAGMA user_version = 37;",
+        )
+        .expect("downgrade fixture to canonical v37");
+        let before_denied_open = sqlite_schema(&conn);
+        drop(conn);
+
+        let denied = MemoryServer::new_with_migration_authority_and_home(
+            global_db.clone(),
+            None,
+            MigrationAuthority::Deny,
+            home.clone(),
+        );
+        assert!(
+            denied.is_err(),
+            "ordinary startup must refuse the pending v38 migration"
+        );
+        let conn = Connection::open(&global_db).expect("inspect denied startup");
+        assert_eq!(
+            sqlite_schema(&conn),
+            before_denied_open,
+            "denied startup must not acquire CurrentTruth or any other schema"
+        );
+        let current_truth_objects: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE name LIKE 'current_truth_%' OR name LIKE 'idx_ct_%'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(current_truth_objects, 0);
+        drop(conn);
+
+        drop(
+            MemoryServer::new_with_migration_authority_and_home(
+                global_db.clone(),
+                None,
+                MigrationAuthority::Allow {
+                    approved_by: "test:current-truth-v38".to_string(),
+                },
+                home.clone(),
+            )
+            .expect("authorized startup migrates and opens CurrentTruth"),
+        );
+        let conn = Connection::open(&global_db).expect("inspect migrated DB");
+        let current_truth_objects: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE name LIKE 'current_truth_%' OR name LIKE 'idx_ct_%'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(current_truth_objects, 5);
+        assert_eq!(
+            conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            38
+        );
+        drop(conn);
+
+        drop(
+            MemoryServer::new_with_migration_authority_and_home(
+                global_db,
+                None,
+                MigrationAuthority::Deny,
+                home,
+            )
+            .expect("current v38 DB reopens without migration authority"),
+        );
     }
 }

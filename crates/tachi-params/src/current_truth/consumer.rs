@@ -17,7 +17,7 @@ use serde::Serialize;
 use super::projection::{projection_health, OpenActionV1, ProjectionHealthV1};
 use super::reducer::ReductionV1;
 use super::store::{CurrentTruthSqliteStore, CurrentTruthStoreError, RefreshPostureRowV1};
-use super::types::{GithubObjectRefV1, PredicateV1, ReductionStatusV1};
+use super::types::{GithubObjectRefV1, PredicateV1, ReductionStatusV1, VisibilityClassV1};
 
 /// Caller authorization for consumer reads. `sees_private` is granted by the
 /// owning server surface, not self-declared by the caller.
@@ -79,12 +79,13 @@ pub enum ConsumerViewError {
 /// is **unknown, never fresh** (#1696: GitHub unavailable ⇒ unknown/stale,
 /// never guessed current).
 ///
-/// Visibility is **subject-scoped and fail-closed** for unauthorized
-/// callers: a subject with ANY private row (including a public→private
-/// transition's newer rows) is hidden entirely, with its historical public
-/// rows — otherwise a subject that became private would stay exposed
-/// through its older public assertions. Health is computed over the
-/// visible set only, so counts cannot be used to infer hidden existence.
+/// Visibility is fail-closed for unauthorized callers. A repository last
+/// observed private exposes no historical rows, even when the private read
+/// failed before minting assertions. Otherwise visibility remains
+/// subject-scoped: a subject with ANY private row (including a
+/// public→private transition's newer rows) is hidden entirely with its
+/// historical public rows. Health is computed over the visible set only, so
+/// counts cannot be used to infer hidden existence.
 pub fn read_view(
     store: &CurrentTruthSqliteStore,
     repo: &str,
@@ -93,7 +94,11 @@ pub fn read_view(
     let posture = store
         .refresh_posture_row(repo)?
         .ok_or_else(|| ConsumerViewError::NoPosture(repo.to_string()))?;
-    let visible: Vec<_> = if authorization.sees_private {
+    let repository_hidden = !authorization.sees_private
+        && posture.repository_visibility == Some(VisibilityClassV1::Private);
+    let visible: Vec<_> = if repository_hidden {
+        Vec::new()
+    } else if authorization.sees_private {
         store.assertions_for_repo(repo)?
     } else {
         // Private rows are excluded in SQL and NEVER decoded for an

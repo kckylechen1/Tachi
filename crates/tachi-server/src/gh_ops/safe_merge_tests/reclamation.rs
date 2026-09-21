@@ -62,6 +62,7 @@ async fn safe_merge_reclaims_worktree_after_successful_merge() {
     let home = tempfile::tempdir().unwrap();
     let original_home = std::env::var_os("TACHI_HOME");
     std::env::set_var("TACHI_HOME", home.path());
+    let server = verification_server(home.path());
 
     let bin_dir = tmp.path().join("bin");
     std::fs::create_dir_all(&bin_dir).unwrap();
@@ -84,12 +85,14 @@ async fn safe_merge_reclaims_worktree_after_successful_merge() {
     // #1454 F1: the gate needs the full canonical receipt set in the
     // server-owned store before safe_merge may reach ready/merged.
     seed_full_passed_set(home.path(), flow, &head, None);
+    seed_verification_claim(&server, flow, &head);
     let mut pr = ready_pr();
     pr.head_sha = head;
     let client = MockGhClient::new()
         .with_pr("o/r", pr)
         .with_checks("o/r", 42, vec![]);
     let out = handle_github_safe_merge(
+        &server,
         &client,
         "o/r",
         42,
@@ -171,6 +174,7 @@ async fn safe_merge_holder_refusal_happens_before_external_cleaner() {
     let home = tempfile::tempdir().unwrap();
     let original_home = std::env::var_os("TACHI_HOME");
     std::env::set_var("TACHI_HOME", home.path());
+    let server = verification_server(home.path());
     let bin_dir = tmp.path().join("bin");
     std::fs::create_dir_all(&bin_dir).unwrap();
     let (bin_path, marker_path) = install_fake_cleaner(&bin_dir, true);
@@ -184,10 +188,12 @@ async fn safe_merge_holder_refusal_happens_before_external_cleaner() {
     // #1454 F1: the gate needs the full canonical receipt set in the
     // server-owned store before safe_merge may reach ready/merged.
     seed_full_passed_set(home.path(), flow, "deadbeef", None);
+    seed_verification_claim(&server, flow, "deadbeef");
     let client = MockGhClient::new()
         .with_pr("o/r", ready_pr())
         .with_checks("o/r", 42, vec![]);
     let out = handle_github_safe_merge_with_holder_gate(
+        &server,
         &client,
         "o/r",
         42,
@@ -249,6 +255,7 @@ async fn safe_merge_dry_run_does_not_reclaim_worktree() {
     let home = tempfile::tempdir().unwrap();
     let original_home = std::env::var_os("TACHI_HOME");
     std::env::set_var("TACHI_HOME", home.path());
+    let server = verification_server(home.path());
 
     let bin_dir = tmp.path().join("bin");
     std::fs::create_dir_all(&bin_dir).unwrap();
@@ -264,10 +271,12 @@ async fn safe_merge_dry_run_does_not_reclaim_worktree() {
     // #1454 F1: the gate needs the full canonical receipt set in the
     // server-owned store before safe_merge may reach ready/merged.
     seed_full_passed_set(home.path(), flow, "deadbeef", None);
+    seed_verification_claim(&server, flow, "deadbeef");
     let client = MockGhClient::new()
         .with_pr("o/r", ready_pr())
         .with_checks("o/r", 42, vec![]);
     let out = handle_github_safe_merge(
+        &server,
         &client,
         "o/r",
         42,
@@ -334,6 +343,7 @@ async fn safe_merge_missing_worktree_warns_does_not_fail_merge() {
     let home = tempfile::tempdir().unwrap();
     let original_home = std::env::var_os("TACHI_HOME");
     std::env::set_var("TACHI_HOME", home.path());
+    let server = verification_server(home.path());
 
     // A worktree path that does not exist on disk.
     let missing_worktree = tmp.path().join("does-not-exist-wt");
@@ -343,10 +353,12 @@ async fn safe_merge_missing_worktree_warns_does_not_fail_merge() {
     // #1454 F1: the gate needs the full canonical receipt set in the
     // server-owned store before safe_merge may reach ready/merged.
     seed_full_passed_set(home.path(), flow, "deadbeef", None);
+    seed_verification_claim(&server, flow, "deadbeef");
     let client = MockGhClient::new()
         .with_pr("o/r", ready_pr())
         .with_checks("o/r", 42, vec![]);
     let out = handle_github_safe_merge(
+        &server,
         &client,
         "o/r",
         42,
@@ -415,6 +427,7 @@ async fn safe_merge_auto_resolves_worktree_from_registry_when_worktree_is_none()
     let original_sys_home = std::env::var_os("HOME");
     std::env::set_var("TACHI_HOME", home.path());
     std::env::set_var("HOME", home.path());
+    let server = verification_server(home.path());
 
     let bin_dir = tmp.path().join("bin");
     std::fs::create_dir_all(&bin_dir).unwrap();
@@ -449,6 +462,7 @@ async fn safe_merge_auto_resolves_worktree_from_registry_when_worktree_is_none()
     let flow = "flow_reclaim-auto";
     write_verification(tmp.path(), flow, "passed", &head);
     seed_full_passed_set(home.path(), flow, &head, None);
+    seed_verification_claim(&server, flow, &head);
 
     let mut pr = ready_pr();
     pr.head_ref = Some(branch.to_string());
@@ -458,6 +472,7 @@ async fn safe_merge_auto_resolves_worktree_from_registry_when_worktree_is_none()
         .with_checks("o/r", 42, vec![]);
 
     let out = handle_github_safe_merge(
+        &server,
         &client,
         "o/r",
         42,
@@ -525,10 +540,12 @@ async fn safe_merge_skips_reclamation_when_no_worktree_mapped_and_registry_misse
     let original_sys_home = std::env::var_os("HOME");
     std::env::set_var("TACHI_HOME", home.path());
     std::env::set_var("HOME", home.path());
+    let server = verification_server(home.path());
 
     let flow = "flow_reclaim-unmapped";
     write_verification(tmp.path(), flow, "passed", "deadbeef");
     seed_full_passed_set(home.path(), flow, "deadbeef", None);
+    seed_verification_claim(&server, flow, "deadbeef");
 
     let mut pr = ready_pr();
     pr.head_ref = Some("feat/unregistered-branch".to_string());
@@ -537,6 +554,7 @@ async fn safe_merge_skips_reclamation_when_no_worktree_mapped_and_registry_misse
         .with_checks("o/r", 42, vec![]);
 
     let out = handle_github_safe_merge(
+        &server,
         &client,
         "o/r",
         42,

@@ -612,7 +612,7 @@ impl RateLimiter {
                 return Err(RateLimitRejection {
                     message: format!(
                         "Loop detected: tool '{}' called {} times with identical arguments within {}s (burst_limit={}). \
-                         Stop before retrying the same path. Call tachi_unstick with the current task, attempts, and latest error to get a debug checklist and ask_codex_prompt; search prior lessons with tachi_wiki_search or tachi_task_brief; if still blocked, ask another agent using that prompt.",
+                         Stop before retrying the same path. Call tachi_memory(action='alerts') with the current context, inspect prior lessons with tachi_memory(action='search'), or request feature context with tachi_task(action='brief'); if still blocked, ask another agent with the evidence gathered.",
                         tool_name,
                         stamps.len() + 1,
                         RATE_LIMIT_BURST_WINDOW.as_secs(),
@@ -625,8 +625,8 @@ impl RateLimiter {
             if upcoming_count >= STUCK_SOFT_WARN_THRESHOLD && upcoming_count < effective_burst {
                 soft_warning = Some(format!(
                     "⚠️ stuck-detection: tool '{}' has been called {} times with identical arguments within {}s. \
-                     Hard block triggers at {} repeats. Consider calling tachi_unstick with the current task / attempts / latest error, \
-                     or searching prior solutions via tachi_wiki_search / tachi_task_brief before retrying the same path.",
+                     Hard block triggers at {} repeats. Call tachi_memory(action='alerts') with the current context, search prior lessons with tachi_memory(action='search'), \
+                     request feature context with tachi_task(action='brief'), or ask another agent with the evidence gathered.",
                     tool_name,
                     upcoming_count,
                     RATE_LIMIT_BURST_WINDOW.as_secs(),

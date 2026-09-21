@@ -4,6 +4,34 @@ use tachi_gh_safe_merge::{CheckRun, MockGhClient};
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
+fn test_server() -> crate::tests::TestServer {
+    crate::tests::make_server()
+}
+
+fn verification_server(home: &std::path::Path) -> MemoryServer {
+    MemoryServer::new_with_home_for_test(home.join("global.db"), None, home.to_path_buf())
+        .expect("verification server")
+}
+
+fn seed_verification_claim(server: &MemoryServer, flow_id: &str, expected_head: &str) {
+    crate::claims_ops::admit_agent_connection(server, Some("agent.safe-merge".into()), true)
+        .expect("local admission");
+    let params: crate::TachiTaskParams = serde_json::from_value(json!({
+        "action": "claim",
+        "flow_id": flow_id,
+        "issue_ref": format!("org/repo#{flow_id}"),
+        "branch": format!("lane/{flow_id}"),
+        "claim_role": "reviewer",
+        "claim_mode": "read_only",
+        "worktree_path": "",
+        "claim_scope": ["crates/tachi-server/src/gh_ops/safe_merge/handler.rs"],
+        "expected_head": expected_head,
+        "lease_expires_at": "2030-01-01T00:00:00Z",
+    }))
+    .expect("claim params");
+    crate::claims_ops::handle_task_claim(server, &params).expect("work claim");
+}
+
 fn ready_pr() -> PrState {
     PrState {
         number: 42,

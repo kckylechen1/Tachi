@@ -348,7 +348,7 @@ pub struct TachiMemoryParams {
     #[serde(deserialize_with = "deserialize_memory_action")]
     #[schemars(
         schema_with = "tachi_memory_action_schema",
-        description = "Required. One of: search, get, save, briefing, checkpoint, alerts, ask, extract_facts, consolidate. Work status lives on tachi_task; health lives on tachi_status; maintenance lives on the operator CLI; ingestion and pattern evidence use admitted internal APIs."
+        description = "Required. One of: search, get, save, briefing, checkpoint, alerts, ask, extract_facts, consolidate. Work status lives on tachi_task; operational warnings use tachi_memory(action='alerts'); maintenance lives on the operator CLI; ingestion and pattern evidence use admitted internal APIs."
     )]
     pub action: String,
     #[serde(default, alias = "output_format")]

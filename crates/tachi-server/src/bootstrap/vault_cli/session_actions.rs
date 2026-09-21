@@ -15,11 +15,12 @@ pub(super) async fn run_session_action(
     match action {
         VaultAction::Status => {
             if let Some(info) = detect_matching_daemon(app_home, global_db_path).await {
-                let out = crate::cli_client::call_daemon_tool(
+                let out = crate::cli_client::call_daemon_tool_with_profile(
                     &info,
                     "vault_status",
                     serde_json::Map::new(),
                     None,
+                    Some(tachi_hub::ToolProfile::operate()),
                 )
                 .await?;
                 println!("{out}");
@@ -87,11 +88,12 @@ pub(super) async fn run_session_action(
         }
         VaultAction::Lock => {
             if let Some(info) = detect_matching_daemon(app_home, global_db_path).await {
-                let out = crate::cli_client::call_daemon_tool(
+                let out = crate::cli_client::call_daemon_tool_with_profile(
                     &info,
                     "vault_lock",
                     serde_json::Map::new(),
                     None,
+                    Some(tachi_hub::ToolProfile::operate()),
                 )
                 .await?;
                 println!("{out}");
