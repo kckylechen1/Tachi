@@ -764,6 +764,112 @@ async fn model_in_place_rename_failure_preserves_original_complete_document() {
 #[cfg(unix)]
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
+async fn read_only_receiptless_predecessor_archives_with_bound_replacement() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let classifier = MockDocsClassifier::start(
+        &model_response(
+            "docs/product/acme",
+            "Read Only Replacement",
+            "Read only archive summary",
+        ),
+        MockFinishReason::named("stop"),
+    )
+    .await;
+    let mut server = make_server();
+    install_classifier(&mut server, &classifier);
+    let workspace = DocsWorktree::new();
+    let docs = workspace.docs_path().canonicalize().unwrap();
+    let source = docs.join("a-read-only.md");
+    fs::write(&source, "Durable body sentinel replacement.\n").unwrap();
+    let destination = docs.join("product/acme/a-read-only.md");
+    fs::create_dir_all(destination.parent().unwrap()).unwrap();
+    let predecessor_bytes = "receiptless read-only predecessor\n";
+    fs::write(&destination, predecessor_bytes).unwrap();
+    fs::File::open(&destination)
+        .unwrap()
+        .set_times(fs::FileTimes::new().set_modified(std::time::SystemTime::UNIX_EPOCH))
+        .unwrap();
+    let original_permissions = fs::metadata(&destination).unwrap().permissions();
+    fs::set_permissions(&destination, fs::Permissions::from_mode(0o444)).unwrap();
+    assert_eq!(
+        fs::metadata(&destination).unwrap().permissions().mode() & 0o777,
+        0o444
+    );
+    let archive = docs.join("archive/a-read-only.md");
+    let observed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let publication_observed = observed.clone();
+    let source_at_publication = source.clone();
+    let destination_at_publication = destination.clone();
+    let archive_at_publication = archive.clone();
+    let _hook = crate::docs_ops::set_new_file_test_hook(
+        crate::docs_ops::OrganizeTestPoint::NewFilePublished,
+        destination.parent().unwrap().to_path_buf(),
+        Box::new(move || {
+            assert!(
+                source_at_publication.exists(),
+                "source must remain until replacement publication is durable"
+            );
+            assert_eq!(
+                fs::read_to_string(&archive_at_publication).unwrap(),
+                predecessor_bytes
+            );
+            assert_eq!(
+                fs::metadata(&archive_at_publication)
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o444
+            );
+            assert_model_document(
+                &fs::read_to_string(&destination_at_publication).unwrap(),
+                "Read Only Replacement",
+                "Read only archive summary",
+                "product/acme",
+                "docs/product/acme/a-read-only.md",
+                1,
+            );
+            publication_observed.store(true, std::sync::atomic::Ordering::SeqCst);
+        }),
+    );
+    let _model_mode = crate::docs_ops::enable_model_classification_for_test();
+    let result =
+        crate::docs_ops::handle_wiki_organize(&server, docs.to_str().unwrap(), false).await;
+    // Restore fixture permissions on both the error and success paths before
+    // asserting the handler result. No document content is changed by cleanup.
+    for path in [&destination, &archive] {
+        if path.exists() {
+            fs::set_permissions(path, original_permissions.clone()).unwrap();
+        }
+    }
+    result.expect("read-only receiptless predecessor must remain eligible for archival");
+    assert!(observed.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(!source.exists());
+    assert_eq!(fs::read_to_string(&archive).unwrap(), predecessor_bytes);
+    assert!(receipt_from_document(&fs::read_to_string(&archive).unwrap()).is_none());
+    let replacement = fs::read_to_string(&destination).unwrap();
+    assert_model_document(
+        &replacement,
+        "Read Only Replacement",
+        "Read only archive summary",
+        "product/acme",
+        "docs/product/acme/a-read-only.md",
+        1,
+    );
+    // Existing task synchronization joins body lines without a final newline.
+    let (_, replacement_body) = replacement
+        .strip_prefix("---\n")
+        .unwrap()
+        .split_once("\n---\n")
+        .expect("replacement has a complete frontmatter boundary");
+    assert_eq!(replacement_body, "Durable body sentinel replacement.");
+    assert_eq!(classifier.request_count(), 1);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn archive_destination_created_after_empty_check_preserves_foreign_and_live_bytes() {
     let classifier = MockDocsClassifier::start(
         &model_response(

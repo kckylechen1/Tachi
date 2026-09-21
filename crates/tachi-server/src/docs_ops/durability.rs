@@ -170,7 +170,13 @@ impl AuthorizedDocs {
         self.revalidate_roots()?;
         self.revalidate_object(path, expected, false, label)?;
         let mut options = OpenOptions::new();
-        options.read(true).write(true);
+        // Rename needs a writable parent, not writable source bytes. Unix can
+        // sync a read-only descriptor without rejecting read-only documents.
+        options.read(true);
+        // Windows file synchronization requires a writable handle. Preserve
+        // the existing non-Unix policy rather than claiming permission parity.
+        #[cfg(not(unix))]
+        options.write(true);
         #[cfg(unix)]
         options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
         let file = options.open(path).map_err(|error| {
