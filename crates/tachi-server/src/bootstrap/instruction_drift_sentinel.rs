@@ -1154,6 +1154,27 @@ mod tests {
             report.findings
         );
 
+        // A truthful root consumer does not suppress independent content findings.
+        // Coverage and content validity are separate: do not manufacture missing
+        // consumption merely because an actually consumed source has a leak.
+        manifest["surfaces"][0]["direct_consumers"] = json!(["codex"]);
+        write_manifest(&manifest_path, &manifest);
+        let direct_report =
+            scan_drift_for_test(&manifest_path).expect("valid direct consumer scan");
+        assert_ne!(direct_report.status, CLEAN_STATUS);
+        assert!(direct_report.findings.iter().any(|finding| {
+            finding.source_id == "public-agents" && finding.check_kind == CHECK_AUDIENCE_LEAK
+        }));
+        assert!(!direct_report.findings.iter().any(|finding| {
+            finding.source_id == "public-agents" && finding.check_kind == CHECK_WRONG_CARRIER
+        }));
+
+        std::fs::write(root.join("AGENTS.md"), "public contract\n").expect("clean source");
+        let clean_report = scan_drift_for_test(&manifest_path).expect("clean direct consumer scan");
+        assert_eq!(clean_report.status, CLEAN_STATUS);
+        assert!(clean_report.findings.is_empty());
+        assert!(clean_report.manifest_findings.is_empty());
+
         let _ = std::fs::remove_dir_all(root);
     }
 
