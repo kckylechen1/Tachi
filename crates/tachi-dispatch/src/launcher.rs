@@ -251,6 +251,10 @@ pub fn build_codex_launch(
     // persistent Codex session state are outside that server-minted contract.
     cmd.arg("--ignore-user-config");
     cmd.arg("--ephemeral");
+    // The code-mode host may create a separate process group. Managed CLI
+    // execution must retain the one owned group used for terminal proof.
+    cmd.arg("--disable");
+    cmd.arg("code_mode_host");
 
     let profile = resolve_permission_profile(params)?;
     reject_non_claude_allowlist("codex", profile)?;
@@ -627,6 +631,8 @@ mod tests {
                 "exec",
                 "--ignore-user-config",
                 "--ephemeral",
+                "--disable",
+                "code_mode_host",
                 "--sandbox",
                 "workspace-write",
                 "--json",
