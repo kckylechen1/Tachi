@@ -19,7 +19,8 @@ const DAEMON_CALL_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// How the stdio proxy / CLI should stamp `X-Tachi-Agent-Identity` on a
 /// daemon hop. `AutoEnv` is the CLI default (read process env). The proxy
-/// resolves once at initialize so `_meta` wins and blank/illegal stay omit.
+/// resolves legacy identity once at initialize and modern identity per request,
+/// so `_meta` wins and blank/illegal values stay omitted in either mode.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ProxyIdentityForward {
     AutoEnv,
@@ -37,6 +38,25 @@ fn proxy_env_agent_identity_header(raw: Option<&str>) -> Option<(HeaderName, Hea
             header,
         )
     })
+}
+
+fn insert_internal_proxy_token(
+    headers: &mut HashMap<HeaderName, HeaderValue>,
+    info: &DaemonInfo,
+) -> Result<(), DaemonCallError> {
+    let Some(token) = info.internal_proxy_token.as_deref() else {
+        return Ok(());
+    };
+    let value = HeaderValue::from_str(token).map_err(|error| {
+        DaemonCallError::BeforeDispatch(format!(
+            "invalid internal proxy capability in daemon discovery receipt: {error}"
+        ))
+    })?;
+    headers.insert(
+        HeaderName::from_static(crate::session_identity::HEADER_INTERNAL_PROXY_TOKEN),
+        value,
+    );
+    Ok(())
 }
 
 /// Headroom added on top of a caller-supplied poll/control timeout so the
@@ -173,11 +193,12 @@ pub(crate) async fn call_daemon_tool(
 
 /// Call a daemon tool with an optional, typed profile bound at MCP initialize.
 ///
-/// Ordinary CLI and proxy calls use [`call_daemon_tool`] and therefore inherit
-/// the daemon's default profile. The override exists for narrow trusted CLI
+/// Ordinary CLI calls use [`call_daemon_tool`] and therefore receive the
+/// default profile. The override exists for trusted local proxy and CLI
 /// maintenance flows whose required native tool is deliberately absent from
-/// the standard facade tray. The daemon still parses and authorizes the
-/// profile; in particular, HTTP direct-connect continues to reject `admin`.
+/// the standard facade tray. The daemon still authenticates privileged
+/// profiles with its owner-only per-process capability; profile metadata alone
+/// remains insufficient.
 pub(crate) async fn call_daemon_tool_with_profile(
     info: &DaemonInfo,
     tool_name: &str,
@@ -235,7 +256,7 @@ pub(crate) async fn call_daemon_tool_raw(
     params: CallToolRequestParams,
     proxy_project: Option<&str>,
 ) -> Result<rmcp::model::CallToolResult, DaemonCallError> {
-    call_daemon_tool_raw_with_phases(info, params, proxy_project)
+    call_daemon_tool_raw_with_phases(info, params, proxy_project, None)
         .await
         .0
 }
@@ -251,6 +272,7 @@ pub(crate) async fn call_daemon_tool_raw_with_profile(
         params,
         proxy_project,
         profile,
+        None,
         ProxyIdentityForward::AutoEnv,
     )
     .await
@@ -258,19 +280,29 @@ pub(crate) async fn call_daemon_tool_raw_with_profile(
 }
 
 /// Raw call carrying BOTH the connection's immutable tool profile and the
-/// forwarded agent identity. The profile rides the same header rail as
-/// `list_daemon_tools_with_profile`, so the call surface cannot silently
-/// widen beyond what discovery already showed for this connection.
+/// request-local client/agent identity. The profile rides the same header rail
+/// as `list_daemon_tools_with_profile`, so the call surface cannot silently
+/// widen beyond what discovery already showed for this connection. The client
+/// label is attribution only and is never retained by the stdio protocol
+/// session.
 pub(crate) async fn call_daemon_tool_raw_with_profile_and_identity(
     info: &DaemonInfo,
     params: CallToolRequestParams,
     proxy_project: Option<&str>,
     profile: Option<tachi_hub::ToolProfile>,
+    proxy_client: Option<&str>,
     identity: ProxyIdentityForward,
 ) -> Result<rmcp::model::CallToolResult, DaemonCallError> {
-    call_daemon_tool_raw_with_phases_and_profile(info, params, proxy_project, profile, identity)
-        .await
-        .0
+    call_daemon_tool_raw_with_phases_and_profile(
+        info,
+        params,
+        proxy_project,
+        profile,
+        proxy_client,
+        identity,
+    )
+    .await
+    .0
 }
 
 /// Same transport path as [`call_daemon_tool_raw`], plus handshake/call phase
@@ -281,6 +313,7 @@ pub(crate) async fn call_daemon_tool_raw_with_phases(
     info: &DaemonInfo,
     params: CallToolRequestParams,
     proxy_project: Option<&str>,
+    profile: Option<tachi_hub::ToolProfile>,
 ) -> (
     Result<rmcp::model::CallToolResult, DaemonCallError>,
     DaemonCallPhaseTiming,
@@ -289,6 +322,7 @@ pub(crate) async fn call_daemon_tool_raw_with_phases(
         info,
         params,
         proxy_project,
+        profile,
         None,
         ProxyIdentityForward::AutoEnv,
     )
@@ -300,6 +334,7 @@ async fn call_daemon_tool_raw_with_phases_and_profile(
     params: CallToolRequestParams,
     proxy_project: Option<&str>,
     profile: Option<tachi_hub::ToolProfile>,
+    proxy_client: Option<&str>,
     identity: ProxyIdentityForward,
 ) -> (
     Result<rmcp::model::CallToolResult, DaemonCallError>,
@@ -322,6 +357,29 @@ async fn call_daemon_tool_raw_with_phases_and_profile(
                 return (
                     Err(DaemonCallError::BeforeDispatch(format!(
                         "invalid proxy project header value: {e}"
+                    ))),
+                    DaemonCallPhaseTiming {
+                        handshake_ms: 0,
+                        call_ms: 0,
+                        total_ms,
+                    },
+                );
+            }
+        }
+    }
+    if let Some(client) = proxy_client {
+        match HeaderValue::from_str(client) {
+            Ok(value) => {
+                headers.insert(
+                    HeaderName::from_static(crate::session_identity::HEADER_CLIENT),
+                    value,
+                );
+            }
+            Err(e) => {
+                let total_ms = elapsed_ms(started);
+                return (
+                    Err(DaemonCallError::BeforeDispatch(format!(
+                        "invalid proxy client header value: {e}"
                     ))),
                     DaemonCallPhaseTiming {
                         handshake_ms: 0,
@@ -355,6 +413,17 @@ async fn call_daemon_tool_raw_with_phases_and_profile(
                 );
             }
         }
+    }
+    if let Err(error) = insert_internal_proxy_token(&mut headers, info) {
+        let total_ms = elapsed_ms(started);
+        return (
+            Err(error),
+            DaemonCallPhaseTiming {
+                handshake_ms: 0,
+                call_ms: 0,
+                total_ms,
+            },
+        );
     }
     // #1251: forward this proxy process's OWN recursion depth to the daemon on
     // every call, over the same per-call header rail as X-Tachi-Project. The
@@ -482,16 +551,19 @@ pub(crate) async fn list_daemon_tools_with_profile(
     profile: Option<tachi_hub::ToolProfile>,
 ) -> Result<ListToolsResult, DaemonCallError> {
     let mut transport_config = StreamableHttpClientTransportConfig::with_uri(info.url.clone());
+    let mut headers = HashMap::new();
     if let Some(profile) = profile {
         let profile = profile.as_str();
         let value = HeaderValue::from_str(&profile).map_err(|error| {
             DaemonCallError::BeforeDispatch(format!("invalid proxy profile header value: {error}"))
         })?;
-        let mut headers = HashMap::new();
         headers.insert(
             HeaderName::from_static(crate::session_identity::HEADER_PROFILE),
             value,
         );
+    }
+    insert_internal_proxy_token(&mut headers, info)?;
+    if !headers.is_empty() {
         transport_config = transport_config.custom_headers(headers);
     }
     let transport = StreamableHttpClientTransport::from_config(transport_config);
@@ -708,6 +780,7 @@ mod tests {
             project_db: None,
             version: None,
             pid: None,
+            internal_proxy_token: None,
         }
     }
 

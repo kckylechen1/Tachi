@@ -16,27 +16,23 @@
 //! * The **refresh table is operational metadata** (staleness posture and
 //!   refresh debt), not a truth source: it never feeds the reducer.
 //!
-//! Schema lives in this crate (not memcore's DDL) because the typed
-//! assertion vocabulary is defined here and memcore cannot depend on it;
-//! `tachi-params` already carries the rusqlite edge for the taskintent
-//! ingest adapter. The store owns a connection handed to it — the
-//! `MemoryStore` integration seam is a later slice, mirroring how
-//! `taskintent::memcore_ingest` takes a `Connection`.
+//! This crate retains standalone/test DDL because the typed assertion
+//! vocabulary is defined here and memcore cannot depend on it. Production
+//! product databases acquire the same tables through memcore's canonical
+//! versioned migration boundary, then this store opens them with validation
+//! but no DDL. The production server binds that typed API to its existing
+//! global SQLite file, so no second CurrentTruth database or projection
+//! authority is introduced.
 //!
-//! # Trust boundary and integration status (#1696 scope)
+//! # Trust boundary and integration status
 //!
 //! **The store trusts its caller.** `authority_class`, `review_state`, and
 //! `issuer` are data fields the caller supplies; this library performs
-//! structural validation only. The semantic admission gate — who may append
-//! which authority class, against which live identity — is the
-//! server-integration admission surface and is deliberately OUT of this
-//! leaf: #1696's verification list ships the store, fixtures, reducer
-//! tests, and the #1693 consumer FIXTURE (discrimination 11), with no
-//! production caller. The follow-up slices that consume this seam must
-//! interpose that admission surface before any untrusted caller reaches
-//! `append`. `tachi_events` remains the collect-only observation ledger;
-//! bridging observations into assertions is a later slice, not a second
-//! authority here.
+//! structural validation only. The production GitHub refresh integration
+//! therefore constructs assertions exclusively through the typed adapter
+//! minting seam before calling this API; no untrusted assertion payload is
+//! accepted from the facade. `tachi_events` remains the collect-only
+//! observation ledger and is not a second CurrentTruth authority.
 
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -51,6 +47,8 @@ use super::types::{
 pub enum CurrentTruthStoreError {
     #[error("sqlite error: {0}")]
     Sqlite(#[from] rusqlite::Error),
+    #[error("CurrentTruth schema is not admitted by the product migration boundary: {0}")]
+    Schema(String),
     #[error("assertion id must be non-empty")]
     EmptyAssertionId,
     #[error("subject repository must be `owner/name`")]
@@ -74,7 +72,7 @@ pub enum CurrentTruthStoreError {
     #[error("observed_at/effective_at must be RFC 3339 — `{0}` does not parse")]
     MalformedObservedAt(String),
     #[error(
-        "refresh record older than the recorded attempt for `{repo}`: {recorded_at} < {existing_attempt_at}"
+        "refresh record is not newer than the recorded attempt for `{repo}`: {recorded_at} <= {existing_attempt_at}"
     )]
     StaleRefreshRecord {
         repo: String,
@@ -139,17 +137,25 @@ const PROJECTION_SCHEMA_SQL: &str = r#"
 
 const REFRESH_SCHEMA_SQL: &str = r#"
         -- Operational refresh posture metadata (#1696): staleness and
-        -- refresh-debt bookkeeping. Not a truth source; never feeds the
-        -- reducer.
+        -- refresh-debt bookkeeping, scoped to the subject slice actually
+        -- covered by one bounded source read. Repository visibility is
+        -- restrictive access metadata, not a truth assertion; neither field
+        -- feeds the reducer.
         CREATE TABLE IF NOT EXISTS current_truth_refresh (
-            repo                 TEXT PRIMARY KEY,
-            fresh                INTEGER NOT NULL,
+            repo                 TEXT NOT NULL,
+            subject_token        TEXT NOT NULL,
+            fresh                INTEGER NOT NULL CHECK (fresh IN (0, 1)),
             last_fresh_revision  TEXT,
             last_fresh_at        TEXT,
             last_attempt_at      TEXT NOT NULL,
-            unavailable_reason   TEXT
+            unavailable_reason   TEXT,
+            repository_visibility TEXT CHECK (repository_visibility IN ('public', 'private')),
+            repository_visibility_at TEXT,
+            PRIMARY KEY (repo, subject_token)
         );
 "#;
+
+const REPOSITORY_REFRESH_SCOPE: &str = "__repository__";
 
 /// SQLite-backed CurrentTruth store over a caller-owned connection.
 pub struct CurrentTruthSqliteStore {
@@ -163,15 +169,26 @@ impl CurrentTruthSqliteStore {
         Self::with_connection(conn)
     }
 
+    /// Open a production database whose CurrentTruth schema was already
+    /// admitted and installed by memcore's versioned migration boundary.
+    /// This path performs no DDL and refuses missing or drifted schema.
+    pub fn open_existing(path: &str) -> Result<Self, CurrentTruthStoreError> {
+        let conn = Connection::open(path)?;
+        memcore::db::validate_current_truth_schema(&conn)
+            .map_err(|error| CurrentTruthStoreError::Schema(error.to_string()))?;
+        Ok(Self { conn })
+    }
+
     /// Open an in-memory store (tests, projections over ephemeral state).
     pub fn open_in_memory() -> Result<Self, CurrentTruthStoreError> {
         let conn = Connection::open_in_memory()?;
         Self::with_connection(conn)
     }
 
-    /// Adopt a caller-owned connection and ensure the schema. Append-only
-    /// semantics are enforced by this API surface — no mutation of existing
-    /// assertion rows is possible through it.
+    /// Adopt a caller-owned standalone/test connection and ensure the schema.
+    /// Production product databases use [`Self::open_existing`] instead.
+    /// Append-only semantics are enforced by this API surface — no mutation
+    /// of existing assertion rows is possible through it.
     pub fn with_connection(conn: Connection) -> Result<Self, CurrentTruthStoreError> {
         conn.execute_batch(ASSERTION_SCHEMA_SQL)?;
         conn.execute_batch(PROJECTION_SCHEMA_SQL)?;
@@ -332,7 +349,7 @@ impl CurrentTruthSqliteStore {
                     observed_at, effective_at, supersedes, evidence_json,
                     review_state, visibility
              FROM current_truth_assertions
-             WHERE subject_repo = ?1
+             WHERE subject_repo = ?1 COLLATE NOCASE
              ORDER BY subject_repo, subject_kind, subject_id, predicate,
                       authority, issuer, source_id, source_revision, assertion_id",
         )?;
@@ -366,7 +383,7 @@ impl CurrentTruthSqliteStore {
                 review_state,
                 visibility,
             ) = row?;
-            out.push(decode_assertion_row(
+            let mut assertion = decode_assertion_row(
                 assertion_id,
                 subject_repo,
                 subject_kind,
@@ -383,7 +400,12 @@ impl CurrentTruthSqliteStore {
                 evidence_json,
                 review_state,
                 visibility,
-            )?);
+            )?;
+            // GitHub repository identity is case-insensitive. Canonicalize
+            // rows at the read boundary as compatibility for data written
+            // before production ingress began storing lowercase identities.
+            assertion.subject.repo.make_ascii_lowercase();
+            out.push(assertion);
         }
         Ok(out)
     }
@@ -400,10 +422,23 @@ impl CurrentTruthSqliteStore {
         let mut stmt = self.conn.prepare(
             "SELECT DISTINCT subject_repo || '#' || subject_kind || ':' || subject_id
              FROM current_truth_assertions
-             WHERE subject_repo = ?1 AND visibility = 'private'",
+             WHERE subject_repo = ?1 COLLATE NOCASE AND visibility = 'private'",
         )?;
+        let canonical_repo = repo.to_ascii_lowercase();
         let rows = stmt.query_map(params![repo], |row| row.get::<_, String>(0))?;
-        Ok(rows.collect::<Result<std::collections::BTreeSet<_>, _>>()?)
+        Ok(rows
+            .map(|row| {
+                let token = row?;
+                let (_, suffix) = token.split_once('#').ok_or_else(|| {
+                    rusqlite::Error::InvalidColumnType(
+                        0,
+                        "subject_token".to_string(),
+                        rusqlite::types::Type::Text,
+                    )
+                })?;
+                Ok(format!("{canonical_repo}#{suffix}"))
+            })
+            .collect::<Result<std::collections::BTreeSet<_>, rusqlite::Error>>()?)
     }
 
     /// Public-visibility assertions for one repository, same deterministic
@@ -419,7 +454,7 @@ impl CurrentTruthSqliteStore {
                     observed_at, effective_at, supersedes, evidence_json,
                     review_state, visibility
              FROM current_truth_assertions
-             WHERE subject_repo = ?1 AND visibility = 'public'
+             WHERE subject_repo = ?1 COLLATE NOCASE AND visibility = 'public'
              ORDER BY subject_repo, subject_kind, subject_id, predicate,
                       authority, issuer, source_id, source_revision, assertion_id",
         )?;
@@ -430,7 +465,7 @@ impl CurrentTruthSqliteStore {
     /// Assertion count for one repository (test/health use).
     pub fn assertion_count(&self, repo: &str) -> Result<usize, CurrentTruthStoreError> {
         let count: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM current_truth_assertions WHERE subject_repo = ?1",
+            "SELECT COUNT(*) FROM current_truth_assertions WHERE subject_repo = ?1 COLLATE NOCASE",
             params![repo],
             |row| row.get(0),
         )?;
@@ -440,7 +475,8 @@ impl CurrentTruthSqliteStore {
     /// Write (replace) the disposable projection for one repository.
     /// `generation` binds the projection to the exact assertion set it was
     /// built from; `built_at` is caller-supplied (this module reads no
-    /// clock).
+    /// clock). Legacy mixed-case keys are replaced together: a failed insert
+    /// restores every prior projection row and never changes assertion history.
     pub fn write_projection(
         &self,
         repo: &str,
@@ -448,55 +484,63 @@ impl CurrentTruthSqliteStore {
         built_at: &str,
         view_json: &str,
     ) -> Result<(), CurrentTruthStoreError> {
-        self.conn.execute(
+        let repo = repo.to_ascii_lowercase();
+        let transaction = self.conn.unchecked_transaction()?;
+        transaction.execute(
+            "DELETE FROM current_truth_projection WHERE repo = ?1 COLLATE NOCASE",
+            params![repo],
+        )?;
+        transaction.execute(
             "INSERT INTO current_truth_projection (repo, generation, built_at, view_json)
-             VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(repo) DO UPDATE SET
-                generation = excluded.generation,
-                built_at = excluded.built_at,
-                view_json = excluded.view_json",
+             VALUES (?1, ?2, ?3, ?4)",
             params![repo, generation, built_at, view_json],
         )?;
+        transaction.commit()?;
         Ok(())
     }
 
-    /// Read the stored projection for one repository, if present.
+    /// Read the stored projection for one repository, if unambiguous. Multiple
+    /// legacy case variants are a cache miss, never a choice by insertion order
+    /// or timestamp. Callers can rebuild from the unchanged assertion authority.
     pub fn read_projection(
         &self,
         repo: &str,
     ) -> Result<Option<StoredProjectionV1>, CurrentTruthStoreError> {
-        let row = self
-            .conn
-            .query_row(
-                "SELECT generation, built_at, view_json
-                 FROM current_truth_projection WHERE repo = ?1",
-                params![repo],
-                |row| {
-                    Ok(StoredProjectionV1 {
-                        generation: row.get(0)?,
-                        built_at: row.get(1)?,
-                        view_json: row.get(2)?,
-                    })
-                },
-            )
-            .optional()?;
-        Ok(row)
+        let mut statement = self.conn.prepare(
+            "SELECT generation, built_at, view_json
+             FROM current_truth_projection WHERE repo = ?1 COLLATE NOCASE LIMIT 2",
+        )?;
+        let mut rows = statement.query(params![repo])?;
+        let Some(row) = rows.next()? else {
+            return Ok(None);
+        };
+        let projection = StoredProjectionV1 {
+            generation: row.get(0)?,
+            built_at: row.get(1)?,
+            view_json: row.get(2)?,
+        };
+        Ok(if rows.next()?.is_some() {
+            None
+        } else {
+            Some(projection)
+        })
     }
 
     /// Drop the disposable projection for one repository. Never touches the
     /// assertion authority.
     pub fn drop_projection(&self, repo: &str) -> Result<(), CurrentTruthStoreError> {
         self.conn.execute(
-            "DELETE FROM current_truth_projection WHERE repo = ?1",
+            "DELETE FROM current_truth_projection WHERE repo = ?1 COLLATE NOCASE",
             params![repo],
         )?;
         Ok(())
     }
 
     /// Record one refresh attempt's operational posture. `recorded_at` is
-    /// caller-supplied. Monotonic by attempt instant: an attempt older than
-    /// the recorded one is refused — a late, out-of-order refresh record can
-    /// never erase a newer posture (a newer outage included).
+    /// caller-supplied. Strictly monotonic by attempt instant: an attempt
+    /// older than or equal to the recorded one is refused. First committer
+    /// wins an equal-time race, so arrival order can never overwrite posture
+    /// nondeterministically (a newer outage included).
     pub fn record_refresh(
         &self,
         repo: &str,
@@ -505,6 +549,160 @@ impl CurrentTruthSqliteStore {
         last_fresh_at: Option<&str>,
         recorded_at: &str,
         unavailable_reason: Option<&str>,
+    ) -> Result<(), CurrentTruthStoreError> {
+        self.record_subject_refresh(
+            repo,
+            REPOSITORY_REFRESH_SCOPE,
+            fresh,
+            last_fresh_revision,
+            last_fresh_at,
+            recorded_at,
+            unavailable_reason,
+        )
+    }
+
+    /// Record one refresh attempt for the exact subject slice covered by the
+    /// bounded source read. A successful sibling slice cannot clear this
+    /// subject's debt. Repository visibility has an independent observation
+    /// order and is recorded through [`Self::record_repository_visibility`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_subject_refresh(
+        &self,
+        repo: &str,
+        subject_token: &str,
+        fresh: bool,
+        last_fresh_revision: Option<&str>,
+        last_fresh_at: Option<&str>,
+        recorded_at: &str,
+        unavailable_reason: Option<&str>,
+    ) -> Result<(), CurrentTruthStoreError> {
+        Self::validate_refresh(repo, fresh, last_fresh_revision, last_fresh_at, recorded_at)?;
+        // One transaction: the staleness check and the upsert commit
+        // atomically, so a concurrent writer on the same file cannot
+        // interleave an older record over a newer one.
+        let transaction = self.conn.unchecked_transaction()?;
+        Self::record_refresh_in(
+            &transaction,
+            repo,
+            subject_token,
+            fresh,
+            last_fresh_revision,
+            last_fresh_at,
+            recorded_at,
+            unavailable_reason,
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Atomically append one fresh adapter observation and advance its
+    /// refresh posture. A contradiction, stale attempt, or SQLite failure
+    /// rolls back both the assertion batch and posture, so consumers can
+    /// never observe assertions stamped by a different refresh revision.
+    pub fn append_all_and_record_refresh(
+        &self,
+        assertions: &[AssertionV1],
+        repo: &str,
+        last_fresh_revision: &str,
+        last_fresh_at: &str,
+        recorded_at: &str,
+    ) -> Result<usize, CurrentTruthStoreError> {
+        self.append_all_and_record_subject_refresh(
+            assertions,
+            repo,
+            REPOSITORY_REFRESH_SCOPE,
+            last_fresh_revision,
+            last_fresh_at,
+            recorded_at,
+        )
+    }
+
+    /// Atomically append one fresh subject-slice observation and advance only
+    /// that slice's posture.
+    #[allow(clippy::too_many_arguments)]
+    pub fn append_all_and_record_subject_refresh(
+        &self,
+        assertions: &[AssertionV1],
+        repo: &str,
+        subject_token: &str,
+        last_fresh_revision: &str,
+        last_fresh_at: &str,
+        recorded_at: &str,
+    ) -> Result<usize, CurrentTruthStoreError> {
+        self.append_subject_refresh_and_consume(
+            assertions,
+            repo,
+            subject_token,
+            last_fresh_revision,
+            last_fresh_at,
+            recorded_at,
+            None,
+            |_, appended| Ok(appended),
+        )
+    }
+
+    /// Commit fresh assertions, subject posture and observed visibility only
+    /// after complete consumption succeeds. A consumer failure rolls back all
+    /// of this attempt, allowing its original timestamp to record refresh debt
+    /// without weakening first-committer ordering. Restrictive observations
+    /// should also be recorded independently before entering this boundary.
+    /// The callback shares the transaction and must not start another one.
+    #[allow(clippy::too_many_arguments)]
+    pub fn append_subject_refresh_and_consume<T, E>(
+        &self,
+        assertions: &[AssertionV1],
+        repo: &str,
+        subject_token: &str,
+        last_fresh_revision: &str,
+        last_fresh_at: &str,
+        recorded_at: &str,
+        repository_visibility: Option<VisibilityClassV1>,
+        consume: impl FnOnce(&Self, usize) -> Result<T, E>,
+    ) -> Result<T, E>
+    where
+        E: From<CurrentTruthStoreError>,
+    {
+        Self::validate_refresh(
+            repo,
+            true,
+            Some(last_fresh_revision),
+            Some(last_fresh_at),
+            recorded_at,
+        )?;
+        let transaction = self
+            .conn
+            .unchecked_transaction()
+            .map_err(CurrentTruthStoreError::from)?;
+        let mut appended = 0;
+        for assertion in assertions {
+            if Self::append_in(&transaction, assertion)? == AppendOutcome::Appended {
+                appended += 1;
+            }
+        }
+        Self::record_refresh_in(
+            &transaction,
+            repo,
+            subject_token,
+            true,
+            Some(last_fresh_revision),
+            Some(last_fresh_at),
+            recorded_at,
+            None,
+        )?;
+        if let Some(visibility) = repository_visibility {
+            Self::record_repository_visibility_in(&transaction, repo, visibility, recorded_at)?;
+        }
+        let consumed = consume(self, appended)?;
+        transaction.commit().map_err(CurrentTruthStoreError::from)?;
+        Ok(consumed)
+    }
+
+    fn validate_refresh(
+        repo: &str,
+        fresh: bool,
+        last_fresh_revision: Option<&str>,
+        last_fresh_at: Option<&str>,
+        recorded_at: &str,
     ) -> Result<(), CurrentTruthStoreError> {
         if chrono::DateTime::parse_from_rfc3339(recorded_at).is_err() {
             return Err(CurrentTruthStoreError::MalformedObservedAt(
@@ -527,62 +725,184 @@ impl CurrentTruthSqliteStore {
                 return Err(CurrentTruthStoreError::MalformedObservedAt(at.to_string()));
             }
         }
-        // One transaction: the staleness check and the upsert commit
-        // atomically, so a concurrent writer on the same file cannot
-        // interleave an older record over a newer one.
-        let transaction = self.conn.unchecked_transaction()?;
-        let existing: Option<RefreshPostureRowV1> = transaction
-            .query_row(
-                "SELECT fresh, last_fresh_revision, last_fresh_at, last_attempt_at,
-                        unavailable_reason
-                 FROM current_truth_refresh WHERE repo = ?1",
-                params![repo],
-                |row| {
-                    Ok(RefreshPostureRowV1 {
-                        fresh: row.get::<_, i64>(0)? != 0,
-                        last_fresh_revision: row.get(1)?,
-                        last_fresh_at: row.get(2)?,
-                        last_attempt_at: row.get(3)?,
-                        unavailable_reason: row.get(4)?,
-                    })
-                },
-            )
-            .optional()?;
-        if let Some(existing) = existing {
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_refresh_in(
+        transaction: &rusqlite::Transaction<'_>,
+        repo: &str,
+        subject_token: &str,
+        fresh: bool,
+        last_fresh_revision: Option<&str>,
+        last_fresh_at: Option<&str>,
+        recorded_at: &str,
+        unavailable_reason: Option<&str>,
+    ) -> Result<(), CurrentTruthStoreError> {
+        let mut statement = transaction.prepare(
+            "SELECT fresh, last_fresh_revision, last_fresh_at, last_attempt_at,
+                    unavailable_reason, repository_visibility,
+                    repository_visibility_at
+             FROM current_truth_refresh
+             WHERE repo = ?1 COLLATE NOCASE AND subject_token = ?2 COLLATE NOCASE",
+        )?;
+        let existing = statement
+            .query_map(params![repo, subject_token], |row| {
+                Ok(RefreshPostureRowV1 {
+                    fresh: row.get::<_, i64>(0)? != 0,
+                    last_fresh_revision: row.get(1)?,
+                    last_fresh_at: row.get(2)?,
+                    last_attempt_at: row.get(3)?,
+                    unavailable_reason: row.get(4)?,
+                    repository_visibility: row
+                        .get::<_, Option<String>>(5)?
+                        .as_deref()
+                        .map(parse_visibility),
+                    repository_visibility_at: row.get(6)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(statement);
+        if let Some(existing) = existing
+            .iter()
+            .max_by_key(|row| super::types::ordering_instant(&row.last_attempt_at))
+        {
             if super::types::ordering_instant(recorded_at)
-                < super::types::ordering_instant(&existing.last_attempt_at)
+                <= super::types::ordering_instant(&existing.last_attempt_at)
             {
                 return Err(CurrentTruthStoreError::StaleRefreshRecord {
                     repo: repo.to_string(),
                     recorded_at: recorded_at.to_string(),
-                    existing_attempt_at: existing.last_attempt_at,
+                    existing_attempt_at: existing.last_attempt_at.clone(),
                 });
             }
         }
+
+        if !existing.is_empty() {
+            transaction.execute(
+                "UPDATE current_truth_refresh
+                 SET fresh = ?3,
+                     last_fresh_revision = COALESCE(?4, last_fresh_revision),
+                     last_fresh_at = COALESCE(?5, last_fresh_at),
+                     last_attempt_at = ?6,
+                     unavailable_reason = ?7
+                 WHERE repo = ?1 COLLATE NOCASE AND subject_token = ?2 COLLATE NOCASE",
+                params![
+                    repo,
+                    subject_token,
+                    fresh as i64,
+                    last_fresh_revision,
+                    last_fresh_at,
+                    recorded_at,
+                    unavailable_reason,
+                ],
+            )?;
+            return Ok(());
+        }
         transaction.execute(
             "INSERT INTO current_truth_refresh (
-                repo, fresh, last_fresh_revision, last_fresh_at,
-                last_attempt_at, unavailable_reason
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-             ON CONFLICT(repo) DO UPDATE SET
-                fresh = excluded.fresh,
-                last_fresh_revision = COALESCE(excluded.last_fresh_revision,
-                                               current_truth_refresh.last_fresh_revision),
-                last_fresh_at = COALESCE(excluded.last_fresh_at,
-                                         current_truth_refresh.last_fresh_at),
-                last_attempt_at = excluded.last_attempt_at,
-                unavailable_reason = excluded.unavailable_reason",
+                repo, subject_token, fresh, last_fresh_revision, last_fresh_at,
+                last_attempt_at, unavailable_reason, repository_visibility,
+                repository_visibility_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, NULL)",
             params![
                 repo,
+                subject_token,
                 fresh as i64,
                 last_fresh_revision,
                 last_fresh_at,
                 recorded_at,
-                unavailable_reason
+                unavailable_reason,
             ],
         )?;
-        transaction.commit()?;
         Ok(())
+    }
+
+    /// Reconcile independently observed repository visibility without
+    /// changing subject truth/posture ordering. Newer observations win;
+    /// equal-time disagreement resolves to private, independent of arrival.
+    /// All case-compatible legacy rows are updated together. Returns whether
+    /// a posture row existed to receive the metadata.
+    pub fn record_repository_visibility(
+        &self,
+        repo: &str,
+        repository_visibility: VisibilityClassV1,
+        observed_at: &str,
+    ) -> Result<bool, CurrentTruthStoreError> {
+        let transaction = self.conn.unchecked_transaction()?;
+        let updated = Self::record_repository_visibility_in(
+            &transaction,
+            repo,
+            repository_visibility,
+            observed_at,
+        )?;
+        transaction.commit()?;
+        Ok(updated)
+    }
+
+    fn record_repository_visibility_in(
+        conn: &Connection,
+        repo: &str,
+        repository_visibility: VisibilityClassV1,
+        observed_at: &str,
+    ) -> Result<bool, CurrentTruthStoreError> {
+        if chrono::DateTime::parse_from_rfc3339(observed_at).is_err() {
+            return Err(CurrentTruthStoreError::MalformedObservedAt(
+                observed_at.to_string(),
+            ));
+        }
+        let mut statement = conn.prepare(
+            "SELECT repository_visibility, repository_visibility_at
+             FROM current_truth_refresh
+             WHERE repo = ?1 COLLATE NOCASE AND repository_visibility IS NOT NULL
+                   AND repository_visibility_at IS NOT NULL",
+        )?;
+        let candidates = statement
+            .query_map(params![repo], |row| {
+                let token: String = row.get(0)?;
+                Ok((parse_visibility(&token), row.get::<_, String>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(statement);
+        let known = candidates.into_iter().max_by(
+            |(left_visibility, left_at), (right_visibility, right_at)| {
+                super::types::ordering_instant(left_at)
+                    .cmp(&super::types::ordering_instant(right_at))
+                    .then_with(|| {
+                        usize::from(*left_visibility == VisibilityClassV1::Private).cmp(
+                            &usize::from(*right_visibility == VisibilityClassV1::Private),
+                        )
+                    })
+            },
+        );
+        let (visibility, visibility_at) = match known {
+            None => (repository_visibility, observed_at.to_string()),
+            Some((current, current_at)) => {
+                match super::types::ordering_instant(observed_at)
+                    .cmp(&super::types::ordering_instant(&current_at))
+                {
+                    std::cmp::Ordering::Greater => (repository_visibility, observed_at.to_string()),
+                    std::cmp::Ordering::Equal => (
+                        if current == VisibilityClassV1::Private
+                            || repository_visibility == VisibilityClassV1::Private
+                        {
+                            VisibilityClassV1::Private
+                        } else {
+                            VisibilityClassV1::Public
+                        },
+                        current_at,
+                    ),
+                    std::cmp::Ordering::Less => (current, current_at),
+                }
+            }
+        };
+        let matched_existing_row = conn.execute(
+            "UPDATE current_truth_refresh
+             SET repository_visibility = ?2, repository_visibility_at = ?3
+             WHERE repo = ?1 COLLATE NOCASE",
+            params![repo, visibility_token(visibility), visibility_at],
+        )? > 0;
+        Ok(matched_existing_row)
     }
 
     /// Read the recorded refresh posture for one repository, if any.
@@ -590,31 +910,117 @@ impl CurrentTruthSqliteStore {
         &self,
         repo: &str,
     ) -> Result<Option<RefreshPostureRowV1>, CurrentTruthStoreError> {
-        let row = self
-            .conn
-            .query_row(
-                "SELECT fresh, last_fresh_revision, last_fresh_at, last_attempt_at,
-                        unavailable_reason
-                 FROM current_truth_refresh WHERE repo = ?1",
-                params![repo],
-                |row| {
-                    Ok(RefreshPostureRowV1 {
-                        fresh: row.get::<_, i64>(0)? != 0,
-                        last_fresh_revision: row.get(1)?,
-                        last_fresh_at: row.get(2)?,
-                        last_attempt_at: row.get(3)?,
-                        unavailable_reason: row.get(4)?,
-                    })
-                },
+        let mut statement = self.conn.prepare(
+            "SELECT subject_token, fresh, last_fresh_revision, last_fresh_at,
+                    last_attempt_at, unavailable_reason, repository_visibility,
+                    repository_visibility_at
+             FROM current_truth_refresh WHERE repo = ?1 COLLATE NOCASE
+             ORDER BY last_attempt_at DESC, subject_token ASC",
+        )?;
+        let mut rows = statement
+            .query_map(params![repo], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    RefreshPostureRowV1 {
+                        fresh: row.get::<_, i64>(1)? != 0,
+                        last_fresh_revision: row.get(2)?,
+                        last_fresh_at: row.get(3)?,
+                        last_attempt_at: row.get(4)?,
+                        unavailable_reason: row.get(5)?,
+                        repository_visibility: row
+                            .get::<_, Option<String>>(6)?
+                            .as_deref()
+                            .map(parse_visibility),
+                        repository_visibility_at: row.get(7)?,
+                    },
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        // Aggregate equal-attempt ties by stable subject identity. Within one
+        // subject equal attempts are rejected (first committer wins); across
+        // independently covered subjects this order makes the repo posture
+        // deterministic regardless of arrival order.
+        rows.sort_by(|(left_subject, left), (right_subject, right)| {
+            super::types::ordering_instant(&right.last_attempt_at)
+                .cmp(&super::types::ordering_instant(&left.last_attempt_at))
+                .then_with(|| left_subject.cmp(right_subject))
+        });
+        let Some((_, newest)) = rows.first() else {
+            return Ok(None);
+        };
+        if rows.len() == 1 {
+            return Ok(Some(newest.clone()));
+        }
+
+        let fresh = rows.iter().all(|(_, row)| row.fresh);
+        let unavailable_reason = rows
+            .iter()
+            .find(|(_, row)| !row.fresh)
+            .and_then(|(_, row)| row.unavailable_reason.clone());
+        let repository_visibility = if rows
+            .iter()
+            .any(|(_, row)| row.repository_visibility == Some(VisibilityClassV1::Private))
+        {
+            Some(VisibilityClassV1::Private)
+        } else if rows
+            .iter()
+            .any(|(_, row)| row.repository_visibility == Some(VisibilityClassV1::Public))
+        {
+            Some(VisibilityClassV1::Public)
+        } else {
+            None
+        };
+        let repository_visibility_at = rows
+            .iter()
+            .filter_map(|(_, row)| row.repository_visibility_at.as_deref())
+            .max_by_key(|at| super::types::ordering_instant(at))
+            .map(str::to_string);
+        let last_fresh_at = rows
+            .iter()
+            .filter_map(|(_, row)| row.last_fresh_at.as_deref())
+            .max_by_key(|at| super::types::ordering_instant(at))
+            .map(str::to_string);
+        let revisions = rows
+            .iter()
+            .filter_map(|(subject, row)| {
+                row.last_fresh_revision
+                    .as_deref()
+                    .map(|revision| (subject, revision))
+            })
+            .collect::<Vec<_>>();
+        let last_fresh_revision = (!revisions.is_empty()).then(|| {
+            let basis = serde_json::json!({ "subject_revisions": revisions });
+            format!(
+                "subject-set:{}",
+                memcore::canonical_digest::canonical_json_digest_hex(&basis)
             )
-            .optional()?;
-        Ok(row)
+        });
+        Ok(Some(RefreshPostureRowV1 {
+            fresh,
+            last_fresh_revision,
+            last_fresh_at,
+            last_attempt_at: newest.last_attempt_at.clone(),
+            unavailable_reason,
+            repository_visibility,
+            repository_visibility_at,
+        }))
+    }
+
+    /// Last known repository visibility, independent from whether a refresh
+    /// was admissible as fresh truth.
+    pub fn repository_visibility(
+        &self,
+        repo: &str,
+    ) -> Result<Option<VisibilityClassV1>, CurrentTruthStoreError> {
+        Ok(self
+            .refresh_posture_row(repo)?
+            .and_then(|row| row.repository_visibility))
     }
 
     /// Refresh-debt count over all repositories (content-free health).
     pub fn refresh_debt_repos(&self) -> Result<usize, CurrentTruthStoreError> {
         let count: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM current_truth_refresh WHERE fresh = 0",
+            "SELECT COUNT(DISTINCT lower(repo)) FROM current_truth_refresh WHERE fresh = 0",
             [],
             |row| row.get(0),
         )?;
@@ -680,6 +1086,10 @@ pub struct RefreshPostureRowV1 {
     pub last_fresh_at: Option<String>,
     pub last_attempt_at: String,
     pub unavailable_reason: Option<String>,
+    #[serde(default, skip_serializing)]
+    pub repository_visibility: Option<VisibilityClassV1>,
+    #[serde(default, skip_serializing)]
+    pub repository_visibility_at: Option<String>,
 }
 
 /// The canonical generation digest binding a projection to its exact

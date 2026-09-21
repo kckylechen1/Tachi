@@ -39,7 +39,7 @@ pub(super) fn render_skill_invocation_contract(
         format!("- source_path: {source_path}"),
         format!("- why: {}", cap.description),
         format!(
-            "- invocation: `tachi_skill(action='run', skill_id='{skill_id}', args={{\"task\": \"<task>\", \"context\": \"<context>\"}})` when available"
+            "- invocation: use the host's native skill loader for `{skill_id}` when available; otherwise apply the embedded contract"
         ),
     ];
     if let Some(prompt) = prompt {

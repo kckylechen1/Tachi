@@ -2,12 +2,14 @@ use super::*;
 
 #[tokio::test]
 async fn safe_merge_strict_requires_flow_id_before_merge() {
+    let server = test_server();
     let client = MockGhClient::new()
         .with_pr("o/r", ready_pr())
         .with_checks("o/r", 42, vec![]);
     let mut policy = MergeGatePolicy::strict();
     policy.require_head_consistency = false;
     let out = handle_github_safe_merge(
+        &server,
         &client,
         "o/r",
         42,
@@ -35,6 +37,7 @@ async fn safe_merge_strict_requires_flow_id_before_merge() {
 
 #[tokio::test]
 async fn safe_merge_strict_accepts_linked_issue_without_flow_id() {
+    let server = test_server();
     let mut pr = ready_pr();
     pr.linked_issue_refs = vec!["https://github.com/o/r/issues/99".to_string()];
     let client = MockGhClient::new()
@@ -43,6 +46,7 @@ async fn safe_merge_strict_accepts_linked_issue_without_flow_id() {
     let mut policy = MergeGatePolicy::strict();
     policy.require_head_consistency = false;
     let out = handle_github_safe_merge(
+        &server,
         &client,
         "o/r",
         42,
@@ -67,12 +71,14 @@ async fn safe_merge_strict_accepts_linked_issue_without_flow_id() {
 
 #[tokio::test]
 async fn safe_merge_head_consistency_required_blocks_merge() {
+    let server = test_server();
     let client = MockGhClient::new()
         .with_pr("o/r", ready_pr())
         .with_checks("o/r", 42, vec![]);
     let mut policy = MergeGatePolicy::standard();
     policy.require_head_consistency = true;
     let out = handle_github_safe_merge(
+        &server,
         &client,
         "o/r",
         42,
@@ -108,12 +114,14 @@ async fn safe_merge_with_flow_id_missing_verification_waits() {
     let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let (_home, _runs, original_home, original_runs) = with_verify_env();
+    let (home, _runs, original_home, original_runs) = with_verify_env();
+    let server = verification_server(home.path());
     let client = MockGhClient::new()
         .with_pr("o/r", ready_pr())
         .with_checks("o/r", 42, vec![]);
 
     let out = handle_github_safe_merge(
+        &server,
         &client,
         "o/r",
         42,
@@ -147,6 +155,7 @@ async fn safe_merge_failed_verification_blocks_even_permissive() {
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let (home, runs, original_home, original_runs) = with_verify_env();
+    let server = verification_server(home.path());
     let flow = "flow_failed-verification";
     // #1454 F1: authority lives in the receipt store; a FAILED receipt for a
     // canonical kind blocks under every policy (including permissive).
@@ -160,11 +169,13 @@ async fn safe_merge_failed_verification_blocks_even_permissive() {
         "deadbeef",
         Some("failed"),
     );
+    seed_verification_claim(&server, flow, "deadbeef");
     let client = MockGhClient::new()
         .with_pr("o/r", ready_pr())
         .with_checks("o/r", 42, vec![]);
 
     let out = handle_github_safe_merge(
+        &server,
         &client,
         "o/r",
         42,
@@ -197,16 +208,19 @@ async fn safe_merge_stale_verification_waits_on_head_mismatch() {
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let (home, runs, original_home, original_runs) = with_verify_env();
+    let server = verification_server(home.path());
     let flow = "flow_stale-verification";
     // Receipt bound to an OLD head: the PR head is deadbeef, the receipt
     // head is oldsha → stale (F4 head-match requirement).
     write_verification(runs.path(), flow, "passed", "oldsha");
     seed_receipt(home.path(), flow, "fmt", "passed", 0, "oldsha", None);
+    seed_verification_claim(&server, flow, "deadbeef");
     let client = MockGhClient::new()
         .with_pr("o/r", ready_pr())
         .with_checks("o/r", 42, vec![]);
 
     let out = handle_github_safe_merge(
+        &server,
         &client,
         "o/r",
         42,
@@ -234,21 +248,115 @@ async fn safe_merge_stale_verification_waits_on_head_mismatch() {
 
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
-async fn safe_merge_strict_uses_passed_verification_for_head_consistency() {
+async fn safe_merge_refuses_claim_and_live_pr_head_divergence() {
     let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let (home, runs, original_home, original_runs) = with_verify_env();
-    let flow = "flow_strict-verification";
-    // The FULL canonical set has valid receipts for the PR head → gate
-    // passed → head consistency verified (F4).
-    write_verification(runs.path(), flow, "passed", "deadbeef");
-    seed_full_passed_set(home.path(), flow, "deadbeef", None);
+    let server = verification_server(home.path());
+    let flow = "flow_claim-pr-divergence";
+    write_verification(runs.path(), flow, "passed", "claim-head");
+    seed_full_passed_set(home.path(), flow, "claim-head", None);
+    seed_verification_claim(&server, flow, "claim-head");
     let client = MockGhClient::new()
         .with_pr("o/r", ready_pr())
         .with_checks("o/r", 42, vec![]);
 
     let out = handle_github_safe_merge(
+        &server,
+        &client,
+        "o/r",
+        42,
+        MergeStrategy::Squash,
+        false,
+        Some(flow),
+        &[],
+        MergeGatePolicy::standard(),
+        None,
+        false,
+    )
+    .await
+    .expect("fail-closed decision");
+
+    let value: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(value["merge_state"], "pending");
+    assert_eq!(
+        value["status_patch"]["verification"]["current_head_sha"],
+        "claim-head"
+    );
+    assert_eq!(
+        value["status_patch"]["verification"]["observed_pr_head_sha"],
+        "deadbeef"
+    );
+    assert!(value["decision"]["waiting_on"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|reason| reason == "verification:claim_head_mismatch"));
+
+    // Divergence is an independent waiting reason; it must not downgrade a
+    // failed receipt verdict to pending.
+    seed_receipt(
+        home.path(),
+        flow,
+        "fmt",
+        "failed",
+        1,
+        "claim-head",
+        Some("failed"),
+    );
+    let failed_out = handle_github_safe_merge(
+        &server,
+        &client,
+        "o/r",
+        42,
+        MergeStrategy::Squash,
+        false,
+        Some(flow),
+        &[],
+        MergeGatePolicy::standard(),
+        None,
+        false,
+    )
+    .await
+    .expect("failed gate remains observable");
+    let failed: serde_json::Value = serde_json::from_str(&failed_out).unwrap();
+    assert_eq!(failed["merge_state"], "blocked");
+    assert_eq!(failed["status_patch"]["verification"]["overall"], "failed");
+    assert!(failed["decision"]["reasons"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|reason| reason == "verification:fmt:failed"));
+    assert!(failed["status_patch"]["verification"]["waiting_on"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|reason| reason == "verification:claim_head_mismatch"));
+    assert!(client.merge_calls().is_empty());
+    restore_env(original_home, original_runs);
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn safe_merge_strict_uses_passed_verification_for_head_consistency() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (home, runs, original_home, original_runs) = with_verify_env();
+    let server = verification_server(home.path());
+    let flow = "flow_strict-verification";
+    // The FULL canonical set has valid receipts for the PR head → gate
+    // passed → head consistency verified (F4).
+    write_verification(runs.path(), flow, "passed", "deadbeef");
+    seed_full_passed_set(home.path(), flow, "deadbeef", None);
+    seed_verification_claim(&server, flow, "deadbeef");
+    let client = MockGhClient::new()
+        .with_pr("o/r", ready_pr())
+        .with_checks("o/r", 42, vec![]);
+
+    let out = handle_github_safe_merge(
+        &server,
         &client,
         "o/r",
         42,
@@ -297,7 +405,8 @@ async fn safe_merge_strict_does_not_treat_not_required_verification_as_head_proo
     let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let (_home, runs, original_home, original_runs) = with_verify_env();
+    let (home, runs, original_home, original_runs) = with_verify_env();
+    let server = verification_server(home.path());
     let flow = "flow_strict-not-required";
     let run_dir = runs.path().join(flow);
     std::fs::create_dir_all(&run_dir).unwrap();
@@ -313,11 +422,13 @@ async fn safe_merge_strict_does_not_treat_not_required_verification_as_head_proo
         .unwrap(),
     )
     .unwrap();
+    seed_verification_claim(&server, flow, "deadbeef");
     let client = MockGhClient::new()
         .with_pr("o/r", ready_pr())
         .with_checks("o/r", 42, vec![]);
 
     let out = handle_github_safe_merge(
+        &server,
         &client,
         "o/r",
         42,
@@ -360,8 +471,10 @@ async fn safe_merge_records_missing_verification_from_tests_run() {
     let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let (_home, runs, original_home, original_runs) = with_verify_env();
+    let (home, runs, original_home, original_runs) = with_verify_env();
+    let server = verification_server(home.path());
     let flow = "flow_record-tests-run";
+    seed_verification_claim(&server, flow, "deadbeef");
     let tests_run = vec![
         "cargo test -p tachi-server gh_ops::safe_merge_tests".to_string(),
         "gitleaks detect --source .".to_string(),
@@ -371,6 +484,7 @@ async fn safe_merge_records_missing_verification_from_tests_run() {
         .with_checks("o/r", 42, vec![]);
 
     let out = handle_github_safe_merge(
+        &server,
         &client,
         "o/r",
         42,

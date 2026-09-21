@@ -333,7 +333,7 @@ fn answer_runtime_db_path_query(
         "Authoritative runtime binding (not from memory evidence):\n\
          - global_db: {global}\n\
          - project_db: {project}\n\
-         Use runtime_info for the full routing snapshot. Memory hits mentioning other paths are historical and may be stale."
+         This runtime binding is authoritative. Memory hits mentioning other paths are historical and may be stale."
     );
     let confidence = if required_anchors.is_empty() {
         "high"

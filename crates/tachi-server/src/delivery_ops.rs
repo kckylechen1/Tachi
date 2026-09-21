@@ -42,6 +42,9 @@ fn verify_caller(
     if !matches!(admission_state.as_str(), "self_asserted" | "verified") {
         return Err("current host admission is not active".to_string());
     }
+    if admission_state == "verified" {
+        crate::verified_admission::require_current_verified_admission(server)?;
+    }
     if let Some(admitted) = admitted_host {
         if !admitted.trim().is_empty() && admitted != host_identity {
             return Err("host_identity does not match the current host connection".to_string());
@@ -99,10 +102,10 @@ pub(crate) fn handle_tachi_delivery(
                 lease_seconds: params.lease_seconds.unwrap_or(0),
                 only_delivery_id: None,
             };
-            let outcome = server.with_global_store(|store| {
-                claim_ready_delivery(store.connection(), &request)
-                    .map_err(|error| error.to_string())
-            })?;
+            let outcome =
+                crate::verified_admission::with_current_admission_write(server, |conn| {
+                    claim_ready_delivery(conn, &request)
+                })?;
             let (outcome_token, delivery) = match outcome {
                 memcore::DeliveryClaimOutcome::Claimed(view) => (
                     "claimed",
@@ -125,16 +128,16 @@ pub(crate) fn handle_tachi_delivery(
         TachiDeliveryAction::AckDelivered => {
             let delivery_id = required(params.delivery_id.clone(), "delivery_id")?;
             let ack_key = required(params.ack_key.clone(), "ack_key")?;
-            let outcome = server.with_global_store(|store| {
-                ack_delivered(
-                    store.connection(),
-                    &delivery_id,
-                    &caller,
-                    &ack_key,
-                    params.expected_revision,
-                )
-                .map_err(|error| error.to_string())
-            })?;
+            let outcome =
+                crate::verified_admission::with_current_admission_write(server, |conn| {
+                    ack_delivered(
+                        conn,
+                        &delivery_id,
+                        &caller,
+                        &ack_key,
+                        params.expected_revision,
+                    )
+                })?;
             let (outcome_token, revision) = match outcome {
                 memcore::DeliveryAckOutcome::Acknowledged { revision } => {
                     ("acknowledged", Some(revision))
@@ -152,9 +155,9 @@ pub(crate) fn handle_tachi_delivery(
         TachiDeliveryAction::RejectOrBlock => {
             let delivery_id = required(params.delivery_id.clone(), "delivery_id")?;
             let blocker_class = required(params.blocker_class.clone(), "blocker_class")?;
-            let intent = server.with_global_store(|store| {
+            let intent = crate::verified_admission::with_current_admission_write(server, |conn| {
                 reject_or_block(
-                    store.connection(),
+                    conn,
                     &delivery_id,
                     &caller,
                     &blocker_class,
@@ -162,7 +165,6 @@ pub(crate) fn handle_tachi_delivery(
                     params.retry_in_seconds,
                     params.expected_revision,
                 )
-                .map_err(|error| error.to_string())
             })?;
             Ok(json!({
                 "status": "completed",
@@ -176,10 +178,10 @@ pub(crate) fn handle_tachi_delivery(
         }
         TachiDeliveryAction::ResumeRequesterOperation => {
             let rearm_blocked = params.rearm_blocked.unwrap_or(false);
-            let intents = server.with_global_store(|store| {
-                resume_requester_operation(store.connection(), &caller, rearm_blocked)
-                    .map_err(|error| error.to_string())
-            })?;
+            let intents =
+                crate::verified_admission::with_current_admission_write(server, |conn| {
+                    resume_requester_operation(conn, &caller, rearm_blocked)
+                })?;
             let deliveries: Vec<Value> = intents
                 .iter()
                 .map(|intent| delivery_summary(intent))
@@ -193,14 +195,8 @@ pub(crate) fn handle_tachi_delivery(
         }
         TachiDeliveryAction::Dismiss => {
             let delivery_id = required(params.delivery_id.clone(), "delivery_id")?;
-            let intent = server.with_global_store(|store| {
-                dismiss_delivery(
-                    store.connection(),
-                    &delivery_id,
-                    &caller,
-                    params.expected_revision,
-                )
-                .map_err(|error| error.to_string())
+            let intent = crate::verified_admission::with_current_admission_write(server, |conn| {
+                dismiss_delivery(conn, &delivery_id, &caller, params.expected_revision)
             })?;
             Ok(json!({
                 "status": "completed",

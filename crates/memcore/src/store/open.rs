@@ -2102,6 +2102,42 @@ mod exact_dedupe_open_tests {
             triggers,
             vec![
                 (
+                    "identity_verification_receipts_no_delete".to_string(),
+                    "identity_admission_verification_receipts".to_string(),
+                ),
+                (
+                    "identity_verification_receipts_no_replace".to_string(),
+                    "identity_admission_verification_receipts".to_string(),
+                ),
+                (
+                    "identity_verification_receipts_no_update".to_string(),
+                    "identity_admission_verification_receipts".to_string(),
+                ),
+                (
+                    "identity_verification_revocations_no_delete".to_string(),
+                    "identity_admission_verification_revocations".to_string(),
+                ),
+                (
+                    "identity_verification_revocations_no_replace".to_string(),
+                    "identity_admission_verification_revocations".to_string(),
+                ),
+                (
+                    "identity_verification_revocations_no_update".to_string(),
+                    "identity_admission_verification_revocations".to_string(),
+                ),
+                (
+                    "identity_verified_admissions_no_delete".to_string(),
+                    "identity_admissions".to_string(),
+                ),
+                (
+                    "identity_verified_admissions_no_replace".to_string(),
+                    "identity_admissions".to_string(),
+                ),
+                (
+                    "identity_verified_admissions_no_update".to_string(),
+                    "identity_admissions".to_string(),
+                ),
+                (
                     "memories_reserved_refs_insert_guard".to_string(),
                     "memories".to_string(),
                 ),

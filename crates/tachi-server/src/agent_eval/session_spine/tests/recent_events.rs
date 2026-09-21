@@ -127,7 +127,7 @@ async fn recent_events_allow_observe_and_released_claim_but_authorize_zero() {
     eval(&server, event_params(&id, "started", "started", 1)).await;
     server
         .with_global_store(|store| {
-            memcore::release_work_claim(store.connection_mut(), "claim-1", "agent-1", 0, "done")
+            memcore::release_work_claim(store.connection(), "claim-1", "agent-1", 0, "done")
                 .map_err(|error| error.to_string())
         })
         .expect("release claim");

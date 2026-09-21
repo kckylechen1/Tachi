@@ -57,7 +57,7 @@ pub(crate) async fn handle_tachi_verify(
                     "status": "completed",
                     "action": action_str,
                     "runs": recent_verification_summaries(
-                        &server.tachi_home_dir(),
+                        server,
                         params.limit.unwrap_or(DEFAULT_STATUS_LIMIT as u32) as usize,
                     ),
                 })

@@ -2,62 +2,62 @@
   "schema_version": 1,
   "issue": 1317,
   "observation": {
-    "date": "2026-08-30",
-    "revision": "92cce8d8eab119ca128dc724fab48886519d2d54",
-    "scope": "native composed MemoryServer router after production profile, A2A, sticky-retirement action-schema, bound-project, and annotation transforms plus the #1733 trusted-local ACP attachment fields (tachi_agent_eval attach_session/get_attachment, merged via #1738), the #1678 attached-session receipt-spine fields (ingest_session_event, get_session_state, mark_session_connection, reconnect_session, advertise_session_capabilities, request_intervention, record_intervention_result), and the #1678 coordinate/operate mutation-action projection; #1853 omitted vault secret types use name-based inference; environment exposure override unset; #1861 vault_set exposes an explicit fail-closed rebind boolean"
+    "date": "2026-09-21",
+    "revision": "b92de041622b0c4525c2925f02f801bd5e8f0b44",
+    "scope": "native composed MemoryServer router after production profile, A2A, sticky-retirement action-schema, bound-project, and annotation transforms plus the #1733 trusted-local ACP attachment fields (tachi_agent_eval attach_session/get_attachment, merged via #1738), the #1678 attached-session receipt-spine fields (ingest_session_event, get_session_state, mark_session_connection, reconnect_session, advertise_session_capabilities, request_intervention, record_intervention_result), and the #1678 coordinate/operate mutation-action projection; #1853 omitted vault secret types use name-based inference; environment exposure override unset; #1861 vault_set exposes an explicit fail-closed rebind boolean; #1935 five-facade contraction integrated with main b92de041 and #1696/#1949 current_truth_refresh; exact projected remeasurement, Ops unchanged"
   },
   "provisional_budgets": {
     "profiles": {
       "admin": {
-        "max_total_input_schema_bytes": 142519,
-        "max_total_tool_definition_bytes": 173879,
+        "max_total_input_schema_bytes": 142527,
+        "max_total_tool_definition_bytes": 174204,
         "max_visible_tools": 83,
-        "rationale": "Exact live observed #1691 census for admin after profile-specific tools/list narrowing; any regrowth requires explicit adjudication.; #1454 server-run tachi_verify surface (action=run, +check_kind/+timeout_secs props; +1131 schema bytes / +1365 tool-definition bytes per profile) re-pinned after the rebase onto 53939b5b5 (main #1690/#1691 retirements); #1322 declared_file_scope on tachi_staff, including its exact serialized schema bytes; any further regrowth requires explicit adjudication.; #1861 vault_set explicit rebind property re-pinned to the exact live admin surface; #1679 adds the tachi_delivery seam (6 actions, +1771 schema bytes / +2198 tool-def bytes, coordinate+admin visibility only) for the durable delivery spine; #1679 re-measured after the delivery seam action field became a closed wire enum (denominator matches tachi_a2a)"
+        "rationale": "Exact live observed #1691 census for admin after profile-specific tools/list narrowing; any regrowth requires explicit adjudication.; #1454 server-run tachi_verify surface (action=run, +check_kind/+timeout_secs props; +1131 schema bytes / +1365 tool-definition bytes per profile) re-pinned after the rebase onto 53939b5b5 (main #1690/#1691 retirements); #1322 declared_file_scope on tachi_staff, including its exact serialized schema bytes; any further regrowth requires explicit adjudication.; #1861 vault_set explicit rebind property re-pinned to the exact live admin surface; #1679 adds the tachi_delivery seam (6 actions, +1771 schema bytes / +2198 tool-def bytes, coordinate+admin visibility only) for the durable delivery spine; #1679 re-measured after the delivery seam action field became a closed wire enum (denominator matches tachi_a2a) #1696/#1949 CurrentTruth integration adds current_truth_refresh: +27 schema bytes and +311 description bytes (+338 definition bytes); exact remeasurement preserves all 83 routes."
       },
       "coordinate": {
-        "max_total_input_schema_bytes": 96919,
-        "max_total_tool_definition_bytes": 110836,
-        "max_visible_tools": 30,
-        "rationale": "Exact live observed #1691 census for coordinate after profile-specific tools/list narrowing; any regrowth requires explicit adjudication.; #1454 server-run tachi_verify surface (action=run, +check_kind/+timeout_secs props; +1131 schema bytes / +1365 tool-definition bytes per profile) re-pinned after the rebase onto 53939b5b5 (main #1690/#1691 retirements); #1322 declared_file_scope on tachi_staff, including its exact serialized schema bytes; #1678 session-spine mutation policy narrows coordinate tachi_agent_eval schema; any further regrowth requires explicit adjudication.; #1679 adds the tachi_delivery seam (6 actions, +1771 schema bytes / +2198 tool-def bytes, coordinate+admin visibility only) for the durable delivery spine; #1679 re-measured after the delivery seam action field became a closed wire enum (denominator matches tachi_a2a)"
+        "max_total_input_schema_bytes": 49256,
+        "max_total_tool_definition_bytes": 53860,
+        "max_visible_tools": 5,
+        "rationale": "Exact live observed #1935 coordinate compatibility census after contraction to the five product facades; any regrowth requires explicit adjudication. #1696/#1949 CurrentTruth integration adds current_truth_refresh to the Lead-compatible action enum: +24 schema bytes and +311 description bytes (+335 definition bytes); exactly five routes remain."
       },
       "delegate": {
-        "max_total_input_schema_bytes": 38713,
-        "max_total_tool_definition_bytes": 43273,
-        "max_visible_tools": 10,
-        "rationale": "Exact live observed #1691 census for delegate after profile-specific tools/list narrowing; any regrowth requires explicit adjudication."
+        "max_total_input_schema_bytes": 49024,
+        "max_total_tool_definition_bytes": 53561,
+        "max_visible_tools": 5,
+        "rationale": "Exact live observed #1935 Worker census for the five product facades with Worker-safe action schemas; any regrowth requires explicit adjudication. #1696/#1949 CurrentTruth guidance adds +311 description bytes; the Worker action enum still excludes current_truth_refresh and schema bytes remain unchanged."
       },
       "operate": {
-        "max_total_input_schema_bytes": 87843,
-        "max_total_tool_definition_bytes": 101564,
+        "max_total_input_schema_bytes": 87833,
+        "max_total_tool_definition_bytes": 101554,
         "max_visible_tools": 39,
         "rationale": "Exact live observed #1691 census for operate after profile-specific tools/list narrowing; #1678 session-spine mutation policy narrows the operate action surface; any regrowth requires explicit adjudication."
       },
       "standard": {
-        "max_total_input_schema_bytes": 56795,
-        "max_total_tool_definition_bytes": 65811,
-        "max_visible_tools": 15,
-        "rationale": "Exact live observed #1691 census for standard after profile-specific tools/list narrowing; any regrowth requires explicit adjudication.; #1454 server-run tachi_verify surface (action=run, +check_kind/+timeout_secs props; +1131 schema bytes / +1365 tool-definition bytes per profile) re-pinned after the rebase onto 53939b5b5 (main #1690/#1691 retirements); any further regrowth requires explicit adjudication."
+        "max_total_input_schema_bytes": 49256,
+        "max_total_tool_definition_bytes": 53860,
+        "max_visible_tools": 5,
+        "rationale": "Exact live observed #1935 Lead/default census after contraction to the five product facades; any regrowth requires explicit adjudication. #1696/#1949 CurrentTruth integration adds current_truth_refresh to the Lead action enum: +24 schema bytes and +311 description bytes (+335 definition bytes); exactly five routes remain."
       }
     },
     "status": "provisional",
     "surfaces": {
       "admin.tachi_task": {
-        "max_input_schema_bytes": 25735,
+        "max_input_schema_bytes": 25699,
         "max_top_level_properties": 65,
         "rationale": "Exact live observed #1687 C1c operator tachi_task schema; zero headroom."
       },
       "standard.tachi_gh": {
-        "max_input_schema_bytes": 11983,
+        "max_input_schema_bytes": 11925,
         "max_top_level_properties": 57,
-        "rationale": "Exact live observed #1713 tachi_gh schema after close_loop relocation; zero headroom."
+        "rationale": "Exact live observed #1935 Lead tachi_gh action projection; zero headroom. #1696/#1949 current_truth_refresh adds exactly 24 bytes to this projected action enum; the 57 properties are unchanged."
       },
       "standard.tachi_memory": {
-        "max_input_schema_bytes": 7736,
+        "max_input_schema_bytes": 7762,
         "max_top_level_properties": 43,
         "rationale": "Exact live observed #1689 post-action-retirement tachi_memory schema; zero headroom."
       },
       "standard.tachi_task": {
-        "max_input_schema_bytes": 24481,
+        "max_input_schema_bytes": 24445,
         "max_top_level_properties": 65,
         "rationale": "Exact live observed #1687 C1c tachi_task schema; zero headroom."
       }
@@ -88,9 +88,10 @@
         ]
       },
       "tachi_gh": {
-        "action_count": 19,
+        "action_count": 20,
         "actions": [
           "close_loop",
+          "current_truth_refresh",
           "issue_comment",
           "issue_create",
           "issue_freshness_scan",
@@ -190,8 +191,8 @@
     },
     "profiles": {
       "admin": {
-        "total_input_schema_bytes": 142519,
-        "total_tool_definition_bytes": 173879,
+        "total_input_schema_bytes": 142527,
+        "total_tool_definition_bytes": 174204,
         "visible_tool_count": 83,
         "visible_tools": [
           "archive_memory",
@@ -280,62 +281,32 @@
         ]
       },
       "coordinate": {
-        "total_input_schema_bytes": 96919,
-        "total_tool_definition_bytes": 110836,
-        "visible_tool_count": 30,
+        "total_input_schema_bytes": 49256,
+        "total_tool_definition_bytes": 53860,
+        "visible_tool_count": 5,
         "visible_tools": [
-          "extract_facts",
-          "hub_discover",
-          "ingest_event",
-          "list_memories",
-          "memory_stats",
-          "peer_query",
-          "runtime_info",
           "tachi_a2a",
-          "tachi_agent_eval",
-          "tachi_agents",
-          "tachi_browse",
-          "tachi_delivery",
-          "tachi_domain_adapter",
           "tachi_gh",
-          "tachi_handoff",
           "tachi_memory",
-          "tachi_research",
-          "tachi_search",
-          "tachi_skill",
           "tachi_staff",
-          "tachi_status",
-          "tachi_task",
-          "tachi_tools",
-          "tachi_unstick",
-          "tachi_verify",
-          "tachi_web_search",
-          "tachi_wiki",
-          "tachi_wiki_ingest",
-          "tachi_wiki_search",
-          "tachi_wiki_write"
+          "tachi_task"
         ]
       },
       "delegate": {
-        "total_input_schema_bytes": 38713,
-        "total_tool_definition_bytes": 43273,
-        "visible_tool_count": 10,
+        "total_input_schema_bytes": 49024,
+        "total_tool_definition_bytes": 53561,
+        "visible_tool_count": 5,
         "visible_tools": [
-          "peer_query",
-          "runtime_info",
           "tachi_a2a",
+          "tachi_gh",
           "tachi_memory",
-          "tachi_skill",
-          "tachi_task",
-          "tachi_tools",
-          "tachi_unstick",
-          "tachi_web_search",
-          "tachi_wiki"
+          "tachi_staff",
+          "tachi_task"
         ]
       },
       "operate": {
-        "total_input_schema_bytes": 87843,
-        "total_tool_definition_bytes": 101564,
+        "total_input_schema_bytes": 87833,
+        "total_tool_definition_bytes": 101554,
         "visible_tool_count": 39,
         "visible_tools": [
           "archive_memory",
@@ -380,25 +351,15 @@
         ]
       },
       "standard": {
-        "total_input_schema_bytes": 56795,
-        "total_tool_definition_bytes": 65811,
-        "visible_tool_count": 15,
+        "total_input_schema_bytes": 49256,
+        "total_tool_definition_bytes": 53860,
+        "visible_tool_count": 5,
         "visible_tools": [
-          "peer_query",
-          "runtime_info",
           "tachi_a2a",
           "tachi_gh",
           "tachi_memory",
-          "tachi_skill",
-          "tachi_status",
-          "tachi_task",
-          "tachi_tools",
-          "tachi_verify",
-          "tachi_web_search",
-          "tachi_wiki",
-          "vault_lock",
-          "vault_status",
-          "vault_unlock"
+          "tachi_staff",
+          "tachi_task"
         ]
       }
     },
@@ -558,7 +519,7 @@
             ]
           },
           "tachi_task": {
-            "input_schema_bytes": 25735,
+            "input_schema_bytes": 25699,
             "property_count": 65,
             "property_names": [
               "__tachi_project_explicit",
@@ -630,51 +591,8 @@
           }
         },
         "coordinate": {
-          "tachi_agent_eval": {
-            "input_schema_bytes": 16441,
-            "property_count": 37,
-            "property_names": [
-              "action",
-              "adapter_connection_identity",
-              "adjudicate",
-              "admission_receipt_ref",
-              "agent_identity_id",
-              "attachment_id",
-              "authority_confirmation_ref",
-              "capability_class",
-              "connection_fact",
-              "contract_digest",
-              "event_occurred_at",
-              "event_summary",
-              "expected_session_revision",
-              "expected_transition_revision",
-              "fixture_path",
-              "get",
-              "host_identity",
-              "idempotency_key",
-              "intervention_detail",
-              "intervention_disposition",
-              "intervention_kind",
-              "intervention_reason",
-              "intervention_request_id",
-              "limit",
-              "observe",
-              "payload_digest",
-              "projection",
-              "protocol_version",
-              "register",
-              "remote_session_id",
-              "session_capabilities",
-              "session_event_id",
-              "session_event_kind",
-              "session_event_outcome",
-              "source_revision",
-              "tool_profile",
-              "work_claim_id"
-            ]
-          },
           "tachi_staff": {
-            "input_schema_bytes": 3811,
+            "input_schema_bytes": 3823,
             "property_count": 15,
             "property_names": [
               "action",
@@ -695,7 +613,7 @@
             ]
           },
           "tachi_task": {
-            "input_schema_bytes": 24481,
+            "input_schema_bytes": 24445,
             "property_count": 65,
             "property_names": [
               "__tachi_project_explicit",
@@ -782,7 +700,7 @@
           ]
         },
         "tachi_gh": {
-          "input_schema_bytes": 11983,
+          "input_schema_bytes": 11925,
           "property_count": 57,
           "property_names": [
             "action",
@@ -845,7 +763,7 @@
           ]
         },
         "tachi_memory": {
-          "input_schema_bytes": 7736,
+          "input_schema_bytes": 7762,
           "property_count": 43,
           "property_names": [
             "action",
@@ -893,28 +811,29 @@
             "valid_until"
           ]
         },
-        "tachi_skill": {
-          "input_schema_bytes": 529,
-          "property_count": 7,
+        "tachi_staff": {
+          "input_schema_bytes": 3823,
+          "property_count": 15,
           "property_names": [
             "action",
-            "args",
-            "cap_type",
-            "enabled_only",
-            "limit",
-            "query",
-            "skill_id"
-          ]
-        },
-        "tachi_status": {
-          "input_schema_bytes": 621,
-          "property_count": 1,
-          "property_names": [
-            "format"
+            "declared_file_scope",
+            "dispatch_id",
+            "expected_status_revision",
+            "flow_id",
+            "format",
+            "issue_ref",
+            "pr_ref",
+            "profile",
+            "project",
+            "recommendation_ref",
+            "staffing_reason",
+            "stage",
+            "task",
+            "worker"
           ]
         },
         "tachi_task": {
-          "input_schema_bytes": 24481,
+          "input_schema_bytes": 24445,
           "property_count": 65,
           "property_names": [
             "__tachi_project_explicit",
@@ -982,78 +901,6 @@
             "verbose",
             "worktree",
             "worktree_path"
-          ]
-        },
-        "tachi_tools": {
-          "input_schema_bytes": 33,
-          "property_count": 0,
-          "property_names": []
-        },
-        "tachi_verify": {
-          "input_schema_bytes": 4608,
-          "property_count": 19,
-          "property_names": [
-            "action",
-            "check_id",
-            "check_kind",
-            "checks",
-            "command",
-            "commands",
-            "cwd",
-            "exit_code",
-            "flow_id",
-            "format",
-            "head_sha",
-            "kind",
-            "limit",
-            "log_path",
-            "pr_ref",
-            "required",
-            "status",
-            "summary",
-            "timeout_secs"
-          ]
-        },
-        "tachi_web_search": {
-          "input_schema_bytes": 917,
-          "property_count": 6,
-          "property_names": [
-            "backend",
-            "exclude_domains",
-            "include_domains",
-            "query",
-            "tool_name",
-            "top_k"
-          ]
-        },
-        "tachi_wiki": {
-          "input_schema_bytes": 2883,
-          "property_count": 24,
-          "property_names": [
-            "action",
-            "category",
-            "domain",
-            "entities",
-            "force",
-            "format",
-            "importance",
-            "include_patterns",
-            "keywords",
-            "lifecycle",
-            "limit",
-            "metadata",
-            "path",
-            "pattern_query",
-            "pattern_top_k",
-            "project",
-            "query",
-            "references",
-            "scope",
-            "summary",
-            "text",
-            "title",
-            "top_k",
-            "topic"
           ]
         }
       }

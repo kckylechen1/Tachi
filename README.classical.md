@@ -71,7 +71,7 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.9.0
 - **🔐 藏经密室**：Argon2id + AES-256-GCM 本地加密宝库，逐秘 ACL，多钥轮换。
 - **🎯 万宝楼**：Skill、MCP、仙诀一次登录，诸路灵核共享。
 - **👻 跨界传信**：幽灵低语、看板、交接令牌，跨灵核协同。
-- **⚔️ 工务总枢**：`tachi_task` 掌纪略与完结（`action='complete'`），`tachi_staff` 遣偏师记工籍（`action='start'`，唯例外方用），`tachi_verify` 存验据；旧 `tachi_complete` 已退役。
+- **⚔️ 工务总枢**：寻常惟五器显：`tachi_memory`、`tachi_task`、`tachi_staff`、`tachi_gh`、`tachi_a2a`；余诊断旧器惟 Ops/admin 明授权方可见，非谓物理尽删。
 - **🏭 神经熔炉与维基**：上下文生灭、Agent 进化提案、薪火相传之典籍。
 
 ---
@@ -80,13 +80,13 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.9.0
 
 | 令旗 | 用途 |
 |------|------|
-| `standard` | IDE 灵核之默认，日常 Agent 意图面。 |
-| `coordinate` | 叠于尚行之 `remember` 令旗/bundle（非已退役之原生 `remember` 工具别名），主尊调度，兼掌 handoff / workflow / orchestrator / task / verify；`approve_merge` 已退役。 |
-| `operate` | 同叠于尚行之 `remember` 令旗/bundle（非已退役之原生工具别名），用于运行时适配与 OpenClaw，兼掌 Foundry / Vault 会话。 |
-| `delegate` | 小弟偏师，精简工具面，无派发、无交接。 |
-| `admin` | 维护治理，全量法器。 |
+| `standard` | Lead 常令，恰显 `tachi_memory`、`tachi_task`、`tachi_staff`、`tachi_gh`、`tachi_a2a`。 |
+| `coordinate` | 亦惟五器，沿旧 coordinate 动作之权，不显诊断。 |
+| `operate` | 非默认之 Ops 令，明授权方得见 runtime、status、Vault、Foundry、Hub 兼容诊断。 |
+| `delegate` | Worker 亦惟五器，惟读与察；不得递遣偏师，亦不得改 GitHub。 |
+| `admin` / `emergency` | 明授维护急务，方见全量旧器；窄令所隐，非谓物理已删。 |
 
-未设令旗者，自 v1.0.1 起默认 `standard`。
+未设令旗者，自 v1.0.1 起默认 `standard`。已退役之旧 `observe`、`remember` 原生别名及 `coordinate` 令亦只显五器；HTTP 来客自称 Ops/admin，不足为授权。
 
 ---
 
