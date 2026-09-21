@@ -1216,15 +1216,37 @@ pub(crate) fn rename_file_for_test(
     source: &Path,
     destination: &Path,
 ) -> Result<(), String> {
+    rename_file_with_publication_for_test(dir_path, source, destination, None)
+}
+
+#[cfg(test)]
+pub(crate) fn rename_file_with_publication_for_test(
+    dir_path: &str,
+    source: &Path,
+    destination: &Path,
+    kernel_rename: Option<bool>,
+) -> Result<(), String> {
     let authorized = AuthorizedDocs::bind(dir_path)?;
     let (source_identity, _) = authorized
         .optional_file(source)?
         .ok_or_else(|| format!("test rename source '{}' is missing", source.display()))?;
-    let parent = destination
-        .parent()
-        .ok_or_else(|| format!("test rename destination '{}' has no parent", destination.display()))?;
+    let parent = destination.parent().ok_or_else(|| {
+        format!(
+            "test rename destination '{}' has no parent",
+            destination.display()
+        )
+    })?;
     let parent_identity = authorized.ensure_existing_directory(parent)?;
-    authorized.rename_file(source, &source_identity, destination, &parent_identity)
+    match kernel_rename {
+        None => authorized.rename_file(source, &source_identity, destination, &parent_identity),
+        Some(kernel_rename) => authorized.rename_file_with_publication(
+            source,
+            &source_identity,
+            destination,
+            &parent_identity,
+            kernel_rename,
+        ),
+    }
 }
 
 #[cfg(test)]
@@ -1871,7 +1893,9 @@ pub(crate) async fn handle_wiki_organize(
                     let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
                     let relative_url = canonical_relative_path(
                         path.strip_prefix(&canonical_root).map_err(|error| {
-                            format!("Refusing Wiki organize: index path is not docs-relative: {error}")
+                            format!(
+                                "Refusing Wiki organize: index path is not docs-relative: {error}"
+                            )
                         })?,
                     )?;
 

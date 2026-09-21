@@ -55,14 +55,12 @@ pub(super) fn canonical_accepted_category(category: &str) -> Result<Option<Strin
         );
     }
     let canonical = components.join("/");
-    let accepted = ["engineering", "product", "agent"]
-        .iter()
-        .any(|family| {
-            canonical.as_str() == *family
-                || canonical
-                    .strip_prefix(*family)
-                    .is_some_and(|suffix| suffix.starts_with('/'))
-        });
+    let accepted = ["engineering", "product", "agent"].iter().any(|family| {
+        canonical.as_str() == *family
+            || canonical
+                .strip_prefix(*family)
+                .is_some_and(|suffix| suffix.starts_with('/'))
+    });
     Ok(accepted.then_some(canonical))
 }
 

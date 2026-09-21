@@ -764,6 +764,67 @@ async fn model_in_place_rename_failure_preserves_original_complete_document() {
 #[cfg(unix)]
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
+async fn archive_destination_created_after_empty_check_preserves_foreign_and_live_bytes() {
+    let classifier = MockDocsClassifier::start(
+        &model_response(
+            "docs/product/acme",
+            "Archive Race Title",
+            "Archive race summary",
+        ),
+        MockFinishReason::named("stop"),
+    )
+    .await;
+    let mut server = make_server();
+    install_classifier(&mut server, &classifier);
+    let workspace = DocsWorktree::new();
+    let docs = workspace.docs_path().canonicalize().unwrap();
+    // Sort before product/ so the newer source reaches the receiptless
+    // predecessor archive caller before unrelated document normalization.
+    let source = docs.join("a-archive-race.md");
+    let source_bytes = "new source remains recoverable\n";
+    fs::write(&source, source_bytes).unwrap();
+    let destination = docs.join("product/acme/a-archive-race.md");
+    fs::create_dir_all(destination.parent().unwrap()).unwrap();
+    let predecessor_bytes = "receiptless predecessor remains recoverable\n";
+    fs::write(&destination, predecessor_bytes).unwrap();
+    fs::File::open(&destination)
+        .unwrap()
+        .set_times(fs::FileTimes::new().set_modified(std::time::SystemTime::UNIX_EPOCH))
+        .unwrap();
+    let archive_dir = docs.join("archive");
+    fs::create_dir_all(&archive_dir).unwrap();
+    let archive = archive_dir.join("a-archive-race.md");
+    let foreign_bytes = "foreign archive created after empty check\n";
+    let injected_archive = archive.clone();
+    let _model_mode = crate::docs_ops::enable_model_classification_for_test();
+    crate::docs_ops::set_organize_test_hook(
+        crate::docs_ops::OrganizeTestPoint::DestinationParentReady,
+        archive_dir,
+        Box::new(move || {
+            fs::write(injected_archive, foreign_bytes).unwrap();
+        }),
+    );
+
+    let result =
+        crate::docs_ops::handle_wiki_organize(&server, docs.to_str().unwrap(), false).await;
+
+    assert_eq!(
+        fs::read_to_string(&archive).unwrap(),
+        foreign_bytes,
+        "archive publication must not overwrite an entry created after its empty check"
+    );
+    assert_eq!(fs::read_to_string(&source).unwrap(), source_bytes);
+    assert_eq!(fs::read_to_string(&destination).unwrap(), predecessor_bytes);
+    let error =
+        result.expect_err("occupied archive must stop before replacing the live predecessor");
+    assert!(error.contains("Failed to rename"), "{error}");
+    assert!(!docs.join("_index.md").exists());
+    assert_eq!(classifier.request_count(), 1);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn archive_rename_failure_preserves_both_source_and_destination() {
     let classifier = MockDocsClassifier::start(
         &model_response(
@@ -1216,8 +1277,7 @@ async fn post_rename_destination_sync_failure_stops_before_source_parent_sync() 
         .unwrap()
         .iter()
         .filter(|event| {
-            event.contains("rename destination parent")
-                || event.contains("rename source parent")
+            event.contains("rename destination parent") || event.contains("rename source parent")
         })
         .cloned()
         .collect::<Vec<_>>();
@@ -1230,7 +1290,13 @@ async fn post_rename_destination_sync_failure_stops_before_source_parent_sync() 
         "source-parent sync must not be attempted before destination-parent durability"
     );
     assert_eq!(fs::read_to_string(&source).unwrap(), source_bytes);
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     assert!(!destination.exists());
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    assert_eq!(
+        fs::read_to_string(&destination).unwrap(),
+        "old destination moved to archive\n"
+    );
     assert_eq!(
         fs::read_to_string(docs.join("archive/a-rename-sync.md")).unwrap(),
         "old destination moved to archive\n"
@@ -1242,11 +1308,7 @@ async fn post_rename_destination_sync_failure_stops_before_source_parent_sync() 
 #[allow(clippy::await_holding_lock)]
 async fn rename_only_archive_syncs_verified_file_bytes_before_namespace_change() {
     let classifier = MockDocsClassifier::start(
-        &model_response(
-            "docs/product/acme",
-            "File Sync Title",
-            "File sync summary",
-        ),
+        &model_response("docs/product/acme", "File Sync Title", "File sync summary"),
         MockFinishReason::named("stop"),
     )
     .await;
@@ -1382,12 +1444,8 @@ async fn successful_same_directory_rename_traces_one_completed_namespace_sync() 
     fs::write(&source, "same-directory bytes\n").unwrap();
     let (_trace_guard, sync_trace) = crate::docs_ops::capture_directory_sync_trace();
 
-    crate::docs_ops::rename_file_for_test(
-        docs.to_str().unwrap(),
-        &source,
-        &destination,
-    )
-    .expect("same-directory rename must complete one namespace sync");
+    crate::docs_ops::rename_file_for_test(docs.to_str().unwrap(), &source, &destination)
+        .expect("same-directory rename must complete one namespace sync");
 
     let rename_events = sync_trace
         .lock()
@@ -1396,6 +1454,7 @@ async fn successful_same_directory_rename_traces_one_completed_namespace_sync() 
         .filter(|event| event.contains("rename "))
         .cloned()
         .collect::<Vec<_>>();
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     assert_eq!(
         rename_events,
         vec![
@@ -1411,8 +1470,141 @@ async fn successful_same_directory_rename_traces_one_completed_namespace_sync() 
             ),
         ]
     );
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    assert_eq!(
+        rename_events,
+        vec![
+            format!("attempt rename source file:{}", source.display()),
+            format!("complete rename source file:{}", source.display()),
+            format!("attempt rename destination parent:{}", directory.display()),
+            format!("complete rename destination parent:{}", directory.display()),
+            format!("attempt rename source parent:{}", directory.display()),
+            format!("complete rename source parent:{}", directory.display()),
+        ]
+    );
     assert!(!source.exists());
-    assert_eq!(fs::read_to_string(destination).unwrap(), "same-directory bytes\n");
+    assert_eq!(
+        fs::read_to_string(destination).unwrap(),
+        "same-directory bytes\n"
+    );
+}
+
+// Exercise the same non-native publication algorithm on the host filesystem.
+// This does not claim execution of another platform's directory-sync policy.
+#[cfg(unix)]
+#[test]
+fn link_archive_publication_preserves_source_when_destination_sync_fails() {
+    let workspace = DocsWorktree::new();
+    let docs = workspace.docs_path().canonicalize().unwrap();
+    let source = docs.join("source.md");
+    let parent = docs.join("archive");
+    fs::create_dir(&parent).unwrap();
+    let destination = parent.join("source.md");
+    fs::write(&source, "recoverable predecessor\n").unwrap();
+    crate::docs_ops::set_organize_test_hook(
+        crate::docs_ops::OrganizeTestPoint::DirectorySyncFailure,
+        parent.clone(),
+        Box::new(|| {}),
+    );
+    let (_guard, trace) = crate::docs_ops::capture_directory_sync_trace();
+    let error = crate::docs_ops::rename_file_with_publication_for_test(
+        docs.to_str().unwrap(),
+        &source,
+        &destination,
+        Some(false),
+    )
+    .expect_err("link publication must stop before unlink on destination sync failure");
+    assert!(
+        error.contains("Failed to sync rename destination parent"),
+        "{error}"
+    );
+    assert!(
+        source.exists(),
+        "source must survive failed destination namespace sync"
+    );
+    assert_eq!(
+        fs::read_to_string(&source).unwrap(),
+        "recoverable predecessor\n"
+    );
+    assert_eq!(
+        fs::read_to_string(&destination).unwrap(),
+        "recoverable predecessor\n"
+    );
+    assert_eq!(
+        *trace.lock().unwrap(),
+        vec![
+            format!("attempt rename source file:{}", source.display()),
+            format!("complete rename source file:{}", source.display()),
+            format!("attempt rename destination parent:{}", parent.display()),
+        ]
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn link_archive_publication_never_replaces_a_late_foreign_destination() {
+    let workspace = DocsWorktree::new();
+    let docs = workspace.docs_path().canonicalize().unwrap();
+    let source = docs.join("source.md");
+    let destination = docs.join("archive.md");
+    fs::write(&source, "predecessor\n").unwrap();
+    let injected = destination.clone();
+    crate::docs_ops::set_organize_test_hook(
+        crate::docs_ops::OrganizeTestPoint::DestinationParentReady,
+        docs.clone(),
+        Box::new(move || {
+            fs::write(injected, "foreign\n").unwrap();
+        }),
+    );
+    let error = crate::docs_ops::rename_file_with_publication_for_test(
+        docs.to_str().unwrap(),
+        &source,
+        &destination,
+        Some(false),
+    )
+    .expect_err("link publication must not replace a foreign archive");
+    assert!(error.contains("Failed to rename"), "{error}");
+    assert_eq!(fs::read_to_string(&source).unwrap(), "predecessor\n");
+    assert_eq!(fs::read_to_string(&destination).unwrap(), "foreign\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn link_archive_publication_syncs_destination_before_unlink_for_both_parent_layouts() {
+    for same_parent in [false, true] {
+        let workspace = DocsWorktree::new();
+        let docs = workspace.docs_path().canonicalize().unwrap();
+        let source = docs.join("source.md");
+        let parent = if same_parent {
+            docs.clone()
+        } else {
+            docs.join("archive")
+        };
+        fs::create_dir_all(&parent).unwrap();
+        let destination = parent.join("destination.md");
+        fs::write(&source, "predecessor\n").unwrap();
+        let (_guard, trace) = crate::docs_ops::capture_directory_sync_trace();
+        crate::docs_ops::rename_file_with_publication_for_test(
+            docs.to_str().unwrap(),
+            &source,
+            &destination,
+            Some(false),
+        )
+        .expect("link publication must complete both namespace syncs");
+        assert!(!source.exists());
+        assert_eq!(fs::read_to_string(&destination).unwrap(), "predecessor\n");
+        assert_eq!(
+            *trace.lock().unwrap(),
+            vec![
+                format!("attempt rename source file:{}", source.display()),
+                format!("complete rename source file:{}", source.display()),
+                format!("attempt rename destination parent:{}", parent.display()),
+                format!("complete rename destination parent:{}", parent.display()),
+                format!("attempt rename source parent:{}", docs.display()),
+                format!("complete rename source parent:{}", docs.display()),
+            ]
+        );
+    }
 }
 
 #[tokio::test]
@@ -1563,13 +1755,8 @@ async fn accepted_category_aliases_fail_closed_before_preview_or_apply() {
             let path = docs.join(format!("engineering/devops/{label}-{dry_run}.md"));
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             let object_id = format!("docs/engineering/devops/{label}-{dry_run}.md");
-            let receipt = valid_bound_receipt(
-                category,
-                "Alias title",
-                "Alias summary",
-                &object_id,
-                3,
-            );
+            let receipt =
+                valid_bound_receipt(category, "Alias title", "Alias summary", &object_id, 3);
             let original = document_with_receipt(
                 "Alias title",
                 "Alias summary",
@@ -1585,7 +1772,10 @@ async fn accepted_category_aliases_fail_closed_before_preview_or_apply() {
                     .await
                     .expect_err("ambiguous accepted-category alias must fail closed");
 
-            assert!(error.contains("ambiguous path spelling"), "{label}: {error}");
+            assert!(
+                error.contains("ambiguous path spelling"),
+                "{label}: {error}"
+            );
             assert_eq!(fs::read_to_string(path).unwrap(), original);
         }
     }
@@ -2032,10 +2222,9 @@ async fn source_newer_conflict_rejects_predecessor_category_alias_before_preview
             .set_times(fs::FileTimes::new().set_modified(std::time::SystemTime::UNIX_EPOCH))
             .unwrap();
 
-        let error =
-            crate::docs_ops::handle_wiki_organize(&server, docs.to_str().unwrap(), dry_run)
-                .await
-                .expect_err("conflict predecessor aliases must fail closed");
+        let error = crate::docs_ops::handle_wiki_organize(&server, docs.to_str().unwrap(), dry_run)
+            .await
+            .expect_err("conflict predecessor aliases must fail closed");
 
         assert!(error.contains("ambiguous path spelling"), "{error}");
         assert_eq!(fs::read_to_string(&source).unwrap(), source_content);
@@ -2222,7 +2411,10 @@ async fn duplicate_prior_receipt_fields_fail_closed_before_preview_or_rewrite() 
                     .await
                     .expect_err("duplicate prior receipt fields must fail closed");
 
-            assert!(error.contains("closed model-invocation-v1"), "{label}: {error}");
+            assert!(
+                error.contains("closed model-invocation-v1"),
+                "{label}: {error}"
+            );
             assert_eq!(fs::read_to_string(path).unwrap(), original, "{label}");
         }
     }
@@ -2340,10 +2532,9 @@ async fn duplicate_raw_receipt_on_conflict_destination_fails_before_mutation() {
         );
         fs::write(&destination, &destination_content).unwrap();
 
-        let error =
-            crate::docs_ops::handle_wiki_organize(&server, docs.to_str().unwrap(), dry_run)
-                .await
-                .expect_err("duplicate destination receipt headers must fail closed");
+        let error = crate::docs_ops::handle_wiki_organize(&server, docs.to_str().unwrap(), dry_run)
+            .await
+            .expect_err("duplicate destination receipt headers must fail closed");
 
         assert!(
             error.contains("duplicate reserved frontmatter field"),
