@@ -683,6 +683,7 @@ pub(crate) mod tests {
             );
         }
 
+        #[cfg(target_os = "linux")]
         fn assert_dispatch_source(&self, server: &MemoryServer, dispatch_id: &str) {
             let leases = server
                 .with_global_store_read(|store| {
@@ -857,10 +858,10 @@ pub(crate) mod tests {
 
     /// Release the bounded fake worker before the older cleanup guard waits
     /// during unwinding, so source-identity assertion failures cannot strand it.
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     struct StaffWorkerReleaseGuard(std::path::PathBuf);
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     impl Drop for StaffWorkerReleaseGuard {
         fn drop(&mut self) {
             let _ = std::fs::write(&self.0, b"release");
@@ -941,7 +942,7 @@ pub(crate) mod tests {
 
     /// End-to-end discriminator for #1814: Staff must reach the one canonical
     /// background launcher, rather than returning a pending-only receipt.
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[allow(clippy::await_holding_lock)] // serializes process-global fake-worker environment through terminal cleanup
     async fn staff_start_launches_fake_worker_through_canonical_receipt_lifecycle() {
@@ -1137,7 +1138,47 @@ pub(crate) mod tests {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "macos")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[allow(clippy::await_holding_lock)] // serializes process-global fake-worker environment
+    async fn staff_start_refuses_codex_without_containment_before_worker_spawn() {
+        let _environment = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let temp_home = tempfile::tempdir().expect("temp tachi home");
+        let temp_runs = tempfile::tempdir().expect("temp canonical run root");
+        let temp_bin = tempfile::tempdir().expect("temp fake worker bin");
+        write_fake_worker(temp_bin.path(), 0);
+        let joined_path =
+            std::env::join_paths(std::iter::once(temp_bin.path().to_path_buf()).chain(
+                std::env::split_paths(std::ffi::OsStr::new("/usr/bin:/bin:/usr/sbin:/sbin")),
+            ))
+            .expect("join fake-worker PATH");
+        let _home = crate::test_support::EnvRestore::set_path("TACHI_HOME", temp_home.path());
+        let _runs = crate::test_support::EnvRestore::set_path("TACHI_RUN_ROOT", temp_runs.path());
+        let _path = crate::test_support::EnvRestore::set_os("PATH", &joined_path);
+        let _git_environment = isolate_staff_repository_environment();
+        let _registry_home = crate::test_support::EnvRestore::set_path("HOME", temp_home.path());
+        let repository = StaffRepositoryFixture::new(temp_home.path());
+        let _cwd = CurrentDirGuard::set(&repository.repo);
+        let temp_worktrees = tempfile::tempdir().expect("isolated Staff worktrees");
+        let _worktrees = crate::test_support::EnvRestore::set_path(
+            "TACHI_WORKTREES_ROOT",
+            temp_worktrees.path(),
+        );
+        let server = test_server();
+
+        let error = staff_start(&server, staff_request("tachi"))
+            .await
+            .expect_err("uncontained Codex Staff run must refuse before worker spawn");
+        assert!(
+            error.contains("managed_backend_containment_unavailable"),
+            "{error}"
+        );
+        assert!(!temp_bin.path().join("codex.pid").exists());
+    }
+
+    #[cfg(target_os = "linux")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[allow(clippy::await_holding_lock)] // serializes process-global fake-worker environment through terminal cleanup
     async fn managed_codex_cancel_confirms_owned_process_termination() {
@@ -2718,7 +2759,7 @@ pub(crate) mod tests {
     /// A child spawn failure is asynchronous: Staff receives the canonical
     /// acceptance first, then the sole run transitions to failed with its
     /// canonical result and cleanup-owned terminal receipt.
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[allow(clippy::await_holding_lock)] // serializes process-global fake-worker environment through terminal cleanup
     async fn staff_start_child_failure_is_asynchronous_and_uses_one_lifecycle() {
