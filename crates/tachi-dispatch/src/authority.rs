@@ -420,6 +420,8 @@ pub struct ProviderQualification {
 ///   is probed pre-spawn ([`probe_provider_version`]); a mismatch, or a version
 ///   we cannot determine, fails closed. Vendor conformance does not carry across
 ///   versions; an unknown version is not a certified version.
+/// * **Any other host OS** — refused. The macOS kill-test cannot certify a Linux
+///   sandbox even when the provider version is identical.
 /// * **`workspace-write`** — not certified. The kill-test observed nothing about
 ///   what that level contains, so a codex workspace-write contract stays
 ///   *advisory* and says so in its receipt.
@@ -479,7 +481,7 @@ pub(crate) fn version_components(raw: &str) -> Option<Vec<u64>> {
     }
 }
 
-/// Look up whether `backend x transport x version` is certified to enforce
+/// Look up whether `backend x transport x version x host OS` is certified to enforce
 /// `level`. `table` is a parameter (not the const) so the qualification policy
 /// itself is testable against synthetic tables.
 ///
@@ -492,9 +494,10 @@ pub(crate) fn version_components(raw: &str) -> Option<Vec<u64>> {
 ///    better error message);
 /// 3. did that run **pass**, and does the receipt actually attest *this*
 ///    provider?
-/// 4. did it exercise **this level**? (codex's receipt covers `read-only` only —
+/// 4. did it run on **this host OS**? A macOS kill-test cannot certify Linux;
+/// 5. did it exercise **this level**? (codex's receipt covers `read-only` only —
 ///    `workspace-write` containment was never probed, so it is never certified);
-/// 5. does it attest the **installed binary**? `version` is what
+/// 6. does it attest the **installed binary**? `version` is what
 ///    [`probe_provider_version`] read out of `--version` moments ago. A version
 ///    the receipt does not name — including `None`, "we could not tell" — fails
 ///    closed. Provider conformance does not carry across vendor versions.
@@ -503,6 +506,7 @@ pub fn qualify_provider<'a>(
     backend: &str,
     transport: TransportKind,
     version: Option<&str>,
+    host_os: &str,
     level: WorkspaceAuthority,
 ) -> Result<&'a ProviderQualification, String> {
     // Starts as the no-entry-at-all reason; each rejected candidate replaces it
@@ -547,6 +551,13 @@ pub fn qualify_provider<'a>(
                 receipt.backend,
                 receipt.transport.as_str(),
                 transport.as_str()
+            );
+            continue;
+        }
+        if receipt.host_os != host_os {
+            last_reason = format!(
+                "the certification receipt '{}' was executed on {}, not the current host OS {host_os}; sandbox evidence is not transferable across operating systems",
+                receipt.id, receipt.host_os
             );
             continue;
         }
@@ -603,6 +614,9 @@ pub struct ContractInputs<'a> {
     /// Provider version, when the caller could determine it. `None` is honest
     /// ignorance and fails closed against version-scoped qualification entries.
     pub backend_version: Option<&'a str>,
+    /// The execution host OS, supplied by the server from `std::env::consts::OS`.
+    /// This is internal host evidence, never a public request field.
+    pub host_os: &'a str,
     pub profile: Option<&'a DispatchProfileDef>,
     /// The caller's explicit `sandbox` argument, if any.
     pub requested_sandbox: Option<&'a str>,
@@ -828,6 +842,7 @@ pub fn compile_effective_contract(
             inputs.backend,
             transport,
             inputs.backend_version,
+            inputs.host_os,
             workspace_authority,
         ) {
             Ok(entry) => {
@@ -978,6 +993,7 @@ mod tests {
             backend,
             transport: "cli",
             backend_version: None,
+            host_os: "macos",
             profile,
             requested_sandbox: None,
             permission_profile: PermissionProfile::Default,
@@ -1480,6 +1496,13 @@ mod tests {
             other => panic!("the certified binary must be Enforced, got {other:?}"),
         }
 
+        let mut different_host = certified_inputs("codex", Some(profile), &skills);
+        different_host.host_os = "linux";
+        let err = compile_effective_contract(&different_host)
+            .expect_err("the macOS receipt cannot certify Linux even at the same version");
+        assert_eq!(err.code(), "provider_not_qualified");
+        assert!(err.to_string().contains("current host OS linux"), "{err}");
+
         // One patch bump → refused, with a receipt that names the gap.
         let mut upgraded = certified_inputs("codex", Some(profile), &skills);
         upgraded.backend_version = Some("0.144.2");
@@ -1594,6 +1617,7 @@ mod tests {
             "codex",
             TransportKind::Cli,
             Some(CERTIFIED_VERSION),
+            "macos",
             WorkspaceAuthority::ReadOnly
         )
         .is_ok());
@@ -1606,6 +1630,7 @@ mod tests {
                     backend,
                     TransportKind::Cli,
                     Some(CERTIFIED_VERSION),
+                    "macos",
                     WorkspaceAuthority::ReadOnly
                 )
                 .is_err(),
@@ -1625,6 +1650,7 @@ mod tests {
                     "codex",
                     transport,
                     Some(CERTIFIED_VERSION),
+                    "macos",
                     WorkspaceAuthority::ReadOnly
                 )
                 .is_err(),
@@ -1643,11 +1669,54 @@ mod tests {
                 "codex",
                 TransportKind::Cli,
                 Some(CERTIFIED_VERSION),
+                "macos",
                 level,
             )
             .expect_err("only the exercised level is certified");
             assert!(err.contains("certifies [read-only]"), "{err}");
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_linux_receipt_cannot_certify_a_macos_dispatch() {
+        const LINUX_RECEIPT: CertificationReceipt = CertificationReceipt {
+            id: "synthetic-linux-receipt",
+            source_file: "synthetic",
+            backend: "codex",
+            transport: TransportKind::Cli,
+            vendor_binary: "codex-cli",
+            vendor_version: CODEX_CLI_RECEIPT.vendor_version,
+            host_os: "linux",
+            host_os_version: "synthetic",
+            kill_test: CODEX_CLI_RECEIPT.kill_test,
+            kill_test_fn: CODEX_CLI_RECEIPT.kill_test_fn,
+            result: CertificationResult::Pass,
+            executed_at: "synthetic",
+            executed_by: "synthetic",
+            duration_secs: "0",
+            executed_on_commit: "synthetic",
+            kill_test_source_blob: "synthetic",
+            covers: &[WorkspaceAuthority::ReadOnly],
+            matrix: CODEX_CLI_RECEIPT.matrix,
+        };
+        const TABLE: &[ProviderQualification] = &[ProviderQualification {
+            backend: "codex",
+            transport: TransportKind::Cli,
+            certification: Certification::KillTested {
+                receipt: &LINUX_RECEIPT,
+            },
+        }];
+        let error = qualify_provider(
+            TABLE,
+            "codex",
+            TransportKind::Cli,
+            Some(CERTIFIED_VERSION),
+            std::env::consts::OS,
+            WorkspaceAuthority::ReadOnly,
+        )
+        .expect_err("a Linux kill-test must not certify this macOS process");
+        assert!(error.contains("linux"), "{error}");
     }
 
     /// An `Unverified` row is never handed back, no matter how well it matches:
@@ -1660,6 +1729,7 @@ mod tests {
             "codex",
             TransportKind::Cli,
             Some("9.9.9"),
+            "macos",
             WorkspaceAuthority::ReadOnly,
         )
         .expect_err("an uncertified row must not qualify");
@@ -1703,6 +1773,7 @@ mod tests {
             "codex",
             TransportKind::Cli,
             Some(CERTIFIED_VERSION),
+            "macos",
             WorkspaceAuthority::ReadOnly,
         )
         .expect_err("a failed kill-test certifies nothing");

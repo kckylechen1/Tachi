@@ -144,6 +144,7 @@ pub(super) fn compile_dispatch_contract_from_mechanics(
         backend: agent_norm,
         transport: harness_transport,
         backend_version,
+        host_os: std::env::consts::OS,
         profile,
         requested_sandbox: params.sandbox.as_deref(),
         permission_profile,
