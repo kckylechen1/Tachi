@@ -151,6 +151,8 @@ def main() -> int:
 
     pinned_refs = [
         "README.md",
+        "README.zh-CN.md",
+        "README.classical.md",
         "scripts/install.sh",
         "docs/INSTALL.md",
         "integrations/openclaw/README.md",
