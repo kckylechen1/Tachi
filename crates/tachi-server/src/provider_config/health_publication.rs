@@ -15,7 +15,10 @@ pub(super) fn fenced_provider_health_recheck(
         &rotations,
         &key_health,
     );
-    if actual.contents != expected.contents {
+    // A coherent already-captured epoch may publish after ciphertext-only
+    // replacement. Its content generation stays old, so listing cannot attach
+    // that epoch's outcomes to the new durable credentials.
+    if actual.authority != expected.authority {
         return Err(
             "Vault ACL, type, rotation, or entry revision changed before publication; retry provider refresh"
                 .to_string(),

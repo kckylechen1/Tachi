@@ -55,7 +55,8 @@ pub enum EnvAction {
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum VaultIntakeAction {
-    /// Discover local credential candidates without unlocking or writing Vault.
+    /// Discover local credential candidates and classify API keys to provider accounts.
+    /// Read-only, but env discovery unlocks Vault to derive canonical keyed fingerprints.
     Discover {
         /// Source host to scan: env or codex. Other hosts are reported as unsupported for this slice.
         #[arg(long)]
@@ -63,9 +64,21 @@ pub enum VaultIntakeAction {
         /// Emit machine-readable JSON.
         #[arg(long)]
         json: bool,
+        /// Read vault password from stdin.
+        #[arg(long)]
+        stdin_password: bool,
+        /// Read vault password from macOS Keychain.
+        #[arg(long)]
+        keychain: bool,
+        /// Read vault password from a local file (first line only).
+        #[arg(long, value_name = "PATH")]
+        password_file: Option<PathBuf>,
+        /// Allow password files readable by group/other (insecure).
+        #[arg(long)]
+        insecure_password_file: bool,
     },
-    /// Plan intake actions for discovered candidates. Read-only: never unlocks the
-    /// Vault, never reads a secret value, and writes nothing unless --write is set.
+    /// Plan provider-account creation, slot binding, and account rotation.
+    /// Read-only; writes only the redacted artifact requested by --write.
     Plan {
         /// Source host to scan: env or codex. Other hosts are reported as unsupported for this slice.
         #[arg(long)]
@@ -77,6 +90,18 @@ pub enum VaultIntakeAction {
         /// Default is stdout only (fully read-only).
         #[arg(long)]
         write: bool,
+        /// Read vault password from stdin.
+        #[arg(long)]
+        stdin_password: bool,
+        /// Read vault password from macOS Keychain.
+        #[arg(long)]
+        keychain: bool,
+        /// Read vault password from a local file (first line only).
+        #[arg(long, value_name = "PATH")]
+        password_file: Option<PathBuf>,
+        /// Allow password files readable by group/other (insecure).
+        #[arg(long)]
+        insecure_password_file: bool,
     },
 }
 

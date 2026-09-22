@@ -164,17 +164,16 @@ pub(super) async fn run_session_action(
             insecure_password_file: _,
         } => {
             if let Some(info) = detect_matching_daemon(app_home, global_db_path).await {
-                if let Ok(out) = crate::cli_client::call_daemon_tool(
+                let out = crate::cli_client::call_daemon_tool_with_profile(
                     &info,
                     "vault_list",
                     serde_json::Map::new(),
                     None,
+                    Some(tachi_hub::ToolProfile::admin()),
                 )
-                .await
-                {
-                    print_vault_list_output(&out)?;
-                    return Ok(());
-                }
+                .await?;
+                print_vault_list_output(&out)?;
+                return Ok(());
             }
 
             let store = open_cli_store_read_only(global_db_path)?;
@@ -182,31 +181,16 @@ pub(super) async fn run_session_action(
                 .vault_get_config()
                 .map_err(|e| format!("vault_get_config: {e}"))?
                 .ok_or("Vault not initialized. Run `tachi vault init` first.")?;
-
-            let entries = store
-                .vault_list_entries()
-                .map_err(|e| format!("vault_list_entries: {e}"))?;
-
-            let mut config = Vec::new();
-            let mut credentials = Vec::new();
-            for entry in entries {
-                let secret_type =
-                    memcore::effective_vault_secret_type(&entry.name, &entry.secret_type);
-                let row = super::output::VaultListRow {
-                    name: entry.name,
-                    secret_type: secret_type.to_string(),
-                    description: entry.description,
-                };
-                if secret_type == memcore::SECRET_TYPE_CONFIG {
-                    config.push(row);
-                } else {
-                    credentials.push(row);
-                }
-            }
-            print!(
-                "{}",
-                super::output::format_vault_list_groups(&config, &credentials)
-            );
+            let payload = crate::vault_ops::build_vault_list_payload(
+                &store,
+                app_home,
+                None,
+                Default::default(),
+                None,
+                None,
+                Default::default(),
+            )?;
+            super::output::print_vault_list_output(&payload.to_string())?;
             Ok(())
         }
         _ => unreachable!("session action router received non-session action"),

@@ -85,6 +85,8 @@ fn push_skipped_alias(report: &mut MaterializeReport, key: String, class: AliasS
 pub struct ProviderMaterializationSnapshot {
     resolved_pools: HashMap<String, Vec<ProviderSecret>>,
     retained_logical_names: HashSet<String>,
+    source_generation: Option<u64>,
+    listed_drops: HashMap<String, AliasSkipClass>,
     report: MaterializeReport,
 }
 
@@ -131,12 +133,15 @@ impl ProviderMaterializationSnapshot {
         let Self {
             resolved_pools,
             retained_logical_names,
+            source_generation,
+            listed_drops,
             report: _,
         } = self;
         llm.publish_provider_secret_pools_with_health_baseline(
             resolved_pools,
             &retained_logical_names,
             health_baseline,
+            (source_generation, listed_drops),
             lane_config_overlay,
             commit_companion_projection,
         )?;
@@ -326,6 +331,10 @@ where
 pub struct DurableVaultLoad {
     pub pools: HashMap<String, Vec<ProviderSecret>>,
     pub availability: VaultSourceAvailability,
+    /// Opaque generation of the durable rows that supplied the
+    /// pools. `None` means callers must not claim generation-current runtime
+    /// bindings.
+    pub source_generation: Option<u64>,
     /// Vault secret names listed in this scan but not admitted to `pools`.
     pub listed_drops: HashMap<String, AliasSkipClass>,
 }
@@ -338,6 +347,7 @@ impl DurableVaultLoad {
         Self {
             pools,
             availability,
+            source_generation: None,
             listed_drops: HashMap::new(),
         }
     }
@@ -413,6 +423,7 @@ where
         provider_keys,
         load.availability,
         &load.listed_drops,
+        load.source_generation,
         None,
     )?;
     let (snapshot, lane_config_overlay, companion_projection) = prepare_runtime_snapshot(snapshot)?;
@@ -446,6 +457,7 @@ where
         provider_keys,
         availability,
         &HashMap::new(),
+        None,
         after_missing_alias_snapshot,
     )?;
     let report = snapshot.report.clone();
@@ -459,6 +471,7 @@ fn prepare_provider_materialization_under_guard<I, S>(
     provider_keys: I,
     availability: VaultSourceAvailability,
     listed_drops: &HashMap<String, AliasSkipClass>,
+    source_generation: Option<u64>,
     mut after_missing_alias_snapshot: Option<Box<dyn FnOnce() + Send>>,
 ) -> Result<ProviderMaterializationSnapshot, String>
 where
@@ -570,6 +583,8 @@ where
     Ok(ProviderMaterializationSnapshot {
         resolved_pools,
         retained_logical_names,
+        source_generation,
+        listed_drops: listed_drops.clone(),
         report,
     })
 }
@@ -1830,6 +1845,7 @@ mod tests {
             Ok(DurableVaultLoad {
                 pools: HashMap::new(),
                 availability: VaultSourceAvailability::Readable,
+                source_generation: None,
                 listed_drops,
             })
         })
@@ -1844,6 +1860,39 @@ mod tests {
                 .contains("absent from a readable Vault"),
             "{:?}",
             report.skipped_aliases
+        );
+    }
+
+    #[test]
+    fn provider_health_board_snapshot_keeps_published_generation_with_bindings() {
+        let _guard = crate::test_support::global_test_lock().lock();
+        let key = "SILICONFLOW_API_KEY";
+        let _env = EnvGuard::set(key, "vault:SILICONFLOW_API_KEY");
+        let llm = LlmClient::new().expect("llm client");
+        let pools = HashMap::from([(
+            key.to_string(),
+            vec![ProviderSecret {
+                key_id: key.to_string(),
+                value: "generation-fixture".to_string(),
+            }],
+        )]);
+
+        materialize_provider_secrets_from_durable_source(&llm, [key], || {
+            Ok(DurableVaultLoad {
+                pools,
+                availability: VaultSourceAvailability::Readable,
+                source_generation: Some(41),
+                listed_drops: HashMap::new(),
+            })
+        })
+        .expect("materialize generation fixture");
+
+        let (_health, bindings, generation, drops) = llm.provider_health_board_snapshot();
+        assert!(drops.is_empty());
+        assert_eq!(generation, Some(41));
+        assert_eq!(
+            bindings.get(key),
+            Some(&std::collections::BTreeSet::from([key.to_string()]))
         );
     }
 }

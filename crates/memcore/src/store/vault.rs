@@ -2,6 +2,7 @@
 
 use crate::db;
 use crate::error::MemoryError;
+use crate::vault::accounts::{AccountCustody, ProviderAccount, ProviderAccountAlias};
 use crate::vault::{
     api_key_pool_member_index, VaultConfig, VaultEntry, VaultKeyHealth, VaultKeyRotation,
     SECRET_TYPE_API_KEY,
@@ -131,6 +132,24 @@ impl VaultTransaction<'_> {
         logical_name: Option<&str>,
     ) -> Result<Vec<VaultKeyHealth>, MemoryError> {
         db::vault_list_key_health(self.connection(), logical_name)
+    }
+
+    pub fn list_provider_accounts(&self) -> Result<Vec<ProviderAccount>, MemoryError> {
+        db::list_provider_accounts(self.connection())
+    }
+
+    pub fn get_account_custody(
+        &self,
+        account_id: &str,
+    ) -> Result<Option<AccountCustody>, MemoryError> {
+        db::get_account_custody(self.connection(), account_id)
+    }
+
+    pub fn list_provider_account_aliases(
+        &self,
+        account_id: &str,
+    ) -> Result<Vec<ProviderAccountAlias>, MemoryError> {
+        db::list_provider_account_aliases(self.connection(), account_id)
     }
 
     pub fn vault_replace_api_key_pool(

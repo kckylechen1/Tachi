@@ -13,7 +13,7 @@ use super::params::VaultGetParams;
 use super::rotation::collect_rotation_entries;
 use super::session::{ensure_vault_unlocked, with_vault_key, with_vault_key_for_provider_refresh};
 
-mod health_snapshot;
+pub(crate) mod health_snapshot;
 use health_snapshot::merged_provider_key_health;
 mod revision;
 pub(crate) use revision::{
