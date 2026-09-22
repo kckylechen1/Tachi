@@ -1813,6 +1813,38 @@ async fn required_postflight_refuses_uncontained_macos_worker_before_spawn() {
     assert!(!marker.exists(), "uncontained worker was spawned");
 }
 
+#[cfg(all(test, target_os = "macos"))]
+#[tokio::test]
+async fn managed_required_postflight_refuses_uncontained_worker_before_spawn() {
+    let marker = std::env::temp_dir().join(format!(
+        "tachi-managed-containment-refusal-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let mut command = Command::new("/usr/bin/touch");
+    command.arg(&marker);
+    let (_sender, receiver) = mpsc::channel(1);
+    let run_dir = std::env::temp_dir();
+    let outcome = run_managed_custom_subprocess_outcome(
+        command,
+        Duration::from_secs(10),
+        receiver,
+        &run_dir,
+        true,
+        None,
+    )
+    .await;
+    assert!(matches!(
+        outcome.liveness,
+        crate::exec_env_postflight::RunnerLivenessEvidence::NoWorkerSpawned
+    ));
+    assert!(matches!(outcome.result, Err(ref error) if error.contains("containment unavailable")));
+    assert!(!marker.exists(), "uncontained managed worker was spawned");
+}
+
 #[cfg(not(unix))]
 pub(crate) async fn terminate_reap_uncontained_child(
     child: &mut tokio::process::Child,
