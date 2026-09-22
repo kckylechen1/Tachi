@@ -583,6 +583,12 @@ async fn managed_backend_metadata(
                             .to_string(),
                     );
                 }
+                tachi_dispatch::BackendAccountProbe::ContainmentUnavailable => {
+                    return Err(
+                        "managed_backend_containment_unavailable: codex prerequisite process containment is unavailable"
+                            .to_string(),
+                    );
+                }
                 tachi_dispatch::BackendAccountProbe::CleanupUnconfirmed => {
                     return Err(
                             "managed_backend_account_unavailable: codex account probe cleanup was not confirmed"

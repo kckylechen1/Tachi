@@ -548,7 +548,7 @@ mod tests {
         assert!(native_acp.execution_backend_metadata.is_some());
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     #[allow(clippy::await_holding_lock)] // serializes the process-global PATH fixture
     async fn managed_codex_prerequisites_refuse_executable_and_account_without_disclosure() {
@@ -677,5 +677,42 @@ mod tests {
                 "raw probe output must not enter managed metadata: {serialized}"
             );
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // serializes the process-global PATH fixture
+    async fn managed_codex_refuses_missing_containment_before_account_spawn() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _serial = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let bin = tempfile::tempdir().expect("owned Codex PATH fixture");
+        let marker = bin.path().join("codex-started");
+        let _path = crate::test_support::EnvRestore::set_path("PATH", bin.path());
+        let _marker = crate::test_support::EnvRestore::set_path("TACHI_FAKE_CODEX_MARKER", &marker);
+        let codex = bin.path().join("codex");
+        std::fs::write(
+            &codex,
+            "#!/bin/sh\n/usr/bin/touch \"$TACHI_FAKE_CODEX_MARKER\"\n",
+        )
+        .expect("write account fixture");
+        let mut permissions = std::fs::metadata(&codex).unwrap().permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&codex, permissions).unwrap();
+
+        let assignment = assignment("codex", "codex", None);
+        let error = super::super::managed_backend_metadata(
+            super::super::ManagedControlOrigin::StaffFacade,
+            &assignment,
+        )
+        .await
+        .expect_err("uncontained prerequisite must refuse before spawn");
+        assert_eq!(
+            error,
+            "managed_backend_containment_unavailable: codex prerequisite process containment is unavailable"
+        );
+        assert!(!marker.exists(), "Codex prerequisite spawned");
     }
 }

@@ -254,6 +254,7 @@ pub enum BackendAccountProbe {
     ExecutableUnavailable,
     AccountUnavailable,
     TimedOut,
+    ContainmentUnavailable,
     CleanupUnconfirmed,
 }
 
@@ -643,6 +644,38 @@ fn run_version_probe_with_timeout(program: &std::path::Path, timeout: Duration) 
         PROBE_CLEANUP_TIMEOUT,
         VERSION_PROBE_CLEANUP_OPS,
         &mut spawn_reader,
+        crate::configure_process_group_escape_containment,
+    )
+}
+
+#[cfg(all(unix, test))]
+fn fixture_containment(command: &mut std::process::Command) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = command;
+        // Only the known test scripts use this route. They do not call setsid;
+        // these tests check cleanup mechanics, not provider certification.
+        true
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        crate::configure_process_group_escape_containment(command)
+    }
+}
+
+#[cfg(all(unix, test))]
+fn run_fixture_version_probe_with_timeout(
+    program: &std::path::Path,
+    timeout: Duration,
+) -> Option<String> {
+    let mut spawn_reader = spawn_version_probe_reader;
+    run_version_probe_with_timeout_and_spawner_and_cleanup(
+        program,
+        timeout,
+        PROBE_CLEANUP_TIMEOUT,
+        VERSION_PROBE_CLEANUP_OPS,
+        &mut spawn_reader,
+        fixture_containment,
     )
 }
 
@@ -658,6 +691,7 @@ fn run_version_probe_with_timeout_and_spawner(
         PROBE_CLEANUP_TIMEOUT,
         VERSION_PROBE_CLEANUP_OPS,
         spawn_reader,
+        fixture_containment,
     )
 }
 
@@ -668,13 +702,14 @@ fn run_version_probe_with_timeout_and_spawner_and_cleanup(
     cleanup_timeout: Duration,
     cleanup_ops: VersionProbeCleanupOps,
     spawn_reader: &mut VersionProbeReaderSpawner<'_>,
+    configure_containment: fn(&mut std::process::Command) -> bool,
 ) -> Option<String> {
     use std::os::unix::process::CommandExt;
 
     let deadline = Instant::now() + timeout;
     let mut command = std::process::Command::new(program);
     command.arg("--version");
-    if !crate::configure_process_group_escape_containment(&mut command) {
+    if !configure_containment(&mut command) {
         return None;
     }
     command
@@ -729,13 +764,26 @@ fn run_account_probe_with_timeout(
     program: &std::path::Path,
     timeout: Duration,
 ) -> BackendAccountProbe {
+    run_account_probe_with_timeout_and_containment(
+        program,
+        timeout,
+        crate::configure_process_group_escape_containment,
+    )
+}
+
+#[cfg(unix)]
+fn run_account_probe_with_timeout_and_containment(
+    program: &std::path::Path,
+    timeout: Duration,
+    configure_containment: fn(&mut std::process::Command) -> bool,
+) -> BackendAccountProbe {
     use std::os::unix::process::CommandExt;
 
     let deadline = Instant::now() + timeout;
     let mut command = std::process::Command::new(program);
     command.args(["login", "status"]);
-    if !crate::configure_process_group_escape_containment(&mut command) {
-        return BackendAccountProbe::CleanupUnconfirmed;
+    if !configure_containment(&mut command) {
+        return BackendAccountProbe::ContainmentUnavailable;
     }
     command
         .stdin(Stdio::null())
@@ -795,7 +843,7 @@ fn run_account_probe_with_timeout(
     _program: &std::path::Path,
     _timeout: Duration,
 ) -> BackendAccountProbe {
-    BackendAccountProbe::CleanupUnconfirmed
+    BackendAccountProbe::ContainmentUnavailable
 }
 
 /// First `program` on `PATH` — the same resolution `Command::new("codex")` does,
@@ -818,6 +866,7 @@ mod tests {
     struct VersionProbeFixture {
         root: PathBuf,
         program: PathBuf,
+        _serial: std::sync::MutexGuard<'static, ()>,
     }
 
     #[cfg(unix)]
@@ -826,7 +875,15 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             use std::sync::atomic::{AtomicU64, Ordering};
 
+            static FIXTURE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
             static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
+            // Several fixtures spin while testing deadlines and cleanup. Keep
+            // those probes separate so one fixture cannot consume another's
+            // one-second observation window under the parallel test harness.
+            let serial = FIXTURE_LOCK
+                .get_or_init(|| Mutex::new(()))
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             let root = std::env::temp_dir().join(format!(
                 "tachi-version-probe-{}-{}",
                 std::process::id(),
@@ -841,7 +898,11 @@ mod tests {
             permissions.set_mode(0o700);
             std::fs::set_permissions(&program, permissions)
                 .expect("make version probe fixture executable");
-            Self { root, program }
+            Self {
+                root,
+                program,
+                _serial: serial,
+            }
         }
 
         fn pid_path(&self) -> PathBuf {
@@ -1086,9 +1147,26 @@ mod tests {
             "#!/bin/sh\nprintf 'fixture-stdout-secret\\n'\nprintf 'codex-cli 0.144.1+fixture-stderr-secret\\n' >&2\n",
         );
         assert_eq!(
-            run_version_probe_with_timeout(&fixture.program, Duration::from_secs(1)).as_deref(),
+            run_fixture_version_probe_with_timeout(&fixture.program, Duration::from_secs(1))
+                .as_deref(),
             Some("0.144.1"),
             "raw stdout/stderr labels must not survive the probe boundary"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn production_version_probe_refuses_before_spawn_without_containment() {
+        let fixture = VersionProbeFixture::new(
+            "#!/bin/sh\nprintf '%s\\n' \"$$\" > \"$0.pid\"\nprintf 'codex-cli 0.144.1\\n'\n",
+        );
+        assert_eq!(
+            run_version_probe_with_timeout(&fixture.program, Duration::from_secs(1)),
+            None,
+        );
+        assert!(
+            !fixture.pid_path().exists(),
+            "uncontained version probe spawned"
         );
     }
 
@@ -1101,7 +1179,8 @@ mod tests {
                 "#!/bin/sh\nif IFS= read -r daemon_input; then exit 91; fi\nprintf 'codex-cli 0.144.1\\n'\n",
             );
             assert_eq!(
-                run_version_probe_with_timeout(&fixture.program, Duration::from_secs(1)).as_deref(),
+                run_fixture_version_probe_with_timeout(&fixture.program, Duration::from_secs(1))
+                    .as_deref(),
                 Some("0.144.1"),
                 "the version probe must observe EOF instead of readable parent stdin"
             );
@@ -1145,9 +1224,19 @@ mod tests {
             std::fs::hard_link(&fixture.program, &codex).expect("install account probe fixture");
             std::env::set_var("PATH", &fixture.root);
             assert_eq!(
-                probe_codex_account(Duration::from_secs(1)),
+                run_account_probe_with_timeout_and_containment(
+                    &codex,
+                    Duration::from_secs(1),
+                    fixture_containment,
+                ),
                 BackendAccountProbe::Available,
                 "the account probe must observe EOF instead of readable parent stdin"
+            );
+            #[cfg(target_os = "macos")]
+            assert_eq!(
+                probe_codex_account(Duration::from_secs(1)),
+                BackendAccountProbe::ContainmentUnavailable,
+                "the production probe must refuse before spawn without containment"
             );
             return;
         }
@@ -1240,6 +1329,7 @@ mod tests {
                 Duration::from_millis(100),
                 ops,
                 &mut spawn_reader,
+                fixture_containment,
             ),
             None
         );
@@ -1348,7 +1438,7 @@ mod tests {
             "#!/bin/sh\nprintf '%s\\n' \"$$\" > \"$0.pid\"\nwhile :; do :; done\n",
         );
         assert_eq!(
-            run_version_probe_with_timeout(&fixture.program, Duration::from_millis(500)),
+            run_fixture_version_probe_with_timeout(&fixture.program, Duration::from_millis(500)),
             None,
             "a hanging version probe must fail closed"
         );
@@ -1365,7 +1455,8 @@ mod tests {
         );
         let started = Instant::now();
         assert_eq!(
-            run_version_probe_with_timeout(&fixture.program, Duration::from_secs(1)).as_deref(),
+            run_fixture_version_probe_with_timeout(&fixture.program, Duration::from_secs(1))
+                .as_deref(),
             Some("0.144.1"),
             "a root exit must close inherited pipes by terminating the owned group"
         );
@@ -1462,7 +1553,7 @@ mod tests {
             "#!/bin/sh\nprintf 'codex-cli 0.144.1\\n'\ni=0\nwhile [ \"$i\" -lt 5000 ]; do printf x; i=$((i + 1)); done\n",
         );
         assert_eq!(
-            run_version_probe_with_timeout(&fixture.program, Duration::from_secs(1)),
+            run_fixture_version_probe_with_timeout(&fixture.program, Duration::from_secs(1)),
             None,
             "a valid version prefix must not bypass the output bound"
         );
@@ -1475,7 +1566,7 @@ mod tests {
             "#!/bin/sh\nprintf 'codex-cli 0.144.1\\n'\ni=0\nwhile [ \"$i\" -lt 5000 ]; do printf x >&2; i=$((i + 1)); done\n",
         );
         assert_eq!(
-            run_version_probe_with_timeout(&fixture.program, Duration::from_secs(1)),
+            run_fixture_version_probe_with_timeout(&fixture.program, Duration::from_secs(1)),
             None,
             "stderr overflow must fail closed independently of valid stdout"
         );
