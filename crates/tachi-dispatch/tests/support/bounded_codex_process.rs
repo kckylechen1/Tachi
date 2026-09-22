@@ -176,7 +176,7 @@ pub fn run(mut command: Command, timeout: Duration, cap: usize) -> io::Result<Ob
     })
 }
 
-#[cfg(all(test, target_os = "macos"))]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
     fn shell(script: &str) -> Command {
@@ -226,5 +226,30 @@ mod tests {
             assert!(result.stdout.len() <= 4096);
             assert!(result.stderr.len() <= 4096);
         }
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod macos_tests {
+    use super::*;
+
+    #[test]
+    fn bounded_probe_refuses_before_spawning_without_containment() {
+        let marker = std::env::temp_dir().join(format!(
+            "tachi-codex-bounded-refusal-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut command = Command::new("/usr/bin/touch");
+        command.arg(&marker);
+        let error = match run(command, Duration::from_secs(2), 1024) {
+            Ok(_) => panic!("uncontained probe was launched"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("containment unavailable"));
+        assert!(!marker.exists());
     }
 }

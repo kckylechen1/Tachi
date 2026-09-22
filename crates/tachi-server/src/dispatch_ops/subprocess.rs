@@ -335,6 +335,12 @@ pub(super) async fn run_agent_subprocess_with_liveness(
 ) -> DispatchRunOutcome {
     let escape_contained =
         require_postflight_containment && configure_required_postflight_containment(&mut cmd);
+    if require_postflight_containment && !escape_contained {
+        return DispatchRunOutcome::failure(
+            "required postflight process containment unavailable",
+            crate::exec_env_postflight::RunnerLivenessEvidence::NoWorkerSpawned,
+        );
+    }
     if let Some(authority) = cwd_authority.as_ref() {
         if let Err(error) = authority.anchor_command_cwd(cmd.as_std_mut()) {
             return DispatchRunOutcome::failure(
@@ -396,6 +402,11 @@ pub(super) async fn run_managed_custom_subprocess_outcome(
         pause_managed_pre_spawn();
         if let Ok(command) = cancellations.try_recv() {
             return finish_pre_spawn_cancellation(command);
+        }
+        if require_postflight_containment && !escape_contained {
+            return ManagedSubprocessOutcome::plain(Err(
+                "required postflight process containment unavailable".to_string(),
+            ));
         }
         cmd.stdin(std::process::Stdio::null());
         cmd.stdout(std::process::Stdio::piped());
@@ -1578,6 +1589,12 @@ pub(super) async fn run_opencode_sop_subprocess_with_liveness(
     };
     let escape_contained =
         require_postflight_containment && configure_required_postflight_containment(&mut cmd);
+    if require_postflight_containment && !escape_contained {
+        return DispatchRunOutcome::failure(
+            "required postflight process containment unavailable",
+            crate::exec_env_postflight::RunnerLivenessEvidence::NoWorkerSpawned,
+        );
+    }
     if let Some(authority) = cwd_authority.as_ref() {
         if let Err(error) = authority.anchor_command_cwd(cmd.as_std_mut()) {
             return DispatchRunOutcome::failure(
@@ -1774,39 +1791,26 @@ pub(crate) fn configure_required_postflight_containment(cmd: &mut Command) -> bo
 }
 
 #[cfg(all(test, target_os = "macos"))]
-#[test]
-fn required_postflight_containment_child_cannot_setsid() {
-    if std::env::var_os("TACHI_TEST_ATTEMPT_SETSID").is_none() {
-        return;
-    }
-    // SAFETY: setsid takes no pointers. The required-postflight sandbox must
-    // deny this process-control operation with EPERM.
-    let result = unsafe { libc::setsid() };
-    assert_eq!(result, -1, "required worker unexpectedly escaped its group");
-    assert_eq!(
-        std::io::Error::last_os_error().raw_os_error(),
-        Some(libc::EPERM)
-    );
-}
-
-#[cfg(all(test, target_os = "macos"))]
 #[tokio::test]
-async fn required_postflight_kernel_containment_discriminates_setsid_escape() {
-    let mut command = Command::new(std::env::current_exe().expect("current test binary"));
-    command
-        .arg("required_postflight_containment_child_cannot_setsid")
-        .arg("--nocapture")
-        .env("TACHI_TEST_ATTEMPT_SETSID", "1");
+async fn required_postflight_refuses_uncontained_macos_worker_before_spawn() {
+    let marker = std::env::temp_dir().join(format!(
+        "tachi-required-postflight-refusal-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let mut command = Command::new("/usr/bin/touch");
+    command.arg(&marker);
     let outcome =
         run_agent_subprocess_with_liveness(command, Duration::from_secs(10), true, None).await;
-    let result = outcome.result.expect("contained child test must pass");
-    assert_eq!(result.exit_code, Some(0));
     assert!(matches!(
         outcome.liveness,
-        crate::exec_env_postflight::RunnerLivenessEvidence::ConfirmedReaped {
-            proof: "kernel_denied_process_group_escape_and_owned_group_absent"
-        }
+        crate::exec_env_postflight::RunnerLivenessEvidence::NoWorkerSpawned
     ));
+    assert!(matches!(outcome.result, Err(ref error) if error.contains("containment unavailable")));
+    assert!(!marker.exists(), "uncontained worker was spawned");
 }
 
 #[cfg(not(unix))]

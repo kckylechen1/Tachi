@@ -7,42 +7,15 @@
 /// Prevent the command and its descendants from using process-control syscalls
 /// to escape the POSIX process group owned by the caller.
 ///
-/// Callers configure stdio and `process_group(0)` after this function. On macOS
-/// the command is wrapped with `sandbox-exec`; on supported Linux ABIs a
-/// seccomp filter inherited across fork/exec denies group/session escape.
+/// Callers configure stdio and `process_group(0)` after this function. On
+/// supported Linux ABIs a seccomp filter inherited across fork/exec denies
+/// group/session escape. macOS currently has no verified containment route.
 #[cfg(target_os = "macos")]
-pub fn configure_process_group_escape_containment(command: &mut std::process::Command) -> bool {
-    const PROFILE: &str = "(version 1)(allow default)(deny process-info-setcontrol)";
-    let program = command.get_program().to_os_string();
-    let args = command
-        .get_args()
-        .map(std::ffi::OsStr::to_os_string)
-        .collect::<Vec<_>>();
-    let env = command
-        .get_envs()
-        .map(|(name, value)| {
-            (
-                name.to_os_string(),
-                value.map(std::ffi::OsStr::to_os_string),
-            )
-        })
-        .collect::<Vec<_>>();
-    let cwd = command.get_current_dir().map(std::path::Path::to_path_buf);
-
-    let mut wrapped = std::process::Command::new("/usr/bin/sandbox-exec");
-    wrapped.arg("-p").arg(PROFILE).arg(program).args(args);
-    if let Some(cwd) = cwd {
-        wrapped.current_dir(cwd);
-    }
-    for (name, value) in env {
-        if let Some(value) = value {
-            wrapped.env(name, value);
-        } else {
-            wrapped.env_remove(name);
-        }
-    }
-    *command = wrapped;
-    true
+pub fn configure_process_group_escape_containment(_command: &mut std::process::Command) -> bool {
+    // The former `(deny process-info-setcontrol)` sandbox-exec profile did not
+    // deny setsid() in a nonleader child. A process-group absence probe cannot
+    // prove descendant termination when that child can leave the group.
+    false
 }
 
 #[cfg(all(
@@ -169,4 +142,46 @@ pub fn configure_process_group_escape_containment(_command: &mut std::process::C
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 pub fn configure_process_group_escape_containment(_command: &mut std::process::Command) -> bool {
     false
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::*;
+    use std::os::unix::process::CommandExt;
+
+    #[test]
+    fn macos_containment_refuses_a_nonleader_setsid_escape() {
+        if std::env::var_os("TACHI_CONTAINMENT_CHILD_PROBE").is_some() {
+            // SAFETY: the forked child calls only async-signal-safe syscalls,
+            // then exits immediately. A successful setsid is the regression.
+            let child = unsafe { libc::fork() };
+            assert!(child >= 0, "fork failed");
+            if child == 0 {
+                let escaped = unsafe { libc::setsid() } >= 0;
+                unsafe { libc::_exit(if escaped { 42 } else { 0 }) };
+            }
+            let mut status = 0;
+            assert_eq!(unsafe { libc::waitpid(child, &mut status, 0) }, child);
+            assert_eq!(status, 0, "nonleader child escaped its process group");
+            return;
+        }
+
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "containment::tests::macos_containment_refuses_a_nonleader_setsid_escape",
+                "--nocapture",
+            ])
+            .env("TACHI_CONTAINMENT_CHILD_PROBE", "1");
+        if !configure_process_group_escape_containment(&mut command) {
+            return; // No claimed containment means no uncontained spawn.
+        }
+        let output = command.process_group(0).output().unwrap();
+        assert!(
+            output.status.success(),
+            "claimed containment allowed setsid: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
 }
