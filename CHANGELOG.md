@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Quick Navigation
 
 - [Unreleased](#unreleased)
+- [1.9.2](#192---2026-08-05) — wiki legacy adoption, contract-tests carve-out, pooled-client proxy fix
+- [1.9.1](#191---2026-08-05) — portable snapshot import, receipt content binding, distill revival, CI honesty gates
 - [1.9.0](#190---2026-07-11) — portable runtime, execution environments, precedent memory, and reliability hardening
 - [1.8.0](#180---2026-07-10) — Tachi crate branding, action-level profiles, recall discrimination, CI-state ingest
 - [1.7.0](#170---2026-07-08) — portable memory kernel, vector auditability, and dispatch canon
@@ -88,6 +90,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Security
 
 - Recursive-dispatch depth gate v1 against accidental runaway dispatch, and bounded untrusted dispatch prompt inputs (#1251).
+
+## [1.9.2] - 2026-08-05
+
+Local-fallback release. Mirrored from the GitHub release notes for this tag.
+
+### Added
+
+- **Wiki legacy adoption**: `tachi wiki corpus --adopt-legacy` bootstraps-and-adopts the legacy wiki corpus; legacy usage counters are loaded verbatim instead of zeroed, adoption reads refuse before touching legacy state, and failure cleanup is scoped to run-created files. The path carries unit tests plus an end-to-end discriminator (#1624).
+
+### Fixed
+
+- Wiki search refuses loudly when it resolves zero stores; named lookup does not shadow the refusal, and stale-search assertions are non-vacuous (#1624).
+- The pooled LLM client no longer honours ambient proxies, closing a chat-lanes flake and a credential-exposure risk (#1621).
+
+### Changed
+
+- 87 contract/census tests moved to the new `tachi-contract-tests` workspace crate; the known-reds and census gates were widened to it, and dead-code waves removed superseded seams and the zero-test bin target (#1610).
+
+## [1.9.1] - 2026-08-05
+
+Local-fallback release (Actions exhausted). Mirrored from the GitHub release notes for this tag.
+
+### Added
+
+- Portable snapshot import (#1607), released alongside the `portable-kernel-v1.9.1` tag.
+- Gitleaks CI gate covering the rerouted pull-request lanes (#1578, #1553).
+
+### Changed
+
+- Arena retirement wave (#1319 D2/E2): the `tachi_arena` facade and mission ledger were deleted, generated runtime Staff guidance was corrected, and the final staffing projection landed with dead-code cleanup and a contraction census.
+
+### Fixed
+
+- Receipt content binding (#1558): wiki receipt attach is revision-guarded against concurrent writers, with `Cargo.lock` regenerated for the tachi-llm blake2 edge.
+- Daily-distill revival (#1605): stale-close is refused on undecidable metadata probe errors, the registry re-check/delete race is closed under the lock, and the ordinary close path deletes the exact registry row.
+- Known-reds honesty (#1278): the roster was retired once both `board_first` survivors went green; the gate script is pinned to C collation and accepts an intentionally-empty roster.
 
 ## [1.9.0] - 2026-07-11
 

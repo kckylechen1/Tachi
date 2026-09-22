@@ -39,7 +39,7 @@ Named after the Tachikoma from *Ghost in the Shell*: agents that evolve through 
 
 ### Current Release
 
-Current release: `v1.9.0`.
+Current release: `v1.9.2`.
 
 This line makes Tachi's project-cycle direction explicit:
 
