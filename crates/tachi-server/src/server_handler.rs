@@ -343,6 +343,10 @@ fn narrow_gated_action_schemas(
                 }
             }
             "tachi_agent_eval" => {
+                if profile == tachi_hub::ToolProfile::standard() {
+                    project_standard_eval_schema(tool);
+                    continue;
+                }
                 seed_action_enum_property(tool, tachi_params::TACHI_AGENT_EVAL_ACTIONS);
                 let allowed: Vec<&str> = tachi_params::TACHI_AGENT_EVAL_ACTIONS
                     .iter()
@@ -384,6 +388,100 @@ fn narrow_gated_action_schemas(
             _ => {}
         }
     }
+}
+
+/// Expose only the admitted native evaluation loop and its reachable payloads.
+fn project_standard_eval_schema(tool: &mut rmcp::model::Tool) {
+    const ACTIONS: &[&str] = &[
+        "register",
+        "observe",
+        "adjudicate",
+        "get",
+        "candidate_projection",
+    ];
+    const FIELDS: &[&str] = &[
+        "action",
+        "register",
+        "observe",
+        "adjudicate",
+        "get",
+        "candidate_projection",
+        "limit",
+    ];
+    let mut schema = (*tool.input_schema).clone();
+    let Some(properties) = schema
+        .get_mut("properties")
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        schema.clear();
+        schema.insert("not".to_string(), serde_json::json!({}));
+        tool.input_schema = std::sync::Arc::new(schema);
+        return;
+    };
+    properties.retain(|name, _| FIELDS.contains(&name.as_str()));
+    if !properties.contains_key("action") {
+        schema.clear();
+        schema.insert("not".to_string(), serde_json::json!({}));
+        tool.input_schema = std::sync::Arc::new(schema);
+        return;
+    }
+    properties.insert("action".to_string(), serde_json::json!({
+        "type": "string",
+        "enum": ACTIONS,
+        "description": "Native evaluation memory: register, observe, adjudicate, get, or read candidate_projection."
+    }));
+    if let Some(required) = schema
+        .get_mut("required")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        required.retain(|name| name.as_str().is_some_and(|name| FIELDS.contains(&name)));
+    }
+
+    fn refs(value: &serde_json::Value, found: &mut std::collections::BTreeSet<String>) {
+        match value {
+            serde_json::Value::Object(object) => {
+                if let Some(name) = object
+                    .get("$ref")
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(|reference| reference.strip_prefix("#/$defs/"))
+                {
+                    found.insert(name.to_string());
+                }
+                for child in object.values() {
+                    refs(child, found);
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for child in items {
+                    refs(child, found);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut reachable = std::collections::BTreeSet::new();
+    refs(&schema["properties"], &mut reachable);
+    if let Some(definitions) = schema.get("$defs").and_then(serde_json::Value::as_object) {
+        let mut pending = reachable.iter().cloned().collect::<Vec<_>>();
+        while let Some(name) = pending.pop() {
+            if let Some(definition) = definitions.get(&name) {
+                let mut nested = std::collections::BTreeSet::new();
+                refs(definition, &mut nested);
+                for reference in nested {
+                    if reachable.insert(reference.clone()) {
+                        pending.push(reference);
+                    }
+                }
+            }
+        }
+    }
+    if let Some(definitions) = schema
+        .get_mut("$defs")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        definitions.retain(|name, _| reachable.contains(name));
+    }
+    tool.input_schema = std::sync::Arc::new(schema);
 }
 
 fn hide_wiki_write_properties(tool: &mut rmcp::model::Tool) {

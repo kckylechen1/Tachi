@@ -6,6 +6,7 @@ use serde_json::Value;
 use std::path::Path;
 
 mod attachment;
+pub(crate) mod candidate_projection;
 mod fixture;
 mod intervention;
 mod live;
@@ -94,6 +95,13 @@ pub(crate) async fn handle_agent_eval(
             params.projection.unwrap_or_default(),
             params.limit,
         ),
+        "candidate_projection" => {
+            let payload = params.candidate_projection.ok_or_else(|| {
+                "candidate_projection payload is required for action='candidate_projection'"
+                    .to_string()
+            })?;
+            self::candidate_projection::handle_candidate_projection(server, payload, params.limit)
+        }
         "attach_session" => self::attachment::handle_attach_session(server, params),
         "get_attachment" => self::attachment::handle_get_attachment(server, params),
         // tachi#1678 attached-session receipt spine: events, connection
@@ -195,7 +203,7 @@ pub(crate) async fn handle_agent_eval(
         }
         _ => Err(format!(
             "Invalid eval action '{}'. Use aggregate, aggregate_live, telemetry, perf, \
-             register, observe, adjudicate, get, route_projection, attach_session, \
+             register, observe, adjudicate, get, route_projection, candidate_projection, attach_session, \
              get_attachment, ingest_session_event, get_session_state, mark_session_connection, \
              reconnect_session, advertise_session_capabilities, request_intervention, or \
              record_intervention_result.",

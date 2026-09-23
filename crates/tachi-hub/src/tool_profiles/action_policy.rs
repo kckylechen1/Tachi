@@ -109,6 +109,17 @@ pub fn facade_action_allowed(
 ) -> bool {
     let profile = profile.unwrap_or_else(default_tool_profile);
     let action = action.map(str::trim).filter(|a| !a.is_empty());
+    if tool_name == "tachi_agent_eval" && profile.uses_standard_allow_list() && !profile.is_admin()
+    {
+        // This curated surface is evaluation memory, not managed execution or
+        // operator replay. Future actions require explicit admission here.
+        return action.is_some_and(|action| {
+            matches!(
+                action.to_ascii_lowercase().as_str(),
+                "register" | "observe" | "adjudicate" | "get" | "candidate_projection"
+            )
+        });
+    }
     if tool_name == "tachi_agent_eval"
         && action.is_some_and(|action| {
             matches!(
@@ -922,6 +933,52 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn native_eval_standard_surface_is_a_closed_memory_loop() {
+        for profile in [None, Some(ToolProfile::standard())] {
+            for action in [
+                "register",
+                "observe",
+                "adjudicate",
+                "get",
+                "candidate_projection",
+            ] {
+                assert!(facade_action_allowed(
+                    "tachi_agent_eval",
+                    Some(action),
+                    profile
+                ));
+                assert!(!facade_action_allowed(
+                    "tachi_agent_eval",
+                    Some(action),
+                    Some(ToolProfile::delegate())
+                ));
+            }
+            for action in [
+                None,
+                Some(""),
+                Some(" "),
+                Some("attach_session"),
+                Some("get_attachment"),
+                Some("aggregate"),
+                Some("aggregate_live"),
+                Some("telemetry"),
+                Some("perf"),
+                Some("route_projection"),
+                Some("start"),
+                Some("cancel"),
+                Some("new_future_action"),
+            ] {
+                assert!(!facade_action_allowed("tachi_agent_eval", action, profile));
+            }
+        }
+        assert!(facade_action_allowed(
+            "tachi_agent_eval",
+            Some(" CANDIDATE_PROJECTION "),
+            Some(ToolProfile::standard())
+        ));
+    }
+
     #[test]
     fn f1733_attachment_actions_are_coordinate_or_admin_only() {
         for action in ["attach_session", "get_attachment"] {

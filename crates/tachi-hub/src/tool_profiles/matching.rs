@@ -101,15 +101,21 @@ pub fn tool_visible(
         return true;
     }
 
-    // Every ordinary profile discovers the same five product facades. Legacy
-    // observe/remember/coordinate selectors preserve their narrower
-    // action-level permissions; bundle membership must not remove Staff/GH
-    // from discovery or reintroduce diagnostics. Only explicit Ops reaches
-    // the retained bundle-shaped compatibility surface below.
+    // Ordinary profiles share the five product facades. Lead alone also
+    // discovers the bounded native eval memory loop; legacy observe/remember/
+    // coordinate selectors preserve their five-facade surface and narrower
+    // action policy. Only explicit Ops reaches the bundle-shaped compatibility
+    // surface below.
     if profile.uses_standard_allow_list()
         || profile.uses_delegate_allow_list()
         || !profile.allows(ToolBundle::Operate)
     {
+        // The native eval memory loop is an explicit Lead addition. Other
+        // non-Ops selectors sharing the five-facade list retain their prior
+        // discovery surface (notably coordinate and observe).
+        if tool_name == "tachi_agent_eval" && !profile.uses_standard_allow_list() {
+            return false;
+        }
         let patterns = if profile.uses_delegate_allow_list() {
             DELEGATE_MINIMAL_TOOL_PATTERNS
         } else {

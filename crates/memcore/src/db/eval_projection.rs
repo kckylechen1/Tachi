@@ -871,6 +871,10 @@ mod tests {
                 requested_profile: Some("wizard_sonnet".to_string()),
                 requested_model: Some("anthropic/claude-sonnet".to_string()),
                 requested_agent: Some("claude".to_string()),
+                // v34 fields: this fixture projects the unified read spine,
+                // which does not consume them; omitted (NULL).
+                requested_task_type: None,
+                requested_role: None,
             },
         )
         .unwrap();

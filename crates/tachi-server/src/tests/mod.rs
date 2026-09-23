@@ -235,6 +235,7 @@ const TEMPLATE_IDENTITY_SOURCE_BLOBS: &[&[u8]] = &[
     embedded_template_source!("/../memcore/src/db/migrations/idless_identity.rs"),
     embedded_template_source!("/../memcore/src/db/migrations/legacy_columns.rs"),
     embedded_template_source!("/../memcore/src/db/migrations/mirror_eval.rs"),
+    embedded_template_source!("/../memcore/src/db/migrations/mirror_eval_identity.rs"),
     embedded_template_source!("/../memcore/src/db/migrations/pack_retire.rs"),
     embedded_template_source!("/../memcore/src/db/migrations/sentinel.rs"),
     embedded_template_source!("/../memcore/src/db/migrations/session_claims_identity.rs"),
@@ -908,6 +909,10 @@ fn template_cache_fingerprint_tracks_verified_admission_schema_inputs() {
         (
             "CurrentTruth migration",
             embedded_template_source!("/../memcore/src/db/migrations/current_truth.rs"),
+        ),
+        (
+            "mirror eval v39 migration",
+            embedded_template_source!("/../memcore/src/db/migrations/mirror_eval_identity.rs"),
         ),
     ];
     for (label, source) in schema_sources {

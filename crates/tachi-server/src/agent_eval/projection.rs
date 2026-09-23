@@ -520,7 +520,15 @@ mod tests {
             "route-projection-{}.sqlite",
             uuid::Uuid::new_v4()
         ));
-        MemoryServer::new(db_path, None).expect("test memory server")
+        let server = MemoryServer::new(db_path, None).expect("test memory server");
+        // `route_projection` is an operator reporting action: the standard
+        // profile's curated eval-facade gate denies it by design (the hub
+        // test pins that denial). These fixtures exercise the operator read
+        // surface, so they run under the explicit observe profile that the
+        // same gate admits — the standard denial itself is untouched and
+        // separately pinned in tachi-hub.
+        server.set_tool_profile(Some(tachi_hub::ToolProfile::observe()));
+        server
     }
 
     fn eval_params(

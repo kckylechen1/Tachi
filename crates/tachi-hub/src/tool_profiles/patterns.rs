@@ -93,6 +93,7 @@ pub const OPERATE_TOOL_PATTERNS: &[&str] = &[
 pub const STANDARD_MINIMAL_TOOL_PATTERNS: &[&str] = &[
     "tachi_memory",
     "tachi_task",
+    "tachi_agent_eval",
     "tachi_staff",
     "tachi_gh",
     "tachi_a2a",

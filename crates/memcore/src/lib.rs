@@ -217,10 +217,10 @@ pub use db::harness_session_interventions::{
 #[cfg(feature = "admin")]
 pub use db::mirror_eval::{
     append_mirror_eval_adjudication, get_mirror_eval_run_view, get_observation, get_run_by_id,
-    get_run_by_native_child_id, list_adjudications_for_run, record_mirror_eval_observation,
-    register_mirror_eval_run, run_is_adjudicated, MirrorEvalAdjudication, MirrorEvalObservation,
-    MirrorEvalRun, MirrorEvalRunView, NewMirrorEvalAdjudication, NewMirrorEvalObservation,
-    NewMirrorEvalRun,
+    get_run_by_native_child_id, list_adjudications_for_run, list_mirror_eval_run_views,
+    record_mirror_eval_observation, register_mirror_eval_run, run_is_adjudicated,
+    MirrorEvalAdjudication, MirrorEvalObservation, MirrorEvalRun, MirrorEvalRunView,
+    NewMirrorEvalAdjudication, NewMirrorEvalObservation, NewMirrorEvalRun,
 };
 /// tachi#1643 durable outbox (#1630 A1). Ungated: the outbox is portable
 /// surface, so a `StoreProfile::PortableKernel` database carries it and a

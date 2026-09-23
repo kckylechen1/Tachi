@@ -530,6 +530,12 @@ fn changing_live_route_policy_does_not_change_the_replay_of_old_rows() {
 #[tokio::test]
 async fn the_live_surface_reports_recorded_revisions_without_applying_the_live_one() {
     let server = test_server();
+    // `route_projection` is an operator reporting action the standard gate
+    // denies by design; this test reads that operator surface (its seeding
+    // goes through direct store writes, no gated facade actions). Run under
+    // the explicit observe profile that gate admits — the denial itself
+    // stays pinned in tachi-hub.
+    server.set_tool_profile(Some(tachi_hub::ToolProfile::observe()));
     let eligible = eligible_profiles();
     let candidate_set = vec![eligible[0].clone(), eligible[1].clone()];
     for days_ago in 1..=3 {

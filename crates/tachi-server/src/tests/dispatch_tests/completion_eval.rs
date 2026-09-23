@@ -8,6 +8,7 @@ use rmcp::handler::server::wrapper::Parameters;
 use serde_json::{json, Value};
 
 mod aggregate;
+mod candidate_projection;
 mod completion_record;
 mod flow_dispatch;
 mod mirror_eval;

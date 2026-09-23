@@ -184,6 +184,41 @@ pub(crate) fn validate_harness_session_attachments_schema(
     Ok(())
 }
 
+/// Four nullable product-only mirror-eval identity fields; legacy values remain NULL.
+pub(crate) fn install_mirror_eval_identity_schema(conn: &Connection) -> Result<(), MemoryError> {
+    for (table, column) in [
+        ("mirror_eval_runs", "requested_task_type"),
+        ("mirror_eval_runs", "requested_role"),
+        ("mirror_eval_observations", "effective_role"),
+        ("mirror_eval_observations", "effective_model_revision"),
+    ] {
+        ensure_column(conn, table, column, "TEXT")?;
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_mirror_eval_identity_schema(conn: &Connection) -> Result<(), MemoryError> {
+    for (table, column) in [
+        ("mirror_eval_runs", "requested_task_type"),
+        ("mirror_eval_runs", "requested_role"),
+        ("mirror_eval_observations", "effective_role"),
+        ("mirror_eval_observations", "effective_model_revision"),
+    ] {
+        let sql = format!("SELECT 1 FROM pragma_table_info('{table}') WHERE name = ?1");
+        let present = match conn.query_row(&sql, [column], |_| Ok(())) {
+            Ok(()) => true,
+            Err(rusqlite::Error::QueryReturnedNoRows) => false,
+            Err(error) => return Err(error.into()),
+        };
+        if !present {
+            return Err(MemoryError::InvalidArg(format!(
+                "incomplete v39 mirror eval identity metadata: required column {table}.{column} is missing"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Canonical v34 installers for the #1678 attached-session receipt spine: the
 /// append-only event ledger, the materialized canonical session-state
 /// projection, the typed intervention request/result receipts, and the
@@ -1209,6 +1244,7 @@ fn init_schema_with_label_mut_inner(
     validate_harness_session_spine_schema(&tx)?;
     if identity.profile.includes_product() {
         validate_a2a_mailbox_schema(&tx)?;
+        validate_mirror_eval_identity_schema(&tx)?;
     }
     tx.commit()?;
 

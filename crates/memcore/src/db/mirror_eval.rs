@@ -93,6 +93,14 @@ pub struct NewMirrorEvalRun {
     pub requested_profile: Option<String>,
     pub requested_model: Option<String>,
     pub requested_agent: Option<String>,
+    /// Task kind frozen as contract metadata at registration (v39). This is
+    /// REQUESTED-basis metadata — the mirror spine has no carrier-observed
+    /// task fact and never pretends one.
+    pub requested_task_type: Option<String>,
+    /// Register-time role (v39), REQUESTED basis. Role CONFIRMATION never
+    /// reads this column; it mirrors `requested_model`'s relationship to
+    /// `effective_model`.
+    pub requested_role: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -107,6 +115,8 @@ pub struct MirrorEvalRun {
     pub requested_profile: Option<String>,
     pub requested_model: Option<String>,
     pub requested_agent: Option<String>,
+    pub requested_task_type: Option<String>,
+    pub requested_role: Option<String>,
     pub created_at: String,
 }
 
@@ -147,6 +157,8 @@ fn registration_content_matches(existing: &MirrorEvalRun, new: &NewMirrorEvalRun
         && existing.requested_profile == new.requested_profile
         && existing.requested_model == new.requested_model
         && existing.requested_agent == new.requested_agent
+        && existing.requested_task_type == new.requested_task_type
+        && existing.requested_role == new.requested_role
 }
 
 /// Register a mirror eval run. Same native id + same content is idempotent
@@ -203,8 +215,9 @@ pub fn register_mirror_eval_run(
     conn.execute(
         "INSERT INTO mirror_eval_runs
          (eval_run_id, register_key, frozen_contract_ref, execution_origin, lifecycle_owner,
-          harness, native_child_id, requested_profile, requested_model, requested_agent, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+          harness, native_child_id, requested_profile, requested_model, requested_agent,
+          requested_task_type, requested_role, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         params![
             eval_run_id,
             key,
@@ -216,6 +229,8 @@ pub fn register_mirror_eval_run(
             new.requested_profile,
             new.requested_model,
             new.requested_agent,
+            new.requested_task_type,
+            new.requested_role,
             created_at,
         ],
     )?;
@@ -229,7 +244,8 @@ pub fn get_run_by_id(
 ) -> Result<Option<MirrorEvalRun>, MemoryError> {
     conn.query_row(
         "SELECT eval_run_id, register_key, frozen_contract_ref, execution_origin, lifecycle_owner,
-                harness, native_child_id, requested_profile, requested_model, requested_agent, created_at
+                harness, native_child_id, requested_profile, requested_model, requested_agent,
+                requested_task_type, requested_role, created_at
          FROM mirror_eval_runs WHERE eval_run_id = ?1",
         [eval_run_id],
         row_to_run,
@@ -251,7 +267,8 @@ pub fn get_run_by_native_child_id(
     // share a native_child_id — never against new writes.
     conn.query_row(
         "SELECT eval_run_id, register_key, frozen_contract_ref, execution_origin, lifecycle_owner,
-                harness, native_child_id, requested_profile, requested_model, requested_agent, created_at
+                harness, native_child_id, requested_profile, requested_model, requested_agent,
+                requested_task_type, requested_role, created_at
          FROM mirror_eval_runs WHERE native_child_id = ?1
          ORDER BY created_at DESC, eval_run_id DESC LIMIT 1",
         [native_child_id],
@@ -267,7 +284,8 @@ fn get_run_by_register_key(
 ) -> Result<Option<MirrorEvalRun>, MemoryError> {
     conn.query_row(
         "SELECT eval_run_id, register_key, frozen_contract_ref, execution_origin, lifecycle_owner,
-                harness, native_child_id, requested_profile, requested_model, requested_agent, created_at
+                harness, native_child_id, requested_profile, requested_model, requested_agent,
+                requested_task_type, requested_role, created_at
          FROM mirror_eval_runs WHERE register_key = ?1",
         [register_key],
         row_to_run,
@@ -288,7 +306,9 @@ fn row_to_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<MirrorEvalRun> {
         requested_profile: row.get(7)?,
         requested_model: row.get(8)?,
         requested_agent: row.get(9)?,
-        created_at: row.get(10)?,
+        requested_task_type: row.get(10)?,
+        requested_role: row.get(11)?,
+        created_at: row.get(12)?,
     })
 }
 
@@ -311,6 +331,15 @@ pub struct NewMirrorEvalObservation {
     pub effective_model: Option<String>,
     pub effective_backend: Option<String>,
     pub effective_harness: Option<String>,
+    /// Carrier-observed role (v39) — the ONLY role source a candidate
+    /// projection may confirm against. No requested-basis fallback exists.
+    pub effective_role: Option<String>,
+    /// Explicit carrier-observed model revision (v39), separate from the
+    /// model identity string. A legacy `@version` suffix on
+    /// `effective_model` is a read-side fallback ONLY where this is NULL;
+    /// NEW writes may not carry conflicting representations (see
+    /// [`record_mirror_eval_observation`]).
+    pub effective_model_revision: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -326,6 +355,8 @@ pub struct MirrorEvalObservation {
     pub effective_model: Option<String>,
     pub effective_backend: Option<String>,
     pub effective_harness: Option<String>,
+    pub effective_role: Option<String>,
+    pub effective_model_revision: Option<String>,
     pub created_at: String,
 }
 
@@ -342,6 +373,8 @@ fn observation_content_matches(
         && existing.effective_model == new.effective_model
         && existing.effective_backend == new.effective_backend
         && existing.effective_harness == new.effective_harness
+        && existing.effective_role == new.effective_role
+        && existing.effective_model_revision == new.effective_model_revision
 }
 
 /// Record the (at most one) terminal observation for `eval_run_id`. Same
@@ -357,6 +390,29 @@ pub fn record_mirror_eval_observation(
         return Err(MemoryError::InvalidArg(
             "terminal_outcome is required to record a mirror eval observation".to_string(),
         ));
+    }
+    // v39: NEW inputs may not carry conflicting revision representations. An
+    // explicit `effective_model_revision` alongside an `effective_model`
+    // whose `@version` suffix names a DIFFERENT revision is refused here —
+    // the read side could never tell which representation to believe, and
+    // silently preferring one would launder the conflict into confirmed
+    // evidence. A suffix-equal revision, or either representation alone, is
+    // fine; LEGACY rows (revision column NULL) keep their suffix as the
+    // read-side fallback untouched.
+    if let (Some(explicit), Some(model)) = (
+        new.effective_model_revision.as_deref(),
+        new.effective_model.as_deref(),
+    ) {
+        if let Some((_, suffix)) = model.rsplit_once('@') {
+            let explicit = explicit.trim();
+            if !explicit.is_empty() && suffix != explicit {
+                return Err(MemoryError::InvalidArg(format!(
+                    "conflicting model revision representations: effective_model_revision \
+                     '{explicit}' disagrees with the '@{suffix}' suffix on effective_model \
+                     '{model}'; supply one revision, or make them agree"
+                )));
+            }
+        }
     }
     if get_run_by_id(conn, &new.eval_run_id)?.is_none() {
         return Err(MemoryError::InvalidArg(format!(
@@ -383,8 +439,9 @@ pub fn record_mirror_eval_observation(
     conn.execute(
         "INSERT INTO mirror_eval_observations
          (observation_id, eval_run_id, terminal_outcome, duration_ms, cost_tokens, cost_usd,
-          result_ref, artifacts, effective_model, effective_backend, effective_harness, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+          result_ref, artifacts, effective_model, effective_backend, effective_harness,
+          effective_role, effective_model_revision, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
         params![
             observation_id,
             new.eval_run_id,
@@ -397,6 +454,8 @@ pub fn record_mirror_eval_observation(
             new.effective_model,
             new.effective_backend,
             new.effective_harness,
+            new.effective_role,
+            new.effective_model_revision,
             created_at,
         ],
     )?;
@@ -411,7 +470,8 @@ pub fn get_observation(
 ) -> Result<Option<MirrorEvalObservation>, MemoryError> {
     conn.query_row(
         "SELECT observation_id, eval_run_id, terminal_outcome, duration_ms, cost_tokens, cost_usd,
-                result_ref, artifacts, effective_model, effective_backend, effective_harness, created_at
+                result_ref, artifacts, effective_model, effective_backend, effective_harness,
+                effective_role, effective_model_revision, created_at
          FROM mirror_eval_observations WHERE eval_run_id = ?1",
         [eval_run_id],
         row_to_observation,
@@ -452,7 +512,9 @@ fn row_to_observation(row: &rusqlite::Row<'_>) -> rusqlite::Result<MirrorEvalObs
         effective_model: row.get(8)?,
         effective_backend: row.get(9)?,
         effective_harness: row.get(10)?,
-        created_at: row.get(11)?,
+        effective_role: row.get(11)?,
+        effective_model_revision: row.get(12)?,
+        created_at: row.get(13)?,
     })
 }
 
@@ -758,6 +820,53 @@ pub fn get_mirror_eval_run_view(
     }))
 }
 
+/// Windowed full-lifecycle views, newest first, capped at `limit` — the
+/// read surface `tachi_agent_eval(action='candidate_projection')` projects
+/// over. Read-only, same store/checkout semantics as every other reader in
+/// this module; `until = None` means an unbounded upper end.
+///
+/// ## Instant semantics (offset-safe)
+///
+/// Selection, ordering, and the cap compare `created_at` as an ACTUAL
+/// INSTANT via SQLite `julianday`, never lexically: a run stamped
+/// `2026-12-31T23:30:00-01:00` is the instant `2027-01-01T00:30:00Z`, so a
+/// lexical comparison against a `2027-01-01T00:00:00.000Z` cutoff would
+/// wrongly include it (and the inverse offset would wrongly omit a valid
+/// run). Ties at the same instant break by `eval_run_id DESC`, so the same
+/// data always yields the same row sequence; the bound is
+/// lower-inclusive/upper-exclusive at instant granularity.
+///
+/// `julianday` returns NULL for unparseable timestamps, so malformed rows
+/// fail the filter here; it also ACCEPTS strings RFC3339 does not
+/// (date-only forms, `now`), so callers remain the validity authority:
+/// the projection re-validates each run's `created_at` with RFC3339
+/// parsing before admitting it. The cap applies BEFORE that caller-side
+/// validation — a bounded scan, not a load-all — so a page whose rows the
+/// caller rejects is not backfilled by rescanning past the limit.
+pub fn list_mirror_eval_run_views(
+    conn: &Connection,
+    since: &str,
+    until: Option<&str>,
+    limit: usize,
+) -> Result<Vec<MirrorEvalRunView>, MemoryError> {
+    let mut statement = conn.prepare(
+        "SELECT eval_run_id FROM mirror_eval_runs \
+         WHERE julianday(created_at) >= julianday(?1) \
+           AND (?2 IS NULL OR julianday(created_at) < julianday(?2)) \
+         ORDER BY julianday(created_at) DESC, eval_run_id DESC LIMIT ?3",
+    )?;
+    let eval_run_ids: Vec<String> = statement
+        .query_map(params![since, until, limit as i64], |row| row.get(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut views = Vec::with_capacity(eval_run_ids.len());
+    for eval_run_id in eval_run_ids {
+        if let Some(view) = get_mirror_eval_run_view(conn, Some(&eval_run_id), None)? {
+            views.push(view);
+        }
+    }
+    Ok(views)
+}
+
 /// AC-8 / codex round-2 finding #3b: every test below is net-new-capability
 /// coverage with no pre-existing entry point on `origin/main` to regress —
 /// structural-justification exception (compile-red, not behavioral-red),
@@ -785,6 +894,9 @@ mod tests {
             requested_profile: Some("explore".to_string()),
             requested_model: Some("anthropic/claude-sonnet".to_string()),
             requested_agent: Some("claude".to_string()),
+            // v34 fields: legacy-shaped registrations omit them (NULL).
+            requested_task_type: None,
+            requested_role: None,
         }
     }
 
@@ -1069,5 +1181,457 @@ mod tests {
         let conn = open_conn();
         let view = get_mirror_eval_run_view(&conn, Some("nope"), None).unwrap();
         assert!(view.is_none());
+    }
+
+    /// v34: the new register fields round-trip and join the replay
+    /// comparator — omitted-omitted stays idempotent, and a replay that
+    /// newly supplies a v34 field is an explicit conflict (a legacy row's
+    /// NULL is "omitted", never equal to a supplied value).
+    #[test]
+    fn v39_register_fields_roundtrip_and_gate_replay() {
+        let conn = open_conn();
+
+        // Legacy-shaped registration (v34 fields omitted).
+        let legacy = register_mirror_eval_run(&conn, &base_register("v34-reg-legacy")).unwrap();
+        // Replay with the SAME omitted fields: idempotent.
+        let replay = register_mirror_eval_run(&conn, &base_register("v34-reg-legacy")).unwrap();
+        assert_eq!(replay.eval_run_id, legacy.eval_run_id);
+        // Replay that newly supplies requested_task_type: explicit conflict.
+        let mut upgraded = base_register("v34-reg-legacy");
+        upgraded.requested_task_type = Some("fix_request".to_string());
+        let err = register_mirror_eval_run(&conn, &upgraded)
+            .expect_err("supplying a v34 field against a legacy row must conflict");
+        assert!(err.to_string().contains("conflict"), "got: {err}");
+
+        // A NEW registration carrying the v34 fields round-trips them.
+        let mut full = base_register("v34-reg-full");
+        full.requested_task_type = Some("review_request".to_string());
+        full.requested_role = Some("reviewer".to_string());
+        let run = register_mirror_eval_run(&conn, &full).unwrap();
+        let reread = get_run_by_id(&conn, &run.eval_run_id).unwrap().unwrap();
+        assert_eq!(
+            reread.requested_task_type.as_deref(),
+            Some("review_request")
+        );
+        assert_eq!(reread.requested_role.as_deref(), Some("reviewer"));
+        // And replays identically.
+        let replay = register_mirror_eval_run(&conn, &full).unwrap();
+        assert_eq!(replay.eval_run_id, run.eval_run_id);
+    }
+
+    /// v34: the new observation fields round-trip and join the replay
+    /// comparator, with the same NULL-vs-supplied conflict discipline.
+    #[test]
+    fn v39_observation_fields_roundtrip_and_gate_replay() {
+        let conn = open_conn();
+        let run = register_mirror_eval_run(&conn, &base_register("v34-obs-1")).unwrap();
+
+        let observed = record_mirror_eval_observation(
+            &conn,
+            &NewMirrorEvalObservation {
+                eval_run_id: run.eval_run_id.clone(),
+                terminal_outcome: "success".to_string(),
+                effective_model: Some("openai/gpt-5".to_string()),
+                effective_role: Some("implementation".to_string()),
+                effective_model_revision: Some("2026-03-10".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        // Round-trip.
+        let reread = get_observation(&conn, &run.eval_run_id).unwrap().unwrap();
+        assert_eq!(reread.effective_role.as_deref(), Some("implementation"));
+        assert_eq!(
+            reread.effective_model_revision.as_deref(),
+            Some("2026-03-10")
+        );
+        // Same content replay: idempotent (same observation row).
+        let replay = record_mirror_eval_observation(
+            &conn,
+            &NewMirrorEvalObservation {
+                eval_run_id: run.eval_run_id.clone(),
+                terminal_outcome: "success".to_string(),
+                effective_model: Some("openai/gpt-5".to_string()),
+                effective_role: Some("implementation".to_string()),
+                effective_model_revision: Some("2026-03-10".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(replay.observation_id, observed.observation_id);
+
+        // Legacy-shaped observation on a second run: v34 fields omitted.
+        let legacy_run = register_mirror_eval_run(&conn, &base_register("v34-obs-2")).unwrap();
+        let legacy_obs = NewMirrorEvalObservation {
+            eval_run_id: legacy_run.eval_run_id.clone(),
+            terminal_outcome: "success".to_string(),
+            effective_model: Some("openai/gpt-5@2026-03-10".to_string()),
+            ..Default::default()
+        };
+        record_mirror_eval_observation(&conn, &legacy_obs).unwrap();
+        let reread = get_observation(&conn, &legacy_run.eval_run_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(reread.effective_role, None);
+        assert_eq!(reread.effective_model_revision, None);
+        // Replay identical: idempotent; replay newly supplying a v34 field:
+        // conflict.
+        record_mirror_eval_observation(&conn, &legacy_obs).unwrap();
+        let mut changed = legacy_obs.clone();
+        changed.effective_role = Some("explorer".to_string());
+        let err = record_mirror_eval_observation(&conn, &changed)
+            .expect_err("a changed terminal snapshot must be rejected");
+        assert!(err.to_string().contains("conflict"), "got: {err}");
+    }
+
+    /// v34: NEW observations may not carry conflicting revision
+    /// representations — an explicit `effective_model_revision` that
+    /// disagrees with the `@version` suffix on `effective_model` is refused
+    /// before any write. Agreeing representations are accepted.
+    #[test]
+    fn v39_conflicting_revision_representations_are_refused_on_new_writes() {
+        let conn = open_conn();
+        let conflict_run =
+            register_mirror_eval_run(&conn, &base_register("v34-rev-conflict")).unwrap();
+        let err = record_mirror_eval_observation(
+            &conn,
+            &NewMirrorEvalObservation {
+                eval_run_id: conflict_run.eval_run_id.clone(),
+                terminal_outcome: "success".to_string(),
+                effective_model: Some("openai/gpt-5@2026-03-10".to_string()),
+                effective_model_revision: Some("2026-09-01".to_string()),
+                ..Default::default()
+            },
+        )
+        .expect_err("conflicting revision representations must be refused");
+        assert!(
+            err.to_string().contains("conflicting model revision"),
+            "got: {err}"
+        );
+        assert!(
+            get_observation(&conn, &conflict_run.eval_run_id)
+                .unwrap()
+                .is_none(),
+            "the refused observation must not land"
+        );
+
+        // Agreeing representations are fine.
+        let agree_run = register_mirror_eval_run(&conn, &base_register("v34-rev-agree")).unwrap();
+        let observed = record_mirror_eval_observation(
+            &conn,
+            &NewMirrorEvalObservation {
+                eval_run_id: agree_run.eval_run_id.clone(),
+                terminal_outcome: "success".to_string(),
+                effective_model: Some("openai/gpt-5@2026-03-10".to_string()),
+                effective_model_revision: Some("2026-03-10".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            observed.effective_model_revision.as_deref(),
+            Some("2026-03-10")
+        );
+    }
+
+    /// The v39 boundary through the PUBLIC store-open funnel: a portable
+    /// store omits the product-only mirror tables entirely and opens (and
+    /// REOPENS — the integrity validation runs against the stamped-current
+    /// schema) without demanding the v34 identity columns; a full product
+    /// store missing a v34 column fails closed at open.
+    #[test]
+    fn v39_identity_columns_follow_the_product_profile_boundary_at_open() {
+        use crate::db::{DbOpenContext, StoreProfile};
+
+        // Portable: fresh open + reopen must both succeed and omit the
+        // product-only mirror tables (and therefore their v34 columns).
+        let portable_dir = tempfile::tempdir().unwrap();
+        let portable_path = portable_dir.path().join("portable.db");
+        let context =
+            DbOpenContext::open_existing_deny().with_profile(StoreProfile::PortableKernel);
+        let store =
+            crate::MemoryStore::open_with_context(portable_path.to_str().unwrap(), &context)
+                .expect("fresh portable open must not demand product mirror columns");
+        for table in ["mirror_eval_runs", "mirror_eval_observations"] {
+            let present: i64 = store
+                .connection()
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name=?1",
+                    [table],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(present, 0, "portable must omit product table {table}");
+        }
+        drop(store);
+        crate::MemoryStore::open_with_context(portable_path.to_str().unwrap(), &context).expect(
+            "portable REOPEN of a stamped-current schema must not demand product mirror columns",
+        );
+
+        // Full product: build a current store, damage the v34 shape, and
+        // require the reopen to fail closed naming the missing column.
+        let product_dir = tempfile::tempdir().unwrap();
+        let product_path = product_dir.path().join("product.db");
+        let product_context = DbOpenContext::open_existing_deny();
+        let store =
+            crate::MemoryStore::open_with_context(product_path.to_str().unwrap(), &product_context)
+                .expect("fresh product open");
+        drop(store);
+        // Damage the v34 shape through a SECOND, unrestricted connection:
+        // the store's own connections deny schema-mutating statements by
+        // design (the test-failure-injection canon), so the corruption is
+        // injected the same way an external writer would produce it.
+        let external = rusqlite::Connection::open(product_path.to_str().unwrap()).unwrap();
+        external
+            .execute(
+                "ALTER TABLE mirror_eval_runs DROP COLUMN requested_task_type",
+                [],
+            )
+            .unwrap();
+        drop(external);
+        let reopened =
+            crate::MemoryStore::open_with_context(product_path.to_str().unwrap(), &product_context);
+        let err = reopened
+            .err()
+            .expect("a product store missing a v34 identity column must fail closed");
+        assert!(
+            err.to_string().contains("v39 mirror eval identity"),
+            "the failure must name the v34 boundary: {err}"
+        );
+        assert!(
+            err.to_string().contains("requested_task_type"),
+            "the failure must name the missing column: {err}"
+        );
+    }
+
+    /// The windowed view list: newest first, window-bounded, capped, and
+    /// each view carries the full register/observe/adjudicate join.
+    #[test]
+    fn list_mirror_eval_run_views_is_windowed_newest_first_and_capped() {
+        let conn = open_conn();
+        let older = register_mirror_eval_run(&conn, &base_register("native-window-1")).unwrap();
+        let newer = register_mirror_eval_run(&conn, &base_register("native-window-2")).unwrap();
+        record_mirror_eval_observation(
+            &conn,
+            &NewMirrorEvalObservation {
+                eval_run_id: newer.eval_run_id.clone(),
+                terminal_outcome: "success".to_string(),
+                effective_model: Some("anthropic/claude-sonnet".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        append_mirror_eval_adjudication(
+            &conn,
+            &NewMirrorEvalAdjudication {
+                adjudication_id: "adj-window".to_string(),
+                eval_run_id: newer.eval_run_id.clone(),
+                event_key: "adj-window-key".to_string(),
+                actor: "leader".to_string(),
+                usefulness: "useful".to_string(),
+                evidence_usable: true,
+                evidence_ref: "run-window".to_string(),
+                next_prompt_delta: Some("quote the failing test first".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        // `until` bounded to a past instant excludes everything.
+        assert!(list_mirror_eval_run_views(
+            &conn,
+            "2020-01-01T00:00:00.000Z",
+            Some("2020-01-02T00:00:00.000Z"),
+            50
+        )
+        .unwrap()
+        .is_empty());
+
+        let views =
+            list_mirror_eval_run_views(&conn, "2020-01-01T00:00:00.000Z", None, 50).unwrap();
+        assert_eq!(views.len(), 2);
+        // Both runs were created within the same normalized instant here, so
+        // the eval_run_id DESC tiebreak decides; what must hold is that the
+        // set is exactly {older, newer} and the adjudicated one carries its
+        // full join.
+        let ids: Vec<&str> = views.iter().map(|v| v.run.eval_run_id.as_str()).collect();
+        assert!(ids.contains(&older.eval_run_id.as_str()));
+        assert!(ids.contains(&newer.eval_run_id.as_str()));
+        let adjudicated = views
+            .iter()
+            .find(|v| v.run.eval_run_id == newer.eval_run_id)
+            .unwrap();
+        assert!(adjudicated.observation.is_some());
+        assert_eq!(adjudicated.adjudications.len(), 1);
+        assert_eq!(
+            adjudicated
+                .current_adjudication()
+                .unwrap()
+                .next_prompt_delta
+                .as_deref(),
+            Some("quote the failing test first")
+        );
+
+        let capped =
+            list_mirror_eval_run_views(&conn, "2020-01-01T00:00:00.000Z", None, 1).unwrap();
+        assert_eq!(
+            capped.len(),
+            1,
+            "the read is capped, not silently unbounded"
+        );
+    }
+
+    /// Force a run's created_at to an explicit timestamp (offset-bearing and
+    /// malformed fixtures for the instant-semantics tests below).
+    fn force_run_created_at(conn: &Connection, eval_run_id: &str, created_at: &str) {
+        conn.execute(
+            "UPDATE mirror_eval_runs SET created_at = ?1 WHERE eval_run_id = ?2",
+            params![created_at, eval_run_id],
+        )
+        .unwrap();
+    }
+
+    /// The windowed read selects by ACTUAL INSTANT, not lexically:
+    /// offset-bearing timestamps land on their real instant on both ends
+    /// (an offset run that merely LOOKS lexically in-window is excluded;
+    /// one that looks lexically out-of-window but is instant-in-window is
+    /// included), the bound is lower-inclusive/upper-exclusive at instant
+    /// granularity, and unparseable timestamps fail the filter.
+    #[test]
+    fn list_mirror_eval_run_views_compares_actual_instants_not_strings() {
+        let conn = open_conn();
+        // Window under test: [2027-01-01T00:00:00Z, 2027-01-02T00:00:00Z).
+        let since = "2027-01-01T00:00:00.000Z";
+        let until = "2027-01-02T00:00:00.000Z";
+
+        // Lexically "2026-12-31..." < since, but the instant is exactly
+        // `since` — lower-inclusive, so a valid run that a lexical filter
+        // would OMIT is included (the inverse-offset omission case).
+        let offset_at_since =
+            register_mirror_eval_run(&conn, &base_register("instant-lower-offset")).unwrap();
+        force_run_created_at(
+            &conn,
+            &offset_at_since.eval_run_id,
+            "2026-12-31T19:00:00-05:00",
+        );
+
+        // Lexically < until, but the instant (2027-01-01T00:30:00Z) is
+        // inside the window — included.
+        let offset_in_window =
+            register_mirror_eval_run(&conn, &base_register("instant-inside-offset")).unwrap();
+        force_run_created_at(
+            &conn,
+            &offset_in_window.eval_run_id,
+            "2026-12-31T23:30:00-01:00",
+        );
+
+        // Exact upper instant (as a Z string): excluded, upper-exclusive.
+        let exact_upper =
+            register_mirror_eval_run(&conn, &base_register("instant-upper-exact")).unwrap();
+        force_run_created_at(&conn, &exact_upper.eval_run_id, until);
+
+        // Same upper instant expressed with an offset: also excluded.
+        let offset_upper =
+            register_mirror_eval_run(&conn, &base_register("instant-upper-offset")).unwrap();
+        force_run_created_at(
+            &conn,
+            &offset_upper.eval_run_id,
+            "2027-01-02T02:00:00+02:00",
+        );
+
+        // Unparseable timestamp: julianday NULL fails the filter.
+        let malformed =
+            register_mirror_eval_run(&conn, &base_register("instant-malformed")).unwrap();
+        force_run_created_at(&conn, &malformed.eval_run_id, "not-a-timestamp");
+
+        let views = list_mirror_eval_run_views(&conn, since, Some(until), 50).unwrap();
+        let ids: Vec<&str> = views.iter().map(|v| v.run.eval_run_id.as_str()).collect();
+        assert!(
+            ids.contains(&offset_at_since.eval_run_id.as_str()),
+            "lower-inclusive"
+        );
+        assert!(
+            ids.contains(&offset_in_window.eval_run_id.as_str()),
+            "offset in-window"
+        );
+        assert!(
+            !ids.contains(&exact_upper.eval_run_id.as_str()),
+            "exact upper instant is excluded"
+        );
+        assert!(
+            !ids.contains(&offset_upper.eval_run_id.as_str()),
+            "the same instant with an offset is equally excluded"
+        );
+        assert!(
+            !ids.contains(&malformed.eval_run_id.as_str()),
+            "an unparseable timestamp never passes the filter"
+        );
+    }
+
+    /// Ordering is by ACTUAL instant (newest first) with `eval_run_id DESC`
+    /// breaking same-instant ties, and the cap applies to that instant
+    /// order. A date-only form SQLite accepts is returned by the preselect —
+    /// RFC3339 validity remains the caller's authority, and the cap applies
+    /// before that validation (bounded scan).
+    #[test]
+    fn list_mirror_eval_run_views_orders_by_instant_with_id_tiebreak() {
+        let conn = open_conn();
+        // Lexical order of these strings is X > Z > Y, but the INSTANT order
+        // is Y (2027-01-01T00:00:00Z) > Z (2026-12-31T23:30:00Z) >
+        // X (2026-12-31T23:00:00Z): actual-instant ordering must win.
+        let x = register_mirror_eval_run(&conn, &base_register("order-x")).unwrap();
+        force_run_created_at(&conn, &x.eval_run_id, "2027-01-01T01:00:00+02:00");
+        let y = register_mirror_eval_run(&conn, &base_register("order-y")).unwrap();
+        force_run_created_at(&conn, &y.eval_run_id, "2026-12-31T21:00:00-03:00");
+        let z = register_mirror_eval_run(&conn, &base_register("order-z")).unwrap();
+        force_run_created_at(&conn, &z.eval_run_id, "2026-12-31T23:30:00Z");
+        // Same instant as Y — the eval_run_id DESC tiebreak decides between
+        // them deterministically.
+        let w = register_mirror_eval_run(&conn, &base_register("order-w")).unwrap();
+        force_run_created_at(&conn, &w.eval_run_id, "2027-01-01T02:00:00+02:00");
+        // Date-only form: SQLite julianday accepts it; the preselect returns
+        // it and the caller's RFC3339 validation remains authoritative.
+        let date_only = register_mirror_eval_run(&conn, &base_register("order-date-only")).unwrap();
+        force_run_created_at(&conn, &date_only.eval_run_id, "2026-06-01");
+
+        let views =
+            list_mirror_eval_run_views(&conn, "2026-01-01T00:00:00.000Z", None, 50).unwrap();
+        let ids: Vec<&str> = views.iter().map(|v| v.run.eval_run_id.as_str()).collect();
+        // The same-instant pair (Y, W) occupies the first two positions in
+        // eval_run_id DESC order (UUIDs are random, so assert the pair
+        // occupies both slots and each precedes Z), then Z, then X, then
+        // the date-only row (2026-06-01).
+        let same_instant_pair = [y.eval_run_id.as_str(), w.eval_run_id.as_str()];
+        assert!(
+            ids.iter().take(2).all(|id| same_instant_pair.contains(id)),
+            "the same-instant pair leads the instant order: {ids:?}"
+        );
+        assert_eq!(
+            ids.iter()
+                .filter(|id| same_instant_pair.contains(id))
+                .count(),
+            2
+        );
+        assert!(
+            ids.iter()
+                .position(|id| *id == z.eval_run_id.as_str())
+                .unwrap()
+                < ids
+                    .iter()
+                    .position(|id| *id == x.eval_run_id.as_str())
+                    .unwrap(),
+            "actual-instant ordering must beat the lexical order X > Z > Y"
+        );
+        assert!(ids.contains(&date_only.eval_run_id.as_str()));
+
+        // The cap applies to the instant order (newest first).
+        let capped =
+            list_mirror_eval_run_views(&conn, "2026-01-01T00:00:00.000Z", None, 2).unwrap();
+        assert_eq!(capped.len(), 2);
+        let capped_ids: Vec<&str> = capped.iter().map(|v| v.run.eval_run_id.as_str()).collect();
+        assert!(
+            capped_ids.contains(&ids[0]) && capped_ids.contains(&ids[1]),
+            "the cap keeps the newest actual instants"
+        );
     }
 }

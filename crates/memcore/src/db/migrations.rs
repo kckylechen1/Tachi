@@ -71,6 +71,7 @@
 //! - v36: durable delivery intent and append-only delivery event spine (#1679).
 //! - v37: immutable, secret-negative verified AgentIdentity admission receipts (#1938).
 //! - v38: canonical CurrentTruth assertion, projection, and refresh inventory (#1696).
+//! - v39: four nullable, content-free mirror-eval identity/task metadata columns.
 //!
 //! ## Schema version stamp (#984)
 //!
@@ -114,7 +115,7 @@ use super::common::now_utc_iso;
 ///
 /// See the module doc comment ("Schema version stamp (#984)") for what this
 /// counts and when to bump it.
-pub const EXPECTED_SCHEMA_VERSION: u32 = 38;
+pub const EXPECTED_SCHEMA_VERSION: u32 = 39;
 
 mod a2a_body_retention;
 mod basic;
@@ -134,6 +135,7 @@ mod identity_workclaim_spine;
 mod idless_identity;
 mod legacy_columns;
 mod mirror_eval;
+mod mirror_eval_identity;
 mod pack_retire;
 mod sentinel;
 mod session_claims_identity;
@@ -161,6 +163,7 @@ pub use legacy_columns::{
     fold_and_drop_legacy_persons_column, migrate_v9_relocate_and_drop_location,
 };
 use mirror_eval::*;
+use mirror_eval_identity::*;
 use pack_retire::*;
 use sentinel::*;
 pub(in crate::db) use session_claims_identity::dedupe_session_claims_identity_conflicts;
@@ -215,6 +218,7 @@ pub(crate) const MIGRATION_SENTINEL_KEYS: &[&str] = &[
     "v36_delivery_spine",
     "v37_verified_agent_admissions",
     "v38_current_truth",
+    "v39_mirror_eval_identity",
 ];
 
 #[derive(Debug, Default, Clone, serde::Serialize)]
@@ -259,6 +263,7 @@ pub struct MigrationReport {
     pub harness_session_spine_schema_objects_created: usize,
     pub harness_session_spine_receipt_tables_rebuilt: usize,
     pub verified_admission_schema_objects_created: usize,
+    pub mirror_eval_identity_columns_added: usize,
 }
 
 #[cfg(test)]
@@ -371,6 +376,7 @@ pub(crate) fn validate_current_schema_integrity(conn: &Connection) -> Result<(),
     )?;
     if product_schema > 0 {
         crate::db::schema::validate_a2a_mailbox_schema(conn)?;
+        crate::db::schema::validate_mirror_eval_identity_schema(conn)?;
         crate::db::verified_admissions::validate_verified_admission_schema(conn)?;
         crate::db::schema::validate_current_truth_schema(conn)?;
     }
@@ -801,6 +807,11 @@ pub(crate) fn run_data_migrations_in_tx(
     report.current_truth_schema_objects_created =
         apply_versioned_migration(conn, "v38_current_truth", |conn| {
             migrate_v38_current_truth(conn, profile)
+        })?
+        .unwrap_or(0);
+    report.mirror_eval_identity_columns_added =
+        apply_versioned_migration(conn, "v39_mirror_eval_identity", |conn| {
+            migrate_v39_mirror_eval_identity(conn, profile)
         })?
         .unwrap_or(0);
 
@@ -1826,6 +1837,43 @@ mod tests {
         assert!(was_run(&conn, "v38_current_truth").unwrap());
         crate::db::schema::validate_current_truth_schema(&conn).unwrap();
         validate_current_schema_integrity(&conn).expect("the completed v37 shape is valid");
+    }
+
+    #[test]
+    fn stamped_v38_product_adds_mirror_identity_without_backfilling_history() {
+        let (mut conn, tmp) = open_test_db();
+        run_data_migrations(&mut conn, "global", tmp.path()).unwrap();
+        let run = crate::db::mirror_eval::register_mirror_eval_run(
+            &conn,
+            &crate::db::mirror_eval::NewMirrorEvalRun {
+                frozen_contract_ref: "legacy-v38".into(),
+                execution_origin: "host_native_subagent".into(),
+                lifecycle_owner: "host".into(),
+                native_child_id: Some("legacy-v38-child".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        conn.execute_batch(
+            "ALTER TABLE mirror_eval_runs DROP COLUMN requested_task_type;
+             ALTER TABLE mirror_eval_runs DROP COLUMN requested_role;
+             ALTER TABLE mirror_eval_observations DROP COLUMN effective_role;
+             ALTER TABLE mirror_eval_observations DROP COLUMN effective_model_revision;
+             DELETE FROM hard_state WHERE namespace='migrations' AND key='v39_mirror_eval_identity';
+             PRAGMA user_version=38;",
+        )
+        .unwrap();
+
+        let report = run_data_migrations(&mut conn, "global", tmp.path()).unwrap();
+        assert_eq!(report.mirror_eval_identity_columns_added, 4);
+        assert_eq!(read_schema_version(&conn).unwrap(), EXPECTED_SCHEMA_VERSION);
+        assert!(was_run(&conn, "v39_mirror_eval_identity").unwrap());
+        let row = crate::db::mirror_eval::get_run_by_id(&conn, &run.eval_run_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.requested_task_type, None);
+        assert_eq!(row.requested_role, None);
+        validate_current_schema_integrity(&conn).unwrap();
     }
 
     #[test]
