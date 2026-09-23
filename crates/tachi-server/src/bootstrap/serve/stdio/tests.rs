@@ -449,8 +449,16 @@ fn stdio_proxy_profile_is_forwarded_once_and_denies_attachment_before_handler() 
             );
         }
 
-        let expected_names = vec![
+        let expected_five = vec![
             "tachi_a2a".to_string(),
+            "tachi_gh".to_string(),
+            "tachi_memory".to_string(),
+            "tachi_staff".to_string(),
+            "tachi_task".to_string(),
+        ];
+        let expected_standard = vec![
+            "tachi_a2a".to_string(),
+            "tachi_agent_eval".to_string(),
             "tachi_gh".to_string(),
             "tachi_memory".to_string(),
             "tachi_staff".to_string(),
@@ -498,7 +506,36 @@ fn stdio_proxy_profile_is_forwarded_once_and_denies_attachment_before_handler() 
                 .map(|tool| tool.name.into_owned())
                 .collect::<Vec<_>>();
             names.sort();
-            assert_eq!(names, expected_names, "stdio profile {raw_profile}");
+            let is_standard = profile.as_str() == "standard";
+            assert_eq!(
+                &names,
+                if is_standard {
+                    &expected_standard
+                } else {
+                    &expected_five
+                },
+                "stdio profile {raw_profile}"
+            );
+
+            if is_standard {
+                for action in ["attach_session", "aggregate_live", "future_action"] {
+                    let denied = call_tool_via_stdio_proxy(
+                        proxy.clone(),
+                        "tachi_agent_eval",
+                        serde_json::Map::from_iter([(
+                            "action".to_string(),
+                            serde_json::json!(action),
+                        )]),
+                    )
+                    .await
+                    .expect("standard eval action refusal should be an MCP result");
+                    assert_eq!(denied.is_error, Some(true), "{raw_profile}:{action}");
+                    assert!(
+                        first_text(&denied).contains("not allowed"),
+                        "{raw_profile}:{action}: {denied:?}"
+                    );
+                }
+            }
 
             for hidden in ["runtime_info", "tachi_briefing"] {
                 let result =
@@ -547,7 +584,7 @@ fn stdio_proxy_profile_is_forwarded_once_and_denies_attachment_before_handler() 
             .collect::<Vec<_>>();
         default_names.sort();
         assert_eq!(
-            default_names, expected_names,
+            default_names, expected_standard,
             "missing proxy profile must not inherit the broader daemon profile"
         );
         (ct, daemon_task)
@@ -2487,6 +2524,7 @@ fn http_direct_connect_header_identity_binds_profile_and_project() {
             names,
             std::collections::BTreeSet::from([
                 "tachi_a2a",
+                "tachi_agent_eval",
                 "tachi_gh",
                 "tachi_memory",
                 "tachi_staff",
@@ -2507,6 +2545,26 @@ fn http_direct_connect_header_identity_binds_profile_and_project() {
             assert!(
                 http_tool_text(&denied).contains("tool not found"),
                 "standard HTTP direct call should hide {hidden}: {denied:#}"
+            );
+        }
+
+        for (id, action) in [
+            (20, "attach_session"),
+            (21, "aggregate_live"),
+            (22, "future_action"),
+        ] {
+            let denied = http_mcp_call_tool(
+                &client,
+                &daemon.url,
+                session_headers.clone(),
+                id,
+                "tachi_agent_eval",
+                serde_json::Map::from_iter([("action".to_string(), serde_json::json!(action))]),
+            )
+            .await;
+            assert!(
+                http_tool_text(&denied).contains("not allowed"),
+                "standard HTTP eval action {action} must be denied: {denied:#}"
             );
         }
 
@@ -2692,8 +2750,16 @@ fn http_direct_connect_ordinary_profiles_have_exact_facades_and_hide_retired_rou
     let (ct, daemon_task) = rt.block_on(async {
         let server = crate::MemoryServer::new(global.clone(), None).expect("daemon server");
         let (daemon, ct, daemon_task) = spawn_test_http_daemon(server, &global).await;
-        let expected = std::collections::BTreeSet::from([
+        let expected_five = std::collections::BTreeSet::from([
             "tachi_a2a",
+            "tachi_gh",
+            "tachi_memory",
+            "tachi_staff",
+            "tachi_task",
+        ]);
+        let expected_standard = std::collections::BTreeSet::from([
+            "tachi_a2a",
+            "tachi_agent_eval",
             "tachi_gh",
             "tachi_memory",
             "tachi_staff",
@@ -2743,7 +2809,18 @@ fn http_direct_connect_ordinary_profiles_have_exact_facades_and_hide_retired_rou
                 .iter()
                 .filter_map(|tool| tool["name"].as_str())
                 .collect::<std::collections::BTreeSet<_>>();
-            assert_eq!(names, expected, "unexpected HTTP tools for {profile_label}");
+            let expected = if matches!(
+                profile,
+                None | Some("standard" | "lead" | "standard+delegate" | "delegate+standard")
+            ) {
+                &expected_standard
+            } else {
+                &expected_five
+            };
+            assert_eq!(
+                &names, expected,
+                "unexpected HTTP tools for {profile_label}"
+            );
 
             for (id, hidden) in [(3, "runtime_info"), (4, "tachi_briefing")] {
                 let denied = http_mcp_call_tool(

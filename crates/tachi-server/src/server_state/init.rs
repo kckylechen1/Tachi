@@ -764,7 +764,7 @@ mod tests {
         assert_eq!(
             conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
-            38
+            i64::from(memcore::db::migrations::EXPECTED_SCHEMA_VERSION)
         );
         drop(conn);
 
@@ -775,7 +775,7 @@ mod tests {
                 MigrationAuthority::Deny,
                 home,
             )
-            .expect("current v38 DB reopens without migration authority"),
+            .expect("current DB reopens without migration authority"),
         );
     }
 }

@@ -425,7 +425,19 @@ fn live_execution_surface_matches_fixture_and_provisional_budgets() {
         "tachi_staff",
         "tachi_task"
     ]);
-    for profile in ["standard", "delegate", "coordinate"] {
+    assert_eq!(
+        observed["profiles"]["standard"]["visible_tools"],
+        json!([
+            "tachi_a2a",
+            "tachi_agent_eval",
+            "tachi_gh",
+            "tachi_memory",
+            "tachi_staff",
+            "tachi_task"
+        ]),
+        "standard discovery must expose exactly the six approved facades"
+    );
+    for profile in ["delegate", "coordinate"] {
         assert_eq!(
             observed["profiles"][profile]["visible_tools"], expected_product_surface,
             "{profile} discovery must expose exactly the five product facades"
