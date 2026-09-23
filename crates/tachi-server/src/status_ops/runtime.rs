@@ -1,5 +1,384 @@
 use super::*;
 
+/// Routing observation for a daemon status: the raw pid/state identity plus
+/// the liveness-resolved `running` / `serving_current_process` flags.
+/// Extracted from `runtime_observability_json` so warning synthesis reads
+/// the exact routing truth the runtime block reports — one source, no
+/// parallel representation.
+struct DaemonRouteObservation {
+    pid: Option<i32>,
+    state: &'static str,
+    reason: Option<String>,
+    global_db: Option<String>,
+    process_running: Option<bool>,
+    running: Option<bool>,
+    serving_current_process: Option<bool>,
+}
+
+/// Resolve the daemon routing observation shared by runtime observability
+/// and warning synthesis. `daemon: None` falls back to the raw pid file
+/// ("unknown" state). An `Unavailable` probe keeps `running: None` — a
+/// failed liveness probe cannot establish current-process authority.
+fn observe_daemon_route(app_home: &Path, daemon: Option<&DaemonStatus>) -> DaemonRouteObservation {
+    let current_pid = std::process::id();
+    let (pid, state, reason, global_db, authoritative) = match daemon {
+        Some(DaemonStatus::Running { pid, .. }) => (Some(*pid), "running", None, None, true),
+        Some(DaemonStatus::Foreign {
+            pid,
+            reason,
+            global_db,
+            ..
+        }) => (
+            Some(*pid),
+            "foreign",
+            Some(reason.clone()),
+            global_db.clone(),
+            false,
+        ),
+        Some(DaemonStatus::StalePid { pid, .. }) => (Some(*pid), "stale", None, None, false),
+        Some(DaemonStatus::Unavailable { pid, reason, .. }) => {
+            (Some(*pid), "unavailable", Some(reason.clone()), None, false)
+        }
+        Some(DaemonStatus::None) => (None, "none", None, None, false),
+        None => (
+            read_pid_file(app_home.join("daemon.lock")),
+            "unknown",
+            None,
+            None,
+            false,
+        ),
+    };
+    // Preserve an unavailable observation through the public routing
+    // metadata. A failed liveness probe cannot establish current-process
+    // authority.
+    let process_running = if state == "unavailable" {
+        None
+    } else {
+        pid.map(crate::daemon_lock::process_liveness)
+            .unwrap_or(Some(false))
+    };
+    let running = process_running.map(|running| running && authoritative);
+    let serving_current_process =
+        running.map(|running| running && pid.is_some_and(|pid| pid as u32 == current_pid));
+    DaemonRouteObservation {
+        pid,
+        state,
+        reason,
+        global_db,
+        process_running,
+        running,
+        serving_current_process,
+    }
+}
+
+/// Stdio-adapter warning predicate over an observed route: a live,
+/// authoritative daemon exists but is not this process. An unavailable
+/// probe (`running == None`) stays silent — equivalent to the previous
+/// `runtime["daemon"]` JSON field read, now derived from the SAME single
+/// liveness probe that renders the runtime block.
+fn is_stdio_adapter_route(route: &DaemonRouteObservation) -> bool {
+    route.running == Some(true) && route.serving_current_process != Some(true)
+}
+
+#[cfg(test)]
+type StatusSnapshotTestHook = Box<dyn FnOnce() + Send + 'static>;
+
+#[cfg(test)]
+fn status_snapshot_test_hooks(
+) -> &'static std::sync::Mutex<std::collections::HashMap<PathBuf, StatusSnapshotTestHook>> {
+    static HOOKS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<PathBuf, StatusSnapshotTestHook>>,
+    > = std::sync::OnceLock::new();
+    HOOKS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Test-only seam: run `hook` inside the blocking-pool snapshot collection
+/// for exactly one `collect_status_snapshot` call against this app home —
+/// used to prove the async executor stays responsive while the snapshot is
+/// gathered, and to exercise snapshot-failure degradation deterministically.
+#[cfg(test)]
+pub(crate) fn install_status_snapshot_test_hook(
+    app_home: PathBuf,
+    hook: impl FnOnce() + Send + 'static,
+) {
+    let mut hooks = status_snapshot_test_hooks()
+        .lock()
+        .expect("status snapshot test hook lock");
+    assert!(
+        hooks.insert(app_home, Box::new(hook)).is_none(),
+        "status snapshot test hook already installed for app home"
+    );
+}
+
+#[cfg(test)]
+fn run_status_snapshot_test_hook(app_home: &Path) {
+    let hook = status_snapshot_test_hooks()
+        .lock()
+        .expect("status snapshot test hook lock")
+        .remove(app_home);
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
+#[cfg(test)]
+fn status_governance_test_hooks(
+) -> &'static std::sync::Mutex<std::collections::HashMap<PathBuf, StatusSnapshotTestHook>> {
+    static HOOKS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<PathBuf, StatusSnapshotTestHook>>,
+    > = std::sync::OnceLock::new();
+    HOOKS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Test-only seam for the GOVERNANCE phase of the health digest: runs once,
+/// inside the blocking-pool closure, right before the governance store read
+/// — used to prove the async executor stays responsive while governance
+/// SQLite runs (a hook that blocks here deadlocks an executor-resident
+/// governance read on a current-thread runtime).
+#[cfg(test)]
+pub(crate) fn install_status_governance_test_hook(
+    app_home: PathBuf,
+    hook: impl FnOnce() + Send + 'static,
+) {
+    let mut hooks = status_governance_test_hooks()
+        .lock()
+        .expect("status governance test hook lock");
+    assert!(
+        hooks.insert(app_home, Box::new(hook)).is_none(),
+        "status governance test hook already installed for app home"
+    );
+}
+
+#[cfg(test)]
+fn run_status_governance_test_hook(app_home: &Path) {
+    let hook = status_governance_test_hooks()
+        .lock()
+        .expect("status governance test hook lock")
+        .remove(app_home);
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
+/// `collect_snapshot` opens every manifest DB read-only — blocking SQLite
+/// and filesystem work. Keep it off the async executor (same pattern as the
+/// full-briefing health score and `collect_agent_warning_lines`).
+async fn collect_status_snapshot(
+    app_home: PathBuf,
+    global_db_path: PathBuf,
+    project_db_path: Option<PathBuf>,
+) -> Result<StatusSnapshot, String> {
+    tokio::task::spawn_blocking(move || {
+        #[cfg(test)]
+        run_status_snapshot_test_hook(&app_home);
+        collect_snapshot(&app_home, &global_db_path, project_db_path.as_deref())
+    })
+    .await
+    .map_err(|error| format!("status snapshot collection failed: {error}"))
+}
+
+/// The public `daemon` block of the status payload, shared by the status
+/// surface and the typed health digest so `build_status_warnings` and the
+/// response embed key off the identical projection.
+fn daemon_state_json(daemon: &DaemonStatus) -> serde_json::Value {
+    match daemon {
+        DaemonStatus::Running { pid, .. } => json!({
+            "running": true,
+            "pid": pid,
+        }),
+        DaemonStatus::Foreign {
+            pid,
+            reason,
+            version,
+            port,
+            global_db,
+            ..
+        } => json!({
+            "running": false,
+            "foreign": true,
+            "pid": pid,
+            "reason": reason,
+            "version": version,
+            "port": port,
+            "global_db": global_db,
+        }),
+        DaemonStatus::StalePid { pid, .. } => json!({
+            "running": false,
+            "stale": true,
+            "pid": pid,
+        }),
+        DaemonStatus::Unavailable { pid, reason, .. } => json!({
+            "running": null,
+            "unavailable": true,
+            "pid": pid,
+            "reason": reason,
+        }),
+        DaemonStatus::None => json!({
+            "running": false,
+        }),
+    }
+}
+
+/// Component governance context for the active workspace (#799) — registry
+/// only, never presented as memory-derived current truth. Shared by the
+/// status response embed and the warning assembly below.
+fn workspace_component_governance(server: &crate::MemoryServer) -> serde_json::Value {
+    let named_project = crate::memory_search_ops::resolve_workspace_named_project();
+    crate::component_governance_ops::component_governance_context(
+        server,
+        named_project.as_deref(),
+        None,
+    )
+    .unwrap_or_else(|e| {
+        json!({
+            "status": "error",
+            "matches": [],
+            "note": format!("component governance unavailable: {e}"),
+        })
+    })
+}
+
+/// Warning assembly shared by the agent status surface and the typed health
+/// digest: everything `handle_tachi_status_detail` reports as warnings, in
+/// the same order, derived from the same snapshot. `recall_eval` and
+/// `component_governance` are passed in because the status response also
+/// embeds those values themselves. `route` is the SAME liveness observation
+/// the caller's runtime block rendered — one probe per response, so the
+/// stdio-adapter warning cannot drift from the reported daemon flags.
+fn agent_status_warning_lines(
+    app_home: &Path,
+    snapshot: &StatusSnapshot,
+    daemon_state: &serde_json::Value,
+    recall_eval: &serde_json::Value,
+    component_governance: &serde_json::Value,
+    route: &DaemonRouteObservation,
+) -> Vec<String> {
+    let mut warnings = build_status_warnings(snapshot, daemon_state);
+    push_unregistered_project_db_warning(&mut warnings, app_home);
+    if let Some(warning) = crate::status_ops::recall_eval::recall_eval_warning(recall_eval) {
+        warnings.push(warning);
+    }
+    let running_daemons = snapshot
+        .daemon_inventory
+        .iter()
+        .filter(|daemon| daemon.process_running == Some(true))
+        .count();
+    if running_daemons > 1 {
+        let scopes = snapshot
+            .daemon_inventory
+            .iter()
+            .filter(|daemon| daemon.process_running == Some(true))
+            .map(|daemon| {
+                daemon
+                    .global_db
+                    .as_deref()
+                    .unwrap_or(daemon.scope.as_str())
+                    .to_string()
+            })
+            .collect::<Vec<_>>();
+        warnings.push(format!(
+            "{running_daemons} tachi daemon scopes are running concurrently: {}",
+            scopes.join(", ")
+        ));
+    }
+    // Stdio-adapter predicate from the caller's shared route observation —
+    // `running == null` (the unavailable case) stays silent, matching the
+    // previous runtime-JSON read of these two fields.
+    if is_stdio_adapter_route(route) {
+        warnings.push(
+            "this MCP process is a stdio adapter while a daemon is running; supported reads and writes should forward to the daemon, otherwise restart stale MCP clients if runtime state looks inconsistent"
+                .to_string(),
+        );
+    }
+
+    for line in
+        crate::component_governance_ops::component_governance_warning_lines(component_governance)
+    {
+        if !warnings.iter().any(|w| w == &line) {
+            warnings.push(line);
+        }
+    }
+    warnings
+}
+
+/// How many warning lines the compact agent surfaces carry.
+const AGENT_STATUS_WARNING_CAP: usize = 8;
+
+/// Typed health projection for health-only consumers (compact briefing):
+/// the authoritative snapshot's score plus exactly the warning lines the
+/// agent status surface reports — derived from the same snapshot and the
+/// same warning assembly, without building or serializing the full status
+/// payload.
+pub(crate) struct AgentHealthDigest {
+    pub(crate) health_score: u8,
+    pub(crate) warnings: Vec<String>,
+}
+
+/// Collect the typed health digest. ALL blocking reads the digest needs —
+/// the SQLite/filesystem snapshot, the recall-eval status file, and the
+/// governance store read (`with_global_store_read` SQLite) — run on Tokio's
+/// blocking pool; only a join failure (a phase panic or runtime shutdown)
+/// produces `Err` — callers keep their own degradation shape.
+pub(crate) async fn collect_agent_health_digest(
+    server: &crate::MemoryServer,
+) -> Result<AgentHealthDigest, String> {
+    // Resolve server-bound identity BEFORE the blocking closure (#1096
+    // leaf-2a pattern) and take an Arc-backed clone of the server so the
+    // closure is owned/'static — the clone shares the same stores, this is
+    // not a second DB authority.
+    let app_home = server.tachi_home_dir();
+    let global_db_path = server.global_db_path_buf();
+    let project_db_path = server.project_db_path_buf();
+    let server_for_blocking = server.clone();
+    tokio::task::spawn_blocking(move || {
+        build_agent_health_digest_blocking(
+            &app_home,
+            &global_db_path,
+            project_db_path.as_deref(),
+            &server_for_blocking,
+        )
+    })
+    .await
+    .map_err(|error| format!("status snapshot collection failed: {error}"))
+}
+
+/// Blocking core of [`collect_agent_health_digest`]: snapshot collection,
+/// recall-eval file read, governance store read, and the shared warning
+/// assembly — must only run on the blocking pool, never the async executor.
+fn build_agent_health_digest_blocking(
+    app_home: &Path,
+    global_db_path: &Path,
+    project_db_path: Option<&Path>,
+    server: &crate::MemoryServer,
+) -> AgentHealthDigest {
+    #[cfg(test)]
+    run_status_snapshot_test_hook(app_home);
+    let snapshot = collect_snapshot(app_home, global_db_path, project_db_path);
+    #[cfg(test)]
+    run_status_governance_test_hook(app_home);
+    // One route observation feeds the whole digest (daemon projection +
+    // stdio-adapter warning) — no second liveness probe.
+    let route = observe_daemon_route(app_home, Some(&snapshot.daemon));
+    let daemon_state = daemon_state_json(&snapshot.daemon);
+    let recall_eval = crate::status_ops::recall_eval::read_recall_eval_status(app_home);
+    let component_governance = workspace_component_governance(server);
+    let warnings = agent_status_warning_lines(
+        app_home,
+        &snapshot,
+        &daemon_state,
+        &recall_eval,
+        &component_governance,
+        &route,
+    );
+    AgentHealthDigest {
+        health_score: snapshot.health_score,
+        warnings: warnings
+            .into_iter()
+            .take(AGENT_STATUS_WARNING_CAP)
+            .collect(),
+    }
+}
+
 pub(crate) fn resolve_app_home() -> PathBuf {
     std::env::var("TACHI_HOME")
         .ok()
@@ -17,10 +396,6 @@ pub(crate) fn runtime_observability_json(
     daemon: Option<&DaemonStatus>,
     verbose: bool,
 ) -> serde_json::Value {
-    let current_pid = std::process::id();
-    let binary = std::env::current_exe()
-        .ok()
-        .map(|path| path.display().to_string());
     let collected_daemon;
     let daemon = match daemon {
         Some(daemon) => Some(daemon),
@@ -29,46 +404,33 @@ pub(crate) fn runtime_observability_json(
             Some(&collected_daemon)
         }
     };
-    let (daemon_pid, daemon_state, daemon_reason, daemon_global_db, daemon_authoritative) =
-        match daemon {
-            Some(DaemonStatus::Running { pid, .. }) => (Some(*pid), "running", None, None, true),
-            Some(DaemonStatus::Foreign {
-                pid,
-                reason,
-                global_db,
-                ..
-            }) => (
-                Some(*pid),
-                "foreign",
-                Some(reason.clone()),
-                global_db.clone(),
-                false,
-            ),
-            Some(DaemonStatus::StalePid { pid, .. }) => (Some(*pid), "stale", None, None, false),
-            Some(DaemonStatus::Unavailable { pid, reason, .. }) => {
-                (Some(*pid), "unavailable", Some(reason.clone()), None, false)
-            }
-            Some(DaemonStatus::None) => (None, "none", None, None, false),
-            None => (
-                read_pid_file(app_home.join("daemon.lock")),
-                "unknown",
-                None,
-                None,
-                false,
-            ),
-        };
-    // Preserve an unavailable observation through the public routing metadata.
-    // A failed liveness probe cannot establish current-process authority.
-    let daemon_process_running = if daemon_state == "unavailable" {
-        None
-    } else {
-        daemon_pid
-            .map(crate::daemon_lock::process_liveness)
-            .unwrap_or(Some(false))
-    };
-    let daemon_running = daemon_process_running.map(|running| running && daemon_authoritative);
-    let serving_daemon = daemon_running
-        .map(|running| running && daemon_pid.is_some_and(|pid| pid as u32 == current_pid));
+    // Probe daemon liveness exactly once per response; callers that also
+    // synthesize warnings reuse this same route so the reported daemon
+    // flags and the stdio-adapter warning can never disagree (single-probe
+    // parity with the pre-digest code that read the runtime JSON fields).
+    let route = observe_daemon_route(app_home, daemon);
+    render_runtime_observability(server, &route, verbose)
+}
+
+/// Render the runtime observability block from an already-observed route.
+/// Private: `runtime_observability_json` remains the only public entry, so
+/// external callers keep their signature and probing behavior.
+fn render_runtime_observability(
+    server: &crate::MemoryServer,
+    route: &DaemonRouteObservation,
+    verbose: bool,
+) -> serde_json::Value {
+    let current_pid = std::process::id();
+    let binary = std::env::current_exe()
+        .ok()
+        .map(|path| path.display().to_string());
+    let daemon_pid = route.pid;
+    let daemon_state = route.state;
+    let daemon_reason = route.reason.clone();
+    let daemon_global_db = route.global_db.clone();
+    let daemon_process_running = route.process_running;
+    let daemon_running = route.running;
+    let serving_daemon = route.serving_current_process;
     let mode = match (serving_daemon, daemon_running) {
         (Some(true), _) => "daemon",
         (_, Some(true)) => "sidecar_or_stdio",
@@ -291,44 +653,10 @@ async fn handle_tachi_status_detail(
     let global_db_path = server.global_db_path_buf();
     let project_db_path = server.project_db_path_buf();
 
-    let snapshot = collect_snapshot(&app_home, &global_db_path, project_db_path.as_deref());
+    let snapshot =
+        collect_status_snapshot(app_home.clone(), global_db_path, project_db_path).await?;
 
-    let daemon_state = match &snapshot.daemon {
-        DaemonStatus::Running { pid, .. } => json!({
-            "running": true,
-            "pid": pid,
-        }),
-        DaemonStatus::Foreign {
-            pid,
-            reason,
-            version,
-            port,
-            global_db,
-            ..
-        } => json!({
-            "running": false,
-            "foreign": true,
-            "pid": pid,
-            "reason": reason,
-            "version": version,
-            "port": port,
-            "global_db": global_db,
-        }),
-        DaemonStatus::StalePid { pid, .. } => json!({
-            "running": false,
-            "stale": true,
-            "pid": pid,
-        }),
-        DaemonStatus::Unavailable { pid, reason, .. } => json!({
-            "running": null,
-            "unavailable": true,
-            "pid": pid,
-            "reason": reason,
-        }),
-        DaemonStatus::None => json!({
-            "running": false,
-        }),
-    };
+    let daemon_state = daemon_state_json(&snapshot.daemon);
 
     let total_dbs = snapshot.dbs.len();
     let total_pending: usize = snapshot.dbs.iter().map(|d| d.pending).sum();
@@ -538,68 +866,24 @@ async fn handle_tachi_status_detail(
     // Full diagnostic keeps the heavy provider arrays in `runtime`; the compact
     // agent surface gets a slim routing/identity block (api_keys already carries
     // the provider detail there, so the arrays don't need repeating).
-    let runtime = runtime_observability_json(server, &app_home, Some(&snapshot.daemon), full);
-    let mut warnings = build_status_warnings(&snapshot, &daemon_state);
-    push_unregistered_project_db_warning(&mut warnings, &app_home);
+    // One route observation feeds BOTH the runtime block and the warning list
+    // below — the stdio-adapter warning and the reported daemon flags share a
+    // single liveness probe (pre-patch parity: the warning used to read the
+    // same runtime JSON it was embedded in).
+    let route = observe_daemon_route(&app_home, Some(&snapshot.daemon));
+    let runtime = render_runtime_observability(server, &route, full);
     let recall_eval = crate::status_ops::recall_eval::read_recall_eval_status(&app_home);
-    if let Some(warning) = crate::status_ops::recall_eval::recall_eval_warning(&recall_eval) {
-        warnings.push(warning);
-    }
-    let running_daemons = snapshot
-        .daemon_inventory
-        .iter()
-        .filter(|daemon| daemon.process_running == Some(true))
-        .count();
-    if running_daemons > 1 {
-        let scopes = snapshot
-            .daemon_inventory
-            .iter()
-            .filter(|daemon| daemon.process_running == Some(true))
-            .map(|daemon| {
-                daemon
-                    .global_db
-                    .as_deref()
-                    .unwrap_or(daemon.scope.as_str())
-                    .to_string()
-            })
-            .collect::<Vec<_>>();
-        warnings.push(format!(
-            "{running_daemons} tachi daemon scopes are running concurrently: {}",
-            scopes.join(", ")
-        ));
-    }
-    if runtime["daemon"]["running"].as_bool().unwrap_or(false)
-        && !runtime["daemon"]["matches_current_process"]
-            .as_bool()
-            .unwrap_or(false)
-    {
-        warnings.push(
-            "this MCP process is a stdio adapter while a daemon is running; supported reads and writes should forward to the daemon, otherwise restart stale MCP clients if runtime state looks inconsistent"
-                .to_string(),
-        );
-    }
-
     // Component governance for active workspace (#799) — registry only.
-    let named_project = crate::memory_search_ops::resolve_workspace_named_project();
-    let component_governance = crate::component_governance_ops::component_governance_context(
-        server,
-        named_project.as_deref(),
-        None,
-    )
-    .unwrap_or_else(|e| {
-        json!({
-            "status": "error",
-            "matches": [],
-            "note": format!("component governance unavailable: {e}"),
-        })
-    });
-    for line in
-        crate::component_governance_ops::component_governance_warning_lines(&component_governance)
-    {
-        if !warnings.iter().any(|w| w == &line) {
-            warnings.push(line);
-        }
-    }
+    let component_governance = workspace_component_governance(server);
+    // Same snapshot-derived warning list the typed health digest reports.
+    let warnings = agent_status_warning_lines(
+        &app_home,
+        &snapshot,
+        &daemon_state,
+        &recall_eval,
+        &component_governance,
+        &route,
+    );
 
     if full {
         let value = json!({
@@ -677,7 +961,10 @@ async fn handle_tachi_status_detail(
             "version": env!("CARGO_PKG_VERSION"),
             "health_score": snapshot.health_score,
             "health_deductions": snapshot.health_deductions,
-            "warnings": warnings.into_iter().take(8).collect::<Vec<_>>(),
+            "warnings": warnings
+                .into_iter()
+                .take(AGENT_STATUS_WARNING_CAP)
+                .collect::<Vec<_>>(),
             "recall_eval": recall_eval,
             "jobs": {
                 "active": total_active,
