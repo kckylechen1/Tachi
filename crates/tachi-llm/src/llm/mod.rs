@@ -200,6 +200,11 @@ impl LlmClient {
             if fields.is_empty() {
                 return Ok(cfg);
             }
+            // Selector provenance is authority, not a property of a currently
+            // available key. A readable Vault snapshot must not publish a
+            // downgraded selected-provider endpoint merely because its
+            // canonical pool is empty at this refresh.
+            authority.validate_selected_frontline_endpoint(lane, &cfg.base_url)?;
             for logical_name in cfg
                 .api_key_envs
                 .iter()

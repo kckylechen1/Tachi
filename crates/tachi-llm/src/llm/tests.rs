@@ -65,4 +65,5 @@ mod endpoint_credential_guard;
 mod extract_quality_golden;
 mod provider_key_persistence;
 mod provider_pool;
+mod provider_selector;
 mod recall_pool_hygiene;

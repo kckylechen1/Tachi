@@ -12,22 +12,31 @@ const DEFAULT_REASONING_MODEL: &str = "Qwen/Qwen3.5-27B";
 /// materialization is allowed to fill in. The bits are frozen on the client;
 /// request paths never re-read env to decide whether a field was explicit.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct LaneAuthority(u8);
+pub(crate) struct LaneAuthority {
+    fields: u8,
+    /// Selector provenance is frozen with the construction-time field
+    /// authority. Vault overlays and request paths use this rather than
+    /// consulting mutable process environment again.
+    selected_frontline_provider: Option<&'static ProviderProbeDescriptor>,
+}
 
 impl LaneAuthority {
     const BASE_URL_EXPLICIT: u8 = 1 << 0;
     const MODEL_EXPLICIT: u8 = 1 << 1;
 
     pub(super) const fn all_explicit() -> Self {
-        Self(Self::BASE_URL_EXPLICIT | Self::MODEL_EXPLICIT)
+        Self {
+            fields: Self::BASE_URL_EXPLICIT | Self::MODEL_EXPLICIT,
+            selected_frontline_provider: None,
+        }
     }
 
     pub(super) const fn has_explicit_base_url(self) -> bool {
-        self.0 & Self::BASE_URL_EXPLICIT != 0
+        self.fields & Self::BASE_URL_EXPLICIT != 0
     }
 
     pub(super) const fn has_explicit_model(self) -> bool {
-        self.0 & Self::MODEL_EXPLICIT != 0
+        self.fields & Self::MODEL_EXPLICIT != 0
     }
 
     fn from_fields(base_url_explicit: bool, model_explicit: bool) -> Self {
@@ -38,17 +47,61 @@ impl LaneAuthority {
         if model_explicit {
             bits |= Self::MODEL_EXPLICIT;
         }
-        Self(bits)
+        Self {
+            fields: bits,
+            selected_frontline_provider: None,
+        }
     }
 
     fn with_overlay(mut self, fields: &LaneFieldOverlay) -> Self {
         if fields.base_url.is_some() {
-            self.0 |= Self::BASE_URL_EXPLICIT;
+            self.fields |= Self::BASE_URL_EXPLICIT;
         }
         if fields.model.is_some() {
-            self.0 |= Self::MODEL_EXPLICIT;
+            self.fields |= Self::MODEL_EXPLICIT;
         }
         self
+    }
+
+    fn with_selected_frontline_provider(
+        mut self,
+        provider: &'static ProviderProbeDescriptor,
+    ) -> Self {
+        self.selected_frontline_provider = Some(provider);
+        self
+    }
+
+    pub(crate) fn validate_selected_frontline_endpoint(
+        self,
+        lane: ChatLane,
+        base_url: &str,
+    ) -> Result<(), String> {
+        let Some(provider) = self.selected_frontline_provider else {
+            return Ok(());
+        };
+        let url = reqwest::Url::parse(base_url).map_err(|_| {
+            format!(
+                "selected provider '{}' requires an https://{} endpoint, but lane '{}' has a malformed endpoint; refusing credential-bearing request",
+                provider.provider_kind,
+                provider.host,
+                lane.as_str(),
+            )
+        })?;
+        let host = url.host_str().unwrap_or_default();
+        let scheme = url.scheme();
+        let port = url.port();
+        if host != provider.host || scheme != "https" || port.is_some_and(|port| port != 443) {
+            return Err(format!(
+                "selected provider '{}' requires an https://{} endpoint (default port 443), but lane '{}' uses scheme '{}' with host '{}' and explicit port {}; refusing credential-bearing request",
+                provider.provider_kind,
+                provider.host,
+                lane.as_str(),
+                scheme,
+                host,
+                port.map(|port| port.to_string()).unwrap_or_else(|| "none".to_string()),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -100,6 +153,44 @@ const BIGMODEL_LANE_DEFAULT: ProviderLaneDefault = ProviderLaneDefault {
     model_envs: &["BIGMODEL_MODEL"],
 };
 
+/// One entry of the closed provider set selectable for a front-line lane
+/// through `EXTRACT_PROVIDER` / `SUMMARY_PROVIDER`.
+///
+/// `value` is the registry provider id operators write; the entry pairs it
+/// with the one descriptor that owns the provider's documented endpoint and
+/// with the provider's canonical credential/env names. Adding an entry is a
+/// code change reviewed against the descriptor table — the same posture as
+/// `AUTH_PROBE_DESCRIPTORS`.
+struct FrontlineProviderSelection {
+    value: &'static str,
+    descriptor: &'static ProviderProbeDescriptor,
+    /// Canonical credential env — the ONLY logical key a selected lane may
+    /// authenticate with, in env or in the Vault pool.
+    api_key_env: &'static str,
+    /// Provider-scoped endpoint default, honored only as https on the
+    /// descriptor host with the default port.
+    base_url_envs: &'static [&'static str],
+    /// Provider-scoped model default, honored after the lane-scoped override.
+    model_envs: &'static [&'static str],
+}
+
+const FRONTLINE_PROVIDER_SELECTIONS: &[FrontlineProviderSelection] = &[
+    FrontlineProviderSelection {
+        value: "deepseek",
+        descriptor: &DEEPSEEK_AUTH_PROBE,
+        api_key_env: "DEEPSEEK_API_KEY",
+        base_url_envs: &["DEEPSEEK_BASE_URL"],
+        model_envs: &["DEEPSEEK_MODEL"],
+    },
+    FrontlineProviderSelection {
+        value: "siliconflow",
+        descriptor: &SILICONFLOW_AUTH_PROBE,
+        api_key_env: "SILICONFLOW_API_KEY",
+        base_url_envs: &["SILICONFLOW_BASE_URL"],
+        model_envs: &["SILICONFLOW_MODEL"],
+    },
+];
+
 const NO_PROVIDER_DEFAULTS: &[&ProviderLaneDefault] = &[];
 const FOUNDRY_REASONING_DEFAULTS: &[&ProviderLaneDefault] = &[
     &DEEPSEEK_REASONING_DEFAULT,
@@ -146,6 +237,9 @@ impl ProviderRuntimeConfig {
     pub(super) fn from_env_with_authority() -> Result<(Self, [LaneAuthority; 4]), String> {
         // ── Front-line LLM layer (Extract + Summary) ──
         // Extract: EXTRACT_* → SILICONFLOW_*
+        // An explicit EXTRACT_PROVIDER (see `load_lane_selected_provider`)
+        // opts the lane out of this alias chain in favor of canonical
+        // provider selection.
         let (extract, extract_authority) = super::super::LlmClient::load_lane(
             ChatLane::Extract,
             &["EXTRACT_API_KEY", "SILICONFLOW_API_KEY"],
@@ -158,6 +252,7 @@ impl ProviderRuntimeConfig {
             "TACHI_BACKEND_EXTRACT_TIER",
             DEFAULT_EXTRACT_MODEL,
             NO_PROVIDER_DEFAULTS,
+            Some("EXTRACT_PROVIDER"),
         )?;
 
         // Summary: SUMMARY_* → EXTRACT_* → SILICONFLOW_*  (front-line default)
@@ -179,6 +274,7 @@ impl ProviderRuntimeConfig {
             "TACHI_BACKEND_SUMMARY_TIER",
             &extract.model,
             NO_PROVIDER_DEFAULTS,
+            Some("SUMMARY_PROVIDER"),
         )?;
 
         // ── Foundry LLM layer (Distill + Reasoning) ──
@@ -215,6 +311,7 @@ impl ProviderRuntimeConfig {
             "TACHI_BACKEND_REASONING_TIER",
             DEFAULT_REASONING_MODEL,
             FOUNDRY_REASONING_DEFAULTS,
+            None,
         )?;
 
         let (distill, distill_authority) = super::super::LlmClient::load_lane(
@@ -247,6 +344,7 @@ impl ProviderRuntimeConfig {
             "TACHI_BACKEND_DISTILL_TIER",
             &reasoning.model,
             FOUNDRY_DISTILL_DEFAULTS,
+            None,
         )?;
 
         // Eager rerank-config validation: unknown provider / local without
@@ -320,26 +418,44 @@ impl LaneFallbackConfig {
     /// if a distinct fallback api key resolves (either an explicit
     /// `{LANE}_FALLBACK_API_KEY` override or the lane's cross-provider
     /// convenience default) — never invents a fallback out of thin air.
+    ///
+    /// One suppression rule for explicitly selected front-line lanes: when
+    /// the automatic convenience entry names the *same* provider as the
+    /// lane's `EXTRACT_PROVIDER`/`SUMMARY_PROVIDER` selection, it is dropped
+    /// — that "fallback" would duplicate the primary provider and its
+    /// canonical key pool (a same-provider second tier, not #1197's
+    /// cross-provider rescue), and its key remains satisfiable from the
+    /// Vault pool long after construction. Explicit `*_FALLBACK_API_KEY`
+    /// overrides are operator intent and always survive; a selection whose
+    /// automatic fallback is a *different* provider keeps it (e.g.
+    /// `siliconflow`-selected lanes keep the automatic DeepSeek fallback);
+    /// legacy unset-selector behavior is byte-identical.
     pub fn from_env() -> Self {
         let (config, _) = Self::from_env_with_authority();
         config
     }
 
     pub(super) fn from_env_with_authority() -> (Self, [Option<LaneAuthority>; 4]) {
+        let extract_keys = Self::frontline_fallback_api_key_envs(
+            "EXTRACT_PROVIDER",
+            &["EXTRACT_FALLBACK_API_KEY"],
+            "DEEPSEEK_API_KEY",
+        );
         let (extract, extract_authority) = Self::load_fallback(
             ChatLane::Extract,
-            &["EXTRACT_FALLBACK_API_KEY", "DEEPSEEK_API_KEY"],
+            &extract_keys,
             &["EXTRACT_FALLBACK_BASE_URL", "DEEPSEEK_BASE_URL"],
             &["EXTRACT_FALLBACK_MODEL", "DEEPSEEK_MODEL"],
             &DEEPSEEK_FALLBACK_DEFAULT,
         );
+        let summary_keys = Self::frontline_fallback_api_key_envs(
+            "SUMMARY_PROVIDER",
+            &["SUMMARY_FALLBACK_API_KEY", "EXTRACT_FALLBACK_API_KEY"],
+            "DEEPSEEK_API_KEY",
+        );
         let (summary, summary_authority) = Self::load_fallback(
             ChatLane::Summary,
-            &[
-                "SUMMARY_FALLBACK_API_KEY",
-                "EXTRACT_FALLBACK_API_KEY",
-                "DEEPSEEK_API_KEY",
-            ],
+            &summary_keys,
             &[
                 "SUMMARY_FALLBACK_BASE_URL",
                 "EXTRACT_FALLBACK_BASE_URL",
@@ -415,6 +531,28 @@ impl LaneFallbackConfig {
             }),
             Some(authority),
         )
+    }
+
+    /// The fallback credential chain for an explicitly selected front-line
+    /// lane: the explicit `*_FALLBACK_API_KEY` entries plus the automatic
+    /// cross-provider convenience entry — minus that automatic entry when it
+    /// names the selected provider's own canonical key (same-provider
+    /// duplicate tier; see `from_env`'s doc). Suppression happens at chain
+    /// construction, so no later Vault materialization of the canonical pool
+    /// can resurrect the duplicate either.
+    fn frontline_fallback_api_key_envs(
+        selector_env: &str,
+        explicit_keys: &[&'static str],
+        automatic_key: &'static str,
+    ) -> Vec<&'static str> {
+        let suppress_automatic =
+            super::super::LlmClient::frontline_selected_api_key_env(selector_env)
+                == Some(automatic_key);
+        explicit_keys
+            .iter()
+            .copied()
+            .chain(std::iter::once(automatic_key).filter(|_| !suppress_automatic))
+            .collect()
     }
 }
 
@@ -734,6 +872,10 @@ impl super::super::LlmClient {
         })
     }
 
+    // One flat legacy-resolver signature; the selector env is the only new
+    // parameter and bundling the rest into a struct would churn the three
+    // untouched foundry call sites.
+    #[allow(clippy::too_many_arguments)]
     fn load_lane(
         lane: ChatLane,
         api_key_envs: &[&'static str],
@@ -742,7 +884,20 @@ impl super::super::LlmClient {
         tier_env: &str,
         default_model: &str,
         provider_defaults: &[&ProviderLaneDefault],
+        provider_selector_env: Option<&str>,
     ) -> Result<(ChatLaneConfig, LaneAuthority), String> {
+        if let Some(selector_env) = provider_selector_env {
+            if let Some(selector_value) = Self::env_value(selector_env) {
+                return Self::load_lane_selected_provider(
+                    lane,
+                    selector_env,
+                    &selector_value,
+                    base_url_envs,
+                    model_envs,
+                    tier_env,
+                );
+            }
+        }
         let selected_api_key = Self::first_env_key(api_key_envs);
         let selected_descriptor = selected_api_key.and_then(provider_descriptor_for_logical_key);
         let selected_provider_default = selected_descriptor.and_then(|descriptor| {
@@ -807,6 +962,196 @@ impl super::super::LlmClient {
             }
             None => Ok((config, authority)),
         }
+    }
+
+    /// Resolve a front-line lane whose provider was explicitly selected via
+    /// `EXTRACT_PROVIDER` / `SUMMARY_PROVIDER` (values:
+    /// [`FRONTLINE_PROVIDER_SELECTIONS`]).
+    ///
+    /// Opt-in canonical provider selection — the escape hatch for
+    /// deployments whose lane-scoped aliases (`EXTRACT_API_KEY` /
+    /// `SUMMARY_API_KEY`, both SiliconFlow-branded logical keys) need to
+    /// serve a different official provider:
+    ///
+    /// - **Credential**: only the selected provider's canonical registry key
+    ///   (`deepseek` → `DEEPSEEK_API_KEY`, `siliconflow` →
+    ///   `SILICONFLOW_API_KEY`) may supply the secret — via env or via the
+    ///   Vault pool, because runtime key selection flows through
+    ///   [`ChatLaneConfig::api_key_envs`]. Stale lane aliases are ignored
+    ///   entirely: never reinterpreted, never used as a fallback, never sent
+    ///   to the selected provider.
+    /// - **Endpoint**: the lane-scoped base URL wins, then the provider's
+    ///   canonical base URL, then the descriptor's documented chat URL.
+    ///   Every configured value must use `https` on the provider's exact
+    ///   host and default port (implicit 443 or explicit `:443`); anything
+    ///   else — plaintext http, a non-443 port, a foreign known host, an
+    ///   unknown host — is rejected here, before any credential-bearing
+    ///   request can be built, with or without a key present in env (a
+    ///   Vault-only key materializes later against this same stored
+    ///   endpoint).
+    /// - **Model**: lane-scoped override → provider canonical model → the
+    ///   descriptor default for this lane. A model override never moves the
+    ///   endpoint or the credential; the provider boundary stays closed.
+    ///
+    /// With the selector unset or empty the legacy alias chain above runs
+    /// unchanged. Reasoning/distill/rerank lanes are not selectable here.
+    fn load_lane_selected_provider(
+        lane: ChatLane,
+        selector_env: &str,
+        selector_value: &str,
+        base_url_envs: &[&str],
+        model_envs: &[&str],
+        tier_env: &str,
+    ) -> Result<(ChatLaneConfig, LaneAuthority), String> {
+        let selection = Self::frontline_provider_selection(selector_env, selector_value)?;
+        let descriptor = selection.descriptor;
+
+        let lane_base_url_env = base_url_envs.first().copied();
+        let mut resolved_base_url = None;
+        for key in lane_base_url_env
+            .into_iter()
+            .chain(selection.base_url_envs.iter().copied())
+        {
+            let Some(value) = Self::env_value(key) else {
+                continue;
+            };
+            resolved_base_url = Some(Self::selected_provider_base_url(
+                lane,
+                selector_env,
+                selection,
+                key,
+                &value,
+            )?);
+            break;
+        }
+        let base_url = resolved_base_url.unwrap_or_else(|| descriptor.chat.base_url.to_string());
+
+        let explicit_model = model_envs.first().and_then(|key| Self::env_value(key));
+        let provider_model = Self::first_env(selection.model_envs);
+        let model = crate::backend_tier::resolve_lane_model(
+            lane.as_str(),
+            tier_env,
+            explicit_model.clone().or(provider_model),
+            None,
+            descriptor.chat_model_for_lane(lane),
+        );
+
+        let authority = LaneAuthority::from_fields(
+            lane_base_url_env.is_some_and(|key| Self::env_value(key).is_some()),
+            explicit_model.is_some(),
+        )
+        .with_selected_frontline_provider(descriptor);
+
+        let config = ChatLaneConfig {
+            base_url,
+            model,
+            // Canonical-only credential chain: env selection, Vault pool
+            // selection, and every later rebind observe the same single key.
+            api_key_envs: vec![selection.api_key_env],
+        };
+        if Self::env_value(selection.api_key_env).is_some() {
+            return bind_lane_config_to_selected_key(
+                lane,
+                &config,
+                authority,
+                selection.api_key_env,
+                true,
+            )
+            .map(|bound| (bound, authority));
+        }
+        Ok((config, authority))
+    }
+
+    /// Resolve the `*_PROVIDER` value against the closed selection table.
+    /// Unknown values fail closed — never a silent legacy fallback.
+    fn frontline_provider_selection(
+        selector_env: &str,
+        selector_value: &str,
+    ) -> Result<&'static FrontlineProviderSelection, String> {
+        let value = selector_value.trim().to_ascii_lowercase();
+        if let Some(selection) = FRONTLINE_PROVIDER_SELECTIONS
+            .iter()
+            .find(|selection| selection.value == value)
+        {
+            return Ok(selection);
+        }
+        let accepted = FRONTLINE_PROVIDER_SELECTIONS
+            .iter()
+            .map(|selection| selection.value)
+            .collect::<Vec<_>>()
+            .join("|");
+        Err(format!(
+            "{selector_env}='{selector_value}' is not a selectable front-line provider (expected {accepted})"
+        ))
+    }
+
+    /// The canonical credential env of the provider a lane's selector
+    /// resolves to, or `None` when the selector is unset/empty. An invalid
+    /// selector value is reported by the primary lane resolution first (it
+    /// runs before fallback resolution), so `None` here never masks one.
+    fn frontline_selected_api_key_env(selector_env: &str) -> Option<&'static str> {
+        let value = Self::env_value(selector_env)?;
+        Self::frontline_provider_selection(selector_env, &value)
+            .ok()
+            .map(|selection| selection.api_key_env)
+    }
+
+    /// A selected provider's endpoint must use `https` on the provider's
+    /// exact host and default port (implicit 443 or an explicit `:443`) —
+    /// the same posture the auth-probe target table applies to
+    /// credential-bearing requests. Anything else — plaintext http, a
+    /// non-443 port, a foreign known host, an unknown host — is refused
+    /// here, before any credential-bearing request can be built, with or
+    /// without a key configured. This tightens only the opt-in selector
+    /// path; legacy caller-owned lanes keep their existing rules. The
+    /// refusal names the env var, scheme/port and host — never the URL's
+    /// userinfo or query, whose credential material the downstream
+    /// `endpoint_credential_leak` constructor guard keeps rejecting
+    /// separately.
+    fn selected_provider_base_url(
+        lane: ChatLane,
+        selector_env: &str,
+        selection: &FrontlineProviderSelection,
+        key: &str,
+        value: &str,
+    ) -> Result<String, String> {
+        let Ok(url) = reqwest::Url::parse(value) else {
+            return Err(format!(
+                "{selector_env}='{}' requires an https://{} endpoint, but {key} is not a usable endpoint URL for lane '{}'; refusing credential-bearing request",
+                selection.value,
+                selection.descriptor.host,
+                lane.as_str(),
+            ));
+        };
+        let Some(host) = url.host_str().map(str::to_string) else {
+            return Err(format!(
+                "{selector_env}='{}' requires an https://{} endpoint, but {key} carries no host for lane '{}'; refusing credential-bearing request",
+                selection.value,
+                selection.descriptor.host,
+                lane.as_str(),
+            ));
+        };
+        if host != selection.descriptor.host {
+            return Err(format!(
+                "{selector_env}='{}' requires a {} endpoint, but {key} targets host '{host}' for lane '{}'; refusing credential-bearing request",
+                selection.value,
+                selection.descriptor.host,
+                lane.as_str(),
+            ));
+        }
+        let scheme = url.scheme().to_string();
+        let port = url.port();
+        if scheme != "https" || port.is_some_and(|port| port != 443) {
+            return Err(format!(
+                "{selector_env}='{}' requires an https://{} (default port 443) endpoint, but {key} uses scheme '{scheme}' with explicit port {} for lane '{}'; refusing credential-bearing request",
+                selection.value,
+                selection.descriptor.host,
+                port.map(|port| port.to_string())
+                    .unwrap_or_else(|| "none".to_string()),
+                lane.as_str(),
+            ));
+        }
+        Ok(value.to_string())
     }
 
     fn first_compatible_provider_env(
@@ -964,6 +1309,7 @@ pub(crate) fn bind_lane_config_to_selected_key(
     logical_name: &str,
     allow_rebind: bool,
 ) -> Result<ChatLaneConfig, String> {
+    authority.validate_selected_frontline_endpoint(lane, &cfg.base_url)?;
     let Some(selected) = provider_descriptor_for_logical_key(logical_name) else {
         return Ok(cfg.clone());
     };
