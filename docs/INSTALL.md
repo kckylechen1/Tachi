@@ -279,6 +279,27 @@ For advanced setups, you can still route different LLM tasks to different provid
 
 Each prefix supports `_API_KEY`, `_BASE_URL`, and `_MODEL` suffixes.
 
+#### Front-line provider selection
+
+`EXTRACT_PROVIDER` / `SUMMARY_PROVIDER` (values: `deepseek` or `siliconflow`)
+opt one front-line lane out of the alias chain above and pin it to one
+official provider. When set, the lane authenticates with that provider's
+canonical key only — `DEEPSEEK_API_KEY` or `SILICONFLOW_API_KEY`, from the
+environment or the Tachi Vault pool. Only the stale lane API-key aliases
+(`EXTRACT_API_KEY` / `SUMMARY_API_KEY`) are ignored; the lane `*_BASE_URL` /
+`*_MODEL` overrides remain in force. The URL override must be `https` on the
+provider's exact host and default port — any other host (known or unknown),
+plaintext `http`, or a non-443 port fails startup before any
+credential-bearing request, even when the key lives only in the Vault. With
+no URL override the endpoint defaults to the provider's documented chat URL
+(`https://api.deepseek.com/chat/completions` for `deepseek`). Models remain
+free-form overrides (`EXTRACT_MODEL` → provider `_MODEL` → provider default)
+and never move the endpoint or the credential. Unset or empty keeps the
+legacy behavior exactly. Selecting a provider also suppresses the automatic
+same-provider fallback for that lane; configure `*_FALLBACK_*` explicitly for
+a genuine second provider. See `.env.example` for a complete commented
+official-DeepSeek recipe (model `deepseek-flash`).
+
 ### Optional Recall Tuning
 
 Hybrid recall defaults are behavior-preserving, but advanced deployments can
