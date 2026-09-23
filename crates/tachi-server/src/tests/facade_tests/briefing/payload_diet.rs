@@ -433,3 +433,83 @@ async fn compact_briefing_keeps_executor_responsive_while_snapshot_collects() {
         "a current-thread runtime task must run while the status snapshot is being collected"
     );
 }
+
+/// The governance-phase blocking read must also run off the async executor:
+/// while the digest's governance SQLite read is gated on a current-thread
+/// runtime, another task must still be able to run. This gates the
+/// GOVERNANCE phase specifically — if governance ran on the executor
+/// thread, the spawned task below could never be polled.
+#[tokio::test(flavor = "current_thread")]
+async fn compact_briefing_keeps_executor_responsive_during_governance_read() {
+    let (server, _temp_home) = make_server_with_temp_home();
+    let executor_ran_during_governance = Arc::new(AtomicBool::new(false));
+    let observed = Arc::clone(&executor_ran_during_governance);
+    let runtime = tokio::runtime::Handle::current();
+    crate::status_ops::install_status_governance_test_hook(server.tachi_home_dir(), move || {
+        // Runs inside the digest's blocking closure right before the
+        // governance store read. A task spawned onto this current-thread
+        // runtime can only make progress if the executor thread is free —
+        // i.e. governance was actually moved onto the blocking pool.
+        let (ran_tx, ran_rx) = std::sync::mpsc::channel();
+        runtime.spawn(async move {
+            tokio::task::yield_now().await;
+            let _ = ran_tx.send(());
+        });
+        observed.store(
+            ran_rx.recv_timeout(Duration::from_secs(5)).is_ok(),
+            Ordering::SeqCst,
+        );
+    });
+
+    crate::facade_memory_ops::handle_tachi_memory(
+        &server,
+        compact_json_params("governance responsiveness"),
+    )
+    .await
+    .expect("compact briefing should serialize");
+
+    assert!(
+        executor_ran_during_governance.load(Ordering::SeqCst),
+        "a current-thread runtime task must run while the governance read is gated"
+    );
+}
+
+/// A failure in the governance phase of the digest keeps the established
+/// degradation shape: briefing completes, score falls back to 0, no
+/// snapshot-derived status lines surface, wiki block survives.
+#[tokio::test]
+async fn compact_briefing_degrades_silently_when_governance_read_fails() {
+    let (server, _temp_home) = make_server_with_temp_home();
+    crate::status_ops::install_status_governance_test_hook(server.tachi_home_dir(), || {
+        panic!("deliberate governance fixture failure")
+    });
+
+    let body = crate::facade_memory_ops::handle_tachi_memory(
+        &server,
+        compact_json_params("governance failure degradation"),
+    )
+    .await
+    .expect("compact briefing must degrade instead of failing");
+    let briefing: Value = serde_json::from_str(&body).expect("briefing JSON");
+
+    assert_eq!(
+        briefing["health"]["health_score"],
+        json!(0),
+        "failed governance read must degrade the score to 0"
+    );
+    assert!(
+        !briefing["health"]["warnings"]
+            .as_array()
+            .expect("health warnings array")
+            .iter()
+            .any(|warning| warning.as_str().is_some_and(|line| {
+                line.contains("daemon not running") || line.contains("daily distill has never run")
+            })),
+        "degraded health warnings must not carry snapshot-derived status lines: {:?}",
+        briefing["health"]["warnings"]
+    );
+    assert!(
+        briefing["health"]["wiki"].as_object().is_some(),
+        "wiki counts must survive governance degradation"
+    );
+}

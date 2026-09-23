@@ -61,7 +61,10 @@ pub(crate) use runtime::{
     runtime_observability_json, truncate, AgentHealthDigest,
 };
 #[cfg(test)]
-pub(crate) use runtime::{handle_tachi_status_full, install_status_snapshot_test_hook};
+pub(crate) use runtime::{
+    handle_tachi_status_full, install_status_governance_test_hook,
+    install_status_snapshot_test_hook,
+};
 use snapshot::paths_equal;
 pub(crate) use snapshot::{
     collect_snapshot, collect_snapshot_scoped, collect_snapshot_with_provider_value_compare,
