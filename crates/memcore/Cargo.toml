@@ -52,7 +52,7 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 chrono = { workspace = true }
 regex = { workspace = true }
-libsimple = "~0.7"
+libsimple = "~0.9"
 sqlite-vec = { workspace = true }
 vault-kit = { path = "../vault-kit" }
 tempfile = "3"

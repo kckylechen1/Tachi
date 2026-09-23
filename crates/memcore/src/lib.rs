@@ -29,10 +29,10 @@
 // The floor is 3.50.3 because of CVE-2025-7709 (fixed 3.50.3): a corrupt FTS5
 // index yields unauthorized memory access. memcore's core search *is* FTS5 and
 // its content is user-writable (memories, wiki, events, URL ingest), so this is
-// the exact attack surface, not a theoretical one. The workspace `rusqlite`
-// requirement is a range (`>=0.37, <0.39`) whose lower bound resolves to
-// libsqlite3-sys 0.35.0 / SQLite 3.50.2 — below the floor. That lower bound is
-// permitted *only* because this assertion refuses such a build outright.
+// the exact attack surface, not a theoretical one. The workspace pins
+// `rusqlite = "0.40"` (libsqlite3-sys 0.38.x / SQLite 3.53.2), which is above
+// the floor; this assertion still refuses any build that somehow resolves
+// below 3.50.3.
 //
 // If this fails: bump `rusqlite`/`libsqlite3-sys` until the bundled SQLite is
 // >= 3.50.3. Do not lower the constant, and do not replace it and the runtime
