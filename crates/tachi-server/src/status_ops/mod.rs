@@ -56,11 +56,12 @@ mod types;
 #[cfg(test)]
 mod tests;
 
-#[cfg(test)]
-pub(crate) use runtime::handle_tachi_status_full;
 pub(crate) use runtime::{
-    handle_tachi_status_agent, resolve_app_home, runtime_observability_json, truncate,
+    collect_agent_health_digest, handle_tachi_status_agent, resolve_app_home,
+    runtime_observability_json, truncate, AgentHealthDigest,
 };
+#[cfg(test)]
+pub(crate) use runtime::{handle_tachi_status_full, install_status_snapshot_test_hook};
 use snapshot::paths_equal;
 pub(crate) use snapshot::{
     collect_snapshot, collect_snapshot_scoped, collect_snapshot_with_provider_value_compare,

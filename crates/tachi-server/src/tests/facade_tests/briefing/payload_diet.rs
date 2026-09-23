@@ -1,5 +1,10 @@
 use super::*;
 use crate::MemoryServer;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
+use std::time::Duration;
 
 fn compact_json_params(query: &str) -> TachiMemoryParams {
     let mut params = tachi_memory_params("briefing");
@@ -301,4 +306,130 @@ async fn compact_briefing_integration_has_no_low_relevance_memory_or_wiki_rows()
             }
         }
     }
+}
+
+/// The compact briefing health block must be a typed projection of the SAME
+/// snapshot + warning assembly the agent status surface reports: identical
+/// score, and the status warning list opening the briefing health warnings
+/// verbatim and in order (only briefing-side additions — wiki refuse,
+/// governance, binding — may follow).
+#[tokio::test]
+async fn compact_briefing_health_is_typed_projection_of_agent_status() {
+    let (server, _temp_home) = make_server_with_temp_home();
+
+    let briefing_body = crate::facade_memory_ops::handle_tachi_memory(
+        &server,
+        compact_json_params("typed health digest parity"),
+    )
+    .await
+    .expect("compact briefing should serialize");
+    let briefing: Value = serde_json::from_str(&briefing_body).expect("briefing JSON");
+
+    let status_body = crate::status_ops::handle_tachi_status_agent(&server, Some("json"))
+        .await
+        .expect("status should serialize");
+    let status: Value = serde_json::from_str(&status_body).expect("status JSON");
+
+    assert_eq!(
+        briefing["health"]["health_score"], status["health_score"],
+        "compact briefing must report the same snapshot-derived health score as tachi_status"
+    );
+
+    let status_warnings = status["warnings"]
+        .as_array()
+        .expect("status warnings array")
+        .clone();
+    assert!(
+        !status_warnings.is_empty(),
+        "fixture must produce at least one status warning for the parity check to bite"
+    );
+    let health_warnings = briefing["health"]["warnings"]
+        .as_array()
+        .expect("briefing health warnings array");
+    assert!(
+        health_warnings.len() >= status_warnings.len()
+            && health_warnings[..status_warnings.len()] == status_warnings[..],
+        "briefing health warnings must open with the exact status warning list, in order; \
+         status={status_warnings:?} health={health_warnings:?}"
+    );
+}
+
+/// Snapshot-collection failure keeps the pre-existing degradation shape:
+/// the briefing still completes, score falls back to 0, the health warning
+/// list starts empty (no status-derived lines surface), and the wiki block
+/// survives. No new "status unavailable" warning line is invented.
+#[tokio::test]
+async fn compact_briefing_degrades_silently_when_snapshot_collection_fails() {
+    let (server, _temp_home) = make_server_with_temp_home();
+    crate::status_ops::install_status_snapshot_test_hook(server.tachi_home_dir(), || {
+        panic!("deliberate status snapshot fixture failure")
+    });
+
+    let body = crate::facade_memory_ops::handle_tachi_memory(
+        &server,
+        compact_json_params("snapshot failure degradation"),
+    )
+    .await
+    .expect("compact briefing must degrade instead of failing");
+    let briefing: Value = serde_json::from_str(&body).expect("briefing JSON");
+
+    assert_eq!(
+        briefing["health"]["health_score"],
+        json!(0),
+        "failed snapshot collection must degrade the score to 0"
+    );
+    assert!(
+        !briefing["health"]["warnings"]
+            .as_array()
+            .expect("health warnings array")
+            .iter()
+            .any(|warning| warning.as_str().is_some_and(|line| {
+                line.contains("daemon not running") || line.contains("daily distill has never run")
+            })),
+        "degraded health warnings must not carry snapshot-derived status lines: {:?}",
+        briefing["health"]["warnings"]
+    );
+    assert!(
+        briefing["health"]["wiki"].as_object().is_some(),
+        "wiki counts must survive status degradation"
+    );
+    assert_eq!(briefing["health"]["compact"], json!(true));
+}
+
+/// The blocking snapshot work must run off the async executor: on a
+/// current-thread runtime, another task must be able to run WHILE the
+/// snapshot is being collected.
+#[tokio::test(flavor = "current_thread")]
+async fn compact_briefing_keeps_executor_responsive_while_snapshot_collects() {
+    let (server, _temp_home) = make_server_with_temp_home();
+    let executor_ran_during_snapshot = Arc::new(AtomicBool::new(false));
+    let observed = Arc::clone(&executor_ran_during_snapshot);
+    let runtime = tokio::runtime::Handle::current();
+    crate::status_ops::install_status_snapshot_test_hook(server.tachi_home_dir(), move || {
+        // Runs while the briefing future is parked awaiting the snapshot
+        // result. A task spawned onto this current-thread runtime can only
+        // make progress if the executor thread is free — i.e. the snapshot
+        // work was actually moved onto the blocking pool.
+        let (ran_tx, ran_rx) = std::sync::mpsc::channel();
+        runtime.spawn(async move {
+            tokio::task::yield_now().await;
+            let _ = ran_tx.send(());
+        });
+        observed.store(
+            ran_rx.recv_timeout(Duration::from_secs(5)).is_ok(),
+            Ordering::SeqCst,
+        );
+    });
+
+    crate::facade_memory_ops::handle_tachi_memory(
+        &server,
+        compact_json_params("snapshot responsiveness"),
+    )
+    .await
+    .expect("compact briefing should serialize");
+
+    assert!(
+        executor_ran_during_snapshot.load(Ordering::SeqCst),
+        "a current-thread runtime task must run while the status snapshot is being collected"
+    );
 }

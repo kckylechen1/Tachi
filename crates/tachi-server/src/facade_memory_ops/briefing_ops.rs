@@ -109,17 +109,22 @@ mod compact_section_tests {
 }
 
 async fn compact_health_summary(server: &MemoryServer, wiki_counts: Value) -> Value {
-    // tachi#1201 k3: search_memory/tachi_status now default to markdown when
-    // `format` is omitted; this internal consumer parses the body as JSON,
-    // so it must opt in explicitly to keep this call's shape unchanged.
-    let status = crate::status_ops::handle_tachi_status_agent(server, Some("json"))
+    // Health-only consumer: derive the compact health block from the typed
+    // digest (`collect_agent_health_digest`) — the SAME authoritative
+    // snapshot and warning assembly the agent status surface reports —
+    // instead of building the full status payload and round-tripping it
+    // through stringify/parse. The blocking snapshot collection runs on
+    // Tokio's blocking pool. On failure this keeps the exact pre-existing
+    // degradation shape (score 0, empty warnings) — no new warning lines.
+    let digest = crate::status_ops::collect_agent_health_digest(server)
         .await
-        .ok()
-        .and_then(|body| serde_json::from_str::<Value>(&body).ok())
-        .unwrap_or_else(|| json!({}));
+        .unwrap_or(crate::status_ops::AgentHealthDigest {
+            health_score: 0,
+            warnings: Vec::new(),
+        });
     json!({
-        "health_score": status.get("health_score").cloned().unwrap_or_else(|| json!(0)),
-        "warnings": status.get("warnings").cloned().unwrap_or_else(|| json!([])),
+        "health_score": digest.health_score,
+        "warnings": digest.warnings,
         "wiki": wiki_counts,
         "compact": true,
     })
