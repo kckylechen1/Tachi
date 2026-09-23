@@ -228,6 +228,7 @@ fn legacy_http_initialize_meta_survives_wire_dispatch() {
                 names,
                 std::collections::BTreeSet::from([
                     "tachi_a2a",
+                    "tachi_agent_eval",
                     "tachi_gh",
                     "tachi_memory",
                     "tachi_staff",

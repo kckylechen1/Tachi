@@ -20,6 +20,16 @@ exactly the four in-scope lanes of `ci.yml` — `build-seat-setup`, `rust`,
   `physical-db-identity-windows` job is **NOT-COVERED** (its `cfg(not(unix))`
   path is dead on any Unix) and stays on `windows-latest` (out of scope,
   #1865).
+- **Observational Windows classification (owner adjudication 2026-09-23,
+  current delivery only):** the `physical-db-identity-windows` matrix remains
+  defined and unconditional on `windows-latest` — all three crate legs still
+  execute, and the aggregate still collects and reports their raw status —
+  but it is classified observational in `.github/acceptance-plan.json`, so a
+  red leg does not block this delivery's CI acceptance. Visible, not
+  required: the exclusion is dated, named per job in the plan, and not
+  retroactive. Windows releases remain prohibited until #1963 is fixed, and
+  this macOS-arm64 lane still certifies no Linux or Windows platform
+  behavior.
 - **Named coverage gap (review round 1, accepted):** Linux-only `cfg` paths —
   e.g. the seccomp containment in
   `crates/tachi-server/src/dispatch_ops/subprocess.rs` and the

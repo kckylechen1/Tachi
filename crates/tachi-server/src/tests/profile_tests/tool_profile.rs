@@ -120,10 +120,7 @@ async fn standard_profile_exposes_agent_intents_not_execution_internals() {
     assert!(tools.contains("`tachi_gh`"));
     assert!(tools.contains("`tachi_a2a`"));
     assert!(!tools.contains("`tachi_event`"));
-    // Harnesses report native lifecycle/eval facts through their adapter
-    // protocol. Ordinary agents supply semantic completion/adjudication via
-    // the work ledger instead of manually relaying system bookkeeping.
-    assert!(!tools.contains("`tachi_agent_eval`"));
+    assert!(tools.contains("`tachi_agent_eval`"));
     assert!(!tools.contains("`tachi_verify`"));
     assert!(!tools.contains("`tachi_tools`"));
     assert!(!tools.contains("`tachi_status`"));
@@ -132,6 +129,67 @@ async fn standard_profile_exposes_agent_intents_not_execution_internals() {
     assert!(!tools.contains("`tachi_skill`"));
     assert!(!tools.contains("`vault_status`"));
     assert!(!tools.contains("`tachi_orchestrator`"));
+
+    let standard = tachi_hub::ToolProfile::standard();
+    for action in [
+        "register",
+        "observe",
+        "adjudicate",
+        "get",
+        "candidate_projection",
+    ] {
+        assert!(tachi_hub::facade_action_allowed(
+            "tachi_agent_eval",
+            Some(action),
+            Some(standard)
+        ));
+    }
+    for action in [
+        "aggregate",
+        "aggregate_live",
+        "telemetry",
+        "perf",
+        "route_projection",
+        "attach_session",
+        "get_attachment",
+        "",
+        "future_action",
+    ] {
+        assert!(!tachi_hub::facade_action_allowed(
+            "tachi_agent_eval",
+            Some(action),
+            Some(standard)
+        ));
+    }
+}
+
+#[tokio::test]
+async fn standard_eval_tool_call_denies_operator_and_attachment_actions() {
+    for action in [
+        "aggregate",
+        "route_projection",
+        "attach_session",
+        "get_attachment",
+        "future_action",
+    ] {
+        let server = make_server();
+        server.set_tool_profile(Some(tachi_hub::ToolProfile::standard()));
+        let arguments = serde_json::json!({"action": action})
+            .as_object()
+            .expect("arguments object")
+            .clone();
+        let result = call_tool_via_server(server, "tachi_agent_eval", Some(arguments))
+            .await
+            .expect("denial should be a tool response");
+        assert_eq!(result.is_error, Some(true), "{action} must be denied");
+        let text = result
+            .content
+            .first()
+            .and_then(|content| content.as_text())
+            .map(|content| content.text.as_str())
+            .unwrap_or("");
+        assert!(text.contains("not allowed"), "{action} returned: {text}");
+    }
 }
 
 #[tokio::test]

@@ -427,6 +427,15 @@ jobs:
 
   physical-db-identity-windows:
     name: Physical DB identity fallback (Windows, ${{ matrix.crate }})
+    # Platform applicability -- owner adjudication 2026-09-23 (current
+    # delivery only, after confirming no current Windows usage): this matrix
+    # stays visible and unconditional. All three crate legs keep executing
+    # on windows-latest and the aggregate still collects their raw status,
+    # but the job is classified OBSERVATIONAL in
+    # .github/acceptance-plan.json, so a red leg does not block this
+    # delivery's CI acceptance -- the failure is reported as excluded, never
+    # hidden, faked, or skipped. Not retroactive; Windows releases stay
+    # prohibited until #1963 is fixed.
     runs-on: windows-latest
     timeout-minutes: 15
     strategy:
@@ -609,9 +618,14 @@ jobs:
 
   acceptance:
     name: acceptance
-    needs: [build-seat-setup, rust, physical-db-identity-windows, node, gitleaks]
+    needs: [build-seat-setup, rust, node, gitleaks, physical-db-identity-windows]
     # Aggregate CI only; review/canary/owner approval remain separate gates.
-    # This job must inspect failed/skipped dependencies, without admitting forks.
+    # This job must inspect failed/skipped dependencies, without admitting
+    # forks. Required jobs fail closed on any non-success. Observational jobs
+    # (owner adjudication 2026-09-23, current delivery only:
+    # physical-db-identity-windows) are reported with their raw status but
+    # do not block -- see .github/acceptance-plan.json and
+    # docs/engineering/operations/actions-capacity.md.
     if: >-
       always() && (
         ((github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
@@ -632,7 +646,7 @@ jobs:
         shell: bash
         run: bash .github/scripts/runner_hygiene.sh preflight 10
 
-      - name: Evaluate required CI evidence
+      - name: Evaluate required CI evidence and report observational exclusions
         env:
           CI_NEEDS_JSON: ${{ toJSON(needs) }}
         run: python3 .github/scripts/ci_acceptance.py

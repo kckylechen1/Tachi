@@ -194,7 +194,10 @@ mod tests {
             let mut create = DbOpenContext::create_fresh();
             create.required_profile = profile;
             init_schema_with_label_mut(&mut conn, "global", &path, &create).unwrap();
-            assert_eq!(read_schema_version(&conn).unwrap(), 38);
+            assert_eq!(
+                read_schema_version(&conn).unwrap(),
+                crate::db::migrations::EXPECTED_SCHEMA_VERSION
+            );
             validate_current_schema_integrity(&conn).unwrap();
             let object_count = |conn: &Connection, table: &str| -> i64 {
                 conn.query_row(
@@ -231,7 +234,10 @@ mod tests {
             let mut allow = DbOpenContext::open_existing_allow("test:v38-profile-upgrade");
             allow.required_profile = profile;
             init_schema_with_label_mut(&mut conn, "global", &path, &allow).unwrap();
-            assert_eq!(read_schema_version(&conn).unwrap(), 38);
+            assert_eq!(
+                read_schema_version(&conn).unwrap(),
+                crate::db::migrations::EXPECTED_SCHEMA_VERSION
+            );
             for key in ["v37_verified_agent_admissions", "v38_current_truth"] {
                 let count: i64 = conn.query_row("SELECT COUNT(*) FROM hard_state WHERE namespace = 'migrations' AND key = ?1", [key], |row| row.get(0)).unwrap();
                 assert_eq!(count, 1);
@@ -307,7 +313,7 @@ mod tests {
             );
             assert_eq!(
                 crate::db::migrations::read_schema_version(&conn).unwrap(),
-                38
+                crate::db::migrations::EXPECTED_SCHEMA_VERSION
             );
         }
     }

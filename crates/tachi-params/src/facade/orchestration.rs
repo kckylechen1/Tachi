@@ -389,6 +389,7 @@ pub const TACHI_AGENT_EVAL_ACTIONS: &[&str] = &[
     "adjudicate",
     "get",
     "route_projection",
+    "candidate_projection",
     "attach_session",
     "get_attachment",
     "ingest_session_event",
@@ -403,7 +404,7 @@ pub const TACHI_AGENT_EVAL_ACTIONS: &[&str] = &[
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
 pub struct TachiAgentEvalParams {
     /// aggregate | aggregate_live | telemetry | perf | register | observe |
-    /// adjudicate | get | route_projection | attach_session | get_attachment |
+    /// adjudicate | get | route_projection | candidate_projection | attach_session | get_attachment |
     /// ingest_session_event | get_session_state | mark_session_connection |
     /// reconnect_session | advertise_session_capabilities |
     /// request_intervention | record_intervention_result.
@@ -450,6 +451,10 @@ pub struct TachiAgentEvalParams {
     /// unclassified task over the default window.
     #[serde(default)]
     pub projection: Option<RouteProjectionParams>,
+
+    /// Read-only native dispatch evidence over caller-supplied candidates.
+    #[serde(default)]
+    pub candidate_projection: Option<CandidateProjectionParams>,
 
     // #1733 generic host-owned ACP attachment admission. These fields remain
     // flat for compatibility with the existing single-facade parameter
@@ -619,6 +624,31 @@ pub struct RouteProjectionParams {
     pub window_days: Option<u32>,
 }
 
+/// Bounded, caller-supplied candidates; model choice remains with the host.
+#[derive(Debug, Clone, Default, Deserialize, serde::Serialize, JsonSchema)]
+pub struct CandidateProjectionParams {
+    /// Task scope matched against register-time requested_task_type only.
+    #[serde(default)]
+    pub task_type: Option<String>,
+    /// Run-created window in days (default 30, capped at 365).
+    #[serde(default)]
+    pub window_days: Option<u32>,
+    /// Between one and six candidates.
+    #[serde(default)]
+    pub candidates: Vec<CandidateProjectionCandidate>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, serde::Serialize, JsonSchema)]
+pub struct CandidateProjectionCandidate {
+    pub candidate_id: String,
+    pub model: String,
+    #[serde(default)]
+    pub role: Option<String>,
+    pub harness: String,
+    #[serde(default)]
+    pub model_revision: Option<String>,
+}
+
 /// #1066 `register`: records the parent contract, execution origin,
 /// lifecycle owner, harness/native child id, and requested identity for a
 /// harness-native subagent. Same `native_child_id` + same content replays
@@ -660,6 +690,11 @@ pub struct MirrorEvalRegisterParams {
     /// Requested identity — agent/vendor label at spawn time.
     #[serde(default)]
     pub requested_agent: Option<String>,
+    /// Register-time task and role are requested-basis metadata, not observed identity.
+    #[serde(default)]
+    pub requested_task_type: Option<String>,
+    #[serde(default)]
+    pub requested_role: Option<String>,
 }
 
 /// #1066 `observe`: carrier-observed terminal facts, duration/cost,
@@ -707,6 +742,11 @@ pub struct MirrorEvalObserveParams {
 
     #[serde(default)]
     pub effective_harness: Option<String>,
+    /// Carrier-observed role and model revision.
+    #[serde(default)]
+    pub effective_role: Option<String>,
+    #[serde(default)]
+    pub effective_model_revision: Option<String>,
 }
 
 /// #1066 `adjudicate`: leader/independent-reviewer judgment for an

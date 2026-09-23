@@ -174,6 +174,127 @@ fn observed_census() -> Value {
     })
 }
 
+#[test]
+fn standard_eval_schema_exposes_only_usable_native_loop() {
+    let standard = projected_tools(tachi_hub::ToolProfile::standard());
+    let eval = standard
+        .iter()
+        .find(|tool| tool.name == "tachi_agent_eval")
+        .expect("standard eval");
+    let admin = projected_tools(tachi_hub::ToolProfile::admin());
+    let full = admin
+        .iter()
+        .find(|tool| tool.name == "tachi_agent_eval")
+        .expect("admin eval");
+    assert_eq!(
+        action_inventory(eval).expect("standard eval action enum"),
+        [
+            "adjudicate",
+            "candidate_projection",
+            "get",
+            "observe",
+            "register",
+        ]
+    );
+    let properties = eval.input_schema["properties"]
+        .as_object()
+        .expect("eval properties");
+    assert_eq!(
+        properties
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>(),
+        [
+            "action",
+            "adjudicate",
+            "candidate_projection",
+            "get",
+            "limit",
+            "observe",
+            "register",
+        ]
+        .into_iter()
+        .collect()
+    );
+    assert_eq!(eval.input_schema["required"], full.input_schema["required"]);
+    for denied in [
+        "fixture_path",
+        "projection",
+        "host_identity",
+        "attachment_id",
+        "work_claim_id",
+    ] {
+        assert!(!properties.contains_key(denied));
+        assert!(
+            full.input_schema["properties"].get(denied).is_some(),
+            "admin keeps {denied}"
+        );
+    }
+    assert!(projected_tools(tachi_hub::ToolProfile::delegate())
+        .iter()
+        .all(|tool| tool.name != "tachi_agent_eval"));
+
+    let defs = eval.input_schema["$defs"]
+        .as_object()
+        .expect("nested eval payload definitions");
+    fn check_refs(value: &Value, defs: &Map<String, Value>, visited: &mut BTreeSet<String>) {
+        match value {
+            Value::Object(object) => {
+                if let Some(reference) = object.get("$ref").and_then(Value::as_str) {
+                    let name = reference
+                        .strip_prefix("#/$defs/")
+                        .expect("local definition reference");
+                    let definition = defs
+                        .get(name)
+                        .unwrap_or_else(|| panic!("dangling $ref {reference}"));
+                    if visited.insert(name.to_owned()) {
+                        check_refs(definition, defs, visited);
+                    }
+                }
+                for child in object.values() {
+                    check_refs(child, defs, visited);
+                }
+            }
+            Value::Array(items) => {
+                for item in items {
+                    check_refs(item, defs, visited);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut visited = BTreeSet::new();
+    check_refs(&eval.input_schema["properties"], defs, &mut visited);
+    assert_eq!(visited, defs.keys().cloned().collect());
+    for name in [
+        "MirrorEvalRegisterParams",
+        "MirrorEvalObserveParams",
+        "MirrorEvalAdjudicateParams",
+        "MirrorEvalGetParams",
+        "CandidateProjectionParams",
+        "CandidateProjectionCandidate",
+    ] {
+        assert!(defs.contains_key(name), "required nested payload {name}");
+        assert_eq!(
+            defs[name]["required"], full.input_schema["$defs"][name]["required"],
+            "{name} required fields preserved"
+        );
+    }
+    assert!(!defs.contains_key("RouteProjectionParams"));
+    let full_defs = full.input_schema["$defs"]
+        .as_object()
+        .expect("admin definitions");
+    assert_eq!(
+        full_defs
+            .keys()
+            .filter(|name| !defs.contains_key(*name))
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        ["RouteProjectionParams"],
+        "only the denied route projection payload definition is unreachable"
+    );
+}
+
 fn budget_violations(observed: &Value, budgets: &Value) -> Vec<String> {
     let mut violations = Vec::new();
     for (profile, budget) in budgets["profiles"].as_object().expect("profile budgets") {
@@ -304,7 +425,19 @@ fn live_execution_surface_matches_fixture_and_provisional_budgets() {
         "tachi_staff",
         "tachi_task"
     ]);
-    for profile in ["standard", "delegate", "coordinate"] {
+    assert_eq!(
+        observed["profiles"]["standard"]["visible_tools"],
+        json!([
+            "tachi_a2a",
+            "tachi_agent_eval",
+            "tachi_gh",
+            "tachi_memory",
+            "tachi_staff",
+            "tachi_task"
+        ]),
+        "standard discovery must expose exactly the six approved facades"
+    );
+    for profile in ["delegate", "coordinate"] {
         assert_eq!(
             observed["profiles"][profile]["visible_tools"], expected_product_surface,
             "{profile} discovery must expose exactly the five product facades"
@@ -324,9 +457,18 @@ fn live_execution_surface_matches_fixture_and_provisional_budgets() {
         .as_object()
         .expect("standard task properties");
     assert!(!properties.contains_key("dispatch_reason"));
-    assert!(!observed["profiles"]["standard"]["visible_tools"]
+    // Owner-approved surface: standard DOES see the bounded native
+    // evaluation loop, with its exact five admitted actions gated in
+    // tachi-hub (pinned by the profile tests); the delegate worker does
+    // not gain the facade.
+    assert!(observed["profiles"]["standard"]["visible_tools"]
         .as_array()
         .expect("standard tools")
+        .iter()
+        .any(|tool| tool == "tachi_agent_eval"));
+    assert!(!observed["profiles"]["delegate"]["visible_tools"]
+        .as_array()
+        .expect("delegate visible tools")
         .iter()
         .any(|tool| tool == "tachi_agent_eval"));
 }

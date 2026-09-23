@@ -206,6 +206,7 @@ fn standard_profile_restricts_to_allow_list() {
             "tachi_a2a".to_string(),
             "tachi_task".to_string(),
             "tachi_staff".to_string(),
+            "tachi_agent_eval".to_string(),
             "tachi_memory".to_string(),
             "tachi_gh".to_string(),
         ]

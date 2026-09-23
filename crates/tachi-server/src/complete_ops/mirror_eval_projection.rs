@@ -188,6 +188,9 @@ mod tests {
             requested_profile: Some("explore".to_string()),
             requested_model: Some("anthropic/claude-sonnet".to_string()),
             requested_agent: Some("claude".to_string()),
+            // v34 fields: legacy-shaped fixture rows omit them (NULL).
+            requested_task_type: None,
+            requested_role: None,
         }
     }
 
