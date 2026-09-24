@@ -1,5 +1,7 @@
 use super::super::kanban_helpers::update_kanban_state;
 use super::*;
+use crate::dispatch_ops::dispatch_v2::{CommittedModelPlan, PlanCommit, PlanCommitPre};
+use crate::dispatch_ops::kanban_helpers::plan_reference;
 
 // ─── V2 plan stage (optional Stage 1) ────────────────────────────────────────
 
@@ -11,7 +13,6 @@ pub(super) struct PlanStageInputs<'a> {
     pub(super) resolved_profile: &'a ResolvedDispatchProfile,
     pub(super) profile_payload: &'a Value,
     pub(super) base_prompt: &'a str,
-    pub(super) plan_path: &'a Path,
     pub(super) prompt_md_path: &'a Path,
     pub(super) context_md_path: &'a Path,
     pub(super) trajectory_path: &'a Path,
@@ -41,113 +42,60 @@ pub(super) async fn run_v2_plan_stage(
     let mut plan_generated_at: Option<String> = None;
 
     if v2 {
+        // The plan content and its exact serving receipt are published in one
+        // atomic `status.json` replacement. The anchor is opened before the
+        // provider is awaited, and no lock is held across that await.
         let label = format!("dispatch-plan-{}", inputs.dispatch_id);
-        let plan_timeout = Duration::from_secs(plan_timeout_secs());
-        let plan_fut = run_plan_stage(inputs.server, &inputs.request.task, &label);
-        let plan_outcome = match tokio::time::timeout(plan_timeout, plan_fut).await {
-            Ok(Ok(p)) => p,
-            Ok(Err(e)) => {
-                append_trajectory_event(
-                    inputs.trajectory_path,
-                    json!({
-                        "event": "plan_failed",
-                        "dispatch_id": inputs.dispatch_id,
-                        "timestamp": Utc::now().to_rfc3339(),
-                        "error": e,
-                    }),
-                );
-                write_status_json(
-                    inputs.workspace_dir,
-                    inputs.dispatch_id,
-                    true,
-                    None,
-                    None,
-                    "failed",
-                    Some(1),
-                    None,
-                    None,
-                    None,
-                    Some(json!({ "error": e })),
-                );
-                // #971: the kanban row now exists before this stage runs
-                // (BOARD-FIRST) — a plan failure must close it, not leave it
-                // orphaned in TASK_STATE_WORKING. Mirrors the watchdog's own
-                // failure-close pattern in execution.rs (reused helper, same
-                // terminal state + unreviewed flag).
-                if let Err(kanban_err) = update_kanban_state(
-                    inputs.server,
-                    inputs.dispatch_id,
-                    "TASK_STATE_FAILED",
-                    None,
-                    Some(false),
-                )
-                .await
-                {
-                    eprintln!(
-                        "[dispatch-v2] failed to mark dispatch {} FAILED in kanban after plan failure: {}",
-                        inputs.dispatch_id, kanban_err
-                    );
+        let plan_commit = PlanCommit::open(inputs.workspace_dir, inputs.dispatch_id)?;
+        let pre = plan_commit.read()?;
+        let (committed, provider_duration_ms): (CommittedModelPlan, Option<u64>) = match pre {
+            // A valid committed plan is reused without a second model call.
+            PlanCommitPre::Reuse(existing) => (existing, None),
+            PlanCommitPre::NeedsCommit { revision } => {
+                let plan_timeout = Duration::from_secs(plan_timeout_secs());
+                let plan_fut = run_plan_stage(inputs.server, &inputs.request.task, &label);
+                let plan_outcome = match tokio::time::timeout(plan_timeout, plan_fut).await {
+                    Ok(Ok(p)) => p,
+                    Ok(Err(e)) => return fail_plan_stage(&inputs, e).await,
+                    Err(_) => {
+                        let e = format!(
+                            "dispatch v2 stage1 (plan) timed out after {}s",
+                            plan_timeout.as_secs()
+                        );
+                        return fail_plan_stage(&inputs, e).await;
+                    }
+                };
+                let plan_md = plan_outcome.plan_md;
+                match plan_commit.commit(revision, &plan_md, &plan_outcome.invocation) {
+                    Ok(committed) => (committed, Some(plan_outcome.duration_ms)),
+                    // A commit failure is a publication race (stale revision,
+                    // cancellation, terminal run, untrusted prior plan) or an
+                    // IO fault — never a plan-generation failure. Do NOT
+                    // synthesize a FAILED status/kanban row here: that would
+                    // overwrite an authoritative cancel/terminal state or a
+                    // newer committed state. Re-read once so a concurrent
+                    // first winner is still reused; otherwise propagate the
+                    // error and let the caller's guarded early-exit closer
+                    // settle a still-open row without clobbering a settled one.
+                    Err(error) => match plan_commit.read() {
+                        Ok(PlanCommitPre::Reuse(existing)) => {
+                            (existing, Some(plan_outcome.duration_ms))
+                        }
+                        _ => return Err(error),
+                    },
                 }
-                return Err(e);
-            }
-            Err(_) => {
-                let e = format!(
-                    "dispatch v2 stage1 (plan) timed out after {}s",
-                    plan_timeout.as_secs()
-                );
-                append_trajectory_event(
-                    inputs.trajectory_path,
-                    json!({
-                        "event": "plan_failed",
-                        "dispatch_id": inputs.dispatch_id,
-                        "timestamp": Utc::now().to_rfc3339(),
-                        "error": e,
-                    }),
-                );
-                write_status_json(
-                    inputs.workspace_dir,
-                    inputs.dispatch_id,
-                    true,
-                    None,
-                    None,
-                    "failed",
-                    Some(1),
-                    None,
-                    None,
-                    None,
-                    Some(json!({ "error": e })),
-                );
-                // #971: same as above — plan-stage TIMEOUT must also close
-                // the kanban row (this branch previously had no kanban row
-                // to close at all, since BOARD-FIRST didn't exist yet).
-                if let Err(kanban_err) = update_kanban_state(
-                    inputs.server,
-                    inputs.dispatch_id,
-                    "TASK_STATE_FAILED",
-                    None,
-                    Some(false),
-                )
-                .await
-                {
-                    eprintln!(
-                        "[dispatch-v2] failed to mark dispatch {} FAILED in kanban after plan timeout: {}",
-                        inputs.dispatch_id, kanban_err
-                    );
-                }
-                return Err(e);
             }
         };
 
-        // Persist plan.md (overwrites the V1 placeholder).
-        crate::utils::write_owner_only_file_atomic(
-            inputs.plan_path,
-            plan_outcome.plan_md.as_bytes(),
-        )
-        .map_err(|e| format!("Failed to write plan.md: {e}"))?;
-        let sections = parse_plan_sections(&plan_outcome.plan_md);
-
-        plan_duration_ms = Some(plan_outcome.duration_ms);
-        let pgen_at = Utc::now().to_rfc3339();
+        // Never overwrite the V1-placeholder `plan.md`; the canonical model
+        // plan lives only in the committed `status.json#/model_plan` receipt.
+        let plan_md = committed.content.clone();
+        let sections = parse_plan_sections(&plan_md);
+        plan_duration_ms = provider_duration_ms;
+        let pgen_at = committed
+            .plan_generated_at
+            .clone()
+            .unwrap_or_else(|| Utc::now().to_rfc3339());
         plan_generated_at = Some(pgen_at.clone());
         append_trajectory_event(
             inputs.trajectory_path,
@@ -155,9 +103,11 @@ pub(super) async fn run_v2_plan_stage(
                 "event": "plan_generated",
                 "dispatch_id": inputs.dispatch_id,
                 "timestamp": pgen_at,
-                "duration_ms": plan_outcome.duration_ms,
-                "bytes": plan_outcome.plan_md.len(),
+                "duration_ms": provider_duration_ms,
+                "bytes": plan_md.len(),
                 "sections_complete": sections.is_complete(),
+                "artifact_revision": committed.artifact_revision,
+                "payload_digest": committed.payload_digest,
             }),
         );
 
@@ -182,6 +132,8 @@ pub(super) async fn run_v2_plan_stage(
                     "event": "plan_pending_review",
                     "dispatch_id": inputs.dispatch_id,
                     "timestamp": Utc::now().to_rfc3339(),
+                    "artifact_revision": committed.artifact_revision,
+                    "payload_digest": committed.payload_digest,
                 }),
             );
             // #971 review-fix (F2, second pass): the kanban row was seeded
@@ -218,7 +170,8 @@ pub(super) async fn run_v2_plan_stage(
                     inputs.dispatch_id, kanban_err
                 );
             }
-            let response = json!({
+            let plan_reference = plan_reference(None, inputs.workspace_dir, true);
+            let mut response = json!({
                 "dispatch_id": inputs.dispatch_id,
                 "task": {
                     "id": inputs.dispatch_id,
@@ -241,14 +194,17 @@ pub(super) async fn run_v2_plan_stage(
                 "feedback_rules": inputs.feedback_rules_trace.clone(),
                 "v2": true,
                 "plan_review_status": "pending_review",
-                "message": "Plan generated. DISPATCH_V2_PLAN_REVIEW=true — execute stage paused. Audit plan.md and re-dispatch with the env var unset to proceed.",
+                "message": "Plan generated. DISPATCH_V2_PLAN_REVIEW=true — execute stage paused. Audit status.json#/model_plan and re-dispatch with the env var unset to proceed.",
                 "suggested_complete_command": suggested_complete_payload(inputs.dispatch_id, inputs.assignment, inputs.request),
-                "plan_file": inputs.plan_path.to_string_lossy(),
+                "plan_file": plan_reference.file,
                 "prompt_file": inputs.prompt_md_path.to_string_lossy(),
                 "context_file": inputs.context_md_path.to_string_lossy(),
                 "trajectory_file": inputs.trajectory_path.to_string_lossy(),
                 "run_dir": inputs.workspace_dir.to_string_lossy(),
             });
+            if let Some(pointer) = plan_reference.pointer {
+                response["plan_pointer"] = json!(pointer);
+            }
             return Ok(PlanStageOutcome {
                 prompt,
                 plan_duration_ms,
@@ -260,7 +216,7 @@ pub(super) async fn run_v2_plan_stage(
         }
 
         // Auto-approve: rewrite the prompt fed to the executing agent so
-        // it contains the plan + implement-plan skill.
+        // it contains the committed plan + implement-plan skill.
         append_trajectory_event(
             inputs.trajectory_path,
             json!({
@@ -268,13 +224,11 @@ pub(super) async fn run_v2_plan_stage(
                 "dispatch_id": inputs.dispatch_id,
                 "timestamp": Utc::now().to_rfc3339(),
                 "auto": true,
+                "artifact_revision": committed.artifact_revision,
+                "payload_digest": committed.payload_digest,
             }),
         );
-        prompt = build_execute_prompt(
-            &plan_outcome.plan_md,
-            &inputs.request.task,
-            inputs.base_prompt,
-        );
+        prompt = build_execute_prompt(&plan_md, &inputs.request.task, inputs.base_prompt);
     }
 
     Ok(PlanStageOutcome {
@@ -283,4 +237,54 @@ pub(super) async fn run_v2_plan_stage(
         plan_generated_at,
         early_response: None,
     })
+}
+
+/// Close the BOARD-FIRST kanban row, write a failure receipt, and surface the
+/// error. Mirrors the plan-stage failure/timeout pattern in execution.rs/reused
+/// helper (same terminal state + unreviewed flag).
+async fn fail_plan_stage(
+    inputs: &PlanStageInputs<'_>,
+    error: String,
+) -> Result<PlanStageOutcome, String> {
+    append_trajectory_event(
+        inputs.trajectory_path,
+        json!({
+            "event": "plan_failed",
+            "dispatch_id": inputs.dispatch_id,
+            "timestamp": Utc::now().to_rfc3339(),
+            "error": error,
+        }),
+    );
+    write_status_json(
+        inputs.workspace_dir,
+        inputs.dispatch_id,
+        true,
+        None,
+        None,
+        "failed",
+        Some(1),
+        None,
+        None,
+        None,
+        Some(json!({ "error": error })),
+    );
+    // #971: the kanban row now exists before this stage runs (BOARD-FIRST) —
+    // a plan failure must close it, not leave it orphaned in
+    // TASK_STATE_WORKING. Mirrors the watchdog's own failure-close pattern in
+    // execution.rs (reused helper, same terminal state + unreviewed flag).
+    if let Err(kanban_err) = update_kanban_state(
+        inputs.server,
+        inputs.dispatch_id,
+        "TASK_STATE_FAILED",
+        None,
+        Some(false),
+    )
+    .await
+    {
+        eprintln!(
+            "[dispatch-v2] failed to mark dispatch {} FAILED in kanban after plan failure: {}",
+            inputs.dispatch_id, kanban_err
+        );
+    }
+    Err(error)
 }

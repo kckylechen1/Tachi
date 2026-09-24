@@ -512,6 +512,36 @@ impl PersistedModelInvocationReceiptV1 {
     }
 }
 
+/// Downstream unit-test fixture. Gated behind `test-support` so it never
+/// compiles into a production build and cannot become a general receipt
+/// forgery entry point; production receipts still come only from the
+/// controlled model-call paths above.
+#[cfg(any(test, feature = "test-support"))]
+impl PersistedModelInvocationReceiptV1 {
+    /// A provider-HTTP reasoning receipt with provider-reported identity and
+    /// an explicit `Complete` completion status, for downstream tests that
+    /// must exercise the durable publication boundary without a live
+    /// provider.
+    #[doc(hidden)]
+    pub fn test_fixture_reasoning(latency_ms: u128) -> Self {
+        Self::from_provider_http(
+            ModelInvocationLaneV1::Reasoning,
+            ProviderInvocationReceipt {
+                effective_provider: "test_fixture_provider".to_string(),
+                effective_model: Some("test_fixture_model".to_string()),
+                effective_version: None,
+                fallback_chain: Vec::new(),
+                degraded: false,
+                prompt_tokens: Some(1),
+                completion_tokens: Some(1),
+                total_tokens: Some(2),
+                latency_ms,
+            },
+            CompletionStatusV1::Complete,
+        )
+    }
+}
+
 fn non_empty(value: String) -> Option<String> {
     let trimmed = value.trim();
     (!trimmed.is_empty()).then(|| trimmed.to_string())

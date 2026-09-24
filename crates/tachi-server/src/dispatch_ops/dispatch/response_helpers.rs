@@ -1,4 +1,5 @@
 use super::*;
+use crate::dispatch_ops::kanban_helpers::plan_reference;
 
 pub(super) fn suggested_complete_payload(
     dispatch_id: &str,
@@ -99,6 +100,7 @@ pub(super) fn build_dispatch_response(
     // dispatch already committed to one — so it moves behind verbose=true (or
     // a separate operator-only local `tachi card show` diagnostic).
     let verbose = inputs.verbose;
+    let plan_reference = plan_reference(Some(inputs.plan_path), inputs.workspace_dir, inputs.v2);
 
     let mut response = json!({
         "dispatch_id": inputs.dispatch_id,
@@ -129,13 +131,17 @@ pub(super) fn build_dispatch_response(
         "duration_ms_plan": inputs.plan_duration_ms,
         "message": "Task dispatched to background. You are unblocked. Use tachi_task(action='board') to check status.",
         "suggested_complete_command": suggested_complete_payload(inputs.dispatch_id, inputs.assignment, inputs.request),
-        "plan_file": inputs.plan_path.to_string_lossy(),
+        "plan_file": plan_reference.file,
         "prompt_file": inputs.prompt_md_path.to_string_lossy(),
         "context_file": inputs.context_md_path.to_string_lossy(),
         "trajectory_file": inputs.trajectory_path.to_string_lossy(),
         "run_dir": inputs.workspace_dir.to_string_lossy(),
         "verbose": verbose,
     });
+
+    if let Some(pointer) = plan_reference.pointer {
+        response["plan_pointer"] = json!(pointer);
+    }
 
     if verbose {
         let object = response

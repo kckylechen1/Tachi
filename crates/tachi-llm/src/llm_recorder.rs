@@ -23,11 +23,16 @@
 //! renamed to `llm_recorder` to reflect what it actually does.
 //!
 //! `foundry-runs` consumers today: `foundry_runtime_ops::daily_distill`,
-//! `dispatch_ops::dispatch_v2` (plan stage), `hub_ops::security_scan`,
-//! `hub_ops::register` (skill analysis), `hub_ops::evolve`. The
-//! `status_ops::ledger` distill marker at `foundry-runs/.last_distill_run`
-//! is independent of this recorder (it is written by the distill runner,
-//! not by a recorded call).
+//! `hub_ops::security_scan`, `hub_ops::register` (skill analysis),
+//! `hub_ops::evolve`. The `status_ops::ledger` distill marker at
+//! `foundry-runs/.last_distill_run` is independent of this recorder (it is
+//! written by the distill runner, not by a recorded call).
+//!
+//! #1664: the surviving V2 staffing plan stage (`dispatch_ops::dispatch_v2`)
+//! no longer records through this module. A successful plan payload must not
+//! publish a second, uncommitted copy of the model output as `result.md`;
+//! the plan and its `model-invocation-v1` receipt are committed together into
+//! `status.json#/model_plan` instead (see `model_plan_commit`).
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

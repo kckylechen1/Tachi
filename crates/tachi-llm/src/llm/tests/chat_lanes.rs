@@ -2431,6 +2431,179 @@ async fn call_reasoning_llm_provider_only_is_pure_http_no_cli_ceremony_needed() 
     server_task.abort();
 }
 
+/// #1664: the receipt-bearing provider-only reasoning sibling must return the
+/// actual serving engine's receipt while keeping the lane's full serving
+/// policy. This discriminator proves the primary mock tier that served the
+/// request is the one named in the durable receipt.
+#[tokio::test]
+async fn serving_receipt_reasoning_binds_actual_primary_provider() {
+    use axum::{routing::post, Json, Router};
+
+    let app = Router::new().route(
+        "/chat/completions",
+        post(|| async {
+            Json(serde_json::json!({
+                "choices": [{
+                    "message": {"role": "assistant", "content": "serving answer"},
+                    "finish_reason": "stop"
+                }],
+                "usage": {"prompt_tokens": 3, "completion_tokens": 4, "total_tokens": 7},
+                "model": "provider-returned-serving-model",
+                "system_fingerprint": "provider-returned-serving-version"
+            }))
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind mock provider");
+    let port = listener.local_addr().expect("mock provider addr").port();
+    let server_task = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("mock provider");
+    });
+
+    let config = ProviderRuntimeConfig {
+        extract: unused_lane("__1664_UNUSED_EXTRACT"),
+        summary: unused_lane("__1664_UNUSED_SUMMARY"),
+        reasoning: ChatLaneConfig {
+            base_url: format!("http://127.0.0.1:{port}/chat/completions"),
+            model: "configured-serving-model".to_string(),
+            api_key_envs: vec!["__1664_SERVING_KEY"],
+        },
+        distill: unused_lane("__1664_UNUSED_DISTILL"),
+        rerank: RerankConfig {
+            provider: RerankProviderKind::Voyage,
+            local_endpoint: None,
+        },
+    };
+    let client = LlmClient::new_with_config(config, None).expect("client should initialize");
+    client.set_provider_secret_pool(
+        "__1664_SERVING_KEY",
+        vec![ProviderSecret {
+            key_id: "__1664_SERVING_KEY".to_string(),
+            value: "serving-secret".to_string(),
+        }],
+    );
+
+    let generated = client
+        .call_reasoning_llm_provider_only_with_serving_receipt("system", "user", None, 0.0, 16)
+        .await
+        .expect("primary mock must serve");
+
+    assert_eq!(generated.value, "serving answer");
+    assert_eq!(
+        generated.invocation.lane(),
+        ModelInvocationLaneV1::Reasoning
+    );
+    assert_eq!(
+        generated.invocation.engine_kind(),
+        ModelEngineKindV1::ProviderHttp
+    );
+    assert_eq!(
+        generated.invocation.effective_model(),
+        Some("provider-returned-serving-model"),
+        "the receipt must name the actual serving model, not the configured lane default"
+    );
+    assert_eq!(
+        generated.invocation.effective_version(),
+        Some("provider-returned-serving-version")
+    );
+    assert_eq!(
+        generated.invocation.completion_status(),
+        CompletionStatusV1::Complete
+    );
+    assert!(!generated.invocation.degraded());
+    assert!(generated.invocation.fallback_chain().is_empty());
+
+    server_task.abort();
+}
+
+/// #1664: the new sibling must preserve the pre-existing retry/key-rotation/
+/// provider-fallback policy. A primary tier that cannot select a configured
+/// key must still escalate to the configured fallback, and the receipt must
+/// record that degraded, actually-served fallback provider.
+#[tokio::test]
+async fn serving_receipt_reasoning_preserves_provider_fallback_policy() {
+    use axum::{routing::post, Json, Router};
+
+    let app = Router::new().route(
+        "/chat/completions",
+        post(|| async {
+            Json(serde_json::json!({
+                "choices": [{
+                    "message": {"role": "assistant", "content": "fallback answered"},
+                    "finish_reason": "stop"
+                }],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+                "model": "fallback-returned-model"
+            }))
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind fallback mock provider");
+    let port = listener.local_addr().expect("fallback mock addr").port();
+    let server_task = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .await
+            .expect("fallback mock provider");
+    });
+
+    let primary = unused_lane("__1664_UNCONFIGURED_PRIMARY");
+    let fallback = ChatLaneConfig {
+        base_url: format!("http://127.0.0.1:{port}/chat/completions"),
+        model: "fallback-model".to_string(),
+        api_key_envs: vec!["__1664_FALLBACK_KEY"],
+    };
+    let client = LlmClient::new_with_config_and_fallbacks(
+        ProviderRuntimeConfig {
+            extract: unused_lane("__1664_UNUSED_EXTRACT"),
+            summary: unused_lane("__1664_UNUSED_SUMMARY"),
+            reasoning: primary,
+            distill: unused_lane("__1664_UNUSED_DISTILL"),
+            rerank: RerankConfig {
+                provider: RerankProviderKind::Voyage,
+                local_endpoint: None,
+            },
+        },
+        LaneFallbackConfig {
+            reasoning: Some(fallback),
+            ..Default::default()
+        },
+        None,
+    )
+    .expect("client should initialize");
+    client.set_provider_secret_pool(
+        "__1664_FALLBACK_KEY",
+        vec![ProviderSecret {
+            key_id: "__1664_FALLBACK_KEY".to_string(),
+            value: "fallback-secret".to_string(),
+        }],
+    );
+
+    let generated = client
+        .call_reasoning_llm_provider_only_with_serving_receipt("system", "user", None, 0.0, 16)
+        .await
+        .expect("fallback tier must serve when the primary cannot select a key");
+
+    assert_eq!(generated.value, "fallback answered");
+    assert!(
+        generated.invocation.degraded(),
+        "a fallback-served request must be marked degraded"
+    );
+    assert!(!generated.invocation.fallback_chain().is_empty());
+    assert_eq!(
+        generated.invocation.effective_model(),
+        Some("fallback-returned-model"),
+        "the receipt must name the actual serving fallback provider"
+    );
+    assert_eq!(
+        generated.invocation.engine_kind(),
+        ModelEngineKindV1::ProviderHttp
+    );
+
+    server_task.abort();
+}
+
 #[tokio::test]
 async fn provider_only_receipt_401_is_one_attempt_without_pool_retry_or_fallback() {
     use axum::{extract::State, http::StatusCode, response::IntoResponse, routing::post, Router};

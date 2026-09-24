@@ -348,6 +348,21 @@ async fn successful_dispatch_seeds_status_and_kanban_before_plan_completes() {
         .expect("v2 dispatch should eventually succeed");
     let response: Value = serde_json::from_str(&raw).expect("dispatch JSON");
     assert_eq!(response["v2"], json!(true), "{response:#}");
+
+    // #1664: the model-derived plan is durable only as a committed
+    // `status.json#/model_plan` object whose receipt binds the exact content.
+    let final_status = read_status_json(&run_dir).expect("final status.json");
+    let model_plan = &final_status["model_plan"];
+    assert_eq!(model_plan["stage"], json!("plan"), "{final_status:#}");
+    assert_eq!(
+        model_plan["model_invocation"]["content_hash"], model_plan["payload_digest"],
+        "the committed receipt must bind the committed content digest: {final_status:#}"
+    );
+    assert_eq!(
+        model_plan["model_invocation"]["memory_id"],
+        json!(format!("dispatch:{dispatch_id}:stage:plan")),
+        "{final_status:#}"
+    );
 }
 
 /// (5b2) #971 review-fix (F2, second pass): a plan-review early response

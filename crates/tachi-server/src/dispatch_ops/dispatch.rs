@@ -952,11 +952,11 @@ async fn launch_canonical_dispatch(
     // for up to 180s on an LLM call) so board/status pollers see a row
     // immediately, not only after planning succeeds. Artifacts (including
     // the V1-placeholder plan.md) are already written above either way, so
-    // `init_kanban_task`'s `plan_path` argument is always valid here — for
-    // V2 it currently points at the not-yet-overwritten placeholder, not
-    // the real LLM plan; that's an accepted, documented consequence of
-    // moving this earlier (see report), not a functional break: V2 later
-    // overwrites plan.md in place at the same path once Stage 1 completes.
+    // `init_kanban_task`'s plan reference is always valid here. For V2 the
+    // reference is `status.json#/model_plan` — a pointer that is filled by
+    // the plan commit later, while the placeholder `plan.md` is never
+    // overwritten with model content. This is the accepted, documented
+    // consequence of moving board-first ahead of Stage 1.
     init_kanban_and_flow(FlowSetupInputs {
         server,
         dispatch_id: &dispatch_id,
@@ -969,6 +969,7 @@ async fn launch_canonical_dispatch(
         prompt_md_path: &prompt_md_path,
         context_md_path: &context_md_path,
         trajectory_path: &trajectory_path,
+        v2,
     })
     .await?;
 
@@ -999,7 +1000,6 @@ async fn launch_canonical_dispatch(
             resolved_profile: &resolved_profile,
             profile_payload: &profile_payload,
             base_prompt: &base_prompt,
-            plan_path: &plan_path,
             prompt_md_path: &prompt_md_path,
             context_md_path: &context_md_path,
             trajectory_path: &trajectory_path,

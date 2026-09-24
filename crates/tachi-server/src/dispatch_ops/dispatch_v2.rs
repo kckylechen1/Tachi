@@ -7,17 +7,22 @@
 //!
 //! Stage 1 (Plan):
 //!   * builds a planning prompt = `PLAN_SYSTEM_PROMPT` + task body
-//!   * invokes the shared `ClaudePool` (from Phase 1) — bounded concurrency,
-//!     wall-clock timeout, audit dir under `~/.tachi/foundry-runs/`.
-//!   * writes the LLM output to `<run_dir>/plan.md`.
-//!   * appends a `plan_generated` event to `trajectory.jsonl`.
-//!   * an empty / blank plan is treated as a hard error (no silent fallback
-//!     to V1 single-stage; the dispatcher is supposed to fail loudly so the
-//!     operator notices the planner regression).
+//!   * invokes the provider-only reasoning lane (bounded by a wall-clock
+//!     timeout), preserving the lane's retry/key-rotation/cross-provider-
+//!     fallback policy and returning the actual serving engine's receipt.
+//!   * publishes the plan content and its exact `model-invocation-v1`
+//!     receipt together into `<run_dir>/status.json#/model_plan` — one
+//!     locked, fenced, atomic replacement (see `model_plan_commit`). The V1
+//!     placeholder `plan.md` is never overwritten with model content.
+//!   * appends a `plan_generated` event to `trajectory.jsonl` only after the
+//!     commit succeeds.
+//!   * an empty, truncated, or failed plan is treated as a hard error (no
+//!     silent fallback to V1 single-stage; the dispatcher is supposed to fail
+//!     loudly so the operator notices the planner regression).
 //!
 //! Stage 2 (Execute):
 //!   * the original V1 execute path is reused — see `dispatch.rs`. V2 just
-//!     enriches the prompt with the Stage-1 plan and the
+//!     enriches the prompt with the committed Stage-1 plan and the
 //!     `skill:implement-plan` skill body (inline fallback below; the
 //!     capability registry version, if present, is layered in by
 //!     `prompt::assemble_prompt`).
@@ -26,13 +31,20 @@
 //!   * `DISPATCH_V2_PLAN_REVIEW=true` makes the dispatcher pause after
 //!     Stage 1 — for non-interactive callers this means returning a
 //!     `pending_review` response without executing. The MVP does NOT block
-//!     the async path on a TTY confirm; review is auditable via plan.md
-//!     and status.json.
+//!     the async path on a TTY confirm; review is auditable via
+//!     `status.json#/model_plan` (plus the placeholder plan.md).
 
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Instant;
+use tachi_llm::{CompletionStatusV1, PersistedModelInvocationReceiptV1};
+
+mod model_plan_commit;
+
+#[cfg(test)]
+pub(crate) use model_plan_commit::fail_next_plan_commit_write;
+pub(super) use model_plan_commit::{CommittedModelPlan, PlanCommit, PlanCommitPre};
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 enum StatusJsonLockKey {
@@ -245,9 +257,11 @@ pub(super) fn plan_timeout_secs() -> u64 {
         .unwrap_or(DEFAULT_PLAN_TIMEOUT_SECS)
 }
 
-/// Outcome of Stage 1.
+/// Outcome of Stage 1: the plan body and the exact serving-engine receipt
+/// that produced it.
 pub(super) struct PlanOutcome {
     pub plan_md: String,
+    pub invocation: PersistedModelInvocationReceiptV1,
     pub duration_ms: u64,
 }
 
@@ -295,7 +309,7 @@ pub(super) fn set_plan_stage_test_override(value: Option<PlanStageTestOverride>)
 pub(super) async fn run_plan_stage(
     server: &crate::MemoryServer,
     task: &str,
-    label: &str,
+    _label: &str,
 ) -> Result<PlanOutcome, String> {
     #[cfg(test)]
     let override_result = {
@@ -312,6 +326,7 @@ pub(super) async fn run_plan_stage(
                 duration_ms,
             } => Ok(PlanOutcome {
                 plan_md,
+                invocation: PersistedModelInvocationReceiptV1::test_fixture_reasoning(0),
                 duration_ms,
             }),
             PlanStageTestOverride::SuccessWithAssertion {
@@ -319,9 +334,10 @@ pub(super) async fn run_plan_stage(
                 duration_ms,
                 assert_before_return,
             } => {
-                assert_before_return(server, label).await;
+                assert_before_return(server, _label).await;
                 Ok(PlanOutcome {
                     plan_md,
+                    invocation: PersistedModelInvocationReceiptV1::test_fixture_reasoning(0),
                     duration_ms,
                 })
             }
@@ -333,55 +349,54 @@ pub(super) async fn run_plan_stage(
         return Err("dispatch v2: task is empty; cannot plan".to_string());
     }
 
-    let composed = format!("{}\n\n# Task\n{}", PLAN_SYSTEM_PROMPT, task.trim());
-
     let started = Instant::now();
-    let outcome = call_plan_llm(server, label, &composed, task.trim())
+    let generated = call_plan_llm(server, task.trim())
         .await
         .map_err(|e| format!("dispatch v2 stage1 (plan) failed: {e}"))?;
     let duration_ms = started.elapsed().as_millis() as u64;
 
-    let plan_md = outcome.text.trim().to_string();
+    // Only an explicit provider-declared truncation is refused here. An
+    // unknown completion status stays parseable for legacy compatibility, so
+    // this does not silently tighten valid plan formats.
+    if generated.invocation.completion_status() == CompletionStatusV1::Truncated {
+        return Err(tachi_llm::LLM_OUTPUT_TRUNCATED.to_string());
+    }
+
+    let plan_md = generated.value.trim().to_string();
     if plan_md.is_empty() {
         return Err("dispatch v2 stage1 (plan) returned empty plan.md".to_string());
     }
 
     Ok(PlanOutcome {
         plan_md,
+        invocation: generated.invocation,
         duration_ms,
     })
 }
 
-/// Run the Stage-1 plan-stage LLM call, either via the CLI pool (pre-#1087
-/// default) or — when `TACHI_CLAUDE_POOL_PROVIDER_FIRST` is set — via the
-/// provider executor first, with the CLI pool as a fallback for the rollout
-/// cycle. Either way the run-directory artifact contract
-/// (`prompt.md`/`result.md`/`status.json`) is preserved, since the path
-/// goes through `LlmCallRecorder::record_call` (#1214 BUG#3 lineage: this
-/// call site previously had no flag gate at all — the fifth live pool
-/// consumer the flag-coverage audit missed). #1261 step 2/3 removed the
-/// CLI fallback branch; step 3/3 renamed the recorder (formerly
-/// `ClaudePool::call_via_provider`) to its executor-agnostic name.
+/// Run the Stage-1 plan-stage LLM call. This is a provider-only reasoning
+/// round-trip that keeps the lane's full serving policy (retry, key rotation,
+/// configured cross-provider fallback) and returns the actual serving
+/// engine's durable receipt.
+///
+/// The successful plan payload deliberately does **not** go through
+/// `LlmCallRecorder`: the recorder writes `result.md`, which would publish a
+/// second, uncommitted copy of the model output next to the plan. The single
+/// durable publication boundary for the plan is the committed
+/// `status.json#/model_plan` receipt (`model_plan_commit`).
 async fn call_plan_llm(
     server: &crate::MemoryServer,
-    label: &str,
-    composed_prompt: &str,
     task: &str,
-) -> Result<tachi_llm::llm_recorder::RecordedCallOutcome, String> {
-    let llm = server.llm.clone();
-    let task_owned = task.to_string();
+) -> Result<tachi_llm::Generated<String>, String> {
     server
-        .llm_recorder
-        .record_call(label, composed_prompt, move || async move {
-            llm.call_reasoning_llm_provider_only(
-                PLAN_SYSTEM_PROMPT,
-                &task_owned,
-                None,
-                0.2,
-                PLAN_PROVIDER_MAX_TOKENS,
-            )
-            .await
-        })
+        .llm
+        .call_reasoning_llm_provider_only_with_serving_receipt(
+            PLAN_SYSTEM_PROMPT,
+            task,
+            None,
+            0.2,
+            PLAN_PROVIDER_MAX_TOKENS,
+        )
         .await
 }
 
@@ -767,6 +782,14 @@ fn write_status_json_inner(
     }
     if let Some(Value::Object(map)) = extra {
         for (k, v) in map {
+            // A committed model plan is immutable for this status file. No
+            // generic writer may set, clear, or overwrite it via `extra`; only
+            // `model_plan_commit` publishes it, through its own anchored
+            // read-modify-write. The preserve-if-absent loop below carries an
+            // existing committed object forward instead.
+            if k == "model_plan" {
+                continue;
+            }
             obj.insert(k, v);
         }
     }
@@ -868,6 +891,11 @@ fn write_status_json_inner(
                 "execution_classification",
                 "lifecycle_owner",
                 "cancellation",
+                // A committed plan and its receipt are published exactly once
+                // by `model_plan_commit`. Every later canonical writer carries
+                // the object forward unchanged so a `status_revision` bump can
+                // never rebind the plan's `artifact_revision` or receipt.
+                "model_plan",
                 // Durable managed-run identity and the append-only
                 // reconciliation observation are stamped once and carried
                 // forward by every later canonical writer (completion,
@@ -1404,7 +1432,7 @@ mod tests {
 
         let result = tokio::runtime::Runtime::new()
             .expect("tokio runtime")
-            .block_on(call_plan_llm(&server, "plan", "composed prompt", "task"));
+            .block_on(call_plan_llm(&server, "task"));
 
         // The call no longer reaches the CLI binary resolver: regardless
         // of whether the provider path succeeds or fails in the test
