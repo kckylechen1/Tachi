@@ -391,7 +391,7 @@ pub struct TachiMemoryParams {
     pub category: Option<String>,
     #[serde(default)]
     #[schemars(
-        description = "[action=search|ask|get|briefing] Include archived wiki/memory entries in results. For get, this is an explicit same-library opt-in; it does not search other libraries."
+        description = "[action=search|ask|get|briefing] Include archived memory/wiki items."
     )]
     pub include_archived: bool,
     #[serde(default)]

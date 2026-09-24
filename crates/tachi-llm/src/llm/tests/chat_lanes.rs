@@ -1,6 +1,6 @@
 use super::super::{
-    ChatLaneConfig, CompletionStatusV1, LaneConfigOverlay, LaneFallbackConfig, LaneFieldOverlay,
-    ModelEngineKindV1, ModelInvocationLaneV1, ProviderInvocationFailureClass,
+    ChatLaneConfig, CompletionStatusV1, Generated, LaneConfigOverlay, LaneFallbackConfig,
+    LaneFieldOverlay, ModelEngineKindV1, ModelInvocationLaneV1, ProviderInvocationFailureClass,
     ProviderRuntimeConfig, DEEPSEEK_AUTH_PROBE, SILICONFLOW_AUTH_PROBE,
 };
 use super::*;
@@ -932,6 +932,643 @@ async fn generate_summary_propagates_llm_failures() {
         !err.contains("this text used to be silently truncated"),
         "summary errors must not return truncated input as success"
     );
+}
+
+// ── #1967: summary-lane provider/fidelity repair (mock outbound) ────────────
+
+/// The sanitized memory text used by the summary outbound tests. Deliberately
+/// NOT a claim about summary fidelity: the mock's canned completion is a stub,
+/// and assertions below cover the request shape and receipt mechanics only.
+/// Real-output fidelity evidence comes from the parent's 10-record pilot.
+const SUMMARY_WIRE_TEST_INPUT: &str = "2026-09-20 note: service-analog pr 88 passed CI; \
+merge still pending owner review; rollout condition: quota check first";
+
+async fn capture_summary_receipt_outbound(
+    documented_host: Option<&str>,
+    configured_model: &str,
+    response: serde_json::Value,
+) -> (serde_json::Value, Result<Generated<String>, String>) {
+    use axum::{extract::Json as IncomingJson, routing::post, Json, Router};
+    use std::sync::{Arc, Mutex};
+
+    let path = "/chat/completions";
+    let captured = Arc::new(Mutex::new(None::<serde_json::Value>));
+    let app = Router::new().route(
+        path,
+        post({
+            let captured = Arc::clone(&captured);
+            move |IncomingJson(body): IncomingJson<serde_json::Value>| {
+                let captured = Arc::clone(&captured);
+                async move {
+                    *captured.lock().unwrap_or_else(|e| e.into_inner()) = Some(body);
+                    Json(response.clone())
+                }
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind summary capture provider");
+    let addr = listener
+        .local_addr()
+        .expect("summary capture provider addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .await
+            .expect("summary capture provider");
+    });
+
+    let (base_url, resolved) = match documented_host {
+        Some(host) => (
+            format!("http://{host}{path}"),
+            Some(
+                LlmClient::http_client_with_host_resolved_for_tests(host, addr)
+                    .expect("resolved summary test client"),
+            ),
+        ),
+        None => (format!("http://127.0.0.1:{}{path}", addr.port()), None),
+    };
+    let unused = ChatLaneConfig {
+        base_url: "https://unused.test/v1/chat/completions".to_string(),
+        model: "unused".to_string(),
+        api_key_envs: vec!["__1967_UNUSED_LANE_KEY"],
+    };
+    let config = ProviderRuntimeConfig {
+        extract: unused.clone(),
+        summary: ChatLaneConfig {
+            base_url,
+            model: configured_model.to_string(),
+            api_key_envs: vec!["__1967_SUMMARY_WIRE_KEY"],
+        },
+        reasoning: unused.clone(),
+        distill: unused,
+        rerank: RerankConfig {
+            provider: RerankProviderKind::Voyage,
+            local_endpoint: None,
+        },
+    };
+    let client = LlmClient::new_with_config(config, None).expect("summary client");
+    if let Some(http) = resolved {
+        client.replace_http_client_for_tests(http);
+    }
+    client.set_provider_secret_pool(
+        "__1967_SUMMARY_WIRE_KEY",
+        vec![ProviderSecret {
+            key_id: "__1967_SUMMARY_WIRE_KEY".to_string(),
+            value: "fixture-summary-wire-secret".to_string(),
+        }],
+    );
+    let result = client
+        .generate_summary_with_receipt(SUMMARY_WIRE_TEST_INPUT)
+        .await;
+    server.abort();
+    let body = captured
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+        .expect("summary lane must send a JSON body");
+    (body, result)
+}
+
+/// Production-path discriminator: with both official Flash names configured,
+/// the summary lane must put `thinking: disabled`, the shared bounded budget,
+/// and the fidelity prompt on the wire, and the receipt must keep the
+/// provider-reported serving model instead of the configured lane default.
+#[tokio::test]
+async fn outbound_summary_request_recognizes_both_official_flash_names() {
+    let _guard = crate::test_support::global_test_lock().lock();
+    let _env = EnvRestore::unset("TACHI_DISABLE_THINKING_MODELS");
+
+    // The canned completion is a stub, not fidelity evidence.
+    let provider_response = serde_json::json!({
+        "choices": [{
+            "message": {"role": "assistant", "content": "stub completion for wire assertions"},
+            "finish_reason": "stop"
+        }],
+        // Official endpoint reports the short serving alias even when the
+        // request used the canonical long name (2026-09-24 pilot shape).
+        "model": "deepseek-flash",
+        "usage": {"prompt_tokens": 31, "completion_tokens": 7, "total_tokens": 38}
+    });
+
+    for configured_model in ["deepseek-v4-flash", "deepseek-flash"] {
+        let (body, generated) = capture_summary_receipt_outbound(
+            Some(DEEPSEEK_AUTH_PROBE.host),
+            configured_model,
+            provider_response.clone(),
+        )
+        .await;
+        assert_eq!(body["model"], configured_model, "requested model: {body}");
+        assert_eq!(
+            body["thinking"]["type"], "disabled",
+            "official Flash must send thinking.disabled on the wire: {body}"
+        );
+        assert!(
+            body.get("enable_thinking").is_none(),
+            "official DeepSeek body must not carry SiliconFlow keys: {body}"
+        );
+        assert_eq!(
+            body["max_tokens"], 512,
+            "both summary paths must send the shared SUMMARY_MAX_TOKENS budget: {body}"
+        );
+        // The lane passes 0.3f32; JSON round-trips it as the f64 widening of
+        // that f32, which is not bit-equal to the f64 literal 0.3.
+        assert_eq!(body["temperature"], 0.3f32 as f64);
+        assert_eq!(body["messages"][0]["role"], "system");
+        assert_eq!(
+            body["messages"][0]["content"],
+            crate::default_prompts::L0_SUMMARY_PROMPT,
+            "summary lane must carry the L0 fidelity prompt verbatim: {body}"
+        );
+        assert_eq!(body["messages"][1]["role"], "user");
+        assert_eq!(
+            body["messages"][1]["content"], SUMMARY_WIRE_TEST_INPUT,
+            "memory text must reach the provider unmodified: {body}"
+        );
+
+        let generated = generated.expect("mock summary should succeed");
+        assert_eq!(
+            generated.invocation.effective_model(),
+            Some("deepseek-flash"),
+            "receipt must preserve the provider-reported actual model"
+        );
+        assert_eq!(
+            generated.invocation.completion_status(),
+            CompletionStatusV1::Complete
+        );
+    }
+}
+
+/// Suppression fields stay host-bound: a custom OpenAI-compatible host and a
+/// probe-table lookalike get neither field even with a Flash model name, and
+/// official-host Pro keeps thinking by default. The host-independent budget
+/// still applies.
+#[tokio::test]
+async fn outbound_summary_suppression_stays_host_bound_and_pro_keeps_thinking() {
+    let _guard = crate::test_support::global_test_lock().lock();
+    let _env = EnvRestore::unset("TACHI_DISABLE_THINKING_MODELS");
+
+    let provider_response = serde_json::json!({
+        "choices": [{
+            "message": {"role": "assistant", "content": "stub completion for wire assertions"},
+            "finish_reason": "stop"
+        }],
+        "model": "provider-actual-model",
+        "usage": {"prompt_tokens": 9, "completion_tokens": 4, "total_tokens": 13}
+    });
+
+    let (custom_body, custom_result) =
+        capture_summary_receipt_outbound(None, "deepseek-flash", provider_response.clone()).await;
+    assert!(
+        custom_body.get("thinking").is_none() && custom_body.get("enable_thinking").is_none(),
+        "custom host must send neither suppression field: {custom_body}"
+    );
+    assert_eq!(custom_body["max_tokens"], 512);
+    custom_result.expect("custom-host summary should succeed");
+
+    let (lookalike_body, _) = capture_summary_receipt_outbound(
+        Some("api.deepseek.com.attacker.invalid"),
+        "deepseek-flash",
+        provider_response.clone(),
+    )
+    .await;
+    assert!(
+        lookalike_body.get("thinking").is_none() && lookalike_body.get("enable_thinking").is_none(),
+        "probe-table lookalike must send neither suppression field: {lookalike_body}"
+    );
+
+    let (pro_body, _) = capture_summary_receipt_outbound(
+        Some(DEEPSEEK_AUTH_PROBE.host),
+        "deepseek-v4-pro",
+        provider_response,
+    )
+    .await;
+    assert_eq!(pro_body["model"], "deepseek-v4-pro");
+    assert!(
+        pro_body.get("thinking").is_none() && pro_body.get("enable_thinking").is_none(),
+        "official Pro keeps thinking unless the env override names it: {pro_body}"
+    );
+}
+
+/// An explicit `TACHI_DISABLE_THINKING_MODELS=none` must win over the default
+/// Flash recognition on the real summary wire, not just in unit assertions.
+#[tokio::test]
+async fn outbound_summary_explicit_env_off_is_honored() {
+    let _guard = crate::test_support::global_test_lock().lock();
+    let _env = EnvRestore::set("TACHI_DISABLE_THINKING_MODELS", "none");
+
+    let provider_response = serde_json::json!({
+        "choices": [{
+            "message": {"role": "assistant", "content": "stub completion for wire assertions"},
+            "finish_reason": "stop"
+        }],
+        "model": "deepseek-flash"
+    });
+    let (body, result) = capture_summary_receipt_outbound(
+        Some(DEEPSEEK_AUTH_PROBE.host),
+        "deepseek-v4-flash",
+        provider_response,
+    )
+    .await;
+    assert!(
+        body.get("thinking").is_none() && body.get("enable_thinking").is_none(),
+        "explicit `none` must disable suppression for canonical Flash too: {body}"
+    );
+    result.expect("summary itself still succeeds with thinking left on");
+}
+
+/// The pilot's 1/10 failure shape: `finish_reason=length` with NON-EMPTY
+/// content that already fits the L0 ≤100-char cap. The receipt path must
+/// reject it as `llm_output_truncated` (truncation is adjudicated BEFORE the
+/// length cap; no partial-summary fallback). The legacy text-only path keeps
+/// its documented compat behavior — it returns the provider text — pinned
+/// here so the difference stays explicit instead of silently weakening
+/// either side.
+#[tokio::test]
+async fn summary_receipt_rejects_nonempty_length_but_legacy_keeps_compat() {
+    use axum::{routing::post, Json, Router};
+
+    let _guard = crate::test_support::global_test_lock().lock();
+    let _env = EnvRestore::unset("TACHI_DISABLE_THINKING_MODELS");
+
+    let truncated_response = serde_json::json!({
+        "choices": [{
+            "message": {"role": "assistant", "content": "cut off mid-sentence but non-empty"},
+            "finish_reason": "length"
+        }],
+        "model": "deepseek-flash",
+        "usage": {"prompt_tokens": 40, "completion_tokens": 512, "total_tokens": 552}
+    });
+
+    let (body, rejected) = capture_summary_receipt_outbound(
+        Some(DEEPSEEK_AUTH_PROBE.host),
+        "deepseek-flash",
+        truncated_response.clone(),
+    )
+    .await;
+    assert_eq!(body["max_tokens"], 512);
+    let err = rejected.expect_err("non-empty length-truncated summary must be rejected");
+    assert_eq!(err, crate::LLM_OUTPUT_TRUNCATED);
+
+    // Legacy compat leg: same mock shape, text-only generator.
+    let app = Router::new().route(
+        "/chat/completions",
+        post(move || async move { Json(truncated_response) }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind legacy summary provider");
+    let addr = listener.local_addr().expect("legacy summary provider addr");
+    let server_task = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .await
+            .expect("legacy summary provider");
+    });
+    let unused = ChatLaneConfig {
+        base_url: "https://unused.test/v1/chat/completions".to_string(),
+        model: "unused".to_string(),
+        api_key_envs: vec!["__1967_LEGACY_UNUSED_KEY"],
+    };
+    let config = ProviderRuntimeConfig {
+        extract: unused.clone(),
+        summary: ChatLaneConfig {
+            base_url: format!("http://{}/chat/completions", DEEPSEEK_AUTH_PROBE.host),
+            model: "deepseek-flash".to_string(),
+            api_key_envs: vec!["__1967_LEGACY_SUMMARY_KEY"],
+        },
+        reasoning: unused.clone(),
+        distill: unused,
+        rerank: RerankConfig {
+            provider: RerankProviderKind::Voyage,
+            local_endpoint: None,
+        },
+    };
+    let client = LlmClient::new_with_config(config, None).expect("legacy summary client");
+    client.replace_http_client_for_tests(
+        LlmClient::http_client_with_host_resolved_for_tests(DEEPSEEK_AUTH_PROBE.host, addr)
+            .expect("resolved legacy summary client"),
+    );
+    client.set_provider_secret_pool(
+        "__1967_LEGACY_SUMMARY_KEY",
+        vec![ProviderSecret {
+            key_id: "__1967_LEGACY_SUMMARY_KEY".to_string(),
+            value: "fixture-legacy-summary-secret".to_string(),
+        }],
+    );
+    let legacy = client
+        .generate_summary(SUMMARY_WIRE_TEST_INPUT)
+        .await
+        .expect("legacy path documents compat: provider text is returned");
+    assert_eq!(legacy, "cut off mid-sentence but non-empty");
+
+    server_task.abort();
+}
+
+/// Distill owns the legacy `SUMMARY_PROMPT` literal verbatim. This checks the
+/// ACTUAL outbound distill request (not just the constant): the wire must
+/// still carry the exact pre-#1967 prompt plus distill's own 0.4/400 shape,
+/// proving the L0 prompt isolation did not retune the distill contract.
+#[tokio::test]
+async fn outbound_distill_request_keeps_legacy_summary_prompt_verbatim() {
+    use axum::{extract::Json as IncomingJson, routing::post, Json, Router};
+    use std::sync::{Arc, Mutex};
+
+    let _guard = crate::test_support::global_test_lock().lock();
+    let _env = EnvRestore::unset("TACHI_DISABLE_THINKING_MODELS");
+
+    // The exact pre-#1967 literal, hardcoded so any edit to SUMMARY_PROMPT
+    // fails this pin instead of silently retuning distill.
+    const LEGACY_DISTILL_PROMPT: &str = "You are a summarization agent. Compress the given text into a single precisely worded sentence that captures the core fact or point. Do not use conversational filler, quotes, or markdown. Use the same language as the input text.";
+    assert_eq!(
+        crate::default_prompts::SUMMARY_PROMPT,
+        LEGACY_DISTILL_PROMPT,
+        "SUMMARY_PROMPT is distill-owned and must stay the legacy literal verbatim"
+    );
+
+    let captured = Arc::new(Mutex::new(None::<serde_json::Value>));
+    let app = Router::new().route(
+        "/chat/completions",
+        post({
+            let captured = Arc::clone(&captured);
+            move |IncomingJson(body): IncomingJson<serde_json::Value>| {
+                let captured = Arc::clone(&captured);
+                async move {
+                    *captured.lock().unwrap_or_else(|e| e.into_inner()) = Some(body);
+                    Json(serde_json::json!({
+                        "choices": [{
+                            "message": {"role": "assistant", "content": "stub distill synthesis for wire assertions"},
+                            "finish_reason": "stop"
+                        }],
+                        "model": "deepseek-flash"
+                    }))
+                }
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind distill capture provider");
+    let addr = listener
+        .local_addr()
+        .expect("distill capture provider addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .await
+            .expect("distill capture provider");
+    });
+
+    let unused = ChatLaneConfig {
+        base_url: "https://unused.test/v1/chat/completions".to_string(),
+        model: "unused".to_string(),
+        api_key_envs: vec!["__1967_DISTILL_UNUSED_KEY"],
+    };
+    let config = ProviderRuntimeConfig {
+        extract: unused.clone(),
+        // Distill generators route through the summary lane by design.
+        summary: ChatLaneConfig {
+            base_url: format!("http://127.0.0.1:{}/chat/completions", addr.port()),
+            model: "deepseek-v4-flash".to_string(),
+            api_key_envs: vec!["__1967_DISTILL_WIRE_KEY"],
+        },
+        reasoning: unused.clone(),
+        distill: unused,
+        rerank: RerankConfig {
+            provider: RerankProviderKind::Voyage,
+            local_endpoint: None,
+        },
+    };
+    let client = LlmClient::new_with_config(config, None).expect("distill wire client");
+    client.set_provider_secret_pool(
+        "__1967_DISTILL_WIRE_KEY",
+        vec![ProviderSecret {
+            key_id: "__1967_DISTILL_WIRE_KEY".to_string(),
+            value: "fixture-distill-wire-secret".to_string(),
+        }],
+    );
+    let generated = client
+        .generate_distill_with_receipt(
+            "sanitized analog: two source notes about a shipped fix and a pending follow-up",
+        )
+        .await
+        .expect("distill against mock should succeed");
+
+    server.abort();
+    let body = captured
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+        .expect("distill lane must send a JSON body");
+    assert_eq!(
+        body["messages"][0]["content"], LEGACY_DISTILL_PROMPT,
+        "outbound distill request must carry the legacy prompt verbatim: {body}"
+    );
+    assert_eq!(body["temperature"], 0.4f32 as f64);
+    assert_eq!(body["max_tokens"], 400, "distill budget stays 400: {body}");
+    assert_eq!(
+        generated.value, "stub distill synthesis for wire assertions",
+        "distill output contract is unchanged by the L0 repair"
+    );
+}
+
+/// Boundary matrix for the stored-L0 ≤100 cap on the receipt path. The cap
+/// counts Unicode scalar values of the scrubbed, trimmed summary — the same
+/// form the store persists — so 100 CJK characters (300 UTF-8 bytes) pass and
+/// 101 fail, and a think-block prefix is judged after scrubbing. No ASCII
+/// byte cap, no truncate-to-fit, no fallback.
+#[tokio::test]
+async fn summary_receipt_enforces_l0_cap_by_unicode_scalar_after_think_scrub() {
+    let _guard = crate::test_support::global_test_lock().lock();
+    let _env = EnvRestore::unset("TACHI_DISABLE_THINKING_MODELS");
+
+    let ok_response = |content: String| {
+        serde_json::json!({
+            "choices": [{
+                "message": {"role": "assistant", "content": content},
+                "finish_reason": "stop"
+            }],
+            "model": "deepseek-flash",
+            "usage": {"prompt_tokens": 30, "completion_tokens": 60, "total_tokens": 90}
+        })
+    };
+
+    // Exactly 100 chars: accepted, receipt keeps the provider-reported model.
+    let (body, ok) = capture_summary_receipt_outbound(
+        Some(DEEPSEEK_AUTH_PROBE.host),
+        "deepseek-v4-flash",
+        ok_response("x".repeat(100)),
+    )
+    .await;
+    assert_eq!(body["max_tokens"], 512);
+    let ok = ok.expect("100 chars is exactly at the L0 cap");
+    assert_eq!(ok.value.chars().count(), 100);
+    assert_eq!(ok.invocation.effective_model(), Some("deepseek-flash"));
+
+    // 101 chars: loud, explicit failure — never truncated to fit.
+    let (_, over) = capture_summary_receipt_outbound(
+        Some(DEEPSEEK_AUTH_PROBE.host),
+        "deepseek-v4-flash",
+        ok_response("x".repeat(101)),
+    )
+    .await;
+    let err = over.expect_err("101 chars must fail the L0 cap");
+    assert!(
+        err.starts_with("llm_summary_too_long") && err.contains("101"),
+        "expected explicit llm_summary_too_long with the actual count, got: {err}"
+    );
+
+    // 100 CJK chars = 300 UTF-8 bytes: passes only under scalar counting.
+    let (_, cjk_ok) = capture_summary_receipt_outbound(
+        Some(DEEPSEEK_AUTH_PROBE.host),
+        "deepseek-flash",
+        ok_response("忆".repeat(100)),
+    )
+    .await;
+    let cjk_ok = cjk_ok.expect("100 CJK chars is exactly at the scalar cap");
+    assert_eq!(cjk_ok.value.chars().count(), 100);
+    assert_eq!(
+        cjk_ok.value.len(),
+        300,
+        "guard: this fixture is really 300 bytes"
+    );
+
+    // 101 CJK chars: fails by scalars, not bytes.
+    let (_, cjk_over) = capture_summary_receipt_outbound(
+        Some(DEEPSEEK_AUTH_PROBE.host),
+        "deepseek-flash",
+        ok_response("忆".repeat(101)),
+    )
+    .await;
+    let err = cjk_over.expect_err("101 CJK chars must fail the L0 cap");
+    assert!(
+        err.starts_with("llm_summary_too_long") && err.contains("101"),
+        "expected scalar-counted rejection, got: {err}"
+    );
+
+    // Think-block padding is judged after the store's scrub seam: the
+    // visible 100 chars fit even though the raw reply is longer.
+    let (_, scrubbed_ok) = capture_summary_receipt_outbound(
+        Some(DEEPSEEK_AUTH_PROBE.host),
+        "deepseek-flash",
+        ok_response(format!(
+            "<think>reasoning padding</think>{}",
+            "x".repeat(100)
+        )),
+    )
+    .await;
+    scrubbed_ok.expect("scrubbed 100-char summary fits the cap");
+}
+
+/// The legacy text-only generator also enforces the explicit L0 cap on new
+/// over-long output (its `finish_reason=length` compat stays as pinned
+/// above; this is the deliberate, documented new validation).
+#[tokio::test]
+async fn legacy_summary_rejects_overlong_output_explicitly() {
+    use axum::{routing::post, Json, Router};
+
+    let _guard = crate::test_support::global_test_lock().lock();
+    let _env = EnvRestore::unset("TACHI_DISABLE_THINKING_MODELS");
+
+    let app = Router::new().route(
+        "/chat/completions",
+        post(|| async {
+            Json(serde_json::json!({
+                "choices": [{
+                    "message": {"role": "assistant", "content": "y".repeat(101)},
+                    "finish_reason": "stop"
+                }],
+                "model": "deepseek-flash"
+            }))
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind legacy overlong provider");
+    let addr = listener
+        .local_addr()
+        .expect("legacy overlong provider addr");
+    let server_task = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .await
+            .expect("legacy overlong provider");
+    });
+    let unused = ChatLaneConfig {
+        base_url: "https://unused.test/v1/chat/completions".to_string(),
+        model: "unused".to_string(),
+        api_key_envs: vec!["__1967_LEGACY_OVER_UNUSED_KEY"],
+    };
+    let config = ProviderRuntimeConfig {
+        extract: unused.clone(),
+        summary: ChatLaneConfig {
+            base_url: format!("http://{}/chat/completions", DEEPSEEK_AUTH_PROBE.host),
+            model: "deepseek-flash".to_string(),
+            api_key_envs: vec!["__1967_LEGACY_OVER_KEY"],
+        },
+        reasoning: unused.clone(),
+        distill: unused,
+        rerank: RerankConfig {
+            provider: RerankProviderKind::Voyage,
+            local_endpoint: None,
+        },
+    };
+    let client = LlmClient::new_with_config(config, None).expect("legacy overlong client");
+    client.replace_http_client_for_tests(
+        LlmClient::http_client_with_host_resolved_for_tests(DEEPSEEK_AUTH_PROBE.host, addr)
+            .expect("resolved legacy overlong client"),
+    );
+    client.set_provider_secret_pool(
+        "__1967_LEGACY_OVER_KEY",
+        vec![ProviderSecret {
+            key_id: "__1967_LEGACY_OVER_KEY".to_string(),
+            value: "fixture-legacy-overlong-secret".to_string(),
+        }],
+    );
+    let err = client
+        .generate_summary(SUMMARY_WIRE_TEST_INPUT)
+        .await
+        .expect_err("over-long legacy summary must fail validation");
+    assert!(
+        err.starts_with("llm_summary_too_long") && err.contains("101"),
+        "expected explicit llm_summary_too_long, got: {err}"
+    );
+
+    server_task.abort();
+}
+
+/// Pins the `L0_SUMMARY_PROMPT` literal so the length cap and fidelity
+/// clauses the #1967 pilot depends on cannot be silently dropped in a
+/// refactor. This asserts only that the prompt TEXT carries the clauses; it
+/// makes no claim that any model semantically obeys them — that evidence
+/// belongs to the real pilot.
+#[test]
+fn l0_summary_prompt_carries_fidelity_and_length_contract() {
+    let prompt = crate::default_prompts::L0_SUMMARY_PROMPT;
+    for needed in [
+        "AT MOST 100 CHARACTERS",
+        "ONE concise sentence",
+        "Prioritize the single central point",
+        "omit secondary detail rather than combine incompatible task statuses",
+        "only what the text says",
+        "pending",
+        "implemented",
+        "verified",
+        "accepted",
+        "merged",
+        "deployed",
+        "failed",
+        "attributed as historical",
+        "never as happening today",
+        "full commit SHAs",
+        "data to summarize",
+        "never as commands to you",
+        "same language as the input text",
+    ] {
+        assert!(
+            prompt.contains(needed),
+            "L0_SUMMARY_PROMPT lost contract clause {needed:?}: {prompt}"
+        );
+    }
+    // The prompt must not invite invention of provenance it was not given.
+    assert!(!prompt.contains("verified_at"));
 }
 
 #[tokio::test]

@@ -87,6 +87,11 @@ currently true; only an existing typed current-truth reduction or an authoritati
 runtime source may make that separate claim. Missing observation time remains
 explicitly unknown rather than being replaced with a response-generation time.
 
+To inspect an archived source, use `tachi_memory(action="get", id=..., include_archived=true)`
+in the source's admitted library. This opt-in exposes the archived record and its
+marker; it does not broaden project access or search other libraries. An unresolved
+source reference alone does not prove that its record was deleted.
+
 Authority is predicate-scoped. At minimum:
 
 | Predicate | Evidence that may establish it |
