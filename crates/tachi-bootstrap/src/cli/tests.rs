@@ -95,6 +95,72 @@ fn maintenance_cli_exposes_only_nested_plan_and_apply_forms() {
     }
 }
 
+/// Real CLI argument route for the summary backfill slice: repeatable `--id`,
+/// positive `--limit`, `--regenerate` gated on explicit ids, and `--json`.
+#[test]
+fn backfill_summaries_cli_parses_repeatable_ids_limit_regenerate_json() {
+    let parsed = Cli::try_parse_from([
+        "tachi",
+        "backfill-summaries",
+        "--db",
+        "/tmp/memory.db",
+        "--id",
+        "mem-b",
+        "--id",
+        "mem-a",
+        "--id",
+        "mem-b",
+        "--limit",
+        "10",
+        "--regenerate",
+        "--json",
+        "--dry-run",
+    ])
+    .expect("full explicit-id summary backfill form must parse");
+
+    assert!(matches!(
+        parsed.command,
+        Some(Commands::BackfillSummaries {
+            db,
+            dry_run: true,
+            id,
+            limit: Some(10),
+            regenerate: true,
+            json: true,
+        }) if db == std::path::PathBuf::from("/tmp/memory.db").into()
+            && id == vec!["mem-b".to_string(), "mem-a".to_string(), "mem-b".to_string()]
+    ));
+
+    let default_sweep = Cli::try_parse_from(["tachi", "backfill-summaries", "--db", "/tmp/x.db"])
+        .expect("default missing-only sweep form must keep parsing");
+    assert!(matches!(
+        default_sweep.command,
+        Some(Commands::BackfillSummaries {
+            id,
+            limit: None,
+            regenerate: false,
+            json: false,
+            ..
+        }) if id.is_empty()
+    ));
+}
+
+#[test]
+fn backfill_summaries_cli_rejects_regenerate_without_explicit_ids() {
+    let error = Cli::try_parse_from([
+        "tachi",
+        "backfill-summaries",
+        "--db",
+        "/tmp/memory.db",
+        "--regenerate",
+    ])
+    .expect_err("--regenerate must be refused without an explicit --id set");
+    assert!(
+        error.to_string().contains("--id <ID>"),
+        "parse error should name the missing --id argument: {error}"
+    );
+}
+
 #[test]
 fn a2a_sticky_cutover_exposes_only_plan_and_confirmed_apply() {
     Cli::try_parse_from(["tachi", "a2a", "sticky-cutover", "plan"])

@@ -36,6 +36,19 @@ pub struct EnrichmentRetryCandidate {
     pub max_attempts: i64,
 }
 
+/// One operator-inspected summary-backfill candidate row, fetched by exact id.
+///
+/// `text` is the full stored body; callers that report plans must not echo it
+/// into operator-facing output.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SummaryBackfillRow {
+    pub id: String,
+    pub text: String,
+    pub has_summary: bool,
+    pub archived: bool,
+    pub revision: i64,
+}
+
 fn now_utc_iso() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
 }
@@ -301,6 +314,22 @@ impl MemoryStore {
         db::record_enrichment_failure(&self.conn, id, stage, error)
     }
 
+    /// Record an asynchronous enrichment failure only when the row is still
+    /// at `expected_revision`. Returns `false` — with the row untouched —
+    /// when a concurrent writer moved it on, so a stale sweep observation
+    /// cannot pollute the new revision's metadata or `updated_at`.
+    pub fn record_enrichment_failure_if_revision(
+        &self,
+        id: &str,
+        stage: &str,
+        error: &str,
+        expected_revision: i64,
+    ) -> Result<bool, MemoryError> {
+        let _authorization =
+            db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
+        db::record_enrichment_failure_if_revision(&self.conn, id, stage, error, expected_revision)
+    }
+
     /// Set write-side keyword enrichment status (`enriched`/`pending`/`skipped`/`failed`).
     pub fn set_keyword_enrichment_status(&self, id: &str, status: &str) -> Result<(), MemoryError> {
         let _authorization =
@@ -439,6 +468,48 @@ impl MemoryStore {
             })?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
+    }
+
+    /// Fetch summary-backfill candidate rows for an exact, operator-supplied
+    /// ID set in THIS database only — no cross-DB discovery.
+    ///
+    /// Rows come back in the caller's `ids` order (the caller is responsible
+    /// for deduplicating that slice deterministically first). Ids absent from
+    /// this database are surfaced by the returned Vec being shorter than
+    /// `ids`, so the caller fails the whole request before any provider call
+    /// or write instead of silently ignoring a typo'd id.
+    pub fn summary_backfill_rows_for_ids(
+        &self,
+        ids: &[String],
+    ) -> Result<Vec<SummaryBackfillRow>, MemoryError> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let placeholders = std::iter::repeat_n("?", ids.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT id, text, trim(summary) != '', archived, revision
+             FROM memories
+             WHERE id IN ({placeholders})"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(ids.iter()), |row| {
+                Ok(SummaryBackfillRow {
+                    id: row.get(0)?,
+                    text: row.get(1)?,
+                    has_summary: row.get::<_, i64>(2)? != 0,
+                    archived: row.get::<_, i64>(3)? != 0,
+                    revision: row.get(4)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        let by_id = rows
+            .into_iter()
+            .map(|row| (row.id.clone(), row))
+            .collect::<std::collections::HashMap<String, SummaryBackfillRow>>();
+        Ok(ids.iter().filter_map(|id| by_id.get(id).cloned()).collect())
     }
 
     /// List entries missing recall keywords.
@@ -715,5 +786,164 @@ mod tests {
             .expect("entry exists after stale update");
         assert_eq!(stored.keywords, entry.keywords);
         assert_eq!(stored.revision, entry.revision);
+    }
+
+    /// Exact-id summary selection: caller order is preserved, summary and
+    /// archival status are surfaced (not hidden), and unknown ids are
+    /// reported by length mismatch so the caller can fail the whole set.
+    #[test]
+    fn summary_backfill_rows_for_ids_reports_exact_rows_in_caller_order() {
+        let mut store = MemoryStore::open_in_memory().expect("open test store");
+        let mut missing = test_entry("missing-summary");
+        missing.summary = String::new();
+        store.upsert(&missing).expect("seed missing-summary row");
+
+        let mut summarized = test_entry("has-summary");
+        summarized.summary = "existing summary".to_string();
+        store.upsert(&summarized).expect("seed summarized row");
+
+        let mut archived = test_entry("archived-row");
+        archived.archived = true;
+        store.upsert(&archived).expect("seed archived row");
+
+        let rows = store
+            .summary_backfill_rows_for_ids(&[
+                "archived-row".to_string(),
+                "unknown-id".to_string(),
+                "missing-summary".to_string(),
+                "has-summary".to_string(),
+            ])
+            .expect("select exact-id candidates");
+
+        assert_eq!(
+            rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
+            vec!["archived-row", "missing-summary", "has-summary"],
+            "rows keep the caller's deterministic order; the unknown id is simply absent"
+        );
+        assert_eq!(
+            rows.len(),
+            3,
+            "unknown ids surface as a length mismatch, never a silent ignore"
+        );
+        assert!(rows[0].archived);
+        assert!(rows[0].has_summary);
+        assert!(!rows[1].archived);
+        assert!(!rows[1].has_summary);
+        assert!(rows[2].has_summary);
+        assert_eq!(rows[1].text, "enrichment authorization fixture text");
+        assert_eq!(rows[1].revision, 1);
+
+        assert!(
+            store
+                .summary_backfill_rows_for_ids(&[])
+                .expect("empty id set")
+                .is_empty(),
+            "an empty explicit selection stays empty instead of sweeping everything"
+        );
+    }
+
+    /// #2 (Sol rereview): a failure observed at a stale revision must not
+    /// stamp the concurrently-moved row's metadata; only the matching
+    /// revision is stamped, and observation fields never change.
+    #[test]
+    fn record_enrichment_failure_if_revision_guards_against_concurrent_revisions() {
+        let mut store = MemoryStore::open_in_memory().expect("open test store");
+        let entry = test_entry("guarded-failure");
+        store.upsert(&entry).expect("seed entry"); // revision 1
+                                                   // Baseline from the stored row: write-time normalization may rewrite
+                                                   // the constructed entry's timestamp formatting.
+        let seeded = store.get("guarded-failure").expect("read").expect("exists");
+
+        assert!(
+            store
+                .record_enrichment_failure_if_revision(
+                    "guarded-failure",
+                    "summary",
+                    "provider 503",
+                    1
+                )
+                .expect("record at the matching revision"),
+            "a matching revision must stamp the failure"
+        );
+        let stamped = store.get("guarded-failure").expect("read").expect("exists");
+        assert_eq!(
+            stamped
+                .metadata
+                .pointer("/enrichment/failed_stage")
+                .and_then(|value| value.as_str()),
+            Some("summary")
+        );
+        assert_eq!(
+            stamped.timestamp, seeded.timestamp,
+            "observation timestamp preserved"
+        );
+        assert_eq!(
+            stamped.valid_from, seeded.valid_from,
+            "valid_from preserved"
+        );
+        assert_eq!(stamped.text, seeded.text, "raw text preserved");
+
+        // A concurrent writer bumps the revision; the guarded stamp refuses.
+        let mut moved = stamped.clone();
+        moved.importance = 0.9;
+        store.upsert(&moved).expect("concurrent revision bump"); // revision 2
+        let after_bump = store.get("guarded-failure").expect("read").expect("exists");
+        let updated_at_after_bump: String = store
+            .connection()
+            .query_row(
+                "SELECT updated_at FROM memories WHERE id = 'guarded-failure'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read updated_at after bump");
+
+        assert!(
+            !store
+                .record_enrichment_failure_if_revision(
+                    "guarded-failure",
+                    "summary",
+                    "stale observation error",
+                    1
+                )
+                .expect("guarded record must answer, not fail"),
+            "a stale revision must not be stamped"
+        );
+        let untouched = store.get("guarded-failure").expect("read").expect("exists");
+        assert_eq!(
+            untouched.metadata, after_bump.metadata,
+            "the moved revision's metadata stays unpolluted"
+        );
+        let updated_at_after_refusal: String = store
+            .connection()
+            .query_row(
+                "SELECT updated_at FROM memories WHERE id = 'guarded-failure'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read updated_at after refused stamp");
+        assert_eq!(
+            updated_at_after_refusal, updated_at_after_bump,
+            "the moved revision's updated_at stays untouched by the refused stamp"
+        );
+
+        assert!(
+            store
+                .record_enrichment_failure_if_revision(
+                    "guarded-failure",
+                    "summary",
+                    "fresh observation error",
+                    2
+                )
+                .expect("record at the new matching revision"),
+            "the new current revision can be stamped"
+        );
+        let restamped = store.get("guarded-failure").expect("read").expect("exists");
+        assert_eq!(
+            restamped
+                .metadata
+                .pointer("/enrichment/last_error")
+                .and_then(|value| value.as_str()),
+            Some("fresh observation error")
+        );
     }
 }

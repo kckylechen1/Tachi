@@ -54,8 +54,9 @@ pub(crate) use update::{
     update_with_revision_if_expected_state,
 };
 pub use update::{
-    record_enrichment_failure, release_event_claim, set_keyword_enrichment_pending_if_unset,
-    set_keyword_enrichment_status, try_claim_event, update_enrichment_fields, update_with_revision,
+    record_enrichment_failure, record_enrichment_failure_if_revision, release_event_claim,
+    set_keyword_enrichment_pending_if_unset, set_keyword_enrichment_status, try_claim_event,
+    update_enrichment_fields, update_with_revision,
 };
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
