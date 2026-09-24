@@ -1242,14 +1242,25 @@ impl DbRuntime {
         Ok(Some(bound_state.clone()))
     }
 
-    /// issue #1588 R2: the alias path's declared-role gate, mirroring the
-    /// decision table `memcore::db::store_identity::resolve_role` applies on
-    /// the open path (crates/memcore/src/db/store_identity.rs:190-207):
+    /// issue #1588 R2: the alias path's declared-role gate. This is NOT a
+    /// second copy of the decision table — it delegates to memcore's one
+    /// shared predicate
+    /// (`memcore::db::store_identity::validate_declared_role_against_resolved_label`,
+    /// `resolve_role`'s own table behind an already-resolved-label seam), so
+    /// the alias decision cannot drift from the open decision. In particular
+    /// a legacy `project:`-prefixed stamp (`project:<name>`, stamped by the
+    /// foundry scheduler's scope_hint label) admits the bare `<name>` claim
+    /// of the named-project doors here exactly as it does on every open,
+    /// while a different project — including a different Plan-C hash — and
+    /// every special-purpose role keep refusing. The outcomes are the open
+    /// path's decision table — the strict `==` mirror this replaced differed
+    /// only by lacking the legacy-equivalent row:
     ///
     /// | bound stamp      | caller claim      | alias result                          |
     /// |------------------|-------------------|---------------------------------------|
     /// | present          | none (`unknown`)  | the stamp (no conflict)               |
-    /// | present          | equal             | the stamp (no conflict)               |
+    /// | present          | equal or legacy-  | the stamp (no conflict)               |
+    /// |                  | equivalent        |                                       |
     /// | present          | different         | `MemoryError::StoreRoleConflict`      |
     /// | absent           | declared          | the claim (accepted; the open path    |
     /// |                  |                   |  would stamp it — the alias cannot,   |
@@ -1272,17 +1283,13 @@ impl DbRuntime {
         }
         let bound_store = lock_or_recover(&bound_state.store, "bound_project_store");
         let bound_label = bound_store.db_label().to_string();
-        if bound_label == memcore::path_router::UNKNOWN_DB_LABEL || bound_label == claimed {
-            drop(bound_store);
-            return Ok(());
-        }
         drop(bound_store);
-        Err(memcore::MemoryError::StoreRoleConflict {
-            claimed: claimed.to_string(),
-            stored: bound_label.to_string(),
-            db_path: db_path.display().to_string(),
-        }
-        .to_string())
+        memcore::db::store_identity::validate_declared_role_against_resolved_label(
+            &bound_label,
+            claimed,
+            db_path,
+        )
+        .map_err(|error| error.to_string())
     }
 
     /// Dynamic named-project attachment is a write boundary. Permit exactly
@@ -4734,6 +4741,166 @@ mod tests {
         runtime
             .attached_project_state(&project_db, StoreLabel::inferred(&project_db))
             .expect("an anonymous attach must not conflict with the stamp");
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    /// 2026-09 memory-read repair (review round 1): the bound-alias gate used
+    /// to mirror `resolve_role`'s table with a strict `==`, so a daemon whose
+    /// bound project DB carries the legacy `project:<name>` stamp (stamped by
+    /// the foundry scheduler's scope_hint label; the anonymous `--project-db`
+    /// bind keeps that label) rejected the bare `<name>` claim of the
+    /// named-project doors at the alias gate, before memcore was ever asked.
+    /// The gate now delegates to the one shared predicate; the same physical
+    /// DB must be reachable through the named write door, the named read
+    /// door, AND the alias itself, while a different project still refuses.
+    #[test]
+    fn legacy_project_scope_stamp_bound_alias_admits_bare_named_claim() {
+        let temp = unique_temp_dir("legacy-scope-bound-alias");
+        let global_db = temp.join("global/memory.db");
+        let project_db = temp.join("project/.tachi/memory.db");
+        std::fs::create_dir_all(global_db.parent().expect("global parent")).expect("global dir");
+        // The exact live stamp spelling: `project:named`, not `named`.
+        seed_project_db(&project_db, "project:named");
+        let runtime = test_runtime(global_db);
+        // The daemon's anonymous bind (init.rs confers nothing): the bound
+        // handle retains the stamp's own spelling.
+        assert!(
+            runtime
+                .activate_project_db(project_db.clone())
+                .expect("bind project db"),
+            "a fresh runtime must have had no bound project yet"
+        );
+        {
+            let bound = runtime
+                .project_db
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_ref()
+                .expect("bound project db")
+                .clone();
+            let bound_store = lock_or_recover(&bound.store, "bound_project_store");
+            assert_eq!(
+                bound_store.db_label(),
+                "project:named",
+                "the anonymous bind must keep the legacy stamp spelling"
+            );
+        }
+
+        // The alias gate itself: the bare named claim must alias the BOUND
+        // state (same store Arc — no twin connection to the same file).
+        let bound = runtime
+            .project_db
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .expect("bound project db")
+            .clone();
+        let aliased = runtime
+            .attached_project_state(&project_db, StoreLabel::Declared("named"))
+            .expect("the alias gate must admit the bare claim for the legacy stamp");
+        assert!(
+            Arc::ptr_eq(&bound.store, &aliased.store),
+            "the legacy-stamp attach must alias the bound store, not open a twin"
+        );
+
+        // Named WRITE door (with_path_store_with_label → attached_project_state
+        // → the alias gate): a write through the bare claim must succeed and
+        // be visible through the bound handle. The aliased handle keeps the
+        // stamp's own resolved label — one identity for both doors.
+        runtime
+            .with_path_store_with_label(&project_db, "named", |store| {
+                assert_eq!(
+                    store.db_label(),
+                    "project:named",
+                    "the alias must carry the bound store's resolved label, not the bare claim"
+                );
+                let entry = test_memory_entry("legacy-alias-write-marker");
+                store.upsert(&entry).map_err(|e| e.to_string())
+            })
+            .expect("the named write door must open the legacy-stamped bound DB");
+        let visible = runtime
+            .with_project_store_read(|store| {
+                store
+                    .get("legacy-alias-write-marker")
+                    .map(|row| row.is_some())
+                    .map_err(|e| e.to_string())
+            })
+            .expect("bound read");
+        assert!(
+            visible,
+            "the named-route write must land in the bound store"
+        );
+
+        // Named READ door (the path that bypasses the alias and opens
+        // read-only through memcore): must agree with the write door.
+        runtime
+            .with_path_store_read_with_label(&project_db, "named", |store| {
+                store
+                    .get("legacy-alias-write-marker")
+                    .map(|row| row.is_some())
+                    .map_err(|e| e.to_string())
+            })
+            .expect("the named read door must open the legacy-stamped bound DB")
+            .then_some(())
+            .expect("the read door must see the write door's row");
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    /// Negative gates for the legacy stamp at the bound alias: a different
+    /// project name — including a different Plan-C hash identity of the same
+    /// repo nickname — and the frozen corpus role must keep refusing. The
+    /// legacy-equivalence arm admits exactly one bare name per stamp.
+    #[test]
+    fn legacy_project_scope_stamp_bound_alias_still_refuses_other_claims() {
+        let temp = unique_temp_dir("legacy-scope-bound-alias-neg");
+        let global_db = temp.join("global/memory.db");
+        std::fs::create_dir_all(global_db.parent().expect("global parent")).expect("global dir");
+
+        // Different project name against a legacy-prefixed stamp.
+        let project_db = temp.join("project/.tachi/memory.db");
+        seed_project_db(&project_db, "project:yaya-14890056");
+        let runtime = test_runtime(global_db);
+        assert!(runtime
+            .activate_project_db(project_db.clone())
+            .expect("bind project db"));
+        let err = runtime
+            .with_path_store_with_label(&project_db, "yaya-20994e76035f4528deda42ce", |_| Ok(()))
+            .expect_err("a different Plan-C hash identity must refuse at the alias gate");
+        assert!(
+            err.contains("store role conflict"),
+            "expected the typed role-conflict refusal, got: {err}"
+        );
+        let err = runtime
+            .with_path_store_with_label(&project_db, "antigravity", |_| Ok(()))
+            .expect_err("a different project name must refuse at the alias gate");
+        assert!(
+            err.contains("store role conflict"),
+            "expected the typed role-conflict refusal, got: {err}"
+        );
+
+        // Frozen corpus role: a bare `wiki` claim does not match a `wiki`
+        // stamp's project-scoped spelling either way — and, decisively for
+        // the absence gate, an UNSTAMPED bound store still accepts any
+        // declared claim (the open path would stamp it).
+        let unstamped_db = temp.join("other/.tachi/memory.db");
+        std::fs::create_dir_all(unstamped_db.parent().expect("other parent"))
+            .expect("other project dir");
+        drop(
+            MemoryStore::open(unstamped_db.to_str().expect("other utf8"))
+                .expect("seed unstamped project db"),
+        );
+        let second_global = temp.join("second-global/memory.db");
+        std::fs::create_dir_all(second_global.parent().expect("second global parent"))
+            .expect("second global dir");
+        let other_runtime = test_runtime(second_global);
+        assert!(other_runtime
+            .activate_project_db(unstamped_db.clone())
+            .expect("bind unstamped project db"));
+        other_runtime
+            .with_path_store_with_label(&unstamped_db, "anything", |_| Ok(()))
+            .expect("an unstamped bound store must keep accepting a declared claim");
 
         let _ = std::fs::remove_dir_all(temp);
     }

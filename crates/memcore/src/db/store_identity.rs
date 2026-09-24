@@ -179,6 +179,7 @@ pub(crate) fn resolve_profile(
 /// |---------|---------------------|-------------------------------------------|
 /// | present | none (`unknown`)    | the stamp                                 |
 /// | present | equal               | the stamp                                 |
+/// | present | same project, legacy `project:`-prefixed stamp spelling | the stamp |
 /// | present | different           | `StoreRoleConflict` — refuse the open     |
 /// | absent  | none (`unknown`)    | `unknown`; nothing stamped                |
 /// | absent  | declared            | the claim (stamped by the write path)     |
@@ -187,6 +188,16 @@ pub(crate) fn resolve_profile(
 /// role and a declared one is a routing bug or a moved file, and answering it
 /// by silently preferring either side is how the read path and the write path
 /// came to disagree in the first place.
+///
+/// The one compatibility arm (third row) exists because live project DBs were
+/// stamped `project:<name>` by the foundry scheduler's write-open, which used
+/// the manifest `scope_hint` display text as the store label; every
+/// named-project door claims the bare `<name>` for the SAME manifest-resolved
+/// project. The prefix is spelling, not identity: the stamp still answers in
+/// its own spelling, and a claim naming any other project — including a
+/// different Plan-C hash suffix of the same repo nickname — still refuses.
+/// The aliasing runs stamp-side only: a `project:`-shaped *claim* against a
+/// bare or special-purpose stamp (`wiki`, `global`) is still a conflict.
 pub(crate) fn resolve_role(
     stored: Option<&str>,
     claimed: &str,
@@ -195,7 +206,11 @@ pub(crate) fn resolve_role(
     let claim_declared = claimed != UNKNOWN_DB_LABEL;
     match (stored, claim_declared) {
         (Some(stored), false) => Ok(stored.to_string()),
-        (Some(stored), true) if stored == claimed => Ok(stored.to_string()),
+        (Some(stored), true)
+            if stored == claimed || legacy_project_scope_stamp(stored) == Some(claimed) =>
+        {
+            Ok(stored.to_string())
+        }
         (Some(stored), true) => Err(MemoryError::StoreRoleConflict {
             claimed: claimed.to_string(),
             stored: stored.to_string(),
@@ -204,6 +219,39 @@ pub(crate) fn resolve_role(
         (None, true) => Ok(claimed.to_string()),
         (None, false) => Ok(UNKNOWN_DB_LABEL.to_string()),
     }
+}
+
+/// The project identity a legacy `project:`-prefixed role stamp names, when
+/// the stamp is that spelling. Project identities are canonical ASCII
+/// aliases (`[A-Za-z0-9._-]`, never `:`), so the split is unambiguous.
+fn legacy_project_scope_stamp(stored: &str) -> Option<&str> {
+    stored.strip_prefix("project:")
+}
+
+/// The single shared role-vs-claim decision for doors that gate an
+/// ALREADY-OPEN store's identity instead of re-opening it.
+///
+/// `memory-server-runtime`'s bound-project alias gate used to mirror
+/// [`resolve_role`]'s table with a strict `==`, so a legacy
+/// `project:`-prefixed stamp rejected its bare named-project claim at the
+/// alias gate before memcore was ever asked. This wrapper IS that table,
+/// behind a seam shaped for an already-resolved handle: `resolved_label` is
+/// the bound/attached store's `db_label` — [`UNKNOWN_DB_LABEL`] reads as "no
+/// stamp", exactly how the open path treats an absent stamp — and the claim
+/// is the caller's declared role. Ok(()) means the claim agrees with the
+/// store's identity (legacy spelling included); the typed
+/// [`MemoryError::StoreRoleConflict`] means it names a different store.
+///
+/// Every door that must decide "does this claim match this open store?" goes
+/// through here so the alias decision cannot drift from the open decision
+/// again.
+pub fn validate_declared_role_against_resolved_label(
+    resolved_label: &str,
+    claim: &str,
+    db_path: &Path,
+) -> Result<(), MemoryError> {
+    let stored = (resolved_label != UNKNOWN_DB_LABEL).then_some(resolved_label);
+    resolve_role(stored, claim, db_path).map(|_| ())
 }
 
 /// One WARN per process for a read-only open that declared a role against a
@@ -328,6 +376,103 @@ mod tests {
         assert_eq!(
             resolve_role(None, UNKNOWN_DB_LABEL, p()).expect("no stamp, no claim"),
             UNKNOWN_DB_LABEL
+        );
+    }
+
+    #[test]
+    fn legacy_project_scope_stamp_admits_the_bare_name_claim() {
+        // The foundry scheduler stamped live project DBs with the manifest
+        // scope_hint text (`project:<name>`); every named-project door claims
+        // the bare `<name>`. Same manifest-resolved project ⇒ the stamp
+        // answers, in its own spelling.
+        assert_eq!(
+            resolve_role(Some("project:tachi"), "tachi", p()).expect("same project, read as bare"),
+            "project:tachi"
+        );
+        // The stored spelling stays authoritative even under the compatible
+        // claim: the resolution never rewrites the stamp.
+        assert_eq!(
+            resolve_role(Some("project:Split_Brain_Repo"), "Split_Brain_Repo", p())
+                .expect("same project, read as bare"),
+            "project:Split_Brain_Repo"
+        );
+    }
+
+    #[test]
+    fn legacy_project_scope_stamp_still_refuses_different_projects() {
+        // A different bare name is a different project — the prefix is not a
+        // wildcard.
+        let err = resolve_role(Some("project:tachi"), "antigravity", p())
+            .expect_err("different project name must conflict");
+        assert!(
+            matches!(err, MemoryError::StoreRoleConflict { .. }),
+            "{err}"
+        );
+        // The live 2026-09 different-hash shape: two Plan-C identities of the
+        // same repo nickname are NOT the same project.
+        let err = resolve_role(
+            Some("project:yaya-14890056"),
+            "yaya-20994e76035f4528deda42ce",
+            p(),
+        )
+        .expect_err("different Plan-C hash identities must conflict");
+        assert!(
+            matches!(err, MemoryError::StoreRoleConflict { .. }),
+            "{err}"
+        );
+        let err = resolve_role(
+            Some("Quant_Analyzer_2026-64b4e4e2e5b3e54938151007"),
+            "Quant_Analyzer_2026-a5c4bf5d",
+            p(),
+        )
+        .expect_err("bare different-hash stamps must keep conflicting");
+        assert!(
+            matches!(err, MemoryError::StoreRoleConflict { .. }),
+            "{err}"
+        );
+        // Frozen roles are unaffected: a `project:`-shaped claim is never
+        // aliased onto a bare or special-purpose stamp, and wiki/global keep
+        // refusing every other name.
+        let err = resolve_role(Some("wiki"), "project:wiki", p())
+            .expect_err("a project-scoped claim on the wiki corpus must conflict");
+        assert!(
+            matches!(err, MemoryError::StoreRoleConflict { .. }),
+            "{err}"
+        );
+        let err = resolve_role(Some("global"), "project:global", p())
+            .expect_err("a project-scoped claim on the global store must conflict");
+        assert!(
+            matches!(err, MemoryError::StoreRoleConflict { .. }),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn resolved_label_gate_shares_the_open_path_table() {
+        // The alias-gate seam: an `unknown` resolved label is "no stamp" and
+        // accepts any declared claim (the open path would stamp it).
+        validate_declared_role_against_resolved_label(UNKNOWN_DB_LABEL, "anything", p())
+            .expect("unstamped bound store accepts a declared claim");
+        // The legacy spelling admits the bare claim...
+        validate_declared_role_against_resolved_label("project:tachi", "tachi", p())
+            .expect("legacy scope stamp admits its bare project claim");
+        // ...and nothing else: a different project (including a different
+        // Plan-C hash) and a project-scoped claim on a frozen role refuse.
+        let err = validate_declared_role_against_resolved_label(
+            "project:yaya-14890056",
+            "yaya-20994e76035f4528deda42ce",
+            p(),
+        )
+        .expect_err("different Plan-C hash identities must conflict at the gate");
+        assert!(
+            matches!(err, MemoryError::StoreRoleConflict { .. }),
+            "{err}"
+        );
+        let err = validate_declared_role_against_resolved_label("wiki", "project:wiki", p())
+            .expect_err("the wiki corpus must refuse a project-scoped claim");
+        assert!(
+            matches!(err, MemoryError::StoreRoleConflict { .. }),
+            "{err}"
         );
     }
 }
