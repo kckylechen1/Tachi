@@ -4,50 +4,22 @@ use crate::{CompletionStatusV1, Generated, LLM_OUTPUT_TRUNCATED};
 
 /// Completion budget shared by both L0 summary generators — legacy
 /// `generate_summary` and receipt-paired `generate_summary_with_receipt` — so
-/// the two paths cannot diverge.
+/// the two paths cannot diverge. 512 lets a thinking-disabled Flash reply
+/// finish without starving (the 2026-09-24 pilot showed the old 100-token
+/// budget cutting a clean sentence off into `finish_reason=length`).
 ///
-/// This is a *generation* budget, not a stored-length allowance: the stored
-/// L0 artifact stays capped at [`L0_SUMMARY_MAX_CHARS`] Unicode characters,
-/// enforced by [`validate_l0_summary_length`] with a loud failure. 512 lets a
-/// thinking-disabled Flash reply finish without starving (the 2026-09-24
-/// pilot showed the old 100-token budget cutting a clean sentence off into
-/// `finish_reason=length`), while the validator keeps the persisted summary
-/// compact.
+/// This is a *generation* budget, not a stored-length allowance. The owner
+/// direction (2026-09-24) is "brief but not too short": brevity is prompt
+/// guidance in [`crate::default_prompts::L0_SUMMARY_PROMPT`], and tachi-llm
+/// deliberately enforces no character cap — the 2026-09-24 pilot failed 7/10
+/// faithful summaries (103–136 chars) against a hard 100-char gate, and the
+/// pre-04421ef3 `≤100 chars` wording elsewhere in the repo was documentation
+/// guidance, never an enforced contract. Think-tag scrubbing and emptiness
+/// disposition stay at the pre-existing caller seams (backfill's
+/// `scrub_think_tags` + `EmptyOutput` skip; the memcore upsert scrub), so
+/// this crate returns the provider text verbatim — no silent truncate, no
+/// fallback, no extra transform.
 pub(crate) const SUMMARY_MAX_TOKENS: u32 = 512;
-
-/// Stored-L0 length cap. This is the durable store's own documented contract
-/// (memcore `types/entry.rs`: "L0 short summary (≤100 chars)"), restated here
-/// so the generator enforces exactly what the store persists. The full body
-/// and source history are retained elsewhere (L2 text); L0 is only the index
-/// line, so an over-long reply is rejected, never truncated to fit.
-pub(crate) const L0_SUMMARY_MAX_CHARS: usize = 100;
-
-/// Stable error marker for an L0 summary that exceeds the stored cap.
-/// Surfaces through the caller's existing retry/failure path (backfill's
-/// bounded retries, the enrichment batcher) — never a silent empty value.
-pub(crate) const LLM_SUMMARY_TOO_LONG: &str = "llm_summary_too_long";
-
-/// Enforce the stored-L0 length cap on a provider-returned summary.
-///
-/// Counts Unicode scalar values (not bytes) of the summary exactly as the
-/// store would persist it — after the same `scrub_think_tags` seam that
-/// backfill and the memcore upsert apply, then a whitespace trim — so a CJK
-/// summary is never byte-punished. Oversize replies fail loudly; there is no
-/// front/tail truncation and no fallback summary, either of which would
-/// silently destroy fidelity. Think-only replies scrub to empty here and
-/// keep their existing caller-side disposition (backfill's EmptyOutput
-/// skip); emptiness is deliberately not re-judged in tachi-llm.
-fn validate_l0_summary_length(raw: &str) -> Result<(), String> {
-    let stored_form = memcore::noise::scrub_think_tags(raw);
-    let count = stored_form.trim().chars().count();
-    if count > L0_SUMMARY_MAX_CHARS {
-        return Err(format!(
-            "{LLM_SUMMARY_TOO_LONG}: summary is {count} chars; the L0 cap is {L0_SUMMARY_MAX_CHARS} \
-             Unicode characters (memcore MemoryEntry.summary)"
-        ));
-    }
-    Ok(())
-}
 
 impl super::super::LlmClient {
     /// Generate L0 summary using `L0_SUMMARY_PROMPT`.
@@ -55,32 +27,29 @@ impl super::super::LlmClient {
     /// LLM failures are returned to callers so enrichment/backfill can record a
     /// real failure instead of storing a truncated input as if it were a summary.
     /// This legacy path keeps its documented `finish_reason` compatibility (a
-    /// `length` reply with content still returns that text), but an over-long
-    /// reply now fails length validation explicitly.
+    /// `length` reply with content still returns that text); the provider's
+    /// reply is returned verbatim with no length judgment or trimming here.
     pub async fn generate_summary(&self, text: &str) -> Result<String, String> {
-        let summary = self
-            .call_summary_llm(
-                crate::default_prompts::L0_SUMMARY_PROMPT,
-                text,
-                None,
-                0.3,
-                SUMMARY_MAX_TOKENS,
-            )
-            .await?;
-        validate_l0_summary_length(&summary)?;
-        Ok(summary)
+        self.call_summary_llm(
+            crate::default_prompts::L0_SUMMARY_PROMPT,
+            text,
+            None,
+            0.3,
+            SUMMARY_MAX_TOKENS,
+        )
+        .await
     }
 
     /// Generate an L0 summary with the actual serving-engine receipt. A
     /// provider-declared truncation is rejected before a downstream producer
-    /// can treat the output as a clean artifact, and before the L0 length
-    /// cap is judged — a `finish_reason=length` reply is rejected even when
-    /// its surviving content would have fit within 100 characters.
+    /// can treat the output as a clean artifact. A complete reply is paired
+    /// with its receipt and returned verbatim — brevity is the prompt's job,
+    /// not an enforced character cap here.
     pub async fn generate_summary_with_receipt(
         &self,
         text: &str,
     ) -> Result<Generated<String>, String> {
-        let response = Self::reject_truncated(
+        Self::reject_truncated(
             self.call_summary_llm_with_receipt(
                 crate::default_prompts::L0_SUMMARY_PROMPT,
                 text,
@@ -89,9 +58,7 @@ impl super::super::LlmClient {
                 SUMMARY_MAX_TOKENS,
             )
             .await?,
-        )?;
-        validate_l0_summary_length(&response.value)?;
-        Ok(response)
+        )
     }
 
     /// Generate a distilled synthesis from concatenated source memories.
@@ -101,9 +68,9 @@ impl super::super::LlmClient {
     /// whose text is just the prompt's input prefix.
     ///
     /// Distill keeps the legacy `SUMMARY_PROMPT` literal and its own 400-token
-    /// budget verbatim; the L0-specific `L0_SUMMARY_PROMPT` and its ≤100-char
-    /// validation belong to `generate_summary(_with_receipt)` only and must
-    /// not retune this contract.
+    /// budget verbatim; the L0-specific `L0_SUMMARY_PROMPT` and its shared
+    /// 512-token budget belong to `generate_summary(_with_receipt)` only and
+    /// must not retune this contract.
     ///
     /// Historical bug: prior to this method, `generate_summary` was reused
     /// for distill and its silent fallback produced 15/23 (65%) garbage
@@ -134,7 +101,7 @@ impl super::super::LlmClient {
     /// Receipt-preserving distill generator. It deliberately uses the same
     /// legacy `SUMMARY_PROMPT` and 400-token budget as `generate_distill` so
     /// this API addition does not retune existing model routing or inherit
-    /// the L0 ≤100-char validation.
+    /// the L0-specific prompt and budget.
     pub async fn generate_distill_with_receipt(
         &self,
         text: &str,

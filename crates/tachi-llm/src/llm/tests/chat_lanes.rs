@@ -1178,12 +1178,12 @@ async fn outbound_summary_explicit_env_off_is_honored() {
 }
 
 /// The pilot's 1/10 failure shape: `finish_reason=length` with NON-EMPTY
-/// content that already fits the L0 ≤100-char cap. The receipt path must
-/// reject it as `llm_output_truncated` (truncation is adjudicated BEFORE the
-/// length cap; no partial-summary fallback). The legacy text-only path keeps
-/// its documented compat behavior — it returns the provider text — pinned
-/// here so the difference stays explicit instead of silently weakening
-/// either side.
+/// content that would otherwise look like a usable summary. The receipt path
+/// must reject it as `llm_output_truncated` (truncation is adjudicated by
+/// the provider's own finish receipt — no partial-summary fallback). The
+/// legacy text-only path keeps its documented compat behavior — it returns
+/// the provider text — pinned here so the difference stays explicit instead
+/// of silently weakening either side.
 #[tokio::test]
 async fn summary_receipt_rejects_nonempty_length_but_legacy_keeps_compat() {
     use axum::{routing::post, Json, Router};
@@ -1370,13 +1370,19 @@ async fn outbound_distill_request_keeps_legacy_summary_prompt_verbatim() {
     );
 }
 
-/// Boundary matrix for the stored-L0 ≤100 cap on the receipt path. The cap
-/// counts Unicode scalar values of the scrubbed, trimmed summary — the same
-/// form the store persists — so 100 CJK characters (300 UTF-8 bytes) pass and
-/// 101 fail, and a think-block prefix is judged after scrubbing. No ASCII
-/// byte cap, no truncate-to-fit, no fallback.
+/// Acceptance matrix for stored-L0 summary length on the receipt path
+/// (owner direction 2026-09-24: "brief but not too short"). The 2026-09-24
+/// pilot failed 7/10 faithful summaries (103–136 chars) against the
+/// since-removed 100-char gate, so these legs pin the repair: real
+/// pilot-shaped summaries of ~103–136 chars, a ~250-char two-sentence
+/// summary, and a >100-scalar CJK summary are all accepted verbatim with
+/// the receipt's provider-reported identity intact. No character cap, no
+/// truncate-to-fit, no byte counting. A think-tagged reply is also returned
+/// verbatim: think-scrub belongs to the pre-existing caller seams
+/// (backfill's `scrub_think_tags` + EmptyOutput skip, the memcore upsert),
+/// not to this crate.
 #[tokio::test]
-async fn summary_receipt_enforces_l0_cap_by_unicode_scalar_after_think_scrub() {
+async fn summary_receipt_accepts_faithful_summaries_of_useful_length() {
     let _guard = crate::test_support::global_test_lock().lock();
     let _env = EnvRestore::unset("TACHI_DISABLE_THINKING_MODELS");
 
@@ -1391,93 +1397,98 @@ async fn summary_receipt_enforces_l0_cap_by_unicode_scalar_after_think_scrub() {
         })
     };
 
-    // Exactly 100 chars: accepted, receipt keeps the provider-reported model.
+    // Pilot shape (103–136 chars): accepted verbatim, receipt identity kept.
+    let pilot_shaped = "As of 2026-09-20, service-analog PR 88 passed CI but merge was pending owner review; rollout conditional on quota check first.";
+    assert!(
+        (103..=136).contains(&pilot_shaped.chars().count()),
+        "guard: fixture must model the pilot's real 103-136 char range"
+    );
     let (body, ok) = capture_summary_receipt_outbound(
         Some(DEEPSEEK_AUTH_PROBE.host),
         "deepseek-v4-flash",
-        ok_response("x".repeat(100)),
+        ok_response(pilot_shaped.to_string()),
     )
     .await;
     assert_eq!(body["max_tokens"], 512);
-    let ok = ok.expect("100 chars is exactly at the L0 cap");
-    assert_eq!(ok.value.chars().count(), 100);
-    assert_eq!(ok.invocation.effective_model(), Some("deepseek-flash"));
-
-    // 101 chars: loud, explicit failure — never truncated to fit.
-    let (_, over) = capture_summary_receipt_outbound(
-        Some(DEEPSEEK_AUTH_PROBE.host),
-        "deepseek-v4-flash",
-        ok_response("x".repeat(101)),
-    )
-    .await;
-    let err = over.expect_err("101 chars must fail the L0 cap");
-    assert!(
-        err.starts_with("llm_summary_too_long") && err.contains("101"),
-        "expected explicit llm_summary_too_long with the actual count, got: {err}"
+    let ok = ok.expect("pilot-shaped 103-136 char summary must be accepted");
+    assert_eq!(ok.value, pilot_shaped);
+    assert_eq!(
+        ok.invocation.effective_model(),
+        Some("deepseek-flash"),
+        "receipt must preserve the provider-reported actual model"
+    );
+    assert_eq!(
+        ok.invocation.completion_status(),
+        CompletionStatusV1::Complete
     );
 
-    // 100 CJK chars = 300 UTF-8 bytes: passes only under scalar counting.
+    // A ~250-char two-sentence summary: no hard max anywhere near this range.
+    let longer = "As of 2026-09-20, service-analog PR 88 had passed CI, but merge was still pending owner review, so tested-but-not-merged is the accurate state. Rollout remained conditional: the quota check had to pass first, and no deployment had happened yet.";
+    assert!(longer.chars().count() > 200 && longer.chars().count() < 300);
+    let (_, longer_ok) = capture_summary_receipt_outbound(
+        Some(DEEPSEEK_AUTH_PROBE.host),
+        "deepseek-flash",
+        ok_response(longer.to_string()),
+    )
+    .await;
+    let longer_ok = longer_ok.expect("250-char faithful summary must be accepted");
+    assert_eq!(longer_ok.value, longer);
+
+    // CJK >100 Unicode scalars (>300 UTF-8 bytes): scalars are never the
+    // basis for rejection now, but the guard keeps this fixture honest.
+    let cjk = "截至2026-09-20,service-analog 仓库的 PR 88 已经通过 CI 测试,但合并仍在等待负责人评审,准确状态是已测试而未合并;上线部署仍以先完成配额检查为前提条件,当时完全尚未开始。";
+    assert!(cjk.chars().count() > 100);
     let (_, cjk_ok) = capture_summary_receipt_outbound(
         Some(DEEPSEEK_AUTH_PROBE.host),
         "deepseek-flash",
-        ok_response("忆".repeat(100)),
+        ok_response(cjk.to_string()),
     )
     .await;
-    let cjk_ok = cjk_ok.expect("100 CJK chars is exactly at the scalar cap");
-    assert_eq!(cjk_ok.value.chars().count(), 100);
+    let cjk_ok = cjk_ok.expect("CJK summary over 100 scalars must be accepted");
+    assert_eq!(cjk_ok.value, cjk);
+
+    // Think-tagged reply: returned verbatim (scrub is the caller/store seam),
+    // proving neither a new cap nor a new silent transform lives here.
+    let think_prefixed = format!("<think>draft wording</think>{pilot_shaped}");
+    let (_, think_ok) = capture_summary_receipt_outbound(
+        Some(DEEPSEEK_AUTH_PROBE.host),
+        "deepseek-flash",
+        ok_response(think_prefixed.clone()),
+    )
+    .await;
+    let think_ok = think_ok.expect("no length or think-shape rejection in tachi-llm");
     assert_eq!(
-        cjk_ok.value.len(),
-        300,
-        "guard: this fixture is really 300 bytes"
+        think_ok.value, think_prefixed,
+        "tachi-llm must not scrub; backfill/memcore own that seam"
     );
-
-    // 101 CJK chars: fails by scalars, not bytes.
-    let (_, cjk_over) = capture_summary_receipt_outbound(
-        Some(DEEPSEEK_AUTH_PROBE.host),
-        "deepseek-flash",
-        ok_response("忆".repeat(101)),
-    )
-    .await;
-    let err = cjk_over.expect_err("101 CJK chars must fail the L0 cap");
-    assert!(
-        err.starts_with("llm_summary_too_long") && err.contains("101"),
-        "expected scalar-counted rejection, got: {err}"
-    );
-
-    // Think-block padding is judged after the store's scrub seam: the
-    // visible 100 chars fit even though the raw reply is longer.
-    let (_, scrubbed_ok) = capture_summary_receipt_outbound(
-        Some(DEEPSEEK_AUTH_PROBE.host),
-        "deepseek-flash",
-        ok_response(format!(
-            "<think>reasoning padding</think>{}",
-            "x".repeat(100)
-        )),
-    )
-    .await;
-    scrubbed_ok.expect("scrubbed 100-char summary fits the cap");
 }
 
-/// The legacy text-only generator also enforces the explicit L0 cap on new
-/// over-long output (its `finish_reason=length` compat stays as pinned
-/// above; this is the deliberate, documented new validation).
+/// The legacy text-only generator also returns a faithful over-100-char
+/// summary verbatim (its `finish_reason=length` compat stays as pinned
+/// above). This is the repaired counterpart of the removed 100-char gate:
+/// nothing in either generator judges stored length anymore.
 #[tokio::test]
-async fn legacy_summary_rejects_overlong_output_explicitly() {
+async fn legacy_summary_accepts_useful_over_100_char_output_verbatim() {
     use axum::{routing::post, Json, Router};
 
     let _guard = crate::test_support::global_test_lock().lock();
     let _env = EnvRestore::unset("TACHI_DISABLE_THINKING_MODELS");
 
+    let faithful = "cut off no more: as of 2026-09-20 the service-analog PR 88 passed CI while merge stayed pending owner review and rollout stayed gated on the quota check";
+    assert!(faithful.chars().count() > 150);
     let app = Router::new().route(
         "/chat/completions",
-        post(|| async {
-            Json(serde_json::json!({
-                "choices": [{
-                    "message": {"role": "assistant", "content": "y".repeat(101)},
-                    "finish_reason": "stop"
-                }],
-                "model": "deepseek-flash"
-            }))
+        post(move || {
+            let content = faithful.to_string();
+            async move {
+                Json(serde_json::json!({
+                    "choices": [{
+                        "message": {"role": "assistant", "content": content},
+                        "finish_reason": "stop"
+                    }],
+                    "model": "deepseek-flash"
+                }))
+            }
         }),
     );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -1522,31 +1533,31 @@ async fn legacy_summary_rejects_overlong_output_explicitly() {
             value: "fixture-legacy-overlong-secret".to_string(),
         }],
     );
-    let err = client
+    let out = client
         .generate_summary(SUMMARY_WIRE_TEST_INPUT)
         .await
-        .expect_err("over-long legacy summary must fail validation");
-    assert!(
-        err.starts_with("llm_summary_too_long") && err.contains("101"),
-        "expected explicit llm_summary_too_long, got: {err}"
-    );
+        .expect("useful over-100-char legacy summary must be accepted");
+    assert_eq!(out, faithful, "no truncation, no trimming, no rejection");
 
     server_task.abort();
 }
 
-/// Pins the `L0_SUMMARY_PROMPT` literal so the length cap and fidelity
-/// clauses the #1967 pilot depends on cannot be silently dropped in a
-/// refactor. This asserts only that the prompt TEXT carries the clauses; it
-/// makes no claim that any model semantically obeys them — that evidence
+/// Pins the `L0_SUMMARY_PROMPT` literal so the brevity-with-adequacy and
+/// fidelity clauses the #1967 pilot depends on cannot be silently dropped in
+/// a refactor. This asserts only that the prompt TEXT carries the clauses;
+/// it makes no claim that any model semantically obeys them — that evidence
 /// belongs to the real pilot.
 #[test]
-fn l0_summary_prompt_carries_fidelity_and_length_contract() {
+fn l0_summary_prompt_carries_fidelity_and_brevity_contract() {
     let prompt = crate::default_prompts::L0_SUMMARY_PROMPT;
     for needed in [
-        "AT MOST 100 CHARACTERS",
-        "ONE concise sentence",
-        "Prioritize the single central point",
-        "omit secondary detail rather than combine incompatible task statuses",
+        "one to three sentences",
+        "short paragraph at most",
+        "brief but complete enough to be useful",
+        "distinct task states",
+        "conditions or unfinished items",
+        "Do not drop meaningful context merely to be short",
+        "do not pad to any length target",
         "only what the text says",
         "pending",
         "implemented",
@@ -1567,6 +1578,13 @@ fn l0_summary_prompt_carries_fidelity_and_length_contract() {
             "L0_SUMMARY_PROMPT lost contract clause {needed:?}: {prompt}"
         );
     }
+    // The owner removed the hard cap on 2026-09-24 ("brief but not too
+    // short"); the prompt must not reintroduce a character-count target
+    // ("at most" alone is fine — the sentence-shape guidance uses it).
+    assert!(
+        !prompt.to_uppercase().contains("CHARACTERS") && !prompt.contains("100"),
+        "prompt must not carry a hard character cap: {prompt}"
+    );
     // The prompt must not invite invention of provenance it was not given.
     assert!(!prompt.contains("verified_at"));
 }

@@ -378,6 +378,8 @@ Recommended mapping for continuity memory:
 | **reasoning** | DeepSeek V4 Pro | Outcome labeling is the linchpin of the over-fit brake |
 | **label eval** | DeepSeek V4 Pro | The judge that calibrates the labeler must itself be strong |
 
+L0 summary length policy (owner decision, 2026-09-24): summaries are prompt-guided to be brief but not too short — one to three sentences / a short paragraph preserving the observation time, central facts, distinct statuses (e.g. tested vs merged vs deployed), and stated conditions or unfinished items. The generators enforce no character cap. The `≤100 chars` wording still present in some older schema/doc comments is historical guidance, never an enforced contract; a 100-char hard gate tried on 2026-09-24 was removed after the pilot rejected 7/10 faithful summaries (103–136 chars). Fidelity bounds that ARE enforced: the serving receipt's `finish_reason=length` is rejected before producer storage, and think-tag scrubbing plus emptiness disposition stay at the caller/store seams.
+
 Configuration example:
 
 ```bash
