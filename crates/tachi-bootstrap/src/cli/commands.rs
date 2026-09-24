@@ -266,6 +266,27 @@ pub enum Commands {
         /// Only count missing entries, don't generate summaries
         #[arg(long)]
         dry_run: bool,
+        /// Restrict the sweep to one explicit memory ID in the target DB
+        /// (repeatable; duplicates collapse deterministically). Default
+        /// without --id stays the missing-only sweep.
+        #[arg(long = "id", value_name = "ID")]
+        id: Vec<String>,
+        /// Schedule at most N selected entries (positive). Applies after the
+        /// whole --id set is validated, so a typo'd id still fails the run.
+        #[arg(long, value_name = "N")]
+        limit: Option<usize>,
+        /// With explicit --id only: replace existing non-empty summaries.
+        /// Only the summary, its receipt, FTS, updated_at, and enrichment
+        /// metadata change — raw text, observation timestamps
+        /// (timestamp/valid_from/valid_until), identity, and vectors are
+        /// untouched. updated_at is write time, not fact freshness.
+        #[arg(long, requires = "id")]
+        regenerate: bool,
+        /// Emit one structured JSON plan (dry-run) or result document
+        /// instead of human progress lines. Contains ids, revisions,
+        /// statuses and counts only — never memory bodies or key material.
+        #[arg(long)]
+        json: bool,
     },
     /// Backfill missing recall keywords using the configured extract LLM
     BackfillMetadata {

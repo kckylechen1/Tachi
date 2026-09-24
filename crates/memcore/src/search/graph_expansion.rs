@@ -28,6 +28,18 @@ fn injection_parent<'a>(id: &str, injection: &'a GraphTraversalInjection) -> Opt
     }
 }
 
+/// Graph expansion must not widen a path-scoped search back past its scope:
+/// a neighbor row is admissible only when its own path sits under the same
+/// literal prefix the ranked rows were held to (final eligibility's
+/// `entry.path.starts_with(prefix)`). Kept as the exact same predicate —
+/// string prefix, not a segment boundary, and `%`/`_` are path characters,
+/// never SQL wildcards — so the expansion boundary cannot drift from the
+/// candidate boundary. An unscoped search (`None`) admits everything, as
+/// before.
+fn expanded_entry_within_path_prefix(entry: &MemoryEntry, path_prefix: Option<&str>) -> bool {
+    path_prefix.is_none_or(|prefix| entry.path.starts_with(prefix))
+}
+
 /// Walk the recorded BFS injection chain from `id` back to the seed it
 /// ultimately traces to (the entry in `distances` with distance 0).
 /// Bounded by `distances[id] + 1` steps: each recorded injection must point
@@ -163,6 +175,11 @@ pub(super) fn append_graph_expansion(
             Some(target) => surface_of(entry) == target,
             None => true,
         })
+        // Same concern, path scope: a `path_prefix` held every ranked row to
+        // a literal prefix; an expanded neighbor must satisfy the same
+        // boundary or the scope silently re-widens after ranking (and again
+        // downstream — the recall cache and rerank consume these rows).
+        .filter(|entry| expanded_entry_within_path_prefix(entry, opts.path_prefix.as_deref()))
         .collect();
     let expanded_ids: Vec<String> = expanded_entries
         .iter()

@@ -641,6 +641,94 @@ fn directory_name_confers_no_wiki_authority() {
     );
 }
 
+/// Legacy stamp spelling: live project DBs were stamped `project:<name>` by
+/// the foundry scheduler's write-open, which used the manifest `scope_hint`
+/// display text as the store label. The named-project doors claim the bare
+/// `<name>`. Both spellings describe the SAME manifest-resolved project, so
+/// the bare claim must open the store (read AND write) with the stamp kept
+/// authoritative — while a claim naming any other project, including a
+/// different Plan-C hash suffix, must keep refusing.
+#[test]
+fn legacy_project_scope_stamp_opens_under_bare_name_claim() {
+    let dir = temp_dir("legacy-scope-stamp");
+    let path = db_in(&dir, "memory.db");
+    // The exact poisoning door: a write-open whose label is scope_hint text.
+    drop(
+        MemoryStore::open_with_label_and_context(
+            &path,
+            "project:legacy-proj",
+            &deny(StoreProfile::TachiFull),
+        )
+        .expect("stamp the store the way the foundry scheduler did"),
+    );
+
+    // Read door: `with_named_project_store_read` claims the bare name.
+    let read = MemoryStore::open_read_only_with_label(&path, "legacy-proj")
+        .expect("bare project claim must read a project:-prefixed stamp");
+    assert_eq!(
+        read.db_label(),
+        "project:legacy-proj",
+        "the stored spelling stays authoritative; the claim is not rewritten into the stamp"
+    );
+    drop(read);
+
+    // Write door: `with_named_project_store` claims the same bare name and
+    // must agree with the read door on one identity.
+    let write = MemoryStore::open_with_label_and_context(
+        &path,
+        "legacy-proj",
+        &allow(StoreProfile::TachiFull),
+    )
+    .expect("bare project claim must also open for write");
+    assert_eq!(write.db_label(), "project:legacy-proj");
+    drop(write);
+
+    // The stamp is untouched by the compatible opens: still one authority.
+    let conn = raw(&path);
+    assert_eq!(
+        identity_stamp(&conn, "role").as_deref(),
+        Some("project:legacy-proj")
+    );
+
+    // A different project identity — including the different-hash shape the
+    // 2026-09 live audit found (yaya-20994… vs project:yaya-1489…) — is NOT
+    // the same project and must keep refusing.
+    let err = MemoryStore::open_read_only_with_label(&path, "legacy-other")
+        .err()
+        .expect("a different project name must still conflict");
+    assert!(
+        matches!(err, MemoryError::StoreRoleConflict { .. }),
+        "expected StoreRoleConflict, got {err:?}"
+    );
+    let err = MemoryStore::open_read_only_with_label(&path, "yaya-20994e76035f4528deda42ce")
+        .err()
+        .expect("a different Plan-C hash identity must still conflict");
+    assert!(
+        matches!(err, MemoryError::StoreRoleConflict { .. }),
+        "expected StoreRoleConflict, got {err:?}"
+    );
+
+    // The exact live 2026-09 different-hash shape: a `project:`-prefixed
+    // stamp of one hash is NOT satisfiable by the bare claim of another.
+    let dir_b = temp_dir("legacy-scope-stamp-other-hash");
+    let path_b = db_in(&dir_b, "memory.db");
+    drop(
+        MemoryStore::open_with_label_and_context(
+            &path_b,
+            "project:yaya-14890056",
+            &deny(StoreProfile::TachiFull),
+        )
+        .expect("stamp a different-hash project role"),
+    );
+    let err = MemoryStore::open_read_only_with_label(&path_b, "yaya-20994e76035f4528deda42ce")
+        .err()
+        .expect("different Plan-C hash identities are different projects");
+    assert!(
+        matches!(err, MemoryError::StoreRoleConflict { .. }),
+        "expected StoreRoleConflict, got {err:?}"
+    );
+}
+
 #[test]
 fn conflicting_role_claim_is_refused_not_resolved() {
     let dir = temp_dir("role-conflict");

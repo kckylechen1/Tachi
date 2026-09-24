@@ -78,7 +78,19 @@ The reducer MUST:
 6. derive the current action queue from current truth, not copy a prior handoff's
    todo list;
 7. mark projections stale when their evidence head is older than the reconciled
-   object state.
+    object state.
+
+Recall presentation keeps an observation's recorded timestamp, validity interval,
+lifecycle marker, and bounded source references when available. Retrieval relevance
+is confidence in the recalled evidence, not verification that a historical claim is
+currently true; only an existing typed current-truth reduction or an authoritative
+runtime source may make that separate claim. Missing observation time remains
+explicitly unknown rather than being replaced with a response-generation time.
+
+To inspect an archived source, use `tachi_memory(action="get", id=..., include_archived=true)`
+in the source's admitted library. This opt-in exposes the archived record and its
+marker; it does not broaden project access or search other libraries. An unresolved
+source reference alone does not prove that its record was deleted.
 
 Authority is predicate-scoped. At minimum:
 
@@ -365,6 +377,8 @@ Recommended mapping for continuity memory:
 | **distill** | DeepSeek V4 Pro or Qwen 72B | Abstracting patterns and timeline entries requires synthesis |
 | **reasoning** | DeepSeek V4 Pro | Outcome labeling is the linchpin of the over-fit brake |
 | **label eval** | DeepSeek V4 Pro | The judge that calibrates the labeler must itself be strong |
+
+L0 summary length policy (owner decision, 2026-09-24): summaries are prompt-guided to be brief but not too short — one to three sentences / a short paragraph preserving the observation time, central facts, distinct statuses (e.g. tested vs merged vs deployed), and stated conditions or unfinished items. The generators enforce no character cap. The `≤100 chars` wording still present in some older schema/doc comments is historical guidance, never an enforced contract; a 100-char hard gate tried on 2026-09-24 was removed after the pilot rejected 7/10 faithful summaries (103–136 chars). Fidelity bounds that ARE enforced: the serving receipt's `finish_reason=length` is rejected before producer storage, and think-tag scrubbing plus emptiness disposition stay at the caller/store seams.
 
 Configuration example:
 

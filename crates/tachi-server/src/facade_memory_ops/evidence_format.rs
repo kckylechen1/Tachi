@@ -383,12 +383,36 @@ pub(crate) fn format_agent_status(
                     .and_then(Value::as_str)
                     .unwrap_or("(no summary)");
                 let score = evidence_score(row);
+                let observed_at = row
+                    .get("timestamp")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.trim().is_empty())
+                    .unwrap_or("observation time unknown");
+                let lifecycle = if row.get("archived").and_then(Value::as_bool) == Some(true) {
+                    " archived"
+                } else if row.get("superseded_by").and_then(Value::as_str).is_some() {
+                    " superseded"
+                } else {
+                    ""
+                };
+                let validity = match (
+                    row.get("valid_from").and_then(Value::as_str),
+                    row.get("valid_until").and_then(Value::as_str),
+                ) {
+                    (Some(from), Some(until)) => format!(" valid {from}..{until}"),
+                    (Some(from), None) => format!(" valid from {from}"),
+                    (None, Some(until)) => format!(" valid until {until}"),
+                    (None, None) => String::new(),
+                };
                 out.push(format!(
-                    "{}. **{}** {:.3} `{}` - {}",
+                    "{}. **{}** {:.3} `{}` [{}{}{}] - {}",
                     idx + 1,
                     topic,
                     score,
                     path,
+                    observed_at,
+                    validity,
+                    lifecycle,
                     compact_text_line(summary, 100)
                 ));
             }
@@ -450,14 +474,70 @@ pub(crate) fn evidence_ref(row: &Value) -> Value {
         .get("relevance")
         .and_then(Value::as_f64)
         .unwrap_or_else(|| evidence_score(row));
-    json!({
+    let timestamp = row
+        .get("timestamp")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty());
+    let mut reference = json!({
         "id": row.get("id"),
         "path": row.get("path"),
         "summary": row.get("summary"),
         "excerpt": row.get("excerpt"),
         "topic": row.get("topic"),
         "relevance": relevance,
-    })
+        "timestamp": timestamp,
+        "observation_time_status": if timestamp.is_some() { "available" } else { "unknown" },
+    });
+    let object = reference
+        .as_object_mut()
+        .expect("evidence reference is an object");
+    for key in [
+        "valid_from",
+        "valid_until",
+        "archived",
+        "superseded_by",
+        "source",
+        "db",
+        "store",
+    ] {
+        if let Some(value) = row.get(key).filter(|value| !value.is_null()) {
+            object.insert(key.to_string(), value.clone());
+        }
+    }
+    if !object.contains_key("superseded_by") {
+        if let Some(value) = row
+            .pointer("/metadata/superseded_by")
+            .filter(|value| !value.is_null())
+        {
+            object.insert("superseded_by".to_string(), value.clone());
+        }
+    }
+    let source_memory_ids = row
+        .get("source_memory_ids")
+        .or_else(|| row.pointer("/metadata/source_memory_ids"))
+        .and_then(Value::as_array)
+        .map(|ids| {
+            ids.iter()
+                .filter_map(Value::as_str)
+                .take(8)
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .filter(|ids| !ids.is_empty());
+    if let Some(source_memory_ids) = source_memory_ids {
+        object.insert("source_memory_ids".to_string(), json!(source_memory_ids));
+    }
+    let source_refs = row
+        .get("source_refs")
+        .or_else(|| row.pointer("/metadata/source_refs"))
+        .and_then(Value::as_array)
+        .and_then(|refs| {
+            crate::shared_defs::compact_source_refs(Some(&Value::Array(refs.clone())))
+        });
+    if let Some(source_refs) = source_refs {
+        object.insert("source_refs".to_string(), json!(source_refs));
+    }
+    reference
 }
 
 pub(crate) fn build_thinking_scaffold(mode: &str, query: &str, evidence: &Value) -> Value {
@@ -491,6 +571,16 @@ pub(crate) fn build_thinking_scaffold(mode: &str, query: &str, evidence: &Value)
     if top_score < 0.35 && evidence_count > 0 {
         gaps.push("Top evidence relevance is weak; treat conclusions as tentative.".to_string());
     }
+    if evidence_count > 0 {
+        gaps.push("Retrieved evidence preserves historical observations; current fact verification was not performed.".to_string());
+        if rows.iter().any(|row| {
+            row.get("timestamp")
+                .and_then(Value::as_str)
+                .is_none_or(|timestamp| timestamp.trim().is_empty())
+        }) {
+            gaps.push("One or more evidence rows have no observation time.".to_string());
+        }
+    }
     if query.trim().len() < 8 {
         gaps.push("Query is short; refine it with topic, path, or error context.".to_string());
     }
@@ -516,6 +606,8 @@ pub(crate) fn build_thinking_scaffold(mode: &str, query: &str, evidence: &Value)
         "mode": mode,
         "query": query,
         "confidence": confidence,
+        "confidence_basis": "retrieved_evidence",
+        "current_fact_status": "not_verified_current",
         "evidence_count": evidence_count,
         "top_relevance": top_score,
         "key_evidence": key_evidence,
@@ -543,6 +635,36 @@ pub(crate) fn slim_memory_rows(value: Value) -> Value {
                 });
                 if let Some(store) = row.get("store").filter(|value| !value.is_null()) {
                     slim["store"] = store.clone();
+                }
+                for key in [
+                    "timestamp",
+                    "valid_from",
+                    "valid_until",
+                    "archived",
+                    "superseded_by",
+                    "source",
+                ] {
+                    if let Some(value) = row.get(key).filter(|value| !value.is_null()) {
+                        slim[key] = value.clone();
+                    }
+                }
+                let source_memory_ids = row
+                    .get("source_memory_ids")
+                    .and_then(Value::as_array)
+                    .map(|ids| {
+                        ids.iter()
+                            .filter_map(Value::as_str)
+                            .take(8)
+                            .map(str::to_string)
+                            .collect::<Vec<_>>()
+                    })
+                    .filter(|ids| !ids.is_empty());
+                if let Some(ids) = source_memory_ids {
+                    slim["source_memory_ids"] = json!(ids);
+                }
+                if let Some(refs) = crate::shared_defs::compact_source_refs(row.get("source_refs"))
+                {
+                    slim["source_refs"] = refs;
                 }
                 slim
             })
@@ -617,6 +739,31 @@ pub(crate) fn parse_evidence_array(raw: String) -> Value {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn compact_briefing_caps_accumulated_provenance_and_strips_unknown_fields() {
+        let refs: Vec<_> = (0..20)
+            .map(|i| {
+                serde_json::json!({
+                    "ref_type": "turn", "ref_id": format!("turn-{i}"), "revision": i,
+                    "private_payload": "must not reach compact briefing"
+                })
+            })
+            .collect();
+        let ids: Vec<_> = (0..20).map(|i| format!("source-{i}")).collect();
+        let rows = super::slim_memory_rows(serde_json::json!([{
+            "id": "accumulated", "db": "project", "timestamp": "2026-05-01T12:00:00Z",
+            "source_refs": refs, "source_memory_ids": ids
+        }]));
+        assert_eq!(rows[0]["source_refs"].as_array().unwrap().len(), 8);
+        assert_eq!(rows[0]["source_memory_ids"].as_array().unwrap().len(), 8);
+        assert_eq!(rows[0]["timestamp"], "2026-05-01T12:00:00Z");
+        assert_eq!(rows[0]["db"], "project");
+        for reference in rows[0]["source_refs"].as_array().unwrap() {
+            assert_eq!(reference.as_object().unwrap().len(), 3);
+            assert!(reference.get("private_payload").is_none());
+        }
+    }
+
     use super::*;
 
     #[test]
@@ -746,7 +893,9 @@ mod tests {
         assert_eq!(thinking["confidence"], json!("high"));
         assert_eq!(thinking["evidence_count"], json!(2));
         assert_eq!(thinking["key_evidence"][0]["id"], json!("high"));
-        assert!(thinking["gaps"].as_array().unwrap().is_empty());
+        assert!(thinking["gaps"].as_array().unwrap().iter().any(|gap| {
+            gap == "Retrieved evidence preserves historical observations; current fact verification was not performed."
+        }));
     }
 
     #[test]
@@ -760,6 +909,74 @@ mod tests {
             .unwrap()
             .iter()
             .any(|gap| gap == "No evidence rows were retrieved."));
+    }
+
+    #[test]
+    fn thinking_scaffold_keeps_history_time_and_does_not_claim_current_verification() {
+        let thinking = build_thinking_scaffold(
+            "ask",
+            "what was last known versus now?",
+            &json!([{
+                "id": "may-observation",
+                "path": "/scratch/history",
+                "summary": "A high-relevance historical observation",
+                "relevance": 0.95,
+                "timestamp": "2026-05-01T12:00:00Z",
+                "valid_from": "2026-05-01T12:00:00Z",
+                "valid_until": "2026-08-31T23:59:59Z",
+                "archived": true,
+                "superseded_by": "new-observation",
+                "source": "capture",
+                "source_memory_ids": ["raw-1", "raw-2"],
+                "source_refs": ["session:abc"],
+            }]),
+        );
+
+        assert_eq!(thinking["confidence"], json!("high"));
+        assert_eq!(thinking["confidence_basis"], json!("retrieved_evidence"));
+        assert_eq!(
+            thinking["current_fact_status"],
+            json!("not_verified_current")
+        );
+        assert_eq!(
+            thinking["key_evidence"][0]["timestamp"],
+            json!("2026-05-01T12:00:00Z")
+        );
+        assert_eq!(
+            thinking["key_evidence"][0]["valid_until"],
+            json!("2026-08-31T23:59:59Z")
+        );
+        assert_eq!(
+            thinking["key_evidence"][0]["source_memory_ids"],
+            json!(["raw-1", "raw-2"])
+        );
+        assert_eq!(
+            thinking["key_evidence"][0]["source_refs"],
+            json!(["session:abc"])
+        );
+        assert!(thinking["gaps"].as_array().unwrap().iter().any(|gap| {
+            gap == "Retrieved evidence preserves historical observations; current fact verification was not performed."
+        }));
+    }
+
+    #[test]
+    fn thinking_scaffold_marks_missing_observation_time_without_inventing_one() {
+        let thinking = build_thinking_scaffold(
+            "ask",
+            "what was observed?",
+            &json!([{"id": "unknown-time", "relevance": 0.9}]),
+        );
+
+        assert!(thinking["key_evidence"][0]["timestamp"].is_null());
+        assert_eq!(
+            thinking["key_evidence"][0]["observation_time_status"],
+            json!("unknown")
+        );
+        assert!(thinking["gaps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|gap| { gap == "One or more evidence rows have no observation time." }));
     }
 }
 #[test]

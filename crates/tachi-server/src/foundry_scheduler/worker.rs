@@ -35,6 +35,20 @@ fn interval_at(start: Instant, period: Duration) -> tokio::time::Interval {
     tokio::time::interval_at(start, period)
 }
 
+/// Open one scheduler-poll store.
+///
+/// The scheduler's `label` is manifest display text (`manifest_label_for`:
+/// the `scope_hint`, or `parent/file` when absent) — inventory naming, never
+/// a resolved store identity. Confering it write-opened live project DBs with
+/// `project:<name>` role stamps that the bare named-project claims then
+/// refused (`StoreRoleConflict`). Open unlabelled instead — the same ruling
+/// as `tachi migrate --apply` (#1761): the store's own stamp answers, an
+/// unstamped DB stays unstamped, and only a door that actually resolved the
+/// role (the named-project doors) confers identity.
+fn open_poll_store(path_str: &str) -> Result<MemoryStore, memcore::MemoryError> {
+    MemoryStore::open_with_label(path_str, memcore::path_router::UNKNOWN_DB_LABEL)
+}
+
 async fn run_one_poll(
     db_path: &Path,
     label: &str,
@@ -56,7 +70,6 @@ async fn run_one_poll(
     // blocking thread so we never stall the tokio runtime if the DB
     // happens to be locked by a writer.
     let path_owned = db_path.to_path_buf();
-    let label_owned = label.to_string();
     let running_cutoff = (chrono::Utc::now()
         - chrono::Duration::seconds(crate::status_ops::STUCK_THRESHOLD_SECS))
     .to_rfc3339();
@@ -65,7 +78,7 @@ async fn run_one_poll(
             let path_str = path_owned
                 .to_str()
                 .ok_or_else(|| format!("non-utf8 db path: {}", path_owned.display()))?;
-            let store = MemoryStore::open_with_label(path_str, &label_owned)
+            let store = open_poll_store(path_str)
                 .map_err(|e| format!("open {}: {e}", path_owned.display()))?;
             load_pending_foundry_jobs(store.connection(), &running_cutoff)
                 .map_err(|e| format!("load pending: {e}"))
@@ -147,5 +160,70 @@ async fn run_one_poll(
                 "pending foundry job(s) in non-routable DB; see tachi status"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::OptionalExtension;
+
+    fn role_stamp(path: &Path) -> Option<String> {
+        let conn = rusqlite::Connection::open(path).expect("open fixture db");
+        conn.query_row(
+            "SELECT value_json FROM hard_state WHERE namespace = ?1 AND key = ?2",
+            rusqlite::params![
+                memcore::db::store_profile::STORE_IDENTITY_NAMESPACE,
+                memcore::db::store_profile::STORE_ROLE_KEY
+            ],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .expect("read role stamp")
+    }
+
+    /// The poll open must confer no store identity: an unstamped DB stays
+    /// unstamped. Red on the pre-fix code, where the scope_hint label
+    /// (`project:<name>`) became the store's write-once role stamp.
+    #[test]
+    fn scheduler_poll_open_confers_no_store_role() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let db = tmp.path().join("poll-unstamped.db");
+        let db_str = db.to_str().expect("utf8 db path");
+        drop(MemoryStore::open(db_str).expect("create unstamped fixture db"));
+        assert_eq!(role_stamp(&db), None, "fixture must start unstamped");
+
+        drop(open_poll_store(db_str).expect("poll open must succeed"));
+
+        assert_eq!(
+            role_stamp(&db),
+            None,
+            "the scheduler poll must not stamp a store identity"
+        );
+    }
+
+    /// A DB already carrying the legacy `project:<name>` stamp (stamped by
+    /// the pre-fix poll) must keep opening for the poll: conferring nothing
+    /// means the store's own stamp answers without conflict.
+    #[test]
+    fn scheduler_poll_open_reads_a_legacy_scope_stamped_db() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let db = tmp.path().join("poll-legacy-stamped.db");
+        let db_str = db.to_str().expect("utf8 db path");
+        drop(
+            MemoryStore::open_with_label(db_str, "project:legacy-poll-proj")
+                .expect("stamp fixture db the way the pre-fix poll did"),
+        );
+        assert!(
+            role_stamp(&db).is_some_and(|stamp| stamp.contains("project:legacy-poll-proj")),
+            "fixture must carry the legacy scope stamp"
+        );
+
+        drop(open_poll_store(db_str).expect("poll open must succeed"));
+
+        assert!(
+            role_stamp(&db).is_some_and(|stamp| stamp.contains("project:legacy-poll-proj")),
+            "the poll must neither rewrite nor erase the existing stamp"
+        );
     }
 }

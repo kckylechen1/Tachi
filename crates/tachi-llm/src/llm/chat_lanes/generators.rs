@@ -2,30 +2,60 @@ use serde_json::{self, Value};
 
 use crate::{CompletionStatusV1, Generated, LLM_OUTPUT_TRUNCATED};
 
+/// Completion budget shared by both L0 summary generators — legacy
+/// `generate_summary` and receipt-paired `generate_summary_with_receipt` — so
+/// the two paths cannot diverge. 512 lets a thinking-disabled Flash reply
+/// finish without starving (the 2026-09-24 pilot showed the old 100-token
+/// budget cutting a clean sentence off into `finish_reason=length`).
+///
+/// This is a *generation* budget, not a stored-length allowance. The owner
+/// direction (2026-09-24) is "brief but not too short": brevity is prompt
+/// guidance in [`crate::default_prompts::L0_SUMMARY_PROMPT`], and tachi-llm
+/// deliberately enforces no character cap — the 2026-09-24 pilot failed 7/10
+/// faithful summaries (103–136 chars) against a hard 100-char gate, and the
+/// pre-04421ef3 `≤100 chars` wording elsewhere in the repo was documentation
+/// guidance, never an enforced contract. Think-tag scrubbing and emptiness
+/// disposition stay at the pre-existing caller seams (backfill's
+/// `scrub_think_tags` + `EmptyOutput` skip; the memcore upsert scrub), so
+/// this crate returns the provider text verbatim — no silent truncate, no
+/// fallback, no extra transform.
+pub(crate) const SUMMARY_MAX_TOKENS: u32 = 512;
+
 impl super::super::LlmClient {
-    /// Generate L0 summary using SUMMARY_PROMPT.
+    /// Generate L0 summary using `L0_SUMMARY_PROMPT`.
     ///
     /// LLM failures are returned to callers so enrichment/backfill can record a
     /// real failure instead of storing a truncated input as if it were a summary.
+    /// This legacy path keeps its documented `finish_reason` compatibility (a
+    /// `length` reply with content still returns that text); the provider's
+    /// reply is returned verbatim with no length judgment or trimming here.
     pub async fn generate_summary(&self, text: &str) -> Result<String, String> {
-        self.call_summary_llm(crate::default_prompts::SUMMARY_PROMPT, text, None, 0.3, 100)
-            .await
+        self.call_summary_llm(
+            crate::default_prompts::L0_SUMMARY_PROMPT,
+            text,
+            None,
+            0.3,
+            SUMMARY_MAX_TOKENS,
+        )
+        .await
     }
 
     /// Generate an L0 summary with the actual serving-engine receipt. A
     /// provider-declared truncation is rejected before a downstream producer
-    /// can treat the output as a clean artifact.
+    /// can treat the output as a clean artifact. A complete reply is paired
+    /// with its receipt and returned verbatim — brevity is the prompt's job,
+    /// not an enforced character cap here.
     pub async fn generate_summary_with_receipt(
         &self,
         text: &str,
     ) -> Result<Generated<String>, String> {
         Self::reject_truncated(
             self.call_summary_llm_with_receipt(
-                crate::default_prompts::SUMMARY_PROMPT,
+                crate::default_prompts::L0_SUMMARY_PROMPT,
                 text,
                 None,
                 0.3,
-                100,
+                SUMMARY_MAX_TOKENS,
             )
             .await?,
         )
@@ -36,6 +66,11 @@ impl super::super::LlmClient {
     /// Distill callers (Foundry distill worker) want a hard failure so the job
     /// is marked failed/skipped rather than persisting a "frankenstein" memory
     /// whose text is just the prompt's input prefix.
+    ///
+    /// Distill keeps the legacy `SUMMARY_PROMPT` literal and its own 400-token
+    /// budget verbatim; the L0-specific `L0_SUMMARY_PROMPT` and its shared
+    /// 512-token budget belong to `generate_summary(_with_receipt)` only and
+    /// must not retune this contract.
     ///
     /// Historical bug: prior to this method, `generate_summary` was reused
     /// for distill and its silent fallback produced 15/23 (65%) garbage
@@ -64,8 +99,9 @@ impl super::super::LlmClient {
     }
 
     /// Receipt-preserving distill generator. It deliberately uses the same
-    /// summary lane/prompt as the legacy method above so this API addition does
-    /// not retune existing model routing.
+    /// legacy `SUMMARY_PROMPT` and 400-token budget as `generate_distill` so
+    /// this API addition does not retune existing model routing or inherit
+    /// the L0-specific prompt and budget.
     pub async fn generate_distill_with_receipt(
         &self,
         text: &str,

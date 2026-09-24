@@ -693,7 +693,7 @@ async fn handle_save_memory_impl(
         .unwrap_or(0)
         + 1;
 
-    let needs_summary = params.summary.is_empty();
+    let needs_summary = params.summary.trim().is_empty();
     let needs_embedding = params.vector.is_none();
     let auto_link = params.auto_link;
     let emit_continuity = params.emit_continuity;
