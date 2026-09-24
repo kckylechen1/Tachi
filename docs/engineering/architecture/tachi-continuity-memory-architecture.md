@@ -78,7 +78,14 @@ The reducer MUST:
 6. derive the current action queue from current truth, not copy a prior handoff's
    todo list;
 7. mark projections stale when their evidence head is older than the reconciled
-   object state.
+    object state.
+
+Recall presentation keeps an observation's recorded timestamp, validity interval,
+lifecycle marker, and bounded source references when available. Retrieval relevance
+is confidence in the recalled evidence, not verification that a historical claim is
+currently true; only an existing typed current-truth reduction or an authoritative
+runtime source may make that separate claim. Missing observation time remains
+explicitly unknown rather than being replaced with a response-generation time.
 
 Authority is predicate-scoped. At minimum:
 

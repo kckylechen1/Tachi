@@ -49,7 +49,57 @@ pub(in crate::memory_search_ops::save_memory) fn enqueue_save_enrichment(
     if needs_keyword {
         mark_keyword_enrichment_pending(server, &entry.id, target_db, named_project.as_deref());
     }
-    server.enqueue_enrichment(item)
+    let enqueued = server.enqueue_enrichment(item);
+    if !enqueued && needs_summary {
+        record_summary_queue_failure(
+            server,
+            &entry.id,
+            target_db,
+            named_project.as_deref(),
+            enrichment_revision,
+        );
+    }
+    enqueued
+}
+
+const SUMMARY_QUEUE_FAILURE_CODE: &str = "summary_enrichment_queue_unavailable";
+const SUMMARY_QUEUE_FAILURE_MESSAGE: &str =
+    "summary enrichment could not be queued; retry when the enrichment worker is available";
+
+fn record_summary_queue_failure(
+    server: &MemoryServer,
+    id: &str,
+    target_db: DbScope,
+    named_project: Option<&str>,
+    expected_revision: i64,
+) {
+    let record = |store: &mut memcore::MemoryStore| {
+        store
+            .record_enrichment_failure_if_revision(
+                id,
+                "summary",
+                &format!("{SUMMARY_QUEUE_FAILURE_CODE}: {SUMMARY_QUEUE_FAILURE_MESSAGE}"),
+                expected_revision,
+            )
+            .map_err(|error| format!("record save summary queue failure: {error}"))
+    };
+    let result = match named_project {
+        Some(project_name) => server.with_named_project_store(project_name, record),
+        None => server.with_store_for_scope(target_db, record),
+    };
+    match result {
+        Ok(true) => {}
+        Ok(false) => tracing::debug!(
+            entry_id = id,
+            expected_revision,
+            "save summary queue failure not recorded because entry revision advanced"
+        ),
+        Err(error) => tracing::warn!(
+            error = %error,
+            entry_id = id,
+            "failed to record save summary queue failure"
+        ),
+    }
 }
 
 fn mark_keyword_enrichment_pending(

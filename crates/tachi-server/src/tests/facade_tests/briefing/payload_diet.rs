@@ -308,6 +308,66 @@ async fn compact_briefing_integration_has_no_low_relevance_memory_or_wiki_rows()
     }
 }
 
+#[tokio::test]
+async fn compact_briefing_preserves_bounded_historical_provenance() {
+    let project_root = crate::utils::find_project_git_root().expect("test project root");
+    let project_name =
+        crate::path_utils::plan_c_dir_name_from_root(&project_root).expect("test project identity");
+    let (server, _fixture_db) = crate::tests::make_server_with_project_fixture(&project_name);
+    server
+        .with_named_project_store(&project_name, |store| {
+            let mut memory = make_entry("briefing-history-memory");
+            memory.path = "/scratch/briefing/history".to_string();
+            memory.summary = "BriefingHistoryNeedle memory observation".to_string();
+            memory.text = "BriefingHistoryNeedle memory observation".to_string();
+            memory.keywords = vec!["BriefingHistoryNeedle".to_string()];
+            memory.timestamp = "2026-05-01T12:00:00Z".to_string();
+            memory.valid_from = memory.timestamp.clone();
+            memory.source = "capture".to_string();
+            memory.metadata = json!({
+                "source_memory_ids": ["raw-1"],
+                "source_refs": [{"ref_type": "turn", "ref_id": "session-1", "revision": 7, "ignored": "not surfaced"}],
+            });
+            store.upsert(&memory).map_err(|e| e.to_string())?;
+
+            let mut wiki = make_entry("briefing-history-wiki");
+            wiki.path = "/wiki/briefing/history".to_string();
+            wiki.summary = "BriefingHistoryNeedle wiki observation".to_string();
+            wiki.text = "BriefingHistoryNeedle wiki observation".to_string();
+            wiki.keywords = vec!["BriefingHistoryNeedle".to_string()];
+            wiki.timestamp = "2026-06-01T12:00:00Z".to_string();
+            wiki.valid_from = wiki.timestamp.clone();
+            wiki.source = "wiki-import".to_string();
+            store.upsert(&wiki).map_err(|e| e.to_string())?;
+            Ok::<(), String>(())
+        })
+        .expect("seed historical briefing rows");
+
+    let mut params = compact_json_params("BriefingHistoryNeedle");
+    params.project = Some(project_name);
+    let body = crate::facade_memory_ops::handle_tachi_memory(&server, params)
+        .await
+        .expect("compact briefing");
+    let briefing: Value = serde_json::from_str(&body).expect("briefing JSON");
+    let memory = briefing["memories"]
+        .as_array()
+        .and_then(|rows| {
+            rows.iter()
+                .find(|row| row["id"] == "briefing-history-memory")
+        })
+        .expect("memory evidence row");
+    assert_eq!(memory["timestamp"], json!("2026-05-01T12:00:00.000Z"));
+    assert_eq!(memory["source"], json!("external:capture"));
+    assert_eq!(memory["source_memory_ids"], json!(["raw-1"]));
+    let wiki = briefing["wiki"]
+        .as_array()
+        .and_then(|rows| rows.iter().find(|row| row["id"] == "briefing-history-wiki"))
+        .expect("wiki evidence row");
+    assert_eq!(wiki["timestamp"], json!("2026-06-01T12:00:00.000Z"));
+    assert_eq!(wiki["source"], json!("external:wiki-import"));
+    assert!(wiki["store"].is_object(), "wiki store identity: {wiki}");
+}
+
 /// The compact briefing health block must be a typed projection of the SAME
 /// snapshot + warning assembly the agent status surface reports: identical
 /// score, and the status warning list opening the briefing health warnings
