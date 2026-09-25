@@ -1,21 +1,41 @@
-//! Machine-readable registry of legacy tool names kept as forwarding aliases
-//! during a surface fold (#757). Each entry records where a legacy MCP tool
-//! now lives (canonical verb + action), when the alias was introduced, and the
-//! release in which it must be removed — so a version tripwire test can turn
+//! Machine-readable registry of legacy tool names folded into canonical verb
+//! facades (#757). Each entry records where a legacy MCP tool now lives
+//! (canonical verb + action), when the alias was introduced, and the release
+//! in which it must be removed — so a version tripwire test can turn
 //! "we shipped past the removal release but the zombie alias is still routed"
 //! into a red test instead of a silent stale surface.
 //!
-//! S1 (Cut3) registers the six folded sandbox tools. Later cuts (S2–S7) append
-//! their own folds to [`ALIAS_MANIFEST`]; the tripwire and router-coverage
-//! tests iterate the whole manifest, so a new fold gets the same guarantees for
-//! free once its entries are added here.
+//! S1 (Cut3) registered the six folded sandbox tools. Their `remove_in_release`
+//! deadline (1.10.0) was reached at v2.0.0 and the six routes were deleted, so
+//! the S1 entries are now **tombstones** ([`AliasKind::RetiredAlias`]): the
+//! mapping, lifecycle, and admin/destructive classification stay on record
+//! with their original deadlines (never bumped), and the router tripwires pin
+//! that the retired names never come back. Later cuts (S2–S7) append their own
+//! folds to [`ALIAS_MANIFEST`] as live forwarding-alias entries (re-introducing
+//! the `ForwardingAlias` kind in the same change, since a kind with no
+//! constructor is dead code this module refuses to carry); the tripwire and
+//! router-coverage tests iterate the whole manifest, so a new fold gets the
+//! same guarantees for free once its entries are added here.
 
 /// How a legacy name relates to its canonical replacement.
+///
+/// v2 note: a `ForwardingAlias` variant existed while the six sandbox
+/// aliases were still routed; with every manifest entry now a tombstone it
+/// had no constructor left (dead-code, and test builds deliberately keep the
+/// lint strict here) and was removed. An S2–S7 fold that registers a LIVE
+/// forwarding alias re-introduces the variant in the same change that adds
+/// its entries, together with the routed-with-deprecation-prefix branch of
+/// the lifecycle gate in `tests/sandbox_fold.rs`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AliasKind {
-    /// Legacy tool name still routed, forwarding to the canonical verb's
-    /// handler with identical authorization. Removed at `remove_in_release`.
-    ForwardingAlias,
+    /// Legacy tool name that reached its `remove_in_release` deadline and has
+    /// been deleted from the router. The entry survives as a tombstone: the
+    /// mapping, deadline (unchanged from its live span), and admin/destructive
+    /// classification stay on record so the lifecycle tripwires can pin that
+    /// the name stays unrouted — and rejected even for the admin profile —
+    /// forever. Re-introducing the name requires a brand-new manifest entry
+    /// with a fresh lifecycle, not a kind flip back.
+    RetiredAlias,
 }
 
 /// One legacy → canonical mapping with its deprecation lifecycle.
@@ -43,8 +63,11 @@ pub(crate) struct AliasEntry {
 
 impl AliasEntry {
     /// The `DEPRECATED: …` prefix a folded alias must carry in its
-    /// `tools/list` description. Kept here so the manifest is the single source
-    /// of the wording the tripwire test cross-checks against the live router.
+    /// `tools/list` description while it is still routed. Kept here so the
+    /// manifest is the single source of the wording the tripwire test
+    /// cross-checks against the live router; for [`AliasKind::RetiredAlias`]
+    /// tombstones it remains the record of what the route's description said
+    /// (and what callers must migrate to).
     pub(crate) fn deprecation_prefix(&self) -> String {
         format!(
             "DEPRECATED: use {}(action='{}'); removed in {}.",
@@ -59,13 +82,19 @@ impl AliasEntry {
 pub(crate) const CURRENT_RELEASE: &str = env!("CARGO_PKG_VERSION");
 
 /// #757 Cut3-S1: the six sandbox tools folded into the `tachi_sandbox` verb.
-/// All were admin-only pre-fold and stay admin-only (tool-level visibility:
-/// `tachi_sandbox` and every alias are absent from every profile bundle, so
-/// only the admin profile can see or call them).
+/// All were admin-only pre-fold and the fold preserved that (tool-level
+/// visibility: `tachi_sandbox` is absent from every profile bundle, so only
+/// the admin profile can see or call it).
+///
+/// v2.0: the aliases' `remove_in_release` deadline (1.10.0) was reached and
+/// the six routes were deleted, so every entry below is a
+/// [`AliasKind::RetiredAlias`] tombstone. Deadlines are deliberately UNCHANGED
+/// from their live span — bumping `remove_in_release` on a tombstone would
+/// rewrite history and reopen the zombie window the tripwires exist to close.
 const SANDBOX_ALIASES: &[AliasEntry] = &[
     AliasEntry {
         legacy_name: "sandbox_set_rule",
-        alias_kind: AliasKind::ForwardingAlias,
+        alias_kind: AliasKind::RetiredAlias,
         canonical_tool: "tachi_sandbox",
         canonical_action: "set_rule",
         introduced_release: "1.9.0",
@@ -75,7 +104,7 @@ const SANDBOX_ALIASES: &[AliasEntry] = &[
     },
     AliasEntry {
         legacy_name: "sandbox_check",
-        alias_kind: AliasKind::ForwardingAlias,
+        alias_kind: AliasKind::RetiredAlias,
         canonical_tool: "tachi_sandbox",
         canonical_action: "check",
         introduced_release: "1.9.0",
@@ -85,7 +114,7 @@ const SANDBOX_ALIASES: &[AliasEntry] = &[
     },
     AliasEntry {
         legacy_name: "sandbox_set_policy",
-        alias_kind: AliasKind::ForwardingAlias,
+        alias_kind: AliasKind::RetiredAlias,
         canonical_tool: "tachi_sandbox",
         canonical_action: "set_policy",
         introduced_release: "1.9.0",
@@ -95,7 +124,7 @@ const SANDBOX_ALIASES: &[AliasEntry] = &[
     },
     AliasEntry {
         legacy_name: "sandbox_get_policy",
-        alias_kind: AliasKind::ForwardingAlias,
+        alias_kind: AliasKind::RetiredAlias,
         canonical_tool: "tachi_sandbox",
         canonical_action: "get_policy",
         introduced_release: "1.9.0",
@@ -105,7 +134,7 @@ const SANDBOX_ALIASES: &[AliasEntry] = &[
     },
     AliasEntry {
         legacy_name: "sandbox_list_policies",
-        alias_kind: AliasKind::ForwardingAlias,
+        alias_kind: AliasKind::RetiredAlias,
         canonical_tool: "tachi_sandbox",
         canonical_action: "list_policies",
         introduced_release: "1.9.0",
@@ -115,7 +144,7 @@ const SANDBOX_ALIASES: &[AliasEntry] = &[
     },
     AliasEntry {
         legacy_name: "sandbox_exec_audit",
-        alias_kind: AliasKind::ForwardingAlias,
+        alias_kind: AliasKind::RetiredAlias,
         canonical_tool: "tachi_sandbox",
         canonical_action: "exec_audit",
         introduced_release: "1.9.0",
@@ -125,8 +154,8 @@ const SANDBOX_ALIASES: &[AliasEntry] = &[
     },
 ];
 
-/// Every registered forwarding alias across all folds. Later cuts extend this
-/// by appending their own slice.
+/// Every registered fold entry across all cuts — live forwarding aliases AND
+/// retired tombstones. Later cuts extend this by appending their own slice.
 pub(crate) const ALIAS_MANIFEST: &[&[AliasEntry]] = &[SANDBOX_ALIASES];
 
 /// Flattened view of [`ALIAS_MANIFEST`].

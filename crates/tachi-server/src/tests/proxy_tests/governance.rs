@@ -169,19 +169,22 @@ async fn proxy_call_requires_sandbox_policy_and_records_preflight_denial() {
     );
 
     let audit_resp = server
-        .sandbox_exec_audit(Parameters(SandboxExecAuditParams {
-            capability_id: Some("mcp:needs-policy".to_string()),
-            stage: Some("preflight".to_string()),
-            decision: Some("denied".to_string()),
-            limit: 10,
-        }))
+        .tachi_sandbox(Parameters(wire_sandbox_params(
+            "exec_audit",
+            json!({
+                "capability_id": "mcp:needs-policy",
+                "stage": "preflight",
+                "decision": "denied",
+                "limit": 10,
+            }),
+        )))
         .await
-        .expect("sandbox_exec_audit should succeed");
+        .expect("tachi_sandbox(action='exec_audit') should succeed");
     let audit_json: serde_json::Value =
-        serde_json::from_str(&audit_resp).expect("sandbox_exec_audit should return JSON");
+        serde_json::from_str(&audit_resp).expect("exec_audit should return JSON");
     let items = audit_json["items"]
         .as_array()
-        .expect("sandbox_exec_audit should return items array");
+        .expect("exec_audit should return items array");
     assert!(!items.is_empty(), "expected at least one audit row");
     assert_eq!(items[0]["error_kind"], json!("policy_missing"));
 }
