@@ -187,10 +187,12 @@ pub(super) fn with_named_project_search_with_resources(
     String,
 > {
     let context = context.into();
+    let effective_record_access =
+        record_access && named_project_is_bound_project(server, project_name);
     let action = |store: &mut MemoryStore| {
         let source_fingerprint =
             crate::memory_resources::verified_project_source(server, project_name, store);
-        let results = search_store(store, params, record_access, recall_config, false)
+        let results = search_store(store, params, effective_record_access, recall_config, false)
             .map_err(|error| format!("{context}: {error}"))?;
         let mut links = HashMap::new();
         if let Some(source_fingerprint) = source_fingerprint.filter(|before| {
@@ -211,8 +213,6 @@ pub(super) fn with_named_project_search_with_resources(
         Ok((results, links))
     };
 
-    let effective_record_access =
-        record_access && named_project_is_bound_project(server, project_name);
     if effective_record_access {
         server.with_named_project_store(project_name, action)
     } else {
