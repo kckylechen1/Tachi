@@ -81,8 +81,9 @@ move to the surviving facades before upgrading. The highlights:
 - The model broker owns the provider wire directly, with SSE stream grammars
   for OpenAI-compatible and Anthropic providers, provider key health, and
   `tachi broker` alias governance.
-- Standalone store files renamed `memory.db` -> `tachi-memory.db` on first
-  open, leaving a symlink behind for this release window.
+- Standalone store files use `tachi-memory.db`. Existing `memory.db` stores
+  require explicit offline conversion as described above; ordinary opens
+  refuse them. Conversion leaves a compatibility symlink for this release window.
 - Cargo, npm, lockfiles, docs, installer URLs, and OpenClaw plugin metadata
   are checked by `scripts/check_release_versions.py` and CI before release.
   The tag pipeline ships the Mac arm64 CLI and the Homebrew formula; npm

@@ -328,8 +328,9 @@ fn plan_one(lib: &Library) -> MigrateFinding {
             };
             let note = if legacy_name_in_effect {
                 format!(
-                    "{note}; the legacy `memory.db` filename is still in effect (the next \
-                     authorized open performs the #1132 rename)"
+                    "{note}; the legacy `memory.db` filename requires explicit offline \
+                     conversion with `tachi migrate --rename-legacy --apply --offline` \
+                     before a schema upgrade or ordinary open"
                 )
             } else {
                 note
