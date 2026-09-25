@@ -114,27 +114,24 @@ fn probe_holders_with(lsof: &OsStr, path: &Path) -> HolderEvidence {
     interpret_lsof_run(
         out.status.code(),
         &String::from_utf8_lossy(&out.stdout),
-        &String::from_utf8_lossy(&out.stderr),
+        &out.stderr,
         path,
     )
 }
 
-/// Classify a raw `lsof +D <target>` run: stderr is first reduced to the
-/// diagnostics that bear on `target` (tachi#1978 — lsof's Linux start-up
-/// warnings about unrelated, unstat()able mounts such as tracefs are proven
-/// irrelevant and dropped; see [`crate::lsof_stderr`]), then handed to the
-/// fail-closed [`interpret_lsof_output`] unchanged.
+/// Classify a raw `lsof +D <target>` run: stderr is first reduced, as raw
+/// bytes, to the diagnostics that bear on `target` (tachi#1978 — on Linux
+/// only, lsof's exact tracefs start-up warning pair for a mount disjoint from
+/// the target is dropped; see [`crate::lsof_stderr`]), then handed to the
+/// fail-closed [`interpret_lsof_output`].
 fn interpret_lsof_run(
     exit_code: Option<i32>,
     stdout: &str,
-    stderr: &str,
+    stderr: &[u8],
     target: &Path,
 ) -> HolderEvidence {
-    interpret_lsof_output(
-        exit_code,
-        stdout,
-        &crate::lsof_stderr::relevant_lsof_stderr(stderr, target),
-    )
+    let relevant = crate::lsof_stderr::relevant_lsof_stderr(stderr, &[target]);
+    interpret_lsof_output(exit_code, stdout, &String::from_utf8_lossy(&relevant))
 }
 
 /// Pure interpreter for an `lsof +D` run — the part worth testing in
@@ -145,6 +142,9 @@ fn interpret_lsof_run(
 /// the destructive (#1062) side; this module borrows its interpretation,
 /// never its destructive consequence — this module only ever detects.
 ///
+/// * non-blank stdout whose first line is not lsof's `COMMAND  PID` header ⇒
+///   [`HolderEvidence::Unknown`]: the first line is only skipped once it is
+///   proven to be the header, never discarded unvalidated
 /// * any data row on stdout that yields a parseable pid ⇒ [`HolderEvidence::Held`]
 /// * data rows present but NONE yield a parseable pid ⇒ [`HolderEvidence::Unknown`]:
 ///   the walk produced output we could not attribute, which is not proof of
@@ -158,6 +158,12 @@ fn interpret_lsof_run(
 ///   lsof's documented "no matching files" status)
 /// * any other exit / signal ⇒ [`HolderEvidence::Unknown`]
 fn interpret_lsof_output(exit_code: Option<i32>, stdout: &str, stderr: &str) -> HolderEvidence {
+    if !stdout.trim().is_empty() && !crate::lsof_stderr::starts_with_lsof_header(stdout) {
+        return HolderEvidence::Unknown(format!(
+            "lsof output unrecognized: {}",
+            stdout.lines().next().unwrap_or("").trim()
+        ));
+    }
     let data_lines: Vec<&str> = stdout
         .lines()
         .skip(1) // header row: COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME
@@ -394,117 +400,224 @@ mod tests {
         ));
     }
 
-    // --- tachi#1978: lsof's Linux start-up mount warnings ---
+    // --- tachi#1978: lsof's Linux tracefs start-up warning, via stub lsof ---
 
     /// Byte-for-byte stderr of lsof 4.95.0 on Ubuntu 24.04 as a non-root user,
     /// printed on every run whatever the query (captured on atom-dgx-2).
-    const LINUX_TRACEFS_WARNING: &str = "lsof: WARNING: can't stat() tracefs file system /sys/kernel/debug/tracing\n      Output information may be incomplete.\n";
+    const LINUX_TRACEFS_WARNING: &[u8] = b"lsof: WARNING: can't stat() tracefs file system /sys/kernel/debug/tracing\n      Output information may be incomplete.\n";
+    const HEADER: &[u8] = b"COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME\n";
 
-    #[test]
-    fn unrelated_mount_warning_on_an_empty_run_is_clear() {
-        let dir = unique_temp_dir("holder-1978-clear");
-        assert_eq!(
-            interpret_lsof_run(Some(1), "", LINUX_TRACEFS_WARNING, &dir),
-            HolderEvidence::Clear
-        );
-        let _ = std::fs::remove_dir_all(&dir);
+    fn tracefs_pair_for(mount: &Path) -> Vec<u8> {
+        let mut bytes = b"lsof: WARNING: can't stat() tracefs file system ".to_vec();
+        bytes.extend_from_slice(mount.as_os_str().as_encoded_bytes());
+        bytes.extend_from_slice(b"\n      Output information may be incomplete.\n");
+        bytes
     }
 
-    #[test]
-    fn mount_warning_inside_the_walk_stays_unknown() {
-        let dir = unique_temp_dir("holder-1978-inside");
-        let stderr = format!(
-            "lsof: WARNING: can't stat() fuse file system {}\n      Output information may be incomplete.\n",
-            dir.canonicalize().unwrap().join("mnt").display()
-        );
-        assert!(matches!(
-            interpret_lsof_run(Some(1), "", &stderr, &dir),
-            HolderEvidence::Unknown(_)
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn genuine_lsof_error_next_to_the_mount_warning_stays_unknown() {
-        let dir = unique_temp_dir("holder-1978-error");
-        let stderr = format!(
-            "{LINUX_TRACEFS_WARNING}lsof: WARNING: can't opendir({}/sub): Permission denied\n",
-            dir.display()
-        );
-        let evidence = interpret_lsof_run(Some(1), "", &stderr, &dir);
-        let HolderEvidence::Unknown(reason) = &evidence else {
-            panic!("a partial walk must stay Unknown: {evidence:?}");
-        };
-        assert!(reason.contains("can't opendir"), "{reason}");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// Drives the real call site (`Command`, argv, stream capture,
-    /// classification) against a stub `lsof`, so the target the stderr filter
-    /// compares against is the one actually probed.
+    /// Drive the real call site (`Command`, argv, byte capture, stderr
+    /// filtering, classification) with a stub `lsof` that checks it was asked
+    /// `+D <target>` and replays exact stdout/stderr bytes and an exit code.
     #[cfg(unix)]
-    fn stub_lsof(dir: &Path, name: &str, body: &str) -> std::path::PathBuf {
+    fn stub_probe(
+        name: &str,
+        target: &Path,
+        stdout: &[u8],
+        stderr: &[u8],
+        code: i32,
+    ) -> HolderEvidence {
         use std::os::unix::fs::PermissionsExt;
-        // One file per stub: never rewrite a script another exec may hold.
-        let stub = dir.join(name);
-        std::fs::write(&stub, format!("#!/bin/sh\n{body}")).unwrap();
-        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o700)).unwrap();
-        stub
+        let case = unique_temp_dir(&format!("holder-1978-stub-{name}"));
+        std::fs::write(case.join("stdout"), stdout).unwrap();
+        std::fs::write(case.join("stderr"), stderr).unwrap();
+        let script = case.join("lsof");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\n[ \"$1\" = '+D' ] && [ \"$2\" = '{}' ] || {{ echo 'STUB ARGV MISMATCH' >&2; exit 93; }}\ncat '{}/stdout'\ncat '{}/stderr' >&2\nexit {code}\n",
+                target.display(),
+                case.display(),
+                case.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let evidence = probe_holders_with(script.as_os_str(), target);
+        let _ = std::fs::remove_dir_all(&case);
+        if let HolderEvidence::Unknown(reason) = &evidence {
+            assert!(!reason.contains("STUB ARGV MISMATCH"), "{name}: {reason}");
+        }
+        evidence
+    }
+
+    #[cfg(unix)]
+    fn assert_unknown(case: &str, evidence: HolderEvidence) {
+        assert!(
+            matches!(evidence, HolderEvidence::Unknown(_)),
+            "{case}: expected Unknown, got {evidence:?}"
+        );
+    }
+
+    /// The only signatures the filter may turn into `Clear`, and only on Linux
+    /// (round-1 cold review finding 8: other platforms are unchanged).
+    #[cfg(unix)]
+    #[test]
+    fn stub_tracefs_only_empty_walk_is_clear_on_linux_only() {
+        let target = unique_temp_dir("holder-1978-clear");
+        for (name, stdout, code) in [("exit1", &b""[..], 1), ("exit1-header", HEADER, 1)] {
+            let evidence = stub_probe(name, &target, stdout, LINUX_TRACEFS_WARNING, code);
+            if cfg!(target_os = "linux") {
+                assert_eq!(evidence, HolderEvidence::Clear, "{name}");
+            } else {
+                assert_unknown(name, evidence);
+            }
+        }
+        let _ = std::fs::remove_dir_all(&target);
     }
 
     #[cfg(unix)]
     #[test]
-    fn real_call_site_with_stub_lsof_classifies_linux_warnings() {
-        let bin = unique_temp_dir("holder-1978-bin");
-        let target = unique_temp_dir("holder-1978-target");
-        let warn = "cat >&2 <<'EOF'\nlsof: WARNING: can't stat() tracefs file system /sys/kernel/debug/tracing\n      Output information may be incomplete.\nEOF\n";
-
-        let clear = stub_lsof(
-            &bin,
-            "lsof-clear",
-            &format!("[ \"$1\" = '+D' ] || exit 93\n{warn}exit 1\n"),
-        );
-        assert_eq!(
-            probe_holders_with(clear.as_os_str(), &target),
-            HolderEvidence::Clear,
-            "warning-only empty run must be Clear"
-        );
-
+    fn stub_holder_next_to_the_warning_is_held() {
+        let target = unique_temp_dir("holder-1978-held");
         let pid = std::process::id();
-        let held = stub_lsof(
-            &bin,
-            "lsof-held",
-            &format!("{warn}printf 'COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME\\nx {pid} u 3r REG 1,4 0 1 %s/f\\n' \"$2\"\nexit 0\n"),
-        );
-        let evidence = probe_holders_with(held.as_os_str(), &target);
+        let mut stdout = HEADER.to_vec();
+        stdout.extend_from_slice(format!("x {pid} u 3r REG 1,4 0 1 /f\n").as_bytes());
+        let evidence = stub_probe("held", &target, &stdout, LINUX_TRACEFS_WARNING, 0);
         let HolderEvidence::Held(procs) = &evidence else {
             panic!("a holder row must be Held despite the warning: {evidence:?}");
         };
         assert!(procs.iter().any(|p| p.pid == pid as i32));
+        let _ = std::fs::remove_dir_all(&target);
+    }
 
-        let inside = stub_lsof(
-            &bin,
-            "lsof-inside",
-            "echo \"lsof: WARNING: can't stat() fuse file system $2/mnt\" >&2\nexit 1\n",
+    /// Round-1 finding 1: an unvalidated first stdout line is never skipped.
+    #[cfg(unix)]
+    #[test]
+    fn stub_unrecognized_stdout_stays_unknown() {
+        let target = unique_temp_dir("holder-1978-garbage");
+        assert_unknown(
+            "exit1+warning",
+            stub_probe("g1w", &target, b"garbage\n", LINUX_TRACEFS_WARNING, 1),
         );
-        assert!(matches!(
-            probe_holders_with(inside.as_os_str(), &target),
-            HolderEvidence::Unknown(_)
-        ));
+        assert_unknown("exit1", stub_probe("g1", &target, b"garbage\n", b"", 1));
+        assert_unknown("exit0", stub_probe("g0", &target, b"garbage\n", b"", 0));
+        let _ = std::fs::remove_dir_all(&target);
+    }
 
-        let failing = stub_lsof(
-            &bin,
-            "lsof-failing",
-            &format!(
-                "{warn}echo 'lsof: status error on '\"$2\"': Permission denied' >&2\nexit 1\n"
+    /// Round-1 finding 2: an odd exit status is never "no holder".
+    #[cfg(unix)]
+    #[test]
+    fn stub_odd_exit_codes_stay_unknown() {
+        let target = unique_temp_dir("holder-1978-exit");
+        for code in [2, 3, 126, 127] {
+            assert_unknown(
+                &format!("exit {code}"),
+                stub_probe(
+                    &format!("x{code}"),
+                    &target,
+                    b"",
+                    LINUX_TRACEFS_WARNING,
+                    code,
+                ),
+            );
+        }
+        let _ = std::fs::remove_dir_all(&target);
+    }
+
+    /// Round-1 finding 3: only the observed tracefs pair is accepted.
+    #[cfg(unix)]
+    #[test]
+    fn stub_other_file_systems_and_lone_warning_lines_stay_unknown() {
+        let target = unique_temp_dir("holder-1978-fstype");
+        let cases: [(&str, &[u8]); 3] = [
+            (
+                "nfs-pair",
+                b"lsof: WARNING: can't stat() nfs file system /unrelated\n      Output information may be incomplete.\n",
             ),
-        );
-        assert!(matches!(
-            probe_holders_with(failing.as_os_str(), &target),
-            HolderEvidence::Unknown(_)
-        ));
+            ("nfs-lone", b"lsof: WARNING: can't stat() nfs file system /unrelated\n"),
+            (
+                "tracefs-lone",
+                b"lsof: WARNING: can't stat() tracefs file system /sys/kernel/debug/tracing\n",
+            ),
+        ];
+        for (name, stderr) in cases {
+            assert_unknown(name, stub_probe(name, &target, b"", stderr, 1));
+        }
+        let _ = std::fs::remove_dir_all(&target);
+    }
 
-        let _ = std::fs::remove_dir_all(&bin);
+    /// Round-1 finding 4: a non-UTF-8 line is kept, never decoded away.
+    #[cfg(unix)]
+    #[test]
+    fn stub_non_utf8_warning_stays_unknown() {
+        let target = unique_temp_dir("holder-1978-bytes");
+        let stderr = b"lsof: WARNING: can't stat() tracefs file system /tmp/m-\xff\n      Output information may be incomplete.\n";
+        assert_unknown("non-utf8", stub_probe("nonutf8", &target, b"", stderr, 1));
+        let _ = std::fs::remove_dir_all(&target);
+    }
+
+    /// Round-1 finding 5: the caller's spelling (a symlinked alias) is
+    /// compared as well as the canonical one.
+    #[cfg(unix)]
+    #[test]
+    fn stub_warning_over_the_callers_alias_stays_unknown() {
+        let root = unique_temp_dir("holder-1978-alias");
+        let real = root.join("real");
+        let aliases = root.join("aliases");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::create_dir_all(&aliases).unwrap();
+        let alias = aliases.join("link");
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+        let control = stub_probe(
+            "alias-control",
+            &alias,
+            b"",
+            &tracefs_pair_for(&root.join("elsewhere")),
+            1,
+        );
+        if cfg!(target_os = "linux") {
+            assert_eq!(control, HolderEvidence::Clear);
+        }
+        assert_unknown(
+            "alias",
+            stub_probe("alias", &alias, b"", &tracefs_pair_for(&aliases), 1),
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Round-1 finding 7: a relevant diagnostic on a success exit is Unknown.
+    #[cfg(unix)]
+    #[test]
+    fn stub_exit_0_with_a_real_diagnostic_stays_unknown() {
+        let target = unique_temp_dir("holder-1978-exit0");
+        let error = b"lsof: WARNING: can't opendir(/x/sub): Permission denied\n";
+        assert_unknown("exit0-header", stub_probe("e0h", &target, HEADER, error, 0));
+        let mut both = LINUX_TRACEFS_WARNING.to_vec();
+        both.extend_from_slice(error);
+        let evidence = stub_probe("e1", &target, b"", &both, 1);
+        let HolderEvidence::Unknown(reason) = &evidence else {
+            panic!("a partial walk must stay Unknown next to the warning: {evidence:?}");
+        };
+        // Off Linux the tracefs line is itself kept and surfaced first.
+        if cfg!(target_os = "linux") {
+            assert!(reason.contains("can't opendir"), "{reason}");
+        }
+        let _ = std::fs::remove_dir_all(&target);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stub_warning_inside_or_over_the_walk_stays_unknown() {
+        let target = unique_temp_dir("holder-1978-inside");
+        for (name, mount) in [
+            ("inside", target.join("mnt")),
+            ("over", target.parent().unwrap().to_path_buf()),
+            ("same", target.clone()),
+        ] {
+            assert_unknown(
+                name,
+                stub_probe(name, &target, b"", &tracefs_pair_for(&mount), 1),
+            );
+        }
         let _ = std::fs::remove_dir_all(&target);
     }
 

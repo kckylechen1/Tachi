@@ -50,42 +50,44 @@ fn probe_db_ownership_with(lsof: &std::ffi::OsStr, db_path: &Path) -> DbOwnershi
         Ok(p) => p,
         Err(e) => return DbOwnership::Unknown(format!("canonicalize failed: {e}")),
     };
-    let abs_str = abs.to_string_lossy().to_string();
     // Using `--` to terminate options before the path argument so paths
     // beginning with `-` are treated literally.
-    let output = Command::new(lsof).arg("--").arg(&abs_str).output();
+    let output = Command::new(lsof).arg("--").arg(&abs).output();
     match output {
         Ok(o) => classify_lsof_run(
             o.status.code(),
             &String::from_utf8_lossy(&o.stdout),
-            &String::from_utf8_lossy(&o.stderr),
-            &abs,
+            &o.stderr,
+            // Both spellings: the caller's path (which may be a symlinked
+            // alias) and the canonical path lsof was actually asked about.
+            &[db_path, &abs],
             std::process::id(),
         ),
         Err(e) => DbOwnership::Unknown(format!("lsof unavailable: {e}")),
     }
 }
 
-/// Classify a raw `lsof -- <target>` run. stderr is first reduced to the
-/// diagnostics that bear on `target` (tachi#1978): lsof's Linux dialect prints
-/// a warning for every mount-table entry it cannot stat() — `tracefs` at
-/// `/sys/kernel/debug/tracing` for every non-root user — on every run, which
-/// turned lsof's ordinary silent "no holders" exit 1 into `Unknown` on every
-/// Linux host. Only a mount warning proven disjoint from `target` is dropped
-/// (`tachi_clean::lsof_stderr`); any other diagnostic reaches
-/// [`classify_lsof_output`] unchanged and still fails closed.
+/// Classify a raw `lsof -- <target>` run. stderr is first reduced, as raw
+/// bytes, to the diagnostics that bear on `targets` (tachi#1978): on Linux,
+/// lsof prints a warning for the `tracefs` mount it cannot stat() as a
+/// non-root user on every run, which turned lsof's ordinary silent "no
+/// holders" exit 1 into `Unknown` on every Linux host. Only that exact
+/// warning pair, for a mount proven disjoint from every target spelling, is
+/// dropped (`tachi_clean::lsof_stderr`, identity off Linux); everything else
+/// reaches [`classify_lsof_output`] and fails closed.
 #[cfg(unix)]
 fn classify_lsof_run(
     status_code: Option<i32>,
     stdout: &str,
-    stderr: &str,
-    target: &Path,
+    stderr: &[u8],
+    targets: &[&Path],
     self_pid: u32,
 ) -> DbOwnership {
+    let relevant = tachi_clean::lsof_stderr::relevant_lsof_stderr(stderr, targets);
     classify_lsof_output(
         status_code,
         stdout,
-        &tachi_clean::lsof_stderr::relevant_lsof_stderr(stderr, target),
+        &String::from_utf8_lossy(&relevant),
         self_pid,
     )
 }
@@ -110,15 +112,24 @@ fn classify_lsof_run(
 /// a torn-copy risk. A holder line whose PID field cannot be parsed is
 /// counted as a holder anyway (fail closed, never silently excluded).
 ///
+/// `NotOwned` is earned, never defaulted: it needs exit 0 or lsof's
+/// documented "no matching files" exit 1, AND no relevant stderr, AND stdout
+/// that is either empty or starts with lsof's own `COMMAND  PID ...` header.
+///
 /// Signatures:
-/// - `Some(0)` + at least one non-self holder line → `Owned`
-/// - `Some(0)` + header only, or only self-owned holder lines → `NotOwned`
-/// - `Some(n)` (n != 0) + both streams empty → `NotOwned` (lsof's normal,
-///   silent "no holders" exit-1 signature)
 /// - `None` (signal death) → `Unknown("lsof terminated by signal")`,
 ///   regardless of stream contents
-/// - `Some(n)` (n != 0) + diagnostic text on either stream → `Unknown`
-///   with the first diagnostic line surfaced
+/// - `Some(0)`, stdout not starting with the lsof header → `Unknown`
+/// - `Some(0)` + at least one non-self holder line → `Owned`
+/// - `Some(0)` + header only / self-only holder lines + any stderr →
+///   `Unknown` (the run said something we cannot dismiss)
+/// - `Some(0)` + header only / self-only holder lines + silent stderr →
+///   `NotOwned`
+/// - `Some(1)` + both streams empty → `NotOwned` (lsof's normal, silent
+///   "no holders" signature)
+/// - `Some(1)` + text on either stream → `Unknown` with the first
+///   diagnostic line surfaced
+/// - `Some(n)`, n ∉ {0, 1} → `Unknown`, whatever the streams hold
 #[cfg(unix)]
 fn classify_lsof_output(
     status_code: Option<i32>,
@@ -126,37 +137,54 @@ fn classify_lsof_output(
     stderr: &str,
     self_pid: u32,
 ) -> DbOwnership {
+    let first_diagnostic = || {
+        stderr
+            .lines()
+            .find(|l| !l.trim().is_empty())
+            .or_else(|| stdout.lines().find(|l| !l.trim().is_empty()))
+            .map(|l| l.trim().to_string())
+    };
     match status_code {
+        None => DbOwnership::Unknown("lsof terminated by signal".to_string()),
         Some(0) => {
+            if !stdout.trim().is_empty()
+                && !tachi_clean::lsof_stderr::starts_with_lsof_header(stdout)
+            {
+                return DbOwnership::Unknown(format!(
+                    "lsof output unrecognized: {}",
+                    stdout.lines().next().unwrap_or("").trim()
+                ));
+            }
             // lsof prints a header line + one line per holder.
             if count_other_holders(stdout, self_pid) > 0 {
                 DbOwnership::Owned
+            } else if !stderr.trim().is_empty() {
+                DbOwnership::Unknown(format!(
+                    "lsof error: {}",
+                    first_diagnostic().unwrap_or_default()
+                ))
             } else {
                 DbOwnership::NotOwned
             }
         }
-        None => DbOwnership::Unknown("lsof terminated by signal".to_string()),
-        Some(_) => {
-            // lsof's non-zero exit is ambiguous by design: it means either
-            // "no holders found" (the common, harmless case — empty
-            // stdout/stderr) or a genuine fault (permission denied, lsof
-            // internal error, unexpected args). Only trust the "no holders"
-            // reading when lsof stayed silent on both streams; any
-            // diagnostic text means we cannot tell, so fail closed.
+        Some(1) => {
+            // Exit 1 is ambiguous by design: "no holders found" (silent on
+            // both streams) or a genuine fault (permission denied, lsof
+            // internal error, unexpected args). Only the silent form is
+            // trusted; any text means we cannot tell, so fail closed.
             if stderr.trim().is_empty() && stdout.trim().is_empty() {
                 DbOwnership::NotOwned
             } else {
-                let detail = stderr
-                    .lines()
-                    .next()
-                    .filter(|l| !l.trim().is_empty())
-                    .or_else(|| stdout.lines().next())
-                    .unwrap_or("lsof exited non-zero")
-                    .trim()
-                    .to_string();
-                DbOwnership::Unknown(format!("lsof error: {detail}"))
+                DbOwnership::Unknown(format!(
+                    "lsof error: {}",
+                    first_diagnostic().unwrap_or_else(|| "lsof exited 1".to_string())
+                ))
             }
         }
+        Some(code) => DbOwnership::Unknown(match first_diagnostic() {
+            Some(detail) => format!("lsof exited with status {code}: {detail}"),
+            None => format!("lsof exited with status {code}"),
+        }),
     }
 }
 
@@ -169,6 +197,7 @@ fn count_other_holders(stdout: &str, self_pid: u32) -> usize {
     stdout
         .lines()
         .skip(1) // header: "COMMAND  PID USER  FD TYPE ..."
+        .filter(|line| !line.trim().is_empty())
         .filter(|line| {
             line.split_whitespace()
                 .nth(1)
@@ -349,120 +378,230 @@ mod tests {
 
     /// Byte-for-byte stderr of lsof 4.95.0 on Ubuntu 24.04 as a non-root
     /// user, printed on every run whatever the query (atom-dgx-2, tachi#1978).
-    const LINUX_TRACEFS_WARNING: &str = "lsof: WARNING: can't stat() tracefs file system /sys/kernel/debug/tracing\n      Output information may be incomplete.\n";
+    const LINUX_TRACEFS_WARNING: &[u8] = b"lsof: WARNING: can't stat() tracefs file system /sys/kernel/debug/tracing\n      Output information may be incomplete.\n";
+    const HEADER: &[u8] = b"COMMAND  PID USER  FD TYPE DEVICE SIZE/OFF NODE NAME\n";
 
-    #[test]
-    fn classify_run_drops_only_an_unrelated_mount_warning() {
+    fn tracefs_pair_for(mount: &Path) -> Vec<u8> {
+        let mut bytes = b"lsof: WARNING: can't stat() tracefs file system ".to_vec();
+        bytes.extend_from_slice(mount.as_os_str().as_encoded_bytes());
+        bytes.extend_from_slice(b"\n      Output information may be incomplete.\n");
+        bytes
+    }
+
+    /// A stub `lsof` that checks it was asked `-- <canonical db>` and then
+    /// replays exact stdout/stderr bytes and an exit status.
+    struct StubLsof {
+        dir: tempfile::TempDir,
+    }
+
+    impl StubLsof {
+        fn new() -> Self {
+            Self {
+                dir: tempfile::tempdir().expect("stub dir"),
+            }
+        }
+
+        fn probe(
+            &self,
+            name: &str,
+            db: &Path,
+            stdout: &[u8],
+            stderr: &[u8],
+            code: i32,
+        ) -> DbOwnership {
+            use std::os::unix::fs::PermissionsExt;
+            let case = self.dir.path().join(name);
+            std::fs::create_dir(&case).unwrap();
+            std::fs::write(case.join("stdout"), stdout).unwrap();
+            std::fs::write(case.join("stderr"), stderr).unwrap();
+            let script = case.join("lsof");
+            let expected = db.canonicalize().unwrap();
+            std::fs::write(
+                &script,
+                format!(
+                    "#!/bin/sh\n[ \"$1\" = '--' ] && [ \"$2\" = '{}' ] || {{ echo 'STUB ARGV MISMATCH' >&2; exit 93; }}\ncat '{}/stdout'\ncat '{}/stderr' >&2\nexit {code}\n",
+                    expected.display(),
+                    case.display(),
+                    case.display()
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let result = probe_db_ownership_with(script.as_os_str(), db);
+            if let DbOwnership::Unknown(reason) = &result {
+                assert!(!reason.contains("STUB ARGV MISMATCH"), "{name}: {reason}");
+            }
+            result
+        }
+    }
+
+    fn fixture_db() -> (tempfile::TempDir, std::path::PathBuf) {
         let dir = tempfile::tempdir().expect("tempdir");
         let db = dir.path().join("memory.db");
         std::fs::write(&db, b"x").expect("seed");
-        assert_eq!(
-            classify_lsof_run(Some(1), "", LINUX_TRACEFS_WARNING, &db, OTHER_SELF_PID),
-            DbOwnership::NotOwned,
-            "lsof's silent no-holder exit plus the tracefs start-up warning is NotOwned"
+        (dir, db)
+    }
+
+    fn assert_unknown(case: &str, result: DbOwnership) {
+        assert!(
+            matches!(result, DbOwnership::Unknown(_)),
+            "{case}: expected Unknown, got {result:?}"
         );
-        // A holder is still Owned with the warning present.
+    }
+
+    /// The only signature the tracefs filter may turn into `NotOwned`, and
+    /// only on Linux (round-1 cold review finding 8: macOS unchanged).
+    #[test]
+    fn stub_tracefs_only_silent_exit_1_is_not_owned_on_linux_only() {
+        let (_dir, db) = fixture_db();
+        let stub = StubLsof::new();
+        for (name, stdout, code) in [("exit1", &b""[..], 1), ("exit0-header", HEADER, 0)] {
+            let result = stub.probe(name, &db, stdout, LINUX_TRACEFS_WARNING, code);
+            if cfg!(target_os = "linux") {
+                assert_eq!(result, DbOwnership::NotOwned, "{name}");
+            } else {
+                assert_unknown(name, result);
+            }
+        }
+    }
+
+    #[test]
+    fn stub_holder_next_to_the_warning_is_owned() {
+        let (_dir, db) = fixture_db();
+        let mut stdout = HEADER.to_vec();
+        stdout.extend_from_slice(b"tachi  123 kyle  10r REG 1,4 0 1 /x\n");
         assert_eq!(
-            classify_lsof_run(
-                Some(0),
-                "COMMAND  PID USER  FD TYPE\ntachi  123 kyle  10r REG\n",
-                LINUX_TRACEFS_WARNING,
-                &db,
-                OTHER_SELF_PID
-            ),
+            StubLsof::new().probe("held", &db, &stdout, LINUX_TRACEFS_WARNING, 0),
             DbOwnership::Owned
         );
-        // A real error next to the warning stays Unknown and is surfaced.
-        match classify_lsof_run(
-            Some(1),
-            "",
-            &format!("{LINUX_TRACEFS_WARNING}lsof: status error on /x: Permission denied\n"),
-            &db,
-            OTHER_SELF_PID,
-        ) {
+    }
+
+    /// Round-1 finding 2: only exit 1 means "no matching files".
+    #[test]
+    fn stub_odd_exit_codes_stay_unknown_after_filtering() {
+        let (_dir, db) = fixture_db();
+        let stub = StubLsof::new();
+        for code in [2, 3, 126, 127] {
+            assert_unknown(
+                &format!("exit {code}"),
+                stub.probe(
+                    &format!("exit{code}"),
+                    &db,
+                    b"",
+                    LINUX_TRACEFS_WARNING,
+                    code,
+                ),
+            );
+            assert_unknown(
+                &format!("silent exit {code}"),
+                stub.probe(&format!("silent{code}"), &db, b"", b"", code),
+            );
+        }
+    }
+
+    /// Round-1 finding 3: only the observed tracefs pair is accepted.
+    #[test]
+    fn stub_other_file_systems_and_lone_warning_lines_stay_unknown() {
+        let (_dir, db) = fixture_db();
+        let stub = StubLsof::new();
+        let cases: [(&str, &[u8]); 3] = [
+            (
+                "nfs-pair",
+                b"lsof: WARNING: can't stat() nfs file system /unrelated\n      Output information may be incomplete.\n",
+            ),
+            ("nfs-lone", b"lsof: WARNING: can't stat() nfs file system /unrelated\n"),
+            (
+                "tracefs-lone",
+                b"lsof: WARNING: can't stat() tracefs file system /sys/kernel/debug/tracing\n",
+            ),
+        ];
+        for (name, stderr) in cases {
+            assert_unknown(name, stub.probe(name, &db, b"", stderr, 1));
+        }
+    }
+
+    /// Round-1 finding 4: a non-UTF-8 line is never decoded and dismissed.
+    #[test]
+    fn stub_non_utf8_warning_stays_unknown() {
+        let (_dir, db) = fixture_db();
+        let stderr = b"lsof: WARNING: can't stat() tracefs file system /tmp/m-\xff\n      Output information may be incomplete.\n";
+        assert_unknown(
+            "non-utf8",
+            StubLsof::new().probe("nonutf8", &db, b"", stderr, 1),
+        );
+    }
+
+    /// Round-1 finding 5: the caller's raw (symlinked) spelling is compared
+    /// too, not only the canonical path handed to lsof.
+    #[test]
+    fn stub_warning_over_the_callers_alias_stays_unknown() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let real = dir.path().join("real");
+        let aliases = dir.path().join("aliases");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::create_dir_all(&aliases).unwrap();
+        std::fs::write(real.join("memory.db"), b"x").unwrap();
+        std::os::unix::fs::symlink(&real, aliases.join("link")).unwrap();
+        let alias_db = aliases.join("link").join("memory.db");
+        let stub = StubLsof::new();
+        // Control: the same pair over an unrelated sibling is dropped on Linux.
+        let control = stub.probe(
+            "control",
+            &alias_db,
+            b"",
+            &tracefs_pair_for(&dir.path().join("elsewhere")),
+            1,
+        );
+        if cfg!(target_os = "linux") {
+            assert_eq!(control, DbOwnership::NotOwned);
+        }
+        assert_unknown(
+            "alias",
+            stub.probe("alias", &alias_db, b"", &tracefs_pair_for(&aliases), 1),
+        );
+    }
+
+    /// Round-1 finding 7: exit 0 with a relevant diagnostic is not NotOwned.
+    #[test]
+    fn stub_exit_0_with_a_real_diagnostic_stays_unknown() {
+        let (_dir, db) = fixture_db();
+        let stub = StubLsof::new();
+        let error = b"lsof: status error on /x: Permission denied\n";
+        assert_unknown("exit0-header", stub.probe("e0h", &db, HEADER, error, 0));
+        assert_unknown("exit0-empty", stub.probe("e0e", &db, b"", error, 0));
+        let mut both = LINUX_TRACEFS_WARNING.to_vec();
+        both.extend_from_slice(error);
+        match stub.probe("e1", &db, b"", &both, 1) {
+            // Off Linux the tracefs line is itself kept and surfaced first.
             DbOwnership::Unknown(reason) => assert!(
-                reason.contains("lsof: status error on /x"),
-                "reason must surface the real diagnostic, got: {reason}"
+                !cfg!(target_os = "linux") || reason.contains("status error"),
+                "{reason}"
             ),
             other => panic!("expected Unknown, got {other:?}"),
         }
-        // A mount warning for the directory holding the DB is not disjoint.
-        let containing = format!(
-            "lsof: WARNING: can't stat() fuse file system {}\n",
-            dir.path().canonicalize().unwrap().display()
-        );
-        assert!(matches!(
-            classify_lsof_run(Some(1), "", &containing, &db, OTHER_SELF_PID),
-            DbOwnership::Unknown(_)
-        ));
-        // Output on stdout with a non-zero exit is still never NotOwned.
-        assert!(matches!(
-            classify_lsof_run(
-                Some(1),
-                "garbage\n",
-                LINUX_TRACEFS_WARNING,
-                &db,
-                OTHER_SELF_PID
-            ),
-            DbOwnership::Unknown(_)
-        ));
     }
 
-    /// The real call site driven with a stub `lsof`, so the target the stderr
-    /// filter compares against is the canonical path actually probed.
+    /// Round-1 finding 1 (DB side): stdout that is not lsof's header is never
+    /// discarded as one.
     #[test]
-    fn real_call_site_with_stub_lsof_classifies_linux_warnings() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = tempfile::tempdir().expect("tempdir");
-        let db = dir.path().join("memory.db");
-        std::fs::write(&db, b"x").expect("seed");
-        let bin = tempfile::tempdir().expect("stub dir");
-        let stub = |name: &str, body: &str| {
-            // One file per stub: never rewrite a script another exec may hold.
-            let path = bin.path().join(name);
-            std::fs::write(&path, format!("#!/bin/sh\n{body}")).unwrap();
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
-            path
-        };
-        let warn = "cat >&2 <<'EOF'\nlsof: WARNING: can't stat() tracefs file system /sys/kernel/debug/tracing\n      Output information may be incomplete.\nEOF\n";
+    fn stub_unrecognized_stdout_stays_unknown() {
+        let (_dir, db) = fixture_db();
+        let stub = StubLsof::new();
+        assert_unknown(
+            "exit1",
+            stub.probe("g1", &db, b"garbage\n", LINUX_TRACEFS_WARNING, 1),
+        );
+        assert_unknown("exit0", stub.probe("g0", &db, b"garbage\n", b"", 0));
+    }
 
-        let clear = stub(
-            "lsof-clear",
-            &format!("[ \"$1\" = '--' ] || exit 93\n{warn}exit 1\n"),
+    #[test]
+    fn stub_warning_over_the_db_directory_stays_unknown() {
+        let (dir, db) = fixture_db();
+        let parent = dir.path().canonicalize().unwrap();
+        assert_unknown(
+            "parent",
+            StubLsof::new().probe("parent", &db, b"", &tracefs_pair_for(&parent), 1),
         );
-        assert_eq!(
-            probe_db_ownership_with(clear.as_os_str(), &db),
-            DbOwnership::NotOwned
-        );
-
-        let held = stub(
-            "lsof-held",
-            &format!("{warn}printf 'COMMAND PID USER FD TYPE\\ntachi 123 u 10r REG\\n'\nexit 0\n"),
-        );
-        assert_eq!(
-            probe_db_ownership_with(held.as_os_str(), &db),
-            DbOwnership::Owned
-        );
-
-        let ancestor = stub(
-            "lsof-ancestor",
-            "echo \"lsof: WARNING: can't stat() fuse file system $(dirname \"$2\")\" >&2\nexit 1\n",
-        );
-        assert!(matches!(
-            probe_db_ownership_with(ancestor.as_os_str(), &db),
-            DbOwnership::Unknown(_)
-        ));
-
-        let failing = stub(
-            "lsof-failing",
-            &format!(
-                "{warn}echo 'lsof: status error on '\"$2\"': Permission denied' >&2\nexit 1\n"
-            ),
-        );
-        assert!(matches!(
-            probe_db_ownership_with(failing.as_os_str(), &db),
-            DbOwnership::Unknown(_)
-        ));
     }
 
     /// End-to-end proof that the self-PID exclusion is narrowly scoped to

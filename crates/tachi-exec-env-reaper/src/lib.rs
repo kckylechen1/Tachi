@@ -421,20 +421,24 @@ fn lsof_holder_probe_with(
     match Command::new(lsof).arg("+D").arg(path).output() {
         Ok(out) => {
             let stdout = String::from_utf8_lossy(&out.stdout);
-            let filtered = ignored_holder
-                .map(|ignored| without_ignored_holder(&stdout, ignored))
-                .unwrap_or_else(|| stdout.into_owned());
-            // tachi#1978: lsof's Linux dialect warns about every mount it
-            // cannot stat() on every run (tracefs as non-root). Only a mount
-            // proven disjoint from `path` is dropped; every other diagnostic
-            // still reaches `interpret_lsof` and fails closed.
+            // Rows are only filtered under a proven lsof header; anything else
+            // reaches `interpret_lsof` verbatim and is rejected there.
+            let filtered = match ignored_holder {
+                Some(ignored) if tachi_clean::lsof_stderr::starts_with_lsof_header(&stdout) => {
+                    without_ignored_holder(&stdout, ignored)
+                }
+                _ => stdout.into_owned(),
+            };
+            // tachi#1978: on Linux, lsof warns on every run that it cannot
+            // stat() the tracefs mount (non-root). Only that exact warning
+            // pair, for a mount proven disjoint from `path`, is dropped (raw
+            // bytes, Linux only); every other diagnostic still reaches
+            // `interpret_lsof` and fails closed.
+            let relevant = tachi_clean::lsof_stderr::relevant_lsof_stderr(&out.stderr, &[path]);
             interpret_lsof(
                 out.status.code(),
                 &filtered,
-                &tachi_clean::lsof_stderr::relevant_lsof_stderr(
-                    &String::from_utf8_lossy(&out.stderr),
-                    path,
-                ),
+                &String::from_utf8_lossy(&relevant),
             )
         }
         // No lsof on this host ⇒ we cannot prove "unheld" ⇒ nothing is
@@ -467,6 +471,7 @@ fn without_ignored_holder(stdout: &str, ignored: HolderExclusion) -> String {
 
 /// Pure interpreter for an `lsof +D` run — the part worth testing.
 ///
+/// * non-blank stdout not opening with lsof's header ⇒ [`HolderCheck::Unknown`]
 /// * data lines on stdout ⇒ [`HolderCheck::Held`]
 /// * anything on stderr ⇒ [`HolderCheck::Unknown`]: lsof warns (e.g. "can't
 ///   stat()", "Permission denied") when it could not descend part of the tree,
@@ -475,7 +480,14 @@ fn without_ignored_holder(stdout: &str, ignored: HolderExclusion) -> String {
 ///   documented "no matching files" status)
 /// * any other exit / signal ⇒ [`HolderCheck::Unknown`]
 fn interpret_lsof(exit_code: Option<i32>, stdout: &str, stderr: &str) -> HolderCheck {
-    // First stdout line is the COMMAND/PID header; the rest are holders.
+    // The first stdout line is skipped only once proven to be lsof's
+    // COMMAND/PID header (tachi#1978 round-1 finding 1); the rest are holders.
+    if !stdout.trim().is_empty() && !tachi_clean::lsof_stderr::starts_with_lsof_header(stdout) {
+        return HolderCheck::Unknown(format!(
+            "lsof output unrecognized: {}",
+            stdout.lines().next().unwrap_or("").trim()
+        ));
+    }
     let holders: Vec<String> = stdout
         .lines()
         .skip(1)

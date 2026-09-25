@@ -535,65 +535,223 @@ fn lsof_odd_exit_or_signal_is_unknown() {
     ));
 }
 
-/// tachi#1978: a stub `lsof` driven through the real call site, so the target
-/// the stderr filter compares against is exactly the probed path. The stderr
-/// text is byte-for-byte what lsof 4.95.0 prints on Ubuntu 24.04 as a non-root
-/// user on every run (captured on atom-dgx-2).
+/// Byte-for-byte stderr of lsof 4.95.0 on Ubuntu 24.04 as a non-root user,
+/// printed on every run whatever the query (captured on atom-dgx-2).
+const LINUX_TRACEFS_WARNING: &[u8] = b"lsof: WARNING: can't stat() tracefs file system /sys/kernel/debug/tracing\n      Output information may be incomplete.\n";
+const LSOF_HEADER: &[u8] = b"COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME\n";
+
+fn tracefs_pair_for(mount: &Path) -> Vec<u8> {
+    let mut bytes = b"lsof: WARNING: can't stat() tracefs file system ".to_vec();
+    bytes.extend_from_slice(mount.as_os_str().as_encoded_bytes());
+    bytes.extend_from_slice(b"\n      Output information may be incomplete.\n");
+    bytes
+}
+
+/// tachi#1978: drive the real call site (`Command`, argv, byte capture, stderr
+/// filtering, pin exclusion, classification) with a stub `lsof` that checks
+/// it was asked `+D <target>` and replays exact bytes and an exit status.
+#[cfg(unix)]
+fn stub_lsof_probe(
+    name: &str,
+    target: &Path,
+    stdout: &[u8],
+    stderr: &[u8],
+    code: i32,
+    ignored: Option<HolderExclusion>,
+) -> HolderCheck {
+    use std::os::unix::fs::PermissionsExt;
+    let case = unique_temp_dir(&format!("tachi-reaper-1978-{name}"));
+    std::fs::write(case.join("stdout"), stdout).unwrap();
+    std::fs::write(case.join("stderr"), stderr).unwrap();
+    let script = case.join("lsof");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\n[ \"$1\" = '+D' ] && [ \"$2\" = '{}' ] || {{ echo 'STUB ARGV MISMATCH' >&2; exit 93; }}\ncat '{}/stdout'\ncat '{}/stderr' >&2\nexit {code}\n",
+            target.display(),
+            case.display(),
+            case.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let check = lsof_holder_probe_with(script.as_os_str(), target, ignored);
+    let _ = std::fs::remove_dir_all(&case);
+    if let HolderCheck::Unknown(reason) = &check {
+        assert!(!reason.contains("STUB ARGV MISMATCH"), "{name}: {reason}");
+    }
+    check
+}
+
+#[cfg(unix)]
+fn assert_unknown(case: &str, check: HolderCheck) {
+    assert!(
+        matches!(check, HolderCheck::Unknown(_)),
+        "{case}: expected Unknown, got {check:?}"
+    );
+}
+
+/// The only signatures the filter may turn into `None`, and only on Linux
+/// (round-1 cold review finding 8: other platforms are unchanged).
 #[cfg(unix)]
 #[test]
-fn real_call_site_classifies_linux_mount_warnings_against_the_target() {
-    use std::os::unix::fs::PermissionsExt;
-    let bin = unique_temp_dir("tachi-reaper-1978-bin");
-    let root = unique_temp_dir("tachi-reaper-1978-target");
+fn stub_tracefs_only_empty_walk_is_unheld_on_linux_only() {
+    let root = unique_temp_dir("tachi-reaper-1978-clear");
     let target = make_target_dir(&root, "x-target");
-    let stub = |name: &str, body: &str| {
-        // One file per stub: never rewrite a script another exec may hold.
-        let path = bin.join(name);
-        std::fs::write(&path, format!("#!/bin/sh\n{body}")).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
-        path
-    };
-    let warn = "cat >&2 <<'EOF'\nlsof: WARNING: can't stat() tracefs file system /sys/kernel/debug/tracing\n      Output information may be incomplete.\nEOF\n";
+    for (name, stdout) in [("exit1", &b""[..]), ("exit1-header", LSOF_HEADER)] {
+        let check = stub_lsof_probe(name, &target, stdout, LINUX_TRACEFS_WARNING, 1, None);
+        if cfg!(target_os = "linux") {
+            assert_eq!(check, HolderCheck::None, "{name}");
+        } else {
+            assert_unknown(name, check);
+        }
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}
 
-    let clear = stub(
-        "lsof-clear",
-        &format!("[ \"$1\" = '+D' ] || exit 93\n{warn}exit 1\n"),
+#[cfg(unix)]
+#[test]
+fn stub_holder_next_to_the_warning_is_held_and_pin_exclusion_still_applies() {
+    let root = unique_temp_dir("tachi-reaper-1978-held");
+    let target = make_target_dir(&root, "x-target");
+    let mut stdout = LSOF_HEADER.to_vec();
+    stdout.extend_from_slice(b"tachi 123 u 7r DIR 1,4 0 1 /t\ncargo 4242 u 3r REG 1,4 0 1 /t/f\n");
+    assert_eq!(
+        stub_lsof_probe("held", &target, &stdout, LINUX_TRACEFS_WARNING, 0, None),
+        HolderCheck::Held(vec!["tachi 123".to_string(), "cargo 4242".to_string()])
     );
     assert_eq!(
-        lsof_holder_probe_with(clear.as_os_str(), &target, None),
-        HolderCheck::None,
-        "an unrelated unstat()able mount must not make an empty walk Unknown"
-    );
-
-    let held = stub(
-        "lsof-held",
-        &format!("{warn}printf 'COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME\\ncargo 4242 u 3r REG 1,4 0 1 %s/f\\n' \"$2\"\nexit 0\n"),
-    );
-    assert_eq!(
-        lsof_holder_probe_with(held.as_os_str(), &target, None),
+        stub_lsof_probe(
+            "pinned",
+            &target,
+            &stdout,
+            LINUX_TRACEFS_WARNING,
+            0,
+            Some(HolderExclusion { pid: 123, fd: 7 })
+        ),
         HolderCheck::Held(vec!["cargo 4242".to_string()])
     );
+    let _ = std::fs::remove_dir_all(&root);
+}
 
-    let inside = stub(
-        "lsof-inside",
-        "echo \"lsof: WARNING: can't stat() fuse file system $2/debug\" >&2\nexit 1\n",
+/// Round-1 finding 1: an unvalidated first stdout line is never skipped, and
+/// the pin exclusion never runs on output without lsof's header.
+#[cfg(unix)]
+#[test]
+fn stub_unrecognized_stdout_stays_unknown() {
+    let root = unique_temp_dir("tachi-reaper-1978-garbage");
+    let target = make_target_dir(&root, "x-target");
+    assert_unknown(
+        "exit1+warning",
+        stub_lsof_probe("g1w", &target, b"garbage\n", LINUX_TRACEFS_WARNING, 1, None),
     );
-    assert!(matches!(
-        lsof_holder_probe_with(inside.as_os_str(), &target, None),
-        HolderCheck::Unknown(_)
-    ));
+    assert_unknown(
+        "exit1",
+        stub_lsof_probe("g1", &target, b"garbage\n", b"", 1, None),
+    );
+    assert_unknown(
+        "exit0",
+        stub_lsof_probe("g0", &target, b"garbage\n", b"", 0, None),
+    );
+    assert_unknown(
+        "headerless pinned row",
+        stub_lsof_probe(
+            "pin",
+            &target,
+            b"tachi 123 u 7r DIR 1,4 0 1 /t\n",
+            b"",
+            1,
+            Some(HolderExclusion { pid: 123, fd: 7 }),
+        ),
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
 
-    let partial = stub(
-        "lsof-partial",
-        &format!("{warn}echo \"lsof: WARNING: can't opendir($2/debug): Permission denied\" >&2\nexit 1\n"),
+/// Round-1 finding 2: an odd exit status is never "unheld".
+#[cfg(unix)]
+#[test]
+fn stub_odd_exit_codes_stay_unknown() {
+    let root = unique_temp_dir("tachi-reaper-1978-exit");
+    let target = make_target_dir(&root, "x-target");
+    for code in [2, 3, 126, 127] {
+        assert_unknown(
+            &format!("exit {code}"),
+            stub_lsof_probe(
+                &format!("x{code}"),
+                &target,
+                b"",
+                LINUX_TRACEFS_WARNING,
+                code,
+                None,
+            ),
+        );
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Round-1 findings 3 and 4: only the observed tracefs pair, as valid UTF-8,
+/// is accepted.
+#[cfg(unix)]
+#[test]
+fn stub_other_file_systems_lone_lines_and_non_utf8_stay_unknown() {
+    let root = unique_temp_dir("tachi-reaper-1978-fstype");
+    let target = make_target_dir(&root, "x-target");
+    let cases: [(&str, &[u8]); 4] = [
+        (
+            "nfs-pair",
+            b"lsof: WARNING: can't stat() nfs file system /unrelated\n      Output information may be incomplete.\n",
+        ),
+        ("nfs-lone", b"lsof: WARNING: can't stat() nfs file system /unrelated\n"),
+        (
+            "tracefs-lone",
+            b"lsof: WARNING: can't stat() tracefs file system /sys/kernel/debug/tracing\n",
+        ),
+        (
+            "non-utf8",
+            b"lsof: WARNING: can't stat() tracefs file system /tmp/m-\xff\n      Output information may be incomplete.\n",
+        ),
+    ];
+    for (name, stderr) in cases {
+        assert_unknown(name, stub_lsof_probe(name, &target, b"", stderr, 1, None));
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Round-1 findings 5 and 7, plus mounts inside/over the walk.
+#[cfg(unix)]
+#[test]
+fn stub_alias_overlap_and_success_exit_diagnostics_stay_unknown() {
+    let root = unique_temp_dir("tachi-reaper-1978-alias");
+    let real = make_target_dir(&root, "real-target");
+    let aliases = root.join("aliases");
+    std::fs::create_dir_all(&aliases).unwrap();
+    let alias = aliases.join("link-target");
+    std::os::unix::fs::symlink(&real, &alias).unwrap();
+    assert_unknown(
+        "alias",
+        stub_lsof_probe("alias", &alias, b"", &tracefs_pair_for(&aliases), 1, None),
     );
-    let check = lsof_holder_probe_with(partial.as_os_str(), &target, None);
+    for (name, mount) in [("inside", real.join("debug")), ("same", real.clone())] {
+        assert_unknown(
+            name,
+            stub_lsof_probe(name, &real, b"", &tracefs_pair_for(&mount), 1, None),
+        );
+    }
+    let error = b"lsof: WARNING: can't opendir(/t/debug): Permission denied\n";
+    assert_unknown(
+        "exit0-header",
+        stub_lsof_probe("e0h", &real, LSOF_HEADER, error, 0, None),
+    );
+    let mut both = LINUX_TRACEFS_WARNING.to_vec();
+    both.extend_from_slice(error);
+    let check = stub_lsof_probe("e1", &real, b"", &both, 1, None);
     let HolderCheck::Unknown(reason) = &check else {
-        panic!("a partial walk must stay Unknown next to the mount warning: {check:?}");
+        panic!("a partial walk must stay Unknown next to the warning: {check:?}");
     };
-    assert!(reason.contains("can't opendir"), "{reason}");
-
-    let _ = std::fs::remove_dir_all(&bin);
+    // Off Linux the tracefs line is itself kept and surfaced first.
+    if cfg!(target_os = "linux") {
+        assert!(reason.contains("can't opendir"), "{reason}");
+    }
     let _ = std::fs::remove_dir_all(&root);
 }
 
