@@ -707,8 +707,8 @@ pub(crate) fn planner_failure_winner(status: &Map<String, Value>) -> bool {
         && !status.contains_key("model_plan")
 }
 
-/// True only when a canonical `resolved_completion` close (COMPLETED or
-/// INPUT_REQUIRED) is already committed. Its presence is the completion
+/// True when any canonical `resolved_completion` close is already committed,
+/// including failed/aborted outcomes and partial completion. It is the completion
 /// winner, so a later planner success/failure publication must refuse rather
 /// than split the root state from the resolved receipt.
 pub(crate) fn resolved_completion_committed(status: &Map<String, Value>) -> bool {
@@ -718,7 +718,10 @@ pub(crate) fn resolved_completion_committed(status: &Map<String, Value>) -> bool
             .and_then(Value::as_object)
             .and_then(|completion| completion.get("state"))
             .and_then(Value::as_str),
-        Some("TASK_STATE_COMPLETED") | Some("TASK_STATE_INPUT_REQUIRED")
+        Some("TASK_STATE_COMPLETED")
+            | Some("TASK_STATE_INPUT_REQUIRED")
+            | Some("TASK_STATE_FAILED")
+            | Some("TASK_STATE_CANCELED")
     )
 }
 
@@ -1298,40 +1301,47 @@ mod tests {
     /// deliberately kept WORKING to prove the check is not root-state-based.
     #[test]
     fn plan_writes_refuse_a_committed_resolved_completion() {
-        let temp = tempfile::tempdir().expect("run dir");
-        let status = json!({
-            "dispatch_id": "d1",
-            "state": "TASK_STATE_WORKING",
-            "status_revision": 4,
-            "resolved_completion": {"state": "TASK_STATE_COMPLETED"},
-        });
-        crate::utils::write_owner_only_file_atomic(
-            &temp.path().join("status.json"),
-            serde_json::to_vec_pretty(&status).unwrap().as_slice(),
-        )
-        .expect("seed completion winner");
-        let commit = PlanCommit::open(temp.path(), "d1").expect("open");
-        let before = std::fs::read(temp.path().join("status.json")).expect("bytes");
+        for completion_state in [
+            "TASK_STATE_COMPLETED",
+            "TASK_STATE_INPUT_REQUIRED",
+            "TASK_STATE_FAILED",
+            "TASK_STATE_CANCELED",
+        ] {
+            let temp = tempfile::tempdir().expect("run dir");
+            let status = json!({
+                "dispatch_id": "d1",
+                "state": "TASK_STATE_WORKING",
+                "status_revision": 4,
+                "resolved_completion": {"state": completion_state},
+            });
+            crate::utils::write_owner_only_file_atomic(
+                &temp.path().join("status.json"),
+                serde_json::to_vec_pretty(&status).unwrap().as_slice(),
+            )
+            .expect("seed completion winner");
+            let commit = PlanCommit::open(temp.path(), "d1").expect("open");
+            let before = std::fs::read(temp.path().join("status.json")).expect("bytes");
 
-        assert!(
-            commit.read().is_err(),
-            "a committed completion must block plan reuse"
-        );
-        assert!(
-            commit.commit(4, "## Goal\nlate", &plan_binding()).is_err(),
-            "a committed completion must block a plan success write"
-        );
-        assert!(
-            matches!(
-                commit.publish_plan_failure(4, "late failure"),
-                PlanFailurePublication::Refused
-            ),
-            "a committed completion must block a plan failure write"
-        );
-        assert_eq!(
-            std::fs::read(temp.path().join("status.json")).expect("bytes"),
-            before,
-            "no plan write may touch a committed completion winner"
-        );
+            assert!(
+                commit.read().is_err(),
+                "a committed completion must block plan reuse"
+            );
+            assert!(
+                commit.commit(4, "## Goal\nlate", &plan_binding()).is_err(),
+                "a committed completion must block a plan success write"
+            );
+            assert!(
+                matches!(
+                    commit.publish_plan_failure(4, "late failure"),
+                    PlanFailurePublication::Refused
+                ),
+                "a committed completion must block a plan failure write"
+            );
+            assert_eq!(
+                std::fs::read(temp.path().join("status.json")).expect("bytes"),
+                before,
+                "no plan write may touch a committed completion winner"
+            );
+        }
     }
 }
