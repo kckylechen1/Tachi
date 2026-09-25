@@ -84,6 +84,11 @@ move to the surviving facades before upgrading. The highlights:
 - Standalone store files use `tachi-memory.db`. Existing `memory.db` stores
   require explicit offline conversion as described above; ordinary opens
   refuse them. Conversion leaves a compatibility symlink for this release window.
+- Bound-project memory searches can now return MCP ResourceLinks alongside
+  the unchanged search text. A read returns exact text only while its source,
+  revision, body digest and active time window match. Global/Wiki/private
+  memories are excluded; role-constrained searches and configured or unreadable
+  sandbox policy disable this feature. Resource catalogs remain empty.
 - Cargo, npm, lockfiles, docs, installer URLs, and OpenClaw plugin metadata
   are checked by `scripts/check_release_versions.py` and CI before release.
   The tag pipeline ships the Mac arm64 CLI and the Homebrew formula; npm

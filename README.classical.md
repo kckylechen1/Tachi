@@ -38,6 +38,8 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v2.0.0
 
 今版 v2.0.0：藏库卷册之 schema 自二十八进至三十九，旧符（orchestrator、run_skill 之类）皆已退役封存。升册必依 [`docs/INSTALL.md` Step 1b](docs/INSTALL.md) 之序：先停守护并阻新旧写手复起，替换前备份库册与旧器，乃取新器而勿启；先以 `tachi migrate --rename-legacy --apply --offline` 离线改旧库之名，再以 `tachi migrate --apply` 升册，逐条核其结果。旧器拒不启新册，回退当以备份为本。npm 之册另有手动发布之途，新签不即新册。详询 [CHANGELOG.md](CHANGELOG.md)。
 
+今添 MCP ResourceLink：惟所绑定宗门之寻常记忆可附其引，旧检索文不改；读时核来源、版次、正文摘要与生效时限，相合乃返原文。全局库、Wiki、私藏皆不与；检索有角色之限，或 sandbox 策略已设、不可读，亦不启此器。Resource 目录仍空。
+
 ---
 
 ## 启阵
