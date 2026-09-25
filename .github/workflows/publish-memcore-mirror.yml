@@ -36,6 +36,8 @@ jobs:
         run: bash scripts/publish_memcore_mirror.sh /tmp/memcore-mirror "$GITHUB_SHA"
 
       - name: Sanity-build the mirror standalone
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/memcore-mirror-target
         # The mirror must compile on its own before we publish it — a mirror
         # that only builds inside the monorepo workspace is a broken artifact.
         run: |
@@ -61,7 +63,8 @@ jobs:
           git config user.name "memcore-mirror-bot"
           git config user.email "noreply@users.noreply.github.com"
           find . -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
-          cp -R /tmp/memcore-mirror/. .
+          # Keep build output out even if a generator or future check leaves it behind.
+          tar -C /tmp/memcore-mirror --exclude='./target' -cf - . | tar -xf -
           git add -A
           if git diff --cached --quiet; then
             echo "mirror already current; nothing to publish"
