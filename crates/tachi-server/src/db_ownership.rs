@@ -475,12 +475,13 @@ mod tests {
     /// Holder is `tail -f <path>` (a single, non-forking process that opens
     /// the path directly) rather than this test's own connection — a
     /// same-process hold would be *excluded* by design and prove nothing
-    /// about external holders. If `tail` can't be spawned or `lsof`
-    /// resolves to `Unknown` (either environment-dependent), the test skips
-    /// with an explanation rather than failing — there is no existing
-    /// precedent in this file for hard-failing on an unavailable OS tool
-    /// (`probe_db_ownership` itself already treats a missing `lsof` as
-    /// `Unknown`, not a bug).
+    /// about external holders. If `tail` can't be spawned or `lsof` is
+    /// missing, the test skips with an explanation rather than failing —
+    /// `probe_db_ownership` itself treats a missing `lsof` as `Unknown`, not
+    /// a bug. Elsewhere any `Unknown` also skips, but on Linux an `Unknown`
+    /// from an lsof that did run fails the test (tachi#1978: every non-root
+    /// Linux run used to resolve to `Unknown` because of lsof's tracefs
+    /// start-up warning, which a skip would have hidden).
     #[test]
     fn e2e_probe_sees_external_holder_and_clears_after_release() {
         use std::process::{Command, Stdio};
