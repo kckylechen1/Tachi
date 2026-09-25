@@ -7,17 +7,22 @@
 //!
 //! Stage 1 (Plan):
 //!   * builds a planning prompt = `PLAN_SYSTEM_PROMPT` + task body
-//!   * invokes the shared `ClaudePool` (from Phase 1) — bounded concurrency,
-//!     wall-clock timeout, audit dir under `~/.tachi/foundry-runs/`.
-//!   * writes the LLM output to `<run_dir>/plan.md`.
-//!   * appends a `plan_generated` event to `trajectory.jsonl`.
-//!   * an empty / blank plan is treated as a hard error (no silent fallback
-//!     to V1 single-stage; the dispatcher is supposed to fail loudly so the
-//!     operator notices the planner regression).
+//!   * invokes the provider-only reasoning lane (bounded by a wall-clock
+//!     timeout), preserving the lane's retry/key-rotation/cross-provider-
+//!     fallback policy and returning the actual serving engine's receipt.
+//!   * publishes the plan content and its exact `model-invocation-v1`
+//!     receipt together into `<run_dir>/status.json#/model_plan` — one
+//!     locked, fenced, atomic replacement (see `model_plan_commit`). The V1
+//!     placeholder `plan.md` is never overwritten with model content.
+//!   * appends a `plan_generated` event to `trajectory.jsonl` only after the
+//!     commit succeeds.
+//!   * an empty, truncated, or failed plan is treated as a hard error (no
+//!     silent fallback to V1 single-stage; the dispatcher is supposed to fail
+//!     loudly so the operator notices the planner regression).
 //!
 //! Stage 2 (Execute):
 //!   * the original V1 execute path is reused — see `dispatch.rs`. V2 just
-//!     enriches the prompt with the Stage-1 plan and the
+//!     enriches the prompt with the committed Stage-1 plan and the
 //!     `skill:implement-plan` skill body (inline fallback below; the
 //!     capability registry version, if present, is layered in by
 //!     `prompt::assemble_prompt`).
@@ -26,13 +31,23 @@
 //!   * `DISPATCH_V2_PLAN_REVIEW=true` makes the dispatcher pause after
 //!     Stage 1 — for non-interactive callers this means returning a
 //!     `pending_review` response without executing. The MVP does NOT block
-//!     the async path on a TTY confirm; review is auditable via plan.md
-//!     and status.json.
+//!     the async path on a TTY confirm; review is auditable via
+//!     `status.json#/model_plan` (plus the placeholder plan.md).
 
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Instant;
+use tachi_llm::{CompletionStatusV1, PersistedModelInvocationReceiptV1};
+
+mod model_plan_commit;
+
+#[cfg(test)]
+pub(crate) use model_plan_commit::fail_next_plan_commit_write;
+pub(crate) use model_plan_commit::planner_failure_winner;
+pub(super) use model_plan_commit::{
+    CommittedModelPlan, PlanCommit, PlanCommitPre, PlanFailurePublication,
+};
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 enum StatusJsonLockKey {
@@ -165,10 +180,19 @@ the whole document."#;
 
 /// Inline fallback for the implement-plan skill when the capability is not
 /// registered in the running server. Keeps V2 functional on fresh boxes.
+///
+/// The canonical plan is the committed `status.json#/model_plan.content`
+/// (bound by its `model_invocation` receipt), also inlined below as
+/// `## Plan (from Stage 1)`. The V1 placeholder `plan.md` is not a model plan
+/// and must not be read as one.
 pub(super) const IMPLEMENT_PLAN_SKILL_FALLBACK: &str = r#"## Skill: implement-plan
-Follow the attached plan step by step. Do not redesign it. After each step run
-the relevant Validation command. Stop and report blockers instead of improvising
-outside the plan. When done, call tachi_task(action="complete") with the dispatch_id."#;
+The plan is this dispatch's committed model plan: `status.json#/model_plan.content`,
+whose `model_invocation` receipt is bound to that exact content. Legacy
+single-stage (V1) dispatches carry no model plan (`n/a`). The committed plan is
+also appended below as `## Plan (from Stage 1)`. Follow it step by step; do not
+redesign it. After each step run the relevant Validation command. Stop and report
+blockers instead of improvising outside the plan. When done, call
+tachi_task(action="complete") with the dispatch_id."#;
 
 /// Default wall-clock budget for Stage 1 (`claude_pool.call`). Independent of
 /// the broader dispatch timeout so a slow planner can't burn the execute
@@ -245,9 +269,11 @@ pub(super) fn plan_timeout_secs() -> u64 {
         .unwrap_or(DEFAULT_PLAN_TIMEOUT_SECS)
 }
 
-/// Outcome of Stage 1.
+/// Outcome of Stage 1: the plan body and the exact serving-engine receipt
+/// that produced it.
 pub(super) struct PlanOutcome {
     pub plan_md: String,
+    pub invocation: PersistedModelInvocationReceiptV1,
     pub duration_ms: u64,
 }
 
@@ -295,7 +321,7 @@ pub(super) fn set_plan_stage_test_override(value: Option<PlanStageTestOverride>)
 pub(super) async fn run_plan_stage(
     server: &crate::MemoryServer,
     task: &str,
-    label: &str,
+    _label: &str,
 ) -> Result<PlanOutcome, String> {
     #[cfg(test)]
     let override_result = {
@@ -312,6 +338,7 @@ pub(super) async fn run_plan_stage(
                 duration_ms,
             } => Ok(PlanOutcome {
                 plan_md,
+                invocation: PersistedModelInvocationReceiptV1::test_fixture_reasoning(0),
                 duration_ms,
             }),
             PlanStageTestOverride::SuccessWithAssertion {
@@ -319,9 +346,10 @@ pub(super) async fn run_plan_stage(
                 duration_ms,
                 assert_before_return,
             } => {
-                assert_before_return(server, label).await;
+                assert_before_return(server, _label).await;
                 Ok(PlanOutcome {
                     plan_md,
+                    invocation: PersistedModelInvocationReceiptV1::test_fixture_reasoning(0),
                     duration_ms,
                 })
             }
@@ -333,55 +361,59 @@ pub(super) async fn run_plan_stage(
         return Err("dispatch v2: task is empty; cannot plan".to_string());
     }
 
-    let composed = format!("{}\n\n# Task\n{}", PLAN_SYSTEM_PROMPT, task.trim());
-
     let started = Instant::now();
-    let outcome = call_plan_llm(server, label, &composed, task.trim())
+    let generated = call_plan_llm(server, task.trim())
         .await
         .map_err(|e| format!("dispatch v2 stage1 (plan) failed: {e}"))?;
     let duration_ms = started.elapsed().as_millis() as u64;
 
-    let plan_md = outcome.text.trim().to_string();
+    // Only an explicit provider-declared truncation is refused here. An
+    // unknown completion status stays parseable for legacy compatibility, so
+    // this does not silently tighten valid plan formats.
+    if generated.invocation.completion_status() == CompletionStatusV1::Truncated {
+        return Err(tachi_llm::LLM_OUTPUT_TRUNCATED.to_string());
+    }
+
+    let plan_md = generated.value.trim().to_string();
     if plan_md.is_empty() {
         return Err("dispatch v2 stage1 (plan) returned empty plan.md".to_string());
     }
 
     Ok(PlanOutcome {
         plan_md,
+        invocation: generated.invocation,
         duration_ms,
     })
 }
 
-/// Run the Stage-1 plan-stage LLM call, either via the CLI pool (pre-#1087
-/// default) or — when `TACHI_CLAUDE_POOL_PROVIDER_FIRST` is set — via the
-/// provider executor first, with the CLI pool as a fallback for the rollout
-/// cycle. Either way the run-directory artifact contract
-/// (`prompt.md`/`result.md`/`status.json`) is preserved, since the path
-/// goes through `LlmCallRecorder::record_call` (#1214 BUG#3 lineage: this
-/// call site previously had no flag gate at all — the fifth live pool
-/// consumer the flag-coverage audit missed). #1261 step 2/3 removed the
-/// CLI fallback branch; step 3/3 renamed the recorder (formerly
-/// `ClaudePool::call_via_provider`) to its executor-agnostic name.
+/// Run the Stage-1 plan-stage LLM call. This is a provider-only reasoning
+/// round-trip that keeps the lane's full serving policy (retry, key rotation,
+/// configured cross-provider fallback) and returns the actual serving
+/// engine's durable receipt.
+///
+/// The successful plan payload deliberately does **not** go through
+/// `LlmCallRecorder`: the recorder writes `result.md`, which would publish a
+/// second, uncommitted copy of the model output next to the plan. The single
+/// durable publication boundary for the plan is the committed
+/// `status.json#/model_plan` receipt (`model_plan_commit`).
 async fn call_plan_llm(
     server: &crate::MemoryServer,
-    label: &str,
-    composed_prompt: &str,
     task: &str,
-) -> Result<tachi_llm::llm_recorder::RecordedCallOutcome, String> {
-    let llm = server.llm.clone();
-    let task_owned = task.to_string();
+) -> Result<tachi_llm::Generated<String>, String> {
+    // Preserve the retired recorder path's bounded-concurrency admission
+    // (`CLAUDE_POOL_MAX_CONCURRENT`, default `DEFAULT_MAX_CONCURRENT`) while
+    // publishing no recorder run-directory success artifact. The permit is
+    // held across the provider call and released on success or error.
+    let _permit = server.llm_recorder.acquire_slot().await?;
     server
-        .llm_recorder
-        .record_call(label, composed_prompt, move || async move {
-            llm.call_reasoning_llm_provider_only(
-                PLAN_SYSTEM_PROMPT,
-                &task_owned,
-                None,
-                0.2,
-                PLAN_PROVIDER_MAX_TOKENS,
-            )
-            .await
-        })
+        .llm
+        .call_reasoning_llm_provider_only_with_serving_receipt(
+            PLAN_SYSTEM_PROMPT,
+            task,
+            None,
+            0.2,
+            PLAN_PROVIDER_MAX_TOKENS,
+        )
         .await
 }
 
@@ -767,6 +799,14 @@ fn write_status_json_inner(
     }
     if let Some(Value::Object(map)) = extra {
         for (k, v) in map {
+            // A committed model plan is immutable for this status file. No
+            // generic writer may set, clear, or overwrite it via `extra`; only
+            // `model_plan_commit` publishes it, through its own anchored
+            // read-modify-write. The preserve-if-absent loop below carries an
+            // existing committed object forward instead.
+            if k == "model_plan" {
+                continue;
+            }
             obj.insert(k, v);
         }
     }
@@ -868,6 +908,11 @@ fn write_status_json_inner(
                 "execution_classification",
                 "lifecycle_owner",
                 "cancellation",
+                // A committed plan and its receipt are published exactly once
+                // by `model_plan_commit`. Every later canonical writer carries
+                // the object forward unchanged so a `status_revision` bump can
+                // never rebind the plan's `artifact_revision` or receipt.
+                "model_plan",
                 // Durable managed-run identity and the append-only
                 // reconciliation observation are stamped once and carried
                 // forward by every later canonical writer (completion,
@@ -1404,7 +1449,7 @@ mod tests {
 
         let result = tokio::runtime::Runtime::new()
             .expect("tokio runtime")
-            .block_on(call_plan_llm(&server, "plan", "composed prompt", "task"));
+            .block_on(call_plan_llm(&server, "task"));
 
         // The call no longer reaches the CLI binary resolver: regardless
         // of whether the provider path succeeds or fails in the test
@@ -1504,5 +1549,221 @@ Only goal here.
         assert!(prompt.contains("do X"));
         assert!(prompt.contains("ctx"));
         assert!(prompt.contains("implement-plan"));
+    }
+
+    /// #1664: both the dynamically loaded skill source and the inline fallback
+    /// must point at the committed `status.json#/model_plan` content. Neither
+    /// may instruct the executor to read the V1 placeholder `plan.md`.
+    #[test]
+    fn implement_plan_skill_and_inline_fallback_reference_committed_plan() {
+        let inline = IMPLEMENT_PLAN_SKILL_FALLBACK;
+        assert!(
+            !inline.contains("plan.md"),
+            "inline fallback must not point at the V1 placeholder: {inline}"
+        );
+        assert!(inline.contains("status.json#/model_plan"), "{inline}");
+        assert!(inline.contains("model_invocation"), "{inline}");
+
+        let skill_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../wiki/skills/implement-plan.md");
+        let skill = std::fs::read_to_string(&skill_path)
+            .unwrap_or_else(|error| panic!("read {}: {error}", skill_path.display()));
+        assert!(
+            !skill.contains("plan.md"),
+            "the implement-plan skill must not instruct reading the V1 placeholder: {skill}"
+        );
+        assert!(skill.contains("status.json#/model_plan"), "{skill}");
+        assert!(skill.contains("model_invocation"), "{skill}");
+        assert!(
+            skill.contains("n/a"),
+            "the skill must call out legacy V1 as n/a: {skill}"
+        );
+    }
+
+    async fn spawn_chat_provider(app: axum::Router) -> (u16, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind provider");
+        let port = listener.local_addr().expect("provider addr").port();
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve provider");
+        });
+        (port, task)
+    }
+
+    fn reasoning_client(port: u16) -> tachi_llm::LlmClient {
+        use tachi_llm::{
+            llm::{ChatLaneConfig, ProviderRuntimeConfig},
+            LlmClient, ProviderSecret, RerankConfig, RerankProviderKind,
+        };
+        let unused = || ChatLaneConfig {
+            base_url: "https://unused.test/v1/chat/completions".to_string(),
+            model: "unused".to_string(),
+            api_key_envs: vec!["UNUSED_KEY"],
+        };
+        let config = ProviderRuntimeConfig {
+            extract: unused(),
+            summary: unused(),
+            reasoning: ChatLaneConfig {
+                base_url: format!("http://127.0.0.1:{port}/chat/completions"),
+                model: "slot-test-model".to_string(),
+                api_key_envs: vec!["PLAN_SLOT_TEST_KEY"],
+            },
+            distill: unused(),
+            rerank: RerankConfig {
+                provider: RerankProviderKind::Voyage,
+                local_endpoint: None,
+            },
+        };
+        let client = LlmClient::new_with_config(config, None).expect("slot test client");
+        client.set_provider_secret_pool(
+            "PLAN_SLOT_TEST_KEY",
+            vec![ProviderSecret {
+                key_id: "PLAN_SLOT_TEST_KEY".to_string(),
+                value: "slot-test-secret".to_string(),
+            }],
+        );
+        client
+    }
+
+    fn plan_slot_server(port: u16) -> crate::tests::TestServer {
+        // `make_server` isolates the test home and binds the recorder's
+        // semaphore from `CLAUDE_POOL_MAX_CONCURRENT` at construction; the
+        // caller must have set that env var before this call (global lock).
+        let mut server = crate::tests::make_server();
+        server.replace_llm(reasoning_client(port));
+        server
+    }
+
+    #[derive(Clone)]
+    struct SlotInflightState {
+        inflight: Arc<std::sync::atomic::AtomicUsize>,
+        max_inflight: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    async fn slot_inflight_response(
+        axum::extract::State(state): axum::extract::State<SlotInflightState>,
+    ) -> axum::Json<serde_json::Value> {
+        use std::sync::atomic::Ordering;
+        let now = state.inflight.fetch_add(1, Ordering::SeqCst) + 1;
+        state.max_inflight.fetch_max(now, Ordering::SeqCst);
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+        state.inflight.fetch_sub(1, Ordering::SeqCst);
+        axum::Json(serde_json::json!({
+            "choices": [{
+                "message": {"role": "assistant", "content": "gated plan"},
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            "model": "slot-test-model"
+        }))
+    }
+
+    #[derive(Clone)]
+    struct SlotCallsState {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    async fn slot_first_rejected_response(
+        axum::extract::State(state): axum::extract::State<SlotCallsState>,
+    ) -> axum::response::Response {
+        use axum::response::IntoResponse;
+        use std::sync::atomic::Ordering;
+        if state.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            (
+                axum::http::StatusCode::BAD_REQUEST,
+                "synthetic plan rejection",
+            )
+                .into_response()
+        } else {
+            axum::Json(serde_json::json!({
+                "choices": [{
+                    "message": {"role": "assistant", "content": "second plan"},
+                    "finish_reason": "stop"
+                }],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+                "model": "slot-test-model"
+            }))
+            .into_response()
+        }
+    }
+
+    /// #1664: two simultaneous plan provider calls with the recorder limit at
+    /// 1 must never exceed one provider request in flight — the same admission
+    /// the retired recorder path enforced.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn plan_provider_calls_share_the_recorder_slot_limit() {
+        use axum::{routing::post, Router};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _limit = crate::test_support::EnvRestore::set("CLAUDE_POOL_MAX_CONCURRENT", "1");
+
+        let inflight = Arc::new(AtomicUsize::new(0));
+        let max_inflight = Arc::new(AtomicUsize::new(0));
+        let state = SlotInflightState {
+            inflight: Arc::clone(&inflight),
+            max_inflight: Arc::clone(&max_inflight),
+        };
+        let (port, task) = spawn_chat_provider(
+            Router::new()
+                .route("/chat/completions", post(slot_inflight_response))
+                .with_state(state),
+        )
+        .await;
+        let server = plan_slot_server(port);
+
+        let (a, b) = tokio::join!(
+            call_plan_llm(&server, "task-a"),
+            call_plan_llm(&server, "task-b")
+        );
+        assert!(a.is_ok(), "{a:?}");
+        assert!(b.is_ok(), "{b:?}");
+        assert_eq!(
+            max_inflight.load(Ordering::SeqCst),
+            1,
+            "simultaneous plan calls must share the recorder's slot limit"
+        );
+        task.abort();
+    }
+
+    /// #1664: an errored plan provider call must release its slot so the next
+    /// plan can run. The first request gets a non-retriable 400; the second
+    /// must still reach the provider and succeed.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn plan_provider_slot_is_released_after_an_error() {
+        use axum::{routing::post, Router};
+
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _limit = crate::test_support::EnvRestore::set("CLAUDE_POOL_MAX_CONCURRENT", "1");
+
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let state = SlotCallsState {
+            calls: Arc::clone(&calls),
+        };
+        let (port, task) = spawn_chat_provider(
+            Router::new()
+                .route("/chat/completions", post(slot_first_rejected_response))
+                .with_state(state),
+        )
+        .await;
+        let server = plan_slot_server(port);
+
+        let (a, b) = tokio::join!(
+            call_plan_llm(&server, "task-a"),
+            call_plan_llm(&server, "task-b")
+        );
+        let successes = [a.is_ok(), b.is_ok()].into_iter().filter(|ok| *ok).count();
+        assert_eq!(
+            successes, 1,
+            "the erroring call must release the slot so the next plan can run: a={a:?} b={b:?}"
+        );
+        task.abort();
     }
 }

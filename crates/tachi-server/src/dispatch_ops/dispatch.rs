@@ -514,6 +514,26 @@ enum PostInitDispatchOutcome {
     Ready(Box<ReadyDispatch>),
 }
 
+/// Post-init failure with an explicit terminalization disposition. It keeps
+/// the pre-existing post-init behavior for ordinary errors (`planner_settled`
+/// is false, so the caller's early-exit closer runs), while letting the plan
+/// stage report that it already conditionally published a terminal failure or
+/// safely refused to clobber a newer winner — in which case the closer must
+/// NOT run and re-terminalize the row.
+struct PostInitError {
+    message: String,
+    planner_settled: bool,
+}
+
+impl From<String> for PostInitError {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            planner_settled: false,
+        }
+    }
+}
+
 /// Everything the post-guard spawn/response-building code (steps 8-9) needs,
 /// carried out of the guarded `async` block in one bundle.
 struct ReadyDispatch {
@@ -952,11 +972,11 @@ async fn launch_canonical_dispatch(
     // for up to 180s on an LLM call) so board/status pollers see a row
     // immediately, not only after planning succeeds. Artifacts (including
     // the V1-placeholder plan.md) are already written above either way, so
-    // `init_kanban_task`'s `plan_path` argument is always valid here — for
-    // V2 it currently points at the not-yet-overwritten placeholder, not
-    // the real LLM plan; that's an accepted, documented consequence of
-    // moving this earlier (see report), not a functional break: V2 later
-    // overwrites plan.md in place at the same path once Stage 1 completes.
+    // `init_kanban_task`'s plan reference is always valid here. For V2 the
+    // reference is `status.json#/model_plan` — a pointer that is filled by
+    // the plan commit later, while the placeholder `plan.md` is never
+    // overwritten with model content. This is the accepted, documented
+    // consequence of moving board-first ahead of Stage 1.
     init_kanban_and_flow(FlowSetupInputs {
         server,
         dispatch_id: &dispatch_id,
@@ -969,6 +989,7 @@ async fn launch_canonical_dispatch(
         prompt_md_path: &prompt_md_path,
         context_md_path: &context_md_path,
         trajectory_path: &trajectory_path,
+        v2,
     })
     .await?;
 
@@ -986,12 +1007,12 @@ async fn launch_canonical_dispatch(
     // propagates out of this block. A real `Drop` guard can't `.await`,
     // so this "wrap the fallible section, match on Err" shape is the
     // idiom that covers all current exits without per-callsite tracking.
-    let post_init: Result<PostInitDispatchOutcome, String> = async {
-        // 4. Stage 1 (V2 only): generate plan via ClaudePool. On failure/timeout
-        // the kanban row created above must not be left orphaned in
-        // TASK_STATE_WORKING — `run_v2_plan_stage`'s failure branches now close
-        // it directly (see plan_stage.rs) ahead of this guard ever seeing them.
-        let plan_stage_outcome = run_v2_plan_stage(PlanStageInputs {
+    let post_init: Result<PostInitDispatchOutcome, PostInitError> = async {
+        // 4. Stage 1 (V2 only): generate plan via the provider. The plan stage
+        // conditionally publishes its own terminal failure under the run's
+        // anchor/CAS and reports whether it already settled the row, so this
+        // guard does not blind-close a concurrent winner.
+        let plan_stage_outcome = match run_v2_plan_stage(PlanStageInputs {
             server,
             request: &request,
             dispatch_id: &dispatch_id,
@@ -999,7 +1020,6 @@ async fn launch_canonical_dispatch(
             resolved_profile: &resolved_profile,
             profile_payload: &profile_payload,
             base_prompt: &base_prompt,
-            plan_path: &plan_path,
             prompt_md_path: &prompt_md_path,
             context_md_path: &context_md_path,
             trajectory_path: &trajectory_path,
@@ -1007,7 +1027,20 @@ async fn launch_canonical_dispatch(
             feedback_rules_trace: &feedback_rules_trace,
             v2_decision,
         })
-        .await?;
+        .await
+        {
+            Ok(outcome) => outcome,
+            // Every plan-stage error is already settled: the planner either
+            // published a terminal failure, safely refused a newer winner, or
+            // could not durably publish (reconciliation unknown). The outer
+            // closer must not fabricate a terminal kanban state for any of them.
+            Err(error) => {
+                return Err(PostInitError {
+                    message: error,
+                    planner_settled: true,
+                });
+            }
+        };
         if let Some(early_response) = plan_stage_outcome.early_response {
             return Ok(PostInitDispatchOutcome::EarlyResponse(early_response));
         }
@@ -1166,14 +1199,21 @@ async fn launch_canonical_dispatch(
         }
         Ok(PostInitDispatchOutcome::Ready(ready)) => *ready,
         Err(e) => {
-            close_kanban_row_on_early_exit(
-                server,
-                &dispatch_id,
-                "post-init dispatch stage",
-                request.project.as_deref(),
-            )
-            .await;
-            return Err(e);
+            // The plan stage reports whether it already conditionally
+            // published a terminal failure (or safely refused to clobber a
+            // concurrent winner). Blind-closing the row here would clobber
+            // that winner; ordinary post-init failures keep their existing
+            // closer behavior.
+            if !e.planner_settled {
+                close_kanban_row_on_early_exit(
+                    server,
+                    &dispatch_id,
+                    "post-init dispatch stage",
+                    request.project.as_deref(),
+                )
+                .await;
+            }
+            return Err(e.message);
         }
     };
 

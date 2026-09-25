@@ -23,11 +23,16 @@
 //! renamed to `llm_recorder` to reflect what it actually does.
 //!
 //! `foundry-runs` consumers today: `foundry_runtime_ops::daily_distill`,
-//! `dispatch_ops::dispatch_v2` (plan stage), `hub_ops::security_scan`,
-//! `hub_ops::register` (skill analysis), `hub_ops::evolve`. The
-//! `status_ops::ledger` distill marker at `foundry-runs/.last_distill_run`
-//! is independent of this recorder (it is written by the distill runner,
-//! not by a recorded call).
+//! `hub_ops::security_scan`, `hub_ops::register` (skill analysis),
+//! `hub_ops::evolve`. The `status_ops::ledger` distill marker at
+//! `foundry-runs/.last_distill_run` is independent of this recorder (it is
+//! written by the distill runner, not by a recorded call).
+//!
+//! #1664: the surviving V2 staffing plan stage (`dispatch_ops::dispatch_v2`)
+//! no longer records through this module. A successful plan payload must not
+//! publish a second, uncommitted copy of the model output as `result.md`;
+//! the plan and its `model-invocation-v1` receipt are committed together into
+//! `status.json#/model_plan` instead (see `model_plan_commit`).
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -116,6 +121,21 @@ impl LlmCallRecorder {
 
     pub fn runs_dir(&self) -> &Path {
         &self.runs_dir
+    }
+
+    /// Acquire one bounded-concurrency slot without writing this recorder's
+    /// run-directory artifacts. Used by a caller whose durable publication is
+    /// elsewhere (the V2 plan stage publishes only
+    /// `status.json#/model_plan`). The caller must hold the returned permit
+    /// for the whole provider call, so the existing admission limit
+    /// (`CLAUDE_POOL_MAX_CONCURRENT` / [`DEFAULT_MAX_CONCURRENT`]) is
+    /// preserved without re-introducing the recorder's success artifact.
+    pub async fn acquire_slot(&self) -> Result<tokio::sync::OwnedSemaphorePermit, String> {
+        self.sem
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|e| format!("llm recorder semaphore closed: {e}"))
     }
 
     /// Record a provider-executor call: acquire a bounded-concurrency
@@ -471,6 +491,38 @@ mod tests {
         assert!(
             status.get("model_invocation").is_none(),
             "text-only adapter must preserve its legacy status shape"
+        );
+    }
+
+    /// #1664: `acquire_slot` must reuse the recorder's actual semaphore, admit
+    /// only up to the configured limit without writing any run-directory
+    /// artifact, and release on drop (so a cancelled or errored provider call
+    /// cannot leak the slot).
+    #[tokio::test]
+    async fn acquire_slot_is_bounded_and_released_on_drop_without_artifacts() {
+        let app_home = tempfile::tempdir().expect("temp app home");
+        let recorder = LlmCallRecorder::new_in_app_home(1, app_home.path());
+
+        let first = recorder.acquire_slot().await.expect("first slot");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), recorder.acquire_slot())
+                .await
+                .is_err(),
+            "a second slot must not be admitted while the limit-1 permit is held"
+        );
+
+        drop(first);
+        let _second = tokio::time::timeout(Duration::from_millis(500), recorder.acquire_slot())
+            .await
+            .expect("the released permit must be re-admitted")
+            .expect("second slot");
+
+        assert!(
+            std::fs::read_dir(recorder.runs_dir())
+                .expect("runs directory")
+                .next()
+                .is_none(),
+            "slot admission must not write any run-directory artifact"
         );
     }
 }

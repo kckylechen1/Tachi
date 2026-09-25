@@ -268,6 +268,38 @@ impl super::super::LlmClient {
         .map(|outcome| outcome.text)
     }
 
+    /// Provider-only reasoning call that keeps this lane's full serving
+    /// policy — [`Self::call_lane_llm`]'s per-tier key rotation/retry and any
+    /// configured cross-provider fallback — while returning the actual
+    /// serving engine's persisted-safe receipt.
+    ///
+    /// It is the receipt-bearing sibling of
+    /// [`Self::call_reasoning_llm_provider_only`]. It deliberately does **not**
+    /// use [`Self::call_reasoning_llm_provider_only_with_receipt`], which
+    /// collapses the call to a single primary-tier request and would silently
+    /// replace the pre-existing retry/key-rotation/provider-fallback policy.
+    /// Durable producers that must not change routing behavior use this
+    /// method.
+    pub async fn call_reasoning_llm_provider_only_with_serving_receipt(
+        &self,
+        system: &str,
+        user: &str,
+        model: Option<&str>,
+        temperature: f32,
+        max_tokens: u32,
+    ) -> Result<Generated<String>, String> {
+        self.call_lane_llm(
+            ChatLane::Reasoning,
+            system,
+            user,
+            model,
+            temperature,
+            max_tokens,
+        )
+        .await
+        .map(|outcome| outcome.into_generated(ModelInvocationLaneV1::Reasoning))
+    }
+
     /// Spend-aware provider-only reasoning call with a public-safe receipt.
     /// It makes at most one HTTP request against the primary reasoning tier:
     /// no key-pool retry, same-case retry, fallback provider, or Claude CLI.
