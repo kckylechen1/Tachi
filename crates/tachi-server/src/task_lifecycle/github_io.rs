@@ -1,5 +1,64 @@
 use super::*;
 
+/// #1693 compact status/intake: whitelist-shape one GitHub issue snapshot
+/// for compact responses. Identifiers, state, labels, and reference paths
+/// stay; `body` (and any comment content) is omitted WHOLE — never
+/// truncated — because the caller already holds the ref and asked for a
+/// compact read. The explicit full reads (non-compact status, intake
+/// `format=full`) retain the complete snapshot. Shared by the status
+/// cycle receipt and the intake receipt.
+pub(super) fn compact_issue_snapshot_value(snapshot: &Value) -> Value {
+    whitelist_snapshot_value(
+        snapshot,
+        &[
+            "repo",
+            "number",
+            "title",
+            "labels",
+            "state",
+            "url",
+            "doc_paths",
+            "spec_paths",
+            "source",
+        ],
+    )
+}
+
+/// #1693 compact status: the PR-snapshot counterpart. PR snapshots carry
+/// no body today; the whitelist keeps this honest if one ever appears.
+pub(super) fn compact_pr_snapshot_value(snapshot: &Value) -> Value {
+    whitelist_snapshot_value(
+        snapshot,
+        &[
+            "repo",
+            "number",
+            "title",
+            "state",
+            "url",
+            "head_ref",
+            "base_ref",
+            "review_decision",
+            "review",
+            "mergeable",
+            "merge_state",
+            "source",
+        ],
+    )
+}
+
+/// Keep only the whitelisted, non-null fields: presence assertions over
+/// identifiers/state/references — everything else (bodies, comments,
+/// free-form content) is omitted whole rather than truncated.
+fn whitelist_snapshot_value(snapshot: &Value, keys: &[&str]) -> Value {
+    let mut compact = serde_json::Map::new();
+    for key in keys {
+        if let Some(field) = snapshot.get(*key).filter(|value| !value.is_null()) {
+            compact.insert((*key).to_string(), field.clone());
+        }
+    }
+    Value::Object(compact)
+}
+
 pub(super) async fn read_issue_snapshot(
     server: &MemoryServer,
     target: &GithubTarget,
