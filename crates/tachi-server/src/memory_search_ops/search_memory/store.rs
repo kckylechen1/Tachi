@@ -168,6 +168,62 @@ pub(super) fn with_named_project_search(
     }
 }
 
+/// Search a named project while retaining ResourceLinks only for rows proven
+/// to have come from this exact project store. The sidecar is populated inside
+/// the same store callback as `search_store`; it is never reconstructed from a
+/// slim JSON row or looked up by ID in another store.
+pub(super) fn with_named_project_search_with_resources(
+    server: &MemoryServer,
+    project_name: &str,
+    params: &SearchMemoryParams,
+    record_access: bool,
+    recall_config: Option<&RecallConfig>,
+    context: impl Into<String>,
+) -> Result<
+    (
+        Vec<memcore::SearchResult>,
+        HashMap<String, rmcp::model::Resource>,
+    ),
+    String,
+> {
+    let context = context.into();
+    let action = |store: &mut MemoryStore| {
+        let source_fingerprint =
+            crate::memory_resources::verified_project_source(server, project_name, store);
+        let results = search_store(store, params, record_access, recall_config, false)
+            .map_err(|error| format!("{context}: {error}"))?;
+        let mut links = HashMap::new();
+        if let Some(source_fingerprint) = source_fingerprint.filter(|before| {
+            crate::memory_resources::verified_project_source(server, project_name, store).as_ref()
+                == Some(before)
+        }) {
+            for result in &results {
+                if crate::memory_resources::eligible_search_entry(&result.entry, params) {
+                    if let Some(link) = crate::memory_resources::resource_link_for_entry(
+                        &source_fingerprint,
+                        &result.entry,
+                    ) {
+                        links.insert(result.entry.id.clone(), link);
+                    }
+                }
+            }
+        }
+        Ok((results, links))
+    };
+
+    let effective_record_access =
+        record_access && named_project_is_bound_project(server, project_name);
+    if effective_record_access {
+        server.with_named_project_store(project_name, action)
+    } else {
+        // Resource issuance is only requested for explicitly bound project
+        // searches, which use the ordinary named-project store route here.
+        // Keep the same read-only pool path as the non-resource search when
+        // access recording is not needed.
+        server.with_named_project_store_read(project_name, action)
+    }
+}
+
 fn named_project_is_bound_project(server: &MemoryServer, project_name: &str) -> bool {
     let Some(bound_project_db) = server.project_db_path_buf() else {
         return false;

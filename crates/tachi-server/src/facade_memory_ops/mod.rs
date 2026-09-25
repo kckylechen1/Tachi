@@ -270,6 +270,94 @@ pub(crate) async fn handle_tachi_memory(
     }
 }
 
+/// MCP tool entry point that keeps the established text payload byte-for-byte
+/// and adds query-issued ResourceLinks only for eligible project-memory hits.
+pub(crate) async fn handle_tachi_memory_with_resources(
+    server: &MemoryServer,
+    params: TachiMemoryParams,
+    bound_project: Option<&str>,
+) -> Result<(String, Vec<rmcp::model::Resource>), String> {
+    if !params.action.eq_ignore_ascii_case("search") {
+        return handle_tachi_memory(server, params)
+            .await
+            .map(|body| (body, Vec::new()));
+    }
+    if should_forward_facade_read("search") {
+        if let Some(body) =
+            crate::cli_client::maybe_forward_server_read(server, "tachi_memory", &params).await?
+        {
+            return Ok((body, Vec::new()));
+        }
+    }
+    let query = params
+        .query
+        .clone()
+        .ok_or_else(|| "query is required when action='search'".to_string())?;
+    let search_params = TachiSearchParams {
+        query,
+        scope: params.scope.clone().unwrap_or_else(|| "all".to_string()),
+        top_k: crate::clamp_facade_top_k(params.top_k),
+        path_prefix: params.path_prefix.clone(),
+        project: params.project.clone(),
+        domain: params.domain.clone(),
+        file_context: params.file_context.clone(),
+        error_context: params.error_context.clone(),
+        context_symbols: Vec::new(),
+        agent_role: params.agent_role.clone(),
+        category: params.category.clone(),
+        include_archived: params.include_archived,
+        include_training: params.include_training,
+        enable_rerank: params.enable_rerank,
+        as_of: params.as_of.clone(),
+    };
+    if wants_json(params.format.as_deref()) {
+        let (sections, scope_remapped, scope, links) =
+            crate::facade_search_ops::collect_tachi_search_sections_with_resources(
+                server,
+                &search_params,
+                bound_project,
+            )
+            .await;
+        let sections = sections
+            .into_iter()
+            .map(|(name, rows)| json_search_section(name, rows))
+            .collect::<Vec<_>>();
+        let binding = crate::memory_search_ops::library_binding_receipt(
+            server,
+            search_params.project.as_deref(),
+        );
+        let empty_results = sections.iter().all(|section| {
+            section
+                .get("rows")
+                .and_then(serde_json::Value::as_array)
+                .is_none_or(|rows| rows.is_empty())
+        });
+        let mut response = serde_json::Map::new();
+        response.insert("status".to_string(), json!("completed"));
+        response.insert("query".to_string(), json!(search_params.query));
+        response.insert("scope".to_string(), json!(scope));
+        response.insert("scope_remapped".to_string(), json!(scope_remapped));
+        response.insert("sections".to_string(), serde_json::Value::Array(sections));
+        response.insert(
+            "binding_summary".to_string(),
+            json!(crate::memory_search_ops::binding_summary_line(&binding)),
+        );
+        if scope_remapped
+            || empty_results
+            || crate::memory_search_ops::binding_receipt_is_notable(&binding)
+        {
+            response.insert("binding".to_string(), binding);
+        }
+        return Ok((json_string(&serde_json::Value::Object(response))?, links));
+    }
+    crate::facade_search_ops::handle_tachi_search_with_resources(
+        server,
+        search_params,
+        bound_project,
+    )
+    .await
+}
+
 fn should_forward_facade_read(action: &str) -> bool {
     matches!(action, "search" | "get" | "briefing" | "alerts" | "ask")
 }

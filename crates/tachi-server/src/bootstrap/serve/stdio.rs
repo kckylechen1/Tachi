@@ -845,10 +845,81 @@ impl rmcp::ServerHandler for StdioProxyServer {
         Ok(result)
     }
 
+    async fn read_resource(
+        &self,
+        request: rmcp::model::ReadResourceRequestParams,
+        context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
+    ) -> Result<rmcp::model::ReadResourceResponse, rmcp::ErrorData> {
+        let mode = crate::mcp_peer::McpPeerMode::from_context(&context)?;
+        let identity = self.resolve_request_identity(mode, &context.meta)?;
+        // Resource failures must keep the daemon's non-disclosing envelope;
+        // tool-call error wrapping would change the code and expose transport
+        // details. Protocol identity errors above remain transport errors.
+        let unavailable = || rmcp::ErrorData::resource_not_found("resource unavailable", None);
+        let current = self.current_daemon();
+        let mut result = match crate::cli_client::read_daemon_resource_with_profile_and_identity(
+            &current,
+            request.clone(),
+            identity.client_project.as_deref(),
+            identity.tool_profile,
+            identity.client.as_deref(),
+            identity.agent_identity.clone(),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(error) if error.allows_in_process_fallback() => {
+                match self.refresh_daemon(&current, &identity).await {
+                    Some(fresh) => {
+                        crate::cli_client::read_daemon_resource_with_profile_and_identity(
+                            &fresh,
+                            request,
+                            identity.client_project.as_deref(),
+                            identity.tool_profile,
+                            identity.client.as_deref(),
+                            identity.agent_identity,
+                        )
+                        .await
+                        .map_err(|_| unavailable())?
+                    }
+                    None => return Err(unavailable()),
+                }
+            }
+            Err(_) => return Err(unavailable()),
+        };
+        if mode == crate::mcp_peer::McpPeerMode::Modern20260728 {
+            match &mut result {
+                rmcp::model::ReadResourceResponse::Complete(complete) => {
+                    complete
+                        .result_type
+                        .get_or_insert(rmcp::model::ResultType::COMPLETE);
+                    complete.ttl_ms.get_or_insert(0);
+                    complete
+                        .cache_scope
+                        .get_or_insert(rmcp::model::CacheScope::Private);
+                }
+                rmcp::model::ReadResourceResponse::InputRequired(_) => {
+                    return Err(rmcp::ErrorData::internal_error(
+                        "Tachi Resources require a complete read result",
+                        None,
+                    ));
+                }
+                _ => {
+                    return Err(rmcp::ErrorData::internal_error(
+                        "unsupported Resource response",
+                        None,
+                    ));
+                }
+            }
+        }
+        Ok(result)
+    }
+
     fn get_info(&self) -> rmcp::model::ServerInfo {
         rmcp::model::ServerInfo::new(
             rmcp::model::ServerCapabilities::builder()
                 .enable_tools()
+                .enable_resources()
                 .build(),
         )
         .with_instructions(crate::server_instructions::mcp_server_instructions())

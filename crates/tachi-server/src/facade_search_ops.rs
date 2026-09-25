@@ -93,6 +93,35 @@ pub(crate) async fn handle_tachi_search(
     }
 
     let (sections, scope_remapped, scope) = collect_tachi_search_sections(server, &params).await;
+    Ok(format_tachi_search_output(
+        server,
+        &params,
+        sections,
+        scope_remapped,
+        &scope,
+    ))
+}
+
+pub(crate) async fn handle_tachi_search_with_resources(
+    server: &MemoryServer,
+    params: TachiSearchParams,
+    bound_project: Option<&str>,
+) -> Result<(String, Vec<rmcp::model::Resource>), String> {
+    let (sections, scope_remapped, scope, links) =
+        collect_tachi_search_sections_with_resources(server, &params, bound_project).await;
+    Ok((
+        format_tachi_search_output(server, &params, sections, scope_remapped, &scope),
+        links,
+    ))
+}
+
+fn format_tachi_search_output(
+    server: &MemoryServer,
+    params: &TachiSearchParams,
+    sections: Vec<(String, Value)>,
+    scope_remapped: bool,
+    scope: &str,
+) -> String {
     let binding =
         crate::memory_search_ops::library_binding_receipt(server, params.project.as_deref());
     let binding_md = crate::memory_search_ops::format_binding_markdown(&binding);
@@ -112,13 +141,46 @@ pub(crate) async fn handle_tachi_search(
         );
     }
 
-    Ok(output)
+    output
 }
 
 pub(crate) async fn collect_tachi_search_sections(
     server: &MemoryServer,
     params: &TachiSearchParams,
 ) -> (Vec<(String, Value)>, bool, String) {
+    let (sections, scope_remapped, scope, _) =
+        collect_tachi_search_sections_inner(server, params, None).await;
+    (sections, scope_remapped, scope)
+}
+
+pub(crate) async fn collect_tachi_search_sections_with_resources(
+    server: &MemoryServer,
+    params: &TachiSearchParams,
+    bound_project: Option<&str>,
+) -> (
+    Vec<(String, Value)>,
+    bool,
+    String,
+    Vec<rmcp::model::Resource>,
+) {
+    let resource_project = bound_project
+        .filter(|_| {
+            crate::memory_resources::resource_issuance_allowed(server, params, bound_project)
+        })
+        .map(str::to_string);
+    collect_tachi_search_sections_inner(server, params, resource_project).await
+}
+
+async fn collect_tachi_search_sections_inner(
+    server: &MemoryServer,
+    params: &TachiSearchParams,
+    resource_project: Option<String>,
+) -> (
+    Vec<(String, Value)>,
+    bool,
+    String,
+    Vec<rmcp::model::Resource>,
+) {
     let top_k = crate::clamp_facade_top_k(params.top_k);
     let scope = params.scope.to_ascii_lowercase();
     let effective_scope = match scope.as_str() {
@@ -127,6 +189,7 @@ pub(crate) async fn collect_tachi_search_sections(
     };
     let scope_remapped = effective_scope != scope.as_str();
     let mut sections: Vec<(String, Value)> = Vec::new();
+    let mut resource_links = Vec::new();
 
     if effective_scope == "memory" || effective_scope == "all" || effective_scope == "sft" {
         let mem_params = SearchMemoryParams {
@@ -161,12 +224,43 @@ pub(crate) async fn collect_tachi_search_sections(
             format: Some("json".to_string()),
         };
         let memory_path_prefix = mem_params.path_prefix.clone();
-        match handle_search_memory_with_access(server, mem_params, false, true).await {
-            Ok(raw) => sections.push((
-                "Memory".to_string(),
-                parse_memory_rows(raw, top_k, memory_path_prefix.as_deref()),
-            )),
-            Err(e) => sections.push(("Memory".to_string(), Value::String(format!("Error: {e}")))),
+        if let Some(project_name) = resource_project.as_deref() {
+            match crate::memory_search_ops::handle_search_memory_with_resources(
+                server,
+                mem_params,
+                project_name,
+                true,
+            )
+            .await
+            {
+                Ok((raw, links)) => {
+                    let rows = parse_memory_rows(raw, top_k, memory_path_prefix.as_deref());
+                    let visible_ids: std::collections::HashSet<&str> = rows
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|row| row.get("id").and_then(Value::as_str))
+                        .collect();
+                    resource_links.extend(links.into_iter().filter(|link| {
+                        crate::memory_resources::parse_resource_uri(&link.uri)
+                            .is_some_and(|reference| visible_ids.contains(reference.id.as_str()))
+                    }));
+                    sections.push(("Memory".to_string(), rows));
+                }
+                Err(e) => {
+                    sections.push(("Memory".to_string(), Value::String(format!("Error: {e}"))))
+                }
+            }
+        } else {
+            match handle_search_memory_with_access(server, mem_params, false, true).await {
+                Ok(raw) => sections.push((
+                    "Memory".to_string(),
+                    parse_memory_rows(raw, top_k, memory_path_prefix.as_deref()),
+                )),
+                Err(e) => {
+                    sections.push(("Memory".to_string(), Value::String(format!("Error: {e}"))))
+                }
+            }
         }
     }
 
@@ -261,5 +355,5 @@ pub(crate) async fn collect_tachi_search_sections(
         }
     }
 
-    (sections, scope_remapped, scope)
+    (sections, scope_remapped, scope, resource_links)
 }

@@ -1335,9 +1335,59 @@ impl ServerHandler for MemoryServer {
         Ok(result)
     }
 
+    async fn read_resource(
+        &self,
+        request: rmcp::model::ReadResourceRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<rmcp::model::ReadResourceResponse, rmcp::ErrorData> {
+        let mode = crate::mcp_peer::McpPeerMode::from_context(&context)?;
+        reject_modern_direct_stdio(mode, &context)?;
+        let request_server = match mode {
+            crate::mcp_peer::McpPeerMode::Legacy => None,
+            crate::mcp_peer::McpPeerMode::Modern20260728 => {
+                Some(self.clone_for_modern_request(&context)?)
+            }
+        };
+        let server = request_server.as_ref().unwrap_or(self);
+        server.touch_activity();
+
+        let unavailable = || rmcp::ErrorData::resource_not_found("resource unavailable", None);
+        let Some(reference) = crate::memory_resources::parse_resource_uri(&request.uri) else {
+            return Err(unavailable());
+        };
+        let Some(project_name) = server
+            .session_project()
+            .filter(|project| !project.trim().is_empty())
+        else {
+            return Err(unavailable());
+        };
+        let profile = server.active_tool_profile();
+        if !tachi_hub::tool_visible(
+            "tachi_memory",
+            profile,
+            current_exposed_tool_patterns().as_deref(),
+        ) || !tachi_hub::facade_action_allowed("tachi_memory", Some("get"), profile)
+        {
+            return Err(unavailable());
+        }
+        let body = crate::memory_resources::read_resource_text(server, &project_name, &reference)
+            .map_err(|_| unavailable())?;
+        Ok(crate::memory_resources::read_response(
+            request.uri,
+            body,
+            mode == crate::mcp_peer::McpPeerMode::Modern20260728,
+        )
+        .into())
+    }
+
     fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
-            .with_instructions(crate::server_instructions::mcp_server_instructions())
+        ServerInfo::new(
+            ServerCapabilities::builder()
+                .enable_tools()
+                .enable_resources()
+                .build(),
+        )
+        .with_instructions(crate::server_instructions::mcp_server_instructions())
     }
 
     fn initialize(

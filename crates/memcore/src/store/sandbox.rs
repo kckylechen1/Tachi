@@ -9,6 +9,23 @@ use crate::error::MemoryError;
 use crate::MemoryStore;
 
 impl MemoryStore {
+    /// Whether any caller-supplied role sandbox policy is configured.
+    ///
+    /// Resource reads do not accept an authenticated principal, so they must
+    /// fail closed for the whole feature whenever this policy table is in use.
+    pub fn has_configured_sandbox_rules(&self) -> Result<bool, MemoryError> {
+        if self.admitted_partition.is_some() {
+            return Err(MemoryError::PrivatePartitionRefused);
+        }
+        self.conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sandbox_rules LIMIT 1)",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+    }
+
     /// Set a sandbox access rule for an agent role + path pattern.
     pub fn set_sandbox_rule(
         &self,
