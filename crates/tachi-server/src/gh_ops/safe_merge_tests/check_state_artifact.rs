@@ -108,6 +108,39 @@ async fn check_state_artifact_writes_machine_readable_flow_snapshot() {
         json!("check_state.json")
     );
 
+    // Consume the production writer's actual wire shape through Task status.
+    // Compact output must keep the evidence reference and pending/null
+    // conclusion, not infer a replacement state from the display label.
+    let server = crate::tests::make_server();
+    let params = serde_json::from_value(json!({
+        "action": "status", "flow_id": flow, "compact": true,
+    }))
+    .unwrap();
+    let compact: serde_json::Value = serde_json::from_str(
+        &crate::task_lifecycle::handle_task_cycle_status(&server, &params)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    for key in [
+        "state",
+        "status",
+        "conclusion",
+        "source",
+        "artifact",
+        "failed_checks_recorded_only",
+        "updated_at",
+    ] {
+        assert!(
+            compact["github"]["cached"]["checks"].get(key).is_some(),
+            "missing {key}"
+        );
+        assert_eq!(
+            compact["github"]["cached"]["checks"][key],
+            status["github"]["checks"][key]
+        );
+    }
+
     if let Some(v) = original {
         std::env::set_var("TACHI_RUN_ROOT", v);
     } else {

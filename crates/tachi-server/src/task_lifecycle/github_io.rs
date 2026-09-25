@@ -88,6 +88,10 @@ pub(super) fn compact_cached_github_value(cached: &Value) -> Value {
                 "head_sha",
                 "policy",
                 "requested_mode",
+                "dry_run",
+                "will_merge",
+                "merge_attempted",
+                "merge_executed",
                 "labels",
                 "doc_paths",
                 "spec_paths",
@@ -95,16 +99,79 @@ pub(super) fn compact_cached_github_value(cached: &Value) -> Value {
             ],
         );
         for (key, fields) in [
-            ("checks", &["state", "updated_at"][..]),
-            ("review", &["state", "updated_at"][..]),
+            (
+                "checks",
+                &[
+                    "state",
+                    "status",
+                    "conclusion",
+                    "source",
+                    "artifact",
+                    "failed_checks_recorded_only",
+                    "dry_run",
+                    "updated_at",
+                    "required",
+                    "allow_missing",
+                    "head_consistent",
+                    "head_consistency_state",
+                ][..],
+            ),
+            (
+                "review",
+                &["state", "updated_at", "required", "allow_missing_decision"][..],
+            ),
+            (
+                "head_consistency",
+                &[
+                    "head_sha",
+                    "checks_head_sha",
+                    "review_decision_head_sha",
+                    "head_consistent",
+                    "state",
+                    "requirement",
+                    "source",
+                ][..],
+            ),
+            (
+                "flow",
+                &[
+                    "flow_id",
+                    "linked_issue_refs",
+                    "has_linked_issue",
+                    "required",
+                ][..],
+            ),
+            (
+                "verification",
+                &[
+                    "flow_id",
+                    "overall",
+                    "required_total",
+                    "current_head_sha",
+                    "expected_head",
+                    "observed_pr_head_sha",
+                    "claim_id",
+                    "claim_transition_version",
+                    "passed",
+                    "failed",
+                    "pending",
+                    "stale",
+                    "waiting_on",
+                    "reasons",
+                    "ledger_updated_at",
+                ][..],
+            ),
+            (
+                "ship",
+                &["status", "branch", "commit_sha", "files", "warnings"][..],
+            ),
         ] {
-            if let Some(nested) = object.get(key).filter(|value| value.is_object()) {
+            if let Some(nested) = object.get(key) {
                 compact.insert(
                     (*key).to_string(),
-                    Value::Object(whitelist_object_fields(
-                        nested.as_object().expect("checked object"),
-                        fields,
-                    )),
+                    compact_object_value(nested, |value| {
+                        Value::Object(whitelist_object_fields(value, fields))
+                    }),
                 );
             }
         }
@@ -179,7 +246,8 @@ fn compact_object_value(
     }
 }
 
-/// Keep only the whitelisted, non-null fields: presence assertions over
+/// Keep only the whitelisted fields, including explicit unknown/null values:
+/// presence assertions over
 /// identifiers/state/references — everything else (bodies, comments,
 /// free-form content) is omitted whole rather than truncated.
 fn whitelist_object_fields(
@@ -188,7 +256,7 @@ fn whitelist_object_fields(
 ) -> serde_json::Map<String, Value> {
     let mut compact = serde_json::Map::new();
     for key in keys {
-        if let Some(field) = object.get(*key).filter(|value| !value.is_null()) {
+        if let Some(field) = object.get(*key) {
             compact.insert((*key).to_string(), field.clone());
         }
     }

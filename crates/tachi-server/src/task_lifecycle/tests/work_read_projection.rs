@@ -1216,3 +1216,28 @@ fn compact_cached_github_whitelist_is_closed_and_drops_free_form_content() {
         json!("unknown")
     );
 }
+#[test]
+fn compact_cached_gate_and_ship_decisions_preserve_evidence() {
+    let decisions = json!({
+        "head_consistency": {
+            "head_sha": "abc", "checks_head_sha": null,
+            "review_decision_head_sha": null, "head_consistent": false,
+            "state": "unknown", "requirement": true, "source": "single_pr_snapshot"
+        },
+        "flow": {"flow_id": "flow_gate", "linked_issue_refs": ["o/r#8"],
+            "has_linked_issue": true, "required": true},
+        "verification": {"flow_id": "flow_gate", "overall": "pending", "required_total": 1,
+            "current_head_sha": "abc", "expected_head": "abc", "observed_pr_head_sha": "def",
+            "claim_id": "claim_gate", "claim_transition_version": 2,
+            "passed": [], "failed": [], "pending": ["test"], "stale": [],
+            "waiting_on": ["verification:claim_head_mismatch"], "reasons": [],
+            "ledger_updated_at": "2026-09-25T00:00:00Z"},
+        "ship": {"status": "blocked", "branch": "work", "commit_sha": null,
+            "files": ["src/lib.rs"], "warnings": ["verification_required"]}
+    });
+    let mut input = decisions.clone();
+    input["verification"]["error"] = json!("raw diagnostic body");
+    input["head_consistency"]["note"] = json!("free-form explanation");
+    input["ship"]["steps"] = json!([{"stdout": "raw command output"}]);
+    assert_eq!(compact_cached_github_value(&input), decisions);
+}
