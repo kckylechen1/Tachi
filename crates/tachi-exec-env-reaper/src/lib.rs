@@ -395,13 +395,19 @@ impl HolderCheck {
 /// the host's process table.
 type HolderProbe = dyn Fn(&Path, Option<HolderExclusion>) -> HolderCheck;
 
-/// The one holder the reaper itself creates while pinning a candidate's inode.
-/// Both fields must match before an `lsof` row is ignored; excluding the whole
-/// process would hide unrelated descriptors and weaken the holder fence.
+/// The one holder the reaper itself creates while pinning a candidate's inode:
+/// this process's read-only directory handle, identified by PID, descriptor
+/// number, and the `fstat` identity (device major/minor, inode) of that very
+/// descriptor. Every field must match before an `lsof` row is ignored
+/// (tachi#1978 cold review round 4); excluding the whole process would hide
+/// unrelated descriptors and weaken the holder fence.
 #[derive(Debug, Clone, Copy)]
 pub struct HolderExclusion {
     pid: u32,
     fd: i32,
+    dev_major: u64,
+    dev_minor: u64,
+    ino: u64,
 }
 
 /// Real probe: `lsof +D <dir>` (recursive — a live `cargo` holds files deep
@@ -452,10 +458,12 @@ fn lsof_holder_probe_with(
     }
 }
 
+// Rows are split on `\n` only (not `str::lines`, which would also swallow a
+// trailing `\r` from a row's NAME).
 fn without_ignored_holder(stdout: &str, ignored: HolderExclusion, target: &Path) -> String {
     let targets = pin_target_spellings(target);
     stdout
-        .lines()
+        .split('\n')
         .filter(|line| !is_ignored_holder_row(line, ignored, &targets))
         .collect::<Vec<_>>()
         .join("\n")
@@ -465,14 +473,14 @@ fn without_ignored_holder(stdout: &str, ignored: HolderExclusion, target: &Path)
 fn ignored_holder_rows(stdout: &str, ignored: HolderExclusion, target: &Path) -> usize {
     let targets = pin_target_spellings(target);
     stdout
-        .lines()
+        .split('\n')
         .filter(|line| is_ignored_holder_row(line, ignored, &targets))
         .count()
 }
 
-/// The probed target as lsof may print it in NAME: made absolute without
-/// resolving symlinks, and canonical (lsof prints the resolved path, e.g.
-/// `/private/var/...` for `/var/...` on macOS).
+/// The exact spellings lsof may print in NAME for the pinned directory: the
+/// target made absolute without resolving symlinks, and canonical (lsof
+/// prints the resolved path, e.g. `/private/var/...` for `/var/...` on macOS).
 fn pin_target_spellings(target: &Path) -> Vec<PathBuf> {
     let mut spellings = Vec::new();
     for spelling in [std::path::absolute(target), target.canonicalize()]
@@ -486,64 +494,86 @@ fn pin_target_spellings(target: &Path) -> Vec<PathBuf> {
     spellings
 }
 
-/// A row is the reaper's own pin only when ALL of these hold (tachi#1978
-/// cold review round 3):
+/// A row is the reaper's own pin only when it describes that exact open
+/// descriptor (tachi#1978 cold review round 4 — identity, not shape):
 ///
-/// 1. it is a complete row of lsof's default layout: the eight columns
-///    before NAME (`COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE`, the
-///    header already checked exactly) plus a non-empty NAME;
-/// 2. its FD token matches lsof's FD grammar exactly ([`lsof_fd_number`]);
-/// 3. its PID and numeric FD equal the exclusion;
-/// 4. its NAME is a plain absolute path at or under the probed target.
+/// 1. PID == the pin's PID and the numeric FD == the pin's descriptor;
+/// 2. the FD token is exactly `<digits>r` plus an optional documented lock
+///    character ([`lsof_read_fd_number`]) — the pin is a read-only open, so
+///    `u`/`w` modes are rejected;
+/// 3. TYPE is exactly `DIR` — the pin is a directory handle;
+/// 4. DEVICE is exactly `<major>,<minor>` of the pinned descriptor's
+///    `st_dev`, and NODE is exactly its `st_ino` in canonical decimal (the
+///    `fstat` identity taken when the exclusion was built);
+/// 5. NAME — everything after the single space that ends the NODE column,
+///    untrimmed — equals the target's absolute or canonical spelling exactly
+///    (not "at or under": the pin is on the target itself).
 ///
+/// Every number must be canonical ASCII decimal (no sign, no leading zero).
 /// Anything else is not ignored: it stays a holder row (⇒ `Held`).
 fn is_ignored_holder_row(line: &str, ignored: HolderExclusion, targets: &[PathBuf]) -> bool {
     let Some((columns, name)) = split_lsof_row(line) else {
         return false;
     };
-    columns[1].parse::<u32>() == Ok(ignored.pid)
-        && lsof_fd_number(columns[3]) == Some(ignored.fd)
-        && name_at_or_under(name, targets)
+    let [_command, pid, _user, fd, kind, device, _size, node] = columns;
+    canonical_decimal(pid) == Some(u64::from(ignored.pid))
+        && lsof_read_fd_number(fd).is_some_and(|fd| i64::from(fd) == i64::from(ignored.fd))
+        && kind == "DIR"
+        && device.split_once(',').is_some_and(|(major, minor)| {
+            canonical_decimal(major) == Some(ignored.dev_major)
+                && canonical_decimal(minor) == Some(ignored.dev_minor)
+        })
+        && canonical_decimal(node) == Some(ignored.ino)
+        && targets.iter().any(|target| target.as_os_str() == name)
 }
 
-/// Split a default-format lsof row into its eight leading columns and the
-/// NAME remainder (which may itself contain spaces). `None` if any column or
-/// the NAME is missing.
+/// Split a default-format lsof row into its eight leading columns and NAME.
+/// Columns are space-padded, but lsof separates NODE from NAME with exactly
+/// one space; NAME is returned verbatim (not trimmed), so any extra leading
+/// or trailing whitespace makes it differ from the target. `None` if any
+/// column or the NAME is missing.
 fn split_lsof_row(line: &str) -> Option<([&str; 8], &str)> {
     let mut columns = [""; 8];
     let mut rest = line;
     for column in &mut columns {
-        rest = rest.trim_start();
-        let end = rest.find(char::is_whitespace)?;
+        rest = rest.trim_start_matches(' ');
+        let end = rest.find(' ')?;
         *column = &rest[..end];
         rest = &rest[end..];
     }
-    let name = rest.trim();
+    let name = rest.strip_prefix(' ')?;
     (!name.is_empty()).then_some((columns, name))
 }
 
-/// Numeric descriptor of an FD column token, only when the token is exactly
-/// lsof's grammar for an open numbered descriptor, per the FD section of
-/// lsof(8) (lsof 4.95.0 `Lsof.8`; identical in the lsof 4.91 man page on
-/// macOS): "the File Descriptor number of the file ... followed by one of
-/// these characters, describing the mode under which the file is open: r for
-/// read access; w for write access; u for read and write access; space if
-/// mode unknown and no lock character follows; `-' if mode unknown and lock
-/// character follows. The mode character is followed by one of these lock
-/// characters ...: N, r, R, w, W, u, U, x, X; space if there is no lock."
-///
-/// Accepted: `<digits><r|w|u>[N|r|R|w|W|u|U|x|X]`, nothing else. The
-/// unknown-mode spellings (space, `-`) are rejected: real pin rows on both
-/// hosts print `3r`, and an unknown mode is not proof it is our read-only
-/// handle — rejecting keeps the row a holder (fail closed).
-fn lsof_fd_number(token: &str) -> Option<i32> {
-    let digits = token.bytes().take_while(u8::is_ascii_digit).count();
-    if digits == 0 {
-        return None;
+/// `Some(n)` only for canonical ASCII decimal: digits only, no sign, no
+/// leading zero (except `0` itself), no overflow.
+fn canonical_decimal(token: &str) -> Option<u64> {
+    let canonical = !token.is_empty()
+        && token.bytes().all(|byte| byte.is_ascii_digit())
+        && (token == "0" || !token.starts_with('0'));
+    if canonical {
+        token.parse().ok()
+    } else {
+        None
     }
+}
+
+/// Numeric descriptor of a read-only FD token, per the FD section of lsof(8)
+/// (lsof 4.95.0 `Lsof.8`; identical in the lsof 4.91 man page on macOS): "the
+/// File Descriptor number of the file ... followed by one of these
+/// characters, describing the mode under which the file is open: r for read
+/// access; w for write access; u for read and write access; ... The mode
+/// character is followed by one of these lock characters ...: N, r, R, w, W,
+/// u, U, x, X; space if there is no lock."
+///
+/// Accepted: `<canonical digits>r[N|r|R|w|W|u|U|x|X]`, nothing else. The pin
+/// is opened read-only (real pin rows print `3r` on both hosts), so `w`, `u`
+/// and the unknown-mode spellings (space, `-`) are rejected.
+fn lsof_read_fd_number(token: &str) -> Option<i32> {
+    let digits = token.bytes().take_while(u8::is_ascii_digit).count();
     let (number, suffix) = token.split_at(digits);
     let mut suffix = suffix.chars();
-    if !matches!(suffix.next(), Some('r' | 'w' | 'u')) {
+    if suffix.next() != Some('r') {
         return None;
     }
     match suffix.next() {
@@ -553,23 +583,31 @@ fn lsof_fd_number(token: &str) -> Option<i32> {
     if suffix.next().is_some() {
         return None;
     }
-    number.parse().ok()
+    canonical_decimal(number).and_then(|number| i32::try_from(number).ok())
 }
 
-/// Whether lsof's NAME is a plain absolute path (no `.`/`..`/`//`) at or
-/// under one of the target spellings.
-fn name_at_or_under(name: &str, targets: &[PathBuf]) -> bool {
-    let path = Path::new(name);
-    let rebuilt: PathBuf = path.components().collect();
-    let plain = path.is_absolute()
-        && rebuilt.as_os_str() == path.as_os_str()
-        && path.components().all(|component| {
-            matches!(
-                component,
-                std::path::Component::RootDir | std::path::Component::Normal(_)
-            )
-        });
-    plain && targets.iter().any(|target| path.starts_with(target))
+/// `(major, minor)` of an `st_dev` exactly as lsof prints DEVICE for a local
+/// directory. Verified against real pin rows by
+/// `real_probe_reports_unheld_for_unheld_and_pin_only_dirs` on both hosts:
+/// Linux uses glibc's `gnu_dev_major/minor` encoding (lsof 4.95.0 on
+/// atom-dgx-2 printed `259,2`); macOS uses an 8-bit major in the top byte and
+/// a 24-bit minor (lsof 4.91 printed `1,17`). Elsewhere there is no verified
+/// encoding, so no exclusion is offered and the pin stays a holder.
+#[cfg(target_os = "linux")]
+fn lsof_device_numbers(dev: u64) -> Option<(u64, u64)> {
+    let major = ((dev >> 8) & 0xfff) | ((dev >> 32) & !0xfff);
+    let minor = (dev & 0xff) | ((dev >> 12) & !0xff);
+    Some((major, minor))
+}
+
+#[cfg(target_os = "macos")]
+fn lsof_device_numbers(dev: u64) -> Option<(u64, u64)> {
+    Some(((dev >> 24) & 0xff, dev & 0x00ff_ffff))
+}
+
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+fn lsof_device_numbers(_dev: u64) -> Option<(u64, u64)> {
+    None
 }
 
 /// Test shorthand: [`interpret_lsof_excluding`] with no rows removed, i.e. a
@@ -1201,12 +1239,21 @@ impl PinnedDirectory {
             .map(|meta| FileIdentity::from_metadata(&meta))
     }
 
+    /// The exclusion for exactly this handle: PID, descriptor number, and the
+    /// descriptor's own `fstat` identity. `None` (the pin then counts as a
+    /// holder) if the identity cannot be read or its DEVICE form is unknown.
     #[cfg(unix)]
     fn holder_exclusion(&self) -> Option<HolderExclusion> {
         use std::os::fd::AsRawFd;
+        use std::os::unix::fs::MetadataExt;
+        let meta = self.handle.metadata().ok()?;
+        let (dev_major, dev_minor) = lsof_device_numbers(meta.dev())?;
         Some(HolderExclusion {
             pid: std::process::id(),
             fd: self.handle.as_raw_fd(),
+            dev_major,
+            dev_minor,
+            ino: meta.ino(),
         })
     }
 

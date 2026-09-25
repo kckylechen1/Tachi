@@ -495,7 +495,15 @@ fn lsof_excludes_only_the_reapers_exact_pin() {
     // tachi#1978 round 3: the exclusion also checks NAME against the target.
     let filtered = without_ignored_holder(
         stdout,
-        HolderExclusion { pid: 123, fd: 7 },
+        // Round 4: the exclusion carries the pin's fstat identity, which the
+        // pin row below prints (DEVICE 1,16, NODE 123).
+        HolderExclusion {
+            pid: 123,
+            fd: 7,
+            dev_major: 1,
+            dev_minor: 16,
+            ino: 123,
+        },
         Path::new("/tmp/x-target"),
     );
 
@@ -700,7 +708,7 @@ fn stub_pin_only_listing_stays_unheld() {
     let mut stdout = LSOF_HEADER.to_vec();
     stdout
         .extend_from_slice(format!("tachi 123 u 7r DIR 1,4 0 1 {}\n", target.display()).as_bytes());
-    let pin = Some(HolderExclusion { pid: 123, fd: 7 });
+    let pin = Some(stub_pin());
     for code in [0, 1] {
         assert_eq!(
             stub_lsof_probe(&format!("pin{code}"), &target, &stdout, b"", code, pin),
@@ -737,9 +745,10 @@ fn real_probe_reports_unheld_for_unheld_and_pin_only_dirs() {
     );
     assert_eq!(lsof_holder_probe(&target, exclusion), HolderCheck::None);
 
-    // Round 3: the real pin row, exactly as this host's lsof prints it,
-    // passes the strict predicate (default layout, FD grammar, PID/FD, NAME
-    // under the target). Printed so the captured row is on record.
+    // Rounds 3-4: the real pin row, exactly as this host's lsof prints it,
+    // is recognized by identity: read-only DIR, DEVICE and NODE equal to the
+    // pinned descriptor's own fstat, NAME equal to the target. Printed so the
+    // captured row is on record.
     let exclusion = exclusion.expect("unix pin exclusion");
     let out = Command::new("lsof")
         .arg("+D")
@@ -758,6 +767,26 @@ fn real_probe_reports_unheld_for_unheld_and_pin_only_dirs() {
         out.status.code()
     );
     assert_eq!(pin_rows.len(), 1, "exactly one row for our pin: {stdout}");
+    {
+        use std::os::unix::fs::MetadataExt;
+        let meta = pin.handle.metadata().unwrap();
+        let (major, minor) = lsof_device_numbers(meta.dev()).expect("known DEVICE form");
+        let (columns, name) = split_lsof_row(pin_rows[0]).expect("complete pin row");
+        assert_eq!(columns[3], format!("{}r", exclusion.fd), "read-only FD");
+        assert_eq!(columns[4], "DIR");
+        assert_eq!(
+            columns[5],
+            format!("{major},{minor}"),
+            "DEVICE == fstat st_dev"
+        );
+        assert_eq!(columns[7], meta.ino().to_string(), "NODE == fstat st_ino");
+        assert_eq!(
+            Path::new(name),
+            target.canonicalize().unwrap(),
+            "NAME == target"
+        );
+        eprintln!("pin fstat: dev={major},{minor} ino={}", meta.ino());
+    }
     assert!(
         is_ignored_holder_row(pin_rows[0], exclusion, &pin_target_spellings(&target)),
         "the real pin row must be recognized: {:?}",
@@ -767,39 +796,94 @@ fn real_probe_reports_unheld_for_unheld_and_pin_only_dirs() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
-/// Round 3 (cold review): only a row that is exactly the reaper's own pin
-/// may be ignored. Each near-miss below stays a holder row (⇒ Held), and
-/// the one well-formed control is ignored (⇒ None), through the real call
-/// site with a stub lsof, on exit 0 and exit 1.
+/// The stub pin used through the real call site: PID 123, FD 7, and the
+/// fstat identity `1,4` / inode 1 that the stub rows print.
+fn stub_pin() -> HolderExclusion {
+    HolderExclusion {
+        pid: 123,
+        fd: 7,
+        dev_major: 1,
+        dev_minor: 4,
+        ino: 1,
+    }
+}
+
+/// Rounds 3-4 (cold review): a row is ignored only when it is the reaper's
+/// own read-only directory handle on the target itself, identified by PID,
+/// FD, TYPE, DEVICE, NODE and the exact NAME. Every near-miss stays a holder
+/// row (⇒ Held) through the real call site on exit 0 and exit 1; the exact
+/// pin row (optionally with a lock character) is ignored (⇒ None).
 #[cfg(unix)]
 #[test]
 fn stub_only_an_exact_pin_row_is_ignored() {
     let root = unique_temp_dir("tachi-reaper-1978-pinrow");
     let target = make_target_dir(&root, "x-target");
     let outside = root.join("elsewhere");
+    std::os::unix::fs::symlink(&outside, target.join("link")).unwrap();
     let t = target.display();
-    let pin = Some(HolderExclusion { pid: 123, fd: 7 });
+    let pin = Some(stub_pin());
     let near_misses = [
-        // The review's counterexample: FD digits followed by junk, no layout.
+        // Round 3's counterexample: FD digits followed by junk, no layout.
         (
             "review-malformed",
             "garbage 123 user 7not-an-fd".to_string(),
         ),
-        // Right number, wrong trailing character(s).
+        // Round 4's counterexample: padded to nine fields, no valid columns.
+        (
+            "padded-malformed",
+            format!("garbage 123 user 7r NOT_A_TYPE ? ? ? {t}"),
+        ),
+        // Correct shape, wrong identity.
+        ("wrong-inode", format!("tachi 123 u 7r DIR 1,4 0 2 {t}")),
+        ("wrong-device", format!("tachi 123 u 7r DIR 1,5 0 1 {t}")),
+        ("device-no-comma", format!("tachi 123 u 7r DIR 14 0 1 {t}")),
+        ("other-pid", format!("tachi 124 u 7r DIR 1,4 0 1 {t}")),
+        ("other-fd", format!("tachi 123 u 8r DIR 1,4 0 1 {t}")),
+        // Not a read-only directory handle.
+        ("mode-u", format!("tachi 123 u 7u DIR 1,4 0 1 {t}")),
+        ("mode-w", format!("tachi 123 u 7w DIR 1,4 0 1 {t}")),
+        ("type-reg", format!("tachi 123 u 7r REG 1,4 0 1 {t}")),
+        ("type-lowercase", format!("tachi 123 u 7r dir 1,4 0 1 {t}")),
+        // FD tokens with the right number but wrong trailing characters.
         ("fd-junk", format!("tachi 123 u 7rq DIR 1,4 0 1 {t}")),
         ("fd-two-locks", format!("tachi 123 u 7rWW DIR 1,4 0 1 {t}")),
-        ("fd-bad-mode", format!("tachi 123 u 7q DIR 1,4 0 1 {t}")),
-        ("fd-bad-lock", format!("tachi 123 u 7rZ DIR 1,4 0 1 {t}")),
         (
             "fd-unknown-mode",
             format!("tachi 123 u 7-W DIR 1,4 0 1 {t}"),
         ),
         ("fd-bare-number", format!("tachi 123 u 7 DIR 1,4 0 1 {t}")),
         (
-            "fd-leading-junk",
-            format!("tachi 123 u x7r DIR 1,4 0 1 {t}"),
+            "fd-leading-zero",
+            format!("tachi 123 u 07r DIR 1,4 0 1 {t}"),
         ),
-        // NAME outside the target, missing, or not a plain path.
+        // Non-canonical numbers.
+        ("pid-plus", format!("tachi +123 u 7r DIR 1,4 0 1 {t}")),
+        ("node-plus", format!("tachi 123 u 7r DIR 1,4 0 +1 {t}")),
+        (
+            "node-leading-zero",
+            format!("tachi 123 u 7r DIR 1,4 0 01 {t}"),
+        ),
+        // NAME that is not exactly the target.
+        (
+            "name-trailing-space",
+            format!("tachi 123 u 7r DIR 1,4 0 1 {t} "),
+        ),
+        (
+            "name-trailing-cr",
+            format!("tachi 123 u 7r DIR 1,4 0 1 {t}\r"),
+        ),
+        (
+            "name-two-spaces",
+            format!("tachi 123 u 7r DIR 1,4 0 1  {t}"),
+        ),
+        (
+            "name-descendant",
+            format!("tachi 123 u 7r DIR 1,4 0 1 {t}/debug"),
+        ),
+        (
+            "name-symlinked-descendant",
+            format!("tachi 123 u 7r DIR 1,4 0 1 {t}/link/file"),
+        ),
         (
             "name-outside",
             format!("tachi 123 u 7r DIR 1,4 0 1 {}", outside.display()),
@@ -810,16 +894,13 @@ fn stub_only_an_exact_pin_row_is_ignored() {
         ),
         (
             "name-dotdot",
-            format!("tachi 123 u 7r DIR 1,4 0 1 {t}/../elsewhere"),
+            format!("tachi 123 u 7r DIR 1,4 0 1 {t}/../x-target"),
         ),
         (
             "name-relative",
             "tachi 123 u 7r DIR 1,4 0 1 x-target".to_string(),
         ),
         ("name-missing", "tachi 123 u 7r DIR 1,4 0 1".to_string()),
-        // Right FD, wrong PID; right PID, wrong FD.
-        ("other-pid", format!("tachi 124 u 7r DIR 1,4 0 1 {t}")),
-        ("other-fd", format!("tachi 123 u 8r DIR 1,4 0 1 {t}")),
     ];
     for (name, row) in &near_misses {
         let stdout = format!("{}{row}\n", String::from_utf8_lossy(LSOF_HEADER));
@@ -838,17 +919,21 @@ fn stub_only_an_exact_pin_row_is_ignored() {
             );
         }
     }
-    // Controls: the exact pin row (with and without a lock character, and
-    // a NAME under the target) is ignored.
+    // Controls: the exact pin row, with or without a documented lock
+    // character, named by the target's raw or canonical spelling.
     for (name, row) in [
         ("exact", format!("tachi 123 u 7r DIR 1,4 0 1 {t}")),
         (
-            "lock",
-            format!("tachi 123 u 7rW REG 1,4 0 1 {t}/debug/artifact.rlib"),
+            "exact-padded-columns",
+            format!("tachi    123 u   7r   DIR   1,4   0    1 {t}"),
         ),
+        ("lock", format!("tachi 123 u 7rR DIR 1,4 0 1 {t}")),
         (
-            "name-with-space",
-            format!("tachi 123 u 7u REG 1,4 0 1 {t}/a b"),
+            "canonical-name",
+            format!(
+                "tachi 123 u 7r DIR 1,4 0 1 {}",
+                target.canonicalize().unwrap().display()
+            ),
         ),
     ] {
         let stdout = format!("{}{row}\n", String::from_utf8_lossy(LSOF_HEADER));
@@ -871,26 +956,31 @@ fn stub_only_an_exact_pin_row_is_ignored() {
 }
 
 #[test]
-fn lsof_fd_grammar_is_exact() {
+fn lsof_read_fd_grammar_is_exact() {
     for (token, expected) in [
         ("7r", Some(7)),
-        ("7w", Some(7)),
-        ("7u", Some(7)),
-        ("12uW", Some(12)),
+        ("12rW", Some(12)),
         ("3rR", Some(3)),
+        ("7rx", Some(7)),
+        ("0r", Some(0)),
+        ("7w", None),
+        ("7u", None),
+        ("12uW", None),
         ("7", None),
         ("7-", None),
         ("7-W", None),
         ("7rq", None),
-        ("7rx", Some(7)),
         ("7rWW", None),
+        ("07r", None),
+        ("+7r", None),
         ("7not-an-fd", None),
         ("r7", None),
         ("cwd", None),
         ("txt", None),
+        ("99999999999r", None),
         ("", None),
     ] {
-        assert_eq!(lsof_fd_number(token), expected, "{token:?}");
+        assert_eq!(lsof_read_fd_number(token), expected, "{token:?}");
     }
 }
 
@@ -918,7 +1008,7 @@ fn stub_holder_next_to_the_warning_is_held_and_pin_exclusion_still_applies() {
             &stdout,
             LINUX_TRACEFS_WARNING,
             0,
-            Some(HolderExclusion { pid: 123, fd: 7 })
+            Some(stub_pin())
         ),
         HolderCheck::Held(vec!["cargo 4242".to_string()])
     );
@@ -952,7 +1042,7 @@ fn stub_unrecognized_stdout_stays_unknown() {
             b"tachi 123 u 7r DIR 1,4 0 1 /t\n",
             b"",
             1,
-            Some(HolderExclusion { pid: 123, fd: 7 }),
+            Some(stub_pin()),
         ),
     );
     let _ = std::fs::remove_dir_all(&root);
