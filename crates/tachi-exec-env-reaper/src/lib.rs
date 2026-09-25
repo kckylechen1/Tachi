@@ -422,12 +422,16 @@ fn lsof_holder_probe_with(
         Ok(out) => {
             let stdout = String::from_utf8_lossy(&out.stdout);
             // Rows are only filtered under a proven lsof header; anything else
-            // reaches `interpret_lsof` verbatim and is rejected there.
-            let filtered = match ignored_holder {
-                Some(ignored) if tachi_clean::lsof_stderr::starts_with_lsof_header(&stdout) => {
-                    without_ignored_holder(&stdout, ignored)
-                }
-                _ => stdout.into_owned(),
+            // reaches `interpret_lsof` verbatim and is rejected there. The
+            // number of rows removed is carried explicitly: a header left over
+            // after removing our own validated pin row is listing evidence,
+            // a raw header-only response is not (cold review round 2).
+            let (filtered, excluded_rows) = match ignored_holder {
+                Some(ignored) if tachi_clean::lsof_stderr::starts_with_lsof_header(&stdout) => (
+                    without_ignored_holder(&stdout, ignored),
+                    ignored_holder_rows(&stdout, ignored),
+                ),
+                _ => (stdout.into_owned(), 0),
             };
             // tachi#1978: on Linux, lsof warns on every run that it cannot
             // stat() the tracefs mount (non-root). Only that exact warning
@@ -435,10 +439,11 @@ fn lsof_holder_probe_with(
             // bytes, Linux only); every other diagnostic still reaches
             // `interpret_lsof` and fails closed.
             let relevant = tachi_clean::lsof_stderr::relevant_lsof_stderr(&out.stderr, &[path]);
-            interpret_lsof(
+            interpret_lsof_excluding(
                 out.status.code(),
                 &filtered,
                 &String::from_utf8_lossy(&relevant),
+                excluded_rows,
             )
         }
         // No lsof on this host ⇒ we cannot prove "unheld" ⇒ nothing is
@@ -450,38 +455,73 @@ fn lsof_holder_probe_with(
 fn without_ignored_holder(stdout: &str, ignored: HolderExclusion) -> String {
     stdout
         .lines()
-        .filter(|line| {
-            let mut fields = line.split_whitespace();
-            let _command = fields.next();
-            let pid = fields.next().and_then(|value| value.parse::<u32>().ok());
-            let _user = fields.next();
-            let fd = fields.next().and_then(|value| {
-                let digits = value
-                    .as_bytes()
-                    .iter()
-                    .take_while(|byte| byte.is_ascii_digit())
-                    .count();
-                value[..digits].parse::<i32>().ok()
-            });
-            pid != Some(ignored.pid) || fd != Some(ignored.fd)
-        })
+        .filter(|line| !is_ignored_holder_row(line, ignored))
         .collect::<Vec<_>>()
         .join("\n")
 }
 
-/// Pure interpreter for an `lsof +D` run — the part worth testing.
+/// How many rows [`without_ignored_holder`] removes.
+fn ignored_holder_rows(stdout: &str, ignored: HolderExclusion) -> usize {
+    stdout
+        .lines()
+        .filter(|line| is_ignored_holder_row(line, ignored))
+        .count()
+}
+
+/// A row is the reaper's own pin only when both its PID and FD parse and
+/// match exactly.
+fn is_ignored_holder_row(line: &str, ignored: HolderExclusion) -> bool {
+    let mut fields = line.split_whitespace();
+    let _command = fields.next();
+    let pid = fields.next().and_then(|value| value.parse::<u32>().ok());
+    let _user = fields.next();
+    let fd = fields.next().and_then(|value| {
+        let digits = value
+            .as_bytes()
+            .iter()
+            .take_while(|byte| byte.is_ascii_digit())
+            .count();
+        value[..digits].parse::<i32>().ok()
+    });
+    pid == Some(ignored.pid) && fd == Some(ignored.fd)
+}
+
+/// Test shorthand: [`interpret_lsof_excluding`] with no rows removed, i.e. a
+/// raw `lsof +D` response.
+#[cfg(test)]
+fn interpret_lsof(exit_code: Option<i32>, stdout: &str, stderr: &str) -> HolderCheck {
+    interpret_lsof_excluding(exit_code, stdout, stderr, 0)
+}
+
+/// Pure interpreter for an `lsof +D` run — the part worth testing. `stdout`
+/// may have had `excluded_rows` validated rows of the reaper's own pin
+/// removed by the caller ([`without_ignored_holder`]); that count is passed
+/// explicitly, never inferred from the remaining text.
 ///
-/// * non-blank stdout not opening with lsof's header ⇒ [`HolderCheck::Unknown`]
+/// * non-blank stdout not opening with lsof's default header ⇒
+///   [`HolderCheck::Unknown`]
 /// * data lines on stdout ⇒ [`HolderCheck::Held`]
 /// * anything on stderr ⇒ [`HolderCheck::Unknown`]: lsof warns (e.g. "can't
 ///   stat()", "Permission denied") when it could not descend part of the tree,
 ///   and a partial walk that "found nothing" is not proof of nothing.
-/// * exit 0/1 with clean stdout+stderr ⇒ [`HolderCheck::None`] (1 is lsof's
-///   documented "no matching files" status)
+/// * no rows left, clean stderr, rows were removed ⇒ [`HolderCheck::None`] on
+///   exit 0 or 1: lsof really listed the target and only our pin holds it
+///   (`lsof +D` exits 1 even while listing holders unless every file under
+///   the dir is open — observed on lsof 4.95.0, atom-dgx-2, and 4.91, macOS)
+/// * no rows, clean stderr, nothing removed: [`HolderCheck::None`] only for
+///   exit 1 with blank stdout — lsof's "not found" signature and what real
+///   lsof prints for an unheld dir on both hosts. Exit 0 listing nothing, or
+///   exit 1 with a bare header, is anomalous ⇒ [`HolderCheck::Unknown`]
+///   (cold review round 2; tightened, lead-authorized)
 /// * any other exit / signal ⇒ [`HolderCheck::Unknown`]
-fn interpret_lsof(exit_code: Option<i32>, stdout: &str, stderr: &str) -> HolderCheck {
-    // The first stdout line is skipped only once proven to be lsof's
-    // COMMAND/PID header (tachi#1978 round-1 finding 1); the rest are holders.
+fn interpret_lsof_excluding(
+    exit_code: Option<i32>,
+    stdout: &str,
+    stderr: &str,
+    excluded_rows: usize,
+) -> HolderCheck {
+    // The first stdout line is skipped only once proven to be lsof's default
+    // header (tachi#1978 cold review rounds 1-2); the rest are holders.
     if !stdout.trim().is_empty() && !tachi_clean::lsof_stderr::starts_with_lsof_header(stdout) {
         return HolderCheck::Unknown(format!(
             "lsof output unrecognized: {}",
@@ -510,7 +550,10 @@ fn interpret_lsof(exit_code: Option<i32>, stdout: &str, stderr: &str) -> HolderC
     }
 
     match exit_code {
-        Some(0) | Some(1) => HolderCheck::None,
+        Some(0) | Some(1) if excluded_rows > 0 => HolderCheck::None,
+        Some(0) => HolderCheck::Unknown("lsof exited 0 without listing any file row".to_string()),
+        Some(1) if excluded_rows == 0 && stdout.trim().is_empty() => HolderCheck::None,
+        Some(1) => HolderCheck::Unknown("lsof exited 1 with output but no holder rows".to_string()),
         Some(code) => HolderCheck::Unknown(format!("lsof exited with status {code}")),
         None => HolderCheck::Unknown("lsof terminated by a signal".to_string()),
     }

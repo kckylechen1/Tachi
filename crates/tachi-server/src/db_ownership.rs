@@ -112,23 +112,28 @@ fn classify_lsof_run(
 /// a torn-copy risk. A holder line whose PID field cannot be parsed is
 /// counted as a holder anyway (fail closed, never silently excluded).
 ///
-/// `NotOwned` is earned, never defaulted: it needs exit 0 or lsof's
-/// documented "no matching files" exit 1, AND no relevant stderr, AND stdout
-/// that is either empty or starts with lsof's own `COMMAND  PID ...` header.
+/// `NotOwned` is earned, never defaulted. lsof is given an explicit target
+/// (no `-Q`), so its exit contract is: 0 only when the target was found and
+/// listed, 1 when it was not found. Real unheld targets give exit 1 with both
+/// streams empty (lsof 4.95.0 on atom-dgx-2 and 4.91 on macOS). So exactly
+/// two signatures are `NotOwned`: that silent exit 1, and exit 0 whose rows
+/// (after lsof's default header) were all this process's own — proof that
+/// lsof listed the file and only we hold it.
 ///
 /// Signatures:
 /// - `None` (signal death) → `Unknown("lsof terminated by signal")`,
 ///   regardless of stream contents
-/// - `Some(0)`, stdout not starting with the lsof header → `Unknown`
+/// - `Some(0)`, stdout whose first line is not lsof's default header →
+///   `Unknown`
 /// - `Some(0)` + at least one non-self holder line → `Owned`
-/// - `Some(0)` + header only / self-only holder lines + any stderr →
-///   `Unknown` (the run said something we cannot dismiss)
-/// - `Some(0)` + header only / self-only holder lines + silent stderr →
-///   `NotOwned`
+/// - `Some(0)` + no holder rows at all (empty or header-only stdout) →
+///   `Unknown`: an exit-0 run that listed nothing contradicts lsof's contract
+/// - `Some(0)` + self-only holder rows + any stderr → `Unknown`
+/// - `Some(0)` + self-only holder rows + silent stderr → `NotOwned`
 /// - `Some(1)` + both streams empty → `NotOwned` (lsof's normal, silent
 ///   "no holders" signature)
-/// - `Some(1)` + text on either stream → `Unknown` with the first
-///   diagnostic line surfaced
+/// - `Some(1)` + text on either stream (a header included) → `Unknown` with
+///   the first diagnostic line surfaced
 /// - `Some(n)`, n ∉ {0, 1} → `Unknown`, whatever the streams hold
 #[cfg(unix)]
 fn classify_lsof_output(
@@ -158,6 +163,10 @@ fn classify_lsof_output(
             // lsof prints a header line + one line per holder.
             if count_other_holders(stdout, self_pid) > 0 {
                 DbOwnership::Owned
+            } else if count_holder_rows(stdout) == 0 {
+                // Exit 0 means "found and listed"; nothing listed is an
+                // anomaly, not an empty search (cold review round 2).
+                DbOwnership::Unknown("lsof exited 0 without listing any file row".to_string())
             } else if !stderr.trim().is_empty() {
                 DbOwnership::Unknown(format!(
                     "lsof error: {}",
@@ -188,6 +197,16 @@ fn classify_lsof_output(
     }
 }
 
+/// Count every non-blank lsof row after the header line.
+#[cfg(unix)]
+fn count_holder_rows(stdout: &str) -> usize {
+    stdout
+        .lines()
+        .skip(1)
+        .filter(|line| !line.trim().is_empty())
+        .count()
+}
+
 /// Count lsof holder lines (skipping the header line) whose PID differs
 /// from `self_pid`. A line whose PID field can't be parsed is counted as a
 /// holder anyway — an unparsable line is not proof it's harmless, so this
@@ -196,7 +215,7 @@ fn classify_lsof_output(
 fn count_other_holders(stdout: &str, self_pid: u32) -> usize {
     stdout
         .lines()
-        .skip(1) // header: "COMMAND  PID USER  FD TYPE ..."
+        .skip(1) // header: "COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME"
         .filter(|line| !line.trim().is_empty())
         .filter(|line| {
             line.split_whitespace()
@@ -254,27 +273,39 @@ mod tests {
     /// `classify_lsof_output` grew the self-exclusion parameter.
     const OTHER_SELF_PID: u32 = 999_999;
 
+    /// lsof's real default header (lsof 4.95.0 / 4.91). The pre-#1978
+    /// fixtures used a truncated `COMMAND  PID USER  FD TYPE` header, which
+    /// round 2's exact-header check rightly rejects; their expected
+    /// classifications are unchanged.
+    const H: &str = "COMMAND  PID USER  FD TYPE DEVICE SIZE/OFF NODE NAME\n";
+
     #[test]
     fn classify_success_multiple_holders_is_owned() {
-        let header_plus_holder = "COMMAND  PID USER  FD TYPE\ntachi  123 kyle  10r REG\n";
+        let header_plus_holder = &format!("{H}tachi  123 kyle  10r REG 1,4 0 1 /x\n");
         assert_eq!(
             classify_lsof_output(Some(0), header_plus_holder, "", OTHER_SELF_PID),
             DbOwnership::Owned
         );
     }
 
+    /// Tightened in #1978 cold review round 2 (lead-authorized, fail-closed
+    /// direction). Was `classify_success_no_holder_lines_is_not_owned`,
+    /// asserting `NotOwned`. lsof was given an explicit target without `-Q`,
+    /// so exit 0 means "found and listed": exit 0 that lists no row at all is
+    /// an anomalous signature, not an empty search, and must be `Unknown`.
+    /// (Self-only rows — real listing evidence — stay `NotOwned`; see
+    /// `classify_self_only_holder_is_not_owned`.)
     #[test]
-    fn classify_success_no_holder_lines_is_not_owned() {
-        // Some(0) with header-only (or empty) stdout: exit succeeded but
-        // nothing matched.
-        assert_eq!(
-            classify_lsof_output(Some(0), "", "", OTHER_SELF_PID),
-            DbOwnership::NotOwned
-        );
-        assert_eq!(
-            classify_lsof_output(Some(0), "COMMAND  PID USER  FD TYPE\n", "", OTHER_SELF_PID),
-            DbOwnership::NotOwned
-        );
+    fn classify_success_without_any_row_is_unknown() {
+        for stdout in ["", H] {
+            assert!(
+                matches!(
+                    classify_lsof_output(Some(0), stdout, "", OTHER_SELF_PID),
+                    DbOwnership::Unknown(_)
+                ),
+                "{stdout:?}"
+            );
+        }
     }
 
     #[test]
@@ -282,7 +313,7 @@ mod tests {
         // The caller (e.g. a migration's own read-only connection) may be
         // the only "holder" lsof reports for its own PID — that must not
         // register as a live daemon.
-        let header_plus_self = "COMMAND  PID USER  FD TYPE\ntachi  4242 kyle  10r REG\n";
+        let header_plus_self = &format!("{H}tachi  4242 kyle  10r REG 1,4 0 1 /x\n");
         assert_eq!(
             classify_lsof_output(Some(0), header_plus_self, "", 4242),
             DbOwnership::NotOwned
@@ -293,8 +324,9 @@ mod tests {
     fn classify_self_and_other_holder_is_owned() {
         // Self holds it AND some other process holds it too — the other
         // holder still makes this Owned.
-        let header_self_and_other =
-            "COMMAND  PID USER  FD TYPE\ntachi  4242 kyle  10r REG\ntachi  777 kyle  11r REG\n";
+        let header_self_and_other = &format!(
+            "{H}tachi  4242 kyle  10r REG 1,4 0 1 /x\ntachi  777 kyle  11r REG 1,4 0 1 /x\n"
+        );
         assert_eq!(
             classify_lsof_output(Some(0), header_self_and_other, "", 4242),
             DbOwnership::Owned
@@ -305,7 +337,7 @@ mod tests {
     fn classify_unparsable_pid_field_counts_as_holder() {
         // A holder line whose PID field can't be parsed as u32 is not proof
         // it's harmless (e.g. self) — fail closed and count it.
-        let header_plus_garbled = "COMMAND  PID USER  FD TYPE\ntachi  ??? kyle  10r REG\n";
+        let header_plus_garbled = &format!("{H}tachi  ??? kyle  10r REG 1,4 0 1 /x\n");
         assert_eq!(
             classify_lsof_output(Some(0), header_plus_garbled, "", OTHER_SELF_PID),
             DbOwnership::Owned
@@ -336,12 +368,7 @@ mod tests {
         // Also must not be swayed by incidental non-empty output preceding
         // the kill — signal death always wins.
         assert_eq!(
-            classify_lsof_output(
-                None,
-                "COMMAND  PID USER  FD TYPE\n",
-                "some partial text",
-                OTHER_SELF_PID
-            ),
+            classify_lsof_output(None, H, "some partial text", OTHER_SELF_PID),
             DbOwnership::Unknown("lsof terminated by signal".to_string())
         );
     }
@@ -449,19 +476,63 @@ mod tests {
         );
     }
 
-    /// The only signature the tracefs filter may turn into `NotOwned`, and
-    /// only on Linux (round-1 cold review finding 8: macOS unchanged).
+    /// The only raw signature the tracefs filter may turn into `NotOwned`,
+    /// and only on Linux (round-1 finding 8: macOS unchanged). Round 2: a
+    /// header-only exit 0 is no longer one of them (lead-authorized
+    /// tightening; it was `NotOwned` on Linux in `0d1d61877`).
     #[test]
     fn stub_tracefs_only_silent_exit_1_is_not_owned_on_linux_only() {
         let (_dir, db) = fixture_db();
         let stub = StubLsof::new();
-        for (name, stdout, code) in [("exit1", &b""[..], 1), ("exit0-header", HEADER, 0)] {
-            let result = stub.probe(name, &db, stdout, LINUX_TRACEFS_WARNING, code);
-            if cfg!(target_os = "linux") {
-                assert_eq!(result, DbOwnership::NotOwned, "{name}");
-            } else {
-                assert_unknown(name, result);
-            }
+        let result = stub.probe("exit1", &db, b"", LINUX_TRACEFS_WARNING, 1);
+        if cfg!(target_os = "linux") {
+            assert_eq!(result, DbOwnership::NotOwned);
+        } else {
+            assert_unknown("exit1", result);
+        }
+        assert_unknown(
+            "exit0-header",
+            stub.probe("exit0-header", &db, HEADER, LINUX_TRACEFS_WARNING, 0),
+        );
+    }
+
+    /// Round 2 (BUG-A): exit 0 that lists no row is Unknown on every
+    /// platform, with or without the warning; exit 1 with a header is too.
+    #[test]
+    fn stub_exit_0_without_rows_and_exit_1_with_a_header_stay_unknown() {
+        let (_dir, db) = fixture_db();
+        let stub = StubLsof::new();
+        for (name, stdout, stderr, code) in [
+            ("e0-empty", &b""[..], &b""[..], 0),
+            ("e0-header", HEADER, &b""[..], 0),
+            ("e0-empty-w", &b""[..], LINUX_TRACEFS_WARNING, 0),
+            ("e1-header", HEADER, &b""[..], 1),
+            ("e1-header-w", HEADER, LINUX_TRACEFS_WARNING, 1),
+        ] {
+            assert_unknown(name, stub.probe(name, &db, stdout, stderr, code));
+        }
+    }
+
+    /// Round 2 over-refusal guard: rows that are all this process's own are
+    /// real listing evidence and stay `NotOwned` (with the tracefs warning on
+    /// Linux too).
+    #[test]
+    fn stub_self_only_rows_stay_not_owned() {
+        let (_dir, db) = fixture_db();
+        let stub = StubLsof::new();
+        let mut stdout = HEADER.to_vec();
+        stdout.extend_from_slice(
+            format!("tachi {} kyle 10r REG 1,4 0 1 /x\n", std::process::id()).as_bytes(),
+        );
+        assert_eq!(
+            stub.probe("self", &db, &stdout, b"", 0),
+            DbOwnership::NotOwned
+        );
+        let with_warning = stub.probe("self-w", &db, &stdout, LINUX_TRACEFS_WARNING, 0);
+        if cfg!(target_os = "linux") {
+            assert_eq!(with_warning, DbOwnership::NotOwned);
+        } else {
+            assert_unknown("self-w", with_warning);
         }
     }
 

@@ -503,10 +503,63 @@ fn lsof_excludes_only_the_reapers_exact_pin() {
     );
 }
 
+/// Tightened in #1978 cold review round 2 (lead-authorized, fail-closed
+/// direction). Was `lsof_clean_empty_run_means_unheld`, which also asserted
+/// `interpret_lsof(Some(0), "", "") == None`. lsof was given an explicit
+/// target without `-Q`, so exit 0 means "found and listed": exit 0 listing
+/// nothing is anomalous and must be Unknown. Real lsof on an unheld dir exits
+/// 1 with both streams empty (4.95.0 on atom-dgx-2, 4.91 on macOS) — still
+/// unheld. A bare header on exit 1 is not that signature either.
 #[test]
-fn lsof_clean_empty_run_means_unheld() {
+fn only_the_silent_exit_1_run_means_unheld() {
     assert_eq!(interpret_lsof(Some(1), "", ""), HolderCheck::None);
-    assert_eq!(interpret_lsof(Some(0), "", ""), HolderCheck::None);
+    for (code, stdout) in [
+        (0, ""),
+        (0, "COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME\n"),
+        (1, "COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME\n"),
+    ] {
+        assert!(
+            matches!(
+                interpret_lsof(Some(code), stdout, ""),
+                HolderCheck::Unknown(_)
+            ),
+            "exit {code} {stdout:?}"
+        );
+    }
+}
+
+/// Over-refusal guard for round 2: a header left over only because the
+/// reaper removed its own validated pin row is listing evidence and stays
+/// unheld — on exit 1 too, since real `lsof +D` exits 1 while listing unless
+/// every file under the dir is open; the same text as a raw response does not.
+#[test]
+fn header_left_by_removing_the_pin_row_is_unheld_but_a_raw_one_is_not() {
+    let header = "COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME\n";
+    for code in [0, 1] {
+        assert_eq!(
+            interpret_lsof_excluding(Some(code), header, "", 1),
+            HolderCheck::None
+        );
+        assert!(matches!(
+            interpret_lsof_excluding(Some(code), header, "", 0),
+            HolderCheck::Unknown(_)
+        ));
+    }
+    // Removing the pin never excuses stderr, another exit, or a signal.
+    for (code, stderr) in [
+        (Some(0), "lsof: WARNING: x\n"),
+        (Some(1), "lsof: WARNING: x\n"),
+        (Some(2), ""),
+        (None, ""),
+    ] {
+        assert!(
+            matches!(
+                interpret_lsof_excluding(code, header, stderr, 1),
+                HolderCheck::Unknown(_)
+            ),
+            "{code:?} {stderr:?}"
+        );
+    }
 }
 
 #[test]
@@ -591,21 +644,93 @@ fn assert_unknown(case: &str, check: HolderCheck) {
     );
 }
 
-/// The only signatures the filter may turn into `None`, and only on Linux
-/// (round-1 cold review finding 8: other platforms are unchanged).
+/// The only raw signature the filter may turn into `None`, and only on Linux
+/// (round-1 cold review finding 8: other platforms are unchanged). Round 2:
+/// header-only exit 1 is no longer one of them (lead-authorized tightening;
+/// it was `None` on Linux in `0d1d61877`).
 #[cfg(unix)]
 #[test]
 fn stub_tracefs_only_empty_walk_is_unheld_on_linux_only() {
     let root = unique_temp_dir("tachi-reaper-1978-clear");
     let target = make_target_dir(&root, "x-target");
-    for (name, stdout) in [("exit1", &b""[..]), ("exit1-header", LSOF_HEADER)] {
-        let check = stub_lsof_probe(name, &target, stdout, LINUX_TRACEFS_WARNING, 1, None);
-        if cfg!(target_os = "linux") {
-            assert_eq!(check, HolderCheck::None, "{name}");
-        } else {
-            assert_unknown(name, check);
-        }
+    let check = stub_lsof_probe("exit1", &target, b"", LINUX_TRACEFS_WARNING, 1, None);
+    if cfg!(target_os = "linux") {
+        assert_eq!(check, HolderCheck::None);
+    } else {
+        assert_unknown("exit1", check);
     }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Round 2 (BUG-A/BUG-B): raw exit 0 listing no row, and raw exit 1 with a
+/// bare header, are Unknown everywhere, with or without the warning.
+#[cfg(unix)]
+#[test]
+fn stub_exit_0_without_rows_and_exit_1_with_a_header_stay_unknown() {
+    let root = unique_temp_dir("tachi-reaper-1978-norows");
+    let target = make_target_dir(&root, "x-target");
+    for (name, stdout, stderr, code) in [
+        ("e0-empty", &b""[..], &b""[..], 0),
+        ("e0-header", LSOF_HEADER, &b""[..], 0),
+        ("e0-empty-w", &b""[..], LINUX_TRACEFS_WARNING, 0),
+        ("e1-header", LSOF_HEADER, &b""[..], 1),
+        ("e1-header-w", LSOF_HEADER, LINUX_TRACEFS_WARNING, 1),
+    ] {
+        assert_unknown(
+            name,
+            stub_lsof_probe(name, &target, stdout, stderr, code, None),
+        );
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Round 2 over-refusal guard, through the real call site: exit 0 whose only
+/// row is the reaper's own validated pin is unheld (with the tracefs warning
+/// too on Linux); the identical bytes without the exclusion are Held.
+#[cfg(unix)]
+#[test]
+fn stub_pin_only_listing_stays_unheld() {
+    let root = unique_temp_dir("tachi-reaper-1978-pin");
+    let target = make_target_dir(&root, "x-target");
+    let mut stdout = LSOF_HEADER.to_vec();
+    stdout.extend_from_slice(b"tachi 123 u 7r DIR 1,4 0 1 /t\n");
+    let pin = Some(HolderExclusion { pid: 123, fd: 7 });
+    for code in [0, 1] {
+        assert_eq!(
+            stub_lsof_probe(&format!("pin{code}"), &target, &stdout, b"", code, pin),
+            HolderCheck::None
+        );
+    }
+    let with_warning = stub_lsof_probe("pin-w", &target, &stdout, LINUX_TRACEFS_WARNING, 1, pin);
+    if cfg!(target_os = "linux") {
+        assert_eq!(with_warning, HolderCheck::None);
+    } else {
+        assert_unknown("pin-w", with_warning);
+    }
+    assert_eq!(
+        stub_lsof_probe("nopin", &target, &stdout, b"", 0, None),
+        HolderCheck::Held(vec!["tachi 123".to_string()])
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Real lsof, both hosts: an unheld target reads as unheld (lsof exits 1 with
+/// empty stdout), and a target held only by the reaper's own pin reads as
+/// unheld through the exclusion (`lsof +D` exits 1 listing just the pin).
+#[cfg(unix)]
+#[test]
+fn real_probe_reports_unheld_for_unheld_and_pin_only_dirs() {
+    let root = unique_temp_dir("tachi-reaper-1978-real");
+    let target = make_target_dir(&root, "idle-target");
+    assert_eq!(lsof_holder_probe(&target, None), HolderCheck::None);
+    let pin = PinnedDirectory::open(&target).expect("pin target");
+    let exclusion = pin.holder_exclusion();
+    assert!(
+        matches!(lsof_holder_probe(&target, None), HolderCheck::Held(_)),
+        "control: the pin itself is a holder without the exclusion"
+    );
+    assert_eq!(lsof_holder_probe(&target, exclusion), HolderCheck::None);
+    drop(pin);
     let _ = std::fs::remove_dir_all(&root);
 }
 

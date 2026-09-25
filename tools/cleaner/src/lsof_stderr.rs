@@ -38,9 +38,13 @@
 //!   form) is disjoint from `<mount>`: not equal, not an ancestor, not inside;
 //!   a target that cannot be canonicalized drops nothing.
 //!
-//! Everything else is returned untouched and keeps failing closed. On every
-//! other OS the input is returned unchanged: this is a Linux lsof-dialect
-//! behavior and macOS classification must not move.
+//! Every other non-blank line is returned with its bytes unchanged and keeps
+//! failing closed. The Linux result is not byte-identical to the input:
+//! blank (whitespace-only) lines are omitted and the kept lines are re-joined
+//! with `\n` without a trailing delimiter — only emptiness and the kept text
+//! matter to the classifiers. On every other OS the input is returned
+//! byte-for-byte: this is a Linux lsof-dialect behavior and macOS filtering
+//! must not move.
 //!
 //! `lsof -w` is deliberately **not** used: it silences the `+D` walk's own
 //! "can't stat()/opendir()" warnings too, which are exactly the partial-walk
@@ -64,13 +68,26 @@ pub fn relevant_lsof_stderr(stderr: &[u8], targets: &[&Path]) -> Vec<u8> {
     }
 }
 
-/// Whether non-blank `stdout` opens with lsof's column header
-/// (`COMMAND  PID ...`). Every classifier requires this before it treats the
-/// first line as a header to skip: an unvalidated first line must never be
-/// discarded (round-1 cold review finding 1).
+/// lsof's default column header, which is what every probe gets: none of
+/// them selects columns (`-F`, `-o`, `-s`, `-K`, ...). Identical on lsof 4.95.0
+/// (Ubuntu 24.04, atom-dgx-2) and lsof 4.91 (macOS):
+/// `COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME`.
+pub const LSOF_DEFAULT_HEADER: [&str; 9] = [
+    "COMMAND", "PID", "USER", "FD", "TYPE", "DEVICE", "SIZE/OFF", "NODE", "NAME",
+];
+
+/// Whether `stdout`'s first line is exactly lsof's default column header
+/// ([`LSOF_DEFAULT_HEADER`], any column spacing). Every classifier requires
+/// this before it treats the first line as a header to skip: an unvalidated
+/// first line must never be discarded (cold review round 1 finding 1), and a
+/// line that merely starts `COMMAND PID` is not a header (round 2).
 pub fn starts_with_lsof_header(stdout: &str) -> bool {
-    let mut fields = stdout.lines().next().unwrap_or("").split_whitespace();
-    fields.next() == Some("COMMAND") && fields.next() == Some("PID")
+    stdout
+        .lines()
+        .next()
+        .unwrap_or("")
+        .split_whitespace()
+        .eq(LSOF_DEFAULT_HEADER)
 }
 
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
@@ -326,16 +343,30 @@ mod linux {
 mod tests {
     use super::*;
 
+    /// Round 2: only lsof's complete default header, as the first line, is a
+    /// header. (Round 1 accepted any first line starting `COMMAND PID`, e.g.
+    /// `COMMAND PID USER` — tightened, lead-authorized.)
     #[test]
-    fn lsof_header_is_recognized_only_as_the_first_line() {
+    fn only_the_full_default_header_as_the_first_line_is_a_header() {
+        // Real headers, as printed by lsof 4.95.0 (DGX2) and 4.91 (macOS).
         assert!(starts_with_lsof_header(
-            "COMMAND  PID USER  FD TYPE DEVICE SIZE/OFF NODE NAME\n"
+            "COMMAND    PID       USER   FD   TYPE DEVICE SIZE/OFF     NODE NAME\n"
         ));
-        assert!(starts_with_lsof_header("COMMAND PID USER\nx 1 u\n"));
-        assert!(!starts_with_lsof_header("garbage\n"));
-        assert!(!starts_with_lsof_header("\nCOMMAND PID USER\n"));
-        assert!(!starts_with_lsof_header("COMMANDS PID\n"));
-        assert!(!starts_with_lsof_header(""));
+        assert!(starts_with_lsof_header(
+            "COMMAND   PID       USER   FD   TYPE DEVICE SIZE/OFF      NODE NAME\nbash 1 u 3r REG 1,17 2 9 /x\n"
+        ));
+        for not_a_header in [
+            "COMMAND PID USER\nx 1 u\n",
+            "COMMAND PID nonsense\n",
+            "COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME EXTRA\n",
+            "COMMAND PID USER FD TYPE DEVICE SIZE NODE NAME\n",
+            "garbage\n",
+            "\nCOMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME\n",
+            "COMMANDS PID\n",
+            "",
+        ] {
+            assert!(!starts_with_lsof_header(not_a_header), "{not_a_header:?}");
+        }
     }
 
     const TRACEFS: &[u8] = b"lsof: WARNING: can't stat() tracefs file system /sys/kernel/debug/tracing\n      Output information may be incomplete.\n";

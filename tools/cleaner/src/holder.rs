@@ -142,7 +142,7 @@ fn interpret_lsof_run(
 /// the destructive (#1062) side; this module borrows its interpretation,
 /// never its destructive consequence — this module only ever detects.
 ///
-/// * non-blank stdout whose first line is not lsof's `COMMAND  PID` header ⇒
+/// * non-blank stdout whose first line is not lsof's default header ⇒
 ///   [`HolderEvidence::Unknown`]: the first line is only skipped once it is
 ///   proven to be the header, never discarded unvalidated
 /// * any data row on stdout that yields a parseable pid ⇒ [`HolderEvidence::Held`]
@@ -154,8 +154,14 @@ fn interpret_lsof_run(
 ///   warns (e.g. "can't stat()", "Permission denied") when it could not
 ///   descend part of the tree, and a partial walk that "found nothing" is
 ///   not proof of nothing.
-/// * no data rows, no stderr noise, exit 0/1 ⇒ [`HolderEvidence::Clear`] (1 is
-///   lsof's documented "no matching files" status)
+/// * no data rows, no stderr noise, exit 1 AND blank stdout ⇒
+///   [`HolderEvidence::Clear`]: lsof's documented "not found" signature, and
+///   what real lsof prints for an unheld dir (4.95.0 on atom-dgx-2, 4.91 on
+///   macOS)
+/// * no data rows otherwise ⇒ [`HolderEvidence::Unknown`]: exit 0 means lsof
+///   found and listed files, so exit 0 with nothing listed is anomalous, and a
+///   header with no rows on exit 1 is not the silent "not found" signature
+///   (cold review round 2; tightened, lead-authorized)
 /// * any other exit / signal ⇒ [`HolderEvidence::Unknown`]
 fn interpret_lsof_output(exit_code: Option<i32>, stdout: &str, stderr: &str) -> HolderEvidence {
     if !stdout.trim().is_empty() && !crate::lsof_stderr::starts_with_lsof_header(stdout) {
@@ -194,7 +200,13 @@ fn interpret_lsof_output(exit_code: Option<i32>, stdout: &str, stderr: &str) -> 
     }
 
     match exit_code {
-        Some(0) | Some(1) => HolderEvidence::Clear,
+        Some(1) if stdout.trim().is_empty() => HolderEvidence::Clear,
+        Some(1) => {
+            HolderEvidence::Unknown("lsof exited 1 with a header but no file rows".to_string())
+        }
+        Some(0) => {
+            HolderEvidence::Unknown("lsof exited 0 without listing any file row".to_string())
+        }
         Some(code) => HolderEvidence::Unknown(format!("lsof exited with status {code}")),
         None => HolderEvidence::Unknown("lsof terminated by a signal".to_string()),
     }
@@ -370,14 +382,31 @@ mod tests {
         );
     }
 
+    /// Tightened in #1978 cold review round 2 (lead-authorized, fail-closed
+    /// direction). Was `clean_empty_run_is_clear`, asserting `Clear` for exit
+    /// 1 with a header-only stdout. lsof prints its header only while listing
+    /// a file, and real lsof on an unheld dir exits 1 with BOTH streams empty
+    /// (4.95.0 on atom-dgx-2, 4.91 on macOS) — that silent run is the clean
+    /// one. A header with no rows, or exit 0 listing nothing, is anomalous.
     #[test]
-    fn clean_empty_run_is_clear() {
-        let evidence = interpret_lsof_output(
-            Some(1),
-            "COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME\n",
-            "",
+    fn only_the_silent_exit_1_run_is_clear() {
+        assert_eq!(
+            interpret_lsof_output(Some(1), "", ""),
+            HolderEvidence::Clear
         );
-        assert_eq!(evidence, HolderEvidence::Clear);
+        for (code, stdout) in [
+            (1, "COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME\n"),
+            (0, "COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME\n"),
+            (0, ""),
+        ] {
+            assert!(
+                matches!(
+                    interpret_lsof_output(Some(code), stdout, ""),
+                    HolderEvidence::Unknown(_)
+                ),
+                "exit {code} {stdout:?}"
+            );
+        }
     }
 
     #[test]
@@ -457,19 +486,37 @@ mod tests {
         );
     }
 
-    /// The only signatures the filter may turn into `Clear`, and only on Linux
-    /// (round-1 cold review finding 8: other platforms are unchanged).
+    /// The only signature the filter may turn into `Clear`, and only on Linux
+    /// (round-1 cold review finding 8: other platforms are unchanged). Round
+    /// 2: header-only exit 1 is no longer one of them (lead-authorized
+    /// tightening; it was `Clear` on Linux in `0d1d61877`).
     #[cfg(unix)]
     #[test]
     fn stub_tracefs_only_empty_walk_is_clear_on_linux_only() {
         let target = unique_temp_dir("holder-1978-clear");
-        for (name, stdout, code) in [("exit1", &b""[..], 1), ("exit1-header", HEADER, 1)] {
-            let evidence = stub_probe(name, &target, stdout, LINUX_TRACEFS_WARNING, code);
-            if cfg!(target_os = "linux") {
-                assert_eq!(evidence, HolderEvidence::Clear, "{name}");
-            } else {
-                assert_unknown(name, evidence);
-            }
+        let evidence = stub_probe("exit1", &target, b"", LINUX_TRACEFS_WARNING, 1);
+        if cfg!(target_os = "linux") {
+            assert_eq!(evidence, HolderEvidence::Clear);
+        } else {
+            assert_unknown("exit1", evidence);
+        }
+        let _ = std::fs::remove_dir_all(&target);
+    }
+
+    /// Round 2 (BUG-A/BUG-B): exit 0 listing no row, and exit 1 with a bare
+    /// header, are Unknown on every platform, with or without the warning.
+    #[cfg(unix)]
+    #[test]
+    fn stub_exit_0_without_rows_and_exit_1_with_a_header_stay_unknown() {
+        let target = unique_temp_dir("holder-1978-norows");
+        for (name, stdout, stderr, code) in [
+            ("e0-empty", &b""[..], &b""[..], 0),
+            ("e0-header", HEADER, &b""[..], 0),
+            ("e0-empty-w", &b""[..], LINUX_TRACEFS_WARNING, 0),
+            ("e1-header", HEADER, &b""[..], 1),
+            ("e1-header-w", HEADER, LINUX_TRACEFS_WARNING, 1),
+        ] {
+            assert_unknown(name, stub_probe(name, &target, stdout, stderr, code));
         }
         let _ = std::fs::remove_dir_all(&target);
     }
