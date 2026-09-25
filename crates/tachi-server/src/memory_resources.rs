@@ -7,6 +7,7 @@
 
 use crate::tool_params::{SearchMemoryParams, TachiSearchParams};
 use crate::MemoryServer;
+use chrono::{DateTime, Utc};
 use memcore::{MemoryEntry, Surface};
 use rmcp::model::{Resource, ResourceContents};
 use sha2::{Digest, Sha256};
@@ -68,14 +69,40 @@ pub(crate) fn eligible_search_entry(entry: &MemoryEntry, params: &SearchMemoryPa
 }
 
 fn is_ordinary_active_entry(entry: &MemoryEntry) -> bool {
+    is_ordinary_active_entry_at(entry, Utc::now())
+}
+
+fn is_ordinary_active_entry_at(entry: &MemoryEntry, now: DateTime<Utc>) -> bool {
     entry.revision > 0
         && !entry.archived
-        && entry.valid_until.is_none()
+        && entry_is_current_at(entry, now)
         && matches!(entry.scope.as_str(), "user" | "project" | "general")
         && memcore::surface_of(entry) == Surface::Memory
         && !memcore::is_internal_only_row(entry)
         && !memcore::is_namespace_search_noise(entry, None)
         && !memcore::is_eval_entry(entry)
+}
+
+fn entry_is_current_at(entry: &MemoryEntry, now: DateTime<Utc>) -> bool {
+    let parse = |value: &str| {
+        let value = value.trim();
+        DateTime::parse_from_rfc3339(value)
+            .map(|time| time.with_timezone(&Utc))
+            .or_else(|_| value.parse::<DateTime<Utc>>())
+            .ok()
+    };
+    // Match the temporal search fallback without guessing when a non-empty
+    // bound is malformed. Hashing and returning still use this same row.
+    let from = if entry.valid_from.is_empty() {
+        &entry.timestamp
+    } else {
+        &entry.valid_from
+    };
+    parse(from).is_some_and(|start| start <= now)
+        && match entry.valid_until.as_deref() {
+            None => true,
+            Some(until) => parse(until).is_some_and(|end| now < end),
+        }
 }
 
 pub(crate) fn parse_resource_uri(uri: &str) -> Option<ParsedResourceUri> {
@@ -237,7 +264,7 @@ pub(crate) fn resource_issuance_allowed(
 }
 
 pub(crate) fn sandbox_policy_clear(server: &MemoryServer) -> Result<bool, String> {
-    server.with_global_store_read(|store| {
+    server.with_global_store_read_identity_checked(|store| {
         store
             .has_configured_sandbox_rules()
             .map(|configured| !configured)
@@ -779,6 +806,114 @@ mod tests {
             read_resource_text(&server_a, project_name, &reference_b).is_err(),
             "project B URI cannot fall back to same-ID project A content"
         );
+    }
+
+    #[test]
+    fn replaced_global_policy_file_revokes_issuance_and_reads_from_cached_handles() {
+        let project = "resource-policy-replaced";
+        let (server, _, reference) = project_fixture(project, entry("resource-policy-replaced-id"));
+        let params: TachiSearchParams = serde_json::from_value(serde_json::json!({
+            "query": "resource-policy-replaced-id", "scope": "memory", "project": project
+        }))
+        .unwrap();
+        assert!(resource_issuance_allowed(&server, &params, Some(project)));
+        assert!(read_resource_text(&server, project, &reference).is_ok());
+
+        let global = server.global_db_path_buf();
+        let replacement = global.with_extension("replacement.db");
+        let replacement_store =
+            MemoryStore::open_with_label(replacement.to_str().unwrap(), "global").unwrap();
+        replacement_store
+            .set_sandbox_rule("reader", "/memory/**", "deny")
+            .unwrap();
+        drop(replacement_store);
+        // Only isolated fixtures: drain committed WAL before replacing the main
+        // file. Retain the old live handles to model an external path swap.
+        crate::test_support::with_unrestricted_fixture_connection(&global, |conn| {
+            let checkpoint: (i64, i64, i64) =
+                conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                })?;
+            assert_eq!(checkpoint, (0, 0, 0));
+            Ok(())
+        })
+        .unwrap();
+        std::fs::rename(&replacement, &global).unwrap();
+        let current = MemoryStore::open_read_only(global.to_str().unwrap()).unwrap();
+        assert!(current.has_configured_sandbox_rules().unwrap());
+        assert!(
+            server
+                .with_global_store_read(|store| {
+                    store
+                        .has_configured_sandbox_rules()
+                        .map(|rules| !rules)
+                        .map_err(|e| e.to_string())
+                })
+                .unwrap(),
+            "the cached handle still addresses the old policy-free file"
+        );
+        assert!(!resource_issuance_allowed(&server, &params, Some(project)));
+        assert!(read_resource_text(&server, project, &reference).is_err());
+    }
+
+    #[test]
+    fn persisted_resource_time_windows_gate_both_issuance_and_reads() {
+        let project = "resource-time-window";
+        let original = entry("resource-time-window-id");
+        let (server, path, reference) = project_fixture(project, original.clone());
+        for (from, until, allowed) in [
+            ("2999-01-01T00:00:00Z", None, false),
+            ("2000-01-01T00:00:00Z", Some("2999-01-01T00:00:00Z"), true),
+            ("2000-01-01T00:00:00Z", Some("2001-01-01T00:00:00Z"), false),
+            ("not-a-time", None, false),
+            ("2000-01-01T00:00:00Z", Some("not-a-time"), false),
+            ("", None, true),
+        ] {
+            crate::test_support::with_unrestricted_fixture_connection(&path, |conn| {
+                conn.execute(
+                    "UPDATE memories SET valid_from=?1, valid_until=?2 WHERE id=?3",
+                    rusqlite::params![from, until, original.id],
+                )
+            })
+            .unwrap();
+            let persisted = server
+                .with_named_project_store_read(project, |store| {
+                    store.get(&original.id).map_err(|e| e.to_string())
+                })
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                resource_link_for_entry(&reference.source_fingerprint, &persisted).is_some(),
+                allowed,
+                "issuance for {from:?}..{until:?}"
+            );
+            let read = read_resource_text(&server, project, &reference);
+            assert_eq!(read.is_ok(), allowed, "read for {from:?}..{until:?}");
+            if allowed {
+                assert_eq!(read.unwrap(), original.text);
+            }
+        }
+    }
+
+    #[test]
+    fn resource_time_window_has_inclusive_start_and_exclusive_end() {
+        let now: DateTime<Utc> = "2026-09-25T12:00:00Z".parse().unwrap();
+        let mut candidate = entry("resource-exact-time-bound");
+        candidate.valid_from = "2026-09-25T13:00:00+01:00".to_string();
+        candidate.valid_until = Some("2026-09-25T12:00:00.001Z".to_string());
+        assert!(is_ordinary_active_entry_at(&candidate, now));
+        candidate.valid_until = Some("2026-09-25T12:00:00Z".to_string());
+        assert!(!is_ordinary_active_entry_at(&candidate, now));
+        candidate.valid_until = None;
+        candidate.valid_from = "2026-09-25T12:00:00.001Z".to_string();
+        assert!(!is_ordinary_active_entry_at(&candidate, now));
+        candidate.valid_from.clear();
+        candidate.timestamp = "2026-09-25T12:00:00Z".to_string();
+        assert!(is_ordinary_active_entry_at(&candidate, now));
+        candidate.timestamp = "2026-09-25T12:00:00.001Z".to_string();
+        assert!(!is_ordinary_active_entry_at(&candidate, now));
+        candidate.timestamp = "invalid".to_string();
+        assert!(!is_ordinary_active_entry_at(&candidate, now));
     }
 
     #[test]

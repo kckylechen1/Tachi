@@ -13,7 +13,8 @@ use super::{
 ///
 /// This is intentionally narrower than `get_with_options`: Resource reads may
 /// only expose current, active text and must not perform a second lifecycle
-/// lookup after reading the body.
+/// lookup after reading the body. The caller checks this materialized row's
+/// temporal interval; a finite future `valid_until` is still eligible.
 pub(crate) fn get_active_resource_entry(
     conn: &Connection,
     id: &str,
@@ -24,7 +25,6 @@ pub(crate) fn get_active_resource_entry(
          WHERE id = ?1
            AND archived = 0
            AND superseded_by IS NULL
-           AND valid_until IS NULL
            AND revision > 0"
     );
     let mut stmt = conn.prepare(&sql)?;
