@@ -460,7 +460,9 @@ jobs:
           $gitPatch = 'C:\Program Files\Git\usr\bin\patch.exe'
           if (Test-Path $gitPatch) {
             "PATCH=$gitPatch" >> $env:GITHUB_ENV
-            & $gitPatch --version | Select-Object -First 1
+            # Diagnostic only: a failing --version must not become the step's exit code.
+            & $gitPatch --version 2>&1 | Select-Object -First 1
+            $global:LASTEXITCODE = 0
           } else {
             Write-Output "::warning::$gitPatch not found; libsimple falls back to the first patch on PATH"
           }
