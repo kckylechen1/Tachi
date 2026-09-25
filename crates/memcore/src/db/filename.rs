@@ -103,6 +103,7 @@ pub fn convert_legacy_filename_offline(
         .read(true)
         .write(true)
         .create(true)
+        .truncate(false)
         .open(parent.join(".tachi-filename-conversion.lock"))?;
     #[cfg(any(target_os = "macos", target_os = "ios", target_os = "linux"))]
     let _lock = {

@@ -47,7 +47,7 @@ move to the surviving facades before upgrading. The highlights:
 
 - The ordinary Lead surface is six facades: `tachi_memory`, `tachi_task`,
   `tachi_agent_eval`, `tachi_staff`, `tachi_gh`, and `tachi_a2a`. Worker
-  (`delegate`) sessions see five of them (no `tachi_agent_eval`).
+  (`delegate`) sessions see exactly `tachi_memory`, `tachi_task`, `tachi_staff`, `tachi_gh`, and `tachi_a2a` (no `tachi_agent_eval`).
 - Retired model-facing routes are gone from the router, with different fates:
   memory save/search aliases and direct Kanban routes have their capabilities on
   the canonical facades (`tachi_memory`, `tachi_task` board actions);

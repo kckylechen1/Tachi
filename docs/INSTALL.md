@@ -714,8 +714,9 @@ normal agents should see their current repo project DB plus global memory.
 
 ## Available MCP Tools
 
-Once connected, ordinary/default Lead and Worker sessions expose exactly
+Once connected, Worker (`delegate`) sessions expose exactly
 `tachi_memory`, `tachi_task`, `tachi_staff`, `tachi_gh`, and `tachi_a2a`.
+Default Lead (`standard`) sessions also expose `tachi_agent_eval`, for six facades.
 The remaining inventory in this section documents retained routes for explicit
 Ops/admin compatibility or operator CLI workflows; those routes are not daily
 or default discovery, and retaining them does not mean they were deleted.
@@ -923,10 +924,10 @@ Tachi does not need to expose the full tool catalog to every host. Use `--profil
 
 | Profile | Exposed surface | Best for |
 |---|---|---|
-| `standard` | Exactly `tachi_memory`, `tachi_task`, `tachi_staff`, `tachi_gh`, and `tachi_a2a`; facade action policy still applies. | Ordinary Lead sessions. |
-| `coordinate` | The same five-facade discovery surface with legacy coordinate action permissions. | Explicit coordination compatibility without diagnostic discovery. |
+| `standard` | Six facades: `tachi_memory`, `tachi_task`, `tachi_agent_eval`, `tachi_staff`, `tachi_gh`, and `tachi_a2a`; facade action policy still applies. | Ordinary Lead sessions. |
+| `coordinate` | The five coordination facades (no `tachi_agent_eval`) with legacy coordinate action permissions. | Explicit coordination compatibility without diagnostic discovery. |
 | `operate` | Explicit non-default Ops surface retaining runtime, status, Vault-session, Foundry, and Hub diagnostics. | Runtime adapters and authorized Ops sessions. |
-| `delegate` | Exactly the same five facades as Lead; status/read actions remain available while recursive staffing and GitHub mutation stay denied. | Bounded Worker sessions. |
+| `delegate` | Exactly `tachi_memory`, `tachi_task`, `tachi_staff`, `tachi_gh`, and `tachi_a2a`; status/read actions remain available while recursive staffing and GitHub mutation stay denied. | Bounded Worker sessions. |
 | `admin` / `emergency` | Full retained catalog. Narrow-profile hiding does not physically delete compatibility routes. | Explicit maintenance, development, and emergency sessions. |
 
 Host aliases:
