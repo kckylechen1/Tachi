@@ -449,6 +449,32 @@ jobs:
       - name: Setup Rust
         uses: ./.github/actions/setup-rust
 
+      # #1963 probe: libsimple 0.9's build.rs shells out to `patch`, `cmake`
+      # (Unix Makefiles) and `make`, honouring the PATCH / CMAKE / MAKE env
+      # vars. On windows-latest the first `patch` on PATH is Strawberry Perl's
+      # GNU patch 2.5.9, which asserts on libsimple's patches. Point PATCH at
+      # Git for Windows' patch and print the toolchain the build script sees.
+      - name: Point libsimple build.rs at Git's GNU patch (#1963)
+        shell: pwsh
+        run: |
+          $gitPatch = 'C:\Program Files\Git\usr\bin\patch.exe'
+          if (Test-Path $gitPatch) {
+            "PATCH=$gitPatch" >> $env:GITHUB_ENV
+            # Diagnostic only: a failing --version must not become the step's exit code.
+            & $gitPatch --version 2>&1 | Select-Object -First 1
+            $global:LASTEXITCODE = 0
+          } else {
+            Write-Output "::warning::$gitPatch not found; libsimple falls back to the first patch on PATH"
+          }
+          foreach ($tool in 'patch', 'cmake', 'make', 'gmake', 'mingw32-make') {
+            $found = Get-Command $tool -All -ErrorAction SilentlyContinue | ForEach-Object Source
+            Write-Output ("{0}: {1}" -f $tool, (($found -join '; '), '<none>' | Where-Object { $_ } | Select-Object -First 1))
+          }
+          if (-not (Get-Command make -ErrorAction SilentlyContinue)) {
+            $gnuMake = Get-Command gmake, mingw32-make -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($gnuMake) { "MAKE=$($gnuMake.Source)" >> $env:GITHUB_ENV; Write-Output "MAKE=$($gnuMake.Source)" }
+          }
+
       - name: Exercise canonical-only inventory fallback
         if: matrix.crate == 'tachi-server'
         run: >-
