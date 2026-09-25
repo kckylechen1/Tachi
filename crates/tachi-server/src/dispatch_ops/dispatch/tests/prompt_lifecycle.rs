@@ -1017,7 +1017,12 @@ async fn p2_real_plan_stage_matrix_is_board_first_and_receipt_bound() {
         .await;
         match case.expected_error {
             Some(expected) => match outcome {
-                Err(error) => assert!(error.contains(expected), "{}", case.name),
+                Err(error) => assert!(
+                    error.message().contains(expected),
+                    "{}: {}",
+                    case.name,
+                    error.message()
+                ),
                 Ok(_) => panic!("{} unexpectedly succeeded", case.name),
             },
             None => {
@@ -1067,13 +1072,13 @@ async fn p2_real_plan_stage_matrix_is_board_first_and_receipt_bound() {
     }
 }
 
-/// #1664: a plan-commit failure (publication race, cancellation, terminal run,
-/// or IO fault) must not synthesize a FAILED status/kanban row. The commit
-/// path is not a plan-generation failure; overwriting here would clobber an
-/// authoritative cancel/terminal state or a newer committed state.
+/// #1664: a plan-commit IO failure must terminalize the run in ONE
+/// conditional publication at the captured revision — `status.json` becomes
+/// FAILED and the kanban row is projected to FAILED only because that
+/// publication won. Status and kanban must not split (FAILED/WORKING).
 #[tokio::test]
 #[allow(clippy::await_holding_lock)] // serializes the process-wide planner fixture
-async fn plan_commit_write_failure_does_not_clobber_status_or_kanban() {
+async fn plan_commit_write_failure_terminalizes_status_and_kanban() {
     let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -1140,11 +1145,8 @@ async fn plan_commit_write_failure_does_not_clobber_status_or_kanban() {
         None,
         Some(json!({ "state": "TASK_STATE_WORKING" })),
     );
-    let status_before =
-        std::fs::read_to_string(workspace.path().join("status.json")).expect("status before");
-
     let profile_payload = json!({"profile": "typed-profile"});
-    let _failure = crate::dispatch_ops::dispatch_v2::fail_next_plan_commit_write(workspace.path());
+    let _failure = crate::dispatch_ops::fail_next_plan_commit_write(workspace.path());
     let outcome =
         super::super::plan_stage::run_v2_plan_stage(super::super::plan_stage::PlanStageInputs {
             server: &server,
@@ -1162,23 +1164,30 @@ async fn plan_commit_write_failure_does_not_clobber_status_or_kanban() {
             v2_decision: crate::dispatch_ops::dispatch_v2::V2Decision::Enabled,
         })
         .await;
+    let error = outcome.expect_err("an injected commit write failure must surface as an error");
     assert!(
-        outcome.is_err(),
-        "an injected commit write failure must surface as an error"
+        error.is_settled(),
+        "the plan stage must report a settled failure so the outer closer does not double-close"
     );
 
-    let status_after =
-        std::fs::read_to_string(workspace.path().join("status.json")).expect("status after");
-    assert_eq!(
-        status_before, status_after,
-        "a commit failure must not overwrite the authoritative status.json"
+    let status: Value = serde_json::from_str(
+        &std::fs::read_to_string(workspace.path().join("status.json")).expect("status after"),
+    )
+    .expect("status json");
+    assert_eq!(status["state"], json!("TASK_STATE_FAILED"), "{status:#}");
+    assert_eq!(status["plan_review_status"], json!("failed"), "{status:#}");
+    assert_eq!(status["exit_code"], json!(1), "{status:#}");
+    assert_eq!(status["plan_failure"]["stage"], json!("plan"), "{status:#}");
+    assert!(
+        status.get("model_plan").is_none(),
+        "a failed plan publication must never carry a model_plan: {status:#}"
     );
     assert_eq!(
         crate::dispatch_ops::get_kanban_state(&server, "commit-failure-dispatch")
             .await
             .as_deref(),
-        Some("TASK_STATE_WORKING"),
-        "a commit failure must not clobber the kanban projection"
+        Some("TASK_STATE_FAILED"),
+        "a winning failure publication must project the same terminal state to kanban (no split)"
     );
 }
 

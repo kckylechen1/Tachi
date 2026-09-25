@@ -1,6 +1,8 @@
 use super::super::kanban_helpers::update_kanban_state;
 use super::*;
-use crate::dispatch_ops::dispatch_v2::{CommittedModelPlan, PlanCommit, PlanCommitPre};
+use crate::dispatch_ops::dispatch_v2::{
+    CommittedModelPlan, PlanCommit, PlanCommitPre, PlanFailurePublication,
+};
 use crate::dispatch_ops::kanban_helpers::plan_reference;
 
 // ─── V2 plan stage (optional Stage 1) ────────────────────────────────────────
@@ -21,6 +23,7 @@ pub(super) struct PlanStageInputs<'a> {
     pub(super) v2_decision: V2Decision,
 }
 
+#[derive(Debug)]
 pub(super) struct PlanStageOutcome {
     pub(super) prompt: String,
     pub(super) plan_duration_ms: Option<u64>,
@@ -30,9 +33,36 @@ pub(super) struct PlanStageOutcome {
     pub(super) early_response: Option<String>,
 }
 
+/// Typed plan-stage error. It tells the caller whether the planner already
+/// settled the run's canonical status/kanban (so a blind early-exit closer
+/// must not overwrite an authoritative or unknown state), or whether the
+/// ordinary post-init failure handling still applies.
+#[derive(Debug)]
+pub(super) enum PlanStageError {
+    /// The planner conditionally published a terminal failure, or safely
+    /// refused to clobber a newer winner, or could not persist a failure.
+    /// The caller must not blindly terminalize the kanban row.
+    Settled(String),
+    /// An infrastructure error the planner has not terminalized; existing
+    /// post-init early-exit handling applies.
+    Unsettled(String),
+}
+
+impl PlanStageError {
+    pub(super) fn message(&self) -> &str {
+        match self {
+            Self::Settled(message) | Self::Unsettled(message) => message,
+        }
+    }
+
+    pub(super) fn is_settled(&self) -> bool {
+        matches!(self, Self::Settled(_))
+    }
+}
+
 pub(super) async fn run_v2_plan_stage(
     inputs: PlanStageInputs<'_>,
-) -> Result<PlanStageOutcome, String> {
+) -> Result<PlanStageOutcome, PlanStageError> {
     let v2 = matches!(inputs.v2_decision, V2Decision::Enabled);
 
     // The actual prompt fed to the executing agent. In V1 this is just the
@@ -46,8 +76,12 @@ pub(super) async fn run_v2_plan_stage(
         // atomic `status.json` replacement. The anchor is opened before the
         // provider is awaited, and no lock is held across that await.
         let label = format!("dispatch-plan-{}", inputs.dispatch_id);
-        let plan_commit = PlanCommit::open(inputs.workspace_dir, inputs.dispatch_id)?;
-        let pre = plan_commit.read()?;
+        let plan_commit = PlanCommit::open(inputs.workspace_dir, inputs.dispatch_id)
+            .map_err(PlanStageError::Unsettled)?;
+        // A read refusal (terminal/cancelled run, or an untrusted prior plan)
+        // must not be clobbered by a synthetic failure; mark it settled so the
+        // outer early-exit closer leaves the authoritative state alone.
+        let pre = plan_commit.read().map_err(PlanStageError::Settled)?;
         let (committed, provider_duration_ms): (CommittedModelPlan, Option<u64>) = match pre {
             // A valid committed plan is reused without a second model call.
             PlanCommitPre::Reuse(existing) => (existing, None),
@@ -56,32 +90,43 @@ pub(super) async fn run_v2_plan_stage(
                 let plan_fut = run_plan_stage(inputs.server, &inputs.request.task, &label);
                 let plan_outcome = match tokio::time::timeout(plan_timeout, plan_fut).await {
                     Ok(Ok(p)) => p,
-                    Ok(Err(e)) => return fail_plan_stage(&inputs, e).await,
+                    Ok(Err(e)) => {
+                        return Err(
+                            publish_plan_stage_failure(&plan_commit, &inputs, revision, e).await,
+                        );
+                    }
                     Err(_) => {
                         let e = format!(
                             "dispatch v2 stage1 (plan) timed out after {}s",
                             plan_timeout.as_secs()
                         );
-                        return fail_plan_stage(&inputs, e).await;
+                        return Err(
+                            publish_plan_stage_failure(&plan_commit, &inputs, revision, e).await,
+                        );
                     }
                 };
                 let plan_md = plan_outcome.plan_md;
                 match plan_commit.commit(revision, &plan_md, &plan_outcome.invocation) {
                     Ok(committed) => (committed, Some(plan_outcome.duration_ms)),
-                    // A commit failure is a publication race (stale revision,
-                    // cancellation, terminal run, untrusted prior plan) or an
-                    // IO fault — never a plan-generation failure. Do NOT
-                    // synthesize a FAILED status/kanban row here: that would
-                    // overwrite an authoritative cancel/terminal state or a
-                    // newer committed state. Re-read once so a concurrent
-                    // first winner is still reused; otherwise propagate the
-                    // error and let the caller's guarded early-exit closer
-                    // settle a still-open row without clobbering a settled one.
+                    // A commit failure is a publication fault (IO) or a race
+                    // that a concurrent first winner may have settled. Re-read
+                    // once for a winner; otherwise publish the failure
+                    // conditionally under the same anchor/fence/CAS so a newer
+                    // terminal/cancelled/committed state is never overwritten
+                    // and status/kanban do not split.
                     Err(error) => match plan_commit.read() {
                         Ok(PlanCommitPre::Reuse(existing)) => {
                             (existing, Some(plan_outcome.duration_ms))
                         }
-                        _ => return Err(error),
+                        _ => {
+                            return Err(publish_plan_stage_failure(
+                                &plan_commit,
+                                &inputs,
+                                revision,
+                                error,
+                            )
+                            .await);
+                        }
                     },
                 }
             }
@@ -239,52 +284,58 @@ pub(super) async fn run_v2_plan_stage(
     })
 }
 
-/// Close the BOARD-FIRST kanban row, write a failure receipt, and surface the
-/// error. Mirrors the plan-stage failure/timeout pattern in execution.rs/reused
-/// helper (same terminal state + unreviewed flag).
-async fn fail_plan_stage(
+/// Conditionally publish a plan-stage failure and return the typed outcome.
+///
+/// The failure is written under the existing `PlanCommit` anchor/fence/CAS at
+/// the revision captured before the provider call. It is refused (writing
+/// nothing) when a valid committed plan, a terminal/cancelled state, or a
+/// newer status revision already won, so a concurrent completion or
+/// cancellation is never overwritten. The kanban row is projected to FAILED
+/// **only** when this publication wins; a refused or unpersistable failure
+/// leaves the row and status untouched so they cannot split. The `plan_failed`
+/// trajectory event is emitted only after a winning publication.
+async fn publish_plan_stage_failure(
+    plan_commit: &PlanCommit,
     inputs: &PlanStageInputs<'_>,
+    expected_revision: u64,
     error: String,
-) -> Result<PlanStageOutcome, String> {
-    append_trajectory_event(
-        inputs.trajectory_path,
-        json!({
-            "event": "plan_failed",
-            "dispatch_id": inputs.dispatch_id,
-            "timestamp": Utc::now().to_rfc3339(),
-            "error": error,
-        }),
-    );
-    write_status_json(
-        inputs.workspace_dir,
-        inputs.dispatch_id,
-        true,
-        None,
-        None,
-        "failed",
-        Some(1),
-        None,
-        None,
-        None,
-        Some(json!({ "error": error })),
-    );
-    // #971: the kanban row now exists before this stage runs (BOARD-FIRST) —
-    // a plan failure must close it, not leave it orphaned in
-    // TASK_STATE_WORKING. Mirrors the watchdog's own failure-close pattern in
-    // execution.rs (reused helper, same terminal state + unreviewed flag).
-    if let Err(kanban_err) = update_kanban_state(
-        inputs.server,
-        inputs.dispatch_id,
-        "TASK_STATE_FAILED",
-        None,
-        Some(false),
-    )
-    .await
-    {
-        eprintln!(
-            "[dispatch-v2] failed to mark dispatch {} FAILED in kanban after plan failure: {}",
-            inputs.dispatch_id, kanban_err
-        );
+) -> PlanStageError {
+    match plan_commit.publish_plan_failure(expected_revision, &error) {
+        PlanFailurePublication::Published => {
+            append_trajectory_event(
+                inputs.trajectory_path,
+                json!({
+                    "event": "plan_failed",
+                    "dispatch_id": inputs.dispatch_id,
+                    "timestamp": Utc::now().to_rfc3339(),
+                    "error": error,
+                }),
+            );
+            // #971: the BOARD-FIRST row must be closed when this failure is
+            // the winner. This runs only after the status publication won, so
+            // it cannot clobber a concurrent terminal winner.
+            if let Err(kanban_err) = update_kanban_state(
+                inputs.server,
+                inputs.dispatch_id,
+                "TASK_STATE_FAILED",
+                None,
+                Some(false),
+            )
+            .await
+            {
+                eprintln!(
+                    "[dispatch-v2] failed to mark dispatch {} FAILED in kanban after plan failure: {}",
+                    inputs.dispatch_id, kanban_err
+                );
+            }
+            PlanStageError::Settled(error)
+        }
+        // A newer authoritative state won: leave both status and kanban.
+        PlanFailurePublication::Refused => PlanStageError::Settled(error),
+        // The failure could not be persisted: report reconciliation unknown
+        // and do not fabricate a terminal kanban state.
+        PlanFailurePublication::PersistFailed => PlanStageError::Settled(format!(
+            "{error} (plan failure could not be persisted; reconciliation unknown)"
+        )),
     }
-    Err(error)
 }

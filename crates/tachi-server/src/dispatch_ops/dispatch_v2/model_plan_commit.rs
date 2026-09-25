@@ -58,6 +58,22 @@ enum CommitOutcome {
     Publish(Map<String, Value>, CommittedModelPlan),
 }
 
+/// Typed outcome of a conditional planner-failure publication.
+pub(in crate::dispatch_ops) enum PlanFailurePublication {
+    /// This call published `state=FAILED` (+ failure metadata, no
+    /// `model_plan`) at the captured revision. The caller must project the
+    /// same terminal failure into kanban.
+    Published,
+    /// A newer authoritative state won (a valid committed plan, a
+    /// terminal/cancelled run, or a newer status revision). Nothing was
+    /// written; the caller must not terminalize status or kanban.
+    Refused,
+    /// The failure could not be persisted (status unreadable or the atomic
+    /// replacement failed). The durable reconciliation state is unknown; the
+    /// caller must not report a false terminal failure.
+    PersistFailed,
+}
+
 /// Anchored handle for one run's canonical `status.json`. It retains the
 /// opened run directory for its whole lifetime so a path or inode swap after
 /// `open` cannot retarget the plan publication.
@@ -139,6 +155,78 @@ impl PlanCommit {
             return Err("refusing to commit an empty model plan".to_string());
         }
         self.commit_locked(expected_revision, content, receipt)
+    }
+
+    /// Conditionally publish a planner-stage FAILURE at the captured revision:
+    /// `state=FAILED` plus failure metadata and **no** `model_plan`, in one
+    /// locked, fenced, CAS-checked atomic replacement. It refuses (writing
+    /// nothing) when a valid committed plan, a terminal/cancelled state, or a
+    /// newer status revision already won, so a concurrent completion or
+    /// cancellation is never overwritten. The `error` is bounded and stripped
+    /// of control characters; no provider/model content is persisted.
+    pub(in crate::dispatch_ops) fn publish_plan_failure(
+        &self,
+        expected_revision: u64,
+        error: &str,
+    ) -> PlanFailurePublication {
+        self.publish_plan_failure_locked(expected_revision, &bounded_plan_error(error))
+    }
+
+    #[cfg(unix)]
+    fn publish_plan_failure_locked(
+        &self,
+        expected_revision: u64,
+        error: &str,
+    ) -> PlanFailurePublication {
+        let lock = self.anchor.lock();
+        let _guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let fence = match self.anchor.acquire_fence() {
+            Ok(fence) => fence,
+            Err(_) => return PlanFailurePublication::PersistFailed,
+        };
+        let Ok(Some(Value::Object(status))) = self.anchor.read_json() else {
+            return PlanFailurePublication::PersistFailed;
+        };
+        let Some(status) =
+            prepare_failure_publication(status, &self.dispatch_id, expected_revision, error)
+        else {
+            return PlanFailurePublication::Refused;
+        };
+        let body = match serde_json::to_vec_pretty(&Value::Object(status)) {
+            Ok(body) => body,
+            Err(_) => return PlanFailurePublication::PersistFailed,
+        };
+        match self.anchor.write_atomic(&body, &fence) {
+            Ok(()) => PlanFailurePublication::Published,
+            Err(_) => PlanFailurePublication::PersistFailed,
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn publish_plan_failure_locked(
+        &self,
+        expected_revision: u64,
+        error: &str,
+    ) -> PlanFailurePublication {
+        let lock = super::status_json_lock_for(&self.run_dir);
+        let _guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let path = self.status_path();
+        let Ok(Some(Value::Object(status))) = crate::task_lifecycle::read_json_file(&path) else {
+            return PlanFailurePublication::PersistFailed;
+        };
+        let Some(status) =
+            prepare_failure_publication(status, &self.dispatch_id, expected_revision, error)
+        else {
+            return PlanFailurePublication::Refused;
+        };
+        let body = match serde_json::to_vec_pretty(&Value::Object(status)) {
+            Ok(body) => body,
+            Err(_) => return PlanFailurePublication::PersistFailed,
+        };
+        match crate::utils::write_owner_only_file_atomic(&path, &body) {
+            Ok(()) => PlanFailurePublication::Published,
+            Err(_) => PlanFailurePublication::PersistFailed,
+        }
     }
 
     #[cfg(unix)]
@@ -276,12 +364,16 @@ fn prepare_commit(
         ));
     }
     let next_revision = crate::managed_run_control::advance_status_revision(&mut status)?;
+    // The persisted receipt's `revision` field is i64; refuse rather than
+    // wrap once a status revision exceeds that range.
+    let bound_revision = i64::try_from(next_revision).map_err(|_| {
+        format!("plan artifact revision {next_revision} exceeds the persisted receipt i64 range")
+    })?;
     let payload_digest = PersistedModelInvocationReceiptV1::content_hash_for(content);
-    let invocation = receipt.clone().bound_to_content(
-        content,
-        plan_binding_id(dispatch_id),
-        next_revision as i64,
-    );
+    let invocation =
+        receipt
+            .clone()
+            .bound_to_content(content, plan_binding_id(dispatch_id), bound_revision);
     let invocation = serde_json::to_value(&invocation)
         .map_err(|error| format!("serialize model invocation receipt: {error}"))?;
     let model_plan = json!({
@@ -303,6 +395,85 @@ fn prepare_commit(
         &status,
     );
     Ok(CommitOutcome::Publish(status, committed))
+}
+
+/// Maximum retained characters of a planner failure message written into the
+/// canonical status. The message may name a typed provider class but must
+/// never carry model content.
+const MAX_PLAN_ERROR_CHARS: usize = 500;
+
+fn bounded_plan_error(error: &str) -> String {
+    let mut bounded: String = error
+        .chars()
+        .take(MAX_PLAN_ERROR_CHARS)
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect();
+    if error.chars().nth(MAX_PLAN_ERROR_CHARS).is_some() {
+        bounded.push('…');
+    }
+    bounded
+}
+
+/// Build the candidate status for a planner-failure publication, or `None`
+/// when an authoritative newer state must be preserved instead (valid
+/// committed plan, terminal/cancelled run, or stale revision). The returned
+/// status has no `model_plan` and its revision already advanced.
+fn prepare_failure_publication(
+    mut status: Map<String, Value>,
+    dispatch_id: &str,
+    expected_revision: u64,
+    error: &str,
+) -> Option<Map<String, Value>> {
+    if status.get("dispatch_id").and_then(Value::as_str) != Some(dispatch_id) {
+        return None;
+    }
+    if status_blocks_plan(&status) {
+        return None;
+    }
+    if let Some(model_plan) = status.get("model_plan") {
+        if validated_committed_model_plan(model_plan, dispatch_id).is_some() {
+            return None;
+        }
+    }
+    if status_revision(&status) != expected_revision {
+        return None;
+    }
+    // A failure publication never carries a plan (valid or forged).
+    status.remove("model_plan");
+    // Apply the terminal state BEFORE advancing so `advance_status_revision`
+    // mirrors FAILED (not the superseded state) into any cancellation receipt.
+    apply_failure_metadata(&mut status, error);
+    crate::managed_run_control::advance_status_revision(&mut status).ok()?;
+    Some(status)
+}
+
+fn apply_failure_metadata(status: &mut Map<String, Value>, error: &str) {
+    status.insert(
+        "state".to_string(),
+        Value::String("TASK_STATE_FAILED".to_string()),
+    );
+    status.insert(
+        "plan_review_status".to_string(),
+        Value::String("failed".to_string()),
+    );
+    status.insert("exit_code".to_string(), Value::Number(1.into()));
+    status.insert(
+        "updated_at".to_string(),
+        Value::String(chrono::Utc::now().to_rfc3339()),
+    );
+    status.insert(
+        "plan_failure".to_string(),
+        json!({
+            "stage": MODEL_PLAN_STAGE,
+            "error": error,
+        }),
+    );
 }
 
 /// The exact, closed field set of a bound
@@ -408,7 +579,12 @@ fn valid_persisted_receipt_shape(
     if invocation.get("memory_id").and_then(Value::as_str) != Some(binding_id) {
         return false;
     }
-    if invocation.get("revision").and_then(Value::as_i64) != Some(artifact_revision as i64) {
+    // The persisted revision is i64; a u64 artifact revision outside that
+    // range can never match a persisted receipt and is refused, not wrapped.
+    let Ok(artifact_revision_i64) = i64::try_from(artifact_revision) else {
+        return false;
+    };
+    if invocation.get("revision").and_then(Value::as_i64) != Some(artifact_revision_i64) {
         return false;
     }
     true
@@ -930,6 +1106,115 @@ mod tests {
         assert!(
             validated_committed_model_plan(&zero_revision, "d1").is_none(),
             "a committed publication always lands at a positive revision"
+        );
+    }
+
+    #[test]
+    fn revision_overflowing_receipt_i64_range_is_refused_without_writing() {
+        let temp = tempfile::tempdir().expect("run dir");
+        seed_status(temp.path(), "d1", i64::MAX as u64);
+        let commit = PlanCommit::open(temp.path(), "d1").expect("open");
+        let before = std::fs::read(temp.path().join("status.json")).expect("bytes");
+        let error = commit
+            .commit(i64::MAX as u64, "## Goal\noverflow", &plan_binding())
+            .expect_err("a revision beyond the receipt i64 range must be refused");
+        assert!(error.contains("revision"), "{error}");
+        assert_eq!(
+            std::fs::read(temp.path().join("status.json")).expect("bytes"),
+            before,
+            "a refused overflow must leave the prior bytes untouched"
+        );
+        assert!(read_status(temp.path()).get("model_plan").is_none());
+    }
+
+    #[test]
+    fn revision_at_receipt_i64_boundary_is_valid() {
+        let temp = tempfile::tempdir().expect("run dir");
+        let current = (i64::MAX as u64) - 1;
+        seed_status(temp.path(), "d1", current);
+        let commit = PlanCommit::open(temp.path(), "d1").expect("open");
+        let committed = commit
+            .commit(current, "## Goal\nboundary", &plan_binding())
+            .expect("i64::MAX is a valid persisted revision");
+        assert_eq!(committed.artifact_revision, i64::MAX as u64);
+        let status = read_status(temp.path());
+        assert_eq!(status["model_plan"]["artifact_revision"], i64::MAX);
+        assert_eq!(
+            status["model_plan"]["model_invocation"]["revision"],
+            i64::MAX,
+            "the receipt revision must bind exactly at the i64 boundary"
+        );
+    }
+
+    #[test]
+    fn failure_publication_wins_only_without_a_newer_winner() {
+        let temp = tempfile::tempdir().expect("run dir");
+        seed_status(temp.path(), "d1", 1);
+        let commit = PlanCommit::open(temp.path(), "d1").expect("open");
+        assert!(matches!(
+            commit.publish_plan_failure(1, "provider exploded"),
+            PlanFailurePublication::Published
+        ));
+        let status = read_status(temp.path());
+        assert_eq!(status["state"], "TASK_STATE_FAILED");
+        assert_eq!(status["plan_review_status"], "failed");
+        assert_eq!(status["exit_code"], 1);
+        assert_eq!(status["plan_failure"]["stage"], "plan");
+        assert!(
+            status.get("model_plan").is_none(),
+            "a failure publication never carries a model_plan"
+        );
+        let revision_after = status["status_revision"].as_u64().unwrap();
+
+        // A terminal winner refuses to be overwritten.
+        let before = std::fs::read(temp.path().join("status.json")).expect("bytes");
+        assert!(matches!(
+            commit.publish_plan_failure(revision_after, "second failure"),
+            PlanFailurePublication::Refused
+        ));
+        assert_eq!(
+            std::fs::read(temp.path().join("status.json")).expect("bytes"),
+            before
+        );
+
+        // A stale expected revision refuses too.
+        assert!(matches!(
+            commit.publish_plan_failure(0, "stale failure"),
+            PlanFailurePublication::Refused
+        ));
+    }
+
+    #[test]
+    fn failure_publication_reports_persist_failed_when_status_is_unreadable() {
+        let temp = tempfile::tempdir().expect("run dir");
+        // A directory where status.json is expected makes the anchored read
+        // fail: no failure may be fabricated and none may be reported as a
+        // false terminal.
+        std::fs::create_dir(temp.path().join("status.json")).expect("status directory");
+        let commit = PlanCommit::open(temp.path(), "d1").expect("open");
+        assert!(matches!(
+            commit.publish_plan_failure(1, "unreadable status"),
+            PlanFailurePublication::PersistFailed
+        ));
+    }
+
+    #[test]
+    fn failure_publication_refuses_to_clobber_a_committed_plan() {
+        let temp = tempfile::tempdir().expect("run dir");
+        seed_status(temp.path(), "d1", 1);
+        let commit = PlanCommit::open(temp.path(), "d1").expect("open");
+        commit
+            .commit(1, "## Goal\nwinner", &plan_binding())
+            .expect("commit plan");
+        let before = std::fs::read(temp.path().join("status.json")).expect("bytes");
+        assert!(matches!(
+            commit.publish_plan_failure(2, "late failure"),
+            PlanFailurePublication::Refused
+        ));
+        assert_eq!(
+            std::fs::read(temp.path().join("status.json")).expect("bytes"),
+            before,
+            "a concurrent committed plan must never be clobbered by a late failure"
         );
     }
 }

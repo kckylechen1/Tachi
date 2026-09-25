@@ -38,6 +38,14 @@ enum MockProviderMode {
     Success,
     SuccessAfter(std::path::PathBuf),
     Failure,
+    /// #1664: block until `release` exists (signalling `entered` first), then
+    /// fail — so a test can write a concurrent terminal winner in the window
+    /// after the plan stage captured its revision and before the provider
+    /// returns.
+    FailureAfter {
+        entered: std::path::PathBuf,
+        release: std::path::PathBuf,
+    },
 }
 
 struct MockProvider {
@@ -124,6 +132,27 @@ async fn mock_chat_completions(State(mode): State<MockProviderMode>) -> Response
                 tokio::time::sleep(std::time::Duration::from_millis(20)).await;
             }
             mock_plan_response()
+        }
+        MockProviderMode::FailureAfter { entered, release } => {
+            let _ = std::fs::write(&entered, b"entered");
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
+            while !release.is_file() {
+                if tokio::time::Instant::now() >= deadline {
+                    return (
+                        StatusCode::GATEWAY_TIMEOUT,
+                        Json(
+                            json!({"error": {"message": "timed out waiting for release sentinel"}}),
+                        ),
+                    )
+                        .into_response();
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({"error": {"message": "synthetic plan failure"}})),
+            )
+                .into_response()
         }
     }
 }
@@ -490,4 +519,191 @@ async fn v1_dispatch_status_and_kanban_unaffected_by_reorder() {
     );
 
     let _ = wait_for_dispatch_result(&run_dir).await;
+}
+
+/// #1664 (High): a provider error/timeout that races a concurrent terminal
+/// winner must leave that winner untouched. The plan stage captures its
+/// expected revision, the test writes a canceled status + kanban, then the
+/// provider fails; the conditional failure publication must refuse, emit no
+/// `plan_failed` event, and never split status/kanban.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn provider_error_race_leaves_concurrent_terminal_winner_unchanged() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let temp_home = tempfile::tempdir().expect("temp tachi home");
+    let _tachi_home = EnvRestore::set_path("TACHI_HOME", temp_home.path());
+    let _v2_review = EnvRestore::set("DISPATCH_V2_PLAN_REVIEW", "false");
+    let entered = temp_home.path().join("provider-entered");
+    let release = temp_home.path().join("provider-release");
+    let mock_provider = MockProvider::start(MockProviderMode::FailureAfter {
+        entered: entered.clone(),
+        release: release.clone(),
+    })
+    .await;
+
+    let run_root = temp_home.path().join("runs");
+    let mut server = make_server();
+    server.replace_llm(mock_provider.llm.clone());
+    let server_for_task = (*server).clone();
+
+    let mut params = dispatch_params(Some("custom"), "provider error race");
+    params.stage = Some("auto".to_string());
+    params.command = vec!["python3".to_string(), "-c".to_string(), "pass".to_string()];
+
+    let dispatch_task = tokio::spawn(async move {
+        crate::dispatch_ops::handle_tachi_dispatch(&server_for_task, params).await
+    });
+
+    // Wait until the provider is entered: the plan stage has captured its
+    // expected revision and is now blocked on the provider response.
+    for _ in 0..DISPATCH_TEST_WAIT_ATTEMPTS {
+        if entered.is_file() {
+            break;
+        }
+        tokio::time::sleep(DISPATCH_TEST_WAIT_INTERVAL).await;
+    }
+    assert!(
+        entered.is_file(),
+        "the mock provider must be entered before the concurrent winner is written"
+    );
+
+    let run_dir = wait_for_single_run_dir(&run_root).await;
+    let dispatch_id = run_dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .expect("dispatch id from run dir name")
+        .to_string();
+
+    // A concurrent terminal winner.
+    crate::dispatch_ops::write_status_json(
+        &run_dir,
+        &dispatch_id,
+        true,
+        None,
+        None,
+        "n/a",
+        Some(143),
+        None,
+        None,
+        None,
+        Some(json!({ "state": "TASK_STATE_CANCELED" })),
+    );
+    crate::dispatch_ops::update_kanban_state(
+        &server,
+        &dispatch_id,
+        "TASK_STATE_CANCELED",
+        None,
+        None,
+    )
+    .await
+    .expect("project the concurrent cancel to kanban");
+
+    // Release the provider; its 401 must NOT overwrite the winner.
+    std::fs::write(&release, b"go").expect("release the mock provider");
+    let result = dispatch_task.await.expect("dispatch task should not panic");
+    assert!(
+        result.is_err(),
+        "the plan-stage provider error must surface as a dispatch error"
+    );
+
+    let status = read_status_json(&run_dir).expect("status.json written");
+    assert_eq!(
+        status["state"],
+        json!("TASK_STATE_CANCELED"),
+        "the concurrent cancel must survive the provider failure: {status:#}"
+    );
+    assert_eq!(status["exit_code"], json!(143), "{status:#}");
+    assert!(
+        status.get("plan_failure").is_none(),
+        "a refused failure must not write failure metadata: {status:#}"
+    );
+    assert_ne!(
+        status["plan_review_status"],
+        json!("failed"),
+        "a refused failure must not overwrite the winner state: {status:#}"
+    );
+    assert_eq!(
+        crate::dispatch_ops::get_kanban_state(&server, &dispatch_id)
+            .await
+            .as_deref(),
+        Some("TASK_STATE_CANCELED"),
+        "a refused failure must not clobber the kanban winner"
+    );
+    let trajectory = std::fs::read_to_string(run_dir.join("trajectory.jsonl")).unwrap_or_default();
+    assert!(
+        !trajectory.contains("plan_failed"),
+        "a refused failure must emit no plan_failed event: {trajectory}"
+    );
+}
+
+/// #1664 (Medium): a real plan-commit IO failure must terminalize the run in
+/// one publication — status.json FAILED and kanban FAILED — never the split
+/// (kanban FAILED / status WORKING) the previous blind outer closer produced.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn plan_commit_io_failure_terminalizes_status_and_kanban() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let temp_home = tempfile::tempdir().expect("temp tachi home");
+    let _tachi_home = EnvRestore::set_path("TACHI_HOME", temp_home.path());
+    let _v2_review = EnvRestore::set("DISPATCH_V2_PLAN_REVIEW", "false");
+    let release = temp_home.path().join("provider-release");
+    let mock_provider = MockProvider::start(MockProviderMode::SuccessAfter(release.clone())).await;
+
+    let run_root = temp_home.path().join("runs");
+    let mut server = make_server();
+    server.replace_llm(mock_provider.llm.clone());
+    let server_for_task = (*server).clone();
+
+    let mut params = dispatch_params(Some("custom"), "commit io failure terminalizes");
+    params.stage = Some("auto".to_string());
+    params.command = vec!["python3".to_string(), "-c".to_string(), "pass".to_string()];
+
+    let dispatch_task = tokio::spawn(async move {
+        crate::dispatch_ops::handle_tachi_dispatch(&server_for_task, params).await
+    });
+
+    let run_dir = wait_for_single_run_dir(&run_root).await;
+    let dispatch_id = run_dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .expect("dispatch id from run dir name")
+        .to_string();
+    let _ = wait_for_status_json(&run_dir).await;
+
+    // Inject the plan-commit write failure, then let the provider return.
+    let _failure = crate::dispatch_ops::fail_next_plan_commit_write(&run_dir);
+    std::fs::write(&release, b"go").expect("release the mock provider");
+
+    let result = dispatch_task.await.expect("dispatch task should not panic");
+    assert!(
+        result.is_err(),
+        "the plan-commit IO failure must surface as a dispatch error"
+    );
+
+    let status = read_status_json(&run_dir).expect("status.json written");
+    assert_eq!(
+        status["state"],
+        json!("TASK_STATE_FAILED"),
+        "a winning failure publication must terminalize status: {status:#}"
+    );
+    assert_eq!(status["plan_review_status"], json!("failed"), "{status:#}");
+    assert_eq!(status["exit_code"], json!(1), "{status:#}");
+    assert_eq!(status["plan_failure"]["stage"], json!("plan"), "{status:#}");
+    assert!(
+        status.get("model_plan").is_none(),
+        "a failed plan must not publish a model_plan: {status:#}"
+    );
+    assert_eq!(
+        crate::dispatch_ops::get_kanban_state(&server, &dispatch_id)
+            .await
+            .as_deref(),
+        Some("TASK_STATE_FAILED"),
+        "status and kanban must not split after a plan-commit IO failure"
+    );
 }

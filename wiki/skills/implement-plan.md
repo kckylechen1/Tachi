@@ -1,9 +1,11 @@
 ---
 name: implement-plan
 description: |
-  Execute a previously-generated dispatch plan step by step. Read the plan in
-  `plan.md`, follow each numbered step in order, edit only the files listed in
-  the Files section, and verify success by running the commands in the
+  Execute a previously-generated dispatch plan step by step. The committed plan
+  lives at `status.json#/model_plan.content`, with its `model_invocation`
+  receipt bound to that exact content; legacy single-stage (V1) dispatches carry
+  no model plan (`n/a`). Follow each numbered step in order, edit only the files
+  listed in the Files section, and verify success by running the commands in the
   Validation section. Stop and report failure if any validation command fails.
 ---
 
@@ -14,17 +16,22 @@ operator requests a two-stage Plan → Execute dispatch.
 
 ## Inputs
 
-- `plan.md` (in the dispatch run directory) — produced by Stage 1 with
-  four sections:
+- The committed model plan for this dispatch — `status.json#/model_plan`
+  (`content`), with its `model_invocation` receipt bound to that content. The
+  executing prompt also inlines it as `## Plan (from Stage 1)`. It has four
+  sections:
   - `## Goal`
   - `## Steps` (numbered)
   - `## Files`
   - `## Validation`
+- Legacy single-stage (V1) dispatches: `n/a` — no committed model plan exists;
+  use the executing prompt's inline plan and instructions.
 - The original task description.
 
 ## Workflow
 
-1. Read `plan.md` end-to-end before touching any file.
+1. Read the committed plan content (`status.json#/model_plan.content`, or the
+   inlined `## Plan (from Stage 1)`) end-to-end before touching any file.
 2. Work through `## Steps` in order. Do not skip ahead and do not
    reorder steps unless a step explicitly fails and you need to recover.
 3. Limit file edits to the paths declared in `## Files`. If you need to

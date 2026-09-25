@@ -44,7 +44,9 @@ mod model_plan_commit;
 
 #[cfg(test)]
 pub(crate) use model_plan_commit::fail_next_plan_commit_write;
-pub(super) use model_plan_commit::{CommittedModelPlan, PlanCommit, PlanCommitPre};
+pub(super) use model_plan_commit::{
+    CommittedModelPlan, PlanCommit, PlanCommitPre, PlanFailurePublication,
+};
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 enum StatusJsonLockKey {
@@ -177,10 +179,19 @@ the whole document."#;
 
 /// Inline fallback for the implement-plan skill when the capability is not
 /// registered in the running server. Keeps V2 functional on fresh boxes.
+///
+/// The canonical plan is the committed `status.json#/model_plan.content`
+/// (bound by its `model_invocation` receipt), also inlined below as
+/// `## Plan (from Stage 1)`. The V1 placeholder `plan.md` is not a model plan
+/// and must not be read as one.
 pub(super) const IMPLEMENT_PLAN_SKILL_FALLBACK: &str = r#"## Skill: implement-plan
-Follow the attached plan step by step. Do not redesign it. After each step run
-the relevant Validation command. Stop and report blockers instead of improvising
-outside the plan. When done, call tachi_task(action="complete") with the dispatch_id."#;
+The plan is this dispatch's committed model plan: `status.json#/model_plan.content`,
+whose `model_invocation` receipt is bound to that exact content. Legacy
+single-stage (V1) dispatches carry no model plan (`n/a`). The committed plan is
+also appended below as `## Plan (from Stage 1)`. Follow it step by step; do not
+redesign it. After each step run the relevant Validation command. Stop and report
+blockers instead of improvising outside the plan. When done, call
+tachi_task(action="complete") with the dispatch_id."#;
 
 /// Default wall-clock budget for Stage 1 (`claude_pool.call`). Independent of
 /// the broader dispatch timeout so a slow planner can't burn the execute
@@ -388,6 +399,11 @@ async fn call_plan_llm(
     server: &crate::MemoryServer,
     task: &str,
 ) -> Result<tachi_llm::Generated<String>, String> {
+    // Preserve the retired recorder path's bounded-concurrency admission
+    // (`CLAUDE_POOL_MAX_CONCURRENT`, default `DEFAULT_MAX_CONCURRENT`) while
+    // publishing no recorder run-directory success artifact. The permit is
+    // held across the provider call and released on success or error.
+    let _permit = server.llm_recorder.acquire_slot().await?;
     server
         .llm
         .call_reasoning_llm_provider_only_with_serving_receipt(
@@ -1532,5 +1548,221 @@ Only goal here.
         assert!(prompt.contains("do X"));
         assert!(prompt.contains("ctx"));
         assert!(prompt.contains("implement-plan"));
+    }
+
+    /// #1664: both the dynamically loaded skill source and the inline fallback
+    /// must point at the committed `status.json#/model_plan` content. Neither
+    /// may instruct the executor to read the V1 placeholder `plan.md`.
+    #[test]
+    fn implement_plan_skill_and_inline_fallback_reference_committed_plan() {
+        let inline = IMPLEMENT_PLAN_SKILL_FALLBACK;
+        assert!(
+            !inline.contains("plan.md"),
+            "inline fallback must not point at the V1 placeholder: {inline}"
+        );
+        assert!(inline.contains("status.json#/model_plan"), "{inline}");
+        assert!(inline.contains("model_invocation"), "{inline}");
+
+        let skill_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../wiki/skills/implement-plan.md");
+        let skill = std::fs::read_to_string(&skill_path)
+            .unwrap_or_else(|error| panic!("read {}: {error}", skill_path.display()));
+        assert!(
+            !skill.contains("plan.md"),
+            "the implement-plan skill must not instruct reading the V1 placeholder: {skill}"
+        );
+        assert!(skill.contains("status.json#/model_plan"), "{skill}");
+        assert!(skill.contains("model_invocation"), "{skill}");
+        assert!(
+            skill.contains("n/a"),
+            "the skill must call out legacy V1 as n/a: {skill}"
+        );
+    }
+
+    async fn spawn_chat_provider(app: axum::Router) -> (u16, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind provider");
+        let port = listener.local_addr().expect("provider addr").port();
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve provider");
+        });
+        (port, task)
+    }
+
+    fn reasoning_client(port: u16) -> tachi_llm::LlmClient {
+        use tachi_llm::{
+            llm::{ChatLaneConfig, ProviderRuntimeConfig},
+            LlmClient, ProviderSecret, RerankConfig, RerankProviderKind,
+        };
+        let unused = || ChatLaneConfig {
+            base_url: "https://unused.test/v1/chat/completions".to_string(),
+            model: "unused".to_string(),
+            api_key_envs: vec!["UNUSED_KEY"],
+        };
+        let config = ProviderRuntimeConfig {
+            extract: unused(),
+            summary: unused(),
+            reasoning: ChatLaneConfig {
+                base_url: format!("http://127.0.0.1:{port}/chat/completions"),
+                model: "slot-test-model".to_string(),
+                api_key_envs: vec!["PLAN_SLOT_TEST_KEY"],
+            },
+            distill: unused(),
+            rerank: RerankConfig {
+                provider: RerankProviderKind::Voyage,
+                local_endpoint: None,
+            },
+        };
+        let client = LlmClient::new_with_config(config, None).expect("slot test client");
+        client.set_provider_secret_pool(
+            "PLAN_SLOT_TEST_KEY",
+            vec![ProviderSecret {
+                key_id: "PLAN_SLOT_TEST_KEY".to_string(),
+                value: "slot-test-secret".to_string(),
+            }],
+        );
+        client
+    }
+
+    fn plan_slot_server(port: u16) -> crate::tests::TestServer {
+        // `make_server` isolates the test home and binds the recorder's
+        // semaphore from `CLAUDE_POOL_MAX_CONCURRENT` at construction; the
+        // caller must have set that env var before this call (global lock).
+        let mut server = crate::tests::make_server();
+        server.replace_llm(reasoning_client(port));
+        server
+    }
+
+    #[derive(Clone)]
+    struct SlotInflightState {
+        inflight: Arc<std::sync::atomic::AtomicUsize>,
+        max_inflight: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    async fn slot_inflight_response(
+        axum::extract::State(state): axum::extract::State<SlotInflightState>,
+    ) -> axum::Json<serde_json::Value> {
+        use std::sync::atomic::Ordering;
+        let now = state.inflight.fetch_add(1, Ordering::SeqCst) + 1;
+        state.max_inflight.fetch_max(now, Ordering::SeqCst);
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+        state.inflight.fetch_sub(1, Ordering::SeqCst);
+        axum::Json(serde_json::json!({
+            "choices": [{
+                "message": {"role": "assistant", "content": "gated plan"},
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            "model": "slot-test-model"
+        }))
+    }
+
+    #[derive(Clone)]
+    struct SlotCallsState {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    async fn slot_first_rejected_response(
+        axum::extract::State(state): axum::extract::State<SlotCallsState>,
+    ) -> axum::response::Response {
+        use axum::response::IntoResponse;
+        use std::sync::atomic::Ordering;
+        if state.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            (
+                axum::http::StatusCode::BAD_REQUEST,
+                "synthetic plan rejection",
+            )
+                .into_response()
+        } else {
+            axum::Json(serde_json::json!({
+                "choices": [{
+                    "message": {"role": "assistant", "content": "second plan"},
+                    "finish_reason": "stop"
+                }],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+                "model": "slot-test-model"
+            }))
+            .into_response()
+        }
+    }
+
+    /// #1664: two simultaneous plan provider calls with the recorder limit at
+    /// 1 must never exceed one provider request in flight — the same admission
+    /// the retired recorder path enforced.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn plan_provider_calls_share_the_recorder_slot_limit() {
+        use axum::{routing::post, Router};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _limit = crate::test_support::EnvRestore::set("CLAUDE_POOL_MAX_CONCURRENT", "1");
+
+        let inflight = Arc::new(AtomicUsize::new(0));
+        let max_inflight = Arc::new(AtomicUsize::new(0));
+        let state = SlotInflightState {
+            inflight: Arc::clone(&inflight),
+            max_inflight: Arc::clone(&max_inflight),
+        };
+        let (port, task) = spawn_chat_provider(
+            Router::new()
+                .route("/chat/completions", post(slot_inflight_response))
+                .with_state(state),
+        )
+        .await;
+        let server = plan_slot_server(port);
+
+        let (a, b) = tokio::join!(
+            call_plan_llm(&server, "task-a"),
+            call_plan_llm(&server, "task-b")
+        );
+        assert!(a.is_ok(), "{a:?}");
+        assert!(b.is_ok(), "{b:?}");
+        assert_eq!(
+            max_inflight.load(Ordering::SeqCst),
+            1,
+            "simultaneous plan calls must share the recorder's slot limit"
+        );
+        task.abort();
+    }
+
+    /// #1664: an errored plan provider call must release its slot so the next
+    /// plan can run. The first request gets a non-retriable 400; the second
+    /// must still reach the provider and succeed.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn plan_provider_slot_is_released_after_an_error() {
+        use axum::{routing::post, Router};
+
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _limit = crate::test_support::EnvRestore::set("CLAUDE_POOL_MAX_CONCURRENT", "1");
+
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let state = SlotCallsState {
+            calls: Arc::clone(&calls),
+        };
+        let (port, task) = spawn_chat_provider(
+            Router::new()
+                .route("/chat/completions", post(slot_first_rejected_response))
+                .with_state(state),
+        )
+        .await;
+        let server = plan_slot_server(port);
+
+        let (a, b) = tokio::join!(
+            call_plan_llm(&server, "task-a"),
+            call_plan_llm(&server, "task-b")
+        );
+        let successes = [a.is_ok(), b.is_ok()].into_iter().filter(|ok| *ok).count();
+        assert_eq!(
+            successes, 1,
+            "the erroring call must release the slot so the next plan can run: a={a:?} b={b:?}"
+        );
+        task.abort();
     }
 }
