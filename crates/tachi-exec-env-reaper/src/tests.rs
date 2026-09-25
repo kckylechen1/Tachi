@@ -492,7 +492,12 @@ fn lsof_excludes_only_the_reapers_exact_pin() {
                   tachi    123 user    7r   DIR   1,16       320  123 /tmp/x-target\n\
                   tachi    123 user    8r   REG   1,16      2048  124 /tmp/x-target/live\n\
                   cargo    456 user    7r   REG   1,16      2048  125 /tmp/x-target/other\n";
-    let filtered = without_ignored_holder(stdout, HolderExclusion { pid: 123, fd: 7 });
+    // tachi#1978 round 3: the exclusion also checks NAME against the target.
+    let filtered = without_ignored_holder(
+        stdout,
+        HolderExclusion { pid: 123, fd: 7 },
+        Path::new("/tmp/x-target"),
+    );
 
     assert!(!filtered.contains("123 user    7r"));
     assert!(filtered.contains("123 user    8r"));
@@ -693,7 +698,8 @@ fn stub_pin_only_listing_stays_unheld() {
     let root = unique_temp_dir("tachi-reaper-1978-pin");
     let target = make_target_dir(&root, "x-target");
     let mut stdout = LSOF_HEADER.to_vec();
-    stdout.extend_from_slice(b"tachi 123 u 7r DIR 1,4 0 1 /t\n");
+    stdout
+        .extend_from_slice(format!("tachi 123 u 7r DIR 1,4 0 1 {}\n", target.display()).as_bytes());
     let pin = Some(HolderExclusion { pid: 123, fd: 7 });
     for code in [0, 1] {
         assert_eq!(
@@ -730,8 +736,162 @@ fn real_probe_reports_unheld_for_unheld_and_pin_only_dirs() {
         "control: the pin itself is a holder without the exclusion"
     );
     assert_eq!(lsof_holder_probe(&target, exclusion), HolderCheck::None);
+
+    // Round 3: the real pin row, exactly as this host's lsof prints it,
+    // passes the strict predicate (default layout, FD grammar, PID/FD, NAME
+    // under the target). Printed so the captured row is on record.
+    let exclusion = exclusion.expect("unix pin exclusion");
+    let out = Command::new("lsof")
+        .arg("+D")
+        .arg(&target)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let pid = std::process::id().to_string();
+    let pin_rows: Vec<&str> = stdout
+        .lines()
+        .skip(1)
+        .filter(|line| line.split_whitespace().nth(1) == Some(pid.as_str()))
+        .collect();
+    eprintln!(
+        "real lsof +D pin output (exit {:?}):\n{stdout}",
+        out.status.code()
+    );
+    assert_eq!(pin_rows.len(), 1, "exactly one row for our pin: {stdout}");
+    assert!(
+        is_ignored_holder_row(pin_rows[0], exclusion, &pin_target_spellings(&target)),
+        "the real pin row must be recognized: {:?}",
+        pin_rows[0]
+    );
     drop(pin);
     let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Round 3 (cold review): only a row that is exactly the reaper's own pin
+/// may be ignored. Each near-miss below stays a holder row (⇒ Held), and
+/// the one well-formed control is ignored (⇒ None), through the real call
+/// site with a stub lsof, on exit 0 and exit 1.
+#[cfg(unix)]
+#[test]
+fn stub_only_an_exact_pin_row_is_ignored() {
+    let root = unique_temp_dir("tachi-reaper-1978-pinrow");
+    let target = make_target_dir(&root, "x-target");
+    let outside = root.join("elsewhere");
+    let t = target.display();
+    let pin = Some(HolderExclusion { pid: 123, fd: 7 });
+    let near_misses = [
+        // The review's counterexample: FD digits followed by junk, no layout.
+        (
+            "review-malformed",
+            "garbage 123 user 7not-an-fd".to_string(),
+        ),
+        // Right number, wrong trailing character(s).
+        ("fd-junk", format!("tachi 123 u 7rq DIR 1,4 0 1 {t}")),
+        ("fd-two-locks", format!("tachi 123 u 7rWW DIR 1,4 0 1 {t}")),
+        ("fd-bad-mode", format!("tachi 123 u 7q DIR 1,4 0 1 {t}")),
+        ("fd-bad-lock", format!("tachi 123 u 7rZ DIR 1,4 0 1 {t}")),
+        (
+            "fd-unknown-mode",
+            format!("tachi 123 u 7-W DIR 1,4 0 1 {t}"),
+        ),
+        ("fd-bare-number", format!("tachi 123 u 7 DIR 1,4 0 1 {t}")),
+        (
+            "fd-leading-junk",
+            format!("tachi 123 u x7r DIR 1,4 0 1 {t}"),
+        ),
+        // NAME outside the target, missing, or not a plain path.
+        (
+            "name-outside",
+            format!("tachi 123 u 7r DIR 1,4 0 1 {}", outside.display()),
+        ),
+        (
+            "name-sibling-prefix",
+            format!("tachi 123 u 7r DIR 1,4 0 1 {t}-other"),
+        ),
+        (
+            "name-dotdot",
+            format!("tachi 123 u 7r DIR 1,4 0 1 {t}/../elsewhere"),
+        ),
+        (
+            "name-relative",
+            "tachi 123 u 7r DIR 1,4 0 1 x-target".to_string(),
+        ),
+        ("name-missing", "tachi 123 u 7r DIR 1,4 0 1".to_string()),
+        // Right FD, wrong PID; right PID, wrong FD.
+        ("other-pid", format!("tachi 124 u 7r DIR 1,4 0 1 {t}")),
+        ("other-fd", format!("tachi 123 u 8r DIR 1,4 0 1 {t}")),
+    ];
+    for (name, row) in &near_misses {
+        let stdout = format!("{}{row}\n", String::from_utf8_lossy(LSOF_HEADER));
+        for code in [0, 1] {
+            let check = stub_lsof_probe(
+                &format!("{name}-{code}"),
+                &target,
+                stdout.as_bytes(),
+                b"",
+                code,
+                pin,
+            );
+            assert!(
+                matches!(check, HolderCheck::Held(_)),
+                "{name} exit {code}: a non-pin row must stay a holder, got {check:?}"
+            );
+        }
+    }
+    // Controls: the exact pin row (with and without a lock character, and
+    // a NAME under the target) is ignored.
+    for (name, row) in [
+        ("exact", format!("tachi 123 u 7r DIR 1,4 0 1 {t}")),
+        (
+            "lock",
+            format!("tachi 123 u 7rW REG 1,4 0 1 {t}/debug/artifact.rlib"),
+        ),
+        (
+            "name-with-space",
+            format!("tachi 123 u 7u REG 1,4 0 1 {t}/a b"),
+        ),
+    ] {
+        let stdout = format!("{}{row}\n", String::from_utf8_lossy(LSOF_HEADER));
+        for code in [0, 1] {
+            assert_eq!(
+                stub_lsof_probe(
+                    &format!("{name}-{code}"),
+                    &target,
+                    stdout.as_bytes(),
+                    b"",
+                    code,
+                    pin
+                ),
+                HolderCheck::None,
+                "{name} exit {code}"
+            );
+        }
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn lsof_fd_grammar_is_exact() {
+    for (token, expected) in [
+        ("7r", Some(7)),
+        ("7w", Some(7)),
+        ("7u", Some(7)),
+        ("12uW", Some(12)),
+        ("3rR", Some(3)),
+        ("7", None),
+        ("7-", None),
+        ("7-W", None),
+        ("7rq", None),
+        ("7rx", Some(7)),
+        ("7rWW", None),
+        ("7not-an-fd", None),
+        ("r7", None),
+        ("cwd", None),
+        ("txt", None),
+        ("", None),
+    ] {
+        assert_eq!(lsof_fd_number(token), expected, "{token:?}");
+    }
 }
 
 #[cfg(unix)]
@@ -740,7 +900,13 @@ fn stub_holder_next_to_the_warning_is_held_and_pin_exclusion_still_applies() {
     let root = unique_temp_dir("tachi-reaper-1978-held");
     let target = make_target_dir(&root, "x-target");
     let mut stdout = LSOF_HEADER.to_vec();
-    stdout.extend_from_slice(b"tachi 123 u 7r DIR 1,4 0 1 /t\ncargo 4242 u 3r REG 1,4 0 1 /t/f\n");
+    stdout.extend_from_slice(
+        format!(
+            "tachi 123 u 7r DIR 1,4 0 1 {t}\ncargo 4242 u 3r REG 1,4 0 1 {t}/f\n",
+            t = target.display()
+        )
+        .as_bytes(),
+    );
     assert_eq!(
         stub_lsof_probe("held", &target, &stdout, LINUX_TRACEFS_WARNING, 0, None),
         HolderCheck::Held(vec!["tachi 123".to_string(), "cargo 4242".to_string()])

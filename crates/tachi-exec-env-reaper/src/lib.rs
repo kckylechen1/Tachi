@@ -428,8 +428,8 @@ fn lsof_holder_probe_with(
             // a raw header-only response is not (cold review round 2).
             let (filtered, excluded_rows) = match ignored_holder {
                 Some(ignored) if tachi_clean::lsof_stderr::starts_with_lsof_header(&stdout) => (
-                    without_ignored_holder(&stdout, ignored),
-                    ignored_holder_rows(&stdout, ignored),
+                    without_ignored_holder(&stdout, ignored, path),
+                    ignored_holder_rows(&stdout, ignored, path),
                 ),
                 _ => (stdout.into_owned(), 0),
             };
@@ -452,38 +452,124 @@ fn lsof_holder_probe_with(
     }
 }
 
-fn without_ignored_holder(stdout: &str, ignored: HolderExclusion) -> String {
+fn without_ignored_holder(stdout: &str, ignored: HolderExclusion, target: &Path) -> String {
+    let targets = pin_target_spellings(target);
     stdout
         .lines()
-        .filter(|line| !is_ignored_holder_row(line, ignored))
+        .filter(|line| !is_ignored_holder_row(line, ignored, &targets))
         .collect::<Vec<_>>()
         .join("\n")
 }
 
 /// How many rows [`without_ignored_holder`] removes.
-fn ignored_holder_rows(stdout: &str, ignored: HolderExclusion) -> usize {
+fn ignored_holder_rows(stdout: &str, ignored: HolderExclusion, target: &Path) -> usize {
+    let targets = pin_target_spellings(target);
     stdout
         .lines()
-        .filter(|line| is_ignored_holder_row(line, ignored))
+        .filter(|line| is_ignored_holder_row(line, ignored, &targets))
         .count()
 }
 
-/// A row is the reaper's own pin only when both its PID and FD parse and
-/// match exactly.
-fn is_ignored_holder_row(line: &str, ignored: HolderExclusion) -> bool {
-    let mut fields = line.split_whitespace();
-    let _command = fields.next();
-    let pid = fields.next().and_then(|value| value.parse::<u32>().ok());
-    let _user = fields.next();
-    let fd = fields.next().and_then(|value| {
-        let digits = value
-            .as_bytes()
-            .iter()
-            .take_while(|byte| byte.is_ascii_digit())
-            .count();
-        value[..digits].parse::<i32>().ok()
-    });
-    pid == Some(ignored.pid) && fd == Some(ignored.fd)
+/// The probed target as lsof may print it in NAME: made absolute without
+/// resolving symlinks, and canonical (lsof prints the resolved path, e.g.
+/// `/private/var/...` for `/var/...` on macOS).
+fn pin_target_spellings(target: &Path) -> Vec<PathBuf> {
+    let mut spellings = Vec::new();
+    for spelling in [std::path::absolute(target), target.canonicalize()]
+        .into_iter()
+        .flatten()
+    {
+        if !spellings.contains(&spelling) {
+            spellings.push(spelling);
+        }
+    }
+    spellings
+}
+
+/// A row is the reaper's own pin only when ALL of these hold (tachi#1978
+/// cold review round 3):
+///
+/// 1. it is a complete row of lsof's default layout: the eight columns
+///    before NAME (`COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE`, the
+///    header already checked exactly) plus a non-empty NAME;
+/// 2. its FD token matches lsof's FD grammar exactly ([`lsof_fd_number`]);
+/// 3. its PID and numeric FD equal the exclusion;
+/// 4. its NAME is a plain absolute path at or under the probed target.
+///
+/// Anything else is not ignored: it stays a holder row (⇒ `Held`).
+fn is_ignored_holder_row(line: &str, ignored: HolderExclusion, targets: &[PathBuf]) -> bool {
+    let Some((columns, name)) = split_lsof_row(line) else {
+        return false;
+    };
+    columns[1].parse::<u32>() == Ok(ignored.pid)
+        && lsof_fd_number(columns[3]) == Some(ignored.fd)
+        && name_at_or_under(name, targets)
+}
+
+/// Split a default-format lsof row into its eight leading columns and the
+/// NAME remainder (which may itself contain spaces). `None` if any column or
+/// the NAME is missing.
+fn split_lsof_row(line: &str) -> Option<([&str; 8], &str)> {
+    let mut columns = [""; 8];
+    let mut rest = line;
+    for column in &mut columns {
+        rest = rest.trim_start();
+        let end = rest.find(char::is_whitespace)?;
+        *column = &rest[..end];
+        rest = &rest[end..];
+    }
+    let name = rest.trim();
+    (!name.is_empty()).then_some((columns, name))
+}
+
+/// Numeric descriptor of an FD column token, only when the token is exactly
+/// lsof's grammar for an open numbered descriptor, per the FD section of
+/// lsof(8) (lsof 4.95.0 `Lsof.8`; identical in the lsof 4.91 man page on
+/// macOS): "the File Descriptor number of the file ... followed by one of
+/// these characters, describing the mode under which the file is open: r for
+/// read access; w for write access; u for read and write access; space if
+/// mode unknown and no lock character follows; `-' if mode unknown and lock
+/// character follows. The mode character is followed by one of these lock
+/// characters ...: N, r, R, w, W, u, U, x, X; space if there is no lock."
+///
+/// Accepted: `<digits><r|w|u>[N|r|R|w|W|u|U|x|X]`, nothing else. The
+/// unknown-mode spellings (space, `-`) are rejected: real pin rows on both
+/// hosts print `3r`, and an unknown mode is not proof it is our read-only
+/// handle — rejecting keeps the row a holder (fail closed).
+fn lsof_fd_number(token: &str) -> Option<i32> {
+    let digits = token.bytes().take_while(u8::is_ascii_digit).count();
+    if digits == 0 {
+        return None;
+    }
+    let (number, suffix) = token.split_at(digits);
+    let mut suffix = suffix.chars();
+    if !matches!(suffix.next(), Some('r' | 'w' | 'u')) {
+        return None;
+    }
+    match suffix.next() {
+        None | Some('N' | 'r' | 'R' | 'w' | 'W' | 'u' | 'U' | 'x' | 'X') => {}
+        Some(_) => return None,
+    }
+    if suffix.next().is_some() {
+        return None;
+    }
+    number.parse().ok()
+}
+
+/// Whether lsof's NAME is a plain absolute path (no `.`/`..`/`//`) at or
+/// under one of the target spellings.
+fn name_at_or_under(name: &str, targets: &[PathBuf]) -> bool {
+    let path = Path::new(name);
+    let rebuilt: PathBuf = path.components().collect();
+    let plain = path.is_absolute()
+        && rebuilt.as_os_str() == path.as_os_str()
+        && path.components().all(|component| {
+            matches!(
+                component,
+                std::path::Component::RootDir | std::path::Component::Normal(_)
+            )
+        });
+    plain && targets.iter().any(|target| path.starts_with(target))
 }
 
 /// Test shorthand: [`interpret_lsof_excluding`] with no rows removed, i.e. a
