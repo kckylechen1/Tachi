@@ -33,8 +33,10 @@ brew tap kckylechen1/tachi && brew install tachi
 或颁此符诏：
 
 ```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.9.2/scripts/install.sh)"
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v2.0.0/scripts/install.sh)"
 ```
+
+今版 v2.0.0：藏库卷册之 schema 自二十八进至三十九，旧符（orchestrator、run_skill 之类）皆已退役封存。升册之先，宜行 `tachi migrate` 以察（默认只观不书，`--apply` 方行），并先备份；旧版二进制拒不启新册，回退当以备份为本。npm 之册另有手动发布之途，新签不即新册。详询 [CHANGELOG.md](CHANGELOG.md)。
 
 ---
 
@@ -71,7 +73,7 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.9.2
 - **🔐 藏经密室**：Argon2id + AES-256-GCM 本地加密宝库，逐秘 ACL，多钥轮换。
 - **🎯 万宝楼**：Skill、MCP、仙诀一次登录，诸路灵核共享。
 - **👻 跨界传信**：幽灵低语、看板、交接令牌，跨灵核协同。
-- **⚔️ 工务总枢**：寻常惟五器显：`tachi_memory`、`tachi_task`、`tachi_staff`、`tachi_gh`、`tachi_a2a`；余诊断旧器惟 Ops/admin 明授权方可见，非谓物理尽删。
+- **⚔️ 工务总枢**：寻常惟六器显：`tachi_memory`、`tachi_task`、`tachi_agent_eval`、`tachi_staff`、`tachi_gh`、`tachi_a2a`；余诊断旧器惟 Ops/admin 明授权方可见，非谓物理尽删。
 - **🏭 神经熔炉与维基**：上下文生灭、Agent 进化提案、薪火相传之典籍。
 
 ---
@@ -80,13 +82,13 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.9.2
 
 | 令旗 | 用途 |
 |------|------|
-| `standard` | Lead 常令，恰显 `tachi_memory`、`tachi_task`、`tachi_staff`、`tachi_gh`、`tachi_a2a`。 |
-| `coordinate` | 亦惟五器，沿旧 coordinate 动作之权，不显诊断。 |
+| `standard` | Lead 常令，恰显 `tachi_memory`、`tachi_task`、`tachi_agent_eval`、`tachi_staff`、`tachi_gh`、`tachi_a2a` 六器。 |
+| `coordinate` | 惟五器（无 `tachi_agent_eval`），沿旧 coordinate 动作之权，不显诊断。 |
 | `operate` | 非默认之 Ops 令，明授权方得见 runtime、status、Vault、Foundry、Hub 兼容诊断。 |
-| `delegate` | Worker 亦惟五器，惟读与察；不得递遣偏师，亦不得改 GitHub。 |
+| `delegate` | Worker 得六器中之五（无 `tachi_agent_eval`），惟读与察；不得递遣偏师，亦不得改 GitHub。 |
 | `admin` / `emergency` | 明授维护急务，方见全量旧器；窄令所隐，非谓物理已删。 |
 
-未设令旗者，自 v1.0.1 起默认 `standard`。已退役之旧 `observe`、`remember` 原生别名及 `coordinate` 令亦只显五器；HTTP 来客自称 Ops/admin，不足为授权。
+未设令旗者，自 v1.0.1 起默认 `standard`。已退役之旧 `observe`、`remember` 原生别名及 `coordinate` 令亦只显产品门面；HTTP 来客自称 Ops/admin，不足为授权。
 
 ---
 

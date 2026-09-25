@@ -29,7 +29,7 @@ Tachi is a single-binary, local-first memory and coordination backend for AI age
 - **Encrypted local vault** for API keys and secrets
 - **Agent coordination** via handoff, kanban, and pub/sub (Ghost Whispers)
 - **Skill packs and capability hub** — register once, use from any agent
-- **Five-facade product surface** — `tachi_memory`, `tachi_task`, `tachi_staff`, `tachi_gh`, `tachi_a2a`
+- **Six-facade product surface** — `tachi_memory`, `tachi_task`, `tachi_agent_eval`, `tachi_staff`, `tachi_gh`, `tachi_a2a`
 - **Continuity memory** — typed events, pattern projections, outcome labels, and project-cycle context
 - **Lifecycle closure** — GitHub issues/PRs, docs/specs, wiki, memory, verification, and release notes in one loop
 
@@ -39,41 +39,47 @@ Named after the Tachikoma from *Ghost in the Shell*: agents that evolve through 
 
 ### Current Release
 
-Current release: `v1.9.2`.
+Current release: `v2.0.0`.
 
-This line makes Tachi's project-cycle direction explicit:
+This is a major release: public MCP routes were removed and the on-disk schema
+advanced from 28 to 39, so scripts and prompts that call retired tools must
+move to the surviving facades before upgrading. The highlights:
 
-- Continuity memory is now typed: session captures, memory writes, outcome
-  labels, projections, and active patterns can be stored and queried as durable
-  project context.
-- Pattern memory has an explicit evidence loop: pattern search remains read-only,
-  while admitted completion and close-loop paths append context-bound,
-  replay-idempotent evidence internally. Models cannot submit feedback that
-  retunes ranking or promotes patterns into skills.
-- `tachi_task` can guide a full issue/PR/doc lifecycle: intake, doc index,
-  verification status, PR handoff, release notes, reference
-  building, and close-loop writes back to memory/wiki/docs.
-- Recall behavior is tunable and reviewable through simulation, rerank replay,
-  and scored proposals instead of one-off hard-coded ranking changes.
-- Superpowers and Waza are tracked as governed skill sources with pinned
-  metadata and reviewed sync planning.
-- Runtime routing is stricter: repo-local project DBs are primary, global
-  `--no-project-db` serves are isolated from project launch context, and
-  `TACHI_DISABLE_STDIO_PROXY=1` lets source-tree MCP debug sessions avoid
-  reusing an existing daemon.
-- Health scoring now treats a missing daemon as a runtime mode, not a failure
-  by itself; concrete problems such as stale distill, provider failures,
-  vector gaps, or failed Foundry jobs still lower the score.
-- The shell installer now installs a user LaunchAgent for the global Tachi
-  daemon on macOS, with idle shutdown disabled and launchd `KeepAlive` omitted
-  so background work keeps running without duplicate singleton-lock restarts.
-- OpenClaw remains a thin MCP facade. It owns hook timing and OpenClaw-facing
-  tool exposure; Tachi owns database writes, embedding, rerank, distill, graph
-  maintenance, Foundry jobs, and continuity projection.
-- Cargo, npm, lockfiles, docs, installer URLs, and OpenClaw plugin metadata are
-  checked by `scripts/check_release_versions.py` and CI before release.
+- The ordinary Lead surface is six facades: `tachi_memory`, `tachi_task`,
+  `tachi_agent_eval`, `tachi_staff`, `tachi_gh`, and `tachi_a2a`. Worker
+  (`delegate`) sessions see five of them (no `tachi_agent_eval`).
+- Retired model-facing routes are gone from the router, with different fates:
+  memory save/search aliases and direct Kanban routes have their capabilities on
+  the canonical facades (`tachi_memory`, `tachi_task` board actions);
+  orchestrator, skill recommendation/evolution, and the Memory administration
+  actions are removed without a model-facing replacement, and store maintenance
+  stays with the operator CLI (`tachi doctor`, `tachi repair`, `tachi gc`,
+  `tachi delete`).
+- `tachi_task(action='status')` now carries CurrentTruth work facts (board
+  column, blockers, top action) for exactly the resolved refs. It is an
+  orientation view, not a completion verdict: sources CurrentTruth does not
+  own render typed `unavailable`.
+- The store schema moved 28 -> 39 (CurrentTruth, delivery spine, A2A
+  mailboxes, memory outbox, verified admissions). Run `tachi migrate`
+  (plan-only by default, `--apply` to execute) and back up stores first:
+  older binaries refuse to open a newer-stamped database, so restore from
+  backup instead of rolling the binary back.
+- Dispatch V2 commits the model plan to `<run_dir>/status.json#/model_plan`
+  atomically with its serving-model receipt; `plan.md` stays a V1 placeholder.
+  V1 single-stage dispatch is unchanged.
+- The model broker owns the provider wire directly, with SSE stream grammars
+  for OpenAI-compatible and Anthropic providers, provider key health, and
+  `tachi broker` alias governance.
+- Standalone store files renamed `memory.db` -> `tachi-memory.db` on first
+  open, leaving a symlink behind for this release window.
+- Cargo, npm, lockfiles, docs, installer URLs, and OpenClaw plugin metadata
+  are checked by `scripts/check_release_versions.py` and CI before release.
+  The tag pipeline ships the Mac arm64 CLI and the Homebrew formula; npm
+  packages publish through their own manual workflow, so a fresh tag does not
+  by itself mean the new version is on npm.
 
-See [CHANGELOG.md](CHANGELOG.md) for the full release notes.
+See [CHANGELOG.md](CHANGELOG.md) for the full release notes and the complete
+upgrade path.
 
 ---
 
@@ -116,7 +122,7 @@ brew tap kckylechen1/tachi && brew install tachi
 Or use the shell installer (also installs the OpenClaw plugin when detected):
 
 ```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.9.2/scripts/install.sh)"
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v2.0.0/scripts/install.sh)"
 ```
 
 On macOS the shell installer also installs/restarts a user LaunchAgent at
@@ -363,13 +369,13 @@ Tachi exposes a filtered MCP surface based on `TACHI_PROFILE`. The full `admin` 
 
 | Profile | What is exposed | Best for |
 |---------|-----------------|----------|
-| `standard` | Exactly `tachi_memory`, `tachi_task`, `tachi_staff`, `tachi_gh`, and `tachi_a2a`. Existing action policy still governs each facade. | Ordinary Lead sessions in IDE and CLI hosts. |
-| `coordinate` | The same five-facade discovery surface with legacy coordinate action permissions. | Compatibility for explicitly configured coordination sessions; diagnostics are not discovered. |
+| `standard` | Exactly `tachi_memory`, `tachi_task`, `tachi_agent_eval`, `tachi_staff`, `tachi_gh`, and `tachi_a2a`. Existing action policy still governs each facade. | Ordinary Lead sessions in IDE and CLI hosts. |
+| `coordinate` | The five coordination facades (no `tachi_agent_eval`) with legacy coordinate action permissions. | Compatibility for explicitly configured coordination sessions; diagnostics are not discovered. |
 | `operate` | Explicit non-default Ops surface with retained runtime, status, Vault-session, Foundry, and Hub diagnostics. | Runtime adapters, OpenClaw, and authorized Ops automation. |
-| `delegate` | Exactly the same five facades as Lead. Worker action policy permits status/read operations but denies recursive staffing and GitHub mutation. | Bounded Worker sessions. |
+| `delegate` | Five of the Lead facades (no `tachi_agent_eval`). Worker action policy permits status/read operations but denies recursive staffing and GitHub mutation. | Bounded Worker sessions. |
 | `admin` / `emergency` | Full retained catalog. Selecting it does not mean those compatibility routes were physically deleted from narrower profiles. | Explicit maintenance, development, governance, and emergency sessions. |
 
-Host aliases are resolved automatically: `lead`, `claude`, `claude-code`, `codex`, `cursor`, `trae`, `windsurf`, `ide`, `antigravity`, `companion`, `copilot`, `coach`, `workflow` → `standard`; `worker`, `subagent`, `delegate` → `delegate`; `openclaw`, `hermes`, `runtime`, `adapter`, `ops` → `operate`; `admin`, `full`, `emergency` → `admin`. Legacy `observe`, `remember` (retired as a native tool alias), and `coordinate` selectors keep their action permissions but discovery is confined to the five product facades. Privileged admin/emergency names cannot be combined with another selector.
+Host aliases are resolved automatically: `lead`, `claude`, `claude-code`, `codex`, `cursor`, `trae`, `windsurf`, `ide`, `antigravity`, `companion`, `copilot`, `coach`, `workflow` → `standard`; `worker`, `subagent`, `delegate` → `delegate`; `openclaw`, `hermes`, `runtime`, `adapter`, `ops` → `operate`; `admin`, `full`, `emergency` → `admin`. Legacy `observe`, `remember` (retired as a native tool alias), and `coordinate` selectors keep their action permissions but discovery is confined to the product facades. Privileged admin/emergency names cannot be combined with another selector.
 
 Ops/admin aliases are trusted local process configuration only. HTTP
 direct-connect caller metadata cannot self-authorize an Ops/admin surface.
@@ -421,7 +427,7 @@ The server loads `.env` from the project root automatically.
 
 | Variable | Purpose |
 |----------|---------|
-| `TACHI_PROFILE` | Selects the MCP tool surface (`standard`/Lead, `delegate`/Worker, explicit `operate`/Ops, or `admin`/`emergency`). Defaults to the five-facade `standard` surface. |
+| `TACHI_PROFILE` | Selects the MCP tool surface (`standard`/Lead, `delegate`/Worker, explicit `operate`/Ops, or `admin`/`emergency`). Defaults to the six-facade `standard` surface. |
 | `TACHI_HOME` | Overrides the Tachi home directory (default `~/.tachi`). The global DB path flows from this. |
 | `GH_TOKEN` | GitHub token for `tachi_gh`, `safe_merge`, and ship operations. |
 | `TACHI_DISABLE_STDIO_PROXY` | `1` forces a stdio process to serve locally instead of forwarding to a running daemon (for source-tree MCP debugging). |

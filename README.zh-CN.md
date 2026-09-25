@@ -29,11 +29,22 @@ Tachi 是一个单二进制、本地优先的 Agent 记忆与协调后端。它�
 - **本地加密保险库**，用于 API 密钥与机密
 - **Agent 协调**：交接令牌、看板、发布订阅（幽灵低语）
 - **技能包与能力中心**：一次注册，各 Agent 共用
-- **日常产品门面**：`tachi_memory`、`tachi_task`、`tachi_staff`、`tachi_gh`、`tachi_a2a`
+- **六大产品门面**：`tachi_memory`、`tachi_task`、`tachi_agent_eval`、`tachi_staff`、`tachi_gh`、`tachi_a2a`
 
 所有状态都存储在嵌入式 SQLite 中。**无需任何外部数据库。**
 
 名字取自《攻壳机动队》中的塔奇克马：通过共享记忆不断进化的 AI 单元。
+
+### 当前发布
+
+当前版本：`v2.0.0`。这是一次大版本升级：移除了部分公开 MCP 路由，磁盘 schema 从 28 升到 39，调用已退役工具的脚本需要先迁移到存留门面。要点：
+
+- Lead 默认发现面为六个门面（新增 `tachi_agent_eval`）；Worker（`delegate`）为其中五个（不含 `tachi_agent_eval`）。
+- 已退役的模型面路由从路由器移除，结局各不相同：记忆保存/检索别名与直连看板路由的职能由规范门面承接（`tachi_memory`、`tachi_task` 看板动作）；orchestrator、技能推荐/进化与记忆管理动作无替代直接移除，库维护走运维 CLI（`tachi doctor`、`tachi repair`、`tachi gc`、`tachi delete`）。
+- 升级前先运行 `tachi migrate`（默认只读计划，`--apply` 才执行）并备份库文件；旧二进制会拒绝打开更高 schema 的库，回退请用备份，不要用旧二进制硬开。
+- 标签流水线只发布 Mac arm64 CLI 与 Homebrew formula；npm 包走独立的手动发布通道，新标签不等于 npm 上已有新版本。
+
+完整迁移说明见 [CHANGELOG.md](CHANGELOG.md)（英文）。
 
 ---
 
@@ -76,7 +87,7 @@ brew tap kckylechen1/tachi && brew install tachi
 或使用 shell 安装脚本（检测到 OpenClaw 时会自动安装插件）：
 
 ```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.9.2/scripts/install.sh)"
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v2.0.0/scripts/install.sh)"
 ```
 
 验证：
@@ -282,13 +293,13 @@ Tachi 根据 `TACHI_PROFILE` 暴露经过过滤的 MCP 工具面。`admin` 目�
 
 | Profile | 暴露内容 | 适用场景 |
 |---------|----------|----------|
-| `standard` | 恰好 `tachi_memory`、`tachi_task`、`tachi_staff`、`tachi_gh`、`tachi_a2a`；各门面的动作策略仍适用。 | 普通 Lead 会话；日常委派使用宿主原生 subagent。 |
-| `coordinate` | 同样的五门面发现面，并保留旧 coordinate 动作权限；不发现诊断路由。 | 显式协调兼容。 |
+| `standard` | 恰好 `tachi_memory`、`tachi_task`、`tachi_agent_eval`、`tachi_staff`、`tachi_gh`、`tachi_a2a`；各门面的动作策略仍适用。 | 普通 Lead 会话；日常委派使用宿主原生 subagent。 |
+| `coordinate` | 五个协调门面（不含 `tachi_agent_eval`），保留旧 coordinate 动作权限；不发现诊断路由。 | 显式协调兼容。 |
 | `operate` | 显式、非默认 Ops 面，保留 runtime/status/Vault-session/Foundry/Hub 诊断。 | 运行时适配器、OpenClaw 与获授权 Ops 自动化。 |
-| `delegate` | 与 Lead 完全相同的五门面；Worker 动作策略只允许状态/读取，拒绝递归 staffing 与 GitHub 写入。 | 有界 Worker 会话。 |
+| `delegate` | Lead 六门面中的五个（不含 `tachi_agent_eval`）；Worker 动作策略只允许状态/读取，拒绝递归 staffing 与 GitHub 写入。 | 有界 Worker 会话。 |
 | `admin` / `emergency` | 完整保留目录；窄 Profile 隐藏路由不表示物理删除。 | 显式维护、开发、治理与紧急会话。 |
 
-宿主别名自动解析：`lead`、`claude`、`claude-code`、`codex`、`cursor`、`trae`、`windsurf`、`ide`、`antigravity`、`companion`、`copilot`、`coach`、`workflow` → `standard`；`worker`、`subagent`、`delegate` → `delegate`；`openclaw`、`hermes`、`runtime`、`adapter`、`ops` → `operate`；`admin`、`full`、`emergency` → `admin`。已退役的旧 `observe`、`remember` 原生别名及 `coordinate` 选择器保留动作权限，但发现面也严格限于五个产品门面。HTTP 直连调用方元数据不能自行授权 Ops/admin。
+宿主别名自动解析：`lead`、`claude`、`claude-code`、`codex`、`cursor`、`trae`、`windsurf`、`ide`、`antigravity`、`companion`、`copilot`、`coach`、`workflow` → `standard`；`worker`、`subagent`、`delegate` → `delegate`；`openclaw`、`hermes`、`runtime`、`adapter`、`ops` → `operate`；`admin`、`full`、`emergency` → `admin`。已退役的旧 `observe`、`remember` 原生别名及 `coordinate` 选择器保留动作权限，但发现面也严格限于产品门面。HTTP 直连调用方元数据不能自行授权 Ops/admin。
 
 未设置 Profile 时，Tachi 自 v1.0.1 起默认使用 `standard`。
 
