@@ -44,6 +44,7 @@ mod model_plan_commit;
 
 #[cfg(test)]
 pub(crate) use model_plan_commit::fail_next_plan_commit_write;
+pub(crate) use model_plan_commit::planner_failure_winner;
 pub(super) use model_plan_commit::{
     CommittedModelPlan, PlanCommit, PlanCommitPre, PlanFailurePublication,
 };

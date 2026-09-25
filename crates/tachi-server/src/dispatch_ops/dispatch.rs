@@ -1030,10 +1030,14 @@ async fn launch_canonical_dispatch(
         .await
         {
             Ok(outcome) => outcome,
+            // Every plan-stage error is already settled: the planner either
+            // published a terminal failure, safely refused a newer winner, or
+            // could not durably publish (reconciliation unknown). The outer
+            // closer must not fabricate a terminal kanban state for any of them.
             Err(error) => {
                 return Err(PostInitError {
-                    message: error.message().to_string(),
-                    planner_settled: error.is_settled(),
+                    message: error,
+                    planner_settled: true,
                 });
             }
         };

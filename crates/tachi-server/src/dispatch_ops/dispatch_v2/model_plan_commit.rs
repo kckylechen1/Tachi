@@ -121,6 +121,14 @@ impl PlanCommit {
     pub(in crate::dispatch_ops) fn read(&self) -> Result<PlanCommitPre, String> {
         let status = self.read_status()?;
         validate_status_identity(&status, &self.dispatch_id)?;
+        // Reverse order: a completion close already committed is the winner;
+        // never start or reuse a plan over it.
+        if resolved_completion_committed(&status) {
+            return Err(format!(
+                "refusing to plan: run {} already has a committed resolved_completion",
+                self.dispatch_id
+            ));
+        }
         if status_blocks_plan(&status) {
             return Err(format!(
                 "refusing to plan: run {} is terminal or cancelled",
@@ -344,6 +352,11 @@ fn prepare_commit(
     receipt: &PersistedModelInvocationReceiptV1,
 ) -> Result<CommitOutcome, String> {
     validate_status_identity(&status, dispatch_id)?;
+    if resolved_completion_committed(&status) {
+        return Err(format!(
+            "refusing to plan: run {dispatch_id} already has a committed resolved_completion"
+        ));
+    }
     if status_blocks_plan(&status) {
         return Err(format!(
             "refusing to plan: run {dispatch_id} is terminal or cancelled"
@@ -431,6 +444,11 @@ fn prepare_failure_publication(
     error: &str,
 ) -> Option<Map<String, Value>> {
     if status.get("dispatch_id").and_then(Value::as_str) != Some(dispatch_id) {
+        return None;
+    }
+    // Reverse order: a committed completion close is the winner; a planner
+    // failure must not overwrite it.
+    if resolved_completion_committed(&status) {
         return None;
     }
     if status_blocks_plan(&status) {
@@ -670,6 +688,38 @@ fn status_blocks_plan(status: &Map<String, Value>) -> bool {
         .and_then(Value::as_object)
         .and_then(|cancellation| cancellation.get("receipt"))
         .is_some_and(|receipt| !receipt.is_null())
+}
+
+/// True only when the canonical status carries a committed planner-stage
+/// failure winner: an actual `plan_failure.stage == "plan"` marker with root
+/// `state == "TASK_STATE_FAILED"` and no committed `model_plan`. This is the
+/// producer decision written by [`PlanCommit::publish_plan_failure`]. A bare
+/// execution `TASK_STATE_FAILED` with no planner marker is NOT a planner
+/// winner and must not deny an ordinary reviewed completion.
+pub(crate) fn planner_failure_winner(status: &Map<String, Value>) -> bool {
+    status
+        .get("plan_failure")
+        .and_then(Value::as_object)
+        .and_then(|failure| failure.get("stage"))
+        .and_then(Value::as_str)
+        == Some(MODEL_PLAN_STAGE)
+        && status.get("state").and_then(Value::as_str) == Some("TASK_STATE_FAILED")
+        && !status.contains_key("model_plan")
+}
+
+/// True only when a canonical `resolved_completion` close (COMPLETED or
+/// INPUT_REQUIRED) is already committed. Its presence is the completion
+/// winner, so a later planner success/failure publication must refuse rather
+/// than split the root state from the resolved receipt.
+pub(crate) fn resolved_completion_committed(status: &Map<String, Value>) -> bool {
+    matches!(
+        status
+            .get("resolved_completion")
+            .and_then(Value::as_object)
+            .and_then(|completion| completion.get("state"))
+            .and_then(Value::as_str),
+        Some("TASK_STATE_COMPLETED") | Some("TASK_STATE_INPUT_REQUIRED")
+    )
 }
 
 #[cfg(test)]
@@ -1215,6 +1265,73 @@ mod tests {
             std::fs::read(temp.path().join("status.json")).expect("bytes"),
             before,
             "a concurrent committed plan must never be clobbered by a late failure"
+        );
+    }
+
+    #[test]
+    fn planner_failure_winner_requires_the_producer_shape() {
+        let winner = json!({
+            "state": "TASK_STATE_FAILED",
+            "plan_failure": {"stage": "plan", "error": "x"},
+        });
+        assert!(planner_failure_winner(winner.as_object().unwrap()));
+        // A bare execution FAILED (no planner marker) is not a planner winner.
+        let bare = json!({"state": "TASK_STATE_FAILED"});
+        assert!(!planner_failure_winner(bare.as_object().unwrap()));
+        // A committed plan means the plan phase won, not failed.
+        let with_plan = json!({
+            "state": "TASK_STATE_FAILED",
+            "plan_failure": {"stage": "plan"},
+            "model_plan": {"content": "## Goal\nx"},
+        });
+        assert!(!planner_failure_winner(with_plan.as_object().unwrap()));
+        // A non-plan failure stage is not a planner winner.
+        let other_stage = json!({
+            "state": "TASK_STATE_FAILED",
+            "plan_failure": {"stage": "execute"},
+        });
+        assert!(!planner_failure_winner(other_stage.as_object().unwrap()));
+    }
+
+    /// Reverse order: a committed completion close is the winner, so a later
+    /// plan success OR failure publication must refuse. Root `state` alone is
+    /// deliberately kept WORKING to prove the check is not root-state-based.
+    #[test]
+    fn plan_writes_refuse_a_committed_resolved_completion() {
+        let temp = tempfile::tempdir().expect("run dir");
+        let status = json!({
+            "dispatch_id": "d1",
+            "state": "TASK_STATE_WORKING",
+            "status_revision": 4,
+            "resolved_completion": {"state": "TASK_STATE_COMPLETED"},
+        });
+        crate::utils::write_owner_only_file_atomic(
+            &temp.path().join("status.json"),
+            serde_json::to_vec_pretty(&status).unwrap().as_slice(),
+        )
+        .expect("seed completion winner");
+        let commit = PlanCommit::open(temp.path(), "d1").expect("open");
+        let before = std::fs::read(temp.path().join("status.json")).expect("bytes");
+
+        assert!(
+            commit.read().is_err(),
+            "a committed completion must block plan reuse"
+        );
+        assert!(
+            commit.commit(4, "## Goal\nlate", &plan_binding()).is_err(),
+            "a committed completion must block a plan success write"
+        );
+        assert!(
+            matches!(
+                commit.publish_plan_failure(4, "late failure"),
+                PlanFailurePublication::Refused
+            ),
+            "a committed completion must block a plan failure write"
+        );
+        assert_eq!(
+            std::fs::read(temp.path().join("status.json")).expect("bytes"),
+            before,
+            "no plan write may touch a committed completion winner"
         );
     }
 }

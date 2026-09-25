@@ -1017,12 +1017,7 @@ async fn p2_real_plan_stage_matrix_is_board_first_and_receipt_bound() {
         .await;
         match case.expected_error {
             Some(expected) => match outcome {
-                Err(error) => assert!(
-                    error.message().contains(expected),
-                    "{}: {}",
-                    case.name,
-                    error.message()
-                ),
+                Err(error) => assert!(error.contains(expected), "{}: {}", case.name, error),
                 Ok(_) => panic!("{} unexpectedly succeeded", case.name),
             },
             None => {
@@ -1164,11 +1159,7 @@ async fn plan_commit_write_failure_terminalizes_status_and_kanban() {
             v2_decision: crate::dispatch_ops::dispatch_v2::V2Decision::Enabled,
         })
         .await;
-    let error = outcome.expect_err("an injected commit write failure must surface as an error");
-    assert!(
-        error.is_settled(),
-        "the plan stage must report a settled failure so the outer closer does not double-close"
-    );
+    let _error = outcome.expect_err("an injected commit write failure must surface as an error");
 
     let status: Value = serde_json::from_str(
         &std::fs::read_to_string(workspace.path().join("status.json")).expect("status after"),
@@ -1188,6 +1179,85 @@ async fn plan_commit_write_failure_terminalizes_status_and_kanban() {
             .as_deref(),
         Some("TASK_STATE_FAILED"),
         "a winning failure publication must project the same terminal state to kanban (no split)"
+    );
+}
+
+/// #1664 CONCERN: an unverifiable plan anchor (missing/inaccessible run dir)
+/// must be reported as reconciliation-unknown and must NOT let the caller
+/// fabricate a terminal kanban state. The plan stage itself must leave the
+/// BOARD-FIRST row untouched.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)] // serializes the process-wide planner fixture
+async fn plan_anchor_open_failure_reports_reconciliation_unknown() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _review = EnvRestore::remove("DISPATCH_V2_PLAN_REVIEW");
+    let _timeout = EnvRestore::remove("DISPATCH_V2_PLAN_TIMEOUT_SECS");
+    crate::dispatch_ops::dispatch_v2::set_plan_stage_test_override(None);
+
+    let server = crate::tests::make_server();
+    let (request, assignment, grant, profile, skills) = typed_context();
+    let assembly = typed_prompt(&server, &request, &assignment, &grant, &profile, &skills).await;
+    let workspace = tempfile::tempdir().expect("anchor open workspace");
+    let artifacts = write_dispatch_artifacts(DispatchArtifactInputs {
+        workspace_dir: workspace.path(),
+        dispatch_id: "anchor-open-failure",
+        request: &request,
+        assignment: &assignment,
+        grant: &grant,
+        profile: &profile,
+        base_prompt: &assembly.prompt,
+        prompt_assembly: &assembly,
+        effective_skills_for_files: &skills,
+        v2: true,
+    })
+    .await
+    .expect("anchor open artifacts");
+    init_kanban_and_flow(FlowSetupInputs {
+        server: &server,
+        dispatch_id: "anchor-open-failure",
+        request: &request,
+        assignment: &assignment,
+        grant: &grant,
+        resolved_profile: &profile,
+        plan_path: &artifacts.plan_path,
+        workspace_dir: workspace.path(),
+        prompt_md_path: &artifacts.prompt_md_path,
+        context_md_path: &artifacts.context_md_path,
+        trajectory_path: &artifacts.trajectory_path,
+        v2: true,
+    })
+    .await
+    .expect("anchor open board-first init");
+
+    let missing = workspace.path().join("missing-run-dir");
+    let profile_payload = json!({"profile": "typed-profile"});
+    let error =
+        super::super::plan_stage::run_v2_plan_stage(super::super::plan_stage::PlanStageInputs {
+            server: &server,
+            request: &request,
+            dispatch_id: "anchor-open-failure",
+            assignment: &assignment,
+            resolved_profile: &profile,
+            profile_payload: &profile_payload,
+            base_prompt: &assembly.prompt,
+            prompt_md_path: &artifacts.prompt_md_path,
+            context_md_path: &artifacts.context_md_path,
+            trajectory_path: &artifacts.trajectory_path,
+            workspace_dir: &missing,
+            feedback_rules_trace: &artifacts.feedback_rules_trace,
+            v2_decision: crate::dispatch_ops::dispatch_v2::V2Decision::Enabled,
+        })
+        .await
+        .expect_err("an unverifiable anchor must surface as an error");
+    assert!(error.contains("reconciliation unknown"), "{error}");
+    assert_eq!(
+        crate::dispatch_ops::get_kanban_state(&server, "anchor-open-failure")
+            .await
+            .as_deref(),
+        Some("TASK_STATE_WORKING"),
+        "an unverifiable anchor must not fabricate a terminal kanban state"
     );
 }
 

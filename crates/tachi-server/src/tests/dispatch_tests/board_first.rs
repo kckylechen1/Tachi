@@ -707,3 +707,106 @@ async fn plan_commit_io_failure_terminalizes_status_and_kanban() {
         "status and kanban must not split after a plan-commit IO failure"
     );
 }
+
+/// #1664 High, real producers: after the REAL planner failure winner commits,
+/// the REAL public completion producer must refuse — root state, resolved
+/// receipt, and kanban must all agree with the planner winner (no split).
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn planner_failure_then_real_completion_cannot_split_the_run() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let temp_home = tempfile::tempdir().expect("temp tachi home");
+    let _tachi_home = EnvRestore::set_path("TACHI_HOME", temp_home.path());
+    let _v2_review = EnvRestore::set("DISPATCH_V2_PLAN_REVIEW", "false");
+    let mock_provider = MockProvider::start(MockProviderMode::Failure).await;
+
+    let run_root = temp_home.path().join("runs");
+    let mut server = make_server();
+    server.replace_llm(mock_provider.llm.clone());
+
+    let mut params = dispatch_params(Some("custom"), "planner failure then completion");
+    params.stage = Some("auto".to_string());
+    params.command = vec!["python3".to_string(), "-c".to_string(), "pass".to_string()];
+
+    let err = crate::dispatch_ops::handle_tachi_dispatch(&server, params)
+        .await
+        .expect_err("the planner failure must surface as a dispatch error");
+    assert!(err.contains("dispatch v2 stage1 (plan) failed"), "{err}");
+
+    let run_dir = wait_for_single_run_dir(&run_root).await;
+    let dispatch_id = run_dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .expect("dispatch id from run dir name")
+        .to_string();
+
+    // Real planner failure winner.
+    let status = read_status_json(&run_dir).expect("status.json written");
+    assert_eq!(status["state"], json!("TASK_STATE_FAILED"), "{status:#}");
+    assert_eq!(status["plan_failure"]["stage"], json!("plan"), "{status:#}");
+    assert!(status.get("model_plan").is_none(), "{status:#}");
+    assert_eq!(
+        crate::dispatch_ops::get_kanban_state(&server, &dispatch_id)
+            .await
+            .as_deref(),
+        Some("TASK_STATE_FAILED")
+    );
+
+    // Real public completion producer: a partial close must be refused.
+    let complete = crate::tool_params::TachiCompleteParams {
+        task_id: None,
+        task: "planner failure must not be overridden".to_string(),
+        agent: "custom".to_string(),
+        outcome: "partial".to_string(),
+        task_type: None,
+        profile: None,
+        risk: None,
+        duration_ms: None,
+        skills_used: Vec::new(),
+        cost_tokens: None,
+        cost_usd: None,
+        quality_score: None,
+        notes: None,
+        trajectory: None,
+        diff: None,
+        worktree: None,
+        subagents: Vec::new(),
+        feedback_rules_applied: Vec::new(),
+        dispatch_id: Some(dispatch_id.clone()),
+        flow_id: None,
+        issue_ref: None,
+        pr_ref: None,
+        evidence_refs: Vec::new(),
+        tests_run: Vec::new(),
+        diff_present: None,
+        scope: None,
+        project: None,
+        format: None,
+        signatures: Vec::new(),
+        rulings: Vec::new(),
+        adjudication: None,
+        eval_run_ids: Vec::new(),
+    };
+    let result = crate::complete_ops::handle_tachi_complete(&server, complete, false).await;
+    assert!(
+        result.is_err(),
+        "the real completion producer must refuse a planner failure winner: {result:?}"
+    );
+
+    let after = read_status_json(&run_dir).expect("status.json after completion");
+    assert!(
+        after.get("resolved_completion").is_none(),
+        "a refused completion must not write a resolved receipt: {after:#}"
+    );
+    assert_eq!(after["state"], json!("TASK_STATE_FAILED"), "{after:#}");
+    assert_eq!(
+        crate::dispatch_ops::get_kanban_state(&server, &dispatch_id)
+            .await
+            .as_deref(),
+        Some("TASK_STATE_FAILED"),
+        "root, resolved receipt, and kanban must all agree with the planner winner"
+    );
+}

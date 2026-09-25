@@ -33,36 +33,9 @@ pub(super) struct PlanStageOutcome {
     pub(super) early_response: Option<String>,
 }
 
-/// Typed plan-stage error. It tells the caller whether the planner already
-/// settled the run's canonical status/kanban (so a blind early-exit closer
-/// must not overwrite an authoritative or unknown state), or whether the
-/// ordinary post-init failure handling still applies.
-#[derive(Debug)]
-pub(super) enum PlanStageError {
-    /// The planner conditionally published a terminal failure, or safely
-    /// refused to clobber a newer winner, or could not persist a failure.
-    /// The caller must not blindly terminalize the kanban row.
-    Settled(String),
-    /// An infrastructure error the planner has not terminalized; existing
-    /// post-init early-exit handling applies.
-    Unsettled(String),
-}
-
-impl PlanStageError {
-    pub(super) fn message(&self) -> &str {
-        match self {
-            Self::Settled(message) | Self::Unsettled(message) => message,
-        }
-    }
-
-    pub(super) fn is_settled(&self) -> bool {
-        matches!(self, Self::Settled(_))
-    }
-}
-
 pub(super) async fn run_v2_plan_stage(
     inputs: PlanStageInputs<'_>,
-) -> Result<PlanStageOutcome, PlanStageError> {
+) -> Result<PlanStageOutcome, String> {
     let v2 = matches!(inputs.v2_decision, V2Decision::Enabled);
 
     // The actual prompt fed to the executing agent. In V1 this is just the
@@ -76,12 +49,18 @@ pub(super) async fn run_v2_plan_stage(
         // atomic `status.json` replacement. The anchor is opened before the
         // provider is awaited, and no lock is held across that await.
         let label = format!("dispatch-plan-{}", inputs.dispatch_id);
-        let plan_commit = PlanCommit::open(inputs.workspace_dir, inputs.dispatch_id)
-            .map_err(PlanStageError::Unsettled)?;
-        // A read refusal (terminal/cancelled run, or an untrusted prior plan)
-        // must not be clobbered by a synthetic failure; mark it settled so the
-        // outer early-exit closer leaves the authoritative state alone.
-        let pre = plan_commit.read().map_err(PlanStageError::Settled)?;
+        // An unverifiable anchor means we cannot durably publish or refuse a
+        // planner failure: report reconciliation unknown and let the caller's
+        // planner-settled path avoid fabricating a terminal kanban state.
+        let plan_commit =
+            PlanCommit::open(inputs.workspace_dir, inputs.dispatch_id).map_err(|error| {
+                format!("{error} (plan status anchor unverifiable; reconciliation unknown)")
+            })?;
+        // A read refusal (terminal/cancelled run, an already-committed
+        // completion, or an untrusted prior plan) must not be clobbered by a
+        // synthetic failure; propagate and let the planner-settled path leave
+        // the authoritative state alone.
+        let pre = plan_commit.read()?;
         let (committed, provider_duration_ms): (CommittedModelPlan, Option<u64>) = match pre {
             // A valid committed plan is reused without a second model call.
             PlanCommitPre::Reuse(existing) => (existing, None),
@@ -299,7 +278,7 @@ async fn publish_plan_stage_failure(
     inputs: &PlanStageInputs<'_>,
     expected_revision: u64,
     error: String,
-) -> PlanStageError {
+) -> String {
     match plan_commit.publish_plan_failure(expected_revision, &error) {
         PlanFailurePublication::Published => {
             append_trajectory_event(
@@ -328,14 +307,14 @@ async fn publish_plan_stage_failure(
                     inputs.dispatch_id, kanban_err
                 );
             }
-            PlanStageError::Settled(error)
+            error
         }
         // A newer authoritative state won: leave both status and kanban.
-        PlanFailurePublication::Refused => PlanStageError::Settled(error),
+        PlanFailurePublication::Refused => error,
         // The failure could not be persisted: report reconciliation unknown
         // and do not fabricate a terminal kanban state.
-        PlanFailurePublication::PersistFailed => PlanStageError::Settled(format!(
-            "{error} (plan failure could not be persisted; reconciliation unknown)"
-        )),
+        PlanFailurePublication::PersistFailed => {
+            format!("{error} (plan failure could not be persisted; reconciliation unknown)")
+        }
     }
 }

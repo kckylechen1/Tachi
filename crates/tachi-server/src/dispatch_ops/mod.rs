@@ -40,6 +40,7 @@ pub(crate) use dispatch::{load_dispatch_identity_receipt_checked, DispatchReceip
 pub(crate) use dispatch_v2::fail_next_managed_terminal_status_write;
 #[cfg(test)]
 pub(crate) use dispatch_v2::fail_next_plan_commit_write;
+pub(crate) use dispatch_v2::planner_failure_winner;
 pub(crate) use dispatch_v2::stamp_route_decision_id;
 pub(crate) use dispatch_v2::status_json_lock_for;
 #[cfg(unix)]
