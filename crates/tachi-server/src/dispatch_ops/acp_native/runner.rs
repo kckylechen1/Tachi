@@ -82,6 +82,12 @@ async fn run_native_acp_dispatch_inner(
     }
     let escape_contained = defer_artifacts
         && crate::dispatch_ops::subprocess::configure_required_postflight_containment(&mut cmd);
+    if defer_artifacts && !escape_contained {
+        return DispatchRunOutcome::failure(
+            "required postflight process containment unavailable",
+            crate::exec_env_postflight::RunnerLivenessEvidence::NoWorkerSpawned,
+        );
+    }
     if let Some(authority) = spec.cwd_authority.as_ref() {
         if let Err(error) = authority.anchor_command_cwd(cmd.as_std_mut()) {
             return DispatchRunOutcome::failure(

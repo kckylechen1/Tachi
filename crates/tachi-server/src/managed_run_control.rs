@@ -1947,6 +1947,7 @@ mod issue_1825_status_revision_writer_regression_tests {
                 exec_env_ref: None,
                 launch_spec_digest: None,
                 backend_name: "custom".to_string(),
+                backend_metadata: None,
                 backend_metadata_digest: None,
             },
         )

@@ -335,6 +335,12 @@ pub(super) async fn run_agent_subprocess_with_liveness(
 ) -> DispatchRunOutcome {
     let escape_contained =
         require_postflight_containment && configure_required_postflight_containment(&mut cmd);
+    if require_postflight_containment && !escape_contained {
+        return DispatchRunOutcome::failure(
+            "required postflight process containment unavailable",
+            crate::exec_env_postflight::RunnerLivenessEvidence::NoWorkerSpawned,
+        );
+    }
     if let Some(authority) = cwd_authority.as_ref() {
         if let Err(error) = authority.anchor_command_cwd(cmd.as_std_mut()) {
             return DispatchRunOutcome::failure(
@@ -396,6 +402,11 @@ pub(super) async fn run_managed_custom_subprocess_outcome(
         pause_managed_pre_spawn();
         if let Ok(command) = cancellations.try_recv() {
             return finish_pre_spawn_cancellation(command);
+        }
+        if require_postflight_containment && !escape_contained {
+            return ManagedSubprocessOutcome::plain(Err(
+                "required postflight process containment unavailable".to_string(),
+            ));
         }
         cmd.stdin(std::process::Stdio::null());
         cmd.stdout(std::process::Stdio::piped());
@@ -1578,6 +1589,12 @@ pub(super) async fn run_opencode_sop_subprocess_with_liveness(
     };
     let escape_contained =
         require_postflight_containment && configure_required_postflight_containment(&mut cmd);
+    if require_postflight_containment && !escape_contained {
+        return DispatchRunOutcome::failure(
+            "required postflight process containment unavailable",
+            crate::exec_env_postflight::RunnerLivenessEvidence::NoWorkerSpawned,
+        );
+    }
     if let Some(authority) = cwd_authority.as_ref() {
         if let Err(error) = authority.anchor_command_cwd(cmd.as_std_mut()) {
             return DispatchRunOutcome::failure(
@@ -1767,211 +1784,65 @@ pub(crate) fn configure_process_group(cmd: &mut Command) {
 #[cfg(not(unix))]
 pub(crate) fn configure_process_group(_cmd: &mut Command) {}
 
-/// Apply a kernel-enforced rule that prevents a Required-postflight worker or
-/// any inherited descendant from leaving its owned POSIX process group. The
-/// macOS sandbox operation still permits ordinary fork/exec, but denies the
-/// process-control operation used by `setsid`/`setpgid` escapes.
-#[cfg(target_os = "macos")]
+/// Apply the shared kernel-enforced rule that prevents a Required-postflight
+/// worker or inherited descendant from leaving its owned POSIX process group.
 pub(crate) fn configure_required_postflight_containment(cmd: &mut Command) -> bool {
-    const PROFILE: &str = "(version 1)(allow default)(deny process-info-setcontrol)";
-    let original = cmd.as_std();
-    let program = original.get_program().to_os_string();
-    let args = original
-        .get_args()
-        .map(std::ffi::OsStr::to_os_string)
-        .collect::<Vec<_>>();
-    let env = original
-        .get_envs()
-        .map(|(name, value)| {
-            (
-                name.to_os_string(),
-                value.map(std::ffi::OsStr::to_os_string),
-            )
-        })
-        .collect::<Vec<_>>();
-    let cwd = original.get_current_dir().map(std::path::Path::to_path_buf);
-
-    let mut wrapped = Command::new("/usr/bin/sandbox-exec");
-    wrapped.arg("-p").arg(PROFILE).arg(program).args(args);
-    if let Some(cwd) = cwd {
-        wrapped.current_dir(cwd);
-    }
-    for (name, value) in env {
-        if let Some(value) = value {
-            wrapped.env(name, value);
-        } else {
-            wrapped.env_remove(name);
-        }
-    }
-    *cmd = wrapped;
-    true
-}
-
-#[cfg(all(
-    target_os = "linux",
-    any(target_arch = "x86_64", target_arch = "aarch64")
-))]
-pub(crate) fn configure_required_postflight_containment(cmd: &mut Command) -> bool {
-    use std::os::unix::process::CommandExt;
-
-    // SAFETY: the closure runs after fork and before exec. It performs only
-    // prctl syscalls plus stack-local BPF construction; no allocation or lock
-    // is touched in the child. The installed filter is inherited across both
-    // fork/clone and exec, so descendants cannot later call setsid/setpgid to
-    // leave the process group whose lifecycle the parent owns.
-    unsafe {
-        cmd.pre_exec(install_linux_postflight_escape_filter);
-    }
-    true
-}
-
-#[cfg(all(
-    target_os = "linux",
-    any(target_arch = "x86_64", target_arch = "aarch64")
-))]
-fn install_linux_postflight_escape_filter() -> std::io::Result<()> {
-    const BPF_LD_W_ABS: u16 = 0x20;
-    const BPF_JMP_JEQ_K: u16 = 0x15;
-    const BPF_JMP_JSET_K: u16 = 0x45;
-    const BPF_RET_K: u16 = 0x06;
-    const SECCOMP_RET_ALLOW: u32 = 0x7fff_0000;
-    const SECCOMP_RET_ERRNO: u32 = 0x0005_0000;
-    const SECCOMP_MODE_FILTER: libc::c_ulong = 2;
-    #[cfg(target_arch = "x86_64")]
-    const NATIVE_AUDIT_ARCH: u32 = 0xc000_003e;
-    #[cfg(target_arch = "aarch64")]
-    const NATIVE_AUDIT_ARCH: u32 = 0xc000_00b7;
-
-    const fn stmt(code: u16, k: u32) -> libc::sock_filter {
-        libc::sock_filter {
-            code,
-            jt: 0,
-            jf: 0,
-            k,
-        }
-    }
-    const fn deny_if(syscall: u32) -> [libc::sock_filter; 2] {
-        [
-            libc::sock_filter {
-                code: BPF_JMP_JEQ_K,
-                jt: 0,
-                jf: 1,
-                k: syscall,
-            },
-            stmt(BPF_RET_K, SECCOMP_RET_ERRNO | libc::EPERM as u32),
-        ]
-    }
-
-    let setsid = deny_if(libc::SYS_setsid as u32);
-    let setpgid = deny_if(libc::SYS_setpgid as u32);
-    let unshare = deny_if(libc::SYS_unshare as u32);
-    let setns = deny_if(libc::SYS_setns as u32);
-    let mut filter = [
-        // seccomp_data.arch is at byte offset 4. Refuse compatibility ABIs
-        // wholesale: on x86_64 an i386 process uses different syscall numbers
-        // and would otherwise miss the native setsid/setpgid rules below.
-        stmt(BPF_LD_W_ABS, 4),
-        libc::sock_filter {
-            code: BPF_JMP_JEQ_K,
-            jt: 1,
-            jf: 0,
-            k: NATIVE_AUDIT_ARCH,
-        },
-        stmt(BPF_RET_K, SECCOMP_RET_ERRNO | libc::EPERM as u32),
-        stmt(BPF_LD_W_ABS, 0),
-        // x86_64's x32 ABI ORs syscall numbers with 0x4000_0000. Deny that
-        // alternate ABI wholesale so the native-number escape rules below
-        // cannot be bypassed with an x32 setsid/setpgid invocation.
-        libc::sock_filter {
-            code: BPF_JMP_JSET_K,
-            jt: 0,
-            jf: 1,
-            k: 0x4000_0000,
-        },
-        stmt(BPF_RET_K, SECCOMP_RET_ERRNO | libc::EPERM as u32),
-        setsid[0],
-        setsid[1],
-        setpgid[0],
-        setpgid[1],
-        unshare[0],
-        unshare[1],
-        setns[0],
-        setns[1],
-        stmt(BPF_RET_K, SECCOMP_RET_ALLOW),
-    ];
-    let program = libc::sock_fprog {
-        len: filter.len() as u16,
-        filter: filter.as_mut_ptr(),
-    };
-    // SAFETY: prctl receives scalar options and a valid pointer to the
-    // stack-resident filter for the duration of the syscall.
-    if unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } != 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    // SAFETY: no_new_privs is set and `program` points to a valid classic-BPF
-    // array. Failure aborts spawn rather than running uncontained.
-    if unsafe {
-        libc::prctl(
-            libc::PR_SET_SECCOMP,
-            SECCOMP_MODE_FILTER,
-            &program as *const libc::sock_fprog,
-        )
-    } != 0
-    {
-        return Err(std::io::Error::last_os_error());
-    }
-    Ok(())
-}
-
-#[cfg(all(
-    target_os = "linux",
-    not(any(target_arch = "x86_64", target_arch = "aarch64"))
-))]
-pub(crate) fn configure_required_postflight_containment(_cmd: &mut Command) -> bool {
-    // A Required gate must not claim containment on an architecture whose
-    // native audit ABI and syscall numbers are not explicitly certified.
-    false
-}
-
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
-pub(crate) fn configure_required_postflight_containment(_cmd: &mut Command) -> bool {
-    false
-}
-
-#[cfg(all(test, target_os = "macos"))]
-#[test]
-fn required_postflight_containment_child_cannot_setsid() {
-    if std::env::var_os("TACHI_TEST_ATTEMPT_SETSID").is_none() {
-        return;
-    }
-    // SAFETY: setsid takes no pointers. The required-postflight sandbox must
-    // deny this process-control operation with EPERM.
-    let result = unsafe { libc::setsid() };
-    assert_eq!(result, -1, "required worker unexpectedly escaped its group");
-    assert_eq!(
-        std::io::Error::last_os_error().raw_os_error(),
-        Some(libc::EPERM)
-    );
+    tachi_dispatch::configure_process_group_escape_containment(cmd.as_std_mut())
 }
 
 #[cfg(all(test, target_os = "macos"))]
 #[tokio::test]
-async fn required_postflight_kernel_containment_discriminates_setsid_escape() {
-    let mut command = Command::new(std::env::current_exe().expect("current test binary"));
-    command
-        .arg("required_postflight_containment_child_cannot_setsid")
-        .arg("--nocapture")
-        .env("TACHI_TEST_ATTEMPT_SETSID", "1");
+async fn required_postflight_refuses_uncontained_macos_worker_before_spawn() {
+    let marker = std::env::temp_dir().join(format!(
+        "tachi-required-postflight-refusal-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let mut command = Command::new("/usr/bin/touch");
+    command.arg(&marker);
     let outcome =
         run_agent_subprocess_with_liveness(command, Duration::from_secs(10), true, None).await;
-    let result = outcome.result.expect("contained child test must pass");
-    assert_eq!(result.exit_code, Some(0));
     assert!(matches!(
         outcome.liveness,
-        crate::exec_env_postflight::RunnerLivenessEvidence::ConfirmedReaped {
-            proof: "kernel_denied_process_group_escape_and_owned_group_absent"
-        }
+        crate::exec_env_postflight::RunnerLivenessEvidence::NoWorkerSpawned
     ));
+    assert!(matches!(outcome.result, Err(ref error) if error.contains("containment unavailable")));
+    assert!(!marker.exists(), "uncontained worker was spawned");
+}
+
+#[cfg(all(test, target_os = "macos"))]
+#[tokio::test]
+async fn managed_required_postflight_refuses_uncontained_worker_before_spawn() {
+    let marker = std::env::temp_dir().join(format!(
+        "tachi-managed-containment-refusal-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let mut command = Command::new("/usr/bin/touch");
+    command.arg(&marker);
+    let (_sender, receiver) = mpsc::channel(1);
+    let run_dir = std::env::temp_dir();
+    let outcome = run_managed_custom_subprocess_outcome(
+        command,
+        Duration::from_secs(10),
+        receiver,
+        &run_dir,
+        true,
+        None,
+    )
+    .await;
+    assert!(matches!(
+        outcome.liveness,
+        crate::exec_env_postflight::RunnerLivenessEvidence::NoWorkerSpawned
+    ));
+    assert!(matches!(outcome.result, Err(ref error) if error.contains("containment unavailable")));
+    assert!(!marker.exists(), "uncontained managed worker was spawned");
 }
 
 #[cfg(not(unix))]

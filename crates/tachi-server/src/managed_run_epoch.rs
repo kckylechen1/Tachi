@@ -43,8 +43,9 @@ pub(crate) fn mint_controller_epoch() -> String {
 }
 
 /// Identity refs collected at the managed start site. Everything here is a
-/// ref, digest, or closed classification — never raw command, cwd, env,
-/// credential, secret, unrestricted path, or process locator.
+/// ref, digest, closed classification, or server-minted secret-negative
+/// backend provenance receipt — never raw command, cwd, env, credential,
+/// secret, unrestricted path, or process locator.
 pub(crate) struct ManagedRunIdentityInput {
     pub(crate) controller_epoch_id: String,
     pub(crate) assignment_ref: String,
@@ -55,6 +56,10 @@ pub(crate) struct ManagedRunIdentityInput {
     /// One-way digest of the server-minted LaunchSpec serialization.
     pub(crate) launch_spec_digest: Option<String>,
     pub(crate) backend_name: String,
+    /// Closed, server-minted backend receipt. It contains only adapter/build
+    /// provenance and prerequisite verdict names; never probe output, account
+    /// identity, command, environment, credential, or process locators.
+    pub(crate) backend_metadata: Option<Value>,
     /// One-way digest of the backend metadata payload (when the backend
     /// carries one).
     pub(crate) backend_metadata_digest: Option<String>,
@@ -120,14 +125,22 @@ pub(crate) fn build_managed_run_identity(
     input: &ManagedRunIdentityInput,
     receipt_revision_at_acceptance: u64,
 ) -> Value {
+    let backend_metadata = input.backend_metadata.as_ref();
     json!({
         "managed_run_id": dispatch_id,
         "dispatch_id": dispatch_id,
         "controller_epoch_id": input.controller_epoch_id,
         "lifecycle_mode": "TachiManagedBatch",
-        "backend_kind": "custom",
+        "backend_kind": "managed_subprocess",
         "backend_name": input.backend_name,
         "backend_metadata_digest": input.backend_metadata_digest,
+        "adapter": backend_metadata.and_then(|value| value.get("adapter")),
+        "adapter_version": backend_metadata.and_then(|value| value.get("adapter_version")),
+        "host_os": backend_metadata.and_then(|value| value.get("host_os")),
+        "host_arch": backend_metadata.and_then(|value| value.get("host_arch")),
+        "candidate_sha": backend_metadata.and_then(|value| value.get("candidate_sha")),
+        "verification_evidence": backend_metadata
+            .and_then(|value| value.get("verification_evidence")),
         "accepted_at": chrono::Utc::now().to_rfc3339(),
         "assignment_ref": input.assignment_ref,
         "assignment_identity_digest": input.assignment_identity_digest,

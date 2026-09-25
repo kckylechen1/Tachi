@@ -2504,6 +2504,7 @@ dependencies = [
 name = "tachi-dispatch"
 version = "1.9.2"
 dependencies = [
+ "libc",
  "serde",
  "serde_json",
  "tachi-params",
