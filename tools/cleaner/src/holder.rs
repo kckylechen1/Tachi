@@ -19,6 +19,7 @@
 //! `tachi-exec-env-reaper/src/lib.rs` under #1062. This module only ever detects; it
 //! never signals or kills a process.
 
+use std::ffi::OsStr;
 use std::path::Path;
 use std::process::Command;
 
@@ -100,15 +101,39 @@ pub type HolderProbeFn = dyn Fn(&Path) -> HolderEvidence;
 /// predicate; a caller must never substitute a harness-reported liveness
 /// claim for this probe (freeze boundary 1, tachi#1118).
 pub fn probe_holders(path: &Path) -> HolderEvidence {
-    let lsof = Command::new("lsof").arg("+D").arg(path).output();
-    let out = match lsof {
+    probe_holders_with(OsStr::new("lsof"), path)
+}
+
+/// [`probe_holders`] with the `lsof` program injectable, so tests can drive
+/// the real call site (argv, stream capture, classification) with a stub.
+fn probe_holders_with(lsof: &OsStr, path: &Path) -> HolderEvidence {
+    let out = match Command::new(lsof).arg("+D").arg(path).output() {
         Ok(out) => out,
         Err(err) => return HolderEvidence::Unknown(format!("lsof unavailable: {err}")),
     };
-    interpret_lsof_output(
+    interpret_lsof_run(
         out.status.code(),
         &String::from_utf8_lossy(&out.stdout),
         &String::from_utf8_lossy(&out.stderr),
+        path,
+    )
+}
+
+/// Classify a raw `lsof +D <target>` run: stderr is first reduced to the
+/// diagnostics that bear on `target` (tachi#1978 — lsof's Linux start-up
+/// warnings about unrelated, unstat()able mounts such as tracefs are proven
+/// irrelevant and dropped; see [`crate::lsof_stderr`]), then handed to the
+/// fail-closed [`interpret_lsof_output`] unchanged.
+fn interpret_lsof_run(
+    exit_code: Option<i32>,
+    stdout: &str,
+    stderr: &str,
+    target: &Path,
+) -> HolderEvidence {
+    interpret_lsof_output(
+        exit_code,
+        stdout,
+        &crate::lsof_stderr::relevant_lsof_stderr(stderr, target),
     )
 }
 
@@ -367,6 +392,120 @@ mod tests {
             ),
             HolderEvidence::Unknown(_)
         ));
+    }
+
+    // --- tachi#1978: lsof's Linux start-up mount warnings ---
+
+    /// Byte-for-byte stderr of lsof 4.95.0 on Ubuntu 24.04 as a non-root user,
+    /// printed on every run whatever the query (captured on atom-dgx-2).
+    const LINUX_TRACEFS_WARNING: &str = "lsof: WARNING: can't stat() tracefs file system /sys/kernel/debug/tracing\n      Output information may be incomplete.\n";
+
+    #[test]
+    fn unrelated_mount_warning_on_an_empty_run_is_clear() {
+        let dir = unique_temp_dir("holder-1978-clear");
+        assert_eq!(
+            interpret_lsof_run(Some(1), "", LINUX_TRACEFS_WARNING, &dir),
+            HolderEvidence::Clear
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn mount_warning_inside_the_walk_stays_unknown() {
+        let dir = unique_temp_dir("holder-1978-inside");
+        let stderr = format!(
+            "lsof: WARNING: can't stat() fuse file system {}\n      Output information may be incomplete.\n",
+            dir.canonicalize().unwrap().join("mnt").display()
+        );
+        assert!(matches!(
+            interpret_lsof_run(Some(1), "", &stderr, &dir),
+            HolderEvidence::Unknown(_)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn genuine_lsof_error_next_to_the_mount_warning_stays_unknown() {
+        let dir = unique_temp_dir("holder-1978-error");
+        let stderr = format!(
+            "{LINUX_TRACEFS_WARNING}lsof: WARNING: can't opendir({}/sub): Permission denied\n",
+            dir.display()
+        );
+        let evidence = interpret_lsof_run(Some(1), "", &stderr, &dir);
+        let HolderEvidence::Unknown(reason) = &evidence else {
+            panic!("a partial walk must stay Unknown: {evidence:?}");
+        };
+        assert!(reason.contains("can't opendir"), "{reason}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Drives the real call site (`Command`, argv, stream capture,
+    /// classification) against a stub `lsof`, so the target the stderr filter
+    /// compares against is the one actually probed.
+    #[cfg(unix)]
+    fn stub_lsof(dir: &Path, name: &str, body: &str) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        // One file per stub: never rewrite a script another exec may hold.
+        let stub = dir.join(name);
+        std::fs::write(&stub, format!("#!/bin/sh\n{body}")).unwrap();
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o700)).unwrap();
+        stub
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn real_call_site_with_stub_lsof_classifies_linux_warnings() {
+        let bin = unique_temp_dir("holder-1978-bin");
+        let target = unique_temp_dir("holder-1978-target");
+        let warn = "cat >&2 <<'EOF'\nlsof: WARNING: can't stat() tracefs file system /sys/kernel/debug/tracing\n      Output information may be incomplete.\nEOF\n";
+
+        let clear = stub_lsof(
+            &bin,
+            "lsof-clear",
+            &format!("[ \"$1\" = '+D' ] || exit 93\n{warn}exit 1\n"),
+        );
+        assert_eq!(
+            probe_holders_with(clear.as_os_str(), &target),
+            HolderEvidence::Clear,
+            "warning-only empty run must be Clear"
+        );
+
+        let pid = std::process::id();
+        let held = stub_lsof(
+            &bin,
+            "lsof-held",
+            &format!("{warn}printf 'COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME\\nx {pid} u 3r REG 1,4 0 1 %s/f\\n' \"$2\"\nexit 0\n"),
+        );
+        let evidence = probe_holders_with(held.as_os_str(), &target);
+        let HolderEvidence::Held(procs) = &evidence else {
+            panic!("a holder row must be Held despite the warning: {evidence:?}");
+        };
+        assert!(procs.iter().any(|p| p.pid == pid as i32));
+
+        let inside = stub_lsof(
+            &bin,
+            "lsof-inside",
+            "echo \"lsof: WARNING: can't stat() fuse file system $2/mnt\" >&2\nexit 1\n",
+        );
+        assert!(matches!(
+            probe_holders_with(inside.as_os_str(), &target),
+            HolderEvidence::Unknown(_)
+        ));
+
+        let failing = stub_lsof(
+            &bin,
+            "lsof-failing",
+            &format!(
+                "{warn}echo 'lsof: status error on '\"$2\"': Permission denied' >&2\nexit 1\n"
+            ),
+        );
+        assert!(matches!(
+            probe_holders_with(failing.as_os_str(), &target),
+            HolderEvidence::Unknown(_)
+        ));
+
+        let _ = std::fs::remove_dir_all(&bin);
+        let _ = std::fs::remove_dir_all(&target);
     }
 
     #[test]

@@ -230,7 +230,7 @@
 //! `unmanaged`).
 
 use std::collections::BTreeMap;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, SystemTime};
@@ -407,16 +407,34 @@ pub struct HolderExclusion {
 /// Real probe: `lsof +D <dir>` (recursive — a live `cargo` holds files deep
 /// inside the target, not just at its root).
 pub fn lsof_holder_probe(path: &Path, ignored_holder: Option<HolderExclusion>) -> HolderCheck {
-    match Command::new("lsof").arg("+D").arg(path).output() {
+    lsof_holder_probe_with(OsStr::new("lsof"), path, ignored_holder)
+}
+
+/// [`lsof_holder_probe`] with the `lsof` program injectable, so crate tests can
+/// drive the real call site (argv, stream capture, stderr filtering) with a
+/// stub instead of the host's lsof.
+fn lsof_holder_probe_with(
+    lsof: &OsStr,
+    path: &Path,
+    ignored_holder: Option<HolderExclusion>,
+) -> HolderCheck {
+    match Command::new(lsof).arg("+D").arg(path).output() {
         Ok(out) => {
             let stdout = String::from_utf8_lossy(&out.stdout);
             let filtered = ignored_holder
                 .map(|ignored| without_ignored_holder(&stdout, ignored))
                 .unwrap_or_else(|| stdout.into_owned());
+            // tachi#1978: lsof's Linux dialect warns about every mount it
+            // cannot stat() on every run (tracefs as non-root). Only a mount
+            // proven disjoint from `path` is dropped; every other diagnostic
+            // still reaches `interpret_lsof` and fails closed.
             interpret_lsof(
                 out.status.code(),
                 &filtered,
-                &String::from_utf8_lossy(&out.stderr),
+                &tachi_clean::lsof_stderr::relevant_lsof_stderr(
+                    &String::from_utf8_lossy(&out.stderr),
+                    path,
+                ),
             )
         }
         // No lsof on this host ⇒ we cannot prove "unheld" ⇒ nothing is

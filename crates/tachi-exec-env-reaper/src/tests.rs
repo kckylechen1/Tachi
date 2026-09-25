@@ -535,6 +535,68 @@ fn lsof_odd_exit_or_signal_is_unknown() {
     ));
 }
 
+/// tachi#1978: a stub `lsof` driven through the real call site, so the target
+/// the stderr filter compares against is exactly the probed path. The stderr
+/// text is byte-for-byte what lsof 4.95.0 prints on Ubuntu 24.04 as a non-root
+/// user on every run (captured on atom-dgx-2).
+#[cfg(unix)]
+#[test]
+fn real_call_site_classifies_linux_mount_warnings_against_the_target() {
+    use std::os::unix::fs::PermissionsExt;
+    let bin = unique_temp_dir("tachi-reaper-1978-bin");
+    let root = unique_temp_dir("tachi-reaper-1978-target");
+    let target = make_target_dir(&root, "x-target");
+    let stub = |name: &str, body: &str| {
+        // One file per stub: never rewrite a script another exec may hold.
+        let path = bin.join(name);
+        std::fs::write(&path, format!("#!/bin/sh\n{body}")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        path
+    };
+    let warn = "cat >&2 <<'EOF'\nlsof: WARNING: can't stat() tracefs file system /sys/kernel/debug/tracing\n      Output information may be incomplete.\nEOF\n";
+
+    let clear = stub(
+        "lsof-clear",
+        &format!("[ \"$1\" = '+D' ] || exit 93\n{warn}exit 1\n"),
+    );
+    assert_eq!(
+        lsof_holder_probe_with(clear.as_os_str(), &target, None),
+        HolderCheck::None,
+        "an unrelated unstat()able mount must not make an empty walk Unknown"
+    );
+
+    let held = stub(
+        "lsof-held",
+        &format!("{warn}printf 'COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME\\ncargo 4242 u 3r REG 1,4 0 1 %s/f\\n' \"$2\"\nexit 0\n"),
+    );
+    assert_eq!(
+        lsof_holder_probe_with(held.as_os_str(), &target, None),
+        HolderCheck::Held(vec!["cargo 4242".to_string()])
+    );
+
+    let inside = stub(
+        "lsof-inside",
+        "echo \"lsof: WARNING: can't stat() fuse file system $2/debug\" >&2\nexit 1\n",
+    );
+    assert!(matches!(
+        lsof_holder_probe_with(inside.as_os_str(), &target, None),
+        HolderCheck::Unknown(_)
+    ));
+
+    let partial = stub(
+        "lsof-partial",
+        &format!("{warn}echo \"lsof: WARNING: can't opendir($2/debug): Permission denied\" >&2\nexit 1\n"),
+    );
+    let check = lsof_holder_probe_with(partial.as_os_str(), &target, None);
+    let HolderCheck::Unknown(reason) = &check else {
+        panic!("a partial walk must stay Unknown next to the mount warning: {check:?}");
+    };
+    assert!(reason.contains("can't opendir"), "{reason}");
+
+    let _ = std::fs::remove_dir_all(&bin);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// The head-line safety invariant of this module — and the one the reviewed
 /// cut asserted only in its commit message. An *inconclusive* holder probe
 /// must SKIP. The worktree sweep's `_ => false` (unknown ⇒ "not active") is
