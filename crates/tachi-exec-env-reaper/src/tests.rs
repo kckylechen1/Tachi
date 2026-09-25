@@ -856,6 +856,13 @@ fn stub_only_an_exact_pin_row_is_ignored() {
             "fd-leading-zero",
             format!("tachi 123 u 07r DIR 1,4 0 1 {t}"),
         ),
+        // Restored from round 3 (cold review round 5 concern).
+        ("fd-bad-mode", format!("tachi 123 u 7q DIR 1,4 0 1 {t}")),
+        ("fd-bad-lock", format!("tachi 123 u 7rZ DIR 1,4 0 1 {t}")),
+        (
+            "fd-leading-junk",
+            format!("tachi 123 u x7r DIR 1,4 0 1 {t}"),
+        ),
         // Non-canonical numbers.
         ("pid-plus", format!("tachi +123 u 7r DIR 1,4 0 1 {t}")),
         ("node-plus", format!("tachi 123 u 7r DIR 1,4 0 +1 {t}")),
@@ -953,6 +960,86 @@ fn stub_only_an_exact_pin_row_is_ignored() {
         }
     }
     let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Cold review round 5 (monotonicity): a caller target spelled with `..`
+/// (or an interior `.`) is not a plain spelling, so a NAME spelled
+/// identically is never matched and stays Held (as in round 4). The
+/// canonical spelling still matches.
+#[cfg(unix)]
+#[test]
+fn stub_unplain_target_spelling_is_never_matched() {
+    let root = unique_temp_dir("tachi-reaper-1978-dotdot");
+    let target = make_target_dir(&root, "x-target");
+    std::fs::create_dir_all(root.join("a")).unwrap();
+    let pin = Some(stub_pin());
+    for (case, spelling) in [
+        ("dotdot", format!("{}/a/../x-target", root.display())),
+        ("dot", format!("{}/./x-target", root.display())),
+    ] {
+        let raw_target = PathBuf::from(&spelling);
+        assert!(raw_target.is_dir(), "{spelling}");
+        let stdout = format!(
+            "{}tachi 123 u 7r DIR 1,4 0 1 {spelling}\n",
+            String::from_utf8_lossy(LSOF_HEADER)
+        );
+        for code in [0, 1] {
+            let check = stub_lsof_probe(
+                &format!("{case}-{code}"),
+                &raw_target,
+                stdout.as_bytes(),
+                b"",
+                code,
+                pin,
+            );
+            assert!(
+                matches!(check, HolderCheck::Held(_)),
+                "{spelling} exit {code}: an unplain spelling must not match, got {check:?}"
+            );
+        }
+        // Control: the same target named canonically is the pin.
+        let canonical = format!(
+            "{}tachi 123 u 7r DIR 1,4 0 1 {}\n",
+            String::from_utf8_lossy(LSOF_HEADER),
+            target.canonicalize().unwrap().display()
+        );
+        assert_eq!(
+            stub_lsof_probe(
+                &format!("{case}-canonical"),
+                &raw_target,
+                canonical.as_bytes(),
+                b"",
+                1,
+                pin
+            ),
+            HolderCheck::None
+        );
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Cold review round 5: Linux DEVICE decoding is exactly glibc's
+/// gnu_dev_major/gnu_dev_minor (bits/sysmacros.h), including high bits.
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_device_numbers_match_glibc() {
+    for (dev, expected) in [
+        (0x0000_1000_0000_0001_u64, (4096, 1)),
+        (0x0000_0000_0001_0302, (259, 2)),
+        (0x0000_0000_0000_0801, (8, 1)),
+        (0x0000_0000_0000_0034, (0, 0x34)),
+        (0x0000_0fff_fff0_00ff, (0, 0xffff_ffff)),
+        (0xffff_f000_000f_ff00, (0xffff_ffff, 0)),
+    ] {
+        assert_eq!(lsof_device_numbers(dev), Some(expected), "{dev:#018x}");
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_device_numbers_match_the_printed_form() {
+    // lsof 4.91 printed `1,17` for this host's APFS volume (st_dev 0x0100_0011).
+    assert_eq!(lsof_device_numbers(0x0100_0011), Some((1, 17)));
 }
 
 #[test]

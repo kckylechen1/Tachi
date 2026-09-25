@@ -481,17 +481,33 @@ fn ignored_holder_rows(stdout: &str, ignored: HolderExclusion, target: &Path) ->
 /// The exact spellings lsof may print in NAME for the pinned directory: the
 /// target made absolute without resolving symlinks, and canonical (lsof
 /// prints the resolved path, e.g. `/private/var/...` for `/var/...` on macOS).
+/// Only plain spellings qualify (cold review round 5): a caller spelling with
+/// `.`/`..`/`//`/trailing `/` is dropped, so such a NAME is never matched.
 fn pin_target_spellings(target: &Path) -> Vec<PathBuf> {
     let mut spellings = Vec::new();
     for spelling in [std::path::absolute(target), target.canonicalize()]
         .into_iter()
         .flatten()
     {
-        if !spellings.contains(&spelling) {
+        if is_plain_absolute(&spelling) && !spellings.contains(&spelling) {
             spellings.push(spelling);
         }
     }
     spellings
+}
+
+/// Absolute, made only of root and normal components, and spelled exactly as
+/// those components rebuild it (so no `//`, interior `.`, or trailing `/`).
+fn is_plain_absolute(path: &Path) -> bool {
+    let rebuilt: PathBuf = path.components().collect();
+    path.is_absolute()
+        && rebuilt.as_os_str() == path.as_os_str()
+        && path.components().all(|component| {
+            matches!(
+                component,
+                std::path::Component::RootDir | std::path::Component::Normal(_)
+            )
+        })
 }
 
 /// A row is the reaper's own pin only when it describes that exact open
@@ -595,8 +611,11 @@ fn lsof_read_fd_number(token: &str) -> Option<i32> {
 /// encoding, so no exclusion is offered and the pin stays a holder.
 #[cfg(target_os = "linux")]
 fn lsof_device_numbers(dev: u64) -> Option<(u64, u64)> {
-    let major = ((dev >> 8) & 0xfff) | ((dev >> 32) & !0xfff);
-    let minor = (dev & 0xff) | ((dev >> 12) & !0xff);
+    // Exactly glibc's __SYSMACROS_DEFINE_MAJOR/MINOR (bits/sysmacros.h):
+    // major = (dev & 0x00000000000fff00) >> 8 | (dev & 0xfffff00000000000) >> 32
+    // minor = (dev & 0x00000000000000ff)      | (dev & 0x00000ffffff00000) >> 12
+    let major = ((dev & 0x0000_0000_000f_ff00) >> 8) | ((dev & 0xffff_f000_0000_0000) >> 32);
+    let minor = (dev & 0x0000_0000_0000_00ff) | ((dev & 0x0000_0fff_fff0_0000) >> 12);
     Some((major, minor))
 }
 
