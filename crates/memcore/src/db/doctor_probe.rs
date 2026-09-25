@@ -273,7 +273,25 @@ pub fn open_for_wal_checkpoint(path: &str) -> rusqlite::Result<Connection> {
 /// never the live daemon-owned file (the caller enforces that liveness
 /// guard before ever reaching this call).
 pub fn checkpoint_wal_truncate(conn: &Connection) -> rusqlite::Result<()> {
-    conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+    let (busy, log, checkpointed): (i64, i64, i64) =
+        conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?;
+    // Off-WAL mode legitimately reports (-1,-1). A WAL checkpoint may
+    // return busy=1 with an Ok SQLite statement and leave committed frames
+    // behind: execute_batch would silently misreport such a copy as healthy.
+    if busy != 0
+        || !((log == -1 && checkpointed == -1)
+            || (log >= 0 && checkpointed >= 0 && log == checkpointed))
+    {
+        return Err(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+            Some(format!(
+                "WAL checkpoint incomplete: busy={busy}, log={log}, checkpointed={checkpointed}"
+            )),
+        ));
+    }
+    Ok(())
 }
 
 /// Compatibility fixture seam for ad hoc non-canonical SQLite schemas used by

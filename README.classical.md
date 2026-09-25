@@ -33,10 +33,10 @@ brew tap kckylechen1/tachi && brew install tachi
 或颁此符诏：
 
 ```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v2.0.0/scripts/install.sh)"
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v2.0.0/scripts/install.sh)" -- --skip-plugin
 ```
 
-今版 v2.0.0：藏库卷册之 schema 自二十八进至三十九，旧符（orchestrator、run_skill 之类）皆已退役封存。升册之先，宜行 `tachi migrate` 以察（默认只观不书，`--apply` 方行），并先备份；旧版二进制拒不启新册，回退当以备份为本。npm 之册另有手动发布之途，新签不即新册。详询 [CHANGELOG.md](CHANGELOG.md)。
+今版 v2.0.0：藏库卷册之 schema 自二十八进至三十九，旧符（orchestrator、run_skill 之类）皆已退役封存。升册必依 [`docs/INSTALL.md` Step 1b](docs/INSTALL.md) 之序：先停守护并阻新旧写手复起，替换前备份库册与旧器，乃取新器而勿启；先以 `tachi migrate --rename-legacy --apply --offline` 离线改旧库之名，再以 `tachi migrate --apply` 升册，逐条核其结果。旧器拒不启新册，回退当以备份为本。npm 之册另有手动发布之途，新签不即新册。详询 [CHANGELOG.md](CHANGELOG.md)。
 
 ---
 

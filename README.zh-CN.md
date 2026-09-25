@@ -40,8 +40,8 @@ Tachi 是一个单二进制、本地优先的 Agent 记忆与协调后端。它�
 当前版本：`v2.0.0`。这是一次大版本升级：移除了部分公开 MCP 路由，磁盘 schema 从 28 升到 39，调用已退役工具的脚本需要先迁移到存留门面。要点：
 
 - Lead 默认发现面为六个门面（新增 `tachi_agent_eval`）；Worker（`delegate`）为其中五个（不含 `tachi_agent_eval`）。
-- 已退役的模型面路由从路由器移除，结局各不相同：记忆保存/检索别名与直连看板路由的职能由规范门面承接（`tachi_memory`、`tachi_task` 看板动作）；orchestrator、技能推荐/进化与记忆管理动作无替代直接移除，库维护走运维 CLI（`tachi doctor`、`tachi repair`、`tachi gc`、`tachi delete`）。
-- 升级前先运行 `tachi migrate`（默认只读计划，`--apply` 才执行）并备份库文件；旧二进制会拒绝打开更高 schema 的库，回退请用备份，不要用旧二进制硬开。
+- 已退役的模型面路由从路由器移除，结局各不相同：记忆保存/检索别名与直连看板路由的职能由规范门面承接（`tachi_memory`、`tachi_task` 看板动作）；orchestrator 与技能推荐/进化路由无替代直接移除。记忆管理动作按动作分流：`progress` 转 `tachi_task(action='status')`，`readiness` 转 `tachi_status`（仅 Ops/admin 授权可达，不在普通发现面），`delete`/`gc`/`doctor_scan` 转运维 CLI（`tachi delete`、`tachi gc` 的 plan|apply 与 `tachi doctor`）；`ingest`/`ingest_source`/`pattern_feedback` 无模型面替代。
+- 升级按 [`docs/INSTALL.md` Step 1b](docs/INSTALL.md) 的顺序执行：先停掉实际的服务管理器与所有新旧读写方并防止重启，在替换前备份库目录与旧二进制，再安装新二进制但不启动服务；先以 `tachi migrate --rename-legacy --apply --offline` 单独离线转换旧文件名，再以 `tachi migrate --apply` 升级 schema，逐条核对结果。`--offline` 是操作者声明，不能自动阻止旧二进制重启；回退请用备份。
 - 标签流水线只发布 Mac arm64 CLI 与 Homebrew formula；npm 包走独立的手动发布通道，新标签不等于 npm 上已有新版本。
 
 完整迁移说明见 [CHANGELOG.md](CHANGELOG.md)（英文）。
@@ -84,11 +84,13 @@ Tachi 不是通用向量数据库，也不是托管记忆云服务。它是面�
 brew tap kckylechen1/tachi && brew install tachi
 ```
 
-或使用 shell 安装脚本（检测到 OpenClaw 时会自动安装插件）：
+或使用 shell 安装脚本。v2.0.0 标签未发布 OpenClaw 插件资产，二进制安装需带 `--skip-plugin`：
 
 ```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v2.0.0/scripts/install.sh)"
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v2.0.0/scripts/install.sh)" -- --skip-plugin
 ```
+
+标签流水线只发布一个预编译包 `tachi-v2.0.0-aarch64-apple-darwin`（Apple Silicon macOS）；其他平台需源码自行编译，发布不作验证。从 1.9.x 升级请按 [`docs/INSTALL.md` Step 1b](docs/INSTALL.md) 的顺序执行：停服务、防重启、备份，然后先离线转换旧文件名，再升级 schema 并逐条核对，最后重启服务。OpenClaw 插件暂无 2.0.0 资产：现有插件可继续配合 2.0.0 二进制使用，重装前先看 [`integrations/openclaw`](integrations/openclaw)。
 
 验证：
 

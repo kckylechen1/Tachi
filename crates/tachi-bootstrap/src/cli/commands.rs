@@ -158,7 +158,8 @@ pub enum Commands {
     /// (#1119's call-site-authority pattern — never a process env var, and
     /// never the shared top-level `--allow-schema-migration` flag). A
     /// library currently held by a live daemon is skipped and listed, not
-    /// aborted; the rest of the sweep continues.
+    /// aborted; the rest of the sweep continues. Legacy filename conversion
+    /// is a separate, explicitly offline mode and does not upgrade schema.
     Migrate {
         /// Emit machine-readable JSON instead of the human summary table
         #[arg(long)]
@@ -167,6 +168,14 @@ pub enum Commands {
         /// plan-only: report the gap, make zero writes.
         #[arg(long)]
         apply: bool,
+        /// Convert old memory.db filenames only; schema migration is a later
+        /// separate `migrate --apply` invocation.
+        #[arg(long)]
+        rename_legacy: bool,
+        /// Attest that ALL old/new readers and writers have been stopped and
+        /// prevented from restarting. Required for filename conversion apply.
+        #[arg(long)]
+        offline: bool,
     },
     /// Plan or apply irreversible garbage collection for one exact physical DB.
     Gc {

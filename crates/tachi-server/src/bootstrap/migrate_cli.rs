@@ -70,7 +70,7 @@ use std::path::{Path, PathBuf};
 
 use memcore::db::migrations::EXPECTED_SCHEMA_VERSION;
 use memcore::path_router::UNKNOWN_DB_LABEL;
-use memcore::{DbOpenContext, MemoryStore};
+use memcore::{pending_legacy_sidecar, resolve_memory_db_read_path, DbOpenContext, MemoryStore};
 use serde::Serialize;
 
 use super::print_pretty_json;
@@ -192,16 +192,29 @@ fn enumerate_known_libraries(
 /// projects, in enumeration order) — reporting the same file twice under two
 /// labels would double-count it in the summary and, under `--apply`, attempt
 /// two redundant opens of the same path.
+///
+/// The dedup key is the file this slot would physically address after the
+/// read-only #1132 filename resolution below. Distinct real files in a
+/// split-brain directory must remain distinct findings.
 fn dedup_by_canonical_path(libs: Vec<Library>) -> Vec<Library> {
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::with_capacity(libs.len());
     for lib in libs {
-        let key = std::fs::canonicalize(&lib.path).unwrap_or_else(|_| lib.path.clone());
-        if seen.insert(key) {
+        if seen.insert(physical_dedup_key(&lib.path)) {
             out.push(lib);
         }
     }
     out
+}
+
+/// Dedup by the physical path the read-only #1132 resolver would probe.
+/// `resolve_memory_db_read_path` only stats/reads link targets — it never
+/// renames, creates, or relinks anything — so enumeration stays read-only.
+/// On ambiguity, use the raw path: `plan_one` reports `Unreadable` rather
+/// than silently selecting either real file.
+fn physical_dedup_key(path: &Path) -> PathBuf {
+    let resolved = resolve_memory_db_read_path(path).unwrap_or_else(|_| path.to_path_buf());
+    std::fs::canonicalize(&resolved).unwrap_or(resolved)
 }
 
 /// Zero-touch `PRAGMA user_version` read: the exact probe
@@ -215,9 +228,59 @@ fn probe_schema_version(path: &Path) -> Result<u32, String> {
 }
 
 fn plan_one(lib: &Library) -> MigrateFinding {
-    let path_str = lib.path.display().to_string();
+    // Read-only #1132-aware resolution: a slot whose canonical
+    // `tachi-memory.db` file does not exist yet but whose legacy `memory.db`
+    // sibling does is NOT "not found" — the sweep must see the real file the
+    // explicit offline filename conversion must bring forward. This resolution never
+    // renames/writes/creates anything; it applies the same split-brain and
+    // compat-symlink rules as the write-side seam and FAILS LOUD on the
+    // ambiguous both-real-files state, which is surfaced here as `Unreadable`
+    // (never a silent NotFound/UpToDate on a conflicted directory). A path
+    // whose filename is not the canonical one (custom DB paths, explicit
+    // non-standard files) resolves to itself — no arbitrary filename rewrite
+    // and no fallback for custom names.
+    let probe_path = match resolve_memory_db_read_path(&lib.path) {
+        Ok(path) => path,
+        Err(err) => {
+            return MigrateFinding {
+                label: lib.label.clone(),
+                path: lib.path.display().to_string(),
+                stored_version: None,
+                expected_version: EXPECTED_SCHEMA_VERSION,
+                status: GapStatus::Unreadable,
+                applied: None,
+                note: format!("could not resolve this slot's database path read-only: {err}"),
+            };
+        }
+    };
+    let path_str = probe_path.display().to_string();
+    let legacy_name_in_effect = probe_path != lib.path;
 
-    if !lib.path.exists() {
+    // Immutable SQLite probes see only the main file, never pending committed
+    // WAL frames or a hot rollback journal. Refuse a definitive version claim
+    // on either the physical path or the legacy sibling (orphaned sidecar).
+    let mut sidecar_paths = vec![probe_path.clone()];
+    if lib.path.file_name().and_then(|name| name.to_str()) == Some(memcore::MEMORY_DB_FILENAME) {
+        sidecar_paths.push(lib.path.with_file_name(memcore::LEGACY_MEMORY_DB_FILENAME));
+    }
+    for candidate in sidecar_paths {
+        match pending_legacy_sidecar(&candidate) {
+            Ok(Some(sidecar)) => return MigrateFinding {
+                label: lib.label.clone(), path: path_str, stored_version: None,
+                expected_version: EXPECTED_SCHEMA_VERSION, status: GapStatus::Unreadable,
+                applied: None,
+                note: format!("immutable plan cannot account for pending WAL/journal at {}; stop writers and use the explicit offline filename conversion before schema migration", sidecar.display()),
+            },
+            Err(err) => return MigrateFinding {
+                label: lib.label.clone(), path: path_str, stored_version: None,
+                expected_version: EXPECTED_SCHEMA_VERSION, status: GapStatus::Unreadable,
+                applied: None, note: format!("cannot inspect SQLite sidecar state: {err}"),
+            },
+            Ok(None) => {}
+        }
+    }
+
+    if !probe_path.exists() {
         return MigrateFinding {
             label: lib.label.clone(),
             path: path_str,
@@ -229,7 +292,7 @@ fn plan_one(lib: &Library) -> MigrateFinding {
         };
     }
 
-    match probe_schema_version(&lib.path) {
+    match probe_schema_version(&probe_path) {
         Err(err) => MigrateFinding {
             label: lib.label.clone(),
             path: path_str,
@@ -262,6 +325,14 @@ fn plan_one(lib: &Library) -> MigrateFinding {
                          — refused by check_schema_version_gate on any real open"
                     ),
                 )
+            };
+            let note = if legacy_name_in_effect {
+                format!(
+                    "{note}; the legacy `memory.db` filename is still in effect (the next \
+                     authorized open performs the #1132 rename)"
+                )
+            } else {
+                note
             };
             MigrateFinding {
                 label: lib.label.clone(),
@@ -378,6 +449,10 @@ fn apply_one(
             let old_version_display = plan_stored_version_display(&finding);
             finding.stored_version = Some(EXPECTED_SCHEMA_VERSION);
             finding.applied = Some(AppliedOutcome::Migrated);
+            // The write-side filename seam may have renamed `memory.db`;
+            // report the path now holding the migrated store, not the
+            // plan-time location that has become a compat symlink.
+            finding.path = lib.path.display().to_string();
             finding.note = format!("migrated {old_version_display} -> {EXPECTED_SCHEMA_VERSION}");
         }
         Err(memcore::MemoryError::Sqlite(ref sqlite_err))
@@ -465,6 +540,195 @@ pub(super) async fn run_migrate_command(
         print!("{}", render_report(&report));
     }
 
+    Ok(())
+}
+
+#[derive(Debug, Serialize)]
+struct FilenameFinding {
+    label: String,
+    source: String,
+    canonical: String,
+    phase: &'static str,
+    outcome: &'static str,
+    note: String,
+}
+
+#[derive(Debug, Serialize)]
+struct FilenameReport {
+    rename_legacy: bool,
+    apply: bool,
+    offline_attested: bool,
+    findings: Vec<FilenameFinding>,
+}
+
+fn filename_plan(lib: &Library) -> FilenameFinding {
+    let path = &lib.path;
+    let legacy = path.with_file_name(memcore::LEGACY_MEMORY_DB_FILENAME);
+    let mut finding = FilenameFinding {
+        label: lib.label.clone(),
+        source: legacy.display().to_string(),
+        canonical: path.display().to_string(),
+        phase: "blocked",
+        outcome: "not_attempted",
+        note: String::new(),
+    };
+    if path.file_name().and_then(|name| name.to_str()) != Some(memcore::MEMORY_DB_FILENAME) {
+        finding.phase = "custom_path";
+        finding.note = "caller-selected noncanonical filename: no rename".to_string();
+        return finding;
+    }
+    let source_meta = std::fs::symlink_metadata(&legacy);
+    let target_meta = std::fs::symlink_metadata(path);
+    match (source_meta, target_meta) {
+        (Ok(source), Err(err))
+            if err.kind() == std::io::ErrorKind::NotFound && source.file_type().is_file() =>
+        {
+            finding.phase = "legacy_only";
+            finding.note = "requires whole-store backup, explicit offline conversion, then separate schema migration".to_string();
+        }
+        (Ok(source), Ok(target))
+            if source.file_type().is_file() && target.file_type().is_file() =>
+        {
+            finding.note = "both real files exist; manual reconciliation required".to_string();
+        }
+        (Ok(source), Ok(target))
+            if source.file_type().is_symlink() && target.file_type().is_file() =>
+        {
+            match memcore::resolve_memory_db_read_path(path) {
+                Ok(_) => finding.phase = "already_converted",
+                Err(err) => finding.note = err.to_string(),
+            }
+        }
+        (Err(err), Ok(target))
+            if err.kind() == std::io::ErrorKind::NotFound && target.file_type().is_file() =>
+        {
+            finding.phase = "canonical_only";
+            finding.note = "possible interrupted conversion; explicit offline verification needed before restoring compatibility link".to_string();
+        }
+        (Err(source_err), Err(target_err))
+            if source_err.kind() == std::io::ErrorKind::NotFound
+                && target_err.kind() == std::io::ErrorKind::NotFound =>
+        {
+            finding.phase = "missing";
+            finding.note = "no store at either filename".to_string();
+        }
+        (source, target) => {
+            finding.note = format!("uncertain source/target state: {source:?}; {target:?}")
+        }
+    }
+    for candidate in [&legacy, path] {
+        match pending_legacy_sidecar(candidate) {
+            Ok(Some(sidecar)) => {
+                finding.note = format!(
+                    "{}; pending WAL/journal at {} (immutable plan is incomplete)",
+                    finding.note,
+                    sidecar.display()
+                )
+            }
+            Err(err) => {
+                finding.phase = "blocked";
+                finding.note = format!("sidecar state unknown: {err}");
+            }
+            Ok(None) => {}
+        }
+    }
+    finding
+}
+
+pub(super) async fn run_filename_conversion_command(
+    json_output: bool,
+    apply: bool,
+    offline: bool,
+    app_home: &Path,
+    global_db_path: &Path,
+    project_db_path: Option<&Path>,
+) -> Result<(), Box<dyn Error>> {
+    if apply != offline {
+        return Err("filename conversion requires --rename-legacy --apply --offline together (or plan without either flag)".into());
+    }
+    let authority = apply.then(memcore::OfflineFilenameAuthority::operator_attestation);
+    let mut findings = Vec::new();
+    let mut incomplete = false;
+    for lib in enumerate_known_libraries(global_db_path, project_db_path) {
+        let mut finding = filename_plan(&lib);
+        if apply
+            && matches!(
+                finding.phase,
+                "legacy_only" | "canonical_only" | "already_converted"
+            )
+        {
+            let probe = if finding.phase == "legacy_only" {
+                lib.path.with_file_name(memcore::LEGACY_MEMORY_DB_FILENAME)
+            } else {
+                lib.path.clone()
+            };
+            let guard =
+                if let Some(pid) = a_live_daemon_holds_this_app_home(app_home, global_db_path) {
+                    Some(format!("known daemon (pid {pid}) still holds this home"))
+                } else {
+                    match crate::db_ownership::daemon_ownership(&probe) {
+                        crate::db_ownership::DbOwnership::NotOwned => None,
+                        crate::db_ownership::DbOwnership::Owned => {
+                            Some("SQLite file is held by another process".to_string())
+                        }
+                        crate::db_ownership::DbOwnership::Unknown(reason) => {
+                            Some(format!("ownership unknown: {reason}"))
+                        }
+                    }
+                };
+            if let Some(reason) = guard {
+                finding.outcome = "blocked";
+                finding.note = reason;
+            } else {
+                match memcore::convert_legacy_filename_offline(
+                    &lib.path,
+                    authority.as_ref().expect("apply has authority"),
+                ) {
+                    Ok(outcome) => {
+                        finding.outcome = match outcome {
+                            memcore::OfflineFilenameOutcome::Converted => "converted",
+                            memcore::OfflineFilenameOutcome::RecoveredLink => "recovered_link",
+                            memcore::OfflineFilenameOutcome::AlreadyConverted => {
+                                "already_converted"
+                            }
+                        };
+                        finding.note = "verified filename conversion only; run ordinary `tachi migrate --apply` separately for schema".to_string();
+                    }
+                    Err(err) => {
+                        finding.outcome = "failed";
+                        finding.note = err.to_string();
+                    }
+                }
+            }
+        }
+        if apply
+            && !matches!(finding.phase, "custom_path")
+            && !matches!(
+                finding.outcome,
+                "converted" | "recovered_link" | "already_converted"
+            )
+        {
+            incomplete = true;
+        }
+        findings.push(finding);
+    }
+    let report = FilenameReport {
+        rename_legacy: true,
+        apply,
+        offline_attested: offline,
+        findings,
+    };
+    if json_output {
+        print_pretty_json(&serde_json::to_value(&report)?)?;
+    } else {
+        println!(
+            "tachi migrate --rename-legacy: {}",
+            serde_json::to_string_pretty(&report)?
+        );
+    }
+    if incomplete {
+        return Err("filename conversion incomplete: inspect per-store findings; no schema migration was attempted".into());
+    }
     Ok(())
 }
 
@@ -985,5 +1249,367 @@ mod tests {
                  sidecar appearing here would mean the guard was bypassed"
             );
         });
+    }
+
+    // ------------------------------------------------------------------
+    // Legacy `memory.db` filename visibility (this release's repair): a
+    // library whose canonical `tachi-memory.db` does not exist yet but whose
+    // pre-#1132 `memory.db` sibling does is a REAL library the sweep must
+    // see — ordinary `MemoryStore::open` refuses until explicit offline
+    // filename conversion, which plan mode never performs. These tests use the established
+    // modern-schema-rolled-back fixture (`make_stamped_older_fixture`), NOT a
+    // synthesized schema-28 file: a true v1.9.2 (schema 28) fixture must be
+    // generated by the owner's v1.9.2 official release. Its separate
+    // whole-directory WAL copy rehearsal is recorded in the task receipt.
+    // ------------------------------------------------------------------
+
+    /// Default-global shape: directory holds ONLY the legacy `memory.db`,
+    /// stamped older. Plan must report `NeedsMigration` against the legacy
+    /// file (not `NotFound`), and a full plan-only run must leave every byte
+    /// and filename exactly as it was: no rename, no symlink, no sidecars.
+    #[test]
+    fn plan_reports_a_legacy_named_global_library_instead_of_not_found() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let legacy_path = make_stamped_older_fixture(dir.path(), "memory.db", 2);
+        let canonical_path = dir.path().join("tachi-memory.db");
+        assert!(!canonical_path.exists());
+        let before = read_bytes(&legacy_path);
+
+        let lib = Library {
+            label: "global".to_string(),
+            path: canonical_path.clone(),
+        };
+        let plan = plan_one(&lib);
+        assert_eq!(
+            plan.status,
+            GapStatus::NeedsMigration,
+            "a legacy-named stamped-older library must be visible to the plan"
+        );
+        assert_eq!(
+            plan.path,
+            legacy_path.display().to_string(),
+            "the finding must name the physical file that was probed"
+        );
+        assert!(
+            plan.note.contains("#1132 rename"),
+            "the finding must explain the legacy filename is still in effect: {note}",
+            note = plan.note
+        );
+
+        with_isolated_home_run_migrate(false, false, &canonical_path, None)
+            .expect("plan-only migrate must not error");
+
+        assert_eq!(
+            read_bytes(&legacy_path),
+            before,
+            "plan-only must make zero byte changes to the legacy-named fixture"
+        );
+        assert!(
+            !canonical_path.exists(),
+            "plan-only must not perform the #1132 rename"
+        );
+        assert!(
+            std::fs::symlink_metadata(&legacy_path)
+                .expect("legacy metadata")
+                .file_type()
+                .is_file(),
+            "plan-only must not convert the legacy file into a compat symlink"
+        );
+        let parent = dir.path();
+        let unexpected: Vec<String> = std::fs::read_dir(parent)
+            .expect("read fixture dir")
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|name| {
+                name.contains("-wal")
+                    || name.contains("-shm")
+                    || name.contains("migration-marker")
+                    || name.contains("migration-bak")
+            })
+            .collect();
+        assert!(
+            unexpected.is_empty(),
+            "plan-only must not leave sidecars or migration trails: {unexpected:?}"
+        );
+    }
+
+    /// Workspace shape: the current workspace's `.tachi/tachi-memory.db` slot
+    /// resolved against a directory still carrying only the legacy name.
+    #[test]
+    fn plan_reports_a_legacy_named_workspace_library_instead_of_not_found() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let tachi_dir = dir.path().join(".tachi");
+        std::fs::create_dir(&tachi_dir).expect("mkdir .tachi");
+        let legacy_path = make_stamped_older_fixture(&tachi_dir, "memory.db", 1);
+        let canonical_path = tachi_dir.join("tachi-memory.db");
+
+        let lib = Library {
+            label: "workspace".to_string(),
+            path: canonical_path,
+        };
+        let plan = plan_one(&lib);
+        assert_eq!(plan.status, GapStatus::NeedsMigration);
+        assert_eq!(plan.path, legacy_path.display().to_string());
+    }
+
+    #[test]
+    fn immutable_plan_refuses_to_call_a_pending_legacy_wal_up_to_date() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let old = make_current_fixture(dir.path(), "memory.db");
+        let canonical = dir.path().join("tachi-memory.db");
+        let wal = dir.path().join("memory.db-wal");
+        std::fs::write(&wal, b"pending WAL: plan must not ignore this file").unwrap();
+        let old_before = read_bytes(&old);
+        let wal_before = read_bytes(&wal);
+        let lib = Library {
+            label: "global".to_string(),
+            path: canonical.clone(),
+        };
+        let plan = plan_one(&lib);
+        assert_eq!(plan.status, GapStatus::Unreadable);
+        assert!(plan
+            .note
+            .contains("immutable plan cannot account for pending WAL/journal"));
+        let filename_plan = filename_plan(&lib);
+        assert_eq!(filename_plan.phase, "legacy_only");
+        assert!(filename_plan.note.contains("immutable plan is incomplete"));
+        assert_eq!(read_bytes(&old), old_before);
+        assert_eq!(read_bytes(&wal), wal_before);
+        assert!(!canonical.exists());
+    }
+
+    /// Conflict semantics: BOTH a real canonical file and a real legacy file
+    /// in one directory. The write-side seam refuses this state loudly on
+    /// open; the plan must not paper over it as `UpToDate`/`NotFound` — it
+    /// surfaces the same refusal as `Unreadable`, touching nothing.
+    #[test]
+    fn plan_surfaces_the_both_real_files_conflict_loudly() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let canonical_path = make_current_fixture(dir.path(), "tachi-memory.db");
+        let legacy_path = dir.path().join("memory.db");
+        std::fs::write(&legacy_path, b"stale-but-real legacy bytes").expect("write legacy");
+        let canonical_before = read_bytes(&canonical_path);
+        let legacy_before = read_bytes(&legacy_path);
+
+        let lib = Library {
+            label: "global".to_string(),
+            path: canonical_path.clone(),
+        };
+        let plan = plan_one(&lib);
+        assert_eq!(plan.status, GapStatus::Unreadable);
+        assert!(
+            plan.note.contains("both a canonical"),
+            "the conflict note must name the both-real-files ambiguity: {note}",
+            note = plan.note
+        );
+        assert_eq!(read_bytes(&canonical_path), canonical_before);
+        assert_eq!(read_bytes(&legacy_path), legacy_before);
+    }
+
+    /// The healthy migrated shape: canonical file present, legacy name a
+    /// compat symlink to it. Resolution follows the seam's rules and probes
+    /// the canonical file once — `UpToDate`, no conflict, no legacy note.
+    #[cfg(unix)]
+    #[test]
+    fn plan_follows_the_compat_symlink_to_the_canonical_file() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let canonical_path = make_current_fixture(dir.path(), "tachi-memory.db");
+        let legacy_path = dir.path().join("memory.db");
+        std::os::unix::fs::symlink("tachi-memory.db", &legacy_path).expect("plant compat link");
+
+        let lib = Library {
+            label: "global".to_string(),
+            path: canonical_path.clone(),
+        };
+        let plan = plan_one(&lib);
+        assert_eq!(plan.status, GapStatus::UpToDate);
+        assert_eq!(plan.path, canonical_path.display().to_string());
+        assert!(
+            !plan.note.contains("#1132 rename"),
+            "a canonical-named finding must not carry the legacy-name note: {note}",
+            note = plan.note
+        );
+    }
+
+    /// Filename conversion and schema upgrade have separate authorities.
+    /// Ordinary `migrate --apply` cannot rename even with schema authority;
+    /// offline conversion preserves rows, then schema apply upgrades them.
+    #[cfg(unix)]
+    #[test]
+    fn apply_migrates_a_legacy_named_library_preserving_rows() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let legacy_path = make_current_fixture(dir.path(), "memory.db");
+        let canonical_path = dir.path().join("tachi-memory.db");
+        {
+            let mut store = MemoryStore::open(legacy_path.to_str().expect("utf8 path"))
+                .expect("open fixture through production store");
+            let entry = memcore::MemoryEntry {
+                id: "legacy-row-preservation-probe".to_string(),
+                path: "/facts/release-upgrade".to_string(),
+                summary: "Upgrade preservation probe".to_string(),
+                text: "row that must survive the rename and schema migration".to_string(),
+                importance: 0.8,
+                timestamp: chrono::Utc::now().to_rfc3339(),
+                valid_from: String::new(),
+                valid_until: None,
+                category: "fact".to_string(),
+                topic: "upgrade".to_string(),
+                keywords: vec![],
+                persons: vec![],
+                entities: vec![],
+                location: String::new(),
+                source: "test".to_string(),
+                scope: "project".to_string(),
+                archived: false,
+                access_count: 0,
+                scored_count: 0,
+                last_access: None,
+                last_use_at: None,
+                revision: 1,
+                metadata: serde_json::json!({}),
+                vector: None,
+                retention_policy: Some("durable".to_string()),
+                domain: Some("coding".to_string()),
+                recall_count: 0,
+                query_diversity: 0,
+                tier: "raw".to_string(),
+            };
+            store.upsert(&entry).expect("insert through guarded store");
+        }
+        // Like the existing migration fixtures, simulate an older stamp on a
+        // current-schema DB; this is not a genuine v1.9.2 schema-28 file.
+        let conn = Connection::open(&legacy_path).expect("open for version stamp");
+        conn.execute_batch(&format!(
+            "PRAGMA user_version = {}",
+            EXPECTED_SCHEMA_VERSION - 2
+        ))
+        .expect("roll back version stamp for CLI migration");
+        drop(conn);
+        assert_eq!(read_user_version(&legacy_path), EXPECTED_SCHEMA_VERSION - 2);
+
+        let ordinary = MemoryStore::open_with_label_and_context(
+            canonical_path.to_str().unwrap(),
+            UNKNOWN_DB_LABEL,
+            &DbOpenContext::open_existing_allow(MIGRATE_APPLY_APPROVED_BY),
+        );
+        match ordinary {
+            Err(err) => assert!(err
+                .to_string()
+                .contains("offline filename conversion required")),
+            Ok(_) => panic!("ordinary schema-authorized open must refuse filename conversion"),
+        }
+        assert!(!canonical_path.exists());
+        assert_eq!(read_user_version(&legacy_path), EXPECTED_SCHEMA_VERSION - 2);
+
+        crate::test_support::with_tachi_home(|home| {
+            let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+            rt.block_on(run_filename_conversion_command(
+                true,
+                true,
+                true,
+                home,
+                &canonical_path,
+                None,
+            ))
+            .expect("offline filename conversion must succeed");
+        });
+        assert_eq!(
+            read_user_version(&canonical_path),
+            EXPECTED_SCHEMA_VERSION - 2,
+            "filename conversion itself does not upgrade schema"
+        );
+        with_isolated_home_run_migrate(false, true, &canonical_path, None)
+            .expect("subsequent schema apply must not error");
+
+        assert!(
+            canonical_path.exists(),
+            "the authorized apply must converge the canonical filename"
+        );
+        assert_eq!(
+            read_user_version(&canonical_path),
+            EXPECTED_SCHEMA_VERSION,
+            "the legacy-named library must be migrated to the current schema"
+        );
+        assert!(
+            std::fs::symlink_metadata(&legacy_path)
+                .expect("legacy metadata after apply")
+                .file_type()
+                .is_symlink(),
+            "the #1132 compat symlink must be left at the legacy name"
+        );
+        assert_eq!(
+            std::fs::read_link(&legacy_path).expect("compat link target"),
+            PathBuf::from("tachi-memory.db"),
+            "the compat symlink must point at the canonical sibling"
+        );
+        {
+            let conn = Connection::open(&canonical_path).expect("open canonical after apply");
+            let count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM memories WHERE id = 'legacy-row-preservation-probe'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("count probe rows");
+            assert_eq!(count, 1, "rows must survive the rename + schema migration");
+        }
+        let final_finding = plan_one(&Library {
+            label: "global".to_string(),
+            path: canonical_path.clone(),
+        });
+        assert_eq!(final_finding.status, GapStatus::UpToDate);
+        assert_eq!(final_finding.path, canonical_path.display().to_string());
+    }
+
+    /// Canonical and explicit legacy paths to one physical file dedup in
+    /// either order. Separate real files in a conflict stay separate, so the
+    /// canonical slot reports `Unreadable` instead of hiding the ambiguity.
+    #[test]
+    fn dedup_collapses_slots_sharing_one_physical_legacy_file() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let canonical = dir.path().join("tachi-memory.db");
+        let legacy = make_stamped_older_fixture(dir.path(), "memory.db", 1);
+
+        for (first, second) in [(&canonical, &legacy), (&legacy, &canonical)] {
+            let libs = vec![
+                Library {
+                    label: "first".to_string(),
+                    path: first.clone(),
+                },
+                Library {
+                    label: "second".to_string(),
+                    path: second.clone(),
+                },
+            ];
+            let deduped = dedup_by_canonical_path(libs);
+            assert_eq!(deduped.len(), 1, "both names address the same legacy file");
+            assert_eq!(deduped[0].label, "first");
+        }
+        assert!(!canonical.exists(), "dedup must not rename the legacy file");
+        assert!(std::fs::symlink_metadata(&legacy)
+            .unwrap()
+            .file_type()
+            .is_file());
+
+        // Plant the second real file without opening the guarded filename
+        // seam: this is exactly the conflicting on-disk state it must refuse.
+        std::fs::write(&canonical, b"separate real canonical bytes").expect("plant conflict");
+        let libs = vec![
+            Library {
+                label: "workspace".to_string(),
+                path: canonical,
+            },
+            Library {
+                label: "project:legacy".to_string(),
+                path: legacy.clone(),
+            },
+        ];
+        let deduped = dedup_by_canonical_path(libs);
+        assert_eq!(deduped.len(), 2, "distinct real files must not collapse");
+        assert_eq!(plan_one(&deduped[0]).status, GapStatus::Unreadable);
+        assert!(std::fs::symlink_metadata(&legacy)
+            .unwrap()
+            .file_type()
+            .is_file());
     }
 }

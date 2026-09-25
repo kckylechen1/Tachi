@@ -51,19 +51,30 @@ move to the surviving facades before upgrading. The highlights:
 - Retired model-facing routes are gone from the router, with different fates:
   memory save/search aliases and direct Kanban routes have their capabilities on
   the canonical facades (`tachi_memory`, `tachi_task` board actions);
-  orchestrator, skill recommendation/evolution, and the Memory administration
-  actions are removed without a model-facing replacement, and store maintenance
-  stays with the operator CLI (`tachi doctor`, `tachi repair`, `tachi gc`,
-  `tachi delete`).
+  orchestrator and skill recommendation/evolution routes are removed without a
+  model-facing replacement. The retired Memory administration actions split by
+  action: retired `progress` moves to `tachi_task(action='status')`, `readiness` to
+  `tachi_status` (a retained route under Ops/admin authorization only, not
+  ordinary Lead/Worker discovery), and `delete`/`gc`/`doctor_scan` to the
+  operator CLI (`tachi delete` and `tachi gc` plan|apply, `tachi doctor`);
+  `ingest`/`ingest_source`/`pattern_feedback` have no model-facing replacement.
 - `tachi_task(action='status')` now carries CurrentTruth work facts (board
   column, blockers, top action) for exactly the resolved refs. It is an
   orientation view, not a completion verdict: sources CurrentTruth does not
   own render typed `unavailable`.
 - The store schema moved 28 -> 39 (CurrentTruth, delivery spine, A2A
-  mailboxes, memory outbox, verified admissions). Run `tachi migrate`
-  (plan-only by default, `--apply` to execute) and back up stores first:
-  older binaries refuse to open a newer-stamped database, so restore from
-  backup instead of rolling the binary back.
+  mailboxes, memory outbox, verified admissions). Follow the ordered upgrade
+  procedure in [`docs/INSTALL.md` Step 1b](docs/INSTALL.md): stop the actual
+  service manager and other writers, back up stores and the old binary,
+  install the new binary without starting it, then run `tachi migrate
+  --rename-legacy` (plan) and `--rename-legacy --apply --offline` (filename-only
+  conversion) before ordinary `tachi migrate --apply` (schema upgrade). Keep
+  all old/new readers and writers stopped throughout and verify each finding.
+  Exit code 0 is not success:
+  `skipped_locked`/`failed`/`not_attempted` findings need attention, and a
+  re-run plan should show every store `up_to_date` at 39. Older binaries
+  refuse to open a newer-stamped database, so restore from backup instead of
+  rolling the binary back.
 - Dispatch V2 commits the model plan to `<run_dir>/status.json#/model_plan`
   atomically with its serving-model receipt; `plan.md` stays a V1 placeholder.
   V1 single-stage dispatch is unchanged.
@@ -119,15 +130,18 @@ Tachi is not a general-purpose vector database or a managed memory cloud. It is 
 brew tap kckylechen1/tachi && brew install tachi
 ```
 
-Or use the shell installer (also installs the OpenClaw plugin when detected):
+Or use the shell installer. The v2.0.0 tag publishes no OpenClaw plugin
+asset, so binary installs pass `--skip-plugin`:
 
 ```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v2.0.0/scripts/install.sh)"
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v2.0.0/scripts/install.sh)" -- --skip-plugin
 ```
 
 On macOS the shell installer also installs/restarts a user LaunchAgent at
 `~/Library/LaunchAgents/com.kckylechen.tachi.daemon.plist`. Skip that with
-`--skip-daemon-service` if you only want the CLI/MCP stdio binary.
+`--skip-daemon-service` if you only want the CLI/MCP stdio binary. The tag
+pipeline ships exactly one prebuilt archive, `tachi-v2.0.0-aarch64-apple-darwin`
+(Apple Silicon macOS); other platforms must build from source, unverified.
 
 Verify:
 
@@ -136,11 +150,17 @@ tachi --version
 tachi daemon status
 ```
 
-OpenClaw users should use the full installer above to refresh both the Tachi
-binary and the `tachi` OpenClaw plugin. The plugin is a thin MCP facade: it
-starts or connects to the Tachi runtime over stdio, exposes OpenClaw-facing
-memory tools, and does not maintain its own shadow store or SQLite index. Older
-local installs may still have stale plugin metadata until reinstalled.
+Upgrading from 1.9.x: the store schema moves 28 -> 39 and older binaries refuse
+a newer-stamped store, so follow the ordered procedure in
+[`docs/INSTALL.md` Step 1b](docs/INSTALL.md) (stop the launchd supervisor, back
+  up, offline filename conversion then `tachi migrate` plan/apply with the new
+  binary, verify each finding, then
+restart). OpenClaw users: the plugin has no published 2.0.0 asset yet; keep the
+existing plugin install working against the 2.0.0 binary and see
+[`integrations/openclaw`](integrations/openclaw) before reinstalling. The plugin
+is a thin MCP facade: it starts or connects to the Tachi runtime over stdio,
+exposes OpenClaw-facing memory tools, and does not maintain its own shadow store
+or SQLite index.
 
 ### 2. Configure your agent
 

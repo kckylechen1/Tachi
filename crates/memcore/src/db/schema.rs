@@ -1246,6 +1246,8 @@ fn init_schema_with_label_mut_inner(
         validate_a2a_mailbox_schema(&tx)?;
         validate_mirror_eval_identity_schema(&tx)?;
     }
+    #[cfg(test)]
+    test_hooks::pause_after_schema_stamp_before_commit(&tx);
     tx.commit()?;
 
     if filesystem_artifacts {
@@ -1334,6 +1336,7 @@ fn stamp_store_identity_in_tx(
 #[cfg(test)]
 pub(crate) mod test_hooks {
     use crate::error::MemoryError;
+    use rusqlite::Connection;
     use std::cell::Cell;
 
     thread_local! {
@@ -1356,6 +1359,39 @@ pub(crate) mod test_hooks {
             ));
         }
         Ok(())
+    }
+
+    /// Used only by the ignored, fixture-backed subprocess crash test. This
+    /// executes after real migration DDL, sentinels and user_version have all
+    /// been written and validated, while the outer BEGIN IMMEDIATE is still
+    /// open. No production binary compiles this environment-controlled hook.
+    pub(super) fn pause_after_schema_stamp_before_commit(tx: &Connection) {
+        let Ok(marker) = std::env::var("TACHI_TEST_SCHEMA_TX_PAUSE_MARKER") else {
+            return;
+        };
+        assert_eq!(
+            crate::db::migrations::read_schema_version(tx).expect("read uncommitted stamp"),
+            crate::db::migrations::EXPECTED_SCHEMA_VERSION,
+            "schema stamp must already be inside the uncommitted transaction"
+        );
+        let sentinel: i64 = tx.query_row(
+            "SELECT count(*) FROM hard_state WHERE namespace='migrations' AND key='v39_mirror_eval_identity'",
+            [], |row| row.get(0),
+        ).expect("read uncommitted sentinel");
+        assert_eq!(sentinel, 1, "v39 migration must have run before pause");
+        let ddl: i64 = tx.query_row(
+            "SELECT count(*) FROM sqlite_schema WHERE type='table' AND name='memory_outbox_events'",
+            [], |row| row.get(0),
+        ).expect("read uncommitted v29 DDL");
+        assert_eq!(ddl, 1, "v29 schema change must be present before pause");
+        std::fs::write(
+            marker,
+            b"schema=39;v39_sentinel=1;v29_ddl=1;before_outer_commit",
+        )
+        .expect("signal parent after all migration effects and stamp");
+        loop {
+            std::thread::park();
+        }
     }
 }
 
