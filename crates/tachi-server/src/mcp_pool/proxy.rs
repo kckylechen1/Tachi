@@ -234,7 +234,7 @@ impl MemoryServer {
             );
             return Err(rmcp::ErrorData::invalid_params(
                 format!(
-                    "Capability '{}' has no sandbox policy. Use sandbox_set_policy before calling.",
+                    "Capability '{}' has no sandbox policy. Use tachi_sandbox(action='set_policy') under the admin profile before calling.",
                     server_id
                 ),
                 None,

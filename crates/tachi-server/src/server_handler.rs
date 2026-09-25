@@ -2702,7 +2702,7 @@ mod tests {
 
     /// #757 Cut3-S1 round-2 (review fixup): `tachi_sandbox` folds
     /// `sandbox_set_rule`/`sandbox_set_policy` (destructive actions per the
-    /// alias manifest) among its five actions, so it was missing from the
+    /// alias manifest) among its six actions, so it was missing from the
     /// destructive match list entirely and fell to `destructive_hint=false`
     /// — a fail-open MCP client-facing hint. Assert the verb is annotated
     /// destructive.
@@ -2715,12 +2715,9 @@ mod tests {
         );
     }
 
-    /// The six legacy sandbox alias names are NOT in the tool-level
-    /// destructive match list (and never were on main pre-fold — see the
-    /// #757 fold history), so folding them into `tachi_sandbox` must not
-    /// change their own annotated hint. This pins the alias-side "unchanged"
-    /// half of the round-2 fix: only `tachi_sandbox` itself gained
-    /// destructive_hint=true, the six aliases stay exactly as before.
+    /// Retired sandbox names still take the annotation helper's historical
+    /// default for synthetic tools. This does not assert router reachability;
+    /// sandbox_fold tests separately require every retired name to be absent.
     #[test]
     fn sandbox_aliases_keep_their_pre_fold_destructive_hint() {
         for legacy_name in [

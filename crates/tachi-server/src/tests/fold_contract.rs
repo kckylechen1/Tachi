@@ -31,10 +31,8 @@
 //! ## Usage (S2–S7)
 //!
 //! Build a `&[FoldPair]` mapping each legacy tool name to its canonical
-//! `(verb, action)` and call both asserts above while the aliases are live
-//! (plus the oracle-equality goldens in the fold's own test module); once a
-//! fold's aliases are retired, the same two asserts keep guarding the
-//! post-retirement surface.
+//! `(verb, action)` and call both asserts above after the aliases are retired,
+//! together with the oracle-equality goldens in the fold's own test module.
 
 use super::{call_tool_on_server, make_server};
 use serde_json::json;

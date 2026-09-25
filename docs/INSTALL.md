@@ -886,7 +886,8 @@ See also: [`docs/engineering/architecture/safety-hardening-2026-06.md`](engineer
 
 ### Sandbox & Governance
 
-`sandbox_set_rule`, `sandbox_check`, `sandbox_get_policy`, `sandbox_set_policy`, `sandbox_list_policies`, `sandbox_exec_audit`
+Use `tachi_sandbox` under the admin profile with `action='set_rule'|'check'|'get_policy'|'set_policy'|'list_policies'|'exec_audit'`.
+The old names `sandbox_set_rule`, `sandbox_check`, `sandbox_get_policy`, `sandbox_set_policy`, `sandbox_list_policies`, and `sandbox_exec_audit` are retired and no longer routed in v2.0.0.
 
 ### Retired Recommendations
 
@@ -896,8 +897,8 @@ The public `tachi_dispatch(action='recommend')` surface is retired. Surviving in
 
 ### Facade & Delegation
 
-Ordinary/default discovery is exactly `tachi_memory`, `tachi_task`,
-`tachi_staff`, `tachi_gh`, and `tachi_a2a`.
+Worker discovery is exactly `tachi_memory`, `tachi_task`, `tachi_staff`, `tachi_gh`, and `tachi_a2a`.
+Default Lead discovery adds `tachi_agent_eval`, for six facades.
 
 *Compatibility/read-only helpers such as `tachi_web_search`, `tachi_browse`,
 `tachi_unstick`, and `tachi_verify` remain only on explicit Ops/admin surfaces.*
