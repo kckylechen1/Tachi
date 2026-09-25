@@ -40,13 +40,9 @@ pub struct TachiTaskParams {
     /// action="intake" binds a GitHub issue to a flow.
     /// action="status" with flow_id/issue_ref/pr_ref is a read-only lifecycle model;
     /// dispatch_id takes precedence and preserves the flat status snapshot.
-    /// The lifecycle view also carries `work_read_model`, the shared
-    /// CurrentTruth→WorkReadModel projection over the EXACT requested
-    /// issue/PR refs (#1693): only the requested work items (plus an
-    /// admitted explicit link) are projected, their `items[].board|status|brief`
-    /// views share one work token/revision, and the legacy
-    /// `stage`/`spec_drift`/`next_action` fields are marked derived
-    /// non-authoritative alongside it.
+    // Lifecycle responses also carry the CurrentTruth→WorkReadModel projection
+    // for exact requested issue/PR identities and admitted links. Item views
+    // share a work token/revision; legacy heuristics are non-authoritative.
     /// GitHub PR and closure lifecycle: use **tachi_gh only** (#757, #1713).
     #[schemars(schema_with = "tachi_task_action_schema")]
     pub action: TachiTaskAction,
@@ -98,9 +94,13 @@ pub struct TachiTaskParams {
     )]
     pub include_global: bool,
     // #527: agent-facing default is compact when omitted; set false for full boards.
+    // For status, explicit compact=true omits whole snapshot bodies, event replay,
+    // and cached free-form content while retaining decision evidence and nulls.
+    // Omitted/false preserves full status. Intake defaults to body-free receipts;
+    // format=full retains its whole snapshot.
     #[serde(default)]
     #[schemars(
-        description = "[action=brief] When true or omitted, use the tight agent packet (smaller top_k). Set false for the full feature board. [action=status] compact=true keeps identifiers, revision/freshness, state, blockers, and evidence references, and omits whole content instead of truncating it: GitHub issue/PR snapshot bodies, the raw event replay, the cached flow GitHub block's free-form fields (whitelisted to its decision fields; the intake risk rows keep classification/codes/source and drop the body-derived evidence snippet), and null snapshots stay null. Omitted/false keeps the existing full shape. [action=intake] the default receipt omits the issue body whole (identifiers/state/labels stay); format=full retains the full snapshot."
+        description = "[action=brief] When true or omitted, use the tight agent packet (smaller top_k). Set false for the full feature board."
     )]
     pub compact: Option<bool>,
     // complete fields
