@@ -6,11 +6,14 @@
 //! production boundary.
 //!
 //! Guarded invariants, each named at the test that guards it:
-//! * **Exact refs** — only the explicitly bound repos (the cycle-status
-//!   reader's resolved refs) are projected; a foreign repo with live data
-//!   in the same store contributes no row and no existence signal, while
-//!   the bound repo's work still progresses (allowed peer progress
-//!   alongside the blocked foreign repo).
+//! * **Exact refs** — only the requested work items are projected: an
+//!   unrelated same-repo issue never surfaces because a neighbor was
+//!   asked about, and a foreign repo with live data in the same store
+//!   contributes no row and no existence signal, while the bound repo's
+//!   own work still progresses (allowed peer progress alongside blocked
+//!   neighbors). A requested PR projects its owning issue item when the
+//!   CurrentTruth view's ADMITTED link set proves the link, and an
+//!   orphaned PR projects exactly its own item.
 //! * **Unknown ≠ healthy** — a repo with no refresh posture is typed
 //!   `unknown`/`no_refresh_posture`, never an empty healthy board.
 //! * **Conflict blocks success** — a GitHub lifecycle conflict renders a
@@ -21,9 +24,12 @@
 //!   the work token and revision fingerprint, stable across repeated
 //!   reads of the same input revision.
 //! * **Compact omits whole content** — `compact=true` drops GitHub
-//!   snapshot bodies and the raw event replay whole (never truncated)
-//!   while identifiers/revisions/state/blockers/evidence stay; the
-//!   explicit full reads retain content.
+//!   snapshot bodies, the raw event replay, and the cached flow block's
+//!   free-form fields (including the intake risk rows' body-derived
+//!   `evidence` snippets) whole, never truncated, while identifiers/
+//!   revisions/state/blockers/evidence references stay; `null` snapshots
+//!   stay `null` exactly in both shapes; the explicit full reads retain
+//!   content.
 //!
 //! The project-scoped board/brief views are deliberately not wired (no
 //! canonical flow/project ownership authority exists — owner adjudication
@@ -33,6 +39,7 @@ use super::*;
 use rmcp::handler::server::wrapper::Parameters;
 use tachi_params::current_truth::refresh::{
     mint_assertions, GithubRepositoryStateV1, SnapshotIssueStateV1, SnapshotIssueV1,
+    SnapshotObservationKindV1, SnapshotObservationV1, SnapshotPrStateV1, SnapshotPrV1,
 };
 use tachi_params::current_truth::types::VisibilityClassV1;
 
@@ -135,6 +142,61 @@ fn fresh_issue_438_state() -> GithubRepositoryStateV1 {
             "iss438-a1",
         )],
     )
+}
+
+/// REPO with issue 438 AND an unrelated same-repo neighbor 439: exact-ref
+/// status queries for 438 must not expose 439 in any form.
+fn repo_state_with_unrelated_neighbor() -> GithubRepositoryStateV1 {
+    repo_state(
+        "r1",
+        "2026-09-25T10:00:00Z",
+        vec![
+            issue(
+                438,
+                SnapshotIssueStateV1::Open,
+                "2026-09-25T10:00:00Z",
+                "iss438-a1",
+            ),
+            issue(
+                439,
+                SnapshotIssueStateV1::Open,
+                "2026-09-25T10:00:00Z",
+                "iss439-a1",
+            ),
+        ],
+    )
+}
+
+fn pr(
+    number: u64,
+    state: SnapshotPrStateV1,
+    sha: Option<&str>,
+    at: &str,
+    revision: &str,
+    linked: Vec<u64>,
+) -> SnapshotPrV1 {
+    SnapshotPrV1 {
+        number,
+        state,
+        merge_commit_sha: sha.map(str::to_string),
+        updated_at: at.to_string(),
+        snapshot_revision: revision.to_string(),
+        linked_issues: linked,
+        visibility: VisibilityClassV1::Public,
+    }
+}
+
+fn merge_reverted_observation(number: u64, at: &str, revision: &str) -> SnapshotObservationV1 {
+    SnapshotObservationV1 {
+        kind: SnapshotObservationKindV1::MergeReverted {
+            number,
+            revert_commit_sha: format!("revert-{number}"),
+            original_merge_sha: format!("merge-{number}"),
+        },
+        observed_at: at.to_string(),
+        revision: revision.to_string(),
+        visibility: VisibilityClassV1::Public,
+    }
 }
 
 /// A flow record bound to `REPO#438`, written through the production
@@ -252,11 +314,16 @@ impl Drop for IssueViewFixture {
 
 #[cfg(unix)]
 fn issue_view_payload() -> String {
+    issue_view_payload_with_body(BODY_SENTINEL)
+}
+
+#[cfg(unix)]
+fn issue_view_payload_with_body(body: &str) -> String {
     json!({
         "number": 438,
         "title": "#1693 work read model task consumer",
         "state": "OPEN",
-        "body": BODY_SENTINEL,
+        "body": body,
         "labels": [],
         "comments": [{ "body": "comment sentinel must not leak in compact either" }],
     })
@@ -513,6 +580,379 @@ async fn status_item_views_share_work_token_and_revision_across_repeats() {
     assert_eq!(repeat_item["status"]["github"], item["status"]["github"]);
 }
 
+/// Invariant: exact refs. Asking about issue 438 must not expose the
+/// unrelated same-repo issue 439 — no id, token, state, or action of the
+/// neighbor may appear anywhere in the response — while 438's own work
+/// still projects and the foreign-repo regression (live foreign data in
+/// the same store contributing nothing) keeps holding.
+#[allow(clippy::await_holding_lock)]
+#[cfg(unix)]
+#[tokio::test]
+async fn status_projection_exact_refs_hide_unrelated_same_repo_work() {
+    let _env = isolated_env();
+    let _fixture = IssueViewFixture::new(&issue_view_payload());
+    let server = crate::tests::make_server();
+    seed_current_truth(
+        &server,
+        &[repo_state_with_unrelated_neighbor()],
+        true,
+        "r1",
+        "2026-09-25T10:00:00Z",
+    );
+    seed_current_truth(
+        &server,
+        &[foreign_state()],
+        true,
+        "zr1",
+        "2026-09-25T10:00:00Z",
+    );
+
+    let mut params = task_params("status");
+    params.issue_ref = Some(format!("{REPO}#438"));
+    let raw = tachi_task_raw(&server, params).await;
+
+    let section = &cycle_view(&raw)["work_read_model"];
+    assert_eq!(section["available"], json!(true), "{section:#}");
+    assert_eq!(section["scope"]["refs"], json!([format!("{REPO}#438")]));
+    let items = section_items(section);
+    assert_eq!(items.len(), 1, "only the requested work item: {section:#}");
+    assert_eq!(items[0]["work_token"], json!(ISSUE_TOKEN));
+    assert_eq!(
+        section["scope"]["requested_refs"],
+        json!([{ "ref": format!("{REPO}#438"), "kind": "issue", "projected": true }]),
+        "{section:#}"
+    );
+    // The unrelated neighbor and the foreign repo never appear — not even
+    // as an id, and their work items leak nowhere in the response.
+    assert!(
+        !raw.contains("439") && !raw.contains("zeroclaw"),
+        "unrelated same-repo or foreign work leaked into an exact-ref status read: {raw}"
+    );
+}
+
+/// Invariant: exact refs, linked PR. A PR-only query projects the OWNING
+/// issue item (the CurrentTruth view's admitted current link set proves
+/// PR 7 implements issue 438), and the linked PR's OWN transition debt
+/// and blockers travel with that item unfiltered — a merged-then-reverted
+/// linked PR renders the owning issue repair-blocked, not success-shaped.
+/// No separate guessed item and no unrelated neighbor.
+#[allow(clippy::await_holding_lock)]
+#[cfg(unix)]
+#[tokio::test]
+async fn status_projection_pr_ref_projects_owning_issue_via_admitted_link() {
+    let _env = isolated_env();
+    let _fixture = IssueViewFixture::new(&issue_view_payload());
+    let server = crate::tests::make_server();
+    let merged = GithubRepositoryStateV1 {
+        repo: REPO.to_string(),
+        refresh_revision: "r1".to_string(),
+        refreshed_at: "2026-09-25T10:00:00Z".to_string(),
+        issues: vec![
+            issue(
+                438,
+                SnapshotIssueStateV1::Open,
+                "2026-09-25T10:00:00Z",
+                "iss438-a1",
+            ),
+            issue(
+                439,
+                SnapshotIssueStateV1::Open,
+                "2026-09-25T10:00:00Z",
+                "iss439-a1",
+            ),
+        ],
+        pull_requests: vec![pr(
+            7,
+            SnapshotPrStateV1::Merged,
+            Some("merge007"),
+            "2026-09-25T10:00:00Z",
+            "pr7-a1",
+            vec![438],
+        )],
+        observations: vec![],
+    };
+    let reverted = GithubRepositoryStateV1 {
+        repo: REPO.to_string(),
+        refresh_revision: "r2".to_string(),
+        refreshed_at: "2026-09-25T11:00:00Z".to_string(),
+        issues: vec![
+            issue(
+                438,
+                SnapshotIssueStateV1::Open,
+                "2026-09-25T11:00:00Z",
+                "iss438-a2",
+            ),
+            issue(
+                439,
+                SnapshotIssueStateV1::Open,
+                "2026-09-25T11:00:00Z",
+                "iss439-a2",
+            ),
+        ],
+        pull_requests: vec![pr(
+            7,
+            SnapshotPrStateV1::Merged,
+            Some("merge007"),
+            "2026-09-25T11:00:00Z",
+            "pr7-a2",
+            vec![438],
+        )],
+        observations: vec![merge_reverted_observation(
+            7,
+            "2026-09-25T10:30:00Z",
+            "rev7-revert",
+        )],
+    };
+    seed_current_truth(
+        &server,
+        &[merged, reverted],
+        true,
+        "r2",
+        "2026-09-25T11:00:00Z",
+    );
+
+    let mut params = task_params("status");
+    params.pr_ref = Some(format!("{REPO}#7"));
+    let raw = tachi_task_raw(&server, params).await;
+
+    let section = &cycle_view(&raw)["work_read_model"];
+    assert_eq!(section["available"], json!(true), "{section:#}");
+    let items = section_items(section);
+    assert_eq!(items.len(), 1, "only the owning issue item: {section:#}");
+    assert_eq!(items[0]["work_token"], json!(ISSUE_TOKEN));
+    assert_eq!(
+        items[0]["status"]["github"],
+        json!(format!("{REPO}:reverted+transition_debt")),
+        "the linked PR's revert debt must travel with the owning item: {items:#?}"
+    );
+    assert_eq!(items[0]["board"]["column"], json!("reverted"), "{items:#?}");
+    assert!(
+        items[0]["board"]["blocker_count"]
+            .as_u64()
+            .is_some_and(|n| n >= 1),
+        "the linked PR's transition debt must stay a blocker: {items:#?}"
+    );
+    assert_eq!(items[0]["status"]["success_shaped"], json!(false));
+    assert_eq!(
+        section["scope"]["requested_refs"],
+        json!([{
+            "ref": format!("{REPO}#7"),
+            "kind": "pull_request",
+            "projected": true,
+        }]),
+        "{section:#}"
+    );
+    assert!(
+        !raw.contains("439"),
+        "unrelated same-repo work leaked into a PR-only status read: {raw}"
+    );
+}
+
+/// Invariant: exact refs, orphan PR. A PR that no issue's current link set
+/// claims keeps its OWN attributable blocked item (R6-2 orphaned revert
+/// debt); a PR-only query projects exactly that item — no repo-wide
+/// expansion.
+#[allow(clippy::await_holding_lock)]
+#[cfg(unix)]
+#[tokio::test]
+async fn status_projection_pr_ref_keeps_orphan_pr_item_exactly() {
+    let _env = isolated_env();
+    let _fixture = IssueViewFixture::new(&issue_view_payload());
+    let server = crate::tests::make_server();
+    let merged_unlinked = GithubRepositoryStateV1 {
+        repo: REPO.to_string(),
+        refresh_revision: "r1".to_string(),
+        refreshed_at: "2026-09-25T10:00:00Z".to_string(),
+        issues: vec![issue(
+            439,
+            SnapshotIssueStateV1::Open,
+            "2026-09-25T10:00:00Z",
+            "iss439-a1",
+        )],
+        pull_requests: vec![pr(
+            8,
+            SnapshotPrStateV1::Merged,
+            Some("merge008"),
+            "2026-09-25T10:00:00Z",
+            "pr8-a1",
+            vec![],
+        )],
+        observations: vec![],
+    };
+    let reverted = GithubRepositoryStateV1 {
+        repo: REPO.to_string(),
+        refresh_revision: "r2".to_string(),
+        refreshed_at: "2026-09-25T11:00:00Z".to_string(),
+        issues: vec![issue(
+            439,
+            SnapshotIssueStateV1::Open,
+            "2026-09-25T11:00:00Z",
+            "iss439-a2",
+        )],
+        pull_requests: vec![pr(
+            8,
+            SnapshotPrStateV1::Merged,
+            Some("merge008"),
+            "2026-09-25T11:00:00Z",
+            "pr8-a2",
+            vec![],
+        )],
+        observations: vec![merge_reverted_observation(
+            8,
+            "2026-09-25T10:30:00Z",
+            "rev8-revert",
+        )],
+    };
+    seed_current_truth(
+        &server,
+        &[merged_unlinked, reverted],
+        true,
+        "r2",
+        "2026-09-25T11:00:00Z",
+    );
+
+    let mut params = task_params("status");
+    params.pr_ref = Some(format!("{REPO}#8"));
+    let raw = tachi_task_raw(&server, params).await;
+
+    let section = &cycle_view(&raw)["work_read_model"];
+    assert_eq!(section["available"], json!(true), "{section:#}");
+    let items = section_items(section);
+    assert_eq!(
+        items.len(),
+        1,
+        "only the requested orphan PR item: {section:#}"
+    );
+    assert_eq!(
+        items[0]["work_token"],
+        json!(format!("{REPO}#pull_request:8"))
+    );
+    assert_eq!(items[0]["board"]["column"], json!("reverted"), "{items:#?}");
+    assert_eq!(items[0]["status"]["success_shaped"], json!(false));
+    assert!(
+        !raw.contains("439"),
+        "unrelated same-repo work leaked into an orphan-PR status read: {raw}"
+    );
+}
+
+/// Invariant: compact preserves null exactly. A flow with no GitHub
+/// bindings renders `issue_snapshot`/`pr_snapshot`/`cached` as `null` in
+/// BOTH the compact and full shapes — never a fake valid empty object.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn compact_status_preserves_null_snapshots_exactly() {
+    let _env = isolated_env();
+    let server = crate::tests::make_server();
+    // A refs-free flow record, written the way the flow artifact owner
+    // writes status.json.
+    let flow_id = "flow_20260925T000005Z_1693_null_snapshots";
+    let run_dir = crate::task_lifecycle::run_dir_for_flow_id(flow_id).expect("run dir");
+    std::fs::create_dir_all(&run_dir).expect("flow run dir");
+    std::fs::write(
+        run_dir.join("status.json"),
+        serde_json::to_string(&json!({
+            "flow_id": flow_id,
+            "state": "flow_bound",
+            "updated_at": "2026-09-25T00:00:00Z",
+        }))
+        .expect("status json"),
+    )
+    .expect("write status");
+
+    let mut compact_params = task_params("status");
+    compact_params.flow_id = Some(flow_id.to_string());
+    compact_params.compact = Some(true);
+    let compact = cycle_view(&tachi_task_raw(&server, compact_params).await);
+    assert_eq!(
+        compact["github"]["issue_snapshot"],
+        Value::Null,
+        "{compact:#}"
+    );
+    assert_eq!(compact["github"]["pr_snapshot"], Value::Null, "{compact:#}");
+    assert_eq!(compact["github"]["cached"], Value::Null, "{compact:#}");
+
+    let mut full_params = task_params("status");
+    full_params.flow_id = Some(flow_id.to_string());
+    let full = cycle_view(&tachi_task_raw(&server, full_params).await);
+    assert_eq!(full["github"]["issue_snapshot"], Value::Null, "{full:#}");
+    assert_eq!(full["github"]["pr_snapshot"], Value::Null, "{full:#}");
+    assert_eq!(full["github"]["cached"], Value::Null, "{full:#}");
+}
+
+/// Invariant: compact whitelists the cached flow metadata. A REAL intake
+/// (whose risk classification cites body-derived evidence snippets — the
+/// classifier lowercases its input, so the sentinel is lowercase) is
+/// persisted by the production writer; the compact status read must not
+/// replay the body-derived sentinel, while the risk classification, rule
+/// reason codes, source, and confidence stay. The full read retains the
+/// evidence content.
+#[allow(clippy::await_holding_lock)]
+#[cfg(unix)]
+#[tokio::test]
+async fn compact_status_whitelists_cached_risk_evidence_from_real_intake() {
+    let _env = isolated_env();
+    // The security keyword hit is body-sourced (low confidence), and the
+    // sentinel sits inside the evidence snippet window.
+    let _fixture = IssueViewFixture::new(&issue_view_payload_with_body(
+        "Acceptance criteria body. The security sentinel1693ra handling must be fixed.",
+    ));
+    let server = crate::tests::make_server();
+
+    let mut intake = task_params("intake");
+    intake.issue_ref = Some(format!("{REPO}#438"));
+    intake.format = Some("json".to_string());
+    let intake_raw = tachi_task_raw(&server, intake).await;
+    let intake_receipt: Value = serde_json::from_str(&intake_raw).expect("intake receipt JSON");
+    let flow_id = intake_receipt["flow_id"]
+        .as_str()
+        .expect("flow id")
+        .to_string();
+    // Fixture setup proof: the persisted plan really carries the
+    // body-derived evidence snippet for the full-shape distinction below.
+    let run_dir = crate::task_lifecycle::run_dir_for_flow_id(&flow_id).expect("run dir");
+    let status: Value = serde_json::from_str(
+        &std::fs::read_to_string(run_dir.join("status.json")).expect("flow status"),
+    )
+    .expect("status json");
+    let evidence = status["github"]["automation_plan"]["risk_evidence"]
+        .as_array()
+        .expect("risk evidence rows")
+        .iter()
+        .map(|row| row["evidence"].as_str().unwrap_or_default())
+        .collect::<Vec<_>>()
+        .join("|");
+    assert!(
+        evidence.contains("sentinel1693ra"),
+        "fixture setup: the real intake must persist a body-derived evidence snippet, got {evidence}"
+    );
+
+    let mut compact_params = task_params("status");
+    compact_params.flow_id = Some(flow_id.clone());
+    compact_params.compact = Some(true);
+    let compact_raw = tachi_task_raw(&server, compact_params).await;
+    let compact = cycle_view(&compact_raw);
+    assert!(
+        !compact_raw.contains("sentinel1693ra"),
+        "compact status replayed the body-derived risk evidence: {compact_raw}"
+    );
+    let plan = &compact["github"]["cached"]["automation_plan"];
+    assert_eq!(plan["risk"], json!("advisory"), "{plan:#}");
+    let row = &plan["risk_evidence"][0];
+    assert_eq!(row["reason"], json!("touches_security"), "{row:#}");
+    assert_eq!(row["source"], json!("body"));
+    assert_eq!(row["confidence"], json!("low"));
+    assert!(row.get("evidence").is_none(), "{row:#}");
+
+    // The full read retains the evidence content.
+    let mut full_params = task_params("status");
+    full_params.flow_id = Some(flow_id);
+    let full_raw = tachi_task_raw(&server, full_params).await;
+    assert!(
+        full_raw.contains("sentinel1693ra"),
+        "full status must retain the cached evidence content"
+    );
+}
+
 /// Invariant: compact omits whole content. `compact=true` drops GitHub
 /// snapshot bodies and the raw event replay whole (never truncated) and
 /// keeps identifiers, the canonical projection, state, and blockers; the
@@ -658,17 +1098,121 @@ fn compact_snapshot_whitelists_identifiers_and_drops_content_whole() {
     assert_eq!(compact_pr["head_ref"], json!("feat/x"));
 }
 
-/// The status ref helper normalizes casing and dedupes to the CurrentTruth
-/// store's stable repo spelling.
+/// The status binding keeps the EXACT typed issue/PR identities (parsed
+/// canonically, repo lowercased to the store spelling) and the deduped
+/// repo list for view reads.
 #[test]
-fn status_bound_repos_normalize_and_dedupe() {
+fn status_bound_work_keeps_exact_typed_refs() {
+    let bound = status_bound_work(Some("Kckylechen1/Tachi#438"), Some("kckylechen1/tachi#9"));
+    assert_eq!(bound.repos, vec![REPO.to_string()]);
     assert_eq!(
-        status_bound_repos(Some("Kckylechen1/Tachi#438"), Some("kckylechen1/tachi#9")),
-        vec![REPO.to_string()]
+        bound.issues,
+        vec![tachi_params::work_read_model::WorkKey::Issue {
+            repo: REPO.to_string(),
+            number: 438,
+        }]
     );
-    assert_eq!(status_bound_repos(None, None), Vec::<String>::new());
     assert_eq!(
-        status_bound_repos(Some("o/r#1"), Some("other/repo#2")),
-        vec!["o/r".to_string(), "other/repo".to_string()]
+        bound.pull_requests,
+        vec![tachi_params::work_read_model::WorkKey::PullRequest {
+            repo: REPO.to_string(),
+            number: 9,
+        }]
+    );
+
+    let empty = status_bound_work(None, None);
+    assert!(empty.repos.is_empty() && empty.issues.is_empty() && empty.pull_requests.is_empty());
+
+    // Malformed refs bind nothing (no guessed identity).
+    let malformed = status_bound_work(Some("not-a-ref"), Some("a/b/c#1"));
+    assert!(malformed.issues.is_empty() && malformed.pull_requests.is_empty());
+}
+
+/// Compact snapshot helpers preserve `null` exactly, render a malformed
+/// non-object shape as typed unknown (never a fake valid empty object),
+/// and keep only the identifier/state/reference whitelist.
+#[test]
+fn compact_snapshot_helpers_preserve_null_and_reject_malformed_shapes() {
+    assert_eq!(compact_issue_snapshot_value(&Value::Null), Value::Null);
+    assert_eq!(compact_pr_snapshot_value(&Value::Null), Value::Null);
+    for malformed in [json!("text"), json!(7), json!([1, 2])] {
+        let shaped = compact_issue_snapshot_value(&malformed);
+        assert_eq!(
+            shaped["state"],
+            json!("unknown"),
+            "malformed snapshot must be typed unknown, got {shaped}"
+        );
+        assert_eq!(shaped["reason"], json!("snapshot_not_object"));
+    }
+}
+
+/// The cached flow GitHub block whitelist is CLOSED: decision fields and
+/// their nested state objects stay, free-form content (body-derived risk
+/// `evidence`, coaching prose, unknown fields at any level) is omitted
+/// WHOLE, and null/malformed inputs are preserved/typed. Asserted as an
+/// exact object so an accidentally-open branch cannot pass.
+#[test]
+fn compact_cached_github_whitelist_is_closed_and_drops_free_form_content() {
+    let cached = json!({
+        "repo": REPO,
+        "issue_number": 438,
+        "issue_title": "title stays as an identifier",
+        "merge_state": "ready",
+        "head_sha": "abc123",
+        "policy": "standard",
+        "checks": { "state": "success", "updated_at": "2026-09-25T00:00:00Z", "raw_log": "MUST NOT SURVIVE" },
+        "review": { "state": "approved", "updated_at": "2026-09-25T00:00:00Z", "body": "MUST NOT SURVIVE" },
+        "unknown_future_field": "MUST NOT SURVIVE",
+        "automation_plan": {
+            "status": "needs_leader",
+            "dispatch_allowed": false,
+            "risk": "advisory",
+            "leader_gate_reasons": ["missing_acceptance_criteria"],
+            "branch": "tachi/issue-438-x",
+            "recommended_next_action": "coaching prose MUST NOT SURVIVE",
+            "risk_evidence": [
+                { "reason": "touches_security", "needle": "security", "source": "body", "confidence": "low", "evidence": "BODY-DERIVED-SENTINEL" }
+            ],
+            "risk_advisory": [
+                { "reason": "touches_secrets", "needle": "secret", "source": "body", "confidence": "low", "evidence": "BODY-DERIVED-SENTINEL" }
+            ]
+        }
+    });
+    let compact = compact_cached_github_value(&cached);
+    assert_eq!(
+        compact,
+        json!({
+            "repo": REPO,
+            "issue_number": 438,
+            "issue_title": "title stays as an identifier",
+            "merge_state": "ready",
+            "head_sha": "abc123",
+            "policy": "standard",
+            "checks": { "state": "success", "updated_at": "2026-09-25T00:00:00Z" },
+            "review": { "state": "approved", "updated_at": "2026-09-25T00:00:00Z" },
+            "automation_plan": {
+                "status": "needs_leader",
+                "dispatch_allowed": false,
+                "risk": "advisory",
+                "leader_gate_reasons": ["missing_acceptance_criteria"],
+                "branch": "tachi/issue-438-x",
+                "risk_evidence": [
+                    { "reason": "touches_security", "needle": "security", "source": "body", "confidence": "low" }
+                ],
+                "risk_advisory": [
+                    { "reason": "touches_secrets", "needle": "secret", "source": "body", "confidence": "low" }
+                ]
+            }
+        }),
+        "closed whitelist only: {compact:#}"
+    );
+    assert!(!compact.to_string().contains("MUST NOT SURVIVE"));
+    assert!(!compact.to_string().contains("BODY-DERIVED-SENTINEL"));
+
+    // null stays null; a malformed shape is typed unknown.
+    assert_eq!(compact_cached_github_value(&Value::Null), Value::Null);
+    assert_eq!(
+        compact_cached_github_value(&json!("text"))["state"],
+        json!("unknown")
     );
 }

@@ -71,16 +71,16 @@ pub(crate) async fn handle_task_cycle_status(
 
     let issue_ref = status_issue_ref(&status).or(requested_issue_ref.clone());
     let pr_ref = status_pr_ref(&status).or(requested_pr_ref.clone());
-    // #1693 Phase 1: the shared CurrentTruth→WorkReadModel projection over
-    // the explicitly bound repos only (the resolved issue/pr refs — flow
-    // record refs first, caller refs second). The existing status auth
-    // policy is preserved (`sees_private=false` mint, exactly like the
-    // production refresh consumer); the shared view is bound to this
-    // scope, so no other repo's rows — foreign or not — can appear.
+    // #1693: the shared CurrentTruth→WorkReadModel projection over the
+    // EXACT requested work identity — the resolved issue/pr refs (flow
+    // record refs first, caller refs second, the pre-existing status
+    // resolution) under the existing status auth policy. The projection
+    // renders only those work items (plus an admitted explicit link), so
+    // unrelated same-repo or foreign work never appears.
     let projection_read_at = Utc::now().to_rfc3339();
     let work_read_model = task_work_read_section(
         server,
-        &status_bound_repos(issue_ref.as_deref(), pr_ref.as_deref()),
+        &status_bound_work(issue_ref.as_deref(), pr_ref.as_deref()),
         &projection_read_at,
     );
     let (issue_snapshot, issue_warning) = maybe_issue_snapshot(
@@ -240,6 +240,8 @@ pub(crate) async fn handle_task_cycle_status(
 fn compact_status_receipt(full: Value) -> Value {
     let mut compact = full;
     if let Some(github) = compact.get_mut("github").and_then(Value::as_object_mut) {
+        // Null (no snapshot) stays null exactly; a missing key stays
+        // missing; a malformed non-object shape renders typed unknown.
         if let Some(issue) = github.remove("issue_snapshot") {
             github.insert(
                 "issue_snapshot".to_string(),
@@ -248,6 +250,12 @@ fn compact_status_receipt(full: Value) -> Value {
         }
         if let Some(pr) = github.remove("pr_snapshot") {
             github.insert("pr_snapshot".to_string(), compact_pr_snapshot_value(&pr));
+        }
+        // The cached flow `status.json` GitHub block is whitelisted to its
+        // wired decision fields — the intake-persisted automation plan's
+        // body-derived risk `evidence` snippets are omitted WHOLE.
+        if let Some(cached) = github.remove("cached") {
+            github.insert("cached".to_string(), compact_cached_github_value(&cached));
         }
     }
     if let Some(object) = compact.as_object_mut() {

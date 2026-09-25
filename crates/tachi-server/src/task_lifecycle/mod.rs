@@ -184,7 +184,7 @@ pub(crate) use self::issue_flow::{
 };
 pub(crate) use self::release_ux::handle_task_release_note;
 pub(crate) use self::utils::read_json_file;
-pub(crate) use self::work_read_projection::{status_bound_repos, task_work_read_section};
+pub(crate) use self::work_read_projection::{status_bound_work, task_work_read_section};
 
 /// Re-read the lifecycle owner before an internal evidence write. A safe-looking
 /// public `flow_id` is not admission: the durable status row must bind itself

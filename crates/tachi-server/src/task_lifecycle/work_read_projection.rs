@@ -13,17 +13,21 @@
 //!
 //! # Scope (owner adjudication 2026-09-25)
 //!
-//! Only the **status** path carries this projection, bound to exactly the
+//! Only the **status** path carries this projection, bound to EXACTLY the
 //! refs the cycle-status reader resolved (flow-record refs first, caller
 //! refs second — the pre-existing status resolution) under the existing
 //! status auth policy with conservative private visibility
-//! (`sees_private=false`). The project-scoped board/brief views are
-//! deliberately NOT wired: no canonical flow/project ownership authority
-//! exists (flow records, WorkClaims, and orchestrator rows are global and
-//! project-free; kanban cards are dispatch-keyed caller-supplied data), so
-//! consuming a caller-named flow's repos there would let one project read
-//! another's work. Wiring board/brief requires a future canonical
-//! ownership design — the remaining #1693 gap this slice does not close.
+//! (`sees_private=false`). The projection renders only the requested
+//! work items — the resolved issue/PR identities, plus an explicitly
+//! linked PR's owning issue item when the CurrentTruth view's ADMITTED
+//! current link set proves the link — never the whole repository: an
+//! unrelated same-repo issue must not surface because a neighbor was
+//! asked about. Item matching is typed [`WorkKey`] equality (the model's
+//! own identity), never string/number matching. The project-scoped
+//! board/brief views are deliberately NOT wired: no canonical
+//! flow/project ownership authority exists, and wiring them requires a
+//! future canonical ownership design (a remaining #1693 gap this slice
+//! does not close).
 //!
 //! Partial by construction (CurrentTruth-only vertical): work claims,
 //! run receipts, exec envs, verification, adjudication, and delivery
@@ -32,30 +36,93 @@
 
 use super::*;
 use tachi_params::current_truth::consumer::{self, CallerAuthorizationV1, CurrentTruthViewV1};
+use tachi_params::current_truth::types::{PredicateV1, ReductionStatusV1};
 use tachi_params::work_read_model::{
     board_view, brief_view, project, status_view, CurrentTruthFactsV1, ProjectionOptions,
-    SourceFacts, SourceKind, SourceSnapshot, WorkProjectionIndex,
+    SectionState, SourceFacts, SourceKind, SourceSnapshot, WorkKey, WorkProjectionIndex,
+    WorkReadModelV1,
 };
 
-/// The repos bound by the explicit status refs as resolved by the cycle
-/// status reader: sorted, deduped, lowercased to the CurrentTruth store's
-/// stable spelling (GitHub owner/repository identity is ASCII
-/// case-insensitive; the refresh authority records the lowercased form —
-/// one stable spelling prevents posture and subject history from
-/// splitting across caller-selected casing).
-pub(crate) fn status_bound_repos(issue_ref: Option<&str>, pr_ref: Option<&str>) -> Vec<String> {
-    let mut repos: Vec<String> = [issue_ref, pr_ref]
-        .into_iter()
-        .flatten()
-        .filter_map(|raw| raw.split('#').next().map(normalize_bound_repo))
+/// The exact requested work identity for one status read: the resolved
+/// issue/PR refs as typed [`WorkKey`]s, plus the deduped repo spelling
+/// needed to read the CurrentTruth views.
+#[derive(Debug, Default)]
+pub(crate) struct StatusBoundWork {
+    /// Sorted, deduped, lowercased repo spellings for view reads.
+    pub repos: Vec<String>,
+    /// Exact requested issue identities.
+    pub issues: Vec<WorkKey>,
+    /// Exact requested PR identities.
+    pub pull_requests: Vec<WorkKey>,
+}
+
+impl StatusBoundWork {
+    /// The `owner/repo#N` form of every requested ref, for the response
+    /// scope echo.
+    fn ref_tokens(&self) -> Vec<String> {
+        let mut tokens: Vec<String> = self
+            .issues
+            .iter()
+            .chain(self.pull_requests.iter())
+            .map(ref_token)
+            .collect();
+        tokens.sort();
+        tokens
+    }
+}
+
+/// The `owner/repo#N` spelling of a bound GitHub-object key.
+fn ref_token(key: &WorkKey) -> String {
+    match key {
+        WorkKey::Issue { repo, number } | WorkKey::PullRequest { repo, number } => {
+            format!("{repo}#{number}")
+        }
+        WorkKey::Dispatch(id) => format!("dispatch:{id}"),
+        WorkKey::Claim(id) => format!("claim:{id}"),
+    }
+}
+
+/// Bind the EXACT requested work for one status read from the refs the
+/// cycle-status reader resolved. Parsing is the canonical
+/// [`WorkKey::parse_issue_ref`] / `owner/repo#N` split (typed identity,
+/// never string substring matching), normalized to the CurrentTruth
+/// store's stable lowercased repo spelling.
+pub(crate) fn status_bound_work(issue_ref: Option<&str>, pr_ref: Option<&str>) -> StatusBoundWork {
+    let mut bound = StatusBoundWork::default();
+    if let Some(issue_ref) = issue_ref {
+        if let Some(WorkKey::Issue { repo, number }) = WorkKey::parse_issue_ref(issue_ref.trim()) {
+            bound.issues.push(WorkKey::Issue {
+                repo: repo.trim().to_ascii_lowercase(),
+                number,
+            });
+        }
+    }
+    if let Some(pr_ref) = pr_ref {
+        let trimmed = pr_ref.trim();
+        if let Some((repo, number)) = trimmed.rsplit_once('#') {
+            if repo.matches('/').count() == 1 {
+                if let Ok(number) = number.parse::<u64>() {
+                    bound.pull_requests.push(WorkKey::PullRequest {
+                        repo: repo.trim().to_ascii_lowercase(),
+                        number,
+                    });
+                }
+            }
+        }
+    }
+    let mut repos: Vec<String> = bound
+        .issues
+        .iter()
+        .chain(bound.pull_requests.iter())
+        .map(|key| match key {
+            WorkKey::Issue { repo, .. } | WorkKey::PullRequest { repo, .. } => repo.clone(),
+            _ => unreachable!("bound keys are always issue or PR identities"),
+        })
         .collect();
     repos.sort();
     repos.dedup();
-    repos
-}
-
-fn normalize_bound_repo(repo: &str) -> String {
-    repo.trim().to_ascii_lowercase()
+    bound.repos = repos;
+    bound
 }
 
 /// The `work_read_model` section for the status lifecycle response. One
@@ -67,7 +134,7 @@ fn normalize_bound_repo(repo: &str) -> String {
 /// freshness).
 pub(crate) fn task_work_read_section(
     server: &MemoryServer,
-    repos: &[String],
+    bound: &StatusBoundWork,
     read_at: &str,
 ) -> Value {
     // Conservative existing policy: the public Task facade has no
@@ -78,7 +145,7 @@ pub(crate) fn task_work_read_section(
     };
     let mut github_sources = Vec::new();
     let mut minted: Vec<(String, CurrentTruthViewV1, String)> = Vec::new();
-    for repo in repos {
+    for repo in &bound.repos {
         // Store failures are content-free at this public boundary (same
         // law as the refresh handler): the error shape must not reveal
         // whether inaccessible history exists.
@@ -119,7 +186,7 @@ pub(crate) fn task_work_read_section(
         }
     }
 
-    let mut section = unavailable_section(read_at, repos);
+    let mut section = unavailable_section(bound, read_at);
     section["sources"]["github"] = Value::Array(github_sources);
     if minted.is_empty() {
         // No bound repo produced a usable view: every repo row above
@@ -153,8 +220,17 @@ pub(crate) fn task_work_read_section(
         return section;
     };
     let model = project(&index, &options);
-    let items = model
+    // Exact-identity filter BEFORE rendering: only the requested work
+    // items (plus an explicitly linked PR's owning issue item, proven by
+    // the view's ADMITTED current link set) — unrelated same-repo work
+    // never surfaces because a neighbor was asked about. Blockers and
+    // transition debt of kept items travel with the item, unfiltered.
+    let items: Vec<&WorkReadModelV1> = model
         .items
+        .iter()
+        .filter(|item| item_is_requested_work(item, bound))
+        .collect();
+    let rendered = items
         .iter()
         .map(|item| {
             let board = board_view(item);
@@ -189,17 +265,113 @@ pub(crate) fn task_work_read_section(
             })
         })
         .collect::<Vec<_>>();
+    // Per-requested-ref presence: an unprojected requested identity is a
+    // typed unknown for that ref, never silence (the view may simply hold
+    // no row for it).
+    let requested_refs: Vec<Value> = bound
+        .issues
+        .iter()
+        .map(|key| requested_ref_row(key, "issue", &items))
+        .chain(
+            bound
+                .pull_requests
+                .iter()
+                .map(|key| requested_ref_row(key, "pull_request", &items)),
+        )
+        .collect();
+    section["scope"]["requested_refs"] = Value::Array(requested_refs);
     section["available"] = json!(true);
-    section["items"] = Value::Array(items);
+    section["items"] = Value::Array(rendered);
     section["health"] = json!({
-        "visible_work_count": model.health.visible_work_count,
-        "orphaned_revert_debt_count": model.health.orphaned_revert_debt_count,
-        "unbound_verification_count": model.health.unbound_verification_count,
-        "conflicted_count": model.health.conflicted_count,
-        "blocked_count": model.health.blocked_count,
-        "refresh_debt_count": model.health.refresh_debt_count,
+        "visible_work_count": items.len(),
+        "conflicted_count": items
+            .iter()
+            .filter(|item| matches!(&item.github, SectionState::Available(section) if section.conflicted))
+            .count(),
+        "blocked_count": items.iter().filter(|item| !item.blockers.is_empty()).count(),
     });
     section
+}
+
+/// Whether one projected item belongs to the requested work: an exact
+/// requested issue/PR identity, or an issue item whose ADMITTED current
+/// link set explicitly claims a requested PR (that is where a linked
+/// PR's work truth lives — linked, non-orphan PRs have no item of their
+/// own). Matching is typed key equality plus exact
+/// (repo, canonical object-token) equality — the consumer view renders a
+/// link set as BARE object tokens (`pull_request:N`) scoped to the issue
+/// subject's repo — never string substring/number matching.
+fn item_is_requested_work(item: &WorkReadModelV1, bound: &StatusBoundWork) -> bool {
+    if bound.issues.contains(&item.work_id) || bound.pull_requests.contains(&item.work_id) {
+        return true;
+    }
+    bound
+        .pull_requests
+        .iter()
+        .any(|key| issue_item_claims_pr(item, key))
+}
+
+/// Whether this issue item's ADMITTED current implementation-PR link set
+/// explicitly claims the requested PR key: the linked object tokens are
+/// bare (`pull_request:N`) and share the issue subject's repo.
+fn issue_item_claims_pr(item: &WorkReadModelV1, key: &WorkKey) -> bool {
+    let WorkKey::Issue { repo, .. } = &item.work_id else {
+        return false;
+    };
+    let WorkKey::PullRequest {
+        repo: pr_repo,
+        number,
+    } = key
+    else {
+        return false;
+    };
+    pr_repo == repo
+        && admitted_link_object_tokens(item)
+            .iter()
+            .any(|token| *token == format!("pull_request:{number}"))
+}
+
+/// The item's ADMITTED current implementation-PR link set as canonical
+/// BARE object tokens (`pull_request:N`, scoped to the issue subject's
+/// repo), from the CurrentTruth consumer view's `implementation_pr_linked`
+/// row — existing admitted link evidence, never guessed association.
+fn admitted_link_object_tokens(item: &WorkReadModelV1) -> Vec<String> {
+    let SectionState::Available(section) = &item.github else {
+        return Vec::new();
+    };
+    let Some(subject) = &section.subject else {
+        return Vec::new();
+    };
+    subject
+        .predicates
+        .iter()
+        .find(|row| {
+            row.predicate == PredicateV1::ImplementationPrLinked
+                && row.status == ReductionStatusV1::Current
+        })
+        .map(|row| {
+            row.value_token
+                .split(',')
+                .filter(|token| !token.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// One requested ref's presence row: `projected=false` is the typed
+/// unknown for a ref the views hold no row for (and no admitted link
+/// claims), never an implied absence of the work itself.
+fn requested_ref_row(key: &WorkKey, kind: &str, items: &[&WorkReadModelV1]) -> Value {
+    let projected = items.iter().any(|item| match key {
+        WorkKey::PullRequest { .. } => item.work_id == *key || issue_item_claims_pr(item, key),
+        _ => item.work_id == *key,
+    });
+    json!({
+        "ref": ref_token(key),
+        "kind": kind,
+        "projected": projected,
+    })
 }
 
 /// The `current-truth-view-{digest}` revision token from the production
@@ -212,7 +384,7 @@ fn view_revision(view: &CurrentTruthViewV1) -> String {
     format!("current-truth-view-{digest}")
 }
 
-fn unavailable_section(read_at: &str, repos: &[String]) -> Value {
+fn unavailable_section(bound: &StatusBoundWork, read_at: &str) -> Value {
     json!({
         "authority": "work_read_model_v1",
         "available": false,
@@ -221,7 +393,8 @@ fn unavailable_section(read_at: &str, repos: &[String]) -> Value {
         "read_at": read_at,
         "scope": {
             "binding": "explicit_status_refs",
-            "repos": repos,
+            "repos": bound.repos,
+            "refs": bound.ref_tokens(),
         },
         "sources": {
             "github": [],
@@ -235,11 +408,8 @@ fn unavailable_section(read_at: &str, repos: &[String]) -> Value {
         "items": [],
         "health": {
             "visible_work_count": 0,
-            "orphaned_revert_debt_count": 0,
-            "unbound_verification_count": 0,
             "conflicted_count": 0,
             "blocked_count": 0,
-            "refresh_debt_count": 0,
         },
     })
 }
