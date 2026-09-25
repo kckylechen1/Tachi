@@ -442,6 +442,12 @@ pub(crate) async fn handle_tachi_feature_briefing(
     // canonical result discriminator instead of preserving an unreachable
     // retired-token fork.
     let kind = "feature_briefing";
+    // #1693: this brief does NOT carry a CurrentTruth work-read-model
+    // section. The project-scoped board/brief views have no canonical
+    // flow/project ownership authority yet (owner adjudication
+    // 2026-09-25); wiring them needs that future ownership design, not a
+    // caller-named-flow fallback. `current_stage`/`next_action` remain
+    // the briefing's own coaching heuristics.
     let mut response = json!({
         "status": "ok",
         "kind": kind,

@@ -120,6 +120,12 @@ pub(super) async fn handle_tachi_task_facade(
             if let Some(target) = board.as_object_mut() {
                 target.insert("work_claims".to_string(), claims["work_claims"].clone());
                 target.insert("github_state".to_string(), claims["github_state"].clone());
+                // #1693: this board does NOT carry a CurrentTruth
+                // work-read-model section. The project-scoped board/brief
+                // views have no canonical flow/project ownership
+                // authority yet (owner adjudication 2026-09-25); wiring
+                // them needs that future ownership design, not a
+                // caller-named-flow fallback.
             }
             serde_json::to_string(&board).map_err(|err| format!("serialize task board: {err}"))
         }

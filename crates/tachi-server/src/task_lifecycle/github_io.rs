@@ -1,5 +1,268 @@
 use super::*;
 
+/// #1693 compact status/intake: whitelist-shape one GitHub issue snapshot
+/// for compact responses. Identifiers, state, labels, and reference paths
+/// stay; `body` (and any comment content) is omitted WHOLE — never
+/// truncated — because the caller already holds the ref and asked for a
+/// compact read. `null` (no snapshot) stays `null` exactly and a missing
+/// key stays missing; a non-object snapshot is rendered as a typed
+/// unknown marker instead of a fake valid empty object. The explicit full
+/// reads (non-compact status, intake `format=full`) retain the complete
+/// snapshot. Shared by the status cycle receipt and the intake receipt.
+pub(super) fn compact_issue_snapshot_value(snapshot: &Value) -> Value {
+    compact_object_value(snapshot, |object| {
+        Value::Object(whitelist_object_fields(
+            object,
+            &[
+                "repo",
+                "number",
+                "title",
+                "labels",
+                "state",
+                "url",
+                "doc_paths",
+                "spec_paths",
+                "source",
+            ],
+        ))
+    })
+}
+
+/// #1693 compact status: the PR-snapshot counterpart. PR snapshots carry
+/// no body today; the whitelist keeps this honest if one ever appears.
+pub(super) fn compact_pr_snapshot_value(snapshot: &Value) -> Value {
+    compact_object_value(snapshot, |object| {
+        Value::Object(whitelist_object_fields(
+            object,
+            &[
+                "repo",
+                "number",
+                "title",
+                "state",
+                "url",
+                "head_ref",
+                "base_ref",
+                "review_decision",
+                "review",
+                "mergeable",
+                "merge_state",
+                "source",
+            ],
+        ))
+    })
+}
+
+/// #1693 compact status: whitelist the cached flow `status.json` GitHub
+/// block (`github.cached`). The field set is the CLOSED vocabulary the
+/// owning producers write (`task_lifecycle::github_flow_state`'s schema
+/// block plus the intake / link_pr / safe_merge / ship writers): identity,
+/// gate state, check/review state, reference paths — and the automation
+/// plan's DECISION fields (risk classification, reason codes, gate
+/// reasons, branch/pr identity). The risk rows keep
+/// `reason`/`needle`/`source`/`confidence` presence assertions and omit
+/// the free-form `evidence` snippet WHOLE — that snippet is derived from
+/// the issue body, exactly the content a compact read must not replay.
+/// Unknown fields at every level are omitted whole (closed whitelist — no
+/// open arbitrary branches); `null` stays `null`; a non-object input is
+/// a typed unknown marker.
+pub(super) fn compact_cached_github_value(cached: &Value) -> Value {
+    compact_object_value(cached, |object| {
+        let mut compact = whitelist_object_fields(
+            object,
+            &[
+                "repo",
+                "issue_number",
+                "issue_ref",
+                "issue_url",
+                "issue_title",
+                "issue_state",
+                "pr_number",
+                "pr_ref",
+                "pr_url",
+                "pr_title",
+                "pr_state",
+                "head_ref",
+                "base_ref",
+                "merge_state",
+                "mergeable",
+                "head_sha",
+                "policy",
+                "requested_mode",
+                "dry_run",
+                "will_merge",
+                "merge_attempted",
+                "merge_executed",
+                "labels",
+                "doc_paths",
+                "spec_paths",
+                "updated_at",
+            ],
+        );
+        for (key, fields) in [
+            (
+                "checks",
+                &[
+                    "state",
+                    "status",
+                    "conclusion",
+                    "source",
+                    "artifact",
+                    "failed_checks_recorded_only",
+                    "dry_run",
+                    "updated_at",
+                    "required",
+                    "allow_missing",
+                    "head_consistent",
+                    "head_consistency_state",
+                ][..],
+            ),
+            (
+                "review",
+                &["state", "updated_at", "required", "allow_missing_decision"][..],
+            ),
+            (
+                "head_consistency",
+                &[
+                    "head_sha",
+                    "checks_head_sha",
+                    "review_decision_head_sha",
+                    "head_consistent",
+                    "state",
+                    "requirement",
+                    "source",
+                ][..],
+            ),
+            (
+                "flow",
+                &[
+                    "flow_id",
+                    "linked_issue_refs",
+                    "has_linked_issue",
+                    "required",
+                ][..],
+            ),
+            (
+                "verification",
+                &[
+                    "flow_id",
+                    "overall",
+                    "required_total",
+                    "current_head_sha",
+                    "expected_head",
+                    "observed_pr_head_sha",
+                    "claim_id",
+                    "claim_transition_version",
+                    "passed",
+                    "failed",
+                    "pending",
+                    "stale",
+                    "waiting_on",
+                    "reasons",
+                    "ledger_updated_at",
+                ][..],
+            ),
+            (
+                "ship",
+                &["status", "branch", "commit_sha", "files", "warnings"][..],
+            ),
+        ] {
+            if let Some(nested) = object.get(key) {
+                compact.insert(
+                    (*key).to_string(),
+                    compact_object_value(nested, |value| {
+                        Value::Object(whitelist_object_fields(value, fields))
+                    }),
+                );
+            }
+        }
+        if let Some(plan) = object
+            .get("automation_plan")
+            .filter(|value| value.is_object())
+        {
+            compact.insert(
+                "automation_plan".to_string(),
+                compact_automation_plan_value(plan.as_object().expect("checked object")),
+            );
+        }
+        Value::Object(compact)
+    })
+}
+
+/// The automation plan's decision fields: status/gate/risk classification
+/// and identity, with risk rows as presence assertions minus the
+/// body-derived `evidence` snippet (and minus the fixed coaching prose —
+/// `recommended_next_action` is not a decision field the compact receipt
+/// needs; the cycle view carries its own marked `next_action`).
+fn compact_automation_plan_value(plan: &serde_json::Map<String, Value>) -> Value {
+    let mut compact = whitelist_object_fields(
+        plan,
+        &[
+            "status",
+            "dispatch_allowed",
+            "requires_leader",
+            "risk",
+            "has_acceptance_criteria",
+            "missing_acceptance_criteria",
+            "high_risk_reasons",
+            "leader_gate_reasons",
+            "branch",
+            "pr_title",
+        ],
+    );
+    for key in ["risk_evidence", "risk_advisory"] {
+        if let Some(rows) = plan.get(key).and_then(Value::as_array) {
+            let compact_rows: Vec<Value> = rows
+                .iter()
+                .map(|row| {
+                    compact_object_value(row, |object| {
+                        Value::Object(whitelist_object_fields(
+                            object,
+                            &["reason", "needle", "source", "confidence"],
+                        ))
+                    })
+                })
+                .filter(|row| row.as_object().is_some_and(|object| !object.is_empty()))
+                .collect();
+            if !compact_rows.is_empty() {
+                compact.insert((*key).to_string(), Value::Array(compact_rows));
+            }
+        }
+    }
+    Value::Object(compact)
+}
+
+/// Compact one snapshot-shaped value: `null` (no snapshot) is preserved
+/// EXACTLY as null; a non-object shape is malformed and renders as a
+/// typed unknown marker rather than a fake valid empty object; an object
+/// is shaped by `shape`.
+fn compact_object_value(
+    value: &Value,
+    shape: impl FnOnce(&serde_json::Map<String, Value>) -> Value,
+) -> Value {
+    match value {
+        Value::Null => Value::Null,
+        Value::Object(object) => shape(object),
+        _ => json!({ "state": "unknown", "reason": "snapshot_not_object" }),
+    }
+}
+
+/// Keep only the whitelisted fields, including explicit unknown/null values:
+/// presence assertions over
+/// identifiers/state/references — everything else (bodies, comments,
+/// free-form content) is omitted whole rather than truncated.
+fn whitelist_object_fields(
+    object: &serde_json::Map<String, Value>,
+    keys: &[&str],
+) -> serde_json::Map<String, Value> {
+    let mut compact = serde_json::Map::new();
+    for key in keys {
+        if let Some(field) = object.get(*key) {
+            compact.insert((*key).to_string(), field.clone());
+        }
+    }
+    compact
+}
+
 pub(super) async fn read_issue_snapshot(
     server: &MemoryServer,
     target: &GithubTarget,
