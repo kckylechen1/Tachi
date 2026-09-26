@@ -1,6 +1,6 @@
 # Current-Store Admission — refuse damaged state, rebuild only what is derived
 
-> **Status:** spec, pre-implementation, revision 3 (after two cross-vendor attack rounds).
+> **Status:** spec, pre-implementation, revision 4 (after three cross-vendor attack rounds).
 > **Issue:** #1995 (found in #1983's round-4 cold review). **Parent:** #1987.
 > **Anchors:** `db/open.rs:630` (damaged current input is refused, not
 > repaired), #1119 (migration authority), #1983 (read-only preflight plus
@@ -139,14 +139,25 @@ history only; it proves nothing about stores written by other forks.
 (`db/migrations.rs:595-615`) run the sentinel migrations and write the
 stamp *without* calling `init_schema_inner`. Because of that, a store they
 stamp to 39 can lack additive objects (e.g. `exec_env_worktree_identities`,
-which only `init_product_schema_columns` creates). At fbab02c7d the lead
-found no non-test caller. The implementation must do one of two things:
-make them test-only (`pub(crate)` + `#[cfg(test)]`), or route them through
-the schema initializer before stamping. A historical fixture covers the
-compatibility case: a pre-`38ed99d47` store stamped 39 through the
-migration-only path. The outcome must be stated explicitly. Recommended:
-refuse, and point to §6. No production path produces such a store, so a
-refusal there signals out-of-band tooling.
+which only `init_product_schema_columns` creates).
+
+**Callers.** At fbab02c7d the lead found no in-repository production
+caller. The `a2a.rs:1342/1375` calls sit inside `#[cfg(test)]`, and
+Hyperion's origin/main has zero references. The API is still public
+(`memcore/src/lib.rs:66`, `db/mod.rs:49`, re-exported by
+`crates/portable-kernel/src/lib.rs:40`), and its docs describe standalone
+use (`db/migrations.rs:562-575`). So downstream use cannot be ruled out.
+
+**Disposition (decided).** Keep the public API, but make it **run the full
+schema initializer before stamping**. It then produces the same objects as
+a normal open, and the escape hatch is closed without breaking callers.
+
+**Historical outcome (fixed oracle).** Take a pre-`38ed99d47` Full store
+stamped 39 through the old migration-only path, so it lacks
+`exec_env_worktree_identities`. On admission it **is refused with
+`CurrentSchemaIncomplete`**, and the error names the missing table. The
+operator recovers through §6. That is the price of default-deny. It is
+chosen over silently re-creating a state table.
 
 ## 4. Where the check runs
 
@@ -240,8 +251,10 @@ Until that command exists, the runbook documents manual recovery.
   - (iii) optional capabilities: with vec unavailable, `memories_vec`
     stays absent and the open is Ok; with the optimization-index creation
     failing, the index stays absent and the open is Ok. This holds for
-    **both** policies: D7 R5.2b explicitly exempts
-    `idx_memories_path_active_ts`, just as it exempts `memories_vec`.
+    **both** policies: D7 R5.2b exempts the *absence* of
+    `idx_memories_path_active_ts` and `memories_vec`. A **present but
+    malformed** `idx_memories_path_active_ts` (e.g. created `UNIQUE`) must be
+    refused. Pin that case with its own test.
 
   Assert that the allowlist in code equals the enumerated derived set. The
   FTS case asserts only presence and search-generation bump. Projection
@@ -266,7 +279,9 @@ Until that command exists, the runbook documents manual recovery.
     `exec_env_worktree_identities`) and a malformed role payload
     (`{"value":7}`) now returns `CurrentSchemaIncomplete`, **not** today's
     role-decode error. This deliberately displaces a later identity error.
-  - Pin the second case at `F@39` and at `P@39`.
+  - Pin the second case at `F@39` (with `exec_env_worktree_identities`
+    missing) and at `P@39`. For `P@39`, use a Portable table such as
+    `derived_items`, because `exec_env_worktree_identities` is Product-only.
 - **T6 Race.** Using #1983's hook on a store with a matching marker, drop a
   required table between preflight and `BEGIN IMMEDIATE`. The
   authoritative check refuses. Compare the logical state against the
@@ -286,19 +301,28 @@ Until that command exists, the runbook documents manual recovery.
   expectation. Each of those is listed with its before and after.
 - **T9 Growth rule, version-keyed inventory.** Pin a golden, keyed by `E`,
   of the **required-object inventory** per profile: tables, columns,
-  indexes (with uniqueness and partial predicate) and triggers. Enumerate it
-  from a freshly initialized store (every initializer, including inline
-  maintenance, `ensure_column` and `init_product_schema_columns`), minus the
-  allowlist.
-  - The test fails if the inventory at the current `E` differs from the
-    golden for that `E`. A change is only accepted together with a bump of
-    `E` and a new golden entry.
-  - Discrimination cases that must fail it: a test-only `ensure_column`
-    addition without a versioned migration, and a test-only inline
-    `CREATE TABLE` without one.
-  - The migration-only stamping path (§3): a historical pre-`38ed99d47`
-    fixture stamped 39 through it produces the stated outcome (recommended:
-    refusal).
+  indexes (with uniqueness and partial predicate) and triggers, minus the
+  allowlist. Enumerate it twice:
+  - (a) from a freshly initialized store (every initializer, including
+    inline maintenance, `ensure_column` and `init_product_schema_columns`);
+  - (b) from an **already-current store reopened** with the same code.
+
+  Rebuilds such as `migrate_enum_constraints` run on fresh stores but skip
+  converged ones (`db/schema.rs:2880-2888`). Fresh and reopened stores can
+  therefore diverge at the same `E`.
+  - The test fails if (a) ≠ (b), or if either differs from the golden for the
+    current `E`. A change is only accepted together with a bump of `E` and a
+    new golden entry.
+  - Discrimination cases that must fail it:
+    - a test-only `ensure_column` on `memories` placed *before* the
+      `migrate_enum_constraints` rebuild. The fresh rebuild drops the column
+      but the reopened store keeps it, so (a) ≠ (b);
+    - a test-only `ensure_column` elsewhere without a versioned migration;
+    - a test-only inline `CREATE TABLE` without one.
+  - The migration-only stamping path (§3): the historical pre-`38ed99d47`
+    fixture stamped 39 through the old path is **refused with
+    `CurrentSchemaIncomplete` naming `exec_env_worktree_identities`**. After
+    the API fix, the same call on a fresh store produces the full inventory.
 
 ## 8. Not verified
 

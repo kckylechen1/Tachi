@@ -207,10 +207,14 @@ in `band` it is never written.
      trigger, including index uniqueness and partial-index predicates. It
      runs **once**, inside `BEGIN IMMEDIATE`, after `init_schema_inner` has
      applied the frozen set and before commit. A mismatch refuses and rolls
-     back. **Exemptions:** `memories_vec` (the R7 capability) and
-     `idx_memories_path_active_ts`. `ensure_optimization_indexes` discards
-     its own creation error (`db/schema.rs:2677-2685`), so today that index
-     may legitimately stay absent (#1995 §3).
+     back. **Absence-only exemptions:** `memories_vec` (the R7 capability)
+     and `idx_memories_path_active_ts` may be *absent*.
+     `ensure_optimization_indexes` discards its own creation error
+     (`db/schema.rs:2677-2685`), so today that index may legitimately stay
+     absent (#1995 §3). Either object, **if present**, must match its
+     canonical shape. For the index that means non-unique, with its
+     canonical keys and partial predicate. A present-but-wrong definition
+     (e.g. a `UNIQUE` index with that name) is refused.
 
    Two consequences:
    - A marker-fallback backup taken before the transaction can remain after
