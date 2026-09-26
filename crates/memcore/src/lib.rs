@@ -251,15 +251,16 @@ pub use db::session_claims::{
     WorkClaimHeartbeat, WorkClaimMode,
 };
 pub use db::{anchor_id, anchor_path, AnchorKind};
+pub use db::{
+    convert_legacy_filename_offline, is_memory_db_filename, migrate_legacy_filename_if_present,
+    pending_legacy_sidecar, resolve_memory_db_read_path, OfflineFilenameAuthority,
+    OfflineFilenameOutcome, LEGACY_MEMORY_DB_FILENAME, MEMORY_DB_FILENAME,
+};
 #[cfg(feature = "admin")]
 pub use db::{
     get_verified_admission_receipt, has_current_verified_admission,
     with_current_verified_admission_write, VerifiedAdmissionBinding, VerifiedAdmissionReceipt,
     VERIFIED_ADMISSION_METHOD, VERIFIED_ADMISSION_SCOPE, VERIFIED_ADMISSION_VERSION,
-};
-pub use db::{
-    is_memory_db_filename, migrate_legacy_filename_if_present, resolve_memory_db_read_path,
-    LEGACY_MEMORY_DB_FILENAME, MEMORY_DB_FILENAME,
 };
 pub use db::{normalize_utc_iso, normalize_utc_iso_or_now, now_utc_iso};
 pub use db::{

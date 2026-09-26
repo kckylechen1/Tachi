@@ -3,10 +3,11 @@
 > **For AI Agents**: Read this document and follow the steps below to install and configure Tachi as your persistent memory backend. No human intervention required.
 
 > **Distribution trust (#874):** the public Homebrew tap
-> (`kckylechen1/homebrew-tachi`) is **install-only** — formula, bottles, and
-> checksums. It is **not** product design truth, capability authority, or an
-> agent-readable issue forum. Source development and issue/PR workflow live on
-> the maintainer-controlled private source surface. See
+> (`kckylechen1/homebrew-tachi`) is **install-only** — a binary-first formula
+> (it downloads the release CLI archive) and checksums. It is **not** product
+> design truth, capability authority, or an agent-readable issue forum. Source
+> development and issue/PR workflow live on the maintainer-controlled private
+> source surface. See
 > [`docs/engineering/architecture/release-distribution.md`](engineering/architecture/release-distribution.md).
 
 ## What is Tachi?
@@ -42,10 +43,19 @@ tachi status             # runtime.build.git_sha / runtime.binary
 # Prefer brew upgrades outside A-share hours on trading-coupled machines.
 ```
 
-### macOS / Linux (Shell Installer)
+### macOS, Apple Silicon (Shell Installer)
+
+The tag pipeline publishes exactly one prebuilt CLI archive per release:
+`tachi-v<version>-aarch64-apple-darwin.tar.gz` (Apple Silicon macOS). There is
+no prebuilt Linux, Intel macOS, or Windows asset from this tag. A separate
+Windows native workflow exists, but is not this tag's prebuilt release asset.
+Other platforms can build from source (`cargo build --release`), without
+release verification here. The v2.0.0 tag
+also publishes **no OpenClaw plugin asset**, so binary-only installs must pass
+`--skip-plugin`:
 
 ```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.9.2/scripts/install.sh)" -- --skip-plugin
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v2.0.0/scripts/install.sh)" -- --skip-plugin
 ```
 
 On macOS, the shell installer also installs and restarts a user LaunchAgent for
@@ -72,7 +82,7 @@ when you only want stdio MCP clients to auto-spawn short-lived daemons.
 
 ```bash
 tachi --version
-# Expected: tachi 1.7.0 (or later)
+# Expected: tachi 2.0.0
 
 tachi daemon status
 # Expected on macOS after the full installer: daemon running
@@ -116,6 +126,184 @@ tarball and its companion `.sha256` asset, verifies the archive before
 extraction, and fails closed if the checksum asset is missing or mismatched. Use
 `--skip-plugin` when installing a binary-only release that does not publish the
 plugin checksum.
+
+---
+
+## Step 1b: Upgrading an Existing Install to 2.0.0 (schema 39)
+
+v2.0.0 moves the on-disk schema from 28 (v1.9.x) to 39, and older binaries
+refuse to open a newer-stamped store, so the upgrade order matters: stop every
+writer and prevent restart, back up the whole stores and old binary, install the
+new binary **without letting it serve**, convert old filenames offline, migrate
+the schema, verify each finding, then restart. A `tachi migrate` exit
+code 0 only means the sweep ran; success is what the findings say. This section
+is the primary upgrade guidance; the README files and CHANGELOG link here.
+
+**Offline requirement:** Old binaries do not honor this release's filename
+conversion lock. The operator must stop **all** old and new readers/writers
+(including MCP clients), disable their supervisors and scheduled restarts, and
+keep them stopped until both filename conversion and schema migration finish.
+`--offline` records that attestation; it cannot enforce it. Prior automatic
+rename of only the main file could strand committed `memory.db-wal` rows.
+The explicit converter uses SQLite recovery/checkpoint before moving a
+self-contained main file; it refuses ambiguous/orphaned sidecars.
+
+The procedure below applies to the arm64 macOS CLI release. Inventory all
+stores first: `~/.tachi/global/`, manifest-addressed projects, repo-local
+`.tachi/` stores, and any custom `MEMORY_DB_PATH` / `--global-db` paths.
+Cross-check the manifest with running processes because it may omit the global
+store. Ensure enough free space for a separate backup of each store directory.
+
+### 1. Stop the actual service manager and every reader/writer
+
+Identify how **this installation** starts Tachi. A launchd `KeepAlive` agent
+respawns a bare-killed process. Use the one matching stop command:
+
+```bash
+brew services stop tachi   # only if Homebrew services manages this daemon
+```
+
+Or, if the shell installer's LaunchAgent manages it:
+
+```bash
+launchctl bootout "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.kckylechen.tachi.daemon.plist"
+```
+
+For an unmanaged daemon only, use `tachi daemon kill`. Stop editor/CLI MCP
+hosts that auto-spawn `tachi serve`, scheduled jobs, and every other reader or writer of
+these stores. Check `tachi daemon status` and the actual service manager: no
+daemon may still be running or configured to respawn. If a stop command fails
+or another writer remains, resolve that before copying or migrating. Do not
+copy a live WAL database.
+
+### 2. Back up stores and the **old** binary, before any upgrade
+
+While the installed binary is still v1.9.x and all stores are quiescent, copy
+the binary and the **whole** store directories (including SQLite sidecars,
+vault, manifest). Repeat the project copy for every inventoried repo; also
+copy every custom DB path and its sidecars. Choose a backup destination with
+enough free space and keep it separate from directories you will restore:
+
+```bash
+backup_dir="$HOME/tachi-pre-v2.0.0-$(date +%Y%m%d-%H%M%S)"
+mkdir -p "$backup_dir"
+tachi --version                    # confirm this is the OLD binary
+cp -p "$(command -v tachi)" "$backup_dir/tachi-old"
+cp -R "$HOME/.tachi" "$backup_dir/home.tachi"
+# Repeat for each repo: set repo to its absolute path and choose a unique destination.
+repo=/absolute/path/to/repo
+cp -R "$repo/.tachi" "$backup_dir/project.tachi"
+```
+
+The old binary is only for use against restored **pre-migration** backups; it
+cannot read schema 39.
+
+### 3. Install the new binary without starting the daemon
+
+Homebrew users (after the service is stopped and old binary is backed up):
+
+```bash
+brew update && brew upgrade tachi
+```
+
+Or, for the shell installer, suppress daemon start and plugin download (no
+v2.0.0 plugin asset exists yet):
+
+```bash
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v2.0.0/scripts/install.sh)" -- --skip-daemon-service --skip-plugin
+```
+
+The standalone `tachi-v2.0.0-aarch64-apple-darwin.tar.gz` CLI archive is an
+alternative. Verify `tachi --version` says 2.0.0 **before** migrating, and
+check the service remains stopped.
+
+### 4. Convert old filenames offline, then plan and apply the schema
+
+First plan filename conversion, review every `phase`, then perform the
+**filename-only** operation under the offline attestation. A plan never opens
+SQLite for write. The apply verifies committed rows and schema stamp without
+upgrading the schema; `converted`, `recovered_link` and `already_converted`
+are the successful outcomes. `blocked` or `failed` requires stopping and
+reconciling the affected store, even if another store succeeded. A missing
+source and target is not permission to create a replacement. Ordinary
+`MemoryStore` opens of real `memory.db` refuse until conversion is complete.
+
+```bash
+set -o pipefail   # preserve the conversion failure exit status through tee
+tachi migrate --rename-legacy --json | tee filename-plan-v2.0.0.json
+tachi migrate --rename-legacy --apply --offline --json | tee filename-apply-v2.0.0.json
+```
+
+Next, run the independent **schema** plan/apply. An immutable plan refuses a
+definitive `up_to_date` finding if a nonempty WAL, hot rollback journal, or
+uncertain sidecar could contain committed changes. Custom DB paths (`MEMORY_DB_PATH`)
+are swept as given **when selected for this CLI invocation**; named projects
+under `~/.tachi/projects/` are enumerated automatically. Repeat the plan/apply
+for any custom scope not included in this sweep.
+
+```bash
+set -o pipefail
+tachi migrate --json | tee migrate-plan-v2.0.0.json
+```
+
+Read the findings before applying:
+
+- `needs_migration`: this store is behind; `--apply` migrates it.
+- `up_to_date` / `no_op_already_current`: nothing to do.
+- `not_found`: no store file at that slot (genuinely empty).
+- `unstamped`: `user_version == 0`; deliberately not touched by this sweep.
+  Investigate manually; apply will not fix it.
+- `unreadable`: the version could not be read, or the slot could not be
+  resolved, including both real filenames, pending WAL/journal or uncertain
+  sidecar state. Nothing was touched by the plan; reconcile manually first.
+- `ahead_of_binary`: the store is stamped newer than this binary. You are
+  running an old binary against a newer store; stop and get a newer binary
+  instead of applying anything.
+
+Apply:
+
+```bash
+set -o pipefail
+tachi migrate --apply --json | tee migrate-apply-v2.0.0.json
+```
+
+### 5. Verify each finding, then restart the same service manager
+
+Check the apply JSON, not just the exit code: every store the plan reported as
+`needs_migration` must now read `migrated` (or `no_op_already_current`).
+`skipped_locked` (a live daemon or lock held it), `failed`, and `not_attempted`
+are **not** successes. Re-run the plan and confirm every store reads
+`up_to_date` with expected version 39:
+
+```bash
+tachi migrate --json   # every store up_to_date, expected_version 39
+```
+
+Then restart **only** the service manager stopped in step 1:
+
+```bash
+brew services start tachi   # if Homebrew services was stopped in step 1
+```
+
+Or, for the shell installer's LaunchAgent:
+
+```bash
+launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.kckylechen.tachi.daemon.plist"
+```
+
+For an unmanaged daemon use its original start command. Then verify:
+
+```bash
+tachi daemon status
+tachi --version        # expect 2.0.0
+tachi status           # runtime.build.git_sha matches the release
+```
+
+If a store was `skipped_locked`, stop the writer that held it and re-run
+`tachi migrate --apply`; a skipped store is left untouched, so re-running is
+safe. If anything went wrong mid-flight, restore the store directories from the
+step-2 backups with the prior binary; never point an old binary at a migrated
+store.
 
 ---
 
@@ -469,17 +657,23 @@ Live SQLite databases should stay local. Sync encrypted bundles, append-only eve
 
 ## OpenClaw Integration (Optional)
 
-If you use OpenClaw, the full installer configures both the binary and the plugin:
+OpenClaw integration has two halves, and in the 2.0.0 release cycle they move
+separately:
 
-```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.9.2/scripts/install.sh)"
-```
+- The **binary** is installed/upgraded exactly as in Step 1. The v2.0.0 tag
+  publishes no OpenClaw plugin asset, so binary-only installs must pass
+  `--skip-plugin`:
 
-This will:
+  ```bash
+  bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v2.0.0/scripts/install.sh)" -- --skip-plugin
+  ```
 
-- Install/upgrade `tachi` via Homebrew
-- Download and install the OpenClaw `tachi` plugin to `~/.openclaw/extensions/tachi`
-- Update `~/.openclaw/openclaw.json` with plugin allow-list and memory slot
+- The **plugin** (`~/.openclaw/extensions/tachi` plus the `openclaw.json`
+  allow-list and memory-slot wiring) currently has no published 2.0.0 asset and
+  the plugin npm package is not published for 2.0.0 either. Keep your existing
+  plugin install working against the 2.0.0 binary, or wait for the plugin
+  asset's publication before reinstalling it; do not treat the plugin
+  installer URL as a working 2.0.0 command yet.
 
 ### MCP serve DB scope
 
@@ -520,8 +714,9 @@ normal agents should see their current repo project DB plus global memory.
 
 ## Available MCP Tools
 
-Once connected, ordinary/default Lead and Worker sessions expose exactly
+Once connected, Worker (`delegate`) sessions expose exactly
 `tachi_memory`, `tachi_task`, `tachi_staff`, `tachi_gh`, and `tachi_a2a`.
+Default Lead (`standard`) sessions also expose `tachi_agent_eval`, for six facades.
 The remaining inventory in this section documents retained routes for explicit
 Ops/admin compatibility or operator CLI workflows; those routes are not daily
 or default discovery, and retaining them does not mean they were deleted.
@@ -691,7 +886,8 @@ See also: [`docs/engineering/architecture/safety-hardening-2026-06.md`](engineer
 
 ### Sandbox & Governance
 
-`sandbox_set_rule`, `sandbox_check`, `sandbox_get_policy`, `sandbox_set_policy`, `sandbox_list_policies`, `sandbox_exec_audit`
+Use `tachi_sandbox` under the admin profile with `action='set_rule'|'check'|'get_policy'|'set_policy'|'list_policies'|'exec_audit'`.
+The old names `sandbox_set_rule`, `sandbox_check`, `sandbox_get_policy`, `sandbox_set_policy`, `sandbox_list_policies`, and `sandbox_exec_audit` are retired and no longer routed in v2.0.0.
 
 ### Retired Recommendations
 
@@ -701,8 +897,8 @@ The public `tachi_dispatch(action='recommend')` surface is retired. Surviving in
 
 ### Facade & Delegation
 
-Ordinary/default discovery is exactly `tachi_memory`, `tachi_task`,
-`tachi_staff`, `tachi_gh`, and `tachi_a2a`.
+Worker discovery is exactly `tachi_memory`, `tachi_task`, `tachi_staff`, `tachi_gh`, and `tachi_a2a`.
+Default Lead discovery adds `tachi_agent_eval`, for six facades.
 
 *Compatibility/read-only helpers such as `tachi_web_search`, `tachi_browse`,
 `tachi_unstick`, and `tachi_verify` remain only on explicit Ops/admin surfaces.*
@@ -729,10 +925,10 @@ Tachi does not need to expose the full tool catalog to every host. Use `--profil
 
 | Profile | Exposed surface | Best for |
 |---|---|---|
-| `standard` | Exactly `tachi_memory`, `tachi_task`, `tachi_staff`, `tachi_gh`, and `tachi_a2a`; facade action policy still applies. | Ordinary Lead sessions. |
-| `coordinate` | The same five-facade discovery surface with legacy coordinate action permissions. | Explicit coordination compatibility without diagnostic discovery. |
+| `standard` | Six facades: `tachi_memory`, `tachi_task`, `tachi_agent_eval`, `tachi_staff`, `tachi_gh`, and `tachi_a2a`; facade action policy still applies. | Ordinary Lead sessions. |
+| `coordinate` | The five coordination facades (no `tachi_agent_eval`) with legacy coordinate action permissions. | Explicit coordination compatibility without diagnostic discovery. |
 | `operate` | Explicit non-default Ops surface retaining runtime, status, Vault-session, Foundry, and Hub diagnostics. | Runtime adapters and authorized Ops sessions. |
-| `delegate` | Exactly the same five facades as Lead; status/read actions remain available while recursive staffing and GitHub mutation stay denied. | Bounded Worker sessions. |
+| `delegate` | Exactly `tachi_memory`, `tachi_task`, `tachi_staff`, `tachi_gh`, and `tachi_a2a`; status/read actions remain available while recursive staffing and GitHub mutation stay denied. | Bounded Worker sessions. |
 | `admin` / `emergency` | Full retained catalog. Narrow-profile hiding does not physically delete compatibility routes. | Explicit maintenance, development, and emergency sessions. |
 
 Host aliases:

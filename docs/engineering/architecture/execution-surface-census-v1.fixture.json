@@ -192,9 +192,9 @@
     },
     "profiles": {
       "admin": {
-        "total_input_schema_bytes": 144049,
-        "total_tool_definition_bytes": 175910,
-        "visible_tool_count": 83,
+        "total_input_schema_bytes": 140702,
+        "total_tool_definition_bytes": 170561,
+        "visible_tool_count": 77,
         "visible_tools": [
           "archive_memory",
           "capture_session",
@@ -224,12 +224,6 @@
           "peer_query",
           "recall_context",
           "runtime_info",
-          "sandbox_check",
-          "sandbox_exec_audit",
-          "sandbox_get_policy",
-          "sandbox_list_policies",
-          "sandbox_set_policy",
-          "sandbox_set_rule",
           "section_build",
           "sync_memories",
           "tachi_a2a",
@@ -366,7 +360,7 @@
       }
     },
     "registered_native_tools": {
-      "tool_count": 83,
+      "tool_count": 77,
       "tools": [
         "archive_memory",
         "capture_session",
@@ -396,12 +390,6 @@
         "peer_query",
         "recall_context",
         "runtime_info",
-        "sandbox_check",
-        "sandbox_exec_audit",
-        "sandbox_get_policy",
-        "sandbox_list_policies",
-        "sandbox_set_policy",
-        "sandbox_set_rule",
         "section_build",
         "sync_memories",
         "tachi_a2a",
@@ -688,12 +676,7 @@
           }
         }
       },
-        "standard": {
-          "tachi_agent_eval": {
-            "input_schema_bytes": 11134,
-            "property_count": 7,
-            "property_names": ["action", "adjudicate", "candidate_projection", "get", "limit", "observe", "register"]
-          },
+      "standard": {
         "tachi_a2a": {
           "input_schema_bytes": 1301,
           "property_count": 7,
@@ -705,6 +688,19 @@
             "subject_ref",
             "text",
             "ttl_days"
+          ]
+        },
+        "tachi_agent_eval": {
+          "input_schema_bytes": 11134,
+          "property_count": 7,
+          "property_names": [
+            "action",
+            "adjudicate",
+            "candidate_projection",
+            "get",
+            "limit",
+            "observe",
+            "register"
           ]
         },
         "tachi_gh": {

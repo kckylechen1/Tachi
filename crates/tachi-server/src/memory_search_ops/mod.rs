@@ -55,6 +55,7 @@ pub(crate) fn scrub_generated_memory_text(text: &str) -> String {
 pub(crate) use search_memory::handle_find_similar_memory;
 pub(crate) use search_memory::handle_search_memory;
 pub(crate) use search_memory::handle_search_memory_with_access;
+pub(crate) use search_memory::handle_search_memory_with_resources;
 pub(crate) use search_memory::invalidate_recall_cache_after_write;
 pub(crate) use search_memory::search_memory_rows;
 pub(crate) use search_memory::search_memory_rows_with_access;

@@ -7,7 +7,7 @@ use super::cache::{
 use super::cache::{run_recall_cache_race_hook, RecallCacheRacePoint};
 use super::rows::{
     auto_query_embedding_would_run_with_named_project_reads, query_with_context_symbols,
-    search_memory_rows_with_named_project_reads,
+    search_memory_rows_with_named_project_reads, search_memory_rows_with_resources,
 };
 use crate::agent_markdown::{format_search_memory_markdown, wants_explicit_json};
 use crate::memory_search_ops::{
@@ -48,9 +48,44 @@ pub(crate) async fn handle_search_memory_with_access(
     project_only: bool,
     record_access: bool,
 ) -> Result<String, String> {
+    handle_search_memory_inner_entry(server, params, project_only, record_access, None)
+        .await
+        .map(|(body, _)| body)
+}
+
+pub(crate) async fn handle_search_memory_with_resources(
+    server: &MemoryServer,
+    params: SearchMemoryParams,
+    project_name: &str,
+    record_access: bool,
+) -> Result<(String, Vec<rmcp::model::Resource>), String> {
+    handle_search_memory_inner_entry(
+        server,
+        params,
+        false,
+        record_access,
+        Some(project_name.to_string()),
+    )
+    .await
+}
+
+async fn handle_search_memory_inner_entry(
+    server: &MemoryServer,
+    params: SearchMemoryParams,
+    project_only: bool,
+    record_access: bool,
+    resource_project: Option<String>,
+) -> Result<(String, Vec<rmcp::model::Resource>), String> {
     let server = server.clone();
     super::concurrency::run_bounded_recall(move || async move {
-        handle_search_memory_inner(&server, params, project_only, record_access).await
+        handle_search_memory_inner(
+            &server,
+            params,
+            project_only,
+            record_access,
+            resource_project,
+        )
+        .await
     })
     .await?
 }
@@ -60,7 +95,8 @@ async fn handle_search_memory_inner(
     mut params: SearchMemoryParams,
     project_only: bool,
     record_access: bool,
-) -> Result<String, String> {
+    resource_project: Option<String>,
+) -> Result<(String, Vec<rmcp::model::Resource>), String> {
     params.query = query_with_context_symbols(&params.query, &params.context_symbols);
     let top_k = params.normalized_top_k();
 
@@ -178,7 +214,8 @@ async fn handle_search_memory_inner(
                                 &params.query,
                                 params.format.as_deref(),
                                 hit.rows_json,
-                            );
+                            )
+                            .map(|body| (body, Vec::new()));
                         }
                     }
                     cache_write_context = Some((key.clone(), current_generation));
@@ -197,15 +234,23 @@ async fn handle_search_memory_inner(
 
     let mut search_params = params.clone();
     expand_search_params_for_rerank(&mut search_params, top_k);
-    let mut rows = search_memory_rows_with_named_project_reads(
-        server,
-        search_params,
-        project_only,
-        record_access,
-        None,
-        named_project_reads.as_mut(),
-    )
-    .await?;
+    let (mut rows, resource_links) = if let Some(project_name) = resource_project.as_deref() {
+        search_memory_rows_with_resources(server, search_params, project_name, record_access)
+            .await?
+    } else {
+        (
+            search_memory_rows_with_named_project_reads(
+                server,
+                search_params,
+                project_only,
+                record_access,
+                None,
+                named_project_reads.as_mut(),
+            )
+            .await?,
+            Vec::new(),
+        )
+    };
     let (reranked_rows, _rerank_policy) =
         apply_search_rerank_policy(server, &params.query, rows, top_k, params.enable_rerank).await;
     rows = reranked_rows;
@@ -284,5 +329,20 @@ async fn handle_search_memory_inner(
             }
         }
     }
+    let visible_ids: std::collections::HashSet<&str> = rows
+        .iter()
+        .filter_map(|row| row.get("id").and_then(serde_json::Value::as_str))
+        .collect();
+    let resource_links = resource_links
+        .into_iter()
+        .filter(|link| {
+            parse_resource_link_id(&link.uri).is_some_and(|id| visible_ids.contains(id.as_str()))
+        })
+        .collect();
     render_search_response(&params.query, params.format.as_deref(), serialized)
+        .map(|body| (body, resource_links))
+}
+
+fn parse_resource_link_id(uri: &str) -> Option<String> {
+    crate::memory_resources::parse_resource_uri(uri).map(|reference| reference.id)
 }

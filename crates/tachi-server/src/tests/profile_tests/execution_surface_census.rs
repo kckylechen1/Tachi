@@ -445,8 +445,13 @@ fn live_execution_surface_matches_fixture_and_provisional_budgets() {
     }
     assert_eq!(
         observed["registered_native_tools"]["tool_count"],
-        json!(83),
-        "this profile-only contraction must not claim physical route deletion"
+        json!(77),
+        // v2 sandbox retirement re-pin: the #1691 pin of 83 guarded a
+        // PROFILE-ONLY contraction from silently claiming physical route
+        // deletion. The six expired sandbox_* alias routes were later deleted
+        // for real (tombstoned in tools/alias_manifest.rs), so the exact
+        // post-retirement registry count is 77 — still an exact pin: any
+        // route addition/removal must consciously re-anchor this number.
     );
     assert!(observed["profiles"]["operate"]["visible_tools"]
         .as_array()

@@ -9,6 +9,32 @@ use super::{
     MEMORY_SELECT_COLUMNS_QUALIFIED,
 };
 
+/// Read one current resource candidate from a single materialized row.
+///
+/// This is intentionally narrower than `get_with_options`: Resource reads may
+/// only expose current, active text and must not perform a second lifecycle
+/// lookup after reading the body. The caller checks this materialized row's
+/// temporal interval; a finite future `valid_until` is still eligible.
+pub(crate) fn get_active_resource_entry(
+    conn: &Connection,
+    id: &str,
+) -> Result<Option<MemoryEntry>, MemoryError> {
+    let sql = format!(
+        "SELECT {MEMORY_SELECT_COLUMNS}
+         FROM memories
+         WHERE id = ?1
+           AND archived = 0
+           AND superseded_by IS NULL
+           AND revision > 0"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let mut rows = stmt.query(params![id])?;
+    rows.next()?
+        .map(row_to_entry)
+        .transpose()
+        .map_err(Into::into)
+}
+
 /// The Wiki internal-row exclusion for a list route, or `None` when this store
 /// is not the Wiki corpus.
 ///
@@ -189,7 +215,9 @@ pub fn get_all(
                 "SELECT {MEMORY_SELECT_COLUMNS} FROM memories WHERE ({wiki_predicate}) ORDER BY timestamp DESC LIMIT ?"
             ),
             None => {
-                format!("SELECT {MEMORY_SELECT_COLUMNS} FROM memories ORDER BY timestamp DESC LIMIT ?")
+                format!(
+                    "SELECT {MEMORY_SELECT_COLUMNS} FROM memories ORDER BY timestamp DESC LIMIT ?"
+                )
             }
         }
     } else {

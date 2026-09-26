@@ -133,11 +133,11 @@ pub struct SandboxExecAuditParams {
 /// Parameters for the folded `tachi_sandbox` verb. The six pre-fold sandbox
 /// tools (`sandbox_set_rule`/`check`/`set_policy`/`get_policy`/`list_policies`/
 /// `exec_audit`) are now `action=` selectors on this one struct; the six legacy
-/// tool names survive as forwarding aliases. Per-action required fields are
+/// tool names were retired in v2.0.0 after their 1.10.0 removal deadline. Per-action required fields are
 /// validated in the facade dispatcher (`tools::sandbox_facade`), not by serde,
 /// so a caller supplying the wrong action gets a precise error rather than a
 /// deserialization failure. Defaults mirror the per-action structs above so a
-/// folded call and its legacy alias produce byte-identical handler output.
+/// folded call preserves the pre-fold handler output.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct TachiSandboxParams {
     /// Which sandbox operation to run: "set_rule" | "check" | "set_policy" |

@@ -1,5 +1,6 @@
 //! Dual-era wire conformance for the RMCP 3.3 protocol adapter.
 mod capability_lifecycle;
+mod resources;
 use super::*;
 use serde_json::json;
 

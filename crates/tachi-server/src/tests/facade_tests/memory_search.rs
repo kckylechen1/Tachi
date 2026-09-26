@@ -141,6 +141,105 @@ async fn tachi_memory_search_defaults_to_json_and_keeps_markdown_escape_hatch() 
     assert!(markdown.starts_with("## Tachi search:"), "{markdown}");
 }
 
+#[tokio::test]
+async fn resource_links_are_additive_to_the_unchanged_bound_project_search_text() {
+    let project_name = "resource-search-additive";
+    let (server, _project_db) = crate::tests::make_server_with_project_fixture(project_name);
+    let sentinel = "ResourceSearchAdditiveSentinel";
+    let mut entry = crate::tests::make_entry("resource-search-additive-id");
+    entry.summary = format!("{sentinel} summary");
+    entry.text = format!("{sentinel} exact original search body");
+    entry.keywords = vec![sentinel.to_string()];
+    server
+        .with_named_project_store(project_name, |store| {
+            store
+                .upsert(&entry)
+                .map_err(|error| format!("seed resource search entry: {error}"))
+        })
+        .expect("seed bound project search entry");
+
+    let mut params = tachi_memory_params("search");
+    params.format = Some("json".to_string());
+    params.scope = Some("memory".to_string());
+    params.project = Some(project_name.to_string());
+    params.query = Some(sentinel.to_string());
+    let issuance_params: crate::tool_params::TachiSearchParams = serde_json::from_value(json!({
+        "query":sentinel,
+        "scope":"memory",
+        "project":project_name
+    }))
+    .expect("ordinary bound-project issuance params");
+    assert!(
+        crate::memory_resources::resource_issuance_allowed(
+            &server,
+            &issuance_params,
+            Some(project_name)
+        ),
+        "the fixture must satisfy the ordinary bound-project ResourceLink gate"
+    );
+
+    let original_text = crate::facade_memory_ops::handle_tachi_memory(&server, params.clone())
+        .await
+        .expect("ordinary project search");
+    assert!(
+        original_text.contains("ResourceSearchAdditiveSentinel exact original search body"),
+        "the baseline search must actually return the seeded hit: {original_text}"
+    );
+    let (resource_text, links) = crate::facade_memory_ops::handle_tachi_memory_with_resources(
+        &server,
+        params.clone(),
+        Some(project_name),
+    )
+    .await
+    .expect("resource-enabled project search");
+    assert_eq!(
+        resource_text, original_text,
+        "ResourceLinks must be additive"
+    );
+    assert_eq!(links.len(), 1, "the ordinary project hit gets one link");
+    assert!(
+        crate::memory_resources::parse_resource_uri(&links[0].uri).is_some(),
+        "the emitted link uses the canonical readable URI format"
+    );
+    let reference = crate::memory_resources::parse_resource_uri(&links[0].uri).unwrap();
+    assert_eq!(
+        crate::memory_resources::read_resource_text(&server, project_name, &reference)
+            .expect("the bound project remains readable through a cached unknown-role handle"),
+        entry.text,
+    );
+    let parsed: Value = serde_json::from_str(&resource_text).expect("search response JSON");
+    assert_eq!(parsed["query"], json!(sentinel));
+    assert!(
+        parsed
+            .to_string()
+            .contains("ResourceSearchAdditiveSentinel exact original search body"),
+        "the existing search text still contains its original result body: {parsed:#}"
+    );
+
+    let mut role_constrained = params.clone();
+    role_constrained.agent_role = Some("code-review".to_string());
+    let (_, role_links) = crate::facade_memory_ops::handle_tachi_memory_with_resources(
+        &server,
+        role_constrained,
+        Some(project_name),
+    )
+    .await
+    .expect("role-constrained search remains available");
+    assert!(
+        role_links.is_empty(),
+        "role-filtered hits cannot issue links"
+    );
+
+    let (_, unbound_links) =
+        crate::facade_memory_ops::handle_tachi_memory_with_resources(&server, params, None)
+            .await
+            .expect("unbound search remains available");
+    assert!(
+        unbound_links.is_empty(),
+        "unbound searches cannot issue links"
+    );
+}
+
 /// A binding receipt is a diagnostic, not a result. `serde_json::Map` is a
 /// `BTreeMap` (this workspace never enables `preserve_order`), so `"binding"`
 /// sorts ahead of `"sections"` on key name alone and an unconditional receipt

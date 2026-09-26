@@ -147,20 +147,40 @@ pub(super) async fn run_pre_serve_command(
             .await?;
             Ok(true)
         }
-        Commands::Migrate { json, apply } => {
+        Commands::Migrate {
+            json,
+            apply,
+            rename_legacy,
+            offline,
+        } => {
             // #1223: this subcommand's own `--apply` flag is its own,
             // independent schema-migration authorization decision (see
             // `migrate_cli`'s module doc comment) — deliberately NOT the
             // shared top-level `schema_migration` this function threads to
             // every other pre-serve command.
-            super::super::migrate_cli::run_migrate_command(
-                *json,
-                *apply,
-                app_home,
-                global_db_path,
-                project_db_path.map(PathBuf::as_path),
-            )
-            .await?;
+            if *rename_legacy {
+                super::super::migrate_cli::run_filename_conversion_command(
+                    *json,
+                    *apply,
+                    *offline,
+                    app_home,
+                    global_db_path,
+                    project_db_path.map(PathBuf::as_path),
+                )
+                .await?;
+            } else {
+                if *offline {
+                    return Err("--offline only applies to --rename-legacy --apply".into());
+                }
+                super::super::migrate_cli::run_migrate_command(
+                    *json,
+                    *apply,
+                    app_home,
+                    global_db_path,
+                    project_db_path.map(PathBuf::as_path),
+                )
+                .await?;
+            }
             Ok(true)
         }
         Commands::Rescue { action } => {

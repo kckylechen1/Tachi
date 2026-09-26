@@ -29,11 +29,23 @@ Tachi 是一个单二进制、本地优先的 Agent 记忆与协调后端。它�
 - **本地加密保险库**，用于 API 密钥与机密
 - **Agent 协调**：交接令牌、看板、发布订阅（幽灵低语）
 - **技能包与能力中心**：一次注册，各 Agent 共用
-- **日常产品门面**：`tachi_memory`、`tachi_task`、`tachi_staff`、`tachi_gh`、`tachi_a2a`
+- **六大产品门面**：`tachi_memory`、`tachi_task`、`tachi_agent_eval`、`tachi_staff`、`tachi_gh`、`tachi_a2a`
 
 所有状态都存储在嵌入式 SQLite 中。**无需任何外部数据库。**
 
 名字取自《攻壳机动队》中的塔奇克马：通过共享记忆不断进化的 AI 单元。
+
+### 当前发布
+
+当前版本：`v2.0.0`。这是一次大版本升级：移除了部分公开 MCP 路由，磁盘 schema 从 28 升到 39，调用已退役工具的脚本需要先迁移到存留门面。要点：
+
+- Lead 默认发现面为六个门面（新增 `tachi_agent_eval`）；Worker（`delegate`）为其中五个（不含 `tachi_agent_eval`）。
+- 已退役的模型面路由从路由器移除，结局各不相同：记忆保存/检索别名与直连看板路由的职能由规范门面承接（`tachi_memory`、`tachi_task` 看板动作）；orchestrator 与技能推荐/进化路由无替代直接移除。记忆管理动作按动作分流：`progress` 转 `tachi_task(action='status')`，`readiness` 转 `tachi_status`（仅 Ops/admin 授权可达，不在普通发现面），`delete`/`gc`/`doctor_scan` 转运维 CLI（`tachi delete`、`tachi gc` 的 plan|apply 与 `tachi doctor`）；`ingest`/`ingest_source`/`pattern_feedback` 无模型面替代。
+- 升级按 [`docs/INSTALL.md` Step 1b](docs/INSTALL.md) 的顺序执行：先停掉实际的服务管理器与所有新旧读写方并防止重启，在替换前备份库目录与旧二进制，再安装新二进制但不启动服务；先以 `tachi migrate --rename-legacy --apply --offline` 单独离线转换旧文件名，再以 `tachi migrate --apply` 升级 schema，逐条核对结果。`--offline` 是操作者声明，不能自动阻止旧二进制重启；回退请用备份。
+- 标签流水线只发布 Mac arm64 CLI 与 Homebrew formula；npm 包走独立的手动发布通道，新标签不等于 npm 上已有新版本。
+- 绑定项目的普通记忆搜索可在原有结果之外附带 MCP ResourceLink；读取时核对来源、revision、正文摘要和生效时间窗口，返回原正文。全局库、Wiki 和私有分区不在此范围；带角色约束的搜索、已配置或无法读取的 sandbox 策略会禁用此功能，Resource 目录保持为空。
+
+完整迁移说明见 [CHANGELOG.md](CHANGELOG.md)（英文）。
 
 ---
 
@@ -73,11 +85,13 @@ Tachi 不是通用向量数据库，也不是托管记忆云服务。它是面�
 brew tap kckylechen1/tachi && brew install tachi
 ```
 
-或使用 shell 安装脚本（检测到 OpenClaw 时会自动安装插件）：
+或使用 shell 安装脚本。v2.0.0 标签未发布 OpenClaw 插件资产，二进制安装需带 `--skip-plugin`：
 
 ```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.9.2/scripts/install.sh)"
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v2.0.0/scripts/install.sh)" -- --skip-plugin
 ```
+
+标签流水线只发布一个预编译包 `tachi-v2.0.0-aarch64-apple-darwin`（Apple Silicon macOS）；其他平台需源码自行编译，发布不作验证。从 1.9.x 升级请按 [`docs/INSTALL.md` Step 1b](docs/INSTALL.md) 的顺序执行：停服务、防重启、备份，然后先离线转换旧文件名，再升级 schema 并逐条核对，最后重启服务。OpenClaw 插件暂无 2.0.0 资产：现有插件可继续配合 2.0.0 二进制使用，重装前先看 [`integrations/openclaw`](integrations/openclaw)。
 
 验证：
 
@@ -282,13 +296,13 @@ Tachi 根据 `TACHI_PROFILE` 暴露经过过滤的 MCP 工具面。`admin` 目�
 
 | Profile | 暴露内容 | 适用场景 |
 |---------|----------|----------|
-| `standard` | 恰好 `tachi_memory`、`tachi_task`、`tachi_staff`、`tachi_gh`、`tachi_a2a`；各门面的动作策略仍适用。 | 普通 Lead 会话；日常委派使用宿主原生 subagent。 |
-| `coordinate` | 同样的五门面发现面，并保留旧 coordinate 动作权限；不发现诊断路由。 | 显式协调兼容。 |
+| `standard` | 恰好 `tachi_memory`、`tachi_task`、`tachi_agent_eval`、`tachi_staff`、`tachi_gh`、`tachi_a2a`；各门面的动作策略仍适用。 | 普通 Lead 会话；日常委派使用宿主原生 subagent。 |
+| `coordinate` | 五个协调门面（不含 `tachi_agent_eval`），保留旧 coordinate 动作权限；不发现诊断路由。 | 显式协调兼容。 |
 | `operate` | 显式、非默认 Ops 面，保留 runtime/status/Vault-session/Foundry/Hub 诊断。 | 运行时适配器、OpenClaw 与获授权 Ops 自动化。 |
-| `delegate` | 与 Lead 完全相同的五门面；Worker 动作策略只允许状态/读取，拒绝递归 staffing 与 GitHub 写入。 | 有界 Worker 会话。 |
+| `delegate` | Lead 六门面中的五个（不含 `tachi_agent_eval`）；Worker 动作策略只允许状态/读取，拒绝递归 staffing 与 GitHub 写入。 | 有界 Worker 会话。 |
 | `admin` / `emergency` | 完整保留目录；窄 Profile 隐藏路由不表示物理删除。 | 显式维护、开发、治理与紧急会话。 |
 
-宿主别名自动解析：`lead`、`claude`、`claude-code`、`codex`、`cursor`、`trae`、`windsurf`、`ide`、`antigravity`、`companion`、`copilot`、`coach`、`workflow` → `standard`；`worker`、`subagent`、`delegate` → `delegate`；`openclaw`、`hermes`、`runtime`、`adapter`、`ops` → `operate`；`admin`、`full`、`emergency` → `admin`。已退役的旧 `observe`、`remember` 原生别名及 `coordinate` 选择器保留动作权限，但发现面也严格限于五个产品门面。HTTP 直连调用方元数据不能自行授权 Ops/admin。
+宿主别名自动解析：`lead`、`claude`、`claude-code`、`codex`、`cursor`、`trae`、`windsurf`、`ide`、`antigravity`、`companion`、`copilot`、`coach`、`workflow` → `standard`；`worker`、`subagent`、`delegate` → `delegate`；`openclaw`、`hermes`、`runtime`、`adapter`、`ops` → `operate`；`admin`、`full`、`emergency` → `admin`。已退役的旧 `observe`、`remember` 原生别名及 `coordinate` 选择器保留动作权限，但发现面也严格限于产品门面。HTTP 直连调用方元数据不能自行授权 Ops/admin。
 
 未设置 Profile 时，Tachi 自 v1.0.1 起默认使用 `standard`。
 
