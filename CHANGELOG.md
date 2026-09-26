@@ -47,6 +47,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 > **Note to maintainers**: Add unreleased changes here during development. Before cutting a release, move the content under a new `## [X.Y.Z] - YYYY-MM-DD` header and update the Quick Navigation above.
 
+### Removed
+
+- **Public memcore mirror retired** (#1902). Tachi is public now, so consumers take `memcore` / `portable-kernel` directly from `https://github.com/kckylechen1/tachi.git`, e.g. `memcore = { git = "https://github.com/kckylechen1/tachi.git", rev = "…" }`; Cargo finds the package inside the workspace. The `publish-memcore-mirror` workflow, its script and the `MEMCORE_MIRROR_TOKEN` secret are gone. `github.com/kckylechen1/memcore` is archived read-only, so revisions that are already pinned still resolve.
+
 ## [2.0.0] - 2026-09-25
 
 First mainline release since 1.9.0. The 1.9.1 and 1.9.2 tags were narrow fallback releases cut from side branches, so this entry also carries the mainline work those tags never shipped. The major bump is earned: public MCP routes were removed, the on-disk schema advanced from 28 to 39, and dispatch V2 moved where model plans live.
