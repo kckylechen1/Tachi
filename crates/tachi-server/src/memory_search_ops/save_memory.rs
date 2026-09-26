@@ -8,11 +8,9 @@ mod response;
 mod validation;
 pub(crate) mod write_affinity;
 
+pub(crate) use handler::handle_save_memory_with_wiki_projection;
 pub(crate) use handler::{
     handle_save_memory, handle_save_memory_from_caller, handle_save_memory_with_references,
-};
-pub(crate) use handler::{
-    handle_save_memory_with_authorized_reference_mutations, handle_save_memory_with_wiki_projection,
 };
 #[cfg(test)]
 pub(crate) use handler::{

@@ -3,13 +3,12 @@ use super::*;
 /// Per-DB worker task. Wakes every [`POLL_INTERVAL`], opens the DB by
 /// absolute path, scans `foundry_jobs` for queued or stale running
 /// rows, and either re-injects them into the shared `foundry_tx` (for
-/// routable DBs) or counts them as orphans (for everything else).
+/// routable DBs) or warns about them as orphans (for everything else).
 pub(super) async fn run_db_worker(
     db_path: PathBuf,
     label: String,
     route: Route,
     foundry_tx: mpsc::Sender<FoundryMaintenanceItem>,
-    metrics: Arc<WorkerMetrics>,
     cancel: tokio_util::sync::CancellationToken,
 ) {
     // Stagger startup by a small jitter derived from the path so 30+
@@ -25,7 +24,7 @@ pub(super) async fn run_db_worker(
         tokio::select! {
             _ = cancel.cancelled() => break,
             _ = tick.tick() => {
-                run_one_poll(&db_path, &label, &route, &foundry_tx, &metrics).await;
+                run_one_poll(&db_path, &label, &route, &foundry_tx).await;
             }
         }
     }
@@ -54,17 +53,7 @@ async fn run_one_poll(
     label: &str,
     route: &Route,
     foundry_tx: &mpsc::Sender<FoundryMaintenanceItem>,
-    metrics: &WorkerMetrics,
 ) {
-    metrics.polls_total.fetch_add(1, Ordering::Relaxed);
-    let now_secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    metrics
-        .last_poll_unix_secs
-        .store(now_secs, Ordering::Relaxed);
-
     // Open the DB by absolute path. WAL keeps this cheap (a fresh
     // open + drop is microseconds in steady state). We do this on a
     // blocking thread so we never stall the tokio runtime if the DB
@@ -89,15 +78,10 @@ async fn run_one_poll(
     let pending = match pending {
         Ok(v) => v,
         Err(e) => {
-            metrics.errors_total.fetch_add(1, Ordering::Relaxed);
             tracing::warn!(target: "tachi::foundry_scheduler", label = %label, error = %e, "foundry scheduler poll error");
             return;
         }
     };
-
-    metrics
-        .last_pending_count
-        .store(pending.len() as u64, Ordering::Relaxed);
 
     if pending.is_empty() {
         return;
@@ -140,18 +124,14 @@ async fn run_one_poll(
                 }
             }
             if sent > 0 {
-                metrics
-                    .jobs_reinjected_total
-                    .fetch_add(sent, Ordering::Relaxed);
                 tracing::info!(target: "tachi::foundry_scheduler", label = %label, jobs = sent, "re-injected pending foundry job(s)");
             }
         }
         Route::Orphan(reason) => {
-            // Existing worker has no route to this DB path; record the
-            // orphan count so `tachi status` can warn. Execution is
-            // deferred to follow-up work that adds DbScope::Path.
+            // Existing worker has no route to this DB path; warn with the
+            // pending count. Execution is deferred to follow-up work that
+            // adds DbScope::Path.
             let n = pending.len() as u64;
-            metrics.jobs_orphan_total.fetch_add(n, Ordering::Relaxed);
             tracing::warn!(
                 target: "tachi::foundry_scheduler",
                 label = %label,
