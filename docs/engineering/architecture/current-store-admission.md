@@ -1,6 +1,6 @@
 # Current-Store Admission — refuse damaged state, rebuild only what is derived
 
-> **Status:** spec, pre-implementation, revision 4 (after three cross-vendor attack rounds).
+> **Status:** spec, pre-implementation, revision 5 (after four cross-vendor attack rounds).
 > **Issue:** #1995 (found in #1983's round-4 cold review). **Parent:** #1987.
 > **Anchors:** `db/open.rs:630` (damaged current input is refused, not
 > repaired), #1119 (migration authority), #1983 (read-only preflight plus
@@ -148,12 +148,23 @@ Hyperion's origin/main has zero references. The API is still public
 `crates/portable-kernel/src/lib.rs:40`), and its docs describe standalone
 use (`db/migrations.rs:562-575`). So downstream use cannot be ruled out.
 
-**Disposition (decided).** Keep the public API, but make it **run the full
-schema initializer before stamping**. It then produces the same objects as
-a normal open, and the escape hatch is closed without breaking callers.
+**Disposition (decided): leave the API unchanged.** Routing it through the
+full initializer would break frozen assertions. One is
+`unstamped_db_with_existing_sentinels_skips_and_restamps`
+(`db/migrations.rs:2089-2119`), which pins a sentinel-only fixture. The
+other is v12's dedupe report (`db/migrations.rs:1195-1244`), which the
+initializer would pre-empt. The API's behaviour and tests therefore stay
+exactly as they are.
+
+The API can still stamp an incomplete inventory, so it is not a hatch this
+spec closes. Admission closes it instead. Any store the API leaves missing
+a required object is **refused loudly** on its next admission, with
+`CurrentSchemaIncomplete` naming the object. That happens before any
+repair, so nothing gets silently recreated. The API's docs gain one
+sentence: its output is subject to current-store admission.
 
 **Historical outcome (fixed oracle).** Take a pre-`38ed99d47` Full store
-stamped 39 through the old migration-only path, so it lacks
+stamped 39 through the migration-only path, so it lacks
 `exec_env_worktree_identities`. On admission it **is refused with
 `CurrentSchemaIncomplete`**, and the error names the missing table. The
 operator recovers through §6. That is the price of default-deny. It is
@@ -253,8 +264,12 @@ Until that command exists, the runbook documents manual recovery.
     failing, the index stays absent and the open is Ok. This holds for
     **both** policies: D7 R5.2b exempts the *absence* of
     `idx_memories_path_active_ts` and `memories_vec`. A **present but
-    malformed** `idx_memories_path_active_ts` (e.g. created `UNIQUE`) must be
-    refused. Pin that case with its own test.
+    malformed** `idx_memories_path_active_ts` (e.g. created `UNIQUE`) is
+    refused **under the Portable policy only** (D7 R5.2b). Today's policy
+    does no full-shape validation, and this spec does not add one: its check
+    is presence-only. Pin the Portable refusal with its own test. For `F@39`
+    the outcome is unchanged; the TachiFull shape hardening stays out of
+    scope.
 
   Assert that the allowlist in code equals the enumerated derived set. The
   FTS case asserts only presence and search-generation bump. Projection
@@ -320,9 +335,10 @@ Until that command exists, the runbook documents manual recovery.
     - a test-only `ensure_column` elsewhere without a versioned migration;
     - a test-only inline `CREATE TABLE` without one.
   - The migration-only stamping path (§3): the historical pre-`38ed99d47`
-    fixture stamped 39 through the old path is **refused with
-    `CurrentSchemaIncomplete` naming `exec_env_worktree_identities`**. After
-    the API fix, the same call on a fresh store produces the full inventory.
+    fixture stamped 39 through the migration-only path is **refused with
+    `CurrentSchemaIncomplete` naming `exec_env_worktree_identities`**. The
+    API itself is unchanged, and its existing tests
+    (`db/migrations.rs:1195-1244, 2089-2119`) pass unmodified.
 
 ## 8. Not verified
 
