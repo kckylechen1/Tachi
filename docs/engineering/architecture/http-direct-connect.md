@@ -137,7 +137,7 @@ window started empty, so repeat-call warnings and loop blocks never fired.
 |---|---|
 | stdio proxy | One random key minted per proxy connection and sent as `X-Tachi-Rate-Limit-Session` on every daemon tool call (legacy: read at `initialize`) |
 | Any HTTP peer sending a valid `X-Tachi-Rate-Limit-Session` | That key (legacy: for the session; modern: per request) |
-| Modern HTTP without the header, with an AgentIdentity | Digest of the resolved AgentIdentity, client label and canonical bound project |
+| Modern HTTP without the header, with an AgentIdentity | Digest of the resolved AgentIdentity, client label and canonical bound project (peers asserting the same AgentIdentity, client and project share one bucket) |
 | Modern HTTP without the header or an AgentIdentity | Per-request key (unchanged fallback); a client label or project alone is shared by every instance of that client, so it never anchors a bucket |
 | Legacy HTTP without the header, local stdio | Per-session key (unchanged) |
 
@@ -170,6 +170,11 @@ unchanged: only a `BeforeDispatch` failure is retried, with the same key.
 
 Use the **named project key** Tachi reports for the repo (often
 `<Basename>-<hash8>`), not a free-form display name. See INSTALL.md.
+
+A modern (`2026-07-28`) client that sends none of `X-Tachi-Agent-Identity`
+or `X-Tachi-Rate-Limit-Session` gets a per-request rate-limit bucket, so
+loop/stuck detection cannot fire for it. Add one of them if you want it; see
+[Rate-limit bucket](#rate-limit-bucket-x-tachi-rate-limit-session).
 
 ### Process inventory check
 

@@ -969,7 +969,8 @@ impl MemoryServer {
 /// Audit C1: stable rate-limit bucket for a modern (2026-07-28) request that
 /// sent no `X-Tachi-Rate-Limit-Session` header, derived from its resolved
 /// agent identity, client label, and canonical bound project. Returns `None`
-/// when all three are absent, leaving the per-request key in place. The key is
+/// when the request asserts no AgentIdentity (a client label or project alone
+/// is shared across instances), leaving the per-request key in place. The key is
 /// a digest so the bucket id stays opaque (it also appears in lifecycle events)
 /// and cannot collide with the `client:` namespace.
 fn modern_identity_rate_limit_session_id(

@@ -49,11 +49,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **Loop/stuck detection for stdio-proxied and modern HTTP peers**: the stdio proxy opened a fresh daemon MCP session per tool call and modern `2026-07-28` requests got a fresh rate-limit key per request, so the repeat-call warning and the burst `Loop detected` block never fired on the default Claude Code/Cursor path. The proxy now mints one key per connection and sends it as the header-only `X-Tachi-Rate-Limit-Session`; modern peers that assert an AgentIdentity share a bucket derived from it. The header only selects a rate-limit bucket and grants no identity, profile, project, or authority. Repeated identical polling through the proxy is now subject to the same burst limits as legacy direct sessions (audit C1).
+- **Loop/stuck detection for stdio-proxied and identity-asserting modern HTTP peers**: the stdio proxy opened a fresh daemon MCP session per tool call and modern `2026-07-28` requests got a fresh rate-limit key per request, so the repeat-call warning and the burst `Loop detected` block never fired on the default Claude Code/Cursor path. The proxy now mints one key per connection and sends it as the header-only `X-Tachi-Rate-Limit-Session`; modern peers that assert an AgentIdentity share a bucket derived from it (peers asserting the same identity, client and project share one bucket; modern peers with neither the header nor an AgentIdentity keep a per-request bucket). The header only selects a rate-limit bucket and grants no identity, profile, project, or authority. Repeated identical polling through the proxy is now subject to the same burst limits as legacy direct sessions (audit C1).
 
 ### Removed
 
-- Post-2.0 cleanup: dead Kanban card handlers, the `tachi_task` brief handler, unreachable retired-alias arms, unused dependencies and public API, duplicated tests compiled into `tachi-server`, and broken one-off scripts (`scripts/validate_schema.py`, `scripts/backfill_gemini_cli.py`, `scripts/test_memory_server.py`). The provenance `build.rs` no longer reruns on every build in git worktrees.
+- Post-2.0 cleanup: dead Kanban card handlers, the `tachi_task` brief handler, unreachable retired-alias arms, unused dependencies and public API, duplicated tests compiled into `tachi-server`, and stale or broken one-off scripts (`scripts/validate_schema.py`, `scripts/backfill_gemini_cli.py`, `scripts/test_memory_server.py`). The provenance `build.rs` no longer reruns on every build in git worktrees.
 
 ## [2.0.0] - 2026-09-25
 

@@ -43,7 +43,8 @@ Binding rules:
 Constants live in `crates/tachi-server/src/session_identity.rs`, which is the
 authoritative list of `x-tachi-*` headers and their `_meta` twins (for example
 `x-tachi-project` / `tachiProject`, `x-tachi-profile` / `tachiProfile`,
-`x-tachi-client` / `tachiClient`, plus dotted aliases). Header-only values such
+`x-tachi-client` / `tachiClient`). The dotted `_meta` aliases (`tachi.project`
+and friends) are read in `server_handler.rs::request_identity`. Header-only values such
 as `x-tachi-rate-limit-session` are described in
 [`http-direct-connect.md`](./http-direct-connect.md).
 
