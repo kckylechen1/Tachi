@@ -69,11 +69,29 @@ else, so a mislabeled host can never fake green. It also prints
   install `nextest@0.9.140` through the pinned `taiki-e/install-action` with
   `checksum: true` and `fallback: none` (no source build), and
   `validate_action_pins.rb` audits that tool at exactly three uses (`ci.yml`
-  `rust` plus the two C2 jobs). A following `Verify resolved cargo-nextest is
-  the audited install` step fails the job (exit 6) unless `cargo nextest
-  --version` reports `cargo-nextest 0.9.140`, and every nextest step is gated
-  on it: the installer's checksum only covers the binary it extracted, not a
-  different `cargo-nextest` that `cargo nextest` may resolve first.
+  `rust` plus the two C2 jobs). The installer's checksum covers only the file
+  it extracts, so a following `Verify resolved cargo-nextest is the audited
+  install` step checks which executable will run, and every nextest step is
+  gated on its success. It fails the job with exit 6 unless all three hold:
+  1. `${CARGO_HOME:-$HOME/.cargo}/bin/cargo-nextest` does not exist. The
+     Cargo book: "Cargo defaults to prioritizing external tools in
+     $CARGO_HOME/bin over $PATH. Users can override this precedence by adding
+     $CARGO_HOME/bin to $PATH"
+     ([Custom subcommands](https://doc.rust-lang.org/cargo/reference/external-tools.html#custom-subcommands)).
+  2. `realpath -e "$(type -P cargo-nextest)"` equals
+     `realpath -e "$HOME/.install-action/bin/cargo-nextest"`, the file the
+     pinned installer extracts (its `main.sh` uses `~/.install-action/bin`
+     whenever the resolved `cargo` is not under `$CARGO_HOME/bin`, which is
+     the case after `Setup Rust`).
+  3. The first line of `cargo nextest --version` is exactly
+     `cargo-nextest 0.9.140` (optionally followed by a space and build info).
+
+  Together these assert that nothing in `$CARGO_HOME/bin` can win Cargo's
+  lookup and that the PATH lookup resolves to the extracted file reporting
+  the audited version. They do not re-hash the file after extraction, and
+  they do not pin later steps to an absolute path. The asserts are only as
+  current as the step, so no step between it and the nextest steps may change
+  `PATH` or `CARGO_HOME`.
 - **Not** a release/publish lane: no publication or provider secrets;
   `GITHUB_TOKEN` only, workflow-level `permissions: contents: read`.
 - **Not** the C1 runner: distinct label; jobs cannot land on
@@ -316,17 +334,19 @@ unit with `User=gha`, or a user unit with linger) in the activation receipt.
   where `cargo-nextest` lands (run 36224766153 logs
   `adding '/home/gha/.install-action/bin' to PATH`). Same accounting as C1's
   runbook otherwise.
-- `~/.cargo/bin` should not hold its own `cargo-nextest`. `atom-dgx-2` has
-  an unaudited `cargo-nextest 0.9.146` there. The installer appends its own
-  bin directory to the end of `PATH` for its post-install lookup, so its
-  `installed at` line names that stray binary (runs 36226017929 and
-  36226640312). Later steps get `~/.install-action/bin` prepended through
-  `GITHUB_PATH`: in run 36226640312 the version guard shows `cargo nextest`
-  resolving to `/home/gha/.install-action/bin/cargo-nextest`, version
-  `0.9.140`, in both jobs. The guard keeps that true by construction: if the
-  stray ever wins, the job fails (exit 6). Remove
-  `~gha/.cargo/bin/cargo-nextest` from the host, and never relax the guard.
-  Host check: `ls -l ~/.cargo/bin/cargo-nextest` should report no such file.
+- `~/.cargo/bin` must not hold its own `cargo-nextest`: assert 1 above fails
+  both jobs (exit 6) while one exists. `atom-dgx-2` has an unaudited
+  `cargo-nextest 0.9.146` there. The installer appends its own bin directory
+  to the end of `PATH` for its post-install lookup, so its `installed at`
+  line names that stray binary (runs 36226017929 and 36226640312). In run
+  36226640312, `PATH` resolved `cargo-nextest` to
+  `/home/gha/.install-action/bin/cargo-nextest`, version `0.9.140`, in both
+  jobs. That is consistent with `~/.cargo/bin` being on the service `PATH`
+  (the `.path` requirement under Runner registration) behind `GITHUB_PATH`'s
+  prepended entries, which is the Cargo override quoted above; it was not
+  read directly from the service. The fix is an owner act on the host:
+  remove `~gha/.cargo/bin/cargo-nextest`. Never relax the guard. Host check:
+  `ls -l ~/.cargo/bin/cargo-nextest` should report no such file.
 
 ## Queue hygiene before first activation
 

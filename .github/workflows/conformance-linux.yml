@@ -165,23 +165,47 @@ jobs:
 
       - name: Verify resolved cargo-nextest is the audited install
         id: nextest_verify
-        # The installer extracts the checksum-verified binary to
-        # ~/.install-action/bin (cargo resolves to the toolchain dir, not
-        # ~/.cargo/bin), but a cargo-nextest already present elsewhere, e.g.
-        # ~/.cargo/bin, can be the one `cargo nextest` actually runs. Fail
-        # closed unless the resolved subcommand is the audited version (keep
-        # in sync with `tool:` above).
+        # Proves which executable runs, not just what it reports. Three
+        # fail-closed asserts, all exit 6:
+        # (1) no cargo-nextest in ${CARGO_HOME:-~/.cargo}/bin. The Cargo book
+        #     (reference/external-tools.html#custom-subcommands): "Cargo
+        #     defaults to prioritizing external tools in $CARGO_HOME/bin
+        #     over $PATH. Users can override this precedence by adding
+        #     $CARGO_HOME/bin to $PATH." A binary there can win regardless
+        #     of the PATH checked below.
+        # (2) the cargo-nextest that PATH resolves is, after realpath, the
+        #     file the pinned installer extracted: ~/.install-action/bin
+        #     (taiki-e/install-action main.sh at the pinned SHA, lines 641 and
+        #     658-663: used whenever the resolved cargo is not under
+        #     $CARGO_HOME/bin, as after Setup Rust; the C2 logs show
+        #     "adding '/home/gha/.install-action/bin' to PATH").
+        # (3) `cargo nextest --version` is exactly the audited version (keep
+        #     in sync with `tool:` above).
         if: ${{ !cancelled() && steps.nextest_install.outcome == 'success' }}
         run: |
           set -euo pipefail
-          echo "cargo-nextest on PATH: $(type -P cargo-nextest || echo none)"
+          prebuilt_dir="$HOME/.install-action/bin"
+          home_bin="${CARGO_HOME:-$HOME/.cargo}/bin"
+          resolved="$(type -P cargo-nextest || true)"
+          echo "cargo-nextest on PATH: ${resolved:-none}"
+          echo "expected: ${prebuilt_dir}/cargo-nextest"
+          if [ -e "${home_bin}/cargo-nextest" ]; then
+            echo "::error::${home_bin}/cargo-nextest exists; Cargo may run it for cargo nextest ahead of PATH. Remove it from the runner host (docs/engineering/operations/conformance-runner.md)." >&2
+            exit 6
+          fi
+          resolved_real="$(realpath -e "${resolved:-/nonexistent}" 2>/dev/null || true)"
+          expected_real="$(realpath -e "${prebuilt_dir}/cargo-nextest" 2>/dev/null || true)"
+          if [ -z "${resolved_real}" ] || [ -z "${expected_real}" ] || [ "${resolved_real}" != "${expected_real}" ]; then
+            echo "::error::cargo-nextest resolves to '${resolved_real:-none}', not the checksum-verified binary '${expected_real:-missing}'." >&2
+            exit 6
+          fi
           version_out="$(cargo nextest --version)"
           read -r first_line <<<"${version_out}"
           echo "cargo nextest --version: ${first_line}"
           case "${first_line}" in
             "cargo-nextest 0.9.140"|"cargo-nextest 0.9.140 "*) ;;
             *)
-              echo "::error::cargo nextest resolves to '${first_line}', not the audited cargo-nextest 0.9.140. Remove the stray binary from the runner host (docs/engineering/operations/conformance-runner.md)." >&2
+              echo "::error::cargo nextest reports '${first_line}', not the audited cargo-nextest 0.9.140. Remove the stray binary from the runner host (docs/engineering/operations/conformance-runner.md)." >&2
               exit 6
               ;;
           esac
@@ -298,18 +322,32 @@ jobs:
 
       - name: Verify resolved cargo-nextest is the audited install
         id: nextest_verify
-        # Same fail-closed check as rust-gate (see there).
+        # Same three fail-closed asserts as rust-gate (see there).
         if: ${{ !cancelled() && steps.nextest_install.outcome == 'success' }}
         run: |
           set -euo pipefail
-          echo "cargo-nextest on PATH: $(type -P cargo-nextest || echo none)"
+          prebuilt_dir="$HOME/.install-action/bin"
+          home_bin="${CARGO_HOME:-$HOME/.cargo}/bin"
+          resolved="$(type -P cargo-nextest || true)"
+          echo "cargo-nextest on PATH: ${resolved:-none}"
+          echo "expected: ${prebuilt_dir}/cargo-nextest"
+          if [ -e "${home_bin}/cargo-nextest" ]; then
+            echo "::error::${home_bin}/cargo-nextest exists; Cargo may run it for cargo nextest ahead of PATH. Remove it from the runner host (docs/engineering/operations/conformance-runner.md)." >&2
+            exit 6
+          fi
+          resolved_real="$(realpath -e "${resolved:-/nonexistent}" 2>/dev/null || true)"
+          expected_real="$(realpath -e "${prebuilt_dir}/cargo-nextest" 2>/dev/null || true)"
+          if [ -z "${resolved_real}" ] || [ -z "${expected_real}" ] || [ "${resolved_real}" != "${expected_real}" ]; then
+            echo "::error::cargo-nextest resolves to '${resolved_real:-none}', not the checksum-verified binary '${expected_real:-missing}'." >&2
+            exit 6
+          fi
           version_out="$(cargo nextest --version)"
           read -r first_line <<<"${version_out}"
           echo "cargo nextest --version: ${first_line}"
           case "${first_line}" in
             "cargo-nextest 0.9.140"|"cargo-nextest 0.9.140 "*) ;;
             *)
-              echo "::error::cargo nextest resolves to '${first_line}', not the audited cargo-nextest 0.9.140. Remove the stray binary from the runner host (docs/engineering/operations/conformance-runner.md)." >&2
+              echo "::error::cargo nextest reports '${first_line}', not the audited cargo-nextest 0.9.140. Remove the stray binary from the runner host (docs/engineering/operations/conformance-runner.md)." >&2
               exit 6
               ;;
           esac
