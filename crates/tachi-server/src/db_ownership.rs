@@ -570,6 +570,44 @@ mod tests {
         }
     }
 
+    /// Byte-for-byte stderr of lsof 4.95.0 on atom-dgx-2 run as the CI user
+    /// `gha` (tachi#1978 follow-up: the desktop owner's portal mount).
+    const GHA_TRACEFS_AND_PORTAL: &[u8] = b"lsof: WARNING: can't stat() tracefs file system /sys/kernel/debug/tracing\n      Output information may be incomplete.\nlsof: WARNING: can't stat() fuse.portal file system /run/user/1000/doc\n      Output information may be incomplete.\n";
+
+    fn portal_pair_for(mount: &Path) -> Vec<u8> {
+        let mut bytes = b"lsof: WARNING: can't stat() fuse.portal file system ".to_vec();
+        bytes.extend_from_slice(mount.as_os_str().as_encoded_bytes());
+        bytes.extend_from_slice(b"\n      Output information may be incomplete.\n");
+        bytes
+    }
+
+    #[test]
+    fn stub_portal_pair_is_dropped_only_when_disjoint_and_paired() {
+        let (dir, db) = fixture_db();
+        let stub = StubLsof::new();
+        let result = stub.probe("gha", &db, b"", GHA_TRACEFS_AND_PORTAL, 1);
+        if cfg!(target_os = "linux") {
+            assert_eq!(result, DbOwnership::NotOwned);
+        } else {
+            assert_unknown("gha", result);
+        }
+        let parent = dir.path().canonicalize().unwrap();
+        for (name, mount) in [
+            ("db-dir", parent.clone()),
+            ("ancestor", parent.parent().unwrap().to_path_buf()),
+            ("same", db.canonicalize().unwrap()),
+        ] {
+            let mut stderr = LINUX_TRACEFS_WARNING.to_vec();
+            stderr.extend_from_slice(&portal_pair_for(&mount));
+            assert_unknown(name, stub.probe(name, &db, b"", &stderr, 1));
+        }
+        let mut lone = LINUX_TRACEFS_WARNING.to_vec();
+        lone.extend_from_slice(
+            b"lsof: WARNING: can't stat() fuse.portal file system /run/user/1000/doc\n",
+        );
+        assert_unknown("lone", stub.probe("lone", &db, b"", &lone, 1));
+    }
+
     /// Round-1 finding 3: only the observed tracefs pair is accepted.
     #[test]
     fn stub_other_file_systems_and_lone_warning_lines_stay_unknown() {
