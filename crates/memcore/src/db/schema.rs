@@ -3385,6 +3385,21 @@ const SYMBOLIC_FTS_BACKFILL_MISSING_SQL: &str = r#"INSERT INTO memories_symbolic
    WHERE m.id IS NOT NULL
      AND m.id NOT IN (SELECT id FROM memories_symbolic_fts WHERE id IS NOT NULL)"#;
 
+// Orphan pass, the delete side of the same drift repair (tachi#1993).
+// `memories.id` is `TEXT PRIMARY KEY` without NOT NULL, so the subquery must
+// skip NULL ids: one NULL makes `x NOT IN (..., NULL)` NULL for every x and
+// nothing would be pruned. A NULL-id projection row is always an orphan: the
+// insert side above never projects a NULL-id memory, and every search leg joins
+// `m.id = <fts>.id`, which never matches NULL. `NULL NOT IN (<non-empty>)` is
+// NULL, so it needs the explicit `id IS NULL` arm.
+const FTS_DELETE_ORPHANS_SQL: &str = r#"DELETE FROM memories_fts
+   WHERE id IS NULL
+      OR id NOT IN (SELECT id FROM memories WHERE id IS NOT NULL)"#;
+
+const SYMBOLIC_FTS_DELETE_ORPHANS_SQL: &str = r#"DELETE FROM memories_symbolic_fts
+   WHERE id IS NULL
+      OR id NOT IN (SELECT id FROM memories WHERE id IS NOT NULL)"#;
+
 fn ensure_fts_backfilled(conn: &Connection) -> Result<(), MemoryError> {
     // (The stray `vault_entries.allowed_agents` ensure_column that used to sit
     // here moved to `init_product_schema_columns` in #1585 D3: it is a product
@@ -3396,10 +3411,7 @@ fn ensure_fts_backfilled(conn: &Connection) -> Result<(), MemoryError> {
         return Ok(());
     }
 
-    let mut projection_changes = conn.execute(
-        "DELETE FROM memories_fts WHERE id NOT IN (SELECT id FROM memories)",
-        [],
-    )?;
+    let mut projection_changes = conn.execute(FTS_DELETE_ORPHANS_SQL, [])?;
 
     projection_changes += conn.execute(FTS_BACKFILL_MISSING_SQL, [])?;
 
@@ -3415,10 +3427,7 @@ fn ensure_fts_backfilled(conn: &Connection) -> Result<(), MemoryError> {
         )
         .unwrap_or(false);
     if symbolic_fts_present {
-        projection_changes += conn.execute(
-            "DELETE FROM memories_symbolic_fts WHERE id NOT IN (SELECT id FROM memories)",
-            [],
-        )?;
+        projection_changes += conn.execute(SYMBOLIC_FTS_DELETE_ORPHANS_SQL, [])?;
         projection_changes += conn.execute(SYMBOLIC_FTS_BACKFILL_MISSING_SQL, [])?;
     }
 

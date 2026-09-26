@@ -143,7 +143,12 @@ fn backfill_statements_plan_without_correlated_subquery() {
         "probe must discriminate: legacy NOT EXISTS plan was {legacy:?}"
     );
 
-    for sql in [FTS_BACKFILL_MISSING_SQL, SYMBOLIC_FTS_BACKFILL_MISSING_SQL] {
+    for sql in [
+        FTS_BACKFILL_MISSING_SQL,
+        SYMBOLIC_FTS_BACKFILL_MISSING_SQL,
+        FTS_DELETE_ORPHANS_SQL,
+        SYMBOLIC_FTS_DELETE_ORPHANS_SQL,
+    ] {
         let plan = query_plan(&conn, sql);
         assert!(!plan.is_empty(), "empty plan for {sql}");
         assert!(
@@ -286,6 +291,148 @@ fn null_id_projection_row_does_not_suppress_repair() {
             2,
             "{table}: real rows repaired exactly once"
         );
+    }
+    assert_eq!(generation(&conn), generation_before + 1);
+}
+
+/// Seed projection rows with the given ids (`None` = NULL) into `table`,
+/// each pointing at no memory.
+fn seed_projection_rows(conn: &Connection, table: &str, ids: &[Option<&str>]) {
+    let sql = if table == "memories_symbolic_fts" {
+        "INSERT INTO memories_symbolic_fts (id, path, summary, text, keywords, entities, topic)
+             VALUES (?1, '/orphan', '', 'orphan', '', '', '')"
+    } else {
+        "INSERT INTO memories_fts (id, path, summary, text, keywords, entities)
+             VALUES (?1, '/orphan', '', 'orphan', '', '')"
+    };
+    for id in ids {
+        conn.execute(sql, params![id])
+            .expect("seed orphan projection row");
+    }
+}
+
+const KEEPER_SENTINEL: &str = "keeper projection row, never rewritten";
+
+/// Mark the live `keep` projection row so the test can tell "kept" from
+/// "deleted, then re-projected by the insert-missing pass": a re-projection
+/// writes `memories.text`, not this sentinel.
+fn mark_keeper(conn: &Connection, table: &str) {
+    let changed = conn
+        .execute(
+            &format!("UPDATE {table} SET text = ?1 WHERE id = 'keep'"),
+            params![KEEPER_SENTINEL],
+        )
+        .expect("mark keeper projection row");
+    assert_eq!(changed, 1, "{table}: exactly one keeper row");
+}
+
+fn assert_keeper_kept(conn: &Connection, table: &str) {
+    let text: String = conn
+        .query_row(
+            &format!("SELECT text FROM {table} WHERE id = 'keep'"),
+            [],
+            |r| r.get(0),
+        )
+        .expect("keeper projection row present");
+    assert_eq!(
+        text, KEEPER_SENTINEL,
+        "{table}: the live row must be kept, not deleted and re-projected"
+    );
+}
+
+/// tachi#1993: the orphan pass must still prune `table` while a NULL-id
+/// memory exists, must drop NULL-id projection rows, and must keep the live
+/// row. Without `WHERE id IS NOT NULL` in the subquery, `id NOT IN (..., NULL)`
+/// is NULL for every FTS row, so neither the orphan nor the NULL-id row goes.
+fn assert_orphans_pruned_despite_null_memory_id(table: &str, other: &str) {
+    let conn = fresh_conn();
+    insert_memory(&conn, None, "null id memory");
+    insert_memory(&conn, Some("keep"), "live row");
+    project_all(&conn);
+    mark_keeper(&conn, table);
+    mark_keeper(&conn, other);
+    seed_projection_rows(&conn, table, &[Some("ghost"), None]);
+    assert_eq!(
+        count(&conn, "SELECT COUNT(*) FROM memories WHERE id IS NULL"),
+        1,
+        "fixture must hold a NULL-id memory"
+    );
+    assert_eq!(
+        fts_ids(&conn, table),
+        vec![None, Some("ghost".into()), Some("keep".into())],
+        "{table}: fixture holds a NULL-id row, an orphan, and the keeper"
+    );
+    let generation_before = generation(&conn);
+
+    ensure_fts_backfilled(&conn).expect("prune orphans despite a NULL memories.id");
+
+    assert_eq!(
+        fts_ids(&conn, table),
+        vec![Some("keep".into())],
+        "{table}: orphan and NULL-id rows pruned, the live row kept"
+    );
+    assert_eq!(
+        fts_ids(&conn, other),
+        vec![Some("keep".into())],
+        "{other}: the unpoisoned projection is left as it was"
+    );
+    assert_keeper_kept(&conn, table);
+    assert_keeper_kept(&conn, other);
+    assert_eq!(
+        count(&conn, "SELECT COUNT(*) FROM memories"),
+        2,
+        "the orphan pass never deletes memories, NULL-id ones included"
+    );
+    assert_eq!(generation(&conn), generation_before + 1);
+
+    // Converged: the NULL-id memory is not re-projected, so the next open
+    // neither re-deletes a NULL-id row nor bumps the generation.
+    ensure_fts_backfilled(&conn).expect("second pass");
+    assert_eq!(fts_ids(&conn, table), vec![Some("keep".into())]);
+    assert_eq!(fts_ids(&conn, other), vec![Some("keep".into())]);
+    assert_eq!(generation(&conn), generation_before + 1);
+}
+
+#[test]
+fn orphan_fts_rows_pruned_despite_null_memory_id() {
+    assert_orphans_pruned_despite_null_memory_id("memories_fts", "memories_symbolic_fts");
+}
+
+#[test]
+fn orphan_symbolic_fts_rows_pruned_despite_null_memory_id() {
+    assert_orphans_pruned_despite_null_memory_id("memories_symbolic_fts", "memories_fts");
+}
+
+/// tachi#1993: a NULL-id projection row is an orphan even when no memory has
+/// a NULL id. Every search leg joins `m.id = <fts>.id`, which never matches
+/// NULL, so such a row is unreachable and only skews BM25 corpus statistics.
+/// The subquery guard alone does not remove it (`NULL NOT IN (<non-empty>)`
+/// is NULL); that takes the explicit `id IS NULL` arm.
+#[test]
+fn null_id_projection_rows_are_pruned() {
+    let conn = fresh_conn();
+    insert_memory(&conn, Some("keep"), "live row");
+    project_all(&conn);
+    for table in ["memories_fts", "memories_symbolic_fts"] {
+        mark_keeper(&conn, table);
+        seed_projection_rows(&conn, table, &[None]);
+        assert_eq!(
+            fts_ids(&conn, table),
+            vec![None, Some("keep".into())],
+            "{table}: fixture holds a NULL-id row and the keeper"
+        );
+    }
+    let generation_before = generation(&conn);
+
+    ensure_fts_backfilled(&conn).expect("prune NULL-id projection rows");
+
+    for table in ["memories_fts", "memories_symbolic_fts"] {
+        assert_eq!(
+            fts_ids(&conn, table),
+            vec![Some("keep".into())],
+            "{table}: NULL-id row pruned, the live row kept"
+        );
+        assert_keeper_kept(&conn, table);
     }
     assert_eq!(generation(&conn), generation_before + 1);
 }
