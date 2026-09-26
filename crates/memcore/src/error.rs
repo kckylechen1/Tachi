@@ -376,6 +376,24 @@ pub enum MemoryError {
     #[error("delivery idempotency conflict: {0}")]
     DeliveryIdempotencyConflict(String),
 
+    /// The open funnel's pre-transaction preflight and its authoritative
+    /// in-transaction re-evaluation saw different schema versions, and the
+    /// in-transaction state is a migration. The pre-migration backup (#1180)
+    /// was taken, or skipped, for the preflight state, so migrating now would
+    /// run without a backup of the state being migrated. The transaction is
+    /// rolled back untouched; retrying the open backs up the current state.
+    #[error(
+        "schema version of {db_path} changed from {preflight} to {current} while this open was \
+         in progress, and the new state needs a migration. The pre-migration backup was taken \
+         for the earlier state, so the open refuses rather than migrate without one \
+         (kckylechen1/Sigil#1180). Retry the open."
+    )]
+    SchemaChangedDuringOpen {
+        preflight: u32,
+        current: u32,
+        db_path: String,
+    },
+
     /// #1119: a process carrying [`crate::db::MigrationAuthority::Deny`] tried
     /// to open an EXISTING DB stamped below this kernel's
     /// `EXPECTED_SCHEMA_VERSION` (or a `CreateFresh` provisioning call landed
