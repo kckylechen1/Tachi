@@ -176,6 +176,13 @@ in `band` it is never written.
      the same object validators it runs at `s == E` today, applied to the
      sentinel set `relevant(P) ≤ π_P(E)` plus every `Product` sentinel with
      index `≤ min(s, PORTABLE_COMPAT_FLOOR)`.
+     - **Amended by #1995:** R5.2a also runs the current-store presence
+       check in [`current-store-admission.md`](./current-store-admission.md).
+       Before any maintenance, every baseline object not on the derived
+       allowlist must be present. R5.2b alone cannot catch a dropped state
+       table, because `CREATE TABLE IF NOT EXISTS` recreates it empty and
+       the empty table passes a shape check. The two specs share one object
+       inventory.
      - For a `P@39` input this is exactly today's check, so today's error and
        its precedence are unchanged. That includes today's conditional
        Product branch, which runs the A2A, mirror-eval identity,
