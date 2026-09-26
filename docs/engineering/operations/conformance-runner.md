@@ -48,9 +48,10 @@ else, so a mislabeled host can never fake green. It also prints
     JUnit archive (`nextest-junit-report-linux-c2`), portable-kernel feature
     boundary, doc tests. **Cargo audit is intentionally not duplicated**: it
     audits `Cargo.lock` (platform-independent) and the audited supply-chain
-    policy (`validate_action_pins.rb`) pins the `cargo install cargo-audit`
-    count at exactly one across all workflows; the RustSec audit keeps running
-    in the `ci.yml` canonical lane.
+    policy (`validate_action_pins.rb`) admits the prebuilt `cargo-audit@0.22.2`
+    install (`taiki-e/install-action`, `checksum: true`, `fallback: none`) at
+    exactly one use across all workflows and rejects any `cargo install`; the
+    RustSec audit keeps running in the `ci.yml` canonical lane.
   - `linux-platform` — the #1877 inventory as named nextest filters, **one
     step per filter, each with `--no-tests=fail`**, and every filter step runs
     even if an earlier one failed. A filter that matches zero tests (renamed
@@ -64,6 +65,11 @@ else, so a mislabeled host can never fake green. It also prints
     | renameat2 receipt legs | `tachi-server` | `repair::receipt::tests` |
     | renameat2 atomic-exchange legs | `tachi-server` | `sticky_cutover` |
 
+- **Tool installs follow the same supply policy as `ci.yml`**: both jobs
+  install `nextest@0.9.140` through the pinned `taiki-e/install-action` with
+  `checksum: true` and `fallback: none` (no source build), and
+  `validate_action_pins.rb` audits that tool at exactly three uses (`ci.yml`
+  `rust` plus the two C2 jobs).
 - **Not** a release/publish lane: no publication or provider secrets;
   `GITHUB_TOKEN` only, workflow-level `permissions: contents: read`.
 - **Not** the C1 runner: distinct label; jobs cannot land on
@@ -87,9 +93,13 @@ contract carries over verbatim: the guard is trustworthy only while repository
 write access is owner-only — **stop the runner before making the repo public
 or adding collaborators**.
 
-Host-side, the runner process runs as `gha` without sudo, so a job can write
-only to `gha`'s home, the runner work root, and world-writable temp space. It
-cannot install packages, change system services, or read other users' files.
+Host-side, the runner process runs as `gha` without sudo: a job cannot install
+system packages or change system services, and it can write only where `gha`
+can write (its home, the runner work root, world-writable temp space). No-sudo
+is **not** filesystem isolation. A job has `gha`'s full read access, so it can
+read other users' world-readable files (for example mode `0644` under
+traversable directories) and anything readable through `gha`'s groups. Keep
+anything sensitive on this host out of world- and group-readable paths.
 
 ## Prerequisite receipt (verified before installation, #1975)
 
@@ -111,13 +121,19 @@ repeats this procedure and appends a row to the activation receipt; never pipe
 a remote installer into a shell.
 
 The jobs also need `git`, `python3`, `lsof`, a C toolchain, and `pkg-config`
-(native build scripts in the workspace). `gha` has no sudo, so any missing
-system package is an owner act from an administrative account, never
-something a job or the runner user installs. Verify as `gha` before the
-first smoke:
+(native build scripts in the workspace), plus `jq`, `curl`, and `tar` for the
+pinned `taiki-e/install-action`: when any of those three is missing from
+`PATH`, that installer falls back to a package-manager install, which the
+`gha` user cannot and must not perform. Both jobs therefore run an
+`Installer prerequisites (jq, curl, tar)` step before `Setup Rust` that fails
+the job (exit 5) naming the missing tools, and the nextest install is gated on
+that step's success. `gha` has no sudo, so any missing system package is an
+owner act from an administrative account, never something a job or the
+runner user installs. On `atom-dgx-2` they resolve to `/usr/bin/jq`,
+`/usr/bin/curl`, and `/usr/bin/tar`. Verify as `gha` before the first smoke:
 
 ```bash
-for tool in pwsh rustup git python3 lsof cc pkg-config; do
+for tool in pwsh rustup git python3 lsof cc pkg-config jq curl tar; do
   printf '%s: ' "$tool"; command -v "$tool" || echo MISSING
 done
 pwsh -NoProfile -Command '$PSVersionTable.PSVersion.ToString()'
@@ -158,6 +174,8 @@ environment):
   `${RUNNER_ROOT:-$HOME/runner-tachi}/_work`. Unless the runner is installed
   at `~gha/runner-tachi`, this line is **required**: without it both C2 jobs
   fail closed at preflight (exit 8) instead of wiping an unverified tree.
+  A `CARGO_TARGET_DIR` set here (or anywhere in the service environment) has
+  no effect on these jobs: each job sets its own (see Disk watermarks).
 
 - `<runner-root>/.path` (the service PATH): must contain the directories
   holding `pwsh`, `rustup`/`cargo` (`/home/gha/.cargo/bin`), and the system
@@ -176,12 +194,31 @@ unit with `User=gha`, or a user unit with linger) in the activation receipt.
   registration + smoke) applies to the volume backing `<runner-root>/_work`.
   On this native host there is no VM layer: the job's `df` sees the real
   backing store (3.5 TB free at provisioning).
-- Workspace/target storage is per-job ephemeral: `runner_hygiene.sh cleanup`
-  wipes the workspace on every exit path. The same hygiene script C1 uses runs
-  unchanged on Linux (pure bash + `df`/`find`/`lsof`/`pgrep`).
+- Target storage lives inside the job workspace by construction: both jobs
+  set `CARGO_TARGET_DIR: ${{ github.workspace }}/target` in their job `env`,
+  which overrides any `CARGO_TARGET_DIR` inherited from the runner service
+  environment, and the JUnit archive reads `target/nextest/ci/junit.xml` from
+  that same directory. `runner_hygiene.sh preflight` removes a leftover
+  `target/` before the build, and the `if: always()` cleanup step wipes the
+  workspace contents whenever the runner reaches it. The same hygiene script
+  C1 uses runs unchanged on Linux (pure bash + `df`/`find`/`lsof`/`pgrep`).
+- What this does **not** guarantee: cleanup performs no stray-process scan.
+  Processes that outlive a cancelled or timed-out step are handled only at the
+  next job's preflight, which kills processes whose cwd is under the workspace
+  and merely lists (as a warning) ones that reference it in argv from
+  elsewhere. If the runner never reaches the cleanup step (runner or host
+  crash), the workspace and its `target/` remain until the next job's
+  preflight.
 - Bounded outside-workspace caches under `gha`: `~/.rustup`, `~/.cargo`
   (prune `~/.cargo/registry/cache/*` if it grows past a few GB),
-  `<runner-root>/_work/_tool`. Same accounting as C1's runbook.
+  `<runner-root>/_work/_tool`, and the nextest installer's state
+  `~/.install-action/` (`bin/` holds `cargo-nextest`, `tmp/` is removed after
+  each install). The installer puts binaries in `~/.install-action/bin`
+  whenever the `cargo` it resolves is not under `~/.cargo/bin`; `Setup Rust`
+  puts the toolchain's own `bin` first on `PATH`, so on this host that is
+  where `cargo-nextest` lands (run 36224766153 logs
+  `adding '/home/gha/.install-action/bin' to PATH`). Same accounting as C1's
+  runbook otherwise.
 
 ## Queue hygiene before first activation
 
@@ -239,4 +276,5 @@ cd <runner-root>
 
 Preserve any required receipts before deleting `<runner-root>`. The workflow
 file reverts with its merge commit; nothing else is runner-owned outside
-`<runner-root>` and `gha`'s toolchain caches.
+`<runner-root>`, `gha`'s toolchain caches (`~/.rustup`, `~/.cargo`), and the
+installer state `~/.install-action/`.

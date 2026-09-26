@@ -17,15 +17,18 @@ name: Linux platform conformance (C2)
 #
 # Cargo audit is deliberately NOT duplicated here: it audits Cargo.lock
 # (platform-independent) and the audited supply-chain policy
-# (.github/scripts/validate_action_pins.rb) pins its install count at exactly
-# one occurrence across all workflows. The RustSec audit continues to run in
-# the ci.yml canonical lane.
+# (.github/scripts/validate_action_pins.rb) admits the prebuilt
+# `cargo-audit@0.22.2` install at exactly one use across all workflows. The
+# RustSec audit continues to run in the ci.yml canonical lane. Both jobs here
+# install `nextest@0.9.140` with the same audited inputs as ci.yml (checksum
+# on, no source fallback); the policy counts those uses.
 #
 # Runner host prerequisites (docs/engineering/operations/conformance-runner.md):
 # Linux aarch64 (or x86_64) host with rustup, pwsh (the setup-rust
-# composite), lsof, python3, git; the runner runs as the unprivileged `gha`
-# user, and its `.env` must set RUNNER_ROOT to the runner install directory
-# so runner_hygiene.sh will operate (it refuses otherwise).
+# composite), lsof, python3, git, and jq/curl/tar for the nextest installer;
+# the runner runs as the unprivileged `gha` user, and its `.env` must set
+# RUNNER_ROOT to the runner install directory so runner_hygiene.sh will
+# operate (it refuses otherwise).
 
 on:
   pull_request:
@@ -60,6 +63,12 @@ jobs:
       github.triggering_actor == github.repository_owner)
     runs-on: [self-hosted, Linux, ARM64, tachi-conformance]
     timeout-minutes: 60
+    env:
+      # Target storage inside the job workspace by construction: overrides any
+      # service-level CARGO_TARGET_DIR, so builds land where runner_hygiene.sh
+      # removes them and where the JUnit archive below reads them
+      # (target/nextest/ci/junit.xml is this path, workspace-relative).
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
 
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
@@ -83,6 +92,28 @@ jobs:
             aarch64|x86_64) ;;
             *) echo "::error::C2 lane must run on aarch64 or x86_64 (uname -m: $(uname -m))" >&2; exit 4 ;;
           esac
+
+      - name: Installer prerequisites (jq, curl, tar)
+        id: installer_prereqs
+        # The pinned taiki-e/install-action falls back to a package-manager
+        # install (apt-get, via sudo when present) whenever jq, curl or tar is
+        # missing from PATH. `gha` has no sudo and a job never installs system
+        # packages, so a missing tool fails here, loudly, before the installer
+        # can run. Same PATH lookup (`type -P`) as the installer.
+        run: |
+          set -euo pipefail
+          missing=""
+          for tool in jq curl tar; do
+            if tool_path="$(type -P "$tool")"; then
+              echo "$tool: $tool_path"
+            else
+              missing="$missing $tool"
+            fi
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::C2 runner is missing installer prerequisites:${missing}. Installing them is an owner act from an administrative account (docs/engineering/operations/conformance-runner.md); this job never installs system packages." >&2
+            exit 5
+          fi
 
       - name: Setup Rust
         id: rust_setup
@@ -119,10 +150,15 @@ jobs:
 
       - name: Install cargo-nextest
         id: nextest_install
-        if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' }}
-        # Same taiki-e pinned snapshot as ci.yml (get.nextest.rs may be
-        # DNS-blocked; taiki-e pulls a prebuilt binary from GitHub Releases).
+        if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' && steps.installer_prereqs.outcome == 'success' }}
+        # Same taiki-e pinned snapshot and audited inputs as ci.yml
+        # (get.nextest.rs may be DNS-blocked; taiki-e pulls a prebuilt binary
+        # from GitHub Releases). `fallback: none` forbids a source build.
         uses: taiki-e/install-action@c295c25a8d3df7288fa86db860a4f8062bf76ad8 # releases/nextest snapshot 2026-07-25
+        with:
+          tool: nextest@0.9.140
+          checksum: true
+          fallback: none
 
       - name: Run workspace tests
         id: workspace_tests
@@ -156,8 +192,9 @@ jobs:
         run: cargo test --workspace --locked --doc
 
       - name: Runner workspace cleanup
-        # #1865: per-job-ephemeral target storage; runs on every exit path,
-        # after the JUnit artifact upload above so the report survives.
+        # #1865: wipes the workspace (and with it CARGO_TARGET_DIR) whenever
+        # the runner reaches this step, after the JUnit artifact upload above
+        # so the report survives.
         if: always()
         shell: bash
         run: bash .github/scripts/runner_hygiene.sh cleanup
@@ -176,6 +213,9 @@ jobs:
       github.triggering_actor == github.repository_owner)
     runs-on: [self-hosted, Linux, ARM64, tachi-conformance]
     timeout-minutes: 45
+    env:
+      # Same per-job target storage as rust-gate (see there).
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
 
     # One step per #1877 inventory filter, each with --no-tests=fail: a
     # filter that matches zero tests (renamed or cfg'd-out test) fails its
@@ -199,14 +239,36 @@ jobs:
             *) echo "::error::C2 lane must run on aarch64 or x86_64 (uname -m: $(uname -m))" >&2; exit 4 ;;
           esac
 
+      - name: Installer prerequisites (jq, curl, tar)
+        id: installer_prereqs
+        # Same fail-fast check as rust-gate (see there).
+        run: |
+          set -euo pipefail
+          missing=""
+          for tool in jq curl tar; do
+            if tool_path="$(type -P "$tool")"; then
+              echo "$tool: $tool_path"
+            else
+              missing="$missing $tool"
+            fi
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::C2 runner is missing installer prerequisites:${missing}. Installing them is an owner act from an administrative account (docs/engineering/operations/conformance-runner.md); this job never installs system packages." >&2
+            exit 5
+          fi
+
       - name: Setup Rust
         id: rust_setup
         uses: ./.github/actions/setup-rust
 
       - name: Install cargo-nextest
         id: nextest_install
-        if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' && steps.installer_prereqs.outcome == 'success' }}
         uses: taiki-e/install-action@c295c25a8d3df7288fa86db860a4f8062bf76ad8 # releases/nextest snapshot 2026-07-25
+        with:
+          tool: nextest@0.9.140
+          checksum: true
+          fallback: none
 
       - name: Seccomp containment escape probe
         # #1877 gap closure: the parent installs the seccomp escape filter
