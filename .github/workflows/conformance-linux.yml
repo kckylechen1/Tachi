@@ -9,11 +9,14 @@ name: Linux platform conformance (C2)
 # claims ONLY the `tachi-conformance` runner class and never the C1
 # acceptance runner (`tachi-acceptance`).
 #
-# Trust boundary: identical fail-closed admission guard as ci.yml (owner
-# push/dispatch, or same-repo owner-authored PR; both actor fields required --
-# see the build-seat-setup guard rationale in ci.yml and the visibility
-# contract in docs/engineering/operations/acceptance-runner.md). No
-# release/publish/provider secrets: GITHUB_TOKEN only, contents: read.
+# Trust boundary: docs/engineering/operations/conformance-runner.md, section
+# "Trust boundary" (public repository; the fork-PR approval policy, owner-only
+# write access and owner review before approval are the controls, with their
+# inventory check). The job guards below are the same fail-closed admission
+# guard as ci.yml's build-seat-setup (owner push/dispatch, or same-repo
+# owner-authored PR; both actor fields required) and are defence in depth
+# only: a PR or pushed branch can edit them. No release/publish/provider
+# secrets: GITHUB_TOKEN only, contents: read.
 #
 # Cargo audit is deliberately NOT duplicated here: it audits Cargo.lock
 # (platform-independent) and the audited supply-chain policy

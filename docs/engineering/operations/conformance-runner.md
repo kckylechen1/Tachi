@@ -88,44 +88,104 @@ else, so a mislabeled host can never fake green. It also prints
 
 ## Trust boundary
 
-`kckylechen1/tachi` is a **public** repository, and a fork PR can change or
-add workflows that target this runner's labels. The runner's safety rests on
-three layers:
+`kckylechen1/tachi` is a **public** repository. Anyone can open a fork PR
+that changes or adds workflows targeting this runner's labels, and anyone
+with write access can push such workflows directly. Every job that reaches
+this runner executes as `gha` on the host.
 
-1. **Repository approval policy (primary control).** The fork-PR contributor
-   approval policy is `all_external_contributors`: every workflow run
-   triggered by a fork PR from an outside contributor waits for owner
-   approval before GitHub schedules it on any runner.
+GitHub's rules this section relies on are quoted from
+[Managing GitHub Actions settings for a repository — Controlling changes from
+forks to workflows in public repositories](https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/enabling-features-for-your-repository/managing-github-actions-settings-for-a-repository#controlling-changes-from-forks-to-workflows-in-public-repositories).
+
+### Controls
+
+1. **Fork-PR approval policy.** The repository setting is
+   `all_external_contributors`. It gates `pull_request` workflow runs from
+   forks, and only those:
+   - **Who needs approval:** "Both the pull request author and the actor of
+     the pull request event triggering the workflow will be checked to
+     determine if approval is required." Under this setting, "All users that
+     are not a member or owner of this repository and not a member of the
+     organization will require approval to run workflows." The repository
+     owner is exempt. The GitHub doc does not define "member" for a
+     user-owned repository, so treat every collaborator as potentially
+     exempt. Write collaborators need no gate anyway, because they can push
+     workflows directly.
+   - **Who approves:** "a user with write access to the repository must
+     approve the pull request workflow to be run." Approval is therefore
+     owner-only **only while write access is owner-only** (see the
+     collaborator check below).
+   - **What it does not cover:** "workflows triggered by these
+     [`pull_request_target`] events will always run, regardless of approval
+     settings." A `workflow_run` workflow runs the default branch's
+     workflow file, "is able to access secrets and write tokens, even if the
+     previous workflow was not", and falls outside the fork-PR approval
+     setting's documented scope
+     ([Events that trigger workflows — `workflow_run`](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#workflow_run)).
+     **Invariant: no workflow triggered by
+     `pull_request_target` or `workflow_run` may run on a self-hosted
+     runner.** Today the only such workflow is `close-external-prs.yml`
+     (`pull_request_target`), and it runs on GitHub-hosted `ubuntu-latest`.
 2. **In-workflow owner guards (defence in depth only).** Both jobs carry the
-   fail-closed guard copied verbatim from `ci.yml`'s `build-seat-setup` job:
-   it admits only owner `push`/`workflow_dispatch` or same-repo
+   fail-closed guard copied verbatim from `ci.yml`'s `build-seat-setup` job.
+   It admits only owner `push`/`workflow_dispatch` or same-repo
    owner-authored PRs, requires both `github.actor` and
-   `github.triggering_actor` to be the repository owner, and skips before any
-   runner claim otherwise. A fork PR can edit this guard away or add an
-   unguarded job with the same labels, so the guard is not a boundary on
-   its own.
-3. **Owner review before approval.** The owner never approves a run for an
-   outside contributor's PR without first reading that PR's workflow diff
-   (`.github/workflows/`, `.github/actions/`, and every script those call).
+   `github.triggering_actor` to be the repository owner, and otherwise skips
+   before any runner claim. A `pull_request` run uses the PR's own version of
+   the workflow, and a pushed branch uses the pushed version, so either can
+   edit the guard away. The guard is not a boundary on its own.
+3. **Approval is consent to run the whole PR on the host.** Reading the
+   PR's workflow, action and script diff (`.github/workflows/`,
+   `.github/actions/`, and every script they call) is necessary but not
+   sufficient. An approved run also executes the PR's Cargo build scripts,
+   procedural macros, tests, and any other code the jobs build or run, all
+   as `gha`. The owner approves only PRs whose **full** code they would run
+   on this host.
 
-The approval policy does not cover anyone with write access: a collaborator
-can push workflows directly. **Stop the runner before adding collaborators
-with write access.**
+### Inventory check (trust boundary)
 
-Verify the policy as part of the inventory check below (from the
-authenticated administration workstation, not the runner host):
+Run from the authenticated administration workstation, not the runner host,
+before the first smoke and whenever repository access changes:
 
 ```bash
+# 1. Fork-PR approval policy.
 gh api repos/kckylechen1/tachi/actions/permissions/fork-pr-contributor-approval
 # expected: {"approval_policy":"all_external_contributors"}
+
+# 2. Everyone who can approve fork runs or push workflows directly.
+gh api --paginate repos/kckylechen1/tachi/collaborators \
+  --jq '.[] | select(.permissions.push) | "\(.login) \(.role_name)"'
+# expected: exactly one line, "kckylechen1 admin"
+
+# 3. No pull_request_target / workflow_run workflow can reach a self-hosted
+#    runner (run in a checkout of main). Parses the trigger set, so comments
+#    that merely mention the events do not count. Every job in such a
+#    workflow must have a literal GitHub-hosted runs-on and no reusable-
+#    workflow `uses:`. Exit 0 and no output = pass.
+ruby -ryaml -e '
+bad = false
+Dir[".github/workflows/*.{yml,yaml}"].sort.each do |f|
+  d = YAML.safe_load(File.read(f), aliases: false) || {}
+  on = d.key?("on") ? d["on"] : d[true]   # YAML 1.1 reads a bare `on:` key as true
+  events = (on.is_a?(Hash) ? on.keys : Array(on)).map(&:to_s)
+  next if (events & %w[pull_request_target workflow_run]).empty?
+  (d["jobs"] || {}).each do |id, job|
+    runs_on = job["runs-on"]
+    next if job["uses"].nil? && runs_on.is_a?(String) &&
+            runs_on.match?(/\A(ubuntu|macos|windows)-[A-Za-z0-9.-]+\z/)
+    bad = true
+    puts "VIOLATION: #{f} job #{id}: runs-on=#{runs_on.inspect} uses=#{job["uses"].inspect}"
+  end
+end
+exit(bad ? 1 : 0)'
 ```
 
-Any weaker value (or a failed read) means **stop the runner** until the
-policy is restored.
+If any of these fails (a weaker policy, a failed read, any push-capable
+account other than the owner, or any `VIOLATION` line), **stop the runner**
+until the finding is resolved.
 
-The C1 macOS runner `tachi-acceptance-1` (`tachi-acceptance`,
-`acceptance-runner.md`) has the same exposure and is covered by the same
-repository policy.
+The C1 macOS runner `tachi-acceptance-1` (`tachi-acceptance`) has the same
+exposure and is covered by the same repository policy and the same checks.
 
 Host-side, the runner process runs as `gha` without sudo: a job cannot install
 system packages or change system services, and it can write only where `gha`
@@ -164,8 +224,8 @@ the job (exit 5) naming the missing tools, and the nextest install is gated on
 that step's success. `gha` has no sudo, so any missing system package is an
 owner act from an administrative account, never something a job or the
 runner user installs. On `atom-dgx-2` they resolve to `/usr/bin/jq`,
-`/usr/bin/curl`, and `/usr/bin/tar`. Before the first smoke, check the
-repository approval policy (see Trust boundary) from the administration
+`/usr/bin/curl`, and `/usr/bin/tar`. Before the first smoke, run the trust
+boundary inventory check (see Trust boundary) from the administration
 workstation, then verify as `gha` on the host:
 
 ```bash
