@@ -779,6 +779,46 @@ pub enum WikiAction {
         #[arg(long)]
         adopt_legacy: bool,
     },
+    /// Operator review of a pending Wiki entry: read-only preview, then an
+    /// explicit apply that records the advisory approval receipt.
+    ///
+    /// Preview creates nothing and mutates nothing. Apply requires the
+    /// entry revision and review digest the preview reported, a nonempty
+    /// approver, and a source manifest whose rows cover exactly the entry's
+    /// references. URL/GitHub references map to operator-attested local
+    /// snapshot files verified by sha256 — this command never fetches
+    /// upstream content.
+    Review {
+        /// Memory entry id to review.
+        #[arg(long)]
+        id: String,
+        /// Named project whose Wiki store holds the entry.
+        #[arg(long, default_value = "wiki")]
+        project: String,
+        /// Source manifest JSON: `{"sources":[{"ref":...,"snapshot":...,"sha256":...}]}`,
+        /// one row per entry reference, exact coverage, no duplicates.
+        #[arg(long, value_name = "PATH")]
+        source_manifest: PathBuf,
+        /// Perform the approved write. Without this flag the command is a
+        /// read-only preview. Requires --approver, --expected-revision, and
+        /// --review-digest.
+        #[arg(
+            long,
+            requires = "approver",
+            requires = "expected_revision",
+            requires = "review_digest"
+        )]
+        apply: bool,
+        /// Approver identity recorded on the review receipt (apply only).
+        #[arg(long, value_name = "NAME", requires = "apply")]
+        approver: Option<String>,
+        /// Entry revision the approval was previewed against (apply only).
+        #[arg(long, requires = "apply")]
+        expected_revision: Option<i64>,
+        /// Review digest from the preview receipt (apply only).
+        #[arg(long, value_name = "DIGEST", requires = "apply")]
+        review_digest: Option<String>,
+    },
 }
 
 #[derive(Subcommand, Debug, Clone)]

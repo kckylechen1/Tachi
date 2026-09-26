@@ -13,5 +13,6 @@ mod evolver_export;
 mod ingest;
 mod legacy_adoption;
 mod lint;
+mod review;
 mod search_read_browse;
 mod write;
