@@ -1,3 +1,4 @@
+use super::super::RuleReport;
 use super::*;
 
 #[test]
@@ -167,6 +168,164 @@ fn r1_and_open_converge_with_null_memory_id_after_open_prune() {
 #[test]
 fn r1_and_open_converge_with_null_memory_id_from_legacy_projection() {
     assert_r1_and_open_converge_with_null_memory_id(false);
+}
+
+const PROJECTION_TABLES: [&str; 2] = ["memories_fts", "memories_symbolic_fts"];
+
+fn drift_kind(table: &str) -> &'static str {
+    match table {
+        "memories_fts" => "fts_drift",
+        "memories_symbolic_fts" => "symbolic_fts_drift",
+        other => panic!("not a projection table: {other}"),
+    }
+}
+
+/// Replace `table`'s rows with exactly `ids`, in order: `Some(id)` of a live
+/// memory projects that memory's row, `None` projects the NULL-id memory, and
+/// an id with no memory (a ghost) gets a literal row.
+fn set_projection(conn: &Connection, table: &str, ids: &[Option<&str>]) {
+    let cols = match table {
+        "memories_fts" => "id, path, summary, text, keywords, entities",
+        "memories_symbolic_fts" => "id, path, summary, text, keywords, entities, topic",
+        other => panic!("not a projection table: {other}"),
+    };
+    conn.execute(&format!("DELETE FROM {table}"), []).unwrap();
+    for id in ids {
+        let projected = match id {
+            None => conn.execute(
+                &format!(
+                    "INSERT INTO {table} ({cols}) SELECT {cols} FROM memories WHERE id IS NULL"
+                ),
+                [],
+            ),
+            Some(id) => conn.execute(
+                &format!("INSERT INTO {table} ({cols}) SELECT {cols} FROM memories WHERE id = ?1"),
+                [id],
+            ),
+        }
+        .unwrap();
+        if projected == 0 {
+            let id = id.expect("the NULL-id memory exists in every fixture");
+            let values = if table == "memories_fts" {
+                "?1, '/ghost', 'ghost', 'ghost text', '', ''"
+            } else {
+                "?1, '/ghost', 'ghost', 'ghost text', '', '', ''"
+            };
+            conn.execute(
+                &format!("INSERT INTO {table} ({cols}) VALUES ({values})"),
+                [id],
+            )
+            .unwrap();
+        }
+    }
+}
+
+fn projection_ids(conn: &Connection, table: &str) -> Vec<Option<String>> {
+    let mut stmt = conn
+        .prepare(&format!("SELECT id FROM {table} ORDER BY id"))
+        .unwrap();
+    let ids = stmt
+        .query_map([], |r| r.get::<_, Option<String>>(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    ids
+}
+
+fn assert_drift_counts(report: &RuleReport, table: &str, missing: i64, invalid: i64, dup: i64) {
+    let kind = drift_kind(table);
+    let finding = report
+        .findings
+        .iter()
+        .find(|f| f.kind == kind)
+        .unwrap_or_else(|| {
+            panic!("{table}: membership drift must be reported as {kind}: {report:?}")
+        });
+    let detail = &finding.detail;
+    assert_eq!(detail["missing"], missing, "{table}: missing: {detail}");
+    assert_eq!(detail["invalid"], invalid, "{table}: invalid: {detail}");
+    assert_eq!(detail["duplicate"], dup, "{table}: duplicate: {detail}");
+}
+
+/// Runs R1 dry-run + apply on a store and checks that afterwards every
+/// projection holds exactly the `live` ids, once each, and R1 is clean.
+fn assert_r1_repairs_to_exactly(path: &PathBuf, live: &[&str]) -> RuleReport {
+    let mut ctx = open_ctx(path, "test");
+    let dry = FtsRebuild.dry_run(&mut ctx).unwrap();
+    let app = FtsRebuild.apply(&mut ctx).unwrap();
+    assert!(app.errors.is_empty(), "apply errors: {:?}", app.errors);
+    assert_eq!(app.applied, live.len(), "R1 projects every live memory");
+    let expected: Vec<Option<String>> = live.iter().map(|id| Some(id.to_string())).collect();
+    for table in PROJECTION_TABLES {
+        assert_eq!(
+            projection_ids(&ctx.conn, table),
+            expected,
+            "{table}: every live memory projected once, no NULL or ghost rows"
+        );
+    }
+    let final_dry = FtsRebuild.dry_run(&mut ctx).unwrap();
+    assert!(
+        final_dry.findings.is_empty(),
+        "post-repair should be clean: {final_dry:?}"
+    );
+    dry
+}
+
+/// tachi#2000 review (astra r2, finding 1): R1 used to compare net counts.
+/// With memories `{NULL, 'keep'}` and each projection holding only the NULL
+/// row, both sides count 1: no drift reported, `'keep'` stayed unsearchable
+/// and the NULL rows survived. Drift is membership, not a net count.
+#[test]
+fn r1_detects_null_projection_cancelling_a_missing_live_row() {
+    let dir = TempDir::new().unwrap();
+    let (path, conn) = fresh_db(&dir, "null_cancels_missing.db");
+    insert_null_id_memory(&conn);
+    insert_memory(&conn, "keep", "/x/keep", "live row", "{}", None, None);
+    for table in PROJECTION_TABLES {
+        set_projection(&conn, table, &[None]);
+    }
+    drop(conn);
+
+    let dry = assert_r1_repairs_to_exactly(&path, &["keep"]);
+    for table in PROJECTION_TABLES {
+        assert_drift_counts(&dry, table, 1, 1, 0);
+    }
+}
+
+/// Mixed cancellation in one projection while the other is healthy: the
+/// NULL-id row, a ghost and a duplicate of a live id exactly offset three
+/// missing live ids (4 rows vs 4 live memories). Every class counts on its
+/// own, and the healthy table reports nothing.
+fn assert_r1_detects_mixed_cancellation_in(table: &str) {
+    let dir = TempDir::new().unwrap();
+    let (path, conn) = fresh_db(&dir, "mixed_cancellation.db");
+    insert_null_id_memory(&conn);
+    let live = ["a", "b", "c", "d"];
+    for id in live {
+        insert_memory(&conn, id, &format!("/x/{id}"), "live row", "{}", None, None);
+    }
+    for t in PROJECTION_TABLES {
+        if t == table {
+            set_projection(&conn, t, &[None, Some("ghost"), Some("a"), Some("a")]);
+        } else {
+            set_projection(&conn, t, &live.map(Some));
+        }
+    }
+    drop(conn);
+
+    let dry = assert_r1_repairs_to_exactly(&path, &live);
+    assert_drift_counts(&dry, table, 3, 2, 1);
+    assert_eq!(dry.findings.len(), 1, "only {table} drifted: {dry:?}");
+}
+
+#[test]
+fn r1_detects_mixed_cancellation_in_memories_fts() {
+    assert_r1_detects_mixed_cancellation_in("memories_fts");
+}
+
+#[test]
+fn r1_detects_mixed_cancellation_in_symbolic_fts() {
+    assert_r1_detects_mixed_cancellation_in("memories_symbolic_fts");
 }
 
 #[test]

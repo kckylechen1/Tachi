@@ -556,23 +556,30 @@ impl MemoryStore {
         Ok((total, total - missing))
     }
 
-    /// Get the projectable memory count and the FTS index count.
+    /// Get the live memory count and how many of them `memories_fts` covers.
     ///
     /// `total` counts only non-NULL-id memories (tachi#1993): no FTS writer
     /// projects a NULL-id memory, so counting one reported a `missing` row
-    /// that no backfill or rebuild can ever fill. `with_fts` is
-    /// `COUNT(DISTINCT id)`, which already excludes NULL-id projection rows.
+    /// that no backfill or rebuild can ever fill.
+    ///
+    /// `with_fts` counts distinct *live* ids with at least one projection
+    /// row, so `with_fts <= total` and `total - with_fts` is exactly the
+    /// number of unprojected live memories. A raw `COUNT(DISTINCT id)` also
+    /// counted orphan (ghost) and duplicate rows, which could offset a
+    /// missing live id and report `Missing: 0` (tachi#2000 review, astra r2).
+    /// The subquery is uncorrelated and NULL-guarded (#1974 / #1985).
     pub fn fts_stats(&self) -> Result<(i64, i64), MemoryError> {
         let total: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM memories WHERE id IS NOT NULL",
             [],
             |r| r.get(0),
         )?;
-        let with_fts: i64 =
-            self.conn
-                .query_row("SELECT COUNT(DISTINCT id) FROM memories_fts", [], |r| {
-                    r.get(0)
-                })?;
+        let with_fts: i64 = self.conn.query_row(
+            "SELECT COUNT(DISTINCT id) FROM memories_fts
+             WHERE id IN (SELECT id FROM memories WHERE id IS NOT NULL)",
+            [],
+            |r| r.get(0),
+        )?;
         Ok((total, with_fts))
     }
 
@@ -1199,5 +1206,92 @@ mod tests {
             )
             .expect("insert NULL-id memory");
         }
+    }
+
+    /// A file store holding the legacy NULL-id memory plus `live`, whose
+    /// lexical projection is then replaced by exactly `fts_ids` (an id with
+    /// no memory is a ghost row; `None` is a NULL-id row), opened the way
+    /// `backfill-fts --dry-run` opens it: read-only, so no open-time orphan
+    /// pass or backfill runs.
+    fn read_only_store_with_lexical_projection(
+        dir: &tempfile::TempDir,
+        live: &[&str],
+        fts_ids: &[Option<&str>],
+    ) -> MemoryStore {
+        let path = dir.path().join("fts-stats-membership.db");
+        let path = path.to_str().expect("utf8 db path");
+        {
+            let mut store = MemoryStore::open(path).expect("create store");
+            for id in live {
+                store.upsert(&test_entry(id)).expect("seed entry");
+            }
+        }
+        {
+            let _ = libsimple::enable_auto_extension();
+            crate::db::register_sqlite_vec();
+            let raw = rusqlite::Connection::open(path).expect("open raw connection");
+            raw.create_scalar_function(
+                "tachi_reserved_reference_write_enabled",
+                0,
+                rusqlite::functions::FunctionFlags::SQLITE_UTF8,
+                |_| Ok(0_i64),
+            )
+            .expect("register guard function");
+            raw.execute(
+                "INSERT INTO memories (id, path, summary, text, timestamp, valid_from)
+                 VALUES (NULL, '/null', 'null id', 'null id text',
+                         '2026-09-26T00:00:00Z', '2026-09-26T00:00:00Z')",
+                [],
+            )
+            .expect("insert NULL-id memory");
+            raw.execute("DELETE FROM memories_fts", [])
+                .expect("empty memories_fts");
+            for id in fts_ids {
+                raw.execute(
+                    "INSERT INTO memories_fts (id, path, summary, text, keywords, entities)
+                     VALUES (?1, '/fixture', 'fixture', 'fixture text', '', '')",
+                    [id],
+                )
+                .expect("insert fixture projection row");
+            }
+        }
+        MemoryStore::open_read_only_existing_schema_compat(
+            path,
+            crate::store::open::ReadOnlyBackfillOperation::Fts,
+        )
+        .expect("read-only dry-run open")
+    }
+
+    /// tachi#2000 review (astra r2, finding 2): with memories `{NULL, 'keep'}`
+    /// and only a ghost projection row, `fts_stats` returned `(1, 1)` (ghost
+    /// counted as coverage), so `backfill-fts --dry-run` printed `Missing: 0`
+    /// while `'keep'` had no projection. `with_fts` counts covered live ids.
+    #[test]
+    fn fts_stats_does_not_count_a_ghost_as_coverage() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = read_only_store_with_lexical_projection(&dir, &["keep"], &[Some("ghost")]);
+        assert_eq!(
+            store.fts_stats().expect("fts_stats"),
+            (1, 0),
+            "one live memory, none covered: Missing must be 1"
+        );
+    }
+
+    /// Mixed cancellation: a NULL-id row, a ghost and a duplicate of `keep`
+    /// used to count as two distinct covered ids against two live memories
+    /// (`Missing: 0`) while `other` had no projection.
+    #[test]
+    fn fts_stats_counts_only_covered_live_ids_under_mixed_cancellation() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = read_only_store_with_lexical_projection(
+            &dir,
+            &["keep", "other"],
+            &[None, Some("ghost"), Some("keep"), Some("keep")],
+        );
+        assert_eq!(
+            store.fts_stats().expect("fts_stats"),
+            (2, 1),
+            "two live memories, only `keep` covered: Missing must be 1"
+        );
     }
 }
