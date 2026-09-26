@@ -9,6 +9,8 @@ async fn memory_search_full_reports_rerank_diagnostics_on_both_facade_routes() {
             let mut entry = make_entry("diagnostic-target");
             entry.text = "DIAGNOSTIC_RECALL_NEEDLE_20260927 source-bound knowledge".to_string();
             entry.summary = "Recall diagnostic fixture".to_string();
+            // Full-format metadata must not alter the compact section filter.
+            entry.metadata = json!({"projection_kind": "historical_note"});
             store.upsert(&entry).map_err(|e| e.to_string())
         })
         .expect("seed diagnostic fixture");
@@ -35,6 +37,7 @@ async fn memory_search_full_reports_rerank_diagnostics_on_both_facade_routes() {
             let row = &response["sections"][0]["rows"][0];
             assert_eq!(row["id"], json!("diagnostic-target"));
             if full {
+                assert_eq!(row["metadata"]["projection_kind"], json!("historical_note"));
                 let diagnostic = &row["rerank_diagnostics"];
                 assert_eq!(diagnostic["policy"], json!("disabled"));
                 assert_eq!(diagnostic["candidate_count"], json!(1));
