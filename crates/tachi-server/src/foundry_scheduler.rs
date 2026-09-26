@@ -9,7 +9,7 @@
 //! single-process foundry worker can route to) re-injects them into the
 //! shared `foundry_tx` mpsc channel for execution. For DBs the existing
 //! worker does **not** know how to route to (agents/, hub/, vault/, anything
-//! outside global + project + named-projects), jobs are counted as orphans
+//! outside global + project + named-projects), jobs are treated as orphans
 //! and logged with structured `tracing` warnings.
 //!
 //! ### What this does NOT own
@@ -26,7 +26,6 @@
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -48,7 +47,7 @@ mod worker;
 use routing::{classify_route_in_home, manifest_label_for, path_hash};
 pub use scheduler::FoundryScheduler;
 use types::WorkerHandle;
-pub use types::{WorkerMetrics, MANIFEST_REFRESH_INTERVAL, POLL_INTERVAL};
+pub use types::{MANIFEST_REFRESH_INTERVAL, POLL_INTERVAL};
 use worker::run_db_worker;
 
 #[cfg(test)]

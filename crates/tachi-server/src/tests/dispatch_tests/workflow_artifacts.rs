@@ -2,7 +2,7 @@ use super::super::{
     make_entry, make_server, make_server_with_temp_home, plant_leftover_shared_wiki,
 };
 use super::{dispatch_params, task_params, EnvVarGuard};
-use crate::tool_params::{GetMemoryParams, TaskBriefParams};
+use crate::tool_params::GetMemoryParams;
 use chrono::Utc;
 use memcore::MemoryEntry;
 use rmcp::handler::server::wrapper::Parameters;

@@ -1,7 +1,8 @@
 //! Tool implementations for the Memory MCP server.
 //!
 //! Extracted from `main.rs` (Phase 4 of v1.0 cleanup) to keep the crate root
-//! focused on bootstrap/state and delegate the ~120 `#[tool]` wrappers here.
+//! focused on bootstrap/state and delegate the `#[tool]` wrappers here (in this
+//! file and the `tools/*_facade.rs` submodules).
 //! Every method in this file is a thin shim that delegates to a `handle_*`
 //! function in one of the `*_ops` siblings — no business logic lives here.
 

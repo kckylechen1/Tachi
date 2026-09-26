@@ -1,7 +1,6 @@
 //! CLI contract and startup helpers for the Tachi server binary.
 
 pub mod build_info;
-mod build_info_core;
 pub mod cli;
 
 use clap::Parser;

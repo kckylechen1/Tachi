@@ -25,7 +25,7 @@
 //!    narrows further: an unadmitted capability is a typed rejection even
 //!    when well-formed.
 
-use super::refs::{AttemptRef, RequesterRef, TaskRef};
+use super::refs::{AttemptRef, TaskRef};
 use super::wire::{BoundedText, TaskIntentV1};
 
 /// Forbidden-content categories (TB-4). One typed variant per category so a
@@ -257,13 +257,6 @@ pub fn admit(
         return Err(AdmissionRejection::CapabilityNotAdmitted);
     }
     Ok(())
-}
-
-/// Convenience: the requester whose authority must be resolved before
-/// calling [`admit`]; resolving it against an identity source is the port
-/// caller's job before building [`AdmittedAuthority`].
-pub fn requester_of(intent: &TaskIntentV1) -> &RequesterRef {
-    &intent.requester
 }
 
 #[cfg(test)]

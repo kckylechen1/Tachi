@@ -17,8 +17,8 @@ pub(super) fn remap_daemon_tool(
         "save_memory" | "remember" => ("tachi_memory".into(), with_action(args, "save")),
         "search_memory" => ("tachi_memory".into(), with_action(args, "search")),
         "get_memory" => ("tachi_memory".into(), with_action(args, "get")),
-        "tachi_wiki_search" | "wiki_search" => ("tachi_wiki".into(), with_action(args, "search")),
-        "tachi_wiki_write" | "wiki_write" => ("tachi_wiki".into(), with_action(args, "write")),
+        "tachi_wiki_search" => ("tachi_wiki".into(), with_action(args, "search")),
+        "tachi_wiki_write" => ("tachi_wiki".into(), with_action(args, "write")),
         other => (other.to_string(), args),
     }
 }

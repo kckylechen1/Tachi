@@ -56,6 +56,26 @@ pub(crate) const HEADER_WORKSPACE_ROOT: &str = "x-tachi-workspace-root";
 /// depth into that session's identity.
 pub(crate) const HEADER_DISPATCH_DEPTH: &str = "x-tachi-dispatch-depth";
 
+/// Audit C1: opaque, caller-minted rate-limit bucket key. The stdio proxy mints
+/// ONE random key per proxy connection and sends it on every daemon tool call,
+/// because each proxied call opens a fresh short-lived daemon MCP session (no
+/// session pool, see `cli_client::concurrency_receipt`), and without a stable
+/// key every call would land in an empty burst/RPM window, so loop and stuck
+/// detection could never fire.
+///
+/// This header ONLY selects which `RateLimiter` bucket a session or modern
+/// request counts against. It never grants identity, profile, project, or any
+/// authority. It is header-only: it has no `_meta` twin and is never read from
+/// MCP initialize metadata. A value that fails
+/// [`valid_rate_limit_session_key`] is ignored (the daemon keeps its own
+/// per-session or identity-derived key), never an error.
+pub(crate) const HEADER_RATE_LIMIT_SESSION: &str = "x-tachi-rate-limit-session";
+
+/// Bounds for [`HEADER_RATE_LIMIT_SESSION`]. The lower bound keeps a caller
+/// from picking a short, guessable key that other peers could collide with.
+const RATE_LIMIT_SESSION_KEY_MIN_LEN: usize = 16;
+const RATE_LIMIT_SESSION_KEY_MAX_LEN: usize = 128;
+
 /// #1251: the process-env var a parent stamps onto a child worker's
 /// `tachi serve` (see `dispatch_ops::mcp_config`). The child's stdio proxy
 /// reads it back from its OWN process env and re-emits it as
@@ -536,6 +556,21 @@ pub(crate) fn valid_agent_identity_assertion(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
+}
+
+/// Audit C1: shape check for [`HEADER_RATE_LIMIT_SESSION`]. Only ASCII
+/// alphanumerics, `-` and `_`, within the length bounds, are accepted.
+pub(crate) fn valid_rate_limit_session_key(value: &str) -> bool {
+    (RATE_LIMIT_SESSION_KEY_MIN_LEN..=RATE_LIMIT_SESSION_KEY_MAX_LEN).contains(&value.len())
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
+
+/// Audit C1: mint a fresh random [`HEADER_RATE_LIMIT_SESSION`] key. The stdio
+/// proxy calls this once per connection.
+pub(crate) fn mint_rate_limit_session_key() -> String {
+    uuid::Uuid::new_v4().simple().to_string()
 }
 
 /// Parse a `TACHI_AGENT_IDENTITY` env value. Blank or illegal assertions
@@ -1534,5 +1569,29 @@ mod tests {
         );
         assert_eq!(normalize_identity_value("   "), None);
         assert_eq!(normalize_identity_value(""), None);
+    }
+
+    /// Audit C1: the rate-limit bucket header is shape-checked; anything
+    /// outside the bounded `[A-Za-z0-9_-]` alphabet is rejected so the daemon
+    /// ignores it.
+    #[test]
+    fn rate_limit_session_key_is_length_and_charset_bounded() {
+        let minted = mint_rate_limit_session_key();
+        assert!(valid_rate_limit_session_key(&minted), "{minted}");
+        assert_ne!(minted, mint_rate_limit_session_key());
+        assert!(valid_rate_limit_session_key(&"a".repeat(16)));
+        assert!(valid_rate_limit_session_key(&"a".repeat(128)));
+        assert!(valid_rate_limit_session_key("proxy_conn-0123456789"));
+        for rejected in [
+            String::new(),
+            "a".repeat(15),
+            "a".repeat(129),
+            "has space 0123456789".to_string(),
+            "colon:0123456789abcdef".to_string(),
+            "dot.0123456789abcdef".to_string(),
+            "non-ascii-é0123456789".to_string(),
+        ] {
+            assert!(!valid_rate_limit_session_key(&rejected), "{rejected:?}");
+        }
     }
 }

@@ -175,13 +175,27 @@ async fn modern_http_tool_call(
     identity: serde_json::Value,
     arguments: serde_json::Value,
 ) -> serde_json::Value {
+    modern_http_tool_call_with_headers(client, url, id, name, identity, arguments, &[]).await
+}
+
+async fn modern_http_tool_call_with_headers(
+    client: &reqwest::Client,
+    url: &str,
+    id: i64,
+    name: &str,
+    identity: serde_json::Value,
+    arguments: serde_json::Value,
+    extra_headers: &[(&str, &str)],
+) -> serde_json::Value {
+    let mut headers = vec![
+        ("mcp-protocol-version", "2026-07-28"),
+        ("mcp-method", "tools/call"),
+        ("mcp-name", name),
+    ];
+    headers.extend_from_slice(extra_headers);
     let response = client
         .post(url)
-        .headers(http_headers(&[
-            ("mcp-protocol-version", "2026-07-28"),
-            ("mcp-method", "tools/call"),
-            ("mcp-name", name),
-        ]))
+        .headers(http_headers(&headers))
         .json(&json!({
             "jsonrpc":"2.0", "id":id, "method":"tools/call",
             "params":{"_meta":modern_meta(identity), "name":name, "arguments":arguments}
@@ -757,6 +771,7 @@ fn modern_stdio_rejects_identity_drift_and_malformed_metadata_before_dispatch() 
                 project_db_path: Some(project_a.clone()),
                 client_project: Some(project_a_name.to_string()),
                 resolved_agent_identity: Default::default(),
+                rate_limit_session: ProxyRateLimitSession::mint(),
             };
 
             let write = |id: &str, identity: serde_json::Value| {
@@ -1511,6 +1526,86 @@ fn modern_http_request_uses_2026_headers_metadata_and_no_session() {
             let (_, headers, init) = http_mcp_initialize(&daemon.url, http_headers(&[]), None).await;
             assert_eq!(init["result"]["protocolVersion"], "2024-11-05");
             assert!(headers.contains_key("mcp-session-id"));
+            cancel.cancel();
+            task.await.expect("daemon task");
+        });
+    });
+}
+
+/// Audit C1: `clone_for_modern_request` mints a per-request rate-limit key,
+/// so without a stable bucket a modern peer's burst window started empty on
+/// every request and stuck/loop detection never fired. Requests with the same
+/// resolved identity now share a bucket; a different identity does not; a
+/// malformed `X-Tachi-Rate-Limit-Session` is ignored (neither an error nor a
+/// bucket); a valid one selects its own bucket; and a request with no
+/// AgentIdentity stays per-request, even when it carries a client label.
+#[test]
+fn modern_http_rate_limit_bucket_follows_identity_or_bucket_header() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    with_tachi_home(temp.path(), || {
+        let global = temp.path().join("global/memory.db");
+        test_runtime().block_on(async {
+            let server = crate::MemoryServer::new(global.clone(), None).expect("server");
+            let (daemon, cancel, task) = spawn_test_http_daemon(server, &global).await;
+            let client = reqwest::Client::new();
+            let identity = |who: &str| {
+                json!({"tachiClient":format!("c1-{who}"), "tachiAgentIdentity":format!("agent.c1-{who}")})
+            };
+            let args = || {
+                json!({"action":"search", "query":"C1-MODERN-BUCKET-PROBE", "scope":"memory", "top_k":1})
+            };
+            let stuck = |payload: &serde_json::Value| {
+                assert!(payload.get("error").is_none(), "{payload:#}");
+                payload["result"]["content"]
+                    .as_array()
+                    .expect("tool content")
+                    .iter()
+                    .any(|block| {
+                        block["text"]
+                            .as_str()
+                            .is_some_and(|text| text.contains("stuck-detection"))
+                    })
+            };
+            let call = |id: i64, identity: serde_json::Value, headers: &'static [(&'static str, &'static str)]| {
+                modern_http_tool_call_with_headers(
+                    &client, &daemon.url, id, "tachi_memory", identity, args(), headers,
+                )
+            };
+
+            for id in [1, 2] {
+                assert!(!stuck(&call(id, identity("a"), &[]).await), "request {id}");
+            }
+            assert!(
+                !stuck(&call(3, identity("b"), &[]).await),
+                "a different identity must not inherit identity A's burst window"
+            );
+            let malformed: &'static [(&'static str, &'static str)] =
+                &[(crate::session_identity::HEADER_RATE_LIMIT_SESSION, "not a valid key!")];
+            assert!(
+                stuck(&call(4, identity("a"), malformed).await),
+                "a malformed bucket header is ignored and the third identical request \
+                 from identity A shares its identity-derived burst window"
+            );
+
+            // A valid bucket header selects its own bucket, never identity A's.
+            let explicit: &'static [(&'static str, &'static str)] =
+                &[(crate::session_identity::HEADER_RATE_LIMIT_SESSION, "c1-explicit-bucket-0001")];
+            for id in [5, 6] {
+                assert!(!stuck(&call(id, identity("a"), explicit).await), "request {id}");
+            }
+            assert!(stuck(&call(7, identity("a"), explicit).await));
+
+            // Nothing stable to key on: per-request buckets stay the fallback.
+            for id in [8, 9, 10] {
+                assert!(!stuck(&call(id, json!({}), &[]).await), "request {id}");
+            }
+            // A client label alone is shared by every instance of that client,
+            // so it must not anchor a bucket either.
+            for id in [11, 12, 13] {
+                let label_only = json!({"tachiClient":"c1-shared-label"});
+                assert!(!stuck(&call(id, label_only, &[]).await), "request {id}");
+            }
+
             cancel.cancel();
             task.await.expect("daemon task");
         });

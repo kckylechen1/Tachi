@@ -9,8 +9,8 @@
 //!
 //! # Why this lives in `src/tests/`, not `examples/` (tachi#1097 S2 record)
 //!
-//! `crates/tachi-server/examples/auto_link_receipt_workload.rs` is a
-//! compiling BLOCKED stub: every API this workload needs (`MemoryServer`,
+//! The former `crates/tachi-server/examples/auto_link_receipt_workload.rs`
+//! (since deleted) was a compiling BLOCKED stub: every API this workload needs (`MemoryServer`,
 //! `run_auto_linking`, `AutoLinkReceipt`, `spawn_auto_linking_for_test`) was
 //! `pub(crate)`, unreachable from an `examples/` crate — a separate
 //! compilation unit that can only name `pub` items. The "promote to `pub`

@@ -1,4 +1,6 @@
 use super::*;
+use memcore::MemoryEntry;
+use serde_json::json;
 
 fn test_store() -> MemoryStore {
     MemoryStore::open_in_memory().expect("test memory store")

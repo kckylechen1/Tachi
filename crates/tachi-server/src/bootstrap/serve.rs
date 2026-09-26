@@ -630,9 +630,10 @@ async fn run_startup_hygiene(
         Some(expand_cli_path(p, &ctx.home))
     } else if let Some(root) = ctx.git_root.as_ref() {
         let project_default = root.join(".tachi").join(memcore::MEMORY_DB_FILENAME);
-        // Pre-.tachi-layout legacy source; the #1132 rename-on-open seam
-        // inside MemoryStore::open handles an already-standard-layout
-        // `.tachi/memory.db` sitting next to where `project_default` points.
+        // Pre-.tachi-layout legacy source. An already-standard-layout
+        // `.tachi/memory.db` is NOT renamed on open: since 2.0 (#1132) an
+        // ordinary MemoryStore::open refuses a real legacy filename, and
+        // conversion requires `tachi migrate --rename-legacy --apply --offline`.
         let project_legacy = root.join(".sigil").join(memcore::LEGACY_MEMORY_DB_FILENAME);
 
         if project_legacy.exists() && !project_default.exists() {

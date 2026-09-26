@@ -2,8 +2,6 @@
 //!
 //! Canonical policy: `docs/engineering/architecture/agent-fleet.md`.
 
-#[cfg(test)]
-pub(crate) use tachi_dispatch::select_agent_for_intent;
 pub(crate) use tachi_dispatch::{
     dispatch_agent_help_list, fallback_chain, mcp_inject_supported, normalize_dispatch_agent_name,
     resolve_dispatch_agent, select_agent_for_task, DISPATCH_AGENTS,
@@ -55,74 +53,5 @@ pub(crate) async fn handle_agents(
         other => Err(format!(
             "Invalid agents action '{other}'. Use list or select."
         )),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn resolve_canonical_and_aliases() {
-        assert_eq!(resolve_dispatch_agent("claude").unwrap().name, "claude");
-        assert_eq!(
-            resolve_dispatch_agent("claude-code").unwrap().name,
-            "claude"
-        );
-        assert_eq!(resolve_dispatch_agent("CODEX").unwrap().name, "codex");
-        assert_eq!(resolve_dispatch_agent("openai").unwrap().name, "codex");
-        assert_eq!(resolve_dispatch_agent("grok-cli").unwrap().name, "grok");
-        assert_eq!(resolve_dispatch_agent("moonshot").unwrap().name, "kimi");
-        assert!(resolve_dispatch_agent("gemini").is_none());
-    }
-
-    #[test]
-    fn normalize_dispatch_agent_name_handles_adapters_and_registered_agents() {
-        assert_eq!(
-            normalize_dispatch_agent_name(" claude-code ").as_deref(),
-            Some("claude")
-        );
-        assert_eq!(
-            normalize_dispatch_agent_name("OPENCODE").as_deref(),
-            Some("opencode")
-        );
-        assert_eq!(
-            normalize_dispatch_agent_name("custom").as_deref(),
-            Some("custom")
-        );
-        assert!(normalize_dispatch_agent_name("gemini").is_none());
-        assert!(normalize_dispatch_agent_name(" ").is_none());
-    }
-
-    #[test]
-    fn intent_routes_to_fleet_agent() {
-        assert_eq!(select_agent_for_intent("review_request"), "kimi");
-        assert_eq!(select_agent_for_intent("refactor_request"), "codex");
-    }
-
-    #[test]
-    fn fallback_chain_excludes_primary_agent() {
-        for primary in ["claude", "codex", "grok", "kimi"] {
-            assert!(
-                !fallback_chain(primary).contains(&primary),
-                "fallback chain should not retry primary agent {primary}"
-            );
-        }
-    }
-
-    #[test]
-    fn mcp_policy_matches_fleet() {
-        assert!(mcp_inject_supported(
-            resolve_dispatch_agent("claude").unwrap()
-        ));
-        assert!(mcp_inject_supported(
-            resolve_dispatch_agent("grok").unwrap()
-        ));
-        assert!(!mcp_inject_supported(
-            resolve_dispatch_agent("codex").unwrap()
-        ));
-        assert!(!mcp_inject_supported(
-            resolve_dispatch_agent("kimi").unwrap()
-        ));
     }
 }
