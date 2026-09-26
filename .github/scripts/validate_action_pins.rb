@@ -12,6 +12,10 @@
 # obfuscation by someone with write access; static shell analysis cannot be
 # complete. Known limits, accepted by design:
 # - shell aliases and functions (`alias c=cargo; c install x`) are not tracked;
+# - scripts a step calls are not inspected; text run by `eval`,
+#   `sh -c`/`bash -c` or command substitution (`$(...)`, backticks) is caught
+#   only where the dynamic/encoded-installer guards or the quoted-string rescan
+#   see it;
 # - line continuations inside heredoc bodies, and other deliberate obfuscation
 #   beyond the dynamic/encoded-installer guards, are out of scope;
 # - false positives in the safe direction are accepted: the text
@@ -81,11 +85,16 @@ REQUIRED_INSTALL_ACTION_INPUTS = {
 # (COMMAND_WRAPPERS, by name or path) are parsed with their option grammar. A
 # known wrapper with an option this file does not model rejects the command
 # (fail closed) instead of guessing which word is the program. As a backstop
-# for wrappers
-# outside that set (stdbuf, xargs, ...), the words `<binary> <subcommand>`
-# anywhere in a simple command are rejected too. Best effort, like the
-# cargo-install lint below: only top-level simple commands of `run:` text are
-# inspected, not scripts it calls or strings handed to `sh -c`.
+# for wrappers outside that set (stdbuf, xargs, ...), the words
+# `<binary> <subcommand>` anywhere in a simple command are rejected too; that
+# backstop is narrower than the program check, so an unmodelled wrapper that
+# starts the binary without repeating the subcommand
+# (`xargs cargo-audit --deny warnings`) passes. Best effort, and narrower than
+# the cargo-install lint in the header, which also rescans some quoted strings:
+# only top-level simple commands of `run:` text are inspected. Out of scope:
+# scripts a step calls, strings handed to `sh -c`/`bash -c`, `eval` text,
+# command substitution (`$(...)`, backticks), and aliases or function
+# indirection.
 AUDITED_INSTALL_ACTION_BINARIES = {
   "cargo-audit" => ["cargo-audit", "audit"],
   "nextest" => ["cargo-nextest", "nextest"]
@@ -815,7 +824,7 @@ class ActionPolicy
   end
 
   # True when any `cargo` word in `tokens` runs one of `subcommands`, after
-  # skipping a `+toolchain` selector and global options.
+  # skipping a `+toolchain` selector, global options and a `--` delimiter.
   def cargo_subcommand_invoked?(tokens, subcommands)
     tokens.each_with_index.any? do |token, index|
       program = token.split(%r{[/\\]}).last.to_s
@@ -832,9 +841,15 @@ class ActionPolicy
           position += 1
         end
       end
-      # An unrecognised option might take a value; then the real subcommand is one word later.
-      subcommands.include?(tokens[position]) ||
-        (ambiguous && subcommands.include?(tokens[position + 1]))
+      # An unrecognised option might take a value; then the real subcommand is
+      # one word later. `--` ends Cargo's own options and the next word is the
+      # subcommand (`cargo -- nextest run` runs cargo-nextest).
+      candidates = [position]
+      candidates << position + 1 if ambiguous
+      candidates.any? do |candidate|
+        candidate += 1 if tokens[candidate] == "--"
+        subcommands.include?(tokens[candidate])
+      end
     end
   end
 
@@ -962,6 +977,8 @@ def self_test!
     "cargo-global-directory" => ["run: cargo -C /tmp install cargo-audit\n", UNAUDITED_CARGO],
     "cargo-global-unknown-valued" => ["run: cargo --future-option value install cargo-audit\n", UNAUDITED_CARGO],
     "cargo-global-mixed" => ["run: cargo +stable -v --frozen --config k=v install cargo-audit\n", UNAUDITED_CARGO],
+    "cargo-dashdash" => ["run: cargo -- install cargo-audit\n", UNAUDITED_CARGO],
+    "cargo-toolchain-dashdash" => ["run: cargo +stable --locked -- install cargo-audit\n", UNAUDITED_CARGO],
     "cargo-env-prefix-toolchain" => ["run: CARGO_NET_OFFLINE=false cargo +stable install cargo-audit\n", UNAUDITED_CARGO],
     "cargo-env-command" => ["run: env RUSTFLAGS=-Cdebuginfo=0 cargo --locked install cargo-audit\n", UNAUDITED_CARGO],
     "cargo-command-builtin" => ["run: command cargo +stable install cargo-audit\n", UNAUDITED_CARGO],
@@ -1109,6 +1126,11 @@ def self_test!
     "bound-cargo-nextest" => ["run: cargo nextest run --workspace --locked --profile ci\n", unbound],
     "bound-cargo-audit" => ["run: cargo audit --deny warnings\n", unbound],
     "bound-cargo-toolchain-options" => ["run: cargo +1.97.0 --locked nextest run\n", unbound],
+    # astra r2 finding 1: `--` ends Cargo's options; the next word is the subcommand.
+    "bound-cargo-dashdash-nextest" => ["run: cargo -- nextest run --workspace --locked --profile ci\n", unbound],
+    "bound-cargo-toolchain-dashdash" => ["run: cargo +stable -- nextest run\n", unbound],
+    "bound-cargo-dashdash-audit" => ["run: cargo -- audit --deny warnings\n", unbound],
+    "bound-cargo-unknown-option-dashdash" => ["run: cargo --future-option value -- nextest run\n", unbound],
     "bound-cargo-env-prefix" => ["run: |\n  set -e\n  RUST_LOG=info cargo nextest run\n", unbound],
     "bound-cargo-if" => ["run: if cargo audit; then echo ok; fi\n", unbound],
     "bound-cargo-pwsh" => ["run: |\n  & cargo nextest run\n", unbound],
@@ -1198,6 +1220,7 @@ def self_test!
     "echo 'cargo nextest is bound' && type -P cargo-nextest",
     "printf 'cargo-audit %s (fake)' 0.22.2 >\"${dir}/cargo-audit\"",
     "cargo test --workspace --locked --doc",
+    "cargo test --workspace --locked -- nextest",
     "command -v cargo-nextest",
     "command -pv cargo-audit",
     "local -a auth_env=(env -u GITHUB_TOKEN -u GH_TOKEN)",

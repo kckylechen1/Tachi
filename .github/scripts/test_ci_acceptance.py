@@ -260,6 +260,9 @@ class WorkflowTests(unittest.TestCase):
     def test_audit_installer_is_a_real_prerequisite(self):
         body = self.rust.split("      - name: Run cargo audit\n", 1)[1].split("\n      - ", 1)[0]
         self.assertIn("steps.audit_install.outcome == 'success'", body)
+        # #1998 (astra r2): the bound path exists only after the bind step
+        # succeeded; without it "${AUDITED_CARGO_AUDIT:?}" is unset.
+        self.assertIn("steps.audit_bind.outcome == 'success'", body)
         self.assertIn('"${AUDITED_CARGO_AUDIT:?}" audit --deny warnings', body)
 
     def test_success_requires_junit_but_unstarted_tests_do_not(self):

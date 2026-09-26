@@ -29,7 +29,8 @@
 #
 # Freshness proof: `--mark` writes ${RUNNER_TEMP}/audited-install-<binary>.marker
 # and then waits one second, so anything written by the install step has a
-# strictly later timestamp even on a filesystem with 1-second resolution. A
+# strictly later timestamp on a filesystem with 1-second or finer timestamp
+# resolution, provided wall time moves forward (no clock step back). A
 # candidate is fresh when its status-change time (ctime) is later than the
 # marker's modification time (`find -newercm`, BSD and GNU). Not mtime:
 # install-action extracts with `tar x` and moves with `mv`, both of which keep
@@ -42,7 +43,9 @@
 #   2. of ~/.install-action/bin/<binary> and ${CARGO_HOME:-~/.cargo}/bin/<binary>,
 #      exactly one is fresh. None fresh (a leftover from an earlier job, or the
 #      installer wrote somewhere else) or both fresh (cannot tell which one the
-#      installer wrote) fails;
+#      installer wrote) fails. Refusing two fresh candidates only helps while
+#      the genuine install is still visible as a separate fresh candidate (see
+#      the limits below);
 #   3. the fresh one is a regular, executable, non-symlink file;
 #   4. `<that file> <subcommand> --version` prints, on its first line,
 #      "<binary> <version>" or "<binary>-<subcommand> <version>", optionally
@@ -58,8 +61,17 @@
 #     use;
 #   - a binary forging its version string: the version is self-reported, and
 #     the fresh file already runs during the check;
-#   - a ctime refresh of a stale copy during the run (chmod, xattr change) is
-#     not an attack defence; it makes both candidates fresh and fails closed.
+#   - freshness is not provenance. A ctime refresh of a stale copy during the
+#     run (chmod, chown, xattr change, a restore) fails closed only while the
+#     genuine install is visible as a second fresh candidate. If a restore
+#     replaces the installed pathname itself, or a leftover's ctime is
+#     refreshed while the genuine install is absent from both locations, there
+#     is exactly one fresh candidate and it is accepted as long as it reports
+#     the pinned version;
+#   - a wall clock stepped back (between --mark and the install, or after a
+#     leftover was written), or a filesystem with timestamps coarser than
+#     1 second, can make the genuine install look stale (fails closed: none
+#     fresh) or a pre-existing file look fresh.
 #
 # Bash-3.2 compatible: the macOS acceptance host resolves /bin/bash.
 
@@ -88,7 +100,8 @@ if [ "$#" -eq 2 ] && [ "$1" = "--mark" ]; then
   marker="$(marker_path "${binary}")"
   rm -f -- "${marker}"
   : >"${marker}"
-  # Strict ordering for any timestamp resolution; see "Freshness proof".
+  # Strict ordering for 1-second or finer timestamp resolution, with
+  # forward-moving wall time; see "Freshness proof".
   sleep 1
   echo "${binary} install marker: ${marker}"
   exit 0
