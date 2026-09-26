@@ -23,8 +23,7 @@
 //! renamed to `llm_recorder` to reflect what it actually does.
 //!
 //! `foundry-runs` consumers today: `foundry_runtime_ops::daily_distill`,
-//! `hub_ops::security_scan`, `hub_ops::register` (skill analysis),
-//! `hub_ops::evolve`. The `status_ops::ledger` distill marker at
+//! `hub_ops::security_scan`, `hub_ops::register` (skill analysis). The `status_ops::ledger` distill marker at
 //! `foundry-runs/.last_distill_run` is independent of this recorder (it is
 //! written by the distill runner, not by a recorded call).
 //!

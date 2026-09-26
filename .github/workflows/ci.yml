@@ -346,6 +346,11 @@ jobs:
         if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' }}
         run: python3 -m unittest scripts.test_nextest_census scripts.test_nextest_known_reds scripts.test_nextest_slow_diff
 
+      - name: Test release script contracts
+        id: release_script_contracts
+        if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' }}
+        run: python3 -m unittest scripts.test_check_release_versions scripts.test_update_homebrew_formula scripts.test_dev_install
+
       - name: Test Rust setup source contracts
         id: setup_contracts
         if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' }}
@@ -630,11 +635,11 @@ jobs:
         # This CI-side gate is #1578's structural fix: it is a plain, always-
         # defined GitHub Actions job so `gitleaks` is a real CI gate the
         # AGENTS.md/dispatch-lifecycle report contract can point to, not just
-        # prose. Repository Actions is disabled repo-wide (#1562, owner
-        # ruling: stay manual) so this job does not currently execute; the
-        # live, executing secret-scan enforcement remains the local
-        # `.git/hooks/pre-push` gitleaks hook on the machines that have it
-        # installed. Personal-account repos need no GITLEAKS_LICENSE (only
+        # prose. It executes on the #1865 self-hosted trusted acceptance lane
+        # for owner-originated events only (see the job's `if:` guard); fork
+        # and non-owner events skip it. The local `.git/hooks/pre-push`
+        # gitleaks hook remains an earlier, additional gate on the machines
+        # that have it installed. Personal-account repos need no GITLEAKS_LICENSE (only
         # GitHub Organization accounts do); this repo is under the
         # kckylechen1 personal account, not an org.
         # Licensing note (2026-08-05): gitleaks-action v2+ is NOT MIT — its

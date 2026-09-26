@@ -1,7 +1,9 @@
 // lib.rs - Memory MCP Server runtime
 //
 // Rust MCP server using rmcp SDK to expose memcore functionality.
-// Stateless design: each tool opens its own DB connection per-request.
+// Long-lived, server-owned store handles (`memory_server_runtime`): writes go
+// through the gated global/project `MemoryStore`, global reads through the
+// shared `ReadStorePool` (see `server_state::init`).
 
 //! # Feature sets: `full` (default) vs `portable` (Refs #924 / #770 #790 #798)
 //!
@@ -122,9 +124,10 @@ mod exec_env_ops;
 /// receipt, and — on any prohibited delta — a loud failure with NO patch.
 /// It proves "no change was accepted"; it is never read-only enforcement.
 ///
-/// **NOT WIRED YET — see #894 S2 wiring slice.** This declaration is the module's
-/// only reference in the whole crate: no dispatch path calls it, so no dispatch
-/// is gated by it today.
+/// Wired into dispatch (#1322): `dispatch_ops::dispatch` compiles its
+/// applicability and builds the `PostflightGate` before spawn, and
+/// `dispatch_ops::dispatch::execution` applies the verdict (with
+/// `DaemonQuarantineSink`) after the worker exits.
 pub mod exec_env_postflight;
 mod facade_memory_ops;
 mod facade_save_ops;
@@ -204,17 +207,6 @@ use crate::tool_params::*;
 
 pub(crate) mod server_state;
 pub(crate) use server_state::{CachedVaultKey, DbScope, MemoryServer, VaultState};
-
-// Enrichment batcher methods are in enrichment.rs
-
-// ─── Tool Parameter Types ───────────────────────────────────────────────────────
-//
-// Note: dead_code warnings are expected here because the #[tool] macro
-// generates code that uses these types through macro expansion.
-
-// Parameter and tool schema definitions moved to `tool_params.rs`.
-
-// MCP pool proxy methods are in mcp_pool.rs
 
 // ─── Runtime Entrypoint ──────────────────────────────────────────────────────────
 
