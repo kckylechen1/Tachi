@@ -1102,6 +1102,43 @@ fn stub_holder_next_to_the_warning_is_held_and_pin_exclusion_still_applies() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// Byte-for-byte stderr of lsof 4.95.0 on atom-dgx-2 run as the CI user
+/// `gha` (tachi#1978 follow-up: the desktop owner's portal mount).
+const GHA_TRACEFS_AND_PORTAL: &[u8] = b"lsof: WARNING: can't stat() tracefs file system /sys/kernel/debug/tracing\n      Output information may be incomplete.\nlsof: WARNING: can't stat() fuse.portal file system /run/user/1000/doc\n      Output information may be incomplete.\n";
+
+#[cfg(unix)]
+#[test]
+fn stub_portal_pair_is_dropped_only_when_disjoint_and_paired() {
+    let root = unique_temp_dir("tachi-reaper-1978-portal");
+    let target = make_target_dir(&root, "x-target");
+    let check = stub_lsof_probe("gha", &target, b"", GHA_TRACEFS_AND_PORTAL, 1, None);
+    if cfg!(target_os = "linux") {
+        assert_eq!(check, HolderCheck::None);
+    } else {
+        assert_unknown("gha", check);
+    }
+    for (name, mount) in [
+        ("same", target.clone()),
+        ("ancestor", root.clone()),
+        ("descendant", target.join("debug")),
+    ] {
+        let mut stderr = LINUX_TRACEFS_WARNING.to_vec();
+        stderr.extend_from_slice(b"lsof: WARNING: can't stat() fuse.portal file system ");
+        stderr.extend_from_slice(mount.as_os_str().as_encoded_bytes());
+        stderr.extend_from_slice(b"\n      Output information may be incomplete.\n");
+        assert_unknown(name, stub_lsof_probe(name, &target, b"", &stderr, 1, None));
+    }
+    let mut lone = LINUX_TRACEFS_WARNING.to_vec();
+    lone.extend_from_slice(
+        b"lsof: WARNING: can't stat() fuse.portal file system /run/user/1000/doc\n",
+    );
+    assert_unknown(
+        "lone",
+        stub_lsof_probe("lone", &target, b"", &lone, 1, None),
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// Round-1 finding 1: an unvalidated first stdout line is never skipped, and
 /// the pin exclusion never runs on output without lsof's header.
 #[cfg(unix)]
