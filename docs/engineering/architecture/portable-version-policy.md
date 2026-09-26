@@ -1,6 +1,6 @@
 # Portable Version Policy — per-profile schema-version projection
 
-> **Status:** spec, pre-implementation, revision 5 (after four rounds of
+> **Status:** spec, pre-implementation, revision 6 (after five rounds of
 > cross-vendor attack review). Owner decision **D7 = B** (2026-09-26).
 > **Issue:** #1991 (parent #1987 W2-5).
 > **Anchors:** #984 (downgrade gate), #1119 (migration authority), #1180
@@ -119,8 +119,10 @@ un-versioned set (R7, §8 A6):
 - Some older shapes are normalized to the complete baseline by the frozen
   set. One example is the previous `memory_search_generation_after_update`
   trigger (`search_generation.rs:180-199`). Such shapes are admitted.
-- A shape the frozen set cannot bring to the complete baseline is refused by
-  R5.2b. The transaction rolls back, just as today's in-transaction
+- A shape the frozen set cannot bring to the complete baseline is refused.
+  Defects that today's object validators already catch are refused by R5.2a
+  in the preflight. The rest are refused by R5.2b, in which case the
+  transaction rolls back, just as today's in-transaction
   validators refuse it. Example: the pre-`migrate_enum_constraints`
   `memories` shape. Its rebuild drops the v23 reserved-reference guards, and
   only v23 reinstalls them. There is no allowlist of historical variants.
@@ -175,7 +177,14 @@ in `band` it is never written.
      sentinel set `relevant(P) ≤ π_P(E)` plus every `Product` sentinel with
      index `≤ min(s, PORTABLE_COMPAT_FLOOR)`.
      - For a `P@39` input this is exactly today's check, so today's error and
-       its precedence are unchanged.
+       its precedence are unchanged. That includes today's conditional
+       Product branch, which runs the A2A, mirror-eval identity,
+       verified-admission and CurrentTruth validators whenever
+       `identity_admissions` exists (`db/migrations.rs:372-382`). A
+       Portable probe must not drop that branch.
+     - For `P@36..38` it replaces today's version-based early return
+       (`db/migrations.rs:353-355`). Defects in these validators therefore
+       refuse in the preflight, before any backup and before identity (§6).
      - A missing sentinel refuses, because band runs no migration (R2). That
        matches how today refuses an incomplete `F@E`.
    - (a′) **Pending output inventory.** This runs for pending only, inside the
@@ -371,8 +380,24 @@ outcome (success or refusal, phase, and side effects), not just the error:
   the runner executes v3 and the open succeeds. Under B it is band, R5.2a
   refuses it, and nothing is written. This matches how today treats an
   incomplete `F@E`.
-- **Band shape defect under `Allow`.** Today the store migrates, the defect
-  survives, and the open succeeds. Under B, R5.2b refuses it.
+- **Band shape defect that today's validators miss, under `Allow`.** Today
+  the store migrates, the defect survives, and the open succeeds. Under B,
+  R5.2b refuses it inside the transaction.
+- **Older-band (`P@36..38`) defect that today's object validators catch.**
+  Take a filesystem `P@36`, `OpenExisting` + `Allow`, `AtLeast(P)`, with
+  `idx_memory_outbox_events_state_created` removed:
+  - Today: the preflight integrity check is skipped at 36, a forced backup is
+    taken, and then the transactional outbox validator
+    (`db/schema.rs:1857-1879`) refuses. DB writes roll back, but the backup
+    remains.
+  - Under B: R5.2a refuses in the preflight, before any backup, and nothing
+    is written.
+- **Older-band precedence against identity.** Take `P@36` with
+  `idx_delivery_events_delivery` removed **and** a role payload of
+  `{"value":7}`:
+  - Today: integrity is skipped at 36, and the role-decode error wins in the
+    preflight.
+  - Under B: R5.2a's delivery-integrity error wins, before identity.
 - **Precedence at `P@39` for defects that today's integrity check catches.**
   Unchanged. R5.2a *is* today's check at `s == E`, so a missing delivery index
   combined with a malformed role still returns today's integrity error before
@@ -596,7 +621,8 @@ hook, or an error variant), not only the end state.
   variant separately: malformed role, malformed profile, missing sentinel,
   unsatisfied requirement, and an unrepaired shape defect. Also run these
   combined variants: shape defect + malformed role; today's integrity defect
-  (e.g. a missing delivery index at `P@39`) + malformed role. Every case is
+  (e.g. a missing delivery index) + malformed role, at **both** `P@39` and
+  `P@36`; the older-band outbox-index case under `Allow` (§6). Every case is
   pinned twice, for the old (#1983/#1984) behaviour and for B. Each pin is an
   **outcome**, not just an error: success or refusal, the phase that
   decided it, and side effects (backups, stamp, sentinels, rows). The two
