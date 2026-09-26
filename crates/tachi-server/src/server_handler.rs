@@ -788,6 +788,11 @@ struct HttpSessionIdentity {
     /// also ride through). Header-only: the proxy injects it via
     /// `custom_headers`, never `_meta`.
     dispatch_depth: Option<String>,
+    /// Audit C1: validated `X-Tachi-Rate-Limit-Session` key. Header-only (no
+    /// `_meta` twin); a malformed value is dropped to `None` rather than
+    /// failing the request, because it selects a rate-limit bucket only and
+    /// never identity, profile, or authority.
+    rate_limit_session: Option<String>,
 }
 
 /// #1120 PR1: which session-identity field supplies the bound project, when
@@ -831,7 +836,26 @@ impl MemoryServer {
         validate_modern_identity_headers(context)?;
         let request_server = self.clone_for_mcp_session();
         let identity = request_identity(Some(&context.meta), context);
+        // Audit C1: a modern request has no session to hold a rate-limit
+        // bucket, and `clone_for_mcp_session` just minted a per-request one.
+        // Without an explicit bucket header, key the bucket by the resolved
+        // identity so repeated calls from the same peer share burst/RPM
+        // windows. Only when nothing stable exists does the per-request key
+        // stay.
+        let identity_bucket = identity
+            .rate_limit_session
+            .is_none()
+            .then(|| (identity.agent_identity_id.clone(), identity.client.clone()));
         request_server.apply_resolved_request_identity(identity, context)?;
+        if let Some((agent_identity, client)) = identity_bucket {
+            if let Some(key) = modern_identity_rate_limit_session_id(
+                agent_identity.as_deref(),
+                client.as_deref(),
+                request_server.session_project().as_deref(),
+            ) {
+                request_server.set_rate_limit_session_id(key);
+            }
+        }
         Ok(request_server)
     }
 
@@ -930,8 +954,37 @@ impl MemoryServer {
         // recursion gate in `handle_tachi_dispatch` reads the CALLER's depth
         // (via the session), not the daemon's process env.
         self.set_session_dispatch_depth(identity.dispatch_depth);
+        // Audit C1: applied last, after every identity check above has
+        // passed, so the bucket header can never short-circuit or stand in
+        // for identity admission. It only picks the rate-limit bucket.
+        if let Some(key) = identity.rate_limit_session {
+            self.set_rate_limit_session_id(format!("client:{key}"));
+        }
         Ok(())
     }
+}
+
+/// Audit C1: stable rate-limit bucket for a modern (2026-07-28) request that
+/// sent no `X-Tachi-Rate-Limit-Session` header, derived from its resolved
+/// agent identity, client label, and canonical bound project. Returns `None`
+/// when all three are absent, leaving the per-request key in place. The key is
+/// a digest so the bucket id stays opaque (it also appears in lifecycle events)
+/// and cannot collide with the `client:` namespace.
+fn modern_identity_rate_limit_session_id(
+    agent_identity: Option<&str>,
+    client: Option<&str>,
+    project: Option<&str>,
+) -> Option<String> {
+    use sha2::{Digest, Sha256};
+
+    if agent_identity.is_none() && client.is_none() && project.is_none() {
+        return None;
+    }
+    let material = serde_json::json!([agent_identity, client, project]).to_string();
+    Some(format!(
+        "identity:{:x}",
+        Sha256::digest(material.as_bytes())
+    ))
 }
 
 fn http_session_identity(
@@ -991,6 +1044,12 @@ fn request_identity(
         // injects it via `custom_headers` in `call_daemon_tool_raw`.
         identity.dispatch_depth =
             header_string(parts, crate::session_identity::HEADER_DISPATCH_DEPTH);
+        // Audit C1: header-only rate-limit bucket key. Malformed values are
+        // ignored (not an error): the key never carries authority, so the
+        // daemon just keeps its own per-session or identity-derived bucket.
+        identity.rate_limit_session =
+            header_string(parts, crate::session_identity::HEADER_RATE_LIMIT_SESSION)
+                .filter(|key| crate::session_identity::valid_rate_limit_session_key(key));
         // Review finding [3] (#1207): a header wins over `_meta` per this
         // function's usual precedence, but ONLY when it is actually present
         // and well-formed. A PRESENT-but-malformed header must win the error
@@ -1573,7 +1632,11 @@ impl ServerHandler for MemoryServer {
                 // #1255: `clone_for_mcp_session` stamps a unique opaque id on
                 // each MCP session clone; `check_session_rate_limit` keys burst
                 // windows by that id so sessions sharing the process-global
-                // RateLimiter do not inherit each other's counters.
+                // RateLimiter do not inherit each other's counters. Audit C1:
+                // that id is re-keyed to a stable bucket (bucket header or
+                // modern identity) in `apply_resolved_request_identity` /
+                // `clone_for_modern_request`, so short-lived proxy sessions
+                // and modern requests still accumulate one window per client.
                 server.check_session_rate_limit(name, &args_hash)?
             };
 
@@ -2631,6 +2694,7 @@ mod tests {
             workspace_root: Some("/home/agent/repos/sigil".to_string()),
             workspace_root_error: None,
             dispatch_depth: None,
+            rate_limit_session: None,
         };
         assert_eq!(
             project_binding_source(&identity),
@@ -2651,10 +2715,38 @@ mod tests {
             workspace_root: Some("/home/agent/repos/sigil".to_string()),
             workspace_root_error: None,
             dispatch_depth: None,
+            rate_limit_session: None,
         };
         assert_eq!(
             project_binding_source(&identity),
             ProjectBindingSource::WorkspaceRoot("/home/agent/repos/sigil")
+        );
+    }
+
+    /// Audit C1: a modern request's derived bucket is stable for the same
+    /// resolved identity, distinct across identities, opaque, and absent when
+    /// the request carries no identity at all (per-request fallback).
+    #[test]
+    fn modern_identity_rate_limit_bucket_is_stable_per_identity() {
+        let a = modern_identity_rate_limit_session_id(Some("agent.a"), Some("cli"), Some("sigil"))
+            .expect("identity bucket");
+        assert_eq!(
+            Some(a.clone()),
+            modern_identity_rate_limit_session_id(Some("agent.a"), Some("cli"), Some("sigil"))
+        );
+        assert!(a.starts_with("identity:"), "{a}");
+        assert!(!a.contains("agent.a"), "bucket id must stay opaque: {a}");
+        for other in [
+            modern_identity_rate_limit_session_id(Some("agent.b"), Some("cli"), Some("sigil")),
+            modern_identity_rate_limit_session_id(Some("agent.a"), Some("ide"), Some("sigil")),
+            modern_identity_rate_limit_session_id(Some("agent.a"), Some("cli"), None),
+            modern_identity_rate_limit_session_id(None, Some("agent.a"), Some("cli")),
+        ] {
+            assert_ne!(other.as_deref(), Some(a.as_str()));
+        }
+        assert_eq!(
+            modern_identity_rate_limit_session_id(None, None, None),
+            None
         );
     }
 

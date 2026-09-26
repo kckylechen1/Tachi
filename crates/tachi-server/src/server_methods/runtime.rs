@@ -19,6 +19,14 @@ impl MemoryServer {
         self.agent_runtime_read().rate_limit_session_id.clone()
     }
 
+    /// Audit C1: re-key this clone's rate-limit bucket to a stable key (a
+    /// validated `X-Tachi-Rate-Limit-Session` header or a modern request's
+    /// resolved identity). Only changes which burst/RPM window is used; it
+    /// carries no identity or authority.
+    pub(crate) fn set_rate_limit_session_id(&self, session_id: String) {
+        self.agent_runtime_write().rate_limit_session_id = session_id;
+    }
+
     pub(crate) fn set_tool_profile(&self, profile: Option<ToolProfile>) {
         self.agent_runtime_write().tool_profile = profile;
     }

@@ -124,6 +124,33 @@ stays identity-less and rejected; the daemon process environment is not an
 identity fallback for HTTP clients. This is the local attribution posture
 frozen in `identity-workclaim-spine-v1.md`, not remote identity proof.
 
+### Rate-limit bucket (`X-Tachi-Rate-Limit-Session`)
+
+The daemon's loop/stuck detection (`RateLimiter` burst and RPM windows) is
+keyed by a per-session `rate_limit_session_id`. Two peers used to get a fresh
+key on every call: the stdio proxy opens a new short-lived daemon MCP session
+for each `tools/call` (there is deliberately no session pool), and a modern
+`2026-07-28` request runs on a request-local server clone. Either way the burst
+window started empty, so repeat-call warnings and loop blocks never fired.
+
+| Peer | Bucket key |
+|---|---|
+| stdio proxy | One random key minted per proxy connection and sent as `X-Tachi-Rate-Limit-Session` on every daemon tool call (legacy: read at `initialize`) |
+| Any HTTP peer sending a valid `X-Tachi-Rate-Limit-Session` | That key (legacy: for the session; modern: per request) |
+| Modern HTTP without the header | Digest of the resolved AgentIdentity, client label and canonical bound project |
+| Modern HTTP with none of those | Per-request key (unchanged fallback) |
+| Legacy HTTP without the header, local stdio | Per-session key (unchanged) |
+
+The header only selects a rate-limit bucket. It never grants identity,
+profile, project, or authority, and it is applied only after every identity
+check has passed. It is header-only: there is no `_meta` twin, and
+`initialize` metadata cannot set it. Values must be 16 to 128 characters of
+`[A-Za-z0-9_-]`; anything else is ignored rather than failing the request, and
+the daemon keeps its own per-session or identity-derived key. A caller could
+choose a fresh key per call, but it could already open a fresh session, so
+this adds no new way around the limiter. The stdio proxy's retry split is
+unchanged: only a `BeforeDispatch` failure is retried, with the same key.
+
 ### Claude Code / host config sketch
 
 ```json
