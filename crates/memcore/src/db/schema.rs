@@ -1200,48 +1200,67 @@ fn init_schema_with_label_mut_inner(
     filesystem_artifacts: bool,
 ) -> Result<SchemaInitOutcome, MemoryError> {
     super::ensure_reserved_reference_write_guard(conn)?;
+    // ── Preflight (no transaction) ──────────────────────────────────────────
+    // Every admission gate runs here first, on the state as read now, so a
+    // store that already refuses this open refuses before memcore's own side
+    // effects: no `.migration-bak` (and no retention pass), no persistent
+    // connection PRAGMA (`journal_mode`), no DDL, no stamp, no identity/role
+    // write. These results are ADVISORY: another process can change the
+    // store before `BEGIN IMMEDIATE` below, so every gate is evaluated again
+    // on the in-transaction state, and only that evaluation decides.
+    //
+    // #984 version gate, then the #1119 typed migration gate (quiet here; the
+    // audit line is logged by the authoritative evaluation).
     crate::db::migrations::check_schema_version_gate(conn)?;
-    // #1119: typed migration gate. Runs BEFORE any backup/DDL/migration/stamp
-    // mutates the DB — an unauthorized `OpenExisting + Deny` open of a
-    // stamped older DB must refuse before `init_schema_inner`'s idempotent
-    // DDL or the final `write_schema_version_stamp` touches the file.
-    crate::db::migrations::check_db_open_context_gate(conn, current_db_path, ctx)?;
+    let preflight_version = crate::db::migrations::read_schema_version(conn)?;
+    crate::db::migrations::evaluate_db_open_context_gate(conn, current_db_path, ctx)?;
     crate::db::migrations::validate_current_schema_integrity(conn)?;
     // The same discriminator `check_db_open_context_gate` uses: an unstamped
-    // file is fresh, whatever its content (#1119 owner ruling A). Sampled
-    // BEFORE the transaction writes the new stamp.
-    let fresh = crate::db::migrations::read_schema_version(conn)? == 0;
-    // W1-3: read-only identity/profile admission before memcore's own side
-    // effects. The identity rows are plain `hard_state` reads, so a store
-    // whose stamps already refuse this open (role conflict, profile
-    // mismatch) refuses here: no `.migration-bak` is written, the persistent
-    // connection PRAGMAs (`journal_mode`) do not run, and memcore issues no
-    // DDL, stamp or identity/role write.
+    // file is fresh, whatever its content (#1119 owner ruling A).
+    let preflight_fresh = preflight_version == 0;
+    // W1-3: read-only identity/profile admission (plain `hard_state` reads).
+    resolve_store_identity_in_tx(conn, db_label, current_db_path, ctx, preflight_fresh)?;
     //
-    // What this does NOT promise:
+    // What a refusal does NOT promise:
     // * Byte-identical files. The funnel's connection is read-write; if the
     //   store was left with committed but uncheckpointed WAL frames (unclean
     //   shutdown), SQLite folds them into the main file and removes the
-    //   `-wal`/`-shm` pair when this connection closes. That is SQLite's
-    //   last-close checkpoint, not a memcore write, and the logical content
-    //   (schema, `user_version`, `hard_state`) is unchanged by it.
-    // * A backup-free refusal under a race. This is a preflight only: the
-    //   authoritative resolution stays inside the `BEGIN IMMEDIATE` below,
-    //   because another process may stamp the store between this read and
-    //   that transaction. Such an open passes the preflight, may write its
-    //   backup, and is then refused inside the transaction; the backup is a
-    //   harmless extra copy and nothing else is written.
-    resolve_store_identity_in_tx(conn, db_label, current_db_path, ctx, fresh)?;
+    //   `-wal`/`-shm` pair when this connection closes, and SQLite may create
+    //   and remove sidecars transiently while reading. That is SQLite, not a
+    //   memcore write; the logical content (schema, `user_version`,
+    //   `hard_state`) is unchanged by it.
+    // * Nothing persisting under a race. If the store changes between this
+    //   preflight and `BEGIN IMMEDIATE`, the open can pass here and be
+    //   refused by the in-transaction evaluation. What can then persist is
+    //   exactly: the `.migration-bak` written below plus the retention pass
+    //   that may delete older backups, and `journal_mode` switched to WAL by
+    //   `apply_connection_pragmas` (WAL mode is persistent). DDL, stamps and
+    //   identity/role writes are inside the transaction and roll back.
     if filesystem_artifacts {
         maybe_backup_before_migration(conn, current_db_path)?;
     }
     apply_connection_pragmas(conn)?;
 
+    #[cfg(test)]
+    test_hooks::run_before_schema_transaction(current_db_path);
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    // ── Authoritative (inside BEGIN IMMEDIATE) ──────────────────────────────
+    // No other connection can commit until this transaction ends, so these
+    // reads are the state every write below acts on. Re-evaluate every gate
+    // and the `fresh` discriminator here and never use the preflight values
+    // for a decision: a refusal returns and drops `tx` (rollback, nothing
+    // written); a changed-but-admitted state proceeds on what is read here.
+    let fresh = reevaluate_admission_in_tx(
+        &tx,
+        current_db_path,
+        ctx,
+        preflight_version,
+        filesystem_artifacts,
+    )?;
     // #1585/#1579: resolve identity BEFORE any DDL runs, so a refused open
-    // (role conflict, profile mismatch, unstamped-under-portable) leaves the
-    // database byte-identical. Everything below is inside the same
-    // BEGIN IMMEDIATE, so even a later failure rolls the stamps back with it.
+    // (role conflict, profile mismatch, unstamped-under-portable) writes
+    // nothing. Everything below is inside the same BEGIN IMMEDIATE, so even a
+    // later failure rolls the stamps back with it.
     let identity = resolve_store_identity_in_tx(&tx, db_label, current_db_path, ctx, fresh)?;
     init_schema_inner(&tx, identity.profile)?;
     stamp_store_identity_in_tx(&tx, &identity, ctx)?;
@@ -1275,6 +1294,44 @@ fn init_schema_with_label_mut_inner(
         remember_migration_fingerprint(conn, current_db_path)?;
     }
     Ok(SchemaInitOutcome { report, identity })
+}
+
+/// The authoritative admission decision, evaluated inside `BEGIN IMMEDIATE`
+/// on the state every subsequent write acts on. Returns the in-transaction
+/// `fresh` discriminator (`user_version == 0`).
+///
+/// Order mirrors the preflight: #984 version gate → #1119 intent/authority
+/// gate → current-schema integrity → #1180 backup coverage. The last check
+/// exists because the pre-migration backup can only run outside a write
+/// transaction (SQLite refuses to back up a connection holding one): if the
+/// in-transaction state is a migration but the preflight saw a different
+/// version, the backup on disk (if any) is of a different state, so the open
+/// refuses with `SchemaChangedDuringOpen` instead of migrating without one.
+fn reevaluate_admission_in_tx(
+    tx: &Connection,
+    current_db_path: &Path,
+    ctx: &crate::db::DbOpenContext,
+    preflight_version: u32,
+    filesystem_artifacts: bool,
+) -> Result<bool, MemoryError> {
+    use crate::db::migrations::{self, OpenContextDecision};
+
+    migrations::check_schema_version_gate(tx)?;
+    let version = migrations::read_schema_version(tx)?;
+    let decision = migrations::evaluate_db_open_context_gate(tx, current_db_path, ctx)?;
+    migrations::validate_current_schema_integrity(tx)?;
+    if filesystem_artifacts
+        && matches!(decision, OpenContextDecision::AuthorizedMigration { .. })
+        && version != preflight_version
+    {
+        return Err(MemoryError::SchemaChangedDuringOpen {
+            preflight: preflight_version,
+            current: version,
+            db_path: current_db_path.display().to_string(),
+        });
+    }
+    migrations::log_authorized_migration(decision, current_db_path, ctx);
+    Ok(version == 0)
 }
 
 /// What `init_schema_with_label_mut` hands back: the migration report it always
@@ -1363,6 +1420,7 @@ pub(crate) mod test_hooks {
     use crate::error::MemoryError;
     use rusqlite::Connection;
     use std::cell::Cell;
+    use std::path::Path;
 
     thread_local! {
         static FAIL_AFTER_LEGACY_WORK: Cell<bool> = const { Cell::new(false) };
@@ -1384,6 +1442,26 @@ pub(crate) mod test_hooks {
             ));
         }
         Ok(())
+    }
+
+    thread_local! {
+        static BEFORE_SCHEMA_TRANSACTION: std::cell::RefCell<Option<Box<dyn FnOnce(&Path)>>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    /// Arm a closure that runs once, on this thread, in the NEXT schema init:
+    /// after every preflight gate, the backup and the connection PRAGMAs, and
+    /// immediately before `BEGIN IMMEDIATE`. It stands in for another process
+    /// committing to the store in that window; it receives the store path and
+    /// opens its own connection. Auto-disarms after firing once.
+    pub(crate) fn arm_before_schema_transaction(hook: impl FnOnce(&Path) + 'static) {
+        BEFORE_SCHEMA_TRANSACTION.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+    }
+
+    pub(super) fn run_before_schema_transaction(db_path: &Path) {
+        if let Some(hook) = BEFORE_SCHEMA_TRANSACTION.with(|slot| slot.borrow_mut().take()) {
+            hook(db_path);
+        }
     }
 
     /// Used only by the ignored, fixture-backed subprocess crash test. This
@@ -3731,3 +3809,6 @@ mod migration_tests;
 
 #[cfg(test)]
 mod migration_backup_tests;
+
+#[cfg(test)]
+mod open_race_tests;

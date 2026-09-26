@@ -325,8 +325,11 @@ fn file_sha256(path: &Path) -> String {
 
 /// Every file next to the database, by name, INCLUDING SQLite's `-wal`/`-shm`
 /// sidecars. The clean-store refusal tests start from a cleanly closed store,
-/// where the last close already removed both sidecars, so any sidecar left
-/// behind by a refused open would show up here. The unclean-shutdown test
+/// where the last close already removed both sidecars, so any sidecar LEFT
+/// behind by a refused open would show up here. These comparisons observe the
+/// final directory after the connection closed: they prove nothing remains,
+/// not that nothing was ever created (SQLite may create and remove sidecars
+/// transiently while the refused open reads). The unclean-shutdown test
 /// below is where sidecars legitimately change, and it says so explicitly.
 fn sibling_names(dir: &Path) -> std::collections::BTreeSet<String> {
     std::fs::read_dir(dir)
@@ -380,7 +383,7 @@ fn seed_store_needing_backup(dir: &Path, label: &str, ctx: &crate::db::DbOpenCon
 }
 
 #[test]
-fn refused_role_conflict_open_writes_no_backup_and_clean_store_bytes_unchanged() {
+fn refused_role_conflict_open_leaves_no_backup_and_clean_store_bytes_unchanged() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let db_path = seed_store_needing_backup(
         tmp.path(),
@@ -424,14 +427,15 @@ fn refused_role_conflict_open_writes_no_backup_and_clean_store_bytes_unchanged()
 
 /// The unclean-shutdown case the byte-identity claim does NOT cover. A store
 /// whose last writer died with committed frames still in `-wal` is opened
-/// with a conflicting role claim. The refusal must still write no backup, no
-/// marker and no memcore DDL/stamp/identity row, and the conflicting role
+/// with a conflicting role claim. After it closes, no backup, no marker and
+/// no memcore DDL/stamp/identity row may remain, and the conflicting role
 /// must be the one committed only in the WAL (proving the refusal read it).
 /// What SQLite itself does on the connection's last close is allowed: it may
-/// checkpoint those frames into the main file and remove `-wal`/`-shm`, so
+/// checkpoint those frames into the main file and remove `-wal`/`-shm` (and
+/// it may create `-shm` transiently while recovering the WAL index), so
 /// neither the main-file hash nor the sidecar pair is compared for equality.
 #[test]
-fn refused_open_after_unclean_shutdown_writes_no_backup_and_keeps_logical_state() {
+fn refused_open_after_unclean_shutdown_leaves_no_backup_and_keeps_logical_state() {
     let src = tempfile::tempdir().expect("src tempdir");
     let dst = tempfile::tempdir().expect("dst tempdir");
     let src_db = src.path().join("memory.db");
@@ -506,7 +510,7 @@ fn refused_open_after_unclean_shutdown_writes_no_backup_and_keeps_logical_state(
     let removed: Vec<_> = before_siblings.difference(&after_siblings).collect();
     assert!(
         added.is_empty(),
-        "a refused open must create no file (no backup, no marker): {added:?}"
+        "no new file may remain after a refused open (no backup, no marker): {added:?}"
     );
     assert!(
         removed
@@ -526,7 +530,7 @@ fn refused_open_after_unclean_shutdown_writes_no_backup_and_keeps_logical_state(
 }
 
 #[test]
-fn refused_profile_mismatch_open_writes_no_backup_and_clean_store_bytes_unchanged() {
+fn refused_profile_mismatch_open_leaves_no_backup_and_clean_store_bytes_unchanged() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let db_path = seed_store_needing_backup(
         tmp.path(),

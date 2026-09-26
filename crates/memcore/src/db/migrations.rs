@@ -421,6 +421,32 @@ pub fn check_db_open_context_gate(
     db_path: &Path,
     ctx: &crate::db::DbOpenContext,
 ) -> Result<(), MemoryError> {
+    let decision = evaluate_db_open_context_gate(conn, db_path, ctx)?;
+    log_authorized_migration(decision, db_path, ctx);
+    Ok(())
+}
+
+/// What [`check_db_open_context_gate`] admitted, for callers that must act on
+/// (or log) the decision separately from evaluating it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OpenContextDecision {
+    /// `stored == 0`: a build under either intent.
+    Build,
+    /// `OpenExisting` of a `stored == EXPECTED` database.
+    Current,
+    /// `OpenExisting + Allow` of a `1 ≤ stored < EXPECTED` database.
+    AuthorizedMigration { stored: u32 },
+}
+
+/// The side-effect-free core of [`check_db_open_context_gate`]: the same
+/// decision table, without the audit log line. The open funnel evaluates it
+/// twice (a pre-transaction preflight and the authoritative in-transaction
+/// re-evaluation) and logs only the authoritative one.
+pub(crate) fn evaluate_db_open_context_gate(
+    conn: &Connection,
+    db_path: &Path,
+    ctx: &crate::db::DbOpenContext,
+) -> Result<OpenContextDecision, MemoryError> {
     use crate::db::{MigrationAuthority, OpenIntent};
 
     let stored = read_schema_version(conn)?;
@@ -431,7 +457,7 @@ pub fn check_db_open_context_gate(
             // operational DB, not a create target — refuse. Use OpenExisting
             // (with authority) to open/migrate an existing DB.
             if stored == 0 {
-                Ok(())
+                Ok(OpenContextDecision::Build)
             } else {
                 Err(MemoryError::DbCreateTargetExists {
                     stored,
@@ -442,26 +468,39 @@ pub fn check_db_open_context_gate(
         OpenIntent::OpenExisting => {
             if stored >= EXPECTED_SCHEMA_VERSION {
                 // == EXPECTED (current); > EXPECTED refused upstream.
-                return Ok(());
+                return Ok(OpenContextDecision::Current);
             }
             if stored == 0 {
                 // No stamp: a build, not a migration — see the doc comment.
-                return Ok(());
+                return Ok(OpenContextDecision::Build);
             }
             // 1 ≤ stored < EXPECTED: a real older DB. THE migration decision.
             match &ctx.migration {
-                MigrationAuthority::Allow { approved_by } => {
-                    eprintln!(
-                        "{}",
-                        schema_migration_success_log_line(stored, db_path, approved_by)
-                    );
-                    Ok(())
+                MigrationAuthority::Allow { .. } => {
+                    Ok(OpenContextDecision::AuthorizedMigration { stored })
                 }
                 MigrationAuthority::Deny => {
                     Err(schema_migration_opt_in_required_error(stored, db_path))
                 }
             }
         }
+    }
+}
+
+/// Emit the #1119 audit line for an authorized migration decision; a no-op for
+/// every other decision.
+pub(crate) fn log_authorized_migration(
+    decision: OpenContextDecision,
+    db_path: &Path,
+    ctx: &crate::db::DbOpenContext,
+) {
+    if let (OpenContextDecision::AuthorizedMigration { stored }, Some(approved_by)) =
+        (decision, ctx.approved_by())
+    {
+        eprintln!(
+            "{}",
+            schema_migration_success_log_line(stored, db_path, approved_by)
+        );
     }
 }
 
