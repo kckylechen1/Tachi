@@ -25,11 +25,25 @@ AUDITED_PINS = [
   Pin.new("actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02", "v4.6.2"),
   Pin.new("gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e", "v3.0.0"),
   Pin.new("softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65", "v2.6.2"),
+  Pin.new("taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172", "v2.87.20"),
   Pin.new("taiki-e/install-action@c295c25a8d3df7288fa86db860a4f8062bf76ad8", "releases/nextest snapshot 2026-07-25")
 ].freeze
 
-AUDITED_CARGO_INSTALLS = {
-  "cargo install cargo-audit --version 0.22.2 --locked --quiet" => 1
+# No workflow may build a tool from source with `cargo install`; every such
+# command is rejected unless listed here with its exact expected count.
+AUDITED_CARGO_INSTALLS = {}.freeze
+
+# Prebuilt tool installs via taiki-e/install-action: each `with: tool:` value
+# must be an exact name@version listed here, used exactly the listed number of
+# times across all workflows and local actions, with checksums on and the
+# source-build fallback disabled.
+INSTALL_ACTION = "taiki-e/install-action"
+AUDITED_INSTALL_ACTION_TOOLS = {
+  "cargo-audit@0.22.2" => 1
+}.freeze
+REQUIRED_INSTALL_ACTION_INPUTS = {
+  "checksum" => "true",
+  "fallback" => "none"
 }.freeze
 
 IMMUTABLE_IMAGE = /\A[^@[:space:]]+@sha256:[0-9a-f]{64}\z/
@@ -106,10 +120,13 @@ end
 class ActionPolicy
   attr_reader :run_count, :uses_count
 
-  def initialize(inventory, pins = AUDITED_PINS, cargo_installs = AUDITED_CARGO_INSTALLS)
+  def initialize(inventory, pins = AUDITED_PINS, cargo_installs = AUDITED_CARGO_INSTALLS,
+                 install_tools = AUDITED_INSTALL_ACTION_TOOLS)
     @inventory = inventory
     @pins = pins
     @cargo_installs = cargo_installs
+    @install_tools = install_tools
+    @install_tool_uses = Hash.new(0)
     @approved = {}
     @ref_sha = {}
     @pin_uses = Hash.new(0)
@@ -147,6 +164,13 @@ class ActionPolicy
 
       raise PolicyError, "audited cargo install count mismatch: expected=#{expected_count} actual=#{actual_count}: #{command}"
     end
+
+    @install_tools.each do |tool, expected_count|
+      actual_count = @install_tool_uses[tool]
+      next if actual_count == expected_count
+
+      raise PolicyError, "audited install-action tool count mismatch: expected=#{expected_count} actual=#{actual_count}: #{tool}"
+    end
   end
 
   private
@@ -158,10 +182,11 @@ class ActionPolicy
 
       action = match[1]
       sha = match[2]
-      valid_label = if action == "taiki-e/install-action"
-                      pin.label.match?(/\Areleases\/nextest snapshot [0-9]{4}-[0-9]{2}-[0-9]{2}\z/)
+      semver_label = pin.label.match?(/\Av[0-9]+(?:\.[0-9]+){0,2}\z/)
+      valid_label = if action == INSTALL_ACTION
+                      semver_label || pin.label.match?(/\Areleases\/nextest snapshot [0-9]{4}-[0-9]{2}-[0-9]{2}\z/)
                     else
-                      pin.label.match?(/\Av[0-9]+(?:\.[0-9]+){0,2}\z/)
+                      semver_label
                     end
       raise PolicyError, "invalid audited ref label: #{pin.label}" unless valid_label
 
@@ -204,6 +229,7 @@ class ActionPolicy
     when Psych::Nodes::Alias
       raise PolicyError, "#{path}: YAML aliases are forbidden in supply-chain policy files"
     when Psych::Nodes::Mapping
+      validate_install_action_step(node, path)
       node.children.each_slice(2) do |key, value|
         walk(key, path, lines)
         if key.is_a?(Psych::Nodes::Scalar) && key.value == "uses"
@@ -228,6 +254,48 @@ class ActionPolicy
     when Psych::Nodes::Stream, Psych::Nodes::Document, Psych::Nodes::Sequence
       node.children.each { |child| walk(child, path, lines) }
     end
+  end
+
+  # A step that uses taiki-e/install-action either installs the tool baked into
+  # its audited pin (no `with:`), or names the tool explicitly; an explicit tool
+  # must be an audited exact name@version with checksum and no fallback.
+  def validate_install_action_step(node, path)
+    entries = node.children.each_slice(2).select { |key, _value| key.is_a?(Psych::Nodes::Scalar) }
+    uses = entries.select { |key, _value| key.value == "uses" }
+    return unless uses.any? { |_key, value| value.is_a?(Psych::Nodes::Scalar) && value.value.start_with?("#{INSTALL_ACTION}@") }
+    raise PolicyError, "#{path}: #{INSTALL_ACTION} step has duplicate uses keys" if uses.length > 1
+
+    withs = entries.select { |key, _value| key.value == "with" }
+    return if withs.empty?
+    raise PolicyError, "#{path}: #{INSTALL_ACTION} step has duplicate with keys" if withs.length > 1
+
+    inputs_node = withs.first[1]
+    raise PolicyError, "#{path}: #{INSTALL_ACTION} with must be a mapping" unless inputs_node.is_a?(Psych::Nodes::Mapping)
+
+    inputs = {}
+    inputs_node.children.each_slice(2) do |key, value|
+      unless key.is_a?(Psych::Nodes::Scalar) && value.is_a?(Psych::Nodes::Scalar)
+        raise PolicyError, "#{path}: #{INSTALL_ACTION} inputs must be scalar key/value pairs"
+      end
+      raise PolicyError, "#{path}: #{INSTALL_ACTION} input is duplicated: #{key.value}" if inputs.key?(key.value)
+
+      inputs[key.value] = value.value
+    end
+
+    allowed = ["tool"] + REQUIRED_INSTALL_ACTION_INPUTS.keys
+    unknown = inputs.keys - allowed
+    raise PolicyError, "#{path}: #{INSTALL_ACTION} has unaudited inputs: #{unknown.join(',')}" unless unknown.empty?
+
+    tool = inputs["tool"]
+    unless tool && @install_tools.key?(tool)
+      raise PolicyError, "#{path}: #{INSTALL_ACTION} tool is not an audited exact name@version: #{tool.inspect}"
+    end
+    REQUIRED_INSTALL_ACTION_INPUTS.each do |input, required|
+      next if inputs[input] == required
+
+      raise PolicyError, "#{path}: #{INSTALL_ACTION} requires #{input}: #{required} (got #{inputs[input].inspect}) for #{tool}"
+    end
+    @install_tool_uses[tool] += 1
   end
 
   def require_scalar!(node, path, key)
@@ -429,9 +497,9 @@ class ActionPolicy
   end
 end
 
-def validate_virtual(sources, pins: [], cargo_installs: {}, roots: nil)
+def validate_virtual(sources, pins: [], cargo_installs: {}, install_tools: {}, roots: nil)
   inventory = RepoInventory.virtual(sources)
-  policy = ActionPolicy.new(inventory, pins, cargo_installs)
+  policy = ActionPolicy.new(inventory, pins, cargo_installs, install_tools)
   policy.validate_roots(roots || inventory.policy_root_files)
   policy
 end
@@ -492,7 +560,13 @@ def self_test!
     validate_virtual(sources)
   end
 
-  audited = AUDITED_CARGO_INSTALLS.keys.first
+  # Production allows no cargo install at all; exercise the exact-match matcher
+  # against a fixture-local audited command.
+  audited = "cargo install cargo-audit --version 0.22.2 --locked --quiet"
+  fixture_cargo_installs = {audited => 1}.freeze
+  expect_rejected("cargo-install-source-build-retired") do
+    validate_virtual({root => "run: #{audited}\n"}, cargo_installs: AUDITED_CARGO_INSTALLS)
+  end
   cargo_fixtures = {
     "cargo-env-prefix" => "run: FOO=bar #{audited}\n",
     "cargo-sudo" => "run: sudo #{audited}\n",
@@ -518,7 +592,7 @@ def self_test!
   }
   cargo_fixtures.each do |name, source|
     expect_rejected(name) do
-      validate_virtual({root => source}, cargo_installs: AUDITED_CARGO_INSTALLS)
+      validate_virtual({root => source}, cargo_installs: fixture_cargo_installs)
     end
   end
   encoded_fixtures = {
@@ -542,13 +616,60 @@ def self_test!
   }
   encoded_fixtures.each do |name, source|
     expect_rejected(name) do
-      validate_virtual({root => source}, cargo_installs: AUDITED_CARGO_INSTALLS)
+      validate_virtual({root => source}, cargo_installs: fixture_cargo_installs)
     end
   end
   expect_rejected("cargo-nested-local") do
     sources = {root => "uses: ./custom/action\n", action => "runs:\n  using: composite\n  steps:\n    - run: FOO=bar #{audited}\n"}
-    validate_virtual(sources, cargo_installs: AUDITED_CARGO_INSTALLS)
+    validate_virtual(sources, cargo_installs: fixture_cargo_installs)
   end
+
+  install_sha = "0123456789abcdef0123456789abcdef01234568"
+  install_pins = [Pin.new("#{INSTALL_ACTION}@#{install_sha}", "v2.0.0")]
+  install_use = "uses: #{INSTALL_ACTION}@#{install_sha} # v2.0.0"
+  install_step = lambda do |with|
+    "steps:\n  - #{install_use}\n#{with.empty? ? '' : "    with:\n#{with.map { |line| "      #{line}\n" }.join}"}"
+  end
+  audited_tool = "tool: cargo-audit@0.22.2"
+  install_fixtures = {
+    "install-tool-unpinned-version" => install_step.call(["tool: cargo-audit", "checksum: true", "fallback: none"]),
+    "install-tool-latest" => install_step.call(["tool: cargo-audit@latest", "checksum: true", "fallback: none"]),
+    "install-tool-wrong-version" => install_step.call(["tool: cargo-audit@0.22.1", "checksum: true", "fallback: none"]),
+    "install-tool-extra-tool" => install_step.call(["tool: cargo-audit@0.22.2,cargo-deny", "checksum: true", "fallback: none"]),
+    "install-tool-expression" => install_step.call(["tool: ${{ env.TOOL }}", "checksum: true", "fallback: none"]),
+    "install-tool-missing" => install_step.call(["checksum: true", "fallback: none"]),
+    "install-fallback-missing" => install_step.call([audited_tool, "checksum: true"]),
+    "install-fallback-binstall" => install_step.call([audited_tool, "checksum: true", "fallback: cargo-binstall"]),
+    "install-fallback-cargo-install" => install_step.call([audited_tool, "checksum: true", "fallback: cargo-install"]),
+    "install-fallback-expression" => install_step.call([audited_tool, "checksum: true", "fallback: ${{ env.FALLBACK }}"]),
+    "install-checksum-missing" => install_step.call([audited_tool, "fallback: none"]),
+    "install-checksum-false" => install_step.call([audited_tool, "checksum: false", "fallback: none"]),
+    "install-unaudited-input" => install_step.call([audited_tool, "checksum: true", "fallback: none", "extra: x"]),
+    "install-duplicate-input" => install_step.call([audited_tool, audited_tool.sub("0.22.2", "0.22.1"), "checksum: true", "fallback: none"]),
+    "install-with-not-mapping" => "steps:\n  - #{install_use}\n    with: cargo-audit@0.22.2\n",
+    "install-duplicate-with" => "steps:\n  - #{install_use}\n    with: {#{audited_tool}, checksum: true, fallback: none}\n    with: {tool: cargo-deny}\n"
+  }
+  install_fixtures.each do |name, source|
+    expect_rejected(name) do
+      validate_virtual({root => source}, pins: install_pins, install_tools: AUDITED_INSTALL_ACTION_TOOLS)
+    end
+  end
+  valid_install = install_step.call([audited_tool, "checksum: true", "fallback: none"])
+  expect_rejected("install-nested-local-fallback") do
+    sources = {root => "uses: ./custom/action\n",
+               action => "runs:\n  using: composite\n  #{install_step.call([audited_tool, "checksum: true"]).gsub("\n", "\n  ")}"}
+    validate_virtual(sources, pins: install_pins, install_tools: AUDITED_INSTALL_ACTION_TOOLS)
+  end
+  expect_rejected("install-count-exceeded") do
+    doubled = valid_install + install_step.call([audited_tool, "checksum: true", "fallback: none"]).delete_prefix("steps:\n")
+    validate_virtual({root => doubled}, pins: install_pins, install_tools: AUDITED_INSTALL_ACTION_TOOLS).finish!
+  end
+  expect_rejected("install-count-missing") do
+    validate_virtual({root => "steps:\n  - run: echo ok\n"}, install_tools: AUDITED_INSTALL_ACTION_TOOLS).finish!
+  end
+  validate_virtual({root => valid_install}, pins: install_pins, install_tools: AUDITED_INSTALL_ACTION_TOOLS).finish!
+  validate_virtual({root => install_step.call([])}, pins: install_pins).finish!
+  puts "fixture ACCEPTED install-action-audited-tool install-action-pin-default-tool"
 
   digest = "a" * 64
   docker_fixtures = {
@@ -585,7 +706,7 @@ def self_test!
     root => "on: push\nsteps:\n  - \"uses\": ./custom/action\n  - run: #{audited}\n",
     action => "runs:\n  using: composite\n  steps:\n    - run: echo ok\n"
   }
-  valid = validate_virtual(valid_sources, cargo_installs: AUDITED_CARGO_INSTALLS)
+  valid = validate_virtual(valid_sources, cargo_installs: fixture_cargo_installs)
   valid.finish!
   raise PolicyError, "valid fixture inventory mismatch" unless valid.uses_count == 1 && valid.run_count == 2
   puts "fixture ACCEPTED complete-roots nested-local exact-cargo-install yaml-1.1-on"
@@ -602,4 +723,4 @@ inventory = RepoInventory.actual(repo_root)
 policy = ActionPolicy.new(inventory)
 policy.validate_roots(ARGV)
 policy.finish!
-puts "supply-policy OK roots=#{ARGV.length} workflows=#{inventory.workflow_files.length} actions=#{inventory.action_manifest_files.length} uses=#{policy.uses_count} runs=#{policy.run_count} audited_actions=#{AUDITED_PINS.length}"
+puts "supply-policy OK roots=#{ARGV.length} workflows=#{inventory.workflow_files.length} actions=#{inventory.action_manifest_files.length} uses=#{policy.uses_count} runs=#{policy.run_count} audited_actions=#{AUDITED_PINS.length} audited_install_tools=#{AUDITED_INSTALL_ACTION_TOOLS.length}"
