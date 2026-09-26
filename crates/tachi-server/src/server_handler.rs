@@ -839,9 +839,11 @@ impl MemoryServer {
         // Audit C1: a modern request has no session to hold a rate-limit
         // bucket, and `clone_for_mcp_session` just minted a per-request one.
         // Without an explicit bucket header, key the bucket by the resolved
-        // identity so repeated calls from the same peer share burst/RPM
-        // windows. Only when nothing stable exists does the per-request key
-        // stay.
+        // AgentIdentity (plus client and project) so repeated calls from the
+        // same peer share burst/RPM windows. Without an AgentIdentity the
+        // per-request key stays: a client label or project alone is shared by
+        // every instance of that client and would let one peer trip another's
+        // loop block.
         let identity_bucket = identity
             .rate_limit_session
             .is_none()
@@ -977,9 +979,9 @@ fn modern_identity_rate_limit_session_id(
 ) -> Option<String> {
     use sha2::{Digest, Sha256};
 
-    if agent_identity.is_none() && client.is_none() && project.is_none() {
-        return None;
-    }
+    // The client label and project are shared across instances, so they only
+    // refine a bucket that an AgentIdentity already anchors.
+    agent_identity?;
     let material = serde_json::json!([agent_identity, client, project]).to_string();
     Some(format!(
         "identity:{:x}",
@@ -2725,7 +2727,8 @@ mod tests {
 
     /// Audit C1: a modern request's derived bucket is stable for the same
     /// resolved identity, distinct across identities, opaque, and absent when
-    /// the request carries no identity at all (per-request fallback).
+    /// the request carries no AgentIdentity (per-request fallback), even if a
+    /// client label or project is present.
     #[test]
     fn modern_identity_rate_limit_bucket_is_stable_per_identity() {
         let a = modern_identity_rate_limit_session_id(Some("agent.a"), Some("cli"), Some("sigil"))
@@ -2740,14 +2743,17 @@ mod tests {
             modern_identity_rate_limit_session_id(Some("agent.b"), Some("cli"), Some("sigil")),
             modern_identity_rate_limit_session_id(Some("agent.a"), Some("ide"), Some("sigil")),
             modern_identity_rate_limit_session_id(Some("agent.a"), Some("cli"), None),
-            modern_identity_rate_limit_session_id(None, Some("agent.a"), Some("cli")),
         ] {
             assert_ne!(other.as_deref(), Some(a.as_str()));
         }
-        assert_eq!(
+        for anonymous in [
             modern_identity_rate_limit_session_id(None, None, None),
-            None
-        );
+            modern_identity_rate_limit_session_id(None, Some("cli"), None),
+            modern_identity_rate_limit_session_id(None, Some("cli"), Some("sigil")),
+            modern_identity_rate_limit_session_id(None, None, Some("sigil")),
+        ] {
+            assert_eq!(anonymous, None);
+        }
     }
 
     #[test]

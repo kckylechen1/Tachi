@@ -1537,8 +1537,8 @@ fn modern_http_request_uses_2026_headers_metadata_and_no_session() {
 /// every request and stuck/loop detection never fired. Requests with the same
 /// resolved identity now share a bucket; a different identity does not; a
 /// malformed `X-Tachi-Rate-Limit-Session` is ignored (neither an error nor a
-/// bucket); a valid one selects its own bucket; and a request with no identity
-/// at all stays per-request.
+/// bucket); a valid one selects its own bucket; and a request with no
+/// AgentIdentity stays per-request, even when it carries a client label.
 #[test]
 fn modern_http_rate_limit_bucket_follows_identity_or_bucket_header() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -1598,6 +1598,12 @@ fn modern_http_rate_limit_bucket_follows_identity_or_bucket_header() {
             // Nothing stable to key on: per-request buckets stay the fallback.
             for id in [8, 9, 10] {
                 assert!(!stuck(&call(id, json!({}), &[]).await), "request {id}");
+            }
+            // A client label alone is shared by every instance of that client,
+            // so it must not anchor a bucket either.
+            for id in [11, 12, 13] {
+                let label_only = json!({"tachiClient":"c1-shared-label"});
+                assert!(!stuck(&call(id, label_only, &[]).await), "request {id}");
             }
 
             cancel.cancel();

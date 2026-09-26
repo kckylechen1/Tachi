@@ -137,7 +137,7 @@ async fn run_one_poll(
                 label = %label,
                 jobs = n,
                 reason = reason,
-                "pending foundry job(s) in non-routable DB; see tachi status"
+                "pending foundry job(s) in non-routable DB; execution deferred until DbScope::Path routing lands"
             );
         }
     }
