@@ -448,7 +448,7 @@ fn r8_deletes_marked_cache_and_keeps_empty_json_lookalikes_and_projections_consi
         .conn
         .query_row(
             "SELECT COUNT(*) FROM memories_symbolic_fts \
-             WHERE id NOT IN (SELECT id FROM memories)",
+             WHERE id NOT IN (SELECT id FROM memories WHERE id IS NOT NULL)",
             [],
             |r| r.get(0),
         )
