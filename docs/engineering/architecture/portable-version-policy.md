@@ -207,7 +207,10 @@ in `band` it is never written.
      trigger, including index uniqueness and partial-index predicates. It
      runs **once**, inside `BEGIN IMMEDIATE`, after `init_schema_inner` has
      applied the frozen set and before commit. A mismatch refuses and rolls
-     back.
+     back. **Exemptions:** `memories_vec` (the R7 capability) and
+     `idx_memories_path_active_ts`. `ensure_optimization_indexes` discards
+     its own creation error (`db/schema.rs:2677-2685`), so today that index
+     may legitimately stay absent (#1995 §3).
 
    Two consequences:
    - A marker-fallback backup taken before the transaction can remain after
@@ -423,7 +426,12 @@ outcome (success or refusal, phase, and side effects), not just the error:
   both phases. This sequence crosses policies, so it is excluded from R0 on
   purpose.
 
-Row 4 and every row under today's policy keep today's winning error. So
+Row 4 and every row under today's policy keep today's winning error. There is
+one exception, from #1995 (`current-store-admission.md` §5 and T5): on a
+current store, a missing required object now refuses with
+`CurrentSchemaIncomplete`. That refusal fires after the existing integrity
+validators (so their errors still win) and before identity, so it can take
+the place of an identity error that would otherwise have won. So
 `P@30, Deny, AtLeast(F)` still returns `SchemaMigrationOptInRequired`, and
 `unstamped s=28, Deny, AtLeast(P)` still returns
 `SchemaMigrationOptInRequired`, not `StoreProfileUnstamped`.
@@ -615,8 +623,9 @@ hook, or an error variant), not only the end state.
     that the recorded values all come from one commit.
 - **T5 — Today's-policy invariance.**
   - Every existing test that exercises **today's policy** passes with zero
-    assertion changes. The only assertions allowed to change are the Portable
-    ones listed in §8 A4, and each change needs a before/after. The covered
+    assertion changes. Only two kinds of assertion may change: the Portable
+    ones listed in §8 A4, and the #1995 current-store presence refusals
+    (`current-store-admission.md` T8). Each change needs a before/after. The covered
     tests include #1984's admission tables, the marker-fallback tests (a missing or
     old-format marker on `F@39`, non-empty `s = 0`),
     `db/migrations.rs:1984-2000`, and #1983 `open_race_tests.rs:184`.

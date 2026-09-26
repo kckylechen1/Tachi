@@ -1,6 +1,6 @@
 # Current-Store Admission — refuse damaged state, rebuild only what is derived
 
-> **Status:** spec, pre-implementation, revision 2 (after one cross-vendor attack round).
+> **Status:** spec, pre-implementation, revision 3 (after two cross-vendor attack rounds).
 > **Issue:** #1995 (found in #1983's round-4 cold review). **Parent:** #1987.
 > **Anchors:** `db/open.rs:630` (damaged current input is refused, not
 > repaired), #1119 (migration authority), #1983 (read-only preflight plus
@@ -77,8 +77,17 @@ object has to justify its place on the allowlist.
 not by sentinels:
 
 - `TachiFull`: every Portable and Product object the current code creates.
-- `PortableKernel`: every `SchemaScope::Portable` object, plus the
-  Portable-scoped migrations' objects.
+- `PortableKernel`: every object that Portable initialization creates. That
+  covers the `SchemaScope::Portable` chunks, the Portable-scoped migrations'
+  objects, **and the inline maintenance objects** (e.g. the
+  `memory_search_generation` table and its triggers, created by
+  `search_generation::ensure_search_generation_schema`,
+  `db/search_generation.rs:25-54`).
+
+In both cases the baseline is **derived from what initialization actually
+creates**, not from the chunk tags alone. The implementation builds it by
+initializing a fresh store of that profile and enumerating `sqlite_schema`
+plus the columns (§7 T9).
 
 Product sentinels on a Portable store attest no Product objects: v37-v39
 record their sentinel vacuously on Portable (`db/migrations.rs:944-948`,
@@ -96,7 +105,7 @@ pins it:
 |---|---|---|
 | Non-unique indexes not already required by a validator | base, migrated and installer indexes, plus `idx_memories_path_active_ts` | success. `ensure_optimization_indexes` ignores its own errors (`db/schema.rs:2677-2685`), so the index may stay absent; that is today's behaviour |
 | Unique indexes with no rewriting step before them, not already required | `idx_memories_idless_identity_active` | success, or a loud failure that rolls back the schema transaction when duplicate active identities exist. **Excluded:** `idx_session_claims_identity_active`, because dedupe runs first (`db/schema.rs:1861-1872`). The delivery unique indexes are already required by the delivery validator, so they are not on this list |
-| FTS projections | `memories_fts`, `memories_symbolic_fts` | rebuilt from `memories`, with the search-generation bump allowed (it invalidates caches). **Known pre-existing defect:** the backfill projection of `keywords`/`entities` differs from the CRUD projection (SQL bracket/quote stripping at `db/schema.rs:3370-3380` versus `.join(" ")` at `db/memory_crud.rs:2598`). Tracked separately; fixing it is a precondition for "no information loss" on escaped JSON |
+| FTS projections | `memories_fts`, `memories_symbolic_fts` | rebuilt from `memories`, with the search-generation bump allowed (it invalidates caches). **Narrowed claim:** "derived" here means search-derived. It does *not* mean byte-identical to the CRUD projection. The backfill projection of `keywords`/`entities` differs from CRUD (SQL bracket/quote stripping at `db/schema.rs:3370-3380` versus `.join(" ")` at `db/memory_crud.rs:2598`), most visibly on escaped JSON. That fidelity is deferred to #2001, and this spec does not depend on it: dropping FTS is still better rebuilt than refused, because the source rows are intact |
 | Cache | `recall_cache` and `generation_fingerprint` | recomputed on miss. This is disposable for correctness, not lossless: rerank results and telemetry go |
 | Optional capability | `memories_vec` | provisioned empty when sqlite-vec is available, absent otherwise. Embeddings are re-derived from an external provider. **Known gap:** a dropped table loses embeddings until they are backfilled |
 
@@ -120,9 +129,24 @@ landed earlier:
 - `route_*`: 08-10
 - inline `exec_env_worktree_identities`: 08-27 (`38ed99d47`)
 
-The code that stamps 39 creates all of them in the same transaction. So a
-legitimate `s == 39` store contains them. This is a history-based argument
-about this repo, not a proof about stores written by other forks.
+The **schema initializer** stamps 39, and it creates all of these objects in
+the same transaction (`db/schema.rs:20-41, 1273-1318`). A store stamped 39
+through that path therefore contains them. The argument covers this repo's
+history only; it proves nothing about stores written by other forks.
+
+**The migration-only stamping path is closed.** The public
+`run_data_migrations` / `run_data_migrations_with_profile`
+(`db/migrations.rs:595-615`) run the sentinel migrations and write the
+stamp *without* calling `init_schema_inner`. Because of that, a store they
+stamp to 39 can lack additive objects (e.g. `exec_env_worktree_identities`,
+which only `init_product_schema_columns` creates). At fbab02c7d the lead
+found no non-test caller. The implementation must do one of two things:
+make them test-only (`pub(crate)` + `#[cfg(test)]`), or route them through
+the schema initializer before stamping. A historical fixture covers the
+compatibility case: a pre-`38ed99d47` store stamped 39 through the
+migration-only path. The outcome must be stated explicitly. Recommended:
+refuse, and point to §6. No production path produces such a store, so a
+refusal there signals out-of-band tooling.
 
 ## 4. Where the check runs
 
@@ -138,7 +162,13 @@ It extends #1983's integrity step, under both D7 policies:
 - **Authoritative phase.** Inside `BEGIN IMMEDIATE`, the same check runs
   again, in `reevaluate_admission_in_tx` and before `init_schema_inner`.
 - **Private images.** `init_private_schema_with_label_mut` gets the same
-  check with the Portable baseline.
+  check against the Portable baseline. That baseline includes the inline
+  search-generation triggers, so they must be present before maintenance.
+  Today the private initializer skips input trigger validation
+  (`input_inventory=false`, `db/schema.rs:1204-1210`), so a missing trigger
+  is silently recreated. Under this spec it is refused. D7's allowance
+  stays: a *present previous* `memory_search_generation_after_update`
+  definition is accepted and normalized. Only an *absent* trigger refuses.
 - **Pending stores are not checked.** Migrations legitimately create
   objects.
 
@@ -209,9 +239,13 @@ Until that command exists, the runbook documents manual recovery.
     today's error;
   - (iii) optional capabilities: with vec unavailable, `memories_vec`
     stays absent and the open is Ok; with the optimization-index creation
-    failing, the index stays absent and the open is Ok.
+    failing, the index stays absent and the open is Ok. This holds for
+    **both** policies: D7 R5.2b explicitly exempts
+    `idx_memories_path_active_ts`, just as it exempts `memories_vec`.
 
-  Assert that the allowlist in code equals the enumerated derived set.
+  Assert that the allowlist in code equals the enumerated derived set. The
+  FTS case asserts only presence and search-generation bump. Projection
+  fidelity is #2001's acceptance, not this test's.
 - **T3 Default-deny, enumerated.** Enumerate the *current* baseline objects
   from the definitions, not from the historical 263-case count, and
   account for dependent and shadow objects (FTS shadow tables, autoindexes).
@@ -224,24 +258,47 @@ Until that command exists, the runbook documents manual recovery.
     baseline.
 - **T4 `review_status`.** Rebuild `hub_capabilities` without the column.
   The open is refused, and no capability changes state.
-- **T5 Precedence.** A store with both a `validate_current_schema_integrity`
-  defect and a missing required table returns the former's error.
+- **T5 Precedence.** The check sits *after* the existing integrity
+  validators and *before* identity. That placement gives these outcomes:
+  - A store with both a `validate_current_schema_integrity` defect and a
+    missing required table returns the integrity error, as today.
+  - A store with both a missing required table (e.g.
+    `exec_env_worktree_identities`) and a malformed role payload
+    (`{"value":7}`) now returns `CurrentSchemaIncomplete`, **not** today's
+    role-decode error. This deliberately displaces a later identity error.
+  - Pin the second case at `F@39` and at `P@39`.
 - **T6 Race.** Using #1983's hook on a store with a matching marker, drop a
   required table between preflight and `BEGIN IMMEDIATE`. The
   authoritative check refuses. Compare the logical state against the
   **post-hook** state: no DDL, stamp or row change. Separately, assert
   only the backup and WAL effects #1983 permits.
-- **T7 Private image.** A sealed private image missing a Portable required
-  table is refused through the production private door. A healthy image
-  opens (control). A healthy PortableKernel file store with every Product
+- **T7 Private image.** These cases go through the production private door:
+  - A sealed private image missing a Portable required table that today's
+    validators miss (e.g. `derived_items`) is refused.
+  - A sealed image missing only `memory_search_generation_after_update` is
+    refused before maintenance. Today it is silently recreated.
+  - A sealed image carrying the *previous* definition of that trigger opens
+    and is normalized (the D7 allowance).
+  - A healthy image opens (control). A healthy PortableKernel file store with every Product
   sentinel and no Product tables opens (control for §3).
 - **T8 Invariance and supersession.** Every existing test passes unchanged,
   except tests that assert the old silent repair and the D7 T9 phase
   expectation. Each of those is listed with its before and after.
-- **T9 Growth rule.** A lint or test fails if a
-  `CREATE TABLE IF NOT EXISTS` base chunk introduces an object that is not
-  on the allowlist without an `E` bump. At minimum: the frozen list of
-  additive-rule tables must match the set present at `E`.
+- **T9 Growth rule, version-keyed inventory.** Pin a golden, keyed by `E`,
+  of the **required-object inventory** per profile: tables, columns,
+  indexes (with uniqueness and partial predicate) and triggers. Enumerate it
+  from a freshly initialized store (every initializer, including inline
+  maintenance, `ensure_column` and `init_product_schema_columns`), minus the
+  allowlist.
+  - The test fails if the inventory at the current `E` differs from the
+    golden for that `E`. A change is only accepted together with a bump of
+    `E` and a new golden entry.
+  - Discrimination cases that must fail it: a test-only `ensure_column`
+    addition without a versioned migration, and a test-only inline
+    `CREATE TABLE` without one.
+  - The migration-only stamping path (§3): a historical pre-`38ed99d47`
+    fixture stamped 39 through it produces the stated outcome (recommended:
+    refusal).
 
 ## 8. Not verified
 
