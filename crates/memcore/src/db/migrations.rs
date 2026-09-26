@@ -489,6 +489,13 @@ pub(crate) fn evaluate_db_open_context_gate(
 
 /// Emit the #1119 audit line for an authorized migration decision; a no-op for
 /// every other decision.
+///
+/// The open funnel calls this from its in-transaction admission, i.e. BEFORE
+/// the migration runs and commits. The line therefore records an **authorized
+/// migration attempt**, not a committed migration: a later refusal in the
+/// same transaction (identity, DDL, validation) or a failed commit rolls the
+/// migration back after the line was written. Commit success is evidenced by
+/// the stamped `user_version` and the `.migration-marker`, not by this line.
 pub(crate) fn log_authorized_migration(
     decision: OpenContextDecision,
     db_path: &Path,
@@ -505,9 +512,13 @@ pub(crate) fn log_authorized_migration(
 }
 
 /// The audit log line the #1119 incident report asked for when an authorized
-/// migration proceeds: who authorized it (`approved_by`) plus this binary's
-/// own version + pid (so an operator grepping logs after the fact can tell
-/// which process performed the migration), from/to version, and the DB path.
+/// migration is ATTEMPTED: who authorized it (`approved_by`) plus this
+/// binary's own version + pid (so an operator grepping logs after the fact
+/// can tell which process attempted the migration), from/to version, and the
+/// DB path. It is logged before the migration commits and can therefore
+/// appear for a migration that then rolls back; see
+/// [`log_authorized_migration`]. The wording ("migrating") is kept as-is for
+/// operators' existing log searches.
 /// Factored out of the `eprintln!` call site so it is directly unit-testable
 /// without capturing real stderr.
 fn schema_migration_success_log_line(stored: u32, db_path: &Path, approved_by: &str) -> String {

@@ -93,7 +93,10 @@ fn backup_skipped_for_fresh_db() {
     let db_path = tmp.path().join("fresh.db");
     let conn = Connection::open(&db_path).expect("open");
 
-    let result = maybe_backup_before_migration(&conn, &db_path).expect("backup check");
+    let result = maybe_backup_before_migration(&conn, &db_path)
+        .expect("backup check")
+        .backup_path()
+        .cloned();
     assert!(
         result.is_none(),
         "fresh DB (schema_version=0) should not be backed up"
@@ -116,7 +119,10 @@ fn backup_created_on_fingerprint_mismatch() {
         .expect("create table");
     std::fs::write(migration_marker_path(&db_path), "0.0.0:0").expect("stale marker");
 
-    let result = maybe_backup_before_migration(&conn, &db_path).expect("backup check");
+    let result = maybe_backup_before_migration(&conn, &db_path)
+        .expect("backup check")
+        .backup_path()
+        .cloned();
     let backup_path = result.expect("mismatched marker should trigger backup");
     assert!(backup_path.exists());
     assert!(
@@ -149,7 +155,10 @@ fn backup_skipped_when_marker_matches() {
     let fp = migration_schema_fingerprint(&conn).expect("fingerprint");
     std::fs::write(migration_marker_path(&db_path), fp).expect("write marker");
 
-    let result = maybe_backup_before_migration(&conn, &db_path).expect("backup check");
+    let result = maybe_backup_before_migration(&conn, &db_path)
+        .expect("backup check")
+        .backup_path()
+        .cloned();
     assert!(
         result.is_none(),
         "matching marker on an ordinary same-version restart (stored == EXPECTED) should skip backup"
@@ -187,7 +196,10 @@ fn backup_still_created_when_marker_matches_but_version_migration_is_pending() {
         "precondition: a version migration must be pending"
     );
 
-    let result = maybe_backup_before_migration(&conn, &db_path).expect("backup check");
+    let result = maybe_backup_before_migration(&conn, &db_path)
+        .expect("backup check")
+        .backup_path()
+        .cloned();
     assert!(
         result.is_some(),
         "an in-progress version migration (1 <= stored < EXPECTED) must ALWAYS back up, \
@@ -425,6 +437,48 @@ fn refused_role_conflict_open_leaves_no_backup_and_clean_store_bytes_unchanged()
     );
 }
 
+/// A preflight refusal must not flip a rollback-journal store to WAL.
+/// `journal_mode = WAL` is persistent and is set by `apply_connection_pragmas`,
+/// which runs only after the preflight; every other refusal fixture is
+/// already WAL, so this is the one that catches the PRAGMAs moving ahead of
+/// admission again (#1990 measured the flip on main).
+#[test]
+fn refused_open_leaves_a_rollback_journal_store_in_delete_mode() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let db_path = seed_store_needing_backup(
+        tmp.path(),
+        "wiki",
+        &crate::db::DbOpenContext::create_fresh(),
+    );
+    let mode: String = Connection::open(&db_path)
+        .expect("switch journal mode")
+        .query_row("PRAGMA journal_mode = DELETE", [], |r| r.get(0))
+        .expect("journal_mode = DELETE");
+    assert_eq!(mode, "delete", "fixture: a rollback-journal store");
+
+    let err = crate::MemoryStore::open_with_label_and_context(
+        db_path.to_str().expect("utf8 path"),
+        "global",
+        &crate::db::DbOpenContext::open_existing_deny(),
+    )
+    .err()
+    .expect("a conflicting role claim must refuse");
+    assert!(
+        matches!(err, MemoryError::StoreRoleConflict { .. }),
+        "expected StoreRoleConflict, got {err:?}"
+    );
+
+    let mode: String = Connection::open(&db_path)
+        .expect("inspect")
+        .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+        .expect("journal_mode");
+    assert_eq!(
+        mode, "delete",
+        "a preflight refusal must leave the persistent journal mode unchanged"
+    );
+    assert_eq!(count_migration_backups(tmp.path()), 0);
+}
+
 /// The unclean-shutdown case the byte-identity claim does NOT cover. A store
 /// whose last writer died with committed frames still in `-wal` is opened
 /// with a conflicting role claim. After it closes, no backup, no marker and
@@ -654,6 +708,8 @@ fn large_store_backup_is_not_paced() {
     let started = std::time::Instant::now();
     let backup_path = maybe_backup_before_migration(&conn, &db_path)
         .expect("backup")
+        .backup_path()
+        .cloned()
         .expect("no marker → backup");
     let elapsed = started.elapsed();
     eprintln!("large_store_backup_is_not_paced: {page_count} pages copied in {elapsed:?}");
