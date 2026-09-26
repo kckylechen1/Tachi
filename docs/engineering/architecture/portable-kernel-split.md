@@ -254,12 +254,13 @@ The one supported dependency surface for Hypermem:
   runs schema init twice per store.
 
   Preconditions, in funnel order, before this table applies:
-  1. The schema-version gate (a stamp newer than this kernel → refused), the
+  1. The input trigger-inventory admission (`MemoryStore` opens), the
+     schema-version gate (a stamp newer than this kernel → refused), the
      #1119 creation-intent/migration-authority gate
      (`check_db_open_context_gate`) and current-schema integrity validation
-     run first, both in the preflight and again inside the transaction, and
-     can return their own error. A migration state that appears only in the
-     transaction (not backed up by the preflight) refuses with
+     run first, both before schema init and again inside the transaction
+     (before any schema repair), and can return their own error. A migration
+     state that the pre-transaction backup decision did not cover refuses with
      `SchemaChangedDuringOpen`.
   2. "Fresh" means `PRAGMA user_version == 0`, not "empty file": an unstamped
      file with content is fresh.
