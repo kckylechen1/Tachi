@@ -12,6 +12,7 @@ use super::rows::{
 use crate::agent_markdown::{format_search_memory_markdown, wants_explicit_json};
 use crate::memory_search_ops::{
     apply_search_rerank_policy, expand_search_params_for_rerank, normalize_json_relevance,
+    search_rerank_diagnostics,
 };
 use crate::tool_params::SearchMemoryParams;
 use crate::MemoryServer;
@@ -251,9 +252,20 @@ async fn handle_search_memory_inner(
             Vec::new(),
         )
     };
-    let (reranked_rows, _rerank_policy) =
+    let mut diagnostics = params
+        .include_metadata
+        .then(|| search_rerank_diagnostics(&rows, top_k));
+    let (reranked_rows, rerank_policy) =
         apply_search_rerank_policy(server, &params.query, rows, top_k, params.enable_rerank).await;
     rows = reranked_rows;
+    if let Some(diagnostics) = diagnostics.as_mut() {
+        diagnostics["policy"] = serde_json::json!(rerank_policy.as_str());
+        for row in &mut rows {
+            if let Some(row) = row.as_object_mut() {
+                row.insert("rerank_diagnostics".to_string(), diagnostics.clone());
+            }
+        }
+    }
     normalize_json_relevance(&mut rows);
     let serialized =
         serde_json::to_string(&rows).map_err(|e| format!("Failed to serialize response: {}", e))?;

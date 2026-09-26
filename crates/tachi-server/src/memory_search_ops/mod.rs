@@ -24,7 +24,7 @@ pub(crate) use recall_degradation::{
 };
 pub(crate) use rerank::{
     apply_search_rerank_policy, expand_search_params_for_rerank, rerank_rows_with_outcome,
-    RerankOutcome, SearchRerankPolicy,
+    search_rerank_diagnostics, RerankOutcome, SearchRerankPolicy,
 };
 pub(crate) use save_memory::handle_remember;
 pub(crate) use save_memory::handle_save_memory;

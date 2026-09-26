@@ -82,10 +82,15 @@ pub(crate) async fn handle_tachi_memory(
                 enable_rerank: params.enable_rerank,
                 as_of: params.as_of.clone(),
             };
-            if wants_json(params.format.as_deref()) {
-                let (sections, scope_remapped, scope) =
-                    crate::facade_search_ops::collect_tachi_search_sections(server, &search_params)
-                        .await;
+            if wants_json(params.format.as_deref()) || wants_full_format(params.format.as_deref()) {
+                let (sections, scope_remapped, scope, _) =
+                    crate::facade_search_ops::collect_tachi_search_sections_detailed(
+                        server,
+                        &search_params,
+                        None,
+                        wants_full_format(params.format.as_deref()),
+                    )
+                    .await;
                 let sections = sections
                     .into_iter()
                     .map(|(name, rows)| json_search_section(name, rows))
@@ -310,12 +315,13 @@ pub(crate) async fn handle_tachi_memory_with_resources(
         enable_rerank: params.enable_rerank,
         as_of: params.as_of.clone(),
     };
-    if wants_json(params.format.as_deref()) {
+    if wants_json(params.format.as_deref()) || wants_full_format(params.format.as_deref()) {
         let (sections, scope_remapped, scope, links) =
-            crate::facade_search_ops::collect_tachi_search_sections_with_resources(
+            crate::facade_search_ops::collect_tachi_search_sections_detailed(
                 server,
                 &search_params,
                 bound_project,
+                wants_full_format(params.format.as_deref()),
             )
             .await;
         let sections = sections

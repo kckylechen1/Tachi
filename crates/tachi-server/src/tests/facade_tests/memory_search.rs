@@ -1,6 +1,53 @@
 use super::*;
 use memcore::MemoryStore;
 
+#[tokio::test]
+async fn memory_search_full_reports_rerank_diagnostics_on_both_facade_routes() {
+    let server = make_server();
+    server
+        .with_global_store(|store| {
+            let mut entry = make_entry("diagnostic-target");
+            entry.text = "DIAGNOSTIC_RECALL_NEEDLE_20260927 source-bound knowledge".to_string();
+            entry.summary = "Recall diagnostic fixture".to_string();
+            store.upsert(&entry).map_err(|e| e.to_string())
+        })
+        .expect("seed diagnostic fixture");
+
+    for resources in [false, true] {
+        for full in [false, true] {
+            let mut params = tachi_memory_params("search");
+            params.query = Some("DIAGNOSTIC_RECALL_NEEDLE_20260927".to_string());
+            params.scope = Some("memory".to_string());
+            params.format = Some(if full { "full" } else { "json" }.to_string());
+            params.enable_rerank = false;
+            params.top_k = 1;
+            let body = if resources {
+                crate::facade_memory_ops::handle_tachi_memory_with_resources(&server, params, None)
+                    .await
+                    .expect("resource facade")
+                    .0
+            } else {
+                crate::facade_memory_ops::handle_tachi_memory(&server, params)
+                    .await
+                    .expect("memory facade")
+            };
+            let response: Value = serde_json::from_str(&body).expect("JSON including full format");
+            let row = &response["sections"][0]["rows"][0];
+            assert_eq!(row["id"], json!("diagnostic-target"));
+            if full {
+                let diagnostic = &row["rerank_diagnostics"];
+                assert_eq!(diagnostic["policy"], json!("disabled"));
+                assert_eq!(diagnostic["candidate_count"], json!(1));
+                // The facade requests a wider memory pool before its own final filtering.
+                assert_eq!(diagnostic["requested_top_k"], json!(3));
+                assert!(diagnostic["top_three_score_gap"].is_null());
+            } else {
+                assert!(row.get("rerank_diagnostics").is_none());
+            }
+        }
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 struct AccessSnapshot {
     access_count: i64,

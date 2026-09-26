@@ -60,6 +60,17 @@ pub(crate) fn expand_search_params_for_rerank(params: &mut SearchMemoryParams, f
         .min(MAX_SEARCH_CANDIDATES_PER_CHANNEL);
 }
 
+/// Describe the post-filter candidates actually offered to the adaptive gate.
+/// This is not the size of the underlying vector or lexical candidate pools.
+pub(crate) fn search_rerank_diagnostics(rows: &[Value], top_k: usize) -> Value {
+    let score_gap = (rows.len() >= 3).then(|| search_score(&rows[0]) - search_score(&rows[2]));
+    json!({
+        "candidate_count": rows.len(),
+        "requested_top_k": top_k,
+        "top_three_score_gap": score_gap,
+    })
+}
+
 pub(crate) async fn apply_search_rerank_policy(
     server: &MemoryServer,
     query: &str,
