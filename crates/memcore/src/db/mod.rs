@@ -187,7 +187,7 @@ pub use harness_session_interventions::{
 pub use hub_db::{
     hub_get, hub_get_active_version_route, hub_list, hub_list_limited, hub_record_call_outcome,
     hub_record_feedback, hub_search, hub_search_limited, hub_set_active_version_route,
-    hub_set_enabled, hub_set_review, hub_upsert,
+    hub_set_enabled, hub_set_review, hub_update_definition_with, hub_upsert, HubDefinitionUpdate,
 };
 #[cfg(test)]
 pub(crate) use memory_crud::query_hash;

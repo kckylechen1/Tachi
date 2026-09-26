@@ -213,6 +213,14 @@ pub(crate) async fn handle_hub_register(
                 "Skill registered but not listed in tools (policy.visibility != 'listed'). Use tachi_skill(action='run') or change policy.visibility.",
             );
         }
+        // audit G1: a skill's content changed; refresh its scope's quality
+        // guards in the background (coalesced) rather than on this path.
+        // Requested after this handler's own tool registration so a
+        // background re-registration cannot be overwritten by it.
+        server.request_skill_quality_refresh(
+            target_db,
+            crate::wiki_ops::SkillQualityRefreshReason::ContentChanged,
+        );
 
         // L0 analysis: async background scan of the prompt template
         let def: serde_json::Value = match serde_json::from_str(&params.definition) {

@@ -110,6 +110,20 @@ impl MemoryStore {
         db::hub_record_feedback(&self.conn, id, success, rating)
     }
 
+    /// Transactional read-modify-write of only the `definition` column; see
+    /// [`db::hub_update_definition_with`]. Counters, health, enablement,
+    /// review state and `updated_at` are never rewritten.
+    pub fn hub_update_definition_with<F>(
+        &self,
+        id: &str,
+        update: F,
+    ) -> Result<db::HubDefinitionUpdate, MemoryError>
+    where
+        F: FnOnce(&HubCapability) -> Option<String>,
+    {
+        db::hub_update_definition_with(&self.conn, id, update)
+    }
+
     /// Upsert one binding from virtual capability to concrete capability.
     pub fn vc_upsert_binding(&self, binding: &VirtualCapabilityBinding) -> Result<(), MemoryError> {
         db::vc_upsert_binding(&self.conn, binding)
