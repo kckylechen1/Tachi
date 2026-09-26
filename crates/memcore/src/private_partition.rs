@@ -929,6 +929,9 @@ fn read_regular_file_no_follow(path: &Path) -> Result<Vec<u8>, MemoryError> {
 }
 
 #[cfg(test)]
+mod refusal_order_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::db::InsertMemoryResult;
