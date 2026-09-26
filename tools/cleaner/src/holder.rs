@@ -497,13 +497,24 @@ mod tests {
 
     #[cfg(unix)]
     impl StubLsof {
+        /// Every test in a libtest process builds its own store, so the name
+        /// is a v4 UUID rather than `unique_temp_dir`'s PID + wall-clock
+        /// nanoseconds, which two threads can read identically.
         fn new() -> Self {
-            let dir = unique_temp_dir("holder-1988-lsof-stub")
-                .canonicalize()
-                .unwrap();
+            let dir = std::env::temp_dir()
+                .join(format!("holder-1988-lsof-stub-{}", uuid::Uuid::new_v4()));
+            Self::create_in(&dir).unwrap_or_else(|e| panic!("stub store {dir:?}: {e}"))
+        }
+
+        /// Takes `dir` only if it does not exist yet. `create_dir` is
+        /// exclusive, so an existing directory (another live store) is an
+        /// error: it is never reused and never removed.
+        fn create_in(dir: &Path) -> std::io::Result<Self> {
+            std::fs::create_dir(dir)?;
+            let dir = dir.canonicalize()?;
             let body = dir.join("lsof-body");
             write_stub_body(&body);
-            Self { dir, body }
+            Ok(Self { dir, body })
         }
 
         fn probe(
@@ -556,6 +567,33 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.dir);
         }
+    }
+
+    /// Stores built by concurrent tests in one libtest process never share a
+    /// directory, and allocating a store over a live one (a forced name
+    /// collision) fails instead of deleting the live store's files.
+    #[cfg(unix)]
+    #[test]
+    fn stub_stores_never_share_or_remove_a_directory() {
+        let first = StubLsof::new();
+        let second = StubLsof::new();
+        assert_ne!(first.dir, second.dir);
+        match StubLsof::create_in(&first.dir) {
+            Ok(_) => panic!("a live store's directory must not be taken over"),
+            Err(e) => assert_eq!(e.kind(), std::io::ErrorKind::AlreadyExists, "{e}"),
+        }
+        assert_eq!(
+            std::fs::read(&first.body).unwrap(),
+            STUB_LSOF_BODY.as_bytes(),
+            "the refused allocation must leave the live store intact"
+        );
+        drop(second);
+        let target = unique_temp_dir("holder-1988-stores");
+        assert_unknown(
+            "after-drop",
+            first.probe("after-drop", &target, b"garbage\n", b"", 1),
+        );
+        let _ = std::fs::remove_dir_all(&target);
     }
 
     #[cfg(unix)]
