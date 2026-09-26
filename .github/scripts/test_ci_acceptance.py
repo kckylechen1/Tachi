@@ -9,6 +9,12 @@ Every other frozen assertion keeps its intent: required jobs fail closed on
 any non-success, the plan shape and needs inventory stay closed, duplicate
 JSON fields are refused, raw outputs never print, and the workflow carries no
 `continue-on-error` or job-level Windows skip.
+
+Frozen-literal update, leader ruling on PR #2010 (astra r1 finding 2, #1998):
+the audit step's literal `cargo audit --deny warnings` becomes the bound form
+`"${AUDITED_CARGO_AUDIT:?}" audit --deny warnings`. Same subcommand and flags,
+same install prerequisite; the executable is now the checksum-verified file
+instead of whatever Cargo's external-subcommand lookup finds first.
 """
 import contextlib
 import importlib.util
@@ -254,7 +260,7 @@ class WorkflowTests(unittest.TestCase):
     def test_audit_installer_is_a_real_prerequisite(self):
         body = self.rust.split("      - name: Run cargo audit\n", 1)[1].split("\n      - ", 1)[0]
         self.assertIn("steps.audit_install.outcome == 'success'", body)
-        self.assertIn("cargo audit --deny warnings", body)
+        self.assertIn('"${AUDITED_CARGO_AUDIT:?}" audit --deny warnings', body)
 
     def test_success_requires_junit_but_unstarted_tests_do_not(self):
         body = self.rust.split("      - name: Archive nextest JUnit timing report\n", 1)[1].split("\n      - ", 1)[0]
