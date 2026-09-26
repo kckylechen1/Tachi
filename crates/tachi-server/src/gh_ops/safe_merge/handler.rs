@@ -105,36 +105,55 @@ async fn handle_github_safe_merge_with_reclaimer<C: GhClient + ?Sized>(
         Some(fid) => Some(run_dir_for_flow_id(fid)?),
         None => None,
     };
-    let mut pr = client
-        .pr_view(repo, pr_number)
+    // One PR read for the whole dry-run read phase. When the transport exposes
+    // the check runs behind `pr.checks`, the check-state ledger below reuses
+    // them instead of listing the checks again. A real merge takes no ledger
+    // snapshot; its head guard is `--match-head-commit` / `sha` on the merge
+    // call itself, followed by an independent post-merge read.
+    let PrViewSnapshot {
+        mut pr,
+        check_runs: snapshot_check_runs,
+    } = client
+        .pr_view_snapshot(repo, pr_number)
         .await
         .map_err(|e| format!("pr_view failed: {e}"))?;
     let check_state_ingest = if dry_run {
         let observed_at = chrono::Utc::now().to_rfc3339();
         let pr_ref = format!("{repo}#{pr_number}");
         if let Some(fid) = flow_id {
-            let ingest = ingest_check_state_transition(
-                client,
-                &CheckStateIngestRequest {
-                    flow_id: fid,
-                    repo,
-                    pr_number,
-                    pr_ref: Some(pr_ref.as_str()),
-                    head_ref: pr.head_ref.as_deref(),
-                    expected_head_sha: Some(pr.head_sha.as_str()),
-                    source: "safe_merge.dry_run",
-                },
-            )
-            .await?;
+            let request = CheckStateIngestRequest {
+                flow_id: fid,
+                repo,
+                pr_number,
+                pr_ref: Some(pr_ref.as_str()),
+                head_ref: pr.head_ref.as_deref(),
+                expected_head_sha: Some(pr.head_sha.as_str()),
+                source: "safe_merge.dry_run",
+            };
+            // The live head is still re-read after the (reused) checks, so a
+            // head that moved after the snapshot is recorded as `Stale`.
+            let ingest = match snapshot_check_runs {
+                Some(check_runs) => {
+                    ingest_check_state_transition(
+                        &SnapshotCheckStateReader::new(client, check_runs),
+                        &request,
+                    )
+                    .await?
+                }
+                None => ingest_check_state_transition(client, &request).await?,
+            };
             Some(
                 serde_json::to_value(ingest)
                     .map_err(|e| format!("serialize check_state_ingest: {e}"))?,
             )
         } else {
-            let check_runs = client
-                .checks_list(repo, pr_number)
-                .await
-                .map_err(|e| format!("checks_list failed for check-state ingest: {e}"))?;
+            let check_runs = match snapshot_check_runs {
+                Some(check_runs) => check_runs,
+                None => client
+                    .checks_list(repo, pr_number)
+                    .await
+                    .map_err(|e| format!("checks_list failed for check-state ingest: {e}"))?,
+            };
             let artifact = write_check_state_artifact(
                 flow_id,
                 &CheckStateArtifactInput {
