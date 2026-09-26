@@ -402,10 +402,26 @@ fn crate_version_is_not_part_of_the_backup_fingerprint() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let db_path = tmp.path().join("upgrade.db");
     let path = db_path.to_str().expect("utf8 path");
+    let reopen = || {
+        drop(
+            crate::MemoryStore::open_with_context(
+                path,
+                &crate::db::DbOpenContext::open_existing_deny(),
+            )
+            .expect("same-schema reopen"),
+        )
+    };
     drop(
         crate::MemoryStore::open_with_context(path, &crate::db::DbOpenContext::create_fresh())
             .expect("provision"),
     );
+    // Reach steady state first. The marker is written at the end of the
+    // schema transaction, but the open funnel creates `memories_vec` (a vec0
+    // virtual table, when sqlite-vec loads) after it, so the second open of a
+    // brand-new store can see a moved DDL cookie. That is pre-existing and
+    // independent of the crate version; it is not what this test pins.
+    reopen();
+    let steady_backups = count_migration_backups(tmp.path());
 
     let marker = std::fs::read_to_string(migration_marker_path(&db_path)).expect("marker");
     assert!(
@@ -413,28 +429,24 @@ fn crate_version_is_not_part_of_the_backup_fingerprint() {
         "the marker must not encode the binary's crate version, got: {marker}"
     );
     let conn = Connection::open(&db_path).expect("raw open");
-    let schema_version: i64 = conn
-        .query_row("PRAGMA schema_version", [], |r| r.get(0))
-        .expect("schema_version");
     assert_eq!(
         marker,
-        format!(
-            "schema:{}:{schema_version}",
+        migration_schema_fingerprint(&conn).expect("fingerprint"),
+        "the marker must be exactly the file's schema fingerprint"
+    );
+    assert!(
+        marker.starts_with(&format!(
+            "schema:{}:",
             crate::db::migrations::EXPECTED_SCHEMA_VERSION
-        )
+        )),
+        "got: {marker}"
     );
     drop(conn);
 
-    drop(
-        crate::MemoryStore::open_with_context(
-            path,
-            &crate::db::DbOpenContext::open_existing_deny(),
-        )
-        .expect("same-schema reopen"),
-    );
+    reopen();
     assert_eq!(
         count_migration_backups(tmp.path()),
-        0,
+        steady_backups,
         "a same-schema reopen must not back up"
     );
 }
