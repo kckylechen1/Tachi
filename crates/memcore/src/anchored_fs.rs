@@ -240,8 +240,13 @@ mod imp {
             }
             // SAFETY: fstat succeeded and initialized stat.
             let stat = unsafe { stat.assume_init() };
+            // `dev_t` is `i32` on macOS and `u64` on Linux: the cast is the
+            // same widening std's `MetadataExt::dev()` applies, and is a no-op
+            // (clippy's `unnecessary_cast`) only on Linux.
+            #[allow(clippy::unnecessary_cast)]
+            let device = stat.st_dev as u64;
             Ok(DirectoryIdentity {
-                device: stat.st_dev as u64,
+                device,
                 inode: stat.st_ino,
             })
         }
