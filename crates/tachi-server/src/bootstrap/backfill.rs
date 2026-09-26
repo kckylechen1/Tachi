@@ -7,7 +7,8 @@ use futures::{stream, StreamExt};
 use memcore::store::enrichment::EnrichmentInvocationReceipts;
 use memcore::store::open::ReadOnlyBackfillOperation;
 use memcore::{
-    DbOpenContext, MemoryStore, MigrationAuthority, OpenIntent, StoreProfile, VectorBackfillScope,
+    DbOpenContext, MemoryStore, MigrationAuthority, OpenIntent, ProfileRequirement, StoreProfile,
+    VectorBackfillScope,
 };
 use std::collections::{BTreeSet, HashMap};
 use std::error::Error;
@@ -59,7 +60,7 @@ fn backfill_write_open_context(schema_migration: &MigrationAuthority) -> DbOpenC
         migration: schema_migration.clone(),
         // #1585 D2: `backfill-*` is a tachi-server operator command; it opens
         // the same product databases `serve` does.
-        required_profile: StoreProfile::TachiFull,
+        required_profile: ProfileRequirement::AtLeast(StoreProfile::TachiFull),
     }
 }
 

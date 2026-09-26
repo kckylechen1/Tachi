@@ -1143,7 +1143,7 @@ fn persist_llm_usage_blocking(
     let open_context = memcore::DbOpenContext {
         intent: memcore::OpenIntent::OpenExisting,
         migration,
-        required_profile: memcore::StoreProfile::TachiFull,
+        required_profile: memcore::ProfileRequirement::AtLeast(memcore::StoreProfile::TachiFull),
     };
     let store = memcore::MemoryStore::open_with_context_and_busy_timeout(
         db_path,

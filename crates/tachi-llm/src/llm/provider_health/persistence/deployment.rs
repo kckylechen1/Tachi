@@ -251,7 +251,9 @@ impl super::super::super::LlmClient {
             intent: memcore::OpenIntent::OpenExisting,
             migration,
             // #1585 D2: `model_deployment_health` is a product table.
-            required_profile: memcore::StoreProfile::TachiFull,
+            required_profile: memcore::ProfileRequirement::AtLeast(
+                memcore::StoreProfile::TachiFull,
+            ),
         };
         let store = memcore::MemoryStore::open_with_context_and_busy_timeout(
             db_path,

@@ -480,6 +480,24 @@ pub enum MemoryError {
         db_path: String,
     },
 
+    /// W1-2: the caller admits only an exact profile
+    /// ([`crate::db::ProfileRequirement::Exact`]) and the store is stamped a
+    /// different one. In practice: an embedder with a stricter product boundary
+    /// than the kernel (Hypermem, `Exact(PortableKernel)`) opening a full Tachi
+    /// database. The kernel would admit that superset under `AtLeast`; this
+    /// caller asked it not to. Raised before any backup, DDL or stamp.
+    #[error(
+        "store profile is not exact at {db_path}: caller admits only profile {required:?} but \
+         the database is stamped {stored:?}. This caller refuses a store of any other profile, \
+         including a superset, so it never serves or stamps a role into a database it does \
+         not own. Point this process at a {required:?} database."
+    )]
+    StoreProfileNotExact {
+        required: String,
+        stored: String,
+        db_path: String,
+    },
+
     /// #1585: a caller that requires only the portable kernel opened an
     /// EXISTING database carrying no profile stamp.
     ///

@@ -33,7 +33,7 @@
 //! #894 exec-env authorization pattern (`PrivateTargetApproval { approved_by,
 //! .. }`, `env_id`/`unmanaged_cwd`) already established in this codebase.
 
-use super::store_profile::StoreProfile;
+use super::store_profile::{ProfileRequirement, StoreProfile};
 
 /// Legacy environment variable the first (reverted) fix attempt used to carry
 /// migration opt-in. **Never read** by this design — authorization is the
@@ -88,11 +88,15 @@ pub struct DbOpenContext {
     ///
     /// On a fresh build it selects the shape to create. On an existing store
     /// it is compared against the STORED profile
-    /// ([`crate::db::StoreProfile::satisfies`]) and then discarded: the
-    /// effective profile driving DDL and the migration walk is always the
-    /// stored one. See [`crate::db::store_profile`] for why inverting that is
-    /// the worst failure mode in this design.
-    pub required_profile: StoreProfile,
+    /// ([`ProfileRequirement::admits`]: `AtLeast` is the
+    /// [`crate::db::StoreProfile::satisfies`] lattice, `Exact` is equality)
+    /// and then discarded: the effective profile driving DDL and the migration
+    /// walk is always the stored one. See [`crate::db::store_profile`] for why
+    /// inverting that is the worst failure mode in this design.
+    ///
+    /// A refused requirement fails the open before any side effect: no
+    /// migration backup, no connection PRAGMA, no DDL, no stamp.
+    pub required_profile: ProfileRequirement,
 }
 
 impl DbOpenContext {
@@ -102,7 +106,7 @@ impl DbOpenContext {
         Self {
             intent: OpenIntent::CreateFresh,
             migration: MigrationAuthority::Deny,
-            required_profile: StoreProfile::default(),
+            required_profile: ProfileRequirement::default(),
         }
     }
 
@@ -113,7 +117,7 @@ impl DbOpenContext {
         Self {
             intent: OpenIntent::OpenExisting,
             migration: MigrationAuthority::Deny,
-            required_profile: StoreProfile::default(),
+            required_profile: ProfileRequirement::default(),
         }
     }
 
@@ -126,15 +130,27 @@ impl DbOpenContext {
             migration: MigrationAuthority::Allow {
                 approved_by: approved_by.into(),
             },
-            required_profile: StoreProfile::default(),
+            required_profile: ProfileRequirement::default(),
         }
     }
 
-    /// Builder: declare the schema shape this caller needs (#1585 D2). The
-    /// only callers that lower it below [`StoreProfile::TachiFull`] are
-    /// portable-kernel embedders that touch no product table.
+    /// Builder: declare the schema shape this caller needs (#1585 D2), as
+    /// [`ProfileRequirement::AtLeast`]. The only callers that lower it below
+    /// [`StoreProfile::TachiFull`] are portable-kernel embedders that touch no
+    /// product table.
     pub fn with_profile(mut self, required_profile: StoreProfile) -> Self {
-        self.required_profile = required_profile;
+        self.required_profile = ProfileRequirement::AtLeast(required_profile);
+        self
+    }
+
+    /// Builder: admit only a store stamped exactly `required_profile` (W1-2).
+    /// A fresh file is built with that profile; an existing store stamped
+    /// anything else, including a superset `TachiFull` store under
+    /// `PortableKernel`, is refused with
+    /// [`crate::error::MemoryError::StoreProfileNotExact`] before any backup,
+    /// DDL or stamp.
+    pub fn with_exact_profile(mut self, required_profile: StoreProfile) -> Self {
+        self.required_profile = ProfileRequirement::Exact(required_profile);
         self
     }
 

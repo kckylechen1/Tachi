@@ -36,6 +36,16 @@
 //! `Default` is [`StoreProfile::TachiFull`], so an un-threaded open can only
 //! ever *demand more* than it needs (refusing a portable store loudly), never
 //! silently accept less.
+//!
+//! ## Exact admission (W1-2)
+//!
+//! The requirement is a [`ProfileRequirement`]. `AtLeast(p)` is the lattice
+//! rule above: a `TachiFull` store admits a `PortableKernel` caller. `Exact(p)`
+//! admits only a store stamped `p`. It exists for embedders whose product
+//! boundary is stricter than the kernel's: Hypermem must never serve, or stamp a
+//! role into, a Tachi product database. Exactness only narrows *admission*.
+//! The effective-profile rule is unchanged: whatever is admitted is driven by
+//! its stored profile.
 
 use crate::error::MemoryError;
 
@@ -116,6 +126,67 @@ impl Default for StoreProfile {
     }
 }
 
+/// What a caller demands of a store's profile (#1585 D2, W1-2). Carried by
+/// [`crate::db::DbOpenContext::required_profile`].
+///
+/// On a **fresh** file both variants build [`Self::profile`]. On an **existing**
+/// store they differ only in which stamped profiles they admit:
+///
+/// | stored \ required | `AtLeast(Portable)` | `AtLeast(Full)` | `Exact(Portable)` | `Exact(Full)` |
+/// |------------------|---------------------|-----------------|-------------------|---------------|
+/// | `PortableKernel` | admit               | refuse          | admit             | refuse        |
+/// | `TachiFull`      | admit               | admit           | **refuse**        | admit         |
+///
+/// A refusal happens in the open funnel's read-only identity preflight, before
+/// the migration backup, the connection PRAGMAs, any DDL and any stamp. The
+/// same resolver re-runs inside the schema transaction as the authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ProfileRequirement {
+    /// The stored profile must [`StoreProfile::satisfies`] this one. This is
+    /// the historical #1585 D2 rule.
+    AtLeast(StoreProfile),
+    /// The stored profile must be exactly this one. A superset store is
+    /// refused with [`MemoryError::StoreProfileNotExact`].
+    Exact(StoreProfile),
+}
+
+impl ProfileRequirement {
+    /// The profile named by the requirement, which is also the shape a fresh
+    /// file is built with.
+    pub fn profile(self) -> StoreProfile {
+        match self {
+            ProfileRequirement::AtLeast(profile) | ProfileRequirement::Exact(profile) => profile,
+        }
+    }
+
+    /// Whether an existing store stamped `stored` is admitted.
+    pub fn admits(self, stored: StoreProfile) -> bool {
+        match self {
+            ProfileRequirement::AtLeast(required) => stored.satisfies(required),
+            ProfileRequirement::Exact(required) => stored == required,
+        }
+    }
+
+    pub fn is_exact(self) -> bool {
+        matches!(self, ProfileRequirement::Exact(_))
+    }
+}
+
+impl Default for ProfileRequirement {
+    /// `AtLeast(TachiFull)`: the same over-demanding default as
+    /// [`StoreProfile::default`].
+    fn default() -> Self {
+        ProfileRequirement::AtLeast(StoreProfile::default())
+    }
+}
+
+impl From<StoreProfile> for ProfileRequirement {
+    /// A bare profile keeps its historical meaning: `AtLeast`.
+    fn from(profile: StoreProfile) -> Self {
+        ProfileRequirement::AtLeast(profile)
+    }
+}
+
 impl std::fmt::Display for StoreProfile {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
@@ -160,6 +231,36 @@ mod tests {
     #[test]
     fn default_is_the_over_demanding_end() {
         assert_eq!(StoreProfile::default(), StoreProfile::TachiFull);
+        assert_eq!(
+            ProfileRequirement::default(),
+            ProfileRequirement::AtLeast(StoreProfile::TachiFull)
+        );
+    }
+
+    #[test]
+    fn requirement_admission_table() {
+        use ProfileRequirement::{AtLeast, Exact};
+        use StoreProfile::{PortableKernel as P, TachiFull as F};
+        // (required, stored, admitted)
+        let table = [
+            (AtLeast(P), P, true),
+            (AtLeast(P), F, true),
+            (AtLeast(F), P, false),
+            (AtLeast(F), F, true),
+            (Exact(P), P, true),
+            (Exact(P), F, false),
+            (Exact(F), P, false),
+            (Exact(F), F, true),
+        ];
+        for (required, stored, admitted) in table {
+            assert_eq!(
+                required.admits(stored),
+                admitted,
+                "{required:?} admitting {stored:?}"
+            );
+        }
+        assert_eq!(ProfileRequirement::from(P), AtLeast(P));
+        assert_eq!(Exact(P).profile(), P);
     }
 
     #[test]

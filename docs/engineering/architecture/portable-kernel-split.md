@@ -225,6 +225,34 @@ The one supported dependency surface for Hypermem:
   stores only (#1585 §1). A full-Tachi database is refused typed at open, not
   silently reinterpreted; profile and role identity are write-once stamps in
   the store itself, never inferred from paths.
+- **Exact profile admission (W1-2).** `DbOpenContext::required_profile` is a
+  `ProfileRequirement`. `AtLeast(p)` is the #1585 lattice, under which a
+  `TachiFull` store admits a `PortableKernel` caller. `Exact(p)` admits only a
+  store stamped `p` (`DbOpenContext::with_exact_profile`). Under
+  `Exact(PortableKernel)` the kernel refuses a `TachiFull` store with
+  `MemoryError::StoreProfileNotExact`. The refusal comes from the open
+  funnel's read-only identity preflight, before the migration backup, the
+  connection PRAGMAs, any DDL and any stamp: the file bytes,
+  `PRAGMA user_version` and `hard_state` stay unchanged, and no
+  `.migration-bak` is written. One labelled open with
+  `with_exact_profile(PortableKernel)` therefore replaces the "unlabelled
+  preflight open, check `store_profile()`, labelled open" sequence, which
+  runs schema init twice per store.
+
+  | stored profile | required | role claim | outcome |
+  |---|---|---|---|
+  | `PortableKernel` | `Exact(PortableKernel)` | any | admitted; role stamped once if absent |
+  | `TachiFull` | `Exact(PortableKernel)` | any | `StoreProfileNotExact`, zero side effects |
+  | absent, fresh file | `Exact(PortableKernel)` | any | built portable; stamped |
+  | absent, existing file | `Exact(PortableKernel)` | any | `StoreProfileUnstamped` |
+
+  **Migration note (breaking type change).** The field changed from
+  `StoreProfile` to `ProfileRequirement`. Struct-literal constructors replace
+  `required_profile: StoreProfile::X` with
+  `required_profile: ProfileRequirement::AtLeast(StoreProfile::X)` to keep the
+  old behaviour. Callers that use `with_profile(StoreProfile::X)` are unchanged
+  (it sets `AtLeast`). `StoreProfile` converts `Into<ProfileRequirement>` as
+  `AtLeast`.
 - **Licensing** — `DECISION_REQUIRED (owner): AGPL-3.0-only embedding/distribution
   terms in Hyperion artifacts.` Until that decision is recorded here, this
   section documents the technical surface only, not a distribution grant.
