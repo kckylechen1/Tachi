@@ -175,7 +175,10 @@ forks to workflows in public repositories](https://docs.github.com/en/repositori
    sufficient. An approved run also executes the PR's Cargo build scripts,
    procedural macros, tests, and any other code the jobs build or run, all
    as `gha`. The owner approves only PRs whose **full** code they would run
-   on this host.
+   on this host. **While the C1 acceptance runner is online on the owner's
+   account, no fork run is approved at all** (see the current posture in
+   [`acceptance-runner.md`](acceptance-runner.md) and #2015): an approval is
+   repository-wide and would also admit the C1 jobs.
 
 ### Inventory check (trust boundary)
 
