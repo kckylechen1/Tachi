@@ -281,14 +281,213 @@ fn remember_fingerprint_writes_marker() {
     remember_migration_fingerprint(&conn, &db_path).expect("remember");
 
     let content = std::fs::read_to_string(migration_marker_path(&db_path)).expect("read marker");
-    assert!(
-        content.contains(env!("CARGO_PKG_VERSION")),
-        "marker should contain current binary version, got: {content}"
+    let schema_version: i64 = conn
+        .query_row("PRAGMA schema_version", [], |r| r.get(0))
+        .expect("schema_version");
+    assert_eq!(
+        content,
+        format!("schema:0:{schema_version}"),
+        "marker should be formatted as schema:<user_version>:<schema_version>"
     );
-    assert!(
-        content.contains(':'),
-        "marker should be formatted as version:schema_version, got: {content}"
+}
+
+// ── W1-3: backup cost and ordering ──────────────────────────────────────────
+
+fn file_sha256(path: &Path) -> String {
+    use sha2::{Digest, Sha256};
+    let bytes = std::fs::read(path).expect("read db bytes");
+    format!("{:x}", Sha256::digest(&bytes))
+}
+
+/// Every sibling artifact the open funnel can leave next to `db_path`, by name.
+fn sibling_names(dir: &Path) -> std::collections::BTreeSet<String> {
+    std::fs::read_dir(dir)
+        .expect("read dir")
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|name| !name.ends_with("-wal") && !name.ends_with("-shm"))
+        .collect()
+}
+
+/// Provision a real store through the public funnel, then delete its marker so
+/// the NEXT open is one the fingerprint heuristic would back up. That makes a
+/// refused open discriminating: before W1-3 the backup ran ahead of identity
+/// resolution, so this exact setup left a full-size `.migration-bak` behind a
+/// refused open.
+fn seed_store_needing_backup(dir: &Path, label: &str, ctx: &crate::db::DbOpenContext) -> PathBuf {
+    let db_path = dir.join("memory.db");
+    let path = db_path.to_str().expect("utf8 path");
+    drop(crate::MemoryStore::open_with_label_and_context(path, label, ctx).expect("seed store"));
+    std::fs::remove_file(migration_marker_path(&db_path)).expect("drop marker");
+    assert_eq!(count_migration_backups(dir), 0, "seeding must not back up");
+    db_path
+}
+
+#[test]
+fn refused_role_conflict_open_writes_no_backup_and_leaves_bytes_unchanged() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let db_path = seed_store_needing_backup(
+        tmp.path(),
+        "wiki",
+        &crate::db::DbOpenContext::create_fresh(),
     );
+    let before_hash = file_sha256(&db_path);
+    let before_siblings = sibling_names(tmp.path());
+
+    let err = crate::MemoryStore::open_with_label_and_context(
+        db_path.to_str().expect("utf8 path"),
+        "global",
+        &crate::db::DbOpenContext::open_existing_deny(),
+    )
+    .err()
+    .expect("a claim that disagrees with the stamp must refuse");
+    assert!(
+        matches!(err, MemoryError::StoreRoleConflict { .. }),
+        "expected StoreRoleConflict, got {err:?}"
+    );
+
+    assert_eq!(
+        count_migration_backups(tmp.path()),
+        0,
+        "a refused open must not write a migration backup"
+    );
+    assert_eq!(
+        sibling_names(tmp.path()),
+        before_siblings,
+        "a refused open must not create or remove any sibling artifact"
+    );
+    assert_eq!(
+        file_sha256(&db_path),
+        before_hash,
+        "a refused open must leave the database bytes unchanged"
+    );
+}
+
+#[test]
+fn refused_profile_mismatch_open_writes_no_backup_and_leaves_bytes_unchanged() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let db_path = seed_store_needing_backup(
+        tmp.path(),
+        crate::path_router::UNKNOWN_DB_LABEL,
+        &crate::db::DbOpenContext::create_fresh()
+            .with_profile(crate::db::StoreProfile::PortableKernel),
+    );
+    let before_hash = file_sha256(&db_path);
+    let before_siblings = sibling_names(tmp.path());
+
+    let err = crate::MemoryStore::open_with_context(
+        db_path.to_str().expect("utf8 path"),
+        &crate::db::DbOpenContext::open_existing_deny()
+            .with_profile(crate::db::StoreProfile::TachiFull),
+    )
+    .err()
+    .expect("a full-profile caller must refuse a portable store");
+    assert!(
+        matches!(err, MemoryError::StoreProfileMismatch { .. }),
+        "expected StoreProfileMismatch, got {err:?}"
+    );
+
+    assert_eq!(count_migration_backups(tmp.path()), 0);
+    assert_eq!(sibling_names(tmp.path()), before_siblings);
+    assert_eq!(file_sha256(&db_path), before_hash);
+}
+
+#[test]
+fn crate_version_is_not_part_of_the_backup_fingerprint() {
+    // A binary whose crate version differs but whose schema is identical must
+    // see the same fingerprint the previous binary recorded, so an ordinary
+    // upgrade restart does not copy every store. The marker is the only
+    // cross-binary channel, so pin that it is a pure function of the file's
+    // schema state and carries nothing about the binary that wrote it.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let db_path = tmp.path().join("upgrade.db");
+    let path = db_path.to_str().expect("utf8 path");
+    drop(
+        crate::MemoryStore::open_with_context(path, &crate::db::DbOpenContext::create_fresh())
+            .expect("provision"),
+    );
+
+    let marker = std::fs::read_to_string(migration_marker_path(&db_path)).expect("marker");
+    assert!(
+        !marker.contains(env!("CARGO_PKG_VERSION")),
+        "the marker must not encode the binary's crate version, got: {marker}"
+    );
+    let conn = Connection::open(&db_path).expect("raw open");
+    let schema_version: i64 = conn
+        .query_row("PRAGMA schema_version", [], |r| r.get(0))
+        .expect("schema_version");
+    assert_eq!(
+        marker,
+        format!(
+            "schema:{}:{schema_version}",
+            crate::db::migrations::EXPECTED_SCHEMA_VERSION
+        )
+    );
+    drop(conn);
+
+    drop(
+        crate::MemoryStore::open_with_context(
+            path,
+            &crate::db::DbOpenContext::open_existing_deny(),
+        )
+        .expect("same-schema reopen"),
+    );
+    assert_eq!(
+        count_migration_backups(tmp.path()),
+        0,
+        "a same-schema reopen must not back up"
+    );
+}
+
+#[test]
+fn large_store_backup_is_not_paced() {
+    // Old code: `run_to_completion(128, 100ms)` slept 100 ms after every
+    // 128-page step. Seed enough pages that the old pacing alone exceeds the
+    // bound several times over, then require the backup to finish inside it.
+    const BOUND: Duration = Duration::from_secs(3);
+    const PAGE_SIZE: i64 = 4096;
+    const TARGET_PAGES: i64 = 8192; // 32 MiB
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let db_path = tmp.path().join("large.db");
+    let conn = Connection::open(&db_path).expect("open");
+    conn.execute_batch(&format!(
+        "PRAGMA page_size = {PAGE_SIZE};
+         CREATE TABLE bulk(b BLOB NOT NULL);
+         WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < {TARGET_PAGES})
+         INSERT INTO bulk(b) SELECT zeroblob(3900) FROM n;"
+    ))
+    .expect("seed large store");
+    let page_count: i64 = conn
+        .query_row("PRAGMA page_count", [], |r| r.get(0))
+        .expect("page_count");
+    let old_pacing_floor = Duration::from_millis(100) * ((page_count / 128) as u32);
+    assert!(
+        old_pacing_floor > BOUND * 2,
+        "fixture too small to discriminate: {page_count} pages → old pacing floor \
+         {old_pacing_floor:?} vs bound {BOUND:?}"
+    );
+
+    let started = std::time::Instant::now();
+    let backup_path = maybe_backup_before_migration(&conn, &db_path)
+        .expect("backup")
+        .expect("no marker → backup");
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < BOUND,
+        "backup of {page_count} pages took {elapsed:?} (bound {BOUND:?}; the old 128-page/100 ms \
+         pacing alone costs {old_pacing_floor:?})"
+    );
+
+    let copy = Connection::open(&backup_path).expect("open backup");
+    let copied_pages: i64 = copy
+        .query_row("PRAGMA page_count", [], |r| r.get(0))
+        .expect("backup page_count");
+    assert_eq!(copied_pages, page_count, "backup must be a complete copy");
+    let quick_check: String = copy
+        .query_row("PRAGMA quick_check", [], |r| r.get(0))
+        .expect("quick_check");
+    assert_eq!(quick_check, "ok");
 }
 
 #[test]

@@ -1211,6 +1211,15 @@ fn init_schema_with_label_mut_inner(
     // file is fresh, whatever its content (#1119 owner ruling A). Sampled
     // BEFORE the transaction writes the new stamp.
     let fresh = crate::db::migrations::read_schema_version(conn)? == 0;
+    // W1-3: read-only identity/profile admission BEFORE any side effect. The
+    // identity rows are plain `hard_state` reads (no DDL, no stamp), so a
+    // store that is going to be refused for a role conflict or a profile
+    // mismatch refuses here — before the full-size pre-migration backup is
+    // written and before the persistent connection PRAGMAs (`journal_mode`)
+    // run. This is a preflight only: the authoritative resolution stays
+    // inside the `BEGIN IMMEDIATE` below, because another process may stamp
+    // the store between this read and that transaction.
+    resolve_store_identity_in_tx(conn, db_label, current_db_path, ctx, fresh)?;
     if filesystem_artifacts {
         maybe_backup_before_migration(conn, current_db_path)?;
     }
@@ -1271,6 +1280,10 @@ pub struct SchemaInitOutcome {
 
 /// Read both identity stamps and apply the #1579 role table and the #1585 D2
 /// admission table. Errors here abort the open with the transaction untouched.
+///
+/// Pure reads: `init_schema_with_label_mut_inner` calls this twice — once as a
+/// side-effect-free preflight before the migration backup, and once as the
+/// authoritative resolution inside the schema transaction.
 fn resolve_store_identity_in_tx(
     tx: &Connection,
     claimed_label: &str,
@@ -3246,21 +3259,45 @@ fn migration_marker_path(db_path: &Path) -> PathBuf {
     PathBuf::from(s)
 }
 
+/// The "has the schema shape changed since our last successful init"
+/// fingerprint the marker records: `schema:<user_version>:<schema_version>`.
+///
+/// W1-3: this used to lead with `CARGO_PKG_VERSION`, so every crate-version
+/// bump forced a full-size backup on every store even when nothing would
+/// migrate. The binary version is not a schema input: new tables, columns and
+/// data rewrites may only arrive as versioned sentinel migrations that bump
+/// `EXPECTED_SCHEMA_VERSION` (see the v22/v28/v31 notes in `migrations.rs`),
+/// and a stored `user_version` below that always backs up through
+/// `maybe_backup_before_migration`'s #1180 rule regardless of this string.
+/// What the fingerprint still catches is DDL applied outside this funnel
+/// (`PRAGMA schema_version` is SQLite's DDL cookie) and a stamp rewritten out
+/// of band (`PRAGMA user_version`).
+///
+/// A marker written in the old `<crate>:<schema_version>` form never matches,
+/// so the first open after this change backs up once, as the old crate-version
+/// bump would have.
 fn migration_schema_fingerprint(conn: &Connection) -> Result<String, MemoryError> {
-    let sv: i64 = conn.query_row("PRAGMA schema_version", [], |r| r.get(0))?;
-    Ok(format!("{}:{}", env!("CARGO_PKG_VERSION"), sv))
+    let user_version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    let schema_version: i64 = conn.query_row("PRAGMA schema_version", [], |r| r.get(0))?;
+    Ok(format!("schema:{user_version}:{schema_version}"))
+}
+
+/// Has SQLite's DDL cookie never moved, i.e. is there no schema to back up?
+fn schema_cookie_is_empty(conn: &Connection) -> Result<bool, MemoryError> {
+    let schema_version: i64 = conn.query_row("PRAGMA schema_version", [], |r| r.get(0))?;
+    Ok(schema_version == 0)
 }
 
 fn maybe_backup_before_migration(
     conn: &Connection,
     db_path: &Path,
 ) -> Result<Option<PathBuf>, MemoryError> {
-    let current_fp = migration_schema_fingerprint(conn)?;
     // schema_version == 0: the file was just created and has no schema yet.
     // There is nothing to back up.
-    if current_fp.ends_with(":0") {
+    if schema_cookie_is_empty(conn)? {
         return Ok(None);
     }
+    let current_fp = migration_schema_fingerprint(conn)?;
 
     // #1180: the 2026-07-17 v18->v19 live deploy migrated `PRAGMA
     // user_version` forward under an authorized `MigrationAuthority::Allow`
@@ -3268,13 +3305,14 @@ fn maybe_backup_before_migration(
     // promises `<db>.migration-bak.<ts>` + `<db>.migration-marker` for) but
     // left NEITHER file. Root cause: this function's "skip if unchanged"
     // heuristic below keys off `PRAGMA schema_version` (a SQLite-internal DDL
-    // cookie) + the binary's crate version — a proxy for "did the schema
-    // shape change since our last successful init", used to avoid redundant
-    // backups on ordinary same-version daemon restarts. `PRAGMA user_version
-    // = N` does not touch `schema_version`, so a long-lived process whose
-    // marker was last written on a PRIOR restart (no DDL has run since) can
-    // have a marker that coincidentally still matches `current_fp` at the
-    // moment a REAL `stored < EXPECTED_SCHEMA_VERSION` migration begins —
+    // cookie; at the time also the binary's crate version) — a proxy for
+    // "did the schema shape change since our last successful init", used to
+    // avoid redundant backups on ordinary same-version daemon restarts.
+    // `PRAGMA user_version = N` does not touch `schema_version`, so a
+    // long-lived process whose marker was last written on a PRIOR restart
+    // (no DDL has run since) can have a marker that coincidentally still
+    // matches `current_fp` at the moment a REAL
+    // `stored < EXPECTED_SCHEMA_VERSION` migration begins —
     // silently skipping the backup this function exists to guarantee.
     //
     // The authoritative signal for "is this open crossing the migration
@@ -3303,7 +3341,28 @@ fn maybe_backup_before_migration(
     {
         let mut dst = Connection::open(&backup_path)?;
         let backup = rusqlite::backup::Backup::new(conn, &mut dst)?;
-        backup.run_to_completion(128, Duration::from_millis(100), None)?;
+        // W1-3: copy every page in ONE step; no pacing. The old
+        // `run_to_completion(128, 100ms)` slept 100 ms per 128 pages (a 390 MB
+        // store at 4 KiB pages ≈ 745 sleeps ≈ 75 s of pure idle). Pacing is
+        // the online-backup idiom for letting other users of the source run
+        // between steps; nothing here needs that. `MemoryStore`'s open funnel
+        // serializes in-process openers behind its startup lock for this
+        // whole call, and this connection has not begun a transaction.
+        // Other processes are not starved either: on a WAL store (every store
+        // this funnel has initialized) the step holds only a read snapshot,
+        // which never blocks writers; on a legacy rollback-journal file it
+        // holds SHARED for the copy's duration, which writers absorb through
+        // their busy timeout. A single step is also the more consistent copy:
+        // an incremental backup restarts from page 1 whenever another
+        // connection writes the source between steps, so pacing a busy
+        // store can make the backup never finish.
+        //
+        // `i32::MAX` pages is "all remaining pages" (`run_to_completion`
+        // rejects the C API's negative form). The sleep below is therefore
+        // never reached on the normal path: it only fires on `Busy`/`Locked`
+        // (another process holding an exclusive lock), where a short backoff
+        // beats a hot spin.
+        backup.run_to_completion(i32::MAX, Duration::from_millis(5), None)?;
     }
 
     retain_recent_migration_backups(db_path);
