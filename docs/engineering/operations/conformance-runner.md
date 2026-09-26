@@ -256,13 +256,17 @@ unit with `User=gha`, or a user unit with linger) in the activation receipt.
   where `cargo-nextest` lands (run 36224766153 logs
   `adding '/home/gha/.install-action/bin' to PATH`). Same accounting as C1's
   runbook otherwise.
-- `~/.cargo/bin` must not hold its own `cargo-nextest`. Run 36226017929 found
-  `cargo-nextest 0.9.146` there (not the audited version), and the
-  installer's post-install lookup resolved to it. The job's version guard
-  fails the job whenever such a binary is what `cargo nextest` runs; the fix
-  is to delete `~gha/.cargo/bin/cargo-nextest` on the host, never to relax
-  the guard. Host check: `ls -l ~/.cargo/bin/cargo-nextest` should report
-  no such file.
+- `~/.cargo/bin` should not hold its own `cargo-nextest`. `atom-dgx-2` has
+  an unaudited `cargo-nextest 0.9.146` there. The installer appends its own
+  bin directory to the end of `PATH` for its post-install lookup, so its
+  `installed at` line names that stray binary (runs 36226017929 and
+  36226640312). Later steps get `~/.install-action/bin` prepended through
+  `GITHUB_PATH`: in run 36226640312 the version guard shows `cargo nextest`
+  resolving to `/home/gha/.install-action/bin/cargo-nextest`, version
+  `0.9.140`, in both jobs. The guard keeps that true by construction: if the
+  stray ever wins, the job fails (exit 6). Remove
+  `~gha/.cargo/bin/cargo-nextest` from the host, and never relax the guard.
+  Host check: `ls -l ~/.cargo/bin/cargo-nextest` should report no such file.
 
 ## Queue hygiene before first activation
 
