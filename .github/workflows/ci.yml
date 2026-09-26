@@ -291,6 +291,7 @@ jobs:
            fi
           python3 .github/scripts/runner_scan_diagnostics_test.py
           python3 -m unittest discover -s .github/scripts -p "test_ci_acceptance.py" -v
+          python3 -m unittest discover -s .github/scripts -p "test_bind_audited_tool.py" -v
 
       - name: Runner workspace cleanup
         # #1865: no checkout residue survives a failed or cancelled job.
@@ -392,10 +393,22 @@ jobs:
           checksum: true
           fallback: none
 
+      - name: Bind audited cargo-nextest
+        id: nextest_bind
+        # #1998: `cargo nextest` lets Cargo pick the executable
+        # ($CARGO_HOME/bin, then PATH), and this host keeps the owner's own
+        # ~/.cargo/bin/cargo-nextest (0.9.138). Bind the file the
+        # checksum-verified install extracted, assert its version (keep in
+        # sync with `tool:` above; the supply-chain policy rejects a mismatch)
+        # and export its absolute path; the tests run that path.
+        if: ${{ !cancelled() && steps.nextest_install.outcome == 'success' }}
+        run: bash .github/scripts/bind_audited_tool.sh AUDITED_NEXTEST cargo-nextest nextest 0.9.140
+
       - name: Run workspace tests
         id: workspace_tests
-        if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' && steps.nextest_install.outcome == 'success' }}
-        run: cargo nextest run --workspace --locked --profile ci
+        if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' && steps.nextest_install.outcome == 'success' && steps.nextest_bind.outcome == 'success' }}
+        run: |
+          "${AUDITED_NEXTEST:?}" nextest run --workspace --locked --profile ci
 
       - name: Archive nextest JUnit timing report
         # (Refs #1095) The ci profile (.config/nextest.toml) writes

@@ -65,6 +65,28 @@ REQUIRED_INSTALL_ACTION_INPUTS = {
   "fallback" => "none"
 }.freeze
 
+# #1998: every install-action tool must run as the exact file the audited
+# install extracted, never through Cargo's external-subcommand lookup
+# ($CARGO_HOME/bin, then PATH) or a PATH lookup of its binary name, which on a
+# self-hosted host can resolve to an unaudited copy. Tool name (the part of
+# `tool:` before `@`) => [binary, cargo subcommand]. A `run:` step may not
+# start that binary by name or path, nor run `cargo <subcommand>`; it runs the
+# path bound by BIND_AUDITED_TOOL_SCRIPT (or an equivalent inline assertion,
+# as in conformance-linux.yml), and every call to that script must assert the
+# version the install pins. Best effort, like the cargo-install lint below:
+# only top-level simple commands of `run:` text are inspected, not scripts it
+# calls or strings handed to `sh -c`. Every audited tool needs an entry; nil
+# is a visible, explicit exemption.
+AUDITED_INSTALL_ACTION_BINARIES = {
+  # Exempt pending owner adjudication (#1998): binding it rewrites ci.yml's
+  # `cargo audit --deny warnings`, which the frozen WorkflowTests assertion in
+  # .github/scripts/test_ci_acceptance.py pins verbatim. Bound form, once
+  # adjudicated: ["cargo-audit", "audit"].
+  "cargo-audit" => nil,
+  "nextest" => ["cargo-nextest", "nextest"]
+}.freeze
+BIND_AUDITED_TOOL_SCRIPT = "bind_audited_tool.sh"
+
 IMMUTABLE_IMAGE = /\A[^@[:space:]]+@sha256:[0-9a-f]{64}\z/
 
 class RepoInventory
@@ -140,11 +162,12 @@ class ActionPolicy
   attr_reader :run_count, :uses_count
 
   def initialize(inventory, pins = AUDITED_PINS, cargo_installs = AUDITED_CARGO_INSTALLS,
-                 install_tools = AUDITED_INSTALL_ACTION_TOOLS)
+                 install_tools = AUDITED_INSTALL_ACTION_TOOLS, install_binaries = AUDITED_INSTALL_ACTION_BINARIES)
     @inventory = inventory
     @pins = pins
     @cargo_installs = cargo_installs
     @install_tools = install_tools
+    @install_binaries = install_binaries
     @install_tool_uses = Hash.new(0)
     @approved = {}
     @ref_sha = {}
@@ -155,6 +178,7 @@ class ActionPolicy
     @run_count = 0
     @uses_count = 0
     build_map!
+    build_bound_tools!
   end
 
   def validate_roots(roots)
@@ -218,6 +242,29 @@ class ActionPolicy
 
       @approved[exact_key] = true
       @ref_sha[ref_key] = sha
+    end
+  end
+
+  # binary => {subcommand:, version:} for every bound install-action tool.
+  def build_bound_tools!
+    @bound_binaries = {}
+    @bound_subcommands = {}
+    @install_tools.each_key do |tool|
+      name, version = tool.split("@", 2)
+      unless version && @install_binaries.key?(name)
+        raise PolicyError, "audited install-action tool has no binary mapping: #{tool}"
+      end
+
+      mapping = @install_binaries[name]
+      next if mapping.nil?
+
+      binary, subcommand = mapping
+      if @bound_binaries.key?(binary)
+        raise PolicyError, "audited install-action tool is listed at two versions: #{binary}"
+      end
+
+      @bound_binaries[binary] = {subcommand: subcommand, version: version}
+      @bound_subcommands[subcommand] = binary
     end
   end
 
@@ -401,9 +448,74 @@ class ActionPolicy
     if encoded_cargo_installer?(value) || dynamic_cargo_installer?(value)
       raise PolicyError, "#{path}: no known dynamic/encoded installer or transformer-to-shell construction: #{value.inspect}"
     end
-    return unless cargo_install_occurrence?(value)
+    raise PolicyError, "#{path}: unaudited cargo install command: #{value.inspect}" if cargo_install_occurrence?(value)
 
-    raise PolicyError, "#{path}: unaudited cargo install command: #{value.inspect}"
+    validate_bound_tool_use(value, path)
+  end
+
+  SHELL_COMMAND_PREFIXES = %w[sudo env command exec nohup time nice if then elif else do while until ! {].freeze
+
+  # #1998: see AUDITED_INSTALL_ACTION_BINARIES.
+  def validate_bound_tool_use(value, path)
+    return if @bound_binaries.empty?
+
+    joined = value.gsub(/\\\r?\n/, "")
+    [joined, joined.tr("\\", "/")].uniq.each do |text|
+      simple_commands(text).each do |tokens|
+        subcommand = @bound_subcommands.keys.find { |sub| cargo_subcommand_invoked?(tokens, [sub]) }
+        if subcommand
+          raise PolicyError, "#{path}: unbound install-action tool: `cargo #{subcommand}` lets Cargo pick " \
+                             "#{@bound_subcommands[subcommand]} from $CARGO_HOME/bin or PATH; run the path bound by " \
+                             "#{BIND_AUDITED_TOOL_SCRIPT} instead: #{value.inspect}"
+        end
+
+        program_index = tokens.index { |token| !shell_prefix_token?(token) }
+        next unless program_index
+
+        program = tokens[program_index].split("/").last.to_s.sub(/\.exe\z/i, "")
+        if @bound_binaries.key?(program)
+          raise PolicyError, "#{path}: unbound install-action tool: #{tokens[program_index]} is started by name or path; " \
+                             "run the path bound by #{BIND_AUDITED_TOOL_SCRIPT} instead: #{value.inspect}"
+        end
+        validate_bind_call(tokens, path) if tokens.any? { |token| token.split("/").last == BIND_AUDITED_TOOL_SCRIPT }
+      end
+    end
+  end
+
+  # The bind script's asserted version must be the version the install pins.
+  def validate_bind_call(tokens, path)
+    script_index = tokens.index { |token| token.split("/").last == BIND_AUDITED_TOOL_SCRIPT }
+    args = tokens[(script_index + 1)..] || []
+    env_var, binary, subcommand, version = args
+    expected = @bound_binaries[binary]
+    unless args.length == 4 && expected
+      raise PolicyError, "#{path}: #{BIND_AUDITED_TOOL_SCRIPT} must bind an audited install-action tool as " \
+                         "<AUDITED_VAR> <binary> <subcommand> <version>: #{tokens.join(' ').inspect}"
+    end
+    unless env_var.match?(/\AAUDITED_[A-Z0-9_]+\z/) && subcommand == expected[:subcommand] && version == expected[:version]
+      raise PolicyError, "#{path}: #{BIND_AUDITED_TOOL_SCRIPT} asserts #{binary} #{subcommand} #{version} but the " \
+                         "audited install is #{binary} #{expected[:subcommand]} #{expected[:version]}"
+    end
+  end
+
+  def shell_prefix_token?(token)
+    SHELL_COMMAND_PREFIXES.include?(token) || token.match?(/\A[A-Za-z_][A-Za-z0-9_]*=/)
+  end
+
+  # Top-level simple commands of shell text, as token lists. Full-line
+  # comments are dropped (an apostrophe in prose must not unbalance quoting).
+  # Unparseable text yields its whitespace-split words (fail toward inspection).
+  def simple_commands(text)
+    uncommented = text.lines.reject { |line| line.match?(/\A[[:space:]]*#/) }.join
+    normalized = uncommented.gsub(/\r?\n/, " ; ").gsub(/([;&|()])/, ' \\1 ').gsub(/[[:space:]]+/, " ")
+    tokens = begin
+      Shellwords.shellsplit(normalized)
+    rescue ArgumentError
+      normalized.split(" ")
+    end
+    commands = [[]]
+    tokens.each { |token| SHELL_OPERATOR_TOKENS.include?(token) ? commands << [] : commands.last << token }
+    commands.reject(&:empty?)
   end
 
   def encoded_cargo_installer?(value)
@@ -540,9 +652,15 @@ class ActionPolicy
   end
 
   def cargo_install_command?(tokens)
+    tokens.any? { |token| token.split(%r{[/\\]}).last.to_s.match?(/\Acargo-b?install(?:\.exe)?\z/i) } ||
+      cargo_subcommand_invoked?(tokens, CARGO_INSTALL_SUBCOMMANDS)
+  end
+
+  # True when any `cargo` word in `tokens` runs one of `subcommands`, after
+  # skipping a `+toolchain` selector and global options.
+  def cargo_subcommand_invoked?(tokens, subcommands)
     tokens.each_with_index.any? do |token, index|
       program = token.split(%r{[/\\]}).last.to_s
-      next true if program.match?(/\Acargo-b?install(?:\.exe)?\z/i)
       next false unless program.match?(/\Acargo(?:\.exe)?\z/i)
 
       position = index + 1
@@ -557,8 +675,8 @@ class ActionPolicy
         end
       end
       # An unrecognised option might take a value; then the real subcommand is one word later.
-      CARGO_INSTALL_SUBCOMMANDS.include?(tokens[position]) ||
-        (ambiguous && CARGO_INSTALL_SUBCOMMANDS.include?(tokens[position + 1]))
+      subcommands.include?(tokens[position]) ||
+        (ambiguous && subcommands.include?(tokens[position + 1]))
     end
   end
 
@@ -572,9 +690,10 @@ class ActionPolicy
   end
 end
 
-def validate_virtual(sources, pins: [], cargo_installs: {}, install_tools: {}, roots: nil)
+def validate_virtual(sources, pins: [], cargo_installs: {}, install_tools: {},
+                     install_binaries: AUDITED_INSTALL_ACTION_BINARIES, roots: nil)
   inventory = RepoInventory.virtual(sources)
-  policy = ActionPolicy.new(inventory, pins, cargo_installs, install_tools)
+  policy = ActionPolicy.new(inventory, pins, cargo_installs, install_tools, install_binaries)
   policy.validate_roots(roots || inventory.policy_root_files)
   policy
 end
@@ -820,6 +939,67 @@ def self_test!
     validate_virtual({root => "steps:\n  - run: echo ok\n"}, install_tools: {"cargo-audit@0.22.2" => 1}).finish!
   end
   one_tool = {"cargo-audit@0.22.2" => 1}
+
+  # #1998: install-action tools run only through the bound, version-asserted
+  # path. Fixtures bind both tools, so they do not depend on a live exemption.
+  both_bound = {"cargo-audit" => ["cargo-audit", "audit"], "nextest" => ["cargo-nextest", "nextest"]}
+  unbound = /unbound install-action tool/
+  bind_mismatch = /bind_audited_tool\.sh asserts .* but the audited install is/
+  bind_shape = /bind_audited_tool\.sh must bind an audited install-action tool/
+  bind = "bash .github/scripts/bind_audited_tool.sh"
+  bound_fixtures = {
+    "bound-cargo-nextest" => ["run: cargo nextest run --workspace --locked --profile ci\n", unbound],
+    "bound-cargo-audit" => ["run: cargo audit --deny warnings\n", unbound],
+    "bound-cargo-toolchain-options" => ["run: cargo +1.97.0 --locked nextest run\n", unbound],
+    "bound-cargo-env-prefix" => ["run: |\n  set -e\n  RUST_LOG=info cargo nextest run\n", unbound],
+    "bound-cargo-if" => ["run: if cargo audit; then echo ok; fi\n", unbound],
+    "bound-cargo-pwsh" => ["run: |\n  & cargo nextest run\n", unbound],
+    "bound-cargo-exe" => ["run: C:\\Rust\\bin\\cargo.exe audit\n", unbound],
+    "bound-binary-by-name" => ["run: cargo-nextest nextest run\n", unbound],
+    "bound-binary-cargo-home" => ["run: ~/.cargo/bin/cargo-nextest nextest run\n", unbound],
+    "bound-binary-install-dir-unasserted" => ["run: /Users/runner/.install-action/bin/cargo-audit audit\n", unbound],
+    "bound-binary-after-and-sudo" => ["run: echo start && sudo cargo-audit audit\n", unbound],
+    "bound-binary-exe" => ["run: cargo-nextest.exe nextest run\n", unbound],
+    "bind-wrong-version" => ["run: #{bind} AUDITED_NEXTEST cargo-nextest nextest 0.9.141\n", bind_mismatch],
+    "bind-wrong-subcommand" => ["run: #{bind} AUDITED_NEXTEST cargo-nextest run 0.9.140\n", bind_mismatch],
+    "bind-bad-env-var" => ["run: #{bind} NEXTEST cargo-nextest nextest 0.9.140\n", bind_mismatch],
+    "bind-unknown-binary" => ["run: #{bind} AUDITED_DENY cargo-deny deny 0.18.0\n", bind_shape],
+    "bind-missing-version" => ["run: #{bind} AUDITED_NEXTEST cargo-nextest nextest\n", bind_shape]
+  }
+  bound_fixtures.each do |name, (source, expected)|
+    expect_rejected(name, expected) do
+      validate_virtual({root => source}, install_tools: AUDITED_INSTALL_ACTION_TOOLS, install_binaries: both_bound)
+    end
+  end
+  expect_rejected("bound-nested-local", unbound) do
+    sources = {root => "uses: ./custom/action\n", action => "runs:\n  using: composite\n  steps:\n    - run: cargo nextest run\n"}
+    validate_virtual(sources, install_tools: AUDITED_INSTALL_ACTION_TOOLS, install_binaries: both_bound)
+  end
+  expect_rejected("bound-unmapped-tool", /audited install-action tool has no binary mapping: cargo-deny@0.18.0/) do
+    validate_virtual({root => "name: one\n"}, install_tools: {"cargo-deny@0.18.0" => 1})
+  end
+  # The live policy: nextest is bound; the cargo-audit exemption is explicit.
+  expect_rejected("bound-live-nextest", unbound) do
+    validate_virtual({root => "run: cargo nextest run\n"}, install_tools: AUDITED_INSTALL_ACTION_TOOLS)
+  end
+  validate_virtual({root => "run: cargo audit --deny warnings\n"}, install_tools: AUDITED_INSTALL_ACTION_TOOLS)
+  puts "fixture ACCEPTED bound-live-cargo-audit-exempt"
+  bound_accepted = [
+    "\"${AUDITED_NEXTEST:?}\" nextest run --workspace --locked --profile ci",
+    "\"${AUDITED_CARGO_AUDIT:?}\" audit --deny warnings",
+    "#{bind} AUDITED_NEXTEST cargo-nextest nextest 0.9.140",
+    "#{bind} AUDITED_CARGO_AUDIT cargo-audit audit 0.22.2",
+    "required_tools=(cargo rustc cargo-nextest cargo-audit python3)",
+    "echo 'cargo nextest is bound' && type -P cargo-nextest",
+    "printf 'cargo-audit %s (fake)' 0.22.2 >\"${dir}/cargo-audit\"",
+    "cargo test --workspace --locked --doc"
+  ]
+  bound_accepted.each do |command|
+    validate_virtual({root => "run: |\n  #{command}\n"}, install_tools: AUDITED_INSTALL_ACTION_TOOLS,
+                                                       install_binaries: both_bound)
+  end
+  puts "fixture ACCEPTED bound-install-action-tools (#{bound_accepted.length})"
+
   validate_virtual({root => valid_install}, pins: install_pins, install_tools: one_tool).finish!
   validate_virtual({root => "steps:\n  - #{install_use}\n    with: #{flow_inputs}\n"}, pins: install_pins, install_tools: one_tool).finish!
   quoted = "steps:\n  - \"uses\": #{INSTALL_ACTION}@#{install_sha} # v2.0.0\n    'with':\n      \"tool\": cargo-audit@0.22.2\n      checksum: \"true\"\n      fallback: 'none'\n"
