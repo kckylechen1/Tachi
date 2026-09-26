@@ -94,12 +94,12 @@ const ADMIN_ONLY_NATIVE_ROUTE_NAMES: &[&str] = &[
     "hub_set_active_version",
     "hub_set_enabled",
     "hub_stats",
-    "sandbox_check",
-    "sandbox_exec_audit",
-    "sandbox_get_policy",
-    "sandbox_list_policies",
-    "sandbox_set_policy",
-    "sandbox_set_rule",
+    // v2 sandbox retirement: the six `sandbox_*` forwarding aliases expired
+    // (remove_in_release 1.10.0 ≤ 2.0.0) and their routes were deleted, so
+    // they are no longer admin-only ROUTES — they are not routes at all. Their
+    // tombstoned manifest entries and the stay-unrouted tripwires live in
+    // `tools/alias_manifest.rs` + `tests/sandbox_fold.rs` (router-census
+    // absence, admin tools/call rejection with the exact unknown-tool error).
     "save_memory",
     "search_memory",
     "tachi_audit_log",
@@ -107,8 +107,9 @@ const ADMIN_ONLY_NATIVE_ROUTE_NAMES: &[&str] = &[
     "tachi_event",
     "tachi_init_project_db",
     // tachi_research is now observe-bundled (#963/#530), no longer admin-only.
-    // #757 Cut3-S1: folded sandbox verb (its six forwarding aliases above are
-    // also admin-only) — absent from every profile bundle.
+    // #757 Cut3-S1: folded sandbox verb — absent from every profile bundle
+    // (its six pre-fold aliases were admin-only too, before the v2 retirement
+    // above removed them).
     "tachi_sandbox",
     // #1426: the route/recall tuning facade is deliberately in no bundle —
     // `tool_visible` grants it to admin/full profiles only, by omission from
@@ -173,6 +174,12 @@ const RETIRED_NATIVE_ALIASES: &[&str] = &[
     "recommend_toolchain",
     "remember",
     "run_skill",
+    "sandbox_set_rule",
+    "sandbox_check",
+    "sandbox_set_policy",
+    "sandbox_get_policy",
+    "sandbox_list_policies",
+    "sandbox_exec_audit",
     "save_memory",
     "search_memory",
     "section9_review",

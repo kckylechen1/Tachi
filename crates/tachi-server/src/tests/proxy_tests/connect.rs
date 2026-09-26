@@ -1,6 +1,5 @@
 use super::*;
 use crate::tests::make_mcp_capability;
-use crate::tool_params::SandboxSetPolicyParams;
 use rmcp::handler::server::wrapper::Parameters;
 
 /// #995 residual 2: `connect_child_with_context` (the TOCTOU-safe secondary
@@ -23,20 +22,23 @@ async fn connect_deny_message_names_failing_gate() {
         .expect("failed to register capability");
 
     server
-        .sandbox_set_policy(Parameters(SandboxSetPolicyParams {
-            capability_id: "mcp:connect-disabled".to_string(),
-            runtime_type: "process".to_string(),
-            env_allowlist: vec![],
-            fs_read_roots: vec![],
-            fs_write_roots: vec![],
-            cwd_roots: vec![],
-            max_startup_ms: 1500,
-            max_tool_ms: 1500,
-            max_concurrency: 1,
-            enabled: true,
-        }))
+        .tachi_sandbox(Parameters(wire_sandbox_params(
+            "set_policy",
+            json!({
+                "capability_id": "mcp:connect-disabled",
+                "runtime_type": "process",
+                "env_allowlist": [],
+                "fs_read_roots": [],
+                "fs_write_roots": [],
+                "cwd_roots": [],
+                "max_startup_ms": 1500,
+                "max_tool_ms": 1500,
+                "max_concurrency": 1,
+                "enabled": true,
+            }),
+        )))
         .await
-        .expect("sandbox_set_policy should succeed");
+        .expect("tachi_sandbox(action='set_policy') should succeed");
 
     let err = server
         .connect_child_with_context("mcp:connect-disabled", None)

@@ -131,7 +131,7 @@ fn modern_http_capability_requires_explicit_profile_and_never_leaks_between_requ
                 (
                     daemon.internal_proxy_token.as_deref(),
                     Some("admin"),
-                    Some(83),
+                    Some(77),
                 ),
                 (
                     daemon.internal_proxy_token.as_deref(),
@@ -166,6 +166,18 @@ fn modern_http_capability_requires_explicit_profile_and_never_leaks_between_requ
                         count,
                         "case {offset}"
                     );
+                    if profile == Some("admin") {
+                        let names = body["result"]["tools"].as_array().expect("tools")
+                            .iter().filter_map(|tool| tool["name"].as_str())
+                            .collect::<std::collections::BTreeSet<_>>();
+                        assert!(names.contains("tachi_sandbox"), "canonical sandbox route must remain");
+                        for retired in [
+                            "sandbox_set_rule", "sandbox_check", "sandbox_set_policy",
+                            "sandbox_get_policy", "sandbox_list_policies", "sandbox_exec_audit",
+                        ] {
+                            assert!(!names.contains(retired), "retired alias {retired} must not appear in admin HTTP tools/list");
+                        }
+                    }
                     if count == 6 || count == 5 {
                         let names = body["result"]["tools"].as_array().expect("tools")
                             .iter().filter_map(|tool| tool["name"].as_str())

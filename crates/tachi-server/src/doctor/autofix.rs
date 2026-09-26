@@ -632,7 +632,9 @@ fn checkpoint_wal_copy_authorized(
     let dest_str = dest.to_string_lossy().to_string();
     let (result, skip_gc) = match memcore::db::open_for_wal_checkpoint(&dest_str) {
         Ok(conn) => {
-            // Best-effort; ignore returned WAL stats.
+            // Only a complete, non-busy checkpoint is a usable copy. The
+            // helper inspects the result row; SQL statement success alone
+            // does not prove all committed WAL frames were checkpointed.
             match memcore::db::checkpoint_wal_truncate(&conn) {
                 Ok(_) => (
                     AutoFixAction {

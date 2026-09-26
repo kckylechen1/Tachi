@@ -303,8 +303,25 @@ fn initialize_startup_context(cli: &Cli) -> Result<StartupContext, Box<dyn std::
     let app_home = app_home_resolution.path;
 
     let command = cli.command.clone().unwrap_or(Commands::Serve);
+    if let Commands::Migrate {
+        apply,
+        rename_legacy,
+        offline,
+        ..
+    } = &command
+    {
+        if (*rename_legacy && *apply != *offline) || (!*rename_legacy && *offline) {
+            return Err("filename conversion requires --rename-legacy --apply --offline together (or a plan without --apply/--offline)".into());
+        }
+    }
+    // A plan is genuinely zero-write, including startup logging. In
+    // particular it must not create the logs directory in an uninitialized
+    // home merely to report an on-disk filename state.
+    let read_only_migrate_plan = matches!(&command, Commands::Migrate { apply: false, .. });
     #[cfg(unix)]
-    initialize_startup_observability(cli, &command, &app_home)?;
+    if !read_only_migrate_plan {
+        initialize_startup_observability(cli, &command, &app_home)?;
+    }
     let load_project_local_env = should_load_project_local_env(&command, cli.no_project_db);
     let defer_manifest_startup =
         should_defer_manifest_startup(&command, cli.daemon, cli.no_project_db);
@@ -329,7 +346,9 @@ fn initialize_startup_context(cli: &Cli) -> Result<StartupContext, Box<dyn std::
         if matches!(command, Commands::Serve) && (cli.daemon || !stdio::stdio_proxy_disabled()) {
             return Err(crate::daemon_lock::unsupported_daemon_lock_error().into());
         }
-        initialize_startup_observability(cli, &command, &app_home)?;
+        if !read_only_migrate_plan {
+            initialize_startup_observability(cli, &command, &app_home)?;
+        }
     }
 
     // #1119: resolve the schema-migration authority ONCE, from the CLI flag,
@@ -376,10 +395,9 @@ async fn resolve_global_db(
         // Migration: move legacy (pre-app_home-layout AND pre-#1132-filename)
         // DBs into ${TACHI_HOME}/global/tachi-memory.db. These candidates are
         // literally named `memory.db` on disk (they predate the app_home/
-        // global/ layout entirely) — the #1132 rename-on-open seam inside
-        // MemoryStore::open then takes over for the already-standard-layout
-        // case (an existing ${TACHI_HOME}/global/memory.db sitting right next
-        // to where `default_global` now points).
+        // global/ layout entirely). Already-standard-layout directories
+        // carrying `${TACHI_HOME}/global/memory.db` beside the default path
+        // require the separate explicit offline filename conversion.
         let legacy_candidates = vec![
             ctx.app_home.join(memcore::LEGACY_MEMORY_DB_FILENAME),
             ctx.home
@@ -389,7 +407,10 @@ async fn resolve_global_db(
                 .join(".sigil")
                 .join(memcore::LEGACY_MEMORY_DB_FILENAME),
         ];
-        if !default_global.exists() && !is_a2a_sticky_cutover(&ctx.command) {
+        if !default_global.exists()
+            && !is_a2a_sticky_cutover(&ctx.command)
+            && !matches!(ctx.command, Commands::Migrate { .. })
+        {
             for legacy in legacy_candidates {
                 if legacy.exists() {
                     copy_legacy_db_guarded(&legacy, &default_global).await?;
@@ -543,7 +564,7 @@ async fn resolve_global_db(
         global_db_path
     };
 
-    if !is_a2a_sticky_cutover(&ctx.command) {
+    if !is_a2a_sticky_cutover(&ctx.command) && !matches!(ctx.command, Commands::Migrate { .. }) {
         let Some(parent) = global_db_path.parent() else {
             return Ok(global_db_path);
         };
@@ -622,6 +643,22 @@ async fn run_startup_hygiene(
     } else {
         None
     };
+
+    // Both schema-plan and filename-plan must reach their CLI handler before
+    // Plan-C alias creation or pre-layout legacy copying can mutate DB paths.
+    if matches!(ctx.command, Commands::Migrate { .. }) {
+        run_pre_serve_command(
+            &ctx.command,
+            &ctx.home,
+            &ctx.app_home,
+            global_db_path,
+            project_db_path.as_ref(),
+            ctx.git_root.as_ref(),
+            &ctx.schema_migration,
+        )
+        .await?;
+        return Ok(None);
+    }
 
     let distill_db_override = distill_db_override(&ctx.command, &ctx.home);
     // A distill override is the canonical project data file for this command,

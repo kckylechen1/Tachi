@@ -134,8 +134,9 @@ pub use event_ledger::{
     continuity_metrics, insert_tachi_event, insert_tachi_event_if_absent, list_tachi_events,
 };
 pub use filename::{
-    is_memory_db_filename, migrate_legacy_filename_if_present, resolve_memory_db_read_path,
-    LEGACY_MEMORY_DB_FILENAME, MEMORY_DB_FILENAME,
+    convert_legacy_filename_offline, is_memory_db_filename, migrate_legacy_filename_if_present,
+    pending_legacy_sidecar, resolve_memory_db_read_path, OfflineFilenameAuthority,
+    OfflineFilenameOutcome, LEGACY_MEMORY_DB_FILENAME, MEMORY_DB_FILENAME,
 };
 pub use gc_candidates::{
     list_memories_by_category_and_path_prefix, list_memories_by_path_prefix,
@@ -225,7 +226,7 @@ pub use memory_crud::{
 };
 pub(crate) use memory_crud::{
     archive_memory_within_tx, archive_with_metadata_if_expected_state,
-    find_jaccard_candidate_within_tx, merge_jaccard_candidate_within_tx,
+    find_jaccard_candidate_within_tx, get_active_resource_entry, merge_jaccard_candidate_within_tx,
     restore_with_metadata_if_expected_state, update_with_revision_if_expected_state,
 };
 /// tachi#1446 drift guard for hand-built `memories` test fixtures — see the

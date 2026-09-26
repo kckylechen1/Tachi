@@ -1,7 +1,6 @@
-use super::{make_mcp_capability, make_server};
+use super::{make_mcp_capability, make_server, wire_sandbox_params};
 use crate::tool_params::{
-    SandboxSetPolicyParams, VirtualCapabilityBindParams, VirtualCapabilityRegisterParams,
-    VirtualCapabilityResolveParams,
+    VirtualCapabilityBindParams, VirtualCapabilityRegisterParams, VirtualCapabilityResolveParams,
 };
 use memcore::HubCapability;
 use rmcp::handler::server::wrapper::Parameters;
@@ -38,20 +37,23 @@ async fn vc_resolve_prefers_first_callable_binding_and_inherits_policy() {
     assert_eq!(vc_register_json["registered"], json!(true));
 
     server
-        .sandbox_set_policy(Parameters(SandboxSetPolicyParams {
-            capability_id: "vc:web_search".to_string(),
-            runtime_type: "process".to_string(),
-            env_allowlist: vec![],
-            fs_read_roots: vec![],
-            fs_write_roots: vec![],
-            cwd_roots: vec![],
-            max_startup_ms: 1500,
-            max_tool_ms: 1500,
-            max_concurrency: 1,
-            enabled: true,
-        }))
+        .tachi_sandbox(Parameters(wire_sandbox_params(
+            "set_policy",
+            json!({
+                "capability_id": "vc:web_search",
+                "runtime_type": "process",
+                "env_allowlist": [],
+                "fs_read_roots": [],
+                "fs_write_roots": [],
+                "cwd_roots": [],
+                "max_startup_ms": 1500,
+                "max_tool_ms": 1500,
+                "max_concurrency": 1,
+                "enabled": true,
+            }),
+        )))
         .await
-        .expect("sandbox_set_policy for vc should succeed");
+        .expect("tachi_sandbox(action='set_policy') for vc should succeed");
 
     let bind = server
         .vc_bind(Parameters(VirtualCapabilityBindParams {

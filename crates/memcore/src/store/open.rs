@@ -663,33 +663,19 @@ impl MemoryStore {
         let resolved_db_path = crate::private_partition::resolve_generic_open_path(db_path)?;
         let resolved_db_path_string = resolved_db_path.to_string_lossy();
         let db_path = resolved_db_path_string.as_ref();
-        // Acquire the in-process startup lock BEFORE the #1132 rename-on-open
-        // migration, not after (RESIDUAL-1). The migration's stat+rename+symlink
-        // sequence and the `open_read_write` below (which CREATES the canonical
-        // file when absent) must not interleave: without this ordering, two
-        // threads in THIS process could both stat the canonical name as absent
-        // and both `rename` the legacy file onto it, the second clobbering the
-        // first. Holding the guard across migrate + open serializes them.
-        //
-        // SCOPE NOTE: `acquire_startup_lock` is a process-local `Mutex`, so it
-        // serializes the same-process race only. The remaining CROSS-process
-        // TOCTOU (a SECOND daemon opening the same store dir: stat-absent here,
-        // `Connection::open` creates+populates there, our rename would clobber
-        // it) is closed inside `migrate_legacy_filename_if_present` itself, which
-        // now migrates via an ATOMIC NO-CLOBBER rename (`renamex_np`/`renameat2`,
-        // #1226) that fails with EEXIST rather than overwriting a concurrently
-        // created canonical file. On kernels/filesystems/platforms without that
-        // primitive it FAILS CLOSED (loud error) rather than degrading to a
-        // plain rename, which would reopen the very clobber race it closes.
+        // Retain the in-process startup lock across legacy-state validation
+        // and open. It only serializes this process; it never fences an old
+        // binary. The explicit offline operator conversion performs the
+        // checkpoint and atomic no-clobber rename separately, after external
+        // downtime has been established.
         // A caller-owned busy budget covers the whole synchronous open path,
         // including schema initialization's explicit retry sleeps. Without
         // this guard a small per-operation SQLite timeout could still be
         // extended by the retry loop after the local deadline had elapsed.
         let _busy_deadline = busy_timeout.map(db::scoped_sqlite_busy_deadline);
-        // #1132: one-time rename-on-open migration away from the legacy
-        // `memory.db` filename, before the connection is opened. Single seam —
-        // see `db::filename`'s doc comment for why it lives here and not
-        // scattered across every call site that builds a `db_path`.
+        // Offline-only #1132: refuse a real legacy database before SQLite
+        // opens/creates anything. The explicit operator converter owns the
+        // filename transition; schema authorization never implies it.
         db::migrate_legacy_filename_if_present(std::path::Path::new(db_path))?;
         let physical_identity_before_open = physical_db_identity_at_open(db_path);
         let mut conn = match busy_timeout {
@@ -913,6 +899,7 @@ impl MemoryStore {
         let resolved_db_path = crate::private_partition::resolve_generic_open_path(db_path)?;
         let resolved_db_path_string = resolved_db_path.to_string_lossy();
         let db_path = resolved_db_path_string.as_ref();
+        db::migrate_legacy_filename_if_present(std::path::Path::new(db_path))?;
         crate::db::enable_simple_auto_extension()
             .map_err(|e| MemoryError::InvalidArg(format!("simple tokenizer init: {e}")))?;
         db::register_sqlite_vec();

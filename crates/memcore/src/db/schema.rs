@@ -1246,6 +1246,8 @@ fn init_schema_with_label_mut_inner(
         validate_a2a_mailbox_schema(&tx)?;
         validate_mirror_eval_identity_schema(&tx)?;
     }
+    #[cfg(test)]
+    test_hooks::pause_after_schema_stamp_before_commit(&tx);
     tx.commit()?;
 
     if filesystem_artifacts {
@@ -1334,6 +1336,7 @@ fn stamp_store_identity_in_tx(
 #[cfg(test)]
 pub(crate) mod test_hooks {
     use crate::error::MemoryError;
+    use rusqlite::Connection;
     use std::cell::Cell;
 
     thread_local! {
@@ -1356,6 +1359,39 @@ pub(crate) mod test_hooks {
             ));
         }
         Ok(())
+    }
+
+    /// Used only by the ignored, fixture-backed subprocess crash test. This
+    /// executes after real migration DDL, sentinels and user_version have all
+    /// been written and validated, while the outer BEGIN IMMEDIATE is still
+    /// open. No production binary compiles this environment-controlled hook.
+    pub(super) fn pause_after_schema_stamp_before_commit(tx: &Connection) {
+        let Ok(marker) = std::env::var("TACHI_TEST_SCHEMA_TX_PAUSE_MARKER") else {
+            return;
+        };
+        assert_eq!(
+            crate::db::migrations::read_schema_version(tx).expect("read uncommitted stamp"),
+            crate::db::migrations::EXPECTED_SCHEMA_VERSION,
+            "schema stamp must already be inside the uncommitted transaction"
+        );
+        let sentinel: i64 = tx.query_row(
+            "SELECT count(*) FROM hard_state WHERE namespace='migrations' AND key='v39_mirror_eval_identity'",
+            [], |row| row.get(0),
+        ).expect("read uncommitted sentinel");
+        assert_eq!(sentinel, 1, "v39 migration must have run before pause");
+        let ddl: i64 = tx.query_row(
+            "SELECT count(*) FROM sqlite_schema WHERE type='table' AND name='memory_outbox_events'",
+            [], |row| row.get(0),
+        ).expect("read uncommitted v29 DDL");
+        assert_eq!(ddl, 1, "v29 schema change must be present before pause");
+        std::fs::write(
+            marker,
+            b"schema=39;v39_sentinel=1;v29_ddl=1;before_outer_commit",
+        )
+        .expect("signal parent after all migration effects and stamp");
+        loop {
+            std::thread::park();
+        }
     }
 }
 
@@ -3131,6 +3167,42 @@ fn quote_sql_identifier(identifier: &str) -> Result<String, MemoryError> {
     Ok(format!("\"{identifier}\""))
 }
 
+// Insert-missing drift repair for the FTS projections (#1974).
+//
+// FTS5 cannot serve `f.id = m.id` as a lookup: `memories_fts.id` is UNINDEXED
+// and `memories_symbolic_fts.id` is a trigram column. The old correlated
+// `NOT EXISTS (SELECT 1 FROM <fts> f WHERE f.id = m.id)` therefore planned as
+// CORRELATED SCALAR SUBQUERY -> full virtual-table scan per memory row, i.e.
+// O(N^2) on every writable open (~10 min at 10k memories). An uncorrelated
+// `NOT IN (SELECT id ...)` is materialized once into an ephemeral index, so
+// the set difference is one scan of each side.
+//
+// NULL ids (`memories.id` is `TEXT PRIMARY KEY` without NOT NULL, so legacy
+// rows can carry NULL):
+// - `m.id IS NOT NULL`: a NULL-id memory is never projected. It cannot join
+//   back to any FTS hit by id, and projecting it would add one more NULL-id
+//   FTS row on every open (the old NOT EXISTS never matched NULL = NULL).
+//   The explicit guard also covers `NULL NOT IN (<empty set>)`, which is TRUE.
+// - `WHERE id IS NOT NULL` in the subquery: a NULL-id FTS row must not turn
+//   every `m.id NOT IN (...)` into NULL and suppress repair of real rows.
+const FTS_BACKFILL_MISSING_SQL: &str = r#"INSERT INTO memories_fts (id, path, summary, text, keywords, entities)
+   SELECT
+     m.id,
+     m.path,
+     m.summary,
+     m.text,
+     trim(replace(replace(replace(m.keywords, '[', ' '), ']', ' '), '"', ' ')),
+     trim(replace(replace(replace(m.entities, '[', ' '), ']', ' '), '"', ' '))
+   FROM memories m
+   WHERE m.id IS NOT NULL
+     AND m.id NOT IN (SELECT id FROM memories_fts WHERE id IS NOT NULL)"#;
+
+const SYMBOLIC_FTS_BACKFILL_MISSING_SQL: &str = r#"INSERT INTO memories_symbolic_fts (id, path, summary, text, keywords, entities, topic)
+   SELECT m.id, m.path, m.summary, m.text, m.keywords, m.entities, m.topic
+   FROM memories m
+   WHERE m.id IS NOT NULL
+     AND m.id NOT IN (SELECT id FROM memories_symbolic_fts WHERE id IS NOT NULL)"#;
+
 fn ensure_fts_backfilled(conn: &Connection) -> Result<(), MemoryError> {
     // (The stray `vault_entries.allowed_agents` ensure_column that used to sit
     // here moved to `init_product_schema_columns` in #1585 D3: it is a product
@@ -3147,19 +3219,7 @@ fn ensure_fts_backfilled(conn: &Connection) -> Result<(), MemoryError> {
         [],
     )?;
 
-    projection_changes += conn.execute(
-        r#"INSERT INTO memories_fts (id, path, summary, text, keywords, entities)
-           SELECT
-             m.id,
-             m.path,
-             m.summary,
-             m.text,
-             trim(replace(replace(replace(m.keywords, '[', ' '), ']', ' '), '"', ' ')),
-             trim(replace(replace(replace(m.entities, '[', ' '), ']', ' '), '"', ' '))
-           FROM memories m
-           WHERE NOT EXISTS (SELECT 1 FROM memories_fts f WHERE f.id = m.id)"#,
-        [],
-    )?;
+    projection_changes += conn.execute(FTS_BACKFILL_MISSING_SQL, [])?;
 
     // Symbolic trigram index (#1331): insert-missing drift repair only.
     // Content refreshes after path/data migrations are owned by v22's full
@@ -3177,13 +3237,7 @@ fn ensure_fts_backfilled(conn: &Connection) -> Result<(), MemoryError> {
             "DELETE FROM memories_symbolic_fts WHERE id NOT IN (SELECT id FROM memories)",
             [],
         )?;
-        projection_changes += conn.execute(
-            r#"INSERT INTO memories_symbolic_fts (id, path, summary, text, keywords, entities, topic)
-               SELECT m.id, m.path, m.summary, m.text, m.keywords, m.entities, m.topic
-               FROM memories m
-               WHERE NOT EXISTS (SELECT 1 FROM memories_symbolic_fts f WHERE f.id = m.id)"#,
-            [],
-        )?;
+        projection_changes += conn.execute(SYMBOLIC_FTS_BACKFILL_MISSING_SQL, [])?;
     }
 
     if projection_changes > 0 {
@@ -3616,3 +3670,6 @@ mod migration_tests;
 
 #[cfg(test)]
 mod migration_backup_tests;
+
+#[cfg(test)]
+mod fts_backfill_tests;

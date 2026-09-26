@@ -20,24 +20,27 @@ OpenClaw Gateway (Node.js)
 
 ## 安装
 
-### 一键安装（推荐）
+### 二进制与插件分开发布（2.0.0 周期）
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.9.2/scripts/install.sh | bash
-```
+2.0.0 标签**只发布二进制**，没有 OpenClaw 插件资产，插件的 npm 包也尚未发布 2.0.0 版本。两个半区因此分开走：
 
-该脚本会：
-- 通过 Homebrew 安装或升级 `tachi`
-- 下载并安装 OpenClaw `tachi` 插件
-- 自动更新 `~/.openclaw/openclaw.json` 中的 `plugins.allow`、`plugins.load.paths` 与 `plugins.slots.memory`
+- **二进制**：用安装脚本装/升级，必须带 `--skip-plugin`（否则脚本找不到插件资产会拒绝继续）：
 
-### 仅安装 OpenClaw 插件
+  ```bash
+  curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v2.0.0/scripts/install.sh | bash -s -- --skip-plugin
+  ```
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.9.2/scripts/install_openclaw_ext.sh | bash
-```
+  升级已有安装时再加 `--skip-daemon-service`，避免安装脚本在迁移前重启守护；完整顺序见主仓库 [`docs/INSTALL.md` Step 1b](../../docs/INSTALL.md)。
 
-这是兼容旧流程的包装脚本，等价于执行 `scripts/install.sh --skip-brew`。
+- **插件**：继续使用现有版本的插件安装即可，它配合 2.0.0 二进制工作；在插件资产与 npm 发布跟上之前，请勿把插件安装命令当作 2.0.0 的可用安装途径：
+
+  ```bash
+  curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v2.0.0/scripts/install_openclaw_ext.sh | bash
+  ```
+
+  上面这个包装脚本依赖发布资产中的 `tachi-openclaw-v<version>.tar.gz`；2.0.0 尚未提供该资产，脚本会在校验步骤失败关闭。等插件资产发布后再用它重装。
+
+一键安装（二进制 + 插件）在插件资产发布之前不可用；上方的 `--skip-plugin` 二进制安装就是当前的推荐路径。
 
 ## 关键文件
 
