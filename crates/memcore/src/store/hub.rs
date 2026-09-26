@@ -124,6 +124,16 @@ impl MemoryStore {
         db::hub_update_definition_with(&self.conn, id, update)
     }
 
+    /// Fill `description` only while it is still empty; see
+    /// [`db::hub_fill_empty_description`]. No other column is rewritten.
+    pub fn hub_fill_empty_description(
+        &self,
+        id: &str,
+        description: &str,
+    ) -> Result<bool, MemoryError> {
+        db::hub_fill_empty_description(&self.conn, id, description)
+    }
+
     /// Upsert one binding from virtual capability to concrete capability.
     pub fn vc_upsert_binding(&self, binding: &VirtualCapabilityBinding) -> Result<(), MemoryError> {
         db::vc_upsert_binding(&self.conn, binding)

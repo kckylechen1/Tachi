@@ -236,7 +236,6 @@ pub(crate) async fn handle_hub_register(
         if let Some(prompt_text) = def.get("prompt").and_then(|v| v.as_str()) {
             let llm = server.llm.clone();
             let llm_recorder = server.llm_recorder.clone();
-            let cap_clone = cap;
             let desc_empty = params.description.is_empty();
             let db_path = match target_db {
                 DbScope::Global => server.global_db_path_buf(),
@@ -246,7 +245,7 @@ pub(crate) async fn handle_hub_register(
             };
             let prompt_text = prompt_text.to_string();
 
-            let cap_id = cap_clone.id.clone();
+            let cap_id = cap.id.clone();
 
             tokio::spawn(async move {
                 // #1261 step 2/3 removed the CLI fallback; step 3/3 renamed
@@ -290,14 +289,19 @@ pub(crate) async fn handle_hub_register(
                         // and risking "database is locked" under concurrent writes.
                         if desc_empty {
                             if let Some(summary) = analysis_json["summary"].as_str() {
-                                let mut updated_cap = cap_clone;
-                                updated_cap.description = summary.to_string();
+                                // Targeted write: re-registering the
+                                // registration-time snapshot would roll back
+                                // counters, health and the quality_guard a
+                                // background refresh wrote meanwhile (audit G1).
+                                let summary = summary.to_string();
                                 let db_str = db_path.to_string_lossy().to_string();
                                 let cap_id_inner = cap_id.clone();
                                 let _ = tokio::task::spawn_blocking(move || {
                                     match MemoryStore::open(&db_str) {
                                         Ok(store) => {
-                                            if let Err(e) = store.hub_register(&updated_cap) {
+                                            if let Err(e) = store
+                                                .hub_fill_empty_description(&cap_id_inner, &summary)
+                                            {
                                                 eprintln!(
                                                     "[skill-analysis] failed to persist auto description for {}: {}",
                                                     cap_id_inner, e

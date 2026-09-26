@@ -417,6 +417,28 @@ where
     Ok(HubDefinitionUpdate::Updated(Box::new(updated)))
 }
 
+/// Fill `description` only while the stored value is still empty.
+///
+/// Unlike [`hub_upsert`], this never rewrites counters, health, enablement,
+/// review state or the definition from a caller snapshot, never overwrites a
+/// description someone set in the meantime, and never resurrects a deleted
+/// row. Returns whether a row was updated.
+pub fn hub_fill_empty_description(
+    conn: &Connection,
+    id: &str,
+    description: &str,
+) -> Result<bool, MemoryError> {
+    if description.is_empty() {
+        return Ok(false);
+    }
+    let changed = conn.execute(
+        "UPDATE hub_capabilities SET description = ?1, updated_at = ?2 \
+         WHERE id = ?3 AND description = ''",
+        params![description, now_utc_iso(), id],
+    )?;
+    Ok(changed > 0)
+}
+
 /// Helper: build HubCapability from a row (tolerant of unexpected data).
 fn hub_cap_from_row(row: &rusqlite::Row) -> HubCapability {
     HubCapability {
@@ -523,6 +545,40 @@ mod tests {
             serde_json::to_value(hub_get(&conn, id).unwrap().unwrap()).unwrap(),
             serde_json::to_value(&after).unwrap()
         );
+    }
+
+    #[test]
+    fn hub_fill_empty_description_touches_only_an_empty_description() {
+        crate::db::enable_simple_auto_extension().expect("enable simple tokenizer");
+        let conn = Connection::open_in_memory().expect("open hub test database");
+        crate::db::init_schema(&conn).expect("initialize hub test schema");
+        let mut cap = capability(1);
+        cap.description = String::new();
+        cap.definition = r#"{"quality_guard":{"merge_hints":[]}}"#.to_string();
+        hub_upsert(&conn, &cap).expect("seed hub capability");
+        let id = "skill:limited-1";
+        hub_record_call_outcome(&conn, id, false, Some("boom"), 1).unwrap();
+        hub_record_feedback(&conn, id, true, Some(4.0)).unwrap();
+        let before = hub_get(&conn, id).unwrap().unwrap();
+
+        assert!(!hub_fill_empty_description(&conn, id, "").unwrap());
+        assert!(hub_fill_empty_description(&conn, id, "auto summary").unwrap());
+        let after = hub_get(&conn, id).unwrap().unwrap();
+        let mut expected = serde_json::to_value(&before).unwrap();
+        expected["description"] = serde_json::json!("auto summary");
+        expected["updated_at"] = serde_json::json!(after.updated_at);
+        assert_eq!(serde_json::to_value(&after).unwrap(), expected);
+
+        // A description that is already set is never overwritten.
+        assert!(!hub_fill_empty_description(&conn, id, "late summary").unwrap());
+        assert_eq!(
+            hub_get(&conn, id).unwrap().unwrap().description,
+            "auto summary"
+        );
+
+        // A deleted (or never registered) row is not resurrected.
+        assert!(!hub_fill_empty_description(&conn, "skill:missing", "summary").unwrap());
+        assert!(hub_get(&conn, "skill:missing").unwrap().is_none());
     }
 
     #[test]
