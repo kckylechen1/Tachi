@@ -678,7 +678,15 @@ impl MemoryStore {
         // backups for all CLI/open_cli_store paths (#597 CP1).
         let p = std::path::PathBuf::from(db_path);
         let migration_authorization = db::authorize_schema_migration(&reserved_reference_write)?;
-        let schema_result = db::init_store_schema_with_label_mut(&mut conn, db_label, &p, ctx);
+        // The path→handle binding is re-checked inside the schema transaction,
+        // immediately before COMMIT (see `init_store_schema_with_label_mut`),
+        // and again after init below.
+        let path_binding = || {
+            validate_physical_db_identity_across_open(db_path, opened_physical_db_identity.clone())
+                .map(|_| ())
+        };
+        let schema_result =
+            db::init_store_schema_with_label_mut(&mut conn, db_label, &p, ctx, &path_binding);
         let vec_available = schema_result
             .as_ref()
             .map(|_| db::try_load_sqlite_vec(&conn))
@@ -689,8 +697,15 @@ impl MemoryStore {
         // only the caller's claim and may legitimately be `unknown`. A conflict
         // between the two already failed the open above.
         let identity = schema_result?.identity;
-        crate::private_partition::refuse_stamped_private_store(&conn)?;
-        db::validate_persistent_trigger_inventory(&conn, true)?;
+        // tachi#1990: no admission check runs after this point. The
+        // private-partition refusal and the trigger inventory are decided by
+        // schema init (preflight, then authoritatively inside BEGIN IMMEDIATE,
+        // which ends with the strict inventory validation on the exact state
+        // it commits), so neither refusal can follow a committed stamp, a
+        // marker or a backup any more. The physical-identity check below is the
+        // closing bracket of the path→handle binding: schema init already
+        // checked it just before COMMIT, and this covers the rest of the open
+        // (the filesystem is not transactional, so nothing can close it).
         db::install_authority_row_guards(&conn, &reserved_reference_write)?;
         let opened_physical_db_identity = validate_physical_db_identity_across_open(
             db_path,

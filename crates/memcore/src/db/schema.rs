@@ -1176,14 +1176,17 @@ pub fn init_schema_with_label_mut(
     current_db_path: &Path,
     ctx: &crate::db::DbOpenContext,
 ) -> Result<SchemaInitOutcome, MemoryError> {
-    init_schema_with_label_mut_inner(conn, db_label, current_db_path, ctx, true, false)
+    init_schema_with_label_mut_inner(conn, db_label, current_db_path, ctx, SchemaInitFunnel::Bare)
 }
 
 /// `MemoryStore`'s file-backed open: [`init_schema_with_label_mut`] plus the
-/// input trigger-inventory admission (`validate_input_trigger_inventory`)
-/// re-run inside `BEGIN IMMEDIATE`. The store funnel runs that check before
-/// calling here; this repeats it on the in-transaction state, ahead of the
-/// `init_schema_inner` steps that would recreate a missing canonical trigger.
+/// generic-door checks of [`SchemaInitFunnel::Store`]: the input
+/// trigger-inventory admission (`validate_input_trigger_inventory`) re-run
+/// inside `BEGIN IMMEDIATE`, the private-partition refusal (tachi#1990), and
+/// the caller's `path_binding` check immediately before `COMMIT`.
+/// The store funnel runs the inventory check before calling here; this repeats
+/// it on the in-transaction state, ahead of the `init_schema_inner` steps that
+/// would recreate a missing canonical trigger.
 ///
 /// The bare [`init_schema_with_label_mut`] keeps its historical contract and
 /// does not validate the input inventory (fixtures and tools drive it on
@@ -1193,8 +1196,15 @@ pub(crate) fn init_store_schema_with_label_mut(
     db_label: &str,
     current_db_path: &Path,
     ctx: &crate::db::DbOpenContext,
+    path_binding: &dyn Fn() -> Result<(), MemoryError>,
 ) -> Result<SchemaInitOutcome, MemoryError> {
-    init_schema_with_label_mut_inner(conn, db_label, current_db_path, ctx, true, true)
+    init_schema_with_label_mut_inner(
+        conn,
+        db_label,
+        current_db_path,
+        ctx,
+        SchemaInitFunnel::Store { path_binding },
+    )
 }
 
 /// Initialize an admitted in-memory private image without ever materializing
@@ -1207,7 +1217,72 @@ pub(crate) fn init_private_schema_with_label_mut(
     logical_db_path: &Path,
     ctx: &crate::db::DbOpenContext,
 ) -> Result<SchemaInitOutcome, MemoryError> {
-    init_schema_with_label_mut_inner(conn, db_label, logical_db_path, ctx, false, false)
+    init_schema_with_label_mut_inner(
+        conn,
+        db_label,
+        logical_db_path,
+        ctx,
+        SchemaInitFunnel::PrivateImage,
+    )
+}
+
+/// Which door drives schema init. The door decides the door-specific
+/// admission checks and whether filesystem artifacts (`.migration-bak`,
+/// `.migration-marker`) may be written.
+#[derive(Clone, Copy)]
+enum SchemaInitFunnel<'a> {
+    /// [`init_schema_with_label_mut`]: fixtures and tools, including files the
+    /// store funnel itself refuses. No door-specific admission checks.
+    Bare,
+    /// `MemoryStore`'s generic file-backed open
+    /// ([`init_store_schema_with_label_mut`]).
+    Store {
+        /// The caller's path→handle binding check (the database path still
+        /// names the file this connection opened). It runs inside
+        /// `BEGIN IMMEDIATE` after every write, immediately before `COMMIT`:
+        /// SQLite names the `-wal` after the path, so a transaction committed
+        /// after the path was replaced would be read back by the next opener
+        /// of the path as part of the substitute file (tachi#1990).
+        path_binding: &'a dyn Fn() -> Result<(), MemoryError>,
+    },
+    /// An admitted in-memory private image
+    /// ([`init_private_schema_with_label_mut`]).
+    PrivateImage,
+}
+
+impl SchemaInitFunnel<'_> {
+    /// A private image is sealed by its caller; plaintext migration artifacts
+    /// next to a logical path would escape that boundary.
+    fn writes_filesystem_artifacts(self) -> bool {
+        !matches!(self, Self::PrivateImage)
+    }
+
+    /// Re-validate the input trigger inventory inside `BEGIN IMMEDIATE`.
+    fn validates_input_trigger_inventory(self) -> bool {
+        matches!(self, Self::Store { .. })
+    }
+
+    /// The generic-door admission of tachi#1668 design item 7 / #1585: a
+    /// working SQLite image that carries the private-partition stamp is not a
+    /// portable or Tachi handle, so a generic open refuses it with
+    /// [`MemoryError::PrivatePartitionRefused`]. tachi#1990: this is an
+    /// admission decision like identity, evaluated in the preflight (so a
+    /// refusal leaves no backup, marker, PRAGMA, DDL or stamp) and again,
+    /// authoritatively, inside `BEGIN IMMEDIATE` before any DDL. Pure reads.
+    fn admit_private_partition_stamp(self, conn: &Connection) -> Result<(), MemoryError> {
+        match self {
+            Self::Store { .. } => crate::private_partition::refuse_stamped_private_store(conn),
+            Self::Bare | Self::PrivateImage => Ok(()),
+        }
+    }
+
+    /// Last check before `COMMIT`; a refusal drops the transaction.
+    fn check_before_commit(self) -> Result<(), MemoryError> {
+        match self {
+            Self::Store { path_binding } => path_binding(),
+            Self::Bare | Self::PrivateImage => Ok(()),
+        }
+    }
 }
 
 fn init_schema_with_label_mut_inner(
@@ -1215,8 +1290,7 @@ fn init_schema_with_label_mut_inner(
     db_label: &str,
     current_db_path: &Path,
     ctx: &crate::db::DbOpenContext,
-    filesystem_artifacts: bool,
-    input_inventory: bool,
+    funnel: SchemaInitFunnel<'_>,
 ) -> Result<SchemaInitOutcome, MemoryError> {
     super::ensure_reserved_reference_write_guard(conn)?;
     // ── Preflight (no transaction) ──────────────────────────────────────────
@@ -1231,7 +1305,7 @@ fn init_schema_with_label_mut_inner(
     // #984 version gate, then the #1119 typed migration gate (quiet here; the
     // audit line is logged by the authoritative evaluation).
     // (Input trigger inventory: `MemoryStore`'s funnel validates it before
-    // calling here; with `input_inventory` it is re-validated in-tx below.)
+    // calling here; the `Store` funnel re-validates it in-tx below.)
     crate::db::migrations::check_schema_version_gate(conn)?;
     let preflight_version = crate::db::migrations::read_schema_version(conn)?;
     crate::db::migrations::evaluate_db_open_context_gate(conn, current_db_path, ctx)?;
@@ -1241,6 +1315,10 @@ fn init_schema_with_label_mut_inner(
     let preflight_fresh = preflight_version == 0;
     // W1-3: read-only identity/profile admission (plain `hard_state` reads).
     resolve_store_identity_in_tx(conn, db_label, current_db_path, ctx, preflight_fresh)?;
+    // tachi#1990: the generic door's private-partition refusal, after identity
+    // (the same precedence the post-commit check had) and before any side
+    // effect below.
+    funnel.admit_private_partition_stamp(conn)?;
     //
     // What a refusal does NOT promise:
     // * Byte-identical files. The funnel's connection is read-write; if the
@@ -1256,12 +1334,15 @@ fn init_schema_with_label_mut_inner(
     //   exactly: the `.migration-bak` written below plus the retention pass
     //   that may delete older backups, and `journal_mode` switched to WAL by
     //   `apply_connection_pragmas` (WAL mode is persistent). DDL, stamps and
-    //   identity/role writes are inside the transaction and roll back.
+    //   identity/role writes are inside the transaction and roll back. The
+    //   store funnel's pre-COMMIT path-binding refusal (the path was replaced
+    //   during the open) is the same class: the backup, retention and WAL
+    //   switch concern the file this connection opened.
     #[cfg(test)]
     test_hooks::run_window_hook(test_hooks::Window::BeforeBackupDecision, current_db_path);
     // The backup step reports the state it actually decided on; the
     // in-transaction admission compares against THAT, not `preflight_version`.
-    let backup_decision = if filesystem_artifacts {
+    let backup_decision = if funnel.writes_filesystem_artifacts() {
         Some(maybe_backup_before_migration(conn, current_db_path)?)
     } else {
         None
@@ -1282,13 +1363,16 @@ fn init_schema_with_label_mut_inner(
         current_db_path,
         ctx,
         backup_decision.as_ref(),
-        input_inventory,
+        funnel.validates_input_trigger_inventory(),
     )?;
     // #1585/#1579: resolve identity BEFORE any DDL runs, so a refused open
     // (role conflict, profile mismatch, unstamped-under-portable) writes
     // nothing. Everything below is inside the same BEGIN IMMEDIATE, so even a
     // later failure rolls the stamps back with it.
     let identity = resolve_store_identity_in_tx(&tx, db_label, current_db_path, ctx, fresh)?;
+    // tachi#1990: authoritative private-partition refusal on the in-transaction
+    // state (a stamp committed in the window), before any DDL or stamp.
+    funnel.admit_private_partition_stamp(&tx)?;
     init_schema_inner(&tx, identity.profile)?;
     stamp_store_identity_in_tx(&tx, &identity, ctx)?;
     #[cfg(test)]
@@ -1315,9 +1399,10 @@ fn init_schema_with_label_mut_inner(
     }
     #[cfg(test)]
     test_hooks::pause_after_schema_stamp_before_commit(&tx);
+    funnel.check_before_commit()?;
     tx.commit()?;
 
-    if filesystem_artifacts {
+    if funnel.writes_filesystem_artifacts() {
         remember_migration_fingerprint(conn, current_db_path)?;
     }
     Ok(SchemaInitOutcome { report, identity })
