@@ -64,6 +64,44 @@
 //! `lsof -w` is deliberately **not** used: it silences the `+D` walk's own
 //! "can't stat()/opendir()" warnings too, which are exactly the partial-walk
 //! signal the holder probes must never lose.
+//!
+//! # Visibility boundary
+//!
+//! The probes see only holders visible to the probing UID; their threat model
+//! is same-UID holders. A non-root lsof cannot read another UID's (or root's)
+//! `/proc/<pid>/fd`, so such a holder produces exactly the blank-stdout,
+//! exit-1 signature of "no holder" — no row and no diagnostic. This predates
+//! the stderr filter and holds on every platform: on macOS, and on Linux hosts
+//! without another user's desktop session, other-UID holders already read as
+//! absent.
+//!
+//! The `fuse.portal` warning is not a signal for that boundary. It appears
+//! whenever another user has a desktop session (their xdg-document-portal
+//! mount is private to them), whether or not anything the probe targets is
+//! held; refusing on it made the probes fail closed only on desktop Linux
+//! hosts, by accident. That is why it is allowlisted. Closing the boundary
+//! itself (other-UID / root holders) is tracked in tachi#1989.
+//!
+//! Evidence (DGX2, lsof 4.95.0; `kckylechen` is UID 1000 and owns the desktop
+//! session, `gha` is the unprivileged CI user):
+//!
+//! ```text
+//! $ f=$(mktemp /tmp/wz-vis-XXXXXX); chmod 0666 $f; tail -f $f >/dev/null &  # as UID 1000
+//! holder pid=1533813 uid=1000 file=/tmp/wz-vis-FW0Q4G
+//! $ sudo -n -u gha lsof -- /tmp/wz-vis-FW0Q4G
+//! exit=1 stdout_bytes=0
+//! stderr| lsof: WARNING: can't stat() tracefs file system /sys/kernel/debug/tracing
+//! stderr|       Output information may be incomplete.
+//! stderr| lsof: WARNING: can't stat() fuse.portal file system /run/user/1000/doc
+//! stderr|       Output information may be incomplete.
+//! $ sudo -n -u gha ls /proc/1533813/fd
+//! ls: cannot open directory '/proc/1533813/fd': Permission denied
+//! exit=2
+//! $ lsof -- /tmp/wz-vis-FW0Q4G   # same UID as the holder
+//! COMMAND     PID       USER   FD   TYPE DEVICE SIZE/OFF     NODE NAME
+//! tail    1533813 kckylechen    3r   REG  259,2        0 44826736 /tmp/wz-vis-FW0Q4G
+//! exit=0
+//! ```
 
 use std::path::Path;
 

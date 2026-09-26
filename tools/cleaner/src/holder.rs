@@ -200,6 +200,8 @@ fn interpret_lsof_output(exit_code: Option<i32>, stdout: &str, stderr: &str) -> 
     }
 
     match exit_code {
+        // Absence is relative to the probing UID: see "Visibility boundary"
+        // in crate::lsof_stderr (tachi#1989).
         Some(1) if stdout.trim().is_empty() => HolderEvidence::Clear,
         Some(1) => {
             HolderEvidence::Unknown("lsof exited 1 with a header but no file rows".to_string())
