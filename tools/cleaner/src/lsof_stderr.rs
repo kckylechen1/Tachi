@@ -70,15 +70,22 @@
 //!
 //! The probes can only report holders whose descriptors the probe's own lsof
 //! can see; "no holder" means "no holder visible to this lsof", not "no
-//! holder". A holder is invisible — and the probe can report absence — when:
+//! holder". A holder may be invisible — and the probe may then report
+//! absence — in these cases:
 //!
-//! * **(a)** it runs under another UID, or as root, and the probe does not;
+//! * **(a)** it runs under another UID, or as root, and the kernel's `/proc`
+//!   access check denies the probe its `/proc/<pid>/fd` (capability
+//!   overrides such as `CAP_SYS_PTRACE` can grant that access);
 //! * **(b)** it runs under the probe's UID but is not dumpable
-//!   (`PR_SET_DUMPABLE` = 0) or otherwise fails the kernel's access check on
-//!   its `/proc/<pid>/fd`;
+//!   (`PR_SET_DUMPABLE` = 0), or otherwise, when the kernel's `/proc` access
+//!   check denies the probe its `/proc/<pid>/fd`;
 //! * **(c)** the probe sees a different PID or mount namespace view than the
-//!   holder, e.g. a container-local `/proc` while the holder runs on the host
-//!   against a shared target.
+//!   holder, when that view omits the holder's process or prevents descriptor
+//!   inspection — e.g. a container-local `/proc` while the holder runs on the
+//!   host against a shared target. A different namespace is not sufficient by
+//!   itself: an ancestor PID namespace sees its descendants' processes, and a
+//!   different mount namespace alone does not block a readable
+//!   `/proc/<pid>/fd`.
 //!
 //! On Linux, lsof reads descriptors from `/proc/<pid>/fd`; a process it may
 //! not inspect contributes no row and no diagnostic for the target. On macOS,
@@ -87,9 +94,11 @@
 //! different path. An invisible holder removes only its own rows: holders the
 //! probe can see are still listed, and unrelated diagnostics still appear, so
 //! the classification follows from whatever remains. When nothing visible
-//! remains, the run matches lsof's "not found" signature (exit 1, blank
-//! stdout) and the probe reports absence. All of this predates the stderr
-//! filter.
+//! remains, provided no relevant diagnostics remain either, the run matches
+//! lsof's "not found" signature (exit 1, blank stdout, no relevant stderr)
+//! and the probe reports absence; a retained diagnostic (e.g. a
+//! `fuse.gvfsd-fuse` mount warning, which is not allowlisted) keeps it
+//! Unknown. All of this predates the stderr filter.
 //!
 //! The DB probe's self-exclusion (`db_ownership`) compares lsof's PIDs with
 //! the caller's namespace-local `std::process::id()`. Under a PID-namespace
