@@ -198,7 +198,8 @@ gh api --paginate repos/kckylechen1/tachi/collaborators \
 #    workflow must name exactly one label from the explicit GitHub-hosted
 #    allowlist below and must not call a reusable workflow. A label pattern
 #    such as ubuntu-* is not proof of GitHub hosting: a self-hosted runner can
-#    carry any custom label. Extend the allowlist only by editing this
+#    carry any custom label. Runner labels are case-insensitive, so the match
+#    lowercases the label first. Extend the allowlist only by editing this
 #    runbook. Exit 0 and no output = pass.
 ruby -ryaml -e '
 HOSTED = %w[ubuntu-latest ubuntu-24.04 ubuntu-22.04].freeze
@@ -210,7 +211,7 @@ Dir[".github/workflows/*.{yml,yaml}"].sort.each do |f|
   next if (events & %w[pull_request_target workflow_run]).empty?
   (d["jobs"] || {}).each do |id, job|
     runs_on = job["runs-on"]
-    next if job["uses"].nil? && HOSTED.include?(runs_on)
+    next if job["uses"].nil? && runs_on.is_a?(String) && HOSTED.include?(runs_on.downcase(:ascii))
     bad = true
     puts "VIOLATION: #{f} job #{id}: runs-on=#{runs_on.inspect} uses=#{job["uses"].inspect}"
   end
@@ -219,10 +220,11 @@ exit(bad ? 1 : 0)'
 
 # 4. No self-hosted runner registered to this repository carries one of the
 #    allowlisted hosted labels (which would let check 3's allowlist route a
-#    job to it). Silence means pass.
+#    job to it). Labels are compared case-insensitively (a runner labelled
+#    Ubuntu-Latest also matches runs-on: ubuntu-latest). Silence means pass.
 gh api --paginate repos/kckylechen1/tachi/actions/runners \
   --jq '.runners[] | .name as $n | .labels[].name
-        | select(. == "ubuntu-latest" or . == "ubuntu-24.04" or . == "ubuntu-22.04")
+        | select(ascii_downcase | IN("ubuntu-latest", "ubuntu-24.04", "ubuntu-22.04"))
         | "VIOLATION: self-hosted runner \($n) carries hosted label \(.)"'
 ```
 
