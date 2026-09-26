@@ -392,7 +392,9 @@ outcome (success or refusal, phase, and side effects), not just the error:
     remains.
   - Under B: R5.2a refuses in the preflight, before any backup, and nothing
     is written.
-- **Older-band precedence against identity.** Take `P@36` with
+- **Older-band precedence against identity.** Use the same `OpenExisting` +
+  `Allow`, `AtLeast(P)` setup as above; under `Deny`, today's
+  `SchemaMigrationOptInRequired` wins instead. Take `P@36` with
   `idx_delivery_events_delivery` removed **and** a role payload of
   `{"value":7}`:
   - Today: integrity is skipped at 36, and the role-decode error wins in the
