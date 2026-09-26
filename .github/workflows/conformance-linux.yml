@@ -160,12 +160,36 @@ jobs:
           checksum: true
           fallback: none
 
+      - name: Verify resolved cargo-nextest is the audited install
+        id: nextest_verify
+        # The installer extracts the checksum-verified binary to
+        # ~/.install-action/bin (cargo resolves to the toolchain dir, not
+        # ~/.cargo/bin), but a cargo-nextest already present elsewhere, e.g.
+        # ~/.cargo/bin, can be the one `cargo nextest` actually runs. Fail
+        # closed unless the resolved subcommand is the audited version (keep
+        # in sync with `tool:` above).
+        if: ${{ !cancelled() && steps.nextest_install.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          expected="cargo-nextest 0.9.140"
+          echo "cargo-nextest on PATH: $(type -P cargo-nextest || echo '<none>')"
+          out="$(cargo nextest --version)"
+          first="${out%%$'\n'*}"
+          echo "cargo nextest --version: ${first}"
+          case "${first}" in
+            "${expected}"|"${expected} "*) ;;
+            *)
+              echo "::error::cargo nextest resolves to '${first}', not the audited install '${expected}'. Remove the stray cargo-nextest from the runner host (docs/engineering/operations/conformance-runner.md)." >&2
+              exit 6
+              ;;
+          esac
+
       - name: Run workspace tests
         id: workspace_tests
         # The canonical acceptance surface on real Linux: every cfg(linux)
         # test leg that the darwin-arm64 C1 lane compiles out runs here,
         # including the renameat2 paths from the #1877 inventory.
-        if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' && steps.nextest_install.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' && steps.nextest_verify.outcome == 'success' }}
         run: cargo nextest run --workspace --locked --profile ci
 
       - name: Archive nextest JUnit timing report
@@ -270,6 +294,25 @@ jobs:
           checksum: true
           fallback: none
 
+      - name: Verify resolved cargo-nextest is the audited install
+        id: nextest_verify
+        # Same fail-closed check as rust-gate (see there).
+        if: ${{ !cancelled() && steps.nextest_install.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          expected="cargo-nextest 0.9.140"
+          echo "cargo-nextest on PATH: $(type -P cargo-nextest || echo '<none>')"
+          out="$(cargo nextest --version)"
+          first="${out%%$'\n'*}"
+          echo "cargo nextest --version: ${first}"
+          case "${first}" in
+            "${expected}"|"${expected} "*) ;;
+            *)
+              echo "::error::cargo nextest resolves to '${first}', not the audited install '${expected}'. Remove the stray cargo-nextest from the runner host (docs/engineering/operations/conformance-runner.md)." >&2
+              exit 6
+              ;;
+          esac
+
       - name: Seccomp containment escape probe
         # #1877 gap closure: the parent installs the seccomp escape filter
         # through run_agent_subprocess_with_liveness and the re-exec'd child
@@ -277,25 +320,25 @@ jobs:
         # proves owned-group absence. Exact module-root path; zero discovered
         # tests fail the step rather than silently accepting a stale or
         # cfg'd-out selector.
-        if: ${{ !cancelled() && steps.nextest_install.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.nextest_verify.outcome == 'success' }}
         run: cargo nextest run -p tachi-server --locked --no-tests=fail -- --exact 'dispatch_ops::subprocess::required_postflight_kernel_containment_discriminates_setsid_escape'
 
       - name: renameat2 no-clobber legs (memcore db::filename)
         # filename.rs atomic rename (RENAME_NOREPLACE via SYS_renameat2 on
         # Linux).
-        if: ${{ !cancelled() && steps.nextest_install.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.nextest_verify.outcome == 'success' }}
         run: cargo nextest run -p memcore --locked --no-tests=fail 'db::filename::tests::atomic_rename'
 
       - name: Anchored directory legs (memcore anchored_fs)
         # anchored_fs.rs anchored directory identity/replacement -- cfg(unix)
         # legs with a Linux-specific identity path.
-        if: ${{ !cancelled() && steps.nextest_install.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.nextest_verify.outcome == 'success' }}
         run: cargo nextest run -p memcore --locked --no-tests=fail 'anchored_fs::tests'
 
       - name: renameat2 receipt legs (tachi-server repair::receipt)
         # repair/receipt.rs receipt paths over the SYS_renameat2-backed
         # atomic exchange.
-        if: ${{ !cancelled() && steps.nextest_install.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.nextest_verify.outcome == 'success' }}
         run: cargo nextest run -p tachi-server --locked --no-tests=fail 'repair::receipt::tests'
 
       - name: renameat2 atomic-exchange legs (tachi-server sticky_cutover)
@@ -303,7 +346,7 @@ jobs:
         # (bootstrap/wiki_corpus/fs.rs renameat2 legs have no fs.rs-local
         # tests; the cfg(linux)-enabled bootstrap::wiki_corpus::tests
         # replacement/swap legs run in the rust-gate workspace run.)
-        if: ${{ !cancelled() && steps.nextest_install.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.nextest_verify.outcome == 'success' }}
         run: cargo nextest run -p tachi-server --locked --no-tests=fail 'sticky_cutover'
 
       - name: Runner workspace cleanup

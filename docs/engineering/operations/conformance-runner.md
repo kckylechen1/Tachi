@@ -69,7 +69,11 @@ else, so a mislabeled host can never fake green. It also prints
   install `nextest@0.9.140` through the pinned `taiki-e/install-action` with
   `checksum: true` and `fallback: none` (no source build), and
   `validate_action_pins.rb` audits that tool at exactly three uses (`ci.yml`
-  `rust` plus the two C2 jobs).
+  `rust` plus the two C2 jobs). A following `Verify resolved cargo-nextest is
+  the audited install` step fails the job (exit 6) unless `cargo nextest
+  --version` reports `cargo-nextest 0.9.140`, and every nextest step is gated
+  on it: the installer's checksum only covers the binary it extracted, not a
+  different `cargo-nextest` that `cargo nextest` may resolve first.
 - **Not** a release/publish lane: no publication or provider secrets;
   `GITHUB_TOKEN` only, workflow-level `permissions: contents: read`.
 - **Not** the C1 runner: distinct label; jobs cannot land on
@@ -84,14 +88,44 @@ else, so a mislabeled host can never fake green. It also prints
 
 ## Trust boundary
 
-Identical to C1 (see `acceptance-runner.md` for the full rationale): the
-fail-closed job guard — copied verbatim from `ci.yml`'s `build-seat-setup`
-job — admits only owner `push`/`workflow_dispatch` or same-repo owner-authored
-PRs, requires both `github.actor` and `github.triggering_actor` to be the
-repository owner, and skips before any runner claim otherwise. The visibility
-contract carries over verbatim: the guard is trustworthy only while repository
-write access is owner-only — **stop the runner before making the repo public
-or adding collaborators**.
+`kckylechen1/tachi` is a **public** repository, and a fork PR can change or
+add workflows that target this runner's labels. The runner's safety rests on
+three layers:
+
+1. **Repository approval policy (primary control).** The fork-PR contributor
+   approval policy is `all_external_contributors`: every workflow run
+   triggered by a fork PR from an outside contributor waits for owner
+   approval before GitHub schedules it on any runner.
+2. **In-workflow owner guards (defence in depth only).** Both jobs carry the
+   fail-closed guard copied verbatim from `ci.yml`'s `build-seat-setup` job:
+   it admits only owner `push`/`workflow_dispatch` or same-repo
+   owner-authored PRs, requires both `github.actor` and
+   `github.triggering_actor` to be the repository owner, and skips before any
+   runner claim otherwise. A fork PR can edit this guard away or add an
+   unguarded job with the same labels, so the guard is not a boundary on
+   its own.
+3. **Owner review before approval.** The owner never approves a run for an
+   outside contributor's PR without first reading that PR's workflow diff
+   (`.github/workflows/`, `.github/actions/`, and every script those call).
+
+The approval policy does not cover anyone with write access: a collaborator
+can push workflows directly. **Stop the runner before adding collaborators
+with write access.**
+
+Verify the policy as part of the inventory check below (from the
+authenticated administration workstation, not the runner host):
+
+```bash
+gh api repos/kckylechen1/tachi/actions/permissions/fork-pr-contributor-approval
+# expected: {"approval_policy":"all_external_contributors"}
+```
+
+Any weaker value (or a failed read) means **stop the runner** until the
+policy is restored.
+
+The C1 macOS runner `tachi-acceptance-1` (`tachi-acceptance`,
+`acceptance-runner.md`) has the same exposure and is covered by the same
+repository policy.
 
 Host-side, the runner process runs as `gha` without sudo: a job cannot install
 system packages or change system services, and it can write only where `gha`
@@ -130,12 +164,15 @@ the job (exit 5) naming the missing tools, and the nextest install is gated on
 that step's success. `gha` has no sudo, so any missing system package is an
 owner act from an administrative account, never something a job or the
 runner user installs. On `atom-dgx-2` they resolve to `/usr/bin/jq`,
-`/usr/bin/curl`, and `/usr/bin/tar`. Verify as `gha` before the first smoke:
+`/usr/bin/curl`, and `/usr/bin/tar`. Before the first smoke, check the
+repository approval policy (see Trust boundary) from the administration
+workstation, then verify as `gha` on the host:
 
 ```bash
 for tool in pwsh rustup git python3 lsof cc pkg-config jq curl tar; do
   printf '%s: ' "$tool"; command -v "$tool" || echo MISSING
 done
+ls -l ~/.cargo/bin/cargo-nextest 2>/dev/null && echo 'STRAY cargo-nextest: remove it'
 pwsh -NoProfile -Command '$PSVersionTable.PSVersion.ToString()'
 rustup --version
 ```
@@ -219,6 +256,13 @@ unit with `User=gha`, or a user unit with linger) in the activation receipt.
   where `cargo-nextest` lands (run 36224766153 logs
   `adding '/home/gha/.install-action/bin' to PATH`). Same accounting as C1's
   runbook otherwise.
+- `~/.cargo/bin` must not hold its own `cargo-nextest`. Run 36226017929 found
+  `cargo-nextest 0.9.146` there (not the audited version), and the
+  installer's post-install lookup resolved to it. The job's version guard
+  fails the job whenever such a binary is what `cargo nextest` runs; the fix
+  is to delete `~gha/.cargo/bin/cargo-nextest` on the host, never to relax
+  the guard. Host check: `ls -l ~/.cargo/bin/cargo-nextest` should report
+  no such file.
 
 ## Queue hygiene before first activation
 
