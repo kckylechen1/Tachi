@@ -17,9 +17,10 @@
 //!
 //! That made every probe "undetermined" on every non-root Linux host.
 //!
-//! On a Linux desktop host, a user other than the desktop session's owner
-//! also cannot stat that session's xdg-document-portal FUSE mount (FUSE
-//! mounts are private to their owner by default), so lsof adds a second pair.
+//! lsof also warns about any other mount it enumerates but cannot stat. On a
+//! Linux desktop host that is typically another user's xdg-document-portal
+//! FUSE mount (FUSE mounts are private to their owner by default) when that
+//! mount is in the probe's mount namespace; lsof then adds a second pair.
 //! Captured on atom-dgx-2 (lsof 4.95.0) as the unprivileged CI user `gha`,
 //! `sudo -n -u gha lsof -- /tmp/<file>` wrote exactly this and exited 1
 //! (tachi#1978; as the session owner only the tracefs pair appears):
@@ -67,22 +68,44 @@
 //!
 //! # Visibility boundary
 //!
-//! The probes see only holders visible to the probing UID; their threat model
-//! is same-UID holders. A non-root lsof cannot read another UID's (or root's)
-//! `/proc/<pid>/fd`, so such a holder produces exactly the blank-stdout,
-//! exit-1 signature of "no holder" — no row and no diagnostic. This predates
-//! the stderr filter and holds on every platform: on macOS, and on Linux hosts
-//! without another user's desktop session, other-UID holders already read as
-//! absent.
+//! The probes can only report holders whose descriptors the probe's own lsof
+//! can see; "no holder" means "no holder visible to this lsof", not "no
+//! holder". A holder is invisible — and the probe can report absence — when:
 //!
-//! The `fuse.portal` warning is not a signal for that boundary. It appears
-//! whenever another user has a desktop session (their xdg-document-portal
-//! mount is private to them), whether or not anything the probe targets is
-//! held; refusing on it made the probes fail closed only on desktop Linux
-//! hosts, by accident. That is why it is allowlisted. Closing the boundary
-//! itself (other-UID / root holders) is tracked in tachi#1989.
+//! * **(a)** it runs under another UID, or as root, and the probe does not;
+//! * **(b)** it runs under the probe's UID but is not dumpable
+//!   (`PR_SET_DUMPABLE` = 0) or otherwise fails the kernel's access check on
+//!   its `/proc/<pid>/fd`;
+//! * **(c)** the probe sees a different PID or mount namespace view than the
+//!   holder, e.g. a container-local `/proc` while the holder runs on the host
+//!   against a shared target.
 //!
-//! Evidence (DGX2, lsof 4.95.0; `kckylechen` is UID 1000 and owns the desktop
+//! On Linux, lsof reads descriptors from `/proc/<pid>/fd`; a process it may
+//! not inspect contributes no row and no diagnostic for the target. On macOS,
+//! lsof discovers processes through `proc_pidinfo` rather than `/proc`, and
+//! silently skips processes that fail with `EPERM` — the same effect by a
+//! different path. An invisible holder removes only its own rows: holders the
+//! probe can see are still listed, and unrelated diagnostics still appear, so
+//! the classification follows from whatever remains. When nothing visible
+//! remains, the run matches lsof's "not found" signature (exit 1, blank
+//! stdout) and the probe reports absence. All of this predates the stderr
+//! filter.
+//!
+//! The DB probe's self-exclusion (`db_ownership`) compares lsof's PIDs with
+//! the caller's namespace-local `std::process::id()`. Under a PID-namespace
+//! mismatch (host `/proc` seen from a child PID namespace) another process
+//! can carry the same number and be excluded as "self". That is a known
+//! limit, tracked with this boundary in tachi#1989.
+//!
+//! The `fuse.portal` warning is not a signal for any of this. It only means
+//! lsof enumerated a mount it could not stat — typically another user's
+//! desktop portal mount — and it is absent when that mount lies outside the
+//! probe's mount namespace. It says nothing about whether the target is held,
+//! so refusing on it made the probes fail closed only on some hosts, by
+//! accident; that is why it is allowlisted. Closing the boundary is tracked
+//! in tachi#1989.
+//!
+//! Linux evidence for (a) (DGX2, lsof 4.95.0; `kckylechen` is UID 1000 and owns the desktop
 //! session, `gha` is the unprivileged CI user):
 //!
 //! ```text

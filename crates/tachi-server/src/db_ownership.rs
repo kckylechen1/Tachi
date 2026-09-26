@@ -173,7 +173,7 @@ fn classify_lsof_output(
                     first_diagnostic().unwrap_or_default()
                 ))
             } else {
-                // Absence is relative to the probing UID: see "Visibility
+                // Absence is bounded by what this lsof can see: see "Visibility
                 // boundary" in tachi_clean::lsof_stderr (tachi#1989).
                 DbOwnership::NotOwned
             }
@@ -184,7 +184,7 @@ fn classify_lsof_output(
             // internal error, unexpected args). Only the silent form is
             // trusted; any text means we cannot tell, so fail closed.
             if stderr.trim().is_empty() && stdout.trim().is_empty() {
-                // Absence is relative to the probing UID: see "Visibility
+                // Absence is bounded by what this lsof can see: see "Visibility
                 // boundary" in tachi_clean::lsof_stderr (tachi#1989).
                 DbOwnership::NotOwned
             } else {

@@ -692,7 +692,7 @@ fn interpret_lsof_excluding(
         return HolderCheck::Unknown(format!("lsof walk incomplete: {first}"));
     }
 
-    // Absence (`None`) is relative to the probing UID: see "Visibility
+    // Absence (`None`) is bounded by what this lsof can see: see "Visibility
     // boundary" in tachi_clean::lsof_stderr (tachi#1989).
     match exit_code {
         Some(0) | Some(1) if excluded_rows > 0 => HolderCheck::None,
