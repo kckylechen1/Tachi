@@ -331,6 +331,8 @@ pub(crate) use sandbox_access::evaluate_sandbox_access;
 pub use sandbox_access::{evaluate_sandbox_access, path_matches_pattern};
 #[cfg(test)]
 pub(crate) use schema::install_reserved_reference_guard;
+#[cfg(test)]
+pub(crate) use schema::test_hooks as schema_test_hooks;
 pub(crate) use schema::{init_private_schema_with_label_mut, init_store_schema_with_label_mut};
 pub use schema::{
     init_schema, init_schema_with_label_mut, validate_current_truth_schema, SchemaInitOutcome,
