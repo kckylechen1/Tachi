@@ -40,7 +40,7 @@ fn ctx(required: StoreProfile, migration: MigrationAuthority) -> DbOpenContext {
     DbOpenContext {
         intent: OpenIntent::OpenExisting,
         migration,
-        required_profile: required,
+        required_profile: required.into(),
     }
 }
 
@@ -1084,5 +1084,312 @@ fn portable_store_refuses_agent_state_wrappers_typed() {
     assert!(
         matches!(read, Err(MemoryError::StoreProfileMismatch { .. })),
         "portable agent-state read must refuse typed, got {read:?}"
+    );
+}
+
+// ── W1-2: exact-profile admission ───────────────────────────────────────────
+
+fn exact(required: StoreProfile) -> DbOpenContext {
+    DbOpenContext::open_existing_deny().with_exact_profile(required)
+}
+
+fn file_sha256(path: &str) -> String {
+    use sha2::{Digest, Sha256};
+    format!(
+        "{:x}",
+        Sha256::digest(std::fs::read(path).expect("read db bytes"))
+    )
+}
+
+/// Every `hard_state` row, verbatim: identity stamps, migration sentinels and
+/// everything else. A refused open must leave all of it untouched.
+fn hard_state_rows(conn: &Connection) -> Vec<(String, String, String)> {
+    let mut stmt = conn
+        .prepare("SELECT namespace, key, value_json FROM hard_state ORDER BY namespace, key")
+        .expect("prepare hard_state dump");
+    let rows = stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .expect("query hard_state");
+    rows.map(|r| r.expect("hard_state row")).collect()
+}
+
+/// Every file next to the database, by name, INCLUDING SQLite's `-wal`/`-shm`
+/// sidecars. The clean-store test starts from a cleanly closed store (the last
+/// close removed both sidecars), so a sidecar LEFT behind would show up. The
+/// comparison observes the final directory after close: it proves nothing
+/// remains, not that SQLite never created a sidecar transiently. The
+/// unclean-shutdown test is where sidecars legitimately change, and it says so.
+fn sibling_names(dir: &Path) -> BTreeSet<String> {
+    std::fs::read_dir(dir)
+        .expect("read dir")
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect()
+}
+
+/// The hazard W1-2 closes, in one test. An `Exact(PortableKernel)` caller
+/// opening a full Tachi store must refuse ahead of the migration backup and
+/// the connection PRAGMAs, and no memcore DDL, stamp or role write may
+/// remain. For a cleanly closed store that also means byte-identical files,
+/// no role stamp, no `.migration-bak` and no new sibling left after close (the
+/// unclean-shutdown variant below covers what is promised when a WAL is left
+/// behind).
+///
+/// The marker is deleted first, so this open is one the fingerprint heuristic
+/// WOULD back up. Only the admission preflight's position ahead of the backup
+/// keeps the backup from being written.
+#[test]
+fn exact_portable_refuses_full_store_and_leaves_a_clean_store_unchanged() {
+    let dir = temp_dir("exact-refuses-full");
+    let path = db_in(&dir, "memory.db");
+    drop(
+        MemoryStore::open_with_context(&path, &deny(StoreProfile::TachiFull))
+            .expect("fresh full create"),
+    );
+    std::fs::remove_file(format!("{path}.migration-marker")).expect("drop marker");
+
+    let (before_hash, before_version, before_rows) = {
+        let conn = raw(&path);
+        (
+            file_sha256(&path),
+            user_version(&conn),
+            hard_state_rows(&conn),
+        )
+    };
+    assert_eq!(
+        identity_stamp(&raw(&path), "profile").as_deref(),
+        Some("tachi_full")
+    );
+    assert_eq!(identity_stamp(&raw(&path), "role"), None);
+    let before_siblings = sibling_names(&dir);
+
+    let err = MemoryStore::open_with_label_and_context(
+        &path,
+        "global",
+        &exact(StoreProfile::PortableKernel),
+    )
+    .err()
+    .expect("an exact-portable caller must refuse a full store");
+    match &err {
+        MemoryError::StoreProfileNotExact {
+            required, stored, ..
+        } => {
+            assert_eq!(required, "portable_kernel");
+            assert_eq!(stored, "tachi_full");
+        }
+        other => panic!("expected StoreProfileNotExact, got {other:?}"),
+    }
+
+    let conn = raw(&path);
+    assert_eq!(
+        user_version(&conn),
+        before_version,
+        "PRAGMA user_version moved"
+    );
+    assert_eq!(hard_state_rows(&conn), before_rows, "hard_state rows moved");
+    assert_eq!(
+        identity_stamp(&conn, "role"),
+        None,
+        "role stamped on refusal"
+    );
+    drop(conn);
+    assert_eq!(file_sha256(&path), before_hash, "database bytes changed");
+    assert_eq!(
+        sibling_names(&dir),
+        before_siblings,
+        "sibling artifacts changed"
+    );
+    assert!(
+        !before_siblings.iter().any(|n| n.contains("migration-bak")),
+        "no backup may exist, before or after"
+    );
+}
+
+/// Unclean-shutdown variant. A full store whose last writer died with
+/// committed frames still in `-wal` is opened `Exact(PortableKernel)`. After it
+/// closes, no backup, marker, DDL, stamp or role row may remain, and the logical
+/// state must be exactly what the crashed writer committed. SQLite's own
+/// last-close checkpoint is allowed to fold the frames into the main file and
+/// remove `-wal`/`-shm`, so the main-file hash and the sidecar pair are NOT
+/// compared for equality here.
+#[test]
+fn exact_portable_refusal_after_unclean_shutdown_keeps_logical_state() {
+    let src = temp_dir("exact-unclean-src");
+    let dst = temp_dir("exact-unclean-dst");
+    let src_path = db_in(&src, "memory.db");
+    let dst_path = db_in(&dst, "memory.db");
+    drop(
+        MemoryStore::open_with_context(&src_path, &deny(StoreProfile::TachiFull))
+            .expect("fresh full create"),
+    );
+
+    // An extra open connection means no close below is the LAST close, so
+    // the committed frames stay in `-wal`, as a crashed writer leaves them.
+    let keeper = raw(&src_path);
+    keeper
+        .query_row("SELECT count(*) FROM sqlite_schema", [], |r| {
+            r.get::<_, i64>(0)
+        })
+        .expect("keeper read");
+    let mut writer = MemoryStore::open_with_context(&src_path, &deny(StoreProfile::TachiFull))
+        .expect("writer open");
+    writer
+        .upsert(&entry("wal-only", "/scratch/wal-only"))
+        .expect("commit a row into the WAL");
+    drop(writer);
+    let before_rows = hard_state_rows(&keeper);
+    let before_version = user_version(&keeper);
+    let before_schema = schema_snapshot(&keeper);
+
+    std::fs::copy(&src_path, &dst_path).expect("copy main file");
+    std::fs::copy(format!("{src_path}-wal"), format!("{dst_path}-wal")).expect("copy wal");
+    drop(keeper);
+    assert!(
+        std::fs::metadata(format!("{dst_path}-wal"))
+            .expect("wal metadata")
+            .len()
+            > 0,
+        "fixture: the crash image must carry WAL frames"
+    );
+    let before_siblings = sibling_names(&dst);
+
+    let err = MemoryStore::open_with_label_and_context(
+        &dst_path,
+        "global",
+        &exact(StoreProfile::PortableKernel),
+    )
+    .err()
+    .expect("an exact-portable caller must refuse a full store");
+    assert!(
+        matches!(err, MemoryError::StoreProfileNotExact { .. }),
+        "expected StoreProfileNotExact, got {err:?}"
+    );
+
+    let after_siblings = sibling_names(&dst);
+    let added: Vec<_> = after_siblings.difference(&before_siblings).collect();
+    let removed: Vec<_> = before_siblings.difference(&after_siblings).collect();
+    assert!(
+        added.is_empty(),
+        "no new file may remain after the refusal (no backup, no marker): {added:?}"
+    );
+    assert!(
+        removed
+            .iter()
+            .all(|name| name.ends_with("-wal") || name.ends_with("-shm")),
+        "only SQLite's own sidecars may disappear: {removed:?}"
+    );
+
+    let conn = raw(&dst_path);
+    assert_eq!(user_version(&conn), before_version);
+    assert_eq!(hard_state_rows(&conn), before_rows);
+    assert_eq!(schema_snapshot(&conn), before_schema);
+    assert_eq!(
+        identity_stamp(&conn, "role"),
+        None,
+        "role stamped on refusal"
+    );
+    let wal_row: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM memories WHERE id = 'wal-only'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("count wal-only row");
+    assert_eq!(wal_row, 1, "the WAL-committed row must survive the refusal");
+}
+
+/// Contrast for the table in the PR: the same full store under the
+/// historical `AtLeast(PortableKernel)` requirement is admitted, and the
+/// caller's role is stamped into it. That write-once stamp is the side effect
+/// Hypermem's unlabelled preflight open exists to avoid.
+#[test]
+fn at_least_portable_admits_full_store_and_stamps_the_role() {
+    let dir = temp_dir("at-least-admits-full");
+    let path = db_in(&dir, "memory.db");
+    drop(
+        MemoryStore::open_with_context(&path, &deny(StoreProfile::TachiFull))
+            .expect("fresh full create"),
+    );
+
+    let store = MemoryStore::open_with_label_and_context(
+        &path,
+        "global",
+        &deny(StoreProfile::PortableKernel),
+    )
+    .expect("AtLeast(PortableKernel) admits a TachiFull store");
+    assert_eq!(store.store_profile(), StoreProfile::TachiFull);
+    drop(store);
+    assert_eq!(
+        identity_stamp(&raw(&path), "role").as_deref(),
+        Some("global")
+    );
+}
+
+/// The success side: one labelled `Exact(PortableKernel)` open of a portable
+/// store is enough. It is admitted, reports the portable profile and stamps the
+/// declared role exactly once. A second open changes neither stamp.
+#[test]
+fn exact_portable_admits_portable_store_and_stamps_role_once() {
+    let dir = temp_dir("exact-admits-portable");
+    let path = db_in(&dir, "memory.db");
+    drop(
+        MemoryStore::open_with_context(
+            &path,
+            &DbOpenContext::create_fresh().with_exact_profile(StoreProfile::PortableKernel),
+        )
+        .expect("fresh exact-portable create"),
+    );
+    assert_eq!(identity_stamp(&raw(&path), "role"), None);
+    assert!(
+        !table_exists(&raw(&path), "audit_log"),
+        "an exact-portable fresh build must be portable-shaped"
+    );
+
+    let store = MemoryStore::open_with_label_and_context(
+        &path,
+        "global",
+        &exact(StoreProfile::PortableKernel),
+    )
+    .expect("exact-portable caller admits a portable store");
+    assert_eq!(store.store_profile(), StoreProfile::PortableKernel);
+    assert_eq!(store.db_label(), "global");
+    drop(store);
+
+    let identity_rows = |conn: &Connection| -> Vec<(String, String, String)> {
+        hard_state_rows(conn)
+            .into_iter()
+            .filter(|(namespace, _, _)| namespace == "store_identity")
+            .collect()
+    };
+    let stamped = identity_rows(&raw(&path));
+    assert_eq!(
+        stamped
+            .iter()
+            .map(|(_, key, _)| key.as_str())
+            .collect::<Vec<_>>(),
+        vec!["profile", "role"],
+        "exactly one profile stamp and one role stamp"
+    );
+    assert_eq!(
+        identity_stamp(&raw(&path), "role").as_deref(),
+        Some("global")
+    );
+    assert_eq!(
+        user_version(&raw(&path)),
+        crate::db::migrations::EXPECTED_SCHEMA_VERSION
+    );
+
+    drop(
+        MemoryStore::open_with_label_and_context(
+            &path,
+            "global",
+            &exact(StoreProfile::PortableKernel),
+        )
+        .expect("reopen"),
+    );
+    assert_eq!(
+        identity_rows(&raw(&path)),
+        stamped,
+        "a second open must not re-stamp (write-once, provenance unchanged)"
     );
 }

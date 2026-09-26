@@ -49,7 +49,8 @@ use crate::path_router::UNKNOWN_DB_LABEL;
 
 use super::common::now_utc_iso;
 use super::store_profile::{
-    parse_stored_profile, StoreProfile, STORE_IDENTITY_NAMESPACE, STORE_PROFILE_KEY, STORE_ROLE_KEY,
+    parse_stored_profile, ProfileRequirement, StoreProfile, STORE_IDENTITY_NAMESPACE,
+    STORE_PROFILE_KEY, STORE_ROLE_KEY,
 };
 
 /// Kernel-reserved write-once partition stamp for destination-side outbox
@@ -128,13 +129,17 @@ pub(crate) fn write_stamp_if_absent(
 /// Resolve the **effective** schema profile for a store being opened, and say
 /// whether it still needs stamping (#1585 D2's admission table).
 ///
-/// | stored  | fresh file | required      | outcome                                   |
-/// |---------|-----------|---------------|-------------------------------------------|
-/// | present | —         | satisfied     | effective = stored (never `required`)      |
-/// | present | —         | not satisfied | `StoreProfileMismatch`                     |
-/// | absent  | yes       | either        | effective = required; stamp it             |
-/// | absent  | no        | `TachiFull`   | adopt `TachiFull` + stamp (the live DBs)   |
-/// | absent  | no        | `PortableKernel` | `StoreProfileUnstamped`                 |
+/// | stored  | fresh file | required                  | outcome                                 |
+/// |---------|-----------|---------------------------|-----------------------------------------|
+/// | present | —         | admitted                  | effective = stored (never `required`)    |
+/// | present | —         | `AtLeast`, not satisfied  | `StoreProfileMismatch`                   |
+/// | present | —         | `Exact`, not equal        | `StoreProfileNotExact`                   |
+/// | absent  | yes       | any                       | effective = required profile; stamp it   |
+/// | absent  | no        | `TachiFull` (either kind) | adopt `TachiFull` + stamp (the live DBs) |
+/// | absent  | no        | `PortableKernel` (either) | `StoreProfileUnstamped`                  |
+///
+/// "Admitted" is [`ProfileRequirement::admits`]: the satisfies lattice for
+/// `AtLeast`, equality for `Exact` (W1-2).
 ///
 /// `fresh` is the caller's already-computed "this file carries no schema
 /// version stamp" fact (`PRAGMA user_version == 0`), which is this codebase's
@@ -149,23 +154,31 @@ pub(crate) fn write_stamp_if_absent(
 pub(crate) fn resolve_profile(
     stored: Option<StoreProfile>,
     fresh: bool,
-    required: StoreProfile,
+    required: impl Into<ProfileRequirement>,
     db_path: &Path,
 ) -> Result<StoreProfile, MemoryError> {
+    let required = required.into();
     match stored {
+        Some(stored) if required.admits(stored) => Ok(stored),
         Some(stored) => {
-            if stored.satisfies(required) {
-                Ok(stored)
-            } else {
-                Err(MemoryError::StoreProfileMismatch {
-                    required: required.as_str().to_string(),
-                    stored: stored.as_str().to_string(),
-                    db_path: db_path.display().to_string(),
-                })
-            }
+            let required_token = required.profile().as_str().to_string();
+            let stored = stored.as_str().to_string();
+            let db_path = db_path.display().to_string();
+            Err(match required {
+                ProfileRequirement::AtLeast(_) => MemoryError::StoreProfileMismatch {
+                    required: required_token,
+                    stored,
+                    db_path,
+                },
+                ProfileRequirement::Exact(_) => MemoryError::StoreProfileNotExact {
+                    required: required_token,
+                    stored,
+                    db_path,
+                },
+            })
         }
-        None if fresh => Ok(required),
-        None if required.includes_product() => Ok(StoreProfile::TachiFull),
+        None if fresh => Ok(required.profile()),
+        None if required.profile().includes_product() => Ok(StoreProfile::TachiFull),
         None => Err(MemoryError::StoreProfileUnstamped {
             db_path: db_path.display().to_string(),
         }),
@@ -347,6 +360,39 @@ mod tests {
         );
         let err = resolve_profile(None, false, StoreProfile::PortableKernel, p())
             .expect_err("portable must not adopt an unstamped store");
+        assert!(
+            matches!(err, MemoryError::StoreProfileUnstamped { .. }),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn exact_requirement_resolution_table() {
+        use ProfileRequirement::Exact;
+        use StoreProfile::{PortableKernel as P, TachiFull as F};
+        // Admitted: stored equals required, effective = stored.
+        assert_eq!(resolve_profile(Some(P), false, Exact(P), p()).unwrap(), P);
+        assert_eq!(resolve_profile(Some(F), false, Exact(F), p()).unwrap(), F);
+        // The superset the lattice would admit is refused, typed.
+        let err = resolve_profile(Some(F), false, Exact(P), p())
+            .expect_err("exact portable must refuse a full store");
+        assert!(
+            matches!(err, MemoryError::StoreProfileNotExact { .. }),
+            "{err}"
+        );
+        let err = resolve_profile(Some(P), false, Exact(F), p())
+            .expect_err("exact full must refuse a portable store");
+        assert!(
+            matches!(err, MemoryError::StoreProfileNotExact { .. }),
+            "{err}"
+        );
+        // Fresh builds take the required profile; unstamped existing stores
+        // follow the same adopt/refuse rows as `AtLeast`.
+        assert_eq!(resolve_profile(None, true, Exact(P), p()).unwrap(), P);
+        assert_eq!(resolve_profile(None, true, Exact(F), p()).unwrap(), F);
+        assert_eq!(resolve_profile(None, false, Exact(F), p()).unwrap(), F);
+        let err = resolve_profile(None, false, Exact(P), p())
+            .expect_err("exact portable must not adopt an unstamped store");
         assert!(
             matches!(err, MemoryError::StoreProfileUnstamped { .. }),
             "{err}"

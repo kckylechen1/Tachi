@@ -192,7 +192,7 @@ mod tests {
             let path = directory.path().join("profile.sqlite");
             let mut conn = Connection::open(&path).unwrap();
             let mut create = DbOpenContext::create_fresh();
-            create.required_profile = profile;
+            create.required_profile = profile.into();
             init_schema_with_label_mut(&mut conn, "global", &path, &create).unwrap();
             assert_eq!(
                 read_schema_version(&conn).unwrap(),
@@ -227,12 +227,12 @@ mod tests {
             drop(conn);
             let mut conn = Connection::open(&path).unwrap();
             let mut deny = DbOpenContext::open_existing_deny();
-            deny.required_profile = profile;
+            deny.required_profile = profile.into();
             init_schema_with_label_mut(&mut conn, "global", &path, &deny)
                 .expect_err("an older store requires explicit migration authority");
             assert_eq!(read_schema_version(&conn).unwrap(), previous);
             let mut allow = DbOpenContext::open_existing_allow("test:v38-profile-upgrade");
-            allow.required_profile = profile;
+            allow.required_profile = profile.into();
             init_schema_with_label_mut(&mut conn, "global", &path, &allow).unwrap();
             assert_eq!(
                 read_schema_version(&conn).unwrap(),

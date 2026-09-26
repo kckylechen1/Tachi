@@ -268,7 +268,7 @@ pub use db::{
     InsertMemoryResult, PathPrefixMemoryRow,
 };
 pub use db::{CategorySourceGroup, DailyHealthDbSnapshot, DuplicateSummaryRow, EvalEvidenceRow};
-pub use db::{DbOpenContext, MigrationAuthority, OpenIntent, StoreProfile};
+pub use db::{DbOpenContext, MigrationAuthority, OpenIntent, ProfileRequirement, StoreProfile};
 pub use db::{
     DeleteMaintenanceOutcome, GcMaintenanceOutcome, MaintenanceClassFact,
     OperatorMaintenanceCommittedReceiptBinding, OperatorMaintenanceOperation,

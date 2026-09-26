@@ -1,5 +1,7 @@
 use memcore::MemoryStore;
-use memcore::{DbOpenContext, KernelPolicy, MigrationAuthority, OpenIntent, StoreProfile};
+use memcore::{
+    DbOpenContext, KernelPolicy, MigrationAuthority, OpenIntent, ProfileRequirement, StoreProfile,
+};
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 #[cfg(feature = "test-support")]
@@ -2097,7 +2099,7 @@ impl ProjectDbState {
             // exec_envs / session_claims / dispatch ledgers — so it demands
             // the full profile. A portable store is refused loudly here
             // rather than producing `no such table` at the first product call.
-            required_profile: StoreProfile::TachiFull,
+            required_profile: ProfileRequirement::AtLeast(StoreProfile::TachiFull),
         };
         let store = MemoryStore::open_with_label_and_context(db_str, conferral.identity(), &ctx)
             .map_err(|e| format!("open project db: {e}"))?

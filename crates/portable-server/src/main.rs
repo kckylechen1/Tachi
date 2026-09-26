@@ -27,7 +27,9 @@ mod malformed_json_middleware;
 mod service;
 
 use config::{Config, IN_MEMORY};
-use portable_kernel::{DbOpenContext, MemoryStore, MigrationAuthority, OpenIntent, StoreProfile};
+use portable_kernel::{
+    DbOpenContext, MemoryStore, MigrationAuthority, OpenIntent, ProfileRequirement, StoreProfile,
+};
 use service::PortableServer;
 
 fn build_server(config: Config) -> Result<PortableServer, String> {
@@ -61,7 +63,7 @@ fn build_server(config: Config) -> Result<PortableServer, String> {
                 // mean a portable binary silently claiming authority over a
                 // full Tachi store. See `StoreProfileUnstamped`'s remediation
                 // text for the operator route.
-                required_profile: StoreProfile::PortableKernel,
+                required_profile: ProfileRequirement::AtLeast(StoreProfile::PortableKernel),
             };
             MemoryStore::open_with_context(path, &ctx)
                 .map_err(|e| format!("open store at {path}: {e}"))
