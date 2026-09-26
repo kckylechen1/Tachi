@@ -419,16 +419,62 @@ mod tests {
         bytes
     }
 
-    /// A stub `lsof` that checks it was asked `-- <canonical db>` and then
-    /// replays exact stdout/stderr bytes and an exit status.
+    /// The one stub `lsof` body (tachi#1988). It finds its case directory
+    /// through `$0` (the per-case symlink), records its argv NUL-separated
+    /// for an exact byte compare, replays the case's stdout/stderr bytes,
+    /// marks the replay complete, and exits with the case's code.
+    const STUB_LSOF_BODY: &str = "#!/bin/sh\n\
+        d=\"${0%/*}\"\n\
+        printf '%s\\0' \"$@\" > \"$d/argv\" || exit 94\n\
+        cat \"$d/stdout\" || exit 94\n\
+        cat \"$d/stderr\" >&2 || exit 94\n\
+        read -r code < \"$d/code\" || exit 94\n\
+        : > \"$d/replayed\" || exit 94\n\
+        exit \"$code\"\n";
+
+    /// Writes the stub body as an owner-only executable. A child shell does the
+    /// writing, so this process never holds a write descriptor on the file: in a
+    /// multithreaded test binary (libtest runs tests on threads), another thread
+    /// can fork while such a descriptor is open, and exec'ing the stub then fails
+    /// with ETXTBSY until that child execs.
+    fn write_stub_body(body: &Path) {
+        let status = std::process::Command::new("/bin/sh")
+            .args([
+                "-c",
+                "umask 077 && printf '%s' \"$2\" > \"$1\" && chmod 700 \"$1\"",
+                "sh",
+            ])
+            .arg(body)
+            .arg(STUB_LSOF_BODY)
+            .status()
+            .unwrap();
+        assert!(status.success(), "writing the stub body: {status}");
+    }
+
+    /// A stub `lsof` that is asked `-- <canonical db>` and then replays exact
+    /// stdout/stderr bytes and an exit status.
+    ///
+    /// tachi#1988: macOS scans every newly written executable on its first
+    /// exec (about 0.4 s, far more when the scan queue is busy), so the body
+    /// is written once per stub and each case execs it through its own
+    /// symlink next to that case's data files.
     struct StubLsof {
-        dir: tempfile::TempDir,
+        _dir: tempfile::TempDir,
+        /// Canonical, so every link target is absolute.
+        root: std::path::PathBuf,
+        body: std::path::PathBuf,
     }
 
     impl StubLsof {
         fn new() -> Self {
+            let dir = tempfile::tempdir().expect("stub dir");
+            let root = dir.path().canonicalize().unwrap();
+            let body = root.join("lsof-body");
+            write_stub_body(&body);
             Self {
-                dir: tempfile::tempdir().expect("stub dir"),
+                _dir: dir,
+                root,
+                body,
             }
         }
 
@@ -440,28 +486,39 @@ mod tests {
             stderr: &[u8],
             code: i32,
         ) -> DbOwnership {
-            use std::os::unix::fs::PermissionsExt;
-            let case = self.dir.path().join(name);
+            let case = self.root.join(name);
             std::fs::create_dir(&case).unwrap();
             std::fs::write(case.join("stdout"), stdout).unwrap();
             std::fs::write(case.join("stderr"), stderr).unwrap();
-            let script = case.join("lsof");
-            let expected = db.canonicalize().unwrap();
-            std::fs::write(
-                &script,
-                format!(
-                    "#!/bin/sh\n[ \"$1\" = '--' ] && [ \"$2\" = '{}' ] || {{ echo 'STUB ARGV MISMATCH' >&2; exit 93; }}\ncat '{}/stdout'\ncat '{}/stderr' >&2\nexit {code}\n",
-                    expected.display(),
-                    case.display(),
-                    case.display()
-                ),
-            )
-            .unwrap();
-            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
-            let result = probe_db_ownership_with(script.as_os_str(), db);
-            if let DbOwnership::Unknown(reason) = &result {
-                assert!(!reason.contains("STUB ARGV MISMATCH"), "{name}: {reason}");
-            }
+            std::fs::write(case.join("code"), format!("{code}\n")).unwrap();
+            let lsof = case.join("lsof");
+            std::os::unix::fs::symlink(&self.body, &lsof).unwrap();
+            assert_eq!(
+                lsof.canonicalize()
+                    .unwrap_or_else(|e| panic!("{name}: stub link {lsof:?} dangles: {e}")),
+                self.body,
+                "{name}: stub link must resolve to the stub body"
+            );
+            assert_eq!(
+                std::fs::read(&lsof).unwrap(),
+                STUB_LSOF_BODY.as_bytes(),
+                "{name}: stub link must read as the stub body"
+            );
+            let result = probe_db_ownership_with(lsof.as_os_str(), db);
+            assert!(
+                case.join("replayed").is_file(),
+                "{name}: the stub did not replay its case ({result:?})"
+            );
+            let mut expected = b"--\0".to_vec();
+            expected.extend_from_slice(db.canonicalize().unwrap().as_os_str().as_encoded_bytes());
+            expected.push(0);
+            let argv = std::fs::read(case.join("argv")).unwrap();
+            assert!(
+                argv == expected,
+                "{name}: stub argv {:?} != expected {:?}",
+                String::from_utf8_lossy(&argv),
+                String::from_utf8_lossy(&expected)
+            );
             result
         }
     }

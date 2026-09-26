@@ -571,6 +571,15 @@ impl MemoryStore {
 
     /// Backfill FTS index for entries missing from memories_fts.
     /// Returns the number of rows inserted.
+    ///
+    /// NULL ids (`memories.id` is `TEXT PRIMARY KEY` without NOT NULL; FTS5
+    /// columns are untyped), same guards as the open-time backfill (#1985):
+    /// - `WHERE id IS NOT NULL` in the subquery: one NULL-id projection row
+    ///   would make `id NOT IN (..., NULL)` NULL for every memory and
+    ///   silently suppress the whole repair.
+    /// - `id IS NOT NULL` on `memories`: a NULL-id memory can never be matched
+    ///   back to an FTS hit, and projecting it would create exactly such a
+    ///   poisoning row (`NULL NOT IN (<empty>)` is TRUE).
     pub fn backfill_fts_missing(&mut self) -> Result<usize, MemoryError> {
         let tx = self.conn.transaction()?;
         let inserted = tx.execute(
@@ -580,14 +589,16 @@ impl MemoryStore {
                  trim(replace(replace(replace(keywords, '[', ' '), ']', ' '), '"', ' ')),
                  trim(replace(replace(replace(entities, '[', ' '), ']', ' '), '"', ' '))
                FROM memories
-               WHERE id NOT IN (SELECT id FROM memories_fts)"#,
+               WHERE id IS NOT NULL
+                 AND id NOT IN (SELECT id FROM memories_fts WHERE id IS NOT NULL)"#,
             [],
         )?;
         let symbolic_inserted = tx.execute(
             r#"INSERT INTO memories_symbolic_fts (id, path, summary, text, keywords, entities, topic)
                SELECT id, path, summary, text, keywords, entities, topic
                FROM memories
-               WHERE id NOT IN (SELECT id FROM memories_symbolic_fts)"#,
+               WHERE id IS NOT NULL
+                 AND id NOT IN (SELECT id FROM memories_symbolic_fts WHERE id IS NOT NULL)"#,
             [],
         )?;
         if inserted + symbolic_inserted > 0 {
@@ -945,5 +956,179 @@ mod tests {
                 .and_then(|value| value.as_str()),
             Some("fresh observation error")
         );
+    }
+
+    fn count(store: &MemoryStore, sql: &str) -> i64 {
+        store
+            .connection()
+            .query_row(sql, [], |row| row.get(0))
+            .unwrap_or_else(|error| panic!("{sql}: {error}"))
+    }
+
+    /// Seeds two memories (`upsert` projects both into both FTS tables), then
+    /// in `table` only drops `fts-null-guard-b`'s row and adds one NULL-id
+    /// row. FTS5 columns are untyped, so such a row is representable.
+    fn seed_null_id_fts_row_and_missing_row(table: &str) -> MemoryStore {
+        let mut store = MemoryStore::open_in_memory().expect("open test store");
+        for id in ["fts-null-guard-a", "fts-null-guard-b"] {
+            store.upsert(&test_entry(id)).expect("seed entry");
+        }
+        let conn = store.connection();
+        conn.execute(
+            &format!("DELETE FROM {table} WHERE id = 'fts-null-guard-b'"),
+            [],
+        )
+        .expect("drop one real projection row");
+        let insert_null = if table == "memories_symbolic_fts" {
+            "INSERT INTO memories_symbolic_fts (id, path, summary, text, keywords, entities, topic)
+             VALUES (NULL, '/null', 'null', 'null', '', '', '')"
+        } else {
+            "INSERT INTO memories_fts (id, path, summary, text, keywords, entities)
+             VALUES (NULL, '/null', 'null', 'null', '', '')"
+        };
+        conn.execute(insert_null, [])
+            .expect("insert NULL-id FTS row");
+        assert_eq!(
+            count(
+                &store,
+                &format!("SELECT COUNT(*) FROM {table} WHERE id IS NULL")
+            ),
+            1,
+            "{table}: fixture must hold exactly one NULL-id row"
+        );
+        store
+    }
+
+    fn assert_repaired_exactly_once(store: &MemoryStore, table: &str) {
+        assert_eq!(
+            count(
+                store,
+                &format!("SELECT COUNT(*) FROM {table} WHERE id = 'fts-null-guard-b'")
+            ),
+            1,
+            "{table}: the missing real row must be reinserted despite the NULL-id row"
+        );
+        assert_eq!(
+            count(
+                store,
+                &format!("SELECT COUNT(*) FROM {table} WHERE id IS NOT NULL")
+            ),
+            2,
+            "{table}: real rows repaired exactly once, no duplicates"
+        );
+        assert_eq!(
+            count(
+                store,
+                &format!("SELECT COUNT(*) FROM {table} WHERE id IS NULL")
+            ),
+            1,
+            "{table}: backfill is insert-missing only; it neither adds nor prunes NULL-id rows"
+        );
+    }
+
+    /// Under SQL three-valued logic `x NOT IN (..., NULL)` is NULL for every
+    /// `x`, so one NULL-id `memories_fts` row used to suppress every repair.
+    #[test]
+    fn backfill_fts_missing_repairs_memories_fts_despite_null_id_row() {
+        let mut store = seed_null_id_fts_row_and_missing_row("memories_fts");
+
+        let inserted = store.backfill_fts_missing().expect("backfill");
+
+        assert_eq!(inserted, 1, "memories_fts: one missing row reinserted");
+        assert_repaired_exactly_once(&store, "memories_fts");
+        assert_eq!(
+            store.backfill_fts_missing().expect("second backfill"),
+            0,
+            "a second pass finds nothing missing"
+        );
+        assert_repaired_exactly_once(&store, "memories_fts");
+    }
+
+    /// Same NULL poisoning for the symbolic trigram projection. The return
+    /// value counts only `memories_fts`, so assert on table state.
+    #[test]
+    fn backfill_fts_missing_repairs_symbolic_fts_despite_null_id_row() {
+        let mut store = seed_null_id_fts_row_and_missing_row("memories_symbolic_fts");
+
+        store.backfill_fts_missing().expect("backfill");
+
+        assert_repaired_exactly_once(&store, "memories_symbolic_fts");
+        store.backfill_fts_missing().expect("second backfill");
+        assert_repaired_exactly_once(&store, "memories_symbolic_fts");
+    }
+
+    /// A NULL `memories.id` can never be matched back to an FTS hit by id, so
+    /// backfill must not project it. Projecting it would create exactly the
+    /// NULL-id FTS row that poisons later `NOT IN` repairs. With an empty
+    /// projection `NULL NOT IN (<empty>)` is TRUE, so only an explicit
+    /// `id IS NOT NULL` guard on `memories` keeps it out.
+    #[test]
+    fn backfill_fts_missing_never_projects_null_memory_ids() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("null-memory-id.db");
+        let path = path.to_str().expect("utf8 db path");
+        {
+            let mut store = MemoryStore::open(path).expect("create store");
+            store
+                .upsert(&test_entry("fts-null-guard-real"))
+                .expect("seed entry");
+        }
+        {
+            // The store connection's authorizer denies raw `memories` writes,
+            // so a legacy NULL-id row is seeded through a plain connection.
+            let _ = libsimple::enable_auto_extension();
+            crate::db::register_sqlite_vec();
+            let raw = rusqlite::Connection::open(path).expect("open raw connection");
+            // Guard triggers call this per-connection function; report
+            // "not enabled" so they keep enforcing on this plain row.
+            raw.create_scalar_function(
+                "tachi_reserved_reference_write_enabled",
+                0,
+                rusqlite::functions::FunctionFlags::SQLITE_UTF8,
+                |_| Ok(0_i64),
+            )
+            .expect("register guard function");
+            raw.execute(
+                "INSERT INTO memories (id, path, summary, text, timestamp, valid_from)
+                 VALUES (NULL, '/null', 'null id', 'null id text',
+                         '2026-07-26T00:00:00Z', '2026-07-26T00:00:00Z')",
+                [],
+            )
+            .expect("insert NULL-id memory");
+        }
+        let mut store = MemoryStore::open(path).expect("reopen store");
+        assert_eq!(
+            count(&store, "SELECT COUNT(*) FROM memories WHERE id IS NULL"),
+            1,
+            "fixture must hold exactly one NULL-id memory"
+        );
+        // Start from empty projections; raw FTS deletes are permitted.
+        let conn = store.connection();
+        conn.execute("DELETE FROM memories_fts", [])
+            .expect("empty memories_fts");
+        conn.execute("DELETE FROM memories_symbolic_fts", [])
+            .expect("empty memories_symbolic_fts");
+
+        let inserted = store.backfill_fts_missing().expect("backfill");
+
+        assert_eq!(inserted, 1, "only the real memory is projected");
+        for table in ["memories_fts", "memories_symbolic_fts"] {
+            assert_eq!(
+                count(
+                    &store,
+                    &format!("SELECT COUNT(*) FROM {table} WHERE id IS NULL")
+                ),
+                0,
+                "{table}: a NULL memory id must not be projected"
+            );
+            assert_eq!(
+                count(
+                    &store,
+                    &format!("SELECT COUNT(*) FROM {table} WHERE id = 'fts-null-guard-real'")
+                ),
+                1,
+                "{table}: the real memory is projected"
+            );
+        }
     }
 }

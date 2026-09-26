@@ -118,18 +118,19 @@ pub(super) fn init_private_worktree(root: &Path, repo: &Path, wt: &Path, branch:
 #[cfg(unix)]
 #[tokio::test]
 async fn safe_merge_actual_cleaner_preserves_extra_commits() {
-    run_private_case("extra").await;
+    run_private_case(&LsofStubs::new(), "extra").await;
 }
 
 #[cfg(unix)]
 #[tokio::test]
 async fn safe_merge_actual_cleaner_preserves_empty_commit() {
-    run_private_case("empty").await;
+    run_private_case(&LsofStubs::new(), "empty").await;
 }
 
 #[cfg(unix)]
 #[tokio::test]
 async fn safe_merge_actual_cleaner_head_controls() {
+    let stubs = LsofStubs::new();
     for case in [
         "detached",
         "branch",
@@ -142,13 +143,13 @@ async fn safe_merge_actual_cleaner_head_controls() {
         "holder",
         "ownership",
     ] {
-        run_private_case(case).await;
+        run_private_case(&stubs, case).await;
     }
 }
 
 #[cfg(unix)]
 #[allow(clippy::await_holding_lock)]
-async fn run_private_case(case: &str) {
+async fn run_private_case(stubs: &LsofStubs, case: &str) {
     let _lock = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
@@ -156,7 +157,7 @@ async fn run_private_case(case: &str) {
     // No subprocess ever receives an external remote URL.
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().canonicalize().unwrap();
-    let mut env = private_reclamation_environment(&root);
+    let mut env = private_reclamation_environment(&root, &stubs.fixture_only);
     let repo = root.join("repo");
     let wt = root.join("worktrees/fixture");
     let branch = "fixture/accepted";
@@ -358,8 +359,62 @@ async fn run_private_case(case: &str) {
     drop(env);
 }
 
+/// tachi#1988: macOS runs a Gatekeeper/XProtect scan (syspolicyd ->
+/// XprotectService, serialized machine-wide) on the first exec of every newly
+/// written executable file, ~0.15-0.4 s idle and several seconds under load.
+/// The verdict is cached per file, so re-exec (also through a symlink) costs
+/// ~10 ms. The two `lsof` stub bodies are therefore written once per test and
+/// every case's private `bin/lsof` links to one of them.
 #[cfg(unix)]
-fn private_reclamation_environment(root: &Path) -> PrivateGitEnvironment {
+struct LsofStubs {
+    _dir: tempfile::TempDir,
+    /// Clear (exit 1) for `+D $TACHI_WORKTREES_ROOT/fixture` only.
+    fixture_only: std::path::PathBuf,
+    /// Clear for the `fixture` and `clone` worktrees only.
+    fixture_or_clone: std::path::PathBuf,
+}
+
+#[cfg(unix)]
+impl LsofStubs {
+    fn new() -> Self {
+        use std::os::unix::fs::PermissionsExt;
+        // Fixtures repoint TMPDIR while holding this lock; taking it keeps
+        // the stub directory out of another fixture's private TMPDIR.
+        let _lock = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let write = |name: &str, body: &str| {
+            let path = dir.path().join(name);
+            std::fs::write(&path, body).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+            path
+        };
+        let fixture_only = write("lsof-fixture", "#!/bin/sh\n[ \"$1\" = '+D' ] && [ \"$2\" = \"$TACHI_WORKTREES_ROOT/fixture\" ] || exit 92\nexit 1\n");
+        let fixture_or_clone = write("lsof-fixture-or-clone", "#!/bin/sh\n[ \"$1\" = '+D' ] || exit 92\ncase \"$2\" in\n\"$TACHI_WORKTREES_ROOT/fixture\"|\"$TACHI_WORKTREES_ROOT/clone\") exit 1;;\n*) exit 92;;\nesac\n");
+        Self {
+            _dir: dir,
+            fixture_only,
+            fixture_or_clone,
+        }
+    }
+}
+
+/// Point `root/bin/lsof` at `stub`, replacing (never writing through) any
+/// previous link so the shared stub keeps its body.
+#[cfg(unix)]
+fn link_lsof(root: &Path, stub: &Path) {
+    let link = root.join("bin/lsof");
+    match std::fs::remove_file(&link) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => panic!("replace lsof stub {}: {error}", link.display()),
+    }
+    std::os::unix::fs::symlink(stub, link).unwrap();
+}
+
+#[cfg(unix)]
+fn private_reclamation_environment(root: &Path, lsof: &Path) -> PrivateGitEnvironment {
     let mut env = private_git_environment(root);
     for (key, suffix) in [
         ("HOME", "home"),
@@ -381,10 +436,7 @@ fn private_reclamation_environment(root: &Path) -> PrivateGitEnvironment {
     env.push(EnvRestore::remove("TACHI_CLEAN_BIN"));
     let bin = root.join("bin");
     std::fs::create_dir(&bin).unwrap();
-    let lsof = bin.join("lsof");
-    std::fs::write(&lsof, "#!/bin/sh\n[ \"$1\" = '+D' ] && [ \"$2\" = \"$TACHI_WORKTREES_ROOT/fixture\" ] || exit 92\nexit 1\n").unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&lsof, std::fs::Permissions::from_mode(0o700)).unwrap();
+    link_lsof(root, lsof);
     env.push(EnvRestore::set(
         "PATH",
         &format!("{}:/usr/bin:/bin", bin.display()),
@@ -395,12 +447,13 @@ fn private_reclamation_environment(root: &Path) -> PrivateGitEnvironment {
 #[cfg(unix)]
 #[tokio::test]
 async fn safe_merge_actual_cleaner_refuses_ambiguous_clones() {
-    run_mapping_case("ambiguous").await;
+    run_mapping_case(&LsofStubs::new(), "ambiguous").await;
 }
 
 #[cfg(unix)]
 #[tokio::test]
 async fn safe_merge_actual_cleaner_mapping_controls() {
+    let stubs = LsofStubs::new();
     for case in [
         "explicit",
         "single",
@@ -412,19 +465,19 @@ async fn safe_merge_actual_cleaner_mapping_controls() {
         "stale",
         "duplicate",
     ] {
-        run_mapping_case(case).await;
+        run_mapping_case(&stubs, case).await;
     }
 }
 
 #[cfg(unix)]
 #[allow(clippy::await_holding_lock)]
-async fn run_mapping_case(case: &str) {
+async fn run_mapping_case(stubs: &LsofStubs, case: &str) {
     let _lock = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().canonicalize().unwrap();
-    let env = private_reclamation_environment(&root);
+    let env = private_reclamation_environment(&root, &stubs.fixture_only);
     let repo_a = root.join("repo-a");
     let repo_b = root.join("repo-b");
     let wt_a = root.join("worktrees/fixture");
@@ -496,7 +549,7 @@ async fn run_mapping_case(case: &str) {
     }
     // Clear evidence is restricted to these two private paths. No actual
     // machine process census or process signalling occurs in this fixture.
-    std::fs::write(root.join("bin/lsof"), "#!/bin/sh\n[ \"$1\" = '+D' ] || exit 92\ncase \"$2\" in\n\"$TACHI_WORKTREES_ROOT/fixture\"|\"$TACHI_WORKTREES_ROOT/clone\") exit 1;;\n*) exit 92;;\nesac\n").unwrap();
+    link_lsof(&root, &stubs.fixture_or_clone);
     let db = root.join("home/.tachi/global/memory.db");
     std::fs::create_dir_all(db.parent().unwrap()).unwrap();
     drop(memcore::MemoryStore::open(db.to_str().unwrap()).unwrap());
