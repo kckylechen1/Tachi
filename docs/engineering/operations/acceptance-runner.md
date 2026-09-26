@@ -2,7 +2,9 @@
 
 Covers issue #1865 (owner-ratified C1): one trusted acceptance runner serving
 exactly the four in-scope lanes of `ci.yml` — `build-seat-setup`, `rust`,
-`node`, `gitleaks`. Census and sizing rationale: #1852.
+`node`, `gitleaks` — plus the `acceptance` aggregate job, which runs on the
+same runner under the same guard (five self-hosted job definitions in
+total). Census and sizing rationale: #1852.
 
 ## What this lane is (and is not)
 
@@ -45,9 +47,25 @@ exactly the four in-scope lanes of `ci.yml` — `build-seat-setup`, `rust`,
   release/provider secrets. Those workflows keep their hosted `runs-on` labels
   and are not served by this runner.
 
-## Trust boundary (fork PRs never get this runner)
+## Trust boundary
 
-Two structural layers, no racing:
+> **Current posture (owner risk acceptance, 2026-09-27, #2015).** The
+> repository is public. This runner stays online for **owner-authored
+> workloads only**, on the owner's own account, on the premise that an
+> admitted job runs the same code the owner already builds locally. What
+> actually keeps non-owner code off this host is not the job guard below
+> but three controls outside the workflow file: GitHub's fork-run approval
+> policy (`all_external_contributors`), owner-only write access, and the
+> operating rule **never approve a fork PR run, and add no collaborator while
+> this lane is online**. The two layers below are defence in depth: on
+> `pull_request` the workflow comes from the PR's merge ref, so a PR can
+> rewrite its own guard or add a job that names these labels. Deferred host
+> hardening (dedicated non-admin account, immutable hook chain, cargo-gate
+> cross-account protocol) is tracked in #2015; re-derive this section before
+> adding a collaborator, approving any fork run, or adding a
+> `pull_request_target`/`workflow_run`/self-hosted workflow.
+
+Two layers inside the workflow files (defence in depth, see above):
 
 1. **Label scoping** — only the four in-scope jobs name the runner labels; no
    other workflow in the repository uses `self-hosted`/`tachi-acceptance`.
@@ -90,13 +108,14 @@ cannot exist, and only the owner can push branches). That is the ticket's
 v1 trust model: same-repository owner-authored PRs are an admitted source
 by definition.
 
-**Before making this repository public, or adding any collaborator with
-write access, stop the runner first** (`cd ~/runner-tachi && ./svc.sh
-stop`) and re-derive the boundary — a modified `ci.yml` in a PR-controlled
-merge ref could otherwise drop the guard and claim the runner. In a public
-future, GitHub's outside-collaborator approval gate and a runner-group
-review policy are the minimum re-work; do not carry this lane over
-unchanged.
+The repository has since been made public. The owner re-derived this
+boundary on 2026-09-27 and accepted the risk for owner-authored workloads
+(see *Current posture* above and #2015). Runner groups with a
+selected-workflow restriction are unavailable for a user-owned repository,
+so the fork-run approval policy plus the never-approve rule is the
+remaining barrier on the merge-ref path. **Before adding any collaborator
+with write access, or before approving any fork run, stop the runner
+first** (`cd ~/runner-tachi && ./svc.sh stop`) and re-derive the boundary.
 
 ## GITHUB_TOKEN surface
 
