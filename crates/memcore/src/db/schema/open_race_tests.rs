@@ -344,3 +344,47 @@ fn migration_state_appearing_in_window_is_refused_without_backup_coverage() {
         "no migration, stamp or state write may remain"
     );
 }
+
+/// (f) #1119 authority. A `Deny` opener passes its preflight on an empty file
+/// (a build needs no authority); in the window another process leaves a store
+/// stamped one version older. On the in-transaction state that is an
+/// unauthorized migration, which must be refused with
+/// `SchemaMigrationOptInRequired` instead of migrated in place.
+#[test]
+fn unauthorized_migration_state_appearing_in_window_is_refused_under_deny() {
+    crate::db::enable_simple_auto_extension().unwrap();
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = tmp.path().join("race-deny-window.db");
+
+    let after_window = arm_window(|path| {
+        other_process_creates_current_store(path);
+        Connection::open(path)
+            .expect("older writer")
+            .execute_batch(&format!(
+                "PRAGMA user_version = {}",
+                crate::db::migrations::EXPECTED_SCHEMA_VERSION - 1
+            ))
+            .expect("stamp one version older");
+    });
+
+    let mut conn = Connection::open(&path).expect("opener connection");
+    let err = crate::db::init_schema_with_label_mut(
+        &mut conn,
+        "global",
+        &path,
+        &DbOpenContext::open_existing_deny(),
+    )
+    .expect_err("an unauthorized opener must not migrate a store that became older-stamped");
+    assert!(
+        matches!(err, MemoryError::SchemaMigrationOptInRequired { .. }),
+        "expected SchemaMigrationOptInRequired, got {err:?}"
+    );
+    drop(conn);
+
+    let expected = after_window.borrow().clone().expect("window ran");
+    let actual = snapshot(&Connection::open(&path).expect("inspect"));
+    assert_eq!(
+        actual, expected,
+        "no migration, stamp or state write may remain"
+    );
+}
