@@ -4,7 +4,9 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+mod bounded;
 mod bounded_json;
+pub(in crate::gh_ops) use bounded::{GhCall, GhRunError};
 pub(in crate::gh_ops) use bounded_json::run_gh_json_observed_bounded;
 
 const GH_AGENT_ID: &str = "tachi_gh_ops";
@@ -77,20 +79,64 @@ pub(in crate::gh_ops) fn validate_repo(repo: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Resolve absolute path of `gh` binary. Returns error if not found.
+/// Resolve the path of the `gh` binary by scanning `PATH` in-process.
+///
+/// This used to shell out to `which gh` on every call. The scan honors the
+/// same `PATH` (including test shims prepended to it) and the same "first
+/// executable regular file wins" rule, but spawns nothing, so a bounded call
+/// whose deadline fires during preparation cannot leave a process behind.
+/// It is recomputed per call: no cross-operation caching of the path.
 pub(in crate::gh_ops) fn resolve_gh_path() -> Result<String, String> {
-    let output = Command::new("which")
-        .arg("gh")
-        .output()
-        .map_err(|e| format!("Failed to locate `gh` CLI: {e}"))?;
-    if !output.status.success() {
+    let path = std::env::var_os("PATH").and_then(|paths| find_gh_in_path(&paths));
+    let Some(path) = path else {
         return Err("GitHub CLI (`gh`) not found. Install it: https://cli.github.com".into());
-    }
-    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    };
+    let path = path.to_string_lossy().to_string();
     if path.is_empty() {
         return Err("`gh` CLI path resolved to empty string".into());
     }
     Ok(path)
+}
+
+fn find_gh_in_path(paths: &std::ffi::OsStr) -> Option<PathBuf> {
+    const NAMES: &[&str] = if cfg!(windows) {
+        &["gh.exe", "gh"]
+    } else {
+        &["gh"]
+    };
+    for dir in std::env::split_paths(paths) {
+        // An empty PATH entry means the current directory, as for `which`.
+        let dir = if dir.as_os_str().is_empty() {
+            PathBuf::from(".")
+        } else {
+            dir
+        };
+        for name in NAMES {
+            let candidate = dir.join(name);
+            if is_executable_file(&candidate) {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+fn is_executable_file(path: &std::path::Path) -> bool {
+    let Ok(metadata) = fs::metadata(path) else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
 }
 
 /// Strip sensitive tokens from output text
@@ -182,28 +228,21 @@ fn gh_body_temp_path() -> Result<PathBuf, String> {
     )))
 }
 
-/// Write `body` to a temp file and append `--body-file <path>` to `cmd`.
-/// The returned guard keeps the file alive until dropped (after `run_gh`).
-pub(in crate::gh_ops) fn attach_gh_body_file(
-    cmd: &mut Command,
-    body: &str,
-) -> Result<GhBodyFileGuard, String> {
+/// Write `body` to a fresh temp file for `gh --body-file`. The returned
+/// guard removes the file when dropped (see [`GhCall::attach_body_file`]).
+fn write_gh_body_file(body: &str) -> Result<GhBodyFileGuard, String> {
     let path = gh_body_temp_path()?;
     let mut file = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(&path)
         .map_err(|err| format!("create gh body tempfile: {err}"))?;
+    let guard = GhBodyFileGuard(path);
     file.write_all(body.as_bytes())
         .map_err(|err| format!("write gh body tempfile: {err}"))?;
     file.flush()
         .map_err(|err| format!("flush gh body tempfile: {err}"))?;
-    drop(file);
-    let path_str = path
-        .to_str()
-        .ok_or_else(|| "gh body tempfile path is not valid UTF-8".to_string())?;
-    cmd.args(["--body-file", path_str]);
-    Ok(GhBodyFileGuard(path))
+    Ok(guard)
 }
 
 /// Build a sanitized Command for `gh` with env_clear + vault token injection
@@ -268,67 +307,6 @@ fn note_github_command_runner_call() {
     GITHUB_COMMAND_RUNNER_CALLS.with(|calls| calls.set(calls.get().saturating_add(1)));
 }
 
-/// Execute a gh command and return sanitized output, truncated to MAX_GH_OUTPUT_CHARS
-pub(in crate::gh_ops) fn run_gh(mut cmd: Command, token: &str) -> Result<String, String> {
-    #[cfg(test)]
-    note_github_command_runner_call();
-    let output = cmd
-        .output()
-        .map_err(|e| format!("Failed to execute `gh`: {e}"))?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-
-    let sanitized_stdout = sanitize_output(&stdout, token);
-    let sanitized_stderr = sanitize_output(&stderr, token);
-
-    if !output.status.success() {
-        return Err(format!(
-            "gh failed (exit {}): {}",
-            output.status.code().unwrap_or(-1),
-            sanitized_stderr.chars().take(1000).collect::<String>()
-        ));
-    }
-
-    // Truncate large output
-    let result = if sanitized_stdout.len() > MAX_GH_OUTPUT_CHARS {
-        let truncated: String = sanitized_stdout.chars().take(MAX_GH_OUTPUT_CHARS).collect();
-        format!(
-            "{}\n\n[truncated: {} total chars]",
-            truncated,
-            sanitized_stdout.len()
-        )
-    } else {
-        sanitized_stdout
-    };
-
-    Ok(result)
-}
-
-pub(in crate::gh_ops) fn run_gh_json(mut cmd: Command, token: &str) -> Result<String, String> {
-    #[cfg(test)]
-    note_github_command_runner_call();
-    let output = cmd
-        .output()
-        .map_err(|e| format!("Failed to execute `gh`: {e}"))?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-
-    let sanitized_stdout = sanitize_output(&stdout, token);
-    let sanitized_stderr = sanitize_output(&stderr, token);
-
-    if !output.status.success() {
-        return Err(format!(
-            "gh failed (exit {}): {}",
-            output.status.code().unwrap_or(-1),
-            sanitized_stderr.chars().take(1000).collect::<String>()
-        ));
-    }
-
-    Ok(sanitized_stdout)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -369,12 +347,23 @@ mod tests {
     }
 
     #[test]
-    fn attach_gh_body_file_writes_verbatim_body() {
+    fn attach_body_file_writes_verbatim_body() {
         let body = "line one\nline two\n\"quoted\"";
-        let mut cmd = Command::new("true");
-        let guard = attach_gh_body_file(&mut cmd, body).expect("attach body file");
-        let written = fs::read_to_string(&guard.0).expect("read body tempfile");
+        let mut call = GhCall::mutation();
+        call.args(["issue", "comment", "1"]);
+        call.attach_body_file(body).expect("attach body file");
+        let args: Vec<String> = call
+            .get_args()
+            .map(|arg| arg.to_string_lossy().to_string())
+            .collect();
+        assert_eq!(args[3], "--body-file");
+        let written = fs::read_to_string(&args[4]).expect("read body tempfile");
         assert_eq!(written, body);
+        drop(call);
+        assert!(
+            !std::path::Path::new(&args[4]).exists(),
+            "dropping the call removes its body file"
+        );
     }
 
     /// The name must be unique per call, not per microsecond — a burst of `gh`

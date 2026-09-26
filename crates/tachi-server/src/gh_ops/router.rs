@@ -269,7 +269,7 @@ pub(crate) async fn handle_tachi_gh(
         }
         "handoff_draft" => {
             let repo = required_repo(&params, "handoff_draft")?;
-            handle_gh_handoff_draft(server, &params, repo)
+            Box::pin(handle_gh_handoff_draft(server, &params, repo)).await
         }
         "handoff_publish" => {
             let repo = required_repo(&params, "handoff_publish")?;
@@ -414,7 +414,8 @@ async fn handle_issue_freshness_scan(
 
     // Zombie arm: hard-fails the whole action on a `gh` error — this is the
     // scan's primary signal, not a best-effort extra (finding 6).
-    let zombies = crate::gh_ops::fetch_and_scan_zombies(server, &repo, limit, Some(&repo_root))?;
+    let zombies =
+        crate::gh_ops::fetch_and_scan_zombies(server, &repo, limit, Some(&repo_root)).await?;
 
     let mut save_errors = Vec::new();
     let mut reap_errors = Vec::new();
@@ -470,23 +471,26 @@ async fn handle_issue_freshness_scan(
     // verified" — the hit set IS still fresh/authoritative, reaping is safe).
     let mut stale_scan_hard_error: Option<String> = None;
     let mut stale_scan_warning: Option<String> = None;
-    let stale_candidates =
-        match crate::gh_ops::fetch_and_scan_stale_candidates(server, &repo, &repo_root, limit) {
-            Ok((candidates, warnings)) => {
-                if !warnings.is_empty() {
-                    stale_scan_warning = Some(format!(
-                        "{} anchor(s) could not be verified: {}",
-                        warnings.len(),
-                        warnings.join("; ")
-                    ));
-                }
-                candidates
+    let stale_candidates = match crate::gh_ops::fetch_and_scan_stale_candidates(
+        server, &repo, &repo_root, limit,
+    )
+    .await
+    {
+        Ok((candidates, warnings)) => {
+            if !warnings.is_empty() {
+                stale_scan_warning = Some(format!(
+                    "{} anchor(s) could not be verified: {}",
+                    warnings.len(),
+                    warnings.join("; ")
+                ));
             }
-            Err(e) => {
-                stale_scan_hard_error = Some(e);
-                Vec::new()
-            }
-        };
+            candidates
+        }
+        Err(e) => {
+            stale_scan_hard_error = Some(e);
+            Vec::new()
+        }
+    };
     let mut stale_refs = Vec::with_capacity(stale_candidates.len());
     for candidate in &stale_candidates {
         let issue_ref = format!("{repo}#{}", candidate.issue_number);
@@ -560,7 +564,9 @@ async fn handle_issue_freshness_scan(
         limit,
         &activity_since,
         churn_threshold,
-    ) {
+    )
+    .await
+    {
         Ok(candidates) => candidates,
         Err(e) => {
             churn_scan_error = Some(e);

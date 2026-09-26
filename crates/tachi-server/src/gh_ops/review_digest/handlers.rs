@@ -9,7 +9,7 @@ pub(in crate::gh_ops) async fn handle_gh_pr_comments(
 ) -> Result<String, String> {
     validate_repo(&params.repo)?;
     let (reviews, inline_comments, comments) =
-        fetch_gh_pr_comments(server, &params.repo, params.pr_number)?;
+        fetch_gh_pr_comments(server, &params.repo, params.pr_number).await?;
 
     serde_json::to_string(&json!({
         "tool": "tachi_gh_pr_comments",
@@ -31,7 +31,7 @@ pub(in crate::gh_ops) async fn handle_gh_pr_review_digest(
     write_digest: bool,
 ) -> Result<String, String> {
     validate_repo(&params.repo)?;
-    let (_, _, comments) = fetch_gh_pr_comments(server, &params.repo, params.pr_number)?;
+    let (_, _, comments) = fetch_gh_pr_comments(server, &params.repo, params.pr_number).await?;
     let author_filter = author_filter
         .as_deref()
         .map(str::trim)

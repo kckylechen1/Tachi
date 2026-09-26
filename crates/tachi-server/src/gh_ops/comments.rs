@@ -9,20 +9,18 @@ use super::*;
 /// re-run (which would spam the issue and erode trust in the loop). Any error
 /// (gh down, parse failure) returns false so the caller proceeds — we'd rather
 /// risk a rare duplicate than silently swallow the write-back.
-pub(crate) fn gh_comment_marker_present(
+pub(crate) async fn gh_comment_marker_present(
     server: &MemoryServer,
     kind: &str,
     repo: &str,
     number: u64,
     marker: &str,
 ) -> bool {
-    let Ok((mut cmd, token)) = build_gh_command(server) else {
-        return false;
-    };
-    cmd.args([kind, "view", &number.to_string()])
+    let mut call = GhCall::read();
+    call.args([kind, "view", &number.to_string()])
         .args(["--repo", repo])
         .args(["--json", "comments"]);
-    let Ok(output) = run_gh_json(cmd, &token) else {
+    let Ok(output) = call.run_json(server).await else {
         return false;
     };
     serde_json::from_str::<Value>(&output)
@@ -67,12 +65,12 @@ pub(crate) async fn handle_gh_comment(
         .map_err(|e| format!("serialize: {e}"));
     }
 
-    let (mut cmd, token) = build_gh_command(server)?;
-    cmd.args([kind, "comment", &params.number.to_string()])
+    let mut call = GhCall::mutation();
+    call.args([kind, "comment", &params.number.to_string()])
         .args(["--repo", &params.repo]);
-    let _body_file = attach_gh_body_file(&mut cmd, &body)?;
+    call.attach_body_file(&body)?;
 
-    let output = run_gh(cmd, &token)?;
+    let output = call.run(server).await?;
     serde_json::to_string(&json!({
         "tool": format!("tachi_gh_{kind}_comment"),
         "repo": params.repo,

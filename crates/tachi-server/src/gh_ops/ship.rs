@@ -598,15 +598,18 @@ async fn find_open_pr_for_head(
     branch: &str,
     repo: Option<&str>,
 ) -> Result<Option<CreatedPr>, String> {
-    let (mut cmd, token) = build_gh_command(server)?;
-    cmd.current_dir(repo_root)
+    let mut call = GhCall::read();
+    call.current_dir(repo_root)
         .args(["pr", "list", "--state", "open", "--head", branch])
         .args(["--json", "number,url"]);
     if let Some(repo) = repo.map(str::trim).filter(|value| !value.is_empty()) {
         validate_repo(repo)?;
-        cmd.args(["--repo", repo]);
+        call.args(["--repo", repo]);
     }
-    let raw = run_gh(cmd, &token).map_err(|err| format!("pr_exists_check_failed: {err}"))?;
+    let raw = call
+        .run(server)
+        .await
+        .map_err(|err| format!("pr_exists_check_failed: {err}"))?;
     let parsed: Vec<Value> = serde_json::from_str(raw.trim())
         .map_err(|err| format!("pr_exists_check_failed: parse gh pr list JSON: {err}"))?;
     Ok(parsed.first().and_then(|entry| {
@@ -848,8 +851,8 @@ async fn create_pull_request(
     repo: Option<&str>,
 ) -> Result<CreatedPr, String> {
     // TODO: migrate `pr create --body` to `--body-file` for gh shim compatibility.
-    let (mut cmd, token) = build_gh_command(server)?;
-    cmd.current_dir(repo_root)
+    let mut call = GhCall::mutation();
+    call.current_dir(repo_root)
         .args(["pr", "create"])
         .args(["--base", base])
         .args(["--head", branch])
@@ -857,9 +860,9 @@ async fn create_pull_request(
         .args(["--body", body]);
     if let Some(repo) = repo.map(str::trim).filter(|value| !value.is_empty()) {
         validate_repo(repo)?;
-        cmd.args(["--repo", repo]);
+        call.args(["--repo", repo]);
     }
-    let raw = run_gh(cmd, &token)?;
+    let raw = call.run(server).await?;
     let (number, url) = parse_created_pr_url(&raw)?;
     Ok(CreatedPr { number, url })
 }

@@ -33,7 +33,7 @@ pub(crate) async fn handle_gh_label(
     let mut skipped = Vec::new();
     let mut to_apply = Vec::new();
     for label in &params.labels {
-        let present = gh_label_present(server, &params.repo, params.number, label);
+        let present = gh_label_present(server, &params.repo, params.number, label).await;
         let already_target_state = if mode == "add" { present } else { !present };
         if already_target_state {
             skipped.push(label.clone());
@@ -43,13 +43,13 @@ pub(crate) async fn handle_gh_label(
     }
 
     if !to_apply.is_empty() {
-        let (mut cmd, token) = build_gh_command(server)?;
-        cmd.args(["issue", "edit", &params.number.to_string()])
+        let mut call = GhCall::mutation();
+        call.args(["issue", "edit", &params.number.to_string()])
             .args(["--repo", &params.repo]);
         for label in &to_apply {
-            cmd.args([flag, label]);
+            call.args([flag, label]);
         }
-        run_gh(cmd, &token)?;
+        call.run(server).await?;
         applied.extend(to_apply);
     }
 
@@ -67,19 +67,17 @@ pub(crate) async fn handle_gh_label(
 /// Idempotency probe: does this issue already carry `label`? Mirrors
 /// `gh_comment_marker_present`'s any-error-returns-false posture (we'd
 /// rather risk a rare duplicate label-edit than block the write-back).
-pub(crate) fn gh_label_present(
+pub(crate) async fn gh_label_present(
     server: &MemoryServer,
     repo: &str,
     number: u64,
     label: &str,
 ) -> bool {
-    let Ok((mut cmd, token)) = build_gh_command(server) else {
-        return false;
-    };
-    cmd.args(["issue", "view", &number.to_string()])
+    let mut call = GhCall::read();
+    call.args(["issue", "view", &number.to_string()])
         .args(["--repo", repo])
         .args(["--json", "labels"]);
-    let Ok(output) = run_gh_json(cmd, &token) else {
+    let Ok(output) = call.run_json(server).await else {
         return false;
     };
     serde_json::from_str::<Value>(&output)
