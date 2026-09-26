@@ -799,6 +799,13 @@ pub enum WikiAction {
         /// one row per entry reference, exact coverage, no duplicates.
         #[arg(long, value_name = "PATH")]
         source_manifest: PathBuf,
+        /// Repository root that owns repo-relative references (`docs/...`,
+        /// `skill/...`). Required only when the entry carries such refs:
+        /// they must resolve to the actual file under this root (no `..`
+        /// escapes, no unrelated snapshot substitution). Absolute-path
+        /// refs and URL/GitHub refs do not use this flag.
+        #[arg(long, value_name = "PATH")]
+        source_root: Option<PathBuf>,
         /// Perform the approved write. Without this flag the command is a
         /// read-only preview. Requires --approver, --expected-revision, and
         /// --review-digest.

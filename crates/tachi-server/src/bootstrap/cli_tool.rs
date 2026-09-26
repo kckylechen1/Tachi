@@ -316,6 +316,7 @@ pub(super) async fn run_cli_command(
                 id,
                 project,
                 source_manifest,
+                source_root,
                 apply,
                 approver,
                 expected_revision,
@@ -350,6 +351,7 @@ pub(super) async fn run_cli_command(
                             expected_revision,
                             expected_review_digest: review_digest,
                             manifest_path: source_manifest,
+                            source_root,
                         },
                     )
                     .map_err(std::io::Error::other)?;
@@ -362,6 +364,7 @@ pub(super) async fn run_cli_command(
                         &project,
                         &id,
                         &source_manifest,
+                        source_root.as_deref(),
                     )
                     .map_err(std::io::Error::other)?;
                     print_pretty_json(&preview)

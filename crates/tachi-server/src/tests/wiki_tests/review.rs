@@ -193,6 +193,7 @@ fn apply_request(
             .expect("preview digest")
             .to_string(),
         manifest_path: manifest_path.to_path_buf(),
+        source_root: None,
     }
 }
 
@@ -201,7 +202,16 @@ fn preview_entry(
     id: &str,
     manifest_path: &std::path::Path,
 ) -> Result<Value, String> {
-    crate::wiki_ops::preview_wiki_review(project, id, manifest_path)
+    crate::wiki_ops::preview_wiki_review(project, id, manifest_path, None)
+}
+
+fn preview_entry_rooted(
+    project: &str,
+    id: &str,
+    manifest_path: &std::path::Path,
+    source_root: &std::path::Path,
+) -> Result<Value, String> {
+    crate::wiki_ops::preview_wiki_review(project, id, manifest_path, Some(source_root))
 }
 
 #[tokio::test]
@@ -335,7 +345,10 @@ async fn pending_hidden_approve_default_visible_ordinary_edit_hidden() {
     );
 
     // Ordinary public edit through the real wiki facade: the update resets
-    // the candidate lifecycle to pending and the row is hidden again.
+    // the candidate lifecycle to pending, INVALIDATES the operator
+    // approval (the inherited receipt and bundle hash are removed in the
+    // same projection transaction — an ordinary dedicated Wiki write is
+    // never an approval), and the row is hidden again.
     let mut edit = review_write_params(path, fixture.references(), bounded_shared_metadata());
     edit.text = format!("{REVIEW_NEEDLE} revised body after operator approval.");
     let edit_response = server
@@ -349,6 +362,22 @@ async fn pending_hidden_approve_default_visible_ordinary_edit_hidden() {
         edited.metadata["lifecycle"],
         json!("pending_review"),
         "an ordinary edit must return the row to pending: {edited:?}"
+    );
+    assert_eq!(edited.metadata["authority"], json!("advisory"));
+    assert!(
+        edited.metadata.get("review_receipt").is_none(),
+        "an ordinary dedicated Wiki write must invalidate the inherited operator approval: {}",
+        edited.metadata
+    );
+    assert!(
+        edited.metadata.get("source_bundle_hash").is_none(),
+        "an ordinary dedicated Wiki write must drop the inherited source bundle hash: {}",
+        edited.metadata
+    );
+    assert_eq!(
+        edited.metadata["operator_note"],
+        json!("ordinary metadata must survive approval"),
+        "unrelated metadata still survives the edit"
     );
     assert!(
         !default_search_paths(&server)
@@ -507,6 +536,7 @@ fn apply_base(
         expected_revision: 1,
         expected_review_digest: "0".repeat(64),
         manifest_path: manifest_path.to_path_buf(),
+        source_root: None,
     }
 }
 
@@ -759,4 +789,307 @@ async fn wiki_save_response_carries_deterministic_read_locator() {
         parsed["read"].get("project").is_none(),
         "a global landing must not claim a project: {parsed:?}"
     );
+}
+
+#[cfg(unix)]
+mod verified_open_race {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    /// Install a hook that swaps `target` in the stat->open gap exactly
+    /// once, deterministically (no sleeps). The swap happens after the
+    /// pre-open regular-file check passed, which is precisely the gap the
+    /// verified open must close on the opened handle.
+    fn swap_once(target: &std::path::Path, swap: impl FnOnce(&std::path::Path) + Send + 'static) {
+        let target = target.to_path_buf();
+        let done = Arc::new(AtomicBool::new(false));
+        let done_for_hook = Arc::clone(&done);
+        let swap = std::sync::Mutex::new(Some(swap));
+        crate::wiki_ops::install_review_open_swap_hook(Arc::new(move |path: &std::path::Path| {
+            if path == target && !done_for_hook.swap(true, Ordering::SeqCst) {
+                if let Some(swap) = swap
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .take()
+                {
+                    swap(path);
+                }
+            }
+        }));
+    }
+
+    async fn pending_entry_with_github_ref(server: &MemoryServer, path: &str) -> String {
+        write_pending_review_entry(server, path, vec!["kckylechen1/tachi#1072".to_string()]).await
+    }
+
+    fn github_only_manifest() -> (ManifestFixture, std::path::PathBuf) {
+        let fixture = ManifestFixture::new();
+        let github_bytes = std::fs::read(&fixture.snapshot_github).expect("snapshot bytes");
+        let rows = vec![(
+            "kckylechen1/tachi#1072".to_string(),
+            fixture.snapshot_github.clone(),
+            sha256_hex(&github_bytes),
+        )];
+        let manifest_path = fixture.manifest_path(&rows);
+        (fixture, manifest_path)
+    }
+
+    #[tokio::test]
+    async fn regular_to_symlink_swap_in_open_gap_is_refused() {
+        let (server, _home) = seed_wiki_project_entries(vec![]);
+        let (_fixture, manifest_path) = github_only_manifest();
+        let id =
+            pending_entry_with_github_ref(&server, "/wiki/engineering/review-cli/race-symlink")
+                .await;
+
+        let decoy = _fixture.dir.path().join("decoy.md");
+        std::fs::write(&decoy, b"decoy content").expect("write decoy");
+        swap_once(&_fixture.snapshot_github, move |path| {
+            std::fs::rename(path, path.with_extension("original-tmp"))
+                .expect("move original aside");
+            std::os::unix::fs::symlink(&decoy, path).expect("substitute symlink");
+        });
+
+        let error = preview_entry("wiki", &id, &manifest_path)
+            .expect_err("a symlink substituted in the stat->open gap must refuse");
+        crate::wiki_ops::clear_review_open_swap_hook();
+        assert!(
+            error.contains("cannot open snapshot") && error.contains("symbolic link"),
+            "the refusal must come from the O_NOFOLLOW open, not the pre-check: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn regular_to_regular_swap_in_open_gap_is_refused_by_handle_identity() {
+        let (server, _home) = seed_wiki_project_entries(vec![]);
+        let (_fixture, manifest_path) = github_only_manifest();
+        let id =
+            pending_entry_with_github_ref(&server, "/wiki/engineering/review-cli/race-regular")
+                .await;
+
+        swap_once(&_fixture.snapshot_github, |path| {
+            // A NEW file at the same path: same name, different inode. The
+            // pre-open check passes and the open succeeds; only the opened
+            // handle's (dev, ino) can catch it.
+            std::fs::remove_file(path).expect("remove original");
+            std::fs::write(path, b"replacement regular file with a different inode\n")
+                .expect("write replacement");
+        });
+
+        let error = preview_entry("wiki", &id, &manifest_path)
+            .expect_err("a regular file substituted in the stat->open gap must refuse");
+        crate::wiki_ops::clear_review_open_swap_hook();
+        assert!(
+            error.contains("changed identity between validation and open"),
+            "the refusal must come from the handle-identity comparison: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn regular_to_fifo_swap_in_open_gap_is_refused_without_blocking() {
+        let (server, _home) = seed_wiki_project_entries(vec![]);
+        let (_fixture, manifest_path) = github_only_manifest();
+        let id =
+            pending_entry_with_github_ref(&server, "/wiki/engineering/review-cli/race-fifo").await;
+
+        swap_once(&_fixture.snapshot_github, |path| {
+            std::fs::remove_file(path).expect("remove original");
+            let cpath = std::ffi::CString::new(path.as_os_str().as_encoded_bytes())
+                .expect("fifo path cstring");
+            let rc = unsafe { libc::mkfifo(cpath.as_ptr(), 0o600) };
+            assert_eq!(rc, 0, "mkfifo substitution must succeed for the fixture");
+        });
+
+        // Without O_NONBLOCK this open would block forever on the FIFO; the
+        // test completing at all is half the discrimination.
+        let error = preview_entry("wiki", &id, &manifest_path)
+            .expect_err("a FIFO substituted in the stat->open gap must refuse");
+        crate::wiki_ops::clear_review_open_swap_hook();
+        assert!(
+            error.contains("non-regular file at open time"),
+            "the refusal must come from the opened-handle regularness check: {error}"
+        );
+    }
+}
+
+mod repo_relative_sources {
+    use super::*;
+
+    fn repo_root_fixture() -> (tempfile::TempDir, std::path::PathBuf) {
+        let root = tempfile::tempdir().expect("source root temp dir");
+        let docs = root.path().join("docs");
+        std::fs::create_dir_all(&docs).expect("docs dir");
+        (root, docs)
+    }
+
+    fn rooted_manifest(
+        rows: Vec<(String, std::path::PathBuf, String)>,
+    ) -> (ManifestFixture, std::path::PathBuf) {
+        let fixture = ManifestFixture::new();
+        let manifest_path = fixture.manifest_path(&rows);
+        (fixture, manifest_path)
+    }
+
+    #[tokio::test]
+    async fn rooted_docs_reference_hashes_the_actual_file_and_approves() {
+        let (server, _home) = seed_wiki_project_entries(vec![]);
+        let (root, docs) = repo_root_fixture();
+        let spec = docs.join("spec.md");
+        std::fs::write(&spec, b"the actual repository spec under the source root\n")
+            .expect("write rooted spec");
+        let rows = vec![(
+            "docs/spec.md".to_string(),
+            spec,
+            sha256_hex(b"the actual repository spec under the source root\n"),
+        )];
+        let (_manifest_home, manifest_path) = rooted_manifest(rows);
+        let path = "/wiki/engineering/review-cli/rooted-docs";
+        let id = write_pending_review_entry(&server, path, vec!["docs/spec.md".to_string()]).await;
+
+        // Without --source-root the repo-relative reference refuses with a
+        // precise instruction, not a catch-all.
+        let error = preview_entry("wiki", &id, &manifest_path)
+            .expect_err("repo-relative reference without --source-root must refuse");
+        assert!(error.contains("requires --source-root"), "{error}");
+
+        // With the root: the preview validates the ACTUAL rooted file...
+        let preview =
+            preview_entry_rooted("wiki", &id, &manifest_path, root.path()).expect("rooted preview");
+        let verifications: Vec<&str> = preview["references"]
+            .as_array()
+            .expect("reference rows")
+            .iter()
+            .map(|row| row["verification"].as_str().expect("verification"))
+            .collect();
+        assert_eq!(
+            verifications,
+            vec!["source_root_referenced_file"],
+            "a docs/ reference must hash the rooted file itself: {preview:?}"
+        );
+
+        // ...and the apply approves end to end against that root.
+        let receipt = crate::wiki_ops::apply_wiki_review(
+            &server,
+            &crate::wiki_ops::WikiReviewApply {
+                source_root: Some(root.path().to_path_buf()),
+                ..apply_request("wiki", &id, &manifest_path, &preview)
+            },
+        )
+        .expect("rooted apply");
+        assert_eq!(receipt["approved"], json!(true));
+        let row = wiki_row(&server, &id);
+        assert_eq!(row.metadata["lifecycle"], json!("active"));
+    }
+
+    #[tokio::test]
+    async fn rooted_docs_reference_to_unrelated_snapshot_refuses() {
+        let (server, _home) = seed_wiki_project_entries(vec![]);
+        let (root, docs) = repo_root_fixture();
+        let spec = docs.join("spec.md");
+        std::fs::write(&spec, b"the actual repository spec under the source root\n")
+            .expect("write rooted spec");
+        let unrelated_home = ManifestFixture::new();
+        std::fs::write(
+            &unrelated_home.snapshot_github,
+            b"an archived copy that is NOT the rooted file\n",
+        )
+        .expect("write unrelated snapshot");
+        let unrelated = unrelated_home.snapshot_github.clone();
+        let rows = vec![(
+            "docs/spec.md".to_string(),
+            unrelated,
+            sha256_hex(b"an archived copy that is NOT the rooted file\n"),
+        )];
+        let (_manifest_home, manifest_path) = rooted_manifest(rows);
+        let path = "/wiki/engineering/review-cli/rooted-substitution";
+        let id = write_pending_review_entry(&server, path, vec!["docs/spec.md".to_string()]).await;
+
+        let error = preview_entry_rooted("wiki", &id, &manifest_path, root.path())
+            .expect_err("an unrelated snapshot for a docs/ reference must refuse");
+        assert!(
+            error.contains("must hash the referenced file itself"),
+            "{error}"
+        );
+        assert!(
+            wiki_row(&server, &id)
+                .metadata
+                .get("review_receipt")
+                .is_none(),
+            "nothing may be approved"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn repo_relative_escape_and_unsupported_shapes_refuse() {
+        let (server, _home) = seed_wiki_project_entries(vec![]);
+        let (root, _docs) = repo_root_fixture();
+        let outside = root
+            .path()
+            .parent()
+            .and_then(|parent| parent.parent())
+            .expect("tempdir grandparents")
+            .join("outside-secret.md");
+        std::fs::write(&outside, b"file outside the source root\n").expect("write outside file");
+
+        // '..' traversal in the reference itself refuses before any resolution.
+        let rows = vec![(
+            "docs/../outside-secret.md".to_string(),
+            outside.clone(),
+            sha256_hex(b"file outside the source root\n"),
+        )];
+        let (_manifest_home, manifest_path) = rooted_manifest(rows);
+        let path = "/wiki/engineering/review-cli/rooted-escape";
+        let id = write_pending_review_entry(
+            &server,
+            path,
+            vec!["docs/../outside-secret.md".to_string()],
+        )
+        .await;
+        let error = preview_entry_rooted("wiki", &id, &manifest_path, root.path())
+            .expect_err("'..' traversal must refuse");
+        assert!(
+            error.contains("cannot be resolved under a source root"),
+            "{error}"
+        );
+
+        // A symlink under the root pointing outside escapes at resolution
+        // time and must refuse too.
+        std::os::unix::fs::symlink(&outside, root.path().join("docs/leak.md"))
+            .expect("symlink out of the root");
+        let rows = vec![(
+            "docs/leak.md".to_string(),
+            outside.clone(),
+            sha256_hex(b"file outside the source root\n"),
+        )];
+        let (_manifest_home, manifest_path) = rooted_manifest(rows);
+        let path = "/wiki/engineering/review-cli/rooted-symlink-escape";
+        let id = write_pending_review_entry(&server, path, vec!["docs/leak.md".to_string()]).await;
+        let error = preview_entry_rooted("wiki", &id, &manifest_path, root.path())
+            .expect_err("source-root escape must refuse");
+        assert!(error.contains("escapes the source root"), "{error}");
+
+        // Unsupported shapes (file://) are refused precisely, not folded
+        // into the operator-attested catch-all.
+        let rows = vec![(
+            "file:///tmp/some-local-file.md".to_string(),
+            outside,
+            sha256_hex(b"file outside the source root\n"),
+        )];
+        let (_manifest_home, manifest_path) = rooted_manifest(rows);
+        let path = "/wiki/engineering/review-cli/unsupported-shape";
+        let id = write_pending_review_entry(
+            &server,
+            path,
+            vec!["file:///tmp/some-local-file.md".to_string()],
+        )
+        .await;
+        let error = preview_entry("wiki", &id, &manifest_path)
+            .expect_err("file:// reference must refuse as unsupported");
+        assert!(
+            error.contains("cannot validate") && error.contains("file://"),
+            "{error}"
+        );
+    }
 }

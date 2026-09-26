@@ -436,20 +436,46 @@ Contract:
   Approval sets lifecycle/status `active`, review `approved`, authority
   `advisory` (never playbook), with the bound receipt fields nested in
   `review_receipt` (`approver`, `decision`, `decided_at`, plus optional
-  `review_digest` / `source_bundle_hash` / `expected_revision` / `store`
-  that legacy receipt readers ignore).
+  `review_digest` / `source_bundle_hash` / `expected_revision` / `store`).
+  Compatibility with legacy receipts is field-shape compatibility: the
+  optional fields add no keys to a legacy receipt's serialized form, but
+  no raw-byte transport guarantee is claimed.
 - **Source manifest** — `{"version":1,"sources":[{"ref":...,
   "snapshot":...,"sha256":...}]}`. Rows must cover the entry's references
   exactly: nonempty, no missing, no duplicate, no unmatched rows. Every
-  snapshot must be a regular non-symlink file whose streamed sha256
-  matches the manifest. A local absolute-path reference must map to the
-  referenced file itself; an unrelated snapshot substitution is refused.
-  URL / GitHub-shorthand / repo-relative references may map to an explicit
-  local archived snapshot — this is an **operator-attested mapping** whose
-  bytes are verified against the manifest hash, NOT live upstream
-  verification. No network fetch happens anywhere in this flow. The
+  manifest and snapshot open goes through one verified open: the path is
+  stat-checked (regular, non-symlink), opened with `O_NOFOLLOW |
+  O_NONBLOCK` so a symlink or blocking FIFO substituted in the stat->open
+  gap is refused at open, and the OPENED HANDLE is fstat'd to prove it is
+  a regular file with the same (dev, ino) identity that was checked (a
+  regular->regular substitution in that gap is refused). On platforms
+  without a symlink-safe open, review filesystem validation fails CLOSED
+  with a precise error — it never pretends to have validated a file.
+- **Reference shapes** — each entry reference is classified, and
+  unsupported shapes are refused precisely rather than folded into a
+  remote catch-all:
+  - a local absolute path must map to the referenced file itself (the
+    hashed handle's inode identity must equal the referenced file's);
+  - a repo-relative `docs/...` / `skill/...` reference requires
+    `--source-root <path>` naming the owning repository root; the
+    referenced file under that root must be hashed itself (`..`
+    components, and symlinks resolving outside the root, are refused);
+  - an `http(s)://` URL or GitHub shorthand may map to an explicit local
+    archived snapshot — an **operator-attested mapping** whose bytes are
+    verified against the manifest hash, NOT live upstream verification;
+  - anything else (including `file://` URIs) is refused as unsupported.
+  No network fetch happens anywhere in this flow. The
   `source_bundle_hash` is derived from the canonical ref + verified
   snapshot digest records, never taken from caller input.
+- **Approval invalidation** — an ordinary dedicated Wiki write
+  (`tachi_wiki_write` and its internal callers) that updates an
+  already-approved row removes the inherited `review_receipt` and
+  `source_bundle_hash` in the same projection transaction and returns the
+  row to `pending_review` / `advisory`: an ordinary write is never an
+  approval. Public generic saves already strip both. Wiki ingest and the
+  REM evolver do not use the projection seam (both build fresh
+  replacement rows and supersede their predecessors), so trusted ingest
+  semantics are unchanged.
 - **Effective-applicability gate** — apply refuses before any mutation
   when the approved row would not derive `active` (for example shared
   scope without bounded applicability and typed origins), so an approved

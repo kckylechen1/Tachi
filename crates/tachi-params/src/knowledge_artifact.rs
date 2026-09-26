@@ -295,12 +295,12 @@ pub struct EffectiveKnowledgeArtifactV1 {
 /// `WikiReviewReceiptV1`. The first three fields are the original wire
 /// shape every legacy reader parses; the remaining optional fields carry
 /// the operator-approval CLI's bound evidence (see `wiki_ops::review`).
-/// They are `Option` + `skip_serializing_if` so a legacy receipt
-/// round-trips byte-identically and every legacy reader keeps compiling
-/// and matching, while an operator-approved receipt is self-describing:
-/// the digest that bound the approved bytes, the derived source-bundle
-/// hash, the revision the approval was previewed against, and the store
-/// identity it was approved in.
+/// They are `Option` + `skip_serializing_if` so a legacy receipt keeps
+/// its exact field shape (no new keys appear on the wire) and every
+/// legacy reader keeps compiling and matching, while an operator-approved
+/// receipt is self-describing: the digest that bound the approved bytes,
+/// the derived source-bundle hash, the revision the approval was
+/// previewed against, and the store identity it was approved in.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WikiReviewReceiptV1 {
     pub approver: String,
@@ -911,9 +911,10 @@ mod tests {
         assert!(wire.contains("\"lifecycle\":\"active\""));
     }
 
-    /// A legacy three-field receipt round-trips byte-identically: the
-    /// operator-approval bound fields are optional, so old writers,
-    /// readers, and goldens keep their exact wire shape.
+    /// A legacy three-field receipt keeps its exact field shape: the
+    /// operator-approval bound fields are optional, so old writers and
+    /// readers see no new keys (serde field-order/key-set compatibility;
+    /// not a raw-byte transport guarantee).
     #[test]
     fn legacy_review_receipt_round_trips_without_bound_fields() {
         let legacy = r#"{

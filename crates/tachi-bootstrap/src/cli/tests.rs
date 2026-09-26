@@ -346,6 +346,7 @@ fn wiki_review_cli_defaults_to_preview_and_requires_the_apply_quad() {
                 id,
                 project,
                 source_manifest,
+                source_root: None,
                 apply: false,
                 approver: None,
                 expected_revision: None,
@@ -354,6 +355,29 @@ fn wiki_review_cli_defaults_to_preview_and_requires_the_apply_quad() {
         }) if id == "some-entry-id"
             && project == "wiki"
             && source_manifest == std::path::Path::new("/tmp/wiki-sources.json")
+    ));
+
+    let rooted = Cli::try_parse_from([
+        "tachi",
+        "wiki",
+        "review",
+        "--id",
+        "some-entry-id",
+        "--source-manifest",
+        "/tmp/wiki-sources.json",
+        "--source-root",
+        "/work/Sigil",
+    ])
+    .expect("wiki review with a source root should parse");
+    assert!(matches!(
+        rooted.command,
+        Some(Commands::Wiki {
+            action: WikiAction::Review {
+                ref source_root,
+                apply: false,
+                ..
+            }
+        }) if source_root.as_deref() == Some(std::path::Path::new("/work/Sigil"))
     ));
 
     let apply = Cli::try_parse_from([

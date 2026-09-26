@@ -84,6 +84,8 @@ pub(crate) use self::log::append_wiki_log;
 pub(crate) use self::provenance::apply_wiki_lifecycle_gate;
 pub(crate) use self::references::validate_references;
 pub(crate) use self::review::{apply_wiki_review, preview_wiki_review, WikiReviewApply};
+#[cfg(test)]
+pub(crate) use self::review::{clear_review_open_swap_hook, install_review_open_swap_hook};
 pub(crate) use self::search::{
     collect_wiki_browse_value, collect_wiki_read_value_for_plan, collect_wiki_search_value,
     handle_wiki_browse, handle_wiki_read_for_plan, handle_wiki_search, search_wiki_rows_for_plan,

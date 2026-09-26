@@ -52,6 +52,7 @@ pub(crate) const WIKI_SOURCE_BUNDLE_DOMAIN: &str = "tachi:wiki-source-bundle:v1"
 const SNAPSHOT_HASH_BUFFER_BYTES: usize = 64 * 1024;
 
 const SNAPSHOT_VERIFICATION_REFERENCED_FILE: &str = "referenced_file";
+const SNAPSHOT_VERIFICATION_SOURCE_ROOTED_FILE: &str = "source_root_referenced_file";
 const SNAPSHOT_VERIFICATION_OPERATOR_ATTESTED: &str = "operator_attested_snapshot";
 
 // ─── source manifest ────────────────────────────────────────────────────────
@@ -96,30 +97,8 @@ fn normalize_expected_sha256(raw: &str) -> Result<String, String> {
 }
 
 fn load_source_manifest(path: &Path) -> Result<WikiSourceManifest, String> {
-    let metadata = std::fs::symlink_metadata(path)
-        .map_err(|error| format!("cannot inspect source manifest {}: {error}", path.display()))?;
-    if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
-        return Err(format!(
-            "source manifest {} must be a regular non-symlink file",
-            path.display()
-        ));
-    }
-    #[cfg(unix)]
-    let bytes = {
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut file = std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW)
-            .open(path)
-            .map_err(|error| format!("cannot open source manifest {}: {error}", path.display()))?;
-        read_bounded(&mut file, path)?
-    };
-    #[cfg(not(unix))]
-    let bytes = {
-        let mut file = std::fs::File::open(path)
-            .map_err(|e| format!("cannot open source manifest {}: {e}", path.display()))?;
-        read_bounded(&mut file, path)?
-    };
+    let mut verified = open_verified_regular_file(path, "source manifest")?;
+    let bytes = read_bounded(&mut verified.file, path)?;
     let manifest: WikiSourceManifest = serde_json::from_slice(&bytes)
         .map_err(|error| format!("invalid source manifest {}: {error}", path.display()))?;
     if let Some(version) = manifest.version {
@@ -172,21 +151,158 @@ fn is_absolute_path_reference(reference: &str) -> bool {
         && (bytes[2] == b'/' || bytes[2] == b'\\')
 }
 
-fn open_snapshot_file(path: &Path) -> Result<std::fs::File, String> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW)
-            .open(path)
-            .map_err(|error| format!("cannot open snapshot {}: {error}", path.display()))
+/// Dependency-free GitHub-shorthand check (`#N`, `repo#N`,
+/// `owner/repo#N`) mirroring `wiki_ops::references`' closed vocabulary
+/// without pulling `regex` into this module.
+fn is_github_issue_shorthand(reference: &str) -> bool {
+    let Some((prefix, rest)) = reference.rsplit_once('#') else {
+        return false;
+    };
+    if rest.is_empty() || !rest.chars().all(|c| c.is_ascii_digit()) {
+        return false;
     }
-    #[cfg(not(unix))]
-    {
-        std::fs::File::open(path)
-            .map_err(|error| format!("cannot open snapshot {}: {error}", path.display()))
+    prefix.is_empty()
+        || prefix
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-' | '/'))
+}
+
+/// Stable file identity of a stat result. Unix: the (dev, ino) pair, so
+/// an opened handle can be proven to address the exact inode that was
+/// validated. Non-Unix never reaches a comparison (the verified open
+/// below refuses before anything is hashed), so the empty string stands
+/// for "unreachable identity".
+#[cfg(unix)]
+fn file_identity(metadata: &std::fs::Metadata) -> String {
+    use std::os::unix::fs::MetadataExt;
+    format!("{}:{}", metadata.dev(), metadata.ino())
+}
+
+#[cfg(not(unix))]
+fn file_identity(_metadata: &std::fs::Metadata) -> String {
+    String::new()
+}
+
+/// An opened source file whose regularness was verified on the OPENED
+/// HANDLE (fstat), not just on a pre-open path stat. `identity` is the
+/// checked inode identity from before the open; callers that need to
+/// prove which file they hashed compare it against the referenced file's
+/// current identity.
+pub(crate) struct VerifiedRegularFile {
+    file: std::fs::File,
+    identity: String,
+}
+
+/// Deterministic race-injection point for tests: invoked after the
+/// pre-open stat and before every open, so a test can swap a file
+/// (regular -> symlink / regular / FIFO) exactly in the gap the verified
+/// open exists to close. No sleeps; the hook itself decides which path
+/// and how many opens it acts on, and the test clears it when done.
+#[cfg(test)]
+type ReviewOpenSwapHook = std::sync::Arc<dyn Fn(&Path) + Send + Sync>;
+
+#[cfg(test)]
+static REVIEW_OPEN_SWAP_HOOK: std::sync::Mutex<Option<ReviewOpenSwapHook>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(test)]
+pub(crate) fn install_review_open_swap_hook(hook: ReviewOpenSwapHook) {
+    let mut slot = REVIEW_OPEN_SWAP_HOOK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    *slot = Some(hook);
+}
+
+#[cfg(test)]
+pub(crate) fn clear_review_open_swap_hook() {
+    let mut slot = REVIEW_OPEN_SWAP_HOOK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    *slot = None;
+}
+
+#[cfg(test)]
+fn run_review_open_swap_hook(path: &Path) {
+    let hook = REVIEW_OPEN_SWAP_HOOK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone();
+    if let Some(hook) = hook {
+        hook(path);
     }
+}
+
+/// The one open every review-side filesystem validation goes through
+/// (source manifest and every snapshot).
+///
+/// Unix: pre-open stat refuses symlinks/non-regular files, the open
+/// itself carries `O_NOFOLLOW | O_NONBLOCK` so a symlink substituted in
+/// the stat->open gap fails the open (ELOOP) and a FIFO cannot block
+/// the open, and the OPENED HANDLE is fstat'd to prove it is a regular
+/// file with the same (dev, ino) identity that was checked — closing
+/// the regular->regular and regular->FIFO substitution gaps.
+///
+/// Non-Unix: std exposes no symlink-safe open, so this fails CLOSED
+/// with a precise error rather than pretending to have validated the
+/// file. Windows review validation is deferred until it can be done
+/// honestly; no caller can proceed past this refusal.
+#[cfg(unix)]
+fn open_verified_regular_file(path: &Path, label: &str) -> Result<VerifiedRegularFile, String> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let checked = std::fs::symlink_metadata(path)
+        .map_err(|error| format!("cannot inspect {label} {}: {error}", path.display()))?;
+    if checked.file_type().is_symlink() || !checked.file_type().is_file() {
+        return Err(format!(
+            "{label} {} must be a regular non-symlink file",
+            path.display()
+        ));
+    }
+    let checked_identity = file_identity(&checked);
+    #[cfg(test)]
+    run_review_open_swap_hook(path);
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+        .map_err(|error| {
+            format!(
+                "cannot open {label} {}: {error} (a symlink substituted between validation \
+                 and open is refused)",
+                path.display()
+            )
+        })?;
+    let handle = file
+        .metadata()
+        .map_err(|error| format!("cannot inspect opened {label} {}: {error}", path.display()))?;
+    if !handle.file_type().is_file() {
+        return Err(format!(
+            "{label} {} resolved to a non-regular file at open time; fifo/device/socket \
+             substitution is refused",
+            path.display()
+        ));
+    }
+    let handle_identity = file_identity(&handle);
+    if handle_identity != checked_identity {
+        return Err(format!(
+            "{label} {} changed identity between validation and open; a file substituted \
+             in that gap is refused",
+            path.display()
+        ));
+    }
+    Ok(VerifiedRegularFile {
+        file,
+        identity: handle_identity,
+    })
+}
+
+#[cfg(not(unix))]
+fn open_verified_regular_file(_path: &Path, label: &str) -> Result<VerifiedRegularFile, String> {
+    Err(format!(
+        "wiki review filesystem validation is unsupported on this platform: validating a \
+         {label} requires a symlink-safe regular-file open (O_NOFOLLOW) and handle identity \
+         verification, which std does not expose here; refusing to validate rather than \
+         pretending the file was checked — run the review on a Unix host"
+    ))
 }
 
 /// One verified manifest row: the snapshot was a regular file whose
@@ -217,9 +333,141 @@ impl VerifiedSourceRecord {
     }
 }
 
+/// How one entry reference is validated against a local file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ReferenceTarget {
+    /// A local absolute path (`/...` or a Windows drive path): the
+    /// referenced file itself must be hashed; no substitute snapshot.
+    AbsolutePath,
+    /// A repo-relative `docs/...` / `skill/...` path, resolved against
+    /// the operator-provided `--source-root`. The referenced file under
+    /// the root must be hashed; no substitute snapshot, no escaping the
+    /// root.
+    RepoRelative { root: PathBuf, relative: String },
+    /// An `http(s)://` URL or GitHub shorthand: the mapping to a local
+    /// archived snapshot is operator-attested. Snapshot bytes are
+    /// verified against the manifest sha256 — this is NOT live upstream
+    /// verification, and no network fetch ever happens.
+    OperatorAttested,
+}
+
+/// Classify one reference into its validation mode. Unsupported shapes
+/// are refused precisely instead of falling into a remote catch-all:
+/// the review must know exactly what it verified.
+fn classify_reference(
+    reference: &str,
+    source_root: Option<&Path>,
+) -> Result<ReferenceTarget, String> {
+    let trimmed = reference.trim();
+    if is_absolute_path_reference(trimmed) {
+        return Ok(ReferenceTarget::AbsolutePath);
+    }
+    let normalized = trimmed.replace('\\', "/");
+    if normalized.starts_with("docs/") || normalized.starts_with("skill/") {
+        if normalized.split('/').any(|component| component == "..") {
+            return Err(format!(
+                "repo-relative reference '{trimmed}' contains '..' and cannot be resolved \
+                 under a source root"
+            ));
+        }
+        let root = source_root.ok_or_else(|| {
+            format!(
+                "repo-relative reference '{trimmed}' requires --source-root naming the \
+                 repository root that owns it"
+            )
+        })?;
+        let canonical_root = std::fs::canonicalize(root).map_err(|error| {
+            format!("source root {} cannot be resolved: {error}", root.display())
+        })?;
+        if !canonical_root.is_dir() {
+            return Err(format!(
+                "source root {} must be a directory",
+                canonical_root.display()
+            ));
+        }
+        return Ok(ReferenceTarget::RepoRelative {
+            root: canonical_root,
+            relative: normalized,
+        });
+    }
+    if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+        return Ok(ReferenceTarget::OperatorAttested);
+    }
+    if is_github_issue_shorthand(trimmed) {
+        return Ok(ReferenceTarget::OperatorAttested);
+    }
+    Err(format!(
+        "reference '{trimmed}' has a shape wiki review cannot validate; supported shapes \
+         are a local absolute path, a docs/ or skill/ path together with --source-root, an \
+         http(s) URL, or GitHub issue shorthand — file:// URIs and anything else are refused \
+         rather than guessed"
+    ))
+}
+
+/// Resolve a local-file reference (absolute or repo-relative) to the
+/// exact referenced file, refusing unrelated snapshot substitution and
+/// source-root escapes.
+fn resolve_referenced_file(
+    reference: &str,
+    target: &ReferenceTarget,
+    snapshot: &Path,
+) -> Result<PathBuf, String> {
+    let (referenced, describe) = match target {
+        ReferenceTarget::AbsolutePath => (
+            std::fs::canonicalize(reference.trim()).map_err(|error| {
+                format!("referenced file '{reference}' cannot be resolved: {error}")
+            })?,
+            format!("a local absolute path"),
+        ),
+        ReferenceTarget::RepoRelative { root, relative } => {
+            let joined = root.join(relative);
+            let referenced = std::fs::canonicalize(&joined).map_err(|error| {
+                format!(
+                    "referenced file '{}': {} cannot be resolved under the source root: \
+                     {error}",
+                    reference,
+                    joined.display()
+                )
+            })?;
+            if !referenced.starts_with(root) {
+                return Err(format!(
+                    "repo-relative reference '{reference}' resolves to {} which escapes the \
+                     source root {}; source-root escapes are refused",
+                    referenced.display(),
+                    root.display()
+                ));
+            }
+            (
+                referenced,
+                format!("a repo-relative path under the source root"),
+            )
+        }
+        ReferenceTarget::OperatorAttested => {
+            return Err(
+                "internal: operator-attested references have no referenced file".to_string(),
+            )
+        }
+    };
+    let snapshot_resolved = std::fs::canonicalize(snapshot).map_err(|error| {
+        format!(
+            "snapshot {} for reference '{reference}' cannot be resolved: {error}",
+            snapshot.display()
+        )
+    })?;
+    if referenced != snapshot_resolved {
+        return Err(format!(
+            "reference '{reference}' is {describe} but the manifest snapshot {} is a \
+             different file; local file references must hash the referenced file itself",
+            snapshot.display()
+        ));
+    }
+    Ok(referenced)
+}
+
 fn verify_source_manifest(
     manifest: &WikiSourceManifest,
     entry_references: &[String],
+    source_root: Option<&Path>,
 ) -> Result<Vec<VerifiedSourceRecord>, String> {
     let entry_refs = canonical_reference_list(entry_references);
     if entry_refs.is_empty() {
@@ -288,54 +536,50 @@ fn verify_source_manifest(
     let mut records = Vec::new();
     for reference in &entry_refs {
         let row = rows.get(reference).expect("coverage checked above");
-        // The snapshot must be a regular, non-symlink file — directories,
-        // devices, fifos, and symlink indirections are all refused.
-        let snapshot_metadata = std::fs::symlink_metadata(&row.snapshot).map_err(|error| {
-            format!(
-                "cannot inspect snapshot {} for reference '{reference}': {error}",
-                row.snapshot.display()
-            )
-        })?;
-        if snapshot_metadata.file_type().is_symlink() || !snapshot_metadata.file_type().is_file() {
-            return Err(format!(
-                "snapshot {} for reference '{reference}' must be a regular non-symlink file",
-                row.snapshot.display()
-            ));
-        }
-        // A local absolute-path reference names the exact file that must
-        // be hashed; substituting an unrelated local snapshot is refused.
-        let verification = if is_absolute_path_reference(reference) {
-            let referenced = std::fs::canonicalize(reference).map_err(|error| {
-                format!("referenced file '{reference}' cannot be resolved: {error}")
-            })?;
-            let snapshot = std::fs::canonicalize(&row.snapshot).map_err(|error| {
-                format!(
-                    "snapshot {} for reference '{reference}' cannot be resolved: {error}",
-                    row.snapshot.display()
-                )
-            })?;
-            if referenced != snapshot {
-                return Err(format!(
-                    "reference '{reference}' is a local absolute path but the manifest \
-                     snapshot {} is a different file; local file references must hash the \
-                     referenced file itself",
-                    row.snapshot.display()
-                ));
+        let target = classify_reference(reference, source_root)?;
+        let snapshot_label = format!(
+            "snapshot {} for reference '{reference}'",
+            row.snapshot.display()
+        );
+
+        // The one open: regular-file/symlink/FIFO safety and handle
+        // identity are enforced here (see `open_verified_regular_file`).
+        let mut opened = open_verified_regular_file(&row.snapshot, &snapshot_label)?;
+
+        let verification = match &target {
+            ReferenceTarget::AbsolutePath | ReferenceTarget::RepoRelative { .. } => {
+                // Local file reference: the hashed snapshot must BE the
+                // referenced file, and the referenced file's CURRENT
+                // inode identity must equal the identity of the handle
+                // the bytes are streamed from.
+                let referenced = resolve_referenced_file(reference, &target, &row.snapshot)?;
+                let referenced_metadata = std::fs::metadata(&referenced).map_err(|error| {
+                    format!(
+                        "cannot inspect referenced file {} for reference '{reference}': {error}",
+                        referenced.display()
+                    )
+                })?;
+                if file_identity(&referenced_metadata) != opened.identity {
+                    return Err(format!(
+                        "reference '{reference}' resolved to {} but the hashed snapshot \
+                         handle addresses a different file; the referenced file changed \
+                         identity during validation and the review is refused",
+                        referenced.display()
+                    ));
+                }
+                if target == ReferenceTarget::AbsolutePath {
+                    SNAPSHOT_VERIFICATION_REFERENCED_FILE
+                } else {
+                    SNAPSHOT_VERIFICATION_SOURCE_ROOTED_FILE
+                }
             }
-            SNAPSHOT_VERIFICATION_REFERENCED_FILE
-        } else {
-            // URL / GitHub shorthand / repo-relative spec path: the mapping
-            // to a local archived snapshot is operator-attested. This seam
-            // verifies the snapshot's bytes against the expected sha256 —
-            // it is NOT live upstream verification, and no network fetch
-            // ever happens here.
-            SNAPSHOT_VERIFICATION_OPERATOR_ATTESTED
+            ReferenceTarget::OperatorAttested => SNAPSHOT_VERIFICATION_OPERATOR_ATTESTED,
         };
-        let mut file = open_snapshot_file(&row.snapshot)?;
+
         let mut hasher = Sha256::new();
         let mut buffer = vec![0_u8; SNAPSHOT_HASH_BUFFER_BYTES];
         loop {
-            let read = file.read(&mut buffer).map_err(|error| {
+            let read = opened.file.read(&mut buffer).map_err(|error| {
                 format!("cannot hash snapshot {}: {error}", row.snapshot.display())
             })?;
             if read == 0 {
@@ -529,6 +773,7 @@ pub(crate) fn preview_wiki_review(
     project: &str,
     id: &str,
     manifest_path: &Path,
+    source_root: Option<&Path>,
 ) -> Result<Value, String> {
     let db_path = MemoryServer::resolve_named_project_db_path_in_home(
         project,
@@ -566,7 +811,7 @@ pub(crate) fn preview_wiki_review(
 
     let manifest = load_source_manifest(manifest_path)?;
     let candidate = review_candidate(&entry)?;
-    let records = verify_source_manifest(&manifest, &candidate.references)?;
+    let records = verify_source_manifest(&manifest, &candidate.references, source_root)?;
     let bundle_hash = derive_source_bundle_hash(&records);
     let store_db_path = canonical_store_db_path(&db_path);
     let review_digest =
@@ -609,7 +854,9 @@ pub(crate) fn preview_wiki_review(
             "URL/GitHub references map to operator-attested local snapshots: snapshot bytes \
              are verified against the manifest sha256, not against live upstream content; \
              no network fetch happens",
-            "local absolute-path references must hash the referenced file itself",
+            "local absolute-path references and docs//skill/ references (resolved under \
+             --source-root) must hash the referenced file itself; unrelated snapshot \
+             substitution is refused",
             "validation observes snapshot bytes at validation time; no atomicity across \
              the manifest, the snapshots, and the database write is claimed",
         ],
@@ -625,6 +872,7 @@ pub(crate) struct WikiReviewApply {
     pub(crate) expected_revision: i64,
     pub(crate) expected_review_digest: String,
     pub(crate) manifest_path: PathBuf,
+    pub(crate) source_root: Option<PathBuf>,
 }
 
 pub(crate) fn apply_wiki_review(
@@ -699,7 +947,11 @@ pub(crate) fn apply_wiki_review(
             ));
         }
         let candidate = review_candidate(&entry)?;
-        let records = verify_source_manifest(&manifest, &candidate.references)?;
+        let records = verify_source_manifest(
+            &manifest,
+            &candidate.references,
+            request.source_root.as_deref(),
+        )?;
         let bundle_hash = derive_source_bundle_hash(&records);
         let review_digest = compute_review_digest(
             &request.project,
