@@ -78,3 +78,5 @@ Cache hits retain the diagnostics of the cached computation, not a new rerank ru
 rerank policy counts and baseline rank flips. Its per-case `rerank` now also
 contains the same input score gap and requested top-k. Detailed replay remains
 operator-scoped; the shared latest-status artifact stays aggregate-only.
+Replay's `returned[].scores` is populated from the search row's canonical
+`score` object, and `returned[].source` retains its source label for analysis.

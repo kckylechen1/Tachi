@@ -35,6 +35,7 @@ async fn tachi_tune_recall_simulate_reports_hit_metrics_without_access_mutation(
             let mut alpha = make_entry("recall-sim-alpha");
             alpha.path = "/scratch/tachi/recall-sim-alpha".to_string();
             alpha.summary = "Recall simulate alpha".to_string();
+            alpha.source = "manual".to_string();
             alpha.text =
                 "RECALL_SIM_ALPHA_NEEDLE_20260626 clean-cli dry-run force delete".to_string();
             alpha.keywords = vec!["recall-sim".to_string(), "clean-cli".to_string()];
@@ -80,6 +81,13 @@ async fn tachi_tune_recall_simulate_reports_hit_metrics_without_access_mutation(
     assert_eq!(parsed["metrics"]["miss_count"], json!(1));
     assert_eq!(parsed["metrics"]["recall_at_k"], json!(0.5));
     assert_eq!(parsed["metrics"]["mrr"], json!(0.5));
+    let returned = &parsed["cases"][0]["returned"][0];
+    assert!(
+        returned["scores"]["fts"].as_f64().is_some(),
+        "replay must retain actual hybrid score components"
+    );
+    assert_eq!(returned["scores"]["final"], returned["relevance"]);
+    assert_eq!(returned["source"], json!("manual"));
     assert_eq!(parsed["metrics"]["recall_at_1"], json!(0.5));
     assert!(
         parsed["metrics"]["recall_at_3"].is_null(),
