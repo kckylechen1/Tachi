@@ -3473,8 +3473,9 @@ pub(crate) struct BackupDecision {
 
 #[derive(Debug)]
 pub(crate) enum BackupOutcome {
-    /// A `.migration-bak` of the `version` state was written.
-    Written(PathBuf),
+    /// A `.migration-bak` of the `version` state was written. The path is
+    /// read only by tests (production callers need just the covered version).
+    Written(#[cfg_attr(not(test), allow(dead_code))] PathBuf),
     /// `PRAGMA schema_version == 0`: no schema to back up (the accepted
     /// zero-cookie limit when the file is not actually empty).
     SkippedEmptySchema,
@@ -3484,6 +3485,7 @@ pub(crate) enum BackupOutcome {
 }
 
 impl BackupDecision {
+    #[cfg(test)]
     pub(crate) fn backup_path(&self) -> Option<&PathBuf> {
         match &self.outcome {
             BackupOutcome::Written(path) => Some(path),
