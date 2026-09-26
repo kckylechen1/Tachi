@@ -1007,6 +1007,7 @@ impl super::super::LlmClient {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .tracker();
         let background_persist_lock = Arc::clone(&self.background_persist_lock);
+        let writer = Arc::clone(&self.provider_persist_writer);
         let completion = tracker.track();
 
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
@@ -1015,7 +1016,7 @@ impl super::super::LlmClient {
                 let result = {
                     let _persist_guard = background_persist_lock.lock().await;
                     tokio::task::spawn_blocking(move || {
-                        persist_llm_usage_blocking(db_path, migration, record)
+                        persist_llm_usage_blocking(&writer, db_path, migration, record)
                     })
                     .await
                     .map_err(|err| format!("persist llm usage join failed: {err}"))
@@ -1027,7 +1028,7 @@ impl super::super::LlmClient {
                 }
             });
         } else {
-            if let Err(err) = persist_llm_usage_blocking(db_path, migration, record) {
+            if let Err(err) = persist_llm_usage_blocking(&writer, db_path, migration, record) {
                 tracker.record_error(err.clone());
                 tracing::warn!("[llm] {err}");
             }
@@ -1132,12 +1133,15 @@ fn redact_provider_response(resp_text: &str) -> String {
     format!("provider response redacted ({} bytes)", resp_text.len())
 }
 
+/// One usage row per call, never coalesced. The insert reuses the client's
+/// retained vault handle when it is still valid (audit H1).
 fn persist_llm_usage_blocking(
+    writer: &crate::llm::ProviderPersistWriter,
     db_path: std::path::PathBuf,
     migration: memcore::MigrationAuthority,
     record: LlmUsageEvent,
 ) -> Result<(), String> {
-    let db_path = db_path
+    let db_path_str = db_path
         .to_str()
         .ok_or_else(|| "persist llm usage: invalid db path".to_string())?;
     let open_context = memcore::DbOpenContext {
@@ -1145,15 +1149,21 @@ fn persist_llm_usage_blocking(
         migration,
         required_profile: memcore::ProfileRequirement::AtLeast(memcore::StoreProfile::TachiFull),
     };
-    let store = memcore::MemoryStore::open_with_context_and_busy_timeout(
-        db_path,
-        &open_context,
-        LLM_USAGE_PERSIST_SQLITE_BUSY_TIMEOUT,
-    )
-    .map_err(|err| format!("persist llm usage open db: {err}"))?;
-    store
-        .record_llm_usage(&record)
-        .map_err(|err| format!("persist llm usage insert: {err}"))
+    let insert = |store: &memcore::MemoryStore| {
+        store
+            .record_llm_usage(&record)
+            .map_err(|err| format!("persist llm usage insert: {err}"))
+    };
+    writer.write(&db_path, insert, || {
+        let store = memcore::MemoryStore::open_with_context_and_busy_timeout(
+            db_path_str,
+            &open_context,
+            LLM_USAGE_PERSIST_SQLITE_BUSY_TIMEOUT,
+        )
+        .map_err(|err| format!("persist llm usage open db: {err}"))?;
+        insert(&store)?;
+        Ok((store, ()))
+    })
 }
 
 #[cfg(test)]
