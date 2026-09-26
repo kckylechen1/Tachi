@@ -430,6 +430,35 @@ async fn pending_hidden_approve_default_visible_ordinary_edit_hidden() {
 }
 
 #[tokio::test]
+async fn ordinary_wiki_edit_removes_bundle_without_receipt() {
+    let (server, _home) = seed_wiki_project_entries(vec![]);
+    let fixture = ManifestFixture::new();
+    let path = "/wiki/engineering/review-cli/orphan-bundle";
+    let id = write_pending_review_entry(&server, path, fixture.references()).await;
+    let mut entry = wiki_row(&server, &id);
+    entry.metadata["source_bundle_hash"] = json!("obsolete-bundle");
+    assert!(entry.metadata.get("review_receipt").is_none());
+    server
+        .with_named_project_store("wiki", |store| {
+            store.upsert(&entry).map_err(|error| error.to_string())
+        })
+        .expect("seed old bundle without receipt");
+
+    let mut edit = review_write_params(path, fixture.references(), bounded_shared_metadata());
+    edit.text = format!("{REVIEW_NEEDLE} ordinary edit of an old bundle.");
+    server
+        .tachi_wiki_write(Parameters(edit))
+        .await
+        .expect("edit");
+    let edited = wiki_row(&server, &id);
+    assert!(
+        edited.metadata.get("source_bundle_hash").is_none(),
+        "ordinary projection writes must remove obsolete bundles even without a pre-read receipt"
+    );
+    assert_eq!(edited.metadata["lifecycle"], json!("pending_review"));
+}
+
+#[tokio::test]
 async fn stale_revision_digest_or_applicability_refuse_with_no_db_change() {
     let (server, _home) = seed_wiki_project_entries(vec![]);
     let fixture = ManifestFixture::new();

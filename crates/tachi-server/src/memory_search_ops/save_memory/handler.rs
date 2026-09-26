@@ -352,7 +352,7 @@ const PUBLIC_WIKI_AUTHORITY_KEYS: [&str; 3] =
     ["review_receipt", "source_bundle_hash", "source_ref"];
 
 /// Inherited approval fields an ordinary dedicated Wiki projection write
-/// invalidates when it updates an already-approved row. Deliberately the
+/// invalidates on every content write. Deliberately the
 /// same authority keys the public path strips, minus `source_ref` (a
 /// plain provenance pointer the candidate layer already re-stamps).
 const WIKI_PROJECTION_STALE_APPROVAL_KEYS: [&str; 2] = ["review_receipt", "source_bundle_hash"];
@@ -750,8 +750,7 @@ async fn handle_save_memory_impl(
     // `tachi_wiki_write` family) strip caller-supplied review authority at
     // the facade, but patch inheritance re-attaches an EXISTING row's
     // receipt and bundle hash on update. An ordinary dedicated Wiki write
-    // is never itself an approval, so when it updates a row that carries
-    // one, the inherited operator approval is removed atomically in the
+    // is never itself an approval, so inherited authority is always removed in the
     // same projection transaction: the new revision returns to the
     // pending/advisory candidate state instead of parading stale approval.
     // The operator approval seam (`wiki_ops::review`) writes through the
@@ -765,11 +764,9 @@ async fn handle_save_memory_impl(
     {
         constrain_public_wiki_metadata(&mut entry.metadata, &entry.path, &entry.scope)?;
         PUBLIC_WIKI_AUTHORITY_KEYS.to_vec()
-    } else if wiki_projection
-        && existing_entry
-            .as_ref()
-            .is_some_and(|existing| existing.metadata.get("review_receipt").is_some())
-    {
+    } else if wiki_projection {
+        // Do not condition transaction-owned removals on the facade pre-read:
+        // the winner can gain approval before the writer snapshot is acquired.
         WIKI_PROJECTION_STALE_APPROVAL_KEYS.to_vec()
     } else {
         Vec::new()
