@@ -7,14 +7,60 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-struct Fixture(PathBuf);
-impl Drop for Fixture {
+/// tachi#1988: macOS runs a Gatekeeper/XProtect scan (syspolicyd ->
+/// XprotectService, serialized machine-wide) on the first exec of every newly
+/// written executable file, ~0.15-0.4 s idle and several seconds under load.
+/// The verdict is cached per file, so re-exec (also through a symlink) costs
+/// ~10 ms. Each distinct stub body is therefore written once per test here and
+/// every case's `bin/<name>` links to it: scan cost scales with distinct
+/// bodies, not with cases.
+struct StubStore {
+    dir: PathBuf,
+    bodies: std::cell::RefCell<Vec<String>>,
+}
+impl StubStore {
+    fn new() -> Self {
+        let dir = std::env::temp_dir().join(format!("tachi-1988-stubs-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&dir).unwrap();
+        // Link targets must be absolute: `temp_dir()` is `TMPDIR` verbatim, and
+        // a relative one (`TMPDIR=.`) would resolve beneath each `bin/` and
+        // dangle. Canonical, like the fixture roots.
+        let dir = dir.canonicalize().unwrap();
+        Self {
+            dir,
+            bodies: Default::default(),
+        }
+    }
+    /// The store file holding exactly `body`, written on first request.
+    fn install(&self, body: &str) -> PathBuf {
+        let mut bodies = self.bodies.borrow_mut();
+        let index = match bodies.iter().position(|known| known == body) {
+            Some(index) => index,
+            None => {
+                let path = self.dir.join(format!("stub-{}", bodies.len()));
+                fs::write(&path, body).unwrap();
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+                bodies.push(body.to_string());
+                bodies.len() - 1
+            }
+        };
+        self.dir.join(format!("stub-{index}"))
+    }
+}
+impl Drop for StubStore {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.dir);
+    }
+}
+
+struct Fixture<'s>(PathBuf, &'s StubStore);
+impl Drop for Fixture<'_> {
     fn drop(&mut self) {
         // Only the directory created exclusively by this fixture is owned here.
         let _ = fs::remove_dir_all(&self.0);
     }
 }
-impl Fixture {
+impl Fixture<'_> {
     fn command(&self, program: &str, cwd: &Path) -> Command {
         assert!(cwd.starts_with(&self.0));
         let mut cmd = Command::new(program);
@@ -64,10 +110,22 @@ impl Fixture {
         assert!(output.status.success(), "CLI {args:?}: {output:?}");
         serde_json::from_slice(&output.stdout).unwrap()
     }
+    /// `bin/<name>` now runs `body`. A previous link is replaced, never
+    /// written through, so the shared store file keeps its body.
     fn script(&self, name: &str, body: &str) {
         let path = self.0.join("bin").join(name);
-        fs::write(&path, body).unwrap();
-        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+        match fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => panic!("replace stub {}: {error}", path.display()),
+        }
+        let target = self.1.install(body);
+        std::os::unix::fs::symlink(&target, &path).unwrap();
+        // A dangling or misdirected link would silently turn the stub into a
+        // spawn failure; prove the link runs exactly the installed body.
+        let resolved = fs::canonicalize(&path)
+            .unwrap_or_else(|error| panic!("{name} stub link {} dangles: {error}", path.display()));
+        assert_eq!(resolved, target, "{name} stub link");
     }
 }
 
@@ -75,7 +133,8 @@ impl Fixture {
 fn closed_pr_cli_preserves_unmerged_worktree_and_refs() {
     let root = std::env::temp_dir().join(format!("tachi-1906-{}", uuid::Uuid::new_v4()));
     fs::create_dir(&root).unwrap();
-    let fixture = Fixture(root.canonicalize().unwrap());
+    let stubs = StubStore::new();
+    let fixture = Fixture(root.canonicalize().unwrap(), &stubs);
     for dir in [
         "bin",
         "home/.tachi/global",
@@ -219,10 +278,10 @@ fn closed_pr_cli_preserves_unmerged_worktree_and_refs() {
     assert_eq!(fs::read(&marker_path).unwrap(), marker);
 }
 
-fn merged_cli_case(registered_pr: bool, case: &str) {
+fn merged_cli_case(stubs: &StubStore, registered_pr: bool, case: &str) {
     let root = std::env::temp_dir().join(format!("tachi-merged-head-{}", uuid::Uuid::new_v4()));
     fs::create_dir(&root).unwrap();
-    let fixture = Fixture(root.canonicalize().unwrap());
+    let fixture = Fixture(root.canonicalize().unwrap(), stubs);
     for dir in [
         "bin",
         "home/.tachi/global",
@@ -465,39 +524,55 @@ fn merged_cli_case(registered_pr: bool, case: &str) {
 
 #[test]
 fn merged_pr_cli_preserves_later_unique_and_empty_commits() {
+    let stubs = StubStore::new();
     for registered in [true, false] {
         for case in ["unique", "empty"] {
-            merged_cli_case(registered, case);
+            merged_cli_case(&stubs, registered, case);
         }
+    }
+}
+
+/// Head/branch evidence matrix, run once per PR lookup mode. tachi#1988: each
+/// case builds real repositories, a DB and three CLI runs (~0.6-1.7 s on an
+/// idle Mac), so the two lookup modes are separate tests to keep each well
+/// inside nextest's 120 s cap under load.
+const HEAD_AND_BRANCH_EVIDENCE_CASES: [&str; 12] = [
+    "missing-head",
+    "empty-head",
+    "malformed-head",
+    "zero-head",
+    "missing-branch",
+    "empty-branch",
+    "malformed-branch",
+    "registry-branch",
+    "local-branch",
+    "detached",
+    "unknown-head",
+    "exact",
+];
+
+#[test]
+fn merged_pr_cli_requires_head_and_branch_evidence_and_retains_exact_head_cleanup_for_registered_pr(
+) {
+    let stubs = StubStore::new();
+    for case in HEAD_AND_BRANCH_EVIDENCE_CASES {
+        merged_cli_case(&stubs, true, case);
     }
 }
 
 #[test]
-fn merged_pr_cli_requires_head_and_branch_evidence_and_retains_exact_head_cleanup() {
-    for registered in [true, false] {
-        for case in [
-            "missing-head",
-            "empty-head",
-            "malformed-head",
-            "zero-head",
-            "missing-branch",
-            "empty-branch",
-            "malformed-branch",
-            "registry-branch",
-            "local-branch",
-            "detached",
-            "unknown-head",
-            "exact",
-        ] {
-            merged_cli_case(registered, case);
-        }
+fn merged_pr_cli_requires_head_and_branch_evidence_and_retains_exact_head_cleanup_for_branch_lookup(
+) {
+    let stubs = StubStore::new();
+    for case in HEAD_AND_BRANCH_EVIDENCE_CASES {
+        merged_cli_case(&stubs, false, case);
     }
 }
 
-fn pr_lookup_error_cli_case(registered_pr: bool, case: &str) {
+fn pr_lookup_error_cli_case(stubs: &StubStore, registered_pr: bool, case: &str) {
     let root = std::env::temp_dir().join(format!("tachi-pr-lookup-{}", uuid::Uuid::new_v4()));
     fs::create_dir(&root).unwrap();
-    let fixture = Fixture(root.canonicalize().unwrap());
+    let fixture = Fixture(root.canonicalize().unwrap(), stubs);
     for dir in [
         "bin",
         "home/.tachi/global",
@@ -734,6 +809,7 @@ fn pr_lookup_error_cli_case(registered_pr: bool, case: &str) {
 
 #[test]
 fn registered_pr_lookup_errors_never_fall_back_to_another_merged_pr() {
+    let stubs = StubStore::new();
     for case in [
         "command-failure",
         "spawn-failure",
@@ -746,12 +822,13 @@ fn registered_pr_lookup_errors_never_fall_back_to_another_merged_pr() {
         "closed",
         "merged",
     ] {
-        pr_lookup_error_cli_case(true, case);
+        pr_lookup_error_cli_case(&stubs, true, case);
     }
 }
 
 #[test]
 fn branch_pr_lookup_distinguishes_invalid_evidence_from_absence() {
+    let stubs = StubStore::new();
     for case in [
         "command-failure",
         "spawn-failure",
@@ -766,7 +843,7 @@ fn branch_pr_lookup_distinguishes_invalid_evidence_from_absence() {
         "closed",
         "merged",
     ] {
-        pr_lookup_error_cli_case(false, case);
+        pr_lookup_error_cli_case(&stubs, false, case);
     }
 }
 
@@ -776,7 +853,8 @@ fn reconcile_warning_cli_case(case: &str) {
         uuid::Uuid::new_v4()
     ));
     fs::create_dir(&root).unwrap();
-    let fixture = Fixture(root.canonicalize().unwrap());
+    let stubs = StubStore::new();
+    let fixture = Fixture(root.canonicalize().unwrap(), &stubs);
     for dir in [
         "bin",
         "home/.tachi/global",
@@ -981,7 +1059,8 @@ fn completion_error_cli_case(withhold_db: bool) {
         uuid::Uuid::new_v4()
     ));
     fs::create_dir(&root).unwrap();
-    let fixture = Fixture(root.canonicalize().unwrap());
+    let stubs = StubStore::new();
+    let fixture = Fixture(root.canonicalize().unwrap(), &stubs);
     for dir in [
         "bin",
         "home/.tachi/global",
@@ -1235,7 +1314,8 @@ fn remote_delete_warning_cli_case(case: &str) {
         uuid::Uuid::new_v4()
     ));
     fs::create_dir(&root).unwrap();
-    let fixture = Fixture(root.canonicalize().unwrap());
+    let stubs = StubStore::new();
+    let fixture = Fixture(root.canonicalize().unwrap(), &stubs);
     for dir in [
         "bin",
         "home/.tachi/global",
