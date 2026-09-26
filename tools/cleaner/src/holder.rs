@@ -445,39 +445,99 @@ mod tests {
         bytes
     }
 
-    /// Drive the real call site (`Command`, argv, byte capture, stderr
-    /// filtering, classification) with a stub `lsof` that checks it was asked
-    /// `+D <target>` and replays exact stdout/stderr bytes and an exit code.
+    /// The one stub `lsof` body (tachi#1988). It finds its case directory
+    /// through `$0` (the per-case symlink), records its argv NUL-separated
+    /// for an exact byte compare, replays the case's stdout/stderr bytes,
+    /// marks the replay complete, and exits with the case's code.
     #[cfg(unix)]
-    fn stub_probe(
-        name: &str,
-        target: &Path,
-        stdout: &[u8],
-        stderr: &[u8],
-        code: i32,
-    ) -> HolderEvidence {
-        use std::os::unix::fs::PermissionsExt;
-        let case = unique_temp_dir(&format!("holder-1978-stub-{name}"));
-        std::fs::write(case.join("stdout"), stdout).unwrap();
-        std::fs::write(case.join("stderr"), stderr).unwrap();
-        let script = case.join("lsof");
-        std::fs::write(
-            &script,
-            format!(
-                "#!/bin/sh\n[ \"$1\" = '+D' ] && [ \"$2\" = '{}' ] || {{ echo 'STUB ARGV MISMATCH' >&2; exit 93; }}\ncat '{}/stdout'\ncat '{}/stderr' >&2\nexit {code}\n",
-                target.display(),
-                case.display(),
-                case.display()
-            ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let evidence = probe_holders_with(script.as_os_str(), target);
-        let _ = std::fs::remove_dir_all(&case);
-        if let HolderEvidence::Unknown(reason) = &evidence {
-            assert!(!reason.contains("STUB ARGV MISMATCH"), "{name}: {reason}");
+    const STUB_LSOF_BODY: &str = "#!/bin/sh\n\
+        d=\"${0%/*}\"\n\
+        printf '%s\\0' \"$@\" > \"$d/argv\" || exit 94\n\
+        cat \"$d/stdout\" || exit 94\n\
+        cat \"$d/stderr\" >&2 || exit 94\n\
+        read -r code < \"$d/code\" || exit 94\n\
+        : > \"$d/replayed\" || exit 94\n\
+        exit \"$code\"\n";
+
+    /// Drive the real call site (`Command`, argv, byte capture, stderr
+    /// filtering, classification) with a stub `lsof` that is asked
+    /// `+D <target>` and replays exact stdout/stderr bytes and an exit code.
+    ///
+    /// tachi#1988: macOS scans every newly written executable on its first
+    /// exec (about 0.4 s, far more when the scan queue is busy), so the body
+    /// is written once per test and each case execs it through its own
+    /// symlink next to that case's data files.
+    #[cfg(unix)]
+    struct StubLsof {
+        /// Canonical, so every link target is absolute (a relative `TMPDIR`
+        /// would otherwise leave links dangling).
+        dir: std::path::PathBuf,
+        body: std::path::PathBuf,
+    }
+
+    #[cfg(unix)]
+    impl StubLsof {
+        fn new() -> Self {
+            use std::os::unix::fs::PermissionsExt;
+            let dir = unique_temp_dir("holder-1988-lsof-stub")
+                .canonicalize()
+                .unwrap();
+            let body = dir.join("lsof-body");
+            std::fs::write(&body, STUB_LSOF_BODY).unwrap();
+            std::fs::set_permissions(&body, std::fs::Permissions::from_mode(0o700)).unwrap();
+            Self { dir, body }
         }
-        evidence
+
+        fn probe(
+            &self,
+            name: &str,
+            target: &Path,
+            stdout: &[u8],
+            stderr: &[u8],
+            code: i32,
+        ) -> HolderEvidence {
+            let case = self.dir.join(format!("case-{name}"));
+            std::fs::create_dir(&case).unwrap();
+            std::fs::write(case.join("stdout"), stdout).unwrap();
+            std::fs::write(case.join("stderr"), stderr).unwrap();
+            std::fs::write(case.join("code"), format!("{code}\n")).unwrap();
+            let lsof = case.join("lsof");
+            std::os::unix::fs::symlink(&self.body, &lsof).unwrap();
+            assert_eq!(
+                lsof.canonicalize()
+                    .unwrap_or_else(|e| panic!("{name}: stub link {lsof:?} dangles: {e}")),
+                self.body,
+                "{name}: stub link must resolve to the stub body"
+            );
+            assert_eq!(
+                std::fs::read(&lsof).unwrap(),
+                STUB_LSOF_BODY.as_bytes(),
+                "{name}: stub link must read as the stub body"
+            );
+            let evidence = probe_holders_with(lsof.as_os_str(), target);
+            assert!(
+                case.join("replayed").is_file(),
+                "{name}: the stub did not replay its case ({evidence:?})"
+            );
+            let mut expected = b"+D\0".to_vec();
+            expected.extend_from_slice(target.as_os_str().as_encoded_bytes());
+            expected.push(0);
+            let argv = std::fs::read(case.join("argv")).unwrap();
+            assert!(
+                argv == expected,
+                "{name}: stub argv {:?} != expected {:?}",
+                String::from_utf8_lossy(&argv),
+                String::from_utf8_lossy(&expected)
+            );
+            evidence
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for StubLsof {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
     }
 
     #[cfg(unix)]
@@ -495,8 +555,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn stub_tracefs_only_empty_walk_is_clear_on_linux_only() {
+        let stub = StubLsof::new();
         let target = unique_temp_dir("holder-1978-clear");
-        let evidence = stub_probe("exit1", &target, b"", LINUX_TRACEFS_WARNING, 1);
+        let evidence = stub.probe("exit1", &target, b"", LINUX_TRACEFS_WARNING, 1);
         if cfg!(target_os = "linux") {
             assert_eq!(evidence, HolderEvidence::Clear);
         } else {
@@ -510,6 +571,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn stub_exit_0_without_rows_and_exit_1_with_a_header_stay_unknown() {
+        let stub = StubLsof::new();
         let target = unique_temp_dir("holder-1978-norows");
         for (name, stdout, stderr, code) in [
             ("e0-empty", &b""[..], &b""[..], 0),
@@ -518,7 +580,7 @@ mod tests {
             ("e1-header", HEADER, &b""[..], 1),
             ("e1-header-w", HEADER, LINUX_TRACEFS_WARNING, 1),
         ] {
-            assert_unknown(name, stub_probe(name, &target, stdout, stderr, code));
+            assert_unknown(name, stub.probe(name, &target, stdout, stderr, code));
         }
         let _ = std::fs::remove_dir_all(&target);
     }
@@ -526,11 +588,12 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn stub_holder_next_to_the_warning_is_held() {
+        let stub = StubLsof::new();
         let target = unique_temp_dir("holder-1978-held");
         let pid = std::process::id();
         let mut stdout = HEADER.to_vec();
         stdout.extend_from_slice(format!("x {pid} u 3r REG 1,4 0 1 /f\n").as_bytes());
-        let evidence = stub_probe("held", &target, &stdout, LINUX_TRACEFS_WARNING, 0);
+        let evidence = stub.probe("held", &target, &stdout, LINUX_TRACEFS_WARNING, 0);
         let HolderEvidence::Held(procs) = &evidence else {
             panic!("a holder row must be Held despite the warning: {evidence:?}");
         };
@@ -542,13 +605,14 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn stub_unrecognized_stdout_stays_unknown() {
+        let stub = StubLsof::new();
         let target = unique_temp_dir("holder-1978-garbage");
         assert_unknown(
             "exit1+warning",
-            stub_probe("g1w", &target, b"garbage\n", LINUX_TRACEFS_WARNING, 1),
+            stub.probe("g1w", &target, b"garbage\n", LINUX_TRACEFS_WARNING, 1),
         );
-        assert_unknown("exit1", stub_probe("g1", &target, b"garbage\n", b"", 1));
-        assert_unknown("exit0", stub_probe("g0", &target, b"garbage\n", b"", 0));
+        assert_unknown("exit1", stub.probe("g1", &target, b"garbage\n", b"", 1));
+        assert_unknown("exit0", stub.probe("g0", &target, b"garbage\n", b"", 0));
         let _ = std::fs::remove_dir_all(&target);
     }
 
@@ -556,11 +620,12 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn stub_odd_exit_codes_stay_unknown() {
+        let stub = StubLsof::new();
         let target = unique_temp_dir("holder-1978-exit");
         for code in [2, 3, 126, 127] {
             assert_unknown(
                 &format!("exit {code}"),
-                stub_probe(
+                stub.probe(
                     &format!("x{code}"),
                     &target,
                     b"",
@@ -590,8 +655,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn stub_portal_pair_is_dropped_only_when_disjoint_and_paired() {
+        let stub = StubLsof::new();
         let target = unique_temp_dir("holder-1978-portal");
-        let evidence = stub_probe("gha", &target, b"", GHA_TRACEFS_AND_PORTAL, 1);
+        let evidence = stub.probe("gha", &target, b"", GHA_TRACEFS_AND_PORTAL, 1);
         if cfg!(target_os = "linux") {
             assert_eq!(evidence, HolderEvidence::Clear);
         } else {
@@ -604,13 +670,13 @@ mod tests {
         ] {
             let mut stderr = LINUX_TRACEFS_WARNING.to_vec();
             stderr.extend_from_slice(&portal_pair_for(&mount));
-            assert_unknown(name, stub_probe(name, &target, b"", &stderr, 1));
+            assert_unknown(name, stub.probe(name, &target, b"", &stderr, 1));
         }
         let mut lone = LINUX_TRACEFS_WARNING.to_vec();
         lone.extend_from_slice(
             b"lsof: WARNING: can't stat() fuse.portal file system /run/user/1000/doc\n",
         );
-        assert_unknown("lone", stub_probe("lone", &target, b"", &lone, 1));
+        assert_unknown("lone", stub.probe("lone", &target, b"", &lone, 1));
         let _ = std::fs::remove_dir_all(&target);
     }
 
@@ -618,6 +684,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn stub_other_file_systems_and_lone_warning_lines_stay_unknown() {
+        let stub = StubLsof::new();
         let target = unique_temp_dir("holder-1978-fstype");
         let cases: [(&str, &[u8]); 3] = [
             (
@@ -631,7 +698,7 @@ mod tests {
             ),
         ];
         for (name, stderr) in cases {
-            assert_unknown(name, stub_probe(name, &target, b"", stderr, 1));
+            assert_unknown(name, stub.probe(name, &target, b"", stderr, 1));
         }
         let _ = std::fs::remove_dir_all(&target);
     }
@@ -640,9 +707,10 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn stub_non_utf8_warning_stays_unknown() {
+        let stub = StubLsof::new();
         let target = unique_temp_dir("holder-1978-bytes");
         let stderr = b"lsof: WARNING: can't stat() tracefs file system /tmp/m-\xff\n      Output information may be incomplete.\n";
-        assert_unknown("non-utf8", stub_probe("nonutf8", &target, b"", stderr, 1));
+        assert_unknown("non-utf8", stub.probe("nonutf8", &target, b"", stderr, 1));
         let _ = std::fs::remove_dir_all(&target);
     }
 
@@ -651,6 +719,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn stub_warning_over_the_callers_alias_stays_unknown() {
+        let stub = StubLsof::new();
         let root = unique_temp_dir("holder-1978-alias");
         let real = root.join("real");
         let aliases = root.join("aliases");
@@ -658,7 +727,7 @@ mod tests {
         std::fs::create_dir_all(&aliases).unwrap();
         let alias = aliases.join("link");
         std::os::unix::fs::symlink(&real, &alias).unwrap();
-        let control = stub_probe(
+        let control = stub.probe(
             "alias-control",
             &alias,
             b"",
@@ -670,7 +739,7 @@ mod tests {
         }
         assert_unknown(
             "alias",
-            stub_probe("alias", &alias, b"", &tracefs_pair_for(&aliases), 1),
+            stub.probe("alias", &alias, b"", &tracefs_pair_for(&aliases), 1),
         );
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -679,12 +748,13 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn stub_exit_0_with_a_real_diagnostic_stays_unknown() {
+        let stub = StubLsof::new();
         let target = unique_temp_dir("holder-1978-exit0");
         let error = b"lsof: WARNING: can't opendir(/x/sub): Permission denied\n";
-        assert_unknown("exit0-header", stub_probe("e0h", &target, HEADER, error, 0));
+        assert_unknown("exit0-header", stub.probe("e0h", &target, HEADER, error, 0));
         let mut both = LINUX_TRACEFS_WARNING.to_vec();
         both.extend_from_slice(error);
-        let evidence = stub_probe("e1", &target, b"", &both, 1);
+        let evidence = stub.probe("e1", &target, b"", &both, 1);
         let HolderEvidence::Unknown(reason) = &evidence else {
             panic!("a partial walk must stay Unknown next to the warning: {evidence:?}");
         };
@@ -698,6 +768,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn stub_warning_inside_or_over_the_walk_stays_unknown() {
+        let stub = StubLsof::new();
         let target = unique_temp_dir("holder-1978-inside");
         for (name, mount) in [
             ("inside", target.join("mnt")),
@@ -706,7 +777,7 @@ mod tests {
         ] {
             assert_unknown(
                 name,
-                stub_probe(name, &target, b"", &tracefs_pair_for(&mount), 1),
+                stub.probe(name, &target, b"", &tracefs_pair_for(&mount), 1),
             );
         }
         let _ = std::fs::remove_dir_all(&target);
