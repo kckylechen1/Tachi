@@ -1,6 +1,6 @@
 # Current-Store Admission — refuse damaged state, rebuild only what is derived
 
-> **Status:** spec, pre-implementation, revision 6 (after five cross-vendor attack rounds).
+> **Status:** spec, pre-implementation, revision 7 (after six cross-vendor attack rounds).
 > **Issue:** #1995 (found in #1983's round-4 cold review). **Parent:** #1987.
 > **Anchors:** `db/open.rs:630` (damaged current input is refused, not
 > repaired), #1119 (migration authority), #1983 (read-only preflight plus
@@ -193,24 +193,51 @@ It extends #1983's integrity step, under both D7 policies:
   is silently recreated. Under this spec it is refused. D7's allowance
   stays: a *present previous* `memory_search_generation_after_update`
   definition is accepted and normalized. Only an *absent* trigger refuses.
-- **Read-only opens** (`store/open.rs` ~923-946, which call
-  `validate_current_schema_integrity` but never enter the initializer's
-  preflight) run the same presence check right after that call, before
-  returning a handle. A missing required object refuses with
+- **Read-only opens** (`store/open.rs` ~923-946) call
+  `validate_current_schema_integrity` (~925) and then the persistent-trigger
+  inventory (~931/935), but they never enter the initializer's preflight.
+  These opens run the same presence check **after the trigger inventory and
+  before row-guard installation (~937)**, so today's integrity and trigger
+  errors keep their precedence. A missing required object is refused with
   `CurrentSchemaIncomplete`. Without this, `tachi status` reads a
   read-only-opened store and reports `derived_items = 0` for a table that
   does not exist (`status_ops/db_probe.rs:46-59,102-110`). That is a silent
   wrong answer.
 - **Maintenance opens** (`open_existing_read_write`, ~1009-1070) run it at
-  the same point: after the existing integrity validation, before any
-  maintenance write.
+  the same relative point: after the existing integrity validation and
+  trigger inventory (~1005-1006), before row-guard installation (~1007) and
+  before any maintenance write.
+- **The public `db::init_schema`** (`db/schema.rs:15-41`) has its own
+  integrity check, PRAGMAs, transaction and `init_schema_inner`, outside
+  the shared funnel. `open_in_memory` always gives it fresh storage, but a
+  caller can hand it an existing current connection. When the connection
+  is stamped current (`s == E`), it runs the same presence check before
+  its PRAGMAs and transaction. On fresh input it does nothing.
+- **The identity-bound reopen after fresh creation**
+  (`reopen_initialized_file_store`, `store/open.rs:739-791`) opens a new
+  connection after initialization commits. It runs the presence check next
+  to its existing version and integrity validation. Otherwise another
+  process could drop a required table between commit and reopen, and the
+  handle would be returned anyway.
 - **Pending stores are not checked.** Migrations legitimately create
   objects.
 
-**Covered entry points (exhaustive):** the store/labelled/unlabelled writer
-doors and the bare initializer, via the shared preflight and in-tx
-re-evaluation; the private image door; read-only opens; and maintenance
-opens.
+**Covered entry points (exhaustive).** Checked against `store/open.rs` and
+`db/open.rs` at fbab02c7d:
+
+| Entry point | Covered via |
+|---|---|
+| `open`, `open_with_label`, `open_with_context`, `open_with_context_and_busy_timeout`, `open_with_label_and_context`, and the admin `open_and_vault_upsert_key_health_*` | shared writer funnel (`open_with_label_inner_while_startup_owned`) |
+| the bare `init_schema_with_label_mut` | shared preflight and in-tx re-evaluation |
+| `reopen_initialized_file_store` | its own presence check (above) |
+| `open_private_image` | private-image door |
+| `open_read_only`, `open_read_only_immutable`, `open_read_only_with_label`, `open_read_only_existing_schema_compat` | read-only check, placed after the trigger inventory. Pending stores are excluded |
+| `open_existing_read_write` | maintenance check, placed after the trigger inventory |
+| `db::init_schema` / `open_in_memory` | its own presence check when the store is current; fresh storage is a no-op |
+
+The `pub(crate)` connection helpers `db::open::open_read_write*` and
+`db::open::open_read_only` are plumbing. They perform no admission, and
+their production callers are the entry points above.
 
 **Named exceptions** are not covered, and the gap is documented rather than
 silent:
@@ -346,6 +373,14 @@ Until that command exists, the runbook documents manual recovery.
   `open_existing_read_write`. Each refusal returns `CurrentSchemaIncomplete`
   before a handle is returned or any maintenance write happens. A
   `tachi status` probe of that store must not report `derived_items = 0`.
+  **Precedence regression:** an `F@39` store missing both `derived_items`
+  and `memories_reserved_refs_insert_guard` returns today's missing-trigger
+  error on the read-only door and on the maintenance door, not
+  `CurrentSchemaIncomplete`. Additional cases:
+  - `db::init_schema` on an existing current connection that is missing
+    `derived_items` is refused.
+  - The fresh-create reopen is refused when a hook drops `derived_items`
+    between the initialization commit and the reopen.
 - **T8 Invariance and supersession.** Every existing test passes unchanged,
   except tests that assert the old silent repair and the D7 T9 phase
   expectation. Each of those is listed with its before and after.
