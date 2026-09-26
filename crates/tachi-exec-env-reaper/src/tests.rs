@@ -613,40 +613,118 @@ fn tracefs_pair_for(mount: &Path) -> Vec<u8> {
     bytes
 }
 
-/// tachi#1978: drive the real call site (`Command`, argv, byte capture, stderr
-/// filtering, pin exclusion, classification) with a stub `lsof` that checks
-/// it was asked `+D <target>` and replays exact bytes and an exit status.
+/// The one stub `lsof` body (tachi#1988). It finds its case directory through
+/// `$0` (the per-case symlink), records its argv NUL-separated for an exact
+/// byte compare, replays the case's stdout/stderr bytes, marks the replay
+/// complete, and exits with the case's code.
 #[cfg(unix)]
-fn stub_lsof_probe(
-    name: &str,
-    target: &Path,
-    stdout: &[u8],
-    stderr: &[u8],
-    code: i32,
-    ignored: Option<HolderExclusion>,
-) -> HolderCheck {
-    use std::os::unix::fs::PermissionsExt;
-    let case = unique_temp_dir(&format!("tachi-reaper-1978-{name}"));
-    std::fs::write(case.join("stdout"), stdout).unwrap();
-    std::fs::write(case.join("stderr"), stderr).unwrap();
-    let script = case.join("lsof");
-    std::fs::write(
-        &script,
-        format!(
-            "#!/bin/sh\n[ \"$1\" = '+D' ] && [ \"$2\" = '{}' ] || {{ echo 'STUB ARGV MISMATCH' >&2; exit 93; }}\ncat '{}/stdout'\ncat '{}/stderr' >&2\nexit {code}\n",
-            target.display(),
-            case.display(),
-            case.display()
-        ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let check = lsof_holder_probe_with(script.as_os_str(), target, ignored);
-    let _ = std::fs::remove_dir_all(&case);
-    if let HolderCheck::Unknown(reason) = &check {
-        assert!(!reason.contains("STUB ARGV MISMATCH"), "{name}: {reason}");
+const STUB_LSOF_BODY: &str = "#!/bin/sh\n\
+    d=\"${0%/*}\"\n\
+    printf '%s\\0' \"$@\" > \"$d/argv\" || exit 94\n\
+    cat \"$d/stdout\" || exit 94\n\
+    cat \"$d/stderr\" >&2 || exit 94\n\
+    read -r code < \"$d/code\" || exit 94\n\
+    : > \"$d/replayed\" || exit 94\n\
+    exit \"$code\"\n";
+
+/// Writes the stub body as an owner-only executable. A child shell does the
+/// writing, so this process never holds a write descriptor on the file: in a
+/// multithreaded test binary (libtest runs tests on threads), another thread
+/// can fork while such a descriptor is open, and exec'ing the stub then fails
+/// with ETXTBSY until that child execs.
+#[cfg(unix)]
+fn write_stub_body(body: &Path) {
+    let status = std::process::Command::new("/bin/sh")
+        .args([
+            "-c",
+            "umask 077 && printf '%s' \"$2\" > \"$1\" && chmod 700 \"$1\"",
+            "sh",
+        ])
+        .arg(body)
+        .arg(STUB_LSOF_BODY)
+        .status()
+        .unwrap();
+    assert!(status.success(), "writing the stub body: {status}");
+}
+
+/// tachi#1978: drive the real call site (`Command`, argv, byte capture, stderr
+/// filtering, pin exclusion, classification) with a stub `lsof` that is
+/// asked `+D <target>` and replays exact bytes and an exit status.
+///
+/// tachi#1988: macOS scans every newly written executable on its first exec
+/// (about 0.4 s, far more when the scan queue is busy), so the body is
+/// written once per test and each case execs it through its own symlink
+/// next to that case's data files.
+#[cfg(unix)]
+struct StubLsof {
+    /// Canonical, so every link target is absolute (a relative `TMPDIR`
+    /// would otherwise leave links dangling).
+    dir: PathBuf,
+    body: PathBuf,
+}
+
+#[cfg(unix)]
+impl StubLsof {
+    fn new() -> Self {
+        let dir = unique_temp_dir("tachi-reaper-1988-lsof-stub")
+            .canonicalize()
+            .unwrap();
+        let body = dir.join("lsof-body");
+        write_stub_body(&body);
+        Self { dir, body }
     }
-    check
+
+    fn probe(
+        &self,
+        name: &str,
+        target: &Path,
+        stdout: &[u8],
+        stderr: &[u8],
+        code: i32,
+        ignored: Option<HolderExclusion>,
+    ) -> HolderCheck {
+        let case = self.dir.join(format!("case-{name}"));
+        std::fs::create_dir(&case).unwrap();
+        std::fs::write(case.join("stdout"), stdout).unwrap();
+        std::fs::write(case.join("stderr"), stderr).unwrap();
+        std::fs::write(case.join("code"), format!("{code}\n")).unwrap();
+        let lsof = case.join("lsof");
+        std::os::unix::fs::symlink(&self.body, &lsof).unwrap();
+        assert_eq!(
+            lsof.canonicalize()
+                .unwrap_or_else(|e| panic!("{name}: stub link {lsof:?} dangles: {e}")),
+            self.body,
+            "{name}: stub link must resolve to the stub body"
+        );
+        assert_eq!(
+            std::fs::read(&lsof).unwrap(),
+            STUB_LSOF_BODY.as_bytes(),
+            "{name}: stub link must read as the stub body"
+        );
+        let check = lsof_holder_probe_with(lsof.as_os_str(), target, ignored);
+        assert!(
+            case.join("replayed").is_file(),
+            "{name}: the stub did not replay its case ({check:?})"
+        );
+        let mut expected = b"+D\0".to_vec();
+        expected.extend_from_slice(target.as_os_str().as_encoded_bytes());
+        expected.push(0);
+        let argv = std::fs::read(case.join("argv")).unwrap();
+        assert!(
+            argv == expected,
+            "{name}: stub argv {:?} != expected {:?}",
+            String::from_utf8_lossy(&argv),
+            String::from_utf8_lossy(&expected)
+        );
+        check
+    }
+}
+
+#[cfg(unix)]
+impl Drop for StubLsof {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
 }
 
 #[cfg(unix)]
@@ -664,9 +742,10 @@ fn assert_unknown(case: &str, check: HolderCheck) {
 #[cfg(unix)]
 #[test]
 fn stub_tracefs_only_empty_walk_is_unheld_on_linux_only() {
+    let stub = StubLsof::new();
     let root = unique_temp_dir("tachi-reaper-1978-clear");
     let target = make_target_dir(&root, "x-target");
-    let check = stub_lsof_probe("exit1", &target, b"", LINUX_TRACEFS_WARNING, 1, None);
+    let check = stub.probe("exit1", &target, b"", LINUX_TRACEFS_WARNING, 1, None);
     if cfg!(target_os = "linux") {
         assert_eq!(check, HolderCheck::None);
     } else {
@@ -680,6 +759,7 @@ fn stub_tracefs_only_empty_walk_is_unheld_on_linux_only() {
 #[cfg(unix)]
 #[test]
 fn stub_exit_0_without_rows_and_exit_1_with_a_header_stay_unknown() {
+    let stub = StubLsof::new();
     let root = unique_temp_dir("tachi-reaper-1978-norows");
     let target = make_target_dir(&root, "x-target");
     for (name, stdout, stderr, code) in [
@@ -689,10 +769,7 @@ fn stub_exit_0_without_rows_and_exit_1_with_a_header_stay_unknown() {
         ("e1-header", LSOF_HEADER, &b""[..], 1),
         ("e1-header-w", LSOF_HEADER, LINUX_TRACEFS_WARNING, 1),
     ] {
-        assert_unknown(
-            name,
-            stub_lsof_probe(name, &target, stdout, stderr, code, None),
-        );
+        assert_unknown(name, stub.probe(name, &target, stdout, stderr, code, None));
     }
     let _ = std::fs::remove_dir_all(&root);
 }
@@ -703,6 +780,7 @@ fn stub_exit_0_without_rows_and_exit_1_with_a_header_stay_unknown() {
 #[cfg(unix)]
 #[test]
 fn stub_pin_only_listing_stays_unheld() {
+    let stub = StubLsof::new();
     let root = unique_temp_dir("tachi-reaper-1978-pin");
     let target = make_target_dir(&root, "x-target");
     let mut stdout = LSOF_HEADER.to_vec();
@@ -711,18 +789,18 @@ fn stub_pin_only_listing_stays_unheld() {
     let pin = Some(stub_pin());
     for code in [0, 1] {
         assert_eq!(
-            stub_lsof_probe(&format!("pin{code}"), &target, &stdout, b"", code, pin),
+            stub.probe(&format!("pin{code}"), &target, &stdout, b"", code, pin),
             HolderCheck::None
         );
     }
-    let with_warning = stub_lsof_probe("pin-w", &target, &stdout, LINUX_TRACEFS_WARNING, 1, pin);
+    let with_warning = stub.probe("pin-w", &target, &stdout, LINUX_TRACEFS_WARNING, 1, pin);
     if cfg!(target_os = "linux") {
         assert_eq!(with_warning, HolderCheck::None);
     } else {
         assert_unknown("pin-w", with_warning);
     }
     assert_eq!(
-        stub_lsof_probe("nopin", &target, &stdout, b"", 0, None),
+        stub.probe("nopin", &target, &stdout, b"", 0, None),
         HolderCheck::Held(vec!["tachi 123".to_string()])
     );
     let _ = std::fs::remove_dir_all(&root);
@@ -816,6 +894,7 @@ fn stub_pin() -> HolderExclusion {
 #[cfg(unix)]
 #[test]
 fn stub_only_an_exact_pin_row_is_ignored() {
+    let stub = StubLsof::new();
     let root = unique_temp_dir("tachi-reaper-1978-pinrow");
     let target = make_target_dir(&root, "x-target");
     let outside = root.join("elsewhere");
@@ -912,7 +991,7 @@ fn stub_only_an_exact_pin_row_is_ignored() {
     for (name, row) in &near_misses {
         let stdout = format!("{}{row}\n", String::from_utf8_lossy(LSOF_HEADER));
         for code in [0, 1] {
-            let check = stub_lsof_probe(
+            let check = stub.probe(
                 &format!("{name}-{code}"),
                 &target,
                 stdout.as_bytes(),
@@ -946,7 +1025,7 @@ fn stub_only_an_exact_pin_row_is_ignored() {
         let stdout = format!("{}{row}\n", String::from_utf8_lossy(LSOF_HEADER));
         for code in [0, 1] {
             assert_eq!(
-                stub_lsof_probe(
+                stub.probe(
                     &format!("{name}-{code}"),
                     &target,
                     stdout.as_bytes(),
@@ -969,6 +1048,7 @@ fn stub_only_an_exact_pin_row_is_ignored() {
 #[cfg(unix)]
 #[test]
 fn stub_unplain_target_spelling_is_never_matched() {
+    let stub = StubLsof::new();
     let root = unique_temp_dir("tachi-reaper-1978-dotdot");
     let target = make_target_dir(&root, "x-target");
     std::fs::create_dir_all(root.join("a")).unwrap();
@@ -984,7 +1064,7 @@ fn stub_unplain_target_spelling_is_never_matched() {
             String::from_utf8_lossy(LSOF_HEADER)
         );
         for code in [0, 1] {
-            let check = stub_lsof_probe(
+            let check = stub.probe(
                 &format!("{case}-{code}"),
                 &raw_target,
                 stdout.as_bytes(),
@@ -1004,7 +1084,7 @@ fn stub_unplain_target_spelling_is_never_matched() {
             target.canonicalize().unwrap().display()
         );
         assert_eq!(
-            stub_lsof_probe(
+            stub.probe(
                 &format!("{case}-canonical"),
                 &raw_target,
                 canonical.as_bytes(),
@@ -1074,6 +1154,7 @@ fn lsof_read_fd_grammar_is_exact() {
 #[cfg(unix)]
 #[test]
 fn stub_holder_next_to_the_warning_is_held_and_pin_exclusion_still_applies() {
+    let stub = StubLsof::new();
     let root = unique_temp_dir("tachi-reaper-1978-held");
     let target = make_target_dir(&root, "x-target");
     let mut stdout = LSOF_HEADER.to_vec();
@@ -1085,11 +1166,11 @@ fn stub_holder_next_to_the_warning_is_held_and_pin_exclusion_still_applies() {
         .as_bytes(),
     );
     assert_eq!(
-        stub_lsof_probe("held", &target, &stdout, LINUX_TRACEFS_WARNING, 0, None),
+        stub.probe("held", &target, &stdout, LINUX_TRACEFS_WARNING, 0, None),
         HolderCheck::Held(vec!["tachi 123".to_string(), "cargo 4242".to_string()])
     );
     assert_eq!(
-        stub_lsof_probe(
+        stub.probe(
             "pinned",
             &target,
             &stdout,
@@ -1109,9 +1190,10 @@ const GHA_TRACEFS_AND_PORTAL: &[u8] = b"lsof: WARNING: can't stat() tracefs file
 #[cfg(unix)]
 #[test]
 fn stub_portal_pair_is_dropped_only_when_disjoint_and_paired() {
+    let stub = StubLsof::new();
     let root = unique_temp_dir("tachi-reaper-1978-portal");
     let target = make_target_dir(&root, "x-target");
-    let check = stub_lsof_probe("gha", &target, b"", GHA_TRACEFS_AND_PORTAL, 1, None);
+    let check = stub.probe("gha", &target, b"", GHA_TRACEFS_AND_PORTAL, 1, None);
     if cfg!(target_os = "linux") {
         assert_eq!(check, HolderCheck::None);
     } else {
@@ -1126,16 +1208,13 @@ fn stub_portal_pair_is_dropped_only_when_disjoint_and_paired() {
         stderr.extend_from_slice(b"lsof: WARNING: can't stat() fuse.portal file system ");
         stderr.extend_from_slice(mount.as_os_str().as_encoded_bytes());
         stderr.extend_from_slice(b"\n      Output information may be incomplete.\n");
-        assert_unknown(name, stub_lsof_probe(name, &target, b"", &stderr, 1, None));
+        assert_unknown(name, stub.probe(name, &target, b"", &stderr, 1, None));
     }
     let mut lone = LINUX_TRACEFS_WARNING.to_vec();
     lone.extend_from_slice(
         b"lsof: WARNING: can't stat() fuse.portal file system /run/user/1000/doc\n",
     );
-    assert_unknown(
-        "lone",
-        stub_lsof_probe("lone", &target, b"", &lone, 1, None),
-    );
+    assert_unknown("lone", stub.probe("lone", &target, b"", &lone, 1, None));
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -1144,23 +1223,24 @@ fn stub_portal_pair_is_dropped_only_when_disjoint_and_paired() {
 #[cfg(unix)]
 #[test]
 fn stub_unrecognized_stdout_stays_unknown() {
+    let stub = StubLsof::new();
     let root = unique_temp_dir("tachi-reaper-1978-garbage");
     let target = make_target_dir(&root, "x-target");
     assert_unknown(
         "exit1+warning",
-        stub_lsof_probe("g1w", &target, b"garbage\n", LINUX_TRACEFS_WARNING, 1, None),
+        stub.probe("g1w", &target, b"garbage\n", LINUX_TRACEFS_WARNING, 1, None),
     );
     assert_unknown(
         "exit1",
-        stub_lsof_probe("g1", &target, b"garbage\n", b"", 1, None),
+        stub.probe("g1", &target, b"garbage\n", b"", 1, None),
     );
     assert_unknown(
         "exit0",
-        stub_lsof_probe("g0", &target, b"garbage\n", b"", 0, None),
+        stub.probe("g0", &target, b"garbage\n", b"", 0, None),
     );
     assert_unknown(
         "headerless pinned row",
-        stub_lsof_probe(
+        stub.probe(
             "pin",
             &target,
             b"tachi 123 u 7r DIR 1,4 0 1 /t\n",
@@ -1176,12 +1256,13 @@ fn stub_unrecognized_stdout_stays_unknown() {
 #[cfg(unix)]
 #[test]
 fn stub_odd_exit_codes_stay_unknown() {
+    let stub = StubLsof::new();
     let root = unique_temp_dir("tachi-reaper-1978-exit");
     let target = make_target_dir(&root, "x-target");
     for code in [2, 3, 126, 127] {
         assert_unknown(
             &format!("exit {code}"),
-            stub_lsof_probe(
+            stub.probe(
                 &format!("x{code}"),
                 &target,
                 b"",
@@ -1199,6 +1280,7 @@ fn stub_odd_exit_codes_stay_unknown() {
 #[cfg(unix)]
 #[test]
 fn stub_other_file_systems_lone_lines_and_non_utf8_stay_unknown() {
+    let stub = StubLsof::new();
     let root = unique_temp_dir("tachi-reaper-1978-fstype");
     let target = make_target_dir(&root, "x-target");
     let cases: [(&str, &[u8]); 4] = [
@@ -1217,7 +1299,7 @@ fn stub_other_file_systems_lone_lines_and_non_utf8_stay_unknown() {
         ),
     ];
     for (name, stderr) in cases {
-        assert_unknown(name, stub_lsof_probe(name, &target, b"", stderr, 1, None));
+        assert_unknown(name, stub.probe(name, &target, b"", stderr, 1, None));
     }
     let _ = std::fs::remove_dir_all(&root);
 }
@@ -1226,6 +1308,7 @@ fn stub_other_file_systems_lone_lines_and_non_utf8_stay_unknown() {
 #[cfg(unix)]
 #[test]
 fn stub_alias_overlap_and_success_exit_diagnostics_stay_unknown() {
+    let stub = StubLsof::new();
     let root = unique_temp_dir("tachi-reaper-1978-alias");
     let real = make_target_dir(&root, "real-target");
     let aliases = root.join("aliases");
@@ -1234,22 +1317,22 @@ fn stub_alias_overlap_and_success_exit_diagnostics_stay_unknown() {
     std::os::unix::fs::symlink(&real, &alias).unwrap();
     assert_unknown(
         "alias",
-        stub_lsof_probe("alias", &alias, b"", &tracefs_pair_for(&aliases), 1, None),
+        stub.probe("alias", &alias, b"", &tracefs_pair_for(&aliases), 1, None),
     );
     for (name, mount) in [("inside", real.join("debug")), ("same", real.clone())] {
         assert_unknown(
             name,
-            stub_lsof_probe(name, &real, b"", &tracefs_pair_for(&mount), 1, None),
+            stub.probe(name, &real, b"", &tracefs_pair_for(&mount), 1, None),
         );
     }
     let error = b"lsof: WARNING: can't opendir(/t/debug): Permission denied\n";
     assert_unknown(
         "exit0-header",
-        stub_lsof_probe("e0h", &real, LSOF_HEADER, error, 0, None),
+        stub.probe("e0h", &real, LSOF_HEADER, error, 0, None),
     );
     let mut both = LINUX_TRACEFS_WARNING.to_vec();
     both.extend_from_slice(error);
-    let check = stub_lsof_probe("e1", &real, b"", &both, 1, None);
+    let check = stub.probe("e1", &real, b"", &both, 1, None);
     let HolderCheck::Unknown(reason) = &check else {
         panic!("a partial walk must stay Unknown next to the warning: {check:?}");
     };
