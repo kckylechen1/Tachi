@@ -1,6 +1,23 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
+# Supply-chain policy for tracked workflows and action manifests: remote actions
+# must be audited full-SHA pins, container images must be digest-pinned, and
+# tools must come from audited prebuilt installs (taiki-e/install-action with an
+# exact name@version, checksum on, no fallback), never `cargo install`.
+#
+# Threat model: repository write access is owner-only. The cargo-install
+# detection is a best-effort lint against ACCIDENTAL source installs added by an
+# agent or a human. It is not a sandbox and not a defence against deliberate
+# obfuscation by someone with write access; static shell analysis cannot be
+# complete. Known limits, accepted by design:
+# - shell aliases and functions (`alias c=cargo; c install x`) are not tracked;
+# - line continuations inside heredoc bodies, and other deliberate obfuscation
+#   beyond the dynamic/encoded-installer guards, are out of scope;
+# - false positives in the safe direction are accepted: the text
+#   "cargo install" as echo/printf data, in quoted heredoc data, or
+#   `cargo install --list` is rejected. Workflows should not contain it.
+
 require "open3"
 require "pathname"
 require "psych"
@@ -496,11 +513,20 @@ class ActionPolicy
   # True when any simple command in `value` runs cargo with an install
   # subcommand, after skipping a `+toolchain` selector and global options, or
   # runs a cargo-install/cargo-binstall binary directly. Wrappers (env
-  # assignments, sudo/env/command/exec, `\cargo`, paths) are covered because
-  # the cargo word is matched anywhere in the command; quoted strings are
-  # re-scanned as nested commands.
+  # assignments, sudo/env/command/exec, `\cargo`, POSIX or Windows paths,
+  # pwsh `&`) are covered because the cargo word is matched anywhere in the
+  # command; quoted strings are re-scanned as nested commands. Best effort:
+  # see the threat model and known limits at the top of this file.
   def cargo_install_occurrence?(value, depth = 0)
-    normalized = value.gsub(/\\\r?\n/, " ").gsub(/\r?\n/, " ; ").gsub(/([;&|()])/, ' \\1 ').gsub(/[[:space:]]+/, " ")
+    # Like bash, delete backslash-newline so a word split across lines rejoins.
+    joined = value.gsub(/\\\r?\n/, "")
+    # A second pass with `\` read as a path separator keeps unquoted Windows
+    # paths (C:\Rust\bin\cargo.exe) intact through POSIX tokenization.
+    [joined, joined.tr("\\", "/")].uniq.any? { |text| cargo_install_text?(text, depth) }
+  end
+
+  def cargo_install_text?(text, depth)
+    normalized = text.gsub(/\r?\n/, " ; ").gsub(/([;&|()])/, ' \\1 ').gsub(/[[:space:]]+/, " ")
     tokens = Shellwords.shellsplit(normalized)
     commands = [[]]
     tokens.each { |token| SHELL_OPERATOR_TOKENS.include?(token) ? commands << [] : commands.last << token }
@@ -509,14 +535,14 @@ class ActionPolicy
     depth < 3 && tokens.any? { |token| token.match?(/[[:space:]]/) && cargo_install_occurrence?(token, depth + 1) }
   rescue ArgumentError
     # Unparseable shell text fails closed on any cargo ... install shape.
-    normalized.match?(/(?:\A|[^[:alnum:]_-])cargo(?:-b?install\b|[^;&|]*?[[:space:]]b?install(?:[[:space:]]|\z))/)
+    (normalized || text).match?(/(?:\A|[^[:alnum:]_-])cargo(?:-b?install\b|(?:\.exe)?[^;&|]*?[[:space:]]b?install(?:[[:space:]]|\z))/i)
   end
 
   def cargo_install_command?(tokens)
     tokens.each_with_index.any? do |token, index|
-      program = File.basename(token)
-      next true if program.match?(/\Acargo-b?install(?:\.exe)?\z/)
-      next false unless program.match?(/\Acargo(?:\.exe)?\z/)
+      program = token.split(%r{[/\\]}).last.to_s
+      next true if program.match?(/\Acargo-b?install(?:\.exe)?\z/i)
+      next false unless program.match?(/\Acargo(?:\.exe)?\z/i)
 
       position = index + 1
       position += 1 if tokens[position]&.start_with?("+")
@@ -670,7 +696,13 @@ def self_test!
     "cargo-eval-toolchain" => ["run: eval 'cargo +stable install cargo-audit'\n", UNAUDITED_CARGO],
     "cargo-binstall-subcommand" => ["run: cargo binstall --no-confirm cargo-audit\n", UNAUDITED_CARGO],
     "cargo-binstall-binary" => ["run: cargo-binstall --no-confirm cargo-audit\n", UNAUDITED_CARGO],
-    "cargo-install-binary" => ["run: ~/.cargo/bin/cargo-install cargo-audit\n", UNAUDITED_CARGO]
+    "cargo-install-binary" => ["run: ~/.cargo/bin/cargo-install cargo-audit\n", UNAUDITED_CARGO],
+    "cargo-split-word-continuation" => ["run: |\n  car\\\n  go install cargo-audit\n", UNAUDITED_CARGO],
+    "cargo-split-subcommand-continuation" => ["run: |\n  cargo ins\\\n  tall cargo-audit\n", UNAUDITED_CARGO],
+    "cargo-pwsh-quoted-exe" => ["run: |\n  & \"C:\\Rust\\bin\\cargo.exe\" install cargo-audit\n", UNAUDITED_CARGO],
+    "cargo-pwsh-single-quoted-exe" => ["run: |\n  & 'C:\\Program Files\\Rust\\bin\\cargo.exe' install cargo-audit\n", UNAUDITED_CARGO],
+    "cargo-windows-unquoted-exe" => ["run: C:\\Rust\\bin\\cargo.exe install cargo-audit\n", UNAUDITED_CARGO],
+    "cargo-windows-uppercase-exe" => ["run: C:\\Rust\\bin\\Cargo.EXE install cargo-audit\n", UNAUDITED_CARGO]
   }
   cargo_fixtures.each do |name, (source, expected)|
     expect_rejected(name, expected) do
@@ -683,10 +715,12 @@ def self_test!
     "cargo --config k=v --color always build",
     "cargo test -p memcore -- install",
     "cargo run --bin tool -- install",
-    "echo install; cargo build"
+    "echo install; cargo build",
+    "& \"C:\\Rust\\bin\\cargo.exe\" build --locked",
+    "C:\\Rust\\bin\\cargo.exe test -- install"
   ]
   cargo_accepted.each do |command|
-    validate_virtual({root => "run: #{command}\n"}, cargo_installs: AUDITED_CARGO_INSTALLS).finish!
+    validate_virtual({root => "run: |\n  #{command}\n"}, cargo_installs: AUDITED_CARGO_INSTALLS).finish!
   end
   puts "fixture ACCEPTED cargo-non-install-subcommands (#{cargo_accepted.length})"
   encoded_fixtures = {
