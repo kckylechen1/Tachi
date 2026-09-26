@@ -1115,7 +1115,9 @@ fn hard_state_rows(conn: &Connection) -> Vec<(String, String, String)> {
 
 /// Every file next to the database, by name, INCLUDING SQLite's `-wal`/`-shm`
 /// sidecars. The clean-store test starts from a cleanly closed store (the last
-/// close removed both sidecars), so a sidecar left behind would show up. The
+/// close removed both sidecars), so a sidecar LEFT behind would show up. The
+/// comparison observes the final directory after close: it proves nothing
+/// remains, not that SQLite never created a sidecar transiently. The
 /// unclean-shutdown test is where sidecars legitimately change, and it says so.
 fn sibling_names(dir: &Path) -> BTreeSet<String> {
     std::fs::read_dir(dir)
@@ -1127,16 +1129,17 @@ fn sibling_names(dir: &Path) -> BTreeSet<String> {
 
 /// The hazard W1-2 closes, in one test. An `Exact(PortableKernel)` caller
 /// opening a full Tachi store must refuse ahead of the migration backup and
-/// the connection PRAGMAs, with no memcore DDL, stamp or role write. For a
-/// cleanly closed store that also means byte-identical files, no role stamp,
-/// no `.migration-bak` and no new sibling (the unclean-shutdown variant below
-/// covers what is promised when a WAL is left behind).
+/// the connection PRAGMAs, and no memcore DDL, stamp or role write may
+/// remain. For a cleanly closed store that also means byte-identical files,
+/// no role stamp, no `.migration-bak` and no new sibling left after close (the
+/// unclean-shutdown variant below covers what is promised when a WAL is left
+/// behind).
 ///
 /// The marker is deleted first, so this open is one the fingerprint heuristic
 /// WOULD back up. Only the admission preflight's position ahead of the backup
 /// keeps the backup from being written.
 #[test]
-fn exact_portable_refuses_full_store_and_writes_nothing_to_a_clean_store() {
+fn exact_portable_refuses_full_store_and_leaves_a_clean_store_unchanged() {
     let dir = temp_dir("exact-refuses-full");
     let path = db_in(&dir, "memory.db");
     drop(
@@ -1203,8 +1206,8 @@ fn exact_portable_refuses_full_store_and_writes_nothing_to_a_clean_store() {
 }
 
 /// Unclean-shutdown variant. A full store whose last writer died with
-/// committed frames still in `-wal` is opened `Exact(PortableKernel)`. memcore
-/// must still write no backup, marker, DDL, stamp or role row, and the logical
+/// committed frames still in `-wal` is opened `Exact(PortableKernel)`. After it
+/// closes, no backup, marker, DDL, stamp or role row may remain, and the logical
 /// state must be exactly what the crashed writer committed. SQLite's own
 /// last-close checkpoint is allowed to fold the frames into the main file and
 /// remove `-wal`/`-shm`, so the main-file hash and the sidecar pair are NOT
@@ -1267,7 +1270,7 @@ fn exact_portable_refusal_after_unclean_shutdown_keeps_logical_state() {
     let removed: Vec<_> = before_siblings.difference(&after_siblings).collect();
     assert!(
         added.is_empty(),
-        "no file may be created (no backup, no marker): {added:?}"
+        "no new file may remain after the refusal (no backup, no marker): {added:?}"
     );
     assert!(
         removed

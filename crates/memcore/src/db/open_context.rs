@@ -95,10 +95,13 @@ pub struct DbOpenContext {
     /// inverting that is the worst failure mode in this design.
     ///
     /// A requirement refused by the stamps as the open funnel's read-only
-    /// preflight reads them fails the open with no migration backup, no
-    /// connection PRAGMA, and no memcore DDL, stamp or identity/role write.
-    /// SQLite may still checkpoint a pre-existing WAL when the connection
-    /// closes; see `init_schema_with_label_mut_inner`.
+    /// preflight reads them fails the open leaving no migration backup, no
+    /// connection PRAGMA change, and no memcore DDL, stamp or identity/role
+    /// write. SQLite may still create sidecars transiently and checkpoint a
+    /// pre-existing WAL when the connection closes. If the stamps change
+    /// before `BEGIN IMMEDIATE`, the in-transaction evaluation refuses
+    /// instead, and the backup (plus retention) and a `journal_mode=WAL`
+    /// switch may persist; see `init_schema_with_label_mut_inner`.
     pub required_profile: ProfileRequirement,
 }
 

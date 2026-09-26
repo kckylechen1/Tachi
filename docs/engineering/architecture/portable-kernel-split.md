@@ -232,16 +232,23 @@ The one supported dependency surface for Hypermem:
   `Exact(PortableKernel)` the kernel refuses a `TachiFull` store with
   `MemoryError::StoreProfileNotExact`. The refusal comes from the open
   funnel's read-only identity preflight, which runs ahead of the migration
-  backup and the connection PRAGMAs. On refusal memcore writes no
-  `.migration-bak` and issues no DDL, stamp or identity/role write:
+  backup and the connection PRAGMAs. After such a refusal no `.migration-bak`,
+  no marker and no memcore DDL, stamp or identity/role write remains:
   `PRAGMA user_version`, the schema and `hard_state` are unchanged. This is
-  not a byte-identity guarantee. The funnel's connection is read-write, so if
-  the store was left with committed, uncheckpointed WAL frames (an unclean
-  shutdown), SQLite's last-close checkpoint may fold them into the main file
-  and remove `-wal`/`-shm`; the logical content does not change. And because
-  the transaction re-resolves identity authoritatively, a stamp another
-  process writes between the preflight and `BEGIN IMMEDIATE` can still
-  produce a refusal after a backup was written. One labelled open with
+  not a byte-identity or "no file was ever touched" guarantee. The funnel's
+  connection is read-write, so SQLite may create and remove `-wal`/`-shm`
+  transiently, and if the store was left with committed, uncheckpointed WAL
+  frames (an unclean shutdown) its last-close checkpoint may fold them into
+  the main file; the logical content does not change.
+
+  Every gate (schema version, #1119 intent/authority, integrity, `fresh`,
+  profile and role) is evaluated again inside `BEGIN IMMEDIATE`, and only
+  that evaluation decides. If another process changes the store between the
+  preflight and the transaction, the open can pass the preflight and be
+  refused in the transaction. What can then persist is exactly: the
+  `.migration-bak` plus the retention pass that may delete older backups,
+  and `journal_mode` switched to WAL (WAL mode is persistent). DDL, stamps and
+  identity/role writes roll back. One labelled open with
   `with_exact_profile(PortableKernel)` therefore replaces the "unlabelled
   preflight open, check `store_profile()`, labelled open" sequence, which
   runs schema init twice per store.
@@ -250,7 +257,10 @@ The one supported dependency surface for Hypermem:
   1. The schema-version gate (a stamp newer than this kernel → refused), the
      #1119 creation-intent/migration-authority gate
      (`check_db_open_context_gate`) and current-schema integrity validation
-     run first and can return their own error.
+     run first, both in the preflight and again inside the transaction, and
+     can return their own error. A migration state that appears only in the
+     transaction (not backed up by the preflight) refuses with
+     `SchemaChangedDuringOpen`.
   2. "Fresh" means `PRAGMA user_version == 0`, not "empty file": an unstamped
      file with content is fresh.
   3. `read_identity` reads and decodes BOTH stamps (role first, then profile)
