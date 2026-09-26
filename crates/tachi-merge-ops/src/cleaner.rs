@@ -60,3 +60,27 @@ pub async fn remove_worktree_with_cleaner(worktree: &str) -> Result<CleanerRemov
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_tachi_clean_bin;
+
+    // This is the only test in this crate's test binary that touches
+    // `TACHI_CLEAN_BIN`, so no cross-test env lock is needed here.
+    #[test]
+    fn cleaner_bridge_uses_explicit_cleaner_binary_override() {
+        let old_value = std::env::var_os("TACHI_CLEAN_BIN");
+        std::env::set_var("TACHI_CLEAN_BIN", "/tmp/custom-tachi-clean");
+
+        let resolved = resolve_tachi_clean_bin();
+
+        match old_value {
+            Some(value) => std::env::set_var("TACHI_CLEAN_BIN", value),
+            None => std::env::remove_var("TACHI_CLEAN_BIN"),
+        }
+        assert_eq!(
+            resolved,
+            std::path::PathBuf::from("/tmp/custom-tachi-clean")
+        );
+    }
+}

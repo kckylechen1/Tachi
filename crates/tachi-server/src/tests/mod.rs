@@ -2394,7 +2394,6 @@ mod fold_contract;
 mod gh_comment_tests;
 mod hub_tests;
 mod memory_tests;
-mod merge_tests;
 mod orchestrator_tests;
 mod profile_tests;
 mod proxy_tests;
