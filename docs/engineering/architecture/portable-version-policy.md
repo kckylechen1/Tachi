@@ -478,8 +478,16 @@ today (§11).
 - `:352-384`: R5.2a branch.
 - `:419-465`: policy class (R2/R3).
 - `:552-564`: the public standalone `run_data_migrations_with_profile`
-  validates and writes the stamp. It must apply R3/R4/R5 or be restricted to
-  `TachiFull`.
+  validates and writes the stamp. **Amended by #1995.** Its behaviour and
+  its frozen tests stay as they are. It keeps today's policy (`π = E`) for
+  every profile, so it does not implement R3/R4/R5. That has one
+  consequence. If it migrates a PortableKernel store, the store is stamped
+  `E` rather than the floor. For example, at `E = 40` a product-only bump
+  stamps 40, and a pre-B v39 reader then refuses the store as `newer`. The
+  failure is loud, not silent, and it is a documented limitation.
+  PortableKernel callers must migrate through the admission funnel. The
+  API docs state this, and any store the API leaves incomplete is refused
+  on admission (#1995).
 - `:578-818`: the runner becomes table-driven.
 - `:182-222`: the sentinel list becomes derived.
 

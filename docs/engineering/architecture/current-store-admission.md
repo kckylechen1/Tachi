@@ -1,6 +1,6 @@
 # Current-Store Admission — refuse damaged state, rebuild only what is derived
 
-> **Status:** spec, pre-implementation, revision 5 (after four cross-vendor attack rounds).
+> **Status:** spec, pre-implementation, revision 6 (after five cross-vendor attack rounds).
 > **Issue:** #1995 (found in #1983's round-4 cold review). **Parent:** #1987.
 > **Anchors:** `db/open.rs:630` (damaged current input is refused, not
 > repaired), #1119 (migration authority), #1983 (read-only preflight plus
@@ -158,10 +158,12 @@ exactly as they are.
 
 The API can still stamp an incomplete inventory, so it is not a hatch this
 spec closes. Admission closes it instead. Any store the API leaves missing
-a required object is **refused loudly** on its next admission, with
-`CurrentSchemaIncomplete` naming the object. That happens before any
-repair, so nothing gets silently recreated. The API's docs gain one
-sentence: its output is subject to current-store admission.
+a required object is **refused loudly** when it next enters one of the
+**covered entry points** (§4). The refusal names the object in
+`CurrentSchemaIncomplete` and comes before any repair, so nothing gets
+silently recreated. Consumers that bypass those entry points are listed
+as named exceptions in §4. The API's docs gain one sentence: its output
+is subject to current-store admission.
 
 **Historical outcome (fixed oracle).** Take a pre-`38ed99d47` Full store
 stamped 39 through the migration-only path, so it lacks
@@ -191,8 +193,36 @@ It extends #1983's integrity step, under both D7 policies:
   is silently recreated. Under this spec it is refused. D7's allowance
   stays: a *present previous* `memory_search_generation_after_update`
   definition is accepted and normalized. Only an *absent* trigger refuses.
+- **Read-only opens** (`store/open.rs` ~923-946, which call
+  `validate_current_schema_integrity` but never enter the initializer's
+  preflight) run the same presence check right after that call, before
+  returning a handle. A missing required object refuses with
+  `CurrentSchemaIncomplete`. Without this, `tachi status` reads a
+  read-only-opened store and reports `derived_items = 0` for a table that
+  does not exist (`status_ops/db_probe.rs:46-59,102-110`). That is a silent
+  wrong answer.
+- **Maintenance opens** (`open_existing_read_write`, ~1009-1070) run it at
+  the same point: after the existing integrity validation, before any
+  maintenance write.
 - **Pending stores are not checked.** Migrations legitimately create
   objects.
+
+**Covered entry points (exhaustive):** the store/labelled/unlabelled writer
+doors and the bare initializer, via the shared preflight and in-tx
+re-evaluation; the private image door; read-only opens; and maintenance
+opens.
+
+**Named exceptions** are not covered, and the gap is documented rather than
+silent:
+- **Doctor/diagnostic raw connections.** Examples: `db/doctor_probe.rs`,
+  and `status_ops` raw probes that open their own `Connection`. They
+  deliberately bypass admission. Where they count rows in a table, they
+  must report a missing table as *missing*, not as `0`. For instance, the
+  missing-`foundry_jobs` probe returns all zeros today
+  (`db/doctor_probe.rs:232-240`). This is a follow-up leaf, filed with the
+  implementation.
+- **Connections a caller already holds** are not re-admitted. Admission is
+  per open.
 
 **Side effects on refusal.** When the defect is visible to the preflight,
 the refusal happens before backup, PRAGMA, DDL, stamp and marker, so
@@ -311,6 +341,11 @@ Until that command exists, the runbook documents manual recovery.
     and is normalized (the D7 allowance).
   - A healthy image opens (control). A healthy PortableKernel file store with every Product
   sentinel and no Product tables opens (control for §3).
+- **T7b Other entry points.** An `F@39` store with `derived_items` missing
+  must be refused through a **read-only open** and through
+  `open_existing_read_write`. Each refusal returns `CurrentSchemaIncomplete`
+  before a handle is returned or any maintenance write happens. A
+  `tachi status` probe of that store must not report `derived_items = 0`.
 - **T8 Invariance and supersession.** Every existing test passes unchanged,
   except tests that assert the old silent repair and the D7 T9 phase
   expectation. Each of those is listed with its before and after.
