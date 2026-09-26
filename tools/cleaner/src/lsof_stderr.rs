@@ -17,18 +17,34 @@
 //!
 //! That made every probe "undetermined" on every non-root Linux host.
 //!
+//! lsof also warns about any other mount it enumerates but cannot stat. On a
+//! Linux desktop host that is typically another user's xdg-document-portal
+//! FUSE mount (FUSE mounts are private to their owner by default) when that
+//! mount is in the probe's mount namespace; lsof then adds a second pair.
+//! Captured on atom-dgx-2 (lsof 4.95.0) as the unprivileged CI user `gha`,
+//! `sudo -n -u gha lsof -- /tmp/<file>` wrote exactly this and exited 1
+//! (tachi#1978; as the session owner only the tracefs pair appears):
+//!
+//! ```text
+//! lsof: WARNING: can't stat() tracefs file system /sys/kernel/debug/tracing
+//!       Output information may be incomplete.
+//! lsof: WARNING: can't stat() fuse.portal file system /run/user/1000/doc
+//!       Output information may be incomplete.
+//! ```
+//!
 //! lsof matches open files against a named target by device + inode (taken
 //! from the target itself and from each process's descriptors); the mount
 //! table only names file systems and resolves a target that *is* a mount
-//! point. A tracefs mount lsof could not stat therefore cannot hide a holder of
-//! a target that is neither that mount point, nor below it, nor above it.
+//! point. A mount lsof could not stat therefore cannot hide a holder of a
+//! target that is neither that mount point, nor below it, nor above it.
 //!
 //! Exactly that — and nothing wider — is dropped, and only on Linux:
 //!
 //! * the line is valid UTF-8 and is exactly `lsof: WARNING: can't stat()
-//!   tracefs file system <mount>` (no other file-system type: only the
-//!   observed tracefs warning has been shown to be this benign start-up
-//!   failure);
+//!   <fstype> file system <mount>` with `<fstype>` one of
+//!   [`BENIGN_MOUNT_FS_TYPES`] — `tracefs` and `fuse.portal`, each widened
+//!   onto only after real host output (above) showed it as this start-up
+//!   failure; every other file-system type stays relevant;
 //! * it is immediately followed by the exact continuation line
 //!   `      Output information may be incomplete.` (six spaces), as lsof
 //!   printed it on the host — a lone warning line is not the observed shape;
@@ -49,17 +65,91 @@
 //! `lsof -w` is deliberately **not** used: it silences the `+D` walk's own
 //! "can't stat()/opendir()" warnings too, which are exactly the partial-walk
 //! signal the holder probes must never lose.
+//!
+//! # Visibility boundary
+//!
+//! The probes can only report holders whose descriptors the probe's own lsof
+//! can see; "no holder" means "no holder visible to this lsof", not "no
+//! holder". A holder may be invisible — and the probe may then report
+//! absence — in these cases:
+//!
+//! * **(a)** it runs under another UID, or as root, and the kernel's `/proc`
+//!   access check denies the probe its `/proc/<pid>/fd` (capability
+//!   overrides such as `CAP_SYS_PTRACE` can grant that access);
+//! * **(b)** it runs under the probe's UID but is not dumpable
+//!   (`PR_SET_DUMPABLE` = 0), or otherwise, when the kernel's `/proc` access
+//!   check denies the probe its `/proc/<pid>/fd`;
+//! * **(c)** the probe sees a different PID or mount namespace view than the
+//!   holder, when that view omits the holder's process or prevents descriptor
+//!   inspection — e.g. a container-local `/proc` while the holder runs on the
+//!   host against a shared target. A different namespace is not sufficient by
+//!   itself: an ancestor PID namespace sees its descendants' processes, and a
+//!   different mount namespace alone does not block a readable
+//!   `/proc/<pid>/fd`.
+//!
+//! On Linux, lsof reads descriptors from `/proc/<pid>/fd`; a process it may
+//! not inspect contributes no row and no diagnostic for the target. On macOS,
+//! lsof discovers processes through `proc_pidinfo` rather than `/proc`, and
+//! silently skips processes that fail with `EPERM` — the same effect by a
+//! different path. An invisible holder removes only its own rows: holders the
+//! probe can see are still listed, and unrelated diagnostics still appear, so
+//! the classification follows from whatever remains. When nothing visible
+//! remains, provided no relevant diagnostics remain either, the run matches
+//! lsof's "not found" signature (exit 1, blank stdout, no relevant stderr)
+//! and the probe reports absence; a retained diagnostic (e.g. a
+//! `fuse.gvfsd-fuse` mount warning, which is not allowlisted) keeps it
+//! Unknown. All of this predates the stderr filter.
+//!
+//! The DB probe's self-exclusion (`db_ownership`) compares lsof's PIDs with
+//! the caller's namespace-local `std::process::id()`. Under a PID-namespace
+//! mismatch (host `/proc` seen from a child PID namespace) another process
+//! can carry the same number and be excluded as "self". That is a known
+//! limit, tracked with this boundary in tachi#1989.
+//!
+//! The `fuse.portal` warning is not a signal for any of this. It only means
+//! lsof enumerated a mount it could not stat — typically another user's
+//! desktop portal mount — and it is absent when that mount lies outside the
+//! probe's mount namespace. It says nothing about whether the target is held,
+//! so refusing on it made the probes fail closed only on some hosts, by
+//! accident; that is why it is allowlisted. Closing the boundary is tracked
+//! in tachi#1989.
+//!
+//! Linux evidence for (a) (DGX2, lsof 4.95.0; `kckylechen` is UID 1000 and owns the desktop
+//! session, `gha` is the unprivileged CI user):
+//!
+//! ```text
+//! $ f=$(mktemp /tmp/wz-vis-XXXXXX); chmod 0666 $f; tail -f $f >/dev/null &  # as UID 1000
+//! holder pid=1533813 uid=1000 file=/tmp/wz-vis-FW0Q4G
+//! $ sudo -n -u gha lsof -- /tmp/wz-vis-FW0Q4G
+//! exit=1 stdout_bytes=0
+//! stderr| lsof: WARNING: can't stat() tracefs file system /sys/kernel/debug/tracing
+//! stderr|       Output information may be incomplete.
+//! stderr| lsof: WARNING: can't stat() fuse.portal file system /run/user/1000/doc
+//! stderr|       Output information may be incomplete.
+//! $ sudo -n -u gha ls /proc/1533813/fd
+//! ls: cannot open directory '/proc/1533813/fd': Permission denied
+//! exit=2
+//! $ lsof -- /tmp/wz-vis-FW0Q4G   # same UID as the holder
+//! COMMAND     PID       USER   FD   TYPE DEVICE SIZE/OFF     NODE NAME
+//! tail    1533813 kckylechen    3r   REG  259,2        0 44826736 /tmp/wz-vis-FW0Q4G
+//! exit=0
+//! ```
 
 use std::path::Path;
 
+/// File-system types whose start-up "can't stat()" warning may be dropped
+/// (when disjoint from every target). Each entry needs captured host output;
+/// see the module docs.
+pub const BENIGN_MOUNT_FS_TYPES: [&str; 2] = ["tracefs", "fuse.portal"];
+
 /// Return the part of `stderr` that bears on a probe of `targets`, as raw
 /// bytes. An empty result means every diagnostic was a proven-irrelevant
-/// tracefs mount warning; anything else must be handled exactly like a
+/// start-up mount warning; anything else must be handled exactly like a
 /// non-empty stderr (fail closed). Identity on non-Linux platforms.
 pub fn relevant_lsof_stderr(stderr: &[u8], targets: &[&Path]) -> Vec<u8> {
     #[cfg(target_os = "linux")]
     {
-        linux::drop_disjoint_tracefs_warnings(stderr, targets)
+        linux::drop_disjoint_mount_warnings(stderr, targets)
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -94,10 +184,11 @@ pub fn starts_with_lsof_header(stdout: &str) -> bool {
 mod linux {
     use std::path::{Component, Path, PathBuf};
 
-    const TRACEFS_PREFIX: &str = "lsof: WARNING: can't stat() tracefs file system ";
+    const WARNING_PREFIX: &str = "lsof: WARNING: can't stat() ";
+    const FILE_SYSTEM: &str = " file system ";
     const INCOMPLETE_CONTINUATION: &[u8] = b"      Output information may be incomplete.";
 
-    pub(super) fn drop_disjoint_tracefs_warnings(stderr: &[u8], targets: &[&Path]) -> Vec<u8> {
+    pub(super) fn drop_disjoint_mount_warnings(stderr: &[u8], targets: &[&Path]) -> Vec<u8> {
         let comparable = comparable_targets(targets);
         let lines: Vec<&[u8]> = stderr.split(|byte| *byte == b'\n').collect();
         let mut relevant: Vec<&[u8]> = Vec::new();
@@ -106,7 +197,7 @@ mod linux {
             let line = lines[index];
             let droppable = !comparable.is_empty()
                 && lines.get(index + 1).copied() == Some(INCOMPLETE_CONTINUATION)
-                && tracefs_mount(line).is_some_and(|mount| {
+                && benign_mount(line).is_some_and(|mount| {
                     comparable
                         .iter()
                         .all(|target| !target.starts_with(&mount) && !mount.starts_with(target))
@@ -144,11 +235,16 @@ mod linux {
         spellings
     }
 
-    /// Mount point named by the exact tracefs start-up warning, when the line
-    /// is valid UTF-8, is exactly that warning, and the path is plain.
-    fn tracefs_mount(line: &[u8]) -> Option<PathBuf> {
+    /// Mount point named by an allowlisted start-up warning, when the line is
+    /// valid UTF-8, is exactly `lsof: WARNING: can't stat() <fstype> file
+    /// system <mount>` for an `<fstype>` in [`super::BENIGN_MOUNT_FS_TYPES`],
+    /// and the path is plain.
+    fn benign_mount(line: &[u8]) -> Option<PathBuf> {
         let line = std::str::from_utf8(line).ok()?;
-        let mount = line.strip_prefix(TRACEFS_PREFIX)?;
+        let rest = line.strip_prefix(WARNING_PREFIX)?;
+        let mount = super::BENIGN_MOUNT_FS_TYPES
+            .iter()
+            .find_map(|fs_type| rest.strip_prefix(fs_type)?.strip_prefix(FILE_SYSTEM))?;
         if mount.is_empty() || mount != mount.trim() || mount.contains(['\\', '^']) {
             return None;
         }
@@ -192,7 +288,7 @@ mod linux {
         }
 
         fn relevant(stderr: &[u8], target: &Path) -> String {
-            String::from_utf8_lossy(&drop_disjoint_tracefs_warnings(stderr, &[target])).into_owned()
+            String::from_utf8_lossy(&drop_disjoint_mount_warnings(stderr, &[target])).into_owned()
         }
 
         #[test]
@@ -216,16 +312,78 @@ mod linux {
         #[test]
         fn other_file_system_types_are_relevant() {
             let dir = target();
-            for fs_type in ["nfs", "fuse", "fuse.portal", "overlay", "nsfs", "debugfs"] {
+            // `fuse.portal` left this list when it was allowlisted with host
+            // evidence (tachi#1978 follow-up); near-miss spellings stay.
+            for fs_type in [
+                "nfs",
+                "fuse",
+                "fuse.portalx",
+                "fuse.porta",
+                "fuse.gvfsd-fuse",
+                "overlay",
+                "nsfs",
+                "debugfs",
+            ] {
                 let stderr = format!(
                     "lsof: WARNING: can't stat() {fs_type} file system /unrelated\n      Output information may be incomplete.\n"
                 );
                 assert_ne!(
                     relevant(stderr.as_bytes(), dir.path()),
                     "",
-                    "{fs_type} is not the observed tracefs warning"
+                    "{fs_type} is not an allowlisted warning"
                 );
             }
+        }
+
+        /// Byte-for-byte what lsof 4.95.0 on atom-dgx-2 wrote as the CI user
+        /// `gha` (not the desktop session owner) for every query.
+        const TRACEFS_AND_PORTAL: &[u8] = b"lsof: WARNING: can't stat() tracefs file system /sys/kernel/debug/tracing\n      Output information may be incomplete.\nlsof: WARNING: can't stat() fuse.portal file system /run/user/1000/doc\n      Output information may be incomplete.\n";
+
+        fn portal_pair_for(mount: &Path) -> String {
+            format!(
+                "lsof: WARNING: can't stat() fuse.portal file system {}\n      Output information may be incomplete.\n",
+                mount.display()
+            )
+        }
+
+        #[test]
+        fn disjoint_portal_pair_is_irrelevant() {
+            let dir = target();
+            assert_eq!(relevant(TRACEFS_AND_PORTAL, dir.path()), "");
+            let portal_only = portal_pair_for(Path::new("/run/user/1000/doc"));
+            assert_eq!(relevant(portal_only.as_bytes(), dir.path()), "");
+        }
+
+        #[test]
+        fn portal_mount_at_above_or_inside_the_target_is_relevant() {
+            let dir = target();
+            let canonical = dir.path().canonicalize().unwrap();
+            for mount in [
+                canonical.clone(),
+                canonical.parent().unwrap().to_path_buf(),
+                canonical.join("inner"),
+            ] {
+                let mut stderr = TRACEFS.to_vec();
+                stderr.extend_from_slice(portal_pair_for(&mount).as_bytes());
+                assert!(
+                    relevant(&stderr, dir.path()).contains("fuse.portal"),
+                    "portal mount {} overlaps the target",
+                    mount.display()
+                );
+            }
+        }
+
+        #[test]
+        fn portal_warning_without_its_continuation_is_relevant() {
+            let dir = target();
+            let lone = b"lsof: WARNING: can't stat() fuse.portal file system /run/user/1000/doc\n";
+            assert_ne!(relevant(lone, dir.path()), "");
+            let mut after_tracefs = TRACEFS.to_vec();
+            after_tracefs.extend_from_slice(lone);
+            assert_eq!(
+                relevant(&after_tracefs, dir.path()),
+                "lsof: WARNING: can't stat() fuse.portal file system /run/user/1000/doc"
+            );
         }
 
         #[test]
@@ -272,13 +430,12 @@ mod linux {
                 "lsof: WARNING: can't stat() tracefs file system {}\n      Output information may be incomplete.\n",
                 alias_parent.display()
             );
-            let only_canonical =
-                drop_disjoint_tracefs_warnings(stderr.as_bytes(), &[real.as_path()]);
+            let only_canonical = drop_disjoint_mount_warnings(stderr.as_bytes(), &[real.as_path()]);
             assert!(
                 only_canonical.is_empty(),
                 "control: disjoint from the real path"
             );
-            let with_alias = drop_disjoint_tracefs_warnings(stderr.as_bytes(), &[alias.as_path()]);
+            let with_alias = drop_disjoint_mount_warnings(stderr.as_bytes(), &[alias.as_path()]);
             assert!(
                 !with_alias.is_empty(),
                 "the alias spelling lies under the mount"
@@ -291,7 +448,7 @@ mod linux {
             let mut stderr =
                 b"lsof: WARNING: can't stat() tracefs file system /tmp/m-\xff\n".to_vec();
             stderr.extend_from_slice(b"      Output information may be incomplete.\n");
-            let kept = drop_disjoint_tracefs_warnings(&stderr, &[dir.path()]);
+            let kept = drop_disjoint_mount_warnings(&stderr, &[dir.path()]);
             assert!(kept.starts_with(b"lsof: WARNING"), "{kept:?}");
             assert!(kept.contains(&0xff), "bytes are kept verbatim: {kept:?}");
         }

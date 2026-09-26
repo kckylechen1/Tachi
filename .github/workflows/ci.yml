@@ -364,7 +364,15 @@ jobs:
       - name: Install cargo-audit
         id: audit_install
         if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' }}
-        run: cargo install cargo-audit --version 0.22.2 --locked --quiet
+        # Prebuilt rustsec release binary, sha256-verified against the pinned
+        # install-action manifest. A source build of cargo-audit took 19 min and
+        # blew the job budget (run 35823151400); `fallback: none` makes an
+        # unsupported platform/version fail loudly instead of silently compiling.
+        uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172 # v2.87.20
+        with:
+          tool: cargo-audit@0.22.2
+          checksum: true
+          fallback: none
 
       - name: Run cargo audit
         id: audit
@@ -376,7 +384,13 @@ jobs:
         if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' }}
         # get.nextest.rs is unreachable from this runner's network (DNS blocked);
         # taiki-e/install-action pulls a prebuilt binary from GitHub Releases.
+        # 0.9.140 is the pinned manifest's `latest`, i.e. what this step already
+        # installed by default; `fallback: none` forbids a source build.
         uses: taiki-e/install-action@c295c25a8d3df7288fa86db860a4f8062bf76ad8 # releases/nextest snapshot 2026-07-25
+        with:
+          tool: nextest@0.9.140
+          checksum: true
+          fallback: none
 
       - name: Run workspace tests
         id: workspace_tests

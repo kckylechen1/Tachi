@@ -200,6 +200,8 @@ fn interpret_lsof_output(exit_code: Option<i32>, stdout: &str, stderr: &str) -> 
     }
 
     match exit_code {
+        // Absence is bounded by what this lsof can see: see "Visibility
+        // boundary" in crate::lsof_stderr (tachi#1989).
         Some(1) if stdout.trim().is_empty() => HolderEvidence::Clear,
         Some(1) => {
             HolderEvidence::Unknown("lsof exited 1 with a header but no file rows".to_string())
@@ -567,6 +569,48 @@ mod tests {
                 ),
             );
         }
+        let _ = std::fs::remove_dir_all(&target);
+    }
+
+    /// Byte-for-byte stderr of lsof 4.95.0 on atom-dgx-2 run as the CI user
+    /// `gha`, who cannot stat the desktop owner's xdg-document-portal mount
+    /// (tachi#1978 follow-up).
+    const GHA_TRACEFS_AND_PORTAL: &[u8] = b"lsof: WARNING: can't stat() tracefs file system /sys/kernel/debug/tracing\n      Output information may be incomplete.\nlsof: WARNING: can't stat() fuse.portal file system /run/user/1000/doc\n      Output information may be incomplete.\n";
+
+    fn portal_pair_for(mount: &Path) -> Vec<u8> {
+        let mut bytes = b"lsof: WARNING: can't stat() fuse.portal file system ".to_vec();
+        bytes.extend_from_slice(mount.as_os_str().as_encoded_bytes());
+        bytes.extend_from_slice(b"\n      Output information may be incomplete.\n");
+        bytes
+    }
+
+    /// The disjoint portal pair is dropped like tracefs (Linux only; other
+    /// platforms keep every diagnostic). A portal mount that is the target, an
+    /// ancestor or a descendant, or a lone portal line, stays relevant.
+    #[cfg(unix)]
+    #[test]
+    fn stub_portal_pair_is_dropped_only_when_disjoint_and_paired() {
+        let target = unique_temp_dir("holder-1978-portal");
+        let evidence = stub_probe("gha", &target, b"", GHA_TRACEFS_AND_PORTAL, 1);
+        if cfg!(target_os = "linux") {
+            assert_eq!(evidence, HolderEvidence::Clear);
+        } else {
+            assert_unknown("gha", evidence);
+        }
+        for (name, mount) in [
+            ("same", target.clone()),
+            ("ancestor", target.parent().unwrap().to_path_buf()),
+            ("descendant", target.join("doc")),
+        ] {
+            let mut stderr = LINUX_TRACEFS_WARNING.to_vec();
+            stderr.extend_from_slice(&portal_pair_for(&mount));
+            assert_unknown(name, stub_probe(name, &target, b"", &stderr, 1));
+        }
+        let mut lone = LINUX_TRACEFS_WARNING.to_vec();
+        lone.extend_from_slice(
+            b"lsof: WARNING: can't stat() fuse.portal file system /run/user/1000/doc\n",
+        );
+        assert_unknown("lone", stub_probe("lone", &target, b"", &lone, 1));
         let _ = std::fs::remove_dir_all(&target);
     }
 
