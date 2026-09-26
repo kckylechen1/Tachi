@@ -436,3 +436,36 @@ fn null_id_projection_rows_are_pruned() {
     }
     assert_eq!(generation(&conn), generation_before + 1);
 }
+
+/// tachi#2000 review (finding 3): with `memories` empty, every projection row
+/// is an orphan. The pass used to return early on an empty `memories`, so a
+/// ghost or NULL-id projection row there was never pruned, on any open.
+#[test]
+fn orphan_rows_pruned_when_memories_is_empty() {
+    let conn = fresh_conn();
+    for table in ["memories_fts", "memories_symbolic_fts"] {
+        seed_projection_rows(&conn, table, &[Some("ghost"), None]);
+        assert_eq!(
+            fts_ids(&conn, table),
+            vec![None, Some("ghost".into())],
+            "{table}: fixture holds a NULL-id row and an orphan"
+        );
+    }
+    assert_eq!(count(&conn, "SELECT COUNT(*) FROM memories"), 0);
+    let generation_before = generation(&conn);
+
+    ensure_fts_backfilled(&conn).expect("prune orphans with no memories");
+
+    for table in ["memories_fts", "memories_symbolic_fts"] {
+        assert_eq!(
+            fts_ids(&conn, table),
+            Vec::<Option<String>>::new(),
+            "{table}: every projection row is an orphan when memories is empty"
+        );
+    }
+    assert_eq!(generation(&conn), generation_before + 1);
+
+    // Converged: nothing left to delete, so no second bump.
+    ensure_fts_backfilled(&conn).expect("second pass");
+    assert_eq!(generation(&conn), generation_before + 1);
+}

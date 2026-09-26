@@ -33,6 +33,10 @@ pub(super) fn migrate_v22_memories_symbolic_fts(conn: &Connection) -> Result<usi
 /// Drop every symbolic-FTS row and re-insert from live `memories`. No-op when
 /// the virtual table is absent (should not happen after the CREATE above).
 ///
+/// A NULL-id memory is never projected (tachi#1993): it can never join back to
+/// an FTS hit, and the open-time orphan pass in `ensure_fts_backfilled` deletes
+/// every NULL-id projection row, so projecting it would only be undone there.
+///
 /// Public: reused (not reimplemented) by `tachi repair`'s R1 FTS-rebuild rule
 /// (`tachi-server::repair::fts`) so the trigram projection gets the same
 /// full-rebuild coverage as `memories_fts` (#1335 oracle).
@@ -58,7 +62,8 @@ fn rebuild_memories_symbolic_fts_rows(conn: &Connection) -> Result<Option<usize>
     conn.execute("DELETE FROM memories_symbolic_fts", [])?;
     let inserted = conn.execute(
         r#"INSERT INTO memories_symbolic_fts (id, path, summary, text, keywords, entities, topic)
-           SELECT id, path, summary, text, keywords, entities, topic FROM memories"#,
+           SELECT id, path, summary, text, keywords, entities, topic FROM memories
+           WHERE id IS NOT NULL"#,
         [],
     )?;
     Ok(Some(inserted))
@@ -107,6 +112,32 @@ mod tests {
         assert_eq!(path, "/handoff/unknown");
         // Idempotent CREATE + rebuild.
         assert_eq!(rebuild_memories_symbolic_fts_rows(&conn).unwrap(), Some(1));
+    }
+
+    /// tachi#2000 review (finding 1): the full rebuild (v22 and R1 repair)
+    /// never projects a NULL-id memory; the open-time orphan pass would delete
+    /// that row again on the next writable open.
+    #[test]
+    fn rebuild_never_projects_null_memory_ids() {
+        let conn = open_minimal();
+        conn.execute_batch(
+            "INSERT INTO memories (id, path, summary, text, keywords, entities, topic)
+             VALUES (NULL, '/null', 's', 'null id body', '[]', '[]', 't'),
+                    ('keep', '/keep', 's', 'keep body', '[]', '[]', 't');",
+        )
+        .unwrap();
+        conn.execute_batch(MEMORIES_SYMBOLIC_FTS_DDL).unwrap();
+
+        assert_eq!(rebuild_memories_symbolic_fts_rows(&conn).unwrap(), Some(1));
+
+        let ids: Vec<Option<String>> = conn
+            .prepare("SELECT id FROM memories_symbolic_fts ORDER BY id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(ids, vec![Some("keep".to_string())]);
     }
 
     #[test]

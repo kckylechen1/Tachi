@@ -163,6 +163,7 @@ def rebuild_fts_if_present(conn: sqlite3.Connection) -> bool:
                 trim(replace(replace(replace(keywords, '[', ' '), ']', ' '), '"', ' ')),
                 trim(replace(replace(replace(entities, '[', ' '), ']', ' '), '"', ' '))
             FROM memories
+            WHERE id IS NOT NULL
             """
         )
         return True

@@ -3387,11 +3387,15 @@ const SYMBOLIC_FTS_BACKFILL_MISSING_SQL: &str = r#"INSERT INTO memories_symbolic
 
 // Orphan pass, the delete side of the same drift repair (tachi#1993).
 // `memories.id` is `TEXT PRIMARY KEY` without NOT NULL, so the subquery must
-// skip NULL ids: one NULL makes `x NOT IN (..., NULL)` NULL for every x and
-// nothing would be pruned. A NULL-id projection row is always an orphan: the
-// insert side above never projects a NULL-id memory, and every search leg joins
-// `m.id = <fts>.id`, which never matches NULL. `NULL NOT IN (<non-empty>)` is
-// NULL, so it needs the explicit `id IS NULL` arm.
+// skip NULL ids: with a NULL in the list, `x NOT IN (..., NULL)` is NULL for
+// every x that matches no listed id (an x that does match yields FALSE), so no
+// orphan would ever be pruned. A NULL-id projection row is always an orphan:
+// no FTS projection writer projects a NULL-id memory (this insert side, the
+// R1 repair rebuild, `rebuild_memories_symbolic_fts`, `rebuild_fts_full`), and
+// every search leg joins `m.id = <fts>.id`, which never matches NULL.
+// `NULL NOT IN (<non-empty>)` is NULL, so it needs the explicit `id IS NULL`
+// arm. With `memories` empty the list is empty and every projection row,
+// NULL-id or not, is deleted: all of them are orphans.
 const FTS_DELETE_ORPHANS_SQL: &str = r#"DELETE FROM memories_fts
    WHERE id IS NULL
       OR id NOT IN (SELECT id FROM memories WHERE id IS NOT NULL)"#;
@@ -3405,12 +3409,11 @@ fn ensure_fts_backfilled(conn: &Connection) -> Result<(), MemoryError> {
     // here moved to `init_product_schema_columns` in #1585 D3: it is a product
     // table and would `no such table`-crash a PortableKernel init, and it never
     // had anything to do with FTS backfill.)
-    let memories_count: i64 =
-        conn.query_row("SELECT COUNT(*) FROM memories", [], |row| row.get(0))?;
-    if memories_count == 0 {
-        return Ok(());
-    }
-
+    //
+    // No empty-`memories` early return: with no memories every projection row
+    // is an orphan, and skipping the pass left them in place forever. Both
+    // inserts are no-ops then, and the generation still bumps only when a
+    // statement changed a row.
     let mut projection_changes = conn.execute(FTS_DELETE_ORPHANS_SQL, [])?;
 
     projection_changes += conn.execute(FTS_BACKFILL_MISSING_SQL, [])?;

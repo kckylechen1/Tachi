@@ -22,6 +22,12 @@ const FTS_CREATE: &str = r#"
     );
 "#;
 
+// One rule for every FTS projection writer and drift count (tachi#1993):
+// a NULL-id memory is never projected. `memories.id` is `TEXT PRIMARY KEY`
+// without NOT NULL, so legacy rows can carry NULL; such a row can never join
+// back to an FTS hit (`m.id = <fts>.id`), and memcore's open-time orphan pass
+// deletes every NULL-id projection row. Projecting it here would make
+// repair -> open -> repair oscillate, with a generation bump each time.
 const FTS_INSERT: &str = r#"
     INSERT INTO memories_fts (id, path, summary, text, keywords, entities)
     SELECT
@@ -29,12 +35,18 @@ const FTS_INSERT: &str = r#"
         trim(replace(replace(replace(keywords, '[', ' '), ']', ' '), '"', ' ')),
         trim(replace(replace(replace(entities, '[', ' '), ']', ' '), '"', ' '))
     FROM memories
+    WHERE id IS NOT NULL
 "#;
+
+/// The drift baseline: the memories a projection should hold, i.e. the
+/// non-NULL-id ones (see `FTS_INSERT`). The FTS side stays a raw `COUNT(*)`,
+/// so a NULL-id projection row still counts as drift and `apply` drops it.
+const PROJECTABLE_MEMORIES_COUNT: &str = "SELECT COUNT(*) FROM memories WHERE id IS NOT NULL";
 
 fn fts_state(ctx: &DbContext) -> Result<(i64, Option<i64>), RepairError> {
     let mem_count: i64 = ctx
         .conn
-        .query_row("SELECT COUNT(*) FROM memories", [], |r| r.get(0))
+        .query_row(PROJECTABLE_MEMORIES_COUNT, [], |r| r.get(0))
         .map_err(RepairError::from)?;
 
     // Detect existence of memories_fts virtual table.
@@ -65,7 +77,7 @@ fn fts_state(ctx: &DbContext) -> Result<(i64, Option<i64>), RepairError> {
 fn symbolic_fts_state(ctx: &DbContext) -> Result<(i64, Option<i64>), RepairError> {
     let mem_count: i64 = ctx
         .conn
-        .query_row("SELECT COUNT(*) FROM memories", [], |r| r.get(0))
+        .query_row(PROJECTABLE_MEMORIES_COUNT, [], |r| r.get(0))
         .map_err(RepairError::from)?;
 
     let exists: i64 = ctx
