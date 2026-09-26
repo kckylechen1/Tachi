@@ -2714,27 +2714,4 @@ mod tests {
             "tachi_sandbox must be destructive_hint=true (fronts set_rule/set_policy, both destructive)"
         );
     }
-
-    /// Retired sandbox names still take the annotation helper's historical
-    /// default for synthetic tools. This does not assert router reachability;
-    /// sandbox_fold tests separately require every retired name to be absent.
-    #[test]
-    fn sandbox_aliases_keep_their_pre_fold_destructive_hint() {
-        for legacy_name in [
-            "sandbox_set_rule",
-            "sandbox_check",
-            "sandbox_set_policy",
-            "sandbox_get_policy",
-            "sandbox_list_policies",
-            "sandbox_exec_audit",
-        ] {
-            assert_eq!(
-                annotated_destructive_hint(legacy_name),
-                Some(false),
-                "legacy alias '{legacy_name}' must keep its pre-fold destructive_hint=false \
-                 (tool-level annotation is unaware of the alias manifest's per-action \
-                 destructive bit; this is documented as the S2+ direction, not fixed here)"
-            );
-        }
-    }
 }

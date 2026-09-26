@@ -117,7 +117,7 @@ compatibility removal. It is not a current action queue.
 | `search_memory` | Still in observe patterns at `crates/tachi-hub/src/tool_profiles/patterns.rs:10`; daemon CLI remaps to `tachi_memory(action="search")` at `crates/tachi-server/src/cli_client/tool_map.rs:18`. | `tachi_memory(action="search")` | Hard-retire direct MCP name. | Profile-hide in #756, then migrate direct tests/callers and delete wrapper. |
 | `save_memory` | Still in remember patterns at `patterns.rs:38`; daemon CLI remaps to `tachi_memory(action="save")` at `tool_map.rs:17`. | `tachi_memory(action="save")` | Hard-retire direct MCP name. | Same batch as `search_memory`. |
 | `remember` | Still in remember patterns at `patterns.rs:39`; remaps with `save_memory` at `tool_map.rs:17`. | `tachi_memory(action="save")` | Hard-retire direct MCP name and keep only CLI prose if needed. | Same batch as `save_memory`. |
-| `get_memory` | Already folded admin-only in `FOLDED_NATIVE_COMPAT_TOOLS` at `crates/tachi-server/src/tests/profile_tests/tool_profile_router_coverage.rs:155`; daemon CLI remaps to `tachi_memory(action="get")` at `tool_map.rs:19`. | `tachi_memory(action="get")` | Delete candidate after caller migration. | Remove direct wrapper once tests stop using it as public MCP. |
+| `get_memory` | Retired: pinned in `RETIRED_NATIVE_ALIASES` in `crates/tachi-server/src/tests/profile_tests/tool_profile_router_coverage.rs`; daemon CLI remaps to `tachi_memory(action="get")` at `tool_map.rs:19`. | `tachi_memory(action="get")` | Delete candidate after caller migration. | Remove direct wrapper once tests stop using it as public MCP. |
 | `extract_facts` | Still a standalone remember tool and remaps to `tachi_memory(action="extract_facts")` at `tool_map.rs:16`. | `tachi_memory(action="extract_facts")` | Fold candidate, not first cut. | Decide whether high-frequency use justifies standalone entry. |
 
 ### Batch A2: Fold Wiki Duplicate Aliases
@@ -148,6 +148,8 @@ for any of these).
 
 Do not delete the kanban storage/handler code in this batch. Only delete the MCP
 route after the canonical task/staff flows cover the same dogfood path.
+(Later executed: the retired `post_card`/`check_inbox`/`update_card` handlers
+were removed after 2.0; only the kanban GC in `kanban/gc.rs` remains.)
 
 ### Batch C: Executed — deprecated dispatch facades removed (PR #822; tracked by #757)
 

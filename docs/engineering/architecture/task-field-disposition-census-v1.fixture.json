@@ -62,7 +62,7 @@
       ],
       "canonical_future_owner": "Task",
       "disposition": "keep_task_ledger",
-      "rationale": "Ledger identity of the requesting agent; threaded into TaskBriefParams and brief."
+      "rationale": "Ledger identity of the requesting agent; threaded into the brief."
     },
     "domain": {
       "used_by_actions": [

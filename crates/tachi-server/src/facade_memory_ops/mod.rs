@@ -118,10 +118,7 @@ pub(crate) async fn handle_tachi_memory(
                 response.insert("query".to_string(), json!(search_params.query));
                 response.insert("scope".to_string(), json!(scope));
                 response.insert("scope_remapped".to_string(), json!(scope_remapped));
-                response.insert(
-                    "sections".to_string(),
-                    serde_json::Value::Array(sections),
-                );
+                response.insert("sections".to_string(), serde_json::Value::Array(sections));
                 response.insert(
                     "binding_summary".to_string(),
                     json!(crate::memory_search_ops::binding_summary_line(&binding)),
@@ -252,18 +249,6 @@ pub(crate) async fn handle_tachi_memory(
         "alerts" => readiness_ops::handle_memory_alerts(server, &params).await,
         "ask" => readiness_ops::handle_memory_ask(server, &params).await,
         "consolidate" => consolidate_ops::handle_memory_consolidate(server, &params).await,
-        "recall_simulate" => Err(
-            "Invalid tachi_memory action 'recall_simulate'. Recall tuning left Memory in #1426; use tachi_tune(action='recall_simulate').".to_string()
-        ),
-        "recall_proposals" => Err(
-            "Invalid tachi_memory action 'recall_proposals'. Recall tuning left Memory in #1426; use tachi_tune(action='recall_proposals').".to_string()
-        ),
-        "review_recall_proposal" => Err(
-            "Invalid tachi_memory action 'review_recall_proposal'. Recall tuning left Memory in #1426; use tachi_tune(action='recall_review').".to_string()
-        ),
-        "apply_recall_proposals" => Err(
-            "Invalid tachi_memory action 'apply_recall_proposals'. Recall tuning left Memory in #1426; use tachi_tune(action='recall_apply').".to_string()
-        ),
         _ => Err(action
             .parse::<TachiMemoryAction>()
             .expect_err("unmatched Memory action must remain invalid")),
@@ -419,14 +404,7 @@ mod tests {
 
     #[test]
     fn facade_write_actions_do_not_use_read_forwarding() {
-        for action in [
-            "save",
-            "extract_facts",
-            "checkpoint",
-            "pattern_feedback",
-            "progress",
-            "consolidate",
-        ] {
+        for action in ["save", "extract_facts", "checkpoint", "consolidate"] {
             assert!(
                 !should_forward_facade_read(action),
                 "{action} should keep its write/state-specific forwarding path"

@@ -2393,7 +2393,6 @@ mod facade_tests;
 mod fold_contract;
 mod gh_comment_tests;
 mod hub_tests;
-mod kanban_tests;
 mod memory_tests;
 mod merge_tests;
 mod orchestrator_tests;

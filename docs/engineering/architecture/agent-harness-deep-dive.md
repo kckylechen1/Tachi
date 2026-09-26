@@ -484,7 +484,7 @@ commit → CI 挂了 → 修 CI → 目录结构乱 → 重构 → 缺功能 →
 
 | Claude Code 设计 | Tachi 借鉴 |
 |-----------------|-----------|
-| TaskCreate/TaskUpdate 工具 | Kanban 经内部处理器/`tachi_task` 看板动作(旧名 `post_card`/`update_card` 已退役) |
+| TaskCreate/TaskUpdate 工具 | Kanban 经 `tachi_task` 看板动作(旧名 `post_card`/`update_card` 已退役,其内部处理器也已删除) |
 | `--continue` session 恢复 | `tachi_memory briefing` 跨 session 恢复 |
 | Agent 工具 spawn subagent | `tachi_dispatch`(已退役,现归 `tachi_staff`) + `tachi_task(action="complete")` |
 | Compaction 不影响 TODO | Memory 工具独立于对话（已实现） |
