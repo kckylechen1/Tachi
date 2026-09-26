@@ -335,17 +335,14 @@ unit with `User=gha`, or a user unit with linger) in the activation receipt.
   `adding '/home/gha/.install-action/bin' to PATH`). Same accounting as C1's
   runbook otherwise.
 - `~/.cargo/bin` must not hold its own `cargo-nextest`: assert 1 above fails
-  both jobs (exit 6) while one exists. `atom-dgx-2` has an unaudited
+  both jobs (exit 6) while one exists. `atom-dgx-2` had an unaudited
   `cargo-nextest 0.9.146` there. The installer appends its own bin directory
   to the end of `PATH` for its post-install lookup, so its `installed at`
-  line names that stray binary (runs 36226017929 and 36226640312). In run
-  36226640312, `PATH` resolved `cargo-nextest` to
-  `/home/gha/.install-action/bin/cargo-nextest`, version `0.9.140`, in both
-  jobs. That is consistent with `~/.cargo/bin` being on the service `PATH`
-  (the `.path` requirement under Runner registration) behind `GITHUB_PATH`'s
-  prepended entries, which is the Cargo override quoted above; it was not
-  read directly from the service. The fix is an owner act on the host:
-  remove `~gha/.cargo/bin/cargo-nextest`. Never relax the guard. Host check:
+  line named that stray binary (runs 36226017929 and 36226640312). It was
+  removed from the host before run 36229085044: there the installer reports
+  `installed at /home/gha/.install-action/bin/cargo-nextest` and the
+  `rust-gate` job passes all three asserts. If one reappears, remove `~gha/.cargo/bin/cargo-nextest` on
+  the host (an owner act) and never relax the guard. Host check:
   `ls -l ~/.cargo/bin/cargo-nextest` should report no such file.
 
 ## Queue hygiene before first activation
