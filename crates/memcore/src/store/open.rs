@@ -307,26 +307,6 @@ fn require_exact_virtual_shape(
     )))
 }
 
-/// Filesystem presence does not distinguish an operational database from an
-/// empty path reservation. Only an unstamped database with no application
-/// schema may enter ordinary initialization and install the canonical guards.
-fn has_existing_application_schema(conn: &Connection) -> Result<bool, MemoryError> {
-    if db::migrations::read_schema_version(conn)? != 0 {
-        return Ok(true);
-    }
-
-    let application_objects: i64 = conn.query_row(
-        "SELECT EXISTS(
-             SELECT 1
-             FROM main.sqlite_schema
-             WHERE name NOT LIKE 'sqlite_%'
-         )",
-        [],
-        |row| row.get(0),
-    )?;
-    Ok(application_objects != 0)
-}
-
 /// Prove that the compatibility handle can serve the selected read-only
 /// backfill before exposing it. SQLite's table-list and extended-column
 /// metadata distinguish ordinary tables, views, virtual tables, and each
@@ -688,16 +668,9 @@ impl MemoryStore {
         )?;
         let reserved_reference_write = db::register_reserved_reference_write_guard(&conn)?;
         db::install_reserved_reference_authorizer(&conn, Some(&reserved_reference_write))?;
-        let existing_application_schema = has_existing_application_schema(&conn)?;
-        let stored_schema_version = db::migrations::read_schema_version(&conn)?;
-        // Missing guards are legitimate only before the versioned v23
-        // migration (or on a truly empty fresh DB). Unexpected/tampered
-        // definitions are always rejected. A partial unstamped application
-        // schema remains strict and cannot claim fresh-build authority.
-        let is_stamped_older_schema =
-            (1..db::migrations::EXPECTED_SCHEMA_VERSION).contains(&stored_schema_version);
-        let allow_missing_pre_migration = !existing_application_schema || is_stamped_older_schema;
-        db::validate_persistent_trigger_inventory(&conn, !allow_missing_pre_migration)?;
+        // Input trigger-inventory admission (see its doc). Schema init runs it
+        // again inside BEGIN IMMEDIATE on the in-transaction state.
+        db::validate_input_trigger_inventory(&conn)?;
         // Both labelled and unlabelled opens run schema init + data migrations
         // through init_schema_with_label_mut so the pre-migration backup and
         // post-migration fingerprint marker apply uniformly. Previously the
@@ -705,7 +678,7 @@ impl MemoryStore {
         // backups for all CLI/open_cli_store paths (#597 CP1).
         let p = std::path::PathBuf::from(db_path);
         let migration_authorization = db::authorize_schema_migration(&reserved_reference_write)?;
-        let schema_result = db::init_schema_with_label_mut(&mut conn, db_label, &p, ctx);
+        let schema_result = db::init_store_schema_with_label_mut(&mut conn, db_label, &p, ctx);
         let vec_available = schema_result
             .as_ref()
             .map(|_| db::try_load_sqlite_vec(&conn))

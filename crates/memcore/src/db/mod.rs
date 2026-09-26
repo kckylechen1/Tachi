@@ -273,8 +273,9 @@ pub(crate) use open::{
     configure_connection, install_authority_row_guards, install_reserved_reference_authorizer,
     open_read_only, open_read_write, open_read_write_with_busy_timeout,
     register_reserved_reference_write_guard, retry_memory_locked, scoped_sqlite_busy_deadline,
-    sqlite_busy_deadline_remaining, validate_persistent_trigger_inventory,
-    ReservedReferenceWriteAuthorization, ReservedReferenceWriteFlag,
+    sqlite_busy_deadline_remaining, validate_input_trigger_inventory,
+    validate_persistent_trigger_inventory, ReservedReferenceWriteAuthorization,
+    ReservedReferenceWriteFlag,
 };
 pub use open_context::{
     DbOpenContext, MigrationAuthority, OpenIntent, SCHEMA_MIGRATION_LEGACY_ENV,
@@ -328,9 +329,9 @@ pub use sandbox::{
 pub(crate) use sandbox_access::evaluate_sandbox_access;
 #[cfg(feature = "admin")]
 pub use sandbox_access::{evaluate_sandbox_access, path_matches_pattern};
-pub(crate) use schema::init_private_schema_with_label_mut;
 #[cfg(test)]
 pub(crate) use schema::install_reserved_reference_guard;
+pub(crate) use schema::{init_private_schema_with_label_mut, init_store_schema_with_label_mut};
 pub use schema::{
     init_schema, init_schema_with_label_mut, validate_current_truth_schema, SchemaInitOutcome,
 };

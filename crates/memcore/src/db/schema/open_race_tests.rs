@@ -252,7 +252,7 @@ fn older_store_under_deny_refuses_in_preflight_before_the_window() {
         "the preflight must refuse before the window"
     );
     // Disarm for any later test on this thread.
-    test_hooks::run_before_schema_transaction(&path);
+    test_hooks::disarm_window_hooks();
 }
 
 /// (d) The `fresh` discriminator must be the in-transaction one. A portable
@@ -383,6 +383,121 @@ fn unauthorized_migration_state_appearing_in_window_is_refused_under_deny() {
 
     let expected = after_window.borrow().clone().expect("window ran");
     let actual = snapshot(&Connection::open(&path).expect("inspect"));
+    assert_eq!(
+        actual, expected,
+        "no migration, stamp or state write may remain"
+    );
+}
+
+/// Round 3, FIX A. Another process drops a canonical search-generation
+/// trigger in the window. `init_schema_inner` would recreate it
+/// (`CREATE TRIGGER IF NOT EXISTS`) before the end-of-transaction validation,
+/// silently repairing damaged input. The in-transaction input-inventory check
+/// must refuse first, with exactly the error a sequential open of the same
+/// damaged store gives, and leave no DDL or stamp.
+#[test]
+fn trigger_dropped_in_window_is_refused_like_a_sequential_open() {
+    const TRIGGER: &str = "memory_edge_search_generation_after_update";
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = tmp.path().join("race-trigger.db");
+    seed_current_store(&path);
+
+    // Reference: the same damage, present before a plain sequential open.
+    let sequential_path = tmp.path().join("sequential-trigger.db");
+    seed_current_store(&sequential_path);
+    Connection::open(&sequential_path)
+        .expect("damage")
+        .execute_batch(&format!("DROP TRIGGER {TRIGGER}"))
+        .expect("drop trigger before the open");
+    let sequential_err = crate::MemoryStore::open_with_label_and_context(
+        sequential_path.to_str().expect("utf8"),
+        "global",
+        &DbOpenContext::open_existing_deny(),
+    )
+    .err()
+    .expect("a sequential open must refuse a damaged current trigger inventory");
+
+    let after_window = arm_window(|path| {
+        Connection::open(path)
+            .expect("damaging writer")
+            .execute_batch(&format!("DROP TRIGGER {TRIGGER}"))
+            .expect("drop trigger in the window");
+    });
+    // Through the real store funnel: its pre-init inventory check passes (the
+    // trigger is still there), then the window drops it.
+    let err = crate::MemoryStore::open_with_label_and_context(
+        path.to_str().expect("utf8"),
+        "global",
+        &DbOpenContext::open_existing_deny(),
+    )
+    .err()
+    .expect("a trigger dropped in the window must be refused, not repaired");
+
+    assert_eq!(
+        err.to_string(),
+        sequential_err.to_string(),
+        "the in-transaction refusal must be the sequential open's refusal"
+    );
+    let expected = after_window.borrow().clone().expect("window ran");
+    let actual = snapshot(&Connection::open(&path).expect("inspect"));
+    assert!(
+        !actual.1.iter().any(|(_, name, _)| name == TRIGGER),
+        "the dropped trigger must not have been recreated"
+    );
+    assert_eq!(actual, expected, "no DDL, stamp or state write may remain");
+}
+
+/// Round 3, FIX B (ABA). The store is current-shaped, its marker matches
+/// `schema:39:<cookie>`, and an external tool has lowered `user_version` to 38.
+/// The Allow preflight reads 38. Another process sets 39 before the backup
+/// step, which therefore sees "no migration, marker matches" and skips. The
+/// version goes back to 38 before `BEGIN IMMEDIATE`. The preflight and
+/// in-transaction versions agree (38 == 38), but nothing backed up 38: the
+/// coverage check must use the backup step's own decision and refuse.
+#[test]
+fn aba_version_around_the_backup_decision_is_refused_without_a_backup() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = tmp.path().join("race-aba.db");
+    seed_current_store(&path);
+    let older = crate::db::migrations::EXPECTED_SCHEMA_VERSION - 1;
+    let set_version = |path: &Path, version: u32| {
+        Connection::open(path)
+            .expect("version tool")
+            .execute_batch(&format!("PRAGMA user_version = {version}"))
+            .expect("set user_version");
+    };
+    set_version(&path, older);
+    assert!(
+        migration_marker_path(&path).exists(),
+        "fixture: seeding leaves the current-version marker"
+    );
+
+    test_hooks::arm_window_hook(test_hooks::Window::BeforeBackupDecision, move |path| {
+        set_version(path, crate::db::migrations::EXPECTED_SCHEMA_VERSION)
+    });
+    let after_window = arm_window(move |path| set_version(path, older));
+
+    let mut conn = Connection::open(&path).expect("opener connection");
+    let err =
+        crate::db::init_schema_with_label_mut(&mut conn, "global", &path, &open_existing_allow())
+            .expect_err("a migration the backup step never covered must be refused");
+    drop(conn);
+    assert!(
+        matches!(
+            err,
+            MemoryError::SchemaChangedDuringOpen { preflight, current, .. }
+                if preflight == crate::db::migrations::EXPECTED_SCHEMA_VERSION && current == older
+        ),
+        "expected SchemaChangedDuringOpen {{ preflight: 39, current: 38 }}, got {err:?}"
+    );
+    assert_eq!(
+        backups_in(tmp.path()),
+        0,
+        "the backup step skipped; nothing was backed up"
+    );
+    let expected = after_window.borrow().clone().expect("window ran");
+    let actual = snapshot(&Connection::open(&path).expect("inspect"));
+    assert_eq!(actual.0, older, "the store must not have been migrated");
     assert_eq!(
         actual, expected,
         "no migration, stamp or state write may remain"
