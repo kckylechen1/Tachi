@@ -485,7 +485,8 @@ pub enum MemoryError {
     /// different one. In practice: an embedder with a stricter product boundary
     /// than the kernel (Hypermem, `Exact(PortableKernel)`) opening a full Tachi
     /// database. The kernel would admit that superset under `AtLeast`; this
-    /// caller asked it not to. Raised before any backup, DDL or stamp.
+    /// caller asked it not to. Raised by the open funnel's read-only identity
+    /// preflight, ahead of the migration backup and any memcore DDL or stamp.
     #[error(
         "store profile is not exact at {db_path}: caller admits only profile {required:?} but \
          the database is stamped {stored:?}. This caller refuses a store of any other profile, \

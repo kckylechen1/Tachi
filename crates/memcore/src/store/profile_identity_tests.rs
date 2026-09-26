@@ -1113,27 +1113,30 @@ fn hard_state_rows(conn: &Connection) -> Vec<(String, String, String)> {
     rows.map(|r| r.expect("hard_state row")).collect()
 }
 
-/// Sibling files next to the database, excluding the WAL pair SQLite creates
-/// and removes around any connection.
+/// Every file next to the database, by name, INCLUDING SQLite's `-wal`/`-shm`
+/// sidecars. The clean-store test starts from a cleanly closed store (the last
+/// close removed both sidecars), so a sidecar left behind would show up. The
+/// unclean-shutdown test is where sidecars legitimately change, and it says so.
 fn sibling_names(dir: &Path) -> BTreeSet<String> {
     std::fs::read_dir(dir)
         .expect("read dir")
         .filter_map(|e| e.ok())
         .map(|e| e.file_name().to_string_lossy().into_owned())
-        .filter(|name| !name.ends_with("-wal") && !name.ends_with("-shm"))
         .collect()
 }
 
 /// The hazard W1-2 closes, in one test. An `Exact(PortableKernel)` caller
-/// opening a full Tachi store must refuse before the migration backup, the
-/// connection PRAGMAs, any DDL and any stamp. The file must be byte-identical
-/// afterwards, with no role stamp, no `.migration-bak` and no new sibling.
+/// opening a full Tachi store must refuse ahead of the migration backup and
+/// the connection PRAGMAs, with no memcore DDL, stamp or role write. For a
+/// cleanly closed store that also means byte-identical files, no role stamp,
+/// no `.migration-bak` and no new sibling (the unclean-shutdown variant below
+/// covers what is promised when a WAL is left behind).
 ///
 /// The marker is deleted first, so this open is one the fingerprint heuristic
 /// WOULD back up. Only the admission preflight's position ahead of the backup
 /// keeps the backup from being written.
 #[test]
-fn exact_portable_refuses_full_store_with_zero_side_effects() {
+fn exact_portable_refuses_full_store_and_writes_nothing_to_a_clean_store() {
     let dir = temp_dir("exact-refuses-full");
     let path = db_in(&dir, "memory.db");
     drop(
@@ -1197,6 +1200,99 @@ fn exact_portable_refuses_full_store_with_zero_side_effects() {
         !before_siblings.iter().any(|n| n.contains("migration-bak")),
         "no backup may exist, before or after"
     );
+}
+
+/// Unclean-shutdown variant. A full store whose last writer died with
+/// committed frames still in `-wal` is opened `Exact(PortableKernel)`. memcore
+/// must still write no backup, marker, DDL, stamp or role row, and the logical
+/// state must be exactly what the crashed writer committed. SQLite's own
+/// last-close checkpoint is allowed to fold the frames into the main file and
+/// remove `-wal`/`-shm`, so the main-file hash and the sidecar pair are NOT
+/// compared for equality here.
+#[test]
+fn exact_portable_refusal_after_unclean_shutdown_keeps_logical_state() {
+    let src = temp_dir("exact-unclean-src");
+    let dst = temp_dir("exact-unclean-dst");
+    let src_path = db_in(&src, "memory.db");
+    let dst_path = db_in(&dst, "memory.db");
+    drop(
+        MemoryStore::open_with_context(&src_path, &deny(StoreProfile::TachiFull))
+            .expect("fresh full create"),
+    );
+
+    // An extra open connection means no close below is the LAST close, so
+    // the committed frames stay in `-wal`, as a crashed writer leaves them.
+    let keeper = raw(&src_path);
+    keeper
+        .query_row("SELECT count(*) FROM sqlite_schema", [], |r| {
+            r.get::<_, i64>(0)
+        })
+        .expect("keeper read");
+    let mut writer = MemoryStore::open_with_context(&src_path, &deny(StoreProfile::TachiFull))
+        .expect("writer open");
+    writer
+        .upsert(&entry("wal-only", "/scratch/wal-only"))
+        .expect("commit a row into the WAL");
+    drop(writer);
+    let before_rows = hard_state_rows(&keeper);
+    let before_version = user_version(&keeper);
+    let before_schema = schema_snapshot(&keeper);
+
+    std::fs::copy(&src_path, &dst_path).expect("copy main file");
+    std::fs::copy(format!("{src_path}-wal"), format!("{dst_path}-wal")).expect("copy wal");
+    drop(keeper);
+    assert!(
+        std::fs::metadata(format!("{dst_path}-wal"))
+            .expect("wal metadata")
+            .len()
+            > 0,
+        "fixture: the crash image must carry WAL frames"
+    );
+    let before_siblings = sibling_names(&dst);
+
+    let err = MemoryStore::open_with_label_and_context(
+        &dst_path,
+        "global",
+        &exact(StoreProfile::PortableKernel),
+    )
+    .err()
+    .expect("an exact-portable caller must refuse a full store");
+    assert!(
+        matches!(err, MemoryError::StoreProfileNotExact { .. }),
+        "expected StoreProfileNotExact, got {err:?}"
+    );
+
+    let after_siblings = sibling_names(&dst);
+    let added: Vec<_> = after_siblings.difference(&before_siblings).collect();
+    let removed: Vec<_> = before_siblings.difference(&after_siblings).collect();
+    assert!(
+        added.is_empty(),
+        "no file may be created (no backup, no marker): {added:?}"
+    );
+    assert!(
+        removed
+            .iter()
+            .all(|name| name.ends_with("-wal") || name.ends_with("-shm")),
+        "only SQLite's own sidecars may disappear: {removed:?}"
+    );
+
+    let conn = raw(&dst_path);
+    assert_eq!(user_version(&conn), before_version);
+    assert_eq!(hard_state_rows(&conn), before_rows);
+    assert_eq!(schema_snapshot(&conn), before_schema);
+    assert_eq!(
+        identity_stamp(&conn, "role"),
+        None,
+        "role stamped on refusal"
+    );
+    let wal_row: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM memories WHERE id = 'wal-only'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("count wal-only row");
+    assert_eq!(wal_row, 1, "the WAL-committed row must survive the refusal");
 }
 
 /// Contrast for the table in the PR: the same full store under the

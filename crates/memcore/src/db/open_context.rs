@@ -94,8 +94,11 @@ pub struct DbOpenContext {
     /// walk is always the stored one. See [`crate::db::store_profile`] for why
     /// inverting that is the worst failure mode in this design.
     ///
-    /// A refused requirement fails the open before any side effect: no
-    /// migration backup, no connection PRAGMA, no DDL, no stamp.
+    /// A requirement refused by the stamps as the open funnel's read-only
+    /// preflight reads them fails the open with no migration backup, no
+    /// connection PRAGMA, and no memcore DDL, stamp or identity/role write.
+    /// SQLite may still checkpoint a pre-existing WAL when the connection
+    /// closes; see `init_schema_with_label_mut_inner`.
     pub required_profile: ProfileRequirement,
 }
 
@@ -147,8 +150,8 @@ impl DbOpenContext {
     /// A fresh file is built with that profile; an existing store stamped
     /// anything else, including a superset `TachiFull` store under
     /// `PortableKernel`, is refused with
-    /// [`crate::error::MemoryError::StoreProfileNotExact`] before any backup,
-    /// DDL or stamp.
+    /// [`crate::error::MemoryError::StoreProfileNotExact`] ahead of the
+    /// migration backup and without any memcore DDL, stamp or role write.
     pub fn with_exact_profile(mut self, required_profile: StoreProfile) -> Self {
         self.required_profile = ProfileRequirement::Exact(required_profile);
         self

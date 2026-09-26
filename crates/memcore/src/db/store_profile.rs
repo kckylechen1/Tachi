@@ -137,9 +137,10 @@ impl Default for StoreProfile {
 /// | `PortableKernel` | admit               | refuse          | admit             | refuse        |
 /// | `TachiFull`      | admit               | admit           | **refuse**        | admit         |
 ///
-/// A refusal happens in the open funnel's read-only identity preflight, before
-/// the migration backup, the connection PRAGMAs, any DDL and any stamp. The
-/// same resolver re-runs inside the schema transaction as the authority.
+/// A refusal happens in the open funnel's read-only identity preflight, ahead
+/// of the migration backup and the connection PRAGMAs, with no memcore DDL,
+/// stamp or role write. The same resolver re-runs inside the schema
+/// transaction as the authority.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ProfileRequirement {
     /// The stored profile must [`StoreProfile::satisfies`] this one. This is

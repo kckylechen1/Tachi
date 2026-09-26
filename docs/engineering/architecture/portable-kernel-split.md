@@ -231,20 +231,49 @@ The one supported dependency surface for Hypermem:
   store stamped `p` (`DbOpenContext::with_exact_profile`). Under
   `Exact(PortableKernel)` the kernel refuses a `TachiFull` store with
   `MemoryError::StoreProfileNotExact`. The refusal comes from the open
-  funnel's read-only identity preflight, before the migration backup, the
-  connection PRAGMAs, any DDL and any stamp: the file bytes,
-  `PRAGMA user_version` and `hard_state` stay unchanged, and no
-  `.migration-bak` is written. One labelled open with
+  funnel's read-only identity preflight, which runs ahead of the migration
+  backup and the connection PRAGMAs. On refusal memcore writes no
+  `.migration-bak` and issues no DDL, stamp or identity/role write:
+  `PRAGMA user_version`, the schema and `hard_state` are unchanged. This is
+  not a byte-identity guarantee. The funnel's connection is read-write, so if
+  the store was left with committed, uncheckpointed WAL frames (an unclean
+  shutdown), SQLite's last-close checkpoint may fold them into the main file
+  and remove `-wal`/`-shm`; the logical content does not change. And because
+  the transaction re-resolves identity authoritatively, a stamp another
+  process writes between the preflight and `BEGIN IMMEDIATE` can still
+  produce a refusal after a backup was written. One labelled open with
   `with_exact_profile(PortableKernel)` therefore replaces the "unlabelled
   preflight open, check `store_profile()`, labelled open" sequence, which
   runs schema init twice per store.
 
-  | stored profile | required | role claim | outcome |
-  |---|---|---|---|
-  | `PortableKernel` | `Exact(PortableKernel)` | any | admitted; role stamped once if absent |
-  | `TachiFull` | `Exact(PortableKernel)` | any | `StoreProfileNotExact`, zero side effects |
-  | absent, fresh file | `Exact(PortableKernel)` | any | built portable; stamped |
-  | absent, existing file | `Exact(PortableKernel)` | any | `StoreProfileUnstamped` |
+  Preconditions, in funnel order, before this table applies:
+  1. The schema-version gate (a stamp newer than this kernel → refused), the
+     #1119 creation-intent/migration-authority gate
+     (`check_db_open_context_gate`) and current-schema integrity validation
+     run first and can return their own error.
+  2. "Fresh" means `PRAGMA user_version == 0`, not "empty file": an unstamped
+     file with content is fresh.
+  3. `read_identity` reads and decodes BOTH stamps (role first, then profile)
+     before profile admission, so a malformed role or profile stamp returns
+     its decode error ahead of any profile verdict.
+  4. Profile admission is decided before role resolution; a role conflict is
+     only reported for an admitted profile.
+
+  `Exact(PortableKernel)`, claim = role `X`:
+
+  | stored profile | stored role | outcome |
+  |---|---|---|
+  | `PortableKernel` | absent | admitted; `X` stamped once |
+  | `PortableKernel` | `X` (or legacy `project:X`) | admitted |
+  | `PortableKernel` | `Y` ≠ `X` | `StoreRoleConflict` |
+  | `TachiFull` | any | `StoreProfileNotExact` (no backup, no memcore write) |
+  | absent, `user_version == 0` | absent | built portable; profile and `X` stamped |
+  | absent, `user_version == 0` | `X` | built portable; profile stamped |
+  | absent, `user_version == 0` | `Y` ≠ `X` | `StoreRoleConflict` |
+  | absent, `user_version > 0` | any | `StoreProfileUnstamped` |
+
+  An unlabelled open (claim `unknown`) accepts any stored role and never
+  stamps one.
 
   **Migration note (breaking type change).** The field changed from
   `StoreProfile` to `ProfileRequirement`. Struct-literal constructors replace
