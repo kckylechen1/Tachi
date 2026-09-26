@@ -1211,14 +1211,26 @@ fn init_schema_with_label_mut_inner(
     // file is fresh, whatever its content (#1119 owner ruling A). Sampled
     // BEFORE the transaction writes the new stamp.
     let fresh = crate::db::migrations::read_schema_version(conn)? == 0;
-    // W1-3: read-only identity/profile admission BEFORE any side effect. The
-    // identity rows are plain `hard_state` reads (no DDL, no stamp), so a
-    // store that is going to be refused for a role conflict or a profile
-    // mismatch refuses here — before the full-size pre-migration backup is
-    // written and before the persistent connection PRAGMAs (`journal_mode`)
-    // run. This is a preflight only: the authoritative resolution stays
-    // inside the `BEGIN IMMEDIATE` below, because another process may stamp
-    // the store between this read and that transaction.
+    // W1-3: read-only identity/profile admission before memcore's own side
+    // effects. The identity rows are plain `hard_state` reads, so a store
+    // whose stamps already refuse this open (role conflict, profile
+    // mismatch) refuses here: no `.migration-bak` is written, the persistent
+    // connection PRAGMAs (`journal_mode`) do not run, and memcore issues no
+    // DDL, stamp or identity/role write.
+    //
+    // What this does NOT promise:
+    // * Byte-identical files. The funnel's connection is read-write; if the
+    //   store was left with committed but uncheckpointed WAL frames (unclean
+    //   shutdown), SQLite folds them into the main file and removes the
+    //   `-wal`/`-shm` pair when this connection closes. That is SQLite's
+    //   last-close checkpoint, not a memcore write, and the logical content
+    //   (schema, `user_version`, `hard_state`) is unchanged by it.
+    // * A backup-free refusal under a race. This is a preflight only: the
+    //   authoritative resolution stays inside the `BEGIN IMMEDIATE` below,
+    //   because another process may stamp the store between this read and
+    //   that transaction. Such an open passes the preflight, may write its
+    //   backup, and is then refused inside the transaction; the backup is a
+    //   harmless extra copy and nothing else is written.
     resolve_store_identity_in_tx(conn, db_label, current_db_path, ctx, fresh)?;
     if filesystem_artifacts {
         maybe_backup_before_migration(conn, current_db_path)?;
@@ -3345,17 +3357,25 @@ fn maybe_backup_before_migration(
         // `run_to_completion(128, 100ms)` slept 100 ms per 128 pages (a 390 MB
         // store at 4 KiB pages ≈ 745 sleeps ≈ 75 s of pure idle). Pacing is
         // the online-backup idiom for letting other users of the source run
-        // between steps; nothing here needs that. `MemoryStore`'s open funnel
-        // serializes in-process openers behind its startup lock for this
-        // whole call, and this connection has not begun a transaction.
-        // Other processes are not starved either: on a WAL store (every store
-        // this funnel has initialized) the step holds only a read snapshot,
-        // which never blocks writers; on a legacy rollback-journal file it
-        // holds SHARED for the copy's duration, which writers absorb through
-        // their busy timeout. A single step is also the more consistent copy:
-        // an incremental backup restarts from page 1 whenever another
-        // connection writes the source between steps, so pacing a busy
-        // store can make the backup never finish.
+        // between steps. In-process it buys nothing: `MemoryStore`'s open
+        // funnel serializes in-process openers behind its startup lock for
+        // this whole call, and this connection has not begun a transaction.
+        //
+        // The tradeoff is for OTHER processes, and it depends on the journal
+        // mode:
+        // * WAL (every store this funnel has initialized): the single step
+        //   holds one read snapshot. Writers are not blocked, but a
+        //   checkpoint cannot advance past that snapshot until the copy
+        //   finishes, so the WAL may grow for the copy's duration.
+        // * Rollback journal (a legacy file on its first open here): the step
+        //   holds SHARED for the whole copy. A concurrent writer that needs
+        //   EXCLUSIVE waits, and if the copy outlasts its busy_timeout that
+        //   writer gets SQLITE_BUSY. Pacing only spread that exposure over a
+        //   much longer wall time; it did not remove it.
+        // Both an incremental and a single-step backup produce a consistent
+        // copy. The incremental form restarts from page 1 whenever another
+        // connection writes the source between steps, so pacing a busy store
+        // mostly made the backup slower to finish.
         //
         // `i32::MAX` pages is "all remaining pages" (`run_to_completion`
         // rejects the C API's negative form). The sleep below is therefore
