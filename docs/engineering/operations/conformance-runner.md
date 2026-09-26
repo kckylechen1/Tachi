@@ -70,28 +70,42 @@ else, so a mislabeled host can never fake green. It also prints
   `checksum: true` and `fallback: none` (no source build), and
   `validate_action_pins.rb` audits that tool at exactly three uses (`ci.yml`
   `rust` plus the two C2 jobs). The installer's checksum covers only the file
-  it extracts, so a following `Verify resolved cargo-nextest is the audited
-  install` step checks which executable will run, and every nextest step is
-  gated on its success. It fails the job with exit 6 unless all three hold:
-  1. `${CARGO_HOME:-$HOME/.cargo}/bin/cargo-nextest` does not exist. The
+  it extracts, so every nextest step is bound to that file. A following
+  `Verify resolved cargo-nextest is the audited install` step runs four
+  fail-closed asserts (exit 6). Every nextest step is gated on its success.
+  1. No Cargo alias can redirect `cargo nextest`: no `CARGO_ALIAS_*`
+     environment variable is set (any name), and no `.cargo/config.toml` or
+     `.cargo/config` from the workspace up to `/`, nor
+     `$CARGO_HOME/config[.toml]`, defines `alias.nextest` or uses `include`
+     (includes are not followed, so they fail closed). Unparseable files also
+     fail. Cargo aliases outrank external subcommands. `cargo config get` is
+     nightly-only on 1.97, so the step parses the files with Python's
+     `tomllib`.
+  2. `${CARGO_HOME:-$HOME/.cargo}/bin/cargo-nextest` does not exist. The
      Cargo book: "Cargo defaults to prioritizing external tools in
      $CARGO_HOME/bin over $PATH. Users can override this precedence by adding
      $CARGO_HOME/bin to $PATH"
      ([Custom subcommands](https://doc.rust-lang.org/cargo/reference/external-tools.html#custom-subcommands)).
-  2. `realpath -e "$(type -P cargo-nextest)"` equals
+  3. `realpath -e "$(type -P cargo-nextest)"` equals
      `realpath -e "$HOME/.install-action/bin/cargo-nextest"`, the file the
      pinned installer extracts (its `main.sh` uses `~/.install-action/bin`
      whenever the resolved `cargo` is not under `$CARGO_HOME/bin`, which is
      the case after `Setup Rust`).
-  3. The first line of `cargo nextest --version` is exactly
-     `cargo-nextest 0.9.140` (optionally followed by a space and build info).
+  4. That file, run by absolute path (`<file> nextest --version`), reports
+     exactly `cargo-nextest 0.9.140` on its first line (optionally followed by
+     a space and build info).
 
-  Together these assert that nothing in `$CARGO_HOME/bin` can win Cargo's
-  lookup and that the PATH lookup resolves to the extracted file reporting
-  the audited version. They do not re-hash the file after extraction, and
-  they do not pin later steps to an absolute path. The asserts are only as
-  current as the step, so no step between it and the nextest steps may change
-  `PATH` or `CARGO_HOME`.
+  The step then writes `AUDITED_NEXTEST=<realpath of that file>` to
+  `GITHUB_ENV`. Every later nextest step runs `"${AUDITED_NEXTEST:?}" nextest
+  run …`, never `cargo nextest`, so for those steps `PATH`, `CARGO_HOME` and
+  Cargo aliases do not choose the executable, and an unset variable fails the
+  step. What is bound is the **path**, not the bytes: the file is not
+  re-hashed after the installer's checksum. A job step that ran earlier as
+  `gha` could replace it, or rewrite `AUDITED_NEXTEST` through `GITHUB_ENV`.
+  Code from an approved PR already runs as `gha` (see Trust boundary), so
+  this binding protects against host drift, not against the job's own code.
+  Asserts 1-3 describe how `cargo nextest` would resolve at that moment; they
+  keep the host clean, but the nextest steps do not depend on them.
 - **Not** a release/publish lane: no publication or provider secrets;
   `GITHUB_TOKEN` only, workflow-level `permissions: contents: read`.
 - **Not** the C1 runner: distinct label; jobs cannot land on
@@ -334,14 +348,14 @@ unit with `User=gha`, or a user unit with linger) in the activation receipt.
   where `cargo-nextest` lands (run 36224766153 logs
   `adding '/home/gha/.install-action/bin' to PATH`). Same accounting as C1's
   runbook otherwise.
-- `~/.cargo/bin` must not hold its own `cargo-nextest`: assert 1 above fails
+- `~/.cargo/bin` must not hold its own `cargo-nextest`: assert 2 above fails
   both jobs (exit 6) while one exists. `atom-dgx-2` had an unaudited
   `cargo-nextest 0.9.146` there. The installer appends its own bin directory
   to the end of `PATH` for its post-install lookup, so its `installed at`
   line named that stray binary (runs 36226017929 and 36226640312). It was
   removed from the host before run 36229085044: there the installer reports
   `installed at /home/gha/.install-action/bin/cargo-nextest` and the
-  `rust-gate` job passes all three asserts. If one reappears, remove `~gha/.cargo/bin/cargo-nextest` on
+  `rust-gate` job passed the (then three) guard asserts. If one reappears, remove `~gha/.cargo/bin/cargo-nextest` on
   the host (an owner act) and never relax the guard. Host check:
   `ls -l ~/.cargo/bin/cargo-nextest` should report no such file.
 

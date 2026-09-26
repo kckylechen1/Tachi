@@ -165,50 +165,101 @@ jobs:
 
       - name: Verify resolved cargo-nextest is the audited install
         id: nextest_verify
-        # Proves which executable runs, not just what it reports. Three
-        # fail-closed asserts, all exit 6:
-        # (1) no cargo-nextest in ${CARGO_HOME:-~/.cargo}/bin. The Cargo book
+        # Binds execution to the checksum-verified file. All asserts fail
+        # closed with exit 6:
+        # (1) no Cargo alias for nextest: no CARGO_ALIAS_* variable at all,
+        #     and no alias.nextest (or unfollowed `include`) in any
+        #     .cargo/config[.toml] from the workspace up to /, nor in
+        #     $CARGO_HOME. Aliases outrank external subcommands. `cargo config
+        #     get` is nightly-only on 1.97, so the files are parsed directly.
+        # (2) no cargo-nextest in ${CARGO_HOME:-~/.cargo}/bin. The Cargo book
         #     (reference/external-tools.html#custom-subcommands): "Cargo
         #     defaults to prioritizing external tools in $CARGO_HOME/bin
         #     over $PATH. Users can override this precedence by adding
-        #     $CARGO_HOME/bin to $PATH." A binary there can win regardless
-        #     of the PATH checked below.
-        # (2) the cargo-nextest that PATH resolves is, after realpath, the
+        #     $CARGO_HOME/bin to $PATH."
+        # (3) the cargo-nextest that PATH resolves is, after realpath, the
         #     file the pinned installer extracted: ~/.install-action/bin
         #     (taiki-e/install-action main.sh at the pinned SHA, lines 641 and
         #     658-663: used whenever the resolved cargo is not under
         #     $CARGO_HOME/bin, as after Setup Rust; the C2 logs show
         #     "adding '/home/gha/.install-action/bin' to PATH").
-        # (3) `cargo nextest --version` is exactly the audited version (keep
-        #     in sync with `tool:` above).
+        # (4) that exact file, run by absolute path, reports the audited
+        #     version (keep in sync with `tool:` above).
+        # It then exports AUDITED_NEXTEST (the realpath) through GITHUB_ENV.
+        # Every later nextest step runs "$AUDITED_NEXTEST" nextest ... by
+        # absolute path, so PATH, CARGO_HOME and aliases no longer choose the
+        # executable.
         if: ${{ !cancelled() && steps.nextest_install.outcome == 'success' }}
         run: |
           set -euo pipefail
           prebuilt_dir="$HOME/.install-action/bin"
+          prebuilt="${prebuilt_dir}/cargo-nextest"
           home_bin="${CARGO_HOME:-$HOME/.cargo}/bin"
-          resolved="$(type -P cargo-nextest || true)"
-          echo "cargo-nextest on PATH: ${resolved:-none}"
-          echo "expected: ${prebuilt_dir}/cargo-nextest"
+          # (1) No Cargo alias for nextest, from the environment or any config file
+          # Cargo reads from this directory.
+          alias_vars="$(env | grep -oE '^CARGO_ALIAS_[A-Za-z0-9_]*' || true)"
+          if [ -n "${alias_vars}" ]; then
+            echo "::error::Cargo alias environment variables are set: $(echo ${alias_vars}). Remove them from the runner service environment." >&2
+            exit 6
+          fi
+          python3 - <<'PY' || exit 6
+          import os, sys, tomllib
+          from pathlib import Path
+          home = Path(os.environ.get("CARGO_HOME") or Path.home() / ".cargo")
+          here = Path.cwd().resolve()
+          dirs = [p / ".cargo" for p in (here, *here.parents)] + [home]
+          seen, bad = set(), []
+          for d in dirs:
+              for name in ("config.toml", "config"):
+                  f = d / name
+                  try:
+                      if not f.is_file():
+                          continue
+                      real = f.resolve()
+                      if real in seen:
+                          continue
+                      seen.add(real)
+                      data = tomllib.loads(f.read_text())
+                  except (OSError, ValueError) as e:
+                      bad.append(f"{f}: unreadable ({type(e).__name__})")
+                      continue
+                  print(f"checked {f}")
+                  if "include" in data:
+                      bad.append(f"{f}: uses include (not followed)")
+                  alias = data.get("alias")
+                  if isinstance(alias, dict) and "nextest" in alias:
+                      bad.append(f"{f}: defines alias.nextest")
+          for b in bad:
+              print(f"::error::{b}", file=sys.stderr)
+          sys.exit(1 if bad else 0)
+          PY
+          # (2) Nothing in Cargo's own bin directory that could win the lookup.
           if [ -e "${home_bin}/cargo-nextest" ]; then
             echo "::error::${home_bin}/cargo-nextest exists; Cargo may run it for cargo nextest ahead of PATH. Remove it from the runner host (docs/engineering/operations/conformance-runner.md)." >&2
             exit 6
           fi
+          # (3) PATH resolves to the extracted, checksum-verified file.
+          resolved="$(type -P cargo-nextest || true)"
           resolved_real="$(realpath -e "${resolved:-/nonexistent}" 2>/dev/null || true)"
-          expected_real="$(realpath -e "${prebuilt_dir}/cargo-nextest" 2>/dev/null || true)"
-          if [ -z "${resolved_real}" ] || [ -z "${expected_real}" ] || [ "${resolved_real}" != "${expected_real}" ]; then
-            echo "::error::cargo-nextest resolves to '${resolved_real:-none}', not the checksum-verified binary '${expected_real:-missing}'." >&2
+          bound="$(realpath -e "${prebuilt}" 2>/dev/null || true)"
+          echo "cargo-nextest on PATH: ${resolved_real:-none}; extracted file: ${bound:-missing}"
+          if [ -z "${resolved_real}" ] || [ -z "${bound}" ] || [ "${resolved_real}" != "${bound}" ]; then
+            echo "::error::cargo-nextest resolves to '${resolved_real:-none}', not the checksum-verified binary '${bound:-missing}'." >&2
             exit 6
           fi
-          version_out="$(cargo nextest --version)"
+          # (4) That exact file reports the audited version.
+          version_out="$("${bound}" nextest --version)"
           read -r first_line <<<"${version_out}"
-          echo "cargo nextest --version: ${first_line}"
+          echo "bound nextest --version: ${first_line}"
           case "${first_line}" in
             "cargo-nextest 0.9.140"|"cargo-nextest 0.9.140 "*) ;;
             *)
-              echo "::error::cargo nextest reports '${first_line}', not the audited cargo-nextest 0.9.140. Remove the stray binary from the runner host (docs/engineering/operations/conformance-runner.md)." >&2
+              echo "::error::${bound} reports '${first_line}', not the audited cargo-nextest 0.9.140." >&2
               exit 6
               ;;
           esac
+          # Bind: every later nextest step runs this absolute path.
+          echo "AUDITED_NEXTEST=${bound}" >> "$GITHUB_ENV"
 
       - name: Run workspace tests
         id: workspace_tests
@@ -216,7 +267,8 @@ jobs:
         # test leg that the darwin-arm64 C1 lane compiles out runs here,
         # including the renameat2 paths from the #1877 inventory.
         if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' && steps.nextest_verify.outcome == 'success' }}
-        run: cargo nextest run --workspace --locked --profile ci
+        run: |
+          "${AUDITED_NEXTEST:?}" nextest run --workspace --locked --profile ci
 
       - name: Archive nextest JUnit timing report
         # Same archival contract as the ci.yml rust job (Refs #1095): a
@@ -322,35 +374,78 @@ jobs:
 
       - name: Verify resolved cargo-nextest is the audited install
         id: nextest_verify
-        # Same three fail-closed asserts as rust-gate (see there).
+        # Same asserts and AUDITED_NEXTEST binding as rust-gate (see there).
         if: ${{ !cancelled() && steps.nextest_install.outcome == 'success' }}
         run: |
           set -euo pipefail
           prebuilt_dir="$HOME/.install-action/bin"
+          prebuilt="${prebuilt_dir}/cargo-nextest"
           home_bin="${CARGO_HOME:-$HOME/.cargo}/bin"
-          resolved="$(type -P cargo-nextest || true)"
-          echo "cargo-nextest on PATH: ${resolved:-none}"
-          echo "expected: ${prebuilt_dir}/cargo-nextest"
+          # (1) No Cargo alias for nextest, from the environment or any config file
+          # Cargo reads from this directory.
+          alias_vars="$(env | grep -oE '^CARGO_ALIAS_[A-Za-z0-9_]*' || true)"
+          if [ -n "${alias_vars}" ]; then
+            echo "::error::Cargo alias environment variables are set: $(echo ${alias_vars}). Remove them from the runner service environment." >&2
+            exit 6
+          fi
+          python3 - <<'PY' || exit 6
+          import os, sys, tomllib
+          from pathlib import Path
+          home = Path(os.environ.get("CARGO_HOME") or Path.home() / ".cargo")
+          here = Path.cwd().resolve()
+          dirs = [p / ".cargo" for p in (here, *here.parents)] + [home]
+          seen, bad = set(), []
+          for d in dirs:
+              for name in ("config.toml", "config"):
+                  f = d / name
+                  try:
+                      if not f.is_file():
+                          continue
+                      real = f.resolve()
+                      if real in seen:
+                          continue
+                      seen.add(real)
+                      data = tomllib.loads(f.read_text())
+                  except (OSError, ValueError) as e:
+                      bad.append(f"{f}: unreadable ({type(e).__name__})")
+                      continue
+                  print(f"checked {f}")
+                  if "include" in data:
+                      bad.append(f"{f}: uses include (not followed)")
+                  alias = data.get("alias")
+                  if isinstance(alias, dict) and "nextest" in alias:
+                      bad.append(f"{f}: defines alias.nextest")
+          for b in bad:
+              print(f"::error::{b}", file=sys.stderr)
+          sys.exit(1 if bad else 0)
+          PY
+          # (2) Nothing in Cargo's own bin directory that could win the lookup.
           if [ -e "${home_bin}/cargo-nextest" ]; then
             echo "::error::${home_bin}/cargo-nextest exists; Cargo may run it for cargo nextest ahead of PATH. Remove it from the runner host (docs/engineering/operations/conformance-runner.md)." >&2
             exit 6
           fi
+          # (3) PATH resolves to the extracted, checksum-verified file.
+          resolved="$(type -P cargo-nextest || true)"
           resolved_real="$(realpath -e "${resolved:-/nonexistent}" 2>/dev/null || true)"
-          expected_real="$(realpath -e "${prebuilt_dir}/cargo-nextest" 2>/dev/null || true)"
-          if [ -z "${resolved_real}" ] || [ -z "${expected_real}" ] || [ "${resolved_real}" != "${expected_real}" ]; then
-            echo "::error::cargo-nextest resolves to '${resolved_real:-none}', not the checksum-verified binary '${expected_real:-missing}'." >&2
+          bound="$(realpath -e "${prebuilt}" 2>/dev/null || true)"
+          echo "cargo-nextest on PATH: ${resolved_real:-none}; extracted file: ${bound:-missing}"
+          if [ -z "${resolved_real}" ] || [ -z "${bound}" ] || [ "${resolved_real}" != "${bound}" ]; then
+            echo "::error::cargo-nextest resolves to '${resolved_real:-none}', not the checksum-verified binary '${bound:-missing}'." >&2
             exit 6
           fi
-          version_out="$(cargo nextest --version)"
+          # (4) That exact file reports the audited version.
+          version_out="$("${bound}" nextest --version)"
           read -r first_line <<<"${version_out}"
-          echo "cargo nextest --version: ${first_line}"
+          echo "bound nextest --version: ${first_line}"
           case "${first_line}" in
             "cargo-nextest 0.9.140"|"cargo-nextest 0.9.140 "*) ;;
             *)
-              echo "::error::cargo nextest reports '${first_line}', not the audited cargo-nextest 0.9.140. Remove the stray binary from the runner host (docs/engineering/operations/conformance-runner.md)." >&2
+              echo "::error::${bound} reports '${first_line}', not the audited cargo-nextest 0.9.140." >&2
               exit 6
               ;;
           esac
+          # Bind: every later nextest step runs this absolute path.
+          echo "AUDITED_NEXTEST=${bound}" >> "$GITHUB_ENV"
 
       - name: Seccomp containment escape probe
         # #1877 gap closure: the parent installs the seccomp escape filter
@@ -360,25 +455,29 @@ jobs:
         # tests fail the step rather than silently accepting a stale or
         # cfg'd-out selector.
         if: ${{ !cancelled() && steps.nextest_verify.outcome == 'success' }}
-        run: cargo nextest run -p tachi-server --locked --no-tests=fail -- --exact 'dispatch_ops::subprocess::required_postflight_kernel_containment_discriminates_setsid_escape'
+        run: |
+          "${AUDITED_NEXTEST:?}" nextest run -p tachi-server --locked --no-tests=fail -- --exact 'dispatch_ops::subprocess::required_postflight_kernel_containment_discriminates_setsid_escape'
 
       - name: renameat2 no-clobber legs (memcore db::filename)
         # filename.rs atomic rename (RENAME_NOREPLACE via SYS_renameat2 on
         # Linux).
         if: ${{ !cancelled() && steps.nextest_verify.outcome == 'success' }}
-        run: cargo nextest run -p memcore --locked --no-tests=fail 'db::filename::tests::atomic_rename'
+        run: |
+          "${AUDITED_NEXTEST:?}" nextest run -p memcore --locked --no-tests=fail 'db::filename::tests::atomic_rename'
 
       - name: Anchored directory legs (memcore anchored_fs)
         # anchored_fs.rs anchored directory identity/replacement -- cfg(unix)
         # legs with a Linux-specific identity path.
         if: ${{ !cancelled() && steps.nextest_verify.outcome == 'success' }}
-        run: cargo nextest run -p memcore --locked --no-tests=fail 'anchored_fs::tests'
+        run: |
+          "${AUDITED_NEXTEST:?}" nextest run -p memcore --locked --no-tests=fail 'anchored_fs::tests'
 
       - name: renameat2 receipt legs (tachi-server repair::receipt)
         # repair/receipt.rs receipt paths over the SYS_renameat2-backed
         # atomic exchange.
         if: ${{ !cancelled() && steps.nextest_verify.outcome == 'success' }}
-        run: cargo nextest run -p tachi-server --locked --no-tests=fail 'repair::receipt::tests'
+        run: |
+          "${AUDITED_NEXTEST:?}" nextest run -p tachi-server --locked --no-tests=fail 'repair::receipt::tests'
 
       - name: renameat2 atomic-exchange legs (tachi-server sticky_cutover)
         # sticky_cutover_cli.rs SYS_renameat2-backed atomic exchange.
@@ -386,7 +485,8 @@ jobs:
         # tests; the cfg(linux)-enabled bootstrap::wiki_corpus::tests
         # replacement/swap legs run in the rust-gate workspace run.)
         if: ${{ !cancelled() && steps.nextest_verify.outcome == 'success' }}
-        run: cargo nextest run -p tachi-server --locked --no-tests=fail 'sticky_cutover'
+        run: |
+          "${AUDITED_NEXTEST:?}" nextest run -p tachi-server --locked --no-tests=fail 'sticky_cutover'
 
       - name: Runner workspace cleanup
         if: always()
