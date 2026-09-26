@@ -39,8 +39,9 @@ total). Census and sizing rationale: #1852.
   `crates/tachi-server/src/repair/receipt.rs` — no longer compile or test in
   the canonical lane while it runs on darwin-arm64. That coverage was last
   real on 2026-07-05 (the last hosted-ubuntu green run) and has been absent
-  since the queue died; restoring it requires a genuine Linux host (census
-  class A), which is an owner decision outside this lane.
+  since the queue died. This gap is specific to this C1 lane: Linux
+  coverage is now provided by the separate C2 Linux conformance lanes on
+  their own host (see [`conformance-runner.md`](conformance-runner.md)).
 - **Out of scope by law (#1865):** Windows, macOS release/bottles, native
   release matrix, npm/Homebrew publication (the memcore mirror was retired in
   #1902), all
@@ -57,7 +58,11 @@ total). Census and sizing rationale: #1852.
 > but three controls outside the workflow file: GitHub's fork-run approval
 > policy (`all_external_contributors`), owner-only write access, and the
 > operating rule **never approve a fork PR run, and add no collaborator while
-> this lane is online**. The two layers below are defence in depth: on
+> this lane is online**. Accepted residual risk: admitted jobs execute
+> with the owner account's access to its credentials and writable state
+> (SSH keys, the `gh` login, `~/.tachi`, other repositories), so approval is
+> the remaining barrier against a fork-controlled merge-ref workflow. The
+> two layers below are defence in depth: on
 > `pull_request` the workflow comes from the PR's merge ref, so a PR can
 > rewrite its own guard or add a job that names these labels. Deferred host
 > hardening (dedicated non-admin account, immutable hook chain, cargo-gate
@@ -67,9 +72,12 @@ total). Census and sizing rationale: #1852.
 
 Two layers inside the workflow files (defence in depth, see above):
 
-1. **Label scoping** — only the four in-scope jobs name the runner labels; no
-   other workflow in the repository uses `self-hosted`/`tachi-acceptance`.
-2. **Job-level guard** — each of the four jobs carries a fail-closed
+1. **Label scoping** — in the checked-in workflows only the five C1 job
+   definitions in `ci.yml` (the four lanes plus the `acceptance` aggregate)
+   name `tachi-acceptance`; the C2 jobs in `conformance-linux.yml` are also
+   self-hosted but use distinct labels and a different host. A PR can add
+   its own job naming these labels, so this is routing, not authorization.
+2. **Job-level guard** — each of the five C1 jobs carries a fail-closed
    admission expression requiring BOTH `github.actor` (the original event
    actor) AND `github.triggering_actor` (the current operator — on a re-run
    these can differ) to be the repository owner:
@@ -102,11 +110,13 @@ Two layers inside the workflow files (defence in depth, see above):
 
 The guard lives in `ci.yml`, and `pull_request` runs execute the workflow
 from the **merge ref** — the PR's own version of the file. The guard is
-therefore trustworthy only while repository **write access is owner-only**,
-which the private single-owner repo state guarantees today (true fork PRs
-cannot exist, and only the owner can push branches). That is the ticket's
-v1 trust model: same-repository owner-authored PRs are an admitted source
-by definition.
+therefore trustworthy only while repository **write access is owner-only**.
+*Historical (v1, while the repository was private):* the private
+single-owner state guaranteed that true fork PRs could not exist and only
+the owner could push branches, so same-repository owner-authored PRs were an
+admitted source by definition. That guarantee no longer holds: in a public
+repository anyone can open a fork PR carrying a modified workflow, and
+owner-only write access does not prevent that.
 
 The repository has since been made public. The owner re-derived this
 boundary on 2026-09-27 and accepted the risk for owner-authored workloads
