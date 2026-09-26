@@ -492,7 +492,20 @@ fn lsof_excludes_only_the_reapers_exact_pin() {
                   tachi    123 user    7r   DIR   1,16       320  123 /tmp/x-target\n\
                   tachi    123 user    8r   REG   1,16      2048  124 /tmp/x-target/live\n\
                   cargo    456 user    7r   REG   1,16      2048  125 /tmp/x-target/other\n";
-    let filtered = without_ignored_holder(stdout, HolderExclusion { pid: 123, fd: 7 });
+    // tachi#1978 round 3: the exclusion also checks NAME against the target.
+    let filtered = without_ignored_holder(
+        stdout,
+        // Round 4: the exclusion carries the pin's fstat identity, which the
+        // pin row below prints (DEVICE 1,16, NODE 123).
+        HolderExclusion {
+            pid: 123,
+            fd: 7,
+            dev_major: 1,
+            dev_minor: 16,
+            ino: 123,
+        },
+        Path::new("/tmp/x-target"),
+    );
 
     assert!(!filtered.contains("123 user    7r"));
     assert!(filtered.contains("123 user    8r"));
@@ -503,10 +516,63 @@ fn lsof_excludes_only_the_reapers_exact_pin() {
     );
 }
 
+/// Tightened in #1978 cold review round 2 (lead-authorized, fail-closed
+/// direction). Was `lsof_clean_empty_run_means_unheld`, which also asserted
+/// `interpret_lsof(Some(0), "", "") == None`. lsof was given an explicit
+/// target without `-Q`, so exit 0 means "found and listed": exit 0 listing
+/// nothing is anomalous and must be Unknown. Real lsof on an unheld dir exits
+/// 1 with both streams empty (4.95.0 on atom-dgx-2, 4.91 on macOS) — still
+/// unheld. A bare header on exit 1 is not that signature either.
 #[test]
-fn lsof_clean_empty_run_means_unheld() {
+fn only_the_silent_exit_1_run_means_unheld() {
     assert_eq!(interpret_lsof(Some(1), "", ""), HolderCheck::None);
-    assert_eq!(interpret_lsof(Some(0), "", ""), HolderCheck::None);
+    for (code, stdout) in [
+        (0, ""),
+        (0, "COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME\n"),
+        (1, "COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME\n"),
+    ] {
+        assert!(
+            matches!(
+                interpret_lsof(Some(code), stdout, ""),
+                HolderCheck::Unknown(_)
+            ),
+            "exit {code} {stdout:?}"
+        );
+    }
+}
+
+/// Over-refusal guard for round 2: a header left over only because the
+/// reaper removed its own validated pin row is listing evidence and stays
+/// unheld — on exit 1 too, since real `lsof +D` exits 1 while listing unless
+/// every file under the dir is open; the same text as a raw response does not.
+#[test]
+fn header_left_by_removing_the_pin_row_is_unheld_but_a_raw_one_is_not() {
+    let header = "COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME\n";
+    for code in [0, 1] {
+        assert_eq!(
+            interpret_lsof_excluding(Some(code), header, "", 1),
+            HolderCheck::None
+        );
+        assert!(matches!(
+            interpret_lsof_excluding(Some(code), header, "", 0),
+            HolderCheck::Unknown(_)
+        ));
+    }
+    // Removing the pin never excuses stderr, another exit, or a signal.
+    for (code, stderr) in [
+        (Some(0), "lsof: WARNING: x\n"),
+        (Some(1), "lsof: WARNING: x\n"),
+        (Some(2), ""),
+        (None, ""),
+    ] {
+        assert!(
+            matches!(
+                interpret_lsof_excluding(code, header, stderr, 1),
+                HolderCheck::Unknown(_)
+            ),
+            "{code:?} {stderr:?}"
+        );
+    }
 }
 
 #[test]
@@ -533,6 +599,628 @@ fn lsof_odd_exit_or_signal_is_unknown() {
         interpret_lsof(None, "", ""),
         HolderCheck::Unknown(_)
     ));
+}
+
+/// Byte-for-byte stderr of lsof 4.95.0 on Ubuntu 24.04 as a non-root user,
+/// printed on every run whatever the query (captured on atom-dgx-2).
+const LINUX_TRACEFS_WARNING: &[u8] = b"lsof: WARNING: can't stat() tracefs file system /sys/kernel/debug/tracing\n      Output information may be incomplete.\n";
+const LSOF_HEADER: &[u8] = b"COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME\n";
+
+fn tracefs_pair_for(mount: &Path) -> Vec<u8> {
+    let mut bytes = b"lsof: WARNING: can't stat() tracefs file system ".to_vec();
+    bytes.extend_from_slice(mount.as_os_str().as_encoded_bytes());
+    bytes.extend_from_slice(b"\n      Output information may be incomplete.\n");
+    bytes
+}
+
+/// tachi#1978: drive the real call site (`Command`, argv, byte capture, stderr
+/// filtering, pin exclusion, classification) with a stub `lsof` that checks
+/// it was asked `+D <target>` and replays exact bytes and an exit status.
+#[cfg(unix)]
+fn stub_lsof_probe(
+    name: &str,
+    target: &Path,
+    stdout: &[u8],
+    stderr: &[u8],
+    code: i32,
+    ignored: Option<HolderExclusion>,
+) -> HolderCheck {
+    use std::os::unix::fs::PermissionsExt;
+    let case = unique_temp_dir(&format!("tachi-reaper-1978-{name}"));
+    std::fs::write(case.join("stdout"), stdout).unwrap();
+    std::fs::write(case.join("stderr"), stderr).unwrap();
+    let script = case.join("lsof");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\n[ \"$1\" = '+D' ] && [ \"$2\" = '{}' ] || {{ echo 'STUB ARGV MISMATCH' >&2; exit 93; }}\ncat '{}/stdout'\ncat '{}/stderr' >&2\nexit {code}\n",
+            target.display(),
+            case.display(),
+            case.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let check = lsof_holder_probe_with(script.as_os_str(), target, ignored);
+    let _ = std::fs::remove_dir_all(&case);
+    if let HolderCheck::Unknown(reason) = &check {
+        assert!(!reason.contains("STUB ARGV MISMATCH"), "{name}: {reason}");
+    }
+    check
+}
+
+#[cfg(unix)]
+fn assert_unknown(case: &str, check: HolderCheck) {
+    assert!(
+        matches!(check, HolderCheck::Unknown(_)),
+        "{case}: expected Unknown, got {check:?}"
+    );
+}
+
+/// The only raw signature the filter may turn into `None`, and only on Linux
+/// (round-1 cold review finding 8: other platforms are unchanged). Round 2:
+/// header-only exit 1 is no longer one of them (lead-authorized tightening;
+/// it was `None` on Linux in `0d1d61877`).
+#[cfg(unix)]
+#[test]
+fn stub_tracefs_only_empty_walk_is_unheld_on_linux_only() {
+    let root = unique_temp_dir("tachi-reaper-1978-clear");
+    let target = make_target_dir(&root, "x-target");
+    let check = stub_lsof_probe("exit1", &target, b"", LINUX_TRACEFS_WARNING, 1, None);
+    if cfg!(target_os = "linux") {
+        assert_eq!(check, HolderCheck::None);
+    } else {
+        assert_unknown("exit1", check);
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Round 2 (BUG-A/BUG-B): raw exit 0 listing no row, and raw exit 1 with a
+/// bare header, are Unknown everywhere, with or without the warning.
+#[cfg(unix)]
+#[test]
+fn stub_exit_0_without_rows_and_exit_1_with_a_header_stay_unknown() {
+    let root = unique_temp_dir("tachi-reaper-1978-norows");
+    let target = make_target_dir(&root, "x-target");
+    for (name, stdout, stderr, code) in [
+        ("e0-empty", &b""[..], &b""[..], 0),
+        ("e0-header", LSOF_HEADER, &b""[..], 0),
+        ("e0-empty-w", &b""[..], LINUX_TRACEFS_WARNING, 0),
+        ("e1-header", LSOF_HEADER, &b""[..], 1),
+        ("e1-header-w", LSOF_HEADER, LINUX_TRACEFS_WARNING, 1),
+    ] {
+        assert_unknown(
+            name,
+            stub_lsof_probe(name, &target, stdout, stderr, code, None),
+        );
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Round 2 over-refusal guard, through the real call site: exit 0 whose only
+/// row is the reaper's own validated pin is unheld (with the tracefs warning
+/// too on Linux); the identical bytes without the exclusion are Held.
+#[cfg(unix)]
+#[test]
+fn stub_pin_only_listing_stays_unheld() {
+    let root = unique_temp_dir("tachi-reaper-1978-pin");
+    let target = make_target_dir(&root, "x-target");
+    let mut stdout = LSOF_HEADER.to_vec();
+    stdout
+        .extend_from_slice(format!("tachi 123 u 7r DIR 1,4 0 1 {}\n", target.display()).as_bytes());
+    let pin = Some(stub_pin());
+    for code in [0, 1] {
+        assert_eq!(
+            stub_lsof_probe(&format!("pin{code}"), &target, &stdout, b"", code, pin),
+            HolderCheck::None
+        );
+    }
+    let with_warning = stub_lsof_probe("pin-w", &target, &stdout, LINUX_TRACEFS_WARNING, 1, pin);
+    if cfg!(target_os = "linux") {
+        assert_eq!(with_warning, HolderCheck::None);
+    } else {
+        assert_unknown("pin-w", with_warning);
+    }
+    assert_eq!(
+        stub_lsof_probe("nopin", &target, &stdout, b"", 0, None),
+        HolderCheck::Held(vec!["tachi 123".to_string()])
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Real lsof, both hosts: an unheld target reads as unheld (lsof exits 1 with
+/// empty stdout), and a target held only by the reaper's own pin reads as
+/// unheld through the exclusion (`lsof +D` exits 1 listing just the pin).
+#[cfg(unix)]
+#[test]
+fn real_probe_reports_unheld_for_unheld_and_pin_only_dirs() {
+    let root = unique_temp_dir("tachi-reaper-1978-real");
+    let target = make_target_dir(&root, "idle-target");
+    assert_eq!(lsof_holder_probe(&target, None), HolderCheck::None);
+    let pin = PinnedDirectory::open(&target).expect("pin target");
+    let exclusion = pin.holder_exclusion();
+    assert!(
+        matches!(lsof_holder_probe(&target, None), HolderCheck::Held(_)),
+        "control: the pin itself is a holder without the exclusion"
+    );
+    assert_eq!(lsof_holder_probe(&target, exclusion), HolderCheck::None);
+
+    // Rounds 3-4: the real pin row, exactly as this host's lsof prints it,
+    // is recognized by identity: read-only DIR, DEVICE and NODE equal to the
+    // pinned descriptor's own fstat, NAME equal to the target. Printed so the
+    // captured row is on record.
+    let exclusion = exclusion.expect("unix pin exclusion");
+    let out = Command::new("lsof")
+        .arg("+D")
+        .arg(&target)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let pid = std::process::id().to_string();
+    let pin_rows: Vec<&str> = stdout
+        .lines()
+        .skip(1)
+        .filter(|line| line.split_whitespace().nth(1) == Some(pid.as_str()))
+        .collect();
+    eprintln!(
+        "real lsof +D pin output (exit {:?}):\n{stdout}",
+        out.status.code()
+    );
+    assert_eq!(pin_rows.len(), 1, "exactly one row for our pin: {stdout}");
+    {
+        use std::os::unix::fs::MetadataExt;
+        let meta = pin.handle.metadata().unwrap();
+        let (major, minor) = lsof_device_numbers(meta.dev()).expect("known DEVICE form");
+        let (columns, name) = split_lsof_row(pin_rows[0]).expect("complete pin row");
+        assert_eq!(columns[3], format!("{}r", exclusion.fd), "read-only FD");
+        assert_eq!(columns[4], "DIR");
+        assert_eq!(
+            columns[5],
+            format!("{major},{minor}"),
+            "DEVICE == fstat st_dev"
+        );
+        assert_eq!(columns[7], meta.ino().to_string(), "NODE == fstat st_ino");
+        assert_eq!(
+            Path::new(name),
+            target.canonicalize().unwrap(),
+            "NAME == target"
+        );
+        eprintln!("pin fstat: dev={major},{minor} ino={}", meta.ino());
+    }
+    assert!(
+        is_ignored_holder_row(pin_rows[0], exclusion, &pin_target_spellings(&target)),
+        "the real pin row must be recognized: {:?}",
+        pin_rows[0]
+    );
+    drop(pin);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The stub pin used through the real call site: PID 123, FD 7, and the
+/// fstat identity `1,4` / inode 1 that the stub rows print.
+fn stub_pin() -> HolderExclusion {
+    HolderExclusion {
+        pid: 123,
+        fd: 7,
+        dev_major: 1,
+        dev_minor: 4,
+        ino: 1,
+    }
+}
+
+/// Rounds 3-4 (cold review): a row is ignored only when it is the reaper's
+/// own read-only directory handle on the target itself, identified by PID,
+/// FD, TYPE, DEVICE, NODE and the exact NAME. Every near-miss stays a holder
+/// row (⇒ Held) through the real call site on exit 0 and exit 1; the exact
+/// pin row (optionally with a lock character) is ignored (⇒ None).
+#[cfg(unix)]
+#[test]
+fn stub_only_an_exact_pin_row_is_ignored() {
+    let root = unique_temp_dir("tachi-reaper-1978-pinrow");
+    let target = make_target_dir(&root, "x-target");
+    let outside = root.join("elsewhere");
+    std::os::unix::fs::symlink(&outside, target.join("link")).unwrap();
+    let t = target.display();
+    let pin = Some(stub_pin());
+    let near_misses = [
+        // Round 3's counterexample: FD digits followed by junk, no layout.
+        (
+            "review-malformed",
+            "garbage 123 user 7not-an-fd".to_string(),
+        ),
+        // Round 4's counterexample: padded to nine fields, no valid columns.
+        (
+            "padded-malformed",
+            format!("garbage 123 user 7r NOT_A_TYPE ? ? ? {t}"),
+        ),
+        // Correct shape, wrong identity.
+        ("wrong-inode", format!("tachi 123 u 7r DIR 1,4 0 2 {t}")),
+        ("wrong-device", format!("tachi 123 u 7r DIR 1,5 0 1 {t}")),
+        ("device-no-comma", format!("tachi 123 u 7r DIR 14 0 1 {t}")),
+        ("other-pid", format!("tachi 124 u 7r DIR 1,4 0 1 {t}")),
+        ("other-fd", format!("tachi 123 u 8r DIR 1,4 0 1 {t}")),
+        // Not a read-only directory handle.
+        ("mode-u", format!("tachi 123 u 7u DIR 1,4 0 1 {t}")),
+        ("mode-w", format!("tachi 123 u 7w DIR 1,4 0 1 {t}")),
+        ("type-reg", format!("tachi 123 u 7r REG 1,4 0 1 {t}")),
+        ("type-lowercase", format!("tachi 123 u 7r dir 1,4 0 1 {t}")),
+        // FD tokens with the right number but wrong trailing characters.
+        ("fd-junk", format!("tachi 123 u 7rq DIR 1,4 0 1 {t}")),
+        ("fd-two-locks", format!("tachi 123 u 7rWW DIR 1,4 0 1 {t}")),
+        (
+            "fd-unknown-mode",
+            format!("tachi 123 u 7-W DIR 1,4 0 1 {t}"),
+        ),
+        ("fd-bare-number", format!("tachi 123 u 7 DIR 1,4 0 1 {t}")),
+        (
+            "fd-leading-zero",
+            format!("tachi 123 u 07r DIR 1,4 0 1 {t}"),
+        ),
+        // Restored from round 3 (cold review round 5 concern).
+        ("fd-bad-mode", format!("tachi 123 u 7q DIR 1,4 0 1 {t}")),
+        ("fd-bad-lock", format!("tachi 123 u 7rZ DIR 1,4 0 1 {t}")),
+        (
+            "fd-leading-junk",
+            format!("tachi 123 u x7r DIR 1,4 0 1 {t}"),
+        ),
+        // Non-canonical numbers.
+        ("pid-plus", format!("tachi +123 u 7r DIR 1,4 0 1 {t}")),
+        ("node-plus", format!("tachi 123 u 7r DIR 1,4 0 +1 {t}")),
+        (
+            "node-leading-zero",
+            format!("tachi 123 u 7r DIR 1,4 0 01 {t}"),
+        ),
+        // NAME that is not exactly the target.
+        (
+            "name-trailing-space",
+            format!("tachi 123 u 7r DIR 1,4 0 1 {t} "),
+        ),
+        (
+            "name-trailing-cr",
+            format!("tachi 123 u 7r DIR 1,4 0 1 {t}\r"),
+        ),
+        (
+            "name-two-spaces",
+            format!("tachi 123 u 7r DIR 1,4 0 1  {t}"),
+        ),
+        (
+            "name-descendant",
+            format!("tachi 123 u 7r DIR 1,4 0 1 {t}/debug"),
+        ),
+        (
+            "name-symlinked-descendant",
+            format!("tachi 123 u 7r DIR 1,4 0 1 {t}/link/file"),
+        ),
+        (
+            "name-outside",
+            format!("tachi 123 u 7r DIR 1,4 0 1 {}", outside.display()),
+        ),
+        (
+            "name-sibling-prefix",
+            format!("tachi 123 u 7r DIR 1,4 0 1 {t}-other"),
+        ),
+        (
+            "name-dotdot",
+            format!("tachi 123 u 7r DIR 1,4 0 1 {t}/../x-target"),
+        ),
+        (
+            "name-relative",
+            "tachi 123 u 7r DIR 1,4 0 1 x-target".to_string(),
+        ),
+        ("name-missing", "tachi 123 u 7r DIR 1,4 0 1".to_string()),
+    ];
+    for (name, row) in &near_misses {
+        let stdout = format!("{}{row}\n", String::from_utf8_lossy(LSOF_HEADER));
+        for code in [0, 1] {
+            let check = stub_lsof_probe(
+                &format!("{name}-{code}"),
+                &target,
+                stdout.as_bytes(),
+                b"",
+                code,
+                pin,
+            );
+            assert!(
+                matches!(check, HolderCheck::Held(_)),
+                "{name} exit {code}: a non-pin row must stay a holder, got {check:?}"
+            );
+        }
+    }
+    // Controls: the exact pin row, with or without a documented lock
+    // character, named by the target's raw or canonical spelling.
+    for (name, row) in [
+        ("exact", format!("tachi 123 u 7r DIR 1,4 0 1 {t}")),
+        (
+            "exact-padded-columns",
+            format!("tachi    123 u   7r   DIR   1,4   0    1 {t}"),
+        ),
+        ("lock", format!("tachi 123 u 7rR DIR 1,4 0 1 {t}")),
+        (
+            "canonical-name",
+            format!(
+                "tachi 123 u 7r DIR 1,4 0 1 {}",
+                target.canonicalize().unwrap().display()
+            ),
+        ),
+    ] {
+        let stdout = format!("{}{row}\n", String::from_utf8_lossy(LSOF_HEADER));
+        for code in [0, 1] {
+            assert_eq!(
+                stub_lsof_probe(
+                    &format!("{name}-{code}"),
+                    &target,
+                    stdout.as_bytes(),
+                    b"",
+                    code,
+                    pin
+                ),
+                HolderCheck::None,
+                "{name} exit {code}"
+            );
+        }
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Cold review round 5 (monotonicity): a caller target spelled with `..`
+/// (or an interior `.`) is not a plain spelling, so a NAME spelled
+/// identically is never matched and stays Held (as in round 4). The
+/// canonical spelling still matches.
+#[cfg(unix)]
+#[test]
+fn stub_unplain_target_spelling_is_never_matched() {
+    let root = unique_temp_dir("tachi-reaper-1978-dotdot");
+    let target = make_target_dir(&root, "x-target");
+    std::fs::create_dir_all(root.join("a")).unwrap();
+    let pin = Some(stub_pin());
+    for (case, spelling) in [
+        ("dotdot", format!("{}/a/../x-target", root.display())),
+        ("dot", format!("{}/./x-target", root.display())),
+    ] {
+        let raw_target = PathBuf::from(&spelling);
+        assert!(raw_target.is_dir(), "{spelling}");
+        let stdout = format!(
+            "{}tachi 123 u 7r DIR 1,4 0 1 {spelling}\n",
+            String::from_utf8_lossy(LSOF_HEADER)
+        );
+        for code in [0, 1] {
+            let check = stub_lsof_probe(
+                &format!("{case}-{code}"),
+                &raw_target,
+                stdout.as_bytes(),
+                b"",
+                code,
+                pin,
+            );
+            assert!(
+                matches!(check, HolderCheck::Held(_)),
+                "{spelling} exit {code}: an unplain spelling must not match, got {check:?}"
+            );
+        }
+        // Control: the same target named canonically is the pin.
+        let canonical = format!(
+            "{}tachi 123 u 7r DIR 1,4 0 1 {}\n",
+            String::from_utf8_lossy(LSOF_HEADER),
+            target.canonicalize().unwrap().display()
+        );
+        assert_eq!(
+            stub_lsof_probe(
+                &format!("{case}-canonical"),
+                &raw_target,
+                canonical.as_bytes(),
+                b"",
+                1,
+                pin
+            ),
+            HolderCheck::None
+        );
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Cold review round 5: Linux DEVICE decoding is exactly glibc's
+/// gnu_dev_major/gnu_dev_minor (bits/sysmacros.h), including high bits.
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_device_numbers_match_glibc() {
+    for (dev, expected) in [
+        (0x0000_1000_0000_0001_u64, (4096, 1)),
+        (0x0000_0000_0001_0302, (259, 2)),
+        (0x0000_0000_0000_0801, (8, 1)),
+        (0x0000_0000_0000_0034, (0, 0x34)),
+        (0x0000_0fff_fff0_00ff, (0, 0xffff_ffff)),
+        (0xffff_f000_000f_ff00, (0xffff_ffff, 0)),
+    ] {
+        assert_eq!(lsof_device_numbers(dev), Some(expected), "{dev:#018x}");
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_device_numbers_match_the_printed_form() {
+    // lsof 4.91 printed `1,17` for this host's APFS volume (st_dev 0x0100_0011).
+    assert_eq!(lsof_device_numbers(0x0100_0011), Some((1, 17)));
+}
+
+#[test]
+fn lsof_read_fd_grammar_is_exact() {
+    for (token, expected) in [
+        ("7r", Some(7)),
+        ("12rW", Some(12)),
+        ("3rR", Some(3)),
+        ("7rx", Some(7)),
+        ("0r", Some(0)),
+        ("7w", None),
+        ("7u", None),
+        ("12uW", None),
+        ("7", None),
+        ("7-", None),
+        ("7-W", None),
+        ("7rq", None),
+        ("7rWW", None),
+        ("07r", None),
+        ("+7r", None),
+        ("7not-an-fd", None),
+        ("r7", None),
+        ("cwd", None),
+        ("txt", None),
+        ("99999999999r", None),
+        ("", None),
+    ] {
+        assert_eq!(lsof_read_fd_number(token), expected, "{token:?}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn stub_holder_next_to_the_warning_is_held_and_pin_exclusion_still_applies() {
+    let root = unique_temp_dir("tachi-reaper-1978-held");
+    let target = make_target_dir(&root, "x-target");
+    let mut stdout = LSOF_HEADER.to_vec();
+    stdout.extend_from_slice(
+        format!(
+            "tachi 123 u 7r DIR 1,4 0 1 {t}\ncargo 4242 u 3r REG 1,4 0 1 {t}/f\n",
+            t = target.display()
+        )
+        .as_bytes(),
+    );
+    assert_eq!(
+        stub_lsof_probe("held", &target, &stdout, LINUX_TRACEFS_WARNING, 0, None),
+        HolderCheck::Held(vec!["tachi 123".to_string(), "cargo 4242".to_string()])
+    );
+    assert_eq!(
+        stub_lsof_probe(
+            "pinned",
+            &target,
+            &stdout,
+            LINUX_TRACEFS_WARNING,
+            0,
+            Some(stub_pin())
+        ),
+        HolderCheck::Held(vec!["cargo 4242".to_string()])
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Round-1 finding 1: an unvalidated first stdout line is never skipped, and
+/// the pin exclusion never runs on output without lsof's header.
+#[cfg(unix)]
+#[test]
+fn stub_unrecognized_stdout_stays_unknown() {
+    let root = unique_temp_dir("tachi-reaper-1978-garbage");
+    let target = make_target_dir(&root, "x-target");
+    assert_unknown(
+        "exit1+warning",
+        stub_lsof_probe("g1w", &target, b"garbage\n", LINUX_TRACEFS_WARNING, 1, None),
+    );
+    assert_unknown(
+        "exit1",
+        stub_lsof_probe("g1", &target, b"garbage\n", b"", 1, None),
+    );
+    assert_unknown(
+        "exit0",
+        stub_lsof_probe("g0", &target, b"garbage\n", b"", 0, None),
+    );
+    assert_unknown(
+        "headerless pinned row",
+        stub_lsof_probe(
+            "pin",
+            &target,
+            b"tachi 123 u 7r DIR 1,4 0 1 /t\n",
+            b"",
+            1,
+            Some(stub_pin()),
+        ),
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Round-1 finding 2: an odd exit status is never "unheld".
+#[cfg(unix)]
+#[test]
+fn stub_odd_exit_codes_stay_unknown() {
+    let root = unique_temp_dir("tachi-reaper-1978-exit");
+    let target = make_target_dir(&root, "x-target");
+    for code in [2, 3, 126, 127] {
+        assert_unknown(
+            &format!("exit {code}"),
+            stub_lsof_probe(
+                &format!("x{code}"),
+                &target,
+                b"",
+                LINUX_TRACEFS_WARNING,
+                code,
+                None,
+            ),
+        );
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Round-1 findings 3 and 4: only the observed tracefs pair, as valid UTF-8,
+/// is accepted.
+#[cfg(unix)]
+#[test]
+fn stub_other_file_systems_lone_lines_and_non_utf8_stay_unknown() {
+    let root = unique_temp_dir("tachi-reaper-1978-fstype");
+    let target = make_target_dir(&root, "x-target");
+    let cases: [(&str, &[u8]); 4] = [
+        (
+            "nfs-pair",
+            b"lsof: WARNING: can't stat() nfs file system /unrelated\n      Output information may be incomplete.\n",
+        ),
+        ("nfs-lone", b"lsof: WARNING: can't stat() nfs file system /unrelated\n"),
+        (
+            "tracefs-lone",
+            b"lsof: WARNING: can't stat() tracefs file system /sys/kernel/debug/tracing\n",
+        ),
+        (
+            "non-utf8",
+            b"lsof: WARNING: can't stat() tracefs file system /tmp/m-\xff\n      Output information may be incomplete.\n",
+        ),
+    ];
+    for (name, stderr) in cases {
+        assert_unknown(name, stub_lsof_probe(name, &target, b"", stderr, 1, None));
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Round-1 findings 5 and 7, plus mounts inside/over the walk.
+#[cfg(unix)]
+#[test]
+fn stub_alias_overlap_and_success_exit_diagnostics_stay_unknown() {
+    let root = unique_temp_dir("tachi-reaper-1978-alias");
+    let real = make_target_dir(&root, "real-target");
+    let aliases = root.join("aliases");
+    std::fs::create_dir_all(&aliases).unwrap();
+    let alias = aliases.join("link-target");
+    std::os::unix::fs::symlink(&real, &alias).unwrap();
+    assert_unknown(
+        "alias",
+        stub_lsof_probe("alias", &alias, b"", &tracefs_pair_for(&aliases), 1, None),
+    );
+    for (name, mount) in [("inside", real.join("debug")), ("same", real.clone())] {
+        assert_unknown(
+            name,
+            stub_lsof_probe(name, &real, b"", &tracefs_pair_for(&mount), 1, None),
+        );
+    }
+    let error = b"lsof: WARNING: can't opendir(/t/debug): Permission denied\n";
+    assert_unknown(
+        "exit0-header",
+        stub_lsof_probe("e0h", &real, LSOF_HEADER, error, 0, None),
+    );
+    let mut both = LINUX_TRACEFS_WARNING.to_vec();
+    both.extend_from_slice(error);
+    let check = stub_lsof_probe("e1", &real, b"", &both, 1, None);
+    let HolderCheck::Unknown(reason) = &check else {
+        panic!("a partial walk must stay Unknown next to the warning: {check:?}");
+    };
+    // Off Linux the tracefs line is itself kept and surfaced first.
+    if cfg!(target_os = "linux") {
+        assert!(reason.contains("can't opendir"), "{reason}");
+    }
+    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// The head-line safety invariant of this module — and the one the reviewed
