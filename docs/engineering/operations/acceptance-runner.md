@@ -40,7 +40,8 @@ exactly the four in-scope lanes of `ci.yml` — `build-seat-setup`, `rust`,
   since the queue died; restoring it requires a genuine Linux host (census
   class A), which is an owner decision outside this lane.
 - **Out of scope by law (#1865):** Windows, macOS release/bottles, native
-  release matrix, memcore mirror publication, npm/Homebrew publication, all
+  release matrix, npm/Homebrew publication (the memcore mirror was retired in
+  #1902), all
   release/provider secrets. Those workflows keep their hosted `runs-on` labels
   and are not served by this runner.
 
@@ -101,8 +102,7 @@ unchanged.
 
 `ci.yml` already declares workflow-level `permissions: contents: read`. The
 four lanes need nothing beyond the auto `GITHUB_TOKEN` (gitleaks read,
-artifact upload). No third-party publication credential (`MEMCORE_MIRROR_TOKEN`,
-`NPM_TOKEN`, `HOMEBREW_TAP_GITHUB_TOKEN`, provider keys) is referenced by any
+artifact upload). No third-party publication credential (`NPM_TOKEN`, `HOMEBREW_TAP_GITHUB_TOKEN`, provider keys) is referenced by any
 job served by this runner.
 
 ## Installation (host, once)
