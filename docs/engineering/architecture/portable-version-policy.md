@@ -1,6 +1,6 @@
 # Portable Version Policy — per-profile schema-version projection
 
-> **Status:** spec, pre-implementation, revision 4 (after three rounds of
+> **Status:** spec, pre-implementation, revision 5 (after four rounds of
 > cross-vendor attack review). Owner decision **D7 = B** (2026-09-26).
 > **Issue:** #1991 (parent #1987 W2-5).
 > **Anchors:** #984 (downgrade gate), #1119 (migration authority), #1180
@@ -82,9 +82,11 @@ profile, changes none of the four rows above.
 
 ## 3. Rules
 
-**R0 — Invariance.** Every open under today's policy keeps every outcome,
-error, error precedence and side effect it has in #1983/#1984. The Portable
-policy changes only four things:
+**R0 — Invariance.** Every open that runs under today's policy in both the
+preflight and the authoritative phase keeps every outcome, error, error
+precedence and side effect it has in #1983/#1984. An open whose policy class
+differs between the two phases is a deliberate exception, listed in §6. The
+Portable policy changes only four things:
 
 - the version decision in `band` (R2);
 - the output of fresh builds and pending migrations: stamp and sentinels
@@ -146,9 +148,11 @@ migration under the Portable policy, the stamp is
 `max(s, π_P(E), min(PORTABLE_COMPAT_FLOOR, E))`. A stamp is never lowered, and
 in `band` it is never written.
 
-- The floor means any store a B binary creates or migrates can be reopened by
-  the last pre-B binary under `Deny`. This covers sealed images too, which
-  have no `Allow` path.
+- **While `π_P(E) ≤ PORTABLE_COMPAT_FLOOR`**, the floor means any store a B
+  binary creates or migrates can be reopened by the last pre-B binary under
+  `Deny`. That includes sealed images, which have no `Allow` path. Once a
+  Portable migration above the floor ships, the stamp exceeds the floor, and
+  the last pre-B binary refuses the store as `newer` (§7).
 - Above the floor, the stamp moves only when a Portable migration ships.
   Every index between `π_P(E)` and `E` is Product by definition, so the floor
   never claims a Portable migration that was not applied.
@@ -164,10 +168,21 @@ in `band` it is never written.
    and never removed.
 2. **Validation.** It runs on every admission under the Portable policy that
    is not a fresh build.
-   - (a) **Sentinel evidence.** Every `relevant(P)` sentinel `≤ π_P(E)` must
-     be present, plus every `Product` sentinel with index
-     `≤ min(s, PORTABLE_COMPAT_FLOOR)`. This is static, so it runs in the
-     preflight integrity step and again in the authoritative one (§5).
+   - (a) **Band input integrity.** This runs for band only, in both the
+     preflight and the authoritative integrity step (§5). It is today's
+     `validate_current_schema_integrity` projected to the Portable policy:
+     the same object validators it runs at `s == E` today, applied to the
+     sentinel set `relevant(P) ≤ π_P(E)` plus every `Product` sentinel with
+     index `≤ min(s, PORTABLE_COMPAT_FLOOR)`.
+     - For a `P@39` input this is exactly today's check, so today's error and
+       its precedence are unchanged.
+     - A missing sentinel refuses, because band runs no migration (R2). That
+       matches how today refuses an incomplete `F@E`.
+   - (a′) **Pending output inventory.** This runs for pending only, inside the
+     transaction, after R3's migrations and before the stamp. It checks the
+     complete `relevant(P) ≤ π_P(E)` inventory plus the R5.1 vacuous set.
+     Pending preflight imposes no sentinel requirement, so missing-sentinel
+     recovery at any index (R3) still works.
    - (b) **Complete shape.** Every Portable table, column, index and
      trigger, including index uniqueness and partial-index predicates. It
      runs **once**, inside `BEGIN IMMEDIATE`, after `init_schema_inner` has
@@ -277,8 +292,9 @@ ends before the connection PRAGMAs and `BEGIN IMMEDIATE`.
    under the Portable policy, today's decision otherwise. At `s == 0` it is
    always a build.
 3. Integrity. Under today's policy: today's
-   `validate_current_schema_integrity`. Under the Portable policy with
-   `s > 0`: R5.2a. Nothing for fresh builds.
+   `validate_current_schema_integrity`. Under the Portable policy in band:
+   R5.2a. Under the Portable policy in pending: today's behaviour, which
+   skips the check for non-current versions. Nothing for fresh builds.
 4. Identity, exactly as in #1983/#1984:
    - `read_identity` decodes the role, then the profile;
    - profile admission (`StoreProfileMismatch` / `StoreProfileNotExact` /
@@ -295,7 +311,11 @@ then run the connection PRAGMAs.
 0–3. Repeat preflight steps 0–3 on the in-transaction state.
 
 3½. **Coverage**, placed between integrity and identity, as in #1983
-(`schema.rs:1319-1333`). Refuse with `SchemaChangedDuringOpen` in either case:
+(`schema.rs:1319-1333`). Both rules below apply only when
+`filesystem_artifacts` is true, which is the condition #1983's check already
+uses. Private images are exempt: by design they take no backup and write no
+marker (`schema.rs:1182-1192`), and they must not be made to create plaintext
+artifacts. Refuse with `SchemaChangedDuringOpen` in either case:
    - (i) The authoritative decision is an authorized migration, and
      `(s, probe)` differs from the preflight's. This is #1983's rule with
      the probe added.
@@ -325,7 +345,7 @@ Refusal order is #1983/#1984's for every row. Example values: `E = 39`,
 |---|---|---|---|---|---|---|
 | 1 | any | `> E` | newer | `newer` | same | none |
 | 2 | today's | any | today's | today's | today's | **none (R0)** |
-| 3 | Portable (fresh, resolved P) | 0 | fresh | build P, stamp `max(36, min(39, E))`, vacuous sentinels ≤ floor | same | none at `E = 39`. At `E > 39`, stamp and sentinels stop at the floor (was `E`) |
+| 3 | Portable (fresh, resolved P) | 0 | fresh | build P, stamp `max(π_P(E), min(39, E))`, vacuous sentinels ≤ floor | same | none at `E = 39`. At `E > 39` with `π_P(E) ≤ 39` (product-only bumps), the stamp and sentinels stop at the floor instead of `E`. Once `π_P(E) > 39`, the stamp is `π_P(E)` |
 | 4 | Portable | 1–35 | pending | OptInRequired | backup, missing `relevant(P)` sentinels (any index), vacuous ≤ floor, **R5.2**, stamp 39 | Allow: **a store whose shape fails R5.2b is now refused** (today it migrates and is stamped 39) |
 | 5 | Portable | 36–38 | band | **admitted if §5 and R5.2 admit**: no migration, no stamp, no forced backup | same | **was OptInRequired (Deny) / backup + stamp 39 (Allow)** |
 | 6 | Portable | 39 | band | admitted if §5 and R5.2 admit | same | adds R5.2 |
@@ -338,7 +358,32 @@ refusal becomes the returned error:
 - a missing sentinel → the R5.2a error;
 - an unsatisfied requirement (`AtLeast(F)`, `Exact(F)`) → `StoreProfileMismatch`
   or `StoreProfileNotExact`;
-- a role conflict → `StoreRoleConflict`.
+- a role conflict → `StoreRoleConflict`;
+- a shape defect that the frozen set does not repair (e.g. a non-unique
+  `idx_memories_idless_identity_active`) → the R5.2b refusal, inside the
+  transaction.
+
+**Other outcome changes.** Each is pinned in T7 with both the old and the B
+outcome (success or refusal, phase, and side effects), not just the error:
+
+- **Band + `Allow` with a missing sentinel.** Example: `P@36`, otherwise
+  canonical, but missing the v3 sentinel. Today this is a pending migration:
+  the runner executes v3 and the open succeeds. Under B it is band, R5.2a
+  refuses it, and nothing is written. This matches how today treats an
+  incomplete `F@E`.
+- **Band shape defect under `Allow`.** Today the store migrates, the defect
+  survives, and the open succeeds. Under B, R5.2b refuses it.
+- **Precedence at `P@39` for defects that today's integrity check catches.**
+  Unchanged. R5.2a *is* today's check at `s == E`, so a missing delivery index
+  combined with a malformed role still returns today's integrity error before
+  identity. Only defects that today's validators miss, and that R5.2b alone
+  detects, come after identity.
+- **Cross-policy race (intended).** A full-shaped `P@36` flipped to `F@36` in
+  the window under `Allow`. Today this passes #1983's unchanged-version
+  coverage check and migrates. Under B, rule (i) refuses it because the probe
+  changed. R0's invariance covers opens that stay under today's policy in
+  both phases. This sequence crosses policies, so it is excluded from R0 on
+  purpose.
 
 Row 4 and every row under today's policy keep today's winning error. So
 `P@30, Deny, AtLeast(F)` still returns `SchemaMigrationOptInRequired`, and
@@ -510,11 +555,16 @@ hook, or an error variant), not only the end state.
   `E + 1`, together with a consistent catalogue, `E` and projection, through
   the real funnel.
   - A P store at 39, and one at 36, each with a matching marker, open under
-    `Deny`. Assert: zero backups, and unchanged `user_version` and
-    `PRAGMA schema_version`. Vector availability is controlled.
+    `Deny`. Assert: zero backups; unchanged `user_version` and
+    `PRAGMA schema_version`; **zero versioned-migration invocations** (a
+    counter hook in the runner); and an **unchanged migration-sentinel
+    inventory**, so the `E + 1` Product sentinel is absent. Vector
+    availability is controlled.
   - An F store refuses under `Deny`.
 - **T3 — Portable bump.** Inject a test-only Portable migration at `E + 1`
-  that has an observable effect.
+  that has an observable effect. This test also covers the pending path's
+  absent preflight sentinel requirement (R5.2a′): the new migration's
+  sentinel is necessarily missing going in.
   - Under `Deny`, a P store refuses.
   - Under `Allow` it backs up; the backup holds the pre-migration state, the
     effect is present, and the stamp is `E + 1`.
@@ -526,8 +576,10 @@ hook, or an error variant), not only the end state.
     version under WAL between the preflight's first and last reads. Assert
     that the recorded values all come from one commit.
 - **T5 — Today's-policy invariance.**
-  - The full existing suite passes with zero assertion changes. That includes
-    #1984's admission tables, the marker-fallback tests (a missing or
+  - Every existing test that exercises **today's policy** passes with zero
+    assertion changes. The only assertions allowed to change are the Portable
+    ones listed in §8 A4, and each change needs a before/after. The covered
+    tests include #1984's admission tables, the marker-fallback tests (a missing or
     old-format marker on `F@39`, non-empty `s = 0`),
     `db/migrations.rs:1984-2000`, and #1983 `open_race_tests.rs:184`.
   - `F@38` missing the v3 sentinel migrates v3 under `Allow`.
@@ -542,9 +594,14 @@ hook, or an error variant), not only the end state.
 - **T7 — Outcome table.** For every row of §6, run one valid-input baseline
   that reaches the row's branch. On that baseline, run each corruption
   variant separately: malformed role, malformed profile, missing sentinel,
-  unsatisfied requirement. Every case is pinned twice: the old
-  (#1983/#1984) expected error, and the B expected error. They differ exactly
-  where §6's "errors unmasked in band" lists them.
+  unsatisfied requirement, and an unrepaired shape defect. Also run these
+  combined variants: shape defect + malformed role; today's integrity defect
+  (e.g. a missing delivery index at `P@39`) + malformed role. Every case is
+  pinned twice, for the old (#1983/#1984) behaviour and for B. Each pin is an
+  **outcome**, not just an error: success or refusal, the phase that
+  decided it, and side effects (backups, stamp, sentinels, rows). The two
+  pins differ exactly where §6 ("errors unmasked in band" and "other outcome
+  changes") says they do.
 - **T8 — Idempotent maintenance.** Reopening a converged P store and a
   converged F store leaves `sqlite_schema` and `PRAGMA schema_version`
   unchanged. `memories_vec` is controlled.
@@ -553,8 +610,16 @@ hook, or an error variant), not only the end state.
     `idx_memories_idless_identity_active`, with a matching marker, refuses
     at R5.2b inside the transaction. Assert: rolled back, zero backups, not
     repaired.
-  - The same for a missing Portable column and for a missing trigger. Assert
-    which validator refused.
+  - The same for a missing Portable column and a missing trigger. Choose
+    objects the frozen set does **not** recreate; a missing search-generation
+    trigger, for example, is recreated, so it doesn't qualify. Assert which
+    validator refused.
+  - A `P@35` store with a complete v35 inventory, under `Allow`, migrates
+    v36. R5.2a′ passes after the migration and the stamp is 39. This shows
+    that pending preflight does not demand the v36 sentinel.
+  - A `P@36` store that is otherwise canonical but missing the v3 sentinel
+    refuses at R5.2a under `Allow`, and nothing is written. Today the same
+    store migrates and succeeds (§6 "other outcome changes").
   - The same non-unique-index store stamped 30 under `Allow` refuses at
     R5.2b (§6 row 4).
   - A `P@39` store missing the v39 Product sentinel refuses at R5.2a in the
