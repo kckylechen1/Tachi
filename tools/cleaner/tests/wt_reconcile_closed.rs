@@ -22,6 +22,10 @@ impl StubStore {
     fn new() -> Self {
         let dir = std::env::temp_dir().join(format!("tachi-1988-stubs-{}", uuid::Uuid::new_v4()));
         fs::create_dir(&dir).unwrap();
+        // Link targets must be absolute: `temp_dir()` is `TMPDIR` verbatim, and
+        // a relative one (`TMPDIR=.`) would resolve beneath each `bin/` and
+        // dangle. Canonical, like the fixture roots.
+        let dir = dir.canonicalize().unwrap();
         Self {
             dir,
             bodies: Default::default(),
@@ -115,7 +119,13 @@ impl Fixture<'_> {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => panic!("replace stub {}: {error}", path.display()),
         }
-        std::os::unix::fs::symlink(self.1.install(body), path).unwrap();
+        let target = self.1.install(body);
+        std::os::unix::fs::symlink(&target, &path).unwrap();
+        // A dangling or misdirected link would silently turn the stub into a
+        // spawn failure; prove the link runs exactly the installed body.
+        let resolved = fs::canonicalize(&path)
+            .unwrap_or_else(|error| panic!("{name} stub link {} dangles: {error}", path.display()));
+        assert_eq!(resolved, target, "{name} stub link");
     }
 }
 
