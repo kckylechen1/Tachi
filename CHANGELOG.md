@@ -53,6 +53,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- **Public memcore mirror retired** (#1902). Tachi is public now, so consumers take `memcore` / `portable-kernel` directly from `https://github.com/kckylechen1/tachi.git`, e.g. `memcore = { git = "https://github.com/kckylechen1/tachi.git", rev = "…" }`; Cargo finds the package inside the workspace. The `publish-memcore-mirror` workflow, its script and the `MEMCORE_MIRROR_TOKEN` secret are gone. `github.com/kckylechen1/memcore` is archived read-only, so revisions that are already pinned still resolve.
 - Post-2.0 cleanup: dead Kanban card handlers, the `tachi_task` brief handler, unreachable retired-alias arms, unused dependencies and public API, duplicated tests compiled into `tachi-server`, and stale or broken one-off scripts (`scripts/validate_schema.py`, `scripts/backfill_gemini_cli.py`, `scripts/test_memory_server.py`). The provenance `build.rs` no longer reruns on every build in git worktrees.
 
 ## [2.0.0] - 2026-09-25

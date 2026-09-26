@@ -351,7 +351,7 @@ pub use stats_gc::{
 };
 pub use store_identity::StoreIdentity;
 pub use store_profile::{
-    StoreProfile, STORE_IDENTITY_NAMESPACE, STORE_PROFILE_KEY, STORE_ROLE_KEY,
+    ProfileRequirement, StoreProfile, STORE_IDENTITY_NAMESPACE, STORE_PROFILE_KEY, STORE_ROLE_KEY,
 };
 #[cfg(feature = "admin")]
 pub use vault_accounts::{

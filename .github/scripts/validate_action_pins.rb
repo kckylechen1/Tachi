@@ -57,7 +57,8 @@ AUDITED_CARGO_INSTALLS = {}.freeze
 INSTALL_ACTION = "taiki-e/install-action"
 AUDITED_INSTALL_ACTION_TOOLS = {
   "cargo-audit@0.22.2" => 1,
-  "nextest@0.9.140" => 1
+  # ci.yml rust + conformance-linux.yml rust-gate and linux-platform.
+  "nextest@0.9.140" => 3
 }.freeze
 REQUIRED_INSTALL_ACTION_INPUTS = {
   "checksum" => "true",
