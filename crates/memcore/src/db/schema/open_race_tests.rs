@@ -503,3 +503,74 @@ fn aba_version_around_the_backup_decision_is_refused_without_a_backup() {
         "no migration, stamp or state write may remain"
     );
 }
+
+/// Table 2, row 3 (`pre = tx`, a written backup of ANOTHER version). The Allow
+/// preflight reads 37; another process moves the store to 38 before the
+/// backup step, which therefore copies 38; the store is back at 37 before
+/// `BEGIN IMMEDIATE`. The preflight and in-transaction versions agree
+/// (37 == 37), but the only backup is of 38, so migrating 37 would run
+/// without a backup of the state being migrated. The coverage check must
+/// compare against the backup step's own decision and refuse.
+#[test]
+fn written_backup_of_another_version_does_not_cover_the_in_tx_migration() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = tmp.path().join("race-row3.db");
+    seed_current_store(&path);
+    let expected_version = crate::db::migrations::EXPECTED_SCHEMA_VERSION;
+    let pre = expected_version - 2;
+    let backed_up = expected_version - 1;
+    let set_version = |path: &Path, version: u32| {
+        Connection::open(path)
+            .expect("version tool")
+            .execute_batch(&format!("PRAGMA user_version = {version}"))
+            .expect("set user_version");
+    };
+    set_version(&path, pre);
+
+    test_hooks::arm_window_hook(test_hooks::Window::BeforeBackupDecision, move |path| {
+        set_version(path, backed_up)
+    });
+    let after_window = arm_window(move |path| set_version(path, pre));
+
+    let mut conn = Connection::open(&path).expect("opener connection");
+    let err =
+        crate::db::init_schema_with_label_mut(&mut conn, "global", &path, &open_existing_allow())
+            .expect_err("a backup of another version must not cover the in-tx migration");
+    drop(conn);
+    assert!(
+        matches!(
+            err,
+            MemoryError::SchemaChangedDuringOpen { preflight, current, .. }
+                if preflight == backed_up && current == pre
+        ),
+        "expected SchemaChangedDuringOpen {{ preflight: {backed_up}, current: {pre} }}, got {err:?}"
+    );
+
+    let backups: Vec<_> = std::fs::read_dir(tmp.path())
+        .expect("read dir")
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.to_string_lossy().contains("migration-bak"))
+        .collect();
+    assert_eq!(
+        backups.len(),
+        1,
+        "exactly the backup step's one backup: {backups:?}"
+    );
+    assert_eq!(
+        crate::db::migrations::read_schema_version(
+            &Connection::open(&backups[0]).expect("open backup")
+        )
+        .expect("backup user_version"),
+        backed_up,
+        "the backup is of the version the backup step saw, not of the in-tx state"
+    );
+
+    let expected = after_window.borrow().clone().expect("window ran");
+    let actual = snapshot(&Connection::open(&path).expect("inspect"));
+    assert_eq!(actual.0, pre, "the store must not have been migrated");
+    assert_eq!(
+        actual, expected,
+        "no migration, stamp or state write may remain"
+    );
+}
