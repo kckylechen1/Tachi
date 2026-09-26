@@ -627,6 +627,26 @@ const STUB_LSOF_BODY: &str = "#!/bin/sh\n\
     : > \"$d/replayed\" || exit 94\n\
     exit \"$code\"\n";
 
+/// Writes the stub body as an owner-only executable. A child shell does the
+/// writing, so this process never holds a write descriptor on the file: in a
+/// multithreaded test binary (libtest runs tests on threads), another thread
+/// can fork while such a descriptor is open, and exec'ing the stub then fails
+/// with ETXTBSY until that child execs.
+#[cfg(unix)]
+fn write_stub_body(body: &Path) {
+    let status = std::process::Command::new("/bin/sh")
+        .args([
+            "-c",
+            "umask 077 && printf '%s' \"$2\" > \"$1\" && chmod 700 \"$1\"",
+            "sh",
+        ])
+        .arg(body)
+        .arg(STUB_LSOF_BODY)
+        .status()
+        .unwrap();
+    assert!(status.success(), "writing the stub body: {status}");
+}
+
 /// tachi#1978: drive the real call site (`Command`, argv, byte capture, stderr
 /// filtering, pin exclusion, classification) with a stub `lsof` that is
 /// asked `+D <target>` and replays exact bytes and an exit status.
@@ -646,13 +666,11 @@ struct StubLsof {
 #[cfg(unix)]
 impl StubLsof {
     fn new() -> Self {
-        use std::os::unix::fs::PermissionsExt;
         let dir = unique_temp_dir("tachi-reaper-1988-lsof-stub")
             .canonicalize()
             .unwrap();
         let body = dir.join("lsof-body");
-        std::fs::write(&body, STUB_LSOF_BODY).unwrap();
-        std::fs::set_permissions(&body, std::fs::Permissions::from_mode(0o700)).unwrap();
+        write_stub_body(&body);
         Self { dir, body }
     }
 

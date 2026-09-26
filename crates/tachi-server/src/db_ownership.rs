@@ -432,6 +432,25 @@ mod tests {
         : > \"$d/replayed\" || exit 94\n\
         exit \"$code\"\n";
 
+    /// Writes the stub body as an owner-only executable. A child shell does the
+    /// writing, so this process never holds a write descriptor on the file: in a
+    /// multithreaded test binary (libtest runs tests on threads), another thread
+    /// can fork while such a descriptor is open, and exec'ing the stub then fails
+    /// with ETXTBSY until that child execs.
+    fn write_stub_body(body: &Path) {
+        let status = std::process::Command::new("/bin/sh")
+            .args([
+                "-c",
+                "umask 077 && printf '%s' \"$2\" > \"$1\" && chmod 700 \"$1\"",
+                "sh",
+            ])
+            .arg(body)
+            .arg(STUB_LSOF_BODY)
+            .status()
+            .unwrap();
+        assert!(status.success(), "writing the stub body: {status}");
+    }
+
     /// A stub `lsof` that is asked `-- <canonical db>` and then replays exact
     /// stdout/stderr bytes and an exit status.
     ///
@@ -448,12 +467,10 @@ mod tests {
 
     impl StubLsof {
         fn new() -> Self {
-            use std::os::unix::fs::PermissionsExt;
             let dir = tempfile::tempdir().expect("stub dir");
             let root = dir.path().canonicalize().unwrap();
             let body = root.join("lsof-body");
-            std::fs::write(&body, STUB_LSOF_BODY).unwrap();
-            std::fs::set_permissions(&body, std::fs::Permissions::from_mode(0o700)).unwrap();
+            write_stub_body(&body);
             Self {
                 _dir: dir,
                 root,
