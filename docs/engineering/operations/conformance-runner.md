@@ -50,8 +50,11 @@ else, so a mislabeled host can never fake green. It also prints
     audits `Cargo.lock` (platform-independent) and the audited supply-chain
     policy (`validate_action_pins.rb`) admits the prebuilt `cargo-audit@0.22.2`
     install (`taiki-e/install-action`, `checksum: true`, `fallback: none`) at
-    exactly one use across all workflows and rejects any `cargo install`; the
-    RustSec audit keeps running in the `ci.yml` canonical lane.
+    exactly one use across all workflows. Its `cargo install` rejection is
+    best-effort detection, not a guarantee (see the threat model at the top of
+    `validate_action_pins.rb`, line 9: shell aliases and deliberate
+    obfuscation are out of scope). The RustSec audit keeps running in the
+    `ci.yml` canonical lane.
   - `linux-platform` — the #1877 inventory as named nextest filters, **one
     step per filter, each with `--no-tests=fail`**, and every filter step runs
     even if an earlier one failed. A filter that matches zero tests (renamed
@@ -192,9 +195,13 @@ gh api --paginate repos/kckylechen1/tachi/collaborators \
 # 3. No pull_request_target / workflow_run workflow can reach a self-hosted
 #    runner (run in a checkout of main). Parses the trigger set, so comments
 #    that merely mention the events do not count. Every job in such a
-#    workflow must have a literal GitHub-hosted runs-on and no reusable-
-#    workflow `uses:`. Exit 0 and no output = pass.
+#    workflow must name exactly one label from the explicit GitHub-hosted
+#    allowlist below and must not call a reusable workflow. A label pattern
+#    such as ubuntu-* is not proof of GitHub hosting: a self-hosted runner can
+#    carry any custom label. Extend the allowlist only by editing this
+#    runbook. Exit 0 and no output = pass.
 ruby -ryaml -e '
+HOSTED = %w[ubuntu-latest ubuntu-24.04 ubuntu-22.04].freeze
 bad = false
 Dir[".github/workflows/*.{yml,yaml}"].sort.each do |f|
   d = YAML.safe_load(File.read(f), aliases: false) || {}
@@ -203,13 +210,20 @@ Dir[".github/workflows/*.{yml,yaml}"].sort.each do |f|
   next if (events & %w[pull_request_target workflow_run]).empty?
   (d["jobs"] || {}).each do |id, job|
     runs_on = job["runs-on"]
-    next if job["uses"].nil? && runs_on.is_a?(String) &&
-            runs_on.match?(/\A(ubuntu|macos|windows)-[A-Za-z0-9.-]+\z/)
+    next if job["uses"].nil? && HOSTED.include?(runs_on)
     bad = true
     puts "VIOLATION: #{f} job #{id}: runs-on=#{runs_on.inspect} uses=#{job["uses"].inspect}"
   end
 end
 exit(bad ? 1 : 0)'
+
+# 4. No self-hosted runner registered to this repository carries one of the
+#    allowlisted hosted labels (which would let check 3's allowlist route a
+#    job to it). Silence means pass.
+gh api --paginate repos/kckylechen1/tachi/actions/runners \
+  --jq '.runners[] | .name as $n | .labels[].name
+        | select(. == "ubuntu-latest" or . == "ubuntu-24.04" or . == "ubuntu-22.04")
+        | "VIOLATION: self-hosted runner \($n) carries hosted label \(.)"'
 ```
 
 If any of these fails (a weaker policy, a failed read, any push-capable
