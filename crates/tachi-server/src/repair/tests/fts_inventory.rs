@@ -1,3 +1,4 @@
+use super::super::RuleReport;
 use super::*;
 
 #[test]
@@ -27,6 +28,304 @@ fn r1_fts_drift_detected_and_rebuilt() {
         dry2.findings.is_empty(),
         "post-rebuild should be clean: {dry2:?}"
     );
+}
+
+/// Insert a legacy NULL-id memory (`memories.id` is `TEXT PRIMARY KEY`
+/// without NOT NULL). `valid_from` is set so a writable open's validity
+/// normalization, which decodes the id as a String, leaves the row alone.
+fn insert_null_id_memory(conn: &Connection) {
+    conn.execute(
+        "INSERT INTO memories (id, path, summary, text, timestamp, valid_from)
+         VALUES (NULL, '/x/null', 'null id', 'null id text',
+                 '2026-09-26T00:00:00Z', '2026-09-26T00:00:00Z')",
+        [],
+    )
+    .expect("insert NULL-id memory");
+}
+
+/// Project the NULL-id memory into both FTS tables: the rows a pre-#1993 full
+/// rebuild or R1 repair left behind next to the live projections.
+fn project_null_id_memory(path: &PathBuf) {
+    Connection::open(path)
+        .unwrap()
+        .execute_batch(
+            "INSERT INTO memories_fts (id, path, summary, text, keywords, entities)
+             SELECT id, path, summary, text, keywords, entities FROM memories WHERE id IS NULL;
+             INSERT INTO memories_symbolic_fts (id, path, summary, text, keywords, entities, topic)
+             SELECT id, path, summary, text, keywords, entities, topic FROM memories WHERE id IS NULL;",
+        )
+        .expect("project the NULL-id memory");
+}
+
+fn null_projection_rows(conn: &Connection) -> i64 {
+    conn.query_row(
+        "SELECT (SELECT COUNT(*) FROM memories_fts WHERE id IS NULL)
+              + (SELECT COUNT(*) FROM memories_symbolic_fts WHERE id IS NULL)",
+        [],
+        |r| r.get(0),
+    )
+    .unwrap()
+}
+
+fn search_generation_at(path: &PathBuf) -> i64 {
+    let conn = Connection::open(path).unwrap();
+    memcore::db::search_generation(&conn).expect("read search generation")
+}
+
+/// A generic writable open (`MemoryStore::open`): runs schema init, including
+/// memcore's open-time FTS drift repair (`ensure_fts_backfilled`).
+/// (`open_existing_read_write` would not do: it deliberately skips init.)
+fn writable_open(path: &PathBuf) {
+    let store = memcore::MemoryStore::open(path.to_str().unwrap()).expect("writable open");
+    drop(store);
+}
+
+/// tachi#2000 review (astra r1, finding 1): R1 repair and the open-time
+/// orphan pass must agree on one rule, a NULL-id memory is never projected,
+/// or repair -> open -> repair oscillates. Before, R1 counted NULL-id memories
+/// as drift baseline and re-projected them; the next open deleted them again
+/// (a generation bump), and R1 reported drift once more.
+///
+/// `open_first`: start from the state the open-time pass converges to
+/// (NULL-id projections already pruned) instead of the legacy state that
+/// still holds them.
+fn assert_r1_and_open_converge_with_null_memory_id(open_first: bool) {
+    let dir = TempDir::new().unwrap();
+    let (path, conn) = fresh_db(&dir, "null_id_cycle.db");
+    insert_null_id_memory(&conn);
+    insert_memory(&conn, "keep", "/x/keep", "live row", "{}", None, None);
+    drop(conn);
+    // Settle the raw-SQL fixture first: the first writable open backfills
+    // validity/timestamp columns (memories UPDATEs, each a generation bump)
+    // and projects 'keep'. Later generation reads then see FTS changes only.
+    writable_open(&path);
+    project_null_id_memory(&path);
+    assert_eq!(null_projection_rows(&Connection::open(&path).unwrap()), 2);
+    if open_first {
+        writable_open(&path);
+        // Proves `writable_open` really runs the open-time pass, so the
+        // generation check after the second open below is not vacuous.
+        assert_eq!(
+            null_projection_rows(&Connection::open(&path).unwrap()),
+            0,
+            "the writable open prunes NULL-id projection rows"
+        );
+    }
+
+    let mut ctx = open_ctx(&path, "test");
+    let dry = FtsRebuild.dry_run(&mut ctx).unwrap();
+    let app = FtsRebuild.apply(&mut ctx).unwrap();
+    assert!(app.errors.is_empty(), "apply errors: {:?}", app.errors);
+    drop(ctx);
+    if !open_first {
+        // NULL-id projection rows are drift against the non-NULL baseline.
+        for kind in ["fts_drift", "symbolic_fts_drift"] {
+            assert!(
+                dry.findings.iter().any(|f| f.kind == kind),
+                "legacy NULL-id projections must be reported as {kind}: {dry:?}"
+            );
+        }
+        assert_eq!(app.applied, 1, "R1 re-projects only the non-NULL memory");
+    }
+
+    // Second pass: the open after R1 has nothing left to prune.
+    let generation_after_repair = search_generation_at(&path);
+    writable_open(&path);
+    assert_eq!(
+        search_generation_at(&path),
+        generation_after_repair,
+        "the open after R1 must not delete what R1 just projected"
+    );
+
+    let mut ctx = open_ctx(&path, "test");
+    let final_dry = FtsRebuild.dry_run(&mut ctx).unwrap();
+    assert!(
+        final_dry.findings.is_empty(),
+        "R1 after open must report no drift: {final_dry:?}"
+    );
+    assert_eq!(null_projection_rows(&ctx.conn), 0);
+    let null_memories: i64 = ctx
+        .conn
+        .query_row("SELECT COUNT(*) FROM memories WHERE id IS NULL", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(null_memories, 1, "neither pass deletes the NULL-id memory");
+    if open_first {
+        // Checked last so a regression fails on the oscillation itself above.
+        assert!(
+            dry.findings.is_empty(),
+            "the store the open-time pass converged to has no R1 drift: {dry:?}"
+        );
+    }
+}
+
+#[test]
+fn r1_and_open_converge_with_null_memory_id_after_open_prune() {
+    assert_r1_and_open_converge_with_null_memory_id(true);
+}
+
+#[test]
+fn r1_and_open_converge_with_null_memory_id_from_legacy_projection() {
+    assert_r1_and_open_converge_with_null_memory_id(false);
+}
+
+const PROJECTION_TABLES: [&str; 2] = ["memories_fts", "memories_symbolic_fts"];
+
+fn drift_kind(table: &str) -> &'static str {
+    match table {
+        "memories_fts" => "fts_drift",
+        "memories_symbolic_fts" => "symbolic_fts_drift",
+        other => panic!("not a projection table: {other}"),
+    }
+}
+
+/// Replace `table`'s rows with exactly `ids`, in order: `Some(id)` of a live
+/// memory projects that memory's row, `None` projects the NULL-id memory, and
+/// an id with no memory (a ghost) gets a literal row.
+fn set_projection(conn: &Connection, table: &str, ids: &[Option<&str>]) {
+    let cols = match table {
+        "memories_fts" => "id, path, summary, text, keywords, entities",
+        "memories_symbolic_fts" => "id, path, summary, text, keywords, entities, topic",
+        other => panic!("not a projection table: {other}"),
+    };
+    conn.execute(&format!("DELETE FROM {table}"), []).unwrap();
+    for id in ids {
+        let projected = match id {
+            None => conn.execute(
+                &format!(
+                    "INSERT INTO {table} ({cols}) SELECT {cols} FROM memories WHERE id IS NULL"
+                ),
+                [],
+            ),
+            Some(id) => conn.execute(
+                &format!("INSERT INTO {table} ({cols}) SELECT {cols} FROM memories WHERE id = ?1"),
+                [id],
+            ),
+        }
+        .unwrap();
+        if projected == 0 {
+            let id = id.expect("the NULL-id memory exists in every fixture");
+            let values = if table == "memories_fts" {
+                "?1, '/ghost', 'ghost', 'ghost text', '', ''"
+            } else {
+                "?1, '/ghost', 'ghost', 'ghost text', '', '', ''"
+            };
+            conn.execute(
+                &format!("INSERT INTO {table} ({cols}) VALUES ({values})"),
+                [id],
+            )
+            .unwrap();
+        }
+    }
+}
+
+fn projection_ids(conn: &Connection, table: &str) -> Vec<Option<String>> {
+    let mut stmt = conn
+        .prepare(&format!("SELECT id FROM {table} ORDER BY id"))
+        .unwrap();
+    let ids = stmt
+        .query_map([], |r| r.get::<_, Option<String>>(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    ids
+}
+
+fn assert_drift_counts(report: &RuleReport, table: &str, missing: i64, invalid: i64, dup: i64) {
+    let kind = drift_kind(table);
+    let finding = report
+        .findings
+        .iter()
+        .find(|f| f.kind == kind)
+        .unwrap_or_else(|| {
+            panic!("{table}: membership drift must be reported as {kind}: {report:?}")
+        });
+    let detail = &finding.detail;
+    assert_eq!(detail["missing"], missing, "{table}: missing: {detail}");
+    assert_eq!(detail["invalid"], invalid, "{table}: invalid: {detail}");
+    assert_eq!(detail["duplicate"], dup, "{table}: duplicate: {detail}");
+}
+
+/// Runs R1 dry-run + apply on a store and checks that afterwards every
+/// projection holds exactly the `live` ids, once each, and R1 is clean.
+fn assert_r1_repairs_to_exactly(path: &PathBuf, live: &[&str]) -> RuleReport {
+    let mut ctx = open_ctx(path, "test");
+    let dry = FtsRebuild.dry_run(&mut ctx).unwrap();
+    let app = FtsRebuild.apply(&mut ctx).unwrap();
+    assert!(app.errors.is_empty(), "apply errors: {:?}", app.errors);
+    assert_eq!(app.applied, live.len(), "R1 projects every live memory");
+    let expected: Vec<Option<String>> = live.iter().map(|id| Some(id.to_string())).collect();
+    for table in PROJECTION_TABLES {
+        assert_eq!(
+            projection_ids(&ctx.conn, table),
+            expected,
+            "{table}: every live memory projected once, no NULL or ghost rows"
+        );
+    }
+    let final_dry = FtsRebuild.dry_run(&mut ctx).unwrap();
+    assert!(
+        final_dry.findings.is_empty(),
+        "post-repair should be clean: {final_dry:?}"
+    );
+    dry
+}
+
+/// tachi#2000 review (astra r2, finding 1): R1 used to compare net counts.
+/// With memories `{NULL, 'keep'}` and each projection holding only the NULL
+/// row, both sides count 1: no drift reported, `'keep'` stayed unsearchable
+/// and the NULL rows survived. Drift is membership, not a net count.
+#[test]
+fn r1_detects_null_projection_cancelling_a_missing_live_row() {
+    let dir = TempDir::new().unwrap();
+    let (path, conn) = fresh_db(&dir, "null_cancels_missing.db");
+    insert_null_id_memory(&conn);
+    insert_memory(&conn, "keep", "/x/keep", "live row", "{}", None, None);
+    for table in PROJECTION_TABLES {
+        set_projection(&conn, table, &[None]);
+    }
+    drop(conn);
+
+    let dry = assert_r1_repairs_to_exactly(&path, &["keep"]);
+    for table in PROJECTION_TABLES {
+        assert_drift_counts(&dry, table, 1, 1, 0);
+    }
+}
+
+/// Mixed cancellation in one projection while the other is healthy: the
+/// NULL-id row, a ghost and a duplicate of a live id exactly offset three
+/// missing live ids (4 rows vs 4 live memories). Every class counts on its
+/// own, and the healthy table reports nothing.
+fn assert_r1_detects_mixed_cancellation_in(table: &str) {
+    let dir = TempDir::new().unwrap();
+    let (path, conn) = fresh_db(&dir, "mixed_cancellation.db");
+    insert_null_id_memory(&conn);
+    let live = ["a", "b", "c", "d"];
+    for id in live {
+        insert_memory(&conn, id, &format!("/x/{id}"), "live row", "{}", None, None);
+    }
+    for t in PROJECTION_TABLES {
+        if t == table {
+            set_projection(&conn, t, &[None, Some("ghost"), Some("a"), Some("a")]);
+        } else {
+            set_projection(&conn, t, &live.map(Some));
+        }
+    }
+    drop(conn);
+
+    let dry = assert_r1_repairs_to_exactly(&path, &live);
+    assert_drift_counts(&dry, table, 3, 2, 1);
+    assert_eq!(dry.findings.len(), 1, "only {table} drifted: {dry:?}");
+}
+
+#[test]
+fn r1_detects_mixed_cancellation_in_memories_fts() {
+    assert_r1_detects_mixed_cancellation_in("memories_fts");
+}
+
+#[test]
+fn r1_detects_mixed_cancellation_in_symbolic_fts() {
+    assert_r1_detects_mixed_cancellation_in("memories_symbolic_fts");
 }
 
 #[test]

@@ -22,6 +22,12 @@ const FTS_CREATE: &str = r#"
     );
 "#;
 
+// One rule for every FTS projection writer and drift count (tachi#1993):
+// a NULL-id memory is never projected. `memories.id` is `TEXT PRIMARY KEY`
+// without NOT NULL, so legacy rows can carry NULL; such a row can never join
+// back to an FTS hit (`m.id = <fts>.id`), and memcore's open-time orphan pass
+// deletes every NULL-id projection row. Projecting it here would make
+// repair -> open -> repair oscillate, with a generation bump each time.
 const FTS_INSERT: &str = r#"
     INSERT INTO memories_fts (id, path, summary, text, keywords, entities)
     SELECT
@@ -29,64 +35,111 @@ const FTS_INSERT: &str = r#"
         trim(replace(replace(replace(keywords, '[', ' '), ']', ' '), '"', ' ')),
         trim(replace(replace(replace(entities, '[', ' '), ']', ' '), '"', ' '))
     FROM memories
+    WHERE id IS NOT NULL
 "#;
 
-fn fts_state(ctx: &DbContext) -> Result<(i64, Option<i64>), RepairError> {
-    let mem_count: i64 = ctx
-        .conn
-        .query_row("SELECT COUNT(*) FROM memories", [], |r| r.get(0))
-        .map_err(RepairError::from)?;
-
-    // Detect existence of memories_fts virtual table.
-    let exists: i64 = ctx
-        .conn
-        .query_row(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='memories_fts'",
-            [],
-            |r| r.get(0),
-        )
-        .map_err(RepairError::from)?;
-
-    if exists == 0 {
-        return Ok((mem_count, None));
-    }
-
-    let fts_count: i64 = ctx
-        .conn
-        .query_row("SELECT COUNT(*) FROM memories_fts", [], |r| r.get(0))
-        .map_err(RepairError::from)?;
-    Ok((mem_count, Some(fts_count)))
+/// Membership drift between the live memories and one FTS projection.
+///
+/// Net row counts can cancel: a NULL-id or orphan projection row offsets a
+/// live memory with no projection, so `COUNT(*)` on both sides matches while
+/// that memory stays unsearchable (tachi#2000 review, astra r2). Every class
+/// is therefore counted on its own, and any non-zero class is drift. All
+/// three at zero implies `rows == memories`, so this catches everything the
+/// old net-count comparison did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ProjectionDrift {
+    /// Live (non-NULL-id) memories: what the projection should hold, once
+    /// each (see `FTS_INSERT`).
+    memories: i64,
+    /// Raw projection row count.
+    rows: i64,
+    /// Live memory ids with no projection row.
+    missing: i64,
+    /// Projection rows whose id is NULL or names no live memory: exactly the
+    /// rows memcore's open-time orphan pass deletes.
+    invalid: i64,
+    /// Live ids projected more than once.
+    duplicate: i64,
 }
 
-/// Same shape as `fts_state` but for the `memories_symbolic_fts` trigram
-/// projection. Returns `None` for the symbolic count when the table doesn't
-/// exist (pre-v22 DB, or mid-migration) — that is out of scope for R1, which
-/// only reconciles drift on a projection that is already present.
-fn symbolic_fts_state(ctx: &DbContext) -> Result<(i64, Option<i64>), RepairError> {
-    let mem_count: i64 = ctx
-        .conn
-        .query_row("SELECT COUNT(*) FROM memories", [], |r| r.get(0))
-        .map_err(RepairError::from)?;
+impl ProjectionDrift {
+    fn drifted(&self) -> bool {
+        self.missing > 0 || self.invalid > 0 || self.duplicate > 0
+    }
 
+    fn count(&self) -> usize {
+        (self.missing + self.invalid + self.duplicate) as usize
+    }
+}
+
+fn table_exists(ctx: &DbContext, table: &str) -> Result<bool, RepairError> {
     let exists: i64 = ctx
         .conn
         .query_row(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='memories_symbolic_fts'",
-            [],
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+            [table],
             |r| r.get(0),
         )
         .map_err(RepairError::from)?;
-    if exists == 0 {
-        return Ok((mem_count, None));
-    }
+    Ok(exists > 0)
+}
 
-    let symbolic_count: i64 = ctx
-        .conn
-        .query_row("SELECT COUNT(*) FROM memories_symbolic_fts", [], |r| {
-            r.get(0)
-        })
-        .map_err(RepairError::from)?;
-    Ok((mem_count, Some(symbolic_count)))
+fn live_memory_count(ctx: &DbContext) -> Result<i64, RepairError> {
+    ctx.conn
+        .query_row(
+            "SELECT COUNT(*) FROM memories WHERE id IS NOT NULL",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(RepairError::from)
+}
+
+/// Membership drift of `table` (`memories_fts` or `memories_symbolic_fts`)
+/// against the live memories; `None` when the table does not exist. Every
+/// subquery is uncorrelated and carries `WHERE id IS NOT NULL`, so a NULL id
+/// on either side can neither poison `NOT IN` nor force a per-row scan of
+/// the FTS table (#1974 / #1985).
+fn projection_drift(ctx: &DbContext, table: &str) -> Result<Option<ProjectionDrift>, RepairError> {
+    if !table_exists(ctx, table)? {
+        return Ok(None);
+    }
+    let count = |sql: String| -> Result<i64, RepairError> {
+        ctx.conn
+            .query_row(&sql, [], |r| r.get(0))
+            .map_err(RepairError::from)
+    };
+    Ok(Some(ProjectionDrift {
+        memories: live_memory_count(ctx)?,
+        rows: count(format!("SELECT COUNT(*) FROM {table}"))?,
+        missing: count(format!(
+            "SELECT COUNT(*) FROM memories \
+             WHERE id IS NOT NULL \
+               AND id NOT IN (SELECT id FROM {table} WHERE id IS NOT NULL)"
+        ))?,
+        invalid: count(format!(
+            "SELECT COUNT(*) FROM {table} \
+             WHERE id IS NULL \
+                OR id NOT IN (SELECT id FROM memories WHERE id IS NOT NULL)"
+        ))?,
+        duplicate: count(format!(
+            "SELECT COUNT(*) FROM ( \
+               SELECT id FROM {table} \
+               WHERE id IN (SELECT id FROM memories WHERE id IS NOT NULL) \
+               GROUP BY id HAVING COUNT(*) > 1)"
+        ))?,
+    }))
+}
+
+fn drift_finding(kind: &str, rows_key: &str, drift: &ProjectionDrift) -> Finding {
+    let mut detail = json!({
+        "memories": drift.memories,
+        "delta": drift.memories - drift.rows,
+        "missing": drift.missing,
+        "invalid": drift.invalid,
+        "duplicate": drift.duplicate,
+    });
+    detail[rows_key] = json!(drift.rows);
+    Finding::new(kind, drift.count()).with_detail(detail)
 }
 
 /// Count orphaned FTS5 shadow tables (those whose virtual parent
@@ -117,12 +170,11 @@ impl RepairRule for FtsRebuild {
 
     fn dry_run(&self, ctx: &mut DbContext) -> Result<RuleReport, RepairError> {
         let mut r = RuleReport::new(self.id(), self.name(), ctx.label.clone());
-        let (mem, fts_opt) = fts_state(ctx)?;
         let orphan_shadows = orphan_shadow_count(ctx)?;
-        match fts_opt {
+        match projection_drift(ctx, "memories_fts")? {
             None => {
                 let mut detail = json!({
-                    "memories": mem,
+                    "memories": live_memory_count(ctx)?,
                     "orphan_shadow_tables": orphan_shadows,
                 });
                 let kind = if orphan_shadows > 0 {
@@ -138,28 +190,18 @@ impl RepairRule for FtsRebuild {
                 };
                 r.findings.push(Finding::new(kind, 1).with_detail(detail));
             }
-            Some(fts) if fts != mem => {
-                let drift = (mem - fts).abs() as usize;
-                r.findings
-                    .push(Finding::new("fts_drift", drift).with_detail(json!({
-                        "memories": mem,
-                        "fts": fts,
-                        "delta": mem - fts,
-                    })));
+            Some(drift) if drift.drifted() => {
+                r.findings.push(drift_finding("fts_drift", "fts", &drift));
             }
-            _ => {}
+            Some(_) => {}
         }
-        let (mem, symbolic_opt) = symbolic_fts_state(ctx)?;
-        if let Some(symbolic) = symbolic_opt {
-            if symbolic != mem {
-                let drift = (mem - symbolic).abs() as usize;
-                r.findings.push(
-                    Finding::new("symbolic_fts_drift", drift).with_detail(json!({
-                        "memories": mem,
-                        "symbolic_fts": symbolic,
-                        "delta": mem - symbolic,
-                    })),
-                );
+        // A missing symbolic table (pre-v22 DB, or mid-migration) is out of
+        // scope for R1, which only reconciles drift on a projection that is
+        // already present.
+        if let Some(drift) = projection_drift(ctx, "memories_symbolic_fts")? {
+            if drift.drifted() {
+                r.findings
+                    .push(drift_finding("symbolic_fts_drift", "symbolic_fts", &drift));
             }
         }
         Ok(r)
@@ -170,7 +212,7 @@ impl RepairRule for FtsRebuild {
         if r.findings.is_empty() {
             return Ok(r);
         }
-        let symbolic_fts_present = symbolic_fts_state(ctx)?.1.is_some();
+        let symbolic_fts_present = table_exists(ctx, "memories_symbolic_fts")?;
         // Drop + recreate atomically so a crash cannot leave the DB without FTS.
         //
         // We must defensively drop the FTS5 shadow tables as well: a previous
@@ -205,21 +247,16 @@ impl RepairRule for FtsRebuild {
             memcore::db::bump_search_generation(&tx)?;
         }
         tx.commit()?;
-        let (mem, fts_opt) = fts_state(ctx)?;
-        if fts_opt != Some(mem) {
-            r.errors.push(format!(
-                "post-rebuild count mismatch: memories={} fts={:?}",
-                mem, fts_opt
-            ));
-        } else {
-            r.applied = inserted;
+        match projection_drift(ctx, "memories_fts")? {
+            Some(drift) if !drift.drifted() => r.applied = inserted,
+            drift => r
+                .errors
+                .push(format!("post-rebuild memories_fts drift: {drift:?}")),
         }
-        let (mem, symbolic_opt) = symbolic_fts_state(ctx)?;
-        if let Some(symbolic) = symbolic_opt {
-            if symbolic != mem {
+        if let Some(drift) = projection_drift(ctx, "memories_symbolic_fts")? {
+            if drift.drifted() {
                 r.errors.push(format!(
-                    "post-rebuild symbolic count mismatch: memories={} symbolic_fts={}",
-                    mem, symbolic
+                    "post-rebuild memories_symbolic_fts drift: {drift:?}"
                 ));
             }
         }
