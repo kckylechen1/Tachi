@@ -1,6 +1,23 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
+# Supply-chain policy for tracked workflows and action manifests: remote actions
+# must be audited full-SHA pins, container images must be digest-pinned, and
+# tools must come from audited prebuilt installs (taiki-e/install-action with an
+# exact name@version, checksum on, no fallback), never `cargo install`.
+#
+# Threat model: repository write access is owner-only. The cargo-install
+# detection is a best-effort lint against ACCIDENTAL source installs added by an
+# agent or a human. It is not a sandbox and not a defence against deliberate
+# obfuscation by someone with write access; static shell analysis cannot be
+# complete. Known limits, accepted by design:
+# - shell aliases and functions (`alias c=cargo; c install x`) are not tracked;
+# - line continuations inside heredoc bodies, and other deliberate obfuscation
+#   beyond the dynamic/encoded-installer guards, are out of scope;
+# - false positives in the safe direction are accepted: the text
+#   "cargo install" as echo/printf data, in quoted heredoc data, or
+#   `cargo install --list` is rejected. Workflows should not contain it.
+
 require "open3"
 require "pathname"
 require "psych"
@@ -25,11 +42,26 @@ AUDITED_PINS = [
   Pin.new("actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02", "v4.6.2"),
   Pin.new("gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e", "v3.0.0"),
   Pin.new("softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65", "v2.6.2"),
+  Pin.new("taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172", "v2.87.20"),
   Pin.new("taiki-e/install-action@c295c25a8d3df7288fa86db860a4f8062bf76ad8", "releases/nextest snapshot 2026-07-25")
 ].freeze
 
-AUDITED_CARGO_INSTALLS = {
-  "cargo install cargo-audit --version 0.22.2 --locked --quiet" => 1
+# No workflow may build a tool from source with `cargo install`; every such
+# command is rejected unless listed here with its exact expected count.
+AUDITED_CARGO_INSTALLS = {}.freeze
+
+# Prebuilt tool installs via taiki-e/install-action: every step must declare
+# `with: tool:` as an exact name@version listed here, used exactly the listed
+# number of times across all workflows and local actions, with checksums on
+# and the source-build fallback disabled.
+INSTALL_ACTION = "taiki-e/install-action"
+AUDITED_INSTALL_ACTION_TOOLS = {
+  "cargo-audit@0.22.2" => 1,
+  "nextest@0.9.140" => 1
+}.freeze
+REQUIRED_INSTALL_ACTION_INPUTS = {
+  "checksum" => "true",
+  "fallback" => "none"
 }.freeze
 
 IMMUTABLE_IMAGE = /\A[^@[:space:]]+@sha256:[0-9a-f]{64}\z/
@@ -106,10 +138,13 @@ end
 class ActionPolicy
   attr_reader :run_count, :uses_count
 
-  def initialize(inventory, pins = AUDITED_PINS, cargo_installs = AUDITED_CARGO_INSTALLS)
+  def initialize(inventory, pins = AUDITED_PINS, cargo_installs = AUDITED_CARGO_INSTALLS,
+                 install_tools = AUDITED_INSTALL_ACTION_TOOLS)
     @inventory = inventory
     @pins = pins
     @cargo_installs = cargo_installs
+    @install_tools = install_tools
+    @install_tool_uses = Hash.new(0)
     @approved = {}
     @ref_sha = {}
     @pin_uses = Hash.new(0)
@@ -147,6 +182,13 @@ class ActionPolicy
 
       raise PolicyError, "audited cargo install count mismatch: expected=#{expected_count} actual=#{actual_count}: #{command}"
     end
+
+    @install_tools.each do |tool, expected_count|
+      actual_count = @install_tool_uses[tool]
+      next if actual_count == expected_count
+
+      raise PolicyError, "audited install-action tool count mismatch: expected=#{expected_count} actual=#{actual_count}: #{tool}"
+    end
   end
 
   private
@@ -158,10 +200,11 @@ class ActionPolicy
 
       action = match[1]
       sha = match[2]
-      valid_label = if action == "taiki-e/install-action"
-                      pin.label.match?(/\Areleases\/nextest snapshot [0-9]{4}-[0-9]{2}-[0-9]{2}\z/)
+      semver_label = pin.label.match?(/\Av[0-9]+(?:\.[0-9]+){0,2}\z/)
+      valid_label = if action == INSTALL_ACTION
+                      semver_label || pin.label.match?(/\Areleases\/nextest snapshot [0-9]{4}-[0-9]{2}-[0-9]{2}\z/)
                     else
-                      pin.label.match?(/\Av[0-9]+(?:\.[0-9]+){0,2}\z/)
+                      semver_label
                     end
       raise PolicyError, "invalid audited ref label: #{pin.label}" unless valid_label
 
@@ -204,6 +247,10 @@ class ActionPolicy
     when Psych::Nodes::Alias
       raise PolicyError, "#{path}: YAML aliases are forbidden in supply-chain policy files"
     when Psych::Nodes::Mapping
+      # Reject aliases before any key-specific check reads the mapping, so an
+      # aliased uses/with/input always fails as an alias.
+      node.children.each { |child| walk(child, path, lines) if child.is_a?(Psych::Nodes::Alias) }
+      validate_install_action_step(node, path)
       node.children.each_slice(2) do |key, value|
         walk(key, path, lines)
         if key.is_a?(Psych::Nodes::Scalar) && key.value == "uses"
@@ -228,6 +275,51 @@ class ActionPolicy
     when Psych::Nodes::Stream, Psych::Nodes::Document, Psych::Nodes::Sequence
       node.children.each { |child| walk(child, path, lines) }
     end
+  end
+
+  # Every step that uses taiki-e/install-action must name its tool explicitly
+  # (never the pin's default) as an audited exact name@version, with checksum
+  # verification on and no source-build fallback.
+  def validate_install_action_step(node, path)
+    entries = node.children.each_slice(2).select { |key, _value| key.is_a?(Psych::Nodes::Scalar) }
+    uses = entries.select { |key, _value| key.value == "uses" }
+    return unless uses.any? { |_key, value| value.is_a?(Psych::Nodes::Scalar) && value.value.start_with?("#{INSTALL_ACTION}@") }
+    raise PolicyError, "#{path}: #{INSTALL_ACTION} step has duplicate uses keys" if uses.length > 1
+
+    withs = entries.select { |key, _value| key.value == "with" }
+    raise PolicyError, "#{path}: #{INSTALL_ACTION} step requires an explicit with: tool/checksum/fallback" if withs.empty?
+    raise PolicyError, "#{path}: #{INSTALL_ACTION} step has duplicate with keys" if withs.length > 1
+
+    inputs_node = withs.first[1]
+    raise PolicyError, "#{path}: #{INSTALL_ACTION} with must be a mapping" unless inputs_node.is_a?(Psych::Nodes::Mapping)
+
+    inputs = {}
+    inputs_node.children.each_slice(2) do |key, value|
+      if key.is_a?(Psych::Nodes::Alias) || value.is_a?(Psych::Nodes::Alias)
+        raise PolicyError, "#{path}: YAML aliases are forbidden in supply-chain policy files"
+      end
+      unless key.is_a?(Psych::Nodes::Scalar) && value.is_a?(Psych::Nodes::Scalar)
+        raise PolicyError, "#{path}: #{INSTALL_ACTION} inputs must be scalar key/value pairs"
+      end
+      raise PolicyError, "#{path}: #{INSTALL_ACTION} input is duplicated: #{key.value}" if inputs.key?(key.value)
+
+      inputs[key.value] = value.value
+    end
+
+    allowed = ["tool"] + REQUIRED_INSTALL_ACTION_INPUTS.keys
+    unknown = inputs.keys - allowed
+    raise PolicyError, "#{path}: #{INSTALL_ACTION} has unaudited inputs: #{unknown.join(',')}" unless unknown.empty?
+
+    tool = inputs["tool"]
+    unless tool && @install_tools.key?(tool)
+      raise PolicyError, "#{path}: #{INSTALL_ACTION} tool is not an audited exact name@version: #{tool.inspect}"
+    end
+    REQUIRED_INSTALL_ACTION_INPUTS.each do |input, required|
+      next if inputs[input] == required
+
+      raise PolicyError, "#{path}: #{INSTALL_ACTION} requires #{input}: #{required} (got #{inputs[input].inspect}) for #{tool}"
+    end
+    @install_tool_uses[tool] += 1
   end
 
   def require_scalar!(node, path, key)
@@ -410,13 +502,63 @@ class ActionPolicy
     end
   end
 
-  def cargo_install_occurrence?(value)
-    normalized = value.gsub(/\\\r?\n/, " ").gsub(/[[:space:]]+/, " ")
+  # Cargo global options that consume the following word as their value.
+  CARGO_VALUE_OPTIONS = %w[--config --color --explain -Z -C].freeze
+  # Cargo global options known to take no value.
+  CARGO_FLAG_OPTIONS = %w[-q --quiet -v -vv -vvv --verbose --locked --frozen --offline -V --version --list -h --help].freeze
+  # Subcommands that install a tool (binstall may itself fall back to a source build).
+  CARGO_INSTALL_SUBCOMMANDS = %w[install binstall].freeze
+  SHELL_OPERATOR_TOKENS = %w[; & | ( )].freeze
+
+  # True when any simple command in `value` runs cargo with an install
+  # subcommand, after skipping a `+toolchain` selector and global options, or
+  # runs a cargo-install/cargo-binstall binary directly. Wrappers (env
+  # assignments, sudo/env/command/exec, `\cargo`, POSIX or Windows paths,
+  # pwsh `&`) are covered because the cargo word is matched anywhere in the
+  # command; quoted strings are re-scanned as nested commands. Best effort:
+  # see the threat model and known limits at the top of this file.
+  def cargo_install_occurrence?(value, depth = 0)
+    # Like bash, delete backslash-newline so a word split across lines rejoins.
+    joined = value.gsub(/\\\r?\n/, "")
+    # A second pass with `\` read as a path separator keeps unquoted Windows
+    # paths (C:\Rust\bin\cargo.exe) intact through POSIX tokenization.
+    [joined, joined.tr("\\", "/")].uniq.any? { |text| cargo_install_text?(text, depth) }
+  end
+
+  def cargo_install_text?(text, depth)
+    normalized = text.gsub(/\r?\n/, " ; ").gsub(/([;&|()])/, ' \\1 ').gsub(/[[:space:]]+/, " ")
     tokens = Shellwords.shellsplit(normalized)
-    tokens.each_cons(2).any? { |command, argument| File.basename(command) == "cargo" && argument == "install" } ||
-      tokens.any? { |token| token.match?(/\bcargo[[:space:]]+install\b/) }
+    commands = [[]]
+    tokens.each { |token| SHELL_OPERATOR_TOKENS.include?(token) ? commands << [] : commands.last << token }
+    return true if commands.any? { |command| cargo_install_command?(command) }
+
+    depth < 3 && tokens.any? { |token| token.match?(/[[:space:]]/) && cargo_install_occurrence?(token, depth + 1) }
   rescue ArgumentError
-    normalized.match?(%r{(?:\A|[;&|()[:space:]])(?:[^[:space:];&|()]*/)?cargo[[:space:]]+install(?:[[:space:]]|\z)})
+    # Unparseable shell text fails closed on any cargo ... install shape.
+    (normalized || text).match?(/(?:\A|[^[:alnum:]_-])cargo(?:-b?install\b|(?:\.exe)?[^;&|]*?[[:space:]]b?install(?:[[:space:]]|\z))/i)
+  end
+
+  def cargo_install_command?(tokens)
+    tokens.each_with_index.any? do |token, index|
+      program = token.split(%r{[/\\]}).last.to_s
+      next true if program.match?(/\Acargo-b?install(?:\.exe)?\z/i)
+      next false unless program.match?(/\Acargo(?:\.exe)?\z/i)
+
+      position = index + 1
+      position += 1 if tokens[position]&.start_with?("+")
+      ambiguous = false
+      while (option = tokens[position]) && option.start_with?("-") && option != "--"
+        if CARGO_VALUE_OPTIONS.include?(option)
+          position += 2
+        else
+          ambiguous ||= !CARGO_FLAG_OPTIONS.include?(option) && !option.match?(/\A(?:--[a-z-]+=|-[ZC].)/)
+          position += 1
+        end
+      end
+      # An unrecognised option might take a value; then the real subcommand is one word later.
+      CARGO_INSTALL_SUBCOMMANDS.include?(tokens[position]) ||
+        (ambiguous && CARGO_INSTALL_SUBCOMMANDS.include?(tokens[position + 1]))
+    end
   end
 
   def trailing_ref_comment(node, lines)
@@ -429,98 +571,158 @@ class ActionPolicy
   end
 end
 
-def validate_virtual(sources, pins: [], cargo_installs: {}, roots: nil)
+def validate_virtual(sources, pins: [], cargo_installs: {}, install_tools: {}, roots: nil)
   inventory = RepoInventory.virtual(sources)
-  policy = ActionPolicy.new(inventory, pins, cargo_installs)
+  policy = ActionPolicy.new(inventory, pins, cargo_installs, install_tools)
   policy.validate_roots(roots || inventory.policy_root_files)
   policy
 end
 
-def expect_rejected(name)
+def expect_rejected(name, expected)
   yield
-rescue PolicyError
+rescue PolicyError => e
+  unless e.message.match?(expected)
+    raise PolicyError, "fixture rejected for the wrong reason: #{name}: expected #{expected.inspect}, got #{e.message.inspect}"
+  end
+
   puts "fixture REJECTED #{name}"
 else
   raise PolicyError, "fixture unexpectedly accepted: #{name}"
 end
+
+UNAUDITED_CARGO = /unaudited cargo install command/
+DYNAMIC_INSTALLER = %r{no known dynamic/encoded installer or transformer-to-shell construction}
+NOT_AUDITED_ACTION = /remote action is not in the audited mapping/
+YAML_ALIAS = /YAML aliases are forbidden/
 
 def self_test!
   wrong_sha = "0123456789abcdef0123456789abcdef01234567"
   root = ".github/workflows/root.yml"
   action = "custom/action/action.yml"
 
-  expect_rejected("local-missing") do
+  expect_rejected("local-missing", /local action manifest is missing or untracked/) do
     validate_virtual(root => "uses: ./missing\n")
   end
-  expect_rejected("local-escape") do
+  expect_rejected("local-escape", /local action escapes repository root/) do
     validate_virtual(root => "uses: ./../outside\n")
   end
-  expect_rejected("local-ambiguous") do
+  expect_rejected("local-ambiguous", /local action manifest is ambiguous/) do
     sources = {root => "uses: ./custom/action\n", action => "name: a\n", "custom/action/action.yaml" => "name: b\n"}
     validate_virtual(sources)
   end
-  expect_rejected("local-cycle") do
+  expect_rejected("local-cycle", /local action cycle detected/) do
     sources = {root => "uses: ./custom/a\n", "custom/a/action.yml" => "uses: ./custom/b\n", "custom/b/action.yml" => "uses: ./custom/a\n"}
     validate_virtual(sources)
   end
-  expect_rejected("nested-local-remote") do
+  expect_rejected("nested-local-remote", NOT_AUDITED_ACTION) do
     sources = {root => "uses: ./custom/action\n", action => "runs:\n  using: composite\n  steps:\n    - uses: unknown/action@#{wrong_sha} # v1\n"}
     validate_virtual(sources)
   end
-  expect_rejected("nested-local-docker") do
+  expect_rejected("nested-local-docker", /docker action requires an immutable sha256 digest/) do
     sources = {root => "uses: ./custom/action\n", action => "runs:\n  using: composite\n  steps:\n    - uses: docker://alpine:3.20\n"}
     validate_virtual(sources)
   end
-  expect_rejected("root-coverage") do
+  expect_rejected("root-coverage", /policy root coverage mismatch/) do
     sources = {root => "name: one\n", ".github/workflows/other.yaml" => "name: two\n"}
     validate_virtual(sources, roots: [root])
   end
-  expect_rejected("root-coverage-action-omitted") do
+  expect_rejected("root-coverage-action-omitted", /policy root coverage mismatch/) do
     sources = {root => "name: one\n", action => "name: hidden\n"}
     validate_virtual(sources, roots: [root])
   end
-  expect_rejected("unreferenced-action-remote") do
+  expect_rejected("unreferenced-action-remote", NOT_AUDITED_ACTION) do
     sources = {root => "name: one\n", action => "uses: unknown/action@#{wrong_sha} # v1\n"}
     validate_virtual(sources)
   end
-  expect_rejected("unreferenced-action-docker") do
+  expect_rejected("unreferenced-action-docker", /docker action requires an immutable sha256 digest/) do
     sources = {root => "name: one\n", action => "uses: docker://alpine:3.20\n"}
     validate_virtual(sources)
   end
-  expect_rejected("unreferenced-action-run") do
+  expect_rejected("unreferenced-action-run", DYNAMIC_INSTALLER) do
     sources = {root => "name: one\n", action => "run: cargo${EMPTY} install cargo-audit\n"}
     validate_virtual(sources)
   end
 
-  audited = AUDITED_CARGO_INSTALLS.keys.first
+  # Production allows no cargo install at all; exercise the exact-match matcher
+  # against a fixture-local audited command.
+  audited = "cargo install cargo-audit --version 0.22.2 --locked --quiet"
+  fixture_cargo_installs = {audited => 1}.freeze
+  expect_rejected("cargo-install-source-build-retired", UNAUDITED_CARGO) do
+    validate_virtual({root => "run: #{audited}\n"}, cargo_installs: AUDITED_CARGO_INSTALLS)
+  end
   cargo_fixtures = {
-    "cargo-env-prefix" => "run: FOO=bar #{audited}\n",
-    "cargo-sudo" => "run: sudo #{audited}\n",
-    "cargo-semicolon" => "run: #{audited}; echo done\n",
-    "cargo-multiline" => "run: |\n  #{audited}\n",
-    "cargo-continuation" => "run: |\n  cargo \\\n  install cargo-audit --version 0.22.2 --locked --quiet\n",
-    "cargo-shell-string" => "run: sh -c 'cargo install cargo-audit --version 0.22.2 --locked --quiet'\n",
-    "cargo-github-command" => "run: ${{ env.CARGO }} install cargo-audit --version 0.22.2 --locked --quiet\n",
-    "cargo-github-subcommand" => "run: cargo ${{ env.SUBCOMMAND }} cargo-audit --version 0.22.2 --locked --quiet\n",
-    "cargo-shell-default" => "run: ${CARGO:-cargo} install cargo-audit --version 0.22.2 --locked --quiet\n",
-    "cargo-concatenated" => "run: cargo${EMPTY} install cargo-audit --version 0.22.2 --locked --quiet\n",
-    "cargo-fragment-concatenated" => "run: ca${X}rgo in${Y}stall cargo-audit --version 0.22.2 --locked --quiet\n",
-    "cargo-command-substitution" => "run: $(printf cargo) install cargo-audit --version 0.22.2 --locked --quiet\n",
-    "cargo-backticks" => "run: '`printf cargo` install cargo-audit --version 0.22.2 --locked --quiet'\n",
-    "cargo-eval" => "run: eval 'cargo install cargo-audit --version 0.22.2 --locked --quiet'\n",
-    "cargo-bash-c" => "run: bash -c 'cargo install cargo-audit --version 0.22.2 --locked --quiet'\n",
-    "cargo-assignment" => "run: CMD=cargo; $CMD install cargo-audit --version 0.22.2 --locked --quiet\n",
-    "cargo-assigned-command" => "run: INSTALLER='cargo install cargo-audit --version 0.22.2 --locked --quiet'; $INSTALLER\n",
-    "cargo-dynamic-newline" => "run: |\n  \"${CARGO:-cargo}\" \\\n+  install cargo-audit --version 0.22.2 --locked --quiet\n",
-    "cargo-wrong-args" => "run: cargo install --locked cargo-audit --version 0.22.2 --quiet\n",
-    "cargo-quoted" => "run: \"cargo install cargo-audit --version 0.22.1 --locked --quiet\"\n",
-    "cargo-folded" => "run: >-\n  #{audited}\n"
+    "cargo-env-prefix" => ["run: FOO=bar #{audited}\n", UNAUDITED_CARGO],
+    "cargo-sudo" => ["run: sudo #{audited}\n", UNAUDITED_CARGO],
+    "cargo-semicolon" => ["run: #{audited}; echo done\n", UNAUDITED_CARGO],
+    "cargo-multiline" => ["run: |\n  #{audited}\n", UNAUDITED_CARGO],
+    "cargo-continuation" => ["run: |\n  cargo \\\n  install cargo-audit --version 0.22.2 --locked --quiet\n", UNAUDITED_CARGO],
+    "cargo-shell-string" => ["run: sh -c 'cargo install cargo-audit --version 0.22.2 --locked --quiet'\n", DYNAMIC_INSTALLER],
+    "cargo-github-command" => ["run: ${{ env.CARGO }} install cargo-audit --version 0.22.2 --locked --quiet\n", DYNAMIC_INSTALLER],
+    "cargo-github-subcommand" => ["run: cargo ${{ env.SUBCOMMAND }} cargo-audit --version 0.22.2 --locked --quiet\n", DYNAMIC_INSTALLER],
+    "cargo-shell-default" => ["run: ${CARGO:-cargo} install cargo-audit --version 0.22.2 --locked --quiet\n", DYNAMIC_INSTALLER],
+    "cargo-concatenated" => ["run: cargo${EMPTY} install cargo-audit --version 0.22.2 --locked --quiet\n", DYNAMIC_INSTALLER],
+    "cargo-fragment-concatenated" => ["run: ca${X}rgo in${Y}stall cargo-audit --version 0.22.2 --locked --quiet\n", DYNAMIC_INSTALLER],
+    "cargo-command-substitution" => ["run: $(printf cargo) install cargo-audit --version 0.22.2 --locked --quiet\n", DYNAMIC_INSTALLER],
+    "cargo-backticks" => ["run: '`printf cargo` install cargo-audit --version 0.22.2 --locked --quiet'\n", DYNAMIC_INSTALLER],
+    "cargo-eval" => ["run: eval 'cargo install cargo-audit --version 0.22.2 --locked --quiet'\n", UNAUDITED_CARGO],
+    "cargo-bash-c" => ["run: bash -c 'cargo install cargo-audit --version 0.22.2 --locked --quiet'\n", DYNAMIC_INSTALLER],
+    "cargo-assignment" => ["run: CMD=cargo; $CMD install cargo-audit --version 0.22.2 --locked --quiet\n", DYNAMIC_INSTALLER],
+    "cargo-assigned-command" => ["run: INSTALLER='cargo install cargo-audit --version 0.22.2 --locked --quiet'; $INSTALLER\n", DYNAMIC_INSTALLER],
+    "cargo-dynamic-newline" => ["run: |\n  \"${CARGO:-cargo}\" \\\n  install cargo-audit --version 0.22.2 --locked --quiet\n", DYNAMIC_INSTALLER],
+    "cargo-wrong-args" => ["run: cargo install --locked cargo-audit --version 0.22.2 --quiet\n", UNAUDITED_CARGO],
+    "cargo-quoted" => ["run: \"cargo install cargo-audit --version 0.22.1 --locked --quiet\"\n", UNAUDITED_CARGO],
+    "cargo-folded" => ["run: >-\n  #{audited}\n", UNAUDITED_CARGO],
+    "cargo-toolchain" => ["run: cargo +stable install cargo-audit --version 0.22.2 --locked\n", UNAUDITED_CARGO],
+    "cargo-toolchain-path" => ["run: /usr/local/bin/cargo +1.97.0 install cargo-audit\n", UNAUDITED_CARGO],
+    "cargo-global-locked" => ["run: cargo --locked install cargo-audit\n", UNAUDITED_CARGO],
+    "cargo-global-quiet" => ["run: cargo -q install cargo-audit\n", UNAUDITED_CARGO],
+    "cargo-global-short-cluster" => ["run: cargo -qv install cargo-audit\n", UNAUDITED_CARGO],
+    "cargo-global-config" => ["run: cargo --config net.git-fetch-with-cli=true install cargo-audit\n", UNAUDITED_CARGO],
+    "cargo-global-config-equals" => ["run: cargo --config=build.jobs=1 install cargo-audit\n", UNAUDITED_CARGO],
+    "cargo-global-color" => ["run: cargo --color never install cargo-audit\n", UNAUDITED_CARGO],
+    "cargo-global-unstable" => ["run: cargo -Z unstable-options install cargo-audit\n", UNAUDITED_CARGO],
+    "cargo-global-directory" => ["run: cargo -C /tmp install cargo-audit\n", UNAUDITED_CARGO],
+    "cargo-global-unknown-valued" => ["run: cargo --future-option value install cargo-audit\n", UNAUDITED_CARGO],
+    "cargo-global-mixed" => ["run: cargo +stable -v --frozen --config k=v install cargo-audit\n", UNAUDITED_CARGO],
+    "cargo-env-prefix-toolchain" => ["run: CARGO_NET_OFFLINE=false cargo +stable install cargo-audit\n", UNAUDITED_CARGO],
+    "cargo-env-command" => ["run: env RUSTFLAGS=-Cdebuginfo=0 cargo --locked install cargo-audit\n", UNAUDITED_CARGO],
+    "cargo-command-builtin" => ["run: command cargo +stable install cargo-audit\n", UNAUDITED_CARGO],
+    "cargo-backslash" => ["run: \\cargo --locked install cargo-audit\n", UNAUDITED_CARGO],
+    "cargo-exe" => ["run: cargo.exe install cargo-audit\n", UNAUDITED_CARGO],
+    "cargo-after-separator" => ["run: true;cargo install cargo-audit\n", UNAUDITED_CARGO],
+    "cargo-after-and" => ["run: cd /tmp&&cargo -q install cargo-audit\n", UNAUDITED_CARGO],
+    "cargo-subshell" => ["run: (cargo +stable install cargo-audit)\n", UNAUDITED_CARGO],
+    "cargo-later-line" => ["run: |\n  echo start\n  cargo --locked install cargo-audit\n", UNAUDITED_CARGO],
+    "cargo-eval-toolchain" => ["run: eval 'cargo +stable install cargo-audit'\n", UNAUDITED_CARGO],
+    "cargo-binstall-subcommand" => ["run: cargo binstall --no-confirm cargo-audit\n", UNAUDITED_CARGO],
+    "cargo-binstall-binary" => ["run: cargo-binstall --no-confirm cargo-audit\n", UNAUDITED_CARGO],
+    "cargo-install-binary" => ["run: ~/.cargo/bin/cargo-install cargo-audit\n", UNAUDITED_CARGO],
+    "cargo-split-word-continuation" => ["run: |\n  car\\\n  go install cargo-audit\n", UNAUDITED_CARGO],
+    "cargo-split-subcommand-continuation" => ["run: |\n  cargo ins\\\n  tall cargo-audit\n", UNAUDITED_CARGO],
+    "cargo-pwsh-quoted-exe" => ["run: |\n  & \"C:\\Rust\\bin\\cargo.exe\" install cargo-audit\n", UNAUDITED_CARGO],
+    "cargo-pwsh-single-quoted-exe" => ["run: |\n  & 'C:\\Program Files\\Rust\\bin\\cargo.exe' install cargo-audit\n", UNAUDITED_CARGO],
+    "cargo-windows-unquoted-exe" => ["run: C:\\Rust\\bin\\cargo.exe install cargo-audit\n", UNAUDITED_CARGO],
+    "cargo-windows-uppercase-exe" => ["run: C:\\Rust\\bin\\Cargo.EXE install cargo-audit\n", UNAUDITED_CARGO]
   }
-  cargo_fixtures.each do |name, source|
-    expect_rejected(name) do
-      validate_virtual({root => source}, cargo_installs: AUDITED_CARGO_INSTALLS)
+  cargo_fixtures.each do |name, (source, expected)|
+    expect_rejected(name, expected) do
+      validate_virtual({root => source}, cargo_installs: fixture_cargo_installs)
     end
   end
+  cargo_accepted = [
+    "cargo nextest run --workspace --locked --profile ci",
+    "cargo +stable build --locked",
+    "cargo --config k=v --color always build",
+    "cargo test -p memcore -- install",
+    "cargo run --bin tool -- install",
+    "echo install; cargo build",
+    "& \"C:\\Rust\\bin\\cargo.exe\" build --locked",
+    "C:\\Rust\\bin\\cargo.exe test -- install"
+  ]
+  cargo_accepted.each do |command|
+    validate_virtual({root => "run: |\n  #{command}\n"}, cargo_installs: AUDITED_CARGO_INSTALLS).finish!
+  end
+  puts "fixture ACCEPTED cargo-non-install-subcommands (#{cargo_accepted.length})"
   encoded_fixtures = {
     "cargo-ansi-c" => "run: |\n  $'\\x63\\x61\\x72\\x67\\x6f' $'\\x69\\x6e\\x73\\x74\\x61\\x6c\\x6c' cargo-audit\n",
     "cargo-ansi-c-split" => "run: |\n  $'ca'$'rgo' $'in'$'stall' cargo-audit\n",
@@ -541,27 +743,103 @@ def self_test!
     "transformer-command-substitution" => "run: |\n  $(xxd -r -p <<< 6563686f)\n"
   }
   encoded_fixtures.each do |name, source|
-    expect_rejected(name) do
-      validate_virtual({root => source}, cargo_installs: AUDITED_CARGO_INSTALLS)
+    expect_rejected(name, DYNAMIC_INSTALLER) do
+      validate_virtual({root => source}, cargo_installs: fixture_cargo_installs)
     end
   end
-  expect_rejected("cargo-nested-local") do
+  expect_rejected("cargo-nested-local", UNAUDITED_CARGO) do
     sources = {root => "uses: ./custom/action\n", action => "runs:\n  using: composite\n  steps:\n    - run: FOO=bar #{audited}\n"}
-    validate_virtual(sources, cargo_installs: AUDITED_CARGO_INSTALLS)
+    validate_virtual(sources, cargo_installs: fixture_cargo_installs)
   end
 
-  digest = "a" * 64
-  docker_fixtures = {
-    "docker-container-comment-digest" => "jobs:\n  test:\n    container: alpine:3.20 # @sha256:#{digest}\n",
-    "docker-container-quoted-tag" => "jobs: {test: {container: \"alpine:3.20\"}}\n",
-    "docker-container-flow-image-tag" => "jobs: {test: {container: {image: alpine:3.20}}}\n",
-    "docker-service-image-tag" => "jobs:\n  test:\n    services: {db: {image: postgres:16}}\n",
-    "docker-folded-image-tag" => "jobs:\n  test:\n    container:\n      image: >-\n        alpine:3.20\n",
-    "docker-action-image-tag" => "runs:\n  using: docker\n  image: alpine:3.20\n",
-    "docker-uses-comment-digest" => "uses: docker://alpine:3.20 # @sha256:#{digest}\n"
+  install_sha = "0123456789abcdef0123456789abcdef01234568"
+  install_pins = [Pin.new("#{INSTALL_ACTION}@#{install_sha}", "v2.0.0")]
+  install_use = "uses: #{INSTALL_ACTION}@#{install_sha} # v2.0.0"
+  install_step = lambda do |with, uses: install_use|
+    "steps:\n  - #{uses}\n#{with.empty? ? '' : "    with:\n#{with.map { |line| "      #{line}\n" }.join}"}"
+  end
+  audited_tool = "tool: cargo-audit@0.22.2"
+  valid_inputs = [audited_tool, "checksum: true", "fallback: none"]
+  flow_inputs = "{#{audited_tool}, checksum: true, fallback: none}"
+  tool_error = /tool is not an audited exact name@version/
+  fallback_error = /requires fallback: none/
+  checksum_error = /requires checksum: true/
+  install_fixtures = {
+    "install-no-with" => [install_step.call([]), /requires an explicit with: tool\/checksum\/fallback/],
+    "install-tool-unpinned-version" => [install_step.call(["tool: cargo-audit", "checksum: true", "fallback: none"]), tool_error],
+    "install-tool-latest" => [install_step.call(["tool: cargo-audit@latest", "checksum: true", "fallback: none"]), tool_error],
+    "install-tool-wrong-version" => [install_step.call(["tool: cargo-audit@0.22.1", "checksum: true", "fallback: none"]), tool_error],
+    "install-tool-extra-tool" => [install_step.call(["tool: cargo-audit@0.22.2,cargo-deny", "checksum: true", "fallback: none"]), tool_error],
+    "install-tool-space-list" => [install_step.call(["tool: cargo-audit@0.22.2 cargo-deny@0.18.0", "checksum: true", "fallback: none"]), tool_error],
+    "install-tool-expression" => [install_step.call(["tool: ${{ env.TOOL }}", "checksum: true", "fallback: none"]), tool_error],
+    "install-tool-missing" => [install_step.call(["checksum: true", "fallback: none"]), tool_error],
+    "install-fallback-missing" => [install_step.call([audited_tool, "checksum: true"]), fallback_error],
+    "install-fallback-binstall" => [install_step.call([audited_tool, "checksum: true", "fallback: cargo-binstall"]), fallback_error],
+    "install-fallback-cargo-install" => [install_step.call([audited_tool, "checksum: true", "fallback: cargo-install"]), fallback_error],
+    "install-fallback-expression" => [install_step.call([audited_tool, "checksum: true", "fallback: ${{ env.FALLBACK }}"]), fallback_error],
+    "install-checksum-missing" => [install_step.call([audited_tool, "fallback: none"]), checksum_error],
+    "install-checksum-false" => [install_step.call([audited_tool, "checksum: false", "fallback: none"]), checksum_error],
+    "install-checksum-expression" => [install_step.call([audited_tool, "checksum: ${{ env.CHECKSUM }}", "fallback: none"]), checksum_error],
+    "install-unaudited-input" => [install_step.call(valid_inputs + ["extra: x"]), /has unaudited inputs: extra/],
+    "install-duplicate-input" => [install_step.call([audited_tool, "tool: cargo-audit@0.22.1", "checksum: true", "fallback: none"]), /input is duplicated: tool/],
+    "install-non-scalar-input" => ["steps:\n  - #{install_use}\n    with: {tool: [cargo-audit@0.22.2], checksum: true, fallback: none}\n", /inputs must be scalar key\/value pairs/],
+    "install-with-not-mapping" => ["steps:\n  - #{install_use}\n    with: cargo-audit@0.22.2\n", /with must be a mapping/],
+    "install-duplicate-with" => ["steps:\n  - #{install_use}\n    with: #{flow_inputs}\n    with: {tool: cargo-deny}\n", /duplicate with keys/],
+    "install-duplicate-uses" => ["steps:\n  - #{install_use}\n    #{install_use}\n    with: #{flow_inputs}\n", /duplicate uses keys/],
+    "install-flow-missing-fallback" => ["steps:\n  - #{install_use}\n    with: {#{audited_tool}, checksum: true}\n", fallback_error],
+    "install-alias-step" => ["steps:\n  - &step\n    #{install_use}\n    with: #{flow_inputs}\n  - *step\n", YAML_ALIAS],
+    "install-alias-with" => ["inputs: &inputs #{flow_inputs}\nsteps:\n  - #{install_use}\n    with: *inputs\n", YAML_ALIAS],
+    "install-alias-input" => ["tool: &tool cargo-audit@0.22.2\nsteps:\n  - #{install_use}\n    with: {tool: *tool, checksum: true, fallback: none}\n", YAML_ALIAS],
+    "install-alias-uses" => ["ref: &ref #{INSTALL_ACTION}@#{install_sha}\nsteps:\n  - uses: *ref\n    with: #{flow_inputs}\n", YAML_ALIAS],
+    "install-merge-key" => ["base: &base {checksum: true, fallback: none}\nsteps:\n  - #{install_use}\n    with:\n      <<: *base\n      #{audited_tool}\n", YAML_ALIAS],
+    "install-ref-tag" => [install_step.call(valid_inputs, uses: "uses: #{INSTALL_ACTION}@v2.0.0 # v2.0.0"), NOT_AUDITED_ACTION],
+    "install-ref-refs-tags" => [install_step.call(valid_inputs, uses: "uses: #{INSTALL_ACTION}@refs/tags/v2.0.0 # v2.0.0"), NOT_AUDITED_ACTION],
+    "install-ref-case" => [install_step.call(valid_inputs, uses: "uses: Taiki-E/Install-Action@#{install_sha} # v2.0.0"), NOT_AUDITED_ACTION],
+    "install-ref-quoted-whitespace" => [install_step.call(valid_inputs, uses: "uses: \"#{INSTALL_ACTION}@#{install_sha} \" # v2.0.0"), NOT_AUDITED_ACTION],
+    "install-ref-subpath" => [install_step.call(valid_inputs, uses: "uses: #{INSTALL_ACTION}/sub@#{install_sha} # v2.0.0"), NOT_AUDITED_ACTION],
+    "install-ref-wrong-label" => [install_step.call(valid_inputs, uses: "uses: #{INSTALL_ACTION}@#{install_sha} # v2.0.1"), NOT_AUDITED_ACTION],
+    "install-ref-no-label" => [install_step.call(valid_inputs, uses: "uses: #{INSTALL_ACTION}@#{install_sha}"), NOT_AUDITED_ACTION]
   }
-  docker_fixtures.each do |name, source|
-    expect_rejected(name) do
+  install_fixtures.each do |name, (source, expected)|
+    expect_rejected(name, expected) do
+      validate_virtual({root => source}, pins: install_pins, install_tools: AUDITED_INSTALL_ACTION_TOOLS)
+    end
+  end
+  valid_install = install_step.call(valid_inputs)
+  expect_rejected("install-nested-local-fallback", fallback_error) do
+    sources = {root => "uses: ./custom/action\n",
+               action => "runs:\n  using: composite\n  #{install_step.call([audited_tool, "checksum: true"]).gsub("\n", "\n  ")}"}
+    validate_virtual(sources, pins: install_pins, install_tools: AUDITED_INSTALL_ACTION_TOOLS)
+  end
+  expect_rejected("install-count-exceeded", /audited install-action tool count mismatch: expected=1 actual=2: cargo-audit@0.22.2/) do
+    doubled = valid_install + install_step.call(valid_inputs).delete_prefix("steps:\n")
+    validate_virtual({root => doubled}, pins: install_pins, install_tools: {"cargo-audit@0.22.2" => 1}).finish!
+  end
+  expect_rejected("install-count-missing", /audited install-action tool count mismatch: expected=1 actual=0: cargo-audit@0.22.2/) do
+    validate_virtual({root => "steps:\n  - run: echo ok\n"}, install_tools: {"cargo-audit@0.22.2" => 1}).finish!
+  end
+  one_tool = {"cargo-audit@0.22.2" => 1}
+  validate_virtual({root => valid_install}, pins: install_pins, install_tools: one_tool).finish!
+  validate_virtual({root => "steps:\n  - #{install_use}\n    with: #{flow_inputs}\n"}, pins: install_pins, install_tools: one_tool).finish!
+  quoted = "steps:\n  - \"uses\": #{INSTALL_ACTION}@#{install_sha} # v2.0.0\n    'with':\n      \"tool\": cargo-audit@0.22.2\n      checksum: \"true\"\n      fallback: 'none'\n"
+  validate_virtual({root => quoted}, pins: install_pins, install_tools: one_tool).finish!
+  anchored = "steps:\n  - &step\n    #{install_use}\n    with: #{flow_inputs}\n"
+  validate_virtual({root => anchored}, pins: install_pins, install_tools: one_tool).finish!
+  puts "fixture ACCEPTED install-action-block install-action-flow install-action-quoted install-action-unused-anchor"
+
+  digest = "a" * 64
+  image_error = /container image requires an immutable sha256 digest/
+  docker_fixtures = {
+    "docker-container-comment-digest" => ["jobs:\n  test:\n    container: alpine:3.20 # @sha256:#{digest}\n", image_error],
+    "docker-container-quoted-tag" => ["jobs: {test: {container: \"alpine:3.20\"}}\n", image_error],
+    "docker-container-flow-image-tag" => ["jobs: {test: {container: {image: \"alpine:3.20\"}}}\n", image_error],
+    "docker-service-image-tag" => ["jobs:\n  test:\n    services: {db: {image: \"postgres:16\"}}\n", image_error],
+    "docker-folded-image-tag" => ["jobs:\n  test:\n    container:\n      image: >-\n        alpine:3.20\n", image_error],
+    "docker-action-image-tag" => ["runs:\n  using: docker\n  image: alpine:3.20\n", image_error],
+    "docker-uses-comment-digest" => ["uses: docker://alpine:3.20 # @sha256:#{digest}\n", /docker action requires an immutable sha256 digest/]
+  }
+  docker_fixtures.each do |name, (source, expected)|
+    expect_rejected(name, expected) do
       validate_virtual(root => source)
     end
   end
@@ -585,7 +863,7 @@ def self_test!
     root => "on: push\nsteps:\n  - \"uses\": ./custom/action\n  - run: #{audited}\n",
     action => "runs:\n  using: composite\n  steps:\n    - run: echo ok\n"
   }
-  valid = validate_virtual(valid_sources, cargo_installs: AUDITED_CARGO_INSTALLS)
+  valid = validate_virtual(valid_sources, cargo_installs: fixture_cargo_installs)
   valid.finish!
   raise PolicyError, "valid fixture inventory mismatch" unless valid.uses_count == 1 && valid.run_count == 2
   puts "fixture ACCEPTED complete-roots nested-local exact-cargo-install yaml-1.1-on"
@@ -602,4 +880,4 @@ inventory = RepoInventory.actual(repo_root)
 policy = ActionPolicy.new(inventory)
 policy.validate_roots(ARGV)
 policy.finish!
-puts "supply-policy OK roots=#{ARGV.length} workflows=#{inventory.workflow_files.length} actions=#{inventory.action_manifest_files.length} uses=#{policy.uses_count} runs=#{policy.run_count} audited_actions=#{AUDITED_PINS.length}"
+puts "supply-policy OK roots=#{ARGV.length} workflows=#{inventory.workflow_files.length} actions=#{inventory.action_manifest_files.length} uses=#{policy.uses_count} runs=#{policy.run_count} audited_actions=#{AUDITED_PINS.length} audited_install_tools=#{AUDITED_INSTALL_ACTION_TOOLS.length}"

@@ -739,6 +739,25 @@ const EXEMPTIONS: &[Exemption<'static>] = &[
                  declaration.",
     },
     Exemption {
+        path: "crates/memcore/src/db/schema/open_race_tests.rs",
+        basis: ExemptionBasis::Proven(MachineProof::NoStoreDoorwayInFile),
+        sites: &[Site {
+            symbol: "TRIGGER",
+            trigger: "",
+            ddl: "6f0bc4e1dfbe5fa6",
+            occurrences: 2,
+        }],
+        reason: "trigger_dropped_in_window_is_refused_like_a_sequential_open \
+                 drops the canonical memory_edge_search_generation_after_update \
+                 trigger (named by the local const TRIGGER, hence runtime-assembled) \
+                 to damage a store's trigger inventory: once on a second store \
+                 before a sequential open, once inside the cfg(test) window hook. \
+                 Both DROPs run on a fresh rusqlite::Connection::open(path), never \
+                 on a MemoryStore doorway; the test asserts the open REFUSES the \
+                 damaged inventory. Body read 2026-09-26. The proof remains valid \
+                 only while this file names no MemoryStore doorway.",
+    },
+    Exemption {
         path: "crates/memcore/src/db/search_generation.rs",
         basis: ExemptionBasis::Proven(MachineProof::MemcoreArmsTheMigrationToken),
         sites: &[

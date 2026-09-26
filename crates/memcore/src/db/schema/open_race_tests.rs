@@ -408,7 +408,7 @@ fn trigger_dropped_in_window_is_refused_like_a_sequential_open() {
     Connection::open(&sequential_path)
         .expect("damage")
         .execute_batch(&format!("DROP TRIGGER {TRIGGER}"))
-        .expect("drop trigger before the open");
+        .expect("damage the store before the sequential open");
     let sequential_err = crate::MemoryStore::open_with_label_and_context(
         sequential_path.to_str().expect("utf8"),
         "global",
@@ -421,7 +421,7 @@ fn trigger_dropped_in_window_is_refused_like_a_sequential_open() {
         Connection::open(path)
             .expect("damaging writer")
             .execute_batch(&format!("DROP TRIGGER {TRIGGER}"))
-            .expect("drop trigger in the window");
+            .expect("damage the store inside the window");
     });
     // Through the real store funnel: its pre-init inventory check passes (the
     // trigger is still there), then the window drops it.
