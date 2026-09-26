@@ -1,6 +1,6 @@
 # Current-Store Admission — refuse damaged state, rebuild only what is derived
 
-> **Status:** spec, pre-implementation.
+> **Status:** spec, pre-implementation, revision 2 (after one cross-vendor attack round).
 > **Issue:** #1995 (found in #1983's round-4 cold review). **Parent:** #1987.
 > **Anchors:** `db/open.rs:630` (damaged current input is refused, not
 > repaired), #1119 (migration authority), #1983 (read-only preflight plus
@@ -39,156 +39,219 @@ that runs before a rebuild. Measured on the old main with a 263-case sweep:
 This contradicts the current-store rule at `db/open.rs:630`: damaged current
 input is refused, not repaired.
 
+
 ## 2. Decision
 
-**Default-deny, with a frozen allowlist of derived objects.** When a store is
-at the current version, every schema object in its profile's baseline must be
-present **before** any maintenance runs. The only exceptions are objects on
-the derived allowlist (§3). Those may be missing and are rebuilt, as they are
-today. Anything else missing refuses the open with a typed error. Nothing is
-written: no backup, no PRAGMA, no DDL, no stamp, no marker.
+**The new check is additive and default-deny. It sits on top of today's
+validators.** A store at the current version must already contain every
+object in its **required set** (§3) before any maintenance runs. If any
+required object is missing, the open is refused with a typed error. Three
+rules bound this:
 
-Why default-deny rather than listing the state-bearing objects:
+- **Existing checks are unchanged.** The trigger inventory,
+  `validate_current_schema_integrity` and its per-migration shape
+  validators keep their errors and their precedence. The new check runs
+  after them and can only add refusals. Some objects that look derived are
+  already required by an existing validator, for example the delivery and
+  outbox indexes (`db/migrations.rs:371`, `db/schema.rs:979-1003`,
+  `:2040-2044`). Those stay refused with the error they produce today.
+- **Allow grants no repair.** `Allow` is *migration* authority for
+  `1 ≤ s < E`. It does not authorize repairing a damaged current store, so
+  the new refusal applies under `Allow` as well. Repair is an explicit
+  operator action (§6).
+- **Row values are out of scope.** Row-level normalization does not
+  change: the `created_at`/`updated_at`/`revision` backfills,
+  `normalize_memory_validity_columns` and the legacy bridges. They repair
+  row values, not missing schema, and #1987 W2-7 showed they are
+  load-bearing.
 
-- New tables are state-bearing by default. A new derived object has to
-  justify joining the allowlist; a new state table needs no list entry to be
-  protected.
-- The 263-case sweep shows that almost everything outside the allowlist is S
-  or W.
+Default-deny, rather than listing the state-bearing objects, is chosen for
+one reason: new tables are state-bearing by default, and a new derived
+object has to justify its place on the allowlist.
 
-`Allow` does not change this. `Allow` is *migration* authority for
-`1 ≤ s < E`. It does not authorize repairing a damaged current store. Repair
-is an explicit operator action (§6).
+## 3. Required set
 
-## 3. Derived allowlist (frozen)
+**Required set = profile baseline − derived allowlist.**
 
-An object may be on this list only if rebuilding it from other rows in the
-same store changes no existing row and loses no information. The
-implementation must enumerate every object from the baseline definitions and
-assert that the list is exact:
+**Profile baseline.** The baseline is chosen by the *effective* profile,
+not by sentinels:
 
-| Object class | Members | Why derived |
+- `TachiFull`: every Portable and Product object the current code creates.
+- `PortableKernel`: every `SchemaScope::Portable` object, plus the
+  Portable-scoped migrations' objects.
+
+Product sentinels on a Portable store attest no Product objects: v37-v39
+record their sentinel vacuously on Portable (`db/migrations.rs:944-948`,
+`mirror_eval_identity.rs:36-41`). The existing *conditional* Product
+validators, keyed on `identity_admissions` existing
+(`db/migrations.rs:372-381`), are kept exactly as they are.
+
+**Derived allowlist (frozen).** An object is allowed on this list only if
+it is not already required by an existing validator, and it can be rebuilt
+from other rows in the same store with no information loss. The
+implementation enumerates it from the baseline definitions, and a test
+pins it:
+
+| Class | Members | Rebuild outcome |
 |---|---|---|
-| Non-unique indexes | every non-unique index in `BASE_SCHEMA_CHUNKS`, `MIGRATED_INDEXES_CHUNKS`, the versioned-migration installers, and `idx_memories_path_active_ts` (`ensure_optimization_indexes`) | the index is a function of its table |
-| Unique indexes with no rewriting step before them | `idx_memories_idless_identity_active`, `idx_delivery_events_claim_key_global`, `idx_delivery_events_ack_key_global` (each must be checked) | rebuilding either succeeds with no row change or fails loudly on duplicates. **Excluded:** `idx_session_claims_identity_active`, whose rebuild runs `dedupe_session_claims_identity_conflicts` first (W) |
-| FTS projections | `memories_fts`, `memories_symbolic_fts` | `ensure_fts_backfilled` rebuilds them from `memories` |
-| Caches | `recall_cache` and its `generation_fingerprint` column | a cache, recomputed on miss (`db/schema.rs`, the `recall_cache` comment) |
-| Vector capability | `memories_vec` (`try_load_sqlite_vec`) | an optional capability, provisioned after init. Embeddings can be re-derived from an external provider (vector backfill). This is the D7 R7 exception, kept here for the same reason. **A known gap:** a dropped `memories_vec` loses embeddings until they are backfilled |
+| Non-unique indexes not already required by a validator | base, migrated and installer indexes, plus `idx_memories_path_active_ts` | success. `ensure_optimization_indexes` ignores its own errors (`db/schema.rs:2677-2685`), so the index may stay absent; that is today's behaviour |
+| Unique indexes with no rewriting step before them, not already required | `idx_memories_idless_identity_active` | success, or a loud failure that rolls back the schema transaction when duplicate active identities exist. **Excluded:** `idx_session_claims_identity_active`, because dedupe runs first (`db/schema.rs:1861-1872`). The delivery unique indexes are already required by the delivery validator, so they are not on this list |
+| FTS projections | `memories_fts`, `memories_symbolic_fts` | rebuilt from `memories`, with the search-generation bump allowed (it invalidates caches). **Known pre-existing defect:** the backfill projection of `keywords`/`entities` differs from the CRUD projection (SQL bracket/quote stripping at `db/schema.rs:3370-3380` versus `.join(" ")` at `db/memory_crud.rs:2598`). Tracked separately; fixing it is a precondition for "no information loss" on escaped JSON |
+| Cache | `recall_cache` and `generation_fingerprint` | recomputed on miss. This is disposable for correctness, not lossless: rerank results and telemetry go |
+| Optional capability | `memories_vec` | provisioned empty when sqlite-vec is available, absent otherwise. Embeddings are re-derived from an external provider. **Known gap:** a dropped table loses embeddings until they are backfilled |
 
-Everything else counts as state (S) or rewrites data when repaired (W), and
-must be present. That covers every table not listed above, every
-`ensure_column` target, every unique index with a rewriting step before it,
-and every trigger (triggers are already enforced by the trigger inventory).
+Everything else in the baseline is required: every other table, every
+`ensure_column` target, and every unique index with a rewriting step
+before it. Triggers are already enforced by the trigger inventory.
 
-Row-level normalization is **out of scope**. This means the
-`created_at`/`updated_at`/`revision` backfills, `normalize_memory_validity_columns`
-and the legacy bridges. These repair row *values*, not missing schema. W2-7
-showed they are load-bearing while snapshot import and rescue apply still
-write rows that violate them (#1987 W2-7). They keep running.
+**Schema-growth rule (new).** A new **required** object can only be
+introduced with a versioned migration, which bumps `E`. That way, a store
+stamped `E` was always initialized by code that creates every object
+required at `E`. The additive-base-chunk amendment rule
+(`db/schema/ddl.rs:2128-2146`, and D7 R7) remains open only for objects on
+the derived allowlist.
+
+For objects that already shipped, this holds today. v39 landed on
+2026-09-23 (`de7921d10`). Every table added through the additive rule
+landed earlier:
+
+- `provider_accounts…`: 08-10
+- `model_*`: 08-12 / 08-13
+- `route_*`: 08-10
+- inline `exec_env_worktree_identities`: 08-27 (`38ed99d47`)
+
+The code that stamps 39 creates all of them in the same transaction. So a
+legitimate `s == 39` store contains them. This is a history-based argument
+about this repo, not a proof about stores written by other forks.
 
 ## 4. Where the check runs
 
-It lives in #1983's funnel as an extension of the integrity step, for both
-policies of D7:
+It extends #1983's integrity step, under both D7 policies:
 
-- **Preflight** (read-only, one snapshot), at the integrity step: if the
-  store is current, check that the baseline minus the allowlist is present.
-  Under today's policy, "current" means `s == E`. For a D7 Portable band
-  store, it means `π_P(E) ≤ s ≤ E`, with the Portable baseline plus the
-  Product objects its sentinels attest. A missing object means refusal
-  before any side effect.
-- **Authoritative** (inside `BEGIN IMMEDIATE`), in the same step of
-  `reevaluate_admission_in_tx`: the same check runs again on the
-  in-transaction state, before `init_schema_inner`.
-- **Precedence:** in #1983's order, the check is part of integrity. It comes
-  after the version and #1119 gates and before coverage and identity, the
-  same slot `validate_current_schema_integrity` already occupies. A store
-  that today fails `validate_current_schema_integrity` keeps that error.
-  The new check runs after it and only adds refusals.
-- **Private images** (`init_private_schema_with_label_mut`, which reuses
-  `init_schema_inner`) get the same check.
+- **Preflight.** A read-only check, placed after the existing integrity
+  validators. If the store is current, the required set must be present.
+  "Current" means `s == E` under today's policy, and the Portable band
+  under D7. A missing object is refused before any side effect.
+  - The merged preflight is *not* yet one read snapshot
+    (`db/schema.rs:1235-1243`). The D7 implementation adds the snapshot;
+    this check joins it.
+- **Authoritative phase.** Inside `BEGIN IMMEDIATE`, the same check runs
+  again, in `reevaluate_admission_in_tx` and before `init_schema_inner`.
+- **Private images.** `init_private_schema_with_label_mut` gets the same
+  check with the Portable baseline.
+- **Pending stores are not checked.** Migrations legitimately create
+  objects.
 
-**Coupling with D7 R5.2.** D7's R5.2b runs a complete-shape check *after*
-the frozen normalizations. That cannot catch a dropped state table:
-`CREATE TABLE IF NOT EXISTS` rebuilds it empty, and the empty table then
-passes the shape check. So D7's R5.2a (the band-input integrity) **must
-include this presence check** (the baseline minus the allowlist, checked
-before maintenance). Both specs share one object inventory. This PR amends
-D7 R5.2a to say so.
+**Side effects on refusal.** When the defect is visible to the preflight,
+the refusal happens before backup, PRAGMA, DDL, stamp and marker, so
+nothing is written. When the defect appears *between* preflight and
+`BEGIN IMMEDIATE` (a race), the authoritative check still refuses. Any
+marker-fallback backup, backup retention and the WAL PRAGMA that #1983
+already permits in that window may remain, as documented at
+`db/schema.rs:1253-1259`. The DB's logical state is unchanged.
 
-Pending stores (`1 ≤ s < E`, or below `π_P` under D7) are not checked.
-Migrations legitimately create objects there.
+**Coupling with D7.** D7's R5.2b checks shape *after* the frozen
+normalizations, so it cannot see a dropped state table:
+`CREATE TABLE IF NOT EXISTS` recreates it empty. So D7 R5.2a must include
+this presence check. This PR amends D7 in three places:
+
+1. **R5.2a includes the presence check.** For `P@39` it is today's check
+   plus the new presence refusals.
+2. **R0 (today's-policy invariance) is superseded for exactly the §5 rows
+   of this spec.** A `TachiFull` current store missing a required object
+   is now refused.
+3. **D7 T9's missing-column and missing-trigger cases** now refuse at
+   R5.2a, in the preflight, not at R5.2b. R5.2b still catches a *present
+   but malformed* object, e.g. a non-unique idless index.
 
 ## 5. Outcomes
 
 | Input (`OpenExisting`, current store) | Today | After |
 |---|---|---|
-| allowlisted object missing (e.g. `idx_memories_tier`) | open Ok, rebuilt | **unchanged**: open Ok, rebuilt |
-| state table missing (e.g. `exec_env_worktree_identities`) | open Ok, recreated empty, rows lost | **refused** in preflight with `CurrentSchemaIncomplete`, nothing written |
-| W unique index missing (`idx_session_claims_identity_active`) with duplicates | open Ok, older claim released | **refused** in preflight, claims untouched |
-| `ensure_column` target missing (e.g. `hub_capabilities.review_status`) | open Ok, column re-added with a DEFAULT | **refused** in preflight |
-| trigger missing | refused (trigger inventory) | unchanged |
-| missing object that `validate_current_schema_integrity` already catches | its error | unchanged, same error and precedence |
-| same inputs under `Allow` | same as `Deny` today | refused, same as `Deny` (§2) |
-| store below the current version | today's migration behaviour | unchanged |
+| allowlisted object missing (e.g. `idx_memories_tier`) | open Ok, rebuilt | unchanged |
+| idless unique index missing, duplicate active identities | schema transaction fails (index creation) | unchanged |
+| delivery or outbox index missing | refused by the existing validator | unchanged (same error, same precedence) |
+| state table missing (e.g. `exec_env_worktree_identities`) | open Ok, recreated empty, rows lost | **refused** (`CurrentSchemaIncomplete`), nothing written |
+| `idx_session_claims_identity_active` missing, with duplicates | open Ok, older claim released | **refused**, claims untouched |
+| required column missing (e.g. `hub_capabilities.review_status`) | open Ok, re-added with its DEFAULT | **refused** |
+| trigger missing | refused by the trigger inventory | unchanged |
+| the same inputs under `Allow` | same as `Deny` today | same as `Deny` after |
+| store below current version | migration behaviour | unchanged |
 
-Error: a new typed `MemoryError::CurrentSchemaIncomplete { missing:
-Vec<String>, db_path }`. `missing` lists every absent required object, in a
-stable order. The message points to the operator repair path (§6).
+Error: a new `MemoryError::CurrentSchemaIncomplete { missing:
+Vec<String>, db_path }`, listing every absent required object in stable
+order. The message points to §6.
 
 ## 6. Operator repair path
 
-Refusing an open leaves an operator who needs a way forward. This spec does
-not build a repair tool. It requires the refusal message and the
-`schema-migration-runbook.md` entry to name the options:
+The refusal message and a `schema-migration-runbook.md` entry name the
+options:
 
 - restore the most recent `.migration-bak` or snapshot;
-- run an explicit, named repair command whose output is reviewed. That
-  command is a follow-up leaf, created when this is implemented.
+- run an explicit, reviewed repair command. This is a follow-up leaf, filed
+  when the fix is implemented.
 
-Until the follow-up exists, the runbook describes a manual recovery.
+Until that command exists, the runbook documents manual recovery.
 
 ## 7. Tests (acceptance)
 
 - **T1 Reproductions.** Un-ignore the two tests on
-  `test/current-store-silent-repair-1995`. They must be green:
-  - (a) `idx_session_claims_identity_active` missing, with duplicates;
-  - (b) `exec_env_worktree_identities` dropped.
+  `test/current-store-silent-repair-1995`:
+  - (a) the missing `idx_session_claims_identity_active` with duplicates;
+  - (b) the dropped `exec_env_worktree_identities`.
 
-  Each is refused, and claims, rows and `sqlite_schema` are unchanged, with
-  no backup and no marker.
-- **T2 Allowlist.** For every allowlisted object, a current store missing it
-  opens `Ok` and the object is rebuilt. Also assert that the allowlist in
-  code equals the enumerated derived set, so the allowlist cannot grow
-  silently.
-- **T3 Default-deny sweep.** Promote the 263-case diagnostic sweep to an
-  asserting test. Every non-allowlisted object missing means refused, with
-  zero side effects. Every allowlisted object missing means Ok. Run it for
-  `TachiFull`. The Portable run follows D7 (T9 there).
-- **T4 `review_status`.** Rebuild `hub_capabilities` without `review_status`
-  (via table rebuild; the column has an index). The open is refused and no
-  capability changes state.
+  Each must be refused, and claims, rows and `sqlite_schema` must be
+  unchanged, with no backup and no marker.
+- **T2 Allowlist, in three separate oracles:**
+  - (i) every allowlisted object whose rebuild succeeds: open Ok, and the
+    object is present afterwards;
+  - (ii) the idless index with duplicates: the transaction rolls back with
+    today's error;
+  - (iii) optional capabilities: with vec unavailable, `memories_vec`
+    stays absent and the open is Ok; with the optimization-index creation
+    failing, the index stays absent and the open is Ok.
+
+  Assert that the allowlist in code equals the enumerated derived set.
+- **T3 Default-deny, enumerated.** Enumerate the *current* baseline objects
+  from the definitions, not from the historical 263-case count, and
+  account for dependent and shadow objects (FTS shadow tables, autoindexes).
+  - Every required object missing: refused, and nothing written.
+  - Every allowlisted object: T2.
+  - Objects already required by an existing validator: that validator's
+    error.
+  - Row-normalization cases are excluded.
+  - Run it for `TachiFull`, and for `PortableKernel` with the Portable
+    baseline.
+- **T4 `review_status`.** Rebuild `hub_capabilities` without the column.
+  The open is refused, and no capability changes state.
 - **T5 Precedence.** A store with both a `validate_current_schema_integrity`
-  defect and a missing state table returns the former's error, exactly as
-  today.
-- **T6 Race.** Using #1983's hook, a state table is dropped between
-  preflight and `BEGIN IMMEDIATE`. The authoritative check refuses, and the
-  database has no DDL, stamp or row change.
-- **T7 Private image.** A sealed private image missing a state table is
-  refused through the production private door.
-- **T8 Invariance.** Every existing test passes unchanged except those that
-  assert the old silent repair. Each of those is listed in the PR with a
-  before and after.
+  defect and a missing required table returns the former's error.
+- **T6 Race.** Using #1983's hook on a store with a matching marker, drop a
+  required table between preflight and `BEGIN IMMEDIATE`. The
+  authoritative check refuses. Compare the logical state against the
+  **post-hook** state: no DDL, stamp or row change. Separately, assert
+  only the backup and WAL effects #1983 permits.
+- **T7 Private image.** A sealed private image missing a Portable required
+  table is refused through the production private door. A healthy image
+  opens (control). A healthy PortableKernel file store with every Product
+  sentinel and no Product tables opens (control for §3).
+- **T8 Invariance and supersession.** Every existing test passes unchanged,
+  except tests that assert the old silent repair and the D7 T9 phase
+  expectation. Each of those is listed with its before and after.
+- **T9 Growth rule.** A lint or test fails if a
+  `CREATE TABLE IF NOT EXISTS` base chunk introduces an object that is not
+  on the allowlist without an `E` bump. At minimum: the frozen list of
+  additive-rule tables must match the set present at `E`.
 
 ## 8. Not verified
 
-- The sweep ran on the full profile only. The 16 columns the fixture could
-  not drop (index or CHECK dependencies) are classified by reading
-  `ensure_column`, not by measurement.
-- Legacy-gated steps (the persons/location/hypertachi bridges and the enum
-  rebuild) were not exercised. They are row or legacy normalization and stay
-  out of scope.
-- Whether any production store today is missing a non-allowlisted object,
-  in which case it would start refusing after this change. The
-  implementation PR must run the preflight check read-only against a copy of
-  each live store on this host, and report the result, before merging.
+- **Other schema families.** The sweep ran on the full profile only. The
+  16 columns the fixture could not drop are classified by reading, not by
+  running.
+- **Legacy-gated steps.** These stay out of scope.
+- **Live stores.** Before merging, the implementation PR must run the
+  preflight check read-only against a copy of every live store on this
+  host and report the result. That does not establish compatibility for
+  stores on other hosts or forks.
+- **FTS projection.** The CRUD-versus-backfill projection mismatch is
+  proven from source only. Its effect on search results is unmeasured.

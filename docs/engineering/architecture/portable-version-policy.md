@@ -98,7 +98,10 @@ The refusal *order* stays that of #1983/#1984 under both policies. The
 Portable policy can change which error wins, because an admission that used
 to stop at the #1119 gate now reaches later checks. §6 lists every such case.
 If any rule text contradicts R0 for an open under today's policy, R0 wins and
-the text is a spec bug.
+the text is a spec bug. **Exception (#1995):** the current-store presence
+refusals in [`current-store-admission.md`](./current-store-admission.md) §5
+deliberately supersede R0 for those rows. For example, a `TachiFull` current
+store missing a required table is now refused.
 
 **R1 — Downgrade.** `newer` is refused under every policy at the header gate,
 as today, before any identity decode.
@@ -183,8 +186,9 @@ in `band` it is never written.
        table, because `CREATE TABLE IF NOT EXISTS` recreates it empty and
        the empty table passes a shape check. The two specs share one object
        inventory.
-     - For a `P@39` input this is exactly today's check, so today's error and
-       its precedence are unchanged. That includes today's conditional
+     - For a `P@39` input this is today's check followed by the #1995
+       presence check. Today's errors, and their precedence, are unchanged,
+       and the presence check only adds refusals. That includes today's conditional
        Product branch, which runs the A2A, mirror-eval identity,
        verified-admission and CurrentTruth validators whenever
        `identity_admissions` exists (`db/migrations.rs:372-382`). A
@@ -645,9 +649,10 @@ hook, or an error variant), not only the end state.
     `idx_memories_idless_identity_active`, with a matching marker, refuses
     at R5.2b inside the transaction. Assert: rolled back, zero backups, not
     repaired.
-  - The same for a missing Portable column and a missing trigger. Choose
-    objects the frozen set does **not** recreate; a missing search-generation
-    trigger, for example, is recreated, so it doesn't qualify. Assert which
+  - A missing required Portable column or table, per #1995, is refused at
+    R5.2a in the preflight (presence check). A missing trigger is refused
+    by the trigger inventory. R5.2b is the check that catches a *present
+    but malformed* object, as with the non-unique index above. Assert which
     validator refused.
   - A `P@35` store with a complete v35 inventory, under `Allow`, migrates
     v36. R5.2a′ passes after the migration and the stamp is 39. This shows
