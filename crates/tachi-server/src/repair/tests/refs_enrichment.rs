@@ -78,7 +78,8 @@ fn r7_orphan_vectors_and_superseded_refs_detected_and_purged() {
 /// `memories.id` is `TEXT PRIMARY KEY` without NOT NULL, so legacy rows can
 /// carry NULL. Under SQL three-valued logic `x NOT IN (..., NULL)` is NULL for
 /// every `x`; without a guard one such row made R7 report a clean store and
-/// purge nothing.
+/// purge nothing. The live self-edge `m1→m1` is the keeper: the guard must not
+/// widen the purge past the orphan, so an apply that deleted every edge fails.
 #[test]
 fn r7_orphans_detected_and_purged_despite_null_memory_id() {
     let dir = TempDir::new().unwrap();
@@ -105,15 +106,25 @@ fn r7_orphans_detected_and_purged_despite_null_memory_id() {
         [&now],
     )
     .unwrap();
+    conn.execute(
+        "INSERT INTO memory_edges (source_id, target_id, relation, weight, metadata, created_at)
+         VALUES ('m1', 'm1', 'rel', 1.0, '{}', ?1)",
+        [&now],
+    )
+    .unwrap();
     drop(conn);
 
     let mut ctx = open_ctx(&path, "test");
     let dry = OrphanRefs.dry_run(&mut ctx).unwrap();
-    assert!(
-        dry.findings
-            .iter()
-            .any(|f| f.kind == "orphans_edges_target" && f.count == 1),
-        "expected one orphan edge target despite the NULL-id memory, got {dry:?}"
+    let dry_findings: Vec<(&str, usize)> = dry
+        .findings
+        .iter()
+        .map(|f| (f.kind.as_str(), f.count))
+        .collect();
+    assert_eq!(
+        dry_findings,
+        vec![("orphans_edges_target", 1)],
+        "dry-run must report only the orphan target despite the NULL-id memory"
     );
 
     let app = OrphanRefs.apply(&mut ctx).unwrap();
@@ -123,11 +134,19 @@ fn r7_orphans_detected_and_purged_despite_null_memory_id() {
         dry2.findings.is_empty(),
         "post-purge should be clean: {dry2:?}"
     );
-    let edges: i64 = ctx
+    let edges: Vec<(String, String)> = ctx
         .conn
-        .query_row("SELECT COUNT(*) FROM memory_edges", [], |r| r.get(0))
+        .prepare("SELECT source_id, target_id FROM memory_edges ORDER BY source_id, target_id")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
         .unwrap();
-    assert_eq!(edges, 0, "the orphan edge is gone");
+    assert_eq!(
+        edges,
+        vec![("m1".to_string(), "m1".to_string())],
+        "only the orphan edge is purged; the live keeper edge survives"
+    );
 }
 
 #[test]
