@@ -45,6 +45,8 @@ pub(super) struct StoreArtifacts {
     pub user_version: i64,
     /// `PRAGMA schema_version`: SQLite bumps it on every DDL statement.
     pub schema_cookie: i64,
+    /// `(type, name, tbl_name, sql)` of every `sqlite_schema` row, verbatim.
+    pub schema_rows: Vec<(String, String, String, Option<String>)>,
     pub role: Option<String>,
     pub profile: Option<String>,
     pub private_partition_stamped: bool,
@@ -116,6 +118,22 @@ pub(super) fn observe(db_path: &Path) -> StoreArtifacts {
     let schema_cookie: i64 = conn
         .query_row("PRAGMA schema_version", [], |row| row.get(0))
         .unwrap();
+    let schema_rows: Vec<(String, String, String, Option<String>)> = {
+        let mut statement = conn
+            .prepare(
+                "SELECT type, name, tbl_name, sql FROM main.sqlite_schema \
+                 ORDER BY type, name",
+            )
+            .unwrap();
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        rows
+    };
     let has_hard_state: bool = conn
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='hard_state')",
@@ -161,6 +179,7 @@ pub(super) fn observe(db_path: &Path) -> StoreArtifacts {
         backups,
         user_version,
         schema_cookie,
+        schema_rows,
         role: stamp(STORE_ROLE_KEY),
         profile: stamp(STORE_PROFILE_KEY),
         private_partition_stamped: stamp(STORE_PRIVATE_PARTITION_KEY).is_some(),
@@ -191,6 +210,7 @@ pub(super) fn artifact_diff(before: &StoreArtifacts, after: &StoreArtifacts) -> 
     field!(backups);
     field!(user_version);
     field!(schema_cookie);
+    field!(schema_rows);
     field!(role);
     field!(profile);
     field!(private_partition_stamped);
@@ -520,9 +540,14 @@ fn sealed_private_envelope_under_a_generic_open_leaves_no_side_effect() {
 
 /// Authoritative half: the store is not private-stamped at the preflight, and
 /// another process stamps it in the window before `BEGIN IMMEDIATE`. The
-/// in-transaction evaluation must refuse before any DDL or identity write, so
-/// the role stays unstamped. (A raced refusal may keep the backup and the WAL
-/// switch, #1983's documented raced-refusal residue.)
+/// in-transaction evaluation must refuse before any DDL or identity write.
+/// The window's own state is sampled inside the window, and what the refused
+/// open leaves must be exactly that state: the same `sqlite_schema` rows and
+/// `schema_version` (no DDL), the same `user_version`, and the same
+/// `store_identity` rows verbatim (the pre-existing rows unchanged, the
+/// window's private stamp the only addition, no role). (A raced refusal may
+/// keep the backup and the WAL switch, #1983's documented raced-refusal
+/// residue, so those fields are not compared.)
 #[test]
 fn private_stamp_committed_in_the_window_is_refused_in_the_transaction() {
     let dir = tempfile::tempdir().unwrap();
@@ -532,10 +557,16 @@ fn private_stamp_committed_in_the_window_is_refused_in_the_transaction() {
     assert!(!before.private_partition_stamped);
     assert_eq!(before.role, None);
 
-    db::schema_test_hooks::arm_before_schema_transaction(|path| {
-        let other = rusqlite::Connection::open(path).expect("other process connection");
-        stamp_private_identity(&other, &fixture_partition()).expect("stamp in the window");
-    });
+    let window_state = std::rc::Rc::new(std::cell::RefCell::new(None));
+    {
+        let window_state = std::rc::Rc::clone(&window_state);
+        db::schema_test_hooks::arm_before_schema_transaction(move |path| {
+            let other = rusqlite::Connection::open(path).expect("other process connection");
+            stamp_private_identity(&other, &fixture_partition()).expect("stamp in the window");
+            drop(other);
+            *window_state.borrow_mut() = Some(observe(path));
+        });
+    }
     let result = MemoryStore::open_with_label_and_context(
         &path.to_string_lossy(),
         "global",
@@ -543,17 +574,52 @@ fn private_stamp_committed_in_the_window_is_refused_in_the_transaction() {
     );
     db::schema_test_hooks::disarm_window_hooks();
     expect_refused(result, is_private_refusal);
+    let window: StoreArtifacts = window_state.borrow().clone().expect("the window ran");
+
+    // Precondition: the window committed only the private stamp.
+    assert_eq!(
+        (
+            &window.schema_rows,
+            window.schema_cookie,
+            window.user_version
+        ),
+        (
+            &before.schema_rows,
+            before.schema_cookie,
+            before.user_version
+        ),
+        "the window's stamp must be no DDL"
+    );
+    let private_rows: Vec<_> = window
+        .identity_rows
+        .iter()
+        .filter(|(key, _, _)| key == STORE_PRIVATE_PARTITION_KEY)
+        .cloned()
+        .collect();
+    assert_eq!(private_rows.len(), 1, "the window adds one private stamp");
+    let mut expected_rows = before.identity_rows.clone();
+    expected_rows.extend(private_rows);
+    expected_rows.sort();
+    assert_eq!(
+        window.identity_rows, expected_rows,
+        "the window adds only the private stamp"
+    );
 
     let after = observe(&path);
-    assert!(after.private_partition_stamped, "the window's stamp stays");
-    assert_eq!(after.role, None, "no role may be committed");
-    assert_eq!(after.user_version, before.user_version);
     assert_eq!(
-        after.identity_rows.len(),
-        before.identity_rows.len() + 1,
-        "only the window's private stamp may be added: {:?}",
-        after.identity_rows
+        (&after.schema_rows, after.schema_cookie, after.user_version),
+        (
+            &window.schema_rows,
+            window.schema_cookie,
+            window.user_version
+        ),
+        "the refused open must commit no DDL and no version stamp"
     );
+    assert_eq!(
+        after.identity_rows, window.identity_rows,
+        "the refused open must leave the identity rows exactly as the window left them"
+    );
+    assert_eq!(after.role, None, "no role may be committed");
     assert_eq!(after.marker, None, "no marker after a refusal");
 }
 

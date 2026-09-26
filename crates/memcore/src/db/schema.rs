@@ -1243,6 +1243,10 @@ enum SchemaInitFunnel<'a> {
         /// SQLite names the `-wal` after the path, so a transaction committed
         /// after the path was replaced would be read back by the next opener
         /// of the path as part of the substitute file (tachi#1990).
+        ///
+        /// Known limit (pre-existing, not closed here): the check compares
+        /// pathname samples, not the handle SQLite opened; see the note on
+        /// `validate_physical_db_identity_across_open` in `store/open.rs`.
         path_binding: &'a dyn Fn() -> Result<(), MemoryError>,
     },
     /// An admitted in-memory private image
@@ -1401,6 +1405,8 @@ fn init_schema_with_label_mut_inner(
     test_hooks::pause_after_schema_stamp_before_commit(&tx);
     funnel.check_before_commit()?;
     tx.commit()?;
+    #[cfg(test)]
+    test_hooks::run_window_hook(test_hooks::Window::AfterSchemaCommit, current_db_path);
 
     if funnel.writes_filesystem_artifacts() {
         remember_migration_fingerprint(conn, current_db_path)?;
@@ -1572,8 +1578,8 @@ pub(crate) mod test_hooks {
 
     type WindowHook = Box<dyn FnOnce(&Path)>;
 
-    /// The two points in the preflight → `BEGIN IMMEDIATE` window a test can
-    /// stand another process in.
+    /// The points around the schema transaction a test can stand another
+    /// process in.
     #[derive(Clone, Copy)]
     pub(crate) enum Window {
         /// After every preflight gate, before the backup step decides.
@@ -1581,12 +1587,18 @@ pub(crate) mod test_hooks {
         /// After the backup step and the connection PRAGMAs, immediately
         /// before `BEGIN IMMEDIATE`.
         BeforeSchemaTransaction,
+        /// Immediately after the schema transaction's `COMMIT`, before the
+        /// migration marker, `try_load_sqlite_vec` and the store funnel's
+        /// post-init checks.
+        AfterSchemaCommit,
     }
 
     thread_local! {
         static BEFORE_BACKUP_DECISION: std::cell::RefCell<Option<WindowHook>> =
             const { std::cell::RefCell::new(None) };
         static BEFORE_SCHEMA_TRANSACTION: std::cell::RefCell<Option<WindowHook>> =
+            const { std::cell::RefCell::new(None) };
+        static AFTER_SCHEMA_COMMIT: std::cell::RefCell<Option<WindowHook>> =
             const { std::cell::RefCell::new(None) };
     }
 
@@ -1596,6 +1608,7 @@ pub(crate) mod test_hooks {
         match window {
             Window::BeforeBackupDecision => &BEFORE_BACKUP_DECISION,
             Window::BeforeSchemaTransaction => &BEFORE_SCHEMA_TRANSACTION,
+            Window::AfterSchemaCommit => &AFTER_SCHEMA_COMMIT,
         }
     }
 
@@ -1623,6 +1636,7 @@ pub(crate) mod test_hooks {
         for window in [
             Window::BeforeBackupDecision,
             Window::BeforeSchemaTransaction,
+            Window::AfterSchemaCommit,
         ] {
             slot(window).with(|slot| slot.borrow_mut().take());
         }

@@ -574,3 +574,60 @@ fn written_backup_of_another_version_does_not_cover_the_in_tx_migration() {
         "no migration, stamp or state write may remain"
     );
 }
+
+/// tachi#2002 review finding 2: the store funnel's post-COMMIT trigger
+/// inventory re-check. Another process drops a canonical trigger immediately
+/// after the schema transaction commits. The admission was valid, but the
+/// connection's state no longer is, so the open must refuse to return the
+/// handle, with the same error a sequential open of the damaged store gives.
+#[test]
+fn trigger_dropped_after_commit_is_refused_before_a_handle_is_returned() {
+    const TRIGGER: &str = "memory_edge_search_generation_after_update";
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = tmp.path().join("race-after-commit.db");
+    seed_current_store(&path);
+
+    let sequential_path = tmp.path().join("sequential-after-commit.db");
+    seed_current_store(&sequential_path);
+    Connection::open(&sequential_path)
+        .expect("damage")
+        .execute_batch(&format!("DROP TRIGGER {TRIGGER}"))
+        .expect("damage the store before the sequential open");
+    let sequential_err = crate::MemoryStore::open_with_label_and_context(
+        sequential_path.to_str().expect("utf8"),
+        "global",
+        &DbOpenContext::open_existing_deny(),
+    )
+    .err()
+    .expect("a sequential open must refuse a damaged current trigger inventory");
+
+    let fired = Rc::new(RefCell::new(false));
+    {
+        let fired = Rc::clone(&fired);
+        test_hooks::arm_window_hook(test_hooks::Window::AfterSchemaCommit, move |path| {
+            Connection::open(path)
+                .expect("damaging writer")
+                .execute_batch(&format!("DROP TRIGGER {TRIGGER}"))
+                .expect("damage the store right after the schema COMMIT");
+            *fired.borrow_mut() = true;
+        });
+    }
+    let result = crate::MemoryStore::open_with_label_and_context(
+        path.to_str().expect("utf8"),
+        "global",
+        &DbOpenContext::open_existing_deny(),
+    );
+    test_hooks::disarm_window_hooks();
+    assert!(
+        *fired.borrow(),
+        "the post-COMMIT window must have been reached"
+    );
+    let err = result
+        .err()
+        .expect("a trigger dropped after COMMIT must refuse the handle, not return it");
+    assert_eq!(
+        err.to_string(),
+        sequential_err.to_string(),
+        "the post-COMMIT refusal must be the sequential open's refusal"
+    );
+}
