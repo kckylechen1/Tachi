@@ -1444,8 +1444,10 @@ pub(crate) mod test_hooks {
         Ok(())
     }
 
+    type WindowHook = Box<dyn FnOnce(&Path)>;
+
     thread_local! {
-        static BEFORE_SCHEMA_TRANSACTION: std::cell::RefCell<Option<Box<dyn FnOnce(&Path)>>> =
+        static BEFORE_SCHEMA_TRANSACTION: std::cell::RefCell<Option<WindowHook>> =
             const { std::cell::RefCell::new(None) };
     }
 
