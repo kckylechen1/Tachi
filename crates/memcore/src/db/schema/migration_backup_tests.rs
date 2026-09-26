@@ -339,7 +339,10 @@ fn sibling_names(dir: &Path) -> std::collections::BTreeSet<String> {
 /// Every `hard_state` row verbatim (identity stamps, migration sentinels and
 /// the rest), plus `user_version` and the schema object inventory: the
 /// logical state a refused open must not change.
-fn logical_state(conn: &Connection) -> (i64, Vec<(String, String, String)>, Vec<(String, String)>) {
+/// `(user_version, hard_state rows, (type, name) schema inventory)`.
+type LogicalState = (i64, Vec<(String, String, String)>, Vec<(String, String)>);
+
+fn logical_state(conn: &Connection) -> LogicalState {
     let user_version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .expect("user_version");
