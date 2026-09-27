@@ -323,6 +323,136 @@ fn wiki_corpus_cli_parses_adopt_legacy_mode() {
     ));
 }
 
+/// `tachi wiki review` is preview-by-default and requires the full apply
+/// quad (flag + approver + expected revision + review digest) when it
+/// mutates. The flag wiring is enforced by clap itself, so parsing is the
+/// contract.
+#[test]
+fn wiki_review_cli_defaults_to_preview_and_requires_the_apply_quad() {
+    let preview = Cli::try_parse_from([
+        "tachi",
+        "wiki",
+        "review",
+        "--id",
+        "some-entry-id",
+        "--source-manifest",
+        "/tmp/wiki-sources.json",
+    ])
+    .expect("wiki review preview should parse");
+    assert!(matches!(
+        preview.command,
+        Some(Commands::Wiki {
+            action: WikiAction::Review {
+                id,
+                project,
+                source_manifest,
+                source_root: None,
+                apply: false,
+                approver: None,
+                expected_revision: None,
+                review_digest: None,
+            }
+        }) if id == "some-entry-id"
+            && project == "wiki"
+            && source_manifest == std::path::Path::new("/tmp/wiki-sources.json")
+    ));
+
+    let rooted = Cli::try_parse_from([
+        "tachi",
+        "wiki",
+        "review",
+        "--id",
+        "some-entry-id",
+        "--source-manifest",
+        "/tmp/wiki-sources.json",
+        "--source-root",
+        "/work/Sigil",
+    ])
+    .expect("wiki review with a source root should parse");
+    assert!(matches!(
+        rooted.command,
+        Some(Commands::Wiki {
+            action: WikiAction::Review {
+                ref source_root,
+                apply: false,
+                ..
+            }
+        }) if source_root.as_deref() == Some(std::path::Path::new("/work/Sigil"))
+    ));
+
+    let apply = Cli::try_parse_from([
+        "tachi",
+        "wiki",
+        "review",
+        "--id",
+        "some-entry-id",
+        "--source-manifest",
+        "/tmp/wiki-sources.json",
+        "--apply",
+        "--approver",
+        "ops-lead",
+        "--expected-revision",
+        "3",
+        "--review-digest",
+        &"a".repeat(64),
+    ])
+    .expect("wiki review apply with the full quad should parse");
+    assert!(matches!(
+        apply.command,
+        Some(Commands::Wiki {
+            action: WikiAction::Review {
+                apply: true,
+                ref approver,
+                ref expected_revision,
+                ref review_digest,
+                ..
+            }
+        }) if approver.as_deref() == Some("ops-lead")
+            && *expected_revision == Some(3)
+            && review_digest.as_deref() == Some(&"a".repeat(64)[..])
+    ));
+
+    // An apply without the digest (or any other missing quad member) is a
+    // parse error, not a runtime surprise.
+    let incomplete = Cli::try_parse_from([
+        "tachi",
+        "wiki",
+        "review",
+        "--id",
+        "some-entry-id",
+        "--source-manifest",
+        "/tmp/wiki-sources.json",
+        "--apply",
+        "--approver",
+        "ops-lead",
+        "--expected-revision",
+        "3",
+    ])
+    .expect_err("apply without --review-digest must fail to parse");
+    assert!(
+        incomplete.to_string().contains("review-digest"),
+        "the parse error must name the missing flag: {incomplete}"
+    );
+
+    // Preview invocations cannot smuggle apply-only flags.
+    let smuggled = Cli::try_parse_from([
+        "tachi",
+        "wiki",
+        "review",
+        "--id",
+        "some-entry-id",
+        "--source-manifest",
+        "/tmp/wiki-sources.json",
+        "--approver",
+        "ops-lead",
+    ])
+    .expect_err("--approver without --apply must fail to parse");
+    assert!(
+        smuggled.to_string().contains("apply"),
+        "the parse error must name --apply: {smuggled}"
+    );
+}
+
 #[test]
 fn recall_coverage_cli_requires_db_and_exposes_explicit_options() {
     let parsed = Cli::try_parse_from([

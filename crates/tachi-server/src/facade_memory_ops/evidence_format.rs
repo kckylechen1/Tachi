@@ -49,8 +49,16 @@ const SAVE_BASE_RECEIPT_KEYS: &[&str] = &[
     "scope_warning",
 ];
 /// Per-route identity fields — kept whole when present, never echoed input text.
-const SAVE_VARIANT_ROUTE_KEYS: &[&str] =
-    &["wiki_path", "note_file", "note_path", "continuity_event"];
+/// `read` is the wiki route's deterministic read-back locator
+/// (`action=get` + resolved project + id); keeping it whole through the
+/// compact receipt is what lets a caller act on the receipt alone.
+const SAVE_VARIANT_ROUTE_KEYS: &[&str] = &[
+    "wiki_path",
+    "note_file",
+    "note_path",
+    "continuity_event",
+    "read",
+];
 
 pub(crate) fn save_receipt_value(value: &Value) -> Value {
     let mut receipt = serde_json::Map::new();

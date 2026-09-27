@@ -149,7 +149,7 @@ pub(crate) async fn collect_tachi_search_sections(
     params: &TachiSearchParams,
 ) -> (Vec<(String, Value)>, bool, String) {
     let (sections, scope_remapped, scope, _) =
-        collect_tachi_search_sections_inner(server, params, None).await;
+        collect_tachi_search_sections_inner(server, params, None, false).await;
     (sections, scope_remapped, scope)
 }
 
@@ -163,18 +163,33 @@ pub(crate) async fn collect_tachi_search_sections_with_resources(
     String,
     Vec<rmcp::model::Resource>,
 ) {
+    collect_tachi_search_sections_detailed(server, params, bound_project, false).await
+}
+
+pub(crate) async fn collect_tachi_search_sections_detailed(
+    server: &MemoryServer,
+    params: &TachiSearchParams,
+    bound_project: Option<&str>,
+    include_metadata: bool,
+) -> (
+    Vec<(String, Value)>,
+    bool,
+    String,
+    Vec<rmcp::model::Resource>,
+) {
     let resource_project = bound_project
         .filter(|_| {
             crate::memory_resources::resource_issuance_allowed(server, params, bound_project)
         })
         .map(str::to_string);
-    collect_tachi_search_sections_inner(server, params, resource_project).await
+    collect_tachi_search_sections_inner(server, params, resource_project, include_metadata).await
 }
 
 async fn collect_tachi_search_sections_inner(
     server: &MemoryServer,
     params: &TachiSearchParams,
     resource_project: Option<String>,
+    include_metadata: bool,
 ) -> (
     Vec<(String, Value)>,
     bool,
@@ -216,7 +231,7 @@ async fn collect_tachi_search_sections_inner(
             error_context: params.error_context.clone(),
             enable_rerank: params.enable_rerank,
             as_of: params.as_of.clone(),
-            include_metadata: false,
+            include_metadata,
             // tachi#1201 k3: search_memory now defaults to markdown when
             // `format` is omitted; `parse_memory_rows` below parses the body
             // as JSON (and silently degrades to empty on failure), so this

@@ -1,6 +1,33 @@
 use super::*;
 
 #[tokio::test]
+async fn recall_simulate_top_three_uses_only_cases_requested_at_least_three() {
+    let server = make_server();
+    server
+        .with_global_store(|store| {
+            let mut entry = make_entry("cutoff-target");
+            entry.text = "CUTOFF_RECALL_NEEDLE_20260927 archive recovery".to_string();
+            store.upsert(&entry).map_err(|error| error.to_string())
+        })
+        .expect("seed cutoff target");
+    let mut params = tachi_tune_params("recall_simulate");
+    params.format = Some("json".to_string());
+    params.scope = Some("memory".to_string());
+    params.metadata = Some(json!({"cases": [
+        {"query": "CUTOFF_RECALL_NEEDLE_20260927", "expected_id": "cutoff-target", "top_k": 1},
+        {"query": "CUTOFF_RECALL_NEEDLE_20260927", "expected_id": "cutoff-target", "top_k": 3},
+        {"query": "CUTOFF_RECALL_NEEDLE_20260927", "expected_id": "missing-target", "top_k": 3}
+    ]}));
+    let body = handle_tachi_tune_for_test(&server, params)
+        .await
+        .expect("replay");
+    let report: Value = serde_json::from_str(&body).expect("JSON");
+    assert_eq!(report["metrics"]["recall_at_1"], json!(2.0 / 3.0));
+    assert_eq!(report["metrics"]["recall_at_3_case_count"], json!(2));
+    assert_eq!(report["metrics"]["recall_at_3"], json!(0.5));
+}
+
+#[tokio::test]
 async fn tachi_tune_recall_simulate_reports_hit_metrics_without_access_mutation() {
     let server = make_server();
     server
@@ -8,6 +35,7 @@ async fn tachi_tune_recall_simulate_reports_hit_metrics_without_access_mutation(
             let mut alpha = make_entry("recall-sim-alpha");
             alpha.path = "/scratch/tachi/recall-sim-alpha".to_string();
             alpha.summary = "Recall simulate alpha".to_string();
+            alpha.source = "manual".to_string();
             alpha.text =
                 "RECALL_SIM_ALPHA_NEEDLE_20260626 clean-cli dry-run force delete".to_string();
             alpha.keywords = vec!["recall-sim".to_string(), "clean-cli".to_string()];
@@ -53,6 +81,21 @@ async fn tachi_tune_recall_simulate_reports_hit_metrics_without_access_mutation(
     assert_eq!(parsed["metrics"]["miss_count"], json!(1));
     assert_eq!(parsed["metrics"]["recall_at_k"], json!(0.5));
     assert_eq!(parsed["metrics"]["mrr"], json!(0.5));
+    let returned = &parsed["cases"][0]["returned"][0];
+    assert!(
+        returned["scores"]["fts"].as_f64().is_some(),
+        "replay must retain actual hybrid score components"
+    );
+    assert_eq!(returned["scores"]["final"], returned["relevance"]);
+    assert_eq!(returned["source"], json!("manual"));
+    assert_eq!(parsed["metrics"]["recall_at_1"], json!(0.5));
+    assert!(
+        parsed["metrics"]["recall_at_3"].is_null(),
+        "top-1 replay cannot establish top-3 recall"
+    );
+    assert_eq!(parsed["metrics"]["recall_at_3_case_count"], json!(0));
+    assert_eq!(parsed["cases"][0]["rerank"]["requested_top_k"], json!(1));
+    assert!(parsed["cases"][0]["rerank"]["top_three_score_gap"].is_null());
     assert_eq!(parsed["cases"][0]["hit"], json!(true));
     assert_eq!(parsed["cases"][0]["rank"], json!(1));
     assert_eq!(

@@ -292,11 +292,34 @@ pub struct EffectiveKnowledgeArtifactV1 {
     pub validation_issues: Vec<String>,
 }
 
+/// `WikiReviewReceiptV1`. The first three fields are the original wire
+/// shape every legacy reader parses; the remaining optional fields carry
+/// the operator-approval CLI's bound evidence (see `wiki_ops::review`).
+/// They are `Option` + `skip_serializing_if` so a legacy receipt keeps
+/// its exact field shape (no new keys appear on the wire) and every
+/// legacy reader keeps compiling and matching, while an operator-approved
+/// receipt is self-describing: the digest that bound the approved bytes,
+/// the derived source-bundle hash, the revision the approval was
+/// previewed against, and the store identity it was approved in.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WikiReviewReceiptV1 {
     pub approver: String,
     pub decision: String,
     pub decided_at: String,
+    /// sha256 over the canonical review-digest binding (identity + entry
+    /// state + verified source bundle) computed by the approval CLI.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_digest: Option<String>,
+    /// Bundle hash derived from verified ref+snapshot digest records —
+    /// never a caller-supplied hash.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_bundle_hash: Option<String>,
+    /// Entry revision the approval was previewed and applied against.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_revision: Option<i64>,
+    /// Target library identity (e.g. `named:wiki`) the approval bound.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub store: Option<String>,
 }
 
 /// Canon doc §7.1's canonical typed evidence-ref write shape. Legacy
@@ -886,6 +909,63 @@ mod tests {
         let back: KnowledgeArtifactV1 = serde_json::from_str(&wire).expect("deserialize");
         assert_eq!(back, artifact);
         assert!(wire.contains("\"lifecycle\":\"active\""));
+    }
+
+    /// A legacy three-field receipt keeps its exact field shape: the
+    /// operator-approval bound fields are optional, so old writers and
+    /// readers see no new keys (serde field-order/key-set compatibility;
+    /// not a raw-byte transport guarantee).
+    #[test]
+    fn legacy_review_receipt_round_trips_without_bound_fields() {
+        let legacy = r#"{
+            "approver": "owner",
+            "decision": "approved",
+            "decided_at": "2026-07-31T00:00:00Z"
+        }"#;
+        let receipt: WikiReviewReceiptV1 =
+            serde_json::from_str(legacy).expect("legacy receipt parses");
+        assert_eq!(receipt.approver, "owner");
+        assert_eq!(receipt.decision, "approved");
+        assert!(receipt.review_digest.is_none());
+        assert!(receipt.source_bundle_hash.is_none());
+        assert!(receipt.expected_revision.is_none());
+        assert!(receipt.store.is_none());
+        let wire = serde_json::to_string(&receipt).expect("serialize");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&wire)
+                .expect("wire json")
+                .as_object()
+                .expect("object")
+                .len(),
+            3,
+            "a legacy receipt must not grow new keys on the wire: {wire}"
+        );
+
+        // A bound operator receipt parses back with every binding intact.
+        let bound = WikiReviewReceiptV1 {
+            approver: "ops-lead".to_string(),
+            decision: "approved".to_string(),
+            decided_at: "2026-09-27T00:00:00Z".to_string(),
+            review_digest: Some("a".repeat(64)),
+            source_bundle_hash: Some("b".repeat(64)),
+            expected_revision: Some(3),
+            store: Some("named:wiki".to_string()),
+        };
+        let wire = serde_json::to_string(&bound).expect("serialize bound receipt");
+        let back: WikiReviewReceiptV1 = serde_json::from_str(&wire).expect("parse bound receipt");
+        assert_eq!(back, bound);
+
+        // The metadata reader accepts the legacy shape unchanged.
+        let metadata = serde_json::json!({
+            "review_receipt": {
+                "approver": "owner",
+                "decision": "approved",
+                "decided_at": "2026-07-31T00:00:00Z"
+            }
+        });
+        let derived = derive_wiki_review_receipt(&metadata).expect("derived legacy receipt");
+        assert_eq!(derived.approver, "owner");
+        assert!(derived.review_digest.is_none());
     }
 
     #[test]

@@ -180,6 +180,7 @@ fn build_capture_entry(query: &str, expected_id: &str, top_k: usize) -> MemoryEn
                 "slice": "auto_capture",
                 "source": "record_access",
                 "signal": "recalled_and_used",
+                "label_kind": "weak",
             },
             "auto_captured": true,
             // Not auto_synthesized: personal recall cases must remain loadable by

@@ -10,7 +10,7 @@ use super::types::RecallSimCase;
 use crate::facade_memory_ops::{json_string, wants_json};
 use crate::memory_search_ops::{
     apply_search_rerank_policy, expand_search_params_for_rerank, normalize_json_relevance,
-    search_memory_rows_with_recall_config, SearchRerankPolicy,
+    search_memory_rows_with_recall_config, search_rerank_diagnostics, SearchRerankPolicy,
 };
 use crate::tool_params::*;
 use crate::MemoryServer;
@@ -83,6 +83,9 @@ async fn run_variant(
 ) -> Result<Value, String> {
     let mut reports = Vec::with_capacity(cases.len());
     let mut hit_count = 0usize;
+    let mut hit_at_1 = 0usize;
+    let mut hit_at_3 = 0usize;
+    let mut cases_at_3 = 0usize;
     let mut reciprocal_sum = 0.0f64;
     let mut rerank_policy_counts: BTreeMap<&'static str, usize> = BTreeMap::new();
     let mut flip_report = FlipReport::default();
@@ -116,9 +119,9 @@ async fn run_variant(
             recall_config,
         )
         .await;
-        let (rows, rerank_policy, candidate_count, error) = match rows_result {
+        let (rows, rerank_policy, mut diagnostics, error) = match rows_result {
             Ok(rows) => {
-                let candidate_count = rows.len();
+                let diagnostics = search_rerank_diagnostics(&rows, top_k);
                 let (mut rows, policy) = apply_search_rerank_policy(
                     server,
                     &case.query,
@@ -128,16 +131,30 @@ async fn run_variant(
                 )
                 .await;
                 normalize_json_relevance(&mut rows);
-                (rows, Some(policy), candidate_count, None)
+                (rows, Some(policy), diagnostics, None)
             }
-            Err(err) => (Vec::new(), None, 0, Some(err)),
+            Err(err) => (
+                Vec::new(),
+                None,
+                json!({"candidate_count": 0, "requested_top_k": top_k, "top_three_score_gap": null}),
+                Some(err),
+            ),
         };
+        diagnostics["enabled"] = json!(params.enable_rerank);
+        diagnostics["policy"] = json!(rerank_policy
+            .map(SearchRerankPolicy::as_str)
+            .unwrap_or("not_run"));
         if let Some(policy) = rerank_policy {
             *rerank_policy_counts.entry(policy.as_str()).or_insert(0) += 1;
         }
         let returned_ids = returned_ids(&rows);
         let rank = first_expected_rank(&returned_ids, &expected_ids);
         let reciprocal_rank = rank.map(|rank| 1.0 / rank as f64).unwrap_or(0.0);
+        hit_at_1 += usize::from(rank == Some(1));
+        if top_k >= 3 {
+            cases_at_3 += 1;
+            hit_at_3 += usize::from(rank.is_some_and(|rank| rank <= 3));
+        }
         if rank.is_some() {
             hit_count += 1;
             reciprocal_sum += reciprocal_rank;
@@ -158,13 +175,7 @@ async fn run_variant(
             "returned_ids": returned_ids,
             "returned": rows.iter().map(compact_row).collect::<Vec<_>>(),
             "baseline": baseline.to_json(),
-            "rerank": {
-                "enabled": params.enable_rerank,
-                "policy": rerank_policy
-                    .map(SearchRerankPolicy::as_str)
-                    .unwrap_or("not_run"),
-                "candidate_count": candidate_count,
-            },
+            "rerank": diagnostics,
             "error": error,
         }));
     }
@@ -189,6 +200,11 @@ async fn run_variant(
             "hit_count": hit_count,
             "miss_count": case_count.saturating_sub(hit_count),
             "recall_at_k": recall_at_k,
+            "hit_at_1": hit_at_1,
+            "hit_at_3": hit_at_3,
+            "recall_at_1": hit_at_1 as f64 / case_count.max(1) as f64,
+            "recall_at_3": (cases_at_3 > 0).then(|| hit_at_3 as f64 / cases_at_3 as f64),
+            "recall_at_3_case_count": cases_at_3,
             "mrr": mrr,
         },
         "rerank": {
@@ -405,8 +421,9 @@ fn compact_row(row: &Value) -> Value {
         "path": row.get("path").cloned().unwrap_or(Value::Null),
         "summary": row.get("summary").cloned().unwrap_or(Value::Null),
         "db": row.get("db").cloned().unwrap_or(Value::Null),
+        "source": row.get("source").cloned().unwrap_or(Value::Null),
         "relevance": row.get("relevance").cloned().unwrap_or(Value::Null),
-        "scores": row.get("scores").cloned().unwrap_or(Value::Null),
+        "scores": row.get("score").cloned().unwrap_or(Value::Null),
         "exact_token_match": row.get("exact_token_match").cloned().unwrap_or(Value::Null),
         "match_type": row.get("match_type").cloned().unwrap_or(Value::Null),
         "rerank_policy": row.get("rerank_policy").cloned().unwrap_or(Value::Null),

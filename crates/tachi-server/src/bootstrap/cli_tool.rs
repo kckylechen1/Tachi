@@ -312,6 +312,64 @@ pub(super) async fn run_cli_command(
                 }
                 Ok(())
             }
+            tachi_bootstrap::cli::WikiAction::Review {
+                id,
+                project,
+                source_manifest,
+                source_root,
+                apply,
+                approver,
+                expected_revision,
+                review_digest,
+            } => {
+                if apply {
+                    // clap's `requires` wiring already refuses an
+                    // incomplete apply invocation; the explicit checks keep
+                    // library callers of the same entry point honest.
+                    let approver = approver
+                        .filter(|value| !value.trim().is_empty())
+                        .ok_or_else(|| {
+                            std::io::Error::other("wiki review apply requires --approver")
+                        })?;
+                    let expected_revision = expected_revision.ok_or_else(|| {
+                        std::io::Error::other("wiki review apply requires --expected-revision")
+                    })?;
+                    let review_digest = review_digest.ok_or_else(|| {
+                        std::io::Error::other("wiki review apply requires --review-digest")
+                    })?;
+                    let server = MemoryServer::new_with_migration_authority(
+                        db_path.clone(),
+                        project_db_path.cloned(),
+                        schema_migration.clone(),
+                    )?;
+                    let receipt = crate::wiki_ops::apply_wiki_review(
+                        &server,
+                        &crate::wiki_ops::WikiReviewApply {
+                            project,
+                            id,
+                            approver,
+                            expected_revision,
+                            expected_review_digest: review_digest,
+                            manifest_path: source_manifest,
+                            source_root,
+                        },
+                    )
+                    .map_err(std::io::Error::other)?;
+                    print_pretty_json(&receipt)
+                } else {
+                    // Read-only preview: resolves the named Wiki store
+                    // directly and opens it read-only. No MemoryServer is
+                    // constructed, so no DB is created or migrated.
+                    let preview = crate::wiki_ops::preview_wiki_review(
+                        &project,
+                        &id,
+                        &source_manifest,
+                        source_root.as_deref(),
+                    )
+                    .map_err(std::io::Error::other)?;
+                    print_pretty_json(&preview)
+                }
+            }
         },
         Commands::Remember {
             text,
