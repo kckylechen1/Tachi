@@ -15,10 +15,12 @@ use memcore::vault::health::{
 };
 
 use crate::llm::catalog_import::{env_deployment_id, DeploymentAttribution};
+use crate::llm::chat_lanes::persist_llm_usage_blocking;
 use crate::llm::provider_health::{
-    success_snapshots_merge, ChatLaneConfig, ProviderRuntimeConfig, SelectedProviderSecret,
-    RETAINED_STORE_TTL,
+    install_retained_post_commit_hook_for_tests, success_snapshots_merge, ChatLaneConfig,
+    ProviderRuntimeConfig, SelectedProviderSecret, RETAINED_STORE_TTL,
 };
+use memcore::store::llm_usage::LlmUsageEvent;
 
 const EXTRACT_ENDPOINT: &str = "https://api.siliconflow.cn/v1/chat/completions";
 const EXTRACT_MODEL: &str = "Qwen/Qwen3.5-27B";
@@ -452,6 +454,173 @@ fn the_retained_handle_is_dropped_on_schema_change_ttl_failure_and_path_replacem
         replaced.status, HEALTH_RATE_LIMITED,
         "the row lands in the new file"
     );
+}
+
+/// Replace the database at `live` with a snapshot of itself that already
+/// includes every committed transaction (so a just-committed row is present
+/// in the replacement), as a backup or snapshot taken right after that
+/// commit would be. The installed file is a new physical identity at the
+/// same path, which is exactly what the post-write check must notice.
+fn replace_path_with_snapshot_of_the_committed_db(live: &std::path::Path) {
+    use rusqlite::backup::Backup;
+
+    let snapshot_dir = tempfile::tempdir().expect("snapshot dir");
+    let snapshot = snapshot_dir.path().join("committed-snapshot.db");
+    {
+        let source = rusqlite::Connection::open(live).expect("peer open of the committed db");
+        let mut target = rusqlite::Connection::open(&snapshot).expect("snapshot target db");
+        let backup = Backup::new(&source, &mut target).expect("backup handle");
+        backup
+            .run_to_completion(
+                5,
+                Duration::from_millis(1),
+                None::<fn(rusqlite::backup::Progress)>,
+            )
+            .expect("snapshot the committed database");
+    }
+    for suffix in ["", "-wal", "-shm"] {
+        let mut sidecar = live.as_os_str().to_os_string();
+        sidecar.push(suffix);
+        let sidecar = std::path::PathBuf::from(sidecar);
+        if sidecar.exists() {
+            std::fs::remove_file(&sidecar).expect("remove the live db file set");
+        }
+    }
+    std::fs::rename(&snapshot, live).expect("install the snapshot at the live path");
+}
+
+#[test]
+fn a_deployment_event_committed_before_its_path_is_replaced_is_not_replayed() {
+    const KEY_ENV: &str = "TACHI_TEST_ONLY_H1_SNAPSHOT_DEPLOY_API_KEY";
+    let _lock = crate::test_support::global_test_lock().lock();
+    let _persist = EnvRestore::set("TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST", "0");
+    let temp = tempfile::tempdir().expect("temp db");
+    let db_path = temp.path().join("vault.db");
+    let client = client_with_catalog(&db_path, KEY_ENV);
+    let writer = Arc::clone(&client.provider_persist_writer);
+    let deployment_id = env_deployment_id("extract");
+    let events_before = deployment_event_count(&db_path, &deployment_id);
+
+    client.note_deployment_http_status(extract_attribution(), 200, None);
+    assert_eq!(
+        writer.counts().full_opens,
+        1,
+        "the first outcome pays the full open and admits the handle"
+    );
+    if !writer.has_retained_store() {
+        // No stable file identity on this target: every write keeps its
+        // own open, so the retained-write window below cannot exist.
+        return;
+    }
+
+    // While the next outcome's row is between its commit and the writer's
+    // post-write identity check, replace the path with a snapshot that
+    // already includes that commit.
+    let replaced_path = db_path.clone();
+    let _hook = install_retained_post_commit_hook_for_tests(&db_path, move || {
+        replace_path_with_snapshot_of_the_committed_db(&replaced_path);
+    });
+
+    client.note_deployment_http_status(extract_attribution(), 503, None);
+
+    assert_eq!(
+        deployment_event_count(&db_path, &deployment_id) - events_before,
+        2,
+        "one 200 and one 503: the snapshot already includes the committed 503, so replaying the write would duplicate the event"
+    );
+    let store = memcore::MemoryStore::open(db_path.to_str().unwrap()).expect("open the snapshot");
+    let deployment = get_model_deployment_health(store.connection(), &deployment_id)
+        .expect("read deployment")
+        .expect("deployment row");
+    assert_eq!(
+        deployment.error_count, 1,
+        "the single 503 advances the deployment once, not once per replay"
+    );
+
+    // The handle addressed the detached file and is gone: the next write
+    // re-opens whatever the path names now and lands there.
+    client.note_deployment_http_status(extract_attribution(), 200, None);
+    let counts = writer.counts();
+    assert_eq!(
+        counts.full_opens, 2,
+        "the write after the replacement re-opens the new identity: {counts:?}"
+    );
+    assert!(writer.has_retained_store(), "the new handle is admitted");
+    assert_eq!(
+        deployment_event_count(&db_path, &deployment_id) - events_before,
+        3
+    );
+}
+
+#[test]
+fn an_llm_usage_row_committed_before_its_path_is_replaced_is_not_replayed() {
+    let _lock = crate::test_support::global_test_lock().lock();
+    let _persist = EnvRestore::set("TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST", "0");
+    let temp = tempfile::tempdir().expect("temp db");
+    let db_path = temp.path().join("vault.db");
+    init_vault_db(&db_path);
+    let client = LlmClient::new_with_vault_db(Some(&db_path)).expect("client");
+    let writer = Arc::clone(&client.provider_persist_writer);
+    let usage_rows = || -> i64 {
+        rusqlite::Connection::open(&db_path)
+            .expect("open db")
+            .query_row("SELECT COUNT(*) FROM llm_usage", [], |row| row.get(0))
+            .expect("count usage rows")
+    };
+    let usage_event = |second: i64| LlmUsageEvent {
+        timestamp: format!("2026-09-27T00:00:{second:02}.000Z"),
+        lane: "extract".to_string(),
+        model: EXTRACT_MODEL.to_string(),
+        provider_host: "api.siliconflow.cn".to_string(),
+        provider_logical_name: "TACHI_TEST_ONLY_H1_SNAPSHOT_USAGE".to_string(),
+        provider_key_id: "TACHI_TEST_ONLY_H1_SNAPSHOT_USAGE_1".to_string(),
+        prompt_tokens: Some(10 + second),
+        completion_tokens: Some(second),
+        total_tokens: Some(10 + 2 * second),
+        max_tokens: 300,
+        request_chars: 512,
+        response_chars: 128,
+        duration_ms: second,
+    };
+    let persist_usage = |second: i64| {
+        persist_llm_usage_blocking(
+            &writer,
+            db_path.clone(),
+            client.vault_db_migration.clone(),
+            usage_event(second),
+        )
+    };
+
+    persist_usage(0).expect("the first usage row pays the full open");
+    assert_eq!(writer.counts().full_opens, 1);
+    if !writer.has_retained_store() {
+        // No stable file identity on this target: every write keeps its
+        // own open, so the retained-write window below cannot exist.
+        return;
+    }
+
+    let replaced_path = db_path.clone();
+    let _hook = install_retained_post_commit_hook_for_tests(&db_path, move || {
+        replace_path_with_snapshot_of_the_committed_db(&replaced_path);
+    });
+
+    persist_usage(1).expect("the committed usage row is reported as written");
+    assert_eq!(
+        usage_rows(),
+        2,
+        "the snapshot already includes the committed row; replaying the insert would duplicate the ledger entry"
+    );
+
+    // The handle addressed the detached file and is gone: the next usage
+    // write re-opens the new identity and lands there.
+    persist_usage(2).expect("the next usage row re-opens the new identity");
+    assert_eq!(
+        writer.counts().full_opens,
+        2,
+        "the write after the replacement re-opens the new identity"
+    );
+    assert!(writer.has_retained_store(), "the new handle is admitted");
+    assert_eq!(usage_rows(), 3);
 }
 
 #[test]

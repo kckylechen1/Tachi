@@ -24,8 +24,13 @@
 //!   forces a full open that re-validates the schema and trigger inventory.
 //!
 //! The identity is checked again after the write. If the path was replaced
-//! meanwhile, the handle is dropped and the write is repeated through a fresh
-//! open, so the row lands in the file readers of that path see.
+//! meanwhile, the handle is dropped — but the committed write is never
+//! replayed against whatever the path names then. The deployment and usage
+//! rows this writer carries are append-only events with no idempotency key,
+//! and a replacement that already includes the commit (a snapshot or backup
+//! taken after it) would record the row twice. The write's value is
+//! returned as committed, a diagnostic notes that the path identity changed
+//! under it, and the next write opens the new identity afresh.
 //!
 //! Any failed write drops the handle; the next write opens afresh. Opens use
 //! the caller's own context and busy budget, exactly as before, and a handle is
@@ -104,6 +109,65 @@ fn schema_version(store: &memcore::MemoryStore) -> Option<i64> {
         .connection()
         .query_row("PRAGMA schema_version", [], |row| row.get(0))
         .ok()
+}
+
+#[cfg(test)]
+struct RetainedPostCommitHook {
+    db_path: std::path::PathBuf,
+    hook: Box<dyn FnOnce() + Send + 'static>,
+}
+
+#[cfg(test)]
+static RETAINED_POST_COMMIT_HOOK: Mutex<Option<RetainedPostCommitHook>> = Mutex::new(None);
+
+/// Test seam: run `hook` between the commit of the next retained write on
+/// `db_path` and the post-write identity check that follows it, so a test
+/// can replace the path in exactly that window. Fires once; dropping the
+/// guard uninstalls a hook that never fired. The hook runs while the
+/// writer's handle lock is held, so it must not write through this writer.
+#[cfg(test)]
+#[doc(hidden)]
+pub(in crate::llm) struct RetainedPostCommitHookGuard;
+
+#[cfg(test)]
+impl Drop for RetainedPostCommitHookGuard {
+    fn drop(&mut self) {
+        *RETAINED_POST_COMMIT_HOOK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    }
+}
+
+#[cfg(test)]
+pub(in crate::llm) fn install_retained_post_commit_hook_for_tests(
+    db_path: &Path,
+    hook: impl FnOnce() + Send + 'static,
+) -> RetainedPostCommitHookGuard {
+    let mut slot = RETAINED_POST_COMMIT_HOOK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    assert!(
+        slot.is_none(),
+        "retained post-commit hook already installed"
+    );
+    *slot = Some(RetainedPostCommitHook {
+        db_path: db_path.to_path_buf(),
+        hook: Box::new(hook),
+    });
+    RetainedPostCommitHookGuard
+}
+
+#[cfg(test)]
+fn take_retained_post_commit_hook_for(
+    db_path: &Path,
+) -> Option<Box<dyn FnOnce() + Send + 'static>> {
+    let mut slot = RETAINED_POST_COMMIT_HOOK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    match slot.as_ref() {
+        Some(candidate) if candidate.db_path == db_path => slot.take().map(|taken| taken.hook),
+        _ => None,
+    }
 }
 
 /// How often each path was taken. Test and measurement surface only; nothing
@@ -216,6 +280,10 @@ impl ProviderPersistWriter {
             if retained.still_addresses(db_path, Instant::now()) {
                 // A failed write returns here and drops the handle.
                 let value = write_retained(&retained.store)?;
+                #[cfg(test)]
+                if let Some(hook) = take_retained_post_commit_hook_for(db_path) {
+                    hook();
+                }
                 if retained
                     .store
                     .verify_opened_physical_db_identity(db_path)
@@ -229,9 +297,23 @@ impl ProviderPersistWriter {
                     }
                     return Ok(value);
                 }
-                // The path was replaced during the write: the row went to a
-                // detached file. Drop the handle and write again through a
-                // fresh open of whatever the path names now.
+                // The path was replaced during the write, so this handle
+                // addresses a detached file. The write itself did commit
+                // (`write_retained` returned Ok), and the deployment and
+                // usage rows this writer carries are append-only events
+                // with no idempotency key: replaying against whatever the
+                // path names now would record the row twice whenever the
+                // replacement already includes this commit (a snapshot or
+                // backup taken after it). Keep the committed value, drop
+                // the handle, and let the next write open the new identity
+                // afresh. Which file readers of the path see is uncertain,
+                // never duplicated.
+                self.retained_writes.fetch_add(1, Ordering::Relaxed);
+                tracing::warn!(
+                    "[provider] retained write committed, but the vault path was replaced during it ({}); not replaying against the replacement: the active target is uncertain",
+                    db_path.display()
+                );
+                return Ok(value);
             }
         }
         self.full_opens.fetch_add(1, Ordering::Relaxed);

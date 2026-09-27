@@ -1135,7 +1135,9 @@ fn redact_provider_response(resp_text: &str) -> String {
 
 /// One usage row per call, never coalesced. The insert reuses the client's
 /// retained vault handle when it is still valid (audit H1).
-fn persist_llm_usage_blocking(
+// `pub(in crate::llm)` so the writer tests can drive the exact production
+// usage-persist boundary (the retained-handle window it runs through).
+pub(in crate::llm) fn persist_llm_usage_blocking(
     writer: &crate::llm::ProviderPersistWriter,
     db_path: std::path::PathBuf,
     migration: memcore::MigrationAuthority,
