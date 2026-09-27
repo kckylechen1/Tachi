@@ -403,7 +403,7 @@ async fn successful_dispatch_seeds_status_and_kanban_before_plan_completes() {
 ///      `plan_review_status == "pending_review"` -> `TASK_STATE_INPUT_REQUIRED`
 ///      mapping).
 /// `TASK_STATE_INPUT_REQUIRED` (unlike the old `PENDING_REVIEW`) is also in
-/// `kanban::KANBAN_DISPATCH_NON_TERMINAL_STATES`, so an abandoned row is
+/// `KANBAN_DISPATCH_NON_TERMINAL_STATES` (`memcore/src/db/operator_maintenance.rs`), so an abandoned row is
 /// reapable by `gc_expired_kanban_cards` instead of pinned forever — this
 /// test only asserts the vocabulary is consistent; GC aging itself is
 /// covered at the `kanban::gc` unit level, not re-driven end-to-end here.

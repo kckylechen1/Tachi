@@ -274,6 +274,7 @@ pub(crate) async fn call_daemon_tool_raw_with_profile(
         profile,
         None,
         ProxyIdentityForward::AutoEnv,
+        None,
     )
     .await
     .0
@@ -285,6 +286,11 @@ pub(crate) async fn call_daemon_tool_raw_with_profile(
 /// widen beyond what discovery already showed for this connection. The client
 /// label is attribution only and is never retained by the stdio protocol
 /// session.
+///
+/// `rate_limit_session` is the stdio proxy's per-connection
+/// `X-Tachi-Rate-Limit-Session` key (audit C1). It keeps every short-lived
+/// daemon session this connection opens in one burst/RPM bucket, and carries
+/// no identity or authority.
 pub(crate) async fn call_daemon_tool_raw_with_profile_and_identity(
     info: &DaemonInfo,
     params: CallToolRequestParams,
@@ -292,6 +298,7 @@ pub(crate) async fn call_daemon_tool_raw_with_profile_and_identity(
     profile: Option<tachi_hub::ToolProfile>,
     proxy_client: Option<&str>,
     identity: ProxyIdentityForward,
+    rate_limit_session: Option<&str>,
 ) -> Result<rmcp::model::CallToolResult, DaemonCallError> {
     call_daemon_tool_raw_with_phases_and_profile(
         info,
@@ -300,6 +307,7 @@ pub(crate) async fn call_daemon_tool_raw_with_profile_and_identity(
         profile,
         proxy_client,
         identity,
+        rate_limit_session,
     )
     .await
     .0
@@ -419,6 +427,7 @@ pub(crate) async fn call_daemon_tool_raw_with_phases(
         profile,
         None,
         ProxyIdentityForward::AutoEnv,
+        None,
     )
     .await
 }
@@ -430,6 +439,7 @@ async fn call_daemon_tool_raw_with_phases_and_profile(
     profile: Option<tachi_hub::ToolProfile>,
     proxy_client: Option<&str>,
     identity: ProxyIdentityForward,
+    rate_limit_session: Option<&str>,
 ) -> (
     Result<rmcp::model::CallToolResult, DaemonCallError>,
     DaemonCallPhaseTiming,
@@ -574,6 +584,21 @@ async fn call_daemon_tool_raw_with_phases_and_profile(
                     );
                 }
             }
+        }
+    }
+    // Audit C1: the proxy mints one bucket key per connection and it rides
+    // every call's headers (including the per-call initialize), so all the
+    // short-lived daemon sessions of one connection share burst/RPM windows.
+    // A key that fails the shared shape check is simply not sent; it only
+    // selects a rate-limit bucket, so omitting it never fails the call.
+    if let Some(key) =
+        rate_limit_session.filter(|key| crate::session_identity::valid_rate_limit_session_key(key))
+    {
+        if let Ok(value) = HeaderValue::from_str(key) {
+            headers.insert(
+                HeaderName::from_static(crate::session_identity::HEADER_RATE_LIMIT_SESSION),
+                value,
+            );
         }
     }
     if !headers.is_empty() {

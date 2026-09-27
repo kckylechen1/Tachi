@@ -24,7 +24,6 @@ fn cli_tool_allows_read_fallback(tool_name: &str) -> bool {
             | "list_memories"
             | "get_memory"
             | "tachi_search"
-            | "wiki_search"
             | "tachi_wiki_search"
             | "vault_status"
             | "vault_list"
@@ -1205,7 +1204,6 @@ mod tests {
             "list_memories",
             "get_memory",
             "tachi_search",
-            "wiki_search",
             "tachi_wiki_search",
             "vault_status",
             "vault_list",

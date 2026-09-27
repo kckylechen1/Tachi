@@ -232,24 +232,14 @@ fn reconcile_worker_targets(
         if map.contains_key(&path) {
             continue;
         }
-        let metrics = Arc::new(WorkerMetrics::default());
         let cancel = cancel_root.child_token();
-        let task_metrics = metrics.clone();
         let task_cancel = cancel.clone();
         let task_path = path.clone();
         let task_label = label.clone();
         let task_route = route.clone();
         let task_tx = foundry_tx.clone();
         let join = tokio::spawn(async move {
-            run_db_worker(
-                task_path,
-                task_label,
-                task_route,
-                task_tx,
-                task_metrics,
-                task_cancel,
-            )
-            .await;
+            run_db_worker(task_path, task_label, task_route, task_tx, task_cancel).await;
         });
         map.insert(path.clone(), WorkerHandle { cancel, join });
     }

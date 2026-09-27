@@ -58,6 +58,10 @@ chmod +x \"$CARGO_TARGET_DIR/release/tachi\"
     def run_install(self, content: str) -> subprocess.CompletedProcess[str]:
         env = os.environ | {
             "HOME": str(self.home),
+            # Pin the build output into the temp root: an inherited
+            # CARGO_TARGET_DIR (e.g. a CI runner's shared target) must never
+            # receive the fake release binary.
+            "CARGO_TARGET_DIR": str(self.root / "target"),
             "PATH": f"{self.fake_bin}:{os.environ['PATH']}",
             "FAKE_CARGO_ARGS": str(self.root / "cargo-args"),
             "FAKE_BINARY_CONTENT": content,

@@ -13,6 +13,7 @@ fn modern_ops_proxy_refreshes_rotated_capability_at_same_url_for_list_and_call()
                 adapter_started_at: chrono::Utc::now(),
                 tool_profile: Some(tachi_hub::ToolProfile::operate()),
                 resolved_agent_identity: Default::default(),
+                rate_limit_session: ProxyRateLimitSession::mint(),
                 daemon: std::sync::Arc::new(std::sync::RwLock::new(daemon.clone())),
                 app_home: temp.path().to_path_buf(),
                 global_db_path: global.clone(),

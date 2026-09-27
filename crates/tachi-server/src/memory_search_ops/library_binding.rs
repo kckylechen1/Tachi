@@ -2,7 +2,7 @@
 //!
 //! Agents frequently conclude "there is no memory" when the process is
 //! global-only (`--no-project-db`) while a workspace repo still has a real
-//! `<repo>/.tachi/memory.db`. This module reports **which libraries a call
+//! `<repo>/.tachi/tachi-memory.db`. This module reports **which libraries a call
 //! actually addresses** and emits loud, stable warnings when that posture is
 //! unsafe for coding sessions.
 //!
@@ -17,7 +17,7 @@ use serde_json::{json, Value};
 
 /// Stable warning id when the process is single-DB while a workspace local DB exists.
 pub(crate) const WARN_SINGLE_DB_WITH_WORKSPACE_DB: &str =
-    "single_db_mode while workspace has .tachi/memory.db — project memories are invisible unless you pass project=… or restart without --no-project-db";
+    "single_db_mode while workspace has .tachi/tachi-memory.db — project memories are invisible unless you pass project=… or restart without --no-project-db";
 
 /// Stable warning when no project library is bound and no named project could be resolved.
 pub(crate) const WARN_UNSCOPED_NO_WORKSPACE: &str =

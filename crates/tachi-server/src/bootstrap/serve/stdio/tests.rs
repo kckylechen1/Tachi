@@ -371,6 +371,7 @@ fn stdio_proxy_profile_is_forwarded_once_and_denies_attachment_before_handler() 
             adapter_started_at: chrono::Utc::now(),
             tool_profile: Some(tachi_hub::ToolProfile::delegate()),
             resolved_agent_identity: Default::default(),
+            rate_limit_session: ProxyRateLimitSession::mint(),
             daemon: std::sync::Arc::new(std::sync::RwLock::new(daemon.clone())),
             app_home: tachi_home.clone(),
             global_db_path: global.clone(),
@@ -429,6 +430,7 @@ fn stdio_proxy_profile_is_forwarded_once_and_denies_attachment_before_handler() 
                 adapter_started_at: chrono::Utc::now(),
                 tool_profile: Some(tachi_hub::ToolProfile::observe()),
                 resolved_agent_identity: Default::default(),
+                rate_limit_session: ProxyRateLimitSession::mint(),
                 daemon: std::sync::Arc::new(std::sync::RwLock::new(daemon.clone())),
                 app_home: tachi_home.clone(),
                 global_db_path: global.clone(),
@@ -492,6 +494,7 @@ fn stdio_proxy_profile_is_forwarded_once_and_denies_attachment_before_handler() 
                 adapter_started_at: chrono::Utc::now(),
                 tool_profile: Some(profile),
                 resolved_agent_identity: Default::default(),
+                rate_limit_session: ProxyRateLimitSession::mint(),
                 daemon: std::sync::Arc::new(std::sync::RwLock::new(daemon.clone())),
                 app_home: tachi_home.clone(),
                 global_db_path: global.clone(),
@@ -556,6 +559,7 @@ fn stdio_proxy_profile_is_forwarded_once_and_denies_attachment_before_handler() 
             adapter_started_at: chrono::Utc::now(),
             tool_profile: None,
             resolved_agent_identity: Default::default(),
+            rate_limit_session: ProxyRateLimitSession::mint(),
             daemon: std::sync::Arc::new(std::sync::RwLock::new(daemon)),
             app_home: tachi_home,
             global_db_path: global,
@@ -616,6 +620,7 @@ fn stdio_process_selected_ops_proxy_lists_and_calls_through_production_session_c
             adapter_started_at: chrono::Utc::now(),
             tool_profile: Some(tachi_hub::ToolProfile::operate()),
             resolved_agent_identity: Default::default(),
+            rate_limit_session: ProxyRateLimitSession::mint(),
             daemon: std::sync::Arc::new(std::sync::RwLock::new(daemon)),
             app_home: tachi_home,
             global_db_path: global,
@@ -1040,6 +1045,7 @@ fn stdio_proxy_call_writes_bound_project_via_global_only_daemon() {
             project_db_path: Some(project.clone()),
             client_project: Some(project_name.to_string()),
             resolved_agent_identity: Default::default(),
+            rate_limit_session: ProxyRateLimitSession::mint(),
         };
 
         let saved_text = "stdio proxy e2e writes only the bound project db";
@@ -1125,6 +1131,7 @@ fn stdio_proxy_same_db_alias_write_normalizes_to_bound_identity() {
             project_db_path: Some(project.clone()),
             client_project: Some(bound_name.clone()),
             resolved_agent_identity: Default::default(),
+            rate_limit_session: ProxyRateLimitSession::mint(),
         };
         let result = call_tool_via_stdio_proxy(
             proxy,
@@ -1203,6 +1210,7 @@ fn stdio_proxy_call_rejects_cross_project_override_before_daemon_write() {
             project_db_path: Some(bound_project.clone()),
             client_project: Some(bound_project_name.to_string()),
             resolved_agent_identity: Default::default(),
+            rate_limit_session: ProxyRateLimitSession::mint(),
         };
 
         let rejected_text = "stdio proxy e2e rejects cross-project override";
@@ -1278,6 +1286,7 @@ fn stdio_proxy_tachi_search_returns_global_and_bound_project_rows() {
             project_db_path: Some(project.clone()),
             client_project: Some(project_name.to_string()),
             resolved_agent_identity: Default::default(),
+            rate_limit_session: ProxyRateLimitSession::mint(),
         };
 
         for (id, scope, summary) in [
@@ -1388,6 +1397,7 @@ fn stdio_proxy_allows_explicit_cross_project_read() {
             project_db_path: Some(bound_project.clone()),
             client_project: Some(bound_project_name.to_string()),
             resolved_agent_identity: Default::default(),
+            rate_limit_session: ProxyRateLimitSession::mint(),
         };
         let other_proxy = StdioProxyServer {
             adapter_started_at: chrono::Utc::now(),
@@ -1398,6 +1408,7 @@ fn stdio_proxy_allows_explicit_cross_project_read() {
             project_db_path: Some(other_project.clone()),
             client_project: Some(other_project_name.to_string()),
             resolved_agent_identity: Default::default(),
+            rate_limit_session: ProxyRateLimitSession::mint(),
         };
 
         let result = call_tool_via_stdio_proxy(
@@ -1496,6 +1507,7 @@ fn stdio_proxy_tachi_memory_search_rows_stay_objects_under_parallel_forwarding()
             project_db_path: Some(project.clone()),
             client_project: Some(project_name.to_string()),
             resolved_agent_identity: Default::default(),
+            rate_limit_session: ProxyRateLimitSession::mint(),
         };
 
         for (id, scope, summary) in [
@@ -1651,6 +1663,7 @@ fn stdio_proxy_runtime_info_reflects_pid_file_changes_not_cached_snapshot() {
             project_db_path: None,
             client_project: None,
             resolved_agent_identity: Default::default(),
+            rate_limit_session: ProxyRateLimitSession::mint(),
         };
 
         let first = call_tool_via_stdio_proxy(proxy.clone(), "runtime_info", serde_json::Map::new())
@@ -1757,6 +1770,7 @@ fn stdio_proxy_runtime_info_reports_unreachable_when_daemon_absent() {
             project_db_path: None,
             client_project: None,
             resolved_agent_identity: Default::default(),
+            rate_limit_session: ProxyRateLimitSession::mint(),
         };
 
         let result = call_tool_via_stdio_proxy(proxy, "runtime_info", serde_json::Map::new())
@@ -1825,6 +1839,7 @@ fn stdio_proxy_archives_global_row_with_bound_project() {
             project_db_path: Some(project.clone()),
             client_project: Some(project_name.to_string()),
             resolved_agent_identity: Default::default(),
+            rate_limit_session: ProxyRateLimitSession::mint(),
         };
 
         let result = call_tool_via_stdio_proxy(
@@ -3187,6 +3202,7 @@ fn identity_probe_proxy() -> StdioProxyServer {
         project_db_path: None,
         client_project: None,
         resolved_agent_identity: Default::default(),
+        rate_limit_session: ProxyRateLimitSession::mint(),
     }
 }
 
@@ -3348,4 +3364,91 @@ fn http_loopback_explicit_agent_identity_is_self_asserted_for_a2a() {
 
     ct.cancel();
     rt.block_on(daemon_task).expect("daemon task");
+}
+
+fn stuck_probe_args(query: &str) -> serde_json::Map<String, serde_json::Value> {
+    serde_json::Map::from_iter([
+        ("action".to_string(), serde_json::json!("search")),
+        ("query".to_string(), serde_json::json!(query)),
+        ("scope".to_string(), serde_json::json!("memory")),
+        ("top_k".to_string(), serde_json::json!(1)),
+    ])
+}
+
+fn has_stuck_warning(result: &rmcp::model::CallToolResult) -> bool {
+    result.content.iter().any(|content| {
+        matches!(content, rmcp::model::ContentBlock::Text(text) if text.text.contains("stuck-detection"))
+    })
+}
+
+/// Audit C1: every proxied `tools/call` opens its own short-lived daemon MCP
+/// session, so without a per-connection bucket key the daemon's burst window
+/// started empty on every call and stuck/loop detection never fired. One
+/// proxy connection must now share one burst window across its calls, and a
+/// second proxy connection must not inherit it.
+#[test]
+fn stdio_proxy_calls_share_one_rate_limit_bucket_per_connection() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let tachi_home = temp.path().join("home");
+    let global = tachi_home.join("global/memory.db");
+    std::fs::create_dir_all(global.parent().expect("global parent")).expect("global parent");
+
+    with_tachi_home(&tachi_home, || {
+        test_runtime().block_on(async {
+            let server = crate::MemoryServer::new(global.clone(), None).expect("daemon server");
+            let (daemon, ct, daemon_task) = spawn_test_http_daemon(server, &global).await;
+            let make_proxy = || StdioProxyServer {
+                adapter_started_at: chrono::Utc::now(),
+                tool_profile: None,
+                daemon: std::sync::Arc::new(std::sync::RwLock::new(daemon.clone())),
+                app_home: tachi_home.clone(),
+                global_db_path: global.clone(),
+                project_db_path: None,
+                client_project: None,
+                resolved_agent_identity: Default::default(),
+                rate_limit_session: ProxyRateLimitSession::mint(),
+            };
+            let proxy_a = make_proxy();
+            let proxy_b = make_proxy();
+            assert_ne!(
+                proxy_a.rate_limit_session.as_str(),
+                proxy_b.rate_limit_session.as_str(),
+                "each proxy connection mints its own bucket key"
+            );
+            let args = || stuck_probe_args("C1-STDIO-PROXY-BUCKET-PROBE");
+
+            for call in 1..=2 {
+                let result = call_tool_via_stdio_proxy(proxy_a.clone(), "tachi_memory", args())
+                    .await
+                    .unwrap_or_else(|err| panic!("proxy A call {call}: {err}"));
+                assert_tool_ok(&result);
+                assert!(
+                    !has_stuck_warning(&result),
+                    "call {call} is below the stuck threshold: {result:?}"
+                );
+            }
+
+            let other = call_tool_via_stdio_proxy(proxy_b.clone(), "tachi_memory", args())
+                .await
+                .expect("proxy B call");
+            assert_tool_ok(&other);
+            assert!(
+                !has_stuck_warning(&other),
+                "a different proxy connection must not inherit proxy A's burst window: {other:?}"
+            );
+
+            let third = call_tool_via_stdio_proxy(proxy_a.clone(), "tachi_memory", args())
+                .await
+                .expect("proxy A call 3");
+            assert_tool_ok(&third);
+            assert!(
+                has_stuck_warning(&third),
+                "the third identical call through one proxy connection must share the burst \
+                 window across its per-call daemon sessions: {third:?}"
+            );
+
+            ct.cancel();
+            daemon_task.await.expect("daemon task");
+        });
+    });
 }

@@ -648,7 +648,7 @@ async fn launch_canonical_dispatch(
     // spawn work (#894 S2d). This is the single choke-point every dispatch
     // caller (`tachi_staff(start)`, task lifecycle callers, poke probes)
     // funnels through, so it runs before step 1 (workspace creation), before
-    // prompt assembly, before the V2 plan stage's `ClaudePool` spawn, before
+    // prompt assembly, before the V2 plan stage's provider call, before
     // credential materialization, and before any builder's own preflight
     // (acpx's `node --version` probe, etc.).
     //

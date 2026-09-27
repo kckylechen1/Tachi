@@ -174,16 +174,6 @@ impl LlmClient {
         self.runtime_config_from_overlay(&state.lane_config_overlay)
     }
 
-    /// Project a candidate Vault overlay without publishing it. Materializers
-    /// use this while preparing the catalog projection, before the combined
-    /// provider-state publication is allowed to happen.
-    pub fn runtime_config_with_lane_config_overlay(
-        &self,
-        overlay: &LaneConfigOverlay,
-    ) -> ProviderRuntimeConfig {
-        self.runtime_config_from_overlay(overlay)
-    }
-
     pub(crate) fn validated_runtime_config_with_lane_config_overlay(
         &self,
         overlay: &LaneConfigOverlay,

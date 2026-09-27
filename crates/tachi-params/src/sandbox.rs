@@ -33,98 +33,84 @@ fn default_sandbox_policy_limit() -> usize {
     100
 }
 
-fn default_sandbox_exec_audit_limit() -> usize {
-    100
-}
+// ─── Per-action handler arguments ───────────────────────────────────────────
+//
+// Internal argument structs for the `sandbox_ops` handlers. They are built
+// field by field by the `tachi_sandbox` facade dispatcher
+// (`tools::sandbox_facade`) from [`TachiSandboxParams`] and are never
+// deserialized or published as a schema; wire defaults live on the facade.
 
 // ─── Sandbox Access Rules ───────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[derive(Debug, Clone)]
 pub struct SandboxSetRuleParams {
     /// Agent role (e.g. "code-review", "domain-pack", "admin")
     pub agent_role: String,
     /// Path pattern to match (e.g. "/domain-pack/*", "/project/secrets")
     pub path_pattern: String,
     /// Access level: "read", "write", or "deny"
-    #[serde(default = "default_access_level")]
     pub access_level: String,
 }
 
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[derive(Debug, Clone)]
 pub struct SandboxCheckParams {
     /// Agent role to check access for
     pub agent_role: String,
     /// Memory path to check
     pub path: String,
     /// Operation type: "read" or "write"
-    #[serde(default = "default_sandbox_operation")]
     pub operation: String,
 }
 
 // ─── Sandbox Execution Policies ─────────────────────────────────────────────
 
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[derive(Debug, Clone)]
 pub struct SandboxSetPolicyParams {
     /// Capability ID (typically MCP capability id, e.g. "mcp:exa")
     pub capability_id: String,
     /// Runtime type: "process" | "wasm"
-    #[serde(default = "default_runtime_type")]
     pub runtime_type: String,
     /// Environment variable allowlist. Empty means keep existing behavior.
-    #[serde(default)]
     pub env_allowlist: Vec<String>,
     /// Allowed read roots for filesystem access (advisory + cwd guard).
-    #[serde(default)]
     pub fs_read_roots: Vec<String>,
     /// Allowed write roots for filesystem access (reserved for executors).
-    #[serde(default)]
     pub fs_write_roots: Vec<String>,
     /// Allowed working-directory roots for process startup.
-    #[serde(default)]
     pub cwd_roots: Vec<String>,
     /// Startup timeout cap in milliseconds.
-    #[serde(default = "default_sandbox_startup_ms")]
     pub max_startup_ms: u64,
     /// Tool call timeout cap in milliseconds.
-    #[serde(default = "default_sandbox_tool_ms")]
     pub max_tool_ms: u64,
     /// Max concurrency cap for the capability.
-    #[serde(default = "default_sandbox_max_concurrency")]
     pub max_concurrency: u32,
     /// Whether this policy is enabled.
-    #[serde(default = "default_true_bool")]
     pub enabled: bool,
 }
 
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[derive(Debug, Clone)]
 pub struct SandboxGetPolicyParams {
     /// Capability ID to query
     pub capability_id: String,
 }
 
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[derive(Debug, Clone)]
 pub struct SandboxListPoliciesParams {
     /// Only return enabled policies
-    #[serde(default)]
     pub enabled_only: bool,
     /// Max rows returned
-    #[serde(default = "default_sandbox_policy_limit")]
     pub limit: usize,
 }
 
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[derive(Debug, Clone)]
 pub struct SandboxExecAuditParams {
     /// Optional capability filter (e.g. "mcp:exa")
-    #[serde(default)]
     pub capability_id: Option<String>,
     /// Optional stage filter (e.g. "preflight", "startup", "tool_call")
-    #[serde(default)]
     pub stage: Option<String>,
     /// Optional decision filter (e.g. "allowed", "denied", "timeout", "failed")
-    #[serde(default)]
     pub decision: Option<String>,
     /// Max rows returned.
-    #[serde(default = "default_sandbox_exec_audit_limit")]
     pub limit: usize,
 }
 
@@ -136,8 +122,8 @@ pub struct SandboxExecAuditParams {
 /// tool names were retired in v2.0.0 after their 1.10.0 removal deadline. Per-action required fields are
 /// validated in the facade dispatcher (`tools::sandbox_facade`), not by serde,
 /// so a caller supplying the wrong action gets a precise error rather than a
-/// deserialization failure. Defaults mirror the per-action structs above so a
-/// folded call preserves the pre-fold handler output.
+/// deserialization failure. Defaults preserve the pre-fold per-action tool
+/// defaults so a folded call preserves the pre-fold handler output.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct TachiSandboxParams {
     /// Which sandbox operation to run: "set_rule" | "check" | "set_policy" |

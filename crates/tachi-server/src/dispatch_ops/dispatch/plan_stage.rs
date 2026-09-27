@@ -173,8 +173,8 @@ pub(super) async fn run_v2_plan_stage(
             // TASK_STATE_INPUT_REQUIRED) — one vocabulary, no drift between
             // the two projections of the same run; and (2) unlike
             // TASK_STATE_PENDING_REVIEW, TASK_STATE_INPUT_REQUIRED IS in
-            // `kanban::KANBAN_DISPATCH_NON_TERMINAL_STATES`
-            // (`kanban.rs`), so an abandoned row (caller never re-dispatches)
+            // `KANBAN_DISPATCH_NON_TERMINAL_STATES`
+            // (`memcore/src/db/operator_maintenance.rs`), so an abandoned row (caller never re-dispatches)
             // ages out through `gc_expired_kanban_cards` instead of staying
             // pinned as a phantom "in review" card forever.
             // Best-effort: log but do not fail the dispatch response over a
