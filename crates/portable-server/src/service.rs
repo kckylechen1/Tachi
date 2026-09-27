@@ -390,9 +390,53 @@ fn validated_scope(scope: Option<String>) -> Result<String, String> {
     }
 }
 
+/// Run synchronous store work on tokio's blocking pool (audit B6).
+///
+/// Every store call is blocking SQLite work behind a `std::sync::Mutex`; run
+/// inline in an `async fn` it pinned an executor worker for the whole search
+/// (including the `record_access` write transaction) and a concurrent call
+/// pinned a second worker waiting on the mutex. A panic inside `work` is
+/// re-raised unchanged; a task cancelled by runtime shutdown is a typed `Err`.
+async fn run_store_work<T, F>(work: F) -> Result<T, String>
+where
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+    T: Send + 'static,
+{
+    match tokio::task::spawn_blocking(work).await {
+        Ok(result) => result,
+        Err(join_error) if join_error.is_panic() => {
+            std::panic::resume_unwind(join_error.into_panic())
+        }
+        Err(join_error) => Err(format!("store task did not complete: {join_error}")),
+    }
+}
+
+/// The per-store copy of the merged search's options. `SearchOptions` is not
+/// `Clone`; every field the tool sets is copied and the rest (including the
+/// default `record_access = true`) come from `Default`, exactly as the
+/// previous inline literal did.
+fn per_store_search_options(options: &SearchOptions) -> SearchOptions {
+    SearchOptions {
+        weights: options.weights.clone(),
+        top_k: options.top_k,
+        path_prefix: options.path_prefix.clone(),
+        domain: options.domain.clone(),
+        query_vec: options.query_vec.clone(),
+        include_archived: options.include_archived,
+        candidates_per_channel: options.candidates_per_channel,
+        mmr_threshold: options.mmr_threshold,
+        graph_expand_hops: options.graph_expand_hops,
+        graph_relation_filter: options.graph_relation_filter.clone(),
+        as_of: options.as_of.clone(),
+        decay_policy: options.decay_policy.clone(),
+        ..Default::default()
+    }
+}
+
 /// The rmcp service. Owns the kernel store behind a mutex (rusqlite `Connection`
-/// is `Send` but not `Sync`; all handler work is synchronous and never awaits
-/// while the lock is held) plus the injected #791 decay policy.
+/// is `Send` but not `Sync`) plus the injected #791 decay policy. All store
+/// work runs synchronously on the blocking pool via [`run_store_work`] and
+/// never awaits while the lock is held.
 #[derive(Clone)]
 pub struct PortableServer {
     stores: StoreSet,
@@ -467,12 +511,17 @@ impl PortableServer {
         };
         entry.fold_persons_into_entities();
 
-        let mut store = target
-            .store
-            .lock()
-            .map_err(|_| "store lock poisoned".to_string())?;
-        let existed = store.get(&id).map_err(|e| e.to_string())?.is_some();
-        store.upsert(&entry).map_err(|e| e.to_string())?;
+        let store = Arc::clone(&target.store);
+        let entry_id = id.clone();
+        let (existed, entry) = run_store_work(move || {
+            let mut store = store
+                .lock()
+                .map_err(|_| "store lock poisoned".to_string())?;
+            let existed = store.get(&entry_id).map_err(|e| e.to_string())?.is_some();
+            store.upsert(&entry).map_err(|e| e.to_string())?;
+            Ok((existed, entry))
+        })
+        .await?;
         Ok(json!({
             "id": id,
             "path": entry.path,
@@ -492,7 +541,6 @@ impl PortableServer {
         Parameters(params): Parameters<SearchParams>,
     ) -> Result<String, String> {
         let top_k = normalized_top_k(params.top_k);
-        let mut results = Vec::new();
         let path_prefix = params.resolved_path_prefix();
         let query = params.query_with_context_symbols();
         let mut options = SearchOptions {
@@ -515,33 +563,24 @@ impl PortableServer {
         if let Some(weights) = params.weights {
             options.weights = weights.apply_to(options.weights);
         }
-        for handle in self.stores.all() {
-            let store = handle
-                .store
-                .lock()
-                .map_err(|_| "store lock poisoned".to_string())?;
-            let mut store_results = store
-                .search(
-                    &query,
-                    Some(SearchOptions {
-                        weights: options.weights.clone(),
-                        top_k: options.top_k,
-                        path_prefix: options.path_prefix.clone(),
-                        domain: options.domain.clone(),
-                        query_vec: options.query_vec.clone(),
-                        include_archived: options.include_archived,
-                        candidates_per_channel: options.candidates_per_channel,
-                        mmr_threshold: options.mmr_threshold,
-                        graph_expand_hops: options.graph_expand_hops,
-                        graph_relation_filter: options.graph_relation_filter.clone(),
-                        as_of: options.as_of.clone(),
-                        decay_policy: options.decay_policy.clone(),
-                        ..Default::default()
-                    }),
-                )
-                .map_err(|e| e.to_string())?;
-            results.append(&mut store_results);
-        }
+        // Same store order and lock sequence as before (one store locked at a
+        // time), now on the blocking pool.
+        let stores = self.stores.clone();
+        let mut results = run_store_work(move || {
+            let mut results = Vec::new();
+            for handle in stores.all() {
+                let store = handle
+                    .store
+                    .lock()
+                    .map_err(|_| "store lock poisoned".to_string())?;
+                let mut store_results = store
+                    .search(&query, Some(per_store_search_options(&options)))
+                    .map_err(|e| e.to_string())?;
+                results.append(&mut store_results);
+            }
+            Ok(results)
+        })
+        .await?;
         results.sort_by(|left, right| right.score.final_score.total_cmp(&left.score.final_score));
         let mut seen = HashSet::new();
         results.retain(|result| seen.insert(result.entry.id.clone()));
@@ -551,16 +590,21 @@ impl PortableServer {
 
     #[tool(description = "Fetch a single memory entry by id. Returns null when not found.")]
     pub async fn get(&self, Parameters(params): Parameters<GetParams>) -> Result<String, String> {
-        for handle in self.stores.all() {
-            let store = handle
-                .store
-                .lock()
-                .map_err(|_| "store lock poisoned".to_string())?;
-            if let Some(entry) = store.get(&params.id).map_err(|e| e.to_string())? {
-                return serde_json::to_string(&Some(entry)).map_err(|e| e.to_string());
+        let stores = self.stores.clone();
+        let found = run_store_work(move || {
+            for handle in stores.all() {
+                let store = handle
+                    .store
+                    .lock()
+                    .map_err(|_| "store lock poisoned".to_string())?;
+                if let Some(entry) = store.get(&params.id).map_err(|e| e.to_string())? {
+                    return Ok(Some(entry));
+                }
             }
-        }
-        serde_json::to_string(&Option::<MemoryEntry>::None).map_err(|e| e.to_string())
+            Ok(None)
+        })
+        .await?;
+        serde_json::to_string(&found).map_err(|e| e.to_string())
     }
 
     /// Cheap DB-reachability probe used by `--daemon` mode's `/health` route
@@ -568,6 +612,9 @@ impl PortableServer {
     /// error. Kept transport-agnostic here (returns a plain `bool`, not an
     /// HTTP response) so this file stays free of any HTTP-framework
     /// dependency — `http.rs` owns turning this into a status code + JSON.
+    ///
+    /// Blocking: it waits on each store's mutex. Async callers go through
+    /// [`PortableServer::health_ok_off_executor`].
     pub fn health_ok(&self) -> bool {
         self.stores.all().all(|handle| {
             handle
@@ -576,6 +623,17 @@ impl PortableServer {
                 .map(|store| store.stats(false).is_ok())
                 .unwrap_or(false)
         })
+    }
+
+    /// [`PortableServer::health_ok`] on the blocking pool (audit B6), so a
+    /// `/health` probe that has to wait for an in-flight search's store lock
+    /// waits there instead of pinning an async executor worker. The answer is
+    /// unchanged: the same `stats(false)` probe of every store.
+    pub async fn health_ok_off_executor(&self) -> bool {
+        let server = self.clone();
+        run_store_work(move || Ok(server.health_ok()))
+            .await
+            .unwrap_or(false)
     }
 
     #[tool(
@@ -598,14 +656,18 @@ impl PortableServer {
                 "vec_available": store.vec_available,
             }))
         };
-        let global = database_status(&self.stores.global)?;
-        let project = self.stores.project().map(database_status).transpose()?;
-        let attached = self
-            .stores
-            .attached
-            .iter()
-            .map(database_status)
-            .collect::<Result<Vec<_>, _>>()?;
+        let stores = self.stores.clone();
+        let (global, project, attached) = run_store_work(move || {
+            let global = database_status(&stores.global)?;
+            let project = stores.project().map(database_status).transpose()?;
+            let attached = stores
+                .attached
+                .iter()
+                .map(database_status)
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok((global, project, attached))
+        })
+        .await?;
         Ok(json!({
             "profile": "portable",
             "runtime": { "name": "tachi", "profile": "portable" },
@@ -904,6 +966,64 @@ mod tests {
         assert_eq!(status["profile"], serde_json::json!("portable"));
         assert!(status["entry_count"].as_i64().unwrap_or(0) >= 1);
         assert_eq!(status["decay_policy"], serde_json::json!("default"));
+    }
+
+    /// Audit B6: while another holder keeps the store mutex, `/health`'s
+    /// probe and a search wait on the blocking pool, not on the executor. On a
+    /// current-thread runtime the pre-B6 inline lock would have frozen the only
+    /// thread (and this ticker) until the holder let go. Answers are unchanged.
+    #[tokio::test(flavor = "current_thread")]
+    async fn store_work_waits_off_the_executor_while_the_store_is_busy() {
+        use std::time::{Duration, Instant};
+
+        let server = boot(None, "default");
+        server
+            .save(Parameters(save_params(
+                "portable kernel busy store fact",
+                "/busy/notes",
+            )))
+            .await
+            .expect("save");
+
+        let store = Arc::clone(&server.stores.global.store);
+        let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let _guard = store.lock().expect("hold store");
+            locked_tx.send(()).expect("signal locked");
+            std::thread::sleep(Duration::from_millis(400));
+        });
+        locked_rx.recv().expect("store is held");
+
+        let started = Instant::now();
+        let ticker = async {
+            for _ in 0..5 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            started.elapsed()
+        };
+        let search = server.search(Parameters(SearchParams {
+            query: "busy store fact".to_string(),
+            top_k: Some(5),
+            ..Default::default()
+        }));
+        let (ticked, health_ok, hits) =
+            tokio::join!(ticker, server.health_ok_off_executor(), search);
+        holder.join().expect("holder thread");
+
+        assert!(
+            ticked < Duration::from_millis(250),
+            "the executor must keep running while the store is busy; 5x10ms took {ticked:?}"
+        );
+        assert!(health_ok, "health still probes the store and reports ok");
+        let hits: serde_json::Value = serde_json::from_str(&hits.expect("search")).expect("json");
+        assert!(
+            !hits.as_array().expect("array").is_empty(),
+            "search still returns the saved entry: {hits}"
+        );
+        assert!(
+            started.elapsed() >= Duration::from_millis(300),
+            "health and search really waited for the busy store"
+        );
     }
 
     #[tokio::test]

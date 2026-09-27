@@ -128,6 +128,7 @@ mod exec_env_ops;
 /// `dispatch_ops::dispatch::execution` applies the verdict (with
 /// `DaemonQuarantineSink`) after the worker exits.
 pub mod exec_env_postflight;
+mod executor_offload;
 mod facade_memory_ops;
 mod facade_save_ops;
 mod facade_search_ops;

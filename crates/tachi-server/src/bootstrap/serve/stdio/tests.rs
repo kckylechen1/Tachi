@@ -3452,3 +3452,51 @@ fn stdio_proxy_calls_share_one_rate_limit_bucket_per_connection() {
         });
     });
 }
+
+/// Audit C3: reaping the auto-spawned daemon must not pin an executor worker
+/// for the daemon's lifetime. On a current-thread runtime the old
+/// `tokio::spawn(async move { child.wait() })` blocked the only thread until
+/// the child exited; the reaper thread leaves the executor free and still
+/// reaps the child (no zombie left behind).
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn auto_daemon_reap_does_not_block_the_executor_and_still_reaps() {
+    use std::time::{Duration, Instant};
+
+    let child = std::process::Command::new("sleep")
+        .arg("1")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn sleep child");
+    let pid = child.id();
+    let reaper = reap_detached_daemon(child).expect("reaper thread starts");
+
+    // Yield to the executor several times while the child is still alive.
+    let started = Instant::now();
+    for _ in 0..5 {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < Duration::from_millis(500),
+        "executor must stay free while the daemon child lives; 5x10ms sleeps took {elapsed:?}"
+    );
+    assert!(
+        !reaper.is_finished(),
+        "the reaper must still be waiting on the live child"
+    );
+
+    reaper.join().expect("reaper thread joins");
+    // After the reap the pid is released: waitpid on it reports ECHILD.
+    // SAFETY: `waitpid` with WNOHANG only queries the kernel for a child of
+    // this process; it passes a valid out-pointer to a local and aliases no
+    // Rust memory.
+    let mut status: libc::c_int = 0;
+    let rc = unsafe { libc::waitpid(pid as libc::pid_t, &mut status, libc::WNOHANG) };
+    assert_eq!(
+        rc, -1,
+        "the daemon child must already be reaped (no zombie), waitpid rc={rc}"
+    );
+}
