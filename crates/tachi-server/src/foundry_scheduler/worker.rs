@@ -3,13 +3,12 @@ use super::*;
 /// Per-DB worker task. Wakes every [`POLL_INTERVAL`], opens the DB by
 /// absolute path, scans `foundry_jobs` for queued or stale running
 /// rows, and either re-injects them into the shared `foundry_tx` (for
-/// routable DBs) or counts them as orphans (for everything else).
+/// routable DBs) or warns about them as orphans (for everything else).
 pub(super) async fn run_db_worker(
     db_path: PathBuf,
     label: String,
     route: Route,
     foundry_tx: mpsc::Sender<FoundryMaintenanceItem>,
-    metrics: Arc<WorkerMetrics>,
     cancel: tokio_util::sync::CancellationToken,
 ) {
     // Stagger startup by a small jitter derived from the path so 30+
@@ -26,7 +25,7 @@ pub(super) async fn run_db_worker(
         tokio::select! {
             _ = cancel.cancelled() => break,
             _ = tick.tick() => {
-                run_one_poll(&db_path, &label, &route, &foundry_tx, &metrics, &mut ledger).await;
+                run_one_poll(&db_path, &label, &route, &foundry_tx, &mut ledger).await;
             }
         }
     }
@@ -122,13 +121,13 @@ pub(super) enum PollOutcome {
     ProbeOnly,
     /// The poll took the full open and loaded pending jobs.
     FullOpen,
-    /// The poll failed (counted in `errors_total`).
+    /// The poll failed.
     Error,
 }
 
 enum PollRead {
     /// Probe succeeded and nothing needs the full open.
-    Idle { pending: usize },
+    Idle,
     /// Full open: the loaded jobs plus their row markers read right after.
     Loaded {
         jobs: Vec<PersistedFoundryJob>,
@@ -141,18 +140,8 @@ pub(super) async fn run_one_poll(
     label: &str,
     route: &Route,
     foundry_tx: &mpsc::Sender<FoundryMaintenanceItem>,
-    metrics: &WorkerMetrics,
     ledger: &mut InjectionLedger,
 ) -> PollOutcome {
-    metrics.polls_total.fetch_add(1, Ordering::Relaxed);
-    let now_secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    metrics
-        .last_poll_unix_secs
-        .store(now_secs, Ordering::Relaxed);
-
     // A full open is not cheap: it takes the process-wide startup lock and
     // runs schema init (a write transaction and several fsyncs) on every
     // call. So the poll first probes read-only, and takes the full open only
@@ -188,9 +177,7 @@ pub(super) async fn run_one_poll(
             if has_work {
                 load_pending_full(db_path, running_cutoff).await
             } else {
-                Ok(PollRead::Idle {
-                    pending: probe.pending.len(),
-                })
+                Ok(PollRead::Idle)
             }
         }
         Ok(Err(probe_error)) => {
@@ -204,23 +191,14 @@ pub(super) async fn run_one_poll(
     };
 
     let (jobs, markers) = match read {
-        Ok(PollRead::Idle { pending }) => {
-            metrics
-                .last_pending_count
-                .store(pending as u64, Ordering::Relaxed);
-            return PollOutcome::ProbeOnly;
-        }
+        Ok(PollRead::Idle) => return PollOutcome::ProbeOnly,
         Ok(PollRead::Loaded { jobs, markers }) => (jobs, markers),
         Err(e) => {
-            metrics.errors_total.fetch_add(1, Ordering::Relaxed);
             tracing::warn!(target: "tachi::foundry_scheduler", label = %label, error = %e, "foundry scheduler poll error");
             return PollOutcome::Error;
         }
     };
 
-    metrics
-        .last_pending_count
-        .store(jobs.len() as u64, Ordering::Relaxed);
     ledger.retain_pending(&markers);
 
     if jobs.is_empty() {
@@ -277,18 +255,14 @@ pub(super) async fn run_one_poll(
                 }
             }
             if sent > 0 {
-                metrics
-                    .jobs_reinjected_total
-                    .fetch_add(sent, Ordering::Relaxed);
                 tracing::info!(target: "tachi::foundry_scheduler", label = %label, jobs = sent, "re-injected pending foundry job(s)");
             }
         }
         Route::Orphan(reason) => {
-            // Existing worker has no route to this DB path; record the
-            // orphan count so `tachi status` can warn. Execution is
-            // deferred to follow-up work that adds DbScope::Path.
+            // Existing worker has no route to this DB path; warn with the
+            // pending count. Execution is deferred to follow-up work that
+            // adds DbScope::Path.
             let n = jobs.len() as u64;
-            metrics.jobs_orphan_total.fetch_add(n, Ordering::Relaxed);
             tracing::warn!(
                 target: "tachi::foundry_scheduler",
                 label = %label,
@@ -391,7 +365,6 @@ mod tests {
         db: PathBuf,
         tx: mpsc::Sender<FoundryMaintenanceItem>,
         rx: mpsc::Receiver<FoundryMaintenanceItem>,
-        metrics: WorkerMetrics,
         ledger: InjectionLedger,
     }
 
@@ -405,21 +378,12 @@ mod tests {
                 db,
                 tx,
                 rx,
-                metrics: WorkerMetrics::default(),
                 ledger: InjectionLedger::new(window),
             }
         }
 
         async fn poll(&mut self) -> PollOutcome {
-            run_one_poll(
-                &self.db,
-                "test",
-                &Route::Global,
-                &self.tx,
-                &self.metrics,
-                &mut self.ledger,
-            )
-            .await
+            run_one_poll(&self.db, "test", &Route::Global, &self.tx, &mut self.ledger).await
         }
     }
 
@@ -550,7 +514,6 @@ mod tests {
         rig.db = missing.clone();
         assert_eq!(rig.poll().await, PollOutcome::Error);
         assert!(!missing.exists(), "the poll must not create the DB");
-        assert_eq!(rig.metrics.errors_total.load(Ordering::Relaxed), 1);
     }
 
     /// An empty queue is answered by the probe alone: no full open, so no
@@ -564,9 +527,6 @@ mod tests {
 
         assert!(!marker_path(&rig.db).exists(), "no full open may happen");
         assert!(drain(&mut rig.rx).is_empty());
-        assert_eq!(rig.metrics.polls_total.load(Ordering::Relaxed), 2);
-        assert_eq!(rig.metrics.errors_total.load(Ordering::Relaxed), 0);
-        assert_eq!(rig.metrics.last_pending_count.load(Ordering::Relaxed), 0);
     }
 
     /// A queued job is sent once, then not again while it is unchanged and
@@ -584,8 +544,9 @@ mod tests {
         assert_eq!(rig.poll().await, PollOutcome::ProbeOnly);
         assert!(drain(&mut rig.rx).is_empty(), "no duplicate sends");
         assert!(!marker_path(&rig.db).exists(), "no full open for sent jobs");
-        assert_eq!(rig.metrics.last_pending_count.load(Ordering::Relaxed), 1);
-        assert_eq!(rig.metrics.jobs_reinjected_total.load(Ordering::Relaxed), 1);
+        // Re-anchored from the removed `last_pending_count` counter: the row
+        // stays pending in the live DB; the poller only suppresses the resend.
+        assert_eq!(status_of(&rig.db, "q1"), "queued");
     }
 
     /// The fallback poll stays a safety net: once the window has passed, a job

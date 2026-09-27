@@ -29,7 +29,6 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -54,7 +53,7 @@ mod worker;
 use routing::{classify_route_in_home, manifest_label_for, path_hash};
 pub use scheduler::FoundryScheduler;
 use types::WorkerHandle;
-pub use types::{WorkerMetrics, MANIFEST_REFRESH_INTERVAL, POLL_INTERVAL};
+pub use types::{MANIFEST_REFRESH_INTERVAL, POLL_INTERVAL};
 use worker::run_db_worker;
 
 #[cfg(test)]
