@@ -185,9 +185,10 @@ pub use harness_session_interventions::{
 };
 #[cfg(feature = "admin")]
 pub use hub_db::{
-    hub_get, hub_get_active_version_route, hub_list, hub_list_limited, hub_record_call_outcome,
-    hub_record_feedback, hub_search, hub_search_limited, hub_set_active_version_route,
-    hub_set_enabled, hub_set_review, hub_upsert,
+    hub_fill_empty_description, hub_get, hub_get_active_version_route, hub_list, hub_list_limited,
+    hub_record_call_outcome, hub_record_feedback, hub_search, hub_search_limited,
+    hub_set_active_version_route, hub_set_enabled, hub_set_review, hub_update_definition_with,
+    hub_upsert, HubDefinitionUpdate,
 };
 #[cfg(test)]
 pub(crate) use memory_crud::query_hash;
@@ -331,6 +332,8 @@ pub(crate) use sandbox_access::evaluate_sandbox_access;
 pub use sandbox_access::{evaluate_sandbox_access, path_matches_pattern};
 #[cfg(test)]
 pub(crate) use schema::install_reserved_reference_guard;
+#[cfg(test)]
+pub(crate) use schema::test_hooks as schema_test_hooks;
 pub(crate) use schema::{init_private_schema_with_label_mut, init_store_schema_with_label_mut};
 pub use schema::{
     init_schema, init_schema_with_label_mut, validate_current_truth_schema, SchemaInitOutcome,

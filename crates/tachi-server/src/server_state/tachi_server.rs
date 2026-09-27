@@ -98,4 +98,8 @@ pub(crate) struct MemoryServer {
     /// Routing configuration belongs to the same immutable home identity as
     /// this server. Clones share its success-only cache.
     pub(crate) routing_config: Arc<RoutingConfigProvider>,
+    /// Coalescing queue for deferred skill-quality refreshes (audit G1):
+    /// content changes and throttled feedback request a refresh here instead
+    /// of running the pairwise pass on the request path.
+    pub(crate) skill_quality_refresh: Arc<crate::wiki_ops::SkillQualityRefreshQueue>,
 }

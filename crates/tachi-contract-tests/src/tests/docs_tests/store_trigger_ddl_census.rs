@@ -745,15 +745,17 @@ const EXEMPTIONS: &[Exemption<'static>] = &[
             symbol: "TRIGGER",
             trigger: "",
             ddl: "6f0bc4e1dfbe5fa6",
-            occurrences: 2,
+            occurrences: 4,
         }],
-        reason: "trigger_dropped_in_window_is_refused_like_a_sequential_open \
-                 drops the canonical memory_edge_search_generation_after_update \
-                 trigger (named by the local const TRIGGER, hence runtime-assembled) \
+        reason: "trigger_dropped_in_window_is_refused_like_a_sequential_open and \
+                 trigger_dropped_after_commit_is_refused_before_a_handle_is_returned \
+                 each drop the canonical memory_edge_search_generation_after_update \
+                 trigger (named by a local const TRIGGER, hence runtime-assembled) \
                  to damage a store's trigger inventory: once on a second store \
-                 before a sequential open, once inside the cfg(test) window hook. \
-                 Both DROPs run on a fresh rusqlite::Connection::open(path), never \
-                 on a MemoryStore doorway; the test asserts the open REFUSES the \
+                 before a sequential open, once inside a cfg(test) window hook \
+                 (before BEGIN IMMEDIATE, and after the schema COMMIT). All four \
+                 DROPs run on a fresh rusqlite::Connection::open(path), never on a \
+                 MemoryStore doorway; each test asserts the open REFUSES the \
                  damaged inventory. Body read 2026-09-26. The proof remains valid \
                  only while this file names no MemoryStore doorway.",
     },
