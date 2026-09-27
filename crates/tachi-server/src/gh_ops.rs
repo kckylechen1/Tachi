@@ -15,7 +15,7 @@ use std::process::Command;
 use tachi_gh_safe_merge::{
     evaluate_merge_gate_with_policy, CheckRun, ChecksState, ClosingIssueLabels, GhClient, GhError,
     MergeDecision, MergeGatePolicy, MergeGatePolicyMode, MergeResult, MergeStrategy, Mergeable,
-    PrLifecycleState, PrState, ReviewDecision,
+    PrLifecycleState, PrState, PrViewSnapshot, ReviewDecision,
 };
 
 const DEFAULT_REVIEW_AUTHOR_FILTER: &str = "gemini";

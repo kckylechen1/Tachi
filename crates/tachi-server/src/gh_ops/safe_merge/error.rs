@@ -1,8 +1,9 @@
 use super::*;
 
 /// Map a `gh` CLI failure string into a typed `GhError`. The input is already
-/// sanitized by `run_gh`. We classify by substring so callers can distinguish
-/// "PR doesn't exist" (NotFound, terminal) from "API rate limit" (transient).
+/// sanitized by the bounded `GhCall` executor. We classify by substring so
+/// callers can distinguish "PR doesn't exist" (NotFound, terminal) from "API
+/// rate limit" (transient).
 pub(in crate::gh_ops) fn classify_gh_error(raw: &str) -> GhError {
     let lower = raw.to_ascii_lowercase();
     if lower.contains("could not resolve") || lower.contains("not found") || lower.contains("404") {
