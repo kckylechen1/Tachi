@@ -363,6 +363,82 @@ pub fn hub_record_feedback(
     Ok(true)
 }
 
+/// Outcome of [`hub_update_definition_with`].
+#[derive(Debug, Clone)]
+pub enum HubDefinitionUpdate {
+    /// No capability row with this id exists.
+    Missing,
+    /// The caller declined to change the definition, or proposed the value
+    /// already stored. Nothing was written.
+    Unchanged,
+    /// Only the `definition` column was rewritten. Carries the row as it is
+    /// now stored.
+    Updated(Box<HubCapability>),
+}
+
+/// Transactional read-modify-write of **only** the `definition` column.
+///
+/// Inside one `BEGIN IMMEDIATE` transaction this reads the current row,
+/// hands it to `update`, and, when `update` proposes a different definition,
+/// writes it with a compare-and-set `UPDATE ... WHERE id = ? AND definition =
+/// <value just read>`. No other column is touched, so counters, health,
+/// enablement, review state and `updated_at` written by concurrent callers
+/// (feedback, circuit breaker, review) survive. Derived-metadata writers use
+/// this instead of [`hub_upsert`], which rewrites every column from the
+/// caller's (possibly stale) copy.
+pub fn hub_update_definition_with<F>(
+    conn: &Connection,
+    id: &str,
+    update: F,
+) -> Result<HubDefinitionUpdate, MemoryError>
+where
+    F: FnOnce(&HubCapability) -> Option<String>,
+{
+    let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
+    let Some(current) = hub_get(&tx, id)? else {
+        return Ok(HubDefinitionUpdate::Missing);
+    };
+    let Some(new_definition) = update(&current) else {
+        return Ok(HubDefinitionUpdate::Unchanged);
+    };
+    if new_definition == current.definition {
+        return Ok(HubDefinitionUpdate::Unchanged);
+    }
+    let changed = tx.execute(
+        "UPDATE hub_capabilities SET definition = ?1 WHERE id = ?2 AND definition = ?3",
+        params![&new_definition, id, &current.definition],
+    )?;
+    if changed == 0 {
+        return Ok(HubDefinitionUpdate::Unchanged);
+    }
+    tx.commit()?;
+    let mut updated = current;
+    updated.definition = new_definition;
+    Ok(HubDefinitionUpdate::Updated(Box::new(updated)))
+}
+
+/// Fill `description` only while the stored value is still empty.
+///
+/// Unlike [`hub_upsert`], this never rewrites counters, health, enablement,
+/// review state or the definition from a caller snapshot, never overwrites a
+/// description someone set in the meantime, and never resurrects a deleted
+/// row. Returns whether a row was updated.
+pub fn hub_fill_empty_description(
+    conn: &Connection,
+    id: &str,
+    description: &str,
+) -> Result<bool, MemoryError> {
+    if description.is_empty() {
+        return Ok(false);
+    }
+    let changed = conn.execute(
+        "UPDATE hub_capabilities SET description = ?1, updated_at = ?2 \
+         WHERE id = ?3 AND description = ''",
+        params![description, now_utc_iso(), id],
+    )?;
+    Ok(changed > 0)
+}
+
 /// Helper: build HubCapability from a row (tolerant of unexpected data).
 fn hub_cap_from_row(row: &rusqlite::Row) -> HubCapability {
     HubCapability {
@@ -420,6 +496,89 @@ mod tests {
             created_at: String::new(),
             updated_at: String::new(),
         }
+    }
+
+    #[test]
+    fn hub_update_definition_with_touches_only_definition() {
+        crate::db::enable_simple_auto_extension().expect("enable simple tokenizer");
+        let conn = Connection::open_in_memory().expect("open hub test database");
+        crate::db::init_schema(&conn).expect("initialize hub test schema");
+        hub_upsert(&conn, &capability(1)).expect("seed hub capability");
+        let id = "skill:limited-1";
+        conn.execute(
+            "UPDATE hub_capabilities SET updated_at = '2020-01-01T00:00:00+00:00' WHERE id = ?1",
+            params![id],
+        )
+        .unwrap();
+        hub_record_call_outcome(&conn, id, false, Some("boom"), 1).unwrap();
+        hub_record_feedback(&conn, id, true, Some(4.0)).unwrap();
+        let before = hub_get(&conn, id).unwrap().unwrap();
+
+        let outcome = hub_update_definition_with(&conn, id, |current| {
+            assert_eq!(current.fail_streak, 1);
+            Some(r#"{"quality_guard":{}}"#.to_string())
+        })
+        .unwrap();
+        let HubDefinitionUpdate::Updated(updated) = outcome else {
+            panic!("expected definition update, got {outcome:?}");
+        };
+        let after = hub_get(&conn, id).unwrap().unwrap();
+        assert_eq!(after.definition, r#"{"quality_guard":{}}"#);
+        assert_eq!(updated.definition, after.definition);
+        let mut expected = serde_json::to_value(&before).unwrap();
+        expected["definition"] = serde_json::json!(after.definition);
+        assert_eq!(serde_json::to_value(&after).unwrap(), expected);
+
+        assert!(matches!(
+            hub_update_definition_with(&conn, id, |_| None).unwrap(),
+            HubDefinitionUpdate::Unchanged
+        ));
+        assert!(matches!(
+            hub_update_definition_with(&conn, id, |cap| Some(cap.definition.clone())).unwrap(),
+            HubDefinitionUpdate::Unchanged
+        ));
+        assert!(matches!(
+            hub_update_definition_with(&conn, "skill:missing", |_| Some("{}".into())).unwrap(),
+            HubDefinitionUpdate::Missing
+        ));
+        assert_eq!(
+            serde_json::to_value(hub_get(&conn, id).unwrap().unwrap()).unwrap(),
+            serde_json::to_value(&after).unwrap()
+        );
+    }
+
+    #[test]
+    fn hub_fill_empty_description_touches_only_an_empty_description() {
+        crate::db::enable_simple_auto_extension().expect("enable simple tokenizer");
+        let conn = Connection::open_in_memory().expect("open hub test database");
+        crate::db::init_schema(&conn).expect("initialize hub test schema");
+        let mut cap = capability(1);
+        cap.description = String::new();
+        cap.definition = r#"{"quality_guard":{"merge_hints":[]}}"#.to_string();
+        hub_upsert(&conn, &cap).expect("seed hub capability");
+        let id = "skill:limited-1";
+        hub_record_call_outcome(&conn, id, false, Some("boom"), 1).unwrap();
+        hub_record_feedback(&conn, id, true, Some(4.0)).unwrap();
+        let before = hub_get(&conn, id).unwrap().unwrap();
+
+        assert!(!hub_fill_empty_description(&conn, id, "").unwrap());
+        assert!(hub_fill_empty_description(&conn, id, "auto summary").unwrap());
+        let after = hub_get(&conn, id).unwrap().unwrap();
+        let mut expected = serde_json::to_value(&before).unwrap();
+        expected["description"] = serde_json::json!("auto summary");
+        expected["updated_at"] = serde_json::json!(after.updated_at);
+        assert_eq!(serde_json::to_value(&after).unwrap(), expected);
+
+        // A description that is already set is never overwritten.
+        assert!(!hub_fill_empty_description(&conn, id, "late summary").unwrap());
+        assert_eq!(
+            hub_get(&conn, id).unwrap().unwrap().description,
+            "auto summary"
+        );
+
+        // A deleted (or never registered) row is not resurrected.
+        assert!(!hub_fill_empty_description(&conn, "skill:missing", "summary").unwrap());
+        assert!(hub_get(&conn, "skill:missing").unwrap().is_none());
     }
 
     #[test]
