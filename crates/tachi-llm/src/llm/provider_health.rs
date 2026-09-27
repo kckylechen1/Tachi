@@ -16,6 +16,7 @@ mod pools;
 mod selection;
 mod state;
 mod types;
+mod writer;
 
 pub(super) use self::config::{bind_lane_config_to_selected_key, LaneAuthority};
 pub use self::config::{LaneFallbackConfig, ProviderRuntimeConfig};
@@ -39,6 +40,11 @@ pub use self::types::{
 };
 pub use self::types::{
     LaneOutageStatus, ProviderHealthStatus, ProviderKeyCooldownStatus, ProviderPoolStatus,
+};
+pub(super) use self::writer::ProviderPersistWriter;
+#[cfg(test)]
+pub(super) use self::writer::{
+    install_retained_post_commit_hook_for_tests, success_snapshots_merge, RETAINED_STORE_TTL,
 };
 
 // The persisted `vault_key_health.status` vocabulary belongs to the single

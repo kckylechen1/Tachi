@@ -9,8 +9,9 @@ mod queue;
 mod status;
 
 pub use queue::{
-    claim_foundry_job_for_run, load_pending_foundry_jobs, requeue_retryable_foundry_jobs,
-    FoundryJobLease, FoundryRetryPolicy, RequeueOutcome,
+    claim_foundry_job_for_run, load_pending_foundry_jobs, probe_pending_foundry_jobs,
+    requeue_retryable_foundry_jobs, FoundryJobLease, FoundryPendingProbe, FoundryRetryPolicy,
+    PendingFoundryJobMarker, RequeueOutcome,
 };
 pub use status::{
     find_foundry_jobs_for_memory, gc_foundry_jobs, job_status_histogram,
@@ -357,6 +358,141 @@ mod tests {
             .map(|job| job.spec.id.as_str())
             .collect::<Vec<_>>();
         assert_eq!(ids, vec!["a-canonical", "z-bare"]);
+    }
+
+    fn probe_ids(probe: &FoundryPendingProbe) -> Vec<&str> {
+        probe.pending.iter().map(|m| m.id.as_str()).collect()
+    }
+
+    #[test]
+    fn probe_reports_the_pending_loader_rows_and_writes_nothing() {
+        let conn = open_test_db();
+        insert_minimal_job(&conn, "queued", "queued");
+        insert_minimal_job(&conn, "fresh-running", "running");
+        insert_minimal_job(&conn, "old-running", "running");
+        insert_minimal_job(&conn, "completed", "completed");
+        insert_minimal_job(&conn, "failed-in-backoff", "failed");
+        backdate_updated_at(&conn, "old-running", 20 * 60);
+        let old_running_updated_at: String = conn
+            .query_row(
+                "SELECT updated_at FROM foundry_jobs WHERE id = 'old-running'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let cutoff = canonical_ts(chrono::Utc::now() - chrono::Duration::minutes(10));
+
+        let changes_before = conn.total_changes();
+        let probe = probe_pending_foundry_jobs(&conn, &cutoff, chrono::Utc::now()).unwrap();
+        assert_eq!(
+            conn.total_changes(),
+            changes_before,
+            "the probe must not write"
+        );
+        assert_eq!(probe_ids(&probe), vec!["queued", "old-running"]);
+        assert!(
+            !probe.retry_sweep_due,
+            "a failed job still in backoff is not due"
+        );
+        assert_eq!(probe.pending[1].status, "running");
+        assert_eq!(probe.pending[1].updated_at, old_running_updated_at);
+
+        let loaded = load_pending_foundry_jobs(&conn, &cutoff).unwrap();
+        let loaded_ids = loaded
+            .iter()
+            .map(|j| j.spec.id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(probe_ids(&probe), loaded_ids);
+    }
+
+    #[test]
+    fn probe_uses_the_loader_datetime_cutoff_and_created_order() {
+        // Same fixture as the tachi#1638 loader test: the probe must agree
+        // with the loader on mixed timestamp forms.
+        let conn = open_test_db();
+        insert_job_at(
+            &conn,
+            "a-canonical",
+            "queued",
+            "2026-07-20T12:00:00.000Z",
+            "2026-07-20T12:00:00.000Z",
+        );
+        insert_job_at(
+            &conn,
+            "z-bare",
+            "queued",
+            "2026-07-20T12:00:00+00:00",
+            "2026-07-20T12:00:00+00:00",
+        );
+        insert_job_at(
+            &conn,
+            "same-second-running",
+            "running",
+            "2026-07-20T11:00:00.000Z",
+            "2026-07-20T12:00:00.100999+00:00",
+        );
+
+        let probe =
+            probe_pending_foundry_jobs(&conn, "2026-07-20T12:00:00.100Z", chrono::Utc::now())
+                .unwrap();
+        assert_eq!(probe_ids(&probe), vec!["a-canonical", "z-bare"]);
+    }
+
+    #[test]
+    fn probe_reports_a_due_retry_sweep_exactly_when_the_sweep_would_act() {
+        let cutoff = canonical_ts(chrono::Utc::now() - chrono::Duration::minutes(10));
+        let due = |seed: &dyn Fn(&Connection)| -> (bool, RequeueOutcome) {
+            let conn = open_test_db();
+            seed(&conn);
+            let probe = probe_pending_foundry_jobs(&conn, &cutoff, chrono::Utc::now()).unwrap();
+            assert!(probe.pending.is_empty(), "no queued or stale rows seeded");
+            let sweep = requeue_retryable_foundry_jobs(
+                &conn,
+                &FoundryRetryPolicy::default(),
+                chrono::Utc::now(),
+            )
+            .unwrap();
+            (probe.retry_sweep_due, sweep)
+        };
+
+        let (flag, sweep) = due(&|conn| {
+            insert_minimal_job(conn, "ready", "failed");
+            backdate_updated_at(conn, "ready", 3600);
+        });
+        assert!(flag, "a failed job past its backoff is due");
+        assert_eq!(sweep.requeued, 1);
+
+        let (flag, sweep) = due(&|conn| {
+            insert_job_with_metadata(conn, "exhausted", "failed", r#"{"attempts":4}"#);
+        });
+        assert!(flag, "an exhausted failed job is due for dead-lettering");
+        assert_eq!(sweep.dead_lettered, 1);
+
+        let (flag, sweep) = due(&|conn| {
+            insert_minimal_job(conn, "in-backoff", "failed");
+            insert_job_with_metadata(conn, "dead", "failed", r#"{"attempts":9,"dead_letter":1}"#);
+            backdate_updated_at(conn, "dead", 3600);
+        });
+        assert!(!flag, "backoff and dead-lettered rows are not due");
+        assert_eq!((sweep.requeued, sweep.dead_lettered), (0, 0));
+    }
+
+    #[test]
+    fn probe_runs_on_a_read_only_connection() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("probe-ro.db");
+        {
+            let _ = crate::db::enable_simple_auto_extension();
+            crate::db::sqlite_vec::register_sqlite_vec();
+            let conn = Connection::open(&path).unwrap();
+            init_schema(&conn).unwrap();
+            insert_minimal_job(&conn, "queued", "queued");
+        }
+        let ro =
+            Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        let cutoff = canonical_ts(chrono::Utc::now() - chrono::Duration::minutes(10));
+        let probe = probe_pending_foundry_jobs(&ro, &cutoff, chrono::Utc::now()).unwrap();
+        assert_eq!(probe_ids(&probe), vec!["queued"]);
     }
 
     #[test]

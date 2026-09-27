@@ -18,7 +18,11 @@ impl super::super::super::LlmClient {
     /// [`memcore::vault::health::record_key_outcome`] — the single writer all
     /// channels share; what stays here is the in-process bookkeeping only this
     /// client has: the ephemeral `Instant` cooldown mirror, the availability
-    /// snapshot, and the debounced persist.
+    /// snapshot, and queueing the row's background persist. That persist is
+    /// not debounced: every outcome schedules a tracked write, pending
+    /// plain-success snapshots of one key may be merged into the next one, and
+    /// the write reuses the client's retained vault handle while it is valid
+    /// (see `provider_health/writer.rs`).
     ///
     /// `evidence` is never inferred: the invocation path and the caller-facing
     /// `record_provider_key_result` are [`EvidenceKind::SelfReported`] (a

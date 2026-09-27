@@ -90,22 +90,36 @@ pub struct RequeueOutcome {
     pub dead_lettered: usize,
 }
 
-/// Re-queue failed jobs whose backoff has elapsed and dead-letter the ones that
-/// have exhausted their attempts.
-///
-/// All retry logic lives here so the many failure sites can keep simply marking
-/// jobs `failed`; `attempts` / `dead_letter` are tracked in the existing
-/// `metadata` JSON column (no schema migration). Idempotent and safe to call
-/// before any replay.
-pub fn requeue_retryable_foundry_jobs(
-    conn: &Connection,
+/// What one retry sweep does to a `failed`, not-yet-dead-lettered job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FailedJobSweepAction {
+    DeadLetter,
+    Requeue,
+}
+
+/// The single retry decision shared by [`requeue_retryable_foundry_jobs`]
+/// (which acts on it) and [`probe_pending_foundry_jobs`] (which only reports
+/// whether a sweep would act). `None` means the sweep leaves the row alone.
+fn failed_job_sweep_action(
     policy: &FoundryRetryPolicy,
+    attempts: u32,
+    updated_at: &str,
     now: chrono::DateTime<chrono::Utc>,
-) -> Result<RequeueOutcome, MemoryError> {
-    // Batch all requeue/dead-letter writes into one transaction: a single
-    // commit/fsync instead of an implicit transaction per UPDATE.
-    let tx = conn.unchecked_transaction()?;
-    let mut stmt = tx.prepare(
+) -> Option<FailedJobSweepAction> {
+    if attempts >= policy.max_attempts {
+        return Some(FailedJobSweepAction::DeadLetter);
+    }
+    let ready = chrono::DateTime::parse_from_rfc3339(updated_at)
+        .map(|last| {
+            (now - last.with_timezone(&chrono::Utc)).num_seconds() >= policy.backoff_secs(attempts)
+        })
+        .unwrap_or(true);
+    ready.then_some(FailedJobSweepAction::Requeue)
+}
+
+/// `(id, attempts, updated_at)` of every failed job a retry sweep considers.
+fn select_retry_candidates(conn: &Connection) -> Result<Vec<(String, u32, String)>, MemoryError> {
+    let mut stmt = conn.prepare(
         "SELECT id,
                 COALESCE(json_extract(metadata, '$.attempts'), 0) AS attempts,
                 updated_at
@@ -121,12 +135,33 @@ pub fn requeue_retryable_foundry_jobs(
             Ok((id, attempts.max(0) as u32, updated_at))
         })?
         .collect::<Result<Vec<_>, _>>()?;
-    drop(stmt);
+    Ok(rows)
+}
+
+/// Re-queue failed jobs whose backoff has elapsed and dead-letter the ones that
+/// have exhausted their attempts.
+///
+/// All retry logic lives here so the many failure sites can keep simply marking
+/// jobs `failed`; `attempts` / `dead_letter` are tracked in the existing
+/// `metadata` JSON column (no schema migration). Idempotent and safe to call
+/// before any replay.
+pub fn requeue_retryable_foundry_jobs(
+    conn: &Connection,
+    policy: &FoundryRetryPolicy,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<RequeueOutcome, MemoryError> {
+    // Batch all requeue/dead-letter writes into one transaction: a single
+    // commit/fsync instead of an implicit transaction per UPDATE.
+    let tx = conn.unchecked_transaction()?;
+    let rows = select_retry_candidates(&tx)?;
 
     let now_str = now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     let mut outcome = RequeueOutcome::default();
     for (id, attempts, updated_at) in rows {
-        if attempts >= policy.max_attempts {
+        let Some(action) = failed_job_sweep_action(policy, attempts, &updated_at, now) else {
+            continue;
+        };
+        if action == FailedJobSweepAction::DeadLetter {
             tx.execute(
                 "UPDATE foundry_jobs
                  SET updated_at = ?1,
@@ -137,16 +172,6 @@ pub fn requeue_retryable_foundry_jobs(
                 params![now_str, id],
             )?;
             outcome.dead_lettered += 1;
-            continue;
-        }
-
-        let ready = chrono::DateTime::parse_from_rfc3339(&updated_at)
-            .map(|last| {
-                (now - last.with_timezone(&chrono::Utc)).num_seconds()
-                    >= policy.backoff_secs(attempts)
-            })
-            .unwrap_or(true);
-        if !ready {
             continue;
         }
 
@@ -166,6 +191,12 @@ pub fn requeue_retryable_foundry_jobs(
     Ok(outcome)
 }
 
+/// The pending-row filter and order shared by [`load_pending_foundry_jobs`]
+/// and [`probe_pending_foundry_jobs`]; `?1` is the stale-running cutoff.
+const PENDING_JOBS_FILTER: &str = "WHERE status = 'queued'
+            OR (status = 'running' AND datetime(updated_at) < datetime(?1))
+         ORDER BY datetime(created_at) ASC, rowid ASC";
+
 /// Load queued jobs plus stale running jobs for startup/safety-net replay.
 ///
 /// First runs a retry sweep ([`requeue_retryable_foundry_jobs`]) so failed jobs
@@ -179,14 +210,12 @@ pub fn load_pending_foundry_jobs(
     let _ =
         requeue_retryable_foundry_jobs(conn, &FoundryRetryPolicy::default(), chrono::Utc::now());
 
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare(&format!(
         "SELECT id, kind, lane, status, target_db, named_project, path_prefix, memory_ids,
                 target_agent_id, requested_by, evidence_count, goal_count, metadata, created_at
          FROM foundry_jobs
-         WHERE status = 'queued'
-            OR (status = 'running' AND datetime(updated_at) < datetime(?1))
-         ORDER BY datetime(created_at) ASC, rowid ASC",
-    )?;
+         {PENDING_JOBS_FILTER}"
+    ))?;
 
     let rows = stmt.query_map(params![running_before], |row| {
         let kind_str: String = row.get(1)?;
@@ -223,4 +252,69 @@ pub fn load_pending_foundry_jobs(
         jobs.push(job?);
     }
     Ok(jobs)
+}
+
+/// The row state that identifies one pending job for a replay: a job whose
+/// `status` and `updated_at` are unchanged has not moved since it was last
+/// seen.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingFoundryJobMarker {
+    pub id: String,
+    pub status: String,
+    pub updated_at: String,
+}
+
+/// Read-only answer to "would [`load_pending_foundry_jobs`] find or change
+/// anything?", for pollers that only need a write-capable store when it would.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FoundryPendingProbe {
+    /// The rows [`load_pending_foundry_jobs`] would return right now, in the
+    /// same order.
+    pub pending: Vec<PendingFoundryJobMarker>,
+    /// Whether the retry sweep that [`load_pending_foundry_jobs`] runs first
+    /// would re-queue or dead-letter at least one failed job (with the default
+    /// [`FoundryRetryPolicy`], as that sweep uses).
+    pub retry_sweep_due: bool,
+}
+
+/// Probe `foundry_jobs` without writing anything.
+///
+/// Reports the queued and stale-running rows, and whether the retry sweep
+/// would act, using the same predicates as [`load_pending_foundry_jobs`] and
+/// the same retry decision as [`requeue_retryable_foundry_jobs`]. Both reads
+/// run in one read transaction, so they see one snapshot. Safe on a
+/// `SQLITE_OPEN_READ_ONLY` connection.
+pub fn probe_pending_foundry_jobs(
+    conn: &Connection,
+    running_before: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<FoundryPendingProbe, MemoryError> {
+    let tx = conn.unchecked_transaction()?;
+    let policy = FoundryRetryPolicy::default();
+    let retry_sweep_due = select_retry_candidates(&tx)?
+        .iter()
+        .any(|(_, attempts, updated_at)| {
+            failed_job_sweep_action(&policy, *attempts, updated_at, now).is_some()
+        });
+    let mut stmt = tx.prepare(&format!(
+        "SELECT id, status, updated_at
+         FROM foundry_jobs
+         {PENDING_JOBS_FILTER}"
+    ))?;
+    let pending = stmt
+        .query_map(params![running_before], |row| {
+            Ok(PendingFoundryJobMarker {
+                id: row.get(0)?,
+                status: row.get(1)?,
+                updated_at: row.get(2)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(stmt);
+    // Read-only: nothing to commit. Dropping the transaction rolls back.
+    drop(tx);
+    Ok(FoundryPendingProbe {
+        pending,
+        retry_sweep_due,
+    })
 }

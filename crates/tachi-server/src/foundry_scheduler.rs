@@ -3,9 +3,12 @@
 //! ### What this owns
 //! The scheduler is a single tokio task spawned by the daemon at startup that
 //! periodically rescans `~/.tachi/manifest.json` and, for every DB it lists,
-//! runs a per-DB **safety-net poll** every [`POLL_INTERVAL`]. Each poll opens
-//! the DB by absolute path, calls [`memcore::load_pending_foundry_jobs`]
-//! to find queued or stale `running` jobs, and (for DBs the existing
+//! runs a per-DB **safety-net poll** every [`POLL_INTERVAL`]. Each poll first
+//! probes the DB read-only ([`memcore::probe_pending_foundry_jobs`]); only
+//! when that finds work (a pending row this worker has not sent recently, or
+//! a due retry) does it take the full open and call
+//! [`memcore::load_pending_foundry_jobs`] to find queued or stale `running`
+//! jobs, and (for DBs the existing
 //! single-process foundry worker can route to) re-injects them into the
 //! shared `foundry_tx` mpsc channel for execution. For DBs the existing
 //! worker does **not** know how to route to (agents/, hub/, vault/, anything
@@ -24,15 +27,19 @@
 //! - Manifest re-read: [`MANIFEST_REFRESH_INTERVAL`] (60 s).
 //! - Per-DB safety-net poll: [`POLL_INTERVAL`] (30 s).
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::sync::mpsc;
 use tokio::time::{interval, Instant, MissedTickBehavior};
 
-use memcore::{load_pending_foundry_jobs, MemoryStore, PersistedFoundryJob};
+use memcore::{
+    load_pending_foundry_jobs, probe_pending_foundry_jobs, FoundryPendingProbe, MemoryStore,
+    PendingFoundryJobMarker, PersistedFoundryJob,
+};
 use tachi_foundry::FoundryRoute as Route;
 
 use crate::foundry_runtime_ops::FoundryMaintenanceItem;
@@ -47,7 +54,7 @@ mod worker;
 use routing::{classify_route_in_home, manifest_label_for, path_hash};
 pub use scheduler::FoundryScheduler;
 use types::WorkerHandle;
-pub use types::{MANIFEST_REFRESH_INTERVAL, POLL_INTERVAL};
+pub use types::{WorkerMetrics, MANIFEST_REFRESH_INTERVAL, POLL_INTERVAL};
 use worker::run_db_worker;
 
 #[cfg(test)]
