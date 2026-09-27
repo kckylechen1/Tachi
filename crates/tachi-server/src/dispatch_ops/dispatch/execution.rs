@@ -395,14 +395,14 @@ fn managed_timeout_override() -> Option<std::time::Duration> {
 /// the detached owner at a chosen lifecycle boundary installs this first and
 /// receives the real handle instead.
 #[cfg(test)]
-static BACKGROUND_DISPATCH_ABORT_CAPTURES: OnceLock<
-    Mutex<
-        std::collections::HashMap<
-            (PathBuf, PathBuf),
-            std::sync::mpsc::Sender<tokio::task::JoinHandle<()>>,
-        >,
-    >,
-> = OnceLock::new();
+type BackgroundDispatchAbortCaptures = std::collections::HashMap<
+    (PathBuf, PathBuf),
+    std::sync::mpsc::Sender<tokio::task::JoinHandle<()>>,
+>;
+
+#[cfg(test)]
+static BACKGROUND_DISPATCH_ABORT_CAPTURES: OnceLock<Mutex<BackgroundDispatchAbortCaptures>> =
+    OnceLock::new();
 
 #[cfg(test)]
 pub(crate) struct BackgroundDispatchAbortCaptureGuard((PathBuf, PathBuf));
