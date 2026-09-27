@@ -1537,8 +1537,13 @@ fn modern_http_request_uses_2026_headers_metadata_and_no_session() {
 /// every request and stuck/loop detection never fired. Requests with the same
 /// resolved identity now share a bucket; a different identity does not; a
 /// malformed `X-Tachi-Rate-Limit-Session` is ignored (neither an error nor a
-/// bucket); a valid one selects its own bucket; and a request with no
-/// AgentIdentity stays per-request, even when it carries a client label.
+/// bucket). PR2009 repair: every modern request is a fresh clone, so a valid
+/// bucket header must NOT override the identity-derived bucket — one
+/// identified peer rotating fresh legal keys per call would otherwise shed
+/// its own burst window; rotation must still reach the hard `Loop detected`
+/// block. The header stays the bucket selector only for identityless requests
+/// (the stdio proxy's per-connection key), and a request with no
+/// AgentIdentity and no header stays per-request, even with a client label.
 #[test]
 fn modern_http_rate_limit_bucket_follows_identity_or_bucket_header() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -1566,6 +1571,13 @@ fn modern_http_rate_limit_bucket_follows_identity_or_bucket_header() {
                             .is_some_and(|text| text.contains("stuck-detection"))
                     })
             };
+            let loop_blocked = |payload: &serde_json::Value| {
+                payload
+                    .get("error")
+                    .and_then(|err| err.get("message"))
+                    .and_then(|message| message.as_str())
+                    .is_some_and(|message| message.contains("Loop detected"))
+            };
             let call = |id: i64, identity: serde_json::Value, headers: &'static [(&'static str, &'static str)]| {
                 modern_http_tool_call_with_headers(
                     &client, &daemon.url, id, "tachi_memory", identity, args(), headers,
@@ -1587,21 +1599,98 @@ fn modern_http_rate_limit_bucket_follows_identity_or_bucket_header() {
                  from identity A shares its identity-derived burst window"
             );
 
-            // A valid bucket header selects its own bucket, never identity A's.
-            let explicit: &'static [(&'static str, &'static str)] =
-                &[(crate::session_identity::HEADER_RATE_LIMIT_SESSION, "c1-explicit-bucket-0001")];
-            for id in [5, 6] {
-                assert!(!stuck(&call(id, identity("a"), explicit).await), "request {id}");
+            // PR2009 repair: every modern request is a fresh clone, so a
+            // valid bucket header must not override the identity-derived
+            // bucket — rotating fresh legal keys would let identity A shed
+            // its own burst window. The soft stuck warning keeps firing
+            // across rotations (requests 5-8 land in identity A's window,
+            // which already holds the three stamps from requests 1, 2, 4)...
+            for (i, id) in (5..=8).enumerate() {
+                let key = format!("c1-rotate-header-{i:04}");
+                let headers = [(
+                    crate::session_identity::HEADER_RATE_LIMIT_SESSION,
+                    key.as_str(),
+                )];
+                let payload = modern_http_tool_call_with_headers(
+                    &client,
+                    &daemon.url,
+                    id,
+                    "tachi_memory",
+                    identity("a"),
+                    args(),
+                    &headers,
+                )
+                .await;
+                assert!(
+                    stuck(&payload),
+                    "rotated legal header {i} must keep identity A's burst window: {payload:#}"
+                );
             }
-            assert!(stuck(&call(7, identity("a"), explicit).await));
+            // ...the ninth identical call is the last the default burst
+            // window (limit 8) permits: no soft warning at exactly the
+            // limit, and no block yet...
+            let ninth = {
+                let headers = [(
+                    crate::session_identity::HEADER_RATE_LIMIT_SESSION,
+                    "c1-rotate-header-0004",
+                )];
+                modern_http_tool_call_with_headers(
+                    &client,
+                    &daemon.url,
+                    9,
+                    "tachi_memory",
+                    identity("a"),
+                    args(),
+                    &headers,
+                )
+                .await
+            };
+            assert!(
+                !stuck(&ninth) && !loop_blocked(&ninth),
+                "the ninth identical call is the last permitted one: {ninth:#}"
+            );
+            // ...and the tenth identical call hits the hard loop block even
+            // though it presents yet another fresh legal key.
+            let tenth = {
+                let headers = [(
+                    crate::session_identity::HEADER_RATE_LIMIT_SESSION,
+                    "c1-rotate-header-0005",
+                )];
+                modern_http_tool_call_with_headers(
+                    &client,
+                    &daemon.url,
+                    10,
+                    "tachi_memory",
+                    identity("a"),
+                    args(),
+                    &headers,
+                )
+                .await
+            };
+            assert!(
+                loop_blocked(&tenth),
+                "rotating legal headers must still reach the loop block: {tenth:#}"
+            );
+
+            // The header stays the bucket selector for identityless requests
+            // (the stdio proxy's per-connection key): one key with no
+            // AgentIdentity still accumulates one shared window.
+            let anon: &'static [(&'static str, &'static str)] = &[(
+                crate::session_identity::HEADER_RATE_LIMIT_SESSION,
+                "c1-anon-shared-bucket-01",
+            )];
+            for id in [11, 12] {
+                assert!(!stuck(&call(id, json!({}), anon).await), "request {id}");
+            }
+            assert!(stuck(&call(13, json!({}), anon).await));
 
             // Nothing stable to key on: per-request buckets stay the fallback.
-            for id in [8, 9, 10] {
+            for id in [14, 15, 16] {
                 assert!(!stuck(&call(id, json!({}), &[]).await), "request {id}");
             }
             // A client label alone is shared by every instance of that client,
             // so it must not anchor a bucket either.
-            for id in [11, 12, 13] {
+            for id in [17, 18, 19] {
                 let label_only = json!({"tachiClient":"c1-shared-label"});
                 assert!(!stuck(&call(id, label_only, &[]).await), "request {id}");
             }

@@ -838,25 +838,28 @@ impl MemoryServer {
         let identity = request_identity(Some(&context.meta), context);
         // Audit C1: a modern request has no session to hold a rate-limit
         // bucket, and `clone_for_mcp_session` just minted a per-request one.
-        // Without an explicit bucket header, key the bucket by the resolved
-        // AgentIdentity (plus client and project) so repeated calls from the
-        // same peer share burst/RPM windows. Without an AgentIdentity the
-        // per-request key stays: a client label or project alone is shared by
-        // every instance of that client and would let one peer trip another's
-        // loop block.
-        let identity_bucket = identity
-            .rate_limit_session
-            .is_none()
-            .then(|| (identity.agent_identity_id.clone(), identity.client.clone()));
+        // Key the bucket by the resolved AgentIdentity (plus client and
+        // project) whenever one is resolved — even if the request also
+        // carries a valid `X-Tachi-Rate-Limit-Session` header. Every modern
+        // request is a fresh clone, so honoring a caller-rotated header would
+        // let one identified peer shed its own burst/RPM window by sending a
+        // fresh legal key per call (PR2009). The header stays the fallback
+        // for identityless requests (the stdio proxy's per-connection key);
+        // without either anchor the per-request key remains: a client label
+        // or project alone is shared by every instance of that client and
+        // would let one peer trip another's loop block.
+        let identity_bucket = (identity.agent_identity_id.clone(), identity.client.clone());
         request_server.apply_resolved_request_identity(identity, context)?;
-        if let Some((agent_identity, client)) = identity_bucket {
-            if let Some(key) = modern_identity_rate_limit_session_id(
-                agent_identity.as_deref(),
-                client.as_deref(),
-                request_server.session_project().as_deref(),
-            ) {
-                request_server.set_rate_limit_session_id(key);
-            }
+        // Applied only after `apply_resolved_request_identity` succeeded —
+        // every identity check passed — so the derived bucket can never
+        // short-circuit identity admission. It overrides the header-installed
+        // `client:` key from `apply_resolved_request_identity`.
+        if let Some(key) = modern_identity_rate_limit_session_id(
+            identity_bucket.0.as_deref(),
+            identity_bucket.1.as_deref(),
+            request_server.session_project().as_deref(),
+        ) {
+            request_server.set_rate_limit_session_id(key);
         }
         Ok(request_server)
     }
@@ -958,7 +961,12 @@ impl MemoryServer {
         self.set_session_dispatch_depth(identity.dispatch_depth);
         // Audit C1: applied last, after every identity check above has
         // passed, so the bucket header can never short-circuit or stand in
-        // for identity admission. It only picks the rate-limit bucket.
+        // for identity admission. It only picks the rate-limit bucket. For a
+        // modern request with a resolved AgentIdentity this `client:` key is
+        // immediately overridden by the identity-derived bucket in
+        // `clone_for_modern_request` (PR2009: a rotated header must not let
+        // an identified peer shed its burst window); it stays authoritative
+        // for identityless requests and legacy sessions.
         if let Some(key) = identity.rate_limit_session {
             self.set_rate_limit_session_id(format!("client:{key}"));
         }
@@ -966,13 +974,17 @@ impl MemoryServer {
     }
 }
 
-/// Audit C1: stable rate-limit bucket for a modern (2026-07-28) request that
-/// sent no `X-Tachi-Rate-Limit-Session` header, derived from its resolved
-/// agent identity, client label, and canonical bound project. Returns `None`
-/// when the request asserts no AgentIdentity (a client label or project alone
-/// is shared across instances), leaving the per-request key in place. The key is
-/// a digest so the bucket id stays opaque (it also appears in lifecycle events)
-/// and cannot collide with the `client:` namespace.
+/// Audit C1: stable rate-limit bucket for a modern (2026-07-28) request,
+/// derived from its resolved agent identity, client label, and canonical
+/// bound project. Takes precedence over a valid `X-Tachi-Rate-Limit-Session`
+/// header whenever an AgentIdentity is resolved (PR2009): every modern
+/// request is a fresh clone, so a header-selected bucket would let one
+/// identified peer rotate fresh legal keys to shed its burst window. Returns
+/// `None` when the request asserts no AgentIdentity (a client label or
+/// project alone is shared across instances), leaving the header-installed
+/// `client:` key or the per-request key in place. The key is a digest so the
+/// bucket id stays opaque (it also appears in lifecycle events) and cannot
+/// collide with the `client:` namespace.
 fn modern_identity_rate_limit_session_id(
     agent_identity: Option<&str>,
     client: Option<&str>,

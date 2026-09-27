@@ -136,8 +136,8 @@ window started empty, so repeat-call warnings and loop blocks never fired.
 | Peer | Bucket key |
 |---|---|
 | stdio proxy | One random key minted per proxy connection and sent as `X-Tachi-Rate-Limit-Session` on every daemon tool call (legacy: read at `initialize`) |
-| Any HTTP peer sending a valid `X-Tachi-Rate-Limit-Session` | That key (legacy: for the session; modern: per request) |
-| Modern HTTP without the header, with an AgentIdentity | Digest of the resolved AgentIdentity, client label and canonical bound project (peers asserting the same AgentIdentity, client and project share one bucket) |
+| Modern HTTP with an AgentIdentity | Digest of the resolved AgentIdentity, client label and canonical bound project (peers asserting the same AgentIdentity, client and project share one bucket). This takes precedence over the bucket header: a modern request runs on a fresh clone, so honoring a rotated key would let one identified peer shed its own burst window |
+| Any HTTP peer sending a valid `X-Tachi-Rate-Limit-Session`, with no AgentIdentity | That key (legacy: for the session; modern: per request) |
 | Modern HTTP without the header or an AgentIdentity | Per-request key (unchanged fallback); a client label or project alone is shared by every instance of that client, so it never anchors a bucket |
 | Legacy HTTP without the header, local stdio | Per-session key (unchanged) |
 
@@ -146,10 +146,13 @@ profile, project, or authority, and it is applied only after every identity
 check has passed. It is header-only: there is no `_meta` twin, and
 `initialize` metadata cannot set it. Values must be 16 to 128 characters of
 `[A-Za-z0-9_-]`; anything else is ignored rather than failing the request, and
-the daemon keeps its own per-session or identity-derived key. A caller could
-choose a fresh key per call, but it could already open a fresh session, so
-this adds no new way around the limiter. The stdio proxy's retry split is
-unchanged: only a `BeforeDispatch` failure is retried, with the same key.
+the daemon keeps its own per-session or identity-derived key. For a legacy
+session a caller could choose a fresh key per call, but it could already open
+a fresh session, so this adds no new way around the limiter; for a modern
+identity-asserting request the identity-derived bucket wins regardless of the
+header, so rotating keys no longer sheds the burst window. The stdio proxy's
+retry split is unchanged: only a `BeforeDispatch` failure is retried, with
+the same key.
 
 ### Claude Code / host config sketch
 
@@ -173,7 +176,9 @@ Use the **named project key** Tachi reports for the repo (often
 
 A modern (`2026-07-28`) client that sends none of `X-Tachi-Agent-Identity`
 or `X-Tachi-Rate-Limit-Session` gets a per-request rate-limit bucket, so
-loop/stuck detection cannot fire for it. Add one of them if you want it; see
+loop/stuck detection cannot fire for it. Send an `X-Tachi-Agent-Identity` to
+anchor a stable bucket (it wins even when a bucket header is also sent), or
+an `X-Tachi-Rate-Limit-Session` if the client has no identity to assert; see
 [Rate-limit bucket](#rate-limit-bucket-x-tachi-rate-limit-session).
 
 ### Process inventory check
