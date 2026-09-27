@@ -1,10 +1,12 @@
 use rusqlite::functions::FunctionFlags;
 use rusqlite::types::Value;
 use rusqlite::{params, Connection};
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 use crate::error::MemoryError;
 use crate::namespace::{surface_sql_splice, Surface};
+use crate::scorer::SymbolicQuery;
 use crate::types::MemoryEntry;
 
 use super::{
@@ -252,7 +254,9 @@ fn run_search_vec_query(
     // existed, preserving the fused-pool behavior exactly.
     let surface_clause = surface_sql_splice(surface, true);
     let wiki_clause = wiki_gate.splice(true);
-    let mut stmt = conn.prepare(&format!(
+    // Fixed text per (surface, gate); `k` is a bound parameter, so widen
+    // passes and repeat searches reuse the cached statement (audit A6).
+    let mut stmt = conn.prepare_cached(&format!(
         r#"SELECT v.id, v.distance
            FROM memories_vec v
            JOIN memories m ON m.id = v.id
@@ -416,7 +420,9 @@ fn search_fts_match(
     let wiki_clause = wiki_gate.splice(true);
     // The ordinary path uses simple_query() for automatic CJK segmentation.
     // Raw match mode is only for internally constructed, sanitized FTS expressions.
-    let mut stmt = conn.prepare(&format!(
+    // Fixed text per (match operand, surface, gate): expansion groups and
+    // repeat searches reuse the cached statement (audit A6).
+    let mut stmt = conn.prepare_cached(&format!(
         r#"SELECT memories_fts.id, -bm25(memories_fts) AS score
            FROM memories_fts
            JOIN memories m ON m.id = memories_fts.id
@@ -496,7 +502,7 @@ pub fn search_symbolic_candidates(
     let as_of_utc = as_of
         .map(|instant| normalize_sqlite_as_of(conn, instant))
         .transpose()?;
-    search_symbolic_candidates_with_relevance(
+    search_symbolic_candidate_rows(
         conn,
         query,
         query,
@@ -507,12 +513,21 @@ pub fn search_symbolic_candidates(
         as_of_utc.as_deref(),
         surface,
         wiki_corpus_store,
+        memories_symbolic_fts_available(conn),
+        &SYMBOLIC_ENTRY_ROWS,
     )
 }
 
 /// In-crate variant used by hybrid search, where the final ranker's expanded
 /// symbolic query must decide pre-cap eligibility. The public helper above
 /// preserves its existing raw-query API for other consumers.
+///
+/// Returns candidate ids only, in the same relevance-first order and under
+/// the same LIMIT as the public helper: hybrid search re-fetches every
+/// candidate through `fetch_by_ids`, so materialising full rows here was
+/// discarded work (audit B1). The caller resolves `symbolic_fts_available`
+/// once per search ([`RecallTables`]) instead of each leg re-probing
+/// `sqlite_master` (audit B11).
 #[allow(clippy::too_many_arguments)] // matches the established raw-query helper plus relevance query
 pub(crate) fn search_symbolic_candidates_with_relevance(
     conn: &Connection,
@@ -525,14 +540,77 @@ pub(crate) fn search_symbolic_candidates_with_relevance(
     as_of_utc: Option<&str>,
     surface: Option<Surface>,
     wiki_corpus_store: bool,
-) -> Result<Vec<MemoryEntry>, MemoryError> {
+    symbolic_fts_available: bool,
+) -> Result<Vec<String>, MemoryError> {
+    search_symbolic_candidate_rows(
+        conn,
+        query,
+        relevance_query,
+        limit,
+        include_archived,
+        include_superseded,
+        path_prefix,
+        as_of_utc,
+        surface,
+        wiki_corpus_store,
+        symbolic_fts_available,
+        &SYMBOLIC_ID_ROWS,
+    )
+}
+
+/// The projection a symbolic candidate query returns. Only the SELECT list
+/// and the row mapper differ between shapes; the WHERE, ORDER BY and LIMIT
+/// clauses (and therefore membership and order) are shared.
+struct SymbolicRowShape<T> {
+    /// SELECT list for the trigram path (`m.` join alias).
+    qualified_columns: &'static str,
+    /// SELECT list for the table-scan path (bare `memories`).
+    unqualified_columns: &'static str,
+    map_row: fn(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
+}
+
+const SYMBOLIC_ENTRY_ROWS: SymbolicRowShape<MemoryEntry> = SymbolicRowShape {
+    qualified_columns: MEMORY_SELECT_COLUMNS_QUALIFIED,
+    unqualified_columns: MEMORY_SELECT_COLUMNS,
+    map_row: row_to_entry,
+};
+
+const SYMBOLIC_ID_ROWS: SymbolicRowShape<String> = SymbolicRowShape {
+    qualified_columns: "m.id",
+    unqualified_columns: "id",
+    map_row: symbolic_id_row,
+};
+
+fn symbolic_id_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<String> {
+    row.get(0)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn search_symbolic_candidate_rows<T>(
+    conn: &Connection,
+    query: &str,
+    relevance_query: &str,
+    limit: usize,
+    include_archived: bool,
+    include_superseded: bool,
+    path_prefix: Option<&str>,
+    as_of_utc: Option<&str>,
+    surface: Option<Surface>,
+    wiki_corpus_store: bool,
+    symbolic_fts_available: bool,
+    shape: &SymbolicRowShape<T>,
+) -> Result<Vec<T>, MemoryError> {
     let terms = symbolic_terms(query);
 
     if terms.is_empty() && path_prefix.is_none() {
         return Ok(Vec::new());
     }
 
-    register_symbolic_score_function(conn)?;
+    // Store connections register the scorer at open; this lazy, idempotent
+    // registration covers bare connections (fixtures, harnesses) without
+    // re-registering -- which would expire every cached statement -- on
+    // each search (audit A6).
+    ensure_symbolic_score_function(conn)?;
 
     let wiki_gate = WikiCorpusGate::resolve(wiki_corpus_store, path_prefix);
     let path_like = path_prefix.map(|prefix| format!("{prefix}%"));
@@ -545,10 +623,7 @@ pub(crate) fn search_symbolic_candidates_with_relevance(
     // while LIKE would have hit. Path-prefix-only queries keep the ordinary
     // `memories` path. Legacy fixtures without the virtual table also fall
     // back to the LIKE scan.
-    if !terms.is_empty()
-        && memories_symbolic_fts_available(conn)
-        && terms_trigram_match_eligible(&terms)
-    {
+    if !terms.is_empty() && symbolic_fts_available && terms_trigram_match_eligible(&terms) {
         return search_symbolic_via_trigram(
             conn,
             &terms,
@@ -560,6 +635,7 @@ pub(crate) fn search_symbolic_candidates_with_relevance(
             as_of_utc,
             surface,
             wiki_gate,
+            shape,
         );
     }
 
@@ -574,16 +650,60 @@ pub(crate) fn search_symbolic_candidates_with_relevance(
         as_of_utc,
         surface,
         wiki_gate,
+        shape,
     )
 }
 
+/// Presence probe for the trigram index. Same predicate as before (a
+/// `type = 'table'` row named `memories_symbolic_fts`, any error reads as
+/// absent); the statement text is fixed, so it is served from the
+/// connection's statement cache.
 fn memories_symbolic_fts_available(conn: &Connection) -> bool {
-    conn.query_row(
+    conn.prepare_cached(
         "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'memories_symbolic_fts'",
-        [],
-        |_| Ok(()),
     )
+    .and_then(|mut stmt| stmt.query_row([], |_| Ok(())))
     .is_ok()
+}
+
+/// Presence of the optional recall tables, resolved once per hybrid search
+/// and handed to every leg that used to re-probe `sqlite_master` on its own
+/// (audit B11). Deliberately *not* cached across searches: fixtures and
+/// repair paths create and drop these tables on live connections, and a
+/// per-search probe keeps each search seeing the schema as of its start.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct RecallTables {
+    /// A `sqlite_master` row named `memories_vec` exists (any object type,
+    /// matching the historical `fetch_by_ids` probe).
+    pub(crate) vector: bool,
+    /// A `type = 'table'` row named `memories_symbolic_fts` exists (matching
+    /// the historical symbolic and typo-prefilter probes).
+    pub(crate) symbolic_fts: bool,
+}
+
+impl RecallTables {
+    /// Both probes in one cached statement. Each predicate is the one its
+    /// former per-helper probe used, and a failed probe reads as "absent"
+    /// for both, as each helper's own probe did.
+    pub(crate) fn probe(conn: &Connection) -> Self {
+        conn.prepare_cached(
+            "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE name = 'memories_vec'),
+                    EXISTS (SELECT 1 FROM sqlite_master
+                             WHERE type = 'table' AND name = 'memories_symbolic_fts')",
+        )
+        .and_then(|mut stmt| {
+            stmt.query_row([], |row| {
+                Ok(Self {
+                    vector: row.get(0)?,
+                    symbolic_fts: row.get(1)?,
+                })
+            })
+        })
+        .unwrap_or(Self {
+            vector: false,
+            symbolic_fts: false,
+        })
+    }
 }
 
 /// Production SQL body for trigram-accelerated symbolic retrieval (#1331).
@@ -647,7 +767,7 @@ fn symbolic_trigram_select_sql_with_gate(
 /// scan). Scoring and the final row payload still read from `memories`,
 /// preserving #1154's relevance-first ORDER BY / LIMIT contract.
 #[allow(clippy::too_many_arguments)]
-fn search_symbolic_via_trigram(
+fn search_symbolic_via_trigram<T>(
     conn: &Connection,
     terms: &[String],
     relevance_query: &str,
@@ -658,10 +778,10 @@ fn search_symbolic_via_trigram(
     as_of_utc: Option<&str>,
     surface: Option<Surface>,
     wiki_gate: WikiCorpusGate,
-) -> Result<Vec<MemoryEntry>, MemoryError> {
+    shape: &SymbolicRowShape<T>,
+) -> Result<Vec<T>, MemoryError> {
     let match_query = symbolic_trigram_match_query(terms);
-    let sql =
-        symbolic_trigram_select_sql_with_gate(MEMORY_SELECT_COLUMNS_QUALIFIED, surface, wiki_gate);
+    let sql = symbolic_trigram_select_sql_with_gate(shape.qualified_columns, surface, wiki_gate);
 
     let params: Vec<Value> = vec![
         (include_archived as i64).into(),
@@ -673,8 +793,10 @@ fn search_symbolic_via_trigram(
         (limit.max(1) as i64).into(),
     ];
 
-    let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map(rusqlite::params_from_iter(params.iter()), row_to_entry)?;
+    // Fixed text per (projection, surface, gate): served from the statement
+    // cache on repeat searches (audit A6).
+    let mut stmt = conn.prepare_cached(&sql)?;
+    let rows = stmt.query_map(rusqlite::params_from_iter(params.iter()), shape.map_row)?;
     let mut out = Vec::new();
     for r in rows {
         out.push(r?);
@@ -696,7 +818,7 @@ fn symbolic_trigram_match_query(terms: &[String]) -> String {
 /// Pre-#1331 full-table LIKE scan. Kept as the path-prefix-only path and as
 /// a fallback when `memories_symbolic_fts` is absent (legacy test fixtures).
 #[allow(clippy::too_many_arguments)]
-fn search_symbolic_via_table_scan(
+fn search_symbolic_via_table_scan<T>(
     conn: &Connection,
     terms: &[String],
     relevance_query: &str,
@@ -707,13 +829,15 @@ fn search_symbolic_via_table_scan(
     as_of_utc: Option<&str>,
     surface: Option<Surface>,
     wiki_gate: WikiCorpusGate,
-) -> Result<Vec<MemoryEntry>, MemoryError> {
+    shape: &SymbolicRowShape<T>,
+) -> Result<Vec<T>, MemoryError> {
     // Unqualified (`qualified = false`): this path SELECTs from bare
     // `memories`, no `m.` join alias.
     let surface_clause = surface_sql_splice(surface, false);
     let wiki_clause = wiki_gate.splice(false);
+    let columns = shape.unqualified_columns;
     let mut sql = format!(
-        "SELECT {MEMORY_SELECT_COLUMNS} FROM memories
+        "SELECT {columns} FROM memories
          WHERE (?1 = 1 OR archived = 0)
            AND lower(trim(category)) <> 'sticky'
            AND lower(trim(path)) <> '/sticky'
@@ -759,12 +883,58 @@ fn search_symbolic_via_table_scan(
     ));
 
     let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map(rusqlite::params_from_iter(params.iter()), row_to_entry)?;
+    let rows = stmt.query_map(rusqlite::params_from_iter(params.iter()), shape.map_row)?;
     let mut out = Vec::new();
     for r in rows {
         out.push(r?);
     }
     Ok(out)
+}
+
+/// Client-data key marking a connection on which `tachi_symbolic_score` is
+/// registered. The pointer stored under it is a static sentinel and is never
+/// dereferenced; only its non-null presence is read.
+const SYMBOLIC_SCORE_REGISTERED_KEY: &std::ffi::CStr = c"tachi.symbolic_score_registered";
+static SYMBOLIC_SCORE_REGISTERED_SENTINEL: u8 = 1;
+
+fn symbolic_score_function_registered(conn: &Connection) -> bool {
+    // SAFETY: `conn.handle()` is this live connection's `sqlite3*`, and the
+    // key is a NUL-terminated static string. SQLite only reads the key.
+    !unsafe {
+        rusqlite::ffi::sqlite3_get_clientdata(conn.handle(), SYMBOLIC_SCORE_REGISTERED_KEY.as_ptr())
+    }
+    .is_null()
+}
+
+/// Register `tachi_symbolic_score` unless this connection already has it.
+///
+/// Store open paths call this once per connection. Symbolic search calls it
+/// again as the fallback for bare connections, and it is then a single
+/// client-data lookup: re-running `create_scalar_function` on every search
+/// would expire every prepared statement on the connection (SQLite
+/// redefinition semantics), defeating the statement cache (audit A6).
+pub(crate) fn ensure_symbolic_score_function(conn: &Connection) -> Result<(), MemoryError> {
+    if symbolic_score_function_registered(conn) {
+        return Ok(());
+    }
+    register_symbolic_score_function(conn)?;
+    // SAFETY: as above for handle and key. The value is the address of a
+    // `'static` byte and the destructor is `None`, so SQLite never frees it
+    // and the pointer stays valid for the connection's whole lifetime.
+    //
+    // A failed set (SQLITE_NOMEM) only means a later call registers the
+    // function again, which is the pre-cache behaviour, so it is ignored.
+    let _ = unsafe {
+        rusqlite::ffi::sqlite3_set_clientdata(
+            conn.handle(),
+            SYMBOLIC_SCORE_REGISTERED_KEY.as_ptr(),
+            std::ptr::addr_of!(SYMBOLIC_SCORE_REGISTERED_SENTINEL)
+                .cast_mut()
+                .cast(),
+            None,
+        )
+    };
+    Ok(())
 }
 
 fn register_symbolic_score_function(conn: &Connection) -> Result<(), MemoryError> {
@@ -773,17 +943,26 @@ fn register_symbolic_score_function(conn: &Connection) -> Result<(), MemoryError
         8,
         FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
         |context| {
-            let query = context.get::<String>(0)?;
-            let id = context.get::<String>(1)?;
-            let path = context.get::<String>(2)?;
-            let topic = context.get::<String>(3)?;
-            let summary = context.get::<String>(4)?;
-            let text = context.get::<String>(5)?;
+            // The query argument is the same bound parameter on every row, so
+            // tokenize it once per statement execution and keep it as SQLite
+            // auxiliary data (SQLite drops it whenever the argument changes).
+            let query = match context.get_aux::<SymbolicQuery>(0)? {
+                Some(query) => query,
+                None => {
+                    let query = context.get::<String>(0)?;
+                    context.set_aux(0, SymbolicQuery::new(&query))?
+                }
+            };
+            let id = text_arg(context, 1)?;
+            let path = text_arg(context, 2)?;
+            let topic = text_arg(context, 3)?;
+            let summary = text_arg(context, 4)?;
+            let text = text_arg(context, 5)?;
             // `row_to_entry` treats a legacy NULL JSON column as an empty
             // array. Mirror that fallback so candidate selection cannot fail
             // before final ranking sees the same row.
-            let keywords = context.get::<Option<String>>(6)?.unwrap_or_default();
-            let entities = context.get::<Option<String>>(7)?.unwrap_or_default();
+            let keywords = optional_text_arg(context, 6)?;
+            let entities = optional_text_arg(context, 7)?;
             Ok(crate::scorer::symbolic_score_stored_entry(
                 &query,
                 &[&id, &path, &topic, &summary, &text],
@@ -793,6 +972,33 @@ fn register_symbolic_score_function(conn: &Connection) -> Result<(), MemoryError
         },
     )?;
     Ok(())
+}
+
+/// A `TEXT` argument borrowed from SQLite instead of copied into a `String`.
+/// Any other value (NULL, a number, invalid UTF-8) goes through
+/// `Context::get::<String>`, so it converts or fails exactly as before.
+fn text_arg<'a>(
+    context: &'a rusqlite::functions::Context<'_>,
+    idx: usize,
+) -> rusqlite::Result<Cow<'a, str>> {
+    if let rusqlite::types::ValueRef::Text(bytes) = context.get_raw(idx) {
+        if let Ok(text) = std::str::from_utf8(bytes) {
+            return Ok(Cow::Borrowed(text));
+        }
+    }
+    context.get::<String>(idx).map(Cow::Owned)
+}
+
+/// [`text_arg`] for a nullable column: NULL reads as `""`, like
+/// `get::<Option<String>>().unwrap_or_default()`.
+fn optional_text_arg<'a>(
+    context: &'a rusqlite::functions::Context<'_>,
+    idx: usize,
+) -> rusqlite::Result<Cow<'a, str>> {
+    if let rusqlite::types::ValueRef::Null = context.get_raw(idx) {
+        return Ok(Cow::Borrowed(""));
+    }
+    text_arg(context, idx)
 }
 
 fn symbolic_terms(query: &str) -> Vec<String> {

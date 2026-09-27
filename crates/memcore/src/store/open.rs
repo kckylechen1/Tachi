@@ -605,6 +605,9 @@ impl MemoryStore {
         db::configure_connection(&conn)?;
         let reserved_reference_write = db::register_reserved_reference_write_guard(&conn)?;
         db::install_reserved_reference_authorizer(&conn, Some(&reserved_reference_write))?;
+        // Once per connection, so symbolic search never re-registers it
+        // (which would expire the connection's cached statements).
+        db::ensure_symbolic_score_function(&conn)?;
         let ctx = if sqlite_image.is_some() {
             DbOpenContext::open_existing_deny()
         } else {
@@ -725,6 +728,9 @@ impl MemoryStore {
         )?;
         let reserved_reference_write = db::register_reserved_reference_write_guard(&conn)?;
         db::install_reserved_reference_authorizer(&conn, Some(&reserved_reference_write))?;
+        // Once per connection, so symbolic search never re-registers it
+        // (which would expire the connection's cached statements).
+        db::ensure_symbolic_score_function(&conn)?;
         // Input trigger-inventory admission (see its doc). Schema init runs it
         // again inside BEGIN IMMEDIATE on the in-transaction state.
         db::validate_input_trigger_inventory(&conn)?;
@@ -838,6 +844,9 @@ impl MemoryStore {
         };
         let reserved_reference_write = db::register_reserved_reference_write_guard(&conn)?;
         db::install_reserved_reference_authorizer(&conn, Some(&reserved_reference_write))?;
+        // Once per connection, so symbolic search never re-registers it
+        // (which would expire the connection's cached statements).
+        db::ensure_symbolic_score_function(&conn)?;
         db::migrations::check_schema_version_gate(&conn)?;
         let stored = db::migrations::read_schema_version(&conn)?;
         if stored != db::migrations::EXPECTED_SCHEMA_VERSION {
@@ -990,6 +999,9 @@ impl MemoryStore {
             validate_physical_db_identity_across_open(db_path, physical_identity_before_open)?;
         let reserved_reference_write = db::register_reserved_reference_write_guard(&conn)?;
         db::install_reserved_reference_authorizer(&conn, Some(&reserved_reference_write))?;
+        // Once per connection, so symbolic search never re-registers it
+        // (which would expire the connection's cached statements).
+        db::ensure_symbolic_score_function(&conn)?;
         if compat_operation.is_some() {
             let raw_schema_version: i64 =
                 conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
@@ -1073,6 +1085,9 @@ impl MemoryStore {
         db::configure_connection(&conn)?;
         let reserved_reference_write = db::register_reserved_reference_write_guard(&conn)?;
         db::install_reserved_reference_authorizer(&conn, Some(&reserved_reference_write))?;
+        // Once per connection, so symbolic search never re-registers it
+        // (which would expire the connection's cached statements).
+        db::ensure_symbolic_score_function(&conn)?;
         db::migrations::check_schema_version_gate(&conn)?;
         let stored = db::migrations::read_schema_version(&conn)?;
         if stored != db::migrations::EXPECTED_SCHEMA_VERSION {
@@ -1130,6 +1145,9 @@ impl MemoryStore {
         db::configure_connection(&conn)?;
         let reserved_reference_write = db::register_reserved_reference_write_guard(&conn)?;
         db::install_reserved_reference_authorizer(&conn, Some(&reserved_reference_write))?;
+        // Once per connection, so symbolic search never re-registers it
+        // (which would expire the connection's cached statements).
+        db::ensure_symbolic_score_function(&conn)?;
         db::validate_persistent_trigger_inventory(&conn, false)?;
         let migration_authorization = db::authorize_schema_migration(&reserved_reference_write)?;
         let schema_result = db::init_schema(&conn);

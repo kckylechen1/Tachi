@@ -236,6 +236,10 @@ pub(crate) use memory_crud::{
 pub(crate) use memory_crud::{
     assert_memories_fixture_matches_select_columns, memory_select_required_columns,
 };
+pub(crate) use memory_crud::{
+    ensure_symbolic_score_function, fetch_by_ids_with_vector_table, fetch_embeddings_by_ids,
+    RecallTables,
+};
 /// tachi#1607 snapshot import: see `memory_crud::snapshot_import`.
 pub(crate) use memory_crud::{
     import_snapshot_row_within_tx, memory_row_exists_within_tx,

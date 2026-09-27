@@ -43,9 +43,9 @@ pub fn normalize_utc_iso(ts: &str) -> Result<String, MemoryError> {
 
 pub(crate) fn normalize_sqlite_as_of(conn: &Connection, ts: &str) -> Result<String, MemoryError> {
     let canonical = normalize_utc_iso(ts)?;
-    let anchored: Option<f64> = conn.query_row("SELECT julianday(?1)", [&canonical], |row| {
-        row.get::<_, Option<f64>>(0)
-    })?;
+    let anchored: Option<f64> = conn
+        .prepare_cached("SELECT julianday(?1)")?
+        .query_row([&canonical], |row| row.get::<_, Option<f64>>(0))?;
     if anchored.is_none() {
         return Err(MemoryError::InvalidArg(format!(
             "as_of instant {canonical} is outside the SQLite julianday range"
