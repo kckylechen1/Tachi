@@ -1524,6 +1524,39 @@ fn postflight_handoff_has_no_pid_reconstruction_or_signal_capability() {
         execution_source.contains("gate.run(&runner_liveness)"),
         "the production postflight handoff must consume typed runner liveness"
     );
+    // Audit E4: the typed evidence handed to the gate is a clone of the
+    // runner's evidence (never rebuilt), and the multi-second re-walk runs on
+    // the blocking pool rather than on the dispatch task's executor worker.
+    assert!(
+        execution_source.contains("let runner_liveness = runner_liveness.clone();"),
+        "the postflight gate must receive a clone of the runner's typed liveness evidence"
+    );
+    assert!(
+        execution_source.contains("spawn_blocking(move || gate.run(&runner_liveness))"),
+        "the postflight gate re-walk must run on the blocking pool, not an executor worker"
+    );
+}
+
+/// Audit E4: the pre-image capture (walk + content hash + clock barrier) runs
+/// with the executor core handed off, and WITHOUT an `.await` — the launch
+/// success path holds a non-RAII flow slot and credential materializations, so
+/// it must not gain a cancellation point between capture and spawn.
+#[test]
+fn postflight_preimage_capture_runs_off_the_executor_core_without_an_await() {
+    let dispatch_source = include_str!("../dispatch.rs");
+    assert!(
+        dispatch_source.contains("block_off_core(|| gate.capture_preimage())"),
+        "the pre-image capture must run through executor_offload::block_off_core"
+    );
+    assert!(
+        !dispatch_source.contains("spawn_blocking(move || gate.capture_preimage())"),
+        "the pre-image capture must not gain an await point on the launch success path"
+    );
+    assert_eq!(
+        dispatch_source.matches(".capture_preimage()").count(),
+        1,
+        "exactly one production pre-image capture site is expected"
+    );
 }
 
 #[test]

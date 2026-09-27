@@ -668,7 +668,24 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
             // The runner owns termination and reap. Postflight receives typed
             // terminal evidence only; no numeric PID crosses this handoff and
             // this layer has no signalling capability.
-            let outcome = gate.run(&runner_liveness);
+            //
+            // Audit E4: the re-walk + BLAKE2s re-hash takes seconds on a large
+            // lease, so it runs on the blocking pool instead of this worker.
+            // The clone shares the parent-held pre-image (`Arc`), and the typed
+            // evidence is cloned, never reconstructed.
+            let outcome = {
+                let gate = gate.clone();
+                let runner_liveness = runner_liveness.clone();
+                match tokio::task::spawn_blocking(move || gate.run(&runner_liveness)).await {
+                    Ok(outcome) => outcome,
+                    Err(join_error) if join_error.is_panic() => {
+                        std::panic::resume_unwind(join_error.into_panic())
+                    }
+                    Err(join_error) => Err(format!(
+                        "postflight gate task did not complete: {join_error}"
+                    )),
+                }
+            };
             match outcome {
                 Ok(mut outcome) => {
                     let quarantine_sink = crate::exec_env_postflight::DaemonQuarantineSink {

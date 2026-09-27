@@ -1405,7 +1405,13 @@ async fn launch_canonical_dispatch(
             if let Some(authority) = managed_worktree_authority.as_ref() {
                 gate = gate.with_worktree_authority(authority.clone());
             }
-            if let Err(error) = gate.capture_preimage() {
+            // Audit E4: the pre-image walk + BLAKE2s content hash + clock
+            // barrier takes seconds on a large lease. It runs with the executor
+            // core handed off, but WITHOUT a new `.await`: the flow slot and
+            // credential materializations held here are not RAII, so this
+            // success path must not gain a cancellation point.
+            if let Err(error) = crate::executor_offload::block_off_core(|| gate.capture_preimage())
+            {
                 let release_error = dispatch_lease.release_without_spawn().err();
                 let _ = server.with_global_store(|store| {
                     cleanup_ephemeral_credential_materializations(store, &workspace_dir, false)
