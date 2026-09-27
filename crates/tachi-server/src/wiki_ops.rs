@@ -88,5 +88,9 @@ pub(crate) use self::search::{
 };
 #[cfg(test)]
 pub(crate) use self::search::{collect_wiki_read_value, handle_wiki_read};
-pub(crate) use self::skill_quality::refresh_skill_quality_guards;
+#[cfg(test)]
+pub(crate) use self::skill_quality::refresh_skill_quality_scope_interleaved_for_test;
+pub(crate) use self::skill_quality::{
+    refresh_skill_quality_guards, SkillQualityRefreshQueue, SkillQualityRefreshReason,
+};
 pub(crate) use self::store::list_wiki_entries_for_plan;

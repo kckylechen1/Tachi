@@ -11,3 +11,4 @@ mod export_skills;
 mod feedback_stats;
 mod quick_add;
 mod register_review;
+mod skill_quality_refresh;
