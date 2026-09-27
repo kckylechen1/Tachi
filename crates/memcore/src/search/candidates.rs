@@ -16,7 +16,8 @@ use crate::{
 };
 
 use super::{
-    expansion::{search_fts_with_expansion_normalized, symbolic_query_with_expansion},
+    expansion::search_fts_with_expansion_normalized,
+    ranking::{NormalPoolEvidence, SymbolicEvidenceQuery},
     recall_config, CandidatePhaseReceipt, ChannelPhaseReceipt, SearchOptions,
     TypoFallbackAttribution, TypoFallbackPhaseReceipt,
 };
@@ -38,6 +39,19 @@ pub(super) struct CandidateSet {
     /// asks for bounded normal-leg coverage evidence. Typo fallback membership
     /// travels separately through `typo_candidate_ids` and #1447 attribution.
     pub(super) observed_evidence: Option<HashMap<String, super::CandidateLegEvidence>>,
+    /// Every row of `candidate_ids`, already fetched by the typo-fallback
+    /// activation gate (normal pool) and the typo prefilter (typo-only rows),
+    /// with the same filters and embedding shape the bulk fetch uses. `None`
+    /// when the query was not typo-eligible and the gate never fetched.
+    pub(super) prefetched: Option<PrefetchedCandidates>,
+}
+
+/// Candidate rows and derived evidence the typo-fallback gate already read,
+/// handed on so the bulk fetch and the rank phase do not read them again
+/// (audit B4).
+pub(super) struct PrefetchedCandidates {
+    pub(super) entries: HashMap<String, MemoryEntry>,
+    pub(super) normal_pool: NormalPoolEvidence,
 }
 
 struct TypoFallbackCandidates {
@@ -45,21 +59,24 @@ struct TypoFallbackCandidates {
     candidate_ids: HashSet<String>,
     attribution: TypoFallbackAttribution,
     receipt: Option<TypoFallbackPhaseReceipt>,
+    prefetched: Option<PrefetchedCandidates>,
 }
 
 impl TypoFallbackCandidates {
-    fn not_activated() -> Self {
+    fn not_activated(prefetched: Option<PrefetchedCandidates>) -> Self {
         Self {
             scores: HashMap::new(),
             candidate_ids: HashSet::new(),
             attribution: TypoFallbackAttribution::default(),
             receipt: None,
+            prefetched,
         }
     }
 }
 
-/// `as_of_utc` must already be normalized by the caller
-/// (`normalize_sqlite_as_of`).
+/// [`collect_candidates_for_search`] with the query-constant inputs derived
+/// here, for tests that drive candidate collection on its own.
+#[cfg(test)]
 pub(super) fn collect_candidates(
     conn: &Connection,
     query: &str,
@@ -68,6 +85,37 @@ pub(super) fn collect_candidates(
     as_of_utc: Option<&str>,
     sample: bool,
     observed_ids: Option<&[String]>,
+) -> Result<(CandidateSet, Option<CandidatePhaseReceipt>), MemoryError> {
+    collect_candidates_for_search(
+        conn,
+        query,
+        &SymbolicEvidenceQuery::new(query, recall_config(opts)),
+        opts,
+        include_superseded,
+        as_of_utc,
+        sample,
+        observed_ids,
+        super::ranking_reads_entry_vectors(opts),
+    )
+}
+
+/// `as_of_utc` must already be normalized by the caller
+/// (`normalize_sqlite_as_of`).
+///
+/// `embed_rows` is whether candidate rows are fetched with their embeddings
+/// (see [`super::ranking_reads_entry_vectors`]); it only matters when
+/// `memories_vec` exists.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn collect_candidates_for_search(
+    conn: &Connection,
+    query: &str,
+    symbolic: &SymbolicEvidenceQuery,
+    opts: &SearchOptions,
+    include_superseded: bool,
+    as_of_utc: Option<&str>,
+    sample: bool,
+    observed_ids: Option<&[String]>,
+    embed_rows: bool,
 ) -> Result<(CandidateSet, Option<CandidatePhaseReceipt>), MemoryError> {
     let n = opts.candidates_per_channel;
     let phase_start = sample.then(Instant::now);
@@ -140,11 +188,10 @@ pub(super) fn collect_candidates(
     // (`clean-cli`, `dry-run`, `RECALL_PROBE_*`). Pull a bounded lexical set so
     // symbolic scoring can add candidates instead of merely re-ranking FTS/vec.
     let symbolic_start = sample.then(Instant::now);
-    let symbolic_relevance_query = symbolic_query_with_expansion(query);
     let symbolic_candidate_ids = search_symbolic_candidates_with_relevance(
         conn,
         query,
-        &symbolic_relevance_query,
+        symbolic.expanded_text(),
         n.saturating_mul(SYMBOLIC_CANDIDATE_MULTIPLIER)
             .max(opts.top_k),
         opts.include_archived,
@@ -171,10 +218,12 @@ pub(super) fn collect_candidates(
     let typo = collect_typo_fallback_candidates(
         conn,
         query,
+        symbolic,
         opts,
         include_superseded,
         as_of_utc,
-        tables,
+        tables.vector && embed_rows,
+        tables.symbolic_fts,
         &vec_scores,
         &fts_scores,
         &normal_candidate_ids,
@@ -186,6 +235,7 @@ pub(super) fn collect_candidates(
         candidate_ids: typo_candidate_ids,
         attribution: typo_attribution,
         receipt: typo_receipt,
+        prefetched,
     } = typo;
     // Explicit type: the receipt below calls `candidate_ids.len()` inside a
     // closure, and method resolution can't wait for the `CandidateSet` literal
@@ -242,19 +292,25 @@ pub(super) fn collect_candidates(
             exact_id,
             candidate_ids,
             observed_evidence,
+            prefetched,
         },
         receipt,
     ))
 }
 
+/// `fetch_embeddings` is the bulk fetch's embedding shape (`memories_vec`
+/// exists and rows are fetched with vectors), so the rows fetched here can
+/// stand in for it.
 #[allow(clippy::too_many_arguments)]
 fn collect_typo_fallback_candidates(
     conn: &Connection,
     query: &str,
+    symbolic: &SymbolicEvidenceQuery,
     opts: &SearchOptions,
     include_superseded: bool,
     as_of_utc: Option<&str>,
-    tables: RecallTables,
+    fetch_embeddings: bool,
+    symbolic_fts_table: bool,
     vec_scores: &HashMap<String, f64>,
     fts_scores: &HashMap<String, f64>,
     normal_candidate_ids: &[String],
@@ -263,7 +319,7 @@ fn collect_typo_fallback_candidates(
 ) -> Result<TypoFallbackCandidates, MemoryError> {
     let config = &recall_config(opts).typo_fallback;
     let Some(query_terms) = eligible_typo_query_terms(query, config) else {
-        return Ok(TypoFallbackCandidates::not_activated());
+        return Ok(TypoFallbackCandidates::not_activated(None));
     };
     // Activation deliberately evaluates normal candidates with the same
     // retrieval-evidence predicate used after the final fetch/rank boundary.
@@ -271,28 +327,37 @@ fn collect_typo_fallback_candidates(
     // FTS/symbolic/vector rows can otherwise suppress fallback and then be
     // discarded by that later predicate. This fetch stays behind the typo
     // query eligibility gate, so the normal hot path remains allocation/I/O
-    // unchanged.
-    let normal_candidate_entries = fetch_by_ids_with_vector_table(
+    // unchanged. It uses the bulk fetch's exact filters and embedding shape,
+    // so its rows, symbolic scores and supersession state are handed on
+    // instead of being read and derived a second time (audit B4).
+    let mut normal_candidate_entries = fetch_by_ids_with_vector_table(
         conn,
         normal_candidate_ids,
         opts.include_archived,
         false,
-        tables.vector,
+        fetch_embeddings,
     )?;
-    if super::ranking::normal_candidates_have_final_retrieval_evidence(
-        conn,
-        query,
-        opts,
-        super::ranking::NormalCandidateEligibility {
-            entries: &normal_candidate_entries,
-            vec_scores,
-            fts_scores,
-            exact_id,
-        },
-        include_superseded,
-        as_of_utc,
-    )? {
-        return Ok(TypoFallbackCandidates::not_activated());
+    let (has_normal_evidence, normal_pool) =
+        super::ranking::normal_candidates_have_final_retrieval_evidence(
+            conn,
+            symbolic,
+            opts,
+            super::ranking::NormalCandidateEligibility {
+                entries: &normal_candidate_entries,
+                vec_scores,
+                fts_scores,
+                exact_id,
+            },
+            include_superseded,
+            as_of_utc,
+        )?;
+    if has_normal_evidence {
+        return Ok(TypoFallbackCandidates::not_activated(Some(
+            PrefetchedCandidates {
+                entries: normal_candidate_entries,
+                normal_pool,
+            },
+        )));
     }
 
     let started = Instant::now();
@@ -303,19 +368,19 @@ fn collect_typo_fallback_candidates(
         include_superseded,
         as_of_utc,
         config,
-        tables.symbolic_fts,
+        symbolic_fts_table,
     )?;
     let prefilter_candidate_count = prefilter_ids.len();
     // A typo match is independent retrieval evidence, not merely a source of
     // new IDs. Re-score prefiltered rows even when a weak vector leg already
     // contributed the same ID; otherwise a candidate can suppress fallback
     // and then be removed by the vector-only evidence floor.
-    let entries = fetch_by_ids_with_vector_table(
+    let mut entries = fetch_by_ids_with_vector_table(
         conn,
         &prefilter_ids,
         opts.include_archived,
         false,
-        tables.vector,
+        fetch_embeddings,
     )?;
     let compared_candidate_count = entries.len();
     let mut token_comparison_count = 0usize;
@@ -353,11 +418,25 @@ fn collect_typo_fallback_candidates(
         edit_cell_count,
         contributed_candidate_count: typo_candidate_ids.len(),
     });
+    // The bulk fetch would read exactly the normal pool plus the accepted typo
+    // rows; the prefilter fetch used the same filters, so those rows are
+    // already here.
+    for id in &typo_candidate_ids {
+        if !normal_candidate_entries.contains_key(id) {
+            if let Some(entry) = entries.remove(id) {
+                normal_candidate_entries.insert(id.clone(), entry);
+            }
+        }
+    }
     Ok(TypoFallbackCandidates {
         scores: typo_scores,
         candidate_ids: typo_candidate_ids,
         attribution,
         receipt,
+        prefetched: Some(PrefetchedCandidates {
+            entries: normal_candidate_entries,
+            normal_pool,
+        }),
     })
 }
 

@@ -187,28 +187,8 @@ pub(crate) fn fetch_by_ids_with_vector_table(
         let rows = stmt.query_map(rusqlite::params_from_iter(batch.iter()), |row| {
             let mut entry = row_to_entry(row)?;
             if has_vector_table {
-                let blob: Option<Vec<u8>> = row.get(MEMORY_EMBEDDING_COLUMN_INDEX)?;
-                if let Some(blob) = blob {
-                    if blob.len() % 4 != 0 {
-                        return Err(rusqlite::Error::FromSqlConversionFailure(
-                            MEMORY_EMBEDDING_COLUMN_INDEX,
-                            rusqlite::types::Type::Blob,
-                            format!(
-                                "invalid vector blob length for '{}': {}",
-                                entry.id,
-                                blob.len()
-                            )
-                            .into(),
-                        ));
-                    }
-                    entry.vector = Some(
-                        blob.as_chunks::<4>()
-                            .0
-                            .iter()
-                            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-                            .collect(),
-                    );
-                }
+                entry.vector =
+                    decode_embedding_column(row, MEMORY_EMBEDDING_COLUMN_INDEX, &entry.id)?;
             }
             Ok(entry)
         })?;
@@ -219,6 +199,77 @@ pub(crate) fn fetch_by_ids_with_vector_table(
         }
     }
 
+    Ok(out)
+}
+
+/// Decodes the little-endian `f32` embedding blob in column `idx`, exactly as
+/// [`fetch_by_ids_with_vector_table`] attaches it to `MemoryEntry::vector`:
+/// NULL is `None`, and a length that is not a multiple of 4 is an error. The
+/// error always names `MEMORY_EMBEDDING_COLUMN_INDEX`, the full fetch's
+/// column, so both read shapes fail identically.
+fn decode_embedding_column(
+    row: &rusqlite::Row<'_>,
+    idx: usize,
+    id: &str,
+) -> rusqlite::Result<Option<Vec<f32>>> {
+    let blob: Option<Vec<u8>> = row.get(idx)?;
+    let Some(blob) = blob else {
+        return Ok(None);
+    };
+    if blob.len() % 4 != 0 {
+        return Err(rusqlite::Error::FromSqlConversionFailure(
+            MEMORY_EMBEDDING_COLUMN_INDEX,
+            rusqlite::types::Type::Blob,
+            format!("invalid vector blob length for '{}': {}", id, blob.len()).into(),
+        ));
+    }
+    Ok(Some(
+        blob.as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect(),
+    ))
+}
+
+/// The embeddings [`fetch_by_ids_with_vector_table`] would have attached to
+/// the rows `ids`, for a caller that fetched those rows with
+/// `has_vector_table == false` and needs only some of their vectors (hybrid
+/// search hydrates just the MMR frontier and the returned rows; audit B4).
+///
+/// The caller must pass ids of rows it already fetched: there is no archived
+/// or store filter here. Rows without an embedding are absent from the map.
+/// Uses the same `memories LEFT JOIN memories_vec ON v.id = m.id` shape as the
+/// full fetch, so the lookup plan into `memories_vec` is unchanged.
+pub(crate) fn fetch_embeddings_by_ids(
+    conn: &Connection,
+    ids: &[String],
+) -> Result<HashMap<String, Vec<f32>>, MemoryError> {
+    let mut out = HashMap::new();
+    for batch in ids.chunks(IN_BATCH_SIZE) {
+        let placeholders = (1..=batch.len())
+            .map(|i| format!("?{i}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT m.id, v.embedding
+             FROM memories m
+             LEFT JOIN memories_vec v ON v.id = m.id
+             WHERE m.id IN ({placeholders})"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(batch.iter()), |row| {
+            let id: String = row.get(0)?;
+            let vector = decode_embedding_column(row, 1, &id)?;
+            Ok((id, vector))
+        })?;
+        for row in rows {
+            let (id, vector) = row?;
+            if let Some(vector) = vector {
+                out.insert(id, vector);
+            }
+        }
+    }
     Ok(out)
 }
 

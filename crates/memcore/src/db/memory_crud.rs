@@ -24,7 +24,6 @@ pub use access::{
 };
 #[cfg(test)]
 pub(crate) use access::{record_access, AccessUpdate};
-pub(crate) use read::fetch_by_ids_with_vector_table;
 pub(crate) use read::get_active_resource_entry;
 pub use read::{
     fetch_by_ids, fetch_by_ids_excluding_store_internal, find_active_wiki_entry_by_path,
@@ -32,6 +31,7 @@ pub use read::{
     list_active_wiki_ingest_predecessors, list_by_path, list_by_path_active_unsuperseded,
     list_by_path_recent, list_user_facing_wiki_entries, list_wiki_duplicate_candidates,
 };
+pub(crate) use read::{fetch_by_ids_with_vector_table, fetch_embeddings_by_ids};
 #[cfg(test)]
 pub(crate) use search::search_fts_raw_match;
 pub(crate) use search::search_fts_with_normalized_as_of;

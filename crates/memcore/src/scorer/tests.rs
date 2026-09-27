@@ -696,3 +696,176 @@ fn recall_tiebreak_orders_mixed_timestamp_formats_by_true_instant() {
         "score-tied rows must order by parsed instant desc, not lexical string"
     );
 }
+
+/// Audit B2: the streaming `SymbolicQuery` matcher must return bit-identical
+/// scores to the previous per-entry `HashSet<String>` implementation, for the
+/// entry scorer, the stored-row (UDF) scorer, and the free-text scorer.
+mod symbolic_query_differential {
+    use super::super::text::{symbolic_score_fields_reference, SymbolicQuery};
+    use super::*;
+
+    const PIECES: &[&str] = &[
+        "Rust",
+        "rust",
+        "RUST",
+        "memory",
+        "Memory-safety",
+        "dry-run",
+        "clean_cli",
+        "a",
+        "é",
+        "É",
+        "ab",
+        "x1",
+        "42",
+        "7",
+        "中文",
+        "記憶",
+        "搜索",
+        "ΣΟΦΟΣ",
+        "σοφος",
+        "ὈΔΥΣΣΕΎΣ",
+        "İstanbul",
+        "straße",
+        "STRASSE",
+        "ǅemal",
+        "tachi#1144",
+        "RECALL_PROBE_A",
+        "  ",
+        "\t",
+        "-",
+        "/",
+        ".",
+        "κόσμε",
+        "Ⅻ",
+        "½",
+        "٣٤",
+        "e\u{301}",
+        "ﬁne",
+        "日本語テキスト",
+        "한국어",
+        "abc中def",
+    ];
+
+    struct Lcg(u64);
+    impl Lcg {
+        fn next(&mut self) -> usize {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (self.0 >> 33) as usize
+        }
+        fn text(&mut self, max_pieces: usize) -> String {
+            let n = self.next() % (max_pieces + 1);
+            let mut out = String::new();
+            for _ in 0..n {
+                out.push_str(PIECES[self.next() % PIECES.len()]);
+                match self.next() % 4 {
+                    0 => {}
+                    1 => out.push(' '),
+                    2 => out.push('-'),
+                    _ => out.push_str(", "),
+                }
+            }
+            out
+        }
+        fn list(&mut self, max_items: usize) -> Vec<String> {
+            let n = self.next() % (max_items + 1);
+            (0..n).map(|_| self.text(3)).collect()
+        }
+    }
+
+    #[test]
+    fn streaming_matcher_matches_hashset_reference() {
+        let mut rng = Lcg(0x005e_edb2);
+        let (mut partial, mut full) = (0usize, 0usize);
+        for case in 0..20_000 {
+            // Some queries exceed the linear-scan threshold so the hashed
+            // lookup path is exercised too.
+            let query = rng.text(if case % 10 == 0 { 40 } else { 8 });
+            let fields: Vec<String> = (0..5).map(|_| rng.text(12)).collect();
+            let keywords = rng.list(4);
+            let entities = rng.list(4);
+            let field_refs: Vec<&str> = fields.iter().map(String::as_str).collect();
+
+            let expected =
+                symbolic_score_fields_reference(&query, &field_refs, &keywords, &entities);
+            if expected == 1.0 {
+                full += 1;
+            } else if expected > 0.0 {
+                partial += 1;
+            }
+
+            let mut entry = test_entry(&fields[0]);
+            entry.path = fields[1].clone();
+            entry.topic = fields[2].clone();
+            entry.summary = fields[3].clone();
+            entry.text = fields[4].clone();
+            entry.keywords = keywords.clone();
+            entry.entities = entities.clone();
+            let got_entry = symbolic_score_entry(&query, &entry);
+            assert_eq!(
+                got_entry.to_bits(),
+                expected.to_bits(),
+                "case {case}: query={query:?} fields={fields:?} kw={keywords:?} ent={entities:?}"
+            );
+
+            let stored = symbolic_score_stored_entry(
+                &SymbolicQuery::new(&query),
+                &[&fields[0], &fields[1], &fields[2], &fields[3], &fields[4]],
+                &serde_json::to_string(&keywords).unwrap(),
+                &serde_json::to_string(&entities).unwrap(),
+            );
+            assert_eq!(stored.to_bits(), expected.to_bits(), "case {case} (stored)");
+
+            let text_only = symbolic_score(&query, &fields[4], &keywords, &entities);
+            let text_expected =
+                symbolic_score_fields_reference(&query, &[&fields[4]], &keywords, &entities);
+            assert_eq!(
+                text_only.to_bits(),
+                text_expected.to_bits(),
+                "case {case} (text)"
+            );
+        }
+        // The generator must exercise partial and full overlap (early exit),
+        // not only disjoint pairs.
+        assert!(
+            partial > 1_000 && full > 1_000,
+            "partial={partial} full={full}"
+        );
+    }
+
+    #[test]
+    fn stored_scorer_keeps_invalid_json_fallback() {
+        let query = SymbolicQuery::new("alpha beta");
+        let fields = ["", "", "", "", "alpha"];
+        // Invalid JSON and a non-string element both read as "no keywords".
+        for bad in ["not json", "[\"beta\", 1]", ""] {
+            let got = symbolic_score_stored_entry(&query, &fields, bad, "[]");
+            let expected =
+                symbolic_score_fields_reference("alpha beta", &["", "", "", "", "alpha"], &[], &[]);
+            assert_eq!(got.to_bits(), expected.to_bits(), "{bad:?}");
+        }
+        let got = symbolic_score_stored_entry(&query, &fields, "[\"be\\u0074a\"]", "[]");
+        assert_eq!(got, 1.0);
+    }
+
+    #[test]
+    fn entity_whole_string_token_is_ascii_lowercased_only() {
+        // The whole trimmed entity is a token lowercased ASCII-only, so
+        // "ÉCOLE" never matches the query token "école", while "Tachi" does
+        // match "tachi" both ways.
+        for (query, entity) in [
+            ("école", "ÉCOLE"),
+            ("tachi", " Tachi "),
+            ("foo bar", "foo bar"),
+            ("中", "中"),
+        ] {
+            let expected =
+                symbolic_score_fields_reference(query, &[""], &[], &[entity.to_string()]);
+            let got = symbolic_score(query, "", &[], &[entity.to_string()]);
+            assert_eq!(got.to_bits(), expected.to_bits(), "{query:?} / {entity:?}");
+        }
+    }
+}

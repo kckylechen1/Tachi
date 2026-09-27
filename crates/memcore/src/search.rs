@@ -192,6 +192,18 @@ pub(super) fn decay_policy(opts: &SearchOptions) -> &dyn DecayPolicy {
         .unwrap_or(&DEFAULT_DECAY_POLICY)
 }
 
+/// Whether an injected decay policy or precision matcher may read
+/// `entry.vector` while ranking, in which case every candidate row is fetched
+/// with its embedding. Otherwise only the MMR frontier and the returned rows
+/// get theirs (audit B4).
+pub(super) fn ranking_reads_entry_vectors(opts: &SearchOptions) -> bool {
+    decay_policy(opts).reads_entry_vector()
+        || opts
+            .precision_matchers
+            .iter()
+            .any(|matcher| matcher.reads_entry_vector())
+}
+
 pub(super) fn resolve_weights(opts: &SearchOptions) -> HybridWeights {
     if opts.weights != HybridWeights::default() {
         return opts.weights.clone();
@@ -383,6 +395,11 @@ pub(super) struct TypoFallbackAttribution {
 }
 
 /// Bulk-fetch-by-id phase receipt (`db::fetch_by_ids`).
+///
+/// On a typo-eligible query the typo-fallback activation gate already fetched
+/// every candidate row during the candidates phase; this phase then hands
+/// those rows on without a second read (audit B4), so `elapsed` covers no DB
+/// read while `fetched_count` still counts the rows given to ranking.
 #[derive(Debug, Clone)]
 pub struct FetchPhaseReceipt {
     pub elapsed: Duration,
@@ -408,6 +425,10 @@ pub struct RankPhaseReceipt {
     /// `get_superseded_ids` DB I/O (ranking.rs:55). Always populated when
     /// the rank phase produced a receipt — it runs unconditionally at the
     /// top of `rank_candidate_entries`, before the candidate filter.
+    /// `candidate_count` is the number of ids looked up here: on a
+    /// typo-eligible query the typo-fallback activation gate already looked
+    /// up the normal candidate pool, so only the typo-only rows remain
+    /// (possibly none; audit B4).
     pub get_superseded_ids: ChannelPhaseReceipt,
     /// `get_access_times` DB I/O (ranking.rs:96). `None` when the rank
     /// phase executed but the candidate filter zeroed out before this
@@ -617,14 +638,18 @@ fn hybrid_search_inner(
         || include_superseded_env_override_active()
         || scoped_path_can_surface_superseded(opts.path_prefix.as_deref());
 
-    let (mut candidates, candidates_receipt) = candidates::collect_candidates(
+    let symbolic = ranking::SymbolicEvidenceQuery::new(query, recall_config(opts));
+    let embed_rows = ranking_reads_entry_vectors(opts);
+    let (mut candidates, candidates_receipt) = candidates::collect_candidates_for_search(
         conn,
         query,
+        &symbolic,
         opts,
         include_superseded,
         as_of_utc.as_deref(),
         sample,
         observed_ids,
+        embed_rows,
     )?;
     let candidate_leg_evidence = candidates.observed_evidence.take().unwrap_or_default();
     if candidates.candidate_ids.is_empty() {
@@ -638,14 +663,24 @@ fn hybrid_search_inner(
     }
 
     // ── Bulk-fetch entries ─────────────────────────────────────────────────────
+    // Rows are fetched without embeddings unless an injected policy or
+    // matcher may read them; the rank phase then decodes embeddings only for
+    // the MMR frontier and the returned rows (audit B4). When the typo gate
+    // already fetched every candidate row, those rows are reused.
     let fetch_start = sample.then(Instant::now);
-    let entries_map = crate::db::fetch_by_ids_with_vector_table(
-        conn,
-        &candidates.candidate_ids,
-        opts.include_archived,
-        false,
-        candidates.tables.vector,
-    )?;
+    let (entries_map, normal_pool) = match candidates.prefetched.take() {
+        Some(prefetched) => (prefetched.entries, Some(prefetched.normal_pool)),
+        None => (
+            crate::db::fetch_by_ids_with_vector_table(
+                conn,
+                &candidates.candidate_ids,
+                opts.include_archived,
+                false,
+                candidates.tables.vector && embed_rows,
+            )?,
+            None,
+        ),
+    };
     let fetch_receipt = fetch_start.map(|s| FetchPhaseReceipt {
         elapsed: s.elapsed(),
         fetched_count: entries_map.len(),
@@ -671,6 +706,9 @@ fn hybrid_search_inner(
                 exact_id: candidates.exact_id.as_deref(),
                 include_superseded,
                 as_of_utc: as_of_utc.as_deref(),
+                symbolic: &symbolic,
+                normal_pool,
+                deferred_vectors: candidates.tables.vector && !embed_rows,
             },
             sample,
             capture_impression,
@@ -814,14 +852,17 @@ fn hybrid_search_with_attribution(
         || include_superseded_env_override_active()
         || scoped_path_can_surface_superseded(opts.path_prefix.as_deref());
 
-    let (candidates, _receipt) = candidates::collect_candidates(
+    let symbolic = ranking::SymbolicEvidenceQuery::new(query, recall_config(opts));
+    let (candidates, _receipt) = candidates::collect_candidates_for_search(
         conn,
         query,
+        &symbolic,
         opts,
         include_superseded,
         as_of_utc.as_deref(),
         false,
         None,
+        true,
     )?;
     if candidates.candidate_ids.is_empty() {
         return Ok((
@@ -855,6 +896,9 @@ fn hybrid_search_with_attribution(
             exact_id: candidates.exact_id.as_deref(),
             include_superseded,
             as_of_utc: as_of_utc.as_deref(),
+            symbolic: &symbolic,
+            normal_pool: None,
+            deferred_vectors: false,
         },
     )?;
     Ok((ranked, attribution))

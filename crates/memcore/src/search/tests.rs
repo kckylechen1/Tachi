@@ -12,6 +12,7 @@ mod anchor;
 mod baseline;
 mod config;
 mod decay_policy;
+mod deferred_vectors;
 mod expansion;
 mod exposure_loop;
 mod golden_corpus;

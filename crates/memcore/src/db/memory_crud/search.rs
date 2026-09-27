@@ -1,10 +1,12 @@
 use rusqlite::functions::FunctionFlags;
 use rusqlite::types::Value;
 use rusqlite::{params, Connection};
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 use crate::error::MemoryError;
 use crate::namespace::{surface_sql_splice, Surface};
+use crate::scorer::SymbolicQuery;
 use crate::types::MemoryEntry;
 
 use super::{
@@ -941,17 +943,26 @@ fn register_symbolic_score_function(conn: &Connection) -> Result<(), MemoryError
         8,
         FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
         |context| {
-            let query = context.get::<String>(0)?;
-            let id = context.get::<String>(1)?;
-            let path = context.get::<String>(2)?;
-            let topic = context.get::<String>(3)?;
-            let summary = context.get::<String>(4)?;
-            let text = context.get::<String>(5)?;
+            // The query argument is the same bound parameter on every row, so
+            // tokenize it once per statement execution and keep it as SQLite
+            // auxiliary data (SQLite drops it whenever the argument changes).
+            let query = match context.get_aux::<SymbolicQuery>(0)? {
+                Some(query) => query,
+                None => {
+                    let query = context.get::<String>(0)?;
+                    context.set_aux(0, SymbolicQuery::new(&query))?
+                }
+            };
+            let id = text_arg(context, 1)?;
+            let path = text_arg(context, 2)?;
+            let topic = text_arg(context, 3)?;
+            let summary = text_arg(context, 4)?;
+            let text = text_arg(context, 5)?;
             // `row_to_entry` treats a legacy NULL JSON column as an empty
             // array. Mirror that fallback so candidate selection cannot fail
             // before final ranking sees the same row.
-            let keywords = context.get::<Option<String>>(6)?.unwrap_or_default();
-            let entities = context.get::<Option<String>>(7)?.unwrap_or_default();
+            let keywords = optional_text_arg(context, 6)?;
+            let entities = optional_text_arg(context, 7)?;
             Ok(crate::scorer::symbolic_score_stored_entry(
                 &query,
                 &[&id, &path, &topic, &summary, &text],
@@ -961,6 +972,33 @@ fn register_symbolic_score_function(conn: &Connection) -> Result<(), MemoryError
         },
     )?;
     Ok(())
+}
+
+/// A `TEXT` argument borrowed from SQLite instead of copied into a `String`.
+/// Any other value (NULL, a number, invalid UTF-8) goes through
+/// `Context::get::<String>`, so it converts or fails exactly as before.
+fn text_arg<'a>(
+    context: &'a rusqlite::functions::Context<'_>,
+    idx: usize,
+) -> rusqlite::Result<Cow<'a, str>> {
+    if let rusqlite::types::ValueRef::Text(bytes) = context.get_raw(idx) {
+        if let Ok(text) = std::str::from_utf8(bytes) {
+            return Ok(Cow::Borrowed(text));
+        }
+    }
+    context.get::<String>(idx).map(Cow::Owned)
+}
+
+/// [`text_arg`] for a nullable column: NULL reads as `""`, like
+/// `get::<Option<String>>().unwrap_or_default()`.
+fn optional_text_arg<'a>(
+    context: &'a rusqlite::functions::Context<'_>,
+    idx: usize,
+) -> rusqlite::Result<Cow<'a, str>> {
+    if let rusqlite::types::ValueRef::Null = context.get_raw(idx) {
+        return Ok(Cow::Borrowed(""));
+    }
+    text_arg(context, idx)
 }
 
 fn symbolic_terms(query: &str) -> Vec<String> {
