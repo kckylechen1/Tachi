@@ -24,6 +24,7 @@ pub use access::{
 };
 #[cfg(test)]
 pub(crate) use access::{record_access, AccessUpdate};
+pub(crate) use read::fetch_by_ids_with_vector_table;
 pub(crate) use read::get_active_resource_entry;
 pub use read::{
     fetch_by_ids, fetch_by_ids_excluding_store_internal, find_active_wiki_entry_by_path,
@@ -36,6 +37,7 @@ pub(crate) use search::search_fts_raw_match;
 pub(crate) use search::search_fts_with_normalized_as_of;
 pub(crate) use search::search_symbolic_candidates_with_relevance;
 pub(crate) use search::wiki_corpus_store_sql_splice;
+pub(crate) use search::{ensure_symbolic_score_function, RecallTables};
 pub use search::{
     search_fts, search_symbolic_candidates, search_vec, symbolic_trigram_select_sql,
     SYMBOLIC_TRIGRAM_SELECT_SQL_TEMPLATE,

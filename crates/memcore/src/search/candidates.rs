@@ -6,8 +6,8 @@ use std::time::Instant;
 
 use crate::{
     db::{
-        fetch_by_ids, search_symbolic_candidates_with_relevance, search_vec,
-        wiki_corpus_store_sql_splice,
+        fetch_by_ids_with_vector_table, search_symbolic_candidates_with_relevance, search_vec,
+        wiki_corpus_store_sql_splice, RecallTables,
     },
     error::MemoryError,
     namespace::surface_sql_splice,
@@ -16,7 +16,7 @@ use crate::{
 };
 
 use super::{
-    expansion::{search_fts_with_expansion_config, symbolic_query_with_expansion},
+    expansion::{search_fts_with_expansion_normalized, symbolic_query_with_expansion},
     recall_config, CandidatePhaseReceipt, ChannelPhaseReceipt, SearchOptions,
     TypoFallbackAttribution, TypoFallbackPhaseReceipt,
 };
@@ -24,6 +24,8 @@ use super::{
 const SYMBOLIC_CANDIDATE_MULTIPLIER: usize = 10;
 
 pub(super) struct CandidateSet {
+    /// Optional-table presence probed at the start of this search.
+    pub(super) tables: RecallTables,
     pub(super) vec_scores: HashMap<String, f64>,
     pub(super) fts_scores: HashMap<String, f64>,
     pub(super) typo_scores: HashMap<String, f64>,
@@ -56,6 +58,8 @@ impl TypoFallbackCandidates {
     }
 }
 
+/// `as_of_utc` must already be normalized by the caller
+/// (`normalize_sqlite_as_of`).
 pub(super) fn collect_candidates(
     conn: &Connection,
     query: &str,
@@ -67,6 +71,11 @@ pub(super) fn collect_candidates(
 ) -> Result<(CandidateSet, Option<CandidatePhaseReceipt>), MemoryError> {
     let n = opts.candidates_per_channel;
     let phase_start = sample.then(Instant::now);
+    // One presence probe per search for the optional recall tables, shared by
+    // the symbolic leg, the typo fallback and the caller's bulk fetch
+    // (`CandidateSet::tables`) instead of one `sqlite_master` probe per
+    // helper (audit B11).
+    let tables = RecallTables::probe(conn);
 
     // ── Vector KNN ───────────────────────────────────────────────────────────
     // The "vector unavailable" branch is the `if opts.vec_available { ... }
@@ -109,7 +118,9 @@ pub(super) fn collect_candidates(
     // `merged.is_empty()`) gets its own `Instant`. Without per-group timing
     // a "FTS slow" report could not distinguish a noisy expanded variant
     // from the original query — and could not give a bounded follow-up.
-    let (fts_scores, fts_groups) = search_fts_with_expansion_config(
+    // `as_of_utc` is already normalized, so the FTS leg does not repeat the
+    // `julianday` preflight (audit B11).
+    let (fts_scores, fts_groups) = search_fts_with_expansion_normalized(
         conn,
         query,
         n,
@@ -130,7 +141,7 @@ pub(super) fn collect_candidates(
     // symbolic scoring can add candidates instead of merely re-ranking FTS/vec.
     let symbolic_start = sample.then(Instant::now);
     let symbolic_relevance_query = symbolic_query_with_expansion(query);
-    let symbolic_candidate_entries = search_symbolic_candidates_with_relevance(
+    let symbolic_candidate_ids = search_symbolic_candidates_with_relevance(
         conn,
         query,
         &symbolic_relevance_query,
@@ -142,15 +153,16 @@ pub(super) fn collect_candidates(
         as_of_utc,
         opts.surface,
         opts.wiki_corpus_store,
+        tables.symbolic_fts,
     )?;
     let symbolic_elapsed = symbolic_start.map(|s| s.elapsed());
-    let symbolic_candidate_count = symbolic_candidate_entries.len();
+    let symbolic_candidate_count = symbolic_candidate_ids.len();
 
     let exact_id = exact_memory_id_query(query);
     let mut normal_candidate_ids = vec_scores
         .keys()
         .chain(fts_scores.keys())
-        .chain(symbolic_candidate_entries.iter().map(|entry| &entry.id))
+        .chain(symbolic_candidate_ids.iter())
         .chain(exact_id.as_ref())
         .cloned()
         .collect::<HashSet<_>>();
@@ -162,6 +174,7 @@ pub(super) fn collect_candidates(
         opts,
         include_superseded,
         as_of_utc,
+        tables,
         &vec_scores,
         &fts_scores,
         &normal_candidate_ids,
@@ -181,7 +194,7 @@ pub(super) fn collect_candidates(
     let candidate_ids: Vec<String> = vec_scores
         .keys()
         .chain(fts_scores.keys())
-        .chain(symbolic_candidate_entries.iter().map(|entry| &entry.id))
+        .chain(symbolic_candidate_ids.iter())
         .chain(exact_id.as_ref())
         .chain(typo_candidate_ids.iter())
         .cloned()
@@ -196,9 +209,7 @@ pub(super) fn collect_candidates(
                     super::CandidateLegEvidence {
                         vector: vec_scores.contains_key(id),
                         fts: fts_scores.contains_key(id),
-                        symbolic: symbolic_candidate_entries
-                            .iter()
-                            .any(|entry| entry.id == id.as_str()),
+                        symbolic: symbolic_candidate_ids.contains(id),
                         exact_id: exact_id.as_deref() == Some(id.as_str()),
                     },
                 )
@@ -222,6 +233,7 @@ pub(super) fn collect_candidates(
 
     Ok((
         CandidateSet {
+            tables,
             vec_scores,
             fts_scores,
             typo_scores,
@@ -242,6 +254,7 @@ fn collect_typo_fallback_candidates(
     opts: &SearchOptions,
     include_superseded: bool,
     as_of_utc: Option<&str>,
+    tables: RecallTables,
     vec_scores: &HashMap<String, f64>,
     fts_scores: &HashMap<String, f64>,
     normal_candidate_ids: &[String],
@@ -259,7 +272,13 @@ fn collect_typo_fallback_candidates(
     // discarded by that later predicate. This fetch stays behind the typo
     // query eligibility gate, so the normal hot path remains allocation/I/O
     // unchanged.
-    let normal_candidate_entries = fetch_by_ids(conn, normal_candidate_ids, opts.include_archived)?;
+    let normal_candidate_entries = fetch_by_ids_with_vector_table(
+        conn,
+        normal_candidate_ids,
+        opts.include_archived,
+        false,
+        tables.vector,
+    )?;
     if super::ranking::normal_candidates_have_final_retrieval_evidence(
         conn,
         query,
@@ -284,13 +303,20 @@ fn collect_typo_fallback_candidates(
         include_superseded,
         as_of_utc,
         config,
+        tables.symbolic_fts,
     )?;
     let prefilter_candidate_count = prefilter_ids.len();
     // A typo match is independent retrieval evidence, not merely a source of
     // new IDs. Re-score prefiltered rows even when a weak vector leg already
     // contributed the same ID; otherwise a candidate can suppress fallback
     // and then be removed by the vector-only evidence floor.
-    let entries = fetch_by_ids(conn, &prefilter_ids, opts.include_archived)?;
+    let entries = fetch_by_ids_with_vector_table(
+        conn,
+        &prefilter_ids,
+        opts.include_archived,
+        false,
+        tables.vector,
+    )?;
     let compared_candidate_count = entries.len();
     let mut token_comparison_count = 0usize;
     let mut edit_cell_count = 0usize;
@@ -362,15 +388,9 @@ fn typo_prefilter_ids(
     include_superseded: bool,
     as_of_utc: Option<&str>,
     config: &TypoFallbackConfig,
+    symbolic_fts_available: bool,
 ) -> Result<Vec<String>, MemoryError> {
-    let table_available = conn
-        .query_row(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'memories_symbolic_fts'",
-            [],
-            |_| Ok(()),
-        )
-        .is_ok();
-    if !table_available {
+    if !symbolic_fts_available {
         return Ok(Vec::new());
     }
     let mut trigrams = Vec::new();
@@ -428,7 +448,8 @@ fn typo_prefilter_ids(
         match_query.into(),
         (config.prefilter_candidate_limit as i64).into(),
     ];
-    let mut stmt = conn.prepare(&sql)?;
+    // Fixed text per (surface, gate); served from the statement cache.
+    let mut stmt = conn.prepare_cached(&sql)?;
     let rows = stmt.query_map(rusqlite::params_from_iter(params.iter()), |row| row.get(0))?;
     rows.collect::<Result<Vec<String>, _>>().map_err(Into::into)
 }

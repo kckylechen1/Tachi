@@ -114,16 +114,39 @@ pub fn fetch_by_ids_excluding_store_internal(
     if ids.is_empty() {
         return Ok(HashMap::new());
     }
+    fetch_by_ids_with_vector_table(
+        conn,
+        ids,
+        include_archived,
+        wiki_corpus_store,
+        memories_vec_available(conn),
+    )
+}
+
+/// Presence probe for `memories_vec`: any `sqlite_master` row with that name,
+/// any error reads as absent. Fixed statement text, so it is served from the
+/// connection's statement cache.
+pub(crate) fn memories_vec_available(conn: &Connection) -> bool {
+    conn.prepare_cached("SELECT 1 FROM sqlite_master WHERE name = 'memories_vec' LIMIT 1")
+        .and_then(|mut stmt| stmt.query_row([], |_| Ok(true)))
+        .unwrap_or(false)
+}
+
+/// [`fetch_by_ids_excluding_store_internal`] for a caller that already
+/// resolved `memories_vec` presence for this search (hybrid search resolves
+/// it once in `RecallTables` instead of once per fetch; audit B11).
+pub(crate) fn fetch_by_ids_with_vector_table(
+    conn: &Connection,
+    ids: &[String],
+    include_archived: bool,
+    wiki_corpus_store: bool,
+    has_vector_table: bool,
+) -> Result<HashMap<String, MemoryEntry>, MemoryError> {
+    if ids.is_empty() {
+        return Ok(HashMap::new());
+    }
 
     let mut out = HashMap::new();
-    let has_vector_table = conn
-        .query_row(
-            "SELECT 1 FROM sqlite_master WHERE name = 'memories_vec' LIMIT 1",
-            [],
-            |_| Ok(true),
-        )
-        .unwrap_or(false);
-
     for batch in ids.chunks(IN_BATCH_SIZE) {
         let placeholders = batch
             .iter()

@@ -828,7 +828,7 @@ fn apply_lexical_overlap_boost(
     const DISCRIMINATIVE_TOKEN_DOCUMENT_FREQUENCY_DENOMINATOR: usize = 4;
 
     let q_tokens = soft_token_set(query);
-    let q_ngrams = char_ngrams(query, 4);
+    let q_ngrams = char_ngrams::<4>(query);
     if q_tokens.len() < 3 && q_ngrams.len() < 8 {
         return;
     }
@@ -836,22 +836,20 @@ fn apply_lexical_overlap_boost(
     if entries_ref.len() < DISCRIMINATIVE_TOKEN_DOCUMENT_FREQUENCY_DENOMINATOR {
         return;
     }
+    // One tokenization per candidate: the document-frequency pass keeps each
+    // entry's soft-token set for the scoring pass instead of re-tokenizing
+    // the same text (audit B3).
     let mut query_token_document_frequencies = HashMap::new();
-    for entry in entries_ref.values() {
-        let mut text = String::new();
-        text.push_str(&entry.summary);
-        text.push(' ');
-        text.push_str(&entry.text);
-        for keyword in &entry.keywords {
-            text.push(' ');
-            text.push_str(keyword);
-        }
-        let entry_tokens = soft_token_set(&text);
+    let mut entry_token_sets: HashMap<&str, HashSet<String>> =
+        HashMap::with_capacity(entries_ref.len());
+    for (id, entry) in entries_ref {
+        let entry_tokens = soft_token_set(&lexical_overlap_bag_text(entry));
         for token in q_tokens.intersection(&entry_tokens) {
             *query_token_document_frequencies
                 .entry(token.clone())
                 .or_insert(0_usize) += 1;
         }
+        entry_token_sets.insert(id.as_str(), entry_tokens);
     }
 
     for (id, entry) in entries_ref {
@@ -863,20 +861,12 @@ fn apply_lexical_overlap_boost(
         if entry.is_guide() && !guide_scoped {
             continue;
         }
-        let mut text = String::new();
-        text.push_str(&entry.summary);
-        text.push(' ');
-        text.push_str(&entry.text);
-        for kw in &entry.keywords {
-            text.push(' ');
-            text.push_str(kw);
-        }
-        let e_tokens = soft_token_set(&text);
-        let e_ngrams = char_ngrams(&text, 4);
-        if e_tokens.is_empty() && e_ngrams.is_empty() {
+        let Some(e_tokens) = entry_token_sets.get(id.as_str()) else {
             continue;
-        }
-        let has_discriminative_token_overlap = q_tokens.intersection(&e_tokens).any(|token| {
+        };
+        // An empty token set has no discriminative overlap, so the check
+        // below also covers the former "no tokens and no n-grams" skip.
+        let has_discriminative_token_overlap = q_tokens.intersection(e_tokens).any(|token| {
             query_token_document_frequencies
                 .get(token)
                 .is_some_and(|frequency| {
@@ -887,18 +877,23 @@ fn apply_lexical_overlap_boost(
         if !has_discriminative_token_overlap {
             continue;
         }
+        // Char 4-grams only for candidates that passed the discriminative
+        // gate; most of the pool never needs them (audit B3).
+        let e_ngrams = char_ngrams::<4>(&lexical_overlap_bag_text(entry));
 
         let token_cov = if q_tokens.is_empty() {
             0.0
         } else {
-            q_tokens.intersection(&e_tokens).count() as f64 / q_tokens.len() as f64
+            q_tokens.intersection(e_tokens).count() as f64 / q_tokens.len() as f64
         };
         let jaccard = if q_ngrams.is_empty() || e_ngrams.is_empty() {
             0.0
         } else {
-            let inter = q_ngrams.intersection(&e_ngrams).count() as f64;
-            let union = q_ngrams.union(&e_ngrams).count() as f64;
-            inter / union.max(1.0)
+            let inter = q_ngrams.intersection(&e_ngrams).count();
+            // |A ∪ B| = |A| + |B| - |A ∩ B|: the same integer the set union
+            // would count, without walking both sets again.
+            let union = q_ngrams.len() + e_ngrams.len() - inter;
+            inter as f64 / (union as f64).max(1.0)
         };
 
         if token_cov < TOKEN_COVERAGE_FLOOR && jaccard < NGRAM_JACCARD_FLOOR {
@@ -1041,19 +1036,40 @@ fn soft_stem_token(token: &str) -> String {
     s
 }
 
-fn char_ngrams(text: &str, n: usize) -> std::collections::HashSet<String> {
+/// The text the lexical-overlap boost tokenizes for one candidate.
+fn lexical_overlap_bag_text(entry: &MemoryEntry) -> String {
+    let mut text = String::new();
+    text.push_str(&entry.summary);
+    text.push(' ');
+    text.push_str(&entry.text);
+    for keyword in &entry.keywords {
+        text.push(' ');
+        text.push_str(keyword);
+    }
+    text
+}
+
+/// Distinct char `N`-grams of the lowercased alphanumeric/CJK characters.
+///
+/// Each gram is a fixed-size `[char; N]` key rather than a heap `String`, so
+/// the set costs one allocation (sized to the window count) instead of one
+/// per window (audit B3). A window of `N` chars maps one-to-one onto the
+/// `String` it used to be collected into, so set sizes, intersections and
+/// the Jaccard ratio are unchanged.
+fn char_ngrams<const N: usize>(text: &str) -> HashSet<[char; N]> {
     let chars: Vec<char> = text
         .to_lowercase()
         .chars()
         .filter(|c| c.is_alphanumeric() || crate::noise::is_cjk(*c))
         .collect();
-    if chars.len() < n {
-        return std::collections::HashSet::new();
+    if chars.len() < N {
+        return HashSet::new();
     }
-    chars
-        .windows(n)
-        .map(|w| w.iter().collect::<String>())
-        .collect()
+    let mut grams = HashSet::with_capacity(chars.len() + 1 - N);
+    for window in chars.windows(N) {
+        grams.insert(window.try_into().expect("windows(N) yields N chars"));
+    }
+    grams
 }
 
 /// tachi#1446 lever 5 — the single decision of *which provenance* the ACT-R

@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::{
-    db::{fetch_by_ids, record_access_with_updates},
+    db::record_access_with_updates,
     error::MemoryError,
     namespace::Surface,
     recall_config::RecallConfig,
@@ -639,7 +639,13 @@ fn hybrid_search_inner(
 
     // ── Bulk-fetch entries ─────────────────────────────────────────────────────
     let fetch_start = sample.then(Instant::now);
-    let entries_map = fetch_by_ids(conn, &candidates.candidate_ids, opts.include_archived)?;
+    let entries_map = crate::db::fetch_by_ids_with_vector_table(
+        conn,
+        &candidates.candidate_ids,
+        opts.include_archived,
+        false,
+        candidates.tables.vector,
+    )?;
     let fetch_receipt = fetch_start.map(|s| FetchPhaseReceipt {
         elapsed: s.elapsed(),
         fetched_count: entries_map.len(),
@@ -828,7 +834,13 @@ fn hybrid_search_with_attribution(
         ));
     }
 
-    let entries_map = fetch_by_ids(conn, &candidates.candidate_ids, opts.include_archived)?;
+    let entries_map = crate::db::fetch_by_ids_with_vector_table(
+        conn,
+        &candidates.candidate_ids,
+        opts.include_archived,
+        false,
+        candidates.tables.vector,
+    )?;
     let attribution = ranking::attribution::rank_candidate_entries_with_attribution(
         conn,
         ranking::CandidateRanking {
