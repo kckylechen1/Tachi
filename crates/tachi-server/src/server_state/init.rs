@@ -441,6 +441,9 @@ impl MemoryServer {
             bound_agent_id: Arc::new(StdRwLock::new(bound_agent_id)),
             home_dir,
             routing_config,
+            skill_quality_refresh: Arc::new(crate::wiki_ops::SkillQualityRefreshQueue::new(
+                start_background_workers,
+            )),
         };
 
         if start_background_workers {
