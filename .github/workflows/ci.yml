@@ -291,6 +291,7 @@ jobs:
            fi
           python3 .github/scripts/runner_scan_diagnostics_test.py
           python3 -m unittest discover -s .github/scripts -p "test_ci_acceptance.py" -v
+          python3 -m unittest discover -s .github/scripts -p "test_bind_audited_tool.py" -v
 
       - name: Runner workspace cleanup
         # #1865: no checkout residue survives a failed or cancelled job.
@@ -361,6 +362,14 @@ jobs:
         if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' }}
         run: cargo fmt --all --check
 
+      - name: Mark cargo-audit install
+        id: audit_mark
+        # #1998: the bind step below only accepts a cargo-audit written after
+        # this marker, so a same-version leftover from an earlier job is never
+        # mistaken for this run's checksum-verified install.
+        if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' }}
+        run: bash .github/scripts/bind_audited_tool.sh --mark cargo-audit
+
       - name: Install cargo-audit
         id: audit_install
         if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' }}
@@ -374,10 +383,28 @@ jobs:
           checksum: true
           fallback: none
 
+      - name: Bind audited cargo-audit
+        id: audit_bind
+        # #1998: `cargo audit` lets Cargo pick the executable ($CARGO_HOME/bin,
+        # then PATH), and this host keeps the owner's own
+        # ~/.cargo/bin/cargo-audit at the same version, so only the path can
+        # tell them apart. Bind the file this run's checksum-verified install
+        # wrote, assert its version (keep in sync with `tool:` above; the
+        # supply-chain policy rejects a mismatch) and export its absolute path.
+        if: ${{ !cancelled() && steps.audit_install.outcome == 'success' }}
+        run: bash .github/scripts/bind_audited_tool.sh AUDITED_CARGO_AUDIT cargo-audit audit 0.22.2
+
       - name: Run cargo audit
         id: audit
-        if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' && steps.audit_install.outcome == 'success' }}
-        run: cargo audit --deny warnings
+        if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' && steps.audit_install.outcome == 'success' && steps.audit_bind.outcome == 'success' }}
+        run: |
+          "${AUDITED_CARGO_AUDIT:?}" audit --deny warnings
+
+      - name: Mark cargo-nextest install
+        id: nextest_mark
+        # #1998: see "Mark cargo-audit install".
+        if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' }}
+        run: bash .github/scripts/bind_audited_tool.sh --mark cargo-nextest
 
       - name: Install cargo-nextest
         id: nextest_install
@@ -392,10 +419,22 @@ jobs:
           checksum: true
           fallback: none
 
+      - name: Bind audited cargo-nextest
+        id: nextest_bind
+        # #1998: `cargo nextest` lets Cargo pick the executable
+        # ($CARGO_HOME/bin, then PATH), and this host keeps the owner's own
+        # ~/.cargo/bin/cargo-nextest (0.9.138). Bind the file this run's
+        # checksum-verified install wrote (after the mark step), assert its
+        # version (keep in sync with `tool:` above; the supply-chain policy
+        # rejects a mismatch) and export its absolute path; the tests run it.
+        if: ${{ !cancelled() && steps.nextest_install.outcome == 'success' }}
+        run: bash .github/scripts/bind_audited_tool.sh AUDITED_NEXTEST cargo-nextest nextest 0.9.140
+
       - name: Run workspace tests
         id: workspace_tests
-        if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' && steps.nextest_install.outcome == 'success' }}
-        run: cargo nextest run --workspace --locked --profile ci
+        if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' && steps.nextest_install.outcome == 'success' && steps.nextest_bind.outcome == 'success' }}
+        run: |
+          "${AUDITED_NEXTEST:?}" nextest run --workspace --locked --profile ci
 
       - name: Archive nextest JUnit timing report
         # (Refs #1095) The ci profile (.config/nextest.toml) writes
