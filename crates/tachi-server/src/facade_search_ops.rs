@@ -55,23 +55,12 @@ fn parse_memory_rows(raw: String, top_k: usize, path_prefix: Option<&str>) -> Va
     let Ok(mut rows) = serde_json::from_str::<Vec<Value>>(&raw) else {
         return Value::Array(vec![]);
     };
-    rows.retain_mut(|row| {
-        // The Memory section historically filters compact search rows, which
-        // omit metadata. Full format adds evidence, not a different selection
-        // policy: evaluate the same compact view, then restore the payload.
-        let metadata = row.as_object_mut().and_then(|row| row.remove("metadata"));
+    rows.retain(|row| {
         let projection_is_explicitly_scoped =
             row.get("path").and_then(Value::as_str).is_some_and(|path| {
                 memcore::path_prefix_opts_into_continuity_projection(path, path_prefix)
             });
-        let keep = !is_wiki_row(row)
-            && (!is_continuity_projection_row(row) || projection_is_explicitly_scoped);
-        if let Some(metadata) = metadata {
-            row.as_object_mut()
-                .expect("metadata came from an object")
-                .insert("metadata".to_string(), metadata);
-        }
-        keep
+        !is_wiki_row(row) && (!is_continuity_projection_row(row) || projection_is_explicitly_scoped)
     });
     rows.truncate(top_k);
     Value::Array(rows)

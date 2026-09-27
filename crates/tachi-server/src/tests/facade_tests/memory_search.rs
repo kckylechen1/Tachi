@@ -9,8 +9,12 @@ async fn memory_search_full_reports_rerank_diagnostics_on_both_facade_routes() {
             let mut entry = make_entry("diagnostic-target");
             entry.text = "DIAGNOSTIC_RECALL_NEEDLE_20260927 source-bound knowledge".to_string();
             entry.summary = "Recall diagnostic fixture".to_string();
-            // Full-format metadata must not alter the compact section filter.
-            entry.metadata = json!({"projection_kind": "historical_note"});
+            entry.metadata = json!({"note_kind": "historical_note"});
+            let mut projection = entry.clone();
+            projection.id = "diagnostic-projection".to_string();
+            projection.text = "DIAGNOSTIC_RECALL_NEEDLE_20260927 internal projection".to_string();
+            projection.metadata = json!({"projection_kind": "historical_note"});
+            store.upsert(&projection).map_err(|e| e.to_string())?;
             store.upsert(&entry).map_err(|e| e.to_string())
         })
         .expect("seed diagnostic fixture");
@@ -34,10 +38,18 @@ async fn memory_search_full_reports_rerank_diagnostics_on_both_facade_routes() {
                     .expect("memory facade")
             };
             let response: Value = serde_json::from_str(&body).expect("JSON including full format");
+            assert!(
+                response["sections"][0]["rows"]
+                    .as_array()
+                    .expect("memory rows")
+                    .iter()
+                    .all(|row| row["id"] != json!("diagnostic-projection")),
+                "internal projections must remain excluded in both output formats"
+            );
             let row = &response["sections"][0]["rows"][0];
             assert_eq!(row["id"], json!("diagnostic-target"));
             if full {
-                assert_eq!(row["metadata"]["projection_kind"], json!("historical_note"));
+                assert_eq!(row["metadata"]["note_kind"], json!("historical_note"));
                 let diagnostic = &row["rerank_diagnostics"];
                 assert_eq!(diagnostic["policy"], json!("disabled"));
                 assert_eq!(diagnostic["candidate_count"], json!(1));
