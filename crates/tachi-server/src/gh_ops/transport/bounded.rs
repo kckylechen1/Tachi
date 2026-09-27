@@ -71,6 +71,16 @@ pub(in crate::gh_ops) enum GhRunError {
     },
 }
 
+/// Marker carried by the rendered message of a mutation whose `gh` process
+/// was killed mid-flight. Callers that only see the stringified error use
+/// [`is_outcome_unknown_message`] so they never advise a blind retry.
+const OUTCOME_UNKNOWN_MARKER: &str = "outcome is UNKNOWN";
+
+/// Whether a stringified gh error reports a mutation with an unknown outcome.
+pub(in crate::gh_ops) fn is_outcome_unknown_message(message: &str) -> bool {
+    message.contains(OUTCOME_UNKNOWN_MARKER)
+}
+
 #[cfg(test)]
 impl GhRunError {
     /// A mutation whose `gh` process was killed mid-flight: GitHub may or
@@ -111,7 +121,7 @@ impl std::fmt::Display for GhRunError {
                 (GhEffect::Mutation, GhTimeoutStage::Execute) => write!(
                     f,
                     "{context} timed out after {timeout:?}; the gh process was killed and the \
-                     outcome is UNKNOWN (GitHub may or may not have applied the change). \
+                     {OUTCOME_UNKNOWN_MARKER} (GitHub may or may not have applied the change). \
                      Verify the remote state before retrying; this call is never retried \
                      automatically"
                 ),
@@ -590,6 +600,7 @@ mod tests {
         assert!(error.outcome_unknown(), "got {error:?}");
         let message = String::from(error);
         assert!(message.contains("outcome is UNKNOWN"), "{message}");
+        assert!(is_outcome_unknown_message(&message), "{message}");
         assert!(message.contains("never retried"), "{message}");
         assert!(
             pid_gone(read_pid(&pid_file)),

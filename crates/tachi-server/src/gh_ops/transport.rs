@@ -6,7 +6,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 mod bounded;
 mod bounded_json;
-pub(in crate::gh_ops) use bounded::{GhCall, GhRunError};
+pub(in crate::gh_ops) use bounded::{is_outcome_unknown_message, GhCall, GhRunError};
 pub(in crate::gh_ops) use bounded_json::run_gh_json_observed_bounded;
 
 const GH_AGENT_ID: &str = "tachi_gh_ops";

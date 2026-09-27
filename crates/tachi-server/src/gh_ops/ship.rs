@@ -178,8 +178,9 @@ pub(in crate::gh_ops) async fn handle_github_ship_inner(
                             }
                             Err(err) => {
                                 status = "partial";
-                                warnings.push(format!(
-                                    "commit {sha} pushed but PR creation failed; open the PR manually: {err}"
+                                warnings.push(pr_creation_failed_warning(
+                                    &format!("commit {sha}"),
+                                    &err,
                                 ));
                                 steps["pr"] = json!({ "error": err });
                                 steps["linked"] = json!("skipped");
@@ -766,8 +767,9 @@ async fn handle_contract_ship(
                         }
                         Err(err) => {
                             status = "partial";
-                            warnings.push(format!(
-                                "branch {branch} pushed but PR creation failed; open the PR manually: {err}"
+                            warnings.push(pr_creation_failed_warning(
+                                &format!("branch {branch}"),
+                                &err,
                             ));
                             steps["pr"] = json!({ "error": err });
                             steps["linked"] = json!("skipped");
@@ -839,6 +841,20 @@ async fn handle_contract_ship(
     }
     serde_json::to_string(&response)
         .map_err(|err| format!("serialize contract ship response: {err}"))
+}
+
+/// Warning for a failed `gh pr create`. When the create call timed out with
+/// an unknown outcome the PR may already exist, so the advice is to check
+/// GitHub first rather than to open another one.
+fn pr_creation_failed_warning(pushed: &str, err: &str) -> String {
+    if super::transport::is_outcome_unknown_message(err) {
+        format!(
+            "{pushed} pushed but PR creation timed out with an unknown outcome; check GitHub \
+             for an existing PR from this branch before opening one: {err}"
+        )
+    } else {
+        format!("{pushed} pushed but PR creation failed; open the PR manually: {err}")
+    }
 }
 
 async fn create_pull_request(
@@ -984,4 +1000,24 @@ fn run_git_os(repo: &Path, args: Vec<OsString>) -> Result<String, String> {
         output.status.code().unwrap_or(-1),
         stderr.trim()
     ))
+}
+
+#[cfg(test)]
+mod pr_creation_warning_tests {
+    use super::pr_creation_failed_warning;
+
+    #[test]
+    fn unknown_outcome_never_advises_opening_another_pr() {
+        let unknown = "gh pr create timed out after 60s; the gh process was killed and the \
+                       outcome is UNKNOWN (GitHub may or may not have applied the change).";
+        let warning = pr_creation_failed_warning("branch feat/x", unknown);
+        assert!(
+            warning.contains("check GitHub for an existing PR"),
+            "{warning}"
+        );
+        assert!(!warning.contains("open the PR manually"), "{warning}");
+
+        let failed = pr_creation_failed_warning("branch feat/x", "gh failed (exit 1): boom");
+        assert!(failed.contains("open the PR manually"), "{failed}");
+    }
 }
