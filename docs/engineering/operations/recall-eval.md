@@ -65,8 +65,8 @@ establish recall at three. Existing `recall_at_k` and MRR semantics are unchange
 
 For ordinary Memory queries, `tachi_memory(action="search", format="full")`
 returns JSON with row metadata and `rerank_diagnostics`; compact/default JSON
-keeps its existing payload. Raw `search_memory` callers can request
-`include_metadata=true, format="json"`. Diagnostics contain the actual adaptive
+keeps its existing payload. Internal search handlers attach the same diagnostics
+when metadata is requested. Diagnostics contain the actual adaptive
 gate policy, post-filter candidate count, requested top-k at that gate, and the
 top-first minus top-third score gap (null with fewer than three candidates).
 The facade can request a wider intermediate pool than its final response size.

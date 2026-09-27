@@ -410,7 +410,7 @@ deviation, close an issue, or establish precedent.
 
 The review/approval seam required above is implemented as a local operator
 CLI, not a facade action: `tachi wiki review`. Ordinary facades cannot
-approve — `tachi_wiki_write`, `tachi_save kind=wiki`, and generic
+approve — `tachi_memory(action="save", kind="wiki")` and generic
 `tachi_memory` saves onto `/wiki/...` paths strip caller-supplied review
 authority and stamp `pending_review`; only this CLI mints an advisory
 approval receipt, and it is never reachable from an MCP tool call.
@@ -482,7 +482,7 @@ Contract:
   row genuinely reaches default read/search instead of silently demoting
   back to `pending_review`.
 - **Read locator** — every Wiki save response (and the compact
-  `tachi_memory action=save` / `tachi_save kind=wiki` receipt, which
+  `tachi_memory(action="save", kind="wiki")` receipt, which
   preserves it) carries a deterministic `read` locator:
   `{"action":"get","id":...,"project":...}` naming the resolved store the
   row actually landed in, so a caller can read the entry back through the
