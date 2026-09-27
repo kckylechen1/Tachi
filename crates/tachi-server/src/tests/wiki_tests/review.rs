@@ -901,7 +901,9 @@ mod verified_open_race {
             // A NEW file at the same path: same name, different inode. The
             // pre-open check passes and the open succeeds; only the opened
             // handle's (dev, ino) can catch it.
-            std::fs::remove_file(path).expect("remove original");
+            // Keep the old inode allocated; unlink/recreate can reuse it on Linux.
+            std::fs::rename(path, path.with_extension("original-tmp"))
+                .expect("retain original inode");
             std::fs::write(path, b"replacement regular file with a different inode\n")
                 .expect("write replacement");
         });
@@ -1054,12 +1056,8 @@ mod repo_relative_sources {
     async fn repo_relative_escape_and_unsupported_shapes_refuse() {
         let (server, _home) = seed_wiki_project_entries(vec![]);
         let (root, _docs) = repo_root_fixture();
-        let outside = root
-            .path()
-            .parent()
-            .and_then(|parent| parent.parent())
-            .expect("tempdir grandparents")
-            .join("outside-secret.md");
+        let outside_dir = tempfile::tempdir().expect("independent outside directory");
+        let outside = outside_dir.path().join("outside-secret.md");
         std::fs::write(&outside, b"file outside the source root\n").expect("write outside file");
 
         // '..' traversal in the reference itself refuses before any resolution.
