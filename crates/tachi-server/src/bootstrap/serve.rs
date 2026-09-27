@@ -1024,7 +1024,6 @@ fn build_server_state(
             hygiene.gc_interval_secs,
             background_shutdown.clone(),
         ));
-        run_startup_integrity_checks(&server, hygiene.project_db_path.is_some())?;
         load_cached_hub_tools(&server);
         bg_handles.push(report_pipeline_and_spawn_daily_distill(
             &server,
@@ -1039,6 +1038,22 @@ fn build_server_state(
         bg_handles.push(crate::gh_ops::spawn_ci_watch(
             ci_reader,
             background_shutdown.clone(),
+        ));
+        // Audit C11: `PRAGMA quick_check` is an O(DB size) page scan whose
+        // outcome only ever logs, so it runs on the blocking pool concurrently
+        // with the transport bind instead of gating it — an auto-spawned
+        // daemon must bind and publish its pid file inside the stdio proxy's
+        // 5s readiness window. Spawned LAST so the synchronous startup store
+        // work above (hub tool cache) never queues behind it. It is never
+        // skipped: the join handle rides `bg_handles`, so shutdown still waits
+        // for it, and every outcome is logged exactly as before. It still runs
+        // on the writer connection under the global write gate (same
+        // connection as before, so sqlite-vec tables check identically), so
+        // store calls that arrive while it runs wait for it as they would for
+        // any write; the store-free `/health/live` and pid discovery do not.
+        bg_handles.push(spawn_startup_integrity_checks(
+            &server,
+            hygiene.project_db_path.is_some(),
         ));
     }
 

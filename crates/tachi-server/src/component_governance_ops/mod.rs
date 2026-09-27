@@ -631,11 +631,40 @@ fn classify_repo(
     repo_path: &std::path::Path,
     scope_component_id: Option<&str>,
 ) -> (String, Option<String>, Vec<String>) {
+    let classified = classify_repo_with_origin(records, repo_path, scope_component_id);
+    (
+        classified.category,
+        classified.matched_component_id,
+        classified.evidence_gaps,
+    )
+}
+
+/// [`classify_repo`] plus the raw `origin` remote URL it resolved, so a
+/// caller that also needs the origin (e.g. [`component_governance_context`])
+/// does not spawn a second `git remote get-url origin` for the same checkout.
+struct RepoClassification {
+    category: String,
+    matched_component_id: Option<String>,
+    evidence_gaps: Vec<String>,
+    /// `None` when the path does not exist or git reported no origin.
+    origin_remote: Option<String>,
+}
+
+fn classify_repo_with_origin(
+    records: &[Value],
+    repo_path: &std::path::Path,
+    scope_component_id: Option<&str>,
+) -> RepoClassification {
     let mut gaps: Vec<String> = Vec::new();
 
     if !repo_path.exists() {
         gaps.push(format!("repo path does not exist: {}", repo_path.display()));
-        return (CATEGORY_UNKNOWN.to_string(), None, gaps);
+        return RepoClassification {
+            category: CATEGORY_UNKNOWN.to_string(),
+            matched_component_id: None,
+            evidence_gaps: gaps,
+            origin_remote: None,
+        };
     }
 
     // Callers may pass a package directory instead of the checkout root. Resolve
@@ -765,11 +794,12 @@ fn classify_repo(
                 "matched by owner_path only; git origin remote is unavailable (possible fork / drift)".to_string()
             });
         }
-        return (
-            category.to_string(),
-            Some(component_id.to_string()),
-            result_gaps,
-        );
+        return RepoClassification {
+            category: category.to_string(),
+            matched_component_id: Some(component_id.to_string()),
+            evidence_gaps: result_gaps,
+            origin_remote: remote,
+        };
     }
 
     if let Some(rn) = remote_normalized.as_deref() {
@@ -784,7 +814,12 @@ fn classify_repo(
         }
     }
     gaps.push("no declared component record matched this repo's remote or owner_path".to_string());
-    (CATEGORY_UNKNOWN.to_string(), None, gaps)
+    RepoClassification {
+        category: CATEGORY_UNKNOWN.to_string(),
+        matched_component_id: None,
+        evidence_gaps: gaps,
+        origin_remote: remote,
+    }
 }
 
 /// Handle `tachi_component(action="check")` — read-only downstream classifier.
@@ -1415,7 +1450,12 @@ pub(crate) fn component_governance_context(
     let mut evidence_gaps: Vec<String> = Vec::new();
 
     if let Some(ref root) = path {
-        let (category, matched_id, gaps) = classify_repo(&records, root, None);
+        let RepoClassification {
+            category,
+            matched_component_id: matched_id,
+            evidence_gaps: gaps,
+            origin_remote,
+        } = classify_repo_with_origin(&records, root, None);
         evidence_gaps.extend(gaps);
         if let Some(id) = matched_id.as_deref() {
             if let Some(record) = find_record_by_id(&records, id) {
@@ -1428,7 +1468,9 @@ pub(crate) fn component_governance_context(
         }
         // Also surface other records that list this path's origin as a consumer
         // context when the remote matches a known owner_repo of a related component.
-        if let Ok(remote) = run_git_readonly(root, &["remote", "get-url", "origin"]) {
+        // Reuses the origin `classify_repo_with_origin` already resolved (audit
+        // F1/G10): one `git remote get-url origin` per call, not two.
+        if let Some(remote) = origin_remote {
             let owner = normalize_remote_to_owner_repo(&remote);
             for record in &records {
                 let id = record

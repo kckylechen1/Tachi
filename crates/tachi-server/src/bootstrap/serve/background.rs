@@ -352,6 +352,23 @@ pub(super) fn spawn_background_gc(
     })
 }
 
+/// Run [`run_startup_integrity_checks`] on Tokio's blocking pool (audit
+/// C11), off the startup critical path. Every quick_check outcome already
+/// only logs; the one `Err` the checks can return (store acquisition — not
+/// reachable once `MemoryServer::new` opened the bound stores) is logged
+/// loudly here instead of aborting a daemon that is already serving.
+pub(super) fn spawn_startup_integrity_checks(
+    server: &MemoryServer,
+    check_project_db: bool,
+) -> tokio::task::JoinHandle<()> {
+    let server = server.clone();
+    tokio::task::spawn_blocking(move || {
+        if let Err(e) = run_startup_integrity_checks(&server, check_project_db) {
+            eprintln!("WARNING: startup database integrity check failed: {e}");
+        }
+    })
+}
+
 pub(super) fn run_startup_integrity_checks(
     server: &MemoryServer,
     check_project_db: bool,
