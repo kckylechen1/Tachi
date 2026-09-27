@@ -200,6 +200,8 @@ pub(crate) use self::managed_materialization_barrier::install_managed_credential
 #[cfg(test)]
 pub(crate) use execution::background_dispatch_cleanup_complete;
 #[cfg(test)]
+pub(crate) use execution::install_background_dispatch_abort_capture;
+#[cfg(test)]
 pub(crate) use execution::install_managed_credential_cleanup_failure;
 #[cfg(test)]
 pub(crate) use execution::install_managed_timeout_override;

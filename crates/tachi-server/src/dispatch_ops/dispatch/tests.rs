@@ -1524,16 +1524,23 @@ fn postflight_handoff_has_no_pid_reconstruction_or_signal_capability() {
         execution_source.contains("gate.run(&runner_liveness)"),
         "the production postflight handoff must consume typed runner liveness"
     );
-    // Audit E4: the typed evidence handed to the gate is a clone of the
-    // runner's evidence (never rebuilt), and the multi-second re-walk runs on
-    // the blocking pool rather than on the dispatch task's executor worker.
+    // Audit E4 (revised, #2022 startup-gate review): the multi-second re-walk
+    // still must not pin the dispatch task's executor worker, but it must not
+    // introduce an `.await` at the gate handoff either. The detached dispatch
+    // task is the sole owner of the armed early-exit cleanup (credential
+    // materializations, flow slot, exclusive postflight lease), so a
+    // `spawn_blocking(..).await` there lets an abort drop that cleanup while
+    // the gate is still running — releasing creds/slot/lease before
+    // resolution and losing the resource fence and terminal trajectory event.
+    // The re-walk runs through executor_offload::block_off_core, which hands
+    // the core to another thread without adding a cancellation point.
     assert!(
-        execution_source.contains("let runner_liveness = runner_liveness.clone();"),
-        "the postflight gate must receive a clone of the runner's typed liveness evidence"
+        execution_source.contains("block_off_core(|| gate.run(&runner_liveness))"),
+        "the postflight gate re-walk must hand off the executor core without an await"
     );
     assert!(
-        execution_source.contains("spawn_blocking(move || gate.run(&runner_liveness))"),
-        "the postflight gate re-walk must run on the blocking pool, not an executor worker"
+        !execution_source.contains("spawn_blocking(move || gate.run(&runner_liveness))"),
+        "the postflight gate handoff must not gain an await point: an abort there releases the armed cleanup before the gate resolves"
     );
 }
 
