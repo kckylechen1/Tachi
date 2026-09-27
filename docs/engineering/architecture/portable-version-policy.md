@@ -98,7 +98,10 @@ The refusal *order* stays that of #1983/#1984 under both policies. The
 Portable policy can change which error wins, because an admission that used
 to stop at the #1119 gate now reaches later checks. §6 lists every such case.
 If any rule text contradicts R0 for an open under today's policy, R0 wins and
-the text is a spec bug.
+the text is a spec bug. **Exception (#1995):** the current-store presence
+refusals in [`current-store-admission.md`](./current-store-admission.md) §5
+deliberately supersede R0 for those rows. For example, a `TachiFull` current
+store missing a required table is now refused.
 
 **R1 — Downgrade.** `newer` is refused under every policy at the header gate,
 as today, before any identity decode.
@@ -176,8 +179,16 @@ in `band` it is never written.
      the same object validators it runs at `s == E` today, applied to the
      sentinel set `relevant(P) ≤ π_P(E)` plus every `Product` sentinel with
      index `≤ min(s, PORTABLE_COMPAT_FLOOR)`.
-     - For a `P@39` input this is exactly today's check, so today's error and
-       its precedence are unchanged. That includes today's conditional
+     - **Amended by #1995:** R5.2a also runs the current-store presence
+       check in [`current-store-admission.md`](./current-store-admission.md).
+       Before any maintenance, every baseline object not on the derived
+       allowlist must be present. R5.2b alone cannot catch a dropped state
+       table, because `CREATE TABLE IF NOT EXISTS` recreates it empty and
+       the empty table passes a shape check. The two specs share one object
+       inventory.
+     - For a `P@39` input this is today's check followed by the #1995
+       presence check. Today's errors, and their precedence, are unchanged,
+       and the presence check only adds refusals. That includes today's conditional
        Product branch, which runs the A2A, mirror-eval identity,
        verified-admission and CurrentTruth validators whenever
        `identity_admissions` exists (`db/migrations.rs:372-382`). A
@@ -196,7 +207,14 @@ in `band` it is never written.
      trigger, including index uniqueness and partial-index predicates. It
      runs **once**, inside `BEGIN IMMEDIATE`, after `init_schema_inner` has
      applied the frozen set and before commit. A mismatch refuses and rolls
-     back.
+     back. **Absence-only exemptions:** `memories_vec` (the R7 capability)
+     and `idx_memories_path_active_ts` may be *absent*.
+     `ensure_optimization_indexes` discards its own creation error
+     (`db/schema.rs:2677-2685`), so today that index may legitimately stay
+     absent (#1995 §3). Either object, **if present**, must match its
+     canonical shape. For the index that means non-unique, with its
+     canonical keys and partial predicate. A present-but-wrong definition
+     (e.g. a `UNIQUE` index with that name) is refused.
 
    Two consequences:
    - A marker-fallback backup taken before the transaction can remain after
@@ -412,7 +430,12 @@ outcome (success or refusal, phase, and side effects), not just the error:
   both phases. This sequence crosses policies, so it is excluded from R0 on
   purpose.
 
-Row 4 and every row under today's policy keep today's winning error. So
+Row 4 and every row under today's policy keep today's winning error. There is
+one exception, from #1995 (`current-store-admission.md` §5 and T5): on a
+current store, a missing required object now refuses with
+`CurrentSchemaIncomplete`. That refusal fires after the existing integrity
+validators (so their errors still win) and before identity, so it can take
+the place of an identity error that would otherwise have won. So
 `P@30, Deny, AtLeast(F)` still returns `SchemaMigrationOptInRequired`, and
 `unstamped s=28, Deny, AtLeast(P)` still returns
 `SchemaMigrationOptInRequired`, not `StoreProfileUnstamped`.
@@ -455,8 +478,16 @@ today (§11).
 - `:352-384`: R5.2a branch.
 - `:419-465`: policy class (R2/R3).
 - `:552-564`: the public standalone `run_data_migrations_with_profile`
-  validates and writes the stamp. It must apply R3/R4/R5 or be restricted to
-  `TachiFull`.
+  validates and writes the stamp. **Amended by #1995.** Its behaviour and
+  its frozen tests stay as they are. It keeps today's policy (`π = E`) for
+  every profile, so it does not implement R3/R4/R5. That has one
+  consequence. If it migrates a PortableKernel store, the store is stamped
+  `E` rather than the floor. For example, at `E = 40` a product-only bump
+  stamps 40, and a pre-B v39 reader then refuses the store as `newer`. The
+  failure is loud, not silent, and it is a documented limitation.
+  PortableKernel callers must migrate through the admission funnel. The
+  API docs state this, and any store the API leaves incomplete is refused
+  on admission (#1995).
 - `:578-818`: the runner becomes table-driven.
 - `:182-222`: the sentinel list becomes derived.
 
@@ -604,8 +635,9 @@ hook, or an error variant), not only the end state.
     that the recorded values all come from one commit.
 - **T5 — Today's-policy invariance.**
   - Every existing test that exercises **today's policy** passes with zero
-    assertion changes. The only assertions allowed to change are the Portable
-    ones listed in §8 A4, and each change needs a before/after. The covered
+    assertion changes. Only two kinds of assertion may change: the Portable
+    ones listed in §8 A4, and the #1995 current-store presence refusals
+    (`current-store-admission.md` T8). Each change needs a before/after. The covered
     tests include #1984's admission tables, the marker-fallback tests (a missing or
     old-format marker on `F@39`, non-empty `s = 0`),
     `db/migrations.rs:1984-2000`, and #1983 `open_race_tests.rs:184`.
@@ -638,9 +670,10 @@ hook, or an error variant), not only the end state.
     `idx_memories_idless_identity_active`, with a matching marker, refuses
     at R5.2b inside the transaction. Assert: rolled back, zero backups, not
     repaired.
-  - The same for a missing Portable column and a missing trigger. Choose
-    objects the frozen set does **not** recreate; a missing search-generation
-    trigger, for example, is recreated, so it doesn't qualify. Assert which
+  - A missing required Portable column or table, per #1995, is refused at
+    R5.2a in the preflight (presence check). A missing trigger is refused
+    by the trigger inventory. R5.2b is the check that catches a *present
+    but malformed* object, as with the non-unique index above. Assert which
     validator refused.
   - A `P@35` store with a complete v35 inventory, under `Allow`, migrates
     v36. R5.2a′ passes after the migration and the stamp is 39. This shows

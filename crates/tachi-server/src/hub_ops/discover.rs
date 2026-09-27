@@ -1,6 +1,6 @@
 use crate::tool_params::{HubDiscoverParams, HubFeedbackParams, HubGetParams};
 use crate::utils::redact_sensitive_value;
-use crate::MemoryServer;
+use crate::{DbScope, MemoryServer};
 use memcore::HubCapability;
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
@@ -179,7 +179,12 @@ pub(crate) async fn handle_hub_feedback(
                     .map_err(|e| format!("feedback: {e}"))
             })?;
             if recorded {
-                let _ = crate::wiki_ops::refresh_skill_quality_guards(server);
+                // audit G1: the pairwise quality refresh is deferred,
+                // coalesced and throttled; never run on this request path.
+                server.request_skill_quality_refresh(
+                    DbScope::Project,
+                    crate::wiki_ops::SkillQualityRefreshReason::Feedback,
+                );
             }
             return serde_json::to_string(
                 &json!({"id": params.id, "recorded": recorded, "db": "project"}),
@@ -193,7 +198,10 @@ pub(crate) async fn handle_hub_feedback(
             .map_err(|e| format!("feedback: {e}"))
     })?;
     if recorded {
-        let _ = crate::wiki_ops::refresh_skill_quality_guards(server);
+        server.request_skill_quality_refresh(
+            DbScope::Global,
+            crate::wiki_ops::SkillQualityRefreshReason::Feedback,
+        );
     }
     serde_json::to_string(&json!({"id": params.id, "recorded": recorded, "db": "global"}))
         .map_err(|e| format!("serialize: {e}"))

@@ -110,6 +110,21 @@ fn physical_db_identity_at_open(db_path: &str) -> Option<String> {
     physical_db_identity_at_path(Path::new(db_path))
 }
 
+/// Compare the physical identity sampled at `db_path` now with `before_open`.
+///
+/// Known limit (pre-existing; tachi#2002 review finding 1, not closed there):
+/// both sides are samples of the *pathname*, not of the handle SQLite opened.
+/// * ABA: if the path is swapped to another file B while SQLite opens it and
+///   restored to the original A before the next sample, every sample matches A
+///   although the connection holds B. No pathname comparison can detect that.
+/// * Unstable tokens: on non-Unix targets, and on Unix when dev/ino fails
+///   `has_stable_unix_file_identity`, the token is `path:<canonical path>`,
+///   which is equal for any file at the same path, so a same-path replacement
+///   is invisible. This function does not require
+///   `physical_db_identity_is_stable`.
+///
+/// So a match proves only that the path named the same Unix file at each
+/// sample, not that the connection's handle is that file.
 fn validate_physical_db_identity_across_open(
     db_path: &str,
     before_open: Option<String>,
@@ -678,7 +693,15 @@ impl MemoryStore {
         // backups for all CLI/open_cli_store paths (#597 CP1).
         let p = std::path::PathBuf::from(db_path);
         let migration_authorization = db::authorize_schema_migration(&reserved_reference_write)?;
-        let schema_result = db::init_store_schema_with_label_mut(&mut conn, db_label, &p, ctx);
+        // The path→handle binding is re-checked inside the schema transaction,
+        // immediately before COMMIT (see `init_store_schema_with_label_mut`),
+        // and again after init below.
+        let path_binding = || {
+            validate_physical_db_identity_across_open(db_path, opened_physical_db_identity.clone())
+                .map(|_| ())
+        };
+        let schema_result =
+            db::init_store_schema_with_label_mut(&mut conn, db_label, &p, ctx, &path_binding);
         let vec_available = schema_result
             .as_ref()
             .map(|_| db::try_load_sqlite_vec(&conn))
@@ -689,7 +712,21 @@ impl MemoryStore {
         // only the caller's claim and may legitimately be `unknown`. A conflict
         // between the two already failed the open above.
         let identity = schema_result?.identity;
-        crate::private_partition::refuse_stamped_private_store(&conn)?;
+        // tachi#1990: admission is decided by schema init, before any side
+        // effect: the private-partition refusal and the input trigger
+        // inventory run in the preflight and again, authoritatively, inside
+        // BEGIN IMMEDIATE, which also ends with the strict inventory validation
+        // on the exact state it commits. The two checks below are not
+        // admission decisions; they refuse to *return a handle* whose state
+        // changed after that COMMIT and add no side effect of their own:
+        // * the trigger inventory, re-read on this connection: another
+        //   connection can drop, add or replace a trigger between COMMIT and
+        //   here (the marker write and `try_load_sqlite_vec` sit in between;
+        //   neither touches a trigger, so a change here is another writer's);
+        // * the physical identity, the closing bracket of the path→handle
+        //   binding: schema init already checked it just before COMMIT, and
+        //   this covers the rest of the open (the filesystem is not
+        //   transactional, so nothing can close it).
         db::validate_persistent_trigger_inventory(&conn, true)?;
         db::install_authority_row_guards(&conn, &reserved_reference_write)?;
         let opened_physical_db_identity = validate_physical_db_identity_across_open(
