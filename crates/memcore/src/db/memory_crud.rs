@@ -3896,13 +3896,26 @@ pub fn refuse_retired_sticky_row_within_tx(
         )
         .optional()?;
     if let Some((path, category)) = row {
-        crate::path_router::validate_retired_sticky_write(&path, &category).map_err(|error| {
-            MemoryError::InvalidArg(format!(
-                "retired sticky row {id} cannot be {operation} through an ordinary writer: {error}"
-            ))
-        })?;
+        refuse_retired_sticky_columns_within_tx(id, &path, &category, operation)?;
     }
     Ok(())
+}
+
+/// The decision half of [`refuse_retired_sticky_row_within_tx`] for callers
+/// that already read `path` and `category` for `id` inside the same writer
+/// transaction (for example one batched `IN` lookup instead of one point
+/// `SELECT` per id). Same predicate, same error text.
+pub(crate) fn refuse_retired_sticky_columns_within_tx(
+    id: &str,
+    path: &str,
+    category: &str,
+    operation: &str,
+) -> Result<(), MemoryError> {
+    crate::path_router::validate_retired_sticky_write(path, category).map_err(|error| {
+        MemoryError::InvalidArg(format!(
+            "retired sticky row {id} cannot be {operation} through an ordinary writer: {error}"
+        ))
+    })
 }
 
 pub(crate) fn archive_memory_within_tx(tx: &Connection, id: &str) -> Result<bool, MemoryError> {
