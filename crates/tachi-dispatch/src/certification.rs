@@ -877,21 +877,46 @@ mod tests {
 
             static FIXTURE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
             static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
-            // macOS security scanning gates the FIRST exec of a freshly
-            // created executable on a synchronous scan (observed 1-3s+ under
-            // load, ~40ms once cached). Every frozen window below starts at
-            // the probe's spawn, so that scan must be absorbed here, outside
-            // any deadline: each script gets a prewarm guard line and this
-            // constructor execs it once with the prewarm argument before the
-            // fixture is handed to a test. Several fixtures also stay alive
-            // on purpose while testing deadlines and cleanup; they park in a
-            // zero-CPU `exec /bin/sleep` keep-alive so co-scheduled fixtures
-            // (nextest runs one process per test, so the lock below cannot
-            // serialize them) never starve each other's bounded observation
-            // windows; under the in-process harness this lock additionally
-            // keeps those windows from overlapping.
+            // A freshly created executable can pay a large cost on its FIRST
+            // exec only (observed 1.3-3.2s under load on this macOS host
+            // versus ~40ms for a re-exec of the same file; consistent with
+            // synchronous security-scan gating, though that attribution is
+            // inferred from timing and scan-service CPU, not proven
+            // directly). Every frozen window below starts at the probe's
+            // spawn, so the cold first exec is absorbed here, outside any
+            // deadline: each script keeps its original first line and gains
+            // a prewarm guard line directly under it, and this constructor
+            // execs the fixture once with the prewarm argument before the
+            // fixture is handed to a test. With a warmed executable these
+            // tests establish readiness, cleanup, reader-failure, and
+            // termination semantics -- not cold-exec end-to-end deadlines
+            // and not the real canary; cold-spawn refusal coverage stays
+            // with `production_version_probe_refuses_before_spawn_without_
+            // containment` (typed refusal before spawn). Several fixtures
+            // also stay alive on purpose while testing deadlines and
+            // cleanup; they park in a zero-CPU `exec /bin/sleep` keep-alive
+            // so co-scheduled fixtures (nextest runs one process per test,
+            // so the lock below cannot serialize them) never starve each
+            // other's bounded observation windows; under the in-process
+            // harness this lock additionally keeps those windows from
+            // overlapping.
             const PREWARM_ARG: &str = "--tachi-fixture-prewarm";
-            let script = format!("if [ \"$1\" = \"{PREWARM_ARG}\" ]; then exit 0; fi\n{script}");
+            // The production probe always execs `<program> --version`; the
+            // prewarm guard must never match that ordinary invocation.
+            assert_ne!(PREWARM_ARG, "--version");
+            // Keep the kernel's interpreter directive on the first line: a
+            // guard placed above the shebang would change execve semantics
+            // (ENOEXEC plus a libc shell fallback instead of the declared
+            // interpreter), so insert the guard strictly after line one.
+            let (first_line, rest) = script
+                .split_once('\n')
+                .expect("fixture script must have a first line");
+            assert!(
+                first_line.starts_with("#!"),
+                "fixture script must start with a shebang, found: {first_line}"
+            );
+            let script =
+                format!("{first_line}\nif [ \"$1\" = \"{PREWARM_ARG}\" ]; then exit 0; fi\n{rest}");
             let serial = FIXTURE_LOCK
                 .get_or_init(|| Mutex::new(()))
                 .lock()
@@ -910,9 +935,11 @@ mod tests {
             permissions.set_mode(0o700);
             std::fs::set_permissions(&program, permissions)
                 .expect("make version probe fixture executable");
-            // Absorb the first-exec scan with the prewarm argument. No test
-            // deadline is active here; the real probe invocation later takes
-            // the cached (fast) exec path instead of the scanned one.
+            // Absorb the cold first exec with the prewarm argument; no test
+            // deadline is active here, and the probe's later `--version`
+            // invocation takes the warmed (fast) exec path instead. This
+            // exec goes through the fixture program itself -- never a shell
+            // wrapper -- matching the production launcher's spawn route.
             let prewarmed = std::process::Command::new(&program)
                 .arg(PREWARM_ARG)
                 .stdin(Stdio::null())
