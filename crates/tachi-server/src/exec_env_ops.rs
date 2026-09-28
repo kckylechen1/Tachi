@@ -1255,11 +1255,6 @@ impl Drop for ExecEnvDispatchLeaseGuard {
     }
 }
 
-// Compatibility shim for old exec_env_ops::ensure_resource_allow_quarantined
-// path (#1702 carve 4). Body lives in tachi-build-broker.
-#[allow(unused_imports)]
-pub(crate) use tachi_build_broker::ensure_resource_allow_quarantined;
-
 fn build_open_options(opts: &ProvisionEnvOptions) -> OpenOptions {
     OpenOptions {
         repo_root: opts.repo_root.clone(),

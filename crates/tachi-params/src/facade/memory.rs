@@ -101,6 +101,12 @@ impl FromStr for TachiMemoryAction {
             "doctor_scan" => Err("retired tachi_memory action 'doctor_scan'; use tachi doctor".to_string()),
             "ingest" | "ingest_source" => Err(format!("retired tachi_memory action '{value}'; use admitted adapter/operator ingest API")),
             "pattern_feedback" => Err("retired tachi_memory action 'pattern_feedback'; use internal pattern-evidence API".to_string()),
+            // #1426: recall tuning moved to `tachi_tune`; redirect here so the
+            // serde path (the only real caller) surfaces the owner guidance.
+            "recall_simulate" => Err("Invalid tachi_memory action 'recall_simulate'. Recall tuning left Memory in #1426; use tachi_tune(action='recall_simulate').".to_string()),
+            "recall_proposals" => Err("Invalid tachi_memory action 'recall_proposals'. Recall tuning left Memory in #1426; use tachi_tune(action='recall_proposals').".to_string()),
+            "review_recall_proposal" => Err("Invalid tachi_memory action 'review_recall_proposal'. Recall tuning left Memory in #1426; use tachi_tune(action='recall_review').".to_string()),
+            "apply_recall_proposals" => Err("Invalid tachi_memory action 'apply_recall_proposals'. Recall tuning left Memory in #1426; use tachi_tune(action='recall_apply').".to_string()),
             other => Err(format!("invalid tachi_memory action '{other}'; use search, get, save, briefing, checkpoint, alerts, ask, extract_facts, or consolidate")),
         }
     }

@@ -32,7 +32,7 @@ pub(crate) struct MemoryServer {
     /// Bounded LLM-call recorder for foundry runs. Writes the `prompt.md` /
     /// `result.md` / `status.json` artifact triple per call under
     /// `<tachi_home>/foundry-runs/<label>-<ts>/`. Used by the daily batch
-    /// distill, Hub skill evolve/register/security-scan, and dispatch V2's
+    /// distill, Hub skill register/security-scan, and dispatch V2's
     /// plan stage. Pre-#1261 this was a `ClaudePool` (which combined the
     /// recording concern with a `claude` CLI subprocess spawn path); the
     /// decommission split out the recording as executor-agnostic and deleted

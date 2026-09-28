@@ -212,8 +212,8 @@ const FOUNDRY_DISTILL_DEFAULTS: &[&ProviderLaneDefault] = &[
 /// to bypass env (tests, programmatic config) can build this struct from
 /// literals and pass it to [`LlmClient::new_with_config`].
 ///
-/// Precedent: `ClaudePool::new_in_app_home` accepts already-resolved values
-/// and does not re-read env at construction.
+/// Precedent: `llm_recorder::LlmCallRecorder::new_in_app_home` accepts
+/// already-resolved values and does not re-read env at construction.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderRuntimeConfig {
     pub extract: ChatLaneConfig,
@@ -647,8 +647,9 @@ impl super::super::LlmClient {
         self.http.read().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
-    /// Per-request deadline for embed & rerank, honouring the same env-override
-    /// idiom as `CLAUDE_POOL_TIMEOUT_SECS`.
+    /// Per-request deadline for embed & rerank: a positive integer in
+    /// `TACHI_RECALL_PROVIDER_TIMEOUT_SECS` overrides
+    /// `RECALL_PROVIDER_TIMEOUT_SECS`.
     pub(in crate::llm) fn recall_request_timeout() -> Duration {
         let secs = std::env::var("TACHI_RECALL_PROVIDER_TIMEOUT_SECS")
             .ok()
@@ -859,6 +860,7 @@ impl super::super::LlmClient {
             provider_health_reload: Arc::new(RwLock::new(provider_health_reload)),
             provider_health_persist: Arc::new(RwLock::new(ProviderHealthPersistState::default())),
             background_persist_lock: Arc::new(tokio::sync::Mutex::new(())),
+            provider_persist_writer: Arc::new(ProviderPersistWriter::default()),
             llm_usage_persist: Arc::new(RwLock::new(ProviderHealthPersistState::default())),
             deployment_health: Arc::new(DeploymentHealthCounters::default()),
             claude_cli_failure: Arc::new(RwLock::new(None)),

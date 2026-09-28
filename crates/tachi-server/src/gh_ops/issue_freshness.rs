@@ -492,28 +492,28 @@ pub(crate) fn scan_same_surface_churn(
 /// to invisible for that one PR, never a hard scan failure. Live-GitHub I/O
 /// boundary — kept thin so the scan logic above stays independently
 /// fixture-tested.
-pub(crate) fn fetch_and_scan_zombies(
+pub(crate) async fn fetch_and_scan_zombies(
     server: &MemoryServer,
     repo: &str,
     limit: u32,
     repo_root: Option<&std::path::Path>,
 ) -> Result<Vec<ZombieHit>, String> {
-    let open_issue_numbers = fetch_open_issue_numbers(server, repo)?;
+    let open_issue_numbers = fetch_open_issue_numbers(server, repo).await?;
     if open_issue_numbers.is_empty() {
         return Ok(Vec::new());
     }
-    let merged_prs = fetch_merged_prs(server, repo, limit, repo_root)?;
+    let merged_prs = fetch_merged_prs(server, repo, limit, repo_root).await?;
     Ok(scan_zombies(&merged_prs, &open_issue_numbers))
 }
 
-fn fetch_open_issue_numbers(server: &MemoryServer, repo: &str) -> Result<Vec<u64>, String> {
-    let (mut cmd, token) = build_gh_command(server)?;
-    cmd.args(["issue", "list"])
+async fn fetch_open_issue_numbers(server: &MemoryServer, repo: &str) -> Result<Vec<u64>, String> {
+    let mut call = GhCall::bulk_read();
+    call.args(["issue", "list"])
         .args(["--repo", repo])
         .args(["--state", "open"])
         .args(["--limit", "500"])
         .args(["--json", "number"]);
-    let output = run_gh_json(cmd, &token)?;
+    let output = call.run_json(server).await?;
     let value: Value =
         serde_json::from_str(&output).map_err(|e| format!("parse issue list json: {e}"))?;
     Ok(parse_issue_numbers_json(&value))
@@ -544,13 +544,13 @@ pub(crate) fn parse_issue_numbers_json(value: &Value) -> Vec<u64> {
 /// already uses, just exposed so a second caller can run its own
 /// `extract_referenced_issue_numbers` cross-check against a different target
 /// set than "the open-issue zombie scan".
-pub(crate) fn fetch_merged_prs(
+pub(crate) async fn fetch_merged_prs(
     server: &MemoryServer,
     repo: &str,
     limit: u32,
     repo_root: Option<&std::path::Path>,
 ) -> Result<Vec<MergedPr>, String> {
-    let (mut cmd, token) = build_gh_command(server)?;
+    let mut call = GhCall::bulk_read();
     // `commits` (not part of the original #1000 shipped fields) carries every
     // commit's messageHeadline/messageBody per PR, including squash commits
     // but NOT a true (2-parent) merge commit, which is its own distinct
@@ -560,12 +560,12 @@ pub(crate) fn fetch_merged_prs(
     // itself only returns `{oid}`, no message text, so a true merge
     // commit's own `Refs #N` is resolved separately below via local `git
     // log` (round-3 codex review finding 1).
-    cmd.args(["pr", "list"])
+    call.args(["pr", "list"])
         .args(["--repo", repo])
         .args(["--state", "merged"])
         .args(["--limit", &limit.to_string()])
         .args(["--json", "number,title,body,mergeCommit,commits"]);
-    let output = run_gh_json(cmd, &token)?;
+    let output = call.run_json(server).await?;
     let value: Value =
         serde_json::from_str(&output).map_err(|e| format!("parse pr list json: {e}"))?;
     let mut merged_prs = parse_merged_prs_json(&value);
@@ -593,25 +593,25 @@ pub(crate) fn fetch_merged_prs(
 /// date-window ledger.
 /// Pure arg-builder, split out from [`fetch_merged_prs_since`] so the exact
 /// `gh` invocation shape (search-based window, NOT `--state`/`--limit`) is
-/// unit-testable against a bare `Command` without shelling out to a real
+/// unit-testable against a bare [`GhCall`] without shelling out to a real
 /// `gh` binary.
-fn apply_merged_prs_since_args(cmd: &mut Command, repo: &str, since_rfc3339: &str, limit: u32) {
-    cmd.args(["pr", "list"])
+fn apply_merged_prs_since_args(call: &mut GhCall, repo: &str, since_rfc3339: &str, limit: u32) {
+    call.args(["pr", "list"])
         .args(["--repo", repo])
         .args(["--search", &format!("is:merged merged:>={since_rfc3339}")])
         .args(["--limit", &limit.to_string()])
         .args(["--json", "number,title,body,mergeCommit,commits,mergedAt"]);
 }
 
-pub(crate) fn fetch_merged_prs_since(
+pub(crate) async fn fetch_merged_prs_since(
     server: &MemoryServer,
     repo: &str,
     since_rfc3339: &str,
     limit: u32,
 ) -> Result<Vec<MergedPr>, String> {
-    let (mut cmd, token) = build_gh_command(server)?;
-    apply_merged_prs_since_args(&mut cmd, repo, since_rfc3339, limit);
-    let output = run_gh_json(cmd, &token)?;
+    let mut call = GhCall::bulk_read();
+    apply_merged_prs_since_args(&mut call, repo, since_rfc3339, limit);
+    let output = call.run_json(server).await?;
     let value: Value =
         serde_json::from_str(&output).map_err(|e| format!("parse pr list json: {e}"))?;
     Ok(parse_merged_prs_json(&value))
@@ -766,14 +766,14 @@ fn probe_file(repo_root: &std::path::Path, path: &str) -> FileProbe {
 /// review queue, same posture as `scan_open_loops`'s `spec_drift` kind.
 /// Returns `(candidates, scan_warnings)` — warnings surface unreadable
 /// anchors distinctly from stale evidence (finding 4).
-pub(crate) fn fetch_and_scan_stale_candidates(
+pub(crate) async fn fetch_and_scan_stale_candidates(
     server: &MemoryServer,
     repo: &str,
     repo_root: &std::path::Path,
     limit: u32,
 ) -> Result<(Vec<StaleCandidate>, Vec<String>), String> {
-    let open = fetch_open_issues_with_body(server, repo, limit)?;
-    let closed_issue_numbers = fetch_closed_issue_numbers(server, repo)?;
+    let open = fetch_open_issues_with_body(server, repo, limit).await?;
+    let closed_issue_numbers = fetch_closed_issue_numbers(server, repo).await?;
 
     let mut file_probes: std::collections::HashMap<String, FileProbe> =
         std::collections::HashMap::new();
@@ -802,18 +802,18 @@ pub(crate) fn fetch_and_scan_stale_candidates(
     ))
 }
 
-fn fetch_open_issues_with_body(
+async fn fetch_open_issues_with_body(
     server: &MemoryServer,
     repo: &str,
     limit: u32,
 ) -> Result<Vec<(u64, String)>, String> {
-    let (mut cmd, token) = build_gh_command(server)?;
-    cmd.args(["issue", "list"])
+    let mut call = GhCall::bulk_read();
+    call.args(["issue", "list"])
         .args(["--repo", repo])
         .args(["--state", "open"])
         .args(["--limit", &limit.to_string()])
         .args(["--json", "number,body"]);
-    let output = run_gh_json(cmd, &token)?;
+    let output = call.run_json(server).await?;
     let value: Value =
         serde_json::from_str(&output).map_err(|e| format!("parse issue list json: {e}"))?;
     Ok(parse_issue_numbers_with_body_json(&value))
@@ -836,14 +836,14 @@ pub(crate) fn parse_issue_numbers_with_body_json(value: &Value) -> Vec<(u64, Str
         .unwrap_or_default()
 }
 
-fn fetch_closed_issue_numbers(server: &MemoryServer, repo: &str) -> Result<Vec<u64>, String> {
-    let (mut cmd, token) = build_gh_command(server)?;
-    cmd.args(["issue", "list"])
+async fn fetch_closed_issue_numbers(server: &MemoryServer, repo: &str) -> Result<Vec<u64>, String> {
+    let mut call = GhCall::bulk_read();
+    call.args(["issue", "list"])
         .args(["--repo", repo])
         .args(["--state", "closed"])
         .args(["--limit", "500"])
         .args(["--json", "number"]);
-    let output = run_gh_json(cmd, &token)?;
+    let output = call.run_json(server).await?;
     let value: Value =
         serde_json::from_str(&output).map_err(|e| format!("parse issue list json: {e}"))?;
     Ok(parse_issue_numbers_json(&value))
@@ -880,15 +880,15 @@ pub(crate) fn filter_merged_prs_since(
 /// the caller). Merged PRs are windowed to the same `activity_since` cutoff
 /// via `filter_merged_prs_since` (round-3 finding 6) before being handed to
 /// the pure `scan_same_surface_churn`.
-pub(crate) fn fetch_and_scan_same_surface_churn(
+pub(crate) async fn fetch_and_scan_same_surface_churn(
     server: &MemoryServer,
     repo: &str,
     limit: u32,
     activity_since: &str,
     churn_threshold: usize,
 ) -> Result<Vec<ChurnCandidate>, String> {
-    let open = fetch_open_issues_with_activity(server, repo, limit)?;
-    let all_merged_prs = fetch_merged_pr_surfaces(server, repo, limit)?;
+    let open = fetch_open_issues_with_activity(server, repo, limit).await?;
+    let all_merged_prs = fetch_merged_pr_surfaces(server, repo, limit).await?;
     let recent_prs = filter_merged_prs_since(all_merged_prs, activity_since);
 
     let issues: Vec<OpenIssueForChurnCheck> = open
@@ -922,18 +922,18 @@ pub(crate) fn fetch_and_scan_same_surface_churn(
 type OpenIssueActivity = (u64, String, String, Option<String>);
 
 /// Fetch open-issue activity rows for the churn heuristic.
-fn fetch_open_issues_with_activity(
+async fn fetch_open_issues_with_activity(
     server: &MemoryServer,
     repo: &str,
     limit: u32,
 ) -> Result<Vec<OpenIssueActivity>, String> {
-    let (mut cmd, token) = build_gh_command(server)?;
-    cmd.args(["issue", "list"])
+    let mut call = GhCall::bulk_read();
+    call.args(["issue", "list"])
         .args(["--repo", repo])
         .args(["--state", "open"])
         .args(["--limit", &limit.to_string()])
         .args(["--json", "number,body,updatedAt,comments"]);
-    let output = run_gh_json(cmd, &token)?;
+    let output = call.run_json(server).await?;
     let value: Value =
         serde_json::from_str(&output).map_err(|e| format!("parse issue list json: {e}"))?;
     Ok(parse_open_issues_with_activity_json(&value))
@@ -977,18 +977,18 @@ pub(crate) fn parse_open_issues_with_activity_json(value: &Value) -> Vec<OpenIss
 
 /// Fetch the touched-file surface for recently merged PRs, for the churn
 /// heuristic's "same surface" cross-check.
-fn fetch_merged_pr_surfaces(
+async fn fetch_merged_pr_surfaces(
     server: &MemoryServer,
     repo: &str,
     limit: u32,
 ) -> Result<Vec<MergedPrSurface>, String> {
-    let (mut cmd, token) = build_gh_command(server)?;
-    cmd.args(["pr", "list"])
+    let mut call = GhCall::bulk_read();
+    call.args(["pr", "list"])
         .args(["--repo", repo])
         .args(["--state", "merged"])
         .args(["--limit", &limit.to_string()])
         .args(["--json", "number,files,mergedAt"]);
-    let output = run_gh_json(cmd, &token)?;
+    let output = call.run_json(server).await?;
     let value: Value =
         serde_json::from_str(&output).map_err(|e| format!("parse pr list json: {e}"))?;
     Ok(parse_merged_pr_surfaces_json(&value))
@@ -1327,9 +1327,9 @@ mod tests {
     fn fetch_merged_prs_since_builds_merged_date_search_not_state_limit() {
         let repo = "kckylechen1/tachi";
         let since = "2026-07-12T00:00:00+00:00";
-        let mut cmd = Command::new("gh");
-        apply_merged_prs_since_args(&mut cmd, repo, since, 100);
-        let args: Vec<String> = cmd
+        let mut call = GhCall::bulk_read();
+        apply_merged_prs_since_args(&mut call, repo, since, 100);
+        let args: Vec<String> = call
             .get_args()
             .map(|a| a.to_string_lossy().to_string())
             .collect();

@@ -43,7 +43,7 @@ pub use provider_health::{
 };
 use provider_health::{
     ClaudeCliFailure, DeploymentHealthCounters, LaneAuthority, ProviderHealthPersistState,
-    ProviderHealthReloadState, ProviderState,
+    ProviderHealthReloadState, ProviderPersistWriter, ProviderState,
 };
 pub use rerank::{
     RerankConfig, RerankProviderKind, RERANK_LOCAL_ENDPOINT_ENV, RERANK_PROVIDER_ENV,
@@ -98,9 +98,13 @@ pub struct LlmClient {
     provider_materialization_lock: Arc<Mutex<()>>,
     provider_health_reload: Arc<RwLock<ProviderHealthReloadState>>,
     provider_health_persist: Arc<RwLock<ProviderHealthPersistState>>,
-    /// FIFO ownership for same-client background SQLite open+write phases.
+    /// FIFO ownership for same-client background SQLite write phases.
     /// Model calls enqueue work but never wait on this lock.
     background_persist_lock: Arc<tokio::sync::Mutex<()>>,
+    /// The retained vault-DB handle and the pending key-health snapshots
+    /// every persistence write of this client (and its clones) goes through
+    /// (audit H1). See `provider_health/writer.rs`.
+    provider_persist_writer: Arc<ProviderPersistWriter>,
     /// Tracks fire-and-forget usage writes so tests can join the exact
     /// persistence boundary without changing production call latency.
     llm_usage_persist: Arc<RwLock<ProviderHealthPersistState>>,
@@ -172,16 +176,6 @@ impl LlmClient {
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         self.runtime_config_from_overlay(&state.lane_config_overlay)
-    }
-
-    /// Project a candidate Vault overlay without publishing it. Materializers
-    /// use this while preparing the catalog projection, before the combined
-    /// provider-state publication is allowed to happen.
-    pub fn runtime_config_with_lane_config_overlay(
-        &self,
-        overlay: &LaneConfigOverlay,
-    ) -> ProviderRuntimeConfig {
-        self.runtime_config_from_overlay(overlay)
     }
 
     pub(crate) fn validated_runtime_config_with_lane_config_overlay(

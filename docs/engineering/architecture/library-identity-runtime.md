@@ -40,10 +40,13 @@ Binding rules:
 3. Existence of the project DB is the current authorization model for binding
    (single-user / loopback). Multi-tenant ACL of header claims is **#495**, out of scope.
 
-Constants live in `crates/tachi-server/src/session_identity.rs`:
-
-- Headers: `x-tachi-project`, `x-tachi-profile`, `x-tachi-client`
-- Meta keys: `tachiProject`, `tachiProfile`, `tachiClient` (+ dotted aliases)
+Constants live in `crates/tachi-server/src/session_identity.rs`, which is the
+authoritative list of `x-tachi-*` headers and their `_meta` twins (for example
+`x-tachi-project` / `tachiProject`, `x-tachi-profile` / `tachiProfile`,
+`x-tachi-client` / `tachiClient`). The dotted `_meta` aliases (`tachi.project`
+and friends) are read in `server_handler.rs::request_identity`. Header-only values such
+as `x-tachi-rate-limit-session` are described in
+[`http-direct-connect.md`](./http-direct-connect.md).
 
 ## 3. Read / write asymmetry (#737)
 

@@ -94,7 +94,9 @@ async fn run(
             axum::routing::get(move || {
                 let health_server = health_server.clone();
                 async move {
-                    let db_ok = health_server.health_ok();
+                    // Audit B6: the store probe waits on the store mutexes on
+                    // the blocking pool, never on an executor worker.
+                    let db_ok = health_server.health_ok_off_executor().await;
                     let code = if db_ok {
                         axum::http::StatusCode::OK
                     } else {

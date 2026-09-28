@@ -47,13 +47,13 @@ const CONCURRENT_PUBLISH_WARNING_MINUTES: i64 = 10;
 
 // ─────────────────────────── handoff_draft (read-only) ───────────────────────────
 
-pub(crate) fn handle_gh_handoff_draft(
+pub(crate) async fn handle_gh_handoff_draft(
     server: &MemoryServer,
     params: &TachiGhParams,
     repo: String,
 ) -> Result<String, String> {
     validate_repo(&repo)?;
-    let previous = discover_previous_handoff_for_draft(&repo, server);
+    let previous = discover_previous_handoff_for_draft(&repo, server).await;
     let since = resolve_since(params.since.as_deref(), previous.published_at)?;
 
     let mut draft = serde_json::Map::new();
@@ -64,17 +64,19 @@ pub(crate) fn handle_gh_handoff_draft(
     draft.insert("previous_handoff".to_string(), previous.to_json());
     draft.insert(
         "1_delivery_ledger".to_string(),
-        assemble_ledger_section(server, &repo, &since),
+        assemble_ledger_section(server, &repo, &since).await,
     );
     draft.insert(
         "2_current_state".to_string(),
         assemble_current_state_section(server),
     );
+    let next_steps_raw_material =
+        assemble_next_steps_raw_material(server, &repo, previous.mirror_body.as_deref()).await;
     draft.insert(
         "3_next_steps".to_string(),
         json!({
             "note": "LEADER AUTHORED — this section is raw material only; tachi_gh(action='handoff_publish') never synthesizes it",
-            "next_steps_raw_material": assemble_next_steps_raw_material(server, &repo, previous.mirror_body.as_deref()),
+            "next_steps_raw_material": next_steps_raw_material,
         }),
     );
     draft.insert(
@@ -89,9 +91,13 @@ pub(crate) fn handle_gh_handoff_draft(
 /// `merged_prs` failing (gh transport unavailable) degrades the WHOLE §1 to
 /// `unavailable` per the frozen contract ("G3 时间窗必须对账...不可用时 §1
 /// 整段标 unavailable, 宁缺不错") rather than a half-populated ledger.
-fn assemble_ledger_section(server: &MemoryServer, repo: &str, since: &DateTime<Utc>) -> Value {
+async fn assemble_ledger_section(
+    server: &MemoryServer,
+    repo: &str,
+    since: &DateTime<Utc>,
+) -> Value {
     let since_str = since.to_rfc3339();
-    match fetch_merged_prs_since(server, repo, &since_str, 100) {
+    match fetch_merged_prs_since(server, repo, &since_str, 100).await {
         Ok(prs) => json!({
             "status": "ok",
             "since": since_str,
@@ -185,12 +191,12 @@ fn known_reds_section(server: &MemoryServer) -> Value {
 /// §3: raw material only — open issues (best-effort, needs `gh`) + the
 /// previous handoff's own §3 text extracted verbatim (best-effort, needs a
 /// previous mirror). Never synthesizes a recommendation.
-fn assemble_next_steps_raw_material(
+async fn assemble_next_steps_raw_material(
     server: &MemoryServer,
     repo: &str,
     previous_body: Option<&str>,
 ) -> Value {
-    let open_issues = match fetch_open_issues_brief(server, repo) {
+    let open_issues = match fetch_open_issues_brief(server, repo).await {
         Ok(issues) => json!({ "status": "ok", "issues": issues }),
         Err(err) => json!({ "status": "unavailable", "reason": format!("gh transport: {err}") }),
     };
@@ -307,28 +313,31 @@ fn collect_continuity_events_since(
         .collect())
 }
 
-fn fetch_open_issues_brief(server: &MemoryServer, repo: &str) -> Result<Vec<Value>, String> {
-    let (mut cmd, token) = build_gh_command(server)?;
-    cmd.args(["issue", "list"])
+async fn fetch_open_issues_brief(server: &MemoryServer, repo: &str) -> Result<Vec<Value>, String> {
+    let mut call = GhCall::read();
+    call.args(["issue", "list"])
         .args(["--repo", repo])
         .args(["--state", "open"])
         .args(["--json", "number,title,labels"])
         .args(["--limit", "30"]);
-    let output = run_gh_json(cmd, &token)?;
+    let output = call.run_json(server).await?;
     let value: Value =
         serde_json::from_str(&output).map_err(|e| format!("parse issue list json: {e}"))?;
     Ok(value.as_array().cloned().unwrap_or_default())
 }
 
-fn fetch_open_handoff_issues(server: &MemoryServer, repo: &str) -> Result<Vec<Value>, String> {
-    let (mut cmd, token) = build_gh_command(server)?;
-    cmd.args(["issue", "list"])
+async fn fetch_open_handoff_issues(
+    server: &MemoryServer,
+    repo: &str,
+) -> Result<Vec<Value>, String> {
+    let mut call = GhCall::read();
+    call.args(["issue", "list"])
         .args(["--repo", repo])
         .args(["--label", HANDOFF_LABEL])
         .args(["--state", "open"])
         .args(["--json", "number,title,createdAt,labels"])
         .args(["--limit", "20"]);
-    let output = run_gh_json(cmd, &token)?;
+    let output = call.run_json(server).await?;
     let value: Value =
         serde_json::from_str(&output).map_err(|e| format!("parse issue list json: {e}"))?;
     Ok(value.as_array().cloned().unwrap_or_default())
@@ -404,7 +413,7 @@ impl PreviousHandoffForDraft {
     }
 }
 
-fn discover_previous_handoff_for_draft(
+async fn discover_previous_handoff_for_draft(
     repo: &str,
     server: &MemoryServer,
 ) -> PreviousHandoffForDraft {
@@ -412,7 +421,7 @@ fn discover_previous_handoff_for_draft(
         crate::wiki_ops::list_handoff_mirrors_for_repo(server, repo).unwrap_or_default();
     let wiki_latest = wiki_mirrors.first();
 
-    let (gh_issue, gh_error) = match fetch_open_handoff_issues(server, repo) {
+    let (gh_issue, gh_error) = match fetch_open_handoff_issues(server, repo).await {
         Ok(issues) => {
             let newest = issues
                 .iter()
@@ -508,17 +517,19 @@ pub(crate) async fn handle_gh_handoff_publish(
     // (leader-supplied override, per the frozen contract).
     let previous_issue = match params.supersedes {
         Some(explicit) => Ok(Some(explicit)),
-        None => fetch_open_handoff_issues(server, &repo).map(|issues| {
-            issues
-                .iter()
-                .filter_map(|issue| {
-                    let number = issue.get("number")?.as_u64()?;
-                    let created_at = issue.get("createdAt").and_then(Value::as_str)?;
-                    Some((number, created_at.to_string()))
-                })
-                .max_by(|a, b| a.1.cmp(&b.1))
-                .map(|(number, _)| number)
-        }),
+        None => fetch_open_handoff_issues(server, &repo)
+            .await
+            .map(|issues| {
+                issues
+                    .iter()
+                    .filter_map(|issue| {
+                        let number = issue.get("number")?.as_u64()?;
+                        let created_at = issue.get("createdAt").and_then(Value::as_str)?;
+                        Some((number, created_at.to_string()))
+                    })
+                    .max_by(|a, b| a.1.cmp(&b.1))
+                    .map(|(number, _)| number)
+            }),
     };
     let previous_issue = match previous_issue {
         Ok(previous_issue) => previous_issue,
@@ -536,13 +547,14 @@ pub(crate) async fn handle_gh_handoff_publish(
     };
 
     // Step 1: issue create.
-    let (mut cmd, token) = build_gh_command(server)?;
-    cmd.args(["issue", "create"])
+    let mut create = GhCall::mutation();
+    create
+        .args(["issue", "create"])
         .args(["--repo", &repo])
         .args(["--title", &title])
         .args(["--label", HANDOFF_LABEL]);
-    let _body_file = attach_gh_body_file(&mut cmd, &body)?;
-    let create_output = run_gh(cmd, &token)?;
+    create.attach_body_file(&body)?;
+    let create_output = create.run(server).await?;
     let issue_number = parse_issue_number_from_gh_url(&create_output).ok_or_else(|| {
         format!("could not parse issue number from `gh issue create` output: {create_output}")
     })?;
@@ -595,7 +607,7 @@ pub(crate) async fn handle_gh_handoff_publish(
 
     // Step 3: supersede (only if a previous open handoff exists for this repo).
     if let Some(prev_issue) = previous_issue {
-        match supersede_previous_handoff(server, &repo, prev_issue, issue_number) {
+        match supersede_previous_handoff(server, &repo, prev_issue, issue_number).await {
             Ok(supersede_receipt) => {
                 set_step(&mut receipt, "supersede", json!("ok"));
                 receipt.insert("supersedes".to_string(), supersede_receipt);
@@ -765,26 +777,31 @@ async fn write_handoff_mirror(
 /// 两笔仍算成功") — a close failure/refusal degrades to a manual fallback
 /// command inside the returned `Value`, never fails the overall supersede
 /// step.
-fn supersede_previous_handoff(
+async fn supersede_previous_handoff(
     server: &MemoryServer,
     repo: &str,
     previous_issue: u64,
     new_issue: u64,
 ) -> Result<Value, String> {
-    verify_supersede_target(server, repo, previous_issue)?;
+    verify_supersede_target(server, repo, previous_issue).await?;
 
     let comment_body = format!("superseded by {repo}#{new_issue}");
-    let (mut cmd, token) = build_gh_command(server)?;
-    cmd.args(["issue", "comment", &previous_issue.to_string()])
+    let mut comment = GhCall::mutation();
+    comment
+        .args(["issue", "comment", &previous_issue.to_string()])
         .args(["--repo", repo]);
-    let _body_file = attach_gh_body_file(&mut cmd, &comment_body)?;
-    run_gh(cmd, &token).map_err(|e| format!("supersede comment failed: {e}"))?;
+    comment.attach_body_file(&comment_body)?;
+    comment
+        .run(server)
+        .await
+        .map_err(|e| format!("supersede comment failed: {e}"))?;
 
     // Close BEFORE the label swap — see the fn doc above for why the order
     // matters (the close gate's live re-fetch must not observe our own swap).
-    let close_result = attempt_restricted_close(server, repo, previous_issue);
+    let close_result = attempt_restricted_close(server, repo, previous_issue).await;
 
     swap_handoff_label(server, repo, previous_issue)
+        .await
         .map_err(|e| format!("supersede label swap failed (comment/close already done): {e}"))?;
 
     Ok(json!({
@@ -805,12 +822,18 @@ fn supersede_previous_handoff(
 /// path that can name an arbitrary same-repo issue number, so it is exactly
 /// the path this gate exists for). Reuses `restricted_close_allowed`'s label
 /// check rather than a second label-matching implementation.
-fn verify_supersede_target(server: &MemoryServer, repo: &str, number: u64) -> Result<(), String> {
-    let (mut cmd, token) = build_gh_command(server)?;
-    cmd.args(["issue", "view", &number.to_string()])
+async fn verify_supersede_target(
+    server: &MemoryServer,
+    repo: &str,
+    number: u64,
+) -> Result<(), String> {
+    let mut call = GhCall::read();
+    call.args(["issue", "view", &number.to_string()])
         .args(["--repo", repo])
         .args(["--json", "state,labels"]);
-    let output = run_gh_json(cmd, &token)
+    let output = call
+        .run_json(server)
+        .await
         .map_err(|e| format!("could not verify supersede target {repo}#{number}: {e}"))?;
     let value: Value = serde_json::from_str(&output)
         .map_err(|e| format!("parse issue view json for {repo}#{number}: {e}"))?;
@@ -839,22 +862,26 @@ fn verify_supersede_target(server: &MemoryServer, repo: &str, number: u64) -> Re
         .map_err(|e| format!("refusing to supersede {repo}#{number}: {e}"))
 }
 
-fn swap_handoff_label(server: &MemoryServer, repo: &str, number: u64) -> Result<String, String> {
-    let (mut cmd, token) = build_gh_command(server)?;
-    cmd.args(["issue", "edit", &number.to_string()])
+async fn swap_handoff_label(
+    server: &MemoryServer,
+    repo: &str,
+    number: u64,
+) -> Result<String, String> {
+    let mut call = GhCall::mutation();
+    call.args(["issue", "edit", &number.to_string()])
         .args(["--repo", repo])
         .args(["--remove-label", HANDOFF_LABEL])
         .args(["--add-label", HANDOFF_SUPERSEDED_LABEL]);
-    run_gh(cmd, &token)
+    Ok(call.run(server).await?)
 }
 
 /// Re-verifies label state live (not the earlier discovery snapshot) right
 /// before closing, then runs the restricted close gate. Never propagates an
 /// `Err` up to the caller — a refused/failed close degrades to a manual
 /// fallback command inside the returned `Value` (see module doc).
-fn attempt_restricted_close(server: &MemoryServer, repo: &str, number: u64) -> Value {
+async fn attempt_restricted_close(server: &MemoryServer, repo: &str, number: u64) -> Value {
     let fallback = format!("gh issue close {number} --repo {repo} --reason completed");
-    let labels = match fetch_issue_labels(server, repo, number) {
+    let labels = match fetch_issue_labels(server, repo, number).await {
         Ok(labels) => labels,
         Err(err) => {
             return json!({ "status": "failed", "error": err, "fallback": fallback });
@@ -863,22 +890,22 @@ fn attempt_restricted_close(server: &MemoryServer, repo: &str, number: u64) -> V
     if let Err(gate_err) = restricted_close_allowed(&labels, number, number) {
         return json!({ "status": "refused", "error": gate_err, "fallback": fallback });
     }
-    match close_superseded_handoff_issue(server, repo, number) {
+    match close_superseded_handoff_issue(server, repo, number).await {
         Ok(_) => json!({ "status": "ok" }),
         Err(err) => json!({ "status": "failed", "error": err, "fallback": fallback }),
     }
 }
 
-fn fetch_issue_labels(
+async fn fetch_issue_labels(
     server: &MemoryServer,
     repo: &str,
     number: u64,
 ) -> Result<Vec<String>, String> {
-    let (mut cmd, token) = build_gh_command(server)?;
-    cmd.args(["issue", "view", &number.to_string()])
+    let mut call = GhCall::read();
+    call.args(["issue", "view", &number.to_string()])
         .args(["--repo", repo])
         .args(["--json", "labels"]);
-    let output = run_gh_json(cmd, &token)?;
+    let output = call.run_json(server).await?;
     let value: Value =
         serde_json::from_str(&output).map_err(|e| format!("parse issue view json: {e}"))?;
     Ok(value
@@ -920,16 +947,16 @@ fn restricted_close_allowed(
 /// as a standalone `tachi_gh` action — callers reach it exclusively through
 /// `attempt_restricted_close`, which re-verifies the `handoff` label live
 /// immediately beforehand.
-fn close_superseded_handoff_issue(
+async fn close_superseded_handoff_issue(
     server: &MemoryServer,
     repo: &str,
     number: u64,
 ) -> Result<String, String> {
-    let (mut cmd, token) = build_gh_command(server)?;
-    cmd.args(["issue", "close", &number.to_string()])
+    let mut call = GhCall::mutation();
+    call.args(["issue", "close", &number.to_string()])
         .args(["--repo", repo])
         .args(["--reason", "completed"]);
-    run_gh(cmd, &token)
+    Ok(call.run(server).await?)
 }
 
 async fn emit_handoff_published_event(
@@ -1018,11 +1045,11 @@ pub(crate) async fn handle_gh_handoff_repair(
     number: u64,
 ) -> Result<String, String> {
     validate_repo(&repo)?;
-    let (mut cmd, token) = build_gh_command(server)?;
-    cmd.args(["issue", "view", &number.to_string()])
+    let mut call = GhCall::read();
+    call.args(["issue", "view", &number.to_string()])
         .args(["--repo", &repo])
         .args(["--json", "number,title,body,labels,createdAt"]);
-    let output = run_gh_json(cmd, &token)?;
+    let output = call.run_json(server).await?;
     let issue: Value =
         serde_json::from_str(&output).map_err(|e| format!("parse gh issue view json: {e}"))?;
 
@@ -1231,6 +1258,17 @@ mod tests {
         }
     }
 
+    /// The supersede chain runs on the async bounded `gh` executor; these
+    /// tests keep their sync shape (and their std-mutex test lock outside
+    /// the future) by driving it on a local runtime.
+    fn block_on_test<F: std::future::Future>(future: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime")
+            .block_on(future)
+    }
+
     fn write_executable(path: &std::path::Path, contents: &str) {
         std::fs::write(path, contents).expect("write shim");
         #[cfg(unix)]
@@ -1334,7 +1372,7 @@ exit 1
         let _path_guard = PathEnvGuard::prepend(fake_bin.path());
 
         let server = crate::tests::make_server();
-        let result = supersede_previous_handoff(&server, "owner/repo", 100, 101)
+        let result = block_on_test(supersede_previous_handoff(&server, "owner/repo", 100, 101))
             .expect("supersede should succeed in the normal flow");
 
         assert_eq!(
@@ -1371,7 +1409,7 @@ exit 1
         let _path_guard = PathEnvGuard::prepend(fake_bin.path());
 
         let server = crate::tests::make_server();
-        let err = supersede_previous_handoff(&server, "owner/repo", 999, 101)
+        let err = block_on_test(supersede_previous_handoff(&server, "owner/repo", 999, 101))
             .expect_err("a non-handoff-labeled target must be refused");
 
         assert!(err.contains("refusing to supersede"), "err: {err}");
@@ -1401,7 +1439,7 @@ exit 1
         let _path_guard = PathEnvGuard::prepend(fake_bin.path());
 
         let server = crate::tests::make_server();
-        let err = supersede_previous_handoff(&server, "owner/repo", 999, 101)
+        let err = block_on_test(supersede_previous_handoff(&server, "owner/repo", 999, 101))
             .expect_err("a closed target must be refused");
 
         assert!(err.contains("refusing to supersede"), "err: {err}");

@@ -1,6 +1,6 @@
 //! Shared bounded command execution with an explicit partial-failure boundary.
 
-use super::{build_gh_command, sanitize_output, Duration, MemoryServer, Value};
+use super::{sanitize_output, Duration, GhCall, MemoryServer, Value};
 
 /// Parsed stdout is private observation data, never a successful read receipt.
 /// It is not serializable or printable; the adapter may extract independently
@@ -34,33 +34,25 @@ impl GhJsonReadFailure {
     }
 }
 
-/// Keep command preparation and process wait under the existing timeout and
-/// reuse the same credential/environment hardening and kill-on-drop policy.
-/// Synchronous JSON decoding follows the wait; this is not a claim of CPU-time
-/// preemption or complete descendant cleanup. A nonzero exit remains Err even
-/// when stdout is a well-formed, success-shaped JSON document.
+/// Runs on the shared bounded executor ([`GhCall`]): command preparation and
+/// process wait share one deadline, the credential/environment hardening is
+/// the same, and a timed-out child is killed and reaped. Synchronous JSON
+/// decoding follows the wait; this is not a claim of CPU-time preemption or
+/// complete descendant cleanup. A nonzero exit remains Err even when stdout
+/// is a well-formed, success-shaped JSON document.
 pub(in crate::gh_ops) async fn run_gh_json_observed_bounded(
     server: &MemoryServer,
     args: Vec<String>,
     timeout: Duration,
     context: &str,
 ) -> Result<Value, GhJsonReadFailure> {
-    let server = server.clone();
-    let timed = tokio::time::timeout(timeout, async {
-        let (cmd, token) = tokio::task::spawn_blocking(move || build_gh_command(&server))
-            .await
-            .map_err(|error| format!("prepare `gh` command task failed: {error}"))??;
-        let mut cmd = tokio::process::Command::from(cmd);
-        cmd.args(args).kill_on_drop(true);
-        let output = cmd
-            .output()
-            .await
-            .map_err(|error| format!("failed to execute `gh`: {error}"))?;
-        Ok::<(std::process::Output, String), String>((output, token))
-    })
-    .await
-    .map_err(|_| GhJsonReadFailure::unobserved(format!("{context} timed out after {timeout:?}")))?;
-    let (output, token) = timed.map_err(GhJsonReadFailure::unobserved)?;
+    let mut call = GhCall::read();
+    call.args(args).timeout(timeout).context(context);
+    let output = call
+        .output(server)
+        .await
+        .map_err(|error| GhJsonReadFailure::unobserved(error.to_string()))?;
+    let (output, token) = output.into_parts();
     decode_output(output, &token, context)
 }
 

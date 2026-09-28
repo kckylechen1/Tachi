@@ -47,9 +47,8 @@ use persist::{
     normalized_source_memory_ids, persist_distill_memory, serialized_source_set_identity_bytes,
     stable_distill_memory_id, validate_existing_distill_winner,
 };
-// #1087: unit test asserts the flag-off default is unchanged.
 #[cfg(test)]
-pub(crate) use runner::{call_claude_batch, process_api_batch};
+pub(crate) use runner::process_api_batch;
 #[cfg(test)]
 use serde_json::json;
 #[cfg(test)]

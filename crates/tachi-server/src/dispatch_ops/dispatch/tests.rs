@@ -1524,6 +1524,46 @@ fn postflight_handoff_has_no_pid_reconstruction_or_signal_capability() {
         execution_source.contains("gate.run(&runner_liveness)"),
         "the production postflight handoff must consume typed runner liveness"
     );
+    // Audit E4 (revised, #2022 startup-gate review): the multi-second re-walk
+    // still must not pin the dispatch task's executor worker, but it must not
+    // introduce an `.await` at the gate handoff either. The detached dispatch
+    // task is the sole owner of the armed early-exit cleanup (credential
+    // materializations, flow slot, exclusive postflight lease), so a
+    // `spawn_blocking(..).await` there lets an abort drop that cleanup while
+    // the gate is still running — releasing creds/slot/lease before
+    // resolution and losing the resource fence and terminal trajectory event.
+    // The re-walk runs through executor_offload::block_off_core, which hands
+    // the core to another thread without adding a cancellation point.
+    assert!(
+        execution_source.contains("block_off_core(|| gate.run(&runner_liveness))"),
+        "the postflight gate re-walk must hand off the executor core without an await"
+    );
+    assert!(
+        !execution_source.contains("spawn_blocking(move || gate.run(&runner_liveness))"),
+        "the postflight gate handoff must not gain an await point: an abort there releases the armed cleanup before the gate resolves"
+    );
+}
+
+/// Audit E4: the pre-image capture (walk + content hash + clock barrier) runs
+/// with the executor core handed off, and WITHOUT an `.await` — the launch
+/// success path holds a non-RAII flow slot and credential materializations, so
+/// it must not gain a cancellation point between capture and spawn.
+#[test]
+fn postflight_preimage_capture_runs_off_the_executor_core_without_an_await() {
+    let dispatch_source = include_str!("../dispatch.rs");
+    assert!(
+        dispatch_source.contains("block_off_core(|| gate.capture_preimage())"),
+        "the pre-image capture must run through executor_offload::block_off_core"
+    );
+    assert!(
+        !dispatch_source.contains("spawn_blocking(move || gate.capture_preimage())"),
+        "the pre-image capture must not gain an await point on the launch success path"
+    );
+    assert_eq!(
+        dispatch_source.matches(".capture_preimage()").count(),
+        1,
+        "exactly one production pre-image capture site is expected"
+    );
 }
 
 #[test]

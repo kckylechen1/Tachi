@@ -93,7 +93,8 @@ fn status_snapshot_test_hooks(
 }
 
 /// Test-only seam: run `hook` inside the blocking-pool snapshot collection
-/// for exactly one `collect_status_snapshot` call against this app home —
+/// for exactly one `collect_status_core_blocking` call against this app home
+/// (status surface or typed health digest) —
 /// used to prove the async executor stays responsive while the snapshot is
 /// gathered, and to exercise snapshot-failure degradation deterministically.
 #[cfg(test)]
@@ -130,7 +131,8 @@ fn status_governance_test_hooks(
     HOOKS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
-/// Test-only seam for the GOVERNANCE phase of the health digest: runs once,
+/// Test-only seam for the GOVERNANCE phase of the shared status core (status
+/// surface and health digest): runs once,
 /// inside the blocking-pool closure, right before the governance store read
 /// — used to prove the async executor stays responsive while governance
 /// SQLite runs (a hook that blocks here deadlocks an executor-resident
@@ -160,21 +162,60 @@ fn run_status_governance_test_hook(app_home: &Path) {
     }
 }
 
-/// `collect_snapshot` opens every manifest DB read-only — blocking SQLite
-/// and filesystem work. Keep it off the async executor (same pattern as the
-/// full-briefing health score and `collect_agent_warning_lines`).
-async fn collect_status_snapshot(
-    app_home: PathBuf,
-    global_db_path: PathBuf,
-    project_db_path: Option<PathBuf>,
-) -> Result<StatusSnapshot, String> {
-    tokio::task::spawn_blocking(move || {
-        #[cfg(test)]
-        run_status_snapshot_test_hook(&app_home);
-        collect_snapshot(&app_home, &global_db_path, project_db_path.as_deref())
-    })
-    .await
-    .map_err(|error| format!("status snapshot collection failed: {error}"))
+/// Every blocking read the agent status surface and the typed health digest
+/// share, produced by one blocking core ([`collect_status_core_blocking`]).
+/// Holding the route observation here keeps the single-probe invariant: the
+/// status surface renders its runtime block from the SAME observation the
+/// stdio-adapter warning was derived from.
+struct StatusCore {
+    snapshot: StatusSnapshot,
+    route: DaemonRouteObservation,
+    daemon_state: serde_json::Value,
+    recall_eval: serde_json::Value,
+    component_governance: serde_json::Value,
+    /// Uncapped; each surface applies [`AGENT_STATUS_WARNING_CAP`] itself.
+    warnings: Vec<String>,
+}
+
+/// Blocking core shared by [`collect_agent_health_digest`] and
+/// `handle_tachi_status_detail`: the SQLite/filesystem snapshot, the daemon
+/// route liveness probe (pid file + `kill(0)`), the recall-eval status file,
+/// the governance store read and git subprocesses, and the shared warning
+/// assembly (manifest load + `read_dir(projects)`). Must only run on the
+/// blocking pool, never the async executor.
+fn collect_status_core_blocking(
+    app_home: &Path,
+    global_db_path: &Path,
+    project_db_path: Option<&Path>,
+    server: &crate::MemoryServer,
+) -> StatusCore {
+    #[cfg(test)]
+    run_status_snapshot_test_hook(app_home);
+    let snapshot = collect_snapshot(app_home, global_db_path, project_db_path);
+    #[cfg(test)]
+    run_status_governance_test_hook(app_home);
+    // One route observation feeds the whole response (daemon projection +
+    // stdio-adapter warning) — no second liveness probe.
+    let route = observe_daemon_route(app_home, Some(&snapshot.daemon));
+    let daemon_state = daemon_state_json(&snapshot.daemon);
+    let recall_eval = crate::status_ops::recall_eval::read_recall_eval_status(app_home);
+    let component_governance = workspace_component_governance(server);
+    let warnings = agent_status_warning_lines(
+        app_home,
+        &snapshot,
+        &daemon_state,
+        &recall_eval,
+        &component_governance,
+        &route,
+    );
+    StatusCore {
+        snapshot,
+        route,
+        daemon_state,
+        recall_eval,
+        component_governance,
+        warnings,
+    }
 }
 
 /// The public `daemon` block of the status payload, shared by the status
@@ -317,8 +358,9 @@ pub(crate) struct AgentHealthDigest {
 /// Collect the typed health digest. ALL blocking reads the digest needs —
 /// the SQLite/filesystem snapshot, the recall-eval status file, and the
 /// governance store read (`with_global_store_read` SQLite) — run on Tokio's
-/// blocking pool; only a join failure (a phase panic or runtime shutdown)
-/// produces `Err` — callers keep their own degradation shape.
+/// blocking pool via [`collect_status_core_blocking`]; only a join failure
+/// (a phase panic or runtime shutdown) produces `Err` — callers keep their
+/// own degradation shape.
 pub(crate) async fn collect_agent_health_digest(
     server: &crate::MemoryServer,
 ) -> Result<AgentHealthDigest, String> {
@@ -331,52 +373,23 @@ pub(crate) async fn collect_agent_health_digest(
     let project_db_path = server.project_db_path_buf();
     let server_for_blocking = server.clone();
     tokio::task::spawn_blocking(move || {
-        build_agent_health_digest_blocking(
+        let core = collect_status_core_blocking(
             &app_home,
             &global_db_path,
             project_db_path.as_deref(),
             &server_for_blocking,
-        )
+        );
+        AgentHealthDigest {
+            health_score: core.snapshot.health_score,
+            warnings: core
+                .warnings
+                .into_iter()
+                .take(AGENT_STATUS_WARNING_CAP)
+                .collect(),
+        }
     })
     .await
     .map_err(|error| format!("status snapshot collection failed: {error}"))
-}
-
-/// Blocking core of [`collect_agent_health_digest`]: snapshot collection,
-/// recall-eval file read, governance store read, and the shared warning
-/// assembly — must only run on the blocking pool, never the async executor.
-fn build_agent_health_digest_blocking(
-    app_home: &Path,
-    global_db_path: &Path,
-    project_db_path: Option<&Path>,
-    server: &crate::MemoryServer,
-) -> AgentHealthDigest {
-    #[cfg(test)]
-    run_status_snapshot_test_hook(app_home);
-    let snapshot = collect_snapshot(app_home, global_db_path, project_db_path);
-    #[cfg(test)]
-    run_status_governance_test_hook(app_home);
-    // One route observation feeds the whole digest (daemon projection +
-    // stdio-adapter warning) — no second liveness probe.
-    let route = observe_daemon_route(app_home, Some(&snapshot.daemon));
-    let daemon_state = daemon_state_json(&snapshot.daemon);
-    let recall_eval = crate::status_ops::recall_eval::read_recall_eval_status(app_home);
-    let component_governance = workspace_component_governance(server);
-    let warnings = agent_status_warning_lines(
-        app_home,
-        &snapshot,
-        &daemon_state,
-        &recall_eval,
-        &component_governance,
-        &route,
-    );
-    AgentHealthDigest {
-        health_score: snapshot.health_score,
-        warnings: warnings
-            .into_iter()
-            .take(AGENT_STATUS_WARNING_CAP)
-            .collect(),
-    }
 }
 
 pub(crate) fn resolve_app_home() -> PathBuf {
@@ -649,14 +662,36 @@ async fn handle_tachi_status_detail(
     full: bool,
     format: Option<&str>,
 ) -> Result<String, String> {
+    // All blocking reads (snapshot, route probe, recall-eval file, governance
+    // SQLite + git, warning assembly, agent-readiness file reads) run in ONE
+    // blocking-pool closure — the same core the typed health digest uses —
+    // so the async executor is never held by them (audit F1). Server-bound
+    // identity is resolved before the closure; the server clone is Arc-backed
+    // and shares the same stores.
     let app_home = server.tachi_home_dir();
     let global_db_path = server.global_db_path_buf();
     let project_db_path = server.project_db_path_buf();
-
-    let snapshot =
-        collect_status_snapshot(app_home.clone(), global_db_path, project_db_path).await?;
-
-    let daemon_state = daemon_state_json(&snapshot.daemon);
+    let server_for_blocking = server.clone();
+    let (core, readiness) = tokio::task::spawn_blocking(move || {
+        let core = collect_status_core_blocking(
+            &app_home,
+            &global_db_path,
+            project_db_path.as_deref(),
+            &server_for_blocking,
+        );
+        let readiness = status_health::agent_readiness_json(&app_home, &core.snapshot);
+        (core, readiness)
+    })
+    .await
+    .map_err(|error| format!("status snapshot collection failed: {error}"))?;
+    let StatusCore {
+        snapshot,
+        route,
+        daemon_state,
+        recall_eval,
+        component_governance,
+        warnings,
+    } = core;
 
     let total_dbs = snapshot.dbs.len();
     let total_pending: usize = snapshot.dbs.iter().map(|d| d.pending).sum();
@@ -861,29 +896,16 @@ async fn handle_tachi_status_detail(
             })
         })
         .collect();
-    let readiness = status_health::agent_readiness_json(&app_home, &snapshot);
-
     // Full diagnostic keeps the heavy provider arrays in `runtime`; the compact
     // agent surface gets a slim routing/identity block (api_keys already carries
     // the provider detail there, so the arrays don't need repeating).
-    // One route observation feeds BOTH the runtime block and the warning list
-    // below — the stdio-adapter warning and the reported daemon flags share a
-    // single liveness probe (pre-patch parity: the warning used to read the
-    // same runtime JSON it was embedded in).
-    let route = observe_daemon_route(&app_home, Some(&snapshot.daemon));
+    // The core's single route observation feeds BOTH the runtime block and the
+    // warning list — the stdio-adapter warning and the reported daemon flags
+    // share a single liveness probe (pre-patch parity: the warning used to
+    // read the same runtime JSON it was embedded in). `warnings` is the same
+    // snapshot-derived list the typed health digest reports, and
+    // `component_governance` is the active-workspace registry context (#799).
     let runtime = render_runtime_observability(server, &route, full);
-    let recall_eval = crate::status_ops::recall_eval::read_recall_eval_status(&app_home);
-    // Component governance for active workspace (#799) — registry only.
-    let component_governance = workspace_component_governance(server);
-    // Same snapshot-derived warning list the typed health digest reports.
-    let warnings = agent_status_warning_lines(
-        &app_home,
-        &snapshot,
-        &daemon_state,
-        &recall_eval,
-        &component_governance,
-        &route,
-    );
 
     if full {
         let value = json!({

@@ -650,6 +650,84 @@ const MAX_DELTAS_IN_MESSAGE: usize = 20;
 /// same-UID worker can open, replace, or unlink.
 pub const PREIMAGE_CUSTODY: &str = "parent_process_memory";
 
+/// Test-only deterministic pause point at the top of [`PostflightGate::run`],
+/// keyed by the fixture's isolated `TACHI_HOME` / `TACHI_RUN_ROOT` pair. A
+/// regression test installs the barrier, waits for `entered`, then does its
+/// observation while the gate is provably unresolved, and finally releases
+/// the gate. No-op unless installed (and in non-test builds).
+#[cfg(test)]
+pub(crate) mod gate_run_barrier {
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+    use std::sync::{mpsc, Mutex, OnceLock};
+
+    type BarrierKey = (PathBuf, PathBuf);
+
+    struct Barrier {
+        entered: mpsc::Sender<()>,
+        release: mpsc::Receiver<()>,
+    }
+
+    static BARRIERS: OnceLock<Mutex<HashMap<BarrierKey, Barrier>>> = OnceLock::new();
+
+    pub(crate) struct Guard(BarrierKey);
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            if let Some(barriers) = BARRIERS.get() {
+                barriers
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .remove(&self.0);
+            }
+        }
+    }
+
+    /// Stop the next required-postflight gate at the top of its run: the gate
+    /// signals `entered`, then blocks until the test sends `release`.
+    pub(crate) fn install_postflight_gate_run_barrier(
+        home: &std::path::Path,
+        run_root: &std::path::Path,
+    ) -> (Guard, mpsc::Receiver<()>, mpsc::Sender<()>) {
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let key = (home.to_path_buf(), run_root.to_path_buf());
+        assert!(
+            BARRIERS
+                .get_or_init(|| Mutex::new(HashMap::new()))
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .insert(
+                    key.clone(),
+                    Barrier {
+                        entered: entered_tx,
+                        release: release_rx,
+                    },
+                )
+                .is_none(),
+            "postflight gate run barrier already installed for this isolated run root"
+        );
+        (Guard(key), entered_rx, release_tx)
+    }
+
+    pub(crate) fn pause_postflight_gate_run() {
+        let barrier = (|| {
+            let home = std::env::var_os("TACHI_HOME")?;
+            let run_root = std::env::var_os("TACHI_RUN_ROOT")?;
+            BARRIERS.get().and_then(|barriers| {
+                barriers
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .remove(&(PathBuf::from(home), PathBuf::from(run_root)))
+            })
+        })();
+        if let Some(barrier) = barrier {
+            let _ = barrier.entered.send(());
+            let _ = barrier.release.recv();
+        }
+    }
+}
+
 /// The gate itself: parent-side pre-image capture, then the postflight compare.
 #[derive(Debug, Clone)]
 pub struct PostflightGate {
@@ -821,6 +899,12 @@ impl PostflightGate {
     /// rewrite of `.git` itself is still caught — it is a content delta on
     /// `workspace/.git` like any other file.
     pub fn run(&self, liveness: &dyn DescendantLiveness) -> Result<GateOutcome, String> {
+        // Deterministic test-only boundary: hold the gate at the top of its
+        // run so a regression test can abort the dispatch owner while the
+        // gate is provably unresolved. No-op unless a barrier is installed
+        // for the isolated home/run root pair.
+        #[cfg(test)]
+        gate_run_barrier::pause_postflight_gate_run();
         let checked_at = chrono::Utc::now().to_rfc3339();
         // `barrier` is an explicit parameter rather than a field defaulted
         // somewhere convenient: every early return has to name what it

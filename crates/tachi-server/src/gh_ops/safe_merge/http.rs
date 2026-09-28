@@ -74,6 +74,20 @@ impl<'a> GhClient for SelectedGhClient<'a> {
         }
     }
 
+    async fn pr_view_snapshot(&self, repo: &str, number: u64) -> Result<PrViewSnapshot, GhError> {
+        match self {
+            SelectedGhClient::Cli(client) => client.pr_view_snapshot(repo, number).await,
+            SelectedGhClient::Http(client) => client.pr_view_snapshot(repo, number).await,
+        }
+    }
+
+    async fn pr_head_sha(&self, repo: &str, number: u64) -> Result<String, GhError> {
+        match self {
+            SelectedGhClient::Cli(client) => client.pr_head_sha(repo, number).await,
+            SelectedGhClient::Http(client) => client.pr_head_sha(repo, number).await,
+        }
+    }
+
     async fn checks_list(&self, repo: &str, pr_number: u64) -> Result<Vec<CheckRun>, GhError> {
         match self {
             SelectedGhClient::Cli(client) => client.checks_list(repo, pr_number).await,
@@ -299,16 +313,11 @@ impl HttpGhClient {
         Ok(pr)
     }
 
-    async fn pr_head_sha(&self, repo: &str, number: u64) -> Result<String, GhError> {
-        self.pr_view_raw(repo, number)
-            .await?
-            .get("headRefOid")
-            .and_then(Value::as_str)
-            .map(str::to_string)
-            .filter(|sha| !sha.is_empty())
-            .ok_or_else(|| {
-                GhError::Sanitized(format!("pr_view missing headRefOid for {repo}#{number}"))
-            })
+    /// Check runs plus commit statuses for one head commit.
+    async fn checks_for_head(&self, repo: &str, head_sha: &str) -> Result<Vec<CheckRun>, GhError> {
+        let mut checks = self.check_runs_for_ref(repo, head_sha).await?;
+        checks.extend(self.commit_statuses_for_ref(repo, head_sha).await?);
+        Ok(checks)
     }
 
     async fn check_runs_for_ref(
@@ -493,17 +502,67 @@ impl HttpGhClient {
     }
 }
 
+fn required_head_ref_oid(value: &Value, repo: &str, number: u64) -> Result<String, GhError> {
+    value
+        .get("headRefOid")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .filter(|sha| !sha.is_empty())
+        .ok_or_else(|| {
+            GhError::Sanitized(format!("pr_view missing headRefOid for {repo}#{number}"))
+        })
+}
+
 #[async_trait]
 impl GhClient for HttpGhClient {
     async fn pr_view(&self, repo: &str, number: u64) -> Result<PrState, GhError> {
+        Ok(self.pr_view_snapshot(repo, number).await?.pr)
+    }
+
+    async fn pr_view_snapshot(&self, repo: &str, number: u64) -> Result<PrViewSnapshot, GhError> {
         validate_repo(repo).map_err(GhError::Sanitized)?;
         let mut raw = self.pr_view_raw(repo, number).await?;
         normalize_graphql_pr_view(&mut raw);
-        let checks = self.checks_list(repo, number).await?;
-        let mut pr = parse_pr_view_json(&raw, checks)
+        // The checks belong to the head this same read reports; re-querying
+        // the PR just to learn its head again would be a duplicate read.
+        let head_sha = required_head_ref_oid(&raw, repo, number)?;
+        let checks = self.checks_for_head(repo, &head_sha).await?;
+        let mut pr = parse_pr_view_json(&raw, checks.clone())
             .map_err(|err| GhError::Sanitized(format!("pr_view shape: {err}")))?;
         pr.closing_issue_labels = self.closing_issue_labels(repo, &pr.linked_issue_refs).await;
-        Ok(pr)
+        Ok(PrViewSnapshot {
+            pr,
+            check_runs: Some(checks),
+        })
+    }
+
+    /// Head-only GraphQL read (no closing-issue pagination).
+    async fn pr_head_sha(&self, repo: &str, number: u64) -> Result<String, GhError> {
+        let (owner, name) = repo_parts(repo)?;
+        let query = r#"
+            query($owner: String!, $name: String!, $number: Int!) {
+              repository(owner: $owner, name: $name) {
+                pullRequest(number: $number) {
+                  headRefOid
+                }
+              }
+            }
+        "#;
+        let value = self
+            .graphql(
+                query,
+                json!({
+                    "owner": owner,
+                    "name": name,
+                    "number": number,
+                }),
+            )
+            .await?;
+        let pr = value
+            .pointer("/data/repository/pullRequest")
+            .filter(|value| !value.is_null())
+            .ok_or_else(|| GhError::NotFound(format!("pull request {repo}#{number} not found")))?;
+        required_head_ref_oid(pr, repo, number)
     }
 
     async fn pr_merge(
@@ -609,9 +668,7 @@ impl GhClient for HttpGhClient {
     async fn checks_list(&self, repo: &str, pr_number: u64) -> Result<Vec<CheckRun>, GhError> {
         validate_repo(repo).map_err(GhError::Sanitized)?;
         let head_sha = self.pr_head_sha(repo, pr_number).await?;
-        let mut checks = self.check_runs_for_ref(repo, &head_sha).await?;
-        checks.extend(self.commit_statuses_for_ref(repo, &head_sha).await?);
-        Ok(checks)
+        self.checks_for_head(repo, &head_sha).await
     }
 }
 

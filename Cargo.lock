@@ -2489,15 +2489,12 @@ dependencies = [
 name = "tachi-delivery-tests"
 version = "1.9.2"
 dependencies = [
- "chrono",
  "memcore",
  "serde_json",
- "tachi-hub",
  "tachi-params",
  "tachi-server",
  "tempfile",
  "tokio",
- "uuid",
 ]
 
 [[package]]
@@ -2588,7 +2585,6 @@ dependencies = [
  "axum",
  "blake2",
  "chrono",
- "dirs",
  "memcore",
  "reqwest",
  "rusqlite",
@@ -2697,12 +2693,10 @@ dependencies = [
  "rmcp",
  "rusqlite",
  "serde_json",
- "tachi-hub",
  "tachi-llm",
  "tachi-server",
  "tempfile",
  "tokio",
- "uuid",
  "vault-kit",
 ]
 

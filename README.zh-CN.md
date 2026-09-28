@@ -268,7 +268,7 @@ graph TD
 
 ### 7. 跨 Agent 协调
 - **幽灵低语** —— Agent 间持久化主题发布/订阅（`ghost_publish`、`ghost_subscribe`、`ghost_ack`、`ghost_reflect`、`ghost_promote`）。
-- **看板** —— 跨 Agent 卡片，支持 `ack` / `progress` / `result` 状态（旧名 `post_card`/`check_inbox`/`update_card` 已退役——看板经 `tachi_task` 看板动作/内部处理器触达）。
+- **看板** —— 跨 Agent 卡片，支持 `ack` / `progress` / `result` 状态（旧名 `post_card`/`check_inbox`/`update_card` 已退役——看板经 `tachi_task` 看板动作触达）。
 - **交接 Issue 晋升** —— 普通会话用 `tachi_a2a(action='respond')` 发送同机 advisory 消息，或用 `tachi_task(action='handoff')` 传递结构化任务。保留的 `tachi_handoff(action='promote_issue')` 仅供显式 Ops/admin 兼容；#1099 已退役旧的 `leave`/`check` 动作。
 
 > 幽灵及残留看板路由属于 `admin` Profile。普通 Agent 只通过 `tachi_a2a`、`tachi_gh` 与 `tachi_task` 协调。

@@ -389,6 +389,80 @@ fn managed_timeout_override() -> Option<std::time::Duration> {
     })
 }
 
+/// Test-only one-shot capture of the next background dispatch task handle,
+/// keyed by the fixture's isolated home and run root. Production detaches the
+/// dispatch (the `JoinHandle` is dropped); a regression test that must abort
+/// the detached owner at a chosen lifecycle boundary installs this first and
+/// receives the real handle instead.
+#[cfg(test)]
+type BackgroundDispatchAbortCaptures = std::collections::HashMap<
+    (PathBuf, PathBuf),
+    std::sync::mpsc::Sender<tokio::task::JoinHandle<()>>,
+>;
+
+#[cfg(test)]
+static BACKGROUND_DISPATCH_ABORT_CAPTURES: OnceLock<Mutex<BackgroundDispatchAbortCaptures>> =
+    OnceLock::new();
+
+#[cfg(test)]
+pub(crate) struct BackgroundDispatchAbortCaptureGuard((PathBuf, PathBuf));
+
+#[cfg(test)]
+impl Drop for BackgroundDispatchAbortCaptureGuard {
+    fn drop(&mut self) {
+        if let Some(captures) = BACKGROUND_DISPATCH_ABORT_CAPTURES.get() {
+            captures
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .remove(&self.0);
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn install_background_dispatch_abort_capture(
+    home: &std::path::Path,
+    run_root: &std::path::Path,
+) -> (
+    BackgroundDispatchAbortCaptureGuard,
+    std::sync::mpsc::Receiver<tokio::task::JoinHandle<()>>,
+) {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let key = (home.to_path_buf(), run_root.to_path_buf());
+    assert!(BACKGROUND_DISPATCH_ABORT_CAPTURES
+        .get_or_init(|| { Mutex::new(std::collections::HashMap::new()) })
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .insert(key.clone(), sender)
+        .is_none());
+    (BackgroundDispatchAbortCaptureGuard(key), receiver)
+}
+
+/// Hand the freshly spawned detached dispatch handle to an installed capture.
+/// With no capture installed the handle is dropped here, which is exactly the
+/// production detach semantics.
+#[cfg(test)]
+fn hand_over_background_dispatch_handle_to_capture(handle: tokio::task::JoinHandle<()>) {
+    let capture = (|| {
+        let home = std::env::var_os("TACHI_HOME")?;
+        let run_root = std::env::var_os("TACHI_RUN_ROOT")?;
+        BACKGROUND_DISPATCH_ABORT_CAPTURES
+            .get()
+            .and_then(|captures| {
+                captures
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .remove(&(PathBuf::from(home), PathBuf::from(run_root)))
+            })
+    })();
+    match capture {
+        Some(sender) => {
+            let _ = sender.send(handle);
+        }
+        None => drop(handle),
+    }
+}
+
 pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
     let server_clone = ctx.server;
     let d_id = ctx.dispatch_id;
@@ -430,7 +504,7 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
     let postflight_dispatch_lease = ctx.postflight_dispatch_lease;
     let auto_staff_exec_env = ctx.auto_staff_exec_env;
 
-    tokio::task::spawn(async move {
+    let background_dispatch = tokio::task::spawn(async move {
         // Keep the registry entry and its sender alive for the entire
         // background lifecycle. Binding this outside the async move drops the
         // guard as soon as scheduling returns and makes the child observe a
@@ -668,7 +742,20 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
             // The runner owns termination and reap. Postflight receives typed
             // terminal evidence only; no numeric PID crosses this handoff and
             // this layer has no signalling capability.
-            let outcome = gate.run(&runner_liveness);
+            //
+            // Audit E4: the re-walk + BLAKE2s re-hash takes seconds on a large
+            // lease, so the worker hands its executor core to another thread
+            // (executor_offload::block_off_core) while it blocks. Adding no
+            // `.await` point is load-bearing: this detached task is the sole
+            // owner of the armed early-exit cleanup for the credential
+            // materializations, the flow dispatch slot and the exclusive
+            // postflight lease. A `spawn_blocking(..).await` here would let an
+            // abort drop that cleanup while the gate is still running —
+            // releasing creds/slot/lease before resolution and losing the
+            // resource fence and terminal trajectory event — so
+            // run -> apply_verdict -> trajectory must stay one
+            // non-cancellable synchronous section.
+            let outcome = crate::executor_offload::block_off_core(|| gate.run(&runner_liveness));
             match outcome {
                 Ok(mut outcome) => {
                     let quarantine_sink = crate::exec_env_postflight::DaemonQuarantineSink {
@@ -1537,6 +1624,15 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
         #[cfg(test)]
         mark_background_dispatch_cleanup_complete(&d_id);
     });
+    // Production detaches the dispatch: nobody joins it, and dropping the
+    // handle keeps it running. A test-only capture seam can take the handle so
+    // a regression test can abort the detached owner at a chosen lifecycle
+    // boundary (a paused postflight gate); without a capture installed the
+    // handle is dropped here exactly as before.
+    #[cfg(test)]
+    hand_over_background_dispatch_handle_to_capture(background_dispatch);
+    #[cfg(not(test))]
+    drop(background_dispatch);
 }
 
 #[cfg(test)]

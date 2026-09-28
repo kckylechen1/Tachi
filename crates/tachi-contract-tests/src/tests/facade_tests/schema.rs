@@ -104,6 +104,26 @@ fn f1689_retired_memory_actions_are_rejected_with_canonical_owner_guidance() {
     }
 }
 
+/// #1426: recall tuning moved to `tachi_tune`. The redirect must live in the
+/// typed parser, because serde rejects the action before any router arm runs.
+#[test]
+fn f1426_recall_tuning_memory_actions_redirect_to_tachi_tune() {
+    for (retired, tune_action) in [
+        ("recall_simulate", "recall_simulate"),
+        ("recall_proposals", "recall_proposals"),
+        ("review_recall_proposal", "recall_review"),
+        ("apply_recall_proposals", "recall_apply"),
+    ] {
+        let error = serde_json::from_value::<TachiMemoryParams>(json!({ "action": retired }))
+            .expect_err("recall tuning action must fail at typed deserialization")
+            .to_string();
+        assert!(
+            error.contains(&format!("tachi_tune(action='{tune_action}')")),
+            "error for {retired} must redirect to tachi_tune: {error}"
+        );
+    }
+}
+
 #[test]
 fn f1689_memory_schema_removes_retired_only_params() {
     let memory_schema = rmcp::schemars::schema_for!(TachiMemoryParams);

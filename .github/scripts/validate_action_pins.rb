@@ -12,6 +12,10 @@
 # obfuscation by someone with write access; static shell analysis cannot be
 # complete. Known limits, accepted by design:
 # - shell aliases and functions (`alias c=cargo; c install x`) are not tracked;
+# - scripts a step calls are not inspected; text run by `eval`,
+#   `sh -c`/`bash -c` or command substitution (`$(...)`, backticks) is caught
+#   only where the dynamic/encoded-installer guards or the quoted-string rescan
+#   see it;
 # - line continuations inside heredoc bodies, and other deliberate obfuscation
 #   beyond the dynamic/encoded-installer guards, are out of scope;
 # - false positives in the safe direction are accepted: the text
@@ -64,6 +68,38 @@ REQUIRED_INSTALL_ACTION_INPUTS = {
   "checksum" => "true",
   "fallback" => "none"
 }.freeze
+
+# #1998: every install-action tool must run as the exact file the audited
+# install extracted, never through Cargo's external-subcommand lookup
+# ($CARGO_HOME/bin, then PATH) or a PATH lookup of its binary name, which on a
+# self-hosted host can resolve to an unaudited copy. Tool name (the part of
+# `tool:` before `@`) => [binary, cargo subcommand]. A `run:` step may not
+# start that binary by name or path, nor run `cargo <subcommand>`; it runs the
+# path bound by BIND_AUDITED_TOOL_SCRIPT (or an equivalent inline assertion,
+# as in conformance-linux.yml), and every call to that script must assert the
+# version the install pins. Every audited tool needs an entry; there is no
+# exemption.
+#
+# How the program of a simple command is found: leading assignments,
+# redirections and reserved words are skipped, then the known wrappers
+# (COMMAND_WRAPPERS, by name or path) are parsed with their option grammar. A
+# known wrapper with an option this file does not model rejects the command
+# (fail closed) instead of guessing which word is the program. As a backstop
+# for wrappers outside that set (stdbuf, xargs, ...), the words
+# `<binary> <subcommand>` anywhere in a simple command are rejected too; that
+# backstop is narrower than the program check, so an unmodelled wrapper that
+# starts the binary without repeating the subcommand
+# (`xargs cargo-audit --deny warnings`) passes. Best effort, and narrower than
+# the cargo-install lint in the header, which also rescans some quoted strings:
+# only top-level simple commands of `run:` text are inspected. Out of scope:
+# scripts a step calls, strings handed to `sh -c`/`bash -c`, `eval` text,
+# command substitution (`$(...)`, backticks), and aliases or function
+# indirection.
+AUDITED_INSTALL_ACTION_BINARIES = {
+  "cargo-audit" => ["cargo-audit", "audit"],
+  "nextest" => ["cargo-nextest", "nextest"]
+}.freeze
+BIND_AUDITED_TOOL_SCRIPT = "bind_audited_tool.sh"
 
 IMMUTABLE_IMAGE = /\A[^@[:space:]]+@sha256:[0-9a-f]{64}\z/
 
@@ -140,11 +176,12 @@ class ActionPolicy
   attr_reader :run_count, :uses_count
 
   def initialize(inventory, pins = AUDITED_PINS, cargo_installs = AUDITED_CARGO_INSTALLS,
-                 install_tools = AUDITED_INSTALL_ACTION_TOOLS)
+                 install_tools = AUDITED_INSTALL_ACTION_TOOLS, install_binaries = AUDITED_INSTALL_ACTION_BINARIES)
     @inventory = inventory
     @pins = pins
     @cargo_installs = cargo_installs
     @install_tools = install_tools
+    @install_binaries = install_binaries
     @install_tool_uses = Hash.new(0)
     @approved = {}
     @ref_sha = {}
@@ -155,6 +192,7 @@ class ActionPolicy
     @run_count = 0
     @uses_count = 0
     build_map!
+    build_bound_tools!
   end
 
   def validate_roots(roots)
@@ -218,6 +256,30 @@ class ActionPolicy
 
       @approved[exact_key] = true
       @ref_sha[ref_key] = sha
+    end
+  end
+
+  # binary => {subcommand:, version:} for every bound install-action tool.
+  def build_bound_tools!
+    @bound_binaries = {}
+    @bound_subcommands = {}
+    @install_tools.each_key do |tool|
+      name, version = tool.split("@", 2)
+      unless version && @install_binaries.key?(name)
+        raise PolicyError, "audited install-action tool has no binary mapping: #{tool}"
+      end
+
+      binary, subcommand = @install_binaries[name]
+      unless binary.is_a?(String) && subcommand.is_a?(String)
+        raise PolicyError, "audited install-action tool needs a [binary, subcommand] mapping: #{tool}"
+      end
+
+      if @bound_binaries.key?(binary)
+        raise PolicyError, "audited install-action tool is listed at two versions: #{binary}"
+      end
+
+      @bound_binaries[binary] = {subcommand: subcommand, version: version}
+      @bound_subcommands[subcommand] = binary
     end
   end
 
@@ -401,9 +463,226 @@ class ActionPolicy
     if encoded_cargo_installer?(value) || dynamic_cargo_installer?(value)
       raise PolicyError, "#{path}: no known dynamic/encoded installer or transformer-to-shell construction: #{value.inspect}"
     end
-    return unless cargo_install_occurrence?(value)
+    raise PolicyError, "#{path}: unaudited cargo install command: #{value.inspect}" if cargo_install_occurrence?(value)
 
-    raise PolicyError, "#{path}: unaudited cargo install command: #{value.inspect}"
+    validate_bound_tool_use(value, path)
+  end
+
+  # Reserved words that may precede the program word of a simple command.
+  SHELL_RESERVED_WORDS = %w[if then elif else do while until ! {].freeze
+  # Wrappers whose option grammar is modelled below; each runs the program
+  # named after its options. Any other option of these rejects the command.
+  COMMAND_WRAPPERS = %w[sudo env command exec nohup time nice timeout].freeze
+  SUDO_FLAGS = %w[-A -b -E -H -k -n -P -S --askpass --background --preserve-env --set-home --non-interactive
+                  --preserve-groups --stdin].freeze
+  SUDO_VALUE_OPTIONS = %w[-u -g -p -C -D -T --user --group --prompt --close-from --chdir --command-timeout].freeze
+  TIMEOUT_FLAGS = %w[--preserve-status --foreground -v --verbose].freeze
+  TIMEOUT_VALUE_OPTIONS = %w[-s -k --signal --kill-after].freeze
+  TIMEOUT_DURATION = /\A[0-9]+(?:\.[0-9]+)?[smhd]?\z/
+
+  # #1998: see AUDITED_INSTALL_ACTION_BINARIES.
+  def validate_bound_tool_use(value, path)
+    return if @bound_binaries.empty?
+
+    joined = value.gsub(/\\\r?\n/, "")
+    [joined, joined.tr("\\", "/")].uniq.each do |text|
+      simple_commands(text).each do |tokens|
+        subcommand = @bound_subcommands.keys.find { |sub| cargo_subcommand_invoked?(tokens, [sub]) }
+        if subcommand
+          raise PolicyError, "#{path}: unbound install-action tool: `cargo #{subcommand}` lets Cargo pick " \
+                             "#{@bound_subcommands[subcommand]} from $CARGO_HOME/bin or PATH; run the path bound by " \
+                             "#{BIND_AUDITED_TOOL_SCRIPT} instead: #{value.inspect}"
+        end
+
+        program_index = command_program_index(tokens, path, value)
+        if program_index && bound_binary(tokens[program_index])
+          raise PolicyError, "#{path}: unbound install-action tool: #{tokens[program_index]} is started by name or path; " \
+                             "run the path bound by #{BIND_AUDITED_TOOL_SCRIPT} instead: #{value.inspect}"
+        end
+
+        # Backstop for wrappers outside COMMAND_WRAPPERS: `<binary> <subcommand>`
+        # is how a bound binary is started, wherever it sits in the command.
+        # The bind script's own arguments are checked by validate_bind_call.
+        bind_index = tokens.index { |token| token.split("/").last == BIND_AUDITED_TOOL_SCRIPT }
+        tokens[0...(bind_index || tokens.length)].each_cons(2) do |word, following|
+          binary = bound_binary(word)
+          next unless binary && following == @bound_binaries[binary][:subcommand]
+
+          raise PolicyError, "#{path}: unbound install-action tool: `#{word} #{following}` starts #{binary} by name " \
+                             "or path; run the path bound by #{BIND_AUDITED_TOOL_SCRIPT} instead: #{value.inspect}"
+        end
+        validate_bind_call(tokens, path) if bind_index
+      end
+    end
+  end
+
+  # The bound binary a word names by basename (any directory, optional .exe).
+  def bound_binary(word)
+    name = word.split("/").last.to_s.sub(/\.exe\z/i, "")
+    @bound_binaries.key?(name) ? name : nil
+  end
+
+  # The bind script either marks an install (`--mark <binary>`, the step right
+  # before the install) or binds it; a bind must assert the version the
+  # install pins.
+  def validate_bind_call(tokens, path)
+    script_index = tokens.index { |token| token.split("/").last == BIND_AUDITED_TOOL_SCRIPT }
+    args = tokens[(script_index + 1)..] || []
+    if args.first == "--mark"
+      return if args.length == 2 && @bound_binaries.key?(args[1])
+
+      raise PolicyError, "#{path}: #{BIND_AUDITED_TOOL_SCRIPT} --mark takes exactly one audited install-action " \
+                         "binary: #{tokens.join(' ').inspect}"
+    end
+    env_var, binary, subcommand, version = args
+    expected = @bound_binaries[binary]
+    unless args.length == 4 && expected
+      raise PolicyError, "#{path}: #{BIND_AUDITED_TOOL_SCRIPT} must bind an audited install-action tool as " \
+                         "<AUDITED_VAR> <binary> <subcommand> <version>: #{tokens.join(' ').inspect}"
+    end
+    unless env_var.match?(/\AAUDITED_[A-Z0-9_]+\z/) && subcommand == expected[:subcommand] && version == expected[:version]
+      raise PolicyError, "#{path}: #{BIND_AUDITED_TOOL_SCRIPT} asserts #{binary} #{subcommand} #{version} but the " \
+                         "audited install is #{binary} #{expected[:subcommand]} #{expected[:version]}"
+    end
+  end
+
+  # Index of the word naming the program a simple command runs, or nil when it
+  # runs none (`command -v x`, a bare `env`, `exec >log`). Skips assignments,
+  # redirections, reserved words and COMMAND_WRAPPERS with their options. An
+  # option of a known wrapper that is not modelled here raises: the parser
+  # never guesses which word is the program.
+  def command_program_index(tokens, path, value)
+    index = 0
+    while (token = tokens[index])
+      if SHELL_RESERVED_WORDS.include?(token) || assignment_word?(token)
+        index += 1
+      elsif (width = redirection_width(token))
+        index += width
+      elsif COMMAND_WRAPPERS.include?(token.split("/").last)
+        index = wrapper_operand_index(tokens, index, path, value)
+        return nil unless index
+      else
+        return index
+      end
+    end
+    nil
+  end
+
+  def assignment_word?(token)
+    token.match?(/\A[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]*\])?\+?=/)
+  end
+
+  # 1 for a redirection carrying its target (`>log`, `2>&1`, `<<EOF`), 2 for a
+  # bare operator whose target is the next word (`> log`), nil otherwise.
+  def redirection_width(token)
+    return nil unless token.match?(/\A(?:[0-9]*|&)[<>]/)
+
+    token.match?(/\A(?:[0-9]*|&)[<>&|-]+\z/) ? 2 : 1
+  end
+
+  # Index of the first word after the options of the wrapper at
+  # `tokens[index]`; nil when that wrapper runs no program. Raises on an
+  # option this file does not model.
+  def wrapper_operand_index(tokens, index, path, value)
+    wrapper = tokens[index].split("/").last
+    position = index + 1
+    unmodelled = lambda do |detail|
+      raise PolicyError, "#{path}: cannot tell which program `#{wrapper}` runs: #{detail}; write the command " \
+                         "without the wrapper or model its grammar in validate_action_pins.rb: #{value.inspect}"
+    end
+    takes_value = lambda do
+      unmodelled.call("option #{tokens[position].inspect} has no value") unless tokens[position + 1]
+      position += 2
+    end
+    while (option = tokens[position])&.start_with?("-")
+      if option == "--"
+        position += 1
+        break
+      end
+
+      case wrapper
+      when "env"
+        case option
+        when "-i", "-", "--ignore-environment", "-0", "--null", "-v", "--debug" then position += 1
+        when "-u", "--unset", "-C", "--chdir" then takes_value.call
+        when /\A(?:-u|-C)./, /\A--(?:unset|chdir)=./ then position += 1
+        else unmodelled.call("unmodelled option #{option.inspect}")
+        end
+      when "sudo"
+        if SUDO_FLAGS.include?(option) || option.match?(/\A--preserve-env=./)
+          position += 1
+        elsif SUDO_VALUE_OPTIONS.include?(option)
+          takes_value.call
+        elsif option.match?(/\A-[ugpCDT]./) || option.match?(/\A--(?:user|group|prompt|close-from|chdir|command-timeout)=./)
+          position += 1
+        else
+          unmodelled.call("unmodelled option #{option.inspect}")
+        end
+      when "command"
+        unmodelled.call("unmodelled option #{option.inspect}") unless option.match?(/\A-[pvV]+\z/)
+        # -v/-V describe the command instead of running it.
+        return nil if option.match?(/[vV]/)
+
+        position += 1
+      when "exec"
+        if option.match?(/\A-[cl]+\z/)
+          position += 1
+        elsif option == "-a"
+          takes_value.call
+        else
+          unmodelled.call("unmodelled option #{option.inspect}")
+        end
+      when "time"
+        unmodelled.call("unmodelled option #{option.inspect}") unless option == "-p"
+        position += 1
+      when "nice"
+        if %w[-n --adjustment].include?(option)
+          takes_value.call
+        elsif option.match?(/\A(?:-n-?[0-9]+|--adjustment=-?[0-9]+|-[0-9]+)\z/)
+          position += 1
+        else
+          unmodelled.call("unmodelled option #{option.inspect}")
+        end
+      when "timeout"
+        if TIMEOUT_FLAGS.include?(option)
+          position += 1
+        elsif TIMEOUT_VALUE_OPTIONS.include?(option)
+          takes_value.call
+        elsif option.match?(/\A(?:-[sk].|--(?:signal|kill-after)=.)/)
+          position += 1
+        else
+          unmodelled.call("unmodelled option #{option.inspect}")
+        end
+      else # nohup takes no options
+        unmodelled.call("unmodelled option #{option.inspect}")
+      end
+    end
+    if wrapper == "timeout"
+      duration = tokens[position]
+      unmodelled.call("expected a DURATION, got #{duration.inspect}") unless duration&.match?(TIMEOUT_DURATION)
+      position += 1
+    end
+    tokens[position] ? position : nil
+  end
+
+  # Top-level simple commands of shell text, as token lists. Full-line
+  # comments are dropped (an apostrophe in prose must not unbalance quoting).
+  # `&` and `|` inside a redirection (`2>&1`, `&>log`, `>|log`) stay part of
+  # the redirection word. Unparseable text yields its whitespace-split words
+  # (fail toward inspection).
+  def simple_commands(text)
+    uncommented = text.lines.reject { |line| line.match?(/\A[[:space:]]*#/) }.join
+    normalized = uncommented.gsub(/\r?\n/, " ; ")
+                            .gsub(/([;()]|(?<![<>])&(?!>)|(?<!>)\|)/, ' \\1 ')
+                            .gsub(/[[:space:]]+/, " ")
+    tokens = begin
+      Shellwords.shellsplit(normalized)
+    rescue ArgumentError
+      normalized.split(" ")
+    end
+    commands = [[]]
+    tokens.each { |token| SHELL_OPERATOR_TOKENS.include?(token) ? commands << [] : commands.last << token }
+    commands.reject(&:empty?)
   end
 
   def encoded_cargo_installer?(value)
@@ -540,9 +819,15 @@ class ActionPolicy
   end
 
   def cargo_install_command?(tokens)
+    tokens.any? { |token| token.split(%r{[/\\]}).last.to_s.match?(/\Acargo-b?install(?:\.exe)?\z/i) } ||
+      cargo_subcommand_invoked?(tokens, CARGO_INSTALL_SUBCOMMANDS)
+  end
+
+  # True when any `cargo` word in `tokens` runs one of `subcommands`, after
+  # skipping a `+toolchain` selector, global options and a `--` delimiter.
+  def cargo_subcommand_invoked?(tokens, subcommands)
     tokens.each_with_index.any? do |token, index|
       program = token.split(%r{[/\\]}).last.to_s
-      next true if program.match?(/\Acargo-b?install(?:\.exe)?\z/i)
       next false unless program.match?(/\Acargo(?:\.exe)?\z/i)
 
       position = index + 1
@@ -556,9 +841,15 @@ class ActionPolicy
           position += 1
         end
       end
-      # An unrecognised option might take a value; then the real subcommand is one word later.
-      CARGO_INSTALL_SUBCOMMANDS.include?(tokens[position]) ||
-        (ambiguous && CARGO_INSTALL_SUBCOMMANDS.include?(tokens[position + 1]))
+      # An unrecognised option might take a value; then the real subcommand is
+      # one word later. `--` ends Cargo's own options and the next word is the
+      # subcommand (`cargo -- nextest run` runs cargo-nextest).
+      candidates = [position]
+      candidates << position + 1 if ambiguous
+      candidates.any? do |candidate|
+        candidate += 1 if tokens[candidate] == "--"
+        subcommands.include?(tokens[candidate])
+      end
     end
   end
 
@@ -572,9 +863,10 @@ class ActionPolicy
   end
 end
 
-def validate_virtual(sources, pins: [], cargo_installs: {}, install_tools: {}, roots: nil)
+def validate_virtual(sources, pins: [], cargo_installs: {}, install_tools: {},
+                     install_binaries: AUDITED_INSTALL_ACTION_BINARIES, roots: nil)
   inventory = RepoInventory.virtual(sources)
-  policy = ActionPolicy.new(inventory, pins, cargo_installs, install_tools)
+  policy = ActionPolicy.new(inventory, pins, cargo_installs, install_tools, install_binaries)
   policy.validate_roots(roots || inventory.policy_root_files)
   policy
 end
@@ -685,6 +977,8 @@ def self_test!
     "cargo-global-directory" => ["run: cargo -C /tmp install cargo-audit\n", UNAUDITED_CARGO],
     "cargo-global-unknown-valued" => ["run: cargo --future-option value install cargo-audit\n", UNAUDITED_CARGO],
     "cargo-global-mixed" => ["run: cargo +stable -v --frozen --config k=v install cargo-audit\n", UNAUDITED_CARGO],
+    "cargo-dashdash" => ["run: cargo -- install cargo-audit\n", UNAUDITED_CARGO],
+    "cargo-toolchain-dashdash" => ["run: cargo +stable --locked -- install cargo-audit\n", UNAUDITED_CARGO],
     "cargo-env-prefix-toolchain" => ["run: CARGO_NET_OFFLINE=false cargo +stable install cargo-audit\n", UNAUDITED_CARGO],
     "cargo-env-command" => ["run: env RUSTFLAGS=-Cdebuginfo=0 cargo --locked install cargo-audit\n", UNAUDITED_CARGO],
     "cargo-command-builtin" => ["run: command cargo +stable install cargo-audit\n", UNAUDITED_CARGO],
@@ -820,6 +1114,129 @@ def self_test!
     validate_virtual({root => "steps:\n  - run: echo ok\n"}, install_tools: {"cargo-audit@0.22.2" => 1}).finish!
   end
   one_tool = {"cargo-audit@0.22.2" => 1}
+
+  # #1998: install-action tools run only through the bound, version-asserted
+  # path. Fixtures pass the mapping explicitly, independent of the live table.
+  both_bound = {"cargo-audit" => ["cargo-audit", "audit"], "nextest" => ["cargo-nextest", "nextest"]}
+  unbound = /unbound install-action tool/
+  bind_mismatch = /bind_audited_tool\.sh asserts .* but the audited install is/
+  bind_shape = /bind_audited_tool\.sh must bind an audited install-action tool/
+  bind = "bash .github/scripts/bind_audited_tool.sh"
+  bound_fixtures = {
+    "bound-cargo-nextest" => ["run: cargo nextest run --workspace --locked --profile ci\n", unbound],
+    "bound-cargo-audit" => ["run: cargo audit --deny warnings\n", unbound],
+    "bound-cargo-toolchain-options" => ["run: cargo +1.97.0 --locked nextest run\n", unbound],
+    # astra r2 finding 1: `--` ends Cargo's options; the next word is the subcommand.
+    "bound-cargo-dashdash-nextest" => ["run: cargo -- nextest run --workspace --locked --profile ci\n", unbound],
+    "bound-cargo-toolchain-dashdash" => ["run: cargo +stable -- nextest run\n", unbound],
+    "bound-cargo-dashdash-audit" => ["run: cargo -- audit --deny warnings\n", unbound],
+    "bound-cargo-unknown-option-dashdash" => ["run: cargo --future-option value -- nextest run\n", unbound],
+    "bound-cargo-env-prefix" => ["run: |\n  set -e\n  RUST_LOG=info cargo nextest run\n", unbound],
+    "bound-cargo-if" => ["run: if cargo audit; then echo ok; fi\n", unbound],
+    "bound-cargo-pwsh" => ["run: |\n  & cargo nextest run\n", unbound],
+    "bound-cargo-exe" => ["run: C:\\Rust\\bin\\cargo.exe audit\n", unbound],
+    "bound-binary-by-name" => ["run: cargo-nextest nextest run\n", unbound],
+    "bound-binary-cargo-home" => ["run: ~/.cargo/bin/cargo-nextest nextest run\n", unbound],
+    "bound-binary-install-dir-unasserted" => ["run: /Users/runner/.install-action/bin/cargo-audit audit\n", unbound],
+    "bound-binary-after-and-sudo" => ["run: echo start && sudo cargo-audit audit\n", unbound],
+    "bound-binary-exe" => ["run: cargo-nextest.exe nextest run\n", unbound],
+    "bind-wrong-version" => ["run: #{bind} AUDITED_NEXTEST cargo-nextest nextest 0.9.141\n", bind_mismatch],
+    "bind-wrong-subcommand" => ["run: #{bind} AUDITED_NEXTEST cargo-nextest run 0.9.140\n", bind_mismatch],
+    "bind-bad-env-var" => ["run: #{bind} NEXTEST cargo-nextest nextest 0.9.140\n", bind_mismatch],
+    "bind-unknown-binary" => ["run: #{bind} AUDITED_DENY cargo-deny deny 0.18.0\n", bind_shape],
+    "bind-missing-version" => ["run: #{bind} AUDITED_NEXTEST cargo-nextest nextest\n", bind_shape]
+  }
+  bound_fixtures.each do |name, (source, expected)|
+    expect_rejected(name, expected) do
+      validate_virtual({root => source}, install_tools: AUDITED_INSTALL_ACTION_TOOLS, install_binaries: both_bound)
+    end
+  end
+  expect_rejected("bound-nested-local", unbound) do
+    sources = {root => "uses: ./custom/action\n", action => "runs:\n  using: composite\n  steps:\n    - run: cargo nextest run\n"}
+    validate_virtual(sources, install_tools: AUDITED_INSTALL_ACTION_TOOLS, install_binaries: both_bound)
+  end
+  # astra r1 finding 1: wrappers are parsed with their option grammar, so an
+  # option is never mistaken for the program; an unmodelled option of a known
+  # wrapper rejects the command; `<binary> <subcommand>` behind any other
+  # wrapper is caught by the backstop.
+  unmodelled = /cannot tell which program `[a-z]+` runs/
+  started = /unbound install-action tool: \S*cargo-(?:nextest|audit) is started by name or path/
+  backstop = /unbound install-action tool: `\S*cargo-(?:nextest|audit) (?:nextest|audit)` starts/
+  wrapper_fixtures = {
+    "wrapper-command-dashdash" => ["command -- cargo-nextest nextest run", started],
+    "wrapper-env-unset" => ["env -u RUST_LOG cargo-nextest nextest run", started],
+    "wrapper-nice-n" => ["nice -n 10 cargo-nextest nextest run", started],
+    "wrapper-timeout-cargo" => ["timeout 60 cargo nextest run", unbound],
+    "wrapper-env-assignment-cargo" => ["env FOO=1 cargo nextest run", unbound],
+    "wrapper-env-assignment-binary" => ["env -i PATH=/usr/bin FOO=1 cargo-audit audit", started],
+    "wrapper-timeout-options" => ["timeout --signal=KILL -k 5 5m cargo-nextest nextest run", started],
+    "wrapper-sudo-user" => ["sudo -n -u runner -E cargo-audit audit --deny warnings", started],
+    "wrapper-exec-argv0" => ["exec -a x cargo-nextest nextest run", started],
+    "wrapper-chain" => ["time -p nohup nice -5 env -C /tmp -- cargo-nextest nextest run", started],
+    "wrapper-redirect-first" => [">log.txt 2>&1 cargo-nextest nextest run", started],
+    "wrapper-redirect-split" => ["2> err.log cargo-audit audit", started],
+    "wrapper-unmodelled-stdbuf" => ["stdbuf -oL cargo-nextest nextest run", backstop],
+    "wrapper-unmodelled-xargs" => ["echo run | xargs ~/.cargo/bin/cargo-audit audit", backstop],
+    "wrapper-env-split-string" => ["env -S 'cargo-nextest nextest run'", unmodelled],
+    "wrapper-by-path-split-string" => ["/usr/bin/env -S 'cargo-nextest nextest run'", unmodelled],
+    "wrapper-nice-unknown-option" => ["nice --foo cargo-nextest nextest run", unmodelled],
+    "wrapper-command-unknown-option" => ["command -x cargo-nextest", unmodelled],
+    "wrapper-timeout-no-duration" => ["timeout cargo-nextest nextest run", unmodelled],
+    "wrapper-time-unknown-option" => ["time -f %e cargo-nextest nextest run", unmodelled],
+    "wrapper-sudo-shell" => ["sudo -s cargo-nextest nextest run", unmodelled],
+    "wrapper-option-without-value" => ["env -u", unmodelled],
+    "bind-mark-unknown-binary" => ["#{bind} --mark cargo-deny", /--mark takes exactly one audited install-action binary/],
+    "bind-mark-extra-argument" => ["#{bind} --mark cargo-nextest nextest",
+                                   /--mark takes exactly one audited install-action binary/]
+  }
+  wrapper_fixtures.each do |name, (command, expected)|
+    expect_rejected(name, expected) do
+      validate_virtual({root => "run: |\n  #{command}\n"}, install_tools: AUDITED_INSTALL_ACTION_TOOLS,
+                                                         install_binaries: both_bound)
+    end
+  end
+  expect_rejected("bound-unmapped-tool", /audited install-action tool has no binary mapping: cargo-deny@0.18.0/) do
+    validate_virtual({root => "name: one\n"}, install_tools: {"cargo-deny@0.18.0" => 1})
+  end
+  expect_rejected("bound-nil-mapping", /needs a \[binary, subcommand\] mapping: cargo-audit@0.22.2/) do
+    validate_virtual({root => "name: one\n"}, install_tools: AUDITED_INSTALL_ACTION_TOOLS,
+                                              install_binaries: both_bound.merge("cargo-audit" => nil))
+  end
+  # The live policy binds every audited tool: no exemption remains.
+  expect_rejected("bound-live-nextest", unbound) do
+    validate_virtual({root => "run: cargo nextest run\n"}, install_tools: AUDITED_INSTALL_ACTION_TOOLS)
+  end
+  expect_rejected("bound-live-cargo-audit", unbound) do
+    validate_virtual({root => "run: cargo audit --deny warnings\n"}, install_tools: AUDITED_INSTALL_ACTION_TOOLS)
+  end
+  bound_accepted = [
+    "\"${AUDITED_NEXTEST:?}\" nextest run --workspace --locked --profile ci",
+    "\"${AUDITED_CARGO_AUDIT:?}\" audit --deny warnings",
+    "#{bind} AUDITED_NEXTEST cargo-nextest nextest 0.9.140",
+    "#{bind} AUDITED_CARGO_AUDIT cargo-audit audit 0.22.2",
+    "#{bind} --mark cargo-nextest",
+    "#{bind} --mark cargo-audit",
+    "required_tools=(cargo rustc cargo-nextest cargo-audit python3)",
+    "echo 'cargo nextest is bound' && type -P cargo-nextest",
+    "printf 'cargo-audit %s (fake)' 0.22.2 >\"${dir}/cargo-audit\"",
+    "cargo test --workspace --locked --doc",
+    "cargo test --workspace --locked -- nextest",
+    "command -v cargo-nextest",
+    "command -pv cargo-audit",
+    "local -a auth_env=(env -u GITHUB_TOKEN -u GH_TOKEN)",
+    "exec >\"${GITHUB_STEP_SUMMARY}\" 2>&1",
+    "timeout 60 \"${AUDITED_NEXTEST:?}\" nextest run",
+    "env RUST_LOG=info \"${AUDITED_NEXTEST:?}\" nextest run",
+    "nice -n 10 -- \"${AUDITED_CARGO_AUDIT:?}\" audit",
+    "sudo apt-get install -y gcc-aarch64-linux-gnu",
+    "env | grep -oE '^CARGO_ALIAS_' || true"
+  ]
+  bound_accepted.each do |command|
+    validate_virtual({root => "run: |\n  #{command}\n"}, install_tools: AUDITED_INSTALL_ACTION_TOOLS,
+                                                       install_binaries: both_bound)
+  end
+  puts "fixture ACCEPTED bound-install-action-tools (#{bound_accepted.length})"
+
   validate_virtual({root => valid_install}, pins: install_pins, install_tools: one_tool).finish!
   validate_virtual({root => "steps:\n  - #{install_use}\n    with: #{flow_inputs}\n"}, pins: install_pins, install_tools: one_tool).finish!
   quoted = "steps:\n  - \"uses\": #{INSTALL_ACTION}@#{install_sha} # v2.0.0\n    'with':\n      \"tool\": cargo-audit@0.22.2\n      checksum: \"true\"\n      fallback: 'none'\n"

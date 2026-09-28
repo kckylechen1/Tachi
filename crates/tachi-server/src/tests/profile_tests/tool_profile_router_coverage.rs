@@ -82,7 +82,6 @@ fn bundle_count(tool_name: &str) -> usize {
 
 const ADMIN_ONLY_NATIVE_ROUTE_NAMES: &[&str] = &[
     "chain_skills",
-    "check_inbox",
     "dlq_list",
     "dlq_retry",
     "hub_export_skills",
@@ -100,8 +99,6 @@ const ADMIN_ONLY_NATIVE_ROUTE_NAMES: &[&str] = &[
     // tombstoned manifest entries and the stay-unrouted tripwires live in
     // `tools/alias_manifest.rs` + `tests/sandbox_fold.rs` (router-census
     // absence, admin tools/call rejection with the exact unknown-tool error).
-    "save_memory",
-    "search_memory",
     "tachi_audit_log",
     "tachi_component",
     "tachi_event",
@@ -215,21 +212,6 @@ const RETIRED_NATIVE_ALIASES: &[&str] = &[
     "wiki_search",
 ];
 
-// Main has since retired these branch-era folded/admin-only routes completely.
-// Keep the original categories as census inputs; the guards below enforce the
-// stricter retired-route fate when a name also appears above.
-const FOLDED_NATIVE_COMPAT_TOOLS: &[&str] = &["get_memory"];
-
-const PROFILE_RETIRED_DIRECT_TOOLS: &[&str] = &[
-    "check_inbox",
-    "post_card",
-    "remember",
-    "save_memory",
-    "search_memory",
-    "tachi_task_brief",
-    "update_card",
-];
-
 #[test]
 fn every_standard_and_delegate_allow_list_entry_exists_in_tool_router() {
     let route_names: BTreeSet<String> = native_route_names().into_iter().collect();
@@ -278,7 +260,6 @@ fn every_real_tool_is_either_bundled_or_explicitly_admin_only() {
         .collect();
     let expected_admin_only: BTreeSet<String> = ADMIN_ONLY_NATIVE_ROUTE_NAMES
         .iter()
-        .filter(|name| !RETIRED_NATIVE_ALIASES.contains(name))
         .map(|name| (*name).to_string())
         .collect();
 
@@ -365,48 +346,6 @@ fn f757_graph_state_primitives_are_not_mcp_registered() {
         assert!(
             !cacheable.contains(name) && !invalidating.contains(name),
             "internalized graph/state tool '{name}' must not remain in cache policy lists"
-        );
-    }
-}
-
-#[test]
-fn folded_native_compat_tools_stay_admin_only() {
-    let route_names: BTreeSet<String> = native_route_names().into_iter().collect();
-
-    for tool_name in FOLDED_NATIVE_COMPAT_TOOLS {
-        assert!(
-            !route_names.contains(*tool_name),
-            "main-retired folded compatibility tool '{tool_name}' must not be reintroduced"
-        );
-        assert!(
-            bundle_count(tool_name) == 0,
-            "folded compatibility tool '{tool_name}' must not re-enter non-admin profile bundles"
-        );
-        assert!(
-            !STANDARD_MINIMAL_TOOL_PATTERNS.contains(tool_name)
-                && !DELEGATE_MINIMAL_TOOL_PATTERNS.contains(tool_name),
-            "folded compatibility tool '{tool_name}' must not be exposed through minimal profiles"
-        );
-    }
-}
-
-#[test]
-fn profile_retired_direct_tools_stay_admin_only() {
-    let route_names: BTreeSet<String> = native_route_names().into_iter().collect();
-
-    for tool_name in PROFILE_RETIRED_DIRECT_TOOLS {
-        assert!(
-            !route_names.contains(*tool_name),
-            "main-retired direct tool '{tool_name}' must not be reintroduced"
-        );
-        assert!(
-            bundle_count(tool_name) == 0,
-            "profile-retired direct tool '{tool_name}' must not re-enter non-admin profile bundles"
-        );
-        assert!(
-            !STANDARD_MINIMAL_TOOL_PATTERNS.contains(tool_name)
-                && !DELEGATE_MINIMAL_TOOL_PATTERNS.contains(tool_name),
-            "profile-retired direct tool '{tool_name}' must not be exposed through minimal profiles"
         );
     }
 }

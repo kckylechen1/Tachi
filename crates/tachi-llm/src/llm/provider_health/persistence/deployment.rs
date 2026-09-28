@@ -201,6 +201,7 @@ impl super::super::super::LlmClient {
         };
         let migration = self.vault_db_migration.clone();
         let counters = Arc::clone(&self.deployment_health);
+        let writer = Arc::clone(&self.provider_persist_writer);
 
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             // Same shape as `persist_key_health`, including the persist
@@ -219,7 +220,9 @@ impl super::super::super::LlmClient {
                 let outcome = {
                     let _persist_guard = background_persist_lock.lock().await;
                     tokio::task::spawn_blocking(move || {
-                        Self::record_deployment_outcome_blocking(db_path, migration, record)
+                        Self::record_deployment_outcome_blocking(
+                            &writer, db_path, migration, record,
+                        )
                     })
                     .await
                     .map_err(|err| format!("join failure: {err}"))
@@ -228,7 +231,8 @@ impl super::super::super::LlmClient {
                 Self::note_deployment_outcome_result(&counters, outcome);
             });
         } else {
-            let outcome = Self::record_deployment_outcome_blocking(db_path, migration, record);
+            let outcome =
+                Self::record_deployment_outcome_blocking(&writer, db_path, migration, record);
             Self::note_deployment_outcome_result(&counters, outcome);
         }
     }
@@ -239,12 +243,17 @@ impl super::super::super::LlmClient {
         self.deployment_health.snapshot()
     }
 
+    /// Every outcome is applied on its own (never coalesced): the deployment
+    /// row's counters and cooldown are advanced by
+    /// `record_model_deployment_outcome` per observation. The write reuses the
+    /// client's retained vault handle when it is still valid.
     fn record_deployment_outcome_blocking(
+        writer: &ProviderPersistWriter,
         db_path: PathBuf,
         migration: memcore::MigrationAuthority,
         record: DeploymentHealthRecord,
     ) -> Result<DeploymentHealthWrite, String> {
-        let Some(db_path) = db_path.to_str() else {
+        let Some(db_path_str) = db_path.to_str() else {
             return Err("invalid db path".to_string());
         };
         let open_context = memcore::DbOpenContext {
@@ -255,25 +264,35 @@ impl super::super::super::LlmClient {
                 memcore::StoreProfile::TachiFull,
             ),
         };
-        let store = memcore::MemoryStore::open_with_context_and_busy_timeout(
-            db_path,
-            &open_context,
-            DEPLOYMENT_HEALTH_SQLITE_BUSY_TIMEOUT,
-        )
-        .map_err(|err| err.to_string())?;
         let target = DeploymentOutcomeTarget::request(
             &record.deployment_id,
             &record.endpoint,
             &record.model,
         );
-        record_model_deployment_outcome(
-            store.connection(),
-            &target,
-            record.outcome,
-            record.evidence,
-            record.now,
-        )
-        .map_err(|err| err.to_string())
+        let write = |store: &memcore::MemoryStore| {
+            record_model_deployment_outcome(
+                store.connection(),
+                &target,
+                record.outcome,
+                record.evidence,
+                record.now,
+            )
+            .map_err(|err| err.to_string())
+        };
+        writer.write(&db_path, write, || {
+            let store = super::super::StartupOwnedStore::new(
+                memcore::MemoryStore::open_with_context_and_busy_timeout(
+                    db_path_str,
+                    &open_context,
+                    DEPLOYMENT_HEALTH_SQLITE_BUSY_TIMEOUT,
+                )
+                .map_err(|err| err.to_string())?,
+            );
+            // A failed write — or a panic in it — closes the freshly opened
+            // handle under startup ownership on the way out.
+            let value = write(store.store())?;
+            Ok((store.into_store(), value))
+        })
     }
 
     fn note_deployment_outcome_result(

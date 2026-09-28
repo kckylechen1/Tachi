@@ -200,6 +200,8 @@ pub(crate) use self::managed_materialization_barrier::install_managed_credential
 #[cfg(test)]
 pub(crate) use execution::background_dispatch_cleanup_complete;
 #[cfg(test)]
+pub(crate) use execution::install_background_dispatch_abort_capture;
+#[cfg(test)]
 pub(crate) use execution::install_managed_credential_cleanup_failure;
 #[cfg(test)]
 pub(crate) use execution::install_managed_timeout_override;
@@ -648,7 +650,7 @@ async fn launch_canonical_dispatch(
     // spawn work (#894 S2d). This is the single choke-point every dispatch
     // caller (`tachi_staff(start)`, task lifecycle callers, poke probes)
     // funnels through, so it runs before step 1 (workspace creation), before
-    // prompt assembly, before the V2 plan stage's `ClaudePool` spawn, before
+    // prompt assembly, before the V2 plan stage's provider call, before
     // credential materialization, and before any builder's own preflight
     // (acpx's `node --version` probe, etc.).
     //
@@ -1405,7 +1407,13 @@ async fn launch_canonical_dispatch(
             if let Some(authority) = managed_worktree_authority.as_ref() {
                 gate = gate.with_worktree_authority(authority.clone());
             }
-            if let Err(error) = gate.capture_preimage() {
+            // Audit E4: the pre-image walk + BLAKE2s content hash + clock
+            // barrier takes seconds on a large lease. It runs with the executor
+            // core handed off, but WITHOUT a new `.await`: the flow slot and
+            // credential materializations held here are not RAII, so this
+            // success path must not gain a cancellation point.
+            if let Err(error) = crate::executor_offload::block_off_core(|| gate.capture_preimage())
+            {
                 let release_error = dispatch_lease.release_without_spawn().err();
                 let _ = server.with_global_store(|store| {
                     cleanup_ephemeral_credential_materializations(store, &workspace_dir, false)

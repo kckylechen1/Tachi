@@ -501,8 +501,59 @@ impl MemoryStore {
         health: &crate::vault::VaultKeyHealth,
     ) -> Result<(), MemoryError> {
         Self::with_open_store_and_busy_timeout(db_path, ctx, busy_timeout, |store| {
+            // The handle is dropped here, still under startup ownership.
             store.vault_upsert_key_health(health)
         })
+    }
+
+    /// [`Self::open_and_vault_upsert_key_health_with_context_and_busy_timeout`]
+    /// for a caller that keeps the handle for later writes.
+    ///
+    /// Open and upsert run under one startup-ownership hold, exactly as in the
+    /// dropping variant. Only a successful upsert returns the handle: a failed
+    /// one drops it while ownership is still held, so a caller never caches a
+    /// handle whose first write failed. Every later key-health write through
+    /// the returned handle must go through
+    /// [`Self::vault_upsert_key_health_with_startup_ownership`] to keep the
+    /// open-then-write guarantee (#1680 D6).
+    #[cfg(feature = "admin")]
+    pub fn open_and_vault_upsert_key_health_retaining_store(
+        db_path: &str,
+        ctx: &DbOpenContext,
+        busy_timeout: Duration,
+        health: &crate::vault::VaultKeyHealth,
+    ) -> Result<Self, MemoryError> {
+        Self::with_open_store_and_busy_timeout(db_path, ctx, busy_timeout, |store| {
+            store.vault_upsert_key_health(health)?;
+            Ok(store)
+        })
+    }
+
+    /// Persist one provider-key health row through an already-open handle while
+    /// holding process startup ownership for the write.
+    ///
+    /// This is the retained-handle form of the open-then-write guarantee
+    /// (#1680 D6): no open in this process can cross the startup boundary while
+    /// this write is in progress, the same as when the write directly follows
+    /// its own open. It does not open, validate or re-stamp anything; a caller
+    /// that retains a handle owns deciding when the handle is still valid (for
+    /// example with [`Self::verify_opened_physical_db_identity`]).
+    #[cfg(feature = "admin")]
+    pub fn vault_upsert_key_health_with_startup_ownership(
+        &self,
+        health: &crate::vault::VaultKeyHealth,
+    ) -> Result<(), MemoryError> {
+        let _startup_guard = db::acquire_startup_lock();
+        self.vault_upsert_key_health(health)
+    }
+
+    /// Drop an already-open provider-health store while retaining process
+    /// startup ownership. This closes the same connection lifetime boundary
+    /// that a fresh provider-health open and write protect.
+    #[cfg(feature = "admin")]
+    pub fn drop_with_startup_ownership(self) {
+        let _startup_guard = db::acquire_startup_lock();
+        drop(self);
     }
 
     #[cfg(feature = "admin")]
@@ -510,7 +561,7 @@ impl MemoryStore {
         db_path: &str,
         ctx: &DbOpenContext,
         busy_timeout: Duration,
-        operation: impl FnOnce(&Self) -> Result<T, MemoryError>,
+        operation: impl FnOnce(Self) -> Result<T, MemoryError>,
     ) -> Result<T, MemoryError> {
         Self::register_open_extensions()?;
         #[cfg(feature = "test-support")]
@@ -536,7 +587,7 @@ impl MemoryStore {
             ctx,
             Some(busy_timeout),
         )?;
-        operation(&store)
+        operation(store)
     }
 
     /// Open (or create) with an explicit manifest label AND an explicit
@@ -563,6 +614,9 @@ impl MemoryStore {
         db::configure_connection(&conn)?;
         let reserved_reference_write = db::register_reserved_reference_write_guard(&conn)?;
         db::install_reserved_reference_authorizer(&conn, Some(&reserved_reference_write))?;
+        // Once per connection, so symbolic search never re-registers it
+        // (which would expire the connection's cached statements).
+        db::ensure_symbolic_score_function(&conn)?;
         let ctx = if sqlite_image.is_some() {
             DbOpenContext::open_existing_deny()
         } else {
@@ -683,6 +737,9 @@ impl MemoryStore {
         )?;
         let reserved_reference_write = db::register_reserved_reference_write_guard(&conn)?;
         db::install_reserved_reference_authorizer(&conn, Some(&reserved_reference_write))?;
+        // Once per connection, so symbolic search never re-registers it
+        // (which would expire the connection's cached statements).
+        db::ensure_symbolic_score_function(&conn)?;
         // Input trigger-inventory admission (see its doc). Schema init runs it
         // again inside BEGIN IMMEDIATE on the in-transaction state.
         db::validate_input_trigger_inventory(&conn)?;
@@ -796,6 +853,9 @@ impl MemoryStore {
         };
         let reserved_reference_write = db::register_reserved_reference_write_guard(&conn)?;
         db::install_reserved_reference_authorizer(&conn, Some(&reserved_reference_write))?;
+        // Once per connection, so symbolic search never re-registers it
+        // (which would expire the connection's cached statements).
+        db::ensure_symbolic_score_function(&conn)?;
         db::migrations::check_schema_version_gate(&conn)?;
         let stored = db::migrations::read_schema_version(&conn)?;
         if stored != db::migrations::EXPECTED_SCHEMA_VERSION {
@@ -948,6 +1008,9 @@ impl MemoryStore {
             validate_physical_db_identity_across_open(db_path, physical_identity_before_open)?;
         let reserved_reference_write = db::register_reserved_reference_write_guard(&conn)?;
         db::install_reserved_reference_authorizer(&conn, Some(&reserved_reference_write))?;
+        // Once per connection, so symbolic search never re-registers it
+        // (which would expire the connection's cached statements).
+        db::ensure_symbolic_score_function(&conn)?;
         if compat_operation.is_some() {
             let raw_schema_version: i64 =
                 conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
@@ -1031,6 +1094,9 @@ impl MemoryStore {
         db::configure_connection(&conn)?;
         let reserved_reference_write = db::register_reserved_reference_write_guard(&conn)?;
         db::install_reserved_reference_authorizer(&conn, Some(&reserved_reference_write))?;
+        // Once per connection, so symbolic search never re-registers it
+        // (which would expire the connection's cached statements).
+        db::ensure_symbolic_score_function(&conn)?;
         db::migrations::check_schema_version_gate(&conn)?;
         let stored = db::migrations::read_schema_version(&conn)?;
         if stored != db::migrations::EXPECTED_SCHEMA_VERSION {
@@ -1088,6 +1154,9 @@ impl MemoryStore {
         db::configure_connection(&conn)?;
         let reserved_reference_write = db::register_reserved_reference_write_guard(&conn)?;
         db::install_reserved_reference_authorizer(&conn, Some(&reserved_reference_write))?;
+        // Once per connection, so symbolic search never re-registers it
+        // (which would expire the connection's cached statements).
+        db::ensure_symbolic_score_function(&conn)?;
         db::validate_persistent_trigger_inventory(&conn, false)?;
         let migration_authorization = db::authorize_schema_migration(&reserved_reference_write)?;
         let schema_result = db::init_schema(&conn);

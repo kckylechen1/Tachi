@@ -404,11 +404,6 @@ impl StaffAssignmentRequest {
         self
     }
 
-    pub fn with_completion_predicate(mut self, predicate: CompletionPredicate) -> Self {
-        self.completion_predicate = Some(predicate);
-        self
-    }
-
     pub fn with_recommendation_ref(mut self, recommendation_ref: impl Into<String>) -> Self {
         self.recommendation_ref = Some(recommendation_ref.into());
         self

@@ -697,3 +697,153 @@ async fn safe_merge_dry_run_returns_ok_with_reader_error_marker_when_checks_list
         std::env::remove_var("TACHI_RUN_ROOT");
     }
 }
+
+/// A transport that exposes the check runs behind `pr_view` (like the CLI and
+/// HTTP clients) and counts follow-up reads, with a configurable live head.
+struct SnapshotCountingClient {
+    inner: MockGhClient,
+    snapshot_runs: Vec<CheckRun>,
+    live_head: String,
+    checks_list_calls: std::sync::atomic::AtomicUsize,
+    head_calls: std::sync::atomic::AtomicUsize,
+}
+
+impl SnapshotCountingClient {
+    fn new(snapshot_runs: Vec<CheckRun>, live_head: &str) -> Self {
+        Self {
+            inner: MockGhClient::new().with_pr("o/r", ready_pr()),
+            snapshot_runs,
+            live_head: live_head.to_string(),
+            checks_list_calls: Default::default(),
+            head_calls: Default::default(),
+        }
+    }
+    fn checks_list_calls(&self) -> usize {
+        self.checks_list_calls
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+    fn head_calls(&self) -> usize {
+        self.head_calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl GhClient for SnapshotCountingClient {
+    async fn pr_view(&self, repo: &str, number: u64) -> Result<PrState, GhError> {
+        self.inner.pr_view(repo, number).await
+    }
+    async fn pr_view_snapshot(&self, repo: &str, number: u64) -> Result<PrViewSnapshot, GhError> {
+        Ok(PrViewSnapshot {
+            pr: self.inner.pr_view(repo, number).await?,
+            check_runs: Some(self.snapshot_runs.clone()),
+        })
+    }
+    async fn pr_head_sha(&self, _repo: &str, _number: u64) -> Result<String, GhError> {
+        self.head_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(self.live_head.clone())
+    }
+    async fn pr_merge(
+        &self,
+        repo: &str,
+        number: u64,
+        strategy: MergeStrategy,
+        expected_head_sha: &str,
+    ) -> Result<MergeResult, GhError> {
+        self.inner
+            .pr_merge(repo, number, strategy, expected_head_sha)
+            .await
+    }
+    async fn issue_create(
+        &self,
+        repo: &str,
+        title: &str,
+        body: Option<&str>,
+        labels: &[String],
+    ) -> Result<tachi_gh_safe_merge::IssueState, GhError> {
+        self.inner.issue_create(repo, title, body, labels).await
+    }
+    async fn checks_list(&self, _repo: &str, _pr_number: u64) -> Result<Vec<CheckRun>, GhError> {
+        self.checks_list_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Err(GhError::Sanitized(
+            "checks_list must not be re-read when the snapshot has the runs".to_string(),
+        ))
+    }
+}
+
+async fn dry_run_with_snapshot_client(
+    client: &SnapshotCountingClient,
+    flow: Option<&str>,
+) -> serde_json::Value {
+    let out = handle_github_safe_merge(
+        &test_server(),
+        client,
+        "o/r",
+        42,
+        MergeStrategy::Squash,
+        true,
+        flow,
+        &[],
+        MergeGatePolicy::permissive(),
+        None,
+        false,
+    )
+    .await
+    .expect("dry run");
+    serde_json::from_str(&out).unwrap()
+}
+
+/// E2: the dry-run ledger reuses the check runs from the same `pr_view` read,
+/// but still re-reads the live head AFTER them, so a head that moved after
+/// the snapshot is recorded as `Stale` (not silently as the snapshot head).
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn safe_merge_dry_run_reuses_snapshot_checks_and_still_detects_moved_head() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let tmp = tempfile::tempdir().unwrap();
+    let original = std::env::var_os("TACHI_RUN_ROOT");
+    std::env::set_var("TACHI_RUN_ROOT", tmp.path());
+    let runs = vec![check("ci", "completed", Some("failure"))];
+
+    // Head unchanged: ledger records the snapshot's (red) checks.
+    let same_head = SnapshotCountingClient::new(runs.clone(), "deadbeef");
+    let flow = "flow_snapshot-same-head";
+    let v = dry_run_with_snapshot_client(&same_head, Some(flow)).await;
+    assert_eq!(v["check_state_ingest"]["state"], json!("failed"));
+    assert_eq!(v["check_state_ingest"]["reader_error"], json!(false));
+    assert_eq!(same_head.checks_list_calls(), 0, "no duplicate checks read");
+    assert_eq!(same_head.head_calls(), 1, "live head is still re-read");
+    let artifact: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(tmp.path().join(flow).join("check_state.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(artifact["checks"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        artifact["transition"]["observed_head_sha"],
+        json!("deadbeef")
+    );
+
+    // Head moved after the snapshot: Stale, never attributed to the old head.
+    let moved = SnapshotCountingClient::new(runs.clone(), "newhead");
+    let v = dry_run_with_snapshot_client(&moved, Some("flow_snapshot-moved-head")).await;
+    assert_eq!(v["check_state_ingest"]["state"], json!("stale"));
+    assert_eq!(moved.checks_list_calls(), 0);
+    assert_eq!(moved.head_calls(), 1);
+
+    // No flow: the non-auditable artifact also reuses the snapshot runs, and
+    // no head read is needed.
+    let no_flow = SnapshotCountingClient::new(runs, "deadbeef");
+    let v = dry_run_with_snapshot_client(&no_flow, None).await;
+    assert_eq!(v["check_state_ingest"]["persisted"], json!(false));
+    assert_eq!(no_flow.checks_list_calls(), 0);
+    assert_eq!(no_flow.head_calls(), 0);
+
+    if let Some(v) = original {
+        std::env::set_var("TACHI_RUN_ROOT", v);
+    } else {
+        std::env::remove_var("TACHI_RUN_ROOT");
+    }
+}

@@ -339,7 +339,7 @@ tachi skill-surface status --host claude,codex,gemini,cursor,antigravity
 
 ### 7. Agent Coordination
 - **Ghost Whispers** — persistent topic-based pub/sub between agents (`ghost_publish`, `ghost_subscribe`, `ghost_ack`, `ghost_reflect`, `ghost_promote`).
-- **Kanban** — cross-agent cards with `ack` / `progress` / `result` states (the legacy `post_card`/`check_inbox`/`update_card` routes are retired — kanban is reached through `tachi_task` board actions / internal handlers).
+- **Kanban** — cross-agent cards with `ack` / `progress` / `result` states (the legacy `post_card`/`check_inbox`/`update_card` routes are retired — kanban is reached through `tachi_task` board actions).
 - **Handoff issue promotion** — ordinary sessions use `tachi_a2a(action='respond')` for same-host advisory messaging or `tachi_task(action='handoff')` for a structured task baton. The retained `tachi_handoff(action='promote_issue')` route is explicit Ops/admin compatibility only; #1099 retired its older `leave`/`check` actions.
 
 > Ghost tools and residual Kanban routes are native `admin`-profile surfaces. Ordinary agents coordinate through `tachi_a2a`, `tachi_gh`, and `tachi_task`.

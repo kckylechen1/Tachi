@@ -2000,36 +2000,6 @@ mod tests {
     }
 
     #[test]
-    fn keychain_loader_only_groups_configured_rotation_members() {
-        let mut rotations = HashSet::new();
-        rotations.insert("VOYAGE_API_KEY".to_string());
-
-        let grouped = group_api_key_values_by_configured_rotations(
-            vec![
-                ("VOYAGE_API_KEY_1".to_string(), "voyage-a".to_string()),
-                ("VOYAGE_API_KEY_2".to_string(), "voyage-b".to_string()),
-                ("SOME_API_KEY_2".to_string(), "standalone".to_string()),
-            ],
-            &rotations,
-        );
-
-        let voyage = grouped
-            .get("VOYAGE_API_KEY")
-            .expect("configured rotation members should be grouped");
-        assert_eq!(voyage.len(), 2);
-        assert_eq!(voyage[0].key_id, "VOYAGE_API_KEY_1");
-        assert_eq!(voyage[1].key_id, "VOYAGE_API_KEY_2");
-        assert!(!grouped.contains_key("SOME_API_KEY"));
-        assert_eq!(
-            grouped
-                .get("SOME_API_KEY_2")
-                .and_then(|entries| entries.first())
-                .map(|entry| entry.value.as_str()),
-            Some("standalone")
-        );
-    }
-
-    #[test]
     fn readable_empty_keychain_scan_stays_readable() {
         let load =
             durable_load_from_keychain_scan(crate::status_ops::status_health::KeychainApiKeyScan {

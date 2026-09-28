@@ -31,9 +31,7 @@ pub(crate) use save_memory::handle_save_memory;
 pub(crate) use save_memory::handle_save_memory_from_caller;
 pub(crate) use save_memory::handle_save_memory_with_references;
 pub(crate) use save_memory::save_eval_memory;
-#[allow(unused_imports)] // stable internal receipt siblings; producers may be feature-gated
 pub(crate) use save_memory::{
-    handle_save_memory_with_authorized_reference_mutations,
     handle_save_memory_with_wiki_projection, save_eval_memory_with_authorized_reference_mutations,
 };
 pub(crate) use search_helpers::client_project_precedence;
@@ -67,7 +65,4 @@ pub(crate) use search_memory::{
 pub(crate) use search_memory::{
     RecallCacheRaceHook, RecallCacheRacePoint, RecallCacheTestOverride,
 };
-// Compatibility shim for old memory_search_ops::contains_secret_like path.
-#[allow(unused_imports)]
-pub(crate) use tachi_lesson_forge::contains_secret_like;
 pub(crate) use text_scrub::{scrub_secrets, scrub_think_tags};

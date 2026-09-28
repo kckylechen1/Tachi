@@ -2797,3 +2797,129 @@ async fn ambiguous_claim_refuses_before_observation_and_preserves_sources() {
         (3, 3)
     );
 }
+
+/// Audit E4 fake: the copy lifecycle blocks like a large `git worktree
+/// add/remove` would (a synchronous sleep), otherwise [`FakeRunner`].
+struct SlowCopyRunner {
+    inner: FakeRunner,
+    block: Duration,
+}
+
+#[async_trait::async_trait]
+impl CheckRunner for SlowCopyRunner {
+    async fn observe_head(&self, worktree: &Path) -> Result<String, String> {
+        self.inner.observe_head(worktree).await
+    }
+
+    async fn worktree_is_clean(&self, worktree: &Path) -> Result<bool, String> {
+        self.inner.worktree_is_clean(worktree).await
+    }
+
+    async fn run_check(
+        &self,
+        argv: &[&str],
+        cwd: &Path,
+        timeout: Duration,
+        log_path: &Path,
+        env: &[(&str, &str)],
+    ) -> Result<CheckRunOutcome, String> {
+        self.inner
+            .run_check(argv, cwd, timeout, log_path, env)
+            .await
+    }
+
+    fn create_detached_copy(
+        &self,
+        claim: &Path,
+        observed_head: &str,
+        dest: &Path,
+    ) -> Result<(), String> {
+        std::thread::sleep(self.block);
+        self.inner.create_detached_copy(claim, observed_head, dest)
+    }
+
+    fn remove_detached_copy(&self, claim: &Path, copy: &Path) -> Result<(), String> {
+        std::thread::sleep(self.block);
+        self.inner.remove_detached_copy(claim, copy)
+    }
+
+    fn copy_is_registered(&self, claim: &Path, copy: &Path) -> RegistrationProbe {
+        self.inner.copy_is_registered(claim, copy)
+    }
+
+    fn tool_version(&self, kind: &str) -> Result<Option<String>, String> {
+        self.inner.tool_version(kind)
+    }
+}
+
+/// Audit E4: on the production (multi-thread) runtime the synchronous copy
+/// lifecycle — `git worktree add` before the check and the guard's
+/// `git worktree remove` after it — must not stall other tasks. With ONE
+/// worker, the pre-E4 inline calls stalled the probe for each whole block
+/// (≈2 × 400 ms); now the worker core is handed off while they block. The
+/// run's result and cleanup are unchanged.
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+#[allow(clippy::await_holding_lock)]
+async fn run_copy_lifecycle_does_not_stall_the_executor_worker() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    let (_root, _guard) = with_run_root();
+    let server = make_server();
+    let worktree = tempfile::tempdir().expect("worktree tempdir");
+    let flow_id = "flow_run-copy-lifecycle-off-core";
+    seed_claim(
+        &server,
+        flow_id,
+        worktree.path().to_str().expect("utf8 worktree"),
+    );
+
+    let done = Arc::new(AtomicBool::new(false));
+    let probe_done = done.clone();
+    let probe = tokio::spawn(async move {
+        let mut max_gap = Duration::ZERO;
+        let mut last = std::time::Instant::now();
+        while !probe_done.load(Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+            let now = std::time::Instant::now();
+            max_gap = max_gap.max(now - last);
+            last = now;
+        }
+        max_gap
+    });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let task_server: MemoryServer = (*server).clone();
+    let run = tokio::spawn(async move {
+        let runner = SlowCopyRunner {
+            inner: fake_runner(),
+            block: Duration::from_millis(400),
+        };
+        run_with_runner(
+            &task_server,
+            &runner,
+            flow_id,
+            "fmt",
+            check_kind_argv("fmt").expect("fmt argv"),
+            Duration::from_secs(60),
+        )
+        .await
+    });
+    let raw = run.await.expect("run task").expect("run completes");
+    done.store(true, Ordering::SeqCst);
+    let max_gap = probe.await.expect("probe task");
+
+    assert_eq!(raw["item_status"], "passed");
+    let leftovers: Vec<_> = std::fs::read_dir(server.tachi_home_dir().join("verify-worktrees"))
+        .map(|entries| entries.flatten().collect())
+        .unwrap_or_default();
+    assert!(
+        leftovers.is_empty(),
+        "the guard must still remove the copy: {leftovers:?}"
+    );
+    assert!(
+        max_gap < Duration::from_millis(250),
+        "400 ms copy create/remove blocks must not stall the only executor worker; \
+         max probe gap {max_gap:?}"
+    );
+}

@@ -211,7 +211,9 @@ async fn post_closure_comment(
         &target.repo,
         target.number,
         CLOSURE_COMMENT_MARKER,
-    ) {
+    )
+    .await
+    {
         return json!({ "posted": false, "ref": label, "reason": "closure comment already present (idempotent skip)" });
     }
 

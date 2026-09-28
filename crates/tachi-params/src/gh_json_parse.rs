@@ -6,10 +6,9 @@
 //! substring verdict classifiers").
 //!
 //! Recognized line conventions (this leaf's documented syntax choice for the
-//! relation lines; `Spec-Ref:` itself is the canon doc §5 frozen syntax):
+//! relation lines):
 //!
 //! ```text
-//! Spec-Ref: owner/repo:docs/path.md@<commit_sha>/<blob_sha>#<section>
 //! Blocks: #123, #124
 //! Depends-On: #45
 //! Duplicate-Of: #67
@@ -40,86 +39,6 @@
 use crate::refinery::{
     CommentRevisionV1, IssueRelationKindV1, IssueSnapshotV1, RelatedIssueStateV1, SourceSpanV1,
 };
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SpecRefLine {
-    pub repo: String,
-    pub path: String,
-    pub commit_sha: String,
-    pub blob_sha: String,
-    pub section: String,
-    pub span: SourceSpanV1,
-}
-
-/// A line that declared itself a `Spec-Ref:` but failed to parse against
-/// the frozen syntax (canon doc §5). This must NOT be silently skipped —
-/// the issue explicitly claimed a canonical anchor here and failed to
-/// supply a usable one, which is exactly the "requested anchor cannot be
-/// resolved" case canon doc §4.1 requires to degrade the whole packet
-/// (F1: previously a malformed line was simply invisible to the grounding
-/// check, leaving the packet falsely `Grounded`).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MalformedSpecRefLine {
-    pub raw: String,
-    pub span: SourceSpanV1,
-}
-
-/// Scan `text` line by line (byte-offset tracked) for `Spec-Ref:` lines,
-/// returning both successfully parsed refs and malformed ones (a line that
-/// started with `Spec-Ref:` but didn't match the frozen syntax) — the
-/// caller must treat every malformed line as a missing anchor, not ignore
-/// it (F1).
-pub fn parse_spec_ref_lines(text: &str) -> (Vec<SpecRefLine>, Vec<MalformedSpecRefLine>) {
-    let mut ok = Vec::new();
-    let mut malformed = Vec::new();
-    let mut offset = 0usize;
-    for line in text.split_inclusive('\n') {
-        let trimmed = line.trim_end_matches(['\n', '\r']).trim_start();
-        if let Some(rest) = trimmed.strip_prefix("Spec-Ref:") {
-            let span = SourceSpanV1 {
-                start_byte: offset,
-                end_byte: offset + line.len(),
-            };
-            match parse_spec_ref_value(rest.trim()) {
-                Some(mut parsed) => {
-                    parsed.span = span;
-                    ok.push(parsed);
-                }
-                None => malformed.push(MalformedSpecRefLine {
-                    raw: rest.trim().to_string(),
-                    span,
-                }),
-            }
-        }
-        offset += line.len();
-    }
-    (ok, malformed)
-}
-
-pub fn parse_spec_ref_value(value: &str) -> Option<SpecRefLine> {
-    // owner/repo:path@commit_sha/blob_sha#section
-    let (repo_and_path, rest) = value.split_once('@')?;
-    let (repo, path) = repo_and_path.split_once(':')?;
-    let (shas, section) = rest.split_once('#')?;
-    let (commit_sha, blob_sha) = shas.split_once('/')?;
-    if repo.matches('/').count() != 1 || repo.is_empty() || path.is_empty() {
-        return None;
-    }
-    if commit_sha.is_empty() || blob_sha.is_empty() || section.is_empty() {
-        return None;
-    }
-    Some(SpecRefLine {
-        repo: repo.to_string(),
-        path: path.to_string(),
-        commit_sha: commit_sha.to_string(),
-        blob_sha: blob_sha.to_string(),
-        section: section.to_string(),
-        span: SourceSpanV1 {
-            start_byte: 0,
-            end_byte: 0,
-        },
-    })
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RelationLine {

@@ -136,7 +136,7 @@ fn format_tachi_search_output(
     }
     if scope_remapped {
         output = format!(
-            "> **Note**: scope='{}' was interpreted as 'all'. Use `project` to target a named library under `~/.tachi/projects/<name>/memory.db`.\n\n{output}",
+            "> **Note**: scope='{}' was interpreted as 'all'. Use `project` to target a named library under `~/.tachi/projects/<name>/tachi-memory.db`.\n\n{output}",
             scope
         );
     }

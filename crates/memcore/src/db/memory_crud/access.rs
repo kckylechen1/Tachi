@@ -201,6 +201,54 @@ pub(crate) fn record_access(
     .map(|_| ())
 }
 
+/// Existence scan plus retired-sticky preflight shared by both access
+/// writers, run inside the caller's `BEGIN IMMEDIATE` transaction.
+///
+/// One batched `IN` lookup per `IN_BATCH_SIZE` ids reads `id, path,
+/// category`, replacing the former `SELECT id` scan followed by one point
+/// `SELECT path, category` per existing id (audit A3/B5). The guard then runs
+/// in `candidate_ids` order, not in the lookup's storage order, so the first
+/// offender (and its exact error) is the same one the per-id loop refused.
+/// Column decode results are kept per id and surfaced in that same order.
+/// Ids without a `memories` row are dropped, as before.
+fn existing_ids_refusing_retired_sticky<'a>(
+    tx: &Connection,
+    candidate_ids: Vec<&'a str>,
+    operation: &str,
+) -> Result<Vec<&'a str>, MemoryError> {
+    type StickyColumns = (rusqlite::Result<String>, rusqlite::Result<String>);
+    let mut existing: HashMap<String, StickyColumns> = HashMap::with_capacity(candidate_ids.len());
+    for batch in candidate_ids.chunks(IN_BATCH_SIZE) {
+        let placeholders = numbered_placeholders(1, batch.len());
+        let sql = format!("SELECT id, path, category FROM memories WHERE id IN ({placeholders})");
+        let values = batch
+            .iter()
+            .map(|id| Value::Text((*id).to_string()))
+            .collect::<Vec<_>>();
+        let mut stmt = tx.prepare(&sql)?;
+        let rows = stmt.query_map(params_from_iter(values.iter()), |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                (row.get::<_, String>(1), row.get::<_, String>(2)),
+            ))
+        })?;
+        for row in rows {
+            let (id, columns) = row?;
+            existing.insert(id, columns);
+        }
+    }
+    let mut existing_ids = Vec::with_capacity(existing.len());
+    for id in candidate_ids {
+        // `candidate_ids` is unique, so each row is taken exactly once.
+        let Some((path, category)) = existing.remove(id) else {
+            continue;
+        };
+        super::refuse_retired_sticky_columns_within_tx(id, &path?, &category?, operation)?;
+        existing_ids.push(id);
+    }
+    Ok(existing_ids)
+}
+
 /// Bump `access_count` and `last_access` for a list of IDs after a non-empty
 /// search when `SearchOptions::record_access` is enabled.
 /// `fts_hits` are the IDs matched by the FTS channel (get `recall_count` incremented).
@@ -256,32 +304,11 @@ pub(crate) fn record_access_with_updates(
             .into_iter()
             .filter(|id| !displayed_set.contains(id)),
     );
-    let mut existing_set = HashSet::with_capacity(candidate_ids.len());
-    for batch in candidate_ids.chunks(IN_BATCH_SIZE) {
-        let placeholders = numbered_placeholders(1, batch.len());
-        let sql = format!("SELECT id FROM memories WHERE id IN ({placeholders})");
-        let values = batch
-            .iter()
-            .map(|id| Value::Text((*id).to_string()))
-            .collect::<Vec<_>>();
-        let mut stmt = tx.prepare(&sql)?;
-        let rows = stmt.query_map(params_from_iter(values.iter()), |row| {
-            row.get::<_, String>(0)
-        })?;
-        for row in rows {
-            existing_set.insert(row?);
-        }
-    }
-    let existing_ids = candidate_ids
-        .into_iter()
-        .filter(|id| existing_set.contains(*id))
-        .collect::<Vec<_>>();
+    let existing_ids =
+        existing_ids_refusing_retired_sticky(&tx, candidate_ids, "recorded as recalled")?;
     if existing_ids.is_empty() {
         tx.commit()?;
         return Ok(HashMap::new());
-    }
-    for id in &existing_ids {
-        super::refuse_retired_sticky_row_within_tx(&tx, id, "recorded as recalled")?;
     }
 
     let displayed_set: HashSet<&str> = displayed_ids.iter().map(String::as_str).collect();
@@ -545,33 +572,11 @@ pub fn record_memory_use(
     }
 
     let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
-    let unique_ids = unique_id_order(ids);
-    let mut existing_set = HashSet::with_capacity(unique_ids.len());
-    for batch in unique_ids.chunks(IN_BATCH_SIZE) {
-        let placeholders = numbered_placeholders(1, batch.len());
-        let sql = format!("SELECT id FROM memories WHERE id IN ({placeholders})");
-        let values = batch
-            .iter()
-            .map(|id| Value::Text((*id).to_string()))
-            .collect::<Vec<_>>();
-        let mut stmt = tx.prepare(&sql)?;
-        let rows = stmt.query_map(params_from_iter(values.iter()), |row| {
-            row.get::<_, String>(0)
-        })?;
-        for row in rows {
-            existing_set.insert(row?);
-        }
-    }
-    let existing_ids = unique_ids
-        .into_iter()
-        .filter(|id| existing_set.contains(*id))
-        .collect::<Vec<_>>();
+    let existing_ids =
+        existing_ids_refusing_retired_sticky(&tx, unique_id_order(ids), "recorded as used")?;
     if existing_ids.is_empty() {
         tx.commit()?;
         return Ok(0);
-    }
-    for id in &existing_ids {
-        super::refuse_retired_sticky_row_within_tx(&tx, id, "recorded as used")?;
     }
 
     for batch in existing_ids.chunks(IN_BATCH_SIZE) {
@@ -1071,6 +1076,166 @@ mod get_access_times_tests {
                 access_snapshot(store.connection()),
                 before,
                 "{operation} refusal must not partially mutate the ordinary first row"
+            );
+        }
+    }
+
+    fn retire_existing_fixture_as(store: &MemoryStore, id: &str, path: &str, category: &str) {
+        let _authorization =
+            crate::db::authorize_reserved_reference_write(&store.reserved_reference_write)
+                .expect("authorize raw legacy sticky fixture");
+        store
+            .connection()
+            .execute(
+                "UPDATE memories SET path=?2, category=?3 WHERE id=?1",
+                rusqlite::params![id, path, category],
+            )
+            .expect("turn ordinary seed into raw legacy sticky fixture");
+    }
+
+    /// Audit A3/B5 pin: the retired-sticky guard runs over the existence-filtered
+    /// ids in the writer's own order (displayed first, then scored-only; the
+    /// caller's order for use events), not in the storage order of the batched
+    /// lookup. The first offender in that order names the refusal with the exact
+    /// historical text, both retirement branches (category and path-only) still
+    /// refuse, missing ids stay skipped, nothing is written, and the refused
+    /// transaction leaves the connection usable for the identical ordinary write.
+    #[test]
+    fn access_retired_sticky_refusal_names_first_offender_in_writer_order() {
+        let mut store = MemoryStore::open_in_memory().expect("open in-memory store");
+        for id in ["mm-ordinary", "zz-sticky-category", "aa-sticky-path"] {
+            seed_memory(&mut store, id);
+        }
+        // Category branch (path is ordinary) and path-only branch (category is
+        // ordinary), named so storage/PK order is the reverse of writer order.
+        retire_existing_fixture_as(&store, "zz-sticky-category", "/facts/readonly", "sticky");
+        retire_existing_fixture_as(&store, "aa-sticky-path", "/sticky/legacy", "fact");
+        let before = access_snapshot(store.connection());
+        // Arm the same scoped write token `MemoryStore::search` holds around the
+        // production caller, so the ordinary write below is admitted exactly as
+        // it is in production and only the retired-sticky guard can refuse.
+        let _authorization =
+            crate::db::authorize_reserved_reference_write(&store.reserved_reference_write)
+                .expect("arm the search-path write token");
+
+        let displayed = vec![
+            "missing-displayed".to_string(),
+            "mm-ordinary".to_string(),
+            "zz-sticky-category".to_string(),
+        ];
+        let scored = vec![
+            "aa-sticky-path".to_string(),
+            "missing-scored".to_string(),
+            "mm-ordinary".to_string(),
+        ];
+        let display_error = record_access_with_updates(
+            store.connection(),
+            &displayed,
+            &scored,
+            &scored,
+            Some("sticky order"),
+            &crate::RecallConfig::default(),
+            None,
+        )
+        .expect_err("a displayed sticky member must refuse the access batch");
+        assert_eq!(
+            display_error.to_string(),
+            "Invalid argument: retired sticky row zz-sticky-category cannot be recorded as \
+             recalled through an ordinary writer: legacy sticky category \"sticky\" is retired \
+             and read-only; use tachi_a2a instead"
+        );
+
+        // Scored-only offender: the path-only branch refuses too.
+        let display_error = record_access_with_updates(
+            store.connection(),
+            &["mm-ordinary".to_string()],
+            &scored,
+            &[],
+            Some("sticky order"),
+            &crate::RecallConfig::default(),
+            None,
+        )
+        .expect_err("a scored-only sticky member must refuse the access batch");
+        assert_eq!(
+            display_error.to_string(),
+            "Invalid argument: retired sticky row aa-sticky-path cannot be recorded as recalled \
+             through an ordinary writer: legacy sticky path \"/sticky/legacy\" is retired and \
+             read-only; use tachi_a2a instead"
+        );
+
+        let use_error = record_memory_use(
+            store.connection(),
+            &[
+                "missing-use".to_string(),
+                "mm-ordinary".to_string(),
+                "zz-sticky-category".to_string(),
+                "aa-sticky-path".to_string(),
+            ],
+            "2026-08-13T00:00:00Z",
+        )
+        .expect_err("a sticky member must refuse the use batch");
+        assert_eq!(
+            use_error.to_string(),
+            "Invalid argument: retired sticky row zz-sticky-category cannot be recorded as used \
+             through an ordinary writer: legacy sticky category \"sticky\" is retired and \
+             read-only; use tachi_a2a instead"
+        );
+
+        assert_eq!(
+            access_snapshot(store.connection()),
+            before,
+            "refused access batches must not write anything"
+        );
+
+        // The refused transactions rolled back and released the writer: the
+        // same connection still records the ordinary row, missing ids skipped.
+        let updates = record_access_with_updates(
+            store.connection(),
+            &["missing-displayed".to_string(), "mm-ordinary".to_string()],
+            &["mm-ordinary".to_string()],
+            &["mm-ordinary".to_string()],
+            Some("ordinary"),
+            &crate::RecallConfig::default(),
+            None,
+        )
+        .expect("ordinary access batch still records after a refusal");
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates["mm-ordinary"].access_count, 1);
+        assert_eq!(
+            record_memory_use(
+                store.connection(),
+                &["missing-use".to_string(), "mm-ordinary".to_string()],
+                "2026-08-13T00:00:00Z",
+            )
+            .expect("ordinary use batch still records after a refusal"),
+            1
+        );
+        let after = access_snapshot(store.connection());
+        assert_eq!(after.history, before.history + 2);
+        let ordinary = after
+            .memories
+            .iter()
+            .find(|row| row.id == "mm-ordinary")
+            .expect("ordinary row");
+        assert_eq!(ordinary.access_count, 1);
+        assert_eq!(ordinary.scored_count, 1);
+        assert_eq!(
+            ordinary.last_use_at.as_deref(),
+            Some("2026-08-13T00:00:00Z")
+        );
+        for sticky in ["aa-sticky-path", "zz-sticky-category"] {
+            let row = after
+                .memories
+                .iter()
+                .find(|row| row.id == sticky)
+                .expect("sticky row");
+            assert_eq!(
+                row,
+                before
+                    .memories
+                    .iter()
+                    .find(|row| row.id == sticky)
+                    .expect("sticky row before"),
             );
         }
     }
