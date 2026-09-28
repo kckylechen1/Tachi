@@ -93,8 +93,7 @@
 //!   silently dropped from the enumeration.
 //! - **Other direct memory-row writers**: `component_governance_ops/mod.rs`,
 //!   `copilot_ops/support/skills.rs`, `memory_search_ops/eval_capture.rs`,
-//!   `handoff_ops/handlers.rs`, `kanban/handlers.rs`,
-//!   `wiki_ops/ingest.rs`, `wiki_ops/log.rs`.
+//!   `handoff_ops/handlers.rs`, `wiki_ops/ingest.rs`, `wiki_ops/log.rs`.
 //!
 //! Why the remaining paths above still don't close via `with_store_for_scope`:
 //! EVERY one of them ultimately calls the exact same `MemoryStore::upsert`

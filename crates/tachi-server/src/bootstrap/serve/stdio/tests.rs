@@ -371,6 +371,7 @@ fn stdio_proxy_profile_is_forwarded_once_and_denies_attachment_before_handler() 
             adapter_started_at: chrono::Utc::now(),
             tool_profile: Some(tachi_hub::ToolProfile::delegate()),
             resolved_agent_identity: Default::default(),
+            rate_limit_session: ProxyRateLimitSession::mint(),
             daemon: std::sync::Arc::new(std::sync::RwLock::new(daemon.clone())),
             app_home: tachi_home.clone(),
             global_db_path: global.clone(),
@@ -429,6 +430,7 @@ fn stdio_proxy_profile_is_forwarded_once_and_denies_attachment_before_handler() 
                 adapter_started_at: chrono::Utc::now(),
                 tool_profile: Some(tachi_hub::ToolProfile::observe()),
                 resolved_agent_identity: Default::default(),
+                rate_limit_session: ProxyRateLimitSession::mint(),
                 daemon: std::sync::Arc::new(std::sync::RwLock::new(daemon.clone())),
                 app_home: tachi_home.clone(),
                 global_db_path: global.clone(),
@@ -449,8 +451,16 @@ fn stdio_proxy_profile_is_forwarded_once_and_denies_attachment_before_handler() 
             );
         }
 
-        let expected_names = vec![
+        let expected_five = vec![
             "tachi_a2a".to_string(),
+            "tachi_gh".to_string(),
+            "tachi_memory".to_string(),
+            "tachi_staff".to_string(),
+            "tachi_task".to_string(),
+        ];
+        let expected_standard = vec![
+            "tachi_a2a".to_string(),
+            "tachi_agent_eval".to_string(),
             "tachi_gh".to_string(),
             "tachi_memory".to_string(),
             "tachi_staff".to_string(),
@@ -484,6 +494,7 @@ fn stdio_proxy_profile_is_forwarded_once_and_denies_attachment_before_handler() 
                 adapter_started_at: chrono::Utc::now(),
                 tool_profile: Some(profile),
                 resolved_agent_identity: Default::default(),
+                rate_limit_session: ProxyRateLimitSession::mint(),
                 daemon: std::sync::Arc::new(std::sync::RwLock::new(daemon.clone())),
                 app_home: tachi_home.clone(),
                 global_db_path: global.clone(),
@@ -498,7 +509,36 @@ fn stdio_proxy_profile_is_forwarded_once_and_denies_attachment_before_handler() 
                 .map(|tool| tool.name.into_owned())
                 .collect::<Vec<_>>();
             names.sort();
-            assert_eq!(names, expected_names, "stdio profile {raw_profile}");
+            let is_standard = profile.as_str() == "standard";
+            assert_eq!(
+                &names,
+                if is_standard {
+                    &expected_standard
+                } else {
+                    &expected_five
+                },
+                "stdio profile {raw_profile}"
+            );
+
+            if is_standard {
+                for action in ["attach_session", "aggregate_live", "future_action"] {
+                    let denied = call_tool_via_stdio_proxy(
+                        proxy.clone(),
+                        "tachi_agent_eval",
+                        serde_json::Map::from_iter([(
+                            "action".to_string(),
+                            serde_json::json!(action),
+                        )]),
+                    )
+                    .await
+                    .expect("standard eval action refusal should be an MCP result");
+                    assert_eq!(denied.is_error, Some(true), "{raw_profile}:{action}");
+                    assert!(
+                        first_text(&denied).contains("not allowed"),
+                        "{raw_profile}:{action}: {denied:?}"
+                    );
+                }
+            }
 
             for hidden in ["runtime_info", "tachi_briefing"] {
                 let result =
@@ -519,6 +559,7 @@ fn stdio_proxy_profile_is_forwarded_once_and_denies_attachment_before_handler() 
             adapter_started_at: chrono::Utc::now(),
             tool_profile: None,
             resolved_agent_identity: Default::default(),
+            rate_limit_session: ProxyRateLimitSession::mint(),
             daemon: std::sync::Arc::new(std::sync::RwLock::new(daemon)),
             app_home: tachi_home,
             global_db_path: global,
@@ -547,7 +588,7 @@ fn stdio_proxy_profile_is_forwarded_once_and_denies_attachment_before_handler() 
             .collect::<Vec<_>>();
         default_names.sort();
         assert_eq!(
-            default_names, expected_names,
+            default_names, expected_standard,
             "missing proxy profile must not inherit the broader daemon profile"
         );
         (ct, daemon_task)
@@ -579,6 +620,7 @@ fn stdio_process_selected_ops_proxy_lists_and_calls_through_production_session_c
             adapter_started_at: chrono::Utc::now(),
             tool_profile: Some(tachi_hub::ToolProfile::operate()),
             resolved_agent_identity: Default::default(),
+            rate_limit_session: ProxyRateLimitSession::mint(),
             daemon: std::sync::Arc::new(std::sync::RwLock::new(daemon)),
             app_home: tachi_home,
             global_db_path: global,
@@ -1003,6 +1045,7 @@ fn stdio_proxy_call_writes_bound_project_via_global_only_daemon() {
             project_db_path: Some(project.clone()),
             client_project: Some(project_name.to_string()),
             resolved_agent_identity: Default::default(),
+            rate_limit_session: ProxyRateLimitSession::mint(),
         };
 
         let saved_text = "stdio proxy e2e writes only the bound project db";
@@ -1088,6 +1131,7 @@ fn stdio_proxy_same_db_alias_write_normalizes_to_bound_identity() {
             project_db_path: Some(project.clone()),
             client_project: Some(bound_name.clone()),
             resolved_agent_identity: Default::default(),
+            rate_limit_session: ProxyRateLimitSession::mint(),
         };
         let result = call_tool_via_stdio_proxy(
             proxy,
@@ -1166,6 +1210,7 @@ fn stdio_proxy_call_rejects_cross_project_override_before_daemon_write() {
             project_db_path: Some(bound_project.clone()),
             client_project: Some(bound_project_name.to_string()),
             resolved_agent_identity: Default::default(),
+            rate_limit_session: ProxyRateLimitSession::mint(),
         };
 
         let rejected_text = "stdio proxy e2e rejects cross-project override";
@@ -1241,6 +1286,7 @@ fn stdio_proxy_tachi_search_returns_global_and_bound_project_rows() {
             project_db_path: Some(project.clone()),
             client_project: Some(project_name.to_string()),
             resolved_agent_identity: Default::default(),
+            rate_limit_session: ProxyRateLimitSession::mint(),
         };
 
         for (id, scope, summary) in [
@@ -1351,6 +1397,7 @@ fn stdio_proxy_allows_explicit_cross_project_read() {
             project_db_path: Some(bound_project.clone()),
             client_project: Some(bound_project_name.to_string()),
             resolved_agent_identity: Default::default(),
+            rate_limit_session: ProxyRateLimitSession::mint(),
         };
         let other_proxy = StdioProxyServer {
             adapter_started_at: chrono::Utc::now(),
@@ -1361,6 +1408,7 @@ fn stdio_proxy_allows_explicit_cross_project_read() {
             project_db_path: Some(other_project.clone()),
             client_project: Some(other_project_name.to_string()),
             resolved_agent_identity: Default::default(),
+            rate_limit_session: ProxyRateLimitSession::mint(),
         };
 
         let result = call_tool_via_stdio_proxy(
@@ -1459,6 +1507,7 @@ fn stdio_proxy_tachi_memory_search_rows_stay_objects_under_parallel_forwarding()
             project_db_path: Some(project.clone()),
             client_project: Some(project_name.to_string()),
             resolved_agent_identity: Default::default(),
+            rate_limit_session: ProxyRateLimitSession::mint(),
         };
 
         for (id, scope, summary) in [
@@ -1614,6 +1663,7 @@ fn stdio_proxy_runtime_info_reflects_pid_file_changes_not_cached_snapshot() {
             project_db_path: None,
             client_project: None,
             resolved_agent_identity: Default::default(),
+            rate_limit_session: ProxyRateLimitSession::mint(),
         };
 
         let first = call_tool_via_stdio_proxy(proxy.clone(), "runtime_info", serde_json::Map::new())
@@ -1720,6 +1770,7 @@ fn stdio_proxy_runtime_info_reports_unreachable_when_daemon_absent() {
             project_db_path: None,
             client_project: None,
             resolved_agent_identity: Default::default(),
+            rate_limit_session: ProxyRateLimitSession::mint(),
         };
 
         let result = call_tool_via_stdio_proxy(proxy, "runtime_info", serde_json::Map::new())
@@ -1788,6 +1839,7 @@ fn stdio_proxy_archives_global_row_with_bound_project() {
             project_db_path: Some(project.clone()),
             client_project: Some(project_name.to_string()),
             resolved_agent_identity: Default::default(),
+            rate_limit_session: ProxyRateLimitSession::mint(),
         };
 
         let result = call_tool_via_stdio_proxy(
@@ -2487,6 +2539,7 @@ fn http_direct_connect_header_identity_binds_profile_and_project() {
             names,
             std::collections::BTreeSet::from([
                 "tachi_a2a",
+                "tachi_agent_eval",
                 "tachi_gh",
                 "tachi_memory",
                 "tachi_staff",
@@ -2507,6 +2560,26 @@ fn http_direct_connect_header_identity_binds_profile_and_project() {
             assert!(
                 http_tool_text(&denied).contains("tool not found"),
                 "standard HTTP direct call should hide {hidden}: {denied:#}"
+            );
+        }
+
+        for (id, action) in [
+            (20, "attach_session"),
+            (21, "aggregate_live"),
+            (22, "future_action"),
+        ] {
+            let denied = http_mcp_call_tool(
+                &client,
+                &daemon.url,
+                session_headers.clone(),
+                id,
+                "tachi_agent_eval",
+                serde_json::Map::from_iter([("action".to_string(), serde_json::json!(action))]),
+            )
+            .await;
+            assert!(
+                http_tool_text(&denied).contains("not allowed"),
+                "standard HTTP eval action {action} must be denied: {denied:#}"
             );
         }
 
@@ -2692,8 +2765,16 @@ fn http_direct_connect_ordinary_profiles_have_exact_facades_and_hide_retired_rou
     let (ct, daemon_task) = rt.block_on(async {
         let server = crate::MemoryServer::new(global.clone(), None).expect("daemon server");
         let (daemon, ct, daemon_task) = spawn_test_http_daemon(server, &global).await;
-        let expected = std::collections::BTreeSet::from([
+        let expected_five = std::collections::BTreeSet::from([
             "tachi_a2a",
+            "tachi_gh",
+            "tachi_memory",
+            "tachi_staff",
+            "tachi_task",
+        ]);
+        let expected_standard = std::collections::BTreeSet::from([
+            "tachi_a2a",
+            "tachi_agent_eval",
             "tachi_gh",
             "tachi_memory",
             "tachi_staff",
@@ -2743,7 +2824,18 @@ fn http_direct_connect_ordinary_profiles_have_exact_facades_and_hide_retired_rou
                 .iter()
                 .filter_map(|tool| tool["name"].as_str())
                 .collect::<std::collections::BTreeSet<_>>();
-            assert_eq!(names, expected, "unexpected HTTP tools for {profile_label}");
+            let expected = if matches!(
+                profile,
+                None | Some("standard" | "lead" | "standard+delegate" | "delegate+standard")
+            ) {
+                &expected_standard
+            } else {
+                &expected_five
+            };
+            assert_eq!(
+                &names, expected,
+                "unexpected HTTP tools for {profile_label}"
+            );
 
             for (id, hidden) in [(3, "runtime_info"), (4, "tachi_briefing")] {
                 let denied = http_mcp_call_tool(
@@ -3110,6 +3202,7 @@ fn identity_probe_proxy() -> StdioProxyServer {
         project_db_path: None,
         client_project: None,
         resolved_agent_identity: Default::default(),
+        rate_limit_session: ProxyRateLimitSession::mint(),
     }
 }
 
@@ -3271,4 +3364,139 @@ fn http_loopback_explicit_agent_identity_is_self_asserted_for_a2a() {
 
     ct.cancel();
     rt.block_on(daemon_task).expect("daemon task");
+}
+
+fn stuck_probe_args(query: &str) -> serde_json::Map<String, serde_json::Value> {
+    serde_json::Map::from_iter([
+        ("action".to_string(), serde_json::json!("search")),
+        ("query".to_string(), serde_json::json!(query)),
+        ("scope".to_string(), serde_json::json!("memory")),
+        ("top_k".to_string(), serde_json::json!(1)),
+    ])
+}
+
+fn has_stuck_warning(result: &rmcp::model::CallToolResult) -> bool {
+    result.content.iter().any(|content| {
+        matches!(content, rmcp::model::ContentBlock::Text(text) if text.text.contains("stuck-detection"))
+    })
+}
+
+/// Audit C1: every proxied `tools/call` opens its own short-lived daemon MCP
+/// session, so without a per-connection bucket key the daemon's burst window
+/// started empty on every call and stuck/loop detection never fired. One
+/// proxy connection must now share one burst window across its calls, and a
+/// second proxy connection must not inherit it.
+#[test]
+fn stdio_proxy_calls_share_one_rate_limit_bucket_per_connection() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let tachi_home = temp.path().join("home");
+    let global = tachi_home.join("global/memory.db");
+    std::fs::create_dir_all(global.parent().expect("global parent")).expect("global parent");
+
+    with_tachi_home(&tachi_home, || {
+        test_runtime().block_on(async {
+            let server = crate::MemoryServer::new(global.clone(), None).expect("daemon server");
+            let (daemon, ct, daemon_task) = spawn_test_http_daemon(server, &global).await;
+            let make_proxy = || StdioProxyServer {
+                adapter_started_at: chrono::Utc::now(),
+                tool_profile: None,
+                daemon: std::sync::Arc::new(std::sync::RwLock::new(daemon.clone())),
+                app_home: tachi_home.clone(),
+                global_db_path: global.clone(),
+                project_db_path: None,
+                client_project: None,
+                resolved_agent_identity: Default::default(),
+                rate_limit_session: ProxyRateLimitSession::mint(),
+            };
+            let proxy_a = make_proxy();
+            let proxy_b = make_proxy();
+            assert_ne!(
+                proxy_a.rate_limit_session.as_str(),
+                proxy_b.rate_limit_session.as_str(),
+                "each proxy connection mints its own bucket key"
+            );
+            let args = || stuck_probe_args("C1-STDIO-PROXY-BUCKET-PROBE");
+
+            for call in 1..=2 {
+                let result = call_tool_via_stdio_proxy(proxy_a.clone(), "tachi_memory", args())
+                    .await
+                    .unwrap_or_else(|err| panic!("proxy A call {call}: {err}"));
+                assert_tool_ok(&result);
+                assert!(
+                    !has_stuck_warning(&result),
+                    "call {call} is below the stuck threshold: {result:?}"
+                );
+            }
+
+            let other = call_tool_via_stdio_proxy(proxy_b.clone(), "tachi_memory", args())
+                .await
+                .expect("proxy B call");
+            assert_tool_ok(&other);
+            assert!(
+                !has_stuck_warning(&other),
+                "a different proxy connection must not inherit proxy A's burst window: {other:?}"
+            );
+
+            let third = call_tool_via_stdio_proxy(proxy_a.clone(), "tachi_memory", args())
+                .await
+                .expect("proxy A call 3");
+            assert_tool_ok(&third);
+            assert!(
+                has_stuck_warning(&third),
+                "the third identical call through one proxy connection must share the burst \
+                 window across its per-call daemon sessions: {third:?}"
+            );
+
+            ct.cancel();
+            daemon_task.await.expect("daemon task");
+        });
+    });
+}
+
+/// Audit C3: reaping the auto-spawned daemon must not pin an executor worker
+/// for the daemon's lifetime. On a current-thread runtime the old
+/// `tokio::spawn(async move { child.wait() })` blocked the only thread until
+/// the child exited; the reaper thread leaves the executor free and still
+/// reaps the child (no zombie left behind).
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn auto_daemon_reap_does_not_block_the_executor_and_still_reaps() {
+    use std::time::{Duration, Instant};
+
+    let child = std::process::Command::new("sleep")
+        .arg("1")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn sleep child");
+    let pid = child.id();
+    let reaper = reap_detached_daemon(child).expect("reaper thread starts");
+
+    // Yield to the executor several times while the child is still alive.
+    let started = Instant::now();
+    for _ in 0..5 {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < Duration::from_millis(500),
+        "executor must stay free while the daemon child lives; 5x10ms sleeps took {elapsed:?}"
+    );
+    assert!(
+        !reaper.is_finished(),
+        "the reaper must still be waiting on the live child"
+    );
+
+    reaper.join().expect("reaper thread joins");
+    // After the reap the pid is released: waitpid on it reports ECHILD.
+    // SAFETY: `waitpid` with WNOHANG only queries the kernel for a child of
+    // this process; it passes a valid out-pointer to a local and aliases no
+    // Rust memory.
+    let mut status: libc::c_int = 0;
+    let rc = unsafe { libc::waitpid(pid as libc::pid_t, &mut status, libc::WNOHANG) };
+    assert_eq!(
+        rc, -1,
+        "the daemon child must already be reaped (no zombie), waitpid rc={rc}"
+    );
 }

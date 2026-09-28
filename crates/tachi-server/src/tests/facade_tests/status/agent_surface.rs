@@ -207,3 +207,47 @@ async fn platform_refusal_status_and_alerts_preserve_unknown_owner() {
     assert!(alerts.iter().all(|v| !v.starts_with("daemon not running")));
     assert_eq!(std::fs::read(&lock).unwrap(), b"2\n");
 }
+
+/// Audit F1: the agent status surface runs its governance read (registry
+/// SQLite + git subprocesses) inside the SAME blocking-pool core the typed
+/// health digest uses, never on the async executor. While the governance
+/// phase is gated on a current-thread runtime, another task must still run —
+/// if governance ran on the executor thread, the spawned task could never be
+/// polled (and before the shared core, this hook never fired for status).
+#[tokio::test(flavor = "current_thread")]
+async fn tachi_status_agent_keeps_executor_responsive_during_governance_read() {
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
+    use std::time::Duration;
+
+    let (server, _temp_home) = make_server_with_temp_home();
+    let executor_ran_during_governance = Arc::new(AtomicBool::new(false));
+    let observed = Arc::clone(&executor_ran_during_governance);
+    let runtime = tokio::runtime::Handle::current();
+    crate::status_ops::install_status_governance_test_hook(server.tachi_home_dir(), move || {
+        let (ran_tx, ran_rx) = std::sync::mpsc::channel();
+        runtime.spawn(async move {
+            tokio::task::yield_now().await;
+            let _ = ran_tx.send(());
+        });
+        observed.store(
+            ran_rx.recv_timeout(Duration::from_secs(5)).is_ok(),
+            Ordering::SeqCst,
+        );
+    });
+
+    let body = crate::status_ops::handle_tachi_status_agent(&server, Some("json"))
+        .await
+        .expect("agent status should serialize");
+    let parsed: Value = serde_json::from_str(&body).expect("agent status JSON");
+    assert!(
+        parsed["component_governance"].is_object(),
+        "status must still embed component governance: {body}"
+    );
+    assert!(
+        executor_ran_during_governance.load(Ordering::SeqCst),
+        "a current-thread runtime task must run while the status governance read is gated"
+    );
+}

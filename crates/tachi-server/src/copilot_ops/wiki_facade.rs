@@ -221,6 +221,32 @@ async fn handle_tachi_wiki_write_inner(
     if let Some(obj) = response.as_object_mut() {
         obj.insert("pattern_refs".to_string(), json!(pattern_refs.clone()));
     }
+    // Deterministic read locator: exactly how to read this row back
+    // through the real facade — `action=get` plus the project that
+    // actually holds the row (the resolved write target, not the
+    // caller's request), plus the surviving id. A default-routed
+    // write that landed on the bound project store resolves that
+    // project's name; a global landing omits `project` so `get`
+    // reads the global store it landed in.
+    let mut read_locator = serde_json::Map::new();
+    read_locator.insert("action".to_string(), json!("get"));
+    read_locator.insert("id".to_string(), json!(canonical_id.clone()));
+    let read_project = target_project.clone().or_else(|| {
+        if response.get("db").and_then(Value::as_str) != Some("project") {
+            return None;
+        }
+        server.session_project().or_else(|| {
+            server
+                .project_db_path_buf()
+                .and_then(|path| crate::path_utils::named_project_for_db_path(&path))
+        })
+    });
+    if let Some(project) = &read_project {
+        read_locator.insert("project".to_string(), json!(project));
+    }
+    if let Some(obj) = response.as_object_mut() {
+        obj.insert("read".to_string(), Value::Object(read_locator));
+    }
     if duplicate {
         return serde_json::to_string(&response)
             .map_err(|e| format!("serialize duplicate wiki_write: {e}"));

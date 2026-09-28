@@ -225,6 +225,74 @@ The one supported dependency surface for Hypermem:
   stores only (#1585 §1). A full-Tachi database is refused typed at open, not
   silently reinterpreted; profile and role identity are write-once stamps in
   the store itself, never inferred from paths.
+- **Exact profile admission (W1-2).** `DbOpenContext::required_profile` is a
+  `ProfileRequirement`. `AtLeast(p)` is the #1585 lattice, under which a
+  `TachiFull` store admits a `PortableKernel` caller. `Exact(p)` admits only a
+  store stamped `p` (`DbOpenContext::with_exact_profile`). Under
+  `Exact(PortableKernel)` the kernel refuses a `TachiFull` store with
+  `MemoryError::StoreProfileNotExact`. The refusal comes from the open
+  funnel's read-only identity preflight, which runs ahead of the migration
+  backup and the connection PRAGMAs. After such a refusal no `.migration-bak`,
+  no marker and no memcore DDL, stamp or identity/role write remains:
+  `PRAGMA user_version`, the schema and `hard_state` are unchanged. This is
+  not a byte-identity or "no file was ever touched" guarantee. The funnel's
+  connection is read-write, so SQLite may create and remove `-wal`/`-shm`
+  transiently, and if the store was left with committed, uncheckpointed WAL
+  frames (an unclean shutdown) its last-close checkpoint may fold them into
+  the main file; the logical content does not change.
+
+  Every gate (schema version, #1119 intent/authority, integrity, `fresh`,
+  profile and role) is evaluated again inside `BEGIN IMMEDIATE`, and only
+  that evaluation decides. If another process changes the store between the
+  preflight and the transaction, the open can pass the preflight and be
+  refused in the transaction. What can then persist is exactly: the
+  `.migration-bak` plus the retention pass that may delete older backups,
+  and `journal_mode` switched to WAL (WAL mode is persistent). DDL, stamps and
+  identity/role writes roll back. One labelled open with
+  `with_exact_profile(PortableKernel)` therefore replaces the "unlabelled
+  preflight open, check `store_profile()`, labelled open" sequence, which
+  runs schema init twice per store.
+
+  Preconditions, in funnel order, before this table applies:
+  1. The input trigger-inventory admission (`MemoryStore` opens), the
+     schema-version gate (a stamp newer than this kernel → refused), the
+     #1119 creation-intent/migration-authority gate
+     (`check_db_open_context_gate`) and current-schema integrity validation
+     run first, both before schema init and again inside the transaction
+     (before any schema repair), and can return their own error. A migration
+     state that the pre-transaction backup decision did not cover refuses with
+     `SchemaChangedDuringOpen`.
+  2. "Fresh" means `PRAGMA user_version == 0`, not "empty file": an unstamped
+     file with content is fresh.
+  3. `read_identity` reads and decodes BOTH stamps (role first, then profile)
+     before profile admission, so a malformed role or profile stamp returns
+     its decode error ahead of any profile verdict.
+  4. Profile admission is decided before role resolution; a role conflict is
+     only reported for an admitted profile.
+
+  `Exact(PortableKernel)`, claim = role `X`:
+
+  | stored profile | stored role | outcome |
+  |---|---|---|
+  | `PortableKernel` | absent | admitted; `X` stamped once |
+  | `PortableKernel` | `X` (or legacy `project:X`) | admitted |
+  | `PortableKernel` | `Y` ≠ `X` | `StoreRoleConflict` |
+  | `TachiFull` | any | `StoreProfileNotExact` (no backup, no memcore write) |
+  | absent, `user_version == 0` | absent | built portable; profile and `X` stamped |
+  | absent, `user_version == 0` | `X` | built portable; profile stamped |
+  | absent, `user_version == 0` | `Y` ≠ `X` | `StoreRoleConflict` |
+  | absent, `user_version > 0` | any | `StoreProfileUnstamped` |
+
+  An unlabelled open (claim `unknown`) accepts any stored role and never
+  stamps one.
+
+  **Migration note (breaking type change).** The field changed from
+  `StoreProfile` to `ProfileRequirement`. Struct-literal constructors replace
+  `required_profile: StoreProfile::X` with
+  `required_profile: ProfileRequirement::AtLeast(StoreProfile::X)` to keep the
+  old behaviour. Callers that use `with_profile(StoreProfile::X)` are unchanged
+  (it sets `AtLeast`). `StoreProfile` converts `Into<ProfileRequirement>` as
+  `AtLeast`.
 - **Licensing** — `DECISION_REQUIRED (owner): AGPL-3.0-only embedding/distribution
   terms in Hyperion artifacts.` Until that decision is recorded here, this
   section documents the technical surface only, not a distribution grant.

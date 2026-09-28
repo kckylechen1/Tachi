@@ -225,21 +225,31 @@ async fn tachi_complete_writes_eval_ledger_and_returns_review_bundle() {
         "explicit /eval search should include eval entries"
     );
 
-    let aggregate_live = server
-        .tachi_agent_eval(Parameters(TachiAgentEvalParams {
-            action: "aggregate_live".to_string(),
-            fixture_path: None,
-            limit: Some(50),
-            register: None,
-            observe: None,
-            adjudicate: None,
-            get: None,
-            // tachi#1675 PR2: route_projection payload, unused here.
-            projection: None,
-            ..Default::default()
-        }))
-        .await
-        .expect("aggregate_live should succeed");
+    let aggregate_live = {
+        // `aggregate_live` is an operator reporting action the standard
+        // eval-facade gate denies by design; elevate ONLY this operator read
+        // to the observe profile that gate admits and restore the exact
+        // prior profile — the denial itself stays pinned in tachi-hub.
+        let prior_profile = server.active_tool_profile();
+        server.set_tool_profile(Some(tachi_hub::ToolProfile::observe()));
+        let raw = server
+            .tachi_agent_eval(Parameters(TachiAgentEvalParams {
+                action: "aggregate_live".to_string(),
+                fixture_path: None,
+                limit: Some(50),
+                register: None,
+                observe: None,
+                adjudicate: None,
+                get: None,
+                // tachi#1675 PR2: route_projection payload, unused here.
+                projection: None,
+                ..Default::default()
+            }))
+            .await
+            .expect("aggregate_live should succeed");
+        server.set_tool_profile(prior_profile);
+        raw
+    };
     let aggregate: serde_json::Value =
         serde_json::from_str(&aggregate_live).expect("aggregate_live JSON");
     assert_eq!(aggregate["source"], serde_json::json!("live_memory"));
@@ -276,21 +286,30 @@ async fn tachi_complete_writes_eval_ledger_and_returns_review_bundle() {
         "aggregate_live should include subagent performance telemetry: {aggregate:#}"
     );
 
-    let telemetry = server
-        .tachi_agent_eval(Parameters(TachiAgentEvalParams {
-            action: "telemetry".to_string(),
-            fixture_path: None,
-            limit: Some(50),
-            register: None,
-            observe: None,
-            adjudicate: None,
-            get: None,
-            // tachi#1675 PR2: route_projection payload, unused here.
-            projection: None,
-            ..Default::default()
-        }))
-        .await
-        .expect("telemetry alias should succeed");
+    let telemetry = {
+        // `telemetry` is the same denied-by-design operator read as
+        // aggregate_live above: elevate only this call to the observe
+        // profile that gate admits, restore the exact prior profile.
+        let prior_profile = server.active_tool_profile();
+        server.set_tool_profile(Some(tachi_hub::ToolProfile::observe()));
+        let raw = server
+            .tachi_agent_eval(Parameters(TachiAgentEvalParams {
+                action: "telemetry".to_string(),
+                fixture_path: None,
+                limit: Some(50),
+                register: None,
+                observe: None,
+                adjudicate: None,
+                get: None,
+                // tachi#1675 PR2: route_projection payload, unused here.
+                projection: None,
+                ..Default::default()
+            }))
+            .await
+            .expect("telemetry alias should succeed");
+        server.set_tool_profile(prior_profile);
+        raw
+    };
     let telemetry: serde_json::Value = serde_json::from_str(&telemetry).expect("telemetry JSON");
     assert_eq!(telemetry["source"], serde_json::json!("live_memory"));
     assert!(telemetry["performance_matrix"].is_array());

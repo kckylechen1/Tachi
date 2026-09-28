@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # nextest-slow-diff.sh — operator/local gate for new >20s tests against checked-in roster
-# (parallel to known-reds #1278; like the local gitleaks hook). NOT invoked by CI
-# (Actions disabled repo-wide per #1562). Run manually by operators / local tooling.
+# (parallel to known-reds #1278). NOT invoked by any workflow; CI only runs its
+# unit tests (scripts/test_nextest_slow_diff.py). Run manually by operators / local tooling.
 #
 # Invocation (exact command + expected input via --final-status-level slow):
 #   cargo nextest run -p tachi-server -p memory-server-runtime -p tachi-delivery-tests -p tachi-vault-tests --locked \

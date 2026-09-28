@@ -406,6 +406,10 @@ pub(super) fn queue_capture_enrichment(
     agent_id: Option<&str>,
     path_prefix: Option<&str>,
 ) {
+    const SUMMARY_QUEUE_FAILURE_CODE: &str = "summary_enrichment_queue_unavailable";
+    const SUMMARY_QUEUE_FAILURE_MESSAGE: &str =
+        "summary enrichment could not be queued; retry when the enrichment worker is available";
+    let expected_revision = entry.revision;
     if let Err(err) =
         server
             .enrichment_lock()
@@ -415,8 +419,8 @@ pub(super) fn queue_capture_enrichment(
                 true,
                 needs_summary,
                 target_db,
-                named_project,
-                db_path,
+                named_project.clone(),
+                db_path.clone(),
                 agent_id.map(ToString::to_string),
                 path_prefix.map(ToString::to_string),
                 entry.revision,
@@ -427,6 +431,42 @@ pub(super) fn queue_capture_enrichment(
             entry_id = %entry.id,
             "failed to queue capture enrichment"
         );
+        // A queue failure leaves no worker that could later record this outcome.
+        // Summary generation is user-visible, so persist a fixed, revision-guarded
+        // failure only for that requested stage. Do not include channel/debug text:
+        // it can be noisy and is not durable evidence about the captured entry.
+        if needs_summary {
+            let record = |store: &mut MemoryStore| {
+                store
+                    .record_enrichment_failure_if_revision(
+                        &entry.id,
+                        "summary",
+                        &format!("{SUMMARY_QUEUE_FAILURE_CODE}: {SUMMARY_QUEUE_FAILURE_MESSAGE}"),
+                        expected_revision,
+                    )
+                    .map_err(|error| format!("record capture summary queue failure: {error}"))
+            };
+            let result = if let Some(project_name) = named_project.as_deref() {
+                server.with_named_project_store(project_name, record)
+            } else if let Some(path) = db_path.as_ref() {
+                server.with_path_store(path, record)
+            } else {
+                server.with_store_for_scope(target_db, record)
+            };
+            match result {
+                Ok(true) => {}
+                Ok(false) => tracing::debug!(
+                    entry_id = %entry.id,
+                    expected_revision,
+                    "capture summary queue failure not recorded because entry revision advanced"
+                ),
+                Err(error) => tracing::warn!(
+                    error = %error,
+                    entry_id = %entry.id,
+                    "failed to record capture summary queue failure"
+                ),
+            }
+        }
     }
 }
 
@@ -445,5 +485,180 @@ mod tests {
 
         assert_eq!(merged.access_count, 3);
         assert_eq!(merged.scored_count, 7);
+    }
+
+    #[test]
+    fn capture_queue_success_and_stale_failure_preserve_persisted_entry() {
+        let (server, _home) = crate::tests::make_server_with_temp_home();
+        let entry = crate::tests::make_entry("capture-queue-revision");
+        persist_capture_entry(&server, DbScope::Global, None, None, &entry).unwrap();
+        let load = || {
+            server
+                .with_global_store_read(|store| {
+                    store.get(&entry.id).map_err(|error| error.to_string())
+                })
+                .unwrap()
+                .unwrap()
+        };
+        let before = load();
+        // The test server retains the receiver instead of running an LLM worker.
+        // Successful enqueue must return without processing or mutating this row.
+        queue_capture_enrichment(
+            &server,
+            DbScope::Global,
+            None,
+            None,
+            &before,
+            true,
+            None,
+            None,
+        );
+        assert_eq!(
+            serde_json::to_value(load()).unwrap(),
+            serde_json::to_value(&before).unwrap()
+        );
+        server.close_enrichment_channel_for_test();
+        let mut replacement = before.clone();
+        replacement.text.push_str(" newer revision");
+        persist_capture_entry(&server, DbScope::Global, None, None, &replacement).unwrap();
+        let newer = load();
+        assert!(newer.revision > before.revision);
+        queue_capture_enrichment(
+            &server,
+            DbScope::Global,
+            None,
+            None,
+            &before,
+            true,
+            None,
+            None,
+        );
+        assert_eq!(
+            serde_json::to_value(load()).unwrap(),
+            serde_json::to_value(&newer).unwrap()
+        );
+        queue_capture_enrichment(
+            &server,
+            DbScope::Global,
+            None,
+            None,
+            &newer,
+            false,
+            None,
+            None,
+        );
+        assert_eq!(
+            serde_json::to_value(load()).unwrap(),
+            serde_json::to_value(&newer).unwrap()
+        );
+    }
+
+    #[test]
+    fn capture_queue_failure_stays_in_named_or_explicit_path_store() {
+        let (server, _home) = crate::tests::make_server_with_temp_home();
+        let temp = tempfile::tempdir().unwrap();
+        server.close_enrichment_channel_for_test();
+        for named in [false, true] {
+            let project = "capture-queue-scope";
+            let path = if named {
+                crate::path_utils::plan_c_global_db_path(project)
+            } else {
+                temp.path().join("explicit.db")
+            };
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let mut store = MemoryStore::open_with_label(
+                path.to_str().unwrap(),
+                if named {
+                    project
+                } else {
+                    memcore::path_router::UNKNOWN_DB_LABEL
+                },
+            )
+            .unwrap();
+            let entry = crate::tests::make_entry(if named { "queue-named" } else { "queue-path" });
+            store.upsert(&entry).unwrap();
+            let target = store.get(&entry.id).unwrap().unwrap();
+            drop(store);
+            persist_capture_entry(&server, DbScope::Global, None, None, &entry).unwrap();
+            let decoy_before = server
+                .with_global_store_read(|s| s.get(&entry.id).map_err(|e| e.to_string()))
+                .unwrap();
+            queue_capture_enrichment(
+                &server,
+                DbScope::Global,
+                named.then(|| project.to_string()),
+                Some(path.clone()),
+                &target,
+                true,
+                None,
+                None,
+            );
+            let store = MemoryStore::open_read_only(path.to_str().unwrap()).unwrap();
+            let after = store.get(&entry.id).unwrap().unwrap();
+            assert_eq!(
+                after.metadata["enrichment"]["failed_stage"],
+                json!("summary")
+            );
+            let decoy_after = server
+                .with_global_store_read(|s| s.get(&entry.id).map_err(|e| e.to_string()))
+                .unwrap();
+            assert_eq!(
+                serde_json::to_value(decoy_after).unwrap(),
+                serde_json::to_value(decoy_before).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn full_capture_queue_records_required_summary_failure_at_current_revision() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let server = MemoryServer::new(temp.path().join("global.db"), None).expect("server");
+        let entry = crate::tests::make_entry("capture-summary-queue-failure");
+        persist_capture_entry(&server, DbScope::Global, None, None, &entry).expect("persist");
+        let stored = server
+            .with_global_store_read(|store| store.get(&entry.id).map_err(|error| error.to_string()))
+            .expect("load")
+            .expect("stored entry");
+        let item = crate::enrichment::build_enrichment_item(
+            &stored,
+            true,
+            false,
+            DbScope::Global,
+            None,
+            None,
+            None,
+            None,
+            stored.revision,
+        );
+        while server
+            .enrichment_lock()
+            .enrich_tx
+            .try_send(item.clone())
+            .is_ok()
+        {}
+
+        queue_capture_enrichment(
+            &server,
+            DbScope::Global,
+            None,
+            None,
+            &stored,
+            true,
+            None,
+            None,
+        );
+
+        let after = server
+            .with_global_store_read(|store| store.get(&entry.id).map_err(|error| error.to_string()))
+            .expect("load after")
+            .expect("entry remains");
+        assert_eq!(
+            after.metadata["enrichment"]["failed_stage"],
+            json!("summary")
+        );
+        assert_eq!(
+            after.metadata["enrichment"]["last_error"],
+            json!("summary_enrichment_queue_unavailable: summary enrichment could not be queued; retry when the enrichment worker is available")
+        );
     }
 }

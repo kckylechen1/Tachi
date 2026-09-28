@@ -50,7 +50,14 @@ pub(super) async fn run_if_backfill_command(
             }
             Ok(true)
         }
-        Commands::BackfillSummaries { db, dry_run } => {
+        Commands::BackfillSummaries {
+            db,
+            dry_run,
+            id,
+            limit,
+            regenerate,
+            json,
+        } => {
             let target_path = db
                 .as_ref()
                 .map(|p| expand_user_path(home, p.to_string_lossy().as_ref()))
@@ -60,6 +67,12 @@ pub(super) async fn run_if_backfill_command(
                 global_db_path,
                 *dry_run,
                 schema_migration,
+                &super::super::backfill::SummaryBackfillOptions {
+                    ids: id.clone(),
+                    limit: *limit,
+                    regenerate: *regenerate,
+                    json: *json,
+                },
             )
             .await?;
             Ok(true)

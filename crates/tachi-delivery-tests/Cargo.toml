@@ -9,12 +9,9 @@ description = "External durable delivery seam tests extracted from tachi-server 
 [dependencies]
 
 [dev-dependencies]
-chrono = { workspace = true }
 memcore = { path = "../memcore", features = ["test-support"] }
 serde_json = { workspace = true }
-tachi-hub = { path = "../tachi-hub" }
 tachi-params = { path = "../tachi-params" }
 tachi-server = { path = "../tachi-server", features = ["delivery-test-api"] }
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
-uuid = { workspace = true }

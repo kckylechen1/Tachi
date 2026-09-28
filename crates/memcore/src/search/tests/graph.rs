@@ -530,3 +530,170 @@ fn as_of_search_anchors_graph_edge_validity_at_the_instant() {
         "the future edge must not leak into the replay"
     );
 }
+
+/// A `path_prefix` scopes the whole search, not just the candidate legs:
+/// graph expansion must not reintroduce rows the scope excluded. The
+/// boundary is a LITERAL string prefix (matching the `LIKE '<prefix>%'`
+/// legs for wildcard-free prefixes) — `%`/`_` in the caller's prefix are
+/// path characters, never SQL wildcards.
+#[test]
+fn graph_expansion_cannot_escape_path_prefix_scope() {
+    let mut conn = setup();
+    let mut seed = memory_entry(
+        "prefix-seed",
+        "PrefixBoundary probe needle",
+        &["prefixboundary"],
+    );
+    seed.path = "/scratch/tachi/v1.5-recall-probe-matrix".to_string();
+    insert_entry(&mut conn, seed);
+    let mut inside = memory_entry(
+        "prefix-inside-nbr",
+        "Neighbor inside the scoped prefix",
+        &["irrelevantkwinside"],
+    );
+    inside.path = "/scratch/tachi/v1.5-recall-probe-matrix/run-7".to_string();
+    insert_entry(&mut conn, inside);
+    let mut outside = memory_entry(
+        "prefix-outside-nbr",
+        "Neighbor outside the scoped prefix",
+        &["irrelevantkwoutside"],
+    );
+    outside.path = "/scratch/other/graph-neighbor".to_string();
+    insert_entry(&mut conn, outside);
+    add_graph_edge(&conn, "prefix-seed", "prefix-inside-nbr", "supports", 1.0);
+    add_graph_edge(&conn, "prefix-seed", "prefix-outside-nbr", "supports", 1.0);
+
+    let scoped_opts = SearchOptions {
+        top_k: 5,
+        record_access: false,
+        graph_expand_hops: 1,
+        path_prefix: Some("/scratch/tachi/v1.5-recall-probe-matrix".to_string()),
+        ..Default::default()
+    };
+    let scoped = hybrid_search(&conn, "PrefixBoundary probe needle", &scoped_opts).unwrap();
+    let scoped_paths: Vec<&str> = scoped.iter().map(|r| r.entry.path.as_str()).collect();
+    assert!(
+        scoped_paths.iter().all(|path| path.starts_with("/scratch/tachi/v1.5-recall-probe-matrix")),
+        "every row returned by a path-scoped search must sit under the prefix, got {scoped_paths:?}"
+    );
+    let scoped_ids: Vec<&str> = scoped.iter().map(|r| r.entry.id.as_str()).collect();
+    assert_eq!(scoped_ids, vec!["prefix-seed", "prefix-inside-nbr"]);
+
+    // Unscoped, the same edges still expand — the boundary narrows only
+    // scoped searches, it does not disable graph expansion.
+    let unscoped_opts = SearchOptions {
+        top_k: 5,
+        record_access: false,
+        graph_expand_hops: 1,
+        ..Default::default()
+    };
+    let unscoped = hybrid_search(&conn, "PrefixBoundary probe needle", &unscoped_opts).unwrap();
+    let unscoped_ids: Vec<&str> = unscoped.iter().map(|r| r.entry.id.as_str()).collect();
+    assert_eq!(
+        unscoped_ids,
+        vec!["prefix-seed", "prefix-inside-nbr", "prefix-outside-nbr"]
+    );
+}
+
+/// The scope boundary is a STRING prefix, matching the final-eligibility
+/// check the ranked rows already pass (`!entry.path.starts_with(prefix)`):
+/// `/inside/scope` also admits `/inside/scope-extra` (a sibling by path
+/// segment, not a child). Pinning this prevents the graph filter from being
+/// over-tightened into a segment-boundary match that the rest of the
+/// pipeline does not apply.
+#[test]
+fn graph_expansion_path_prefix_is_a_string_prefix_not_a_segment_boundary() {
+    let mut conn = setup();
+    let mut seed = memory_entry("strprefix-seed", "StrPrefix probe needle", &["strprefix"]);
+    seed.path = "/inside/scope".to_string();
+    insert_entry(&mut conn, seed);
+    let mut sibling = memory_entry(
+        "strprefix-sibling",
+        "Sibling under the same string prefix",
+        &["irrelevantkwsibling"],
+    );
+    sibling.path = "/inside/scope-extra".to_string();
+    insert_entry(&mut conn, sibling);
+    add_graph_edge(
+        &conn,
+        "strprefix-seed",
+        "strprefix-sibling",
+        "supports",
+        1.0,
+    );
+
+    let opts = SearchOptions {
+        top_k: 5,
+        record_access: false,
+        graph_expand_hops: 1,
+        path_prefix: Some("/inside/scope".to_string()),
+        ..Default::default()
+    };
+    let results = hybrid_search(&conn, "StrPrefix probe needle", &opts).unwrap();
+    let ids: Vec<&str> = results.iter().map(|r| r.entry.id.as_str()).collect();
+    assert_eq!(
+        ids,
+        vec!["strprefix-seed", "strprefix-sibling"],
+        "string-prefix admission must match the final-eligibility prefix check"
+    );
+}
+
+/// `%` and `_` in a caller's prefix are path characters, not SQL wildcards.
+/// The candidate legs' SQL `LIKE` may pre-filter widely, but final
+/// eligibility (`ranking.rs`'s `!entry.path.starts_with(prefix)`) is a
+/// literal check — graph expansion must enforce the same literal boundary
+/// instead of re-expanding the wildcard.
+#[test]
+fn graph_expansion_prefix_wildcards_stay_literal() {
+    let mut conn = setup();
+    let mut seed = memory_entry(
+        "literal-seed",
+        "LiteralWildcard probe needle",
+        &["literalwildcard"],
+    );
+    seed.path = "/lit/10%".to_string();
+    insert_entry(&mut conn, seed);
+    let mut neighbor = memory_entry(
+        "literal-wildcard-nbr",
+        "Neighbor admitted only if % expands",
+        &["irrelevantkwwild"],
+    );
+    neighbor.path = "/lit/10anything".to_string();
+    insert_entry(&mut conn, neighbor);
+    add_graph_edge(
+        &conn,
+        "literal-seed",
+        "literal-wildcard-nbr",
+        "supports",
+        1.0,
+    );
+
+    // Control: the seed itself literally satisfies the prefix and surfaces;
+    // only the graph neighbor's admission depends on the boundary's
+    // wildcard handling.
+    let control_opts = SearchOptions {
+        top_k: 5,
+        record_access: false,
+        graph_expand_hops: 0,
+        path_prefix: Some("/lit/10%".to_string()),
+        ..Default::default()
+    };
+    let control = hybrid_search(&conn, "LiteralWildcard probe needle", &control_opts).unwrap();
+    let control_ids: Vec<&str> = control.iter().map(|r| r.entry.id.as_str()).collect();
+    assert_eq!(control_ids, vec!["literal-seed"]);
+
+    let opts = SearchOptions {
+        top_k: 5,
+        record_access: false,
+        graph_expand_hops: 1,
+        path_prefix: Some("/lit/10%".to_string()),
+        ..Default::default()
+    };
+    let results = hybrid_search(&conn, "LiteralWildcard probe needle", &opts).unwrap();
+    let ids: Vec<&str> = results.iter().map(|r| r.entry.id.as_str()).collect();
+    assert_eq!(
+        ids,
+        vec!["literal-seed"],
+        "the expanded-row boundary must treat % literally, got {ids:?}"
+    );
+}

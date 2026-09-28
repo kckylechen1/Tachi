@@ -105,6 +105,19 @@ impl MemoryStore {
         Ok(map.remove(id))
     }
 
+    /// Read one current active entry for an MCP Resource response.
+    ///
+    /// The selected body, revision and lifecycle columns are materialized by
+    /// one query so callers can hash and return the same row. Generic-store
+    /// openers continue to refuse stamped private-partition databases before
+    /// this accessor can be reached.
+    pub fn get_active_resource_entry(&self, id: &str) -> Result<Option<MemoryEntry>, MemoryError> {
+        if self.admitted_partition.is_some() {
+            return Err(MemoryError::PrivatePartitionRefused);
+        }
+        db::get_active_resource_entry(&self.conn, id)
+    }
+
     pub fn list_user_facing_wiki_entries(
         &self,
         path_prefix: &str,

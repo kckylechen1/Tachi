@@ -18,7 +18,7 @@ use crate::tool_params::{
     MirrorEvalRegisterParams,
 };
 
-fn lineage_of(model: Option<&str>) -> String {
+pub(crate) fn lineage_of(model: Option<&str>) -> String {
     tachi_dispatch::model_lineage_id(model, tachi_dispatch::UNKNOWN_IDENTITY)
 }
 
@@ -62,7 +62,9 @@ fn scrub_vec(values: Vec<String>) -> Vec<String> {
 /// here too) fell back to the requested value for gating, so a known
 /// `requested_model` alone could satisfy independence (or evade self-eval)
 /// without any observation ever having occurred.
-fn producer_lineage_for_gating(observation: Option<&memcore::MirrorEvalObservation>) -> String {
+pub(crate) fn producer_lineage_for_gating(
+    observation: Option<&memcore::MirrorEvalObservation>,
+) -> String {
     lineage_of(
         observation
             .and_then(|o| o.effective_model.as_deref())
@@ -81,7 +83,7 @@ fn cross_model_independent(producer_lineage: &str, verifier_lineage: &str) -> bo
 
 /// Self-eval: both sides are identifiably the SAME known engine. An unknown
 /// identity on either side is unattributable, never proof of self-eval.
-fn is_self_eval(producer_lineage: &str, verifier_lineage: &str) -> bool {
+pub(crate) fn is_self_eval(producer_lineage: &str, verifier_lineage: &str) -> bool {
     producer_lineage != tachi_dispatch::UNKNOWN_IDENTITY
         && verifier_lineage != tachi_dispatch::UNKNOWN_IDENTITY
         && producer_lineage == verifier_lineage
@@ -100,6 +102,8 @@ pub(crate) fn handle_register(
         requested_profile: scrub_opt(params.requested_profile),
         requested_model: scrub_opt(params.requested_model),
         requested_agent: scrub_opt(params.requested_agent),
+        requested_task_type: scrub_opt(params.requested_task_type),
+        requested_role: scrub_opt(params.requested_role),
     };
     let run = server.with_global_store(|store| {
         memcore::register_mirror_eval_run(store.connection(), &new).map_err(|e| e.to_string())
@@ -111,6 +115,8 @@ pub(crate) fn handle_register(
         "lifecycle_owner": run.lifecycle_owner,
         "harness": run.harness,
         "native_child_id": run.native_child_id,
+        "requested_task_type": run.requested_task_type,
+        "requested_role": run.requested_role,
         "created_at": run.created_at,
     }))
     .map_err(|e| format!("serialize register: {e}"))
@@ -142,6 +148,8 @@ pub(crate) fn handle_observe(
         effective_model: scrub_opt(params.effective_model),
         effective_backend: scrub_opt(params.effective_backend),
         effective_harness: scrub_opt(params.effective_harness),
+        effective_role: scrub_opt(params.effective_role),
+        effective_model_revision: scrub_opt(params.effective_model_revision),
     };
     let observation = server.with_global_store(|store| {
         memcore::record_mirror_eval_observation(store.connection(), &new).map_err(|e| e.to_string())
@@ -463,6 +471,8 @@ pub(crate) fn handle_get(
         "requested_profile": view.run.requested_profile,
         "requested_model": view.run.requested_model,
         "requested_agent": view.run.requested_agent,
+        "requested_task_type": view.run.requested_task_type,
+        "requested_role": view.run.requested_role,
         "created_at": view.run.created_at,
         "observation": view.observation.as_ref().map(|o| json!({
             "observation_id": o.observation_id,
@@ -475,6 +485,8 @@ pub(crate) fn handle_get(
             "effective_model": o.effective_model,
             "effective_backend": o.effective_backend,
             "effective_harness": o.effective_harness,
+            "effective_role": o.effective_role,
+            "effective_model_revision": o.effective_model_revision,
             "created_at": o.created_at,
         })),
         "is_adjudicated": view.is_adjudicated(),
@@ -555,6 +567,8 @@ mod rubric_tests {
             requested_profile: None,
             requested_model: None,
             requested_agent: requested_agent.map(str::to_string),
+            requested_task_type: None,
+            requested_role: None,
         };
         let raw = handle_register(server, params).expect("register succeeds");
         let value: Value = serde_json::from_str(&raw).unwrap();
@@ -574,6 +588,8 @@ mod rubric_tests {
             effective_model: Some(effective_model.to_string()),
             effective_backend: None,
             effective_harness: None,
+            effective_role: None,
+            effective_model_revision: None,
         };
         handle_observe(server, params).expect("observe succeeds");
     }

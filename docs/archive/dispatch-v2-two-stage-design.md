@@ -53,6 +53,17 @@
 └── status.json        # 状态机：planning → review → executing → completed/failed
 ```
 
+> **现行契约（2026-09-25，#1664 起）**：模型生成的计划及其精确的
+> `model-invocation-v1` receipt **不再写入独立的 `plan.md`**，而是一次锁定/
+> fenced 的原子写入到 `status.json` 的 `model_plan` 对象
+> （`status.json#/model_plan`），包含 `dispatch_id`、`stage`（`"plan"`）、
+> `content`、`payload_digest`、`artifact_revision`，以及用
+> `bound_to_content` 绑定该内容和 revision 的 `model_invocation`。
+> 公共引用为 `plan_file`（指向 `status.json`）加上
+> `plan_pointer: "/model_plan"`；V1 的占位 `plan.md`（拼装后的 prompt）保留，
+> 且不再被模型内容覆盖。计划未提交前失败、取消、截断或 revision 漂移时，
+> 不产生 `model_plan`/receipt。
+
 ## Stage 1: Plan（assemble_prompt_v2）
 
 ### 自动注入的上下文

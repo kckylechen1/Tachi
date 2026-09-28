@@ -1845,6 +1845,49 @@ async fn managed_required_postflight_refuses_uncontained_worker_before_spawn() {
     assert!(!marker.exists(), "uncontained managed worker was spawned");
 }
 
+#[cfg(all(
+    test,
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+#[path = "subprocess_required_postflight_child_tests.rs"]
+mod required_postflight_child_tests;
+
+// Linux counterpart of the macOS test above (tachi#1978). The parent spawns
+// the re-exec'd child through `run_agent_subprocess_with_liveness` with
+// `require_postflight_containment = true`, so the seccomp escape filter is
+// installed and the child's `setsid` must fail with EPERM while the runner
+// still proves owned-group absence. The descendant probe is the
+// discriminator: a forked non-process-group leader can call `setsid` in the
+// uncontained control, so EPERM in the contained run comes from the inherited
+// filter rather than the kernel's process-group-leader rule.
+#[cfg(all(
+    test,
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+#[tokio::test]
+async fn required_postflight_kernel_containment_discriminates_setsid_escape() {
+    let mut command = Command::new(std::env::current_exe().expect("current test binary"));
+    command
+        .arg(required_postflight_child_tests::CONTAINMENT_CHILD_TEST_NAME)
+        .arg("--exact")
+        .arg("--nocapture")
+        .env("TACHI_TEST_ATTEMPT_SETSID", "1");
+    let outcome =
+        run_agent_subprocess_with_liveness(command, Duration::from_secs(10), true, None).await;
+    let result = outcome.result.expect("contained child test must pass");
+    assert_eq!(result.exit_code, Some(0));
+    assert!(matches!(
+        outcome.liveness,
+        crate::exec_env_postflight::RunnerLivenessEvidence::ConfirmedReaped {
+            proof: "kernel_denied_process_group_escape_and_owned_group_absent"
+        }
+    ));
+
+    required_postflight_child_tests::assert_descendant_setsid_discrimination().await;
+}
+
 #[cfg(not(unix))]
 pub(crate) async fn terminate_reap_uncontained_child(
     child: &mut tokio::process::Child,

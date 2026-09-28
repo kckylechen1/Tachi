@@ -109,17 +109,22 @@ mod compact_section_tests {
 }
 
 async fn compact_health_summary(server: &MemoryServer, wiki_counts: Value) -> Value {
-    // tachi#1201 k3: search_memory/tachi_status now default to markdown when
-    // `format` is omitted; this internal consumer parses the body as JSON,
-    // so it must opt in explicitly to keep this call's shape unchanged.
-    let status = crate::status_ops::handle_tachi_status_agent(server, Some("json"))
+    // Health-only consumer: derive the compact health block from the typed
+    // digest (`collect_agent_health_digest`) — the SAME authoritative
+    // snapshot and warning assembly the agent status surface reports —
+    // instead of building the full status payload and round-tripping it
+    // through stringify/parse. The blocking snapshot collection runs on
+    // Tokio's blocking pool. On failure this keeps the exact pre-existing
+    // degradation shape (score 0, empty warnings) — no new warning lines.
+    let digest = crate::status_ops::collect_agent_health_digest(server)
         .await
-        .ok()
-        .and_then(|body| serde_json::from_str::<Value>(&body).ok())
-        .unwrap_or_else(|| json!({}));
+        .unwrap_or(crate::status_ops::AgentHealthDigest {
+            health_score: 0,
+            warnings: Vec::new(),
+        });
     json!({
-        "health_score": status.get("health_score").cloned().unwrap_or_else(|| json!(0)),
-        "warnings": status.get("warnings").cloned().unwrap_or_else(|| json!([])),
+        "health_score": digest.health_score,
+        "warnings": digest.warnings,
         "wiki": wiki_counts,
         "compact": true,
     })
@@ -474,12 +479,22 @@ pub(crate) async fn handle_memory_briefing(
         .unwrap_or_default();
 
     // Component governance for the active workspace (#799): registry-only,
-    // never presented as memory-derived current truth.
-    let component_governance = crate::component_governance_ops::component_governance_context(
-        server,
-        named_project.as_deref(),
-        None,
-    )
+    // never presented as memory-derived current truth. The registry read is
+    // blocking SQLite and the repo classification spawns git subprocesses, so
+    // it runs on Tokio's blocking pool, not the async executor (audit G10).
+    // The server clone is Arc-backed and shares the same stores.
+    let governance_server = server.clone();
+    let governance_project = named_project.clone();
+    let component_governance = tokio::task::spawn_blocking(move || {
+        crate::component_governance_ops::component_governance_context(
+            &governance_server,
+            governance_project.as_deref(),
+            None,
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())
+    .and_then(|result| result)
     .unwrap_or_else(|e| {
         json!({
             "status": "error",

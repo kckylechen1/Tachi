@@ -235,6 +235,7 @@ const TEMPLATE_IDENTITY_SOURCE_BLOBS: &[&[u8]] = &[
     embedded_template_source!("/../memcore/src/db/migrations/idless_identity.rs"),
     embedded_template_source!("/../memcore/src/db/migrations/legacy_columns.rs"),
     embedded_template_source!("/../memcore/src/db/migrations/mirror_eval.rs"),
+    embedded_template_source!("/../memcore/src/db/migrations/mirror_eval_identity.rs"),
     embedded_template_source!("/../memcore/src/db/migrations/pack_retire.rs"),
     embedded_template_source!("/../memcore/src/db/migrations/sentinel.rs"),
     embedded_template_source!("/../memcore/src/db/migrations/session_claims_identity.rs"),
@@ -908,6 +909,10 @@ fn template_cache_fingerprint_tracks_verified_admission_schema_inputs() {
         (
             "CurrentTruth migration",
             embedded_template_source!("/../memcore/src/db/migrations/current_truth.rs"),
+        ),
+        (
+            "mirror eval v39 migration",
+            embedded_template_source!("/../memcore/src/db/migrations/mirror_eval_identity.rs"),
         ),
     ];
     for (label, source) in schema_sources {
@@ -1797,6 +1802,30 @@ pub(crate) fn make_server() -> TestServer {
     make_test_server(None).0
 }
 
+/// Build `TachiSandboxParams` for one action from a wire-shaped JSON object,
+/// so per-action defaults come from the REAL serde defaults in `tachi-params`
+/// — exactly what a caller of the canonical `tachi_sandbox` tool
+/// deserializes. The v2 retirement deleted the six pre-fold `sandbox_*`
+/// `#[tool]` wrappers (aliases expired at 1.10.0); tests that used to call
+/// those methods directly drive the same operations through the canonical
+/// verb with this helper instead of hand-copying struct defaults that could
+/// drift from the wire schema.
+pub(crate) fn wire_sandbox_params(
+    action: &str,
+    extra: serde_json::Value,
+) -> crate::tool_params::TachiSandboxParams {
+    let mut value = serde_json::json!({ "action": action });
+    let destination = value
+        .as_object_mut()
+        .expect("root json object for sandbox params");
+    if let Some(extra) = extra.as_object() {
+        for (key, field) in extra {
+            destination.insert(key.clone(), field.clone());
+        }
+    }
+    serde_json::from_value(value).expect("test sandbox params must deserialize")
+}
+
 /// Plant `projects/wiki/tachi-memory.db` at an older `PRAGMA user_version`
 /// so an ordinary Deny-authority open hits `#1119`
 /// `SchemaMigrationOptInRequired`. Discriminates leftover-schema federation
@@ -2364,9 +2393,7 @@ mod facade_tests;
 mod fold_contract;
 mod gh_comment_tests;
 mod hub_tests;
-mod kanban_tests;
 mod memory_tests;
-mod merge_tests;
 mod orchestrator_tests;
 mod profile_tests;
 mod proxy_tests;

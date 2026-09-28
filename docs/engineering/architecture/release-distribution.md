@@ -73,7 +73,10 @@ The gate must inspect the **serving** binary's stamped identity.
 
 ### Running-binary verification gate
 
-Every build stamps `GIT_SHA` + `BUILD_TIME` (`build.rs` → `build_info`).
+Every build stamps `GIT_SHA` + `BUILD_TIME` (`crates/tachi-bootstrap/build.rs` →
+`tachi_bootstrap::build_info`, re-exported as `tachi_server::build_info`).
+`BUILD_TIME` is the wall-clock build time for release builds (or
+`SOURCE_DATE_EPOCH` when set); non-release builds use the HEAD commit time.
 
 1. After upgrade, call `tachi status` (or MCP `tachi_status`).
 2. Read `runtime.build.git_sha` / `runtime.build.build_id` — this is **this

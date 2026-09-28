@@ -19,7 +19,7 @@ route work as follows. Re-read the live workflow before using this inventory.
 | Secret scan | self-hosted, tachi-acceptance | gitleaks |
 | Node packages | self-hosted, tachi-acceptance | Two package matrix members |
 | CI acceptance | self-hosted, tachi-acceptance | Automated job-family aggregation only |
-| Physical DB identity fallback | windows-latest | Three Windows crate matrix members |
+| Physical DB identity fallback | windows-latest | Three Windows crate matrix members (observational for current-delivery acceptance; owner adjudication 2026-09-23) |
 | Separate fmt.yml format gate | ubuntu-24.04 | Hosted formatting if that workflow is enabled and triggered |
 
 A self-hosted label does not establish Linux. Record actual runner name, OS, and
@@ -73,9 +73,20 @@ visibility; request a redacted usage/status screenshot, not a token or payment d
 - Use an existing admitted self-hosted execution seat for appropriate work. New
   runners, trust-label changes, toolchain provisioning, or spending changes require
   their corresponding authorization. Do not expose owner credentials to PR code.
-- Preserve every required Windows matrix member. New Windows hardware or an
-  explicitly reviewed platform-scope change is a separate delivery, not an automatic
-  Linux substitution or a late `not_applicable` label for a failed Windows run.
+- Preserve every Windows matrix member: all three crate legs keep executing
+  on `windows-latest` with their raw status collected by the aggregate. Owner
+  adjudication (2026-09-23, current delivery only, after confirming there is
+  no current Windows usage) classifies `physical-db-identity-windows` as
+  **observational** in `.github/acceptance-plan.json`: its failures and
+  non-execution are reported as `observational_*_excluded` in the acceptance
+  receipt and do not block this delivery's CI aggregate. This is an
+  explicitly reviewed platform-scope change — dated, named per job, and
+  reversible in the plan, not a per-PR flag — not an automatic Linux
+  substitution (the trusted runner is macOS-arm64 and certifies no Linux
+  behavior), not a retroactive greening of past runs, and not a late
+  `not_applicable` label: the raw Windows failure stays visible. Windows
+  releases remain prohibited until #1963 is fixed; every required job still
+  fails closed on failure, cancellation, skip, or unknown evidence.
 - Do not use `[skip ci]`, blanket path exclusions, `continue-on-error`, advisory
   suppression, or success-shaped receipts to bypass this candidate's obligations.
   Markdown that changes governance is not automatically a low-risk docs-only change.

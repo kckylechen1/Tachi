@@ -222,6 +222,7 @@ enum ModelApi {
     CallReasoningLlmWithReceipt,
     CallReasoningLlmProviderOnly,
     CallReasoningLlmProviderOnlyWithReceipt,
+    CallReasoningLlmProviderOnlyWithServingReceipt,
     GenerateSummary,
     GenerateSummaryWithReceipt,
     GenerateDistill,
@@ -250,6 +251,9 @@ impl ModelApi {
             Self::CallReasoningLlmProviderOnly => "call_reasoning_llm_provider_only",
             Self::CallReasoningLlmProviderOnlyWithReceipt => {
                 "call_reasoning_llm_provider_only_with_receipt"
+            }
+            Self::CallReasoningLlmProviderOnlyWithServingReceipt => {
+                "call_reasoning_llm_provider_only_with_serving_receipt"
             }
             Self::GenerateSummary => "generate_summary",
             Self::GenerateSummaryWithReceipt => "generate_summary_with_receipt",
@@ -293,6 +297,7 @@ impl ModelApi {
                 | Self::CallSummaryLlmWithReceipt
                 | Self::CallReasoningLlmWithReceipt
                 | Self::CallReasoningLlmProviderOnlyWithReceipt
+                | Self::CallReasoningLlmProviderOnlyWithServingReceipt
                 | Self::GenerateSummaryWithReceipt
                 | Self::GenerateDistillWithReceipt
                 | Self::ExtractMetadataWithReceipt
@@ -303,6 +308,7 @@ impl ModelApi {
 
     fn all() -> &'static [Self] {
         &[
+            Self::CallReasoningLlmProviderOnlyWithServingReceipt,
             Self::CallReasoningLlmProviderOnlyWithReceipt,
             Self::CallReasoningLlmProviderOnly,
             Self::CallReasoningLlmWithReceipt,
@@ -612,27 +618,15 @@ fn model_call_registry() -> Vec<ModelCallRecord> {
             DailyReportArtifact,
             Covered1522,
         ),
-        record_with_successor(
-            "dispatch_plan_recorder",
+        record(
+            "dispatch_plan_serving_receipt",
             "dispatch_ops/dispatch_v2.rs",
             "call_plan_llm",
-            RecordCall,
-            RecordCallWithReceipt,
+            CallReasoningLlmProviderOnlyWithServingReceipt,
             1,
-            "dispatch plan run artifact recorder",
-            RecorderRunDirectory,
-            Owned1536,
-        ),
-        record_with_successor(
-            "dispatch_plan_provider_call",
-            "dispatch_ops/dispatch_v2.rs",
-            "call_plan_llm",
-            CallReasoningLlmProviderOnly,
-            CallReasoningLlmProviderOnlyWithReceipt,
-            1,
-            "dispatch plan model call inside recorder closure",
-            RecorderRunDirectory,
-            Owned1536,
+            "dispatch plan model call; committed into status.json#/model_plan with its exact serving receipt",
+            PersistedModelInvocation,
+            Covered1522,
         ),
         record(
             "docs_classify_extract_metadata",

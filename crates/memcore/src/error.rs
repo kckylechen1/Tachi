@@ -376,6 +376,24 @@ pub enum MemoryError {
     #[error("delivery idempotency conflict: {0}")]
     DeliveryIdempotencyConflict(String),
 
+    /// The open funnel's pre-transaction preflight and its authoritative
+    /// in-transaction re-evaluation saw different schema versions, and the
+    /// in-transaction state is a migration. The pre-migration backup (#1180)
+    /// was taken, or skipped, for the preflight state, so migrating now would
+    /// run without a backup of the state being migrated. The transaction is
+    /// rolled back untouched; retrying the open backs up the current state.
+    #[error(
+        "schema version of {db_path} changed from {preflight} to {current} while this open was \
+         in progress, and the new state needs a migration. The pre-migration backup was taken \
+         for the earlier state, so the open refuses rather than migrate without one \
+         (kckylechen1/Sigil#1180). Retry the open."
+    )]
+    SchemaChangedDuringOpen {
+        preflight: u32,
+        current: u32,
+        db_path: String,
+    },
+
     /// #1119: a process carrying [`crate::db::MigrationAuthority::Deny`] tried
     /// to open an EXISTING DB stamped below this kernel's
     /// `EXPECTED_SCHEMA_VERSION` (or a `CreateFresh` provisioning call landed
@@ -475,6 +493,25 @@ pub enum MemoryError {
          (kckylechen1/Sigil#1585). Point this process at a {required:?} database."
     )]
     StoreProfileMismatch {
+        required: String,
+        stored: String,
+        db_path: String,
+    },
+
+    /// W1-2: the caller admits only an exact profile
+    /// ([`crate::db::ProfileRequirement::Exact`]) and the store is stamped a
+    /// different one. In practice: an embedder with a stricter product boundary
+    /// than the kernel (Hypermem, `Exact(PortableKernel)`) opening a full Tachi
+    /// database. The kernel would admit that superset under `AtLeast`; this
+    /// caller asked it not to. Raised by the open funnel's read-only identity
+    /// preflight, ahead of the migration backup and any memcore DDL or stamp.
+    #[error(
+        "store profile is not exact at {db_path}: caller admits only profile {required:?} but \
+         the database is stamped {stored:?}. This caller refuses a store of any other profile, \
+         including a superset, so it never serves or stamps a role into a database it does \
+         not own. Point this process at a {required:?} database."
+    )]
+    StoreProfileNotExact {
         required: String,
         stored: String,
         db_path: String,

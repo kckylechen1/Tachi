@@ -62,6 +62,8 @@ def release_fixture(rename_manifest: str | None = None, lock_version: str = VERS
         )
         for path in [
             "README.md",
+            "README.zh-CN.md",
+            "README.classical.md",
             "scripts/install.sh",
             "docs/INSTALL.md",
             "integrations/openclaw/README.md",

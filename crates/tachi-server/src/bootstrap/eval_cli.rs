@@ -102,9 +102,15 @@ fn load_cases_file(path: &Path) -> Result<Vec<LoadedCase>, Box<dyn std::error::E
     Ok(cases
         .iter()
         .cloned()
-        .map(|case| LoadedCase {
-            slice: metadata_string(&case, "slice").unwrap_or_else(|| "unsliced".to_string()),
-            case,
+        .map(|mut case| {
+            let kind = label_kind(&case, &case);
+            if let Some(object) = case.as_object_mut() {
+                object.insert("label_kind".to_string(), json!(kind));
+            }
+            LoadedCase {
+                slice: metadata_string(&case, "slice").unwrap_or_else(|| "unsliced".to_string()),
+                case,
+            }
         })
         .collect())
 }
@@ -158,6 +164,7 @@ fn case_from_eval_metadata(metadata: &Value, row_id: &str, summary: &str) -> Opt
         "name": name,
         "query": query,
         "expected_ids": expected_ids,
+        "label_kind": label_kind(metadata, source),
     });
     for key in ["scope", "project", "domain", "path_prefix", "as_of"] {
         if let Some(value) = metadata_string(source, key) {
@@ -168,6 +175,32 @@ fn case_from_eval_metadata(metadata: &Value, row_id: &str, summary: &str) -> Opt
         case["top_k"] = json!(value as usize);
     }
     Some(LoadedCase { case, slice })
+}
+
+/// Auto-captured search hits are behavioral observations, not independent gold
+/// labels. Old captures predate `label_kind`, so retain their source markers.
+fn label_kind(metadata: &Value, source: &Value) -> &'static str {
+    if metadata.get("auto_captured").and_then(Value::as_bool) == Some(true)
+        || source.get("source").and_then(Value::as_str) == Some("record_access")
+        || source.get("signal").and_then(Value::as_str) == Some("recalled_and_used")
+        || source.get("slice").and_then(Value::as_str) == Some("auto_capture")
+        || source.get("label_kind").and_then(Value::as_str) == Some("weak")
+    {
+        "weak"
+    } else if source.get("label_kind").and_then(Value::as_str) == Some("reviewed") {
+        "reviewed"
+    } else {
+        "unspecified"
+    }
+}
+
+fn label_counts(loaded: &[LoadedCase]) -> Value {
+    let mut counts = json!({"weak": 0, "reviewed": 0, "unspecified": 0});
+    for loaded in loaded {
+        let kind = label_kind(&loaded.case, &loaded.case);
+        counts[kind] = json!(counts[kind].as_u64().unwrap_or(0) + 1);
+    }
+    counts
 }
 
 fn extract_cases_array(value: &Value) -> Option<&Vec<Value>> {
@@ -244,6 +277,8 @@ fn build_aggregate_status(
         "generated_at": chrono::Utc::now().to_rfc3339(),
         "case_count": loaded.len(),
         "skipped_rows": skipped_rows,
+        "label_counts": label_counts(loaded),
+        "gate_label_policy": "all_loaded_cases",
         "top_k": top_k,
         "thresholds": {
             "min_recall": min_recall,
@@ -253,6 +288,9 @@ fn build_aggregate_status(
             "hit_count": metrics.get("hit_count").cloned().unwrap_or(Value::Null),
             "miss_count": metrics.get("miss_count").cloned().unwrap_or(Value::Null),
             "recall_at_k": recall,
+            "recall_at_1": metrics.get("recall_at_1").cloned().unwrap_or(Value::Null),
+            "recall_at_3": metrics.get("recall_at_3").cloned().unwrap_or(Value::Null),
+            "recall_at_3_case_count": metrics.get("recall_at_3_case_count").cloned().unwrap_or(Value::Null),
             "mrr": mrr,
             "case_errors": case_errors,
         },
@@ -303,6 +341,9 @@ fn aggregate_variants(report: &Value) -> Value {
                     "hit_count": metrics.get("hit_count").cloned().unwrap_or(Value::Null),
                     "miss_count": metrics.get("miss_count").cloned().unwrap_or(Value::Null),
                     "recall_at_k": metrics.get("recall_at_k").cloned().unwrap_or(Value::Null),
+                    "recall_at_1": metrics.get("recall_at_1").cloned().unwrap_or(Value::Null),
+                    "recall_at_3": metrics.get("recall_at_3").cloned().unwrap_or(Value::Null),
+                    "recall_at_3_case_count": metrics.get("recall_at_3_case_count").cloned().unwrap_or(Value::Null),
                     "mrr": metrics.get("mrr").cloned().unwrap_or(Value::Null),
                     "rerank_policy_counts": variant
                         .get("rerank")
@@ -357,6 +398,58 @@ fn print_recall_eval_summary(status: &Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recall_eval_labels_preserve_weak_capture_provenance_and_private_aggregate() {
+        let cases = [
+            json!({"auto_captured": true, "recall_eval": {
+                "query": "private auto query", "expected_id": "private-target", "label_kind": "reviewed"
+            }}),
+            json!({"recall_eval": {
+                "query": "private legacy query", "expected_id": "private-target", "source": "record_access"
+            }}),
+            json!({"recall_eval": {
+                "query": "private reviewed query", "expected_id": "private-target", "label_kind": "reviewed"
+            }}),
+            json!({"recall_eval": {
+                "query": "private unspecified query", "expected_id": "private-target"
+            }}),
+        ];
+        let loaded = cases
+            .iter()
+            .map(|metadata| {
+                case_from_eval_metadata(metadata, "private-case", "private-summary").expect("case")
+            })
+            .collect::<Vec<_>>();
+        let report = json!({"variants": [{"name": "current", "metrics": {
+            "recall_at_k": 1.0, "mrr": 0.75, "recall_at_1": 0.5,
+            "recall_at_3": 1.0, "recall_at_3_case_count": 4
+        }}]});
+        let status = build_aggregate_status(&report, &loaded, 0, 5, 0.9, 0.5);
+        assert_eq!(
+            status["label_counts"],
+            json!({"weak": 2, "reviewed": 1, "unspecified": 1})
+        );
+        assert_eq!(status["gate_label_policy"], json!("all_loaded_cases"));
+        assert_eq!(status["current"]["recall_at_1"], json!(0.5));
+        assert_eq!(status["current"]["recall_at_3"], json!(1.0));
+        assert!(!status.to_string().contains("private"));
+    }
+
+    #[test]
+    fn recall_eval_file_labels_keep_legacy_auto_capture_weak() {
+        let dir = tempfile::tempdir().expect("temporary cases");
+        let path = dir.path().join("cases.json");
+        std::fs::write(&path, serde_json::to_vec(&json!([
+            {"query": "q", "expected_id": "id", "slice": "auto_capture", "label_kind": "reviewed"},
+            {"query": "q2", "expected_id": "id2", "label_kind": "reviewed"}
+        ])).unwrap()).unwrap();
+        let loaded = load_cases_file(&path).expect("load cases");
+        assert_eq!(
+            label_counts(&loaded),
+            json!({"weak": 1, "reviewed": 1, "unspecified": 0})
+        );
+    }
 
     #[test]
     fn eval_metadata_becomes_recall_case_without_private_status_fields() {

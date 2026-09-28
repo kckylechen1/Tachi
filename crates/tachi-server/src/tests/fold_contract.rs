@@ -1,4 +1,5 @@
-//! #975-proof fold-contract harness (#757 Cut3-S1; reused by S2–S7).
+//! #975-proof fold-contract harness (#757 Cut3-S1; evolved for the v2 alias
+//! retirement).
 //!
 //! When a set of standalone tools is folded into a single verb facade, the
 //! authorization surface must be *invariant*: every `(profile, legacy_tool)`
@@ -10,15 +11,28 @@
 //! anything a unit-level `facade_action_allowed` check would miss (tool-level
 //! visibility, the action gate, and their interaction).
 //!
+//! ## v2 retirement evolution
+//!
+//! The S1 sandbox aliases expired (`remove_in_release` 1.10.0 ≤ 2.0.0) and
+//! were deleted from the router, so "legacy alias vs verb" cell-for-cell
+//! equivalence is no longer observable on the wire — the legacy side has no
+//! route at all. The pre-fold equivalence guarantee did not disappear; it
+//! moved to `sandbox_fold.rs`, which drives the *unchanged* pre-fold
+//! `sandbox_ops` handlers directly as an oracle and demands byte-identical
+//! output from the canonical facade. This harness now pins the retirement
+//! shape of the authorization matrix itself:
+//!
+//! - [`assert_verb_actions_admin_only`]: every canonical `verb(action=…)` is
+//!   `Callable` under `admin` and `ToolHidden` under the other six profiles.
+//! - [`assert_legacy_names_unrouted_everywhere`]: every retired legacy name is
+//!   `ToolHidden` under **all seven profiles, admin included** — a retired
+//!   name must be rejected even for the admin profile that used to own it.
+//!
 //! ## Usage (S2–S7)
 //!
 //! Build a `&[FoldPair]` mapping each legacy tool name to its canonical
-//! `(verb, action)` and call [`assert_fold_matrix_equivalence`]. It asserts, for
-//! every one of [`CONTRACT_PROFILES`], that the legacy tool and the folded
-//! `verb(action=…)` have identical [`Reachability`]. For admin-only folds also
-//! call [`assert_admin_only`] to pin the absolute expectation (callable only
-//! under `admin`) so a fold that silently widened *both* the alias and the verb
-//! to a bundle can't pass equivalence alone.
+//! `(verb, action)` and call both asserts above after the aliases are retired,
+//! together with the oracle-equality goldens in the fold's own test module.
 
 use super::{call_tool_on_server, make_server};
 use serde_json::json;
@@ -50,7 +64,9 @@ pub(crate) enum Reachability {
     ActionDenied,
 }
 
-/// A legacy tool name and the canonical folded verb+action it maps to.
+/// A legacy tool name and the canonical folded verb+action it maps to. After a
+/// retirement the `legacy_name` side is a tombstone: it must be unrouted, and
+/// the pair records which canonical action replaced it.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct FoldPair {
     pub legacy_name: &'static str,
@@ -60,7 +76,7 @@ pub(crate) struct FoldPair {
 
 /// Drive one `(tool, action)` call through the real MCP `call_tool` path on a
 /// server whose profile was fixed by the caller, and classify the outcome.
-async fn reachability(
+pub(crate) async fn reachability(
     server: crate::MemoryServer,
     tool: &str,
     action: Option<&str>,
@@ -98,41 +114,11 @@ async fn reachability(
     }
 }
 
-/// Assert that every legacy tool in `pairs` has, across all seven profiles, the
-/// identical reachability as the folded `verb(action=…)` it maps to. This is
-/// the per-cell fold invariant: the fold changed the surface shape, not who can
-/// reach it.
-pub(crate) async fn assert_fold_matrix_equivalence(pairs: &[FoldPair]) {
-    for &profile in CONTRACT_PROFILES {
-        let server = make_server();
-        server.set_tool_profile(Some(
-            tachi_hub::parse_tool_profile(profile)
-                .unwrap_or_else(|| panic!("profile '{profile}' should parse")),
-        ));
-        for pair in pairs {
-            let legacy = reachability((*server).clone(), pair.legacy_name, None).await;
-            let folded = reachability(
-                (*server).clone(),
-                pair.canonical_tool,
-                Some(pair.canonical_action),
-            )
-            .await;
-            assert_eq!(
-                legacy, folded,
-                "fold changed reachability for profile='{profile}': legacy '{}' = {legacy:?} but \
-                 {}(action='{}') = {folded:?}",
-                pair.legacy_name, pair.canonical_tool, pair.canonical_action
-            );
-        }
-    }
-}
-
-/// Assert that every pair in `pairs` — both the legacy alias and the folded
-/// `verb(action=…)` — is callable ONLY under the `admin` profile and hidden
-/// under every other profile. Complements [`assert_fold_matrix_equivalence`]:
-/// equivalence alone would still pass if a fold widened *both* sides
-/// identically, so admin-only folds pin the absolute expectation here.
-pub(crate) async fn assert_admin_only(pairs: &[FoldPair]) {
+/// Assert that every canonical `verb(action=…)` in `pairs` is callable ONLY
+/// under the `admin` profile and hidden under every other profile. Absolute
+/// pin (not mere equivalence): a fold that silently widened the verb to a
+/// bundle fails here even if both sides widened identically.
+pub(crate) async fn assert_verb_actions_admin_only(pairs: &[FoldPair]) {
     for &profile in CONTRACT_PROFILES {
         let server = make_server();
         server.set_tool_profile(Some(
@@ -145,14 +131,8 @@ pub(crate) async fn assert_admin_only(pairs: &[FoldPair]) {
             Reachability::ToolHidden
         };
         for pair in pairs {
-            let legacy = reachability((*server).clone(), pair.legacy_name, None).await;
-            assert_eq!(
-                legacy, expected,
-                "admin-only legacy alias '{}' must be {expected:?} for profile='{profile}'",
-                pair.legacy_name
-            );
             let folded = reachability(
-                (*server).clone(),
+                server.clone(),
                 pair.canonical_tool,
                 Some(pair.canonical_action),
             )
@@ -161,6 +141,32 @@ pub(crate) async fn assert_admin_only(pairs: &[FoldPair]) {
                 folded, expected,
                 "admin-only {}(action='{}') must be {expected:?} for profile='{profile}'",
                 pair.canonical_tool, pair.canonical_action
+            );
+        }
+    }
+}
+
+/// Assert that every legacy name in `pairs` is absent from the router
+/// entirely: `ToolHidden` under ALL seven profiles, admin included. This is
+/// the defining property of a completed retirement — the retired name must be
+/// rejected even for the admin profile that used to own it, so a resurrected
+/// zombie alias (or a retirement that only hid the name from non-admin
+/// bundles) fails here.
+pub(crate) async fn assert_legacy_names_unrouted_everywhere(pairs: &[FoldPair]) {
+    for &profile in CONTRACT_PROFILES {
+        let server = make_server();
+        server.set_tool_profile(Some(
+            tachi_hub::parse_tool_profile(profile)
+                .unwrap_or_else(|| panic!("profile '{profile}' should parse")),
+        ));
+        for pair in pairs {
+            let legacy = reachability(server.clone(), pair.legacy_name, None).await;
+            assert_eq!(
+                legacy,
+                Reachability::ToolHidden,
+                "retired legacy name '{}' must be unrouted for profile='{profile}' — a \
+                 retired alias is rejected even for admin",
+                pair.legacy_name
             );
         }
     }

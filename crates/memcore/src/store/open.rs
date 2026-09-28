@@ -110,6 +110,21 @@ fn physical_db_identity_at_open(db_path: &str) -> Option<String> {
     physical_db_identity_at_path(Path::new(db_path))
 }
 
+/// Compare the physical identity sampled at `db_path` now with `before_open`.
+///
+/// Known limit (pre-existing; tachi#2002 review finding 1, not closed there):
+/// both sides are samples of the *pathname*, not of the handle SQLite opened.
+/// * ABA: if the path is swapped to another file B while SQLite opens it and
+///   restored to the original A before the next sample, every sample matches A
+///   although the connection holds B. No pathname comparison can detect that.
+/// * Unstable tokens: on non-Unix targets, and on Unix when dev/ino fails
+///   `has_stable_unix_file_identity`, the token is `path:<canonical path>`,
+///   which is equal for any file at the same path, so a same-path replacement
+///   is invisible. This function does not require
+///   `physical_db_identity_is_stable`.
+///
+/// So a match proves only that the path named the same Unix file at each
+/// sample, not that the connection's handle is that file.
 fn validate_physical_db_identity_across_open(
     db_path: &str,
     before_open: Option<String>,
@@ -307,26 +322,6 @@ fn require_exact_virtual_shape(
     )))
 }
 
-/// Filesystem presence does not distinguish an operational database from an
-/// empty path reservation. Only an unstamped database with no application
-/// schema may enter ordinary initialization and install the canonical guards.
-fn has_existing_application_schema(conn: &Connection) -> Result<bool, MemoryError> {
-    if db::migrations::read_schema_version(conn)? != 0 {
-        return Ok(true);
-    }
-
-    let application_objects: i64 = conn.query_row(
-        "SELECT EXISTS(
-             SELECT 1
-             FROM main.sqlite_schema
-             WHERE name NOT LIKE 'sqlite_%'
-         )",
-        [],
-        |row| row.get(0),
-    )?;
-    Ok(application_objects != 0)
-}
-
 /// Prove that the compatibility handle can serve the selected read-only
 /// backfill before exposing it. SQLite's table-list and extended-column
 /// metadata distinguish ordinary tables, views, virtual tables, and each
@@ -506,8 +501,59 @@ impl MemoryStore {
         health: &crate::vault::VaultKeyHealth,
     ) -> Result<(), MemoryError> {
         Self::with_open_store_and_busy_timeout(db_path, ctx, busy_timeout, |store| {
+            // The handle is dropped here, still under startup ownership.
             store.vault_upsert_key_health(health)
         })
+    }
+
+    /// [`Self::open_and_vault_upsert_key_health_with_context_and_busy_timeout`]
+    /// for a caller that keeps the handle for later writes.
+    ///
+    /// Open and upsert run under one startup-ownership hold, exactly as in the
+    /// dropping variant. Only a successful upsert returns the handle: a failed
+    /// one drops it while ownership is still held, so a caller never caches a
+    /// handle whose first write failed. Every later key-health write through
+    /// the returned handle must go through
+    /// [`Self::vault_upsert_key_health_with_startup_ownership`] to keep the
+    /// open-then-write guarantee (#1680 D6).
+    #[cfg(feature = "admin")]
+    pub fn open_and_vault_upsert_key_health_retaining_store(
+        db_path: &str,
+        ctx: &DbOpenContext,
+        busy_timeout: Duration,
+        health: &crate::vault::VaultKeyHealth,
+    ) -> Result<Self, MemoryError> {
+        Self::with_open_store_and_busy_timeout(db_path, ctx, busy_timeout, |store| {
+            store.vault_upsert_key_health(health)?;
+            Ok(store)
+        })
+    }
+
+    /// Persist one provider-key health row through an already-open handle while
+    /// holding process startup ownership for the write.
+    ///
+    /// This is the retained-handle form of the open-then-write guarantee
+    /// (#1680 D6): no open in this process can cross the startup boundary while
+    /// this write is in progress, the same as when the write directly follows
+    /// its own open. It does not open, validate or re-stamp anything; a caller
+    /// that retains a handle owns deciding when the handle is still valid (for
+    /// example with [`Self::verify_opened_physical_db_identity`]).
+    #[cfg(feature = "admin")]
+    pub fn vault_upsert_key_health_with_startup_ownership(
+        &self,
+        health: &crate::vault::VaultKeyHealth,
+    ) -> Result<(), MemoryError> {
+        let _startup_guard = db::acquire_startup_lock();
+        self.vault_upsert_key_health(health)
+    }
+
+    /// Drop an already-open provider-health store while retaining process
+    /// startup ownership. This closes the same connection lifetime boundary
+    /// that a fresh provider-health open and write protect.
+    #[cfg(feature = "admin")]
+    pub fn drop_with_startup_ownership(self) {
+        let _startup_guard = db::acquire_startup_lock();
+        drop(self);
     }
 
     #[cfg(feature = "admin")]
@@ -515,7 +561,7 @@ impl MemoryStore {
         db_path: &str,
         ctx: &DbOpenContext,
         busy_timeout: Duration,
-        operation: impl FnOnce(&Self) -> Result<T, MemoryError>,
+        operation: impl FnOnce(Self) -> Result<T, MemoryError>,
     ) -> Result<T, MemoryError> {
         Self::register_open_extensions()?;
         #[cfg(feature = "test-support")]
@@ -541,7 +587,7 @@ impl MemoryStore {
             ctx,
             Some(busy_timeout),
         )?;
-        operation(&store)
+        operation(store)
     }
 
     /// Open (or create) with an explicit manifest label AND an explicit
@@ -568,6 +614,9 @@ impl MemoryStore {
         db::configure_connection(&conn)?;
         let reserved_reference_write = db::register_reserved_reference_write_guard(&conn)?;
         db::install_reserved_reference_authorizer(&conn, Some(&reserved_reference_write))?;
+        // Once per connection, so symbolic search never re-registers it
+        // (which would expire the connection's cached statements).
+        db::ensure_symbolic_score_function(&conn)?;
         let ctx = if sqlite_image.is_some() {
             DbOpenContext::open_existing_deny()
         } else {
@@ -663,33 +712,19 @@ impl MemoryStore {
         let resolved_db_path = crate::private_partition::resolve_generic_open_path(db_path)?;
         let resolved_db_path_string = resolved_db_path.to_string_lossy();
         let db_path = resolved_db_path_string.as_ref();
-        // Acquire the in-process startup lock BEFORE the #1132 rename-on-open
-        // migration, not after (RESIDUAL-1). The migration's stat+rename+symlink
-        // sequence and the `open_read_write` below (which CREATES the canonical
-        // file when absent) must not interleave: without this ordering, two
-        // threads in THIS process could both stat the canonical name as absent
-        // and both `rename` the legacy file onto it, the second clobbering the
-        // first. Holding the guard across migrate + open serializes them.
-        //
-        // SCOPE NOTE: `acquire_startup_lock` is a process-local `Mutex`, so it
-        // serializes the same-process race only. The remaining CROSS-process
-        // TOCTOU (a SECOND daemon opening the same store dir: stat-absent here,
-        // `Connection::open` creates+populates there, our rename would clobber
-        // it) is closed inside `migrate_legacy_filename_if_present` itself, which
-        // now migrates via an ATOMIC NO-CLOBBER rename (`renamex_np`/`renameat2`,
-        // #1226) that fails with EEXIST rather than overwriting a concurrently
-        // created canonical file. On kernels/filesystems/platforms without that
-        // primitive it FAILS CLOSED (loud error) rather than degrading to a
-        // plain rename, which would reopen the very clobber race it closes.
+        // Retain the in-process startup lock across legacy-state validation
+        // and open. It only serializes this process; it never fences an old
+        // binary. The explicit offline operator conversion performs the
+        // checkpoint and atomic no-clobber rename separately, after external
+        // downtime has been established.
         // A caller-owned busy budget covers the whole synchronous open path,
         // including schema initialization's explicit retry sleeps. Without
         // this guard a small per-operation SQLite timeout could still be
         // extended by the retry loop after the local deadline had elapsed.
         let _busy_deadline = busy_timeout.map(db::scoped_sqlite_busy_deadline);
-        // #1132: one-time rename-on-open migration away from the legacy
-        // `memory.db` filename, before the connection is opened. Single seam —
-        // see `db::filename`'s doc comment for why it lives here and not
-        // scattered across every call site that builds a `db_path`.
+        // Offline-only #1132: refuse a real legacy database before SQLite
+        // opens/creates anything. The explicit operator converter owns the
+        // filename transition; schema authorization never implies it.
         db::migrate_legacy_filename_if_present(std::path::Path::new(db_path))?;
         let physical_identity_before_open = physical_db_identity_at_open(db_path);
         let mut conn = match busy_timeout {
@@ -702,16 +737,12 @@ impl MemoryStore {
         )?;
         let reserved_reference_write = db::register_reserved_reference_write_guard(&conn)?;
         db::install_reserved_reference_authorizer(&conn, Some(&reserved_reference_write))?;
-        let existing_application_schema = has_existing_application_schema(&conn)?;
-        let stored_schema_version = db::migrations::read_schema_version(&conn)?;
-        // Missing guards are legitimate only before the versioned v23
-        // migration (or on a truly empty fresh DB). Unexpected/tampered
-        // definitions are always rejected. A partial unstamped application
-        // schema remains strict and cannot claim fresh-build authority.
-        let is_stamped_older_schema =
-            (1..db::migrations::EXPECTED_SCHEMA_VERSION).contains(&stored_schema_version);
-        let allow_missing_pre_migration = !existing_application_schema || is_stamped_older_schema;
-        db::validate_persistent_trigger_inventory(&conn, !allow_missing_pre_migration)?;
+        // Once per connection, so symbolic search never re-registers it
+        // (which would expire the connection's cached statements).
+        db::ensure_symbolic_score_function(&conn)?;
+        // Input trigger-inventory admission (see its doc). Schema init runs it
+        // again inside BEGIN IMMEDIATE on the in-transaction state.
+        db::validate_input_trigger_inventory(&conn)?;
         // Both labelled and unlabelled opens run schema init + data migrations
         // through init_schema_with_label_mut so the pre-migration backup and
         // post-migration fingerprint marker apply uniformly. Previously the
@@ -719,7 +750,15 @@ impl MemoryStore {
         // backups for all CLI/open_cli_store paths (#597 CP1).
         let p = std::path::PathBuf::from(db_path);
         let migration_authorization = db::authorize_schema_migration(&reserved_reference_write)?;
-        let schema_result = db::init_schema_with_label_mut(&mut conn, db_label, &p, ctx);
+        // The path→handle binding is re-checked inside the schema transaction,
+        // immediately before COMMIT (see `init_store_schema_with_label_mut`),
+        // and again after init below.
+        let path_binding = || {
+            validate_physical_db_identity_across_open(db_path, opened_physical_db_identity.clone())
+                .map(|_| ())
+        };
+        let schema_result =
+            db::init_store_schema_with_label_mut(&mut conn, db_label, &p, ctx, &path_binding);
         let vec_available = schema_result
             .as_ref()
             .map(|_| db::try_load_sqlite_vec(&conn))
@@ -730,7 +769,21 @@ impl MemoryStore {
         // only the caller's claim and may legitimately be `unknown`. A conflict
         // between the two already failed the open above.
         let identity = schema_result?.identity;
-        crate::private_partition::refuse_stamped_private_store(&conn)?;
+        // tachi#1990: admission is decided by schema init, before any side
+        // effect: the private-partition refusal and the input trigger
+        // inventory run in the preflight and again, authoritatively, inside
+        // BEGIN IMMEDIATE, which also ends with the strict inventory validation
+        // on the exact state it commits. The two checks below are not
+        // admission decisions; they refuse to *return a handle* whose state
+        // changed after that COMMIT and add no side effect of their own:
+        // * the trigger inventory, re-read on this connection: another
+        //   connection can drop, add or replace a trigger between COMMIT and
+        //   here (the marker write and `try_load_sqlite_vec` sit in between;
+        //   neither touches a trigger, so a change here is another writer's);
+        // * the physical identity, the closing bracket of the path→handle
+        //   binding: schema init already checked it just before COMMIT, and
+        //   this covers the rest of the open (the filesystem is not
+        //   transactional, so nothing can close it).
         db::validate_persistent_trigger_inventory(&conn, true)?;
         db::install_authority_row_guards(&conn, &reserved_reference_write)?;
         let opened_physical_db_identity = validate_physical_db_identity_across_open(
@@ -800,6 +853,9 @@ impl MemoryStore {
         };
         let reserved_reference_write = db::register_reserved_reference_write_guard(&conn)?;
         db::install_reserved_reference_authorizer(&conn, Some(&reserved_reference_write))?;
+        // Once per connection, so symbolic search never re-registers it
+        // (which would expire the connection's cached statements).
+        db::ensure_symbolic_score_function(&conn)?;
         db::migrations::check_schema_version_gate(&conn)?;
         let stored = db::migrations::read_schema_version(&conn)?;
         if stored != db::migrations::EXPECTED_SCHEMA_VERSION {
@@ -913,6 +969,7 @@ impl MemoryStore {
         let resolved_db_path = crate::private_partition::resolve_generic_open_path(db_path)?;
         let resolved_db_path_string = resolved_db_path.to_string_lossy();
         let db_path = resolved_db_path_string.as_ref();
+        db::migrate_legacy_filename_if_present(std::path::Path::new(db_path))?;
         crate::db::enable_simple_auto_extension()
             .map_err(|e| MemoryError::InvalidArg(format!("simple tokenizer init: {e}")))?;
         db::register_sqlite_vec();
@@ -951,6 +1008,9 @@ impl MemoryStore {
             validate_physical_db_identity_across_open(db_path, physical_identity_before_open)?;
         let reserved_reference_write = db::register_reserved_reference_write_guard(&conn)?;
         db::install_reserved_reference_authorizer(&conn, Some(&reserved_reference_write))?;
+        // Once per connection, so symbolic search never re-registers it
+        // (which would expire the connection's cached statements).
+        db::ensure_symbolic_score_function(&conn)?;
         if compat_operation.is_some() {
             let raw_schema_version: i64 =
                 conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
@@ -1034,6 +1094,9 @@ impl MemoryStore {
         db::configure_connection(&conn)?;
         let reserved_reference_write = db::register_reserved_reference_write_guard(&conn)?;
         db::install_reserved_reference_authorizer(&conn, Some(&reserved_reference_write))?;
+        // Once per connection, so symbolic search never re-registers it
+        // (which would expire the connection's cached statements).
+        db::ensure_symbolic_score_function(&conn)?;
         db::migrations::check_schema_version_gate(&conn)?;
         let stored = db::migrations::read_schema_version(&conn)?;
         if stored != db::migrations::EXPECTED_SCHEMA_VERSION {
@@ -1091,6 +1154,9 @@ impl MemoryStore {
         db::configure_connection(&conn)?;
         let reserved_reference_write = db::register_reserved_reference_write_guard(&conn)?;
         db::install_reserved_reference_authorizer(&conn, Some(&reserved_reference_write))?;
+        // Once per connection, so symbolic search never re-registers it
+        // (which would expire the connection's cached statements).
+        db::ensure_symbolic_score_function(&conn)?;
         db::validate_persistent_trigger_inventory(&conn, false)?;
         let migration_authorization = db::authorize_schema_migration(&reserved_reference_write)?;
         let schema_result = db::init_schema(&conn);

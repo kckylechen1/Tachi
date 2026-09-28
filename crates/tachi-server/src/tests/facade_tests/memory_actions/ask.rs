@@ -169,6 +169,13 @@ async fn tachi_memory_ask_keeps_controlled_probe_evidence_aligned_with_search() 
                 "RECALL_PROBE_ALPHA_ASK_20260607 clean-cli bridge dry-run force-delete behavior"
                     .to_string();
             alpha.keywords = vec!["recall-probe".to_string(), "clean-cli".to_string()];
+            alpha.timestamp = "2026-05-01T12:00:00Z".to_string();
+            alpha.valid_from = alpha.timestamp.clone();
+            alpha.source = "capture".to_string();
+            alpha.metadata = json!({
+                "source_memory_ids": ["raw-ask"],
+                "source_refs": [{"ref_type": "turn", "ref_id": "ask-session", "revision": 3, "ignored": "not surfaced"}],
+            });
             store.upsert(&alpha).map_err(|e| e.to_string())?;
 
             for idx in 0..12 {
@@ -224,6 +231,16 @@ async fn tachi_memory_ask_keeps_controlled_probe_evidence_aligned_with_search() 
 
     assert_eq!(search_ids.first().copied(), Some("ask-parity-alpha"));
     assert_eq!(ask_ids.first().copied(), Some("ask-parity-alpha"));
+    let alpha_evidence = evidence
+        .iter()
+        .find(|row| row["id"] == "ask-parity-alpha")
+        .expect("actual search evidence must retain alpha provenance");
+    assert_eq!(
+        alpha_evidence["timestamp"],
+        json!("2026-05-01T12:00:00.000Z")
+    );
+    assert_eq!(alpha_evidence["source"], json!("external:capture"));
+    assert_eq!(alpha_evidence["source_memory_ids"], json!(["raw-ask"]));
     assert!(
         ask_ids
             .iter()

@@ -23,19 +23,22 @@ use std::time::{Duration, Instant};
 //   crate::test_support::global_test_lock for the pattern we use when an env
 //   var (HOME) genuinely cannot be uniquified.
 
-struct EnvRestore {
+// `pub(super)` so sibling unit-test modules under `llm::` (e.g. the
+// thinking-suppression tests in `chat_lanes/lane_calls.rs`) can share the
+// same restore-on-drop guard under the global test lock.
+pub(super) struct EnvRestore {
     key: &'static str,
     original: Option<std::ffi::OsString>,
 }
 
 impl EnvRestore {
-    fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+    pub(super) fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
         let original = std::env::var_os(key);
         std::env::set_var(key, value);
         Self { key, original }
     }
 
-    fn unset(key: &'static str) -> Self {
+    pub(super) fn unset(key: &'static str) -> Self {
         let original = std::env::var_os(key);
         std::env::remove_var(key);
         Self { key, original }
@@ -64,5 +67,7 @@ mod embedding_rerank;
 mod endpoint_credential_guard;
 mod extract_quality_golden;
 mod provider_key_persistence;
+mod provider_persist_writer;
 mod provider_pool;
+mod provider_selector;
 mod recall_pool_hygiene;

@@ -340,6 +340,14 @@ fn answer_runtime_db_path_query(
     } else {
         compute_anchor_gated_confidence(required_anchors)
     };
+    // The runtime binding itself is authoritative, but a mixed query that
+    // also names an unresolved current-work anchor cannot represent the
+    // whole answer as verified-current. Keep the authority scope explicit.
+    let current_fact_status = if grounding_status == GroundingStatusV1::Grounded {
+        "verified_current"
+    } else {
+        "not_verified_current"
+    };
     let gaps: Vec<Value> = if confidence == "low" {
         required_anchors
             .iter()
@@ -365,6 +373,8 @@ fn answer_runtime_db_path_query(
                 "confidence": confidence,
                 "gaps": gaps,
                 "basis": "runtime_binding",
+                "current_fact_status": current_fact_status,
+                "current_fact_scope": "runtime_db_binding",
             },
             "synthesis": {
                 "status": "completed",
@@ -381,6 +391,8 @@ fn answer_runtime_db_path_query(
         ("query", query.to_string()),
         ("confidence", confidence.to_string()),
         ("basis", "runtime_binding".to_string()),
+        ("current_fact_status", current_fact_status.to_string()),
+        ("current_fact_scope", "runtime_db_binding".to_string()),
         ("project_db", project.to_string()),
         ("global_db", global.to_string()),
     ];
@@ -436,6 +448,7 @@ fn inject_project_tags(evidence: Value) -> Value {
 /// standalone so the `None` branch has no formatting to get wrong.
 const SYNTHESIS_BASE_SYSTEM_PROMPT: &str = "Answer using the supplied Tachi evidence plus the authoritative `runtime` DB binding. \
 Each evidence row carries a `db` field — values are `global` for the shared library and `project` for a workspace/named project DB. \
+Evidence timestamps and validity fields describe the recorded observation, not verification of what is true now; missing observation time is explicitly unknown. Treat normal retrieved evidence as historical unless an existing typed current-truth or authoritative runtime source establishes the requested current fact. \
 When the question is about which memory.db path is current/active, the `runtime` object is ground truth — never invent paths from evidence text (those may be stale historical mentions). \
 When evidence spans both stores, prefer rows most relevant to the question and explicitly call out claims grounded in cross-store evidence. \
 If evidence is insufficient, say what is missing. Keep the answer concise and cite memory ids or paths when present.";

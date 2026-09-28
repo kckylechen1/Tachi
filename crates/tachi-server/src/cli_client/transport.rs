@@ -274,6 +274,7 @@ pub(crate) async fn call_daemon_tool_raw_with_profile(
         profile,
         None,
         ProxyIdentityForward::AutoEnv,
+        None,
     )
     .await
     .0
@@ -285,6 +286,11 @@ pub(crate) async fn call_daemon_tool_raw_with_profile(
 /// widen beyond what discovery already showed for this connection. The client
 /// label is attribution only and is never retained by the stdio protocol
 /// session.
+///
+/// `rate_limit_session` is the stdio proxy's per-connection
+/// `X-Tachi-Rate-Limit-Session` key (audit C1). It keeps every short-lived
+/// daemon session this connection opens in one burst/RPM bucket, and carries
+/// no identity or authority.
 pub(crate) async fn call_daemon_tool_raw_with_profile_and_identity(
     info: &DaemonInfo,
     params: CallToolRequestParams,
@@ -292,6 +298,7 @@ pub(crate) async fn call_daemon_tool_raw_with_profile_and_identity(
     profile: Option<tachi_hub::ToolProfile>,
     proxy_client: Option<&str>,
     identity: ProxyIdentityForward,
+    rate_limit_session: Option<&str>,
 ) -> Result<rmcp::model::CallToolResult, DaemonCallError> {
     call_daemon_tool_raw_with_phases_and_profile(
         info,
@@ -300,9 +307,104 @@ pub(crate) async fn call_daemon_tool_raw_with_profile_and_identity(
         profile,
         proxy_client,
         identity,
+        rate_limit_session,
     )
     .await
     .0
+}
+
+/// Forward one MCP Resource read over the same identity/profile header rail as
+/// tool calls. Resource URIs remain opaque to the proxy.
+pub(crate) async fn read_daemon_resource_with_profile_and_identity(
+    info: &DaemonInfo,
+    params: rmcp::model::ReadResourceRequestParams,
+    proxy_project: Option<&str>,
+    profile: Option<tachi_hub::ToolProfile>,
+    proxy_client: Option<&str>,
+    identity: ProxyIdentityForward,
+) -> Result<rmcp::model::ReadResourceResponse, DaemonCallError> {
+    let mut transport_config = StreamableHttpClientTransportConfig::with_uri(info.url.clone());
+    let mut headers = HashMap::new();
+    if let Some(project) = proxy_project {
+        let value = HeaderValue::from_str(project).map_err(|error| {
+            DaemonCallError::BeforeDispatch(format!("invalid proxy project header value: {error}"))
+        })?;
+        headers.insert(
+            HeaderName::from_static(crate::session_identity::HEADER_PROJECT),
+            value,
+        );
+    }
+    if let Some(client) = proxy_client {
+        let value = HeaderValue::from_str(client).map_err(|error| {
+            DaemonCallError::BeforeDispatch(format!("invalid proxy client header value: {error}"))
+        })?;
+        headers.insert(
+            HeaderName::from_static(crate::session_identity::HEADER_CLIENT),
+            value,
+        );
+    }
+    if let Some(profile) = profile {
+        let value = HeaderValue::from_str(&profile.as_str()).map_err(|error| {
+            DaemonCallError::BeforeDispatch(format!("invalid proxy profile header value: {error}"))
+        })?;
+        headers.insert(
+            HeaderName::from_static(crate::session_identity::HEADER_PROFILE),
+            value,
+        );
+    }
+    insert_internal_proxy_token(&mut headers, info)?;
+    match identity {
+        ProxyIdentityForward::AutoEnv => {
+            if let Some((name, value)) = proxy_env_agent_identity_header(
+                std::env::var(crate::session_identity::ENV_AGENT_IDENTITY)
+                    .ok()
+                    .as_deref(),
+            ) {
+                headers.insert(name, value);
+            }
+        }
+        ProxyIdentityForward::Header(value) => {
+            if let Some((name, header)) = proxy_env_agent_identity_header(Some(&value)) {
+                headers.insert(name, header);
+            }
+        }
+        ProxyIdentityForward::Omit => {}
+    }
+    if let Ok(depth) = std::env::var(crate::session_identity::ENV_DISPATCH_DEPTH) {
+        let depth = depth.trim();
+        if !depth.is_empty() {
+            let value = HeaderValue::from_str(depth).map_err(|error| {
+                DaemonCallError::BeforeDispatch(format!(
+                    "invalid dispatch depth header value: {error}"
+                ))
+            })?;
+            headers.insert(
+                HeaderName::from_static(crate::session_identity::HEADER_DISPATCH_DEPTH),
+                value,
+            );
+        }
+    }
+    if !headers.is_empty() {
+        transport_config = transport_config.custom_headers(headers);
+    }
+    let transport = StreamableHttpClientTransport::from_config(transport_config);
+    let client = ServiceExt::serve((), transport).await.map_err(|error| {
+        DaemonCallError::BeforeDispatch(format!("daemon resource handshake failed: {error}"))
+    })?;
+    let peer = client.peer().clone();
+    let result =
+        match tokio::time::timeout(DAEMON_CALL_TIMEOUT, peer.read_resource_once(params)).await {
+            Err(_) => Err(DaemonCallError::AfterDispatch(format!(
+                "daemon resource read timed out after {:?}",
+                DAEMON_CALL_TIMEOUT
+            ))),
+            Ok(Err(error)) => Err(DaemonCallError::AfterDispatch(format!(
+                "daemon resource read failed: {error}"
+            ))),
+            Ok(Ok(result)) => Ok(result),
+        };
+    drop(client);
+    result
 }
 
 /// Same transport path as [`call_daemon_tool_raw`], plus handshake/call phase
@@ -325,6 +427,7 @@ pub(crate) async fn call_daemon_tool_raw_with_phases(
         profile,
         None,
         ProxyIdentityForward::AutoEnv,
+        None,
     )
     .await
 }
@@ -336,6 +439,7 @@ async fn call_daemon_tool_raw_with_phases_and_profile(
     profile: Option<tachi_hub::ToolProfile>,
     proxy_client: Option<&str>,
     identity: ProxyIdentityForward,
+    rate_limit_session: Option<&str>,
 ) -> (
     Result<rmcp::model::CallToolResult, DaemonCallError>,
     DaemonCallPhaseTiming,
@@ -480,6 +584,21 @@ async fn call_daemon_tool_raw_with_phases_and_profile(
                     );
                 }
             }
+        }
+    }
+    // Audit C1: the proxy mints one bucket key per connection and it rides
+    // every call's headers (including the per-call initialize), so all the
+    // short-lived daemon sessions of one connection share burst/RPM windows.
+    // A key that fails the shared shape check is simply not sent; it only
+    // selects a rate-limit bucket, so omitting it never fails the call.
+    if let Some(key) =
+        rate_limit_session.filter(|key| crate::session_identity::valid_rate_limit_session_key(key))
+    {
+        if let Ok(value) = HeaderValue::from_str(key) {
+            headers.insert(
+                HeaderName::from_static(crate::session_identity::HEADER_RATE_LIMIT_SESSION),
+                value,
+            );
         }
     }
     if !headers.is_empty() {

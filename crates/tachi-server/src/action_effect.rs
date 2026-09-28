@@ -132,8 +132,10 @@ pub(crate) const CACHE_INVALIDATING_TOOLS: &[&str] = &[
     "vc_register",
     "vc_bind",
     "hub_feedback",
-    "sandbox_set_rule",
-    "sandbox_set_policy",
+    // v2 sandbox retirement: "sandbox_set_rule"/"sandbox_set_policy" routes
+    // were deleted (aliases expired at 1.10.0). Their writes now invalidate the
+    // cache via "tachi_sandbox" below; stale entries would fail the #1098
+    // live-route census gate.
     "tachi_init_project_db",
     // #1099: "handoff_leave"/"handoff_check" retired — the routes no longer
     // exist. "tachi_handoff" (below) stays, still mixed read/write via its

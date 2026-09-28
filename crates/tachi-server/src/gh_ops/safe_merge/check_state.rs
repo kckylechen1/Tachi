@@ -111,12 +111,11 @@ pub(crate) struct CheckStateIngestResult {
 #[async_trait]
 pub(crate) trait CheckStateReader: Send + Sync {
     /// `expected_head_sha` gates whether the reader must resolve the PR's live
-    /// head SHA. When `Some`, the reader calls `pr_view` to populate
-    /// `observed_head_sha` so a moved head can be classified `Stale`. When
-    /// `None` (first poll of a flow with no prior artifact), `pr_view` is
-    /// skipped entirely — there is nothing to be stale against, so the call
-    /// would only spend API budget for no gain. This halves per-PR calls for
-    /// newly-discovered flows.
+    /// head SHA. When `Some`, the reader calls `pr_head_sha` (a head-only
+    /// read) to populate `observed_head_sha` so a moved head can be
+    /// classified `Stale`. When `None` (first poll of a flow with no prior
+    /// artifact), the head read is skipped entirely — there is nothing to be
+    /// stale against, so the call would only spend API budget for no gain.
     async fn read_check_state(
         &self,
         repo: &str,
@@ -130,8 +129,8 @@ impl<T: GhClient + ?Sized> CheckStateReader for T {
     /// Populates `observed_head_sha` from the PR's current `headRefOid` so the
     /// `Stale` ledger state is reachable in production (the #605 watcher relies
     /// on this to detect a head that moved after the expected snapshot). A
-    /// `pr_view` failure is tolerated — checks are still returned with a `None`
-    /// observed SHA — because a transient `pr_view` error must not mask a red
+    /// head-read failure is tolerated — checks are still returned with a `None`
+    /// observed SHA — because a transient error there must not mask a red
     /// check the operator needs to see; it surfaces instead as `ReaderError`
     /// only when the checks read itself failed.
     async fn read_check_state(
@@ -141,25 +140,69 @@ impl<T: GhClient + ?Sized> CheckStateReader for T {
         expected_head_sha: Option<&str>,
     ) -> Result<CheckStateRead, GhError> {
         let checks = self.checks_list(repo, pr_number).await?;
-        // Gate the pr_view call: only fetch the live head SHA when there is a
-        // prior expected SHA to compare it against. On a first poll (no prior
-        // artifact) there is nothing to be stale against, so observed_head_sha
-        // stays None — which keeps Stale unreachable, the correct result.
-        // Skipping this call halves per-PR API cost for new flows.
-        let observed_head_sha = if expected_head_sha.is_some() {
-            // Best-effort head SHA: a pr_view hiccup degrades staleness
-            // detection (observed SHA unknown) but does NOT fail the whole read
-            // — the check list is the authoritative input for the
-            // Failed/Passed ledger state.
-            match self.pr_view(repo, pr_number).await {
-                Ok(pr) => Some(pr.head_sha).filter(|sha| !sha.is_empty()),
-                Err(_) => None,
-            }
-        } else {
-            None
-        };
+        let observed_head_sha =
+            observe_head_sha_after_checks(self, repo, pr_number, expected_head_sha).await;
         Ok(CheckStateRead {
             checks,
+            observed_head_sha,
+        })
+    }
+}
+
+/// The live head SHA, read AFTER the check list so a head that moved while
+/// (or before) the checks were read is classified `Stale`.
+///
+/// Gated: only read when there is a prior expected SHA to compare against. On
+/// a first poll (no prior artifact) there is nothing to be stale against, so
+/// the observed SHA stays `None` — which keeps `Stale` unreachable, the
+/// correct result — and no API budget is spent.
+///
+/// Best-effort: a failed head read degrades staleness detection (observed SHA
+/// unknown) but does NOT fail the whole read — the check list is the
+/// authoritative input for the Failed/Passed ledger state.
+async fn observe_head_sha_after_checks<C: GhClient + ?Sized>(
+    client: &C,
+    repo: &str,
+    pr_number: u64,
+    expected_head_sha: Option<&str>,
+) -> Option<String> {
+    // No expected SHA: nothing to be stale against, so no head read.
+    expected_head_sha?;
+    client
+        .pr_head_sha(repo, pr_number)
+        .await
+        .ok()
+        .filter(|sha| !sha.is_empty())
+}
+
+/// A `CheckStateReader` that reuses the check runs from a `pr_view_snapshot`
+/// already taken in the same read phase instead of listing them again. The
+/// live head SHA is still read fresh (after the reused checks), exactly as
+/// the blanket reader does, so a head that moved after the snapshot is still
+/// classified `Stale`.
+pub(crate) struct SnapshotCheckStateReader<'a, C: GhClient + ?Sized> {
+    client: &'a C,
+    check_runs: Vec<CheckRun>,
+}
+
+impl<'a, C: GhClient + ?Sized> SnapshotCheckStateReader<'a, C> {
+    pub(crate) fn new(client: &'a C, check_runs: Vec<CheckRun>) -> Self {
+        Self { client, check_runs }
+    }
+}
+
+#[async_trait]
+impl<C: GhClient + ?Sized> CheckStateReader for SnapshotCheckStateReader<'_, C> {
+    async fn read_check_state(
+        &self,
+        repo: &str,
+        pr_number: u64,
+        expected_head_sha: Option<&str>,
+    ) -> Result<CheckStateRead, GhError> {
+        let observed_head_sha =
+            observe_head_sha_after_checks(self.client, repo, pr_number, expected_head_sha).await;
+        Ok(CheckStateRead {
+            checks: self.check_runs.clone(),
             observed_head_sha,
         })
     }

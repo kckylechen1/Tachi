@@ -1,7 +1,7 @@
 //! Physical-rowid schema admission and real replacement discriminators.
 
 use super::*;
-use crate::db::{DbOpenContext, MigrationAuthority, OpenIntent, StoreProfile};
+use crate::db::{DbOpenContext, MigrationAuthority, OpenIntent, ProfileRequirement, StoreProfile};
 use crate::MemoryStore;
 
 const ALIASES: &[&str] = &["rowid", "ROWID", "oid", "OiD", "_rowid_", "_RoWiD_"];
@@ -208,7 +208,7 @@ fn current_product_store_reopen_refuses_alias_drift_without_repair() {
         let context = DbOpenContext {
             intent: OpenIntent::OpenExisting,
             migration: MigrationAuthority::Deny,
-            required_profile: StoreProfile::TachiFull,
+            required_profile: ProfileRequirement::AtLeast(StoreProfile::TachiFull),
         };
         drop(
             MemoryStore::open_with_context(path.to_str().unwrap(), &context)

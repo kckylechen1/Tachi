@@ -115,12 +115,23 @@ pub(crate) async fn handle_task_intake(
     // #527: default intake is a receipt (plan + paths). Full briefing is a
     // large read model — include only on format=full (was 50KB+ in dogfood).
     let full = crate::facade_memory_ops::wants_full_format(params.format.as_deref());
+    // #1693 compact intake: the default receipt whitelists the issue
+    // snapshot (identifiers/state/labels/reference paths); the body is
+    // omitted WHOLE — the caller already holds the ref and the flow
+    // artifacts retain the full content. `format=full` (the existing
+    // explicit full read) retains the complete snapshot.
+    let issue_value = issue_to_json(&issue);
+    let issue_value = if full {
+        issue_value
+    } else {
+        compact_issue_snapshot_value(&issue_value)
+    };
     let mut receipt = json!({
         "ok": true,
         "action": "intake",
         "flow_id": flow_id,
         "issue_ref": format!("{}#{}", issue.repo, issue.number),
-        "issue": issue_to_json(&issue),
+        "issue": issue_value,
         "automation_plan": automation_plan,
         "doc_paths": issue.doc_paths,
         "spec_paths": issue.spec_paths,

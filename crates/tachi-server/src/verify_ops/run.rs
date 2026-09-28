@@ -215,7 +215,10 @@ pub(crate) async fn wait_with_kill_cap<C: CheckChild>(
 /// canned fake (fixed exit code + a canned log file) instead of a real cargo
 /// invocation. Process spawns live behind the seam; the copy-lifecycle
 /// methods are SYNCHRONOUS (single `git` subprocess each) so the RAII
-/// cleanup guard can call them from `Drop` without an executor.
+/// cleanup guard can call them from `Drop` without an executor. Every call
+/// site wraps them in [`crate::executor_offload::block_off_core`] so a
+/// whole-tree `git worktree add` does not pin an executor worker (audit E4)
+/// while ordering and cancellation behaviour stay exactly as before.
 #[async_trait::async_trait]
 pub(crate) trait CheckRunner: Send + Sync {
     /// Server-observed HEAD of `worktree` (`git rev-parse HEAD`). Failure is
@@ -843,6 +846,14 @@ struct DetachedCopyGuard<'a, R: CheckRunner> {
 
 impl<R: CheckRunner> Drop for DetachedCopyGuard<'_, R> {
     fn drop(&mut self) {
+        // Audit E4: `git worktree list/remove` + `remove_dir_all` run with the
+        // executor core handed off; `Drop` cannot await, so no spawn_blocking.
+        crate::executor_offload::block_off_core(|| self.cleanup());
+    }
+}
+
+impl<R: CheckRunner> DetachedCopyGuard<'_, R> {
+    fn cleanup(&self) {
         let probe = self.runner.copy_is_registered(&self.claim, &self.copy);
         match &probe {
             RegistrationProbe::Registered => {
@@ -1024,8 +1035,9 @@ async fn run_with_runner<R: CheckRunner>(
     let tachi_home = server.tachi_home_dir();
 
     // #1454 G1: the server-owned receipt store must not resolve inside a git
-    // worktree (executor start, and only there).
-    ensure_receipts_root_not_in_repo(&tachi_home)?;
+    // worktree (executor start, and only there). Sync `git rev-parse` probe;
+    // audit E4 keeps it off the executor core.
+    crate::executor_offload::block_off_core(|| ensure_receipts_root_not_in_repo(&tachi_home))?;
 
     // Server-observed claim HEAD — the head this run binds to (G2). The claim
     // worktree itself is NEVER executed, so its dirtiness is never consulted;
@@ -1081,10 +1093,15 @@ async fn run_with_runner<R: CheckRunner>(
         claim: worktree.clone(),
         copy: copy_dir.clone(),
     };
-    runner.create_detached_copy(&worktree, &source_head, &copy_dir)?;
+    // Audit E4: `git worktree add` checks out the whole tree (hundreds of ms
+    // on a large repo); it runs with the executor core handed off. No await
+    // point is added, so the guard above stays the single cleanup path.
+    crate::executor_offload::block_off_core(|| {
+        runner.create_detached_copy(&worktree, &source_head, &copy_dir)
+    })?;
 
     // G4: tool version into the receipt (informational parity only).
-    let tool_version = runner.tool_version(check_kind)?;
+    let tool_version = crate::executor_offload::block_off_core(|| runner.tool_version(check_kind))?;
 
     // G2: the spawned argv carries a server-owned CARGO_TARGET_DIR so the
     // candidate config cannot redirect the build into the copy (which would

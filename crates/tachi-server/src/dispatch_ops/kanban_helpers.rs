@@ -1,9 +1,61 @@
 use crate::tool_params::SaveMemoryParams;
 use crate::MemoryServer;
 use chrono::Utc;
-use serde_json::json;
+use serde_json::{json, Value};
+use std::path::Path;
 
 // ─── Kanban helpers ────────────────────────────────────────────────────────────
+
+/// JSON pointer to the committed model plan inside a run's `status.json`.
+/// This is the public reference for a V2 model-derived plan; a bare
+/// `plan.md` path is the V1 placeholder and is never model-derived.
+pub(crate) const MODEL_PLAN_POINTER: &str = "/model_plan";
+
+/// Public reference to a dispatch plan. V1 points at the placeholder
+/// `plan.md`; V2 points at `status.json` plus the `/model_plan` JSON pointer
+/// so the reference reaches the committed content and its receipt, not a
+/// bare markdown file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PlanReference {
+    pub(crate) file: String,
+    pub(crate) pointer: Option<&'static str>,
+}
+
+impl PlanReference {
+    /// Human-readable `file#pointer` form for kanban text.
+    pub(crate) fn display(&self) -> String {
+        match self.pointer {
+            Some(pointer) => format!("{}#{pointer}", self.file),
+            None => self.file.clone(),
+        }
+    }
+}
+
+/// Build the public plan reference for a dispatch. V2 always references the
+/// receiving `status.json#/model_plan` even though the plan is committed
+/// later (board-first); V1 keeps the placeholder `plan.md` path.
+pub(crate) fn plan_reference(
+    plan_path: Option<&Path>,
+    workspace_dir: &Path,
+    v2: bool,
+) -> PlanReference {
+    if v2 {
+        PlanReference {
+            file: workspace_dir
+                .join("status.json")
+                .to_string_lossy()
+                .into_owned(),
+            pointer: Some(MODEL_PLAN_POINTER),
+        }
+    } else {
+        PlanReference {
+            file: plan_path
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "inline".to_string()),
+            pointer: None,
+        }
+    }
+}
 
 /// Initialize a kanban task entry in the memory DB
 pub(super) async fn init_kanban_task(
@@ -13,16 +65,16 @@ pub(super) async fn init_kanban_task(
     assignment: &tachi_params::ResolvedStaffAssignment,
     grant: &tachi_params::ExecutionGrant,
     profile: &crate::dispatch_profile::ResolvedDispatchProfile,
-    plan_path: Option<&str>,
+    plan_reference: &PlanReference,
 ) -> Result<(), String> {
     let agent = assignment.selected_backend.as_str();
     let text = format!(
         "Dispatch Task\nAgent: {}\nTask: {}\nPlan: {}",
         agent,
         request.task,
-        plan_path.unwrap_or("inline"),
+        plan_reference.display(),
     );
-    let metadata = json!({
+    let mut metadata = json!({
         "type": "a2a_task",
         "dispatch_id": dispatch_id,
         "a2a_state": "TASK_STATE_WORKING",
@@ -34,9 +86,12 @@ pub(super) async fn init_kanban_task(
         "issue_ref": request.issue_ref,
         "pr_ref": request.pr_ref,
         "flow_id": request.flow_id,
-        "plan_file": plan_path,
+        "plan_file": plan_reference.file,
         "eval_ledger_id": null,
     });
+    if let Some(pointer) = plan_reference.pointer {
+        metadata["plan_pointer"] = Value::String(pointer.to_string());
+    }
 
     crate::memory_search_ops::handle_save_memory(
         server,

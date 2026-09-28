@@ -1,4 +1,5 @@
 use super::*;
+use crate::dispatch_ops::kanban_helpers::plan_reference;
 
 // ─── Kanban task initialization + flow dispatch marker ───────────────────────
 
@@ -14,9 +15,11 @@ pub(super) struct FlowSetupInputs<'a> {
     pub(super) prompt_md_path: &'a Path,
     pub(super) context_md_path: &'a Path,
     pub(super) trajectory_path: &'a Path,
+    pub(super) v2: bool,
 }
 
 pub(super) async fn init_kanban_and_flow(inputs: FlowSetupInputs<'_>) -> Result<(), String> {
+    let plan_reference = plan_reference(Some(inputs.plan_path), inputs.workspace_dir, inputs.v2);
     init_kanban_task(
         inputs.server,
         inputs.dispatch_id,
@@ -24,7 +27,7 @@ pub(super) async fn init_kanban_and_flow(inputs: FlowSetupInputs<'_>) -> Result<
         inputs.assignment,
         inputs.grant,
         inputs.resolved_profile,
-        Some(&inputs.plan_path.to_string_lossy()),
+        &plan_reference,
     )
     .await?;
     if let Some(flow_id) = inputs
@@ -33,28 +36,30 @@ pub(super) async fn init_kanban_and_flow(inputs: FlowSetupInputs<'_>) -> Result<
         .as_deref()
         .filter(|id| !id.trim().is_empty())
     {
-        if let Err(error) = crate::task_lifecycle::mark_task_dispatch(
-            flow_id,
-            inputs.dispatch_id,
-            json!({
-                "agent": inputs.assignment.selected_backend,
-                "profile": inputs.assignment.selected_profile.clone(),
-                "tool_profile": inputs.resolved_profile.tool_profile.clone(),
-                "stage": inputs.request.stage.clone(),
-                "task": inputs.request.task.clone(),
-                "issue_ref": inputs.request.issue_ref.clone(),
-                "pr_ref": inputs.request.pr_ref.clone(),
-                "run_dir": inputs.workspace_dir.to_string_lossy(),
-                "prompt_file": inputs.prompt_md_path.to_string_lossy(),
-                "context_file": inputs.context_md_path.to_string_lossy(),
-                "trajectory_file": inputs.trajectory_path.to_string_lossy(),
-                "plan_file": inputs.plan_path.to_string_lossy(),
-                "evidence_required": inputs.assignment.evidence_required,
-                "route_explanation": inputs.assignment.route_explanation,
-                "identity_receipt": inputs.assignment.identity_receipt,
-                "suggested_complete": suggested_complete_payload(inputs.dispatch_id, inputs.assignment, inputs.request),
-            }),
-        ) {
+        let mut marker = json!({
+            "agent": inputs.assignment.selected_backend,
+            "profile": inputs.assignment.selected_profile.clone(),
+            "tool_profile": inputs.resolved_profile.tool_profile.clone(),
+            "stage": inputs.request.stage.clone(),
+            "task": inputs.request.task.clone(),
+            "issue_ref": inputs.request.issue_ref.clone(),
+            "pr_ref": inputs.request.pr_ref.clone(),
+            "run_dir": inputs.workspace_dir.to_string_lossy(),
+            "prompt_file": inputs.prompt_md_path.to_string_lossy(),
+            "context_file": inputs.context_md_path.to_string_lossy(),
+            "trajectory_file": inputs.trajectory_path.to_string_lossy(),
+            "plan_file": plan_reference.file.clone(),
+            "evidence_required": inputs.assignment.evidence_required.clone(),
+            "route_explanation": inputs.assignment.route_explanation.clone(),
+            "identity_receipt": inputs.assignment.identity_receipt.clone(),
+            "suggested_complete": suggested_complete_payload(inputs.dispatch_id, inputs.assignment, inputs.request),
+        });
+        if let Some(pointer) = plan_reference.pointer {
+            marker["plan_pointer"] = json!(pointer);
+        }
+        if let Err(error) =
+            crate::task_lifecycle::mark_task_dispatch(flow_id, inputs.dispatch_id, marker)
+        {
             append_trajectory_event(
                 inputs.trajectory_path,
                 json!({

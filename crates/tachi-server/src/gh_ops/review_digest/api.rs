@@ -4,14 +4,14 @@ use super::normalize::{
     normalize_review_entry,
 };
 
-pub(in crate::gh_ops) fn run_gh_api_paginated(
+pub(in crate::gh_ops) async fn run_gh_api_paginated(
     server: &MemoryServer,
     endpoint: &str,
 ) -> Result<Value, String> {
-    let (mut cmd, token) = build_gh_command(server)?;
-    cmd.args(["api", "--paginate", "--slurp"]).arg(endpoint);
+    let mut call = GhCall::bulk_read();
+    call.args(["api", "--paginate", "--slurp"]).arg(endpoint);
 
-    let output = run_gh_json(cmd, &token)?;
+    let output = call.run_json(server).await?;
     serde_json::from_str::<Value>(&output).map_err(|e| {
         format!(
             "parse gh api response from '{}': {e}; raw={}",
@@ -21,7 +21,7 @@ pub(in crate::gh_ops) fn run_gh_api_paginated(
     })
 }
 
-pub(in crate::gh_ops) fn fetch_gh_pr_comments(
+pub(in crate::gh_ops) async fn fetch_gh_pr_comments(
     server: &MemoryServer,
     repo: &str,
     pr_number: u64,
@@ -29,13 +29,15 @@ pub(in crate::gh_ops) fn fetch_gh_pr_comments(
     let reviews_endpoint = format!("repos/{}/pulls/{}/reviews?per_page=100", repo, pr_number);
     let inline_comments_endpoint =
         format!("repos/{}/pulls/{}/comments?per_page=100", repo, pr_number);
-    let reviews =
-        flatten_paginated_array(run_gh_api_paginated(server, &reviews_endpoint)?, "reviews")?
-            .into_iter()
-            .map(normalize_review_entry)
-            .collect::<Vec<_>>();
+    let reviews = flatten_paginated_array(
+        run_gh_api_paginated(server, &reviews_endpoint).await?,
+        "reviews",
+    )?
+    .into_iter()
+    .map(normalize_review_entry)
+    .collect::<Vec<_>>();
     let inline_comments = flatten_paginated_array(
-        run_gh_api_paginated(server, &inline_comments_endpoint)?,
+        run_gh_api_paginated(server, &inline_comments_endpoint).await?,
         "inline_comments",
     )?
     .into_iter()

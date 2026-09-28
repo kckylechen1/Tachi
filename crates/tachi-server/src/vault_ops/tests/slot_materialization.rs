@@ -186,3 +186,169 @@ async fn slot_scan_ignores_invalid_legacy_slot_rotation_without_admitting_member
     assert_eq!(pools["EXTRACT_API_KEY"][0].key_id, "DEEPSEEK_API_KEY");
     assert!(!pools.contains_key("EXTRACT_API_KEY_1"));
 }
+
+/// Durable integration for the front-line provider selector
+/// (`EXTRACT_PROVIDER`/`SUMMARY_PROVIDER=deepseek`): the server's LlmClient is built from env
+/// by the normal constructor (selector active, canonical key absent from
+/// env), then the real Vault refresh materializes synthetic pools from the
+/// isolated test DB. The selected lane must keep its canonical chain —
+/// endpoint/model from the DeepSeek descriptor, credential only from the
+/// materialized `DEEPSEEK_API_KEY` pool — while a valid stale lane-alias pool
+/// for SiliconFlow coexists in the same Vault but is never consulted by either
+/// selected lane.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn selected_deepseek_front_line_keeps_canonical_chain_through_durable_vault_refresh() {
+    let _lock = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _selector = EnvRestore::set("EXTRACT_PROVIDER", "deepseek");
+    let _summary_selector = EnvRestore::set("SUMMARY_PROVIDER", "deepseek");
+    let _no_canonical_env = EnvRestore::remove("DEEPSEEK_API_KEY");
+    let _no_stale_env = EnvRestore::remove("EXTRACT_API_KEY");
+    let _no_base = EnvRestore::remove("EXTRACT_BASE_URL");
+    let _no_model = EnvRestore::remove("EXTRACT_MODEL");
+    let _no_sf = EnvRestore::remove("SILICONFLOW_API_KEY");
+
+    let server = fixture().await;
+    seed(&server, "DEEPSEEK_API_KEY", "durable-deepseek-secret");
+    seed(&server, "SILICONFLOW_API_KEY", "durable-siliconflow-secret");
+    seed(&server, "EXTRACT_API_KEY", "vault:SILICONFLOW_API_KEY");
+    server
+        .refresh_llm_provider_secrets_from_vault()
+        .expect("durable vault refresh with a selected front-line provider");
+
+    let runtime = server.llm.runtime_config();
+    assert_eq!(
+        runtime.extract.api_key_envs,
+        vec!["DEEPSEEK_API_KEY"],
+        "selected lane chain must stay canonical after durable materialization"
+    );
+    assert_eq!(
+        runtime.extract.base_url,
+        "https://api.deepseek.com/chat/completions"
+    );
+    assert_eq!(runtime.extract.model, "deepseek-v4-flash");
+    assert_eq!(runtime.summary.api_key_envs, vec!["DEEPSEEK_API_KEY"]);
+    assert_eq!(
+        runtime.summary.base_url,
+        "https://api.deepseek.com/chat/completions"
+    );
+    assert_eq!(
+        server
+            .llm
+            .provider_key_id_for_tests(&runtime.extract.api_key_envs)
+            .as_deref(),
+        Some("DEEPSEEK_API_KEY"),
+        "the materialized canonical pool must serve the selected lane"
+    );
+    assert_eq!(
+        server
+            .llm
+            .provider_secret_for_tests(&["DEEPSEEK_API_KEY"])
+            .as_deref(),
+        Some("durable-deepseek-secret")
+    );
+    assert_eq!(
+        server
+            .llm
+            .provider_key_id_for_tests(&["EXTRACT_API_KEY"])
+            .as_deref(),
+        Some("SILICONFLOW_API_KEY"),
+        "the valid stale alias pool is published but selected lanes never consult it"
+    );
+}
+
+/// A readable Vault refresh is transactional: selected-provider transport
+/// provenance must reject an HTTP or non-443 overlay before either the catalog
+/// or provider pools replace a healthy snapshot.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn selected_deepseek_vault_overlay_rejects_transport_downgrade_without_publication() {
+    let _lock = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _selector = EnvRestore::set("EXTRACT_PROVIDER", "deepseek");
+    let _no_canonical_env = EnvRestore::remove("DEEPSEEK_API_KEY");
+    let _no_base = EnvRestore::remove("EXTRACT_BASE_URL");
+    let _no_model = EnvRestore::remove("EXTRACT_MODEL");
+    let _no_sf = EnvRestore::remove("SILICONFLOW_API_KEY");
+    let server = fixture().await;
+    seed(&server, "DEEPSEEK_API_KEY", "durable-deepseek-secret");
+    server
+        .refresh_llm_provider_secrets_from_vault()
+        .expect("healthy selected-provider snapshot");
+    let before = server.llm.runtime_config();
+    assert_eq!(
+        server
+            .llm
+            .provider_secret_for_tests(&["DEEPSEEK_API_KEY"])
+            .as_deref(),
+        Some("durable-deepseek-secret")
+    );
+
+    seed(
+        &server,
+        "EXTRACT_BASE_URL",
+        "https://api.deepseek.com:8443/chat/completions",
+    );
+    let error = server
+        .refresh_llm_provider_secrets_from_vault()
+        .expect_err("selected-provider non-443 Vault overlay must be rejected");
+    assert!(
+        error.contains("https://api.deepseek.com")
+            && error.contains("refusing credential-bearing request"),
+        "unexpected rejection error: {error}"
+    );
+    assert_eq!(
+        server.llm.runtime_config(),
+        before,
+        "rejected overlay must not publish an endpoint or catalog projection"
+    );
+    assert_eq!(
+        server
+            .llm
+            .provider_secret_for_tests(&["DEEPSEEK_API_KEY"])
+            .as_deref(),
+        Some("durable-deepseek-secret"),
+        "rejected refresh must retain the healthy canonical provider pool"
+    );
+}
+
+/// The selected transport fence is independent of the pool's current
+/// availability: an empty initial Vault must still reject a bad overlay before
+/// it can publish a catalog entry that a later key materialization would use.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn selected_deepseek_empty_vault_rejects_transport_downgrade_before_later_key() {
+    let _lock = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _selector = EnvRestore::set("EXTRACT_PROVIDER", "deepseek");
+    let _no_canonical_env = EnvRestore::remove("DEEPSEEK_API_KEY");
+    let _no_base = EnvRestore::remove("EXTRACT_BASE_URL");
+    let _no_model = EnvRestore::remove("EXTRACT_MODEL");
+    let _no_sf = EnvRestore::remove("SILICONFLOW_API_KEY");
+    let server = fixture().await;
+    seed(
+        &server,
+        "EXTRACT_BASE_URL",
+        "http://api.deepseek.com/chat/completions",
+    );
+
+    let error = server
+        .refresh_llm_provider_secrets_from_vault()
+        .expect_err("selected-provider HTTP overlay must fail without a key pool");
+    assert!(
+        error.contains("https://api.deepseek.com")
+            && error.contains("refusing credential-bearing request"),
+        "unexpected rejection error: {error}"
+    );
+    assert!(
+        server
+            .llm
+            .provider_secret_for_tests(&["DEEPSEEK_API_KEY"])
+            .is_none(),
+        "no pool may be published before a later canonical key materializes"
+    );
+}

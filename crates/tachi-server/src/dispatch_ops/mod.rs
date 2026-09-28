@@ -24,6 +24,8 @@ pub(crate) use dispatch::background_dispatch_cleanup_complete;
 pub(crate) use dispatch::dispatch_runs_root;
 pub(crate) use dispatch::handle_tachi_dispatch;
 #[cfg(test)]
+pub(crate) use dispatch::install_background_dispatch_abort_capture;
+#[cfg(test)]
 pub(crate) use dispatch::install_managed_credential_cleanup_failure;
 #[cfg(test)]
 pub(crate) use dispatch::install_managed_credential_materialization_barrier;
@@ -38,6 +40,9 @@ pub(crate) use dispatch::recover_orphaned_dispatch_runs;
 pub(crate) use dispatch::{load_dispatch_identity_receipt_checked, DispatchReceiptLoad};
 #[cfg(test)]
 pub(crate) use dispatch_v2::fail_next_managed_terminal_status_write;
+#[cfg(test)]
+pub(crate) use dispatch_v2::fail_next_plan_commit_write;
+pub(crate) use dispatch_v2::planner_failure_winner;
 pub(crate) use dispatch_v2::stamp_route_decision_id;
 pub(crate) use dispatch_v2::status_json_lock_for;
 #[cfg(unix)]

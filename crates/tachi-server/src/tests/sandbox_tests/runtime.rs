@@ -14,20 +14,23 @@ async fn process_runtime_rejects_unenforceable_fs_roots() {
         .expect("failed to register fs-locked capability");
 
     server
-        .sandbox_set_policy(Parameters(SandboxSetPolicyParams {
-            capability_id: "mcp:fs-locked".to_string(),
-            runtime_type: "process".to_string(),
-            env_allowlist: vec![],
-            fs_read_roots: vec!["/tmp".to_string()],
-            fs_write_roots: vec![],
-            cwd_roots: vec![],
-            max_startup_ms: 1000,
-            max_tool_ms: 1000,
-            max_concurrency: 1,
-            enabled: true,
-        }))
+        .tachi_sandbox(Parameters(sandbox_params(
+            "set_policy",
+            json!({
+                "capability_id": "mcp:fs-locked",
+                "runtime_type": "process",
+                "env_allowlist": [],
+                "fs_read_roots": ["/tmp"],
+                "fs_write_roots": [],
+                "cwd_roots": [],
+                "max_startup_ms": 1000,
+                "max_tool_ms": 1000,
+                "max_concurrency": 1,
+                "enabled": true,
+            }),
+        )))
         .await
-        .expect("sandbox_set_policy should succeed");
+        .expect("tachi_sandbox(action='set_policy') should succeed");
 
     let err = server
         .proxy_call_internal("fs-locked", "echo", None)

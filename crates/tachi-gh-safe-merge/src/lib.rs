@@ -16,6 +16,8 @@
 //! `GhClient` is the narrow contract those server paths consume:
 //!
 //! - `pr_view` fetches the latest PR state for a gate evaluation;
+//!   `pr_view_snapshot` returns the same read plus the raw check runs behind
+//!   it, and `pr_head_sha` reads only the live head SHA;
 //! - `pr_merge` performs a merge only after the caller has a `Ready` decision;
 //! - `issue_create` opens a tracking issue from a brainstorm flow;
 //! - `checks_list` reads the granular check status used by the event/log path.
@@ -40,7 +42,7 @@ mod mock;
 mod tests;
 mod types;
 
-pub use client::{GhClient, GhError, IssueState, MergeResult, MergeStrategy};
+pub use client::{GhClient, GhError, IssueState, MergeResult, MergeStrategy, PrViewSnapshot};
 #[cfg(test)]
 pub(crate) use gate::evaluate_merge_gate;
 pub use gate::evaluate_merge_gate_with_policy;

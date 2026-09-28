@@ -4,8 +4,8 @@ use crate::tool_params::{
     build_candidate_knowledge_artifact_fields, build_evidence_refs_v1,
     derive_effective_knowledge_artifact, EffectiveKnowledgeArtifactV1, ProgressCheckParams,
     SaveMemoryParams, SearchMemoryParams, StoreRef, TachiBoardParams, TachiTaskParams,
-    TaskBriefParams, WikiApplicabilityStatusV1, WikiKnowledgeScopeV1, WikiLifecycleV1,
-    WikiReadPlan, WikiSearchParams, WikiWriteParams,
+    WikiApplicabilityStatusV1, WikiKnowledgeScopeV1, WikiLifecycleV1, WikiReadPlan,
+    WikiSearchParams, WikiWriteParams,
 };
 use chrono::Utc;
 use memcore::{MemoryEntry, MemoryStore};
@@ -32,7 +32,6 @@ mod wiki_facade;
 #[cfg(test)]
 mod tests;
 
-use self::progress_check::*;
 use self::support::*;
 use self::wiki_facade::*;
 
@@ -42,8 +41,6 @@ use self::feature_briefing::*;
 use self::task_routing::*;
 
 pub(crate) use self::feature_briefing::handle_tachi_feature_briefing;
-#[cfg(test)]
-pub(crate) use self::feature_briefing::handle_tachi_task_brief;
 pub(crate) use self::progress_check::handle_tachi_progress_check;
 pub(crate) use self::support::{
     is_wiki_projection_duplicate, wiki_parent_path, wiki_projection_supersedes_edge,

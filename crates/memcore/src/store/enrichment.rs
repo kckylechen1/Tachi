@@ -36,6 +36,19 @@ pub struct EnrichmentRetryCandidate {
     pub max_attempts: i64,
 }
 
+/// One operator-inspected summary-backfill candidate row, fetched by exact id.
+///
+/// `text` is the full stored body; callers that report plans must not echo it
+/// into operator-facing output.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SummaryBackfillRow {
+    pub id: String,
+    pub text: String,
+    pub has_summary: bool,
+    pub archived: bool,
+    pub revision: i64,
+}
+
 fn now_utc_iso() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
 }
@@ -301,6 +314,22 @@ impl MemoryStore {
         db::record_enrichment_failure(&self.conn, id, stage, error)
     }
 
+    /// Record an asynchronous enrichment failure only when the row is still
+    /// at `expected_revision`. Returns `false` — with the row untouched —
+    /// when a concurrent writer moved it on, so a stale sweep observation
+    /// cannot pollute the new revision's metadata or `updated_at`.
+    pub fn record_enrichment_failure_if_revision(
+        &self,
+        id: &str,
+        stage: &str,
+        error: &str,
+        expected_revision: i64,
+    ) -> Result<bool, MemoryError> {
+        let _authorization =
+            db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
+        db::record_enrichment_failure_if_revision(&self.conn, id, stage, error, expected_revision)
+    }
+
     /// Set write-side keyword enrichment status (`enriched`/`pending`/`skipped`/`failed`).
     pub fn set_keyword_enrichment_status(&self, id: &str, status: &str) -> Result<(), MemoryError> {
         let _authorization =
@@ -441,6 +470,48 @@ impl MemoryStore {
         Ok(rows)
     }
 
+    /// Fetch summary-backfill candidate rows for an exact, operator-supplied
+    /// ID set in THIS database only — no cross-DB discovery.
+    ///
+    /// Rows come back in the caller's `ids` order (the caller is responsible
+    /// for deduplicating that slice deterministically first). Ids absent from
+    /// this database are surfaced by the returned Vec being shorter than
+    /// `ids`, so the caller fails the whole request before any provider call
+    /// or write instead of silently ignoring a typo'd id.
+    pub fn summary_backfill_rows_for_ids(
+        &self,
+        ids: &[String],
+    ) -> Result<Vec<SummaryBackfillRow>, MemoryError> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let placeholders = std::iter::repeat_n("?", ids.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT id, text, trim(summary) != '', archived, revision
+             FROM memories
+             WHERE id IN ({placeholders})"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(ids.iter()), |row| {
+                Ok(SummaryBackfillRow {
+                    id: row.get(0)?,
+                    text: row.get(1)?,
+                    has_summary: row.get::<_, i64>(2)? != 0,
+                    archived: row.get::<_, i64>(3)? != 0,
+                    revision: row.get(4)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        let by_id = rows
+            .into_iter()
+            .map(|row| (row.id.clone(), row))
+            .collect::<std::collections::HashMap<String, SummaryBackfillRow>>();
+        Ok(ids.iter().filter_map(|id| by_id.get(id).cloned()).collect())
+    }
+
     /// List entries missing recall keywords.
     ///
     /// Entities are optional: some short notes and diagnostic rows have no
@@ -485,21 +556,44 @@ impl MemoryStore {
         Ok((total, total - missing))
     }
 
-    /// Get total memory count and FTS index count.
+    /// Get the live memory count and how many of them `memories_fts` covers.
+    ///
+    /// `total` counts only non-NULL-id memories (tachi#1993): no FTS writer
+    /// projects a NULL-id memory, so counting one reported a `missing` row
+    /// that no backfill or rebuild can ever fill.
+    ///
+    /// `with_fts` counts distinct *live* ids with at least one projection
+    /// row, so `with_fts <= total` and `total - with_fts` is exactly the
+    /// number of unprojected live memories. A raw `COUNT(DISTINCT id)` also
+    /// counted orphan (ghost) and duplicate rows, which could offset a
+    /// missing live id and report `Missing: 0` (tachi#2000 review, astra r2).
+    /// The subquery is uncorrelated and NULL-guarded (#1974 / #1985).
     pub fn fts_stats(&self) -> Result<(i64, i64), MemoryError> {
-        let total: i64 = self
-            .conn
-            .query_row("SELECT COUNT(*) FROM memories", [], |r| r.get(0))?;
-        let with_fts: i64 =
-            self.conn
-                .query_row("SELECT COUNT(DISTINCT id) FROM memories_fts", [], |r| {
-                    r.get(0)
-                })?;
+        let total: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM memories WHERE id IS NOT NULL",
+            [],
+            |r| r.get(0),
+        )?;
+        let with_fts: i64 = self.conn.query_row(
+            "SELECT COUNT(DISTINCT id) FROM memories_fts
+             WHERE id IN (SELECT id FROM memories WHERE id IS NOT NULL)",
+            [],
+            |r| r.get(0),
+        )?;
         Ok((total, with_fts))
     }
 
     /// Backfill FTS index for entries missing from memories_fts.
     /// Returns the number of rows inserted.
+    ///
+    /// NULL ids (`memories.id` is `TEXT PRIMARY KEY` without NOT NULL; FTS5
+    /// columns are untyped), same guards as the open-time backfill (#1985):
+    /// - `WHERE id IS NOT NULL` in the subquery: one NULL-id projection row
+    ///   would make `id NOT IN (..., NULL)` NULL for every memory and
+    ///   silently suppress the whole repair.
+    /// - `id IS NOT NULL` on `memories`: a NULL-id memory can never be matched
+    ///   back to an FTS hit, and projecting it would create exactly such a
+    ///   poisoning row (`NULL NOT IN (<empty>)` is TRUE).
     pub fn backfill_fts_missing(&mut self) -> Result<usize, MemoryError> {
         let tx = self.conn.transaction()?;
         let inserted = tx.execute(
@@ -509,14 +603,16 @@ impl MemoryStore {
                  trim(replace(replace(replace(keywords, '[', ' '), ']', ' '), '"', ' ')),
                  trim(replace(replace(replace(entities, '[', ' '), ']', ' '), '"', ' '))
                FROM memories
-               WHERE id NOT IN (SELECT id FROM memories_fts)"#,
+               WHERE id IS NOT NULL
+                 AND id NOT IN (SELECT id FROM memories_fts WHERE id IS NOT NULL)"#,
             [],
         )?;
         let symbolic_inserted = tx.execute(
             r#"INSERT INTO memories_symbolic_fts (id, path, summary, text, keywords, entities, topic)
                SELECT id, path, summary, text, keywords, entities, topic
                FROM memories
-               WHERE id NOT IN (SELECT id FROM memories_symbolic_fts)"#,
+               WHERE id IS NOT NULL
+                 AND id NOT IN (SELECT id FROM memories_symbolic_fts WHERE id IS NOT NULL)"#,
             [],
         )?;
         if inserted + symbolic_inserted > 0 {
@@ -527,6 +623,9 @@ impl MemoryStore {
     }
 
     /// Full FTS rebuild. Use this when the FTS table is stale or corrupted.
+    ///
+    /// Like every FTS projection writer, never projects a NULL-id memory
+    /// (tachi#1993): the open-time orphan pass would delete that row again.
     pub fn rebuild_fts_full(&mut self) -> Result<usize, MemoryError> {
         let tx = self.conn.transaction()?;
         tx.execute_batch("DROP TABLE IF EXISTS memories_fts;")?;
@@ -547,7 +646,8 @@ impl MemoryStore {
                  id, path, summary, text,
                  trim(replace(replace(replace(keywords, '[', ' '), ']', ' '), '"', ' ')),
                  trim(replace(replace(replace(entities, '[', ' '), ']', ' '), '"', ' '))
-               FROM memories"#,
+               FROM memories
+               WHERE id IS NOT NULL"#,
             [],
         )?;
         tx.execute_batch("DROP TABLE IF EXISTS memories_symbolic_fts;")?;
@@ -566,7 +666,8 @@ impl MemoryStore {
         let _ = tx.execute(
             r#"INSERT INTO memories_symbolic_fts (id, path, summary, text, keywords, entities, topic)
                SELECT id, path, summary, text, keywords, entities, topic
-               FROM memories"#,
+               FROM memories
+               WHERE id IS NOT NULL"#,
             [],
         )?;
         crate::db::bump_search_generation(&tx)?;
@@ -715,5 +816,482 @@ mod tests {
             .expect("entry exists after stale update");
         assert_eq!(stored.keywords, entry.keywords);
         assert_eq!(stored.revision, entry.revision);
+    }
+
+    /// Exact-id summary selection: caller order is preserved, summary and
+    /// archival status are surfaced (not hidden), and unknown ids are
+    /// reported by length mismatch so the caller can fail the whole set.
+    #[test]
+    fn summary_backfill_rows_for_ids_reports_exact_rows_in_caller_order() {
+        let mut store = MemoryStore::open_in_memory().expect("open test store");
+        let mut missing = test_entry("missing-summary");
+        missing.summary = String::new();
+        store.upsert(&missing).expect("seed missing-summary row");
+
+        let mut summarized = test_entry("has-summary");
+        summarized.summary = "existing summary".to_string();
+        store.upsert(&summarized).expect("seed summarized row");
+
+        let mut archived = test_entry("archived-row");
+        archived.archived = true;
+        store.upsert(&archived).expect("seed archived row");
+
+        let rows = store
+            .summary_backfill_rows_for_ids(&[
+                "archived-row".to_string(),
+                "unknown-id".to_string(),
+                "missing-summary".to_string(),
+                "has-summary".to_string(),
+            ])
+            .expect("select exact-id candidates");
+
+        assert_eq!(
+            rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
+            vec!["archived-row", "missing-summary", "has-summary"],
+            "rows keep the caller's deterministic order; the unknown id is simply absent"
+        );
+        assert_eq!(
+            rows.len(),
+            3,
+            "unknown ids surface as a length mismatch, never a silent ignore"
+        );
+        assert!(rows[0].archived);
+        assert!(rows[0].has_summary);
+        assert!(!rows[1].archived);
+        assert!(!rows[1].has_summary);
+        assert!(rows[2].has_summary);
+        assert_eq!(rows[1].text, "enrichment authorization fixture text");
+        assert_eq!(rows[1].revision, 1);
+
+        assert!(
+            store
+                .summary_backfill_rows_for_ids(&[])
+                .expect("empty id set")
+                .is_empty(),
+            "an empty explicit selection stays empty instead of sweeping everything"
+        );
+    }
+
+    /// #2 (Sol rereview): a failure observed at a stale revision must not
+    /// stamp the concurrently-moved row's metadata; only the matching
+    /// revision is stamped, and observation fields never change.
+    #[test]
+    fn record_enrichment_failure_if_revision_guards_against_concurrent_revisions() {
+        let mut store = MemoryStore::open_in_memory().expect("open test store");
+        let entry = test_entry("guarded-failure");
+        store.upsert(&entry).expect("seed entry"); // revision 1
+                                                   // Baseline from the stored row: write-time normalization may rewrite
+                                                   // the constructed entry's timestamp formatting.
+        let seeded = store.get("guarded-failure").expect("read").expect("exists");
+
+        assert!(
+            store
+                .record_enrichment_failure_if_revision(
+                    "guarded-failure",
+                    "summary",
+                    "provider 503",
+                    1
+                )
+                .expect("record at the matching revision"),
+            "a matching revision must stamp the failure"
+        );
+        let stamped = store.get("guarded-failure").expect("read").expect("exists");
+        assert_eq!(
+            stamped
+                .metadata
+                .pointer("/enrichment/failed_stage")
+                .and_then(|value| value.as_str()),
+            Some("summary")
+        );
+        assert_eq!(
+            stamped.timestamp, seeded.timestamp,
+            "observation timestamp preserved"
+        );
+        assert_eq!(
+            stamped.valid_from, seeded.valid_from,
+            "valid_from preserved"
+        );
+        assert_eq!(stamped.text, seeded.text, "raw text preserved");
+
+        // A concurrent writer bumps the revision; the guarded stamp refuses.
+        let mut moved = stamped.clone();
+        moved.importance = 0.9;
+        store.upsert(&moved).expect("concurrent revision bump"); // revision 2
+        let after_bump = store.get("guarded-failure").expect("read").expect("exists");
+        let updated_at_after_bump: String = store
+            .connection()
+            .query_row(
+                "SELECT updated_at FROM memories WHERE id = 'guarded-failure'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read updated_at after bump");
+
+        assert!(
+            !store
+                .record_enrichment_failure_if_revision(
+                    "guarded-failure",
+                    "summary",
+                    "stale observation error",
+                    1
+                )
+                .expect("guarded record must answer, not fail"),
+            "a stale revision must not be stamped"
+        );
+        let untouched = store.get("guarded-failure").expect("read").expect("exists");
+        assert_eq!(
+            untouched.metadata, after_bump.metadata,
+            "the moved revision's metadata stays unpolluted"
+        );
+        let updated_at_after_refusal: String = store
+            .connection()
+            .query_row(
+                "SELECT updated_at FROM memories WHERE id = 'guarded-failure'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read updated_at after refused stamp");
+        assert_eq!(
+            updated_at_after_refusal, updated_at_after_bump,
+            "the moved revision's updated_at stays untouched by the refused stamp"
+        );
+
+        assert!(
+            store
+                .record_enrichment_failure_if_revision(
+                    "guarded-failure",
+                    "summary",
+                    "fresh observation error",
+                    2
+                )
+                .expect("record at the new matching revision"),
+            "the new current revision can be stamped"
+        );
+        let restamped = store.get("guarded-failure").expect("read").expect("exists");
+        assert_eq!(
+            restamped
+                .metadata
+                .pointer("/enrichment/last_error")
+                .and_then(|value| value.as_str()),
+            Some("fresh observation error")
+        );
+    }
+
+    fn count(store: &MemoryStore, sql: &str) -> i64 {
+        store
+            .connection()
+            .query_row(sql, [], |row| row.get(0))
+            .unwrap_or_else(|error| panic!("{sql}: {error}"))
+    }
+
+    /// Seeds two memories (`upsert` projects both into both FTS tables), then
+    /// in `table` only drops `fts-null-guard-b`'s row and adds one NULL-id
+    /// row. FTS5 columns are untyped, so such a row is representable.
+    fn seed_null_id_fts_row_and_missing_row(table: &str) -> MemoryStore {
+        let mut store = MemoryStore::open_in_memory().expect("open test store");
+        for id in ["fts-null-guard-a", "fts-null-guard-b"] {
+            store.upsert(&test_entry(id)).expect("seed entry");
+        }
+        let conn = store.connection();
+        conn.execute(
+            &format!("DELETE FROM {table} WHERE id = 'fts-null-guard-b'"),
+            [],
+        )
+        .expect("drop one real projection row");
+        let insert_null = if table == "memories_symbolic_fts" {
+            "INSERT INTO memories_symbolic_fts (id, path, summary, text, keywords, entities, topic)
+             VALUES (NULL, '/null', 'null', 'null', '', '', '')"
+        } else {
+            "INSERT INTO memories_fts (id, path, summary, text, keywords, entities)
+             VALUES (NULL, '/null', 'null', 'null', '', '')"
+        };
+        conn.execute(insert_null, [])
+            .expect("insert NULL-id FTS row");
+        assert_eq!(
+            count(
+                &store,
+                &format!("SELECT COUNT(*) FROM {table} WHERE id IS NULL")
+            ),
+            1,
+            "{table}: fixture must hold exactly one NULL-id row"
+        );
+        store
+    }
+
+    fn assert_repaired_exactly_once(store: &MemoryStore, table: &str) {
+        assert_eq!(
+            count(
+                store,
+                &format!("SELECT COUNT(*) FROM {table} WHERE id = 'fts-null-guard-b'")
+            ),
+            1,
+            "{table}: the missing real row must be reinserted despite the NULL-id row"
+        );
+        assert_eq!(
+            count(
+                store,
+                &format!("SELECT COUNT(*) FROM {table} WHERE id IS NOT NULL")
+            ),
+            2,
+            "{table}: real rows repaired exactly once, no duplicates"
+        );
+        assert_eq!(
+            count(
+                store,
+                &format!("SELECT COUNT(*) FROM {table} WHERE id IS NULL")
+            ),
+            1,
+            "{table}: backfill is insert-missing only; it neither adds nor prunes NULL-id rows"
+        );
+    }
+
+    /// Under SQL three-valued logic `x NOT IN (..., NULL)` is NULL for every
+    /// `x`, so one NULL-id `memories_fts` row used to suppress every repair.
+    #[test]
+    fn backfill_fts_missing_repairs_memories_fts_despite_null_id_row() {
+        let mut store = seed_null_id_fts_row_and_missing_row("memories_fts");
+
+        let inserted = store.backfill_fts_missing().expect("backfill");
+
+        assert_eq!(inserted, 1, "memories_fts: one missing row reinserted");
+        assert_repaired_exactly_once(&store, "memories_fts");
+        assert_eq!(
+            store.backfill_fts_missing().expect("second backfill"),
+            0,
+            "a second pass finds nothing missing"
+        );
+        assert_repaired_exactly_once(&store, "memories_fts");
+    }
+
+    /// Same NULL poisoning for the symbolic trigram projection. The return
+    /// value counts only `memories_fts`, so assert on table state.
+    #[test]
+    fn backfill_fts_missing_repairs_symbolic_fts_despite_null_id_row() {
+        let mut store = seed_null_id_fts_row_and_missing_row("memories_symbolic_fts");
+
+        store.backfill_fts_missing().expect("backfill");
+
+        assert_repaired_exactly_once(&store, "memories_symbolic_fts");
+        store.backfill_fts_missing().expect("second backfill");
+        assert_repaired_exactly_once(&store, "memories_symbolic_fts");
+    }
+
+    /// A NULL `memories.id` can never be matched back to an FTS hit by id, so
+    /// backfill must not project it. Projecting it would create exactly the
+    /// NULL-id FTS row that poisons later `NOT IN` repairs. With an empty
+    /// projection `NULL NOT IN (<empty>)` is TRUE, so only an explicit
+    /// `id IS NOT NULL` guard on `memories` keeps it out.
+    #[test]
+    fn backfill_fts_missing_never_projects_null_memory_ids() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("null-memory-id.db");
+        let path = path.to_str().expect("utf8 db path");
+        seed_store_with_null_memory_id(path);
+        let mut store = MemoryStore::open(path).expect("reopen store");
+        assert_eq!(
+            count(&store, "SELECT COUNT(*) FROM memories WHERE id IS NULL"),
+            1,
+            "fixture must hold exactly one NULL-id memory"
+        );
+        // Start from empty projections; raw FTS deletes are permitted.
+        let conn = store.connection();
+        conn.execute("DELETE FROM memories_fts", [])
+            .expect("empty memories_fts");
+        conn.execute("DELETE FROM memories_symbolic_fts", [])
+            .expect("empty memories_symbolic_fts");
+
+        let inserted = store.backfill_fts_missing().expect("backfill");
+
+        assert_eq!(inserted, 1, "only the real memory is projected");
+        assert_only_real_memory_projected(&store);
+    }
+
+    /// tachi#2000 review (finding 1): `rebuild_fts_full` must follow the same
+    /// rule as every other projection writer and never project a NULL-id
+    /// memory. It used to, and the next writable open's orphan pass deleted
+    /// those rows again (rebuild -> open -> rebuild, a generation bump each
+    /// open). `fts_stats` must then report nothing missing: its `total` counts
+    /// projectable (non-NULL-id) memories only.
+    #[test]
+    fn rebuild_fts_full_never_projects_null_memory_ids_and_open_converges() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("null-memory-id-rebuild.db");
+        let path = path.to_str().expect("utf8 db path");
+        seed_store_with_null_memory_id(path);
+        let generation_after_rebuild = {
+            let mut store = MemoryStore::open(path).expect("reopen store");
+            assert_eq!(
+                count(&store, "SELECT COUNT(*) FROM memories WHERE id IS NULL"),
+                1,
+                "fixture must hold exactly one NULL-id memory"
+            );
+
+            // The connection authorizer denies the DROP/CREATE VIRTUAL TABLE
+            // unless a schema-migration authorization is active. This test
+            // asserts the projection rule, so it holds one explicitly.
+            let migration_authorization =
+                crate::db::authorize_schema_migration(&store.reserved_reference_write)
+                    .expect("authorize full rebuild");
+            let inserted = store.rebuild_fts_full().expect("full rebuild");
+            drop(migration_authorization);
+
+            assert_eq!(inserted, 1, "only the real memory is projected");
+            assert_only_real_memory_projected(&store);
+            assert_eq!(
+                store.fts_stats().expect("fts_stats"),
+                (1, 1),
+                "no projectable memory is missing from memories_fts"
+            );
+            crate::db::search_generation(store.connection()).expect("generation")
+        };
+        let store = MemoryStore::open(path).expect("open after rebuild");
+        assert_eq!(
+            crate::db::search_generation(store.connection()).expect("generation"),
+            generation_after_rebuild,
+            "the open after a full rebuild must find nothing to prune"
+        );
+        assert_only_real_memory_projected(&store);
+    }
+
+    fn assert_only_real_memory_projected(store: &MemoryStore) {
+        for table in ["memories_fts", "memories_symbolic_fts"] {
+            assert_eq!(
+                count(
+                    store,
+                    &format!("SELECT COUNT(*) FROM {table} WHERE id IS NULL")
+                ),
+                0,
+                "{table}: a NULL memory id must not be projected"
+            );
+            assert_eq!(
+                count(
+                    store,
+                    &format!("SELECT COUNT(*) FROM {table} WHERE id = 'fts-null-guard-real'")
+                ),
+                1,
+                "{table}: the real memory is projected"
+            );
+        }
+    }
+
+    /// A file store holding one real memory (`fts-null-guard-real`) and one
+    /// legacy NULL-id memory.
+    fn seed_store_with_null_memory_id(path: &str) {
+        {
+            let mut store = MemoryStore::open(path).expect("create store");
+            store
+                .upsert(&test_entry("fts-null-guard-real"))
+                .expect("seed entry");
+        }
+        {
+            // The store connection's authorizer denies raw `memories` writes,
+            // so a legacy NULL-id row is seeded through a plain connection.
+            let _ = libsimple::enable_auto_extension();
+            crate::db::register_sqlite_vec();
+            let raw = rusqlite::Connection::open(path).expect("open raw connection");
+            // Guard triggers call this per-connection function; report
+            // "not enabled" so they keep enforcing on this plain row.
+            raw.create_scalar_function(
+                "tachi_reserved_reference_write_enabled",
+                0,
+                rusqlite::functions::FunctionFlags::SQLITE_UTF8,
+                |_| Ok(0_i64),
+            )
+            .expect("register guard function");
+            raw.execute(
+                "INSERT INTO memories (id, path, summary, text, timestamp, valid_from)
+                 VALUES (NULL, '/null', 'null id', 'null id text',
+                         '2026-07-26T00:00:00Z', '2026-07-26T00:00:00Z')",
+                [],
+            )
+            .expect("insert NULL-id memory");
+        }
+    }
+
+    /// A file store holding the legacy NULL-id memory plus `live`, whose
+    /// lexical projection is then replaced by exactly `fts_ids` (an id with
+    /// no memory is a ghost row; `None` is a NULL-id row), opened the way
+    /// `backfill-fts --dry-run` opens it: read-only, so no open-time orphan
+    /// pass or backfill runs.
+    fn read_only_store_with_lexical_projection(
+        dir: &tempfile::TempDir,
+        live: &[&str],
+        fts_ids: &[Option<&str>],
+    ) -> MemoryStore {
+        let path = dir.path().join("fts-stats-membership.db");
+        let path = path.to_str().expect("utf8 db path");
+        {
+            let mut store = MemoryStore::open(path).expect("create store");
+            for id in live {
+                store.upsert(&test_entry(id)).expect("seed entry");
+            }
+        }
+        {
+            let _ = libsimple::enable_auto_extension();
+            crate::db::register_sqlite_vec();
+            let raw = rusqlite::Connection::open(path).expect("open raw connection");
+            raw.create_scalar_function(
+                "tachi_reserved_reference_write_enabled",
+                0,
+                rusqlite::functions::FunctionFlags::SQLITE_UTF8,
+                |_| Ok(0_i64),
+            )
+            .expect("register guard function");
+            raw.execute(
+                "INSERT INTO memories (id, path, summary, text, timestamp, valid_from)
+                 VALUES (NULL, '/null', 'null id', 'null id text',
+                         '2026-09-26T00:00:00Z', '2026-09-26T00:00:00Z')",
+                [],
+            )
+            .expect("insert NULL-id memory");
+            raw.execute("DELETE FROM memories_fts", [])
+                .expect("empty memories_fts");
+            for id in fts_ids {
+                raw.execute(
+                    "INSERT INTO memories_fts (id, path, summary, text, keywords, entities)
+                     VALUES (?1, '/fixture', 'fixture', 'fixture text', '', '')",
+                    [id],
+                )
+                .expect("insert fixture projection row");
+            }
+        }
+        MemoryStore::open_read_only_existing_schema_compat(
+            path,
+            crate::store::open::ReadOnlyBackfillOperation::Fts,
+        )
+        .expect("read-only dry-run open")
+    }
+
+    /// tachi#2000 review (astra r2, finding 2): with memories `{NULL, 'keep'}`
+    /// and only a ghost projection row, `fts_stats` returned `(1, 1)` (ghost
+    /// counted as coverage), so `backfill-fts --dry-run` printed `Missing: 0`
+    /// while `'keep'` had no projection. `with_fts` counts covered live ids.
+    #[test]
+    fn fts_stats_does_not_count_a_ghost_as_coverage() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = read_only_store_with_lexical_projection(&dir, &["keep"], &[Some("ghost")]);
+        assert_eq!(
+            store.fts_stats().expect("fts_stats"),
+            (1, 0),
+            "one live memory, none covered: Missing must be 1"
+        );
+    }
+
+    /// Mixed cancellation: a NULL-id row, a ghost and a duplicate of `keep`
+    /// used to count as two distinct covered ids against two live memories
+    /// (`Missing: 0`) while `other` had no projection.
+    #[test]
+    fn fts_stats_counts_only_covered_live_ids_under_mixed_cancellation() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = read_only_store_with_lexical_projection(
+            &dir,
+            &["keep", "other"],
+            &[None, Some("ghost"), Some("keep"), Some("keep")],
+        );
+        assert_eq!(
+            store.fts_stats().expect("fts_stats"),
+            (2, 1),
+            "two live memories, only `keep` covered: Missing must be 1"
+        );
     }
 }

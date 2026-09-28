@@ -104,6 +104,10 @@ fn register_spawn(server: &MemoryServer, event: &TachiEventRecord) -> Result<(),
         // The host tells us a subagent label, not a resolved model/profile —
         // record it as the requested agent, never invent a model identity.
         requested_agent: label(event),
+        // v34: this bridge carries no task/role facts; NULL stays explicitly
+        // unknown rather than guessed.
+        requested_task_type: None,
+        requested_role: None,
     };
     server.with_global_store(|store| {
         memcore::register_mirror_eval_run(store.connection(), &new)

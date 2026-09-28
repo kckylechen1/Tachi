@@ -158,7 +158,8 @@ pub enum Commands {
     /// (#1119's call-site-authority pattern — never a process env var, and
     /// never the shared top-level `--allow-schema-migration` flag). A
     /// library currently held by a live daemon is skipped and listed, not
-    /// aborted; the rest of the sweep continues.
+    /// aborted; the rest of the sweep continues. Legacy filename conversion
+    /// is a separate, explicitly offline mode and does not upgrade schema.
     Migrate {
         /// Emit machine-readable JSON instead of the human summary table
         #[arg(long)]
@@ -167,6 +168,14 @@ pub enum Commands {
         /// plan-only: report the gap, make zero writes.
         #[arg(long)]
         apply: bool,
+        /// Convert old memory.db filenames only; schema migration is a later
+        /// separate `migrate --apply` invocation.
+        #[arg(long)]
+        rename_legacy: bool,
+        /// Attest that ALL old/new readers and writers have been stopped and
+        /// prevented from restarting. Required for filename conversion apply.
+        #[arg(long)]
+        offline: bool,
     },
     /// Plan or apply irreversible garbage collection for one exact physical DB.
     Gc {
@@ -266,6 +275,27 @@ pub enum Commands {
         /// Only count missing entries, don't generate summaries
         #[arg(long)]
         dry_run: bool,
+        /// Restrict the sweep to one explicit memory ID in the target DB
+        /// (repeatable; duplicates collapse deterministically). Default
+        /// without --id stays the missing-only sweep.
+        #[arg(long = "id", value_name = "ID")]
+        id: Vec<String>,
+        /// Schedule at most N selected entries (positive). Applies after the
+        /// whole --id set is validated, so a typo'd id still fails the run.
+        #[arg(long, value_name = "N")]
+        limit: Option<usize>,
+        /// With explicit --id only: replace existing non-empty summaries.
+        /// Only the summary, its receipt, FTS, updated_at, and enrichment
+        /// metadata change — raw text, observation timestamps
+        /// (timestamp/valid_from/valid_until), identity, and vectors are
+        /// untouched. updated_at is write time, not fact freshness.
+        #[arg(long, requires = "id")]
+        regenerate: bool,
+        /// Emit one structured JSON plan (dry-run) or result document
+        /// instead of human progress lines. Contains ids, revisions,
+        /// statuses and counts only — never memory bodies or key material.
+        #[arg(long)]
+        json: bool,
     },
     /// Backfill missing recall keywords using the configured extract LLM
     BackfillMetadata {

@@ -18,7 +18,9 @@ pub use text::{
     entry_has_exact_query_token, generic_precision_multiplier, is_id_like_exact_query,
     symbolic_score, symbolic_score_entry, tokenize, PrecisionMatcher,
 };
-pub(crate) use text::{generic_precision_multiplier_impl_with_config, symbolic_score_stored_entry};
+pub(crate) use text::{
+    generic_precision_multiplier_impl_with_config, symbolic_score_stored_entry, SymbolicQuery,
+};
 
 fn tier_half_life_with_config(tier: &str, recall_config: &RecallConfig) -> f64 {
     recall_config.half_life_days_for_tier(tier)
@@ -48,6 +50,17 @@ pub trait DecayPolicy: Send + Sync {
         recall_config: &RecallConfig,
         access_ages: Option<&[f64]>,
     ) -> f64;
+
+    /// Whether [`score_decay`](Self::score_decay) reads `entry.vector`.
+    ///
+    /// Hybrid search normally decodes stored embeddings only for the rows
+    /// that need them (the MMR frontier and the returned results), so during
+    /// ranking the other candidates carry `vector: None`. It does so only
+    /// when every injected policy and matcher returns `false` here; the
+    /// default `true` keeps every candidate's embedding loaded, as before.
+    fn reads_entry_vector(&self) -> bool {
+        true
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -63,6 +76,10 @@ impl DecayPolicy for DefaultDecayPolicy {
         access_ages: Option<&[f64]>,
     ) -> f64 {
         default_decay_score_actr_with_config(entry, access_ages, recall_config)
+    }
+
+    fn reads_entry_vector(&self) -> bool {
+        false
     }
 }
 

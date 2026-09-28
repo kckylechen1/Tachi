@@ -3,11 +3,8 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 use crate::{
-    db::{normalize_sqlite_as_of, search_fts_with_normalized_as_of},
-    error::MemoryError,
-    namespace::Surface,
-    recall_config::RecallConfig,
-    scorer::tokenize,
+    db::search_fts_with_normalized_as_of, error::MemoryError, namespace::Surface,
+    recall_config::RecallConfig, scorer::tokenize,
 };
 
 use super::FtsExpansionGroupReceipt;
@@ -247,6 +244,12 @@ pub(super) fn symbolic_query_with_expansion(query: &str) -> String {
 /// caller did not opt into sampling, not "zero groups ran".
 type FtsScoresWithGroups = (HashMap<String, f64>, Option<Vec<FtsExpansionGroupReceipt>>);
 
+/// Raw-`as_of` entry point: validates `as_of` itself, before the
+/// empty-query return. Production hybrid search normalizes `as_of` once up
+/// front (and is pinned to reject an unrepresentable instant by
+/// `hybrid_search_rejects_sqlite_unrepresentable_as_of_*`), then calls
+/// [`search_fts_with_expansion_normalized`] directly (audit B11).
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(super) fn search_fts_with_expansion_config(
     conn: &Connection,
@@ -262,8 +265,41 @@ pub(super) fn search_fts_with_expansion_config(
     wiki_corpus_store: bool,
 ) -> Result<FtsScoresWithGroups, MemoryError> {
     let as_of_utc = as_of
-        .map(|instant| normalize_sqlite_as_of(conn, instant))
+        .map(|instant| crate::db::normalize_sqlite_as_of(conn, instant))
         .transpose()?;
+    search_fts_with_expansion_normalized(
+        conn,
+        query,
+        limit,
+        include_archived,
+        include_superseded,
+        path_prefix,
+        as_of_utc.as_deref(),
+        recall_config,
+        sample,
+        surface,
+        wiki_corpus_store,
+    )
+}
+
+/// Expanded FTS for a caller that already holds a canonical,
+/// SQLite-representable `as_of` (`normalize_sqlite_as_of`). The raw-`as_of`
+/// test entry point above keeps its own validation, pinned by
+/// `fts_expansion_rejects_sqlite_unrepresentable_as_of_before_empty_query`.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn search_fts_with_expansion_normalized(
+    conn: &Connection,
+    query: &str,
+    limit: usize,
+    include_archived: bool,
+    include_superseded: bool,
+    path_prefix: Option<&str>,
+    as_of_utc: Option<&str>,
+    recall_config: &RecallConfig,
+    sample: bool,
+    surface: Option<Surface>,
+    wiki_corpus_store: bool,
+) -> Result<FtsScoresWithGroups, MemoryError> {
     let mut merged = HashMap::new();
     let mut groups: Option<Vec<FtsExpansionGroupReceipt>> = sample.then(Vec::new);
     for (idx, fts_query) in expanded_fts_queries(query, recall_config.max_expanded_fts_queries)
@@ -284,7 +320,7 @@ pub(super) fn search_fts_with_expansion_config(
             include_archived,
             include_superseded,
             path_prefix,
-            as_of_utc.as_deref(),
+            as_of_utc,
             surface,
             wiki_corpus_store,
         )?;
@@ -319,7 +355,7 @@ pub(super) fn search_fts_with_expansion_config(
                 include_archived,
                 include_superseded,
                 path_prefix,
-                as_of_utc.as_deref(),
+                as_of_utc,
                 surface,
                 wiki_corpus_store,
             )?;

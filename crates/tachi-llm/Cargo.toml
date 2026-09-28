@@ -1,6 +1,6 @@
 [package]
 name = "tachi-llm"
-version = "1.9.2"
+version = "2.0.0"
 edition = "2021"
 license = "AGPL-3.0-only"
 
@@ -20,7 +20,6 @@ memcore = { path = "../memcore" }
 # something already compiled.
 blake2 = "0.10"
 chrono = { workspace = true }
-dirs = "5.0"
 reqwest = { package = "reqwest", version = "0.13", default-features = false, features = ["charset", "json", "rustls-no-provider", "system-proxy"] }
 rusqlite = { workspace = true }
 rustls = { workspace = true }

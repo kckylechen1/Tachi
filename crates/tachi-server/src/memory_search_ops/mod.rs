@@ -24,16 +24,14 @@ pub(crate) use recall_degradation::{
 };
 pub(crate) use rerank::{
     apply_search_rerank_policy, expand_search_params_for_rerank, rerank_rows_with_outcome,
-    RerankOutcome, SearchRerankPolicy,
+    search_rerank_diagnostics, RerankOutcome, SearchRerankPolicy,
 };
 pub(crate) use save_memory::handle_remember;
 pub(crate) use save_memory::handle_save_memory;
 pub(crate) use save_memory::handle_save_memory_from_caller;
 pub(crate) use save_memory::handle_save_memory_with_references;
 pub(crate) use save_memory::save_eval_memory;
-#[allow(unused_imports)] // stable internal receipt siblings; producers may be feature-gated
 pub(crate) use save_memory::{
-    handle_save_memory_with_authorized_reference_mutations,
     handle_save_memory_with_wiki_projection, save_eval_memory_with_authorized_reference_mutations,
 };
 pub(crate) use search_helpers::client_project_precedence;
@@ -55,6 +53,7 @@ pub(crate) fn scrub_generated_memory_text(text: &str) -> String {
 pub(crate) use search_memory::handle_find_similar_memory;
 pub(crate) use search_memory::handle_search_memory;
 pub(crate) use search_memory::handle_search_memory_with_access;
+pub(crate) use search_memory::handle_search_memory_with_resources;
 pub(crate) use search_memory::invalidate_recall_cache_after_write;
 pub(crate) use search_memory::search_memory_rows;
 pub(crate) use search_memory::search_memory_rows_with_access;
@@ -66,7 +65,4 @@ pub(crate) use search_memory::{
 pub(crate) use search_memory::{
     RecallCacheRaceHook, RecallCacheRacePoint, RecallCacheTestOverride,
 };
-// Compatibility shim for old memory_search_ops::contains_secret_like path.
-#[allow(unused_imports)]
-pub(crate) use tachi_lesson_forge::contains_secret_like;
 pub(crate) use text_scrub::{scrub_secrets, scrub_think_tags};

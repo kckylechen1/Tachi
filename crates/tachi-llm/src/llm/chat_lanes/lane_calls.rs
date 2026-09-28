@@ -15,6 +15,7 @@ use super::super::provider_health::{
     ProviderInvocationFailureClass, ProviderInvocationOutcome, ProviderInvocationReceipt,
     SelectedProviderSecret,
 };
+use super::super::DEEPSEEK_AUTH_PROBE;
 
 /// Exact-host family for thinking-suppression fields. Lookalikes and custom
 /// OpenAI-compatible hosts are `None` — never inherit SiliconFlow or DeepSeek
@@ -24,6 +25,21 @@ fn thinking_suppression_family(base_url: &str) -> Option<ProviderAuthProbeFamily
     let host = url.host_str()?;
     auth_probe_descriptor_for_host(host).map(|descriptor| descriptor.family)
 }
+
+/// The official DeepSeek Flash serving names, anchored to the canonical
+/// auth-probe registry: the first entry IS the registry's configured lane
+/// default (`DEEPSEEK_AUTH_PROBE.chat.summary_model`), so a registry default
+/// change tracks here instead of drifting into a parallel model table. The
+/// second entry is the endpoint's short serving alias for the same Flash
+/// tier.
+///
+/// Matching against this list is by exact (case-folded) name, never by
+/// substring: `deepseek-v4-pro`, `deepseek-flash-pro-experimental`, and
+/// other lookalike ids must not inherit Flash suppression. Non-canonical
+/// names (dated snapshots, internal forks) opt in through
+/// `TACHI_DISABLE_THINKING_MODELS`.
+const OFFICIAL_DEEPSEEK_FLASH_NAMES: &[&str] =
+    &[DEEPSEEK_AUTH_PROBE.chat.summary_model, "deepseek-flash"];
 
 /// Maximum retained characters from a caller-supplied model override.
 const MAX_REFERENCE_CHARS: usize = 64;
@@ -75,7 +91,16 @@ impl ProviderTierFailure {
 
 impl super::super::LlmClient {
     pub(super) fn should_disable_thinking(base_url: &str, model: &str) -> bool {
-        // Check environment variable for explicit override
+        // Check environment variable for explicit override.
+        //
+        // Explicit-override semantics: a set value REPLACES the default alias
+        // recognition below. `none`/`false`/`0` disable suppression outright,
+        // and a comma-separated list is matched by substring against the
+        // request model — it is NOT quietly merged with the official Flash
+        // names. An operator who pinned a list before `deepseek-flash` was a
+        // recognized official alias (e.g. a value of just `deepseek-v4-flash`)
+        // must add the short alias to their explicit list themselves; live
+        // config alignment is an owner action, not a silent code-side fix.
         if let Ok(env_val) = std::env::var("TACHI_DISABLE_THINKING_MODELS") {
             let env_lower = env_val.to_ascii_lowercase();
             if env_lower == "all" || env_lower == "1" || env_lower == "true" {
@@ -99,9 +124,20 @@ impl super::super::LlmClient {
         // content (finish_reason=length, all tokens in reasoning). Pro keeps
         // thinking unless the env override above names it. Unknown hosts stay
         // false — suppression fields are host-specific and must not be guessed.
+        //
+        // The official endpoint serves the same Flash tier under two exact
+        // names: the canonical configured default from the auth-probe registry
+        // (`deepseek-v4-flash`) and the short serving alias `deepseek-flash`,
+        // which the endpoint also reports back in its response `model` field.
+        // Real pilot (2026-09-24): a lane configured with the short alias
+        // served 10/10 empty completions while only the long form was
+        // recognized, because unsuppressed V4 thinking consumed the whole
+        // 100-token budget as reasoning.
         let model = model.to_ascii_lowercase();
         match thinking_suppression_family(base_url) {
-            Some(ProviderAuthProbeFamily::DeepSeek) => model.contains("deepseek-v4-flash"),
+            Some(ProviderAuthProbeFamily::DeepSeek) => OFFICIAL_DEEPSEEK_FLASH_NAMES
+                .iter()
+                .any(|flash_name| *flash_name == model),
             Some(ProviderAuthProbeFamily::SiliconFlow) => {
                 model.contains("qwen") || model.contains("deepseek")
             }
@@ -230,6 +266,38 @@ impl super::super::LlmClient {
         )
         .await
         .map(|outcome| outcome.text)
+    }
+
+    /// Provider-only reasoning call that keeps this lane's full serving
+    /// policy — [`Self::call_lane_llm`]'s per-tier key rotation/retry and any
+    /// configured cross-provider fallback — while returning the actual
+    /// serving engine's persisted-safe receipt.
+    ///
+    /// It is the receipt-bearing sibling of
+    /// [`Self::call_reasoning_llm_provider_only`]. It deliberately does **not**
+    /// use [`Self::call_reasoning_llm_provider_only_with_receipt`], which
+    /// collapses the call to a single primary-tier request and would silently
+    /// replace the pre-existing retry/key-rotation/provider-fallback policy.
+    /// Durable producers that must not change routing behavior use this
+    /// method.
+    pub async fn call_reasoning_llm_provider_only_with_serving_receipt(
+        &self,
+        system: &str,
+        user: &str,
+        model: Option<&str>,
+        temperature: f32,
+        max_tokens: u32,
+    ) -> Result<Generated<String>, String> {
+        self.call_lane_llm(
+            ChatLane::Reasoning,
+            system,
+            user,
+            model,
+            temperature,
+            max_tokens,
+        )
+        .await
+        .map(|outcome| outcome.into_generated(ModelInvocationLaneV1::Reasoning))
     }
 
     /// Spend-aware provider-only reasoning call with a public-safe receipt.
@@ -939,6 +1007,7 @@ impl super::super::LlmClient {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .tracker();
         let background_persist_lock = Arc::clone(&self.background_persist_lock);
+        let writer = Arc::clone(&self.provider_persist_writer);
         let completion = tracker.track();
 
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
@@ -947,7 +1016,7 @@ impl super::super::LlmClient {
                 let result = {
                     let _persist_guard = background_persist_lock.lock().await;
                     tokio::task::spawn_blocking(move || {
-                        persist_llm_usage_blocking(db_path, migration, record)
+                        persist_llm_usage_blocking(&writer, db_path, migration, record)
                     })
                     .await
                     .map_err(|err| format!("persist llm usage join failed: {err}"))
@@ -959,7 +1028,7 @@ impl super::super::LlmClient {
                 }
             });
         } else {
-            if let Err(err) = persist_llm_usage_blocking(db_path, migration, record) {
+            if let Err(err) = persist_llm_usage_blocking(&writer, db_path, migration, record) {
                 tracker.record_error(err.clone());
                 tracing::warn!("[llm] {err}");
             }
@@ -1064,28 +1133,43 @@ fn redact_provider_response(resp_text: &str) -> String {
     format!("provider response redacted ({} bytes)", resp_text.len())
 }
 
-fn persist_llm_usage_blocking(
+/// One usage row per call, never coalesced. The insert reuses the client's
+/// retained vault handle when it is still valid (audit H1).
+// `pub(in crate::llm)` so the writer tests can drive the exact production
+// usage-persist boundary (the retained-handle window it runs through).
+pub(in crate::llm) fn persist_llm_usage_blocking(
+    writer: &crate::llm::ProviderPersistWriter,
     db_path: std::path::PathBuf,
     migration: memcore::MigrationAuthority,
     record: LlmUsageEvent,
 ) -> Result<(), String> {
-    let db_path = db_path
+    let db_path_str = db_path
         .to_str()
         .ok_or_else(|| "persist llm usage: invalid db path".to_string())?;
     let open_context = memcore::DbOpenContext {
         intent: memcore::OpenIntent::OpenExisting,
         migration,
-        required_profile: memcore::StoreProfile::TachiFull,
+        required_profile: memcore::ProfileRequirement::AtLeast(memcore::StoreProfile::TachiFull),
     };
-    let store = memcore::MemoryStore::open_with_context_and_busy_timeout(
-        db_path,
-        &open_context,
-        LLM_USAGE_PERSIST_SQLITE_BUSY_TIMEOUT,
-    )
-    .map_err(|err| format!("persist llm usage open db: {err}"))?;
-    store
-        .record_llm_usage(&record)
-        .map_err(|err| format!("persist llm usage insert: {err}"))
+    let insert = |store: &memcore::MemoryStore| {
+        store
+            .record_llm_usage(&record)
+            .map_err(|err| format!("persist llm usage insert: {err}"))
+    };
+    writer.write(&db_path, insert, || {
+        let store = crate::llm::provider_health::StartupOwnedStore::new(
+            memcore::MemoryStore::open_with_context_and_busy_timeout(
+                db_path_str,
+                &open_context,
+                LLM_USAGE_PERSIST_SQLITE_BUSY_TIMEOUT,
+            )
+            .map_err(|err| format!("persist llm usage open db: {err}"))?,
+        );
+        // A failed insert — or a panic in it — closes the freshly opened
+        // handle under startup ownership on the way out.
+        insert(store.store())?;
+        Ok((store.into_store(), ()))
+    })
 }
 
 #[cfg(test)]
@@ -1128,6 +1212,11 @@ mod failure_class_tests {
 
     #[test]
     fn official_flash_suppresses_thinking_pro_does_not() {
+        // Reads the default (env-unset) path of `should_disable_thinking`;
+        // hold the global test lock and force the var unset so the env-matrix
+        // tests in `thinking_suppression_alias_tests` cannot race this.
+        let _guard = crate::test_support::global_test_lock().lock();
+        let _env = crate::llm::tests::EnvRestore::unset("TACHI_DISABLE_THINKING_MODELS");
         assert!(
             super::super::super::LlmClient::should_disable_thinking(
                 "https://api.deepseek.com/chat/completions",
@@ -1197,5 +1286,140 @@ mod failure_class_tests {
             lookalike.get("enable_thinking").is_none() && lookalike.get("thinking").is_none(),
             "probe-table lookalikes must not inherit DeepSeek suppression: {lookalike}"
         );
+    }
+}
+
+/// #1967 alias repair: the official DeepSeek endpoint serves the Flash tier
+/// under both the canonical long name and the short serving alias, and the
+/// default classifier must recognize exactly those names — nothing broader.
+#[cfg(test)]
+mod thinking_suppression_alias_tests {
+    use super::super::super::LlmClient;
+
+    const OFFICIAL: &str = "https://api.deepseek.com/chat/completions";
+    const LOOKALIKE_HOST: &str = "https://api.deepseek.com.attacker.invalid/chat/completions";
+    const CUSTOM_HOST: &str = "https://llm.example.test/v1/chat/completions";
+    const SILICONFLOW: &str = "https://api.siliconflow.cn/v1/chat/completions";
+
+    #[test]
+    fn official_flash_names_match_exactly_not_by_substring() {
+        let _guard = crate::test_support::global_test_lock().lock();
+        let _env = crate::llm::tests::EnvRestore::unset("TACHI_DISABLE_THINKING_MODELS");
+
+        for flash_name in [
+            "deepseek-v4-flash",
+            "deepseek-flash",
+            "DEEPSEEK-V4-FLASH",
+            "DeepSeek-Flash",
+        ] {
+            assert!(
+                LlmClient::should_disable_thinking(OFFICIAL, flash_name),
+                "{flash_name} is an official Flash serving name and must suppress thinking"
+            );
+        }
+        for lookalike_model in [
+            "deepseek-v4-pro",
+            "deepseek-pro",
+            "deepseek-reasoner",
+            "deepseek-flash-pro-experimental",
+            "deepseek-v4-flashback",
+            "not-deepseek-flash",
+            "flash",
+        ] {
+            assert!(
+                !LlmClient::should_disable_thinking(OFFICIAL, lookalike_model),
+                "substring lookalike {lookalike_model} must not inherit Flash suppression"
+            );
+        }
+    }
+
+    #[test]
+    fn flash_names_on_non_deepseek_hosts_stay_unsuppressed() {
+        let _guard = crate::test_support::global_test_lock().lock();
+        let _env = crate::llm::tests::EnvRestore::unset("TACHI_DISABLE_THINKING_MODELS");
+
+        assert!(
+            !LlmClient::should_disable_thinking(LOOKALIKE_HOST, "deepseek-flash"),
+            "probe-table lookalike host must not inherit DeepSeek suppression"
+        );
+        assert!(
+            !LlmClient::should_disable_thinking(CUSTOM_HOST, "deepseek-v4-flash"),
+            "custom OpenAI-compatible host must not inherit DeepSeek suppression"
+        );
+        // Pre-existing SiliconFlow default rule is intentionally broader
+        // (substring `deepseek`/`qwen`); this pin documents that it is
+        // unchanged by the official-alias repair.
+        assert!(LlmClient::should_disable_thinking(
+            SILICONFLOW,
+            "deepseek-flash"
+        ));
+        assert!(LlmClient::should_disable_thinking(
+            SILICONFLOW,
+            "Qwen/Qwen3.5-27B"
+        ));
+    }
+
+    /// Pins `TACHI_DISABLE_THINKING_MODELS` semantics against the new alias:
+    /// explicit values replace (not merge with) the default recognition, and
+    /// an explicit list pinned before `deepseek-flash` was an official alias
+    /// stays authoritative until the operator extends it — the code must not
+    /// quietly ignore an explicit old config.
+    #[test]
+    fn explicit_env_override_replaces_default_alias_recognition() {
+        let _guard = crate::test_support::global_test_lock().lock();
+
+        for off in ["none", "false", "0"] {
+            let _env = crate::llm::tests::EnvRestore::set("TACHI_DISABLE_THINKING_MODELS", off);
+            for flash_name in ["deepseek-v4-flash", "deepseek-flash"] {
+                assert!(
+                    !LlmClient::should_disable_thinking(OFFICIAL, flash_name),
+                    "explicit {off:?} must disable suppression even for official Flash"
+                );
+            }
+        }
+        for on in ["all", "1", "true"] {
+            let _env = crate::llm::tests::EnvRestore::set("TACHI_DISABLE_THINKING_MODELS", on);
+            assert!(LlmClient::should_disable_thinking(
+                OFFICIAL,
+                "deepseek-v4-pro"
+            ));
+            assert!(LlmClient::should_disable_thinking(
+                OFFICIAL,
+                "anything-else"
+            ));
+        }
+
+        // The pre-alias explicit config shape: the short official alias is NOT
+        // silently merged in. Operators must extend the list themselves
+        // (owner-side config action documented in should_disable_thinking).
+        {
+            let _env = crate::llm::tests::EnvRestore::set(
+                "TACHI_DISABLE_THINKING_MODELS",
+                "deepseek-v4-flash",
+            );
+            assert!(LlmClient::should_disable_thinking(
+                OFFICIAL,
+                "deepseek-v4-flash"
+            ));
+            assert!(
+                !LlmClient::should_disable_thinking(OFFICIAL, "deepseek-flash"),
+                "explicit list replaces defaults; no silent alias merge"
+            );
+        }
+        // The aligned explicit list from the pilot's config-side fix.
+        {
+            let _env = crate::llm::tests::EnvRestore::set(
+                "TACHI_DISABLE_THINKING_MODELS",
+                "deepseek-v4-flash,deepseek-flash",
+            );
+            assert!(LlmClient::should_disable_thinking(
+                OFFICIAL,
+                "deepseek-flash"
+            ));
+            assert!(LlmClient::should_disable_thinking(
+                OFFICIAL,
+                "deepseek-v4-flash"
+            ));
+        }
     }
 }

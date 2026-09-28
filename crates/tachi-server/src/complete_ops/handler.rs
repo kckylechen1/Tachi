@@ -813,6 +813,25 @@ fn resolved_completion_run_dir(
     })
 }
 
+/// Best-effort pre-side-effect guard: true when the dispatch's run already
+/// carries a committed planner-stage failure winner. The authoritative check
+/// lives in [`persist_resolved_completion_receipt_at_with_admission`]; this
+/// only avoids creating the pre-receipt eval artifact in the common case. An
+/// unresolvable or unreadable run directory returns `false` here and is
+/// handled by the authoritative writer.
+fn planner_failure_already_won(server: &MemoryServer, dispatch_id: &str) -> Result<bool, String> {
+    let Ok(run_dir) = resolved_completion_run_dir(&server.tachi_home_dir(), dispatch_id) else {
+        return Ok(false);
+    };
+    let lock = crate::dispatch_ops::status_json_lock_for(&run_dir);
+    let _guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let path = run_dir.join("status.json");
+    let Ok(Some(Value::Object(status))) = crate::task_lifecycle::read_json_file(&path) else {
+        return Ok(false);
+    };
+    Ok(crate::dispatch_ops::planner_failure_winner(&status))
+}
+
 fn persist_resolved_completion_receipt_at(
     run_dir: &std::path::Path,
     dispatch_id: &str,
@@ -894,6 +913,17 @@ fn persist_resolved_completion_receipt_at_with_admission(
     );
     if crate::managed_run_control::cancellation_blocks_terminal_writer(status_object) {
         return Err("cannot overwrite a managed cancellation".to_string());
+    }
+    // Shared canonical first-winner law, planner phase: a committed planner
+    // `plan_failure` winner closes the run before any execution; a completion
+    // must refuse rather than split root state from the resolved receipt.
+    // A bare execution FAILED (no planner marker) is not a planner winner and
+    // is not blocked here.
+    if crate::dispatch_ops::planner_failure_winner(status_object) {
+        return Err(format!(
+            "cannot record resolved completion for dispatch_id={dispatch_id}: \
+             a planner-stage failure already won this run"
+        ));
     }
     status_object.insert(
         "resolved_completion".to_string(),
@@ -1239,6 +1269,16 @@ pub(crate) async fn handle_tachi_complete(
     #[cfg(test)]
     pause_managed_completion_after_admission(params.dispatch_id.as_deref());
     managed_admission.verify()?;
+    // Pre-side-effect guard (authoritative check is in the receipt writer): a
+    // committed planner-stage failure winner must not create an eval artifact.
+    if let Some(dispatch_id) = params.dispatch_id.as_deref() {
+        if planner_failure_already_won(server, dispatch_id)? {
+            return Err(format!(
+                "cannot complete dispatch_id={dispatch_id}: \
+                 a planner-stage failure already won this run"
+            ));
+        }
+    }
     let save_result = match save_eval_memory(server, mem_params).await {
         Ok(result) => result,
         Err(error) => return Err(error),
@@ -3549,6 +3589,127 @@ mod tests {
             source.matches(&shared_lock_call).count(),
             2,
             "every tachi_complete status read-modify-replace must take the shared per-run lock"
+        );
+    }
+
+    /// The post-CAS / pre-kanban planner failure state: root FAILED with the
+    /// producer's `plan_failure{stage:plan}` marker and no `model_plan`.
+    fn seed_planner_failed_status(server: &MemoryServer, dispatch_id: &str) {
+        let run_dir = server.tachi_home_dir().join("runs").join(dispatch_id);
+        std::fs::create_dir_all(&run_dir).expect("planner failure run dir");
+        let status = json!({
+            "dispatch_id": dispatch_id,
+            "state": "TASK_STATE_FAILED",
+            "status_revision": 7,
+            "plan_failure": {"stage": "plan", "error": "synthetic plan failure"},
+        });
+        std::fs::write(run_dir.join("status.json"), status.to_string())
+            .expect("planner failed status");
+    }
+
+    fn read_run_status(server: &MemoryServer, dispatch_id: &str) -> Value {
+        let path = server
+            .tachi_home_dir()
+            .join("runs")
+            .join(dispatch_id)
+            .join("status.json");
+        serde_json::from_slice(&std::fs::read(path).expect("run status bytes"))
+            .expect("run status JSON")
+    }
+
+    /// #1664 High: the authoritative receipt writer under the shared
+    /// anchor/mutex/fence refuses a committed planner failure winner before
+    /// writing `resolved_completion`.
+    #[test]
+    fn resolved_completion_writer_refuses_a_committed_planner_failure() {
+        let (server, _home) = crate::tests::make_server_with_temp_home();
+        let dispatch_id = "20260925T000000Z-planner-writer-refusal";
+        seed_planner_failed_status(&server, dispatch_id);
+        let error = persist_resolved_completion_receipt(
+            &server,
+            dispatch_id,
+            "TASK_STATE_COMPLETED",
+            "eval-writer-refusal",
+            true,
+        )
+        .expect_err("a planner failure winner must refuse the resolved receipt");
+        assert!(error.contains("planner-stage failure"), "{error}");
+        let status = read_run_status(&server, dispatch_id);
+        assert!(status.get("resolved_completion").is_none(), "{status:#}");
+        assert_eq!(status["state"], json!("TASK_STATE_FAILED"), "{status:#}");
+    }
+
+    /// #1664 High: the real public completion producer refuses a committed
+    /// planner failure — for BOTH success and partial — before any eval
+    /// artifact or kanban projection. Kanban stays the planner's FAILED row.
+    #[tokio::test]
+    async fn completion_refuses_a_committed_planner_failure_without_eval_artifact() {
+        for (outcome, suffix) in [("success", "1"), ("partial", "2")] {
+            let (server, _home) = crate::tests::make_server_with_temp_home();
+            let dispatch_id = format!("20260925T00000{suffix}Z-planner-public");
+            seed_planner_failed_status(&server, &dispatch_id);
+            let mut params = managed_completion_params(&dispatch_id);
+            params.outcome = outcome.to_string();
+            let error = handle_tachi_complete(&server, params, false)
+                .await
+                .expect_err("a planner failure winner must refuse completion");
+            assert!(
+                error.contains("planner-stage failure"),
+                "{outcome}: {error}"
+            );
+            let status = read_run_status(&server, &dispatch_id);
+            assert!(
+                status.get("resolved_completion").is_none(),
+                "{outcome}: {status:#}"
+            );
+            assert_eq!(
+                status["state"],
+                json!("TASK_STATE_FAILED"),
+                "{outcome}: {status:#}"
+            );
+            assert_eq!(
+                eval_memory_count(&server, &dispatch_id),
+                0,
+                "{outcome}: no eval-success artifact may be created"
+            );
+            assert_ne!(
+                crate::dispatch_ops::get_kanban_state(&server, &dispatch_id)
+                    .await
+                    .as_deref(),
+                Some("TASK_STATE_COMPLETED"),
+                "{outcome}: kanban must not be projected COMPLETED"
+            );
+        }
+    }
+
+    /// #1664: the planner-failure guard is scoped to the planner winner shape.
+    /// An ordinary execution FAILED (no planner marker) must still close — the
+    /// existing reviewed-completion policy is not blanket-blocked.
+    #[tokio::test]
+    async fn ordinary_failed_execution_completion_is_not_blocked_by_the_planner_guard() {
+        let (server, _home) = crate::tests::make_server_with_temp_home();
+        let dispatch_id = "20260925T000003Z-ordinary-failed";
+        let run_dir = server.tachi_home_dir().join("runs").join(dispatch_id);
+        std::fs::create_dir_all(&run_dir).expect("ordinary failure run dir");
+        std::fs::write(
+            run_dir.join("status.json"),
+            json!({
+                "dispatch_id": dispatch_id,
+                "state": "TASK_STATE_FAILED",
+                "status_revision": 7,
+            })
+            .to_string(),
+        )
+        .expect("ordinary failed status");
+        let mut params = managed_completion_params(dispatch_id);
+        params.outcome = "failure".to_string();
+        handle_tachi_complete(&server, params, false)
+            .await
+            .expect("an ordinary execution failure must still close");
+        let status = read_run_status(&server, dispatch_id);
+        assert!(
+            status.get("resolved_completion").is_some(),
+            "ordinary execution FAILED must still earn a resolved completion: {status:#}"
         );
     }
 }

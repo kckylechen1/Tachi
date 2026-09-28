@@ -1,6 +1,275 @@
 use super::*;
 use rusqlite::params;
 
+#[cfg(unix)]
+#[test]
+fn schema_transaction_kill_child() {
+    let Ok(path) = std::env::var("TACHI_TEST_SCHEMA_TX_CHILD_DB") else {
+        return;
+    };
+    let _store = crate::MemoryStore::open_with_label_and_context(
+        &path,
+        "global",
+        &crate::db::DbOpenContext::open_existing_allow("test:schema-transaction-kill"),
+    )
+    .expect("child must reach the pre-commit pause in a real MemoryStore open");
+    panic!("child migration returned instead of being killed before commit");
+}
+
+#[cfg(unix)]
+#[derive(Debug, PartialEq, Eq)]
+struct CommittedSchemaSnapshot {
+    version: u32,
+    rows: Vec<(String, String)>,
+    edges: i64,
+    sentinels: Vec<(String, String)>,
+    ddl: Vec<(String, String, Option<String>)>,
+}
+
+#[cfg(unix)]
+fn committed_schema_snapshot(path: &Path) -> CommittedSchemaSnapshot {
+    use rusqlite::OpenFlags;
+
+    // Read the actual committed view including WAL frames. immutable=1 would
+    // omit the official v1.9.2 fixture's committed row and is unsafe here.
+    // Match MemoryStore's extension setup: integrity_check visits virtual
+    // tables installed by the genuine v1.9.2 schema.
+    crate::db::enable_simple_auto_extension().expect("register simple tokenizer");
+    crate::db::register_sqlite_vec();
+    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .expect("read committed schema fixture including WAL");
+    let integrity: String = conn
+        .query_row("PRAGMA integrity_check", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(integrity, "ok");
+    let rows = conn
+        .prepare("SELECT id, hex(CAST(text AS BLOB)) FROM memories ORDER BY id")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    let sentinels = conn
+        .prepare("SELECT key, value_json FROM hard_state WHERE namespace='migrations' ORDER BY key")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    let ddl = conn
+        .prepare("SELECT type, name, sql FROM sqlite_schema ORDER BY type, name")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    CommittedSchemaSnapshot {
+        version: crate::db::migrations::read_schema_version(&conn).unwrap(),
+        rows,
+        edges: conn
+            .query_row("SELECT count(*) FROM memory_edges", [], |r| r.get(0))
+            .unwrap(),
+        sentinels,
+        ddl,
+    }
+}
+
+/// An explicit fixture-backed release gate, intentionally ignored in routine
+/// suites. Run only with TACHI_TEST_OFFICIAL_SCHEMA28_GLOBAL pointing at a
+/// whole owner-controlled v1.9.2 backup directory containing memory.db plus
+/// its committed, nonempty memory.db-wal. Every run uses its own fresh temp
+/// copy; no fixture or binary is checked into the repository. This is a real
+/// SIGKILL inside the production MemoryStore schema transaction, not a
+/// graceful injected error and not the filename-conversion interruption test.
+#[cfg(unix)]
+#[test]
+#[ignore = "requires genuine v1.9.2 schema-28 whole-directory WAL fixture; run explicitly with TACHI_TEST_OFFICIAL_SCHEMA28_GLOBAL"]
+fn schema_transaction_kill_rolls_back_stamp_sentinels_ddl_and_data_then_retries() {
+    use sha2::{Digest, Sha256};
+    use std::collections::BTreeMap;
+    use std::process::{Child, Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    struct KillOnDrop(Child);
+    impl Drop for KillOnDrop {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    let source = PathBuf::from(std::env::var("TACHI_TEST_OFFICIAL_SCHEMA28_GLOBAL").expect(
+        "set TACHI_TEST_OFFICIAL_SCHEMA28_GLOBAL to the genuine schema-28 backup/global directory",
+    ));
+    let source_files = || -> BTreeMap<String, [u8; 32]> {
+        std::fs::read_dir(&source)
+            .expect("read official fixture directory")
+            .map(|entry| {
+                let entry = entry.expect("read source entry");
+                assert!(
+                    entry.file_type().unwrap().is_file(),
+                    "fixture must be a whole regular-file directory"
+                );
+                let name = entry
+                    .file_name()
+                    .into_string()
+                    .expect("fixture ASCII filenames");
+                assert!(
+                    name.starts_with("memory.db"),
+                    "unexpected fixture file {name}"
+                );
+                (
+                    name,
+                    Sha256::digest(std::fs::read(entry.path()).unwrap()).into(),
+                )
+            })
+            .collect()
+    };
+    let original_hashes = source_files();
+    assert!(original_hashes.contains_key("memory.db"));
+    assert!(
+        std::fs::metadata(source.join("memory.db-wal"))
+            .unwrap()
+            .len()
+            > 0,
+        "fixture must have pending committed WAL content"
+    );
+
+    let temp = tempfile::tempdir().expect("isolated schema transaction rehearsal");
+    let global = temp.path().join("global");
+    std::fs::create_dir(&global).unwrap();
+    for name in original_hashes.keys() {
+        // This is ONLY fixture setup: renaming the whole disconnected copy's
+        // main+sidecar names together, before opening SQLite. The converter
+        // is not exercised here; the child starts with a canonical filename.
+        std::fs::copy(source.join(name), global.join(format!("tachi-{name}"))).unwrap();
+    }
+    let db = global.join("tachi-memory.db");
+    assert!(db.is_file());
+    assert!(
+        !global.join("memory.db").exists(),
+        "filename conversion must not be part of this gate"
+    );
+    let before = committed_schema_snapshot(&db);
+    assert_eq!(
+        before.version, 28,
+        "a modern DB restamped 28 is not this gate's fixture"
+    );
+    assert_eq!(
+        before.rows.len(),
+        1,
+        "official fixture's committed WAL row is required"
+    );
+    assert_eq!(before.edges, 0);
+    assert!(!before
+        .sentinels
+        .iter()
+        .any(|(key, _)| key == "v39_mirror_eval_identity"));
+    assert!(!before
+        .ddl
+        .iter()
+        .any(|(_, name, _)| name == "memory_outbox_events"));
+
+    let marker = temp.path().join("inside-uncommitted-schema-transaction");
+    let mut child = KillOnDrop(
+        Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "db::schema::migration_tests::schema_transaction_kill_child",
+                "--nocapture",
+            ])
+            .env("TACHI_TEST_SCHEMA_TX_CHILD_DB", &db)
+            .env("TACHI_TEST_SCHEMA_TX_PAUSE_MARKER", &marker)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("start production MemoryStore open in test child"),
+    );
+    let deadline = Instant::now() + Duration::from_secs(120);
+    while !marker.exists() {
+        if let Some(status) = child.0.try_wait().unwrap() {
+            panic!("child exited before the post-stamp/pre-commit marker: {status}");
+        }
+        assert!(
+            Instant::now() < deadline,
+            "child never reached post-stamp/pre-commit; drop kills it"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(
+        std::fs::read(&marker).unwrap(),
+        b"schema=39;v39_sentinel=1;v29_ddl=1;before_outer_commit"
+    );
+    assert!(
+        child.0.try_wait().unwrap().is_none(),
+        "child must still own the transaction"
+    );
+
+    // A separate connection sees the old committed schema while the child
+    // holds the uncommitted v39 stamp, sentinel and DDL in BEGIN IMMEDIATE.
+    assert_eq!(committed_schema_snapshot(&db), before);
+    let contender = Connection::open(&db).unwrap();
+    contender.busy_timeout(Duration::from_millis(100)).unwrap();
+    let busy = contender
+        .execute_batch("BEGIN IMMEDIATE")
+        .expect_err("child must still hold SQLite's write transaction at the marker");
+    assert!(
+        matches!(&busy, rusqlite::Error::SqliteFailure(error, _)
+        if error.code == rusqlite::ErrorCode::DatabaseBusy),
+        "{busy}"
+    );
+    drop(contender);
+
+    child.0.kill().expect("SIGKILL child inside transaction");
+    let status = child.0.wait().expect("reap killed child");
+    use std::os::unix::process::ExitStatusExt;
+    assert_eq!(
+        status.signal(),
+        Some(libc::SIGKILL),
+        "child must die from SIGKILL, not a graceful error"
+    );
+
+    let recovered = committed_schema_snapshot(&db);
+    assert_eq!(
+        recovered, before,
+        "version 28, all old sentinel rows, DDL and committed content must roll back together"
+    );
+    let reopened = crate::MemoryStore::open_with_label_and_context(
+        db.to_str().unwrap(),
+        "global",
+        &crate::db::DbOpenContext::open_existing_allow("test:schema-transaction-retry"),
+    )
+    .expect("retry must complete real migration with typed authority");
+    drop(reopened);
+    let after = committed_schema_snapshot(&db);
+    assert_eq!(
+        after.version,
+        crate::db::migrations::EXPECTED_SCHEMA_VERSION
+    );
+    assert_eq!(
+        after.rows, before.rows,
+        "committed memory IDs and content bytes must survive retry"
+    );
+    assert_eq!(after.edges, before.edges);
+    assert!(after
+        .sentinels
+        .iter()
+        .any(|(key, _)| key == "v39_mirror_eval_identity"));
+    assert!(after
+        .ddl
+        .iter()
+        .any(|(_, name, _)| name == "memory_outbox_events"));
+    assert_eq!(
+        source_files(),
+        original_hashes,
+        "the official fixture must remain untouched"
+    );
+    eprintln!(
+        "schema transaction SIGKILL confirmed: signal={}, recovered_version={}, retried_version={}, committed_rows={}",
+        status.signal().unwrap(), recovered.version, after.version, after.rows.len()
+    );
+}
+
 #[test]
 fn schema_identifier_helpers_reject_dynamic_sql_identifiers() {
     let conn = Connection::open_in_memory().unwrap();

@@ -4,7 +4,7 @@
 //! This is where the pure compiler in `tachi_dispatch::authority` is bound to a
 //! real dispatch: it runs immediately after profile resolution and the env
 //! binding gate, and **before** the run directory exists, before prompt
-//! assembly, before the V2 plan stage's `ClaudePool` call, before credential
+//! assembly, before the V2 plan stage's provider call, before credential
 //! materialization, and before any backend is chosen. That ordering is the
 //! whole contract:
 //!

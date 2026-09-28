@@ -71,6 +71,18 @@ pub(crate) async fn handle_task_cycle_status(
 
     let issue_ref = status_issue_ref(&status).or(requested_issue_ref.clone());
     let pr_ref = status_pr_ref(&status).or(requested_pr_ref.clone());
+    // #1693: the shared CurrentTruth→WorkReadModel projection over the
+    // EXACT requested work identity — the resolved issue/pr refs (flow
+    // record refs first, caller refs second, the pre-existing status
+    // resolution) under the existing status auth policy. The projection
+    // renders only those work items (plus an admitted explicit link), so
+    // unrelated same-repo or foreign work never appears.
+    let projection_read_at = Utc::now().to_rfc3339();
+    let work_read_model = task_work_read_section(
+        server,
+        &status_bound_work(issue_ref.as_deref(), pr_ref.as_deref()),
+        &projection_read_at,
+    );
     let (issue_snapshot, issue_warning) = maybe_issue_snapshot(
         server,
         params,
@@ -149,7 +161,7 @@ pub(crate) async fn handle_task_cycle_status(
     let github_read_attempted =
         flow_id.is_none() && (params.issue_ref.is_some() || params.pr_ref.is_some());
 
-    serde_json::to_string(&json!({
+    let response = json!({
         "ok": true,
         "action": "status",
         "cycle_id": flow_id.clone(),
@@ -179,6 +191,17 @@ pub(crate) async fn handle_task_cycle_status(
         "spec_drift": drift,
         "warnings": warnings,
         "next_action": next_action,
+        // #1693 Phase 1: the canonical shared projection. The legacy
+        // heuristic fields above stay for compatibility but are derived,
+        // non-authoritative displays; `work_read_model` governs canonical
+        // display/action, with GitHub conflict/unknown blocking
+        // success-shaped projection inside it.
+        "work_read_model": work_read_model,
+        "legacy_heuristics": {
+            "authority": "derived_non_authoritative",
+            "fields": ["stage", "spec_drift", "next_action"],
+            "canonical": "work_read_model",
+        },
         "source": {
             "flow_artifacts": run_dir.as_ref().map(|dir| dir.display().to_string()),
             "read_only": true,
@@ -190,8 +213,57 @@ pub(crate) async fn handle_task_cycle_status(
             "github_enrichment": after_github.saturating_sub(after_local).as_millis() as u64,
             "total": started.elapsed().as_millis() as u64,
         },
-    }))
-    .map_err(|e| format!("serialize status lifecycle view: {e}"))
+    });
+    // #1693 compact status: `compact=true` keeps the whitelisted presence
+    // assertions (identifiers, revision/freshness, state, blockers,
+    // evidence references) and omits whole content — GitHub snapshot
+    // bodies and the raw event replay are dropped whole, never truncated.
+    // `compact=false` or omitted keeps the existing full shape.
+    let response = if params.compact.unwrap_or(false) {
+        compact_status_receipt(response)
+    } else {
+        response
+    };
+    serde_json::to_string(&response).map_err(|e| format!("serialize status lifecycle view: {e}"))
+}
+
+/// #1693 compact status receipt: derive the compact shape from the full
+/// response (single source of truth). Whitelist classes kept: identifiers
+/// (`flow_id`/`issue_ref`/`pr_ref`/snapshot identity), revision/freshness
+/// (`work_read_model` revisions + posture, `verification_verdict`), state
+/// (`stage`/`state`/`merge_state`/`github.cached`), blockers
+/// (`spec_drift`/`warnings`), and evidence references (`artifacts` paths,
+/// `verification` item ids). Omitted WHOLE (never truncated): GitHub
+/// snapshot `body`/comment content and the raw `events` replay. The
+/// canonical `work_read_model` section and the derived-heuristic markers
+/// stay so compact output cannot masquerade as unmarked authority.
+fn compact_status_receipt(full: Value) -> Value {
+    let mut compact = full;
+    if let Some(github) = compact.get_mut("github").and_then(Value::as_object_mut) {
+        // Null (no snapshot) stays null exactly; a missing key stays
+        // missing; a malformed non-object shape renders typed unknown.
+        if let Some(issue) = github.remove("issue_snapshot") {
+            github.insert(
+                "issue_snapshot".to_string(),
+                compact_issue_snapshot_value(&issue),
+            );
+        }
+        if let Some(pr) = github.remove("pr_snapshot") {
+            github.insert("pr_snapshot".to_string(), compact_pr_snapshot_value(&pr));
+        }
+        // The cached flow `status.json` GitHub block is whitelisted to its
+        // wired decision fields — the intake-persisted automation plan's
+        // body-derived risk `evidence` snippets are omitted WHOLE.
+        if let Some(cached) = github.remove("cached") {
+            github.insert("cached".to_string(), compact_cached_github_value(&cached));
+        }
+    }
+    if let Some(object) = compact.as_object_mut() {
+        // The raw event replay is whole content, not a presence
+        // assertion — omitted entirely, never truncated.
+        object.remove("events");
+    }
+    compact
 }
 
 fn normalize_optional_issue_ref(raw: Option<&str>) -> Option<String> {

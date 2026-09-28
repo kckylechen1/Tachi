@@ -27,6 +27,12 @@ const REFS: &[(&str, &str, &str)] = &[
     ("memories_vec", "id", "vectors"),
 ];
 
+/// Live memory ids for the `NOT IN` orphan probes. `memories.id` is
+/// `TEXT PRIMARY KEY` without NOT NULL, so legacy rows can carry NULL; one
+/// such row would make `x NOT IN (..., NULL)` NULL for every `x`, and R7 would
+/// report a clean store and purge nothing.
+const LIVE_MEMORY_IDS: &str = "SELECT id FROM memories WHERE id IS NOT NULL";
+
 fn count_broken_superseded_refs(ctx: &DbContext) -> Result<i64, RepairError> {
     Ok(ctx.conn.query_row(
         "SELECT COUNT(*)
@@ -55,9 +61,8 @@ impl RepairRule for OrphanRefs {
             }
             // Count rows whose memory id no longer exists. Assume the column
             // exists if the table exists; on schema drift we skip silently.
-            let sql = format!(
-                "SELECT COUNT(*) FROM {table} WHERE {col} NOT IN (SELECT id FROM memories)"
-            );
+            let sql =
+                format!("SELECT COUNT(*) FROM {table} WHERE {col} NOT IN ({LIVE_MEMORY_IDS})");
             let n: i64 = match ctx.conn.query_row(&sql, [], |row| row.get(0)) {
                 Ok(v) => v,
                 Err(_) => continue,
@@ -109,7 +114,7 @@ impl RepairRule for OrphanRefs {
             };
             let sql = format!(
                 "SELECT CAST({locator} AS TEXT), {guard_columns} FROM {table} \
-                 WHERE {col} NOT IN (SELECT id FROM memories)"
+                 WHERE {col} NOT IN ({LIVE_MEMORY_IDS})"
             );
             let mut stmt = match tx.prepare(&sql) {
                 Ok(stmt) => stmt,

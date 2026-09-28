@@ -38,8 +38,8 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 use super::types::{
-    AssertionIngestionKey, AssertionV1, AssertionValueV1, AuthorityClassV1, EvidenceHeadV1,
-    GithubObjectRefV1, PredicateV1, ReviewStateV1, SourceRefV1, SubjectRefV1, VisibilityClassV1,
+    AssertionIngestionKey, AssertionV1, AssertionValueV1, AuthorityClassV1, GithubObjectRefV1,
+    PredicateV1, ReviewStateV1, SourceRefV1, SubjectRefV1, VisibilityClassV1,
 };
 
 /// Typed store failure.
@@ -593,28 +593,6 @@ impl CurrentTruthSqliteStore {
         )?;
         transaction.commit()?;
         Ok(())
-    }
-
-    /// Atomically append one fresh adapter observation and advance its
-    /// refresh posture. A contradiction, stale attempt, or SQLite failure
-    /// rolls back both the assertion batch and posture, so consumers can
-    /// never observe assertions stamped by a different refresh revision.
-    pub fn append_all_and_record_refresh(
-        &self,
-        assertions: &[AssertionV1],
-        repo: &str,
-        last_fresh_revision: &str,
-        last_fresh_at: &str,
-        recorded_at: &str,
-    ) -> Result<usize, CurrentTruthStoreError> {
-        self.append_all_and_record_subject_refresh(
-            assertions,
-            repo,
-            REPOSITORY_REFRESH_SCOPE,
-            last_fresh_revision,
-            last_fresh_at,
-            recorded_at,
-        )
     }
 
     /// Atomically append one fresh subject-slice observation and advance only
@@ -1351,10 +1329,4 @@ fn decode_assertion_row(
         review_state: parse_review(&review_state),
         visibility: parse_visibility(&visibility),
     })
-}
-
-/// Evidence-head helper for store readers that need heads without raw
-/// assertions (#1693 consumer boundary).
-pub fn heads_of(assertions: &[AssertionV1]) -> Vec<EvidenceHeadV1> {
-    assertions.iter().map(EvidenceHeadV1::of).collect()
 }

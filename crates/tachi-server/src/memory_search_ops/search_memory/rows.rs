@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use super::cache::recall_cache_recall_opted_in;
 use super::exact::{annotate_exact_token_matches, mark_exact_token_match};
@@ -8,8 +8,9 @@ use super::filters::{
     training_recall_opted_in,
 };
 use super::store::{
-    pipeline_rule_read_sources, with_global_search, with_named_project_search, with_project_search,
-    PipelineRuleReadSource, RequestScopedNamedProjectReads,
+    pipeline_rule_read_sources, with_global_search, with_named_project_search,
+    with_named_project_search_with_resources, with_project_search, PipelineRuleReadSource,
+    RequestScopedNamedProjectReads,
 };
 use crate::memory_search_ops::auto_link::is_training_seed;
 use crate::memory_search_ops::search_helpers::{
@@ -393,19 +394,66 @@ pub(crate) async fn search_memory_rows_with_recall_config(
 
 pub(super) async fn search_memory_rows_with_named_project_reads(
     server: &MemoryServer,
+    params: SearchMemoryParams,
+    project_only: bool,
+    record_access: bool,
+    recall_config: Option<&memcore::RecallConfig>,
+    named_project_reads: Option<&mut RequestScopedNamedProjectReads>,
+) -> Result<Vec<serde_json::Value>, String> {
+    search_memory_rows_inner(
+        server,
+        params,
+        project_only,
+        record_access,
+        recall_config,
+        named_project_reads,
+        None,
+    )
+    .await
+    .map(|(rows, _)| rows)
+}
+
+pub(super) async fn search_memory_rows_with_resources(
+    server: &MemoryServer,
+    params: SearchMemoryParams,
+    project_name: &str,
+    record_access: bool,
+) -> Result<(Vec<serde_json::Value>, Vec<rmcp::model::Resource>), String> {
+    search_memory_rows_inner(
+        server,
+        params,
+        false,
+        record_access,
+        None,
+        None,
+        Some(project_name.to_string()),
+    )
+    .await
+}
+
+async fn search_memory_rows_inner(
+    server: &MemoryServer,
     mut params: SearchMemoryParams,
     project_only: bool,
     record_access: bool,
     recall_config: Option<&memcore::RecallConfig>,
     mut named_project_reads: Option<&mut RequestScopedNamedProjectReads>,
-) -> Result<Vec<serde_json::Value>, String> {
+    resource_project: Option<String>,
+) -> Result<(Vec<serde_json::Value>, Vec<rmcp::model::Resource>), String> {
     params.query = query_with_context_symbols(&params.query, &params.context_symbols);
+    let resource_project = resource_project.filter(|project| {
+        params.project.as_deref() == Some(project.as_str())
+            && sandbox_role(&params).is_none()
+            && !params.include_archived
+            && !params.include_training
+            && params.as_of.is_none()
+    });
     let wiki_path_prefix = params
         .path_prefix
         .as_deref()
         .is_some_and(|prefix| prefix == "/wiki" || prefix.starts_with("/wiki/"));
     if !wiki_path_prefix && memcore::should_skip_query(&params.query) {
-        return Ok(vec![]);
+        return Ok((vec![], vec![]));
     }
     let top_k = params.normalized_top_k();
     params.top_k = top_k;
@@ -440,20 +488,34 @@ pub(super) async fn search_memory_rows_with_named_project_reads(
     }
 
     let mut combined_results: Vec<(memcore::SearchResult, DbScope)> = Vec::new();
+    let mut source_resource_links: HashMap<String, rmcp::model::Resource> = HashMap::new();
 
     let mut searched_named = false;
     if let Some(ref project_name) = params.project {
         if crate::memory_search_ops::search_helpers::named_project_db_exists(server, project_name) {
-            let project_results = with_named_project_search(
-                server,
-                project_name,
-                named_project_reads.as_deref_mut(),
-                &params,
-                record_access,
-                recall_config,
-                false,
-                format!("Search failed in project DB '{project_name}'"),
-            )?;
+            let project_results = if resource_project.as_deref() == Some(project_name.as_str()) {
+                let (results, links) = with_named_project_search_with_resources(
+                    server,
+                    project_name,
+                    &params,
+                    record_access,
+                    recall_config,
+                    format!("Search failed in project DB '{project_name}'"),
+                )?;
+                source_resource_links.extend(links);
+                results
+            } else {
+                with_named_project_search(
+                    server,
+                    project_name,
+                    named_project_reads.as_deref_mut(),
+                    &params,
+                    record_access,
+                    recall_config,
+                    false,
+                    format!("Search failed in project DB '{project_name}'"),
+                )?
+            };
             combined_results.extend(project_results.into_iter().map(|r| (r, DbScope::Project)));
             searched_named = true;
             if !project_only {
@@ -637,6 +699,22 @@ pub(super) async fn search_memory_rows_with_named_project_reads(
         }
     }
 
+    // An ID returned by more than one physical source has ambiguous provenance
+    // even when the existing dedupe policy later chooses one row. Keep the
+    // search response unchanged, but withhold its ResourceLink.
+    let ambiguous_resource_ids: HashSet<String> = if resource_project.is_some() {
+        let mut counts = HashMap::<String, usize>::new();
+        for (result, _) in &combined_results {
+            *counts.entry(result.entry.id.clone()).or_default() += 1;
+        }
+        counts
+            .into_iter()
+            .filter_map(|(id, count)| (count > 1).then_some(id))
+            .collect()
+    } else {
+        HashSet::new()
+    };
+
     if !training_recall_opted_in(&params) {
         combined_results.retain(|(result, _)| !is_training_seed(&result.entry));
     }
@@ -814,7 +892,25 @@ pub(super) async fn search_memory_rows_with_named_project_reads(
         }
     }
 
-    Ok(output)
+    if resource_project.is_some()
+        && !crate::memory_resources::sandbox_policy_clear(server).unwrap_or(false)
+    {
+        source_resource_links.clear();
+    }
+    let resource_links = if resource_project.is_some() {
+        deduped_results
+            .iter()
+            .filter_map(|(result, _)| {
+                (!ambiguous_resource_ids.contains(&result.entry.id))
+                    .then(|| source_resource_links.remove(&result.entry.id))
+                    .flatten()
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    Ok((output, resource_links))
 }
 
 /// Test-proven, production-dormant (#1125): the consumer that flips search

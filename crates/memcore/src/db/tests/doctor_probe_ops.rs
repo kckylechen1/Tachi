@@ -226,6 +226,49 @@ fn checkpoint_wal_truncate_is_a_harmless_noop_off_wal_mode() {
     assert!(metadata.contains("evidence_refs_v1"));
 }
 
+#[test]
+fn checkpoint_wal_truncate_rejects_busy_result_row_and_retains_committed_wal() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("busy-checkpoint.db");
+    let writer = Connection::open(&path).unwrap();
+    writer
+        .execute_batch(
+            "PRAGMA journal_mode = WAL; CREATE TABLE rows(id INTEGER PRIMARY KEY, body TEXT)",
+        )
+        .unwrap();
+    let reader = Connection::open(&path).unwrap();
+    reader.execute_batch("BEGIN").unwrap();
+    let _: i64 = reader
+        .query_row("SELECT count(*) FROM rows", [], |row| row.get(0))
+        .unwrap();
+    writer
+        .execute(
+            "INSERT INTO rows(body) VALUES ('committed while reader holds snapshot')",
+            [],
+        )
+        .unwrap();
+
+    let guard = open_for_wal_checkpoint(path.to_str().unwrap()).unwrap();
+    let err = checkpoint_wal_truncate(&guard).expect_err("busy result row must not be success");
+    assert!(
+        err.to_string().contains("WAL checkpoint incomplete"),
+        "{err}"
+    );
+    let wal = path.with_file_name("busy-checkpoint.db-wal");
+    assert!(
+        std::fs::metadata(&wal).unwrap().len() > 0,
+        "busy reader leaves committed WAL frames"
+    );
+
+    reader.execute_batch("ROLLBACK").unwrap();
+    checkpoint_wal_truncate(&guard).expect("checkpoint succeeds after reader releases snapshot");
+    assert_eq!(std::fs::metadata(&wal).unwrap().len(), 0);
+    let count: i64 = writer
+        .query_row("SELECT count(*) FROM rows", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(count, 1);
+}
+
 // ── #1041 S4: doctor cross-domain keyword suspect probe ─────────────────────
 
 #[test]

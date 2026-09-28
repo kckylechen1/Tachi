@@ -3,13 +3,34 @@ use super::*;
 #[tool_router(router = continuity_tool_router, vis = "pub(crate)")]
 impl MemoryServer {
     #[tool(
+        name = "tachi_memory",
         description = "Unified memory facade. Actions: search (hybrid recall), get (fetch one memory by id), save (persist entry), extract_facts (LLM atomize logs), briefing (session start), checkpoint (handoff), alerts (warnings when stuck), ask (Q&A over evidence), consolidate (merge duplicates)."
     )]
-    pub(crate) async fn tachi_memory(
+    pub(crate) async fn tachi_memory_with_resource_links(
         &self,
         Parameters(params): Parameters<TachiMemoryParams>,
-    ) -> Result<String, String> {
-        crate::facade_memory_ops::handle_tachi_memory(self, params).await
+    ) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
+        let bound_project = self.session_project();
+        match crate::facade_memory_ops::handle_tachi_memory_with_resources(
+            self,
+            params,
+            bound_project.as_deref(),
+        )
+        .await
+        {
+            Ok((body, links)) => {
+                let mut content = vec![rmcp::model::ContentBlock::text(body)];
+                content.extend(
+                    links
+                        .into_iter()
+                        .map(rmcp::model::ContentBlock::ResourceLink),
+                );
+                Ok(rmcp::model::CallToolResult::success(content))
+            }
+            Err(error) => Ok(rmcp::model::CallToolResult::error(vec![
+                rmcp::model::ContentBlock::text(error),
+            ])),
+        }
     }
 
     #[tool(
@@ -91,6 +112,16 @@ impl MemoryServer {
 
 #[allow(dead_code)]
 impl MemoryServer {
+    /// Preserve the direct in-process text facade used by non-MCP callers.
+    /// The registered MCP tool is `tachi_memory_with_resource_links`, which
+    /// retains this text as its first content block and adds ResourceLinks.
+    pub(crate) async fn tachi_memory(
+        &self,
+        Parameters(params): Parameters<TachiMemoryParams>,
+    ) -> Result<String, String> {
+        crate::facade_memory_ops::handle_tachi_memory(self, params).await
+    }
+
     pub(crate) async fn tachi_save(
         &self,
         Parameters(params): Parameters<TachiSaveParams>,

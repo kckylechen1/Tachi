@@ -351,6 +351,12 @@ fn is_wiki_namespace(path: &str) -> bool {
 const PUBLIC_WIKI_AUTHORITY_KEYS: [&str; 3] =
     ["review_receipt", "source_bundle_hash", "source_ref"];
 
+/// Inherited approval fields an ordinary dedicated Wiki projection write
+/// invalidates on every content write. Deliberately the
+/// same authority keys the public path strips, minus `source_ref` (a
+/// plain provenance pointer the candidate layer already re-stamps).
+const WIKI_PROJECTION_STALE_APPROVAL_KEYS: [&str; 2] = ["review_receipt", "source_bundle_hash"];
+
 fn is_wiki_classified(entry: &memcore::MemoryEntry) -> bool {
     is_wiki_namespace(&entry.path)
         || matches!(
@@ -693,7 +699,7 @@ async fn handle_save_memory_impl(
         .unwrap_or(0)
         + 1;
 
-    let needs_summary = params.summary.is_empty();
+    let needs_summary = params.summary.trim().is_empty();
     let needs_embedding = params.vector.is_none();
     let auto_link = params.auto_link;
     let emit_continuity = params.emit_continuity;
@@ -739,11 +745,29 @@ async fn handle_save_memory_impl(
     // after patch inheritance and domain resolution, and retain the existing
     // row's classification as a one-way authority constraint even when a
     // public update tries to declassify the candidate.
+    //
+    // Dedicated Wiki projection writes (ServerVerified, the
+    // `tachi_wiki_write` family) strip caller-supplied review authority at
+    // the facade, but patch inheritance re-attaches an EXISTING row's
+    // receipt and bundle hash on update. An ordinary dedicated Wiki write
+    // is never itself an approval, so inherited authority is always removed in the
+    // same projection transaction: the new revision returns to the
+    // pending/advisory candidate state instead of parading stale approval.
+    // The operator approval seam (`wiki_ops::review`) writes through the
+    // store's verified-write primitive, not this path, so a fresh
+    // approval is never stripped by this rule. Wiki ingest and the REM
+    // evolver do not use this seam (both build fresh replacement metadata
+    // and supersede their predecessors), so trusted ingest semantics are
+    // unchanged.
     let metadata_removals = if metadata_authority == SaveMetadataAuthority::Public
         && (is_wiki_classified(&entry) || existing_entry.as_ref().is_some_and(is_wiki_classified))
     {
         constrain_public_wiki_metadata(&mut entry.metadata, &entry.path, &entry.scope)?;
         PUBLIC_WIKI_AUTHORITY_KEYS.to_vec()
+    } else if wiki_projection {
+        // Do not condition transaction-owned removals on the facade pre-read:
+        // the winner can gain approval before the writer snapshot is acquired.
+        WIKI_PROJECTION_STALE_APPROVAL_KEYS.to_vec()
     } else {
         Vec::new()
     };

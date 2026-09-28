@@ -10,7 +10,7 @@ mod policy;
 
 pub(crate) use check_state::{
     ingest_check_state_transition, write_check_state_artifact, CheckStateArtifactInput,
-    CheckStateIngestRequest, CheckStateRead, CheckStateReader,
+    CheckStateIngestRequest, CheckStateRead, CheckStateReader, SnapshotCheckStateReader,
 };
 // `CheckStateLedgerState` is only referenced by the `ci_watch` test module;
 // gate its re-export so the non-test lib build does not warn it is unused.

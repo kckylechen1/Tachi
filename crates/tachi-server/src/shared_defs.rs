@@ -221,6 +221,22 @@ pub(super) fn slim_search_result(
     obj.insert("db".into(), json!(db.as_str()));
     obj.insert("path".into(), json!(entry.path));
     obj.insert("timestamp".into(), json!(entry.timestamp));
+    if !entry.valid_from.trim().is_empty() {
+        obj.insert("valid_from".into(), json!(entry.valid_from));
+    }
+    if let Some(valid_until) = entry
+        .valid_until
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        obj.insert("valid_until".into(), json!(valid_until));
+    }
+    if entry.archived {
+        obj.insert("archived".into(), json!(true));
+    }
+    if !entry.source.trim().is_empty() {
+        obj.insert("source".into(), json!(entry.source));
+    }
     if !entry.topic.is_empty() {
         obj.insert("topic".into(), json!(entry.topic));
     }
@@ -242,6 +258,32 @@ pub(super) fn slim_search_result(
             let paths: Vec<&str> = files.iter().filter_map(|v| v.as_str()).collect();
             if !paths.is_empty() {
                 obj.insert("files".into(), json!(paths));
+            }
+        }
+        if let Some(source_memory_ids) = entry
+            .metadata
+            .get("source_memory_ids")
+            .and_then(serde_json::Value::as_array)
+        {
+            let source_memory_ids: Vec<&str> = source_memory_ids
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .take(8)
+                .collect();
+            if !source_memory_ids.is_empty() {
+                obj.insert("source_memory_ids".into(), json!(source_memory_ids));
+            }
+        }
+        if let Some(source_refs) = compact_source_refs(entry.metadata.get("source_refs")) {
+            obj.insert("source_refs".into(), source_refs);
+        }
+        if let Some(superseded_by) = entry
+            .metadata
+            .get("superseded_by")
+            .and_then(serde_json::Value::as_str)
+        {
+            if !superseded_by.trim().is_empty() {
+                obj.insert("superseded_by".into(), json!(superseded_by));
             }
         }
     }
@@ -281,6 +323,38 @@ pub(super) fn slim_search_result(
         );
     }
     serde_json::Value::Object(obj)
+}
+
+/// Keep provenance navigable on compact recall surfaces without exposing an
+/// arbitrary metadata blob. Capture rows use typed `{ref_type, ref_id,
+/// revision}` references; old rows may have plain strings.
+pub(super) fn compact_source_refs(value: Option<&serde_json::Value>) -> Option<serde_json::Value> {
+    let refs = value?.as_array()?;
+    let refs: Vec<serde_json::Value> = refs
+        .iter()
+        .filter_map(|reference| match reference {
+            serde_json::Value::String(value) if !value.trim().is_empty() => Some(json!(value)),
+            serde_json::Value::Object(object) => {
+                let ref_type = object.get("ref_type").and_then(serde_json::Value::as_str)?;
+                let ref_id = object.get("ref_id").and_then(serde_json::Value::as_str)?;
+                if ref_type.trim().is_empty() || ref_id.trim().is_empty() {
+                    return None;
+                }
+                let mut compact = serde_json::Map::new();
+                compact.insert("ref_type".into(), json!(ref_type));
+                compact.insert("ref_id".into(), json!(ref_id));
+                if let Some(revision) = object.get("revision") {
+                    if revision.is_string() || revision.is_number() {
+                        compact.insert("revision".into(), revision.clone());
+                    }
+                }
+                Some(serde_json::Value::Object(compact))
+            }
+            _ => None,
+        })
+        .take(8)
+        .collect();
+    (!refs.is_empty()).then_some(serde_json::Value::Array(refs))
 }
 
 pub(super) fn slim_l0_rule(rule: &MemoryEntry, db: DbScope) -> serde_json::Value {

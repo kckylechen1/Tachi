@@ -92,8 +92,8 @@ path = "junit.xml"
 #
 # Parallel slow-test roster (see scripts/nextest-slow-roster.txt and
 # scripts/nextest-slow-diff.sh) lives outside test-groups; it is a separate
-# operator/local gate (like the local gitleaks hook), NOT invoked by CI
-# (Actions disabled repo-wide per #1562). Run manually:
+# operator/local gate, NOT invoked by any workflow (CI only runs its
+# unit tests, scripts/test_nextest_slow_diff.py). Run manually:
 #   cargo nextest run -p tachi-server -p memory-server-runtime --locked \
 #     --final-status-level slow > /tmp/slow.txt 2>&1
 #   scripts/nextest-slow-diff.sh /tmp/slow.txt

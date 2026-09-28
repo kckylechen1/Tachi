@@ -36,32 +36,6 @@ pub struct HandoffPromoteIssueParams {
 // ─── Copilot / Task Guidance ────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub struct TaskBriefParams {
-    /// Natural-language task the agent is about to work on.
-    pub task: String,
-
-    /// Optional canonical agent id for sandbox filtering and context scoping.
-    #[serde(default)]
-    pub agent_id: Option<String>,
-
-    /// Optional named project DB.
-    #[serde(default)]
-    pub project: Option<String>,
-
-    /// Optional memory path prefix for non-wiki context search.
-    #[serde(default)]
-    pub path_prefix: Option<String>,
-
-    /// Optional domain filter.
-    #[serde(default)]
-    pub domain: Option<String>,
-
-    /// Number of wiki and memory hits to return.
-    #[serde(default = "default_copilot_top_k")]
-    pub top_k: usize,
-}
-
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct ProgressCheckParams {
     /// Natural-language task currently being attempted.
     pub task: String,

@@ -122,6 +122,7 @@ pub(super) async fn serve_stdio_proxy(
         project_db_path,
         client_project,
         resolved_agent_identity: Default::default(),
+        rate_limit_session: ProxyRateLimitSession::mint(),
     };
     let transport = (stdin(), stdout());
     let running = rmcp::service::serve_server(proxy, transport).await?;
@@ -369,11 +370,9 @@ async fn spawn_stdio_daemon(
                 .stderr(std::process::Stdio::null())
                 .spawn()
             {
-                Ok(mut child) => {
+                Ok(child) => {
                     eprintln!("[auto-daemon] spawned tachi daemon (pid={})", child.id());
-                    tokio::spawn(async move {
-                        let _ = child.wait();
-                    });
+                    reap_detached_daemon(child);
                     wait_for_daemon_ready(
                         app_home,
                         global_db_path,
@@ -386,6 +385,32 @@ async fn spawn_stdio_daemon(
             }
         }
         Err(e) => eprintln!("[auto-daemon] cannot determine binary path: {e}"),
+    }
+}
+
+/// Reap the auto-spawned daemon when it exits, so it never lingers as a
+/// zombie while this proxy outlives it.
+///
+/// Audit C3: `std::process::Child::wait` is a blocking `waitpid`, and the
+/// daemon normally outlives the whole proxy session, so it must not run on an
+/// async executor worker (it used to pin one inside `tokio::spawn`). A plain
+/// detached OS thread does the wait instead: unlike `spawn_blocking`, it never
+/// makes runtime shutdown wait for the long-lived daemon to exit. If the
+/// thread cannot be spawned, the child handle is dropped (std never kills on
+/// drop) and the daemon keeps running; the kernel reaps it once this proxy
+/// exits.
+fn reap_detached_daemon(mut child: std::process::Child) -> Option<std::thread::JoinHandle<()>> {
+    let pid = child.id();
+    match std::thread::Builder::new()
+        .name("tachi-auto-daemon-reaper".to_string())
+        .spawn(move || {
+            let _ = child.wait();
+        }) {
+        Ok(handle) => Some(handle),
+        Err(error) => {
+            eprintln!("[auto-daemon] could not start reaper thread for daemon pid={pid}: {error}");
+            None
+        }
     }
 }
 
@@ -437,6 +462,28 @@ struct StdioProxyServer {
     /// here. `None` means legacy initialize has not run — transport reads env.
     resolved_agent_identity:
         std::sync::Arc<std::sync::Mutex<Option<crate::cli_client::ProxyIdentityForward>>>,
+    /// Audit C1: this connection's `X-Tachi-Rate-Limit-Session` key, minted
+    /// once and sent on every daemon tool call.
+    rate_limit_session: ProxyRateLimitSession,
+}
+
+/// Audit C1: one opaque rate-limit bucket key per stdio proxy connection.
+/// Every proxied `tools/call` opens its own short-lived daemon MCP session (no
+/// session pool), and the daemon would otherwise mint a fresh bucket for each,
+/// so loop and stuck detection could never fire for proxied clients. The key
+/// only selects a daemon `RateLimiter` bucket; it carries no identity or
+/// authority. Clones of one proxy share the key.
+#[derive(Clone)]
+struct ProxyRateLimitSession(std::sync::Arc<str>);
+
+impl ProxyRateLimitSession {
+    fn mint() -> Self {
+        Self(crate::session_identity::mint_rate_limit_session_key().into())
+    }
+
+    fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 #[derive(Clone)]
@@ -845,10 +892,81 @@ impl rmcp::ServerHandler for StdioProxyServer {
         Ok(result)
     }
 
+    async fn read_resource(
+        &self,
+        request: rmcp::model::ReadResourceRequestParams,
+        context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
+    ) -> Result<rmcp::model::ReadResourceResponse, rmcp::ErrorData> {
+        let mode = crate::mcp_peer::McpPeerMode::from_context(&context)?;
+        let identity = self.resolve_request_identity(mode, &context.meta)?;
+        // Resource failures must keep the daemon's non-disclosing envelope;
+        // tool-call error wrapping would change the code and expose transport
+        // details. Protocol identity errors above remain transport errors.
+        let unavailable = || rmcp::ErrorData::resource_not_found("resource unavailable", None);
+        let current = self.current_daemon();
+        let mut result = match crate::cli_client::read_daemon_resource_with_profile_and_identity(
+            &current,
+            request.clone(),
+            identity.client_project.as_deref(),
+            identity.tool_profile,
+            identity.client.as_deref(),
+            identity.agent_identity.clone(),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(error) if error.allows_in_process_fallback() => {
+                match self.refresh_daemon(&current, &identity).await {
+                    Some(fresh) => {
+                        crate::cli_client::read_daemon_resource_with_profile_and_identity(
+                            &fresh,
+                            request,
+                            identity.client_project.as_deref(),
+                            identity.tool_profile,
+                            identity.client.as_deref(),
+                            identity.agent_identity,
+                        )
+                        .await
+                        .map_err(|_| unavailable())?
+                    }
+                    None => return Err(unavailable()),
+                }
+            }
+            Err(_) => return Err(unavailable()),
+        };
+        if mode == crate::mcp_peer::McpPeerMode::Modern20260728 {
+            match &mut result {
+                rmcp::model::ReadResourceResponse::Complete(complete) => {
+                    complete
+                        .result_type
+                        .get_or_insert(rmcp::model::ResultType::COMPLETE);
+                    complete.ttl_ms.get_or_insert(0);
+                    complete
+                        .cache_scope
+                        .get_or_insert(rmcp::model::CacheScope::Private);
+                }
+                rmcp::model::ReadResourceResponse::InputRequired(_) => {
+                    return Err(rmcp::ErrorData::internal_error(
+                        "Tachi Resources require a complete read result",
+                        None,
+                    ));
+                }
+                _ => {
+                    return Err(rmcp::ErrorData::internal_error(
+                        "unsupported Resource response",
+                        None,
+                    ));
+                }
+            }
+        }
+        Ok(result)
+    }
+
     fn get_info(&self) -> rmcp::model::ServerInfo {
         rmcp::model::ServerInfo::new(
             rmcp::model::ServerCapabilities::builder()
                 .enable_tools()
+                .enable_resources()
                 .build(),
         )
         .with_instructions(crate::server_instructions::mcp_server_instructions())
@@ -930,6 +1048,7 @@ impl rmcp::ServerHandler for StdioProxyServer {
                     identity.tool_profile,
                     identity.client.as_deref(),
                     identity.agent_identity.clone(),
+                    Some(self.rate_limit_session.as_str()),
                 )
                 .await
                 {
@@ -948,6 +1067,7 @@ impl rmcp::ServerHandler for StdioProxyServer {
                                     identity.tool_profile,
                                     identity.client.as_deref(),
                                     identity.agent_identity,
+                                    Some(self.rate_limit_session.as_str()),
                                 )
                                 .await
                                 .map_err(daemon_error_data)?

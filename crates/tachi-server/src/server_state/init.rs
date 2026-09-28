@@ -17,7 +17,7 @@ use crate::mcp_proxy::McpToolExposureMode;
 use crate::memory_search_ops::routing_config::RoutingConfigProvider;
 use crate::utils::parse_env_u64;
 use memcore::MemoryStore;
-use memcore::{DbOpenContext, MigrationAuthority, OpenIntent, StoreProfile};
+use memcore::{DbOpenContext, MigrationAuthority, OpenIntent, ProfileRequirement, StoreProfile};
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock};
@@ -216,7 +216,7 @@ impl MemoryServer {
             migration: schema_migration.clone(),
             // #1585 D2: the server's global store backs the full product
             // surface (Vault, Hub, Foundry, dispatch ledgers).
-            required_profile: StoreProfile::TachiFull,
+            required_profile: ProfileRequirement::AtLeast(StoreProfile::TachiFull),
         };
         // tachi#1579: `"global"` here is a RESOLVED role, not a guess — this is
         // the server's own global store by construction — so it is a legitimate
@@ -441,6 +441,9 @@ impl MemoryServer {
             bound_agent_id: Arc::new(StdRwLock::new(bound_agent_id)),
             home_dir,
             routing_config,
+            skill_quality_refresh: Arc::new(crate::wiki_ops::SkillQualityRefreshQueue::new(
+                start_background_workers,
+            )),
         };
 
         if start_background_workers {
@@ -764,7 +767,7 @@ mod tests {
         assert_eq!(
             conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
-            38
+            i64::from(memcore::db::migrations::EXPECTED_SCHEMA_VERSION)
         );
         drop(conn);
 
@@ -775,7 +778,7 @@ mod tests {
                 MigrationAuthority::Deny,
                 home,
             )
-            .expect("current v38 DB reopens without migration authority"),
+            .expect("current DB reopens without migration authority"),
         );
     }
 }

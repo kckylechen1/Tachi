@@ -555,6 +555,46 @@ fn expected_verified_admission_trigger(name: *const c_char, table: *const c_char
         .is_some_and(|(_, expected_table, _)| table.eq_ignore_ascii_case(expected_table))
 }
 
+/// Filesystem presence does not distinguish an operational database from an
+/// empty path reservation. Only an unstamped database with no application
+/// schema may enter ordinary initialization and install the canonical guards.
+fn has_existing_application_schema(conn: &Connection) -> Result<bool, MemoryError> {
+    if crate::db::migrations::read_schema_version(conn)? != 0 {
+        return Ok(true);
+    }
+
+    let application_objects: i64 = conn.query_row(
+        "SELECT EXISTS(
+             SELECT 1
+             FROM main.sqlite_schema
+             WHERE name NOT LIKE 'sqlite_%'
+         )",
+        [],
+        |row| row.get(0),
+    )?;
+    Ok(application_objects != 0)
+}
+
+/// The INPUT trigger-inventory admission: validate the persistent triggers of
+/// the store as found, before any schema-init step (`ensure_*`, DDL, repair)
+/// can recreate a missing one. Missing guards are legitimate only before the
+/// versioned v23 migration (or on a truly empty fresh DB); unexpected or
+/// tampered definitions are always rejected. A partial unstamped application
+/// schema remains strict and cannot claim fresh-build authority.
+///
+/// `MemoryStore`'s open funnel runs this before schema init, and schema init
+/// runs it again inside `BEGIN IMMEDIATE` on the in-transaction state, so a
+/// trigger dropped by another process in between is refused, not silently
+/// repaired by `init_schema_inner`.
+pub(crate) fn validate_input_trigger_inventory(conn: &Connection) -> Result<(), MemoryError> {
+    let existing_application_schema = has_existing_application_schema(conn)?;
+    let stored = crate::db::migrations::read_schema_version(conn)?;
+    let is_stamped_older_schema =
+        (1..crate::db::migrations::EXPECTED_SCHEMA_VERSION).contains(&stored);
+    let allow_missing_pre_migration = !existing_application_schema || is_stamped_older_schema;
+    validate_persistent_trigger_inventory(conn, !allow_missing_pre_migration)
+}
+
 pub(crate) fn validate_persistent_trigger_inventory(
     conn: &Connection,
     require_complete: bool,

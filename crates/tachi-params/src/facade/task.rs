@@ -40,6 +40,9 @@ pub struct TachiTaskParams {
     /// action="intake" binds a GitHub issue to a flow.
     /// action="status" with flow_id/issue_ref/pr_ref is a read-only lifecycle model;
     /// dispatch_id takes precedence and preserves the flat status snapshot.
+    // Lifecycle responses also carry the CurrentTruth→WorkReadModel projection
+    // for exact requested issue/PR identities and admitted links. Item views
+    // share a work token/revision; legacy heuristics are non-authoritative.
     /// GitHub PR and closure lifecycle: use **tachi_gh only** (#757, #1713).
     #[schemars(schema_with = "tachi_task_action_schema")]
     pub action: TachiTaskAction,
@@ -91,6 +94,10 @@ pub struct TachiTaskParams {
     )]
     pub include_global: bool,
     // #527: agent-facing default is compact when omitted; set false for full boards.
+    // For status, explicit compact=true omits whole snapshot bodies, event replay,
+    // and cached free-form content while retaining decision evidence and nulls.
+    // Omitted/false preserves full status. Intake defaults to body-free receipts;
+    // format=full retains its whole snapshot.
     #[serde(default)]
     #[schemars(
         description = "[action=brief] When true or omitted, use the tight agent packet (smaller top_k). Set false for the full feature board."

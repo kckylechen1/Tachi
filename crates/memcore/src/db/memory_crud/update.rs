@@ -669,103 +669,177 @@ pub fn record_enrichment_failure(
     stage: &str,
     error: &str,
 ) -> Result<(), MemoryError> {
-    let now = now_utc_iso();
     let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
-    super::refuse_retired_sticky_row_within_tx(&tx, id, "stamped with enrichment failure")?;
+    record_enrichment_failure_within_tx(&tx, id, stage, error, None)?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Revision-guarded variant for callers that observed the row at a specific
+/// revision (enrichment/apply sweeps): the failure is stamped only when the
+/// row is still at `expected_revision`. A concurrent writer that moved the
+/// row on leaves its metadata and `updated_at` untouched and this returns
+/// `false`, so a stale observation cannot pollute the new revision's
+/// enrichment metadata. Like the unconditional form, only `metadata` and
+/// `updated_at` change — observation fields, receipts, and generated fields
+/// are preserved.
+pub fn record_enrichment_failure_if_revision(
+    conn: &Connection,
+    id: &str,
+    stage: &str,
+    error: &str,
+    expected_revision: i64,
+) -> Result<bool, MemoryError> {
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    let applied =
+        record_enrichment_failure_within_tx(&tx, id, stage, error, Some(expected_revision))?;
+    tx.commit()?;
+    Ok(applied)
+}
+
+/// Run one failure-stamp UPDATE, appending `AND revision = ?` to the base
+/// WHERE clause when a guard revision is supplied. The base SQL uses
+/// explicit `?N` parameters only, so the appended bare `?` binds the next
+/// index; the surrounding `BEGIN IMMEDIATE` transaction keeps the predicate
+/// and the stamp atomic.
+fn execute_failure_stamp(
+    tx: &Transaction<'_>,
+    base_sql: &str,
+    base_params: &[&dyn rusqlite::ToSql],
+    expected_revision: Option<i64>,
+) -> Result<usize, MemoryError> {
+    match expected_revision {
+        None => tx.execute(base_sql, base_params).map_err(MemoryError::from),
+        Some(revision) => {
+            let sql = format!("{base_sql} AND revision = ?");
+            let mut params: Vec<&dyn rusqlite::ToSql> = base_params.to_vec();
+            params.push(&revision);
+            tx.execute(sql.as_str(), params.as_slice())
+                .map_err(MemoryError::from)
+        }
+    }
+}
+
+/// One failure-stamp body shared by the unconditional and revision-guarded
+/// entry points (no duplicated stamp logic). Returns whether a guarded
+/// UPDATE actually matched the row at `expected_revision`.
+fn record_enrichment_failure_within_tx(
+    tx: &Transaction<'_>,
+    id: &str,
+    stage: &str,
+    error: &str,
+    expected_revision: Option<i64>,
+) -> Result<bool, MemoryError> {
+    let now = now_utc_iso();
+    super::refuse_retired_sticky_row_within_tx(tx, id, "stamped with enrichment failure")?;
     // Write-side keyword enrichment (#921) keeps a dedicated keywords_status so
     // operators can distinguish enriched/pending/skipped/failed without
-    // collapsing it into the multi-stage overall enrichment.status string.
+    // collapsing them into the multi-stage overall enrichment.status string.
     let keywords_status = if stage == "keywords" {
         Some("failed")
     } else {
         None
     };
+    let mut applied = false;
     if auth_class_enrichment_error(error) {
         if let Some(kw_status) = keywords_status {
-            tx.execute(
+            applied |= execute_failure_stamp(
+                tx,
                 r#"UPDATE memories
                    SET metadata = json_set(
-                         CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END,
-                         '$.enrichment.status', 'failed',
-                         '$.enrichment.failed_stage', ?1,
-                         '$.enrichment.last_error', ?2,
-                         '$.enrichment.last_failure_at', ?3,
-                         '$.enrichment.keywords_status', ?4,
-                         '$.enrichment.retry.kind', 'auth',
-                         '$.enrichment.retry.attempts',
-                            COALESCE(CAST(json_extract(metadata, '$.enrichment.retry.attempts') AS INTEGER), 0),
-                         '$.enrichment.retry.max_attempts', ?5,
-                         '$.enrichment.retry.next_retry_at', ?3
-                       ),
-                       updated_at = ?3
-                   WHERE id = ?6"#,
-                params![
-                    stage,
-                    error,
+                        CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END,
+                          '$.enrichment.status', 'failed',
+                          '$.enrichment.failed_stage', ?1,
+                          '$.enrichment.last_error', ?2,
+                          '$.enrichment.last_failure_at', ?3,
+                          '$.enrichment.keywords_status', ?4,
+                          '$.enrichment.retry.kind', 'auth',
+                          '$.enrichment.retry.attempts',
+                             COALESCE(CAST(json_extract(metadata, '$.enrichment.retry.attempts') AS INTEGER), 0),
+                          '$.enrichment.retry.max_attempts', ?5,
+                          '$.enrichment.retry.next_retry_at', ?3
+                        ),
+                        updated_at = ?3
+                    WHERE id = ?6"#,
+                &[
+                    &stage,
+                    &error,
                     &now,
-                    kw_status,
-                    ENRICHMENT_AUTH_RETRY_MAX_ATTEMPTS,
-                    id
+                    &kw_status,
+                    &ENRICHMENT_AUTH_RETRY_MAX_ATTEMPTS,
+                    &id,
                 ],
-            )?;
+                expected_revision,
+            )? > 0;
         } else {
-            tx.execute(
+            applied |= execute_failure_stamp(
+                tx,
                 r#"UPDATE memories
                    SET metadata = json_set(
-                         CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END,
-                         '$.enrichment.status', 'failed',
-                         '$.enrichment.failed_stage', ?1,
-                         '$.enrichment.last_error', ?2,
-                         '$.enrichment.last_failure_at', ?3,
-                         '$.enrichment.retry.kind', 'auth',
-                         '$.enrichment.retry.attempts',
-                            COALESCE(CAST(json_extract(metadata, '$.enrichment.retry.attempts') AS INTEGER), 0),
-                         '$.enrichment.retry.max_attempts', ?4,
-                         '$.enrichment.retry.next_retry_at', ?3
-                       ),
-                       updated_at = ?3
-                   WHERE id = ?5"#,
-                params![stage, error, &now, ENRICHMENT_AUTH_RETRY_MAX_ATTEMPTS, id],
-            )?;
+                        CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END,
+                          '$.enrichment.status', 'failed',
+                          '$.enrichment.failed_stage', ?1,
+                          '$.enrichment.last_error', ?2,
+                          '$.enrichment.last_failure_at', ?3,
+                          '$.enrichment.retry.kind', 'auth',
+                          '$.enrichment.retry.attempts',
+                             COALESCE(CAST(json_extract(metadata, '$.enrichment.retry.attempts') AS INTEGER), 0),
+                          '$.enrichment.retry.max_attempts', ?4,
+                          '$.enrichment.retry.next_retry_at', ?3
+                        ),
+                        updated_at = ?3
+                    WHERE id = ?5"#,
+                &[
+                    &stage,
+                    &error,
+                    &now,
+                    &ENRICHMENT_AUTH_RETRY_MAX_ATTEMPTS,
+                    &id,
+                ],
+                expected_revision,
+            )? > 0;
         }
     } else if let Some(kw_status) = keywords_status {
-        tx.execute(
+        applied |= execute_failure_stamp(
+            tx,
             r#"UPDATE memories
                SET metadata = json_remove(
-                     json_set(
-                       CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END,
-                       '$.enrichment.status', 'failed',
-                       '$.enrichment.failed_stage', ?1,
-                       '$.enrichment.last_error', ?2,
-                       '$.enrichment.last_failure_at', ?3,
-                       '$.enrichment.keywords_status', ?4
-                     ),
-                     '$.enrichment.retry'
-                   ),
-                   updated_at = ?3
-               WHERE id = ?5"#,
-            params![stage, error, &now, kw_status, id],
-        )?;
+                    json_set(
+                      CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END,
+                      '$.enrichment.status', 'failed',
+                      '$.enrichment.failed_stage', ?1,
+                      '$.enrichment.last_error', ?2,
+                      '$.enrichment.last_failure_at', ?3,
+                      '$.enrichment.keywords_status', ?4
+                    ),
+                    '$.enrichment.retry'
+                  ),
+                  updated_at = ?3
+                WHERE id = ?5"#,
+            &[&stage, &error, &now, &kw_status, &id],
+            expected_revision,
+        )? > 0;
     } else {
-        tx.execute(
+        applied |= execute_failure_stamp(
+            tx,
             r#"UPDATE memories
                SET metadata = json_remove(
-                     json_set(
-                       CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END,
-                       '$.enrichment.status', 'failed',
-                       '$.enrichment.failed_stage', ?1,
-                       '$.enrichment.last_error', ?2,
-                       '$.enrichment.last_failure_at', ?3
-                     ),
-                     '$.enrichment.retry'
-                   ),
-                   updated_at = ?3
-               WHERE id = ?4"#,
-            params![stage, error, &now, id],
-        )?;
+                    json_set(
+                      CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END,
+                      '$.enrichment.status', 'failed',
+                      '$.enrichment.failed_stage', ?1,
+                      '$.enrichment.last_error', ?2,
+                      '$.enrichment.last_failure_at', ?3
+                    ),
+                    '$.enrichment.retry'
+                  ),
+                  updated_at = ?3
+                WHERE id = ?4"#,
+            &[&stage, &error, &now, &id],
+            expected_revision,
+        )? > 0;
     }
-    tx.commit()?;
-    Ok(())
+    Ok(applied)
 }
 
 /// Set operator-visible write-side keyword enrichment status (#921).

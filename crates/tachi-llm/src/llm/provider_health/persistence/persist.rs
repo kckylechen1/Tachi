@@ -33,6 +33,15 @@ impl super::super::super::LlmClient {
         tracker.wait_until_terminal().await
     }
 
+    /// Queue a background write of this key's health snapshot.
+    ///
+    /// Not a debounce: every call is tracked by the persist tracker and
+    /// schedules its own background task. Pending snapshots of one key are
+    /// written in enqueue order; a pending plain-success snapshot may be
+    /// replaced by a newer plain-success snapshot of the same key, evidence
+    /// and credential generation, in which case the later task finds nothing
+    /// left to write (see `provider_health/writer.rs`). The write reuses the
+    /// client's retained vault handle when it is still valid.
     pub(in crate::llm::provider_health::persistence) fn persist_key_health(
         &self,
         health: &VaultKeyHealth,
@@ -46,6 +55,7 @@ impl super::super::super::LlmClient {
         let mut health = health.clone();
         health.updated_at = Self::format_now_utc();
         let migration = self.vault_db_migration.clone();
+        let writer = Arc::clone(&self.provider_persist_writer);
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             let logical_name = health.logical_name.clone();
             let key_id = health.key_id.clone();
@@ -56,12 +66,24 @@ impl super::super::super::LlmClient {
                 .tracker();
             let background_persist_lock = Arc::clone(&self.background_persist_lock);
             let completion = tracker.track();
+            // Queued before the task exists, so a task of this key that runs
+            // first writes this snapshot (or a newer merge of it) in order.
+            writer.enqueue_key_health(health);
             handle.spawn(async move {
                 let _completion = completion;
                 let result = {
                     let _persist_guard = background_persist_lock.lock().await;
+                    let task_logical_name = logical_name.clone();
+                    let task_key_id = key_id.clone();
                     tokio::task::spawn_blocking(move || {
-                        Self::persist_key_health_blocking(db_path, migration, health)
+                        let Some(health) = writer.take_key_health(&task_logical_name, &task_key_id)
+                        else {
+                            // An earlier task of this key already wrote the
+                            // snapshot this event was merged into.
+                            return Ok(None);
+                        };
+                        Self::persist_key_health_blocking(&writer, db_path, migration, health)
+                            .map(Some)
                     })
                     .await
                     .map_err(|err| {
@@ -76,10 +98,17 @@ impl super::super::super::LlmClient {
                     })
                     .and_then(|inner| inner)
                 };
-                Self::record_key_health_persist_result(&persist_state, result);
+                match result {
+                    // Nothing was written by this task, so there is no attempt
+                    // to record: the task that wrote the merged snapshot
+                    // recorded its own result.
+                    Ok(None) => {}
+                    Ok(Some(())) => Self::record_key_health_persist_result(&persist_state, Ok(())),
+                    Err(err) => Self::record_key_health_persist_result(&persist_state, Err(err)),
+                }
             });
         } else {
-            let result = Self::persist_key_health_blocking(db_path, migration, health);
+            let result = Self::persist_key_health_blocking(&writer, db_path, migration, health);
             Self::record_key_health_persist_result(&self.provider_health_persist, result);
         }
     }
@@ -96,18 +125,23 @@ impl super::super::super::LlmClient {
         };
         let mut health = health.clone();
         health.updated_at = Self::format_now_utc();
-        let result =
-            Self::persist_key_health_blocking(db_path, self.vault_db_migration.clone(), health);
+        let result = Self::persist_key_health_blocking(
+            &self.provider_persist_writer,
+            db_path,
+            self.vault_db_migration.clone(),
+            health,
+        );
         Self::record_key_health_persist_result(&self.provider_health_persist, result);
     }
 
     fn persist_key_health_blocking(
+        writer: &ProviderPersistWriter,
         db_path: PathBuf,
         migration: memcore::MigrationAuthority,
         health: VaultKeyHealth,
     ) -> Result<(), String> {
         let target = format!("{}:{}", health.logical_name, health.key_id);
-        let Some(db_path) = db_path.to_str() else {
+        let Some(db_path_str) = db_path.to_str() else {
             return Err(format!(
                 "persist vault key health for {target}: invalid db path"
             ));
@@ -116,17 +150,30 @@ impl super::super::super::LlmClient {
             intent: memcore::OpenIntent::OpenExisting,
             migration,
             // #1585 D2: this writes `vault_key_health`, a product table.
-            required_profile: memcore::StoreProfile::TachiFull,
+            required_profile: memcore::ProfileRequirement::AtLeast(
+                memcore::StoreProfile::TachiFull,
+            ),
         };
-        match memcore::MemoryStore::open_and_vault_upsert_key_health_with_context_and_busy_timeout(
-            db_path,
-            &open_context,
-            PROVIDER_HEALTH_PERSIST_SQLITE_BUSY_TIMEOUT,
-            &health,
-        ) {
-            Ok(()) => Ok(()),
-            Err(err) => Err(Self::provider_health_persist_error(&target, err)),
-        }
+        // #1680 D6 on both paths: a retained handle writes under startup
+        // ownership, and a fresh open keeps open and upsert under one hold.
+        writer
+            .write(
+                &db_path,
+                |store| store.vault_upsert_key_health_with_startup_ownership(&health),
+                || {
+                    memcore::MemoryStore::open_and_vault_upsert_key_health_retaining_store(
+                        db_path_str,
+                        &open_context,
+                        PROVIDER_HEALTH_PERSIST_SQLITE_BUSY_TIMEOUT,
+                        &health,
+                    )
+                    .map(|store| (store, ()))
+                },
+            )
+            .map_err(|err| Self::provider_health_persist_error(&target, err))?;
+        #[cfg(test)]
+        writer.note_key_health_written(&health);
+        Ok(())
     }
 
     fn provider_health_persist_error(target: &str, error: memcore::MemoryError) -> String {

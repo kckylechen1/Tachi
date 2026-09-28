@@ -370,6 +370,10 @@ fn build_new_run(telemetry: &ClankerTelemetry, native_child_id: &str) -> NewMirr
                 .clone()
                 .or_else(|| telemetry.lane.clone()),
         )),
+        // v34: the Clanker telemetry carries no task/role facts; NULL stays
+        // explicitly unknown rather than guessed.
+        requested_task_type: None,
+        requested_role: None,
     }
 }
 
@@ -442,6 +446,12 @@ fn build_new_observation(
         effective_model: scrub_opt(non_empty(telemetry.observed_model.clone())),
         effective_backend: scrub_opt(non_empty(telemetry.backend.clone())),
         effective_harness: scrub_opt(non_empty(telemetry.transport.clone())),
+        // v34: the Clanker telemetry carries no observed role/revision
+        // facts; NULL stays explicitly unknown rather than guessed. (A
+        // model string with an `@version` suffix keeps it as the read-side
+        // legacy fallback; no explicit revision column is asserted here.)
+        effective_role: None,
+        effective_model_revision: None,
     }
 }
 
@@ -699,6 +709,8 @@ mod tests {
             requested_profile: Some("some-other-profile".to_string()),
             requested_model: None,
             requested_agent: None,
+            requested_task_type: None,
+            requested_role: None,
         };
         register_mirror_eval_run(store.connection(), &conflicting)
             .expect("seed conflicting registration");

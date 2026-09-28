@@ -1,6 +1,68 @@
 use super::*;
 use memcore::MemoryStore;
 
+#[tokio::test]
+async fn memory_search_full_reports_rerank_diagnostics_on_both_facade_routes() {
+    let server = make_server();
+    server
+        .with_global_store(|store| {
+            let mut entry = make_entry("diagnostic-target");
+            entry.text = "DIAGNOSTIC_RECALL_NEEDLE_20260927 source-bound knowledge".to_string();
+            entry.summary = "Recall diagnostic fixture".to_string();
+            entry.metadata = json!({"note_kind": "historical_note"});
+            let mut projection = entry.clone();
+            projection.id = "diagnostic-projection".to_string();
+            projection.text = "DIAGNOSTIC_RECALL_NEEDLE_20260927 internal projection".to_string();
+            projection.metadata = json!({"projection_kind": "historical_note"});
+            store.upsert(&projection).map_err(|e| e.to_string())?;
+            store.upsert(&entry).map_err(|e| e.to_string())
+        })
+        .expect("seed diagnostic fixture");
+
+    for resources in [false, true] {
+        for full in [false, true] {
+            let mut params = tachi_memory_params("search");
+            params.query = Some("DIAGNOSTIC_RECALL_NEEDLE_20260927".to_string());
+            params.scope = Some("memory".to_string());
+            params.format = Some(if full { "full" } else { "json" }.to_string());
+            params.enable_rerank = false;
+            params.top_k = 1;
+            let body = if resources {
+                crate::facade_memory_ops::handle_tachi_memory_with_resources(&server, params, None)
+                    .await
+                    .expect("resource facade")
+                    .0
+            } else {
+                crate::facade_memory_ops::handle_tachi_memory(&server, params)
+                    .await
+                    .expect("memory facade")
+            };
+            let response: Value = serde_json::from_str(&body).expect("JSON including full format");
+            assert!(
+                response["sections"][0]["rows"]
+                    .as_array()
+                    .expect("memory rows")
+                    .iter()
+                    .all(|row| row["id"] != json!("diagnostic-projection")),
+                "internal projections must remain excluded in both output formats"
+            );
+            let row = &response["sections"][0]["rows"][0];
+            assert_eq!(row["id"], json!("diagnostic-target"));
+            if full {
+                assert_eq!(row["metadata"]["note_kind"], json!("historical_note"));
+                let diagnostic = &row["rerank_diagnostics"];
+                assert_eq!(diagnostic["policy"], json!("disabled"));
+                assert_eq!(diagnostic["candidate_count"], json!(1));
+                // The facade requests a wider memory pool before its own final filtering.
+                assert_eq!(diagnostic["requested_top_k"], json!(3));
+                assert!(diagnostic["top_three_score_gap"].is_null());
+            } else {
+                assert!(row.get("rerank_diagnostics").is_none());
+            }
+        }
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 struct AccessSnapshot {
     access_count: i64,
@@ -19,6 +81,26 @@ fn create_named_project_db(project: &str, entries: Vec<memcore::MemoryEntry>) {
             .expect("create named project DB");
     for entry in entries {
         store.upsert(&entry).expect("seed named project entry");
+    }
+}
+
+/// Reproduce the live 2026-09 legacy stamp: the foundry scheduler write-opened
+/// project DBs with the manifest `scope_hint` display text as the label, so
+/// the write-once role stamp inside the file reads `project:<name>` while
+/// every named-project door claims the bare `<name>`.
+fn create_legacy_stamped_named_project_db(project: &str, entries: Vec<memcore::MemoryEntry>) {
+    let db_path = crate::path_utils::plan_c_global_db_path(project);
+    std::fs::create_dir_all(db_path.parent().expect("named project DB parent"))
+        .expect("create named project DB parent");
+    let mut store = MemoryStore::open_with_label(
+        db_path.to_str().expect("named project DB path"),
+        &format!("project:{project}"),
+    )
+    .expect("create legacy-stamped named project DB");
+    for entry in entries {
+        store
+            .upsert(&entry)
+            .expect("seed legacy-stamped project entry");
     }
 }
 
@@ -119,6 +201,105 @@ async fn tachi_memory_search_defaults_to_json_and_keeps_markdown_escape_hatch() 
         .await
         .expect("markdown search should succeed");
     assert!(markdown.starts_with("## Tachi search:"), "{markdown}");
+}
+
+#[tokio::test]
+async fn resource_links_are_additive_to_the_unchanged_bound_project_search_text() {
+    let project_name = "resource-search-additive";
+    let (server, _project_db) = crate::tests::make_server_with_project_fixture(project_name);
+    let sentinel = "ResourceSearchAdditiveSentinel";
+    let mut entry = crate::tests::make_entry("resource-search-additive-id");
+    entry.summary = format!("{sentinel} summary");
+    entry.text = format!("{sentinel} exact original search body");
+    entry.keywords = vec![sentinel.to_string()];
+    server
+        .with_named_project_store(project_name, |store| {
+            store
+                .upsert(&entry)
+                .map_err(|error| format!("seed resource search entry: {error}"))
+        })
+        .expect("seed bound project search entry");
+
+    let mut params = tachi_memory_params("search");
+    params.format = Some("json".to_string());
+    params.scope = Some("memory".to_string());
+    params.project = Some(project_name.to_string());
+    params.query = Some(sentinel.to_string());
+    let issuance_params: crate::tool_params::TachiSearchParams = serde_json::from_value(json!({
+        "query":sentinel,
+        "scope":"memory",
+        "project":project_name
+    }))
+    .expect("ordinary bound-project issuance params");
+    assert!(
+        crate::memory_resources::resource_issuance_allowed(
+            &server,
+            &issuance_params,
+            Some(project_name)
+        ),
+        "the fixture must satisfy the ordinary bound-project ResourceLink gate"
+    );
+
+    let original_text = crate::facade_memory_ops::handle_tachi_memory(&server, params.clone())
+        .await
+        .expect("ordinary project search");
+    assert!(
+        original_text.contains("ResourceSearchAdditiveSentinel exact original search body"),
+        "the baseline search must actually return the seeded hit: {original_text}"
+    );
+    let (resource_text, links) = crate::facade_memory_ops::handle_tachi_memory_with_resources(
+        &server,
+        params.clone(),
+        Some(project_name),
+    )
+    .await
+    .expect("resource-enabled project search");
+    assert_eq!(
+        resource_text, original_text,
+        "ResourceLinks must be additive"
+    );
+    assert_eq!(links.len(), 1, "the ordinary project hit gets one link");
+    assert!(
+        crate::memory_resources::parse_resource_uri(&links[0].uri).is_some(),
+        "the emitted link uses the canonical readable URI format"
+    );
+    let reference = crate::memory_resources::parse_resource_uri(&links[0].uri).unwrap();
+    assert_eq!(
+        crate::memory_resources::read_resource_text(&server, project_name, &reference)
+            .expect("the bound project remains readable through a cached unknown-role handle"),
+        entry.text,
+    );
+    let parsed: Value = serde_json::from_str(&resource_text).expect("search response JSON");
+    assert_eq!(parsed["query"], json!(sentinel));
+    assert!(
+        parsed
+            .to_string()
+            .contains("ResourceSearchAdditiveSentinel exact original search body"),
+        "the existing search text still contains its original result body: {parsed:#}"
+    );
+
+    let mut role_constrained = params.clone();
+    role_constrained.agent_role = Some("code-review".to_string());
+    let (_, role_links) = crate::facade_memory_ops::handle_tachi_memory_with_resources(
+        &server,
+        role_constrained,
+        Some(project_name),
+    )
+    .await
+    .expect("role-constrained search remains available");
+    assert!(
+        role_links.is_empty(),
+        "role-filtered hits cannot issue links"
+    );
+
+    let (_, unbound_links) =
+        crate::facade_memory_ops::handle_tachi_memory_with_resources(&server, params, None)
+            .await
+            .expect("unbound search remains available");
+    assert!(
+        unbound_links.is_empty(),
+        "unbound searches cannot issue links"
+    );
 }
 
 /// A binding receipt is a diagnostic, not a result. `serde_json::Map` is a
@@ -509,6 +690,127 @@ async fn global_only_named_project_search_returns_hits_without_recording_access(
     assert_eq!(
         after, before,
         "no-bound-project named search must not mutate target access bookkeeping"
+    );
+}
+
+/// 2026-09 memory-read repair: a legacy `project:<name>` role stamp (stamped
+/// by the foundry scheduler's scope_hint label) must keep the named-project
+/// read door, the write door, and the facade search pipeline working as one
+/// identity — and a `path_prefix`-scoped facade search must stay bounded by
+/// its prefix even with `graph_expand_hops = 1` (the facade default).
+#[tokio::test]
+async fn legacy_project_scope_stamp_keeps_read_write_and_scoped_search_consistent() {
+    let (server, _temp_home) = make_server_with_temp_home();
+    let project = "legacy_scope_stamp_target";
+
+    let mut target = make_entry("legacy-stamp-target");
+    target.path = "/scratch/tachi/v1.5-recall-probe-matrix".to_string();
+    target.summary = "LegacyStampNeedle target row".to_string();
+    target.text = "LegacyStampNeedle v1.5 recall probe matrix target".to_string();
+    target.keywords = vec!["LegacyStampNeedle".to_string()];
+    let mut neighbor = make_entry("legacy-stamp-graph-neighbor");
+    neighbor.path = "/elsewhere/graph-neighbor".to_string();
+    neighbor.summary = "Neighbor outside the scoped prefix".to_string();
+    neighbor.text = "Unrelated body reachable only through the graph edge".to_string();
+    neighbor.keywords = vec!["legacy-stamp-neighbor".to_string()];
+    create_legacy_stamped_named_project_db(project, vec![target, neighbor]);
+
+    // Read door: the bare-name claim must open the legacy-stamped DB. This is
+    // the exact live failure (`StoreRoleConflict { claimed: "…", stored:
+    // "project:…" }`). A read proves the door opens; the edge is seeded
+    // through the write door below because this handle is read-only.
+    server
+        .with_named_project_store_read(project, |store| {
+            let count: i64 = store
+                .connection()
+                .query_row(
+                    "SELECT COUNT(*) FROM memories WHERE id = 'legacy-stamp-target'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(|e| format!("read door probe: {e}"))?;
+            Ok(count)
+        })
+        .expect("named-project read door must open the legacy-stamped project DB");
+
+    // Write door: same bare-name claim, same identity.
+    let mut written = make_entry("legacy-stamp-written");
+    written.path = "/scratch/tachi/v1.5-recall-probe-matrix/written".to_string();
+    written.text = "LegacyStampNeedle written through the write door".to_string();
+    written.keywords = vec!["LegacyStampNeedle".to_string()];
+    server
+        .with_named_project_store(project, |store| {
+            store
+                .upsert(&written)
+                .map_err(|e| format!("write door upsert: {e}"))?;
+            store
+                .add_edge(&memcore::types::MemoryEdge {
+                    source_id: "legacy-stamp-target".to_string(),
+                    target_id: "legacy-stamp-graph-neighbor".to_string(),
+                    relation: "supports".to_string(),
+                    weight: 1.0,
+                    metadata: serde_json::json!({}),
+                    created_at: String::new(),
+                    valid_from: String::new(),
+                    valid_to: None,
+                })
+                .map_err(|e| format!("seed graph edge: {e}"))
+        })
+        .expect("named-project write door must open the legacy-stamped project DB");
+
+    // Facade search, scoped: the Memory section must not be an error string,
+    // must surface the target first, and must not let graph expansion pull
+    // the out-of-prefix neighbor back in.
+    let params = TachiSearchParams {
+        query: "LegacyStampNeedle".to_string(),
+        scope: "memory".to_string(),
+        top_k: 5,
+        path_prefix: Some("/scratch/tachi/v1.5-recall-probe-matrix".to_string()),
+        project: Some(project.to_string()),
+        domain: None,
+        file_context: None,
+        error_context: None,
+        context_symbols: Vec::new(),
+        agent_role: None,
+        category: None,
+        include_archived: false,
+        include_training: false,
+        enable_rerank: false,
+        as_of: None,
+    };
+    let (sections, _, _) =
+        crate::facade_search_ops::collect_tachi_search_sections(&server, &params).await;
+    let memory_rows = sections
+        .iter()
+        .find(|(name, _)| name == "Memory")
+        .and_then(|(_, rows)| rows.as_array())
+        .expect("Memory section must be a row array, not an error string");
+    assert!(
+        memory_rows.iter().all(|row| row["path"]
+            .as_str()
+            .is_some_and(|path| path.starts_with("/scratch/tachi/v1.5-recall-probe-matrix"))),
+        "every facade row under a path_prefix must stay inside the prefix, got {memory_rows:?}"
+    );
+    assert_eq!(memory_rows[0]["id"], json!("legacy-stamp-target"));
+
+    // Unscoped search over the same project still expands through the graph:
+    // the boundary narrows scoped searches, it does not disable expansion.
+    let unscoped_params = TachiSearchParams {
+        path_prefix: None,
+        ..params
+    };
+    let (sections, _, _) =
+        crate::facade_search_ops::collect_tachi_search_sections(&server, &unscoped_params).await;
+    let unscoped_rows = sections
+        .iter()
+        .find(|(name, _)| name == "Memory")
+        .and_then(|(_, rows)| rows.as_array())
+        .expect("unscoped Memory section");
+    assert!(
+        unscoped_rows
+            .iter()
+            .any(|row| row["id"] == json!("legacy-stamp-graph-neighbor")),
+        "unscoped search must still reach the graph neighbor: {unscoped_rows:?}"
     );
 }
 

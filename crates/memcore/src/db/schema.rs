@@ -184,6 +184,41 @@ pub(crate) fn validate_harness_session_attachments_schema(
     Ok(())
 }
 
+/// Four nullable product-only mirror-eval identity fields; legacy values remain NULL.
+pub(crate) fn install_mirror_eval_identity_schema(conn: &Connection) -> Result<(), MemoryError> {
+    for (table, column) in [
+        ("mirror_eval_runs", "requested_task_type"),
+        ("mirror_eval_runs", "requested_role"),
+        ("mirror_eval_observations", "effective_role"),
+        ("mirror_eval_observations", "effective_model_revision"),
+    ] {
+        ensure_column(conn, table, column, "TEXT")?;
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_mirror_eval_identity_schema(conn: &Connection) -> Result<(), MemoryError> {
+    for (table, column) in [
+        ("mirror_eval_runs", "requested_task_type"),
+        ("mirror_eval_runs", "requested_role"),
+        ("mirror_eval_observations", "effective_role"),
+        ("mirror_eval_observations", "effective_model_revision"),
+    ] {
+        let sql = format!("SELECT 1 FROM pragma_table_info('{table}') WHERE name = ?1");
+        let present = match conn.query_row(&sql, [column], |_| Ok(())) {
+            Ok(()) => true,
+            Err(rusqlite::Error::QueryReturnedNoRows) => false,
+            Err(error) => return Err(error.into()),
+        };
+        if !present {
+            return Err(MemoryError::InvalidArg(format!(
+                "incomplete v39 mirror eval identity metadata: required column {table}.{column} is missing"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Canonical v34 installers for the #1678 attached-session receipt spine: the
 /// append-only event ledger, the materialized canonical session-state
 /// projection, the typed intervention request/result receipts, and the
@@ -1141,7 +1176,35 @@ pub fn init_schema_with_label_mut(
     current_db_path: &Path,
     ctx: &crate::db::DbOpenContext,
 ) -> Result<SchemaInitOutcome, MemoryError> {
-    init_schema_with_label_mut_inner(conn, db_label, current_db_path, ctx, true)
+    init_schema_with_label_mut_inner(conn, db_label, current_db_path, ctx, SchemaInitFunnel::Bare)
+}
+
+/// `MemoryStore`'s file-backed open: [`init_schema_with_label_mut`] plus the
+/// generic-door checks of [`SchemaInitFunnel::Store`]: the input
+/// trigger-inventory admission (`validate_input_trigger_inventory`) re-run
+/// inside `BEGIN IMMEDIATE`, the private-partition refusal (tachi#1990), and
+/// the caller's `path_binding` check immediately before `COMMIT`.
+/// The store funnel runs the inventory check before calling here; this repeats
+/// it on the in-transaction state, ahead of the `init_schema_inner` steps that
+/// would recreate a missing canonical trigger.
+///
+/// The bare [`init_schema_with_label_mut`] keeps its historical contract and
+/// does not validate the input inventory (fixtures and tools drive it on
+/// unstamped legacy files that the store funnel itself refuses).
+pub(crate) fn init_store_schema_with_label_mut(
+    conn: &mut Connection,
+    db_label: &str,
+    current_db_path: &Path,
+    ctx: &crate::db::DbOpenContext,
+    path_binding: &dyn Fn() -> Result<(), MemoryError>,
+) -> Result<SchemaInitOutcome, MemoryError> {
+    init_schema_with_label_mut_inner(
+        conn,
+        db_label,
+        current_db_path,
+        ctx,
+        SchemaInitFunnel::Store { path_binding },
+    )
 }
 
 /// Initialize an admitted in-memory private image without ever materializing
@@ -1154,7 +1217,76 @@ pub(crate) fn init_private_schema_with_label_mut(
     logical_db_path: &Path,
     ctx: &crate::db::DbOpenContext,
 ) -> Result<SchemaInitOutcome, MemoryError> {
-    init_schema_with_label_mut_inner(conn, db_label, logical_db_path, ctx, false)
+    init_schema_with_label_mut_inner(
+        conn,
+        db_label,
+        logical_db_path,
+        ctx,
+        SchemaInitFunnel::PrivateImage,
+    )
+}
+
+/// Which door drives schema init. The door decides the door-specific
+/// admission checks and whether filesystem artifacts (`.migration-bak`,
+/// `.migration-marker`) may be written.
+#[derive(Clone, Copy)]
+enum SchemaInitFunnel<'a> {
+    /// [`init_schema_with_label_mut`]: fixtures and tools, including files the
+    /// store funnel itself refuses. No door-specific admission checks.
+    Bare,
+    /// `MemoryStore`'s generic file-backed open
+    /// ([`init_store_schema_with_label_mut`]).
+    Store {
+        /// The caller's path→handle binding check (the database path still
+        /// names the file this connection opened). It runs inside
+        /// `BEGIN IMMEDIATE` after every write, immediately before `COMMIT`:
+        /// SQLite names the `-wal` after the path, so a transaction committed
+        /// after the path was replaced would be read back by the next opener
+        /// of the path as part of the substitute file (tachi#1990).
+        ///
+        /// Known limit (pre-existing, not closed here): the check compares
+        /// pathname samples, not the handle SQLite opened; see the note on
+        /// `validate_physical_db_identity_across_open` in `store/open.rs`.
+        path_binding: &'a dyn Fn() -> Result<(), MemoryError>,
+    },
+    /// An admitted in-memory private image
+    /// ([`init_private_schema_with_label_mut`]).
+    PrivateImage,
+}
+
+impl SchemaInitFunnel<'_> {
+    /// A private image is sealed by its caller; plaintext migration artifacts
+    /// next to a logical path would escape that boundary.
+    fn writes_filesystem_artifacts(self) -> bool {
+        !matches!(self, Self::PrivateImage)
+    }
+
+    /// Re-validate the input trigger inventory inside `BEGIN IMMEDIATE`.
+    fn validates_input_trigger_inventory(self) -> bool {
+        matches!(self, Self::Store { .. })
+    }
+
+    /// The generic-door admission of tachi#1668 design item 7 / #1585: a
+    /// working SQLite image that carries the private-partition stamp is not a
+    /// portable or Tachi handle, so a generic open refuses it with
+    /// [`MemoryError::PrivatePartitionRefused`]. tachi#1990: this is an
+    /// admission decision like identity, evaluated in the preflight (so a
+    /// refusal leaves no backup, marker, PRAGMA, DDL or stamp) and again,
+    /// authoritatively, inside `BEGIN IMMEDIATE` before any DDL. Pure reads.
+    fn admit_private_partition_stamp(self, conn: &Connection) -> Result<(), MemoryError> {
+        match self {
+            Self::Store { .. } => crate::private_partition::refuse_stamped_private_store(conn),
+            Self::Bare | Self::PrivateImage => Ok(()),
+        }
+    }
+
+    /// Last check before `COMMIT`; a refusal drops the transaction.
+    fn check_before_commit(self) -> Result<(), MemoryError> {
+        match self {
+            Self::Store { path_binding } => path_binding(),
+            Self::Bare | Self::PrivateImage => Ok(()),
+        }
+    }
 }
 
 fn init_schema_with_label_mut_inner(
@@ -1162,31 +1294,89 @@ fn init_schema_with_label_mut_inner(
     db_label: &str,
     current_db_path: &Path,
     ctx: &crate::db::DbOpenContext,
-    filesystem_artifacts: bool,
+    funnel: SchemaInitFunnel<'_>,
 ) -> Result<SchemaInitOutcome, MemoryError> {
     super::ensure_reserved_reference_write_guard(conn)?;
+    // ── Preflight (no transaction) ──────────────────────────────────────────
+    // Every admission gate runs here first, on the state as read now, so a
+    // store that already refuses this open refuses before memcore's own side
+    // effects: no `.migration-bak` (and no retention pass), no persistent
+    // connection PRAGMA (`journal_mode`), no DDL, no stamp, no identity/role
+    // write. These results are ADVISORY: another process can change the
+    // store before `BEGIN IMMEDIATE` below, so every gate is evaluated again
+    // on the in-transaction state, and only that evaluation decides.
+    //
+    // #984 version gate, then the #1119 typed migration gate (quiet here; the
+    // audit line is logged by the authoritative evaluation).
+    // (Input trigger inventory: `MemoryStore`'s funnel validates it before
+    // calling here; the `Store` funnel re-validates it in-tx below.)
     crate::db::migrations::check_schema_version_gate(conn)?;
-    // #1119: typed migration gate. Runs BEFORE any backup/DDL/migration/stamp
-    // mutates the DB — an unauthorized `OpenExisting + Deny` open of a
-    // stamped older DB must refuse before `init_schema_inner`'s idempotent
-    // DDL or the final `write_schema_version_stamp` touches the file.
-    crate::db::migrations::check_db_open_context_gate(conn, current_db_path, ctx)?;
+    let preflight_version = crate::db::migrations::read_schema_version(conn)?;
+    crate::db::migrations::evaluate_db_open_context_gate(conn, current_db_path, ctx)?;
     crate::db::migrations::validate_current_schema_integrity(conn)?;
     // The same discriminator `check_db_open_context_gate` uses: an unstamped
-    // file is fresh, whatever its content (#1119 owner ruling A). Sampled
-    // BEFORE the transaction writes the new stamp.
-    let fresh = crate::db::migrations::read_schema_version(conn)? == 0;
-    if filesystem_artifacts {
-        maybe_backup_before_migration(conn, current_db_path)?;
-    }
+    // file is fresh, whatever its content (#1119 owner ruling A).
+    let preflight_fresh = preflight_version == 0;
+    // W1-3: read-only identity/profile admission (plain `hard_state` reads).
+    resolve_store_identity_in_tx(conn, db_label, current_db_path, ctx, preflight_fresh)?;
+    // tachi#1990: the generic door's private-partition refusal, after identity
+    // (the same precedence the post-commit check had) and before any side
+    // effect below.
+    funnel.admit_private_partition_stamp(conn)?;
+    //
+    // What a refusal does NOT promise:
+    // * Byte-identical files. The funnel's connection is read-write; if the
+    //   store was left with committed but uncheckpointed WAL frames (unclean
+    //   shutdown), SQLite folds them into the main file and removes the
+    //   `-wal`/`-shm` pair when this connection closes, and SQLite may create
+    //   and remove sidecars transiently while reading. That is SQLite, not a
+    //   memcore write; the logical content (schema, `user_version`,
+    //   `hard_state`) is unchanged by it.
+    // * Nothing persisting under a race. If the store changes between this
+    //   preflight and `BEGIN IMMEDIATE`, the open can pass here and be
+    //   refused by the in-transaction evaluation. What can then persist is
+    //   exactly: the `.migration-bak` written below plus the retention pass
+    //   that may delete older backups, and `journal_mode` switched to WAL by
+    //   `apply_connection_pragmas` (WAL mode is persistent). DDL, stamps and
+    //   identity/role writes are inside the transaction and roll back. The
+    //   store funnel's pre-COMMIT path-binding refusal (the path was replaced
+    //   during the open) is the same class: the backup, retention and WAL
+    //   switch concern the file this connection opened.
+    #[cfg(test)]
+    test_hooks::run_window_hook(test_hooks::Window::BeforeBackupDecision, current_db_path);
+    // The backup step reports the state it actually decided on; the
+    // in-transaction admission compares against THAT, not `preflight_version`.
+    let backup_decision = if funnel.writes_filesystem_artifacts() {
+        Some(maybe_backup_before_migration(conn, current_db_path)?)
+    } else {
+        None
+    };
     apply_connection_pragmas(conn)?;
 
+    #[cfg(test)]
+    test_hooks::run_window_hook(test_hooks::Window::BeforeSchemaTransaction, current_db_path);
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    // ── Authoritative (inside BEGIN IMMEDIATE) ──────────────────────────────
+    // No other connection can commit until this transaction ends, so these
+    // reads are the state every write below acts on. Re-evaluate every gate
+    // and the `fresh` discriminator here and never use the preflight values
+    // for a decision: a refusal returns and drops `tx` (rollback, nothing
+    // written); a changed-but-admitted state proceeds on what is read here.
+    let fresh = reevaluate_admission_in_tx(
+        &tx,
+        current_db_path,
+        ctx,
+        backup_decision.as_ref(),
+        funnel.validates_input_trigger_inventory(),
+    )?;
     // #1585/#1579: resolve identity BEFORE any DDL runs, so a refused open
-    // (role conflict, profile mismatch, unstamped-under-portable) leaves the
-    // database byte-identical. Everything below is inside the same
-    // BEGIN IMMEDIATE, so even a later failure rolls the stamps back with it.
+    // (role conflict, profile mismatch, unstamped-under-portable) writes
+    // nothing. Everything below is inside the same BEGIN IMMEDIATE, so even a
+    // later failure rolls the stamps back with it.
     let identity = resolve_store_identity_in_tx(&tx, db_label, current_db_path, ctx, fresh)?;
+    // tachi#1990: authoritative private-partition refusal on the in-transaction
+    // state (a stamp committed in the window), before any DDL or stamp.
+    funnel.admit_private_partition_stamp(&tx)?;
     init_schema_inner(&tx, identity.profile)?;
     stamp_store_identity_in_tx(&tx, &identity, ctx)?;
     #[cfg(test)]
@@ -1209,13 +1399,71 @@ fn init_schema_with_label_mut_inner(
     validate_harness_session_spine_schema(&tx)?;
     if identity.profile.includes_product() {
         validate_a2a_mailbox_schema(&tx)?;
+        validate_mirror_eval_identity_schema(&tx)?;
     }
+    #[cfg(test)]
+    test_hooks::pause_after_schema_stamp_before_commit(&tx);
+    funnel.check_before_commit()?;
     tx.commit()?;
+    #[cfg(test)]
+    test_hooks::run_window_hook(test_hooks::Window::AfterSchemaCommit, current_db_path);
 
-    if filesystem_artifacts {
+    if funnel.writes_filesystem_artifacts() {
         remember_migration_fingerprint(conn, current_db_path)?;
     }
     Ok(SchemaInitOutcome { report, identity })
+}
+
+/// The authoritative admission decision, evaluated inside `BEGIN IMMEDIATE`
+/// on the state every subsequent write acts on. Returns the in-transaction
+/// `fresh` discriminator (`user_version == 0`).
+///
+/// Order mirrors the preflight, and every check here runs BEFORE any
+/// `ensure_*`, DDL or repair step of `init_schema_inner`: input trigger
+/// inventory (store funnel only, `input_inventory`) → #984 version gate → #1119 intent/authority gate →
+/// current-schema integrity → #1180 backup coverage.
+///
+/// The inventory check must run here, not only at the end: `init_schema_inner`
+/// recreates missing canonical triggers (`CREATE TRIGGER IF NOT EXISTS`), so a
+/// trigger another process dropped in the window would otherwise be silently
+/// repaired and pass the end-of-transaction validation.
+///
+/// Backup coverage: the pre-migration backup can only run outside a write
+/// transaction (SQLite refuses to back up a connection holding one). If the
+/// in-transaction state is a migration and the backup step's decision was not
+/// taken on that same version (or skipped it as "no migration"), the backup
+/// on disk (if any) is of a different state, so the open refuses with
+/// `SchemaChangedDuringOpen` instead of migrating without one. `backup` is
+/// `None` only for private images, which never back up.
+fn reevaluate_admission_in_tx(
+    tx: &Connection,
+    current_db_path: &Path,
+    ctx: &crate::db::DbOpenContext,
+    backup: Option<&BackupDecision>,
+    input_inventory: bool,
+) -> Result<bool, MemoryError> {
+    use crate::db::migrations::{self, OpenContextDecision};
+
+    if input_inventory {
+        super::validate_input_trigger_inventory(tx)?;
+    }
+    migrations::check_schema_version_gate(tx)?;
+    let version = migrations::read_schema_version(tx)?;
+    let decision = migrations::evaluate_db_open_context_gate(tx, current_db_path, ctx)?;
+    migrations::validate_current_schema_integrity(tx)?;
+    if let Some(backup) = backup {
+        if matches!(decision, OpenContextDecision::AuthorizedMigration { .. })
+            && !backup.covers_migration_of(version)
+        {
+            return Err(MemoryError::SchemaChangedDuringOpen {
+                preflight: backup.version,
+                current: version,
+                db_path: current_db_path.display().to_string(),
+            });
+        }
+    }
+    migrations::log_authorized_migration(decision, current_db_path, ctx);
+    Ok(version == 0)
 }
 
 /// What `init_schema_with_label_mut` hands back: the migration report it always
@@ -1233,6 +1481,10 @@ pub struct SchemaInitOutcome {
 
 /// Read both identity stamps and apply the #1579 role table and the #1585 D2
 /// admission table. Errors here abort the open with the transaction untouched.
+///
+/// Pure reads: `init_schema_with_label_mut_inner` calls this twice — once as a
+/// side-effect-free preflight before the migration backup, and once as the
+/// authoritative resolution inside the schema transaction.
 fn resolve_store_identity_in_tx(
     tx: &Connection,
     claimed_label: &str,
@@ -1298,7 +1550,9 @@ fn stamp_store_identity_in_tx(
 #[cfg(test)]
 pub(crate) mod test_hooks {
     use crate::error::MemoryError;
+    use rusqlite::Connection;
     use std::cell::Cell;
+    use std::path::Path;
 
     thread_local! {
         static FAIL_AFTER_LEGACY_WORK: Cell<bool> = const { Cell::new(false) };
@@ -1320,6 +1574,105 @@ pub(crate) mod test_hooks {
             ));
         }
         Ok(())
+    }
+
+    type WindowHook = Box<dyn FnOnce(&Path)>;
+
+    /// The points around the schema transaction a test can stand another
+    /// process in.
+    #[derive(Clone, Copy)]
+    pub(crate) enum Window {
+        /// After every preflight gate, before the backup step decides.
+        BeforeBackupDecision,
+        /// After the backup step and the connection PRAGMAs, immediately
+        /// before `BEGIN IMMEDIATE`.
+        BeforeSchemaTransaction,
+        /// Immediately after the schema transaction's `COMMIT`, before the
+        /// migration marker, `try_load_sqlite_vec` and the store funnel's
+        /// post-init checks.
+        AfterSchemaCommit,
+    }
+
+    thread_local! {
+        static BEFORE_BACKUP_DECISION: std::cell::RefCell<Option<WindowHook>> =
+            const { std::cell::RefCell::new(None) };
+        static BEFORE_SCHEMA_TRANSACTION: std::cell::RefCell<Option<WindowHook>> =
+            const { std::cell::RefCell::new(None) };
+        static AFTER_SCHEMA_COMMIT: std::cell::RefCell<Option<WindowHook>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    fn slot(
+        window: Window,
+    ) -> &'static std::thread::LocalKey<std::cell::RefCell<Option<WindowHook>>> {
+        match window {
+            Window::BeforeBackupDecision => &BEFORE_BACKUP_DECISION,
+            Window::BeforeSchemaTransaction => &BEFORE_SCHEMA_TRANSACTION,
+            Window::AfterSchemaCommit => &AFTER_SCHEMA_COMMIT,
+        }
+    }
+
+    /// Arm a closure that runs once, on this thread, at `window` in the NEXT
+    /// schema init. It stands in for another process committing to the store
+    /// there; it receives the store path and opens its own connection.
+    /// Auto-disarms after firing once.
+    pub(crate) fn arm_window_hook(window: Window, hook: impl FnOnce(&Path) + 'static) {
+        slot(window).with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+    }
+
+    /// [`arm_window_hook`] at [`Window::BeforeSchemaTransaction`].
+    pub(crate) fn arm_before_schema_transaction(hook: impl FnOnce(&Path) + 'static) {
+        arm_window_hook(Window::BeforeSchemaTransaction, hook);
+    }
+
+    pub(super) fn run_window_hook(window: Window, db_path: &Path) {
+        if let Some(hook) = slot(window).with(|slot| slot.borrow_mut().take()) {
+            hook(db_path);
+        }
+    }
+
+    /// Disarm a hook that a test armed but whose window was never reached.
+    pub(crate) fn disarm_window_hooks() {
+        for window in [
+            Window::BeforeBackupDecision,
+            Window::BeforeSchemaTransaction,
+            Window::AfterSchemaCommit,
+        ] {
+            slot(window).with(|slot| slot.borrow_mut().take());
+        }
+    }
+
+    /// Used only by the ignored, fixture-backed subprocess crash test. This
+    /// executes after real migration DDL, sentinels and user_version have all
+    /// been written and validated, while the outer BEGIN IMMEDIATE is still
+    /// open. No production binary compiles this environment-controlled hook.
+    pub(super) fn pause_after_schema_stamp_before_commit(tx: &Connection) {
+        let Ok(marker) = std::env::var("TACHI_TEST_SCHEMA_TX_PAUSE_MARKER") else {
+            return;
+        };
+        assert_eq!(
+            crate::db::migrations::read_schema_version(tx).expect("read uncommitted stamp"),
+            crate::db::migrations::EXPECTED_SCHEMA_VERSION,
+            "schema stamp must already be inside the uncommitted transaction"
+        );
+        let sentinel: i64 = tx.query_row(
+            "SELECT count(*) FROM hard_state WHERE namespace='migrations' AND key='v39_mirror_eval_identity'",
+            [], |row| row.get(0),
+        ).expect("read uncommitted sentinel");
+        assert_eq!(sentinel, 1, "v39 migration must have run before pause");
+        let ddl: i64 = tx.query_row(
+            "SELECT count(*) FROM sqlite_schema WHERE type='table' AND name='memory_outbox_events'",
+            [], |row| row.get(0),
+        ).expect("read uncommitted v29 DDL");
+        assert_eq!(ddl, 1, "v29 schema change must be present before pause");
+        std::fs::write(
+            marker,
+            b"schema=39;v39_sentinel=1;v29_ddl=1;before_outer_commit",
+        )
+        .expect("signal parent after all migration effects and stamp");
+        loop {
+            std::thread::park();
+        }
     }
 }
 
@@ -3095,35 +3448,74 @@ fn quote_sql_identifier(identifier: &str) -> Result<String, MemoryError> {
     Ok(format!("\"{identifier}\""))
 }
 
+// Insert-missing drift repair for the FTS projections (#1974).
+//
+// FTS5 cannot serve `f.id = m.id` as a lookup: `memories_fts.id` is UNINDEXED
+// and `memories_symbolic_fts.id` is a trigram column. The old correlated
+// `NOT EXISTS (SELECT 1 FROM <fts> f WHERE f.id = m.id)` therefore planned as
+// CORRELATED SCALAR SUBQUERY -> full virtual-table scan per memory row, i.e.
+// O(N^2) on every writable open (~10 min at 10k memories). An uncorrelated
+// `NOT IN (SELECT id ...)` is materialized once into an ephemeral index, so
+// the set difference is one scan of each side.
+//
+// NULL ids (`memories.id` is `TEXT PRIMARY KEY` without NOT NULL, so legacy
+// rows can carry NULL):
+// - `m.id IS NOT NULL`: a NULL-id memory is never projected. It cannot join
+//   back to any FTS hit by id, and projecting it would add one more NULL-id
+//   FTS row on every open (the old NOT EXISTS never matched NULL = NULL).
+//   The explicit guard also covers `NULL NOT IN (<empty set>)`, which is TRUE.
+// - `WHERE id IS NOT NULL` in the subquery: a NULL-id FTS row must not turn
+//   every `m.id NOT IN (...)` into NULL and suppress repair of real rows.
+const FTS_BACKFILL_MISSING_SQL: &str = r#"INSERT INTO memories_fts (id, path, summary, text, keywords, entities)
+   SELECT
+     m.id,
+     m.path,
+     m.summary,
+     m.text,
+     trim(replace(replace(replace(m.keywords, '[', ' '), ']', ' '), '"', ' ')),
+     trim(replace(replace(replace(m.entities, '[', ' '), ']', ' '), '"', ' '))
+   FROM memories m
+   WHERE m.id IS NOT NULL
+     AND m.id NOT IN (SELECT id FROM memories_fts WHERE id IS NOT NULL)"#;
+
+const SYMBOLIC_FTS_BACKFILL_MISSING_SQL: &str = r#"INSERT INTO memories_symbolic_fts (id, path, summary, text, keywords, entities, topic)
+   SELECT m.id, m.path, m.summary, m.text, m.keywords, m.entities, m.topic
+   FROM memories m
+   WHERE m.id IS NOT NULL
+     AND m.id NOT IN (SELECT id FROM memories_symbolic_fts WHERE id IS NOT NULL)"#;
+
+// Orphan pass, the delete side of the same drift repair (tachi#1993).
+// `memories.id` is `TEXT PRIMARY KEY` without NOT NULL, so the subquery must
+// skip NULL ids: with a NULL in the list, `x NOT IN (..., NULL)` is NULL for
+// every x that matches no listed id (an x that does match yields FALSE), so no
+// orphan would ever be pruned. A NULL-id projection row is always an orphan:
+// no FTS projection writer projects a NULL-id memory (this insert side, the
+// R1 repair rebuild, `rebuild_memories_symbolic_fts`, `rebuild_fts_full`), and
+// every search leg joins `m.id = <fts>.id`, which never matches NULL.
+// `NULL NOT IN (<non-empty>)` is NULL, so it needs the explicit `id IS NULL`
+// arm. With `memories` empty the list is empty and every projection row,
+// NULL-id or not, is deleted: all of them are orphans.
+const FTS_DELETE_ORPHANS_SQL: &str = r#"DELETE FROM memories_fts
+   WHERE id IS NULL
+      OR id NOT IN (SELECT id FROM memories WHERE id IS NOT NULL)"#;
+
+const SYMBOLIC_FTS_DELETE_ORPHANS_SQL: &str = r#"DELETE FROM memories_symbolic_fts
+   WHERE id IS NULL
+      OR id NOT IN (SELECT id FROM memories WHERE id IS NOT NULL)"#;
+
 fn ensure_fts_backfilled(conn: &Connection) -> Result<(), MemoryError> {
     // (The stray `vault_entries.allowed_agents` ensure_column that used to sit
     // here moved to `init_product_schema_columns` in #1585 D3: it is a product
     // table and would `no such table`-crash a PortableKernel init, and it never
     // had anything to do with FTS backfill.)
-    let memories_count: i64 =
-        conn.query_row("SELECT COUNT(*) FROM memories", [], |row| row.get(0))?;
-    if memories_count == 0 {
-        return Ok(());
-    }
+    //
+    // No empty-`memories` early return: with no memories every projection row
+    // is an orphan, and skipping the pass left them in place forever. Both
+    // inserts are no-ops then, and the generation still bumps only when a
+    // statement changed a row.
+    let mut projection_changes = conn.execute(FTS_DELETE_ORPHANS_SQL, [])?;
 
-    let mut projection_changes = conn.execute(
-        "DELETE FROM memories_fts WHERE id NOT IN (SELECT id FROM memories)",
-        [],
-    )?;
-
-    projection_changes += conn.execute(
-        r#"INSERT INTO memories_fts (id, path, summary, text, keywords, entities)
-           SELECT
-             m.id,
-             m.path,
-             m.summary,
-             m.text,
-             trim(replace(replace(replace(m.keywords, '[', ' '), ']', ' '), '"', ' ')),
-             trim(replace(replace(replace(m.entities, '[', ' '), ']', ' '), '"', ' '))
-           FROM memories m
-           WHERE NOT EXISTS (SELECT 1 FROM memories_fts f WHERE f.id = m.id)"#,
-        [],
-    )?;
+    projection_changes += conn.execute(FTS_BACKFILL_MISSING_SQL, [])?;
 
     // Symbolic trigram index (#1331): insert-missing drift repair only.
     // Content refreshes after path/data migrations are owned by v22's full
@@ -3137,17 +3529,8 @@ fn ensure_fts_backfilled(conn: &Connection) -> Result<(), MemoryError> {
         )
         .unwrap_or(false);
     if symbolic_fts_present {
-        projection_changes += conn.execute(
-            "DELETE FROM memories_symbolic_fts WHERE id NOT IN (SELECT id FROM memories)",
-            [],
-        )?;
-        projection_changes += conn.execute(
-            r#"INSERT INTO memories_symbolic_fts (id, path, summary, text, keywords, entities, topic)
-               SELECT m.id, m.path, m.summary, m.text, m.keywords, m.entities, m.topic
-               FROM memories m
-               WHERE NOT EXISTS (SELECT 1 FROM memories_symbolic_fts f WHERE f.id = m.id)"#,
-            [],
-        )?;
+        projection_changes += conn.execute(SYMBOLIC_FTS_DELETE_ORPHANS_SQL, [])?;
+        projection_changes += conn.execute(SYMBOLIC_FTS_BACKFILL_MISSING_SQL, [])?;
     }
 
     if projection_changes > 0 {
@@ -3174,20 +3557,102 @@ fn migration_marker_path(db_path: &Path) -> PathBuf {
     PathBuf::from(s)
 }
 
+/// The "has the schema shape changed since our last successful init"
+/// fingerprint the marker records: `schema:<user_version>:<schema_version>`.
+///
+/// W1-3: this used to lead with `CARGO_PKG_VERSION`, so every crate-version
+/// bump forced a full-size backup on every store even when nothing would
+/// migrate. The binary version is not a schema input: new tables, columns and
+/// data rewrites may only arrive as versioned sentinel migrations that bump
+/// `EXPECTED_SCHEMA_VERSION` (see the v22/v28/v31 notes in `migrations.rs`),
+/// and a stored `user_version` below that always backs up through
+/// `maybe_backup_before_migration`'s #1180 rule regardless of this string.
+/// What the fingerprint still catches is DDL applied outside this funnel
+/// (`PRAGMA schema_version` is SQLite's DDL cookie) and a stamp rewritten out
+/// of band (`PRAGMA user_version`).
+///
+/// A marker written in the old `<crate>:<schema_version>` form never matches,
+/// so the first open after this change backs up once, as the old crate-version
+/// bump would have.
 fn migration_schema_fingerprint(conn: &Connection) -> Result<String, MemoryError> {
-    let sv: i64 = conn.query_row("PRAGMA schema_version", [], |r| r.get(0))?;
-    Ok(format!("{}:{}", env!("CARGO_PKG_VERSION"), sv))
+    let user_version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    let schema_version: i64 = conn.query_row("PRAGMA schema_version", [], |r| r.get(0))?;
+    Ok(format!("schema:{user_version}:{schema_version}"))
+}
+
+/// Has SQLite's DDL cookie never moved, i.e. is there no schema to back up?
+fn schema_cookie_is_empty(conn: &Connection) -> Result<bool, MemoryError> {
+    let schema_version: i64 = conn.query_row("PRAGMA schema_version", [], |r| r.get(0))?;
+    Ok(schema_version == 0)
+}
+
+/// What the pre-migration backup step actually decided, and on which state.
+///
+/// The in-transaction admission (`reevaluate_admission_in_tx`) compares its
+/// own `user_version` with [`Self::version`], not with any earlier preflight
+/// read: only the state this step decided on is known to be covered.
+#[derive(Debug)]
+pub(crate) struct BackupDecision {
+    /// `PRAGMA user_version` of the state this decision covers. For a written
+    /// backup it is read from the backup copy itself (the exact snapshot that
+    /// was copied); for a skip, from the snapshot the skip was decided on.
+    pub(crate) version: u32,
+    pub(crate) outcome: BackupOutcome,
+}
+
+#[derive(Debug)]
+pub(crate) enum BackupOutcome {
+    /// A `.migration-bak` of the `version` state was written. The path is
+    /// read only by tests (production callers need just the covered version).
+    Written(#[cfg_attr(not(test), allow(dead_code))] PathBuf),
+    /// `PRAGMA schema_version == 0`: no schema to back up (the accepted
+    /// zero-cookie limit when the file is not actually empty).
+    SkippedEmptySchema,
+    /// Not a version migration and the marker matched: skipped as a
+    /// redundant same-schema backup.
+    SkippedMarkerMatch,
+}
+
+impl BackupDecision {
+    #[cfg(test)]
+    pub(crate) fn backup_path(&self) -> Option<&PathBuf> {
+        match &self.outcome {
+            BackupOutcome::Written(path) => Some(path),
+            _ => None,
+        }
+    }
+
+    /// Does this decision cover migrating a store at `version`? Only if it
+    /// was taken on that same version and did not skip as "no migration".
+    pub(crate) fn covers_migration_of(&self, version: u32) -> bool {
+        self.version == version && !matches!(self.outcome, BackupOutcome::SkippedMarkerMatch)
+    }
 }
 
 fn maybe_backup_before_migration(
     conn: &Connection,
     db_path: &Path,
-) -> Result<Option<PathBuf>, MemoryError> {
-    let current_fp = migration_schema_fingerprint(conn)?;
+) -> Result<BackupDecision, MemoryError> {
+    // The skip decision's reads (cookie, fingerprint, stamp) come from ONE
+    // read snapshot, so they describe a single state even if another process
+    // writes meanwhile. The deferred read transaction ends before the copy.
+    let (cookie_empty, current_fp, stored) = {
+        let snapshot = conn.unchecked_transaction()?;
+        let read = (
+            schema_cookie_is_empty(&snapshot)?,
+            migration_schema_fingerprint(&snapshot)?,
+            crate::db::migrations::read_schema_version(&snapshot)?,
+        );
+        snapshot.commit()?;
+        read
+    };
     // schema_version == 0: the file was just created and has no schema yet.
     // There is nothing to back up.
-    if current_fp.ends_with(":0") {
-        return Ok(None);
+    if cookie_empty {
+        return Ok(BackupDecision {
+            version: stored,
+            outcome: BackupOutcome::SkippedEmptySchema,
+        });
     }
 
     // #1180: the 2026-07-17 v18->v19 live deploy migrated `PRAGMA
@@ -3196,13 +3661,14 @@ fn maybe_backup_before_migration(
     // promises `<db>.migration-bak.<ts>` + `<db>.migration-marker` for) but
     // left NEITHER file. Root cause: this function's "skip if unchanged"
     // heuristic below keys off `PRAGMA schema_version` (a SQLite-internal DDL
-    // cookie) + the binary's crate version — a proxy for "did the schema
-    // shape change since our last successful init", used to avoid redundant
-    // backups on ordinary same-version daemon restarts. `PRAGMA user_version
-    // = N` does not touch `schema_version`, so a long-lived process whose
-    // marker was last written on a PRIOR restart (no DDL has run since) can
-    // have a marker that coincidentally still matches `current_fp` at the
-    // moment a REAL `stored < EXPECTED_SCHEMA_VERSION` migration begins —
+    // cookie; at the time also the binary's crate version) — a proxy for
+    // "did the schema shape change since our last successful init", used to
+    // avoid redundant backups on ordinary same-version daemon restarts.
+    // `PRAGMA user_version = N` does not touch `schema_version`, so a
+    // long-lived process whose marker was last written on a PRIOR restart
+    // (no DDL has run since) can have a marker that coincidentally still
+    // matches `current_fp` at the moment a REAL
+    // `stored < EXPECTED_SCHEMA_VERSION` migration begins —
     // silently skipping the backup this function exists to guarantee.
     //
     // The authoritative signal for "is this open crossing the migration
@@ -3214,29 +3680,66 @@ fn maybe_backup_before_migration(
     // fingerprint heuristic is downgraded to its original purpose (skip
     // redundant backups on a plain same-version reopen) and must never
     // suppress a genuine, authorized migration's trail.
-    let stored = crate::db::migrations::read_schema_version(conn)?;
     let is_version_migration =
         (1..crate::db::migrations::EXPECTED_SCHEMA_VERSION).contains(&stored);
 
     if !is_version_migration {
         let marker = migration_marker_path(db_path);
         if std::fs::read_to_string(&marker).ok().as_deref() == Some(current_fp.as_str()) {
-            return Ok(None);
+            return Ok(BackupDecision {
+                version: stored,
+                outcome: BackupOutcome::SkippedMarkerMatch,
+            });
         }
     }
 
     let ts = chrono::Utc::now().format("%Y%m%dT%H%M%S");
     let backup_path = sibling_with_suffix(db_path, &format!("migration-bak.{ts}"));
 
-    {
+    let backed_up_version = {
         let mut dst = Connection::open(&backup_path)?;
         let backup = rusqlite::backup::Backup::new(conn, &mut dst)?;
-        backup.run_to_completion(128, Duration::from_millis(100), None)?;
-    }
+        // W1-3: copy every page in ONE step; no pacing. The old
+        // `run_to_completion(128, 100ms)` slept 100 ms per 128 pages (a 390 MB
+        // store at 4 KiB pages ≈ 745 sleeps ≈ 75 s of pure idle). Pacing is
+        // the online-backup idiom for letting other users of the source run
+        // between steps. In-process it buys nothing: `MemoryStore`'s open
+        // funnel serializes in-process openers behind its startup lock for
+        // this whole call, and this connection has not begun a transaction.
+        //
+        // The tradeoff is for OTHER processes, and it depends on the journal
+        // mode:
+        // * WAL (every store this funnel has initialized): the single step
+        //   holds one read snapshot. Writers are not blocked, but a
+        //   checkpoint cannot advance past that snapshot until the copy
+        //   finishes, so the WAL may grow for the copy's duration.
+        // * Rollback journal (a legacy file on its first open here): the step
+        //   holds SHARED for the whole copy. A concurrent writer that needs
+        //   EXCLUSIVE waits, and if the copy outlasts its busy_timeout that
+        //   writer gets SQLITE_BUSY. Pacing only spread that exposure over a
+        //   much longer wall time; it did not remove it.
+        // Both an incremental and a single-step backup produce a consistent
+        // copy. The incremental form restarts from page 1 whenever another
+        // connection writes the source between steps, so pacing a busy store
+        // mostly made the backup slower to finish.
+        //
+        // `i32::MAX` pages is "all remaining pages" (`run_to_completion`
+        // rejects the C API's negative form). The sleep below is therefore
+        // never reached on the normal path: it only fires on `Busy`/`Locked`
+        // (another process holding an exclusive lock), where a short backoff
+        // beats a hot spin.
+        backup.run_to_completion(i32::MAX, Duration::from_millis(5), None)?;
+        drop(backup);
+        // The copy's own stamp is the state that was actually backed up.
+        crate::db::migrations::read_schema_version(&dst)?
+    };
 
     retain_recent_migration_backups(db_path);
 
-    Ok(Some(backup_path))
+    Ok(BackupDecision {
+        version: backed_up_version,
+        outcome: BackupOutcome::Written(backup_path),
+    })
 }
 
 fn remember_migration_fingerprint(conn: &Connection, db_path: &Path) -> Result<(), MemoryError> {
@@ -3580,3 +4083,9 @@ mod migration_tests;
 
 #[cfg(test)]
 mod migration_backup_tests;
+
+#[cfg(test)]
+mod fts_backfill_tests;
+
+#[cfg(test)]
+mod open_race_tests;

@@ -29,10 +29,10 @@
 // The floor is 3.50.3 because of CVE-2025-7709 (fixed 3.50.3): a corrupt FTS5
 // index yields unauthorized memory access. memcore's core search *is* FTS5 and
 // its content is user-writable (memories, wiki, events, URL ingest), so this is
-// the exact attack surface, not a theoretical one. The workspace `rusqlite`
-// requirement is a range (`>=0.37, <0.39`) whose lower bound resolves to
-// libsqlite3-sys 0.35.0 / SQLite 3.50.2 — below the floor. That lower bound is
-// permitted *only* because this assertion refuses such a build outright.
+// the exact attack surface, not a theoretical one. The workspace pins
+// `rusqlite = "0.40"` (libsqlite3-sys 0.38.x / SQLite 3.53.2), which is above
+// the floor; this assertion still refuses any build that somehow resolves
+// below 3.50.3.
 //
 // If this fails: bump `rusqlite`/`libsqlite3-sys` until the bundled SQLite is
 // >= 3.50.3. Do not lower the constant, and do not replace it and the runtime
@@ -180,9 +180,10 @@ pub use db::foundry_config::{get_foundry_config, set_foundry_config, PerDbConfig
 #[cfg(feature = "admin")]
 pub use db::foundry_jobs::{
     claim_foundry_job_for_run, find_foundry_jobs_for_memory, gc_foundry_jobs, insert_foundry_job,
-    job_status_histogram, load_pending_foundry_jobs, requeue_retryable_foundry_jobs,
-    update_foundry_job_status_with_reason, FoundryJobLease, FoundryJobSummary, FoundryRetryPolicy,
-    InsertFoundryJobResult, JobStatusHistogram, PersistedFoundryJob, RequeueOutcome,
+    job_status_histogram, load_pending_foundry_jobs, probe_pending_foundry_jobs,
+    requeue_retryable_foundry_jobs, update_foundry_job_status_with_reason, FoundryJobLease,
+    FoundryJobSummary, FoundryPendingProbe, FoundryRetryPolicy, InsertFoundryJobResult,
+    JobStatusHistogram, PendingFoundryJobMarker, PersistedFoundryJob, RequeueOutcome,
 };
 #[cfg(feature = "admin")]
 pub use db::harness_session_attachments::{
@@ -217,10 +218,10 @@ pub use db::harness_session_interventions::{
 #[cfg(feature = "admin")]
 pub use db::mirror_eval::{
     append_mirror_eval_adjudication, get_mirror_eval_run_view, get_observation, get_run_by_id,
-    get_run_by_native_child_id, list_adjudications_for_run, record_mirror_eval_observation,
-    register_mirror_eval_run, run_is_adjudicated, MirrorEvalAdjudication, MirrorEvalObservation,
-    MirrorEvalRun, MirrorEvalRunView, NewMirrorEvalAdjudication, NewMirrorEvalObservation,
-    NewMirrorEvalRun,
+    get_run_by_native_child_id, list_adjudications_for_run, list_mirror_eval_run_views,
+    record_mirror_eval_observation, register_mirror_eval_run, run_is_adjudicated,
+    MirrorEvalAdjudication, MirrorEvalObservation, MirrorEvalRun, MirrorEvalRunView,
+    NewMirrorEvalAdjudication, NewMirrorEvalObservation, NewMirrorEvalRun,
 };
 /// tachi#1643 durable outbox (#1630 A1). Ungated: the outbox is portable
 /// surface, so a `StoreProfile::PortableKernel` database carries it and a
@@ -251,15 +252,16 @@ pub use db::session_claims::{
     WorkClaimHeartbeat, WorkClaimMode,
 };
 pub use db::{anchor_id, anchor_path, AnchorKind};
+pub use db::{
+    convert_legacy_filename_offline, is_memory_db_filename, migrate_legacy_filename_if_present,
+    pending_legacy_sidecar, resolve_memory_db_read_path, OfflineFilenameAuthority,
+    OfflineFilenameOutcome, LEGACY_MEMORY_DB_FILENAME, MEMORY_DB_FILENAME,
+};
 #[cfg(feature = "admin")]
 pub use db::{
     get_verified_admission_receipt, has_current_verified_admission,
     with_current_verified_admission_write, VerifiedAdmissionBinding, VerifiedAdmissionReceipt,
     VERIFIED_ADMISSION_METHOD, VERIFIED_ADMISSION_SCOPE, VERIFIED_ADMISSION_VERSION,
-};
-pub use db::{
-    is_memory_db_filename, migrate_legacy_filename_if_present, resolve_memory_db_read_path,
-    LEGACY_MEMORY_DB_FILENAME, MEMORY_DB_FILENAME,
 };
 pub use db::{normalize_utc_iso, normalize_utc_iso_or_now, now_utc_iso};
 pub use db::{
@@ -267,7 +269,7 @@ pub use db::{
     InsertMemoryResult, PathPrefixMemoryRow,
 };
 pub use db::{CategorySourceGroup, DailyHealthDbSnapshot, DuplicateSummaryRow, EvalEvidenceRow};
-pub use db::{DbOpenContext, MigrationAuthority, OpenIntent, StoreProfile};
+pub use db::{DbOpenContext, MigrationAuthority, OpenIntent, ProfileRequirement, StoreProfile};
 pub use db::{
     DeleteMaintenanceOutcome, GcMaintenanceOutcome, MaintenanceClassFact,
     OperatorMaintenanceCommittedReceiptBinding, OperatorMaintenanceOperation,

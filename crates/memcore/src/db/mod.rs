@@ -134,8 +134,9 @@ pub use event_ledger::{
     continuity_metrics, insert_tachi_event, insert_tachi_event_if_absent, list_tachi_events,
 };
 pub use filename::{
-    is_memory_db_filename, migrate_legacy_filename_if_present, resolve_memory_db_read_path,
-    LEGACY_MEMORY_DB_FILENAME, MEMORY_DB_FILENAME,
+    convert_legacy_filename_offline, is_memory_db_filename, migrate_legacy_filename_if_present,
+    pending_legacy_sidecar, resolve_memory_db_read_path, OfflineFilenameAuthority,
+    OfflineFilenameOutcome, LEGACY_MEMORY_DB_FILENAME, MEMORY_DB_FILENAME,
 };
 pub use gc_candidates::{
     list_memories_by_category_and_path_prefix, list_memories_by_path_prefix,
@@ -184,9 +185,10 @@ pub use harness_session_interventions::{
 };
 #[cfg(feature = "admin")]
 pub use hub_db::{
-    hub_get, hub_get_active_version_route, hub_list, hub_list_limited, hub_record_call_outcome,
-    hub_record_feedback, hub_search, hub_search_limited, hub_set_active_version_route,
-    hub_set_enabled, hub_set_review, hub_upsert,
+    hub_fill_empty_description, hub_get, hub_get_active_version_route, hub_list, hub_list_limited,
+    hub_record_call_outcome, hub_record_feedback, hub_search, hub_search_limited,
+    hub_set_active_version_route, hub_set_enabled, hub_set_review, hub_update_definition_with,
+    hub_upsert, HubDefinitionUpdate,
 };
 #[cfg(test)]
 pub(crate) use memory_crud::query_hash;
@@ -213,19 +215,19 @@ pub use memory_crud::{
     is_user_facing_wiki_entry, list_active_wiki_ingest_predecessors, list_by_path,
     list_by_path_active_unsuperseded, list_by_path_recent, list_user_facing_wiki_entries,
     list_wiki_duplicate_candidates, normalize_for_write, record_enrichment_failure,
-    record_memory_use, release_event_claim, restore_archived_if_revision,
-    restore_archived_revision_within_tx, search_fts, search_symbolic_candidates, search_vec,
-    set_keyword_enrichment_pending_if_unset, set_keyword_enrichment_status,
-    symbolic_trigram_select_sql, sync_memories_symbolic_fts, try_claim_event,
-    update_enrichment_fields, update_with_revision, AccessEventDensity, AccessEventKind,
-    IdlessUpsertResult, InsertMemoryResult, NearDuplicatePolicy, ValidatedReferenceMutation,
-    MAX_REFERENCE_BYTES, MAX_REFERENCE_HASH_BYTES, MAX_REFERENCE_ID_BYTES,
-    MAX_REFERENCE_KIND_BYTES, MAX_REFERENCE_SECTION_BYTES, MAX_REFERENCE_TIMESTAMP_BYTES,
-    SYMBOLIC_TRIGRAM_SELECT_SQL_TEMPLATE,
+    record_enrichment_failure_if_revision, record_memory_use, release_event_claim,
+    restore_archived_if_revision, restore_archived_revision_within_tx, search_fts,
+    search_symbolic_candidates, search_vec, set_keyword_enrichment_pending_if_unset,
+    set_keyword_enrichment_status, symbolic_trigram_select_sql, sync_memories_symbolic_fts,
+    try_claim_event, update_enrichment_fields, update_with_revision, AccessEventDensity,
+    AccessEventKind, IdlessUpsertResult, InsertMemoryResult, NearDuplicatePolicy,
+    ValidatedReferenceMutation, MAX_REFERENCE_BYTES, MAX_REFERENCE_HASH_BYTES,
+    MAX_REFERENCE_ID_BYTES, MAX_REFERENCE_KIND_BYTES, MAX_REFERENCE_SECTION_BYTES,
+    MAX_REFERENCE_TIMESTAMP_BYTES, SYMBOLIC_TRIGRAM_SELECT_SQL_TEMPLATE,
 };
 pub(crate) use memory_crud::{
     archive_memory_within_tx, archive_with_metadata_if_expected_state,
-    find_jaccard_candidate_within_tx, merge_jaccard_candidate_within_tx,
+    find_jaccard_candidate_within_tx, get_active_resource_entry, merge_jaccard_candidate_within_tx,
     restore_with_metadata_if_expected_state, update_with_revision_if_expected_state,
 };
 /// tachi#1446 drift guard for hand-built `memories` test fixtures — see the
@@ -233,6 +235,10 @@ pub(crate) use memory_crud::{
 #[cfg(test)]
 pub(crate) use memory_crud::{
     assert_memories_fixture_matches_select_columns, memory_select_required_columns,
+};
+pub(crate) use memory_crud::{
+    ensure_symbolic_score_function, fetch_by_ids_with_vector_table, fetch_embeddings_by_ids,
+    RecallTables,
 };
 /// tachi#1607 snapshot import: see `memory_crud::snapshot_import`.
 pub(crate) use memory_crud::{
@@ -272,8 +278,9 @@ pub(crate) use open::{
     configure_connection, install_authority_row_guards, install_reserved_reference_authorizer,
     open_read_only, open_read_write, open_read_write_with_busy_timeout,
     register_reserved_reference_write_guard, retry_memory_locked, scoped_sqlite_busy_deadline,
-    sqlite_busy_deadline_remaining, validate_persistent_trigger_inventory,
-    ReservedReferenceWriteAuthorization, ReservedReferenceWriteFlag,
+    sqlite_busy_deadline_remaining, validate_input_trigger_inventory,
+    validate_persistent_trigger_inventory, ReservedReferenceWriteAuthorization,
+    ReservedReferenceWriteFlag,
 };
 pub use open_context::{
     DbOpenContext, MigrationAuthority, OpenIntent, SCHEMA_MIGRATION_LEGACY_ENV,
@@ -327,9 +334,11 @@ pub use sandbox::{
 pub(crate) use sandbox_access::evaluate_sandbox_access;
 #[cfg(feature = "admin")]
 pub use sandbox_access::{evaluate_sandbox_access, path_matches_pattern};
-pub(crate) use schema::init_private_schema_with_label_mut;
 #[cfg(test)]
 pub(crate) use schema::install_reserved_reference_guard;
+#[cfg(test)]
+pub(crate) use schema::test_hooks as schema_test_hooks;
+pub(crate) use schema::{init_private_schema_with_label_mut, init_store_schema_with_label_mut};
 pub use schema::{
     init_schema, init_schema_with_label_mut, validate_current_truth_schema, SchemaInitOutcome,
 };
@@ -349,7 +358,7 @@ pub use stats_gc::{
 };
 pub use store_identity::StoreIdentity;
 pub use store_profile::{
-    StoreProfile, STORE_IDENTITY_NAMESPACE, STORE_PROFILE_KEY, STORE_ROLE_KEY,
+    ProfileRequirement, StoreProfile, STORE_IDENTITY_NAMESPACE, STORE_PROFILE_KEY, STORE_ROLE_KEY,
 };
 #[cfg(feature = "admin")]
 pub use vault_accounts::{

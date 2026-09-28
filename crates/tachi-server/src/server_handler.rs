@@ -343,6 +343,10 @@ fn narrow_gated_action_schemas(
                 }
             }
             "tachi_agent_eval" => {
+                if profile == tachi_hub::ToolProfile::standard() {
+                    project_standard_eval_schema(tool);
+                    continue;
+                }
                 seed_action_enum_property(tool, tachi_params::TACHI_AGENT_EVAL_ACTIONS);
                 let allowed: Vec<&str> = tachi_params::TACHI_AGENT_EVAL_ACTIONS
                     .iter()
@@ -384,6 +388,100 @@ fn narrow_gated_action_schemas(
             _ => {}
         }
     }
+}
+
+/// Expose only the admitted native evaluation loop and its reachable payloads.
+fn project_standard_eval_schema(tool: &mut rmcp::model::Tool) {
+    const ACTIONS: &[&str] = &[
+        "register",
+        "observe",
+        "adjudicate",
+        "get",
+        "candidate_projection",
+    ];
+    const FIELDS: &[&str] = &[
+        "action",
+        "register",
+        "observe",
+        "adjudicate",
+        "get",
+        "candidate_projection",
+        "limit",
+    ];
+    let mut schema = (*tool.input_schema).clone();
+    let Some(properties) = schema
+        .get_mut("properties")
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        schema.clear();
+        schema.insert("not".to_string(), serde_json::json!({}));
+        tool.input_schema = std::sync::Arc::new(schema);
+        return;
+    };
+    properties.retain(|name, _| FIELDS.contains(&name.as_str()));
+    if !properties.contains_key("action") {
+        schema.clear();
+        schema.insert("not".to_string(), serde_json::json!({}));
+        tool.input_schema = std::sync::Arc::new(schema);
+        return;
+    }
+    properties.insert("action".to_string(), serde_json::json!({
+        "type": "string",
+        "enum": ACTIONS,
+        "description": "Native evaluation memory: register, observe, adjudicate, get, or read candidate_projection."
+    }));
+    if let Some(required) = schema
+        .get_mut("required")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        required.retain(|name| name.as_str().is_some_and(|name| FIELDS.contains(&name)));
+    }
+
+    fn refs(value: &serde_json::Value, found: &mut std::collections::BTreeSet<String>) {
+        match value {
+            serde_json::Value::Object(object) => {
+                if let Some(name) = object
+                    .get("$ref")
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(|reference| reference.strip_prefix("#/$defs/"))
+                {
+                    found.insert(name.to_string());
+                }
+                for child in object.values() {
+                    refs(child, found);
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for child in items {
+                    refs(child, found);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut reachable = std::collections::BTreeSet::new();
+    refs(&schema["properties"], &mut reachable);
+    if let Some(definitions) = schema.get("$defs").and_then(serde_json::Value::as_object) {
+        let mut pending = reachable.iter().cloned().collect::<Vec<_>>();
+        while let Some(name) = pending.pop() {
+            if let Some(definition) = definitions.get(&name) {
+                let mut nested = std::collections::BTreeSet::new();
+                refs(definition, &mut nested);
+                for reference in nested {
+                    if reachable.insert(reference.clone()) {
+                        pending.push(reference);
+                    }
+                }
+            }
+        }
+    }
+    if let Some(definitions) = schema
+        .get_mut("$defs")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        definitions.retain(|name, _| reachable.contains(name));
+    }
+    tool.input_schema = std::sync::Arc::new(schema);
 }
 
 fn hide_wiki_write_properties(tool: &mut rmcp::model::Tool) {
@@ -690,6 +788,11 @@ struct HttpSessionIdentity {
     /// also ride through). Header-only: the proxy injects it via
     /// `custom_headers`, never `_meta`.
     dispatch_depth: Option<String>,
+    /// Audit C1: validated `X-Tachi-Rate-Limit-Session` key. Header-only (no
+    /// `_meta` twin); a malformed value is dropped to `None` rather than
+    /// failing the request, because it selects a rate-limit bucket only and
+    /// never identity, profile, or authority.
+    rate_limit_session: Option<String>,
 }
 
 /// #1120 PR1: which session-identity field supplies the bound project, when
@@ -733,7 +836,31 @@ impl MemoryServer {
         validate_modern_identity_headers(context)?;
         let request_server = self.clone_for_mcp_session();
         let identity = request_identity(Some(&context.meta), context);
+        // Audit C1: a modern request has no session to hold a rate-limit
+        // bucket, and `clone_for_mcp_session` just minted a per-request one.
+        // Key the bucket by the resolved AgentIdentity (plus client and
+        // project) whenever one is resolved — even if the request also
+        // carries a valid `X-Tachi-Rate-Limit-Session` header. Every modern
+        // request is a fresh clone, so honoring a caller-rotated header would
+        // let one identified peer shed its own burst/RPM window by sending a
+        // fresh legal key per call (PR2009). The header stays the fallback
+        // for identityless requests (the stdio proxy's per-connection key);
+        // without either anchor the per-request key remains: a client label
+        // or project alone is shared by every instance of that client and
+        // would let one peer trip another's loop block.
+        let identity_bucket = (identity.agent_identity_id.clone(), identity.client.clone());
         request_server.apply_resolved_request_identity(identity, context)?;
+        // Applied only after `apply_resolved_request_identity` succeeded —
+        // every identity check passed — so the derived bucket can never
+        // short-circuit identity admission. It overrides the header-installed
+        // `client:` key from `apply_resolved_request_identity`.
+        if let Some(key) = modern_identity_rate_limit_session_id(
+            identity_bucket.0.as_deref(),
+            identity_bucket.1.as_deref(),
+            request_server.session_project().as_deref(),
+        ) {
+            request_server.set_rate_limit_session_id(key);
+        }
         Ok(request_server)
     }
 
@@ -832,8 +959,47 @@ impl MemoryServer {
         // recursion gate in `handle_tachi_dispatch` reads the CALLER's depth
         // (via the session), not the daemon's process env.
         self.set_session_dispatch_depth(identity.dispatch_depth);
+        // Audit C1: applied last, after every identity check above has
+        // passed, so the bucket header can never short-circuit or stand in
+        // for identity admission. It only picks the rate-limit bucket. For a
+        // modern request with a resolved AgentIdentity this `client:` key is
+        // immediately overridden by the identity-derived bucket in
+        // `clone_for_modern_request` (PR2009: a rotated header must not let
+        // an identified peer shed its burst window); it stays authoritative
+        // for identityless requests and legacy sessions.
+        if let Some(key) = identity.rate_limit_session {
+            self.set_rate_limit_session_id(format!("client:{key}"));
+        }
         Ok(())
     }
+}
+
+/// Audit C1: stable rate-limit bucket for a modern (2026-07-28) request,
+/// derived from its resolved agent identity, client label, and canonical
+/// bound project. Takes precedence over a valid `X-Tachi-Rate-Limit-Session`
+/// header whenever an AgentIdentity is resolved (PR2009): every modern
+/// request is a fresh clone, so a header-selected bucket would let one
+/// identified peer rotate fresh legal keys to shed its burst window. Returns
+/// `None` when the request asserts no AgentIdentity (a client label or
+/// project alone is shared across instances), leaving the header-installed
+/// `client:` key or the per-request key in place. The key is a digest so the
+/// bucket id stays opaque (it also appears in lifecycle events) and cannot
+/// collide with the `client:` namespace.
+fn modern_identity_rate_limit_session_id(
+    agent_identity: Option<&str>,
+    client: Option<&str>,
+    project: Option<&str>,
+) -> Option<String> {
+    use sha2::{Digest, Sha256};
+
+    // The client label and project are shared across instances, so they only
+    // refine a bucket that an AgentIdentity already anchors.
+    agent_identity?;
+    let material = serde_json::json!([agent_identity, client, project]).to_string();
+    Some(format!(
+        "identity:{:x}",
+        Sha256::digest(material.as_bytes())
+    ))
 }
 
 fn http_session_identity(
@@ -893,6 +1059,12 @@ fn request_identity(
         // injects it via `custom_headers` in `call_daemon_tool_raw`.
         identity.dispatch_depth =
             header_string(parts, crate::session_identity::HEADER_DISPATCH_DEPTH);
+        // Audit C1: header-only rate-limit bucket key. Malformed values are
+        // ignored (not an error): the key never carries authority, so the
+        // daemon just keeps its own per-session or identity-derived bucket.
+        identity.rate_limit_session =
+            header_string(parts, crate::session_identity::HEADER_RATE_LIMIT_SESSION)
+                .filter(|key| crate::session_identity::valid_rate_limit_session_key(key));
         // Review finding [3] (#1207): a header wins over `_meta` per this
         // function's usual precedence, but ONLY when it is actually present
         // and well-formed. A PRESENT-but-malformed header must win the error
@@ -1237,9 +1409,59 @@ impl ServerHandler for MemoryServer {
         Ok(result)
     }
 
+    async fn read_resource(
+        &self,
+        request: rmcp::model::ReadResourceRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<rmcp::model::ReadResourceResponse, rmcp::ErrorData> {
+        let mode = crate::mcp_peer::McpPeerMode::from_context(&context)?;
+        reject_modern_direct_stdio(mode, &context)?;
+        let request_server = match mode {
+            crate::mcp_peer::McpPeerMode::Legacy => None,
+            crate::mcp_peer::McpPeerMode::Modern20260728 => {
+                Some(self.clone_for_modern_request(&context)?)
+            }
+        };
+        let server = request_server.as_ref().unwrap_or(self);
+        server.touch_activity();
+
+        let unavailable = || rmcp::ErrorData::resource_not_found("resource unavailable", None);
+        let Some(reference) = crate::memory_resources::parse_resource_uri(&request.uri) else {
+            return Err(unavailable());
+        };
+        let Some(project_name) = server
+            .session_project()
+            .filter(|project| !project.trim().is_empty())
+        else {
+            return Err(unavailable());
+        };
+        let profile = server.active_tool_profile();
+        if !tachi_hub::tool_visible(
+            "tachi_memory",
+            profile,
+            current_exposed_tool_patterns().as_deref(),
+        ) || !tachi_hub::facade_action_allowed("tachi_memory", Some("get"), profile)
+        {
+            return Err(unavailable());
+        }
+        let body = crate::memory_resources::read_resource_text(server, &project_name, &reference)
+            .map_err(|_| unavailable())?;
+        Ok(crate::memory_resources::read_response(
+            request.uri,
+            body,
+            mode == crate::mcp_peer::McpPeerMode::Modern20260728,
+        )
+        .into())
+    }
+
     fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
-            .with_instructions(crate::server_instructions::mcp_server_instructions())
+        ServerInfo::new(
+            ServerCapabilities::builder()
+                .enable_tools()
+                .enable_resources()
+                .build(),
+        )
+        .with_instructions(crate::server_instructions::mcp_server_instructions())
     }
 
     fn initialize(
@@ -1425,7 +1647,11 @@ impl ServerHandler for MemoryServer {
                 // #1255: `clone_for_mcp_session` stamps a unique opaque id on
                 // each MCP session clone; `check_session_rate_limit` keys burst
                 // windows by that id so sessions sharing the process-global
-                // RateLimiter do not inherit each other's counters.
+                // RateLimiter do not inherit each other's counters. Audit C1:
+                // that id is re-keyed to a stable bucket (bucket header or
+                // modern identity) in `apply_resolved_request_identity` /
+                // `clone_for_modern_request`, so short-lived proxy sessions
+                // and modern requests still accumulate one window per client.
                 server.check_session_rate_limit(name, &args_hash)?
             };
 
@@ -2483,6 +2709,7 @@ mod tests {
             workspace_root: Some("/home/agent/repos/sigil".to_string()),
             workspace_root_error: None,
             dispatch_depth: None,
+            rate_limit_session: None,
         };
         assert_eq!(
             project_binding_source(&identity),
@@ -2503,11 +2730,43 @@ mod tests {
             workspace_root: Some("/home/agent/repos/sigil".to_string()),
             workspace_root_error: None,
             dispatch_depth: None,
+            rate_limit_session: None,
         };
         assert_eq!(
             project_binding_source(&identity),
             ProjectBindingSource::WorkspaceRoot("/home/agent/repos/sigil")
         );
+    }
+
+    /// Audit C1: a modern request's derived bucket is stable for the same
+    /// resolved identity, distinct across identities, opaque, and absent when
+    /// the request carries no AgentIdentity (per-request fallback), even if a
+    /// client label or project is present.
+    #[test]
+    fn modern_identity_rate_limit_bucket_is_stable_per_identity() {
+        let a = modern_identity_rate_limit_session_id(Some("agent.a"), Some("cli"), Some("sigil"))
+            .expect("identity bucket");
+        assert_eq!(
+            Some(a.clone()),
+            modern_identity_rate_limit_session_id(Some("agent.a"), Some("cli"), Some("sigil"))
+        );
+        assert!(a.starts_with("identity:"), "{a}");
+        assert!(!a.contains("agent.a"), "bucket id must stay opaque: {a}");
+        for other in [
+            modern_identity_rate_limit_session_id(Some("agent.b"), Some("cli"), Some("sigil")),
+            modern_identity_rate_limit_session_id(Some("agent.a"), Some("ide"), Some("sigil")),
+            modern_identity_rate_limit_session_id(Some("agent.a"), Some("cli"), None),
+        ] {
+            assert_ne!(other.as_deref(), Some(a.as_str()));
+        }
+        for anonymous in [
+            modern_identity_rate_limit_session_id(None, None, None),
+            modern_identity_rate_limit_session_id(None, Some("cli"), None),
+            modern_identity_rate_limit_session_id(None, Some("cli"), Some("sigil")),
+            modern_identity_rate_limit_session_id(None, None, Some("sigil")),
+        ] {
+            assert_eq!(anonymous, None);
+        }
     }
 
     #[test]
@@ -2554,7 +2813,7 @@ mod tests {
 
     /// #757 Cut3-S1 round-2 (review fixup): `tachi_sandbox` folds
     /// `sandbox_set_rule`/`sandbox_set_policy` (destructive actions per the
-    /// alias manifest) among its five actions, so it was missing from the
+    /// alias manifest) among its six actions, so it was missing from the
     /// destructive match list entirely and fell to `destructive_hint=false`
     /// — a fail-open MCP client-facing hint. Assert the verb is annotated
     /// destructive.
@@ -2565,31 +2824,5 @@ mod tests {
             Some(true),
             "tachi_sandbox must be destructive_hint=true (fronts set_rule/set_policy, both destructive)"
         );
-    }
-
-    /// The six legacy sandbox alias names are NOT in the tool-level
-    /// destructive match list (and never were on main pre-fold — see the
-    /// #757 fold history), so folding them into `tachi_sandbox` must not
-    /// change their own annotated hint. This pins the alias-side "unchanged"
-    /// half of the round-2 fix: only `tachi_sandbox` itself gained
-    /// destructive_hint=true, the six aliases stay exactly as before.
-    #[test]
-    fn sandbox_aliases_keep_their_pre_fold_destructive_hint() {
-        for legacy_name in [
-            "sandbox_set_rule",
-            "sandbox_check",
-            "sandbox_set_policy",
-            "sandbox_get_policy",
-            "sandbox_list_policies",
-            "sandbox_exec_audit",
-        ] {
-            assert_eq!(
-                annotated_destructive_hint(legacy_name),
-                Some(false),
-                "legacy alias '{legacy_name}' must keep its pre-fold destructive_hint=false \
-                 (tool-level annotation is unaware of the alias manifest's per-action \
-                 destructive bit; this is documented as the S2+ direction, not fixed here)"
-            );
-        }
     }
 }

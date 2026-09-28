@@ -14,10 +14,12 @@ use crate::MemoryServer;
 /// Dispatch a `tachi_sandbox` verb call to the matching pre-fold handler.
 ///
 /// Pure routing: it reconstructs the per-action parameter struct from the flat
-/// facade params and calls the exact same `handle_sandbox_*` function the
-/// legacy alias tool calls, so a folded call and its legacy alias produce
-/// byte-identical output. Required fields absent for the chosen action fail
-/// with a precise message (rather than a serde deserialization error).
+/// facade params and calls the exact pre-fold `handle_sandbox_*` handler the
+/// retired `sandbox_*` alias tools used to forward to (the handlers themselves
+/// are unchanged since the fold), so a folded call produces byte-identical
+/// output to pre-fold behavior — pinned in `tests/sandbox_fold.rs` against
+/// these handlers as the oracle. Required fields absent for the chosen action
+/// fail with a precise message (rather than a serde deserialization error).
 async fn handle_tachi_sandbox_facade(
     server: &MemoryServer,
     params: TachiSandboxParams,
@@ -120,6 +122,15 @@ impl MemoryServer {
     /// Canonical folded sandbox verb (#757 Cut3-S1). Admin-only, like every
     /// action it subsumes: `tachi_sandbox` is absent from every profile bundle,
     /// so only the admin profile can see or call it.
+    ///
+    /// v2.0 retirement: the six pre-fold `sandbox_*` forwarding aliases expired
+    /// (their `remove_in_release` was 1.10.0) and their `#[tool]` wrappers were
+    /// deleted. Their manifest entries survive as tombstones in
+    /// `tools/alias_manifest.rs` (deadlines unchanged) and the
+    /// `tests/sandbox_fold.rs` tripwires pin that the names stay unrouted and
+    /// rejected even for the admin profile. The dispatcher below is unchanged:
+    /// it still forwards every action to the exact pre-fold `sandbox_ops`
+    /// handler, which `tests/sandbox_fold.rs` uses as its output oracle.
     #[tool(
         description = "Sandbox governance (admin only). action='set_rule': set an agent-role + path-pattern memory access rule (read/write/deny); action='check': check whether a role can read/write a path; action='set_policy': set a capability's runtime sandbox policy (timeouts, concurrency, env allowlist, fs/cwd roots); action='get_policy': read a capability's runtime policy; action='list_policies': list runtime policies; action='exec_audit': list sandbox execution audit rows."
     )]
@@ -128,65 +139,5 @@ impl MemoryServer {
         Parameters(params): Parameters<TachiSandboxParams>,
     ) -> Result<String, String> {
         handle_tachi_sandbox_facade(self, params).await
-    }
-
-    #[tool(
-        description = "DEPRECATED: use tachi_sandbox(action='set_rule'); removed in 1.10.0. Set a sandbox access rule for an agent role + path pattern. Controls which memories a role can access. Access levels: read, write, deny."
-    )]
-    pub(crate) async fn sandbox_set_rule(
-        &self,
-        Parameters(params): Parameters<SandboxSetRuleParams>,
-    ) -> Result<String, String> {
-        handle_sandbox_set_rule(self, params).await
-    }
-
-    #[tool(
-        description = "DEPRECATED: use tachi_sandbox(action='check'); removed in 1.10.0. Check if an agent role can access a given memory path for a read/write operation. The same global sandbox rules are enforced by role-aware memory/wiki search surfaces when agent_role is supplied."
-    )]
-    pub(crate) async fn sandbox_check(
-        &self,
-        Parameters(params): Parameters<SandboxCheckParams>,
-    ) -> Result<String, String> {
-        handle_sandbox_check(self, params).await
-    }
-
-    #[tool(
-        description = "DEPRECATED: use tachi_sandbox(action='set_policy'); removed in 1.10.0. Set runtime sandbox policy for a capability (timeouts, concurrency, env allowlist, fs/cwd roots)."
-    )]
-    pub(crate) async fn sandbox_set_policy(
-        &self,
-        Parameters(params): Parameters<SandboxSetPolicyParams>,
-    ) -> Result<String, String> {
-        handle_sandbox_set_policy(self, params).await
-    }
-
-    #[tool(
-        description = "DEPRECATED: use tachi_sandbox(action='get_policy'); removed in 1.10.0. Get runtime sandbox policy for a capability."
-    )]
-    pub(crate) async fn sandbox_get_policy(
-        &self,
-        Parameters(params): Parameters<SandboxGetPolicyParams>,
-    ) -> Result<String, String> {
-        handle_sandbox_get_policy(self, params).await
-    }
-
-    #[tool(
-        description = "DEPRECATED: use tachi_sandbox(action='list_policies'); removed in 1.10.0. List runtime sandbox policies."
-    )]
-    pub(crate) async fn sandbox_list_policies(
-        &self,
-        Parameters(params): Parameters<SandboxListPoliciesParams>,
-    ) -> Result<String, String> {
-        handle_sandbox_list_policies(self, params).await
-    }
-
-    #[tool(
-        description = "DEPRECATED: use tachi_sandbox(action='exec_audit'); removed in 1.10.0. List sandbox execution audit rows (policy decisions, startup, runtime outcomes)."
-    )]
-    pub(crate) async fn sandbox_exec_audit(
-        &self,
-        Parameters(params): Parameters<SandboxExecAuditParams>,
-    ) -> Result<String, String> {
-        handle_sandbox_exec_audit(self, params).await
     }
 }

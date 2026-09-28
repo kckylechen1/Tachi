@@ -44,6 +44,9 @@ fn register_payload(native_id: &str, requested_model: &str) -> MirrorEvalRegiste
         requested_profile: Some("explore".to_string()),
         requested_model: Some(requested_model.to_string()),
         requested_agent: Some("claude".to_string()),
+        // v34 fields: this pre-existing wiring fixture stays legacy-shaped.
+        requested_task_type: None,
+        requested_role: None,
     }
 }
 
@@ -73,6 +76,8 @@ async fn observe(server: &crate::MemoryServer, eval_run_id: &str, effective_mode
                 effective_model: effective_model.map(|m| m.to_string()),
                 effective_backend: None,
                 effective_harness: None,
+                effective_role: None,
+                effective_model_revision: None,
             }),
             ..agent_eval_params("observe")
         }))
@@ -179,6 +184,8 @@ async fn mirror_eval_scrubs_secretish_free_text_fields() {
                 effective_model: Some("anthropic/claude-sonnet".to_string()),
                 effective_backend: None,
                 effective_harness: None,
+                effective_role: None,
+                effective_model_revision: None,
             }),
             ..agent_eval_params("observe")
         }))
@@ -445,21 +452,33 @@ async fn complete_projects_only_eligible_eval_run_ids_into_aggregation() {
     let completed: Value = serde_json::from_str(&completed).expect("completion JSON");
     assert!(completed["eval_entry"]["id"].as_str().is_some());
 
-    let aggregate_live = server
-        .tachi_agent_eval(Parameters(TachiAgentEvalParams {
-            action: "aggregate_live".to_string(),
-            fixture_path: None,
-            limit: Some(50),
-            register: None,
-            observe: None,
-            adjudicate: None,
-            get: None,
-            // tachi#1675 PR2: route_projection payload, unused here.
-            projection: None,
-            ..Default::default()
-        }))
-        .await
-        .expect("aggregate_live should succeed");
+    let aggregate_live = {
+        // `aggregate_live` is an operator reporting action the standard
+        // eval-facade gate denies by design; the register/observe/adjudicate
+        // setup above ran under the default profile. Elevate ONLY this
+        // operator read to the observe profile that gate admits and restore
+        // the exact prior profile — the denial itself stays pinned in
+        // tachi-hub.
+        let prior_profile = server.active_tool_profile();
+        server.set_tool_profile(Some(tachi_hub::ToolProfile::observe()));
+        let raw = server
+            .tachi_agent_eval(Parameters(TachiAgentEvalParams {
+                action: "aggregate_live".to_string(),
+                fixture_path: None,
+                limit: Some(50),
+                register: None,
+                observe: None,
+                adjudicate: None,
+                get: None,
+                // tachi#1675 PR2: route_projection payload, unused here.
+                projection: None,
+                ..Default::default()
+            }))
+            .await
+            .expect("aggregate_live should succeed");
+        server.set_tool_profile(prior_profile);
+        raw
+    };
     let aggregate: Value = serde_json::from_str(&aggregate_live).expect("aggregate_live JSON");
     assert!(
         aggregate["subagent_scores"]

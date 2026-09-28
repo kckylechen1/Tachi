@@ -406,7 +406,93 @@ the deleted draft.
 A wiki entry can explain a canonical doc. It cannot replace the doc, approve a
 deviation, close an issue, or establish precedent.
 
-### 7.1 Reference compatibility and closure state
+### 7.1 Operator review CLI: local preview then explicit apply
+
+The review/approval seam required above is implemented as a local operator
+CLI, not a facade action: `tachi wiki review`. Ordinary facades cannot
+approve — `tachi_memory(action="save", kind="wiki")` and generic
+`tachi_memory` saves onto `/wiki/...` paths strip caller-supplied review
+authority and stamp `pending_review`; only this CLI mints an advisory
+approval receipt, and it is never reachable from an MCP tool call.
+
+Contract:
+
+- **Preview (default, read-only)** — `tachi wiki review --id <id>
+  --project <name> --source-manifest <path>`. Resolves the named Wiki
+  store without creating or migrating anything, rereads the entry, and
+  verifies the source manifest. Reports the entry's exact revision and a
+  canonical `review_digest` binding: target library identity
+  (project + resolved store path), id/revision/text/summary/scope/path,
+  the derived effective applicability, the canonical reference list, and
+  the verified source bundle hash.
+- **Apply (explicit)** — adds `--apply --approver <name>
+  --expected-revision <N> --review-digest <hex>`. Revalidates the
+  manifest and snapshot bytes, rereads the row inside the
+  identity-checked store closure, matches both the expected revision and
+  the recomputed digest, and only then writes through the store's
+  verified-write primitive (`update_with_revision_if_expected_state`):
+  revision increments, the recall-cache generation invalidates, and body,
+  summary, references, and unrelated metadata are preserved byte-for-byte.
+  Approval sets lifecycle/status `active`, review `approved`, authority
+  `advisory` (never playbook), with the bound receipt fields nested in
+  `review_receipt` (`approver`, `decision`, `decided_at`, plus optional
+  `review_digest` / `source_bundle_hash` / `expected_revision` / `store`).
+  Compatibility with legacy receipts is field-shape compatibility: the
+  optional fields add no keys to a legacy receipt's serialized form, but
+  no raw-byte transport guarantee is claimed.
+- **Source manifest** — `{"version":1,"sources":[{"ref":...,
+  "snapshot":...,"sha256":...}]}`. Rows must cover the entry's references
+  exactly: nonempty, no missing, no duplicate, no unmatched rows. Every
+  manifest and snapshot open goes through one verified open: the path is
+  stat-checked (regular, non-symlink), opened with `O_NOFOLLOW |
+  O_NONBLOCK` so a symlink or blocking FIFO substituted in the stat->open
+  gap is refused at open, and the OPENED HANDLE is fstat'd to prove it is
+  a regular file with the same (dev, ino) identity that was checked (a
+  regular->regular substitution in that gap is refused). On platforms
+  without a symlink-safe open, review filesystem validation fails CLOSED
+  with a precise error — it never pretends to have validated a file.
+- **Reference shapes** — each entry reference is classified, and
+  unsupported shapes are refused precisely rather than folded into a
+  remote catch-all:
+  - a local absolute path must map to the referenced file itself (the
+    hashed handle's inode identity must equal the referenced file's);
+  - a repo-relative `docs/...` / `skill/...` reference requires
+    `--source-root <path>` naming the owning repository root; the
+    referenced file under that root must be hashed itself (`..`
+    components, and symlinks resolving outside the root, are refused);
+  - an `http(s)://` URL or GitHub shorthand may map to an explicit local
+    archived snapshot — an **operator-attested mapping** whose bytes are
+    verified against the manifest hash, NOT live upstream verification;
+  - anything else (including `file://` URIs) is refused as unsupported.
+  No network fetch happens anywhere in this flow. The
+  `source_bundle_hash` is derived from the canonical ref + verified
+  snapshot digest records, never taken from caller input.
+- **Approval invalidation** — an ordinary dedicated Wiki write
+  (`tachi_wiki_write` and its internal callers) that updates an
+  already-approved row removes the inherited `review_receipt` and
+  `source_bundle_hash` in the same projection transaction and returns the
+  row to `pending_review` / `advisory`: an ordinary write is never an
+  approval. Public generic saves already strip both. Wiki ingest and the
+  REM evolver do not use the projection seam (both build fresh
+  replacement rows and supersede their predecessors), so trusted ingest
+  semantics are unchanged.
+- **Effective-applicability gate** — apply refuses before any mutation
+  when the approved row would not derive `active` (for example shared
+  scope without bounded applicability and typed origins), so an approved
+  row genuinely reaches default read/search instead of silently demoting
+  back to `pending_review`.
+- **Read locator** — every Wiki save response (and the compact
+  `tachi_memory(action="save", kind="wiki")` receipt, which
+  preserves it) carries a deterministic `read` locator:
+  `{"action":"get","id":...,"project":...}` naming the resolved store the
+  row actually landed in, so a caller can read the entry back through the
+  real facade without reverse-engineering write routing.
+
+Honesty boundary: validation observes snapshot bytes at validation time.
+The manifest, the snapshots, and the SQLite write are separate objects;
+no cross-filesystem atomicity is claimed between them.
+
+### 7.2 Reference compatibility and closure state
 
 The existing wiki metadata contract keeps `source_refs: Vec<String>`. Typed refs
 land in a separate versioned `evidence_refs_v1` field. Writers dual-write the

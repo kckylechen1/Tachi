@@ -296,7 +296,7 @@ pub(crate) fn named_project_from_db_path_in_home(
 /// at bootstrap) FIRST, so a repo whose memories live in an explicitly-named
 /// library (e.g. `trading`) is the default target without passing `project=` on
 /// every call. Falls back to the git-derived Plan C folder name
-/// (`~/.tachi/projects/<name>/memory.db`) when no pin is set — which is what a
+/// (`~/.tachi/projects/<name>/tachi-memory.db`) when no pin is set — which is what a
 /// repo without an explicit library relies on.
 pub(crate) fn resolve_workspace_named_project() -> Option<String> {
     if let Some(pinned) = explicit_workspace_project() {

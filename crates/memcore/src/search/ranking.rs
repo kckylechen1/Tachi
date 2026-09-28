@@ -5,14 +5,14 @@ use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 use crate::{
-    db::{get_access_times, get_superseded_ids, get_use_access_times},
+    db::{fetch_embeddings_by_ids, get_access_times, get_superseded_ids, get_use_access_times},
     error::MemoryError,
     recall_impressions::{
         query_fingerprint, RecallImpressionPayload, RecallImpressionRowDraft, RecallReplayPolicy,
     },
     scorer::{
         apply_pre_boost_adjustment, cosine_similarity, is_id_like_exact_query, DecayPolicyContext,
-        PreBoostAdjustment,
+        PreBoostAdjustment, SymbolicQuery,
     },
     types::{HybridScore, MemoryEntry, SearchResult},
 };
@@ -37,6 +37,72 @@ pub(super) struct CandidateRanking<'a> {
     pub(super) exact_id: Option<&'a str>,
     pub(super) include_superseded: bool,
     pub(super) as_of_utc: Option<&'a str>,
+    /// Query-constant symbolic inputs, derived once per search.
+    pub(super) symbolic: &'a SymbolicEvidenceQuery,
+    /// What the typo-fallback activation gate already derived for the rows it
+    /// fetched (the normal candidate pool), reused instead of recomputed.
+    /// `None` when the gate did not run.
+    pub(super) normal_pool: Option<NormalPoolEvidence>,
+    /// `entries_map` rows were fetched without their embeddings: load them
+    /// only for the MMR frontier and the returned results (audit B4).
+    pub(super) deferred_vectors: bool,
+}
+
+/// Query-constant inputs to symbolic scoring and the retrieval-evidence
+/// floor, derived once per search instead of re-tokenizing and re-expanding
+/// the query in every helper (audit B2).
+pub(super) struct SymbolicEvidenceQuery {
+    /// `symbolic_query_with_expansion(query)`, the text the symbolic SQL leg
+    /// binds as its relevance query.
+    expanded_text: String,
+    /// The same expanded query, tokenized for the shared scorer.
+    expanded: SymbolicQuery,
+    requires_pair_evidence: bool,
+    minimum_coverage: f64,
+}
+
+impl SymbolicEvidenceQuery {
+    pub(super) fn new(query: &str, recall_config: &crate::RecallConfig) -> Self {
+        let expanded_text = symbolic_query_with_expansion(query);
+        let expanded = SymbolicQuery::new(&expanded_text);
+        let requires_pair_evidence = query_requires_pair_evidence(query, recall_config);
+        let required_symbolic_matches = if requires_pair_evidence { 2.0 } else { 1.0 };
+        // Symbolic scores use the expansion-aware query, so recover their
+        // actual matched-token count with that same (distinct) denominator.
+        // The raw count in `query_requires_pair_evidence` is intentionally
+        // retained only for deciding whether this was a rich query.
+        let minimum_coverage =
+            required_symbolic_matches / expanded.distinct_token_count().max(1) as f64;
+        Self {
+            expanded_text,
+            expanded,
+            requires_pair_evidence,
+            minimum_coverage,
+        }
+    }
+
+    pub(super) fn expanded_text(&self) -> &str {
+        &self.expanded_text
+    }
+
+    fn score(&self, entry: &MemoryEntry) -> f64 {
+        self.expanded.score_entry(entry)
+    }
+
+    fn scores(&self, entries: &HashMap<String, MemoryEntry>) -> HashMap<String, f64> {
+        entries
+            .iter()
+            .map(|(id, entry)| (id.clone(), self.score(entry)))
+            .collect()
+    }
+}
+
+/// Symbolic scores and supersession state the typo-fallback activation gate
+/// computed for every row it fetched. The rank phase reuses them for those
+/// rows (the keys of `symbolic_scores`) and computes only the rest.
+pub(super) struct NormalPoolEvidence {
+    pub(super) symbolic_scores: HashMap<String, f64>,
+    pub(super) superseded_ids: HashSet<String>,
 }
 
 pub(super) struct NormalCandidateEligibility<'a> {
@@ -77,10 +143,24 @@ pub(super) fn rank_candidate_entries(
         exact_id,
         include_superseded,
         as_of_utc,
+        symbolic,
+        normal_pool,
+        deferred_vectors,
     } = ranking;
-    let normal_symbolic_scores = symbolic_scores(query, &entries_map);
-    let requires_pair_evidence = query_requires_pair_evidence(query, recall_config(opts));
-    let minimum_symbolic_coverage = minimum_symbolic_query_coverage(query, recall_config(opts));
+    // Rows the typo-activation gate already scored and supersession-checked
+    // keep its results; only the rest (typo-only rows, or every row when the
+    // gate did not run) are scored and looked up here (audit B2/B4).
+    let (mut normal_symbolic_scores, reused_superseded_ids) = match normal_pool {
+        Some(pool) => (pool.symbolic_scores, pool.superseded_ids),
+        None => (HashMap::with_capacity(entries_map.len()), HashSet::new()),
+    };
+    let mut lookup_ids_vec: Vec<String> = Vec::with_capacity(entries_map.len());
+    for (id, entry) in &entries_map {
+        if !normal_symbolic_scores.contains_key(id) {
+            normal_symbolic_scores.insert(id.clone(), symbolic.score(entry));
+            lookup_ids_vec.push(id.clone());
+        }
+    }
     let retrieval_evidence = RetrievalEvidence {
         vec_scores,
         fts_scores,
@@ -88,16 +168,17 @@ pub(super) fn rank_candidate_entries(
         typo_evidence: typo_candidate_ids,
         exact_id,
         recall_config: recall_config(opts),
-        minimum_symbolic_coverage,
-        requires_pair_evidence,
+        minimum_symbolic_coverage: symbolic.minimum_coverage,
+        requires_pair_evidence: symbolic.requires_pair_evidence,
     };
-    let fetched_ids_vec: Vec<String> = entries_map.keys().cloned().collect();
     // Per #1097 D3: `get_superseded_ids` (ranking.rs:47) is one of two DB I/O
     // hot spots inside `rank_candidate_entries`. Time it on its own so a
-    // "rank is slow" report can distinguish DB reads from scoring math.
+    // "rank is slow" report can distinguish DB reads from scoring math. The
+    // receipt counts the ids actually looked up here.
     let superseded_start = sample.then(Instant::now);
-    let fetched_ids_count = fetched_ids_vec.len();
-    let superseded_ids = get_superseded_ids(conn, &fetched_ids_vec)?;
+    let superseded_lookup_count = lookup_ids_vec.len();
+    let mut superseded_ids = get_superseded_ids(conn, &lookup_ids_vec)?;
+    superseded_ids.extend(reused_superseded_ids);
     let superseded_elapsed = superseded_start.map(|s| s.elapsed());
 
     let entries_ref: HashMap<String, &MemoryEntry> = entries_map
@@ -132,7 +213,7 @@ pub(super) fn rank_candidate_entries(
             total_elapsed: s.elapsed(),
             get_superseded_ids: ChannelPhaseReceipt {
                 elapsed: superseded_elapsed.unwrap_or_default(),
-                candidate_count: fetched_ids_count,
+                candidate_count: superseded_lookup_count,
             },
             get_access_times: None,
             mmr_enabled: opts.mmr_threshold.is_some(),
@@ -214,8 +295,15 @@ pub(super) fn rank_candidate_entries(
     // `opts.mmr_threshold.is_some()` so a benchmark can compare the same
     // query both ways without a per-MMR timer.
     let mmr_enabled = opts.mmr_threshold.is_some();
+    let mut deferred = deferred_vectors.then(|| DeferredVectors::new(conn));
     let ranked_ids: Vec<String> = if let Some(threshold) = opts.mmr_threshold {
-        apply_mmr_diversity(&ranked, &entries_map, threshold, opts.top_k)
+        apply_mmr_diversity(
+            &ranked,
+            &entries_map,
+            threshold,
+            opts.top_k,
+            deferred.as_mut(),
+        )?
     } else {
         ranked.iter().map(|(id, _, _)| id.to_string()).collect()
     };
@@ -241,11 +329,20 @@ pub(super) fn rank_candidate_entries(
     drop(entries_ref);
 
     let mut entries_map = entries_map;
+    // Returned rows carry their embeddings exactly as a full fetch would have
+    // attached them (tachi-server reads `entry.vector` off results).
+    if let Some(deferred) = deferred.as_mut() {
+        let returned_ids: Vec<&String> = ranked_ids.iter().take(opts.top_k).collect();
+        deferred.load(returned_ids)?;
+    }
     let results: Vec<SearchResult> = ranked_ids
         .iter()
         .take(opts.top_k)
         .filter_map(|id| {
-            let entry = entries_map.remove(id)?;
+            let mut entry = entries_map.remove(id)?;
+            if let Some(deferred) = deferred.as_mut() {
+                entry.vector = deferred.take(id);
+            }
             let score = scores.get(id)?.clone();
             Some(SearchResult {
                 entry,
@@ -260,7 +357,7 @@ pub(super) fn rank_candidate_entries(
         total_elapsed: s.elapsed(),
         get_superseded_ids: ChannelPhaseReceipt {
             elapsed: superseded_elapsed.unwrap_or_default(),
-            candidate_count: fetched_ids_count,
+            candidate_count: superseded_lookup_count,
         },
         get_access_times: Some(ChannelPhaseReceipt {
             elapsed: access_elapsed.unwrap_or_default(),
@@ -465,20 +562,6 @@ fn merge_pre_boost_scores(
     scores
 }
 
-fn symbolic_scores(
-    query: &str,
-    entries_map: &HashMap<String, MemoryEntry>,
-) -> HashMap<String, f64> {
-    let symbolic_query = symbolic_query_with_expansion(query);
-    entries_map
-        .iter()
-        .map(|(id, entry)| {
-            let score = crate::scorer::symbolic_score_entry(&symbolic_query, entry);
-            (id.clone(), score)
-        })
-        .collect()
-}
-
 /// A weak vector score plus sparse lexical overlap is not recall evidence
 /// strong enough to display or reinforce. Filter it before access-history
 /// reads and every subsequent ranking boost, while preserving exact IDs,
@@ -571,18 +654,27 @@ fn passes_final_candidate_eligibility(
 /// rows before deciding whether typo fallback should activate. This deliberately
 /// excludes typo evidence: activation answers whether the normal pipeline can
 /// already yield a survivor, not whether fallback could rescue one.
+///
+/// Also returns the symbolic scores and supersession state it derived for
+/// every row in `candidates.entries`, so the rank phase can reuse them.
 pub(super) fn normal_candidates_have_final_retrieval_evidence(
     conn: &Connection,
-    query: &str,
+    symbolic: &SymbolicEvidenceQuery,
     opts: &SearchOptions,
     candidates: NormalCandidateEligibility<'_>,
     include_superseded: bool,
     as_of_utc: Option<&str>,
-) -> Result<bool, MemoryError> {
+) -> Result<(bool, NormalPoolEvidence), MemoryError> {
     if candidates.entries.is_empty() {
-        return Ok(false);
+        return Ok((
+            false,
+            NormalPoolEvidence {
+                symbolic_scores: HashMap::new(),
+                superseded_ids: HashSet::new(),
+            },
+        ));
     }
-    let symbolic_scores = symbolic_scores(query, candidates.entries);
+    let symbolic_scores = symbolic.scores(candidates.entries);
     let empty_typo_evidence = HashSet::new();
     let retrieval_evidence = RetrievalEvidence {
         vec_scores: candidates.vec_scores,
@@ -591,12 +683,12 @@ pub(super) fn normal_candidates_have_final_retrieval_evidence(
         typo_evidence: &empty_typo_evidence,
         exact_id: candidates.exact_id,
         recall_config: recall_config(opts),
-        minimum_symbolic_coverage: minimum_symbolic_query_coverage(query, recall_config(opts)),
-        requires_pair_evidence: query_requires_pair_evidence(query, recall_config(opts)),
+        minimum_symbolic_coverage: symbolic.minimum_coverage,
+        requires_pair_evidence: symbolic.requires_pair_evidence,
     };
     let candidate_ids = candidates.entries.keys().cloned().collect::<Vec<_>>();
     let superseded_ids = get_superseded_ids(conn, &candidate_ids)?;
-    Ok(candidates.entries.iter().any(|(id, entry)| {
+    let has_evidence = candidates.entries.iter().any(|(id, entry)| {
         passes_final_candidate_eligibility(
             id,
             entry,
@@ -606,7 +698,14 @@ pub(super) fn normal_candidates_have_final_retrieval_evidence(
             &superseded_ids,
             &retrieval_evidence,
         )
-    }))
+    });
+    Ok((
+        has_evidence,
+        NormalPoolEvidence {
+            symbolic_scores,
+            superseded_ids,
+        },
+    ))
 }
 
 fn query_requires_pair_evidence(query: &str, recall_config: &crate::RecallConfig) -> bool {
@@ -620,22 +719,6 @@ fn query_requires_pair_evidence(query: &str, recall_config: &crate::RecallConfig
 
 fn is_high_importance_decision(entry: &MemoryEntry) -> bool {
     entry.category.eq_ignore_ascii_case("decision") && entry.importance >= DECISION_IMPORTANCE_FLOOR
-}
-
-fn minimum_symbolic_query_coverage(query: &str, recall_config: &crate::RecallConfig) -> f64 {
-    let required_symbolic_matches = if query_requires_pair_evidence(query, recall_config) {
-        2.0
-    } else {
-        1.0
-    };
-    // `symbolic_scores` uses the expansion-aware query, so recover its actual
-    // matched-token count with that same denominator. The raw count above is
-    // intentionally retained only for deciding whether this was a rich query.
-    let expanded_query_term_count = crate::scorer::tokenize(&symbolic_query_with_expansion(query))
-        .into_iter()
-        .collect::<std::collections::HashSet<_>>()
-        .len();
-    required_symbolic_matches / expanded_query_term_count.max(1) as f64
 }
 
 fn apply_precision_boosts(
@@ -754,10 +837,7 @@ pub(super) fn has_topical_evidence(score: &HybridScore, expanded_query_tokens: u
 /// term (e.g. "alpha alpha beta": non-dedup 3 vs distinct 2). Single source of
 /// truth: the probe reconstructs the gate through this same helper.
 pub(super) fn distinct_expanded_query_tokens(query: &str) -> usize {
-    crate::scorer::tokenize(&symbolic_query_with_expansion(query))
-        .into_iter()
-        .collect::<std::collections::HashSet<_>>()
-        .len()
+    SymbolicQuery::new(&symbolic_query_with_expansion(query)).distinct_token_count()
 }
 
 /// Same-store precision helper for ops-audit / #708 Phase D follow-ons:
@@ -828,7 +908,7 @@ fn apply_lexical_overlap_boost(
     const DISCRIMINATIVE_TOKEN_DOCUMENT_FREQUENCY_DENOMINATOR: usize = 4;
 
     let q_tokens = soft_token_set(query);
-    let q_ngrams = char_ngrams(query, 4);
+    let q_ngrams = char_ngrams::<4>(query);
     if q_tokens.len() < 3 && q_ngrams.len() < 8 {
         return;
     }
@@ -836,22 +916,20 @@ fn apply_lexical_overlap_boost(
     if entries_ref.len() < DISCRIMINATIVE_TOKEN_DOCUMENT_FREQUENCY_DENOMINATOR {
         return;
     }
+    // One tokenization per candidate: the document-frequency pass keeps each
+    // entry's soft-token set for the scoring pass instead of re-tokenizing
+    // the same text (audit B3).
     let mut query_token_document_frequencies = HashMap::new();
-    for entry in entries_ref.values() {
-        let mut text = String::new();
-        text.push_str(&entry.summary);
-        text.push(' ');
-        text.push_str(&entry.text);
-        for keyword in &entry.keywords {
-            text.push(' ');
-            text.push_str(keyword);
-        }
-        let entry_tokens = soft_token_set(&text);
+    let mut entry_token_sets: HashMap<&str, HashSet<String>> =
+        HashMap::with_capacity(entries_ref.len());
+    for (id, entry) in entries_ref {
+        let entry_tokens = soft_token_set(&lexical_overlap_bag_text(entry));
         for token in q_tokens.intersection(&entry_tokens) {
             *query_token_document_frequencies
                 .entry(token.clone())
                 .or_insert(0_usize) += 1;
         }
+        entry_token_sets.insert(id.as_str(), entry_tokens);
     }
 
     for (id, entry) in entries_ref {
@@ -863,20 +941,12 @@ fn apply_lexical_overlap_boost(
         if entry.is_guide() && !guide_scoped {
             continue;
         }
-        let mut text = String::new();
-        text.push_str(&entry.summary);
-        text.push(' ');
-        text.push_str(&entry.text);
-        for kw in &entry.keywords {
-            text.push(' ');
-            text.push_str(kw);
-        }
-        let e_tokens = soft_token_set(&text);
-        let e_ngrams = char_ngrams(&text, 4);
-        if e_tokens.is_empty() && e_ngrams.is_empty() {
+        let Some(e_tokens) = entry_token_sets.get(id.as_str()) else {
             continue;
-        }
-        let has_discriminative_token_overlap = q_tokens.intersection(&e_tokens).any(|token| {
+        };
+        // An empty token set has no discriminative overlap, so the check
+        // below also covers the former "no tokens and no n-grams" skip.
+        let has_discriminative_token_overlap = q_tokens.intersection(e_tokens).any(|token| {
             query_token_document_frequencies
                 .get(token)
                 .is_some_and(|frequency| {
@@ -887,18 +957,23 @@ fn apply_lexical_overlap_boost(
         if !has_discriminative_token_overlap {
             continue;
         }
+        // Char 4-grams only for candidates that passed the discriminative
+        // gate; most of the pool never needs them (audit B3).
+        let e_ngrams = char_ngrams::<4>(&lexical_overlap_bag_text(entry));
 
         let token_cov = if q_tokens.is_empty() {
             0.0
         } else {
-            q_tokens.intersection(&e_tokens).count() as f64 / q_tokens.len() as f64
+            q_tokens.intersection(e_tokens).count() as f64 / q_tokens.len() as f64
         };
         let jaccard = if q_ngrams.is_empty() || e_ngrams.is_empty() {
             0.0
         } else {
-            let inter = q_ngrams.intersection(&e_ngrams).count() as f64;
-            let union = q_ngrams.union(&e_ngrams).count() as f64;
-            inter / union.max(1.0)
+            let inter = q_ngrams.intersection(&e_ngrams).count();
+            // |A ∪ B| = |A| + |B| - |A ∩ B|: the same integer the set union
+            // would count, without walking both sets again.
+            let union = q_ngrams.len() + e_ngrams.len() - inter;
+            inter as f64 / (union as f64).max(1.0)
         };
 
         if token_cov < TOKEN_COVERAGE_FLOOR && jaccard < NGRAM_JACCARD_FLOOR {
@@ -1041,19 +1116,40 @@ fn soft_stem_token(token: &str) -> String {
     s
 }
 
-fn char_ngrams(text: &str, n: usize) -> std::collections::HashSet<String> {
+/// The text the lexical-overlap boost tokenizes for one candidate.
+fn lexical_overlap_bag_text(entry: &MemoryEntry) -> String {
+    let mut text = String::new();
+    text.push_str(&entry.summary);
+    text.push(' ');
+    text.push_str(&entry.text);
+    for keyword in &entry.keywords {
+        text.push(' ');
+        text.push_str(keyword);
+    }
+    text
+}
+
+/// Distinct char `N`-grams of the lowercased alphanumeric/CJK characters.
+///
+/// Each gram is a fixed-size `[char; N]` key rather than a heap `String`, so
+/// the set costs one allocation (sized to the window count) instead of one
+/// per window (audit B3). A window of `N` chars maps one-to-one onto the
+/// `String` it used to be collected into, so set sizes, intersections and
+/// the Jaccard ratio are unchanged.
+fn char_ngrams<const N: usize>(text: &str) -> HashSet<[char; N]> {
     let chars: Vec<char> = text
         .to_lowercase()
         .chars()
         .filter(|c| c.is_alphanumeric() || crate::noise::is_cjk(*c))
         .collect();
-    if chars.len() < n {
-        return std::collections::HashSet::new();
+    if chars.len() < N {
+        return HashSet::new();
     }
-    chars
-        .windows(n)
-        .map(|w| w.iter().collect::<String>())
-        .collect()
+    let mut grams = HashSet::with_capacity(chars.len() + 1 - N);
+    for window in chars.windows(N) {
+        grams.insert(window.try_into().expect("windows(N) yields N chars"));
+    }
+    grams
 }
 
 /// tachi#1446 lever 5 — the single decision of *which provenance* the ACT-R
@@ -1158,14 +1254,20 @@ fn apply_entity_recency_boosts(
 ///
 /// Candidates with cosine similarity > `threshold` to any already-selected
 /// entry are deferred to the end rather than dropped entirely.
+///
+/// With `vectors`, `entries` were fetched without embeddings: they are loaded
+/// in growing batches along the ranked order, just ahead of the position the
+/// greedy loop reaches, so only the frontier the loop actually inspects is
+/// decoded. It sees exactly the vectors a full fetch would have attached.
 fn apply_mmr_diversity(
     ranked: &[(&String, f64, i64)],
     entries: &HashMap<String, MemoryEntry>,
     threshold: f64,
     needed: usize,
-) -> Vec<String> {
+    mut vectors: Option<&mut DeferredVectors<'_>>,
+) -> Result<Vec<String>, MemoryError> {
     if ranked.len() <= 1 {
-        return ranked.iter().map(|(id, _, _)| id.to_string()).collect();
+        return Ok(ranked.iter().map(|(id, _, _)| id.to_string()).collect());
     }
 
     let mut selected: Vec<String> = Vec::new();
@@ -1181,12 +1283,20 @@ fn apply_mmr_diversity(
             break;
         }
 
-        let candidate = entries.get(*id);
-        let c_vec = candidate.and_then(|e| e.vector.as_ref());
+        if let Some(vectors) = vectors.as_deref_mut() {
+            vectors.load_ranked_prefix(ranked, idx + 1)?;
+        }
+        let vector_of = |id: &str| -> Option<&Vec<f32>> {
+            let entry = entries.get(id)?;
+            match vectors.as_deref() {
+                Some(vectors) => vectors.get(id),
+                None => entry.vector.as_ref(),
+            }
+        };
+        let c_vec = vector_of(id.as_str());
 
         let too_similar = selected.iter().any(|sel_id| {
-            let sel_entry = entries.get(sel_id);
-            let s_vec = sel_entry.and_then(|e| e.vector.as_ref());
+            let s_vec = vector_of(sel_id.as_str());
 
             match (s_vec, c_vec) {
                 (Some(sv), Some(cv)) if !sv.is_empty() && !cv.is_empty() => {
@@ -1204,7 +1314,78 @@ fn apply_mmr_diversity(
     }
 
     selected.extend(deferred);
-    selected
+    Ok(selected)
+}
+
+/// Smallest batch of embeddings the deferred MMR hydration loads at once.
+const DEFERRED_VECTOR_MIN_BATCH: usize = 16;
+
+/// Embeddings for rows that were fetched without them, loaded on demand
+/// (audit B4). Every id asked for is looked up at most once.
+struct DeferredVectors<'c> {
+    conn: &'c Connection,
+    /// Loaded embeddings; ids whose row has none are absent.
+    loaded: HashMap<String, Vec<f32>>,
+    /// Every id already looked up, with or without an embedding.
+    requested: HashSet<String>,
+    /// `ranked[..frontier]` has been requested.
+    frontier: usize,
+}
+
+impl<'c> DeferredVectors<'c> {
+    fn new(conn: &'c Connection) -> Self {
+        Self {
+            conn,
+            loaded: HashMap::new(),
+            requested: HashSet::new(),
+            frontier: 0,
+        }
+    }
+
+    fn get(&self, id: &str) -> Option<&Vec<f32>> {
+        self.loaded.get(id)
+    }
+
+    fn take(&mut self, id: &str) -> Option<Vec<f32>> {
+        self.loaded.remove(id)
+    }
+
+    /// Makes sure `ranked[..len]` is loaded, fetching ahead in batches that
+    /// double in size so a long frontier costs O(log n) queries.
+    fn load_ranked_prefix(
+        &mut self,
+        ranked: &[(&String, f64, i64)],
+        len: usize,
+    ) -> Result<(), MemoryError> {
+        if len <= self.frontier {
+            return Ok(());
+        }
+        let end = len
+            .max(self.frontier.saturating_mul(2))
+            .max(DEFERRED_VECTOR_MIN_BATCH)
+            .min(ranked.len());
+        let batch: Vec<&String> = ranked[self.frontier..end]
+            .iter()
+            .map(|(id, _, _)| *id)
+            .collect();
+        self.frontier = end;
+        self.load(batch)
+    }
+
+    /// Loads the embeddings of `ids` that were not requested yet.
+    fn load<'a>(&mut self, ids: impl IntoIterator<Item = &'a String>) -> Result<(), MemoryError> {
+        let missing: Vec<String> = ids
+            .into_iter()
+            .filter(|id| self.requested.insert((*id).clone()))
+            .cloned()
+            .collect();
+        if missing.is_empty() {
+            return Ok(());
+        }
+        self.loaded
+            .extend(fetch_embeddings_by_ids(self.conn, &missing)?);
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1327,11 +1508,12 @@ pub(super) mod attribution {
             exact_id,
             include_superseded,
             as_of_utc,
+            symbolic,
+            normal_pool: _,
+            deferred_vectors: _,
         } = ranking;
 
-        let normal_symbolic_scores = symbolic_scores(query, &entries_map);
-        let requires_pair_evidence = query_requires_pair_evidence(query, recall_config(opts));
-        let minimum_symbolic_coverage = minimum_symbolic_query_coverage(query, recall_config(opts));
+        let normal_symbolic_scores = symbolic.scores(&entries_map);
         let retrieval_evidence = RetrievalEvidence {
             vec_scores,
             fts_scores,
@@ -1339,8 +1521,8 @@ pub(super) mod attribution {
             typo_evidence: typo_candidate_ids,
             exact_id,
             recall_config: recall_config(opts),
-            minimum_symbolic_coverage,
-            requires_pair_evidence,
+            minimum_symbolic_coverage: symbolic.minimum_coverage,
+            requires_pair_evidence: symbolic.requires_pair_evidence,
         };
         let fetched_ids_vec: Vec<String> = entries_map.keys().cloned().collect();
         let superseded_ids = get_superseded_ids(conn, &fetched_ids_vec)?;

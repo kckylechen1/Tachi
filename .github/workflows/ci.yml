@@ -291,6 +291,7 @@ jobs:
            fi
           python3 .github/scripts/runner_scan_diagnostics_test.py
           python3 -m unittest discover -s .github/scripts -p "test_ci_acceptance.py" -v
+          python3 -m unittest discover -s .github/scripts -p "test_bind_audited_tool.py" -v
 
       - name: Runner workspace cleanup
         # #1865: no checkout residue survives a failed or cancelled job.
@@ -346,6 +347,11 @@ jobs:
         if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' }}
         run: python3 -m unittest scripts.test_nextest_census scripts.test_nextest_known_reds scripts.test_nextest_slow_diff
 
+      - name: Test release script contracts
+        id: release_script_contracts
+        if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' }}
+        run: python3 -m unittest scripts.test_check_release_versions scripts.test_update_homebrew_formula scripts.test_dev_install
+
       - name: Test Rust setup source contracts
         id: setup_contracts
         if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' }}
@@ -361,27 +367,79 @@ jobs:
         if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' }}
         run: cargo fmt --all --check
 
+      - name: Mark cargo-audit install
+        id: audit_mark
+        # #1998: the bind step below only accepts a cargo-audit written after
+        # this marker, so a same-version leftover from an earlier job is never
+        # mistaken for this run's checksum-verified install.
+        if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' }}
+        run: bash .github/scripts/bind_audited_tool.sh --mark cargo-audit
+
       - name: Install cargo-audit
         id: audit_install
         if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' }}
-        run: cargo install cargo-audit --version 0.22.2 --locked --quiet
+        # Prebuilt rustsec release binary, sha256-verified against the pinned
+        # install-action manifest. A source build of cargo-audit took 19 min and
+        # blew the job budget (run 35823151400); `fallback: none` makes an
+        # unsupported platform/version fail loudly instead of silently compiling.
+        uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172 # v2.87.20
+        with:
+          tool: cargo-audit@0.22.2
+          checksum: true
+          fallback: none
+
+      - name: Bind audited cargo-audit
+        id: audit_bind
+        # #1998: `cargo audit` lets Cargo pick the executable ($CARGO_HOME/bin,
+        # then PATH), and this host keeps the owner's own
+        # ~/.cargo/bin/cargo-audit at the same version, so only the path can
+        # tell them apart. Bind the file this run's checksum-verified install
+        # wrote, assert its version (keep in sync with `tool:` above; the
+        # supply-chain policy rejects a mismatch) and export its absolute path.
+        if: ${{ !cancelled() && steps.audit_install.outcome == 'success' }}
+        run: bash .github/scripts/bind_audited_tool.sh AUDITED_CARGO_AUDIT cargo-audit audit 0.22.2
 
       - name: Run cargo audit
         id: audit
-        if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' && steps.audit_install.outcome == 'success' }}
-        run: cargo audit --deny warnings
+        if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' && steps.audit_install.outcome == 'success' && steps.audit_bind.outcome == 'success' }}
+        run: |
+          "${AUDITED_CARGO_AUDIT:?}" audit --deny warnings
+
+      - name: Mark cargo-nextest install
+        id: nextest_mark
+        # #1998: see "Mark cargo-audit install".
+        if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' }}
+        run: bash .github/scripts/bind_audited_tool.sh --mark cargo-nextest
 
       - name: Install cargo-nextest
         id: nextest_install
         if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' }}
         # get.nextest.rs is unreachable from this runner's network (DNS blocked);
         # taiki-e/install-action pulls a prebuilt binary from GitHub Releases.
+        # 0.9.140 is the pinned manifest's `latest`, i.e. what this step already
+        # installed by default; `fallback: none` forbids a source build.
         uses: taiki-e/install-action@c295c25a8d3df7288fa86db860a4f8062bf76ad8 # releases/nextest snapshot 2026-07-25
+        with:
+          tool: nextest@0.9.140
+          checksum: true
+          fallback: none
+
+      - name: Bind audited cargo-nextest
+        id: nextest_bind
+        # #1998: `cargo nextest` lets Cargo pick the executable
+        # ($CARGO_HOME/bin, then PATH), and this host keeps the owner's own
+        # ~/.cargo/bin/cargo-nextest (0.9.138). Bind the file this run's
+        # checksum-verified install wrote (after the mark step), assert its
+        # version (keep in sync with `tool:` above; the supply-chain policy
+        # rejects a mismatch) and export its absolute path; the tests run it.
+        if: ${{ !cancelled() && steps.nextest_install.outcome == 'success' }}
+        run: bash .github/scripts/bind_audited_tool.sh AUDITED_NEXTEST cargo-nextest nextest 0.9.140
 
       - name: Run workspace tests
         id: workspace_tests
-        if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' && steps.nextest_install.outcome == 'success' }}
-        run: cargo nextest run --workspace --locked --profile ci
+        if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' && steps.nextest_install.outcome == 'success' && steps.nextest_bind.outcome == 'success' }}
+        run: |
+          "${AUDITED_NEXTEST:?}" nextest run --workspace --locked --profile ci
 
       - name: Archive nextest JUnit timing report
         # (Refs #1095) The ci profile (.config/nextest.toml) writes
@@ -427,6 +485,15 @@ jobs:
 
   physical-db-identity-windows:
     name: Physical DB identity fallback (Windows, ${{ matrix.crate }})
+    # Platform applicability -- owner adjudication 2026-09-23 (current
+    # delivery only, after confirming no current Windows usage): this matrix
+    # stays visible and unconditional. All three crate legs keep executing
+    # on windows-latest and the aggregate still collects their raw status,
+    # but the job is classified OBSERVATIONAL in
+    # .github/acceptance-plan.json, so a red leg does not block this
+    # delivery's CI acceptance -- the failure is reported as excluded, never
+    # hidden, faked, or skipped. Not retroactive; Windows releases stay
+    # prohibited until #1963 is fixed.
     runs-on: windows-latest
     timeout-minutes: 15
     strategy:
@@ -439,6 +506,32 @@ jobs:
 
       - name: Setup Rust
         uses: ./.github/actions/setup-rust
+
+      # #1963 probe: libsimple 0.9's build.rs shells out to `patch`, `cmake`
+      # (Unix Makefiles) and `make`, honouring the PATCH / CMAKE / MAKE env
+      # vars. On windows-latest the first `patch` on PATH is Strawberry Perl's
+      # GNU patch 2.5.9, which asserts on libsimple's patches. Point PATCH at
+      # Git for Windows' patch and print the toolchain the build script sees.
+      - name: Point libsimple build.rs at Git's GNU patch (#1963)
+        shell: pwsh
+        run: |
+          $gitPatch = 'C:\Program Files\Git\usr\bin\patch.exe'
+          if (Test-Path $gitPatch) {
+            "PATCH=$gitPatch" >> $env:GITHUB_ENV
+            # Diagnostic only: a failing --version must not become the step's exit code.
+            & $gitPatch --version 2>&1 | Select-Object -First 1
+            $global:LASTEXITCODE = 0
+          } else {
+            Write-Output "::warning::$gitPatch not found; libsimple falls back to the first patch on PATH"
+          }
+          foreach ($tool in 'patch', 'cmake', 'make', 'gmake', 'mingw32-make') {
+            $found = Get-Command $tool -All -ErrorAction SilentlyContinue | ForEach-Object Source
+            Write-Output ("{0}: {1}" -f $tool, (($found -join '; '), '<none>' | Where-Object { $_ } | Select-Object -First 1))
+          }
+          if (-not (Get-Command make -ErrorAction SilentlyContinue)) {
+            $gnuMake = Get-Command gmake, mingw32-make -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($gnuMake) { "MAKE=$($gnuMake.Source)" >> $env:GITHUB_ENV; Write-Output "MAKE=$($gnuMake.Source)" }
+          }
 
       - name: Exercise canonical-only inventory fallback
         if: matrix.crate == 'tachi-server'
@@ -581,11 +674,11 @@ jobs:
         # This CI-side gate is #1578's structural fix: it is a plain, always-
         # defined GitHub Actions job so `gitleaks` is a real CI gate the
         # AGENTS.md/dispatch-lifecycle report contract can point to, not just
-        # prose. Repository Actions is disabled repo-wide (#1562, owner
-        # ruling: stay manual) so this job does not currently execute; the
-        # live, executing secret-scan enforcement remains the local
-        # `.git/hooks/pre-push` gitleaks hook on the machines that have it
-        # installed. Personal-account repos need no GITLEAKS_LICENSE (only
+        # prose. It executes on the #1865 self-hosted trusted acceptance lane
+        # for owner-originated events only (see the job's `if:` guard); fork
+        # and non-owner events skip it. The local `.git/hooks/pre-push`
+        # gitleaks hook remains an earlier, additional gate on the machines
+        # that have it installed. Personal-account repos need no GITLEAKS_LICENSE (only
         # GitHub Organization accounts do); this repo is under the
         # kckylechen1 personal account, not an org.
         # Licensing note (2026-08-05): gitleaks-action v2+ is NOT MIT — its
@@ -609,9 +702,14 @@ jobs:
 
   acceptance:
     name: acceptance
-    needs: [build-seat-setup, rust, physical-db-identity-windows, node, gitleaks]
+    needs: [build-seat-setup, rust, node, gitleaks, physical-db-identity-windows]
     # Aggregate CI only; review/canary/owner approval remain separate gates.
-    # This job must inspect failed/skipped dependencies, without admitting forks.
+    # This job must inspect failed/skipped dependencies, without admitting
+    # forks. Required jobs fail closed on any non-success. Observational jobs
+    # (owner adjudication 2026-09-23, current delivery only:
+    # physical-db-identity-windows) are reported with their raw status but
+    # do not block -- see .github/acceptance-plan.json and
+    # docs/engineering/operations/actions-capacity.md.
     if: >-
       always() && (
         ((github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
@@ -632,7 +730,7 @@ jobs:
         shell: bash
         run: bash .github/scripts/runner_hygiene.sh preflight 10
 
-      - name: Evaluate required CI evidence
+      - name: Evaluate required CI evidence and report observational exclusions
         env:
           CI_NEEDS_JSON: ${{ toJSON(needs) }}
         run: python3 .github/scripts/ci_acceptance.py

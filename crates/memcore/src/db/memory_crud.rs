@@ -24,17 +24,20 @@ pub use access::{
 };
 #[cfg(test)]
 pub(crate) use access::{record_access, AccessUpdate};
+pub(crate) use read::get_active_resource_entry;
 pub use read::{
     fetch_by_ids, fetch_by_ids_excluding_store_internal, find_active_wiki_entry_by_path,
     find_exact_path_text_id, get_all, is_reserved_wiki_internal_path, is_user_facing_wiki_entry,
     list_active_wiki_ingest_predecessors, list_by_path, list_by_path_active_unsuperseded,
     list_by_path_recent, list_user_facing_wiki_entries, list_wiki_duplicate_candidates,
 };
+pub(crate) use read::{fetch_by_ids_with_vector_table, fetch_embeddings_by_ids};
 #[cfg(test)]
 pub(crate) use search::search_fts_raw_match;
 pub(crate) use search::search_fts_with_normalized_as_of;
 pub(crate) use search::search_symbolic_candidates_with_relevance;
 pub(crate) use search::wiki_corpus_store_sql_splice;
+pub(crate) use search::{ensure_symbolic_score_function, RecallTables};
 pub use search::{
     search_fts, search_symbolic_candidates, search_vec, symbolic_trigram_select_sql,
     SYMBOLIC_TRIGRAM_SELECT_SQL_TEMPLATE,
@@ -54,8 +57,9 @@ pub(crate) use update::{
     update_with_revision_if_expected_state,
 };
 pub use update::{
-    record_enrichment_failure, release_event_claim, set_keyword_enrichment_pending_if_unset,
-    set_keyword_enrichment_status, try_claim_event, update_enrichment_fields, update_with_revision,
+    record_enrichment_failure, record_enrichment_failure_if_revision, release_event_claim,
+    set_keyword_enrichment_pending_if_unset, set_keyword_enrichment_status, try_claim_event,
+    update_enrichment_fields, update_with_revision,
 };
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -1133,7 +1137,7 @@ fn merge_validated_reference_metadata(
                     Some(_) => {
                         return Err(MemoryError::InvalidArg(format!(
                             "cannot append validated reference to malformed existing metadata.{key}"
-                        )))
+                        )));
                     }
                     None => Vec::new(),
                 };
@@ -3892,13 +3896,26 @@ pub fn refuse_retired_sticky_row_within_tx(
         )
         .optional()?;
     if let Some((path, category)) = row {
-        crate::path_router::validate_retired_sticky_write(&path, &category).map_err(|error| {
-            MemoryError::InvalidArg(format!(
-                "retired sticky row {id} cannot be {operation} through an ordinary writer: {error}"
-            ))
-        })?;
+        refuse_retired_sticky_columns_within_tx(id, &path, &category, operation)?;
     }
     Ok(())
+}
+
+/// The decision half of [`refuse_retired_sticky_row_within_tx`] for callers
+/// that already read `path` and `category` for `id` inside the same writer
+/// transaction (for example one batched `IN` lookup instead of one point
+/// `SELECT` per id). Same predicate, same error text.
+pub(crate) fn refuse_retired_sticky_columns_within_tx(
+    id: &str,
+    path: &str,
+    category: &str,
+    operation: &str,
+) -> Result<(), MemoryError> {
+    crate::path_router::validate_retired_sticky_write(path, category).map_err(|error| {
+        MemoryError::InvalidArg(format!(
+            "retired sticky row {id} cannot be {operation} through an ordinary writer: {error}"
+        ))
+    })
 }
 
 pub(crate) fn archive_memory_within_tx(tx: &Connection, id: &str) -> Result<bool, MemoryError> {

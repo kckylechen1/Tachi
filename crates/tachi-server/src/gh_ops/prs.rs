@@ -6,15 +6,15 @@ pub(in crate::gh_ops) async fn handle_gh_pr_read(
 ) -> Result<String, String> {
     validate_repo(&params.repo)?;
 
-    let (mut cmd, token) = build_gh_command(server)?;
-    cmd.args(["pr", "view", &params.pr_number.to_string()])
+    let mut call = GhCall::read();
+    call.args(["pr", "view", &params.pr_number.to_string()])
         .args(["--repo", &params.repo])
         .args([
             "--json",
             "number,title,state,body,author,labels,reviewDecision,mergeable,additions,deletions,changedFiles,headRefName,baseRefName,createdAt,updatedAt",
         ]);
 
-    let output = run_gh(cmd, &token)?;
+    let output = call.run(server).await?;
     serde_json::to_string(&json!({
         "tool": "tachi_gh_pr_read",
         "repo": params.repo,
@@ -30,8 +30,8 @@ pub(in crate::gh_ops) async fn handle_gh_pr_list(
 ) -> Result<String, String> {
     validate_repo(&params.repo)?;
 
-    let (mut cmd, token) = build_gh_command(server)?;
-    cmd.args(["pr", "list"])
+    let mut call = GhCall::bulk_read();
+    call.args(["pr", "list"])
         .args(["--repo", &params.repo])
         .args(["--state", &params.state])
         .args(["--limit", &params.limit.to_string()])
@@ -40,7 +40,7 @@ pub(in crate::gh_ops) async fn handle_gh_pr_list(
             "number,title,state,author,labels,headRefName,createdAt",
         ]);
 
-    let output = run_gh(cmd, &token)?;
+    let output = call.run(server).await?;
     serde_json::to_string(&json!({
         "tool": "tachi_gh_pr_list",
         "repo": params.repo,

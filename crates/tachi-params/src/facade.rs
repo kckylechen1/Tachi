@@ -541,7 +541,8 @@ pub use action_inventory::{
 
 mod orchestration;
 pub use orchestration::{
-    EvalRubricParams, MirrorEvalAdjudicateParams, MirrorEvalGetParams, MirrorEvalObserveParams,
+    CandidateProjectionCandidate, CandidateProjectionParams, EvalRubricParams,
+    MirrorEvalAdjudicateParams, MirrorEvalGetParams, MirrorEvalObserveParams,
     MirrorEvalRegisterParams, RouteProjectionParams, TachiAgentEvalParams, TachiAgentsParams,
     TachiBoardParams, TachiOrchestratorParams, TachiStaffParams, TachiVerifyCheckItem,
     TachiVerifyParams, TACHI_AGENT_EVAL_ACTIONS,
