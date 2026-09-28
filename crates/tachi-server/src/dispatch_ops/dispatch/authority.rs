@@ -272,7 +272,11 @@ mod tests {
     }
     use crate::dispatch_profile::resolve_and_apply_dispatch_profile;
     use serde_json::json;
-    use tachi_dispatch::{CODEX_CLI_RECEIPT, PROVIDER_QUALIFICATIONS};
+    use tachi_dispatch::{
+        qualify_provider, Certification, CertificationReceipt, CertificationResult,
+        ProviderQualification, TransportKind, WorkspaceAuthority, CODEX_CLI_RECEIPT,
+        PROVIDER_QUALIFICATIONS,
+    };
 
     /// The binary the shipped receipt was issued for. A test that expects codex
     /// to *be* certified has to say which codex it is talking about — that is the
@@ -280,6 +284,46 @@ mod tests {
     /// row for any other version, and passing `None` here is how a box with no
     /// codex on it behaves.
     const CERTIFIED_CODEX_VERSION: Option<&str> = Some(CODEX_CLI_RECEIPT.vendor_version);
+
+    /// Test-only host-matched qualification fixture. The real
+    /// [`PROVIDER_QUALIFICATIONS`] row cites a receipt executed on macOS, so on
+    /// any other host the correct host-mismatch refusal fires before the
+    /// profile-wiring / argv / version-gate checks can run (the CI-red Linux
+    /// failures this round repaired). Tests that check those mechanics compile
+    /// contracts against a SYNTHETIC receipt executed on THIS host OS instead:
+    /// identical shape, obviously not real (no kill-test was executed, nothing
+    /// is minted into `certifications/`, and production never returns this
+    /// row). The real receipt's host boundary is pinned separately by
+    /// [`the_real_macos_receipt_cannot_admit_a_foreign_host`].
+    const HOST_MATCHED_TEST_RECEIPT: CertificationReceipt = CertificationReceipt {
+        id: "test-only-host-matched-receipt-no-kill-test-was-executed",
+        source_file: "crates/tachi-server/src/dispatch_ops/dispatch/authority.rs",
+        backend: "codex",
+        transport: TransportKind::Cli,
+        vendor_binary: "codex-cli",
+        vendor_version: "0.144.1",
+        host_os: std::env::consts::OS,
+        host_os_version: "test-only",
+        kill_test: "synthetic: no kill-test backs this fixture",
+        kill_test_fn: "none",
+        result: CertificationResult::Pass,
+        executed_at: "",
+        executed_by: "authority tests",
+        duration_secs: "0",
+        executed_on_commit: "",
+        kill_test_source_blob: "",
+        covers: &[WorkspaceAuthority::ReadOnly],
+        matrix: &[],
+    };
+    static HOST_MATCHED_TEST_QUALIFICATIONS: &[ProviderQualification] = &[ProviderQualification {
+        backend: "codex",
+        transport: TransportKind::Cli,
+        certification: Certification::KillTested {
+            receipt: &HOST_MATCHED_TEST_RECEIPT,
+        },
+    }];
+    const HOST_MATCHED_CERTIFIED_VERSION: Option<&str> =
+        Some(HOST_MATCHED_TEST_RECEIPT.vendor_version);
 
     /// The #878-B operator opt-in, scoped to one test (the sibling `tests`
     /// module's `EnvGuard` is private to it).
@@ -346,13 +390,17 @@ mod tests {
         }));
         assert_eq!(params.sandbox, None, "the caller omitted sandbox");
 
+        // Host-matched synthetic qualification: this test checks profile
+        // wiring and argv shape, not host certification, and the real macOS
+        // receipt would (correctly) refuse every non-macOS host before these
+        // checks run.
         let contract = compile_contract_from_legacy_projection!(
             &mut params,
             "codex",
             "cli",
             &resolved,
-            PROVIDER_QUALIFICATIONS,
-            CERTIFIED_CODEX_VERSION,
+            HOST_MATCHED_TEST_QUALIFICATIONS,
+            HOST_MATCHED_CERTIFIED_VERSION,
         )
         .expect("review contract compiles");
 
@@ -394,21 +442,22 @@ mod tests {
         // The dispatch receipt must carry the *evidence*, not just the verdict:
         // which receipt, for which binary version, from which kill-test. A reader
         // of `status.json` can then go and check it instead of trusting the word
-        // "enforced".
+        // "enforced". (Echoed against the synthetic host-matched receipt this
+        // compile was qualified by.)
         let receipt = contract_receipt(&contract);
         assert_eq!(receipt["workspace_authority"], json!("read-only"));
         assert_eq!(receipt["enforcement"]["mode"], json!("enforced"));
         assert_eq!(
             receipt["enforcement"]["receipt"],
-            json!(CODEX_CLI_RECEIPT.id)
+            json!(HOST_MATCHED_TEST_RECEIPT.id)
         );
         assert_eq!(
             receipt["enforcement"]["vendor_version"],
-            json!(CODEX_CLI_RECEIPT.vendor_version)
+            json!(HOST_MATCHED_TEST_RECEIPT.vendor_version)
         );
         assert_eq!(
             receipt["enforcement"]["certified_by"],
-            json!(CODEX_CLI_RECEIPT.kill_test)
+            json!(HOST_MATCHED_TEST_RECEIPT.kill_test)
         );
         assert_eq!(receipt["network"], json!("restricted"));
     }
@@ -620,12 +669,16 @@ mod tests {
                 "staffing_reason": "explicit_user_request",
                 "profile": "codex_55_review",
             }));
+            // Host-matched synthetic qualification so the VERSION gate is the
+            // discriminator under test; against the real macOS receipt a
+            // non-macOS host would (correctly) refuse on the host mismatch
+            // before the version comparison runs.
             let err = compile_contract_from_legacy_projection!(
                 &mut params,
                 "codex",
                 "cli",
                 &resolved,
-                PROVIDER_QUALIFICATIONS,
+                HOST_MATCHED_TEST_QUALIFICATIONS,
                 version,
             )
             .expect_err("an uncertified binary must not run a read-only lane");
@@ -637,6 +690,45 @@ mod tests {
                 "[{world}] a refused dispatch must not have had its params rewritten"
             );
         }
+    }
+
+    /// The real receipt's host boundary, pinned independently of the synthetic
+    /// table above: [`PROVIDER_QUALIFICATIONS`] cites a kill-test executed on
+    /// macOS, and that evidence must not admit any other host — same provider,
+    /// same version, different OS (the CI-red Linux failure mode this round
+    /// repaired at the entry point). Runs on every host because
+    /// `qualify_provider` takes the host OS as data.
+    #[test]
+    fn the_real_macos_receipt_cannot_admit_a_foreign_host() {
+        let err = qualify_provider(
+            PROVIDER_QUALIFICATIONS,
+            "codex",
+            TransportKind::Cli,
+            CERTIFIED_CODEX_VERSION,
+            "linux",
+            WorkspaceAuthority::ReadOnly,
+        )
+        .expect_err("a macOS kill-test receipt must not qualify a linux host");
+        assert!(
+            err.contains("was executed on macos, not the current host OS linux"),
+            "{err}"
+        );
+        assert!(
+            err.contains("sandbox evidence is not transferable across operating systems"),
+            "{err}"
+        );
+        assert!(
+            qualify_provider(
+                PROVIDER_QUALIFICATIONS,
+                "codex",
+                TransportKind::Cli,
+                CERTIFIED_CODEX_VERSION,
+                "macos",
+                WorkspaceAuthority::ReadOnly,
+            )
+            .is_ok(),
+            "on the receipt's own host the real qualification still holds"
+        );
     }
 
     /// A write-level dispatch on a provider with no sandbox primitive still gets
