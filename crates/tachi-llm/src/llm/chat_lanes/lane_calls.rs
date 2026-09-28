@@ -1157,14 +1157,18 @@ pub(in crate::llm) fn persist_llm_usage_blocking(
             .map_err(|err| format!("persist llm usage insert: {err}"))
     };
     writer.write(&db_path, insert, || {
-        let store = memcore::MemoryStore::open_with_context_and_busy_timeout(
-            db_path_str,
-            &open_context,
-            LLM_USAGE_PERSIST_SQLITE_BUSY_TIMEOUT,
-        )
-        .map_err(|err| format!("persist llm usage open db: {err}"))?;
-        insert(&store)?;
-        Ok((store, ()))
+        let store = crate::llm::provider_health::StartupOwnedStore::new(
+            memcore::MemoryStore::open_with_context_and_busy_timeout(
+                db_path_str,
+                &open_context,
+                LLM_USAGE_PERSIST_SQLITE_BUSY_TIMEOUT,
+            )
+            .map_err(|err| format!("persist llm usage open db: {err}"))?,
+        );
+        // A failed insert — or a panic in it — closes the freshly opened
+        // handle under startup ownership on the way out.
+        insert(store.store())?;
+        Ok((store.into_store(), ()))
     })
 }
 

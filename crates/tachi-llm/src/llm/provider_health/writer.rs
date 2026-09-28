@@ -40,7 +40,13 @@
 //! ownership for the write
 //! ([`memcore::MemoryStore::vault_upsert_key_health_with_startup_ownership`]),
 //! and a fresh key-health open keeps open and upsert under one hold, so the
-//! #1680 D6 open-then-write guarantee is the same on both paths.
+//! #1680 D6 open-then-write guarantee is the same on both paths. Closing a
+//! handle this writer owns — admission-rejected, dropped after a failed
+//! write, dropped after a success that ended outside autocommit, dropped
+//! while the path was replaced, dropped during a panic in the write, or
+//! dropped with the writer itself — joins that same startup boundary
+//! ([`StartupOwnedStore`]), so no open in this process crosses it during a
+//! connection teardown either.
 //!
 //! # Coalescing
 //!
@@ -71,44 +77,90 @@ use memcore::vault::VaultKeyHealth;
 pub(in crate::llm) const RETAINED_STORE_TTL: Duration = Duration::from_secs(30);
 
 struct RetainedStore {
-    store: memcore::MemoryStore,
+    handle: StartupOwnedStore,
     schema_version: i64,
     admitted_at: Instant,
 }
 
+/// One opened vault handle whose connection is closed under memcore's
+/// process startup ownership on every path that leaves it — admission
+/// rejection, a failed write, a success that ends outside autocommit, a
+/// panic anywhere in between, and the final writer drop. Closing a
+/// connection runs SQLite teardown that another open in this process must
+/// not overlap (the #1680 D6 autoextension window), so the close joins the
+/// same startup boundary the write itself already holds.
+///
+/// `into_store` hands the bare handle back to a caller that will keep it
+/// alive; every other exit from this wrapper is a guarded close.
+pub(in crate::llm) struct StartupOwnedStore {
+    store: Option<memcore::MemoryStore>,
+}
+
+impl StartupOwnedStore {
+    pub(in crate::llm) fn new(store: memcore::MemoryStore) -> Self {
+        Self { store: Some(store) }
+    }
+
+    /// The wrapped handle. Present until [`Drop`] takes it.
+    pub(in crate::llm) fn store(&self) -> &memcore::MemoryStore {
+        self.store
+            .as_ref()
+            .expect("startup-owned store handle present until drop")
+    }
+
+    /// Hand the bare handle back to a caller that will keep it alive; the
+    /// wrapper is disarmed and will not close it.
+    pub(in crate::llm) fn into_store(mut self) -> memcore::MemoryStore {
+        self.store
+            .take()
+            .expect("startup-owned store handle present until drop")
+    }
+}
+
+impl Drop for StartupOwnedStore {
+    fn drop(&mut self) {
+        if let Some(store) = self.store.take() {
+            store.drop_with_startup_ownership();
+        }
+    }
+}
+
 impl RetainedStore {
     /// Admit a freshly opened handle for reuse, or `None` when it cannot be
-    /// verified later (no stable physical identity, unreadable schema version)
-    /// or is not idle (an open transaction).
+    /// verified later (no stable physical identity, unreadable schema
+    /// version) or is not idle (an open transaction). A rejected handle is
+    /// closed under startup ownership by `StartupOwnedStore`'s `Drop`, like
+    /// every other close of a handle this writer owns.
     fn admit(store: memcore::MemoryStore, db_path: &Path) -> Option<Self> {
-        let admitted = store.connection().is_autocommit()
-            && store.verify_opened_physical_db_identity(db_path).is_ok()
-            && schema_version(&store).is_some();
-        if !admitted {
-            store.drop_with_startup_ownership();
-            return None;
-        }
-        let schema_version = schema_version(&store)
-            .expect("store admission checked the schema version immediately above");
+        let handle = StartupOwnedStore::new(store);
+        // One fallible read decides both admission and the schema version
+        // the handle will later be compared against.
+        let schema_version = schema_version(handle.store()).filter(|_| {
+            handle.store().connection().is_autocommit()
+                && handle
+                    .store()
+                    .verify_opened_physical_db_identity(db_path)
+                    .is_ok()
+        })?;
         Some(Self {
-            store,
+            handle,
             schema_version,
             admitted_at: Instant::now(),
         })
     }
 
-    fn still_addresses(&self, db_path: &Path, now: Instant) -> bool {
-        now.saturating_duration_since(self.admitted_at) < RETAINED_STORE_TTL
-            && self.store.connection().is_autocommit()
-            && self
-                .store
-                .verify_opened_physical_db_identity(db_path)
-                .is_ok()
-            && schema_version(&self.store) == Some(self.schema_version)
+    fn store(&self) -> &memcore::MemoryStore {
+        self.handle.store()
     }
 
-    fn drop_with_startup_ownership(self) {
-        self.store.drop_with_startup_ownership();
+    fn still_addresses(&self, db_path: &Path, now: Instant) -> bool {
+        now.saturating_duration_since(self.admitted_at) < RETAINED_STORE_TTL
+            && self.store().connection().is_autocommit()
+            && self
+                .store()
+                .verify_opened_physical_db_identity(db_path)
+                .is_ok()
+            && schema_version(self.store()) == Some(self.schema_version)
     }
 }
 
@@ -206,14 +258,14 @@ pub(in crate::llm) struct ProviderPersistWriter {
 
 impl Drop for ProviderPersistWriter {
     fn drop(&mut self) {
-        let retained = self
-            .retained
-            .get_mut()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .take();
-        if let Some(retained) = retained {
-            retained.drop_with_startup_ownership();
-        }
+        // A still-retained handle closes under startup ownership when the
+        // `RetainedStore` (its `StartupOwnedStore`) dropped here unwinds.
+        drop(
+            self.retained
+                .get_mut()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .take(),
+        );
     }
 }
 
@@ -299,27 +351,26 @@ impl ProviderPersistWriter {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(retained) = slot.take() {
             if retained.still_addresses(db_path, Instant::now()) {
-                // A failed write returns here and drops the handle.
-                let value = match write_retained(&retained.store) {
-                    Ok(value) => value,
-                    Err(error) => {
-                        retained.drop_with_startup_ownership();
-                        return Err(error);
-                    }
-                };
+                // A failed write returns from the `?` below, and a panic in
+                // `write_retained` unwinds through this frame; on both exits
+                // `retained` drops here, and `StartupOwnedStore`'s `Drop`
+                // closes it under startup ownership.
+                let value = write_retained(retained.store())?;
                 #[cfg(test)]
                 if let Some(hook) = take_retained_post_commit_hook_for(db_path) {
                     hook();
                 }
                 if retained
-                    .store
+                    .store()
                     .verify_opened_physical_db_identity(db_path)
                     .is_ok()
                 {
                     self.retained_writes.fetch_add(1, Ordering::Relaxed);
                     // A handle the write left inside a transaction is not
-                    // retained. Dropping it is what a per-write open did.
-                    if retained.store.connection().is_autocommit() {
+                    // retained. Dropping it — under startup ownership, like
+                    // every close of this writer's handles — is what a
+                    // per-write open did.
+                    if retained.store().connection().is_autocommit() {
                         *slot = Some(retained);
                     }
                     return Ok(value);
@@ -332,18 +383,18 @@ impl ProviderPersistWriter {
                 // path names now would record the row twice whenever the
                 // replacement already includes this commit (a snapshot or
                 // backup taken after it). Keep the committed value, drop
-                // the handle, and let the next write open the new identity
-                // afresh. Which file readers of the path see is uncertain,
-                // never duplicated.
+                // the handle — under startup ownership — and let the next
+                // write open the new identity afresh. Which file readers
+                // of the path see is uncertain, never duplicated.
                 self.retained_writes.fetch_add(1, Ordering::Relaxed);
                 tracing::warn!(
                     "[provider] retained write committed, but the vault path was replaced during it ({}); not replaying against the replacement: the active target is uncertain",
                     db_path.display()
                 );
-                retained.drop_with_startup_ownership();
                 return Ok(value);
             }
-            retained.drop_with_startup_ownership();
+            // The handle stopped addressing the path; it drops here, closed
+            // under startup ownership.
         }
         self.full_opens.fetch_add(1, Ordering::Relaxed);
         let (store, value) = open_and_write()?;

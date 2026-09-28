@@ -280,14 +280,18 @@ impl super::super::super::LlmClient {
             .map_err(|err| err.to_string())
         };
         writer.write(&db_path, write, || {
-            let store = memcore::MemoryStore::open_with_context_and_busy_timeout(
-                db_path_str,
-                &open_context,
-                DEPLOYMENT_HEALTH_SQLITE_BUSY_TIMEOUT,
-            )
-            .map_err(|err| err.to_string())?;
-            let value = write(&store)?;
-            Ok((store, value))
+            let store = super::super::StartupOwnedStore::new(
+                memcore::MemoryStore::open_with_context_and_busy_timeout(
+                    db_path_str,
+                    &open_context,
+                    DEPLOYMENT_HEALTH_SQLITE_BUSY_TIMEOUT,
+                )
+                .map_err(|err| err.to_string())?,
+            );
+            // A failed write — or a panic in it — closes the freshly opened
+            // handle under startup ownership on the way out.
+            let value = write(store.store())?;
+            Ok((store.into_store(), value))
         })
     }
 

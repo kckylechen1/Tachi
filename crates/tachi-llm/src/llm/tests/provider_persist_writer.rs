@@ -18,7 +18,7 @@ use crate::llm::catalog_import::{env_deployment_id, DeploymentAttribution};
 use crate::llm::chat_lanes::persist_llm_usage_blocking;
 use crate::llm::provider_health::{
     install_retained_post_commit_hook_for_tests, success_snapshots_merge, ChatLaneConfig,
-    ProviderRuntimeConfig, SelectedProviderSecret, RETAINED_STORE_TTL,
+    ProviderRuntimeConfig, SelectedProviderSecret, StartupOwnedStore, RETAINED_STORE_TTL,
 };
 use memcore::store::llm_usage::LlmUsageEvent;
 
@@ -760,4 +760,199 @@ fn a_retained_key_health_write_keeps_startup_ownership() {
         stored_key_health(&db_path, LOGICAL, KEY).status,
         HEALTH_RATE_LIMITED
     );
+}
+
+/// How the retained handle leaves `write` in the guarded-close regressions
+/// below: a success that ends outside autocommit, a returned error, or a
+/// panic that unwinds through the writer.
+#[derive(Clone, Copy)]
+enum RetainedCloseMode {
+    NonAutocommit,
+    Error,
+    Panic,
+}
+
+/// A production-shaped fresh open whose write succeeds, used to admit the
+/// retained handle.
+fn fresh_open_write_ok(
+    db_path: &std::path::Path,
+) -> impl Fn() -> Result<(memcore::MemoryStore, ()), String> + '_ {
+    move || {
+        let store = StartupOwnedStore::new(
+            memcore::MemoryStore::open_with_context_and_busy_timeout(
+                db_path.to_str().expect("utf-8 path"),
+                &memcore::DbOpenContext {
+                    intent: memcore::OpenIntent::OpenExisting,
+                    migration: memcore::MigrationAuthority::Deny,
+                    required_profile: memcore::ProfileRequirement::AtLeast(
+                        memcore::StoreProfile::TachiFull,
+                    ),
+                },
+                Duration::from_secs(2),
+            )
+            .map_err(|err| err.to_string())?,
+        );
+        Ok((store.into_store(), ()))
+    }
+}
+
+/// The #1680 D6 close-side guarantee, deterministic: a peer key-health
+/// write is held inside its real transaction (so the peer holds memcore's
+/// process startup ownership), then the writer's retained handle leaves
+/// `write` per `mode`. The handle's close must wait for that ownership —
+/// closing a connection runs the same teardown boundary an open does, so an
+/// unguarded close would complete (and could overlap a concurrent open)
+/// while the peer still holds it.
+#[track_caller]
+fn assert_retained_close_waits_for_startup_ownership(mode: RetainedCloseMode) {
+    const LOGICAL: &str = "TACHI_TEST_ONLY_H1_GUARDED_CLOSE";
+    const KEY: &str = "TACHI_TEST_ONLY_H1_GUARDED_CLOSE_1";
+    let _lock = crate::test_support::global_test_lock().lock();
+    let temp = tempfile::tempdir().expect("temp db");
+    let db_path = temp.path().join("vault.db");
+    init_vault_db(&db_path);
+    let writer = Arc::new(crate::llm::provider_health::ProviderPersistWriter::default());
+    writer
+        .write::<(), String>(&db_path, |_store| Ok(()), fresh_open_write_ok(&db_path))
+        .expect("the first write pays the full open and admits the handle");
+    if !writer.has_retained_store() {
+        // No stable file identity on this target: no handle is retained, so
+        // the retained-close window below cannot exist.
+        return;
+    }
+
+    // Peer holder: hold the real vault health transaction — and with it the
+    // process startup ownership `vault_upsert_key_health_with_startup_ownership`
+    // takes — until released.
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let _write_hook =
+        memcore::db::install_vault_key_health_write_hook_for_tests(LOGICAL, KEY, move || {
+            held_tx.send(()).expect("report held health write");
+            release_rx.recv().expect("release held health write");
+        });
+    let holder_store =
+        memcore::MemoryStore::open(db_path.to_str().expect("utf-8 path")).expect("holder store");
+    let holder_health = VaultKeyHealth {
+        logical_name: LOGICAL.to_string(),
+        key_id: KEY.to_string(),
+        ..VaultKeyHealth::default()
+    };
+    let holder = std::thread::spawn(move || {
+        holder_store
+            .vault_upsert_key_health_with_startup_ownership(&holder_health)
+            .expect("holder upsert");
+    });
+    held_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("the holder must reach the real health transaction");
+
+    // The writer's retained handle now leaves `write` per `mode`. `ran`
+    // fires inside the write closure, so after it only the identity check,
+    // the autocommit check and the close remain.
+    let (ran_tx, ran_rx) = std::sync::mpsc::channel();
+    let (closed_tx, closed_rx) = std::sync::mpsc::channel::<()>();
+    let close_path = db_path.clone();
+    let closing_writer = Arc::clone(&writer);
+    let closing = std::thread::spawn(move || {
+        let previous_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            closing_writer.write::<(), String>(
+                &close_path,
+                |store| match mode {
+                    RetainedCloseMode::NonAutocommit => {
+                        store
+                            .connection()
+                            .execute_batch("BEGIN")
+                            .map_err(|err| err.to_string())?;
+                        ran_tx.send(()).expect("report write ran");
+                        Ok(())
+                    }
+                    RetainedCloseMode::Error => {
+                        ran_tx.send(()).expect("report write ran");
+                        Err("injected retained write failure".to_string())
+                    }
+                    RetainedCloseMode::Panic => {
+                        ran_tx.send(()).expect("report write ran");
+                        panic!("injected retained write panic");
+                    }
+                },
+                || unreachable!("the retained handle is valid; the fresh path must not run"),
+            )
+        }));
+        std::panic::set_hook(previous_hook);
+        closed_tx.send(()).expect("report writer exit");
+        result
+    });
+    ran_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("the retained write must run");
+
+    // The write itself has finished; only the close remains. While the peer
+    // holds startup ownership the guarded close may not complete. (With an
+    // unguarded close this fires within microseconds of `ran`.)
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(
+        closed_rx.try_recv().is_err(),
+        "the retained handle closed while a peer held process startup ownership"
+    );
+
+    release_tx.send(()).expect("release the held health write");
+    holder.join().expect("join holder");
+    closed_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("the guarded close proceeds once startup ownership is released");
+    let caught = closing.join().expect("join closing writer");
+    match mode {
+        RetainedCloseMode::NonAutocommit => {
+            caught
+                .expect("no panic escapes the non-autocommit write")
+                .expect("the non-autocommit write itself succeeded");
+        }
+        RetainedCloseMode::Error => {
+            assert_eq!(
+                caught
+                    .expect("no panic escapes the failing write")
+                    .expect_err("the injected failure is returned"),
+                "injected retained write failure"
+            );
+        }
+        RetainedCloseMode::Panic => {
+            assert!(
+                caught.is_err(),
+                "the injected panic must propagate out of write"
+            );
+        }
+    }
+
+    assert!(
+        !writer.has_retained_store(),
+        "the handle must be gone after the guarded close"
+    );
+    writer
+        .write::<(), String>(&db_path, |_store| Ok(()), fresh_open_write_ok(&db_path))
+        .expect("the next write opens afresh and succeeds");
+    assert_eq!(
+        writer.counts().full_opens,
+        2,
+        "the write after the close re-opens: {:?}",
+        writer.counts()
+    );
+    assert!(writer.has_retained_store(), "the new handle is admitted");
+}
+
+#[test]
+fn a_successful_nonautocommit_retained_write_closes_under_startup_ownership() {
+    assert_retained_close_waits_for_startup_ownership(RetainedCloseMode::NonAutocommit);
+}
+
+#[test]
+fn a_failed_retained_write_closes_under_startup_ownership() {
+    assert_retained_close_waits_for_startup_ownership(RetainedCloseMode::Error);
+}
+
+#[test]
+fn a_panicking_retained_write_closes_under_startup_ownership() {
+    assert_retained_close_waits_for_startup_ownership(RetainedCloseMode::Panic);
 }
