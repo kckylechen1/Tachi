@@ -877,9 +877,21 @@ mod tests {
 
             static FIXTURE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
             static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
-            // Several fixtures spin while testing deadlines and cleanup. Keep
-            // those probes separate so one fixture cannot consume another's
-            // one-second observation window under the parallel test harness.
+            // macOS security scanning gates the FIRST exec of a freshly
+            // created executable on a synchronous scan (observed 1-3s+ under
+            // load, ~40ms once cached). Every frozen window below starts at
+            // the probe's spawn, so that scan must be absorbed here, outside
+            // any deadline: each script gets a prewarm guard line and this
+            // constructor execs it once with the prewarm argument before the
+            // fixture is handed to a test. Several fixtures also stay alive
+            // on purpose while testing deadlines and cleanup; they park in a
+            // zero-CPU `exec /bin/sleep` keep-alive so co-scheduled fixtures
+            // (nextest runs one process per test, so the lock below cannot
+            // serialize them) never starve each other's bounded observation
+            // windows; under the in-process harness this lock additionally
+            // keeps those windows from overlapping.
+            const PREWARM_ARG: &str = "--tachi-fixture-prewarm";
+            let script = format!("if [ \"$1\" = \"{PREWARM_ARG}\" ]; then exit 0; fi\n{script}");
             let serial = FIXTURE_LOCK
                 .get_or_init(|| Mutex::new(()))
                 .lock()
@@ -898,6 +910,20 @@ mod tests {
             permissions.set_mode(0o700);
             std::fs::set_permissions(&program, permissions)
                 .expect("make version probe fixture executable");
+            // Absorb the first-exec scan with the prewarm argument. No test
+            // deadline is active here; the real probe invocation later takes
+            // the cached (fast) exec path instead of the scanned one.
+            let prewarmed = std::process::Command::new(&program)
+                .arg(PREWARM_ARG)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .expect("prewarm version probe fixture exec");
+            assert!(
+                prewarmed.success(),
+                "prewarm version probe fixture must exit zero: {prewarmed}"
+            );
             Self {
                 root,
                 program,
@@ -1318,7 +1344,7 @@ mod tests {
     #[cfg(unix)]
     fn assert_cleanup_fault_is_bounded(ops: VersionProbeCleanupOps) {
         let fixture = VersionProbeFixture::new(
-            "#!/bin/sh\nprintf '%s\\n' \"$$\" > \"$0.pid\"\nwhile :; do :; done\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$$\" > \"$0.pid\"\nexec /bin/sleep 300\n",
         );
         let started = Instant::now();
         let mut spawn_reader = spawn_version_probe_reader;
@@ -1435,7 +1461,7 @@ mod tests {
     #[test]
     fn version_probe_timeout_kills_reaps_and_proves_the_owned_group_absent() {
         let fixture = VersionProbeFixture::new(
-            "#!/bin/sh\nprintf '%s\\n' \"$$\" > \"$0.pid\"\nwhile :; do :; done\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$$\" > \"$0.pid\"\nexec /bin/sleep 300\n",
         );
         assert_eq!(
             run_fixture_version_probe_with_timeout(&fixture.program, Duration::from_millis(500)),
@@ -1451,7 +1477,7 @@ mod tests {
     #[test]
     fn version_probe_reaps_descendant_that_inherits_pipes_after_root_exit() {
         let fixture = VersionProbeFixture::new(
-            "#!/bin/sh\nprintf '%s\\n' \"$$\" > \"$0.pid\"\n/bin/sh -c 'printf \"%s\\n\" \"$$\" > \"$1\"; while :; do :; done' sh \"$0.descendant.pid\" &\nwhile [ ! -s \"$0.descendant.pid\" ]; do :; done\nprintf 'codex-cli 0.144.1\\n'\nexit 0\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$$\" > \"$0.pid\"\n/bin/sh -c 'printf \"%s\\n\" \"$$\" > \"$1\"; exec /bin/sleep 300' sh \"$0.descendant.pid\" &\nwhile [ ! -s \"$0.descendant.pid\" ]; do /bin/sleep 0.01; done\nprintf 'codex-cli 0.144.1\\n'\nexit 0\n",
         );
         let started = Instant::now();
         assert_eq!(
@@ -1593,7 +1619,7 @@ mod tests {
     #[test]
     fn version_probe_reader_error_runs_process_cleanup_before_refusal() {
         let fixture = VersionProbeFixture::new(
-            "#!/bin/sh\nprintf '%s\\n' \"$$\" > \"$0.pid\"\nwhile :; do :; done\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$$\" > \"$0.pid\"\nexec /bin/sleep 300\n",
         );
         let pid_path = fixture.pid_path();
         let mut spawn_reader = move |name: &'static str, job: VersionProbeReaderJob| {
@@ -1625,7 +1651,7 @@ mod tests {
     #[test]
     fn version_probe_first_reader_spawn_failure_is_typed_and_cleans_process() {
         let fixture = VersionProbeFixture::new(
-            "#!/bin/sh\nprintf '%s\\n' \"$$\" > \"$0.pid\"\nwhile :; do :; done\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$$\" > \"$0.pid\"\nexec /bin/sleep 300\n",
         );
         let pid_path = fixture.pid_path();
         let failure_path = pid_path.clone();
@@ -1655,7 +1681,7 @@ mod tests {
         use std::sync::Arc;
 
         let fixture = VersionProbeFixture::new(
-            "#!/bin/sh\nprintf '%s\\n' \"$$\" > \"$0.pid\"\nwhile :; do :; done\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$$\" > \"$0.pid\"\nexec /bin/sleep 300\n",
         );
         let pid_path = fixture.pid_path();
         let failure_path = pid_path.clone();
@@ -1706,7 +1732,7 @@ mod tests {
         use std::sync::Arc;
 
         let fixture = VersionProbeFixture::new(
-            "#!/bin/sh\nprintf '%s\\n' \"$$\" > \"$0.pid\"\nwhile :; do :; done\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$$\" > \"$0.pid\"\nexec /bin/sleep 300\n",
         );
         let pid_path = fixture.pid_path();
         let failure_path = pid_path.clone();
