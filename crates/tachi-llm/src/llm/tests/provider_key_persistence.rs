@@ -44,7 +44,6 @@ fn provider_health_open_waits_for_the_prior_real_health_write() {
 
     let (startup_owned_tx, startup_owned_rx) = std::sync::mpsc::channel();
     let (startup_attempted_tx, startup_attempted_rx) = std::sync::mpsc::channel();
-    let (allow_b_open_tx, allow_b_open_rx) = std::sync::mpsc::channel();
     let _startup_hook = memcore::MemoryStore::install_startup_ownership_hook_for_tests(
         db_path.to_str().expect("utf8 db path"),
         move || {
@@ -56,13 +55,6 @@ fn provider_health_open_waits_for_the_prior_real_health_write() {
             startup_owned_tx
                 .send(())
                 .expect("report B crossing the startup boundary");
-            // This callback runs after B acquires startup ownership but before
-            // its Connection::open. Keep that open out of A's transaction
-            // teardown so the assertion below isolates D6 ownership instead
-            // of racing SQLite's auto-extension load against commit.
-            allow_b_open_rx
-                .recv()
-                .expect("allow B to open after A's real write returns");
         },
     );
     let (writer_b_started_tx, writer_b_started_rx) = std::sync::mpsc::channel();
@@ -108,9 +100,6 @@ fn provider_health_open_waits_for_the_prior_real_health_write() {
             .expect("B enters open after A releases startup ownership");
     }
     let status_a = writer_a.join().expect("join provider writer A");
-    allow_b_open_tx
-        .send(())
-        .expect("allow B to perform its fresh open after A returns");
     let status_b = writer_b.join().expect("join provider writer B");
     let store = memcore::MemoryStore::open(db_path.to_str().unwrap()).expect("read health rows");
     let row_a = store

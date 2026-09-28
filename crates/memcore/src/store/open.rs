@@ -547,6 +547,15 @@ impl MemoryStore {
         self.vault_upsert_key_health(health)
     }
 
+    /// Drop an already-open provider-health store while retaining process
+    /// startup ownership. This closes the same connection lifetime boundary
+    /// that a fresh provider-health open and write protect.
+    #[cfg(feature = "admin")]
+    pub fn drop_with_startup_ownership(self) {
+        let _startup_guard = db::acquire_startup_lock();
+        drop(self);
+    }
+
     #[cfg(feature = "admin")]
     fn with_open_store_and_busy_timeout<T>(
         db_path: &str,

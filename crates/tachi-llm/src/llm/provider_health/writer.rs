@@ -81,11 +81,15 @@ impl RetainedStore {
     /// verified later (no stable physical identity, unreadable schema version)
     /// or is not idle (an open transaction).
     fn admit(store: memcore::MemoryStore, db_path: &Path) -> Option<Self> {
-        if !store.connection().is_autocommit() {
+        let admitted = store.connection().is_autocommit()
+            && store.verify_opened_physical_db_identity(db_path).is_ok()
+            && schema_version(&store).is_some();
+        if !admitted {
+            store.drop_with_startup_ownership();
             return None;
         }
-        store.verify_opened_physical_db_identity(db_path).ok()?;
-        let schema_version = schema_version(&store)?;
+        let schema_version = schema_version(&store)
+            .expect("store admission checked the schema version immediately above");
         Some(Self {
             store,
             schema_version,
@@ -101,6 +105,10 @@ impl RetainedStore {
                 .verify_opened_physical_db_identity(db_path)
                 .is_ok()
             && schema_version(&self.store) == Some(self.schema_version)
+    }
+
+    fn drop_with_startup_ownership(self) {
+        self.store.drop_with_startup_ownership();
     }
 }
 
@@ -196,6 +204,19 @@ pub(in crate::llm) struct ProviderPersistWriter {
     key_health_writes: Mutex<Vec<VaultKeyHealth>>,
 }
 
+impl Drop for ProviderPersistWriter {
+    fn drop(&mut self) {
+        let retained = self
+            .retained
+            .get_mut()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        if let Some(retained) = retained {
+            retained.drop_with_startup_ownership();
+        }
+    }
+}
+
 impl ProviderPersistWriter {
     #[cfg(test)]
     pub(in crate::llm) fn counts(&self) -> ProviderPersistWriterCounts {
@@ -279,7 +300,13 @@ impl ProviderPersistWriter {
         if let Some(retained) = slot.take() {
             if retained.still_addresses(db_path, Instant::now()) {
                 // A failed write returns here and drops the handle.
-                let value = write_retained(&retained.store)?;
+                let value = match write_retained(&retained.store) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        retained.drop_with_startup_ownership();
+                        return Err(error);
+                    }
+                };
                 #[cfg(test)]
                 if let Some(hook) = take_retained_post_commit_hook_for(db_path) {
                     hook();
@@ -313,8 +340,10 @@ impl ProviderPersistWriter {
                     "[provider] retained write committed, but the vault path was replaced during it ({}); not replaying against the replacement: the active target is uncertain",
                     db_path.display()
                 );
+                retained.drop_with_startup_ownership();
                 return Ok(value);
             }
+            retained.drop_with_startup_ownership();
         }
         self.full_opens.fetch_add(1, Ordering::Relaxed);
         let (store, value) = open_and_write()?;
