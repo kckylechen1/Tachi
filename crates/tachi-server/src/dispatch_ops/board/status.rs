@@ -86,6 +86,50 @@ pub(super) fn status_state(status: &serde_json::Value, result_written: bool) -> 
     }
 }
 
+/// How the projected run `state` was decided — the evidence basis, not a
+/// second state authority.
+///
+/// `declared` is the run ledger's own explicit [`status_state`] assertion. Every
+/// other value is an INFERENCE the projection performed: an exit code, a
+/// written result report (a report is evidence of a run, never an independent
+/// acceptance), the WORKING fallback for a state string this projection does
+/// not recognize, or the abandonment timeout that overrides a stuck WORKING
+/// ledger to FAILED. Callers must not read an inferred terminal state as an
+/// adjudicated acceptance verdict; independent acceptance lives on the
+/// task/eval adjudication surface, not here.
+///
+/// `declared` is the default and is omitted from the projected row so the
+/// frozen legacy receipt shape is byte-preserved; only the inference/stale
+/// cases add the field.
+pub(super) fn status_state_basis(
+    status: &Value,
+    result_written: bool,
+    abandoned: bool,
+) -> &'static str {
+    if abandoned {
+        return "stale_timeout";
+    }
+    if let Some(state) = status.get("state").and_then(Value::as_str) {
+        return match state {
+            "TASK_STATE_COMPLETED"
+            | "TASK_STATE_FAILED"
+            | "TASK_STATE_WORKING"
+            | "TASK_STATE_PENDING"
+            | "TASK_STATE_INPUT_REQUIRED"
+            | "TASK_STATE_CANCELED" => "declared",
+            _ => "unknown_fallback",
+        };
+    }
+    if status.get("plan_review_status").and_then(Value::as_str) == Some("pending_review") {
+        return "plan_review";
+    }
+    match status.get("exit_code") {
+        Some(Value::Number(_)) => "exit_code",
+        _ if result_written => "result_marker",
+        _ => "unknown_fallback",
+    }
+}
+
 fn status_timeout_secs(status: &Value) -> Option<i64> {
     status
         .get("timeout_secs")
@@ -181,5 +225,9 @@ pub(super) fn mark_abandoned_kanban_task(task: &mut Value, now: DateTime<Utc>) {
     obj.insert(
         "state_source".to_string(),
         Value::String("kanban_stale_timeout".to_string()),
+    );
+    obj.insert(
+        "state_basis".to_string(),
+        Value::String("stale_timeout".to_string()),
     );
 }

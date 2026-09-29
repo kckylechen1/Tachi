@@ -156,7 +156,24 @@ regression infrastructure, and each later phase carries its own gate.
 - Rollback: config knobs + small functions; clean `git revert`; no data
   migration anywhere.
 
-## 8. Related
+## 8. Agent-facing evidence boundary (2026-09-29)
+
+- `/test` and `/tests` are synthetic-record namespaces. Ordinary recall excludes
+  them before final ranking; an explicit `path_prefix` within that namespace
+  permits inspection. The filter does not archive or delete records. `/scratch`,
+  `/testing`, and knowledge *about* tests remain ordinary recall candidates.
+- Compact memory evidence retains the stored revision and declared conflict
+  references alongside observation time, validity, source, and supersession.
+  Retrieval relevance and a recent timestamp do not establish a current fact.
+- More weak matches do not increase the evidence-confidence label. Declared
+  conflicts keep that label low and require reading the referenced observations.
+- A search with a failed source reports `partial`; an empty result is not proof
+  that every requested source was searched successfully.
+
+These are retrieval/response rules, not new establishment authority or changes
+to the project ranking multiplier. Candidate-channel budgets still apply.
+
+## 9. Related
 
 - #683 zvec adoption (shares this harness; escape gate feeds it)
 - #568 secret scrub (prerequisite for rerank-default and Phase E)

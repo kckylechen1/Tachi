@@ -1002,7 +1002,7 @@ impl MemoryStore {
                 rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
             )?
         } else {
-            db::open_read_only(db_path)?
+            db::open_read_only(db_path, db_label)?
         };
         let opened_physical_db_identity =
             validate_physical_db_identity_across_open(db_path, physical_identity_before_open)?;
@@ -2391,9 +2391,13 @@ mod exact_dedupe_open_tests {
         // rows live while the shared prefix keeps them both matching the FTS
         // query below.
         let mut e1 = test_memory_entry("batch-ok-1");
+        // This test exercises ordinary searchable batch records, not the
+        // opt-in-only synthetic /test namespace used by the helper.
+        e1.path = "/notes/batch-one".to_string();
         e1.text = "read-only compatibility fixture batch entry one".to_string();
         e1.vector = Some(vec![0.25_f32; 1024]);
         let mut e2 = test_memory_entry("batch-ok-2");
+        e2.path = "/notes/batch-two".to_string();
         e2.text = "read-only compatibility fixture batch entry two".to_string();
         e2.vector = Some(vec![0.75_f32; 1024]);
 

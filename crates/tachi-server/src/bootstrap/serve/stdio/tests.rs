@@ -1314,7 +1314,7 @@ fn stdio_proxy_tachi_search_returns_global_and_bound_project_rows() {
                     ("summary".to_string(), serde_json::json!(summary)),
                     (
                         "path".to_string(),
-                        serde_json::json!("/tests/stdio-proxy-search-e2e"),
+                        serde_json::json!("/notes/stdio-proxy-search-e2e"),
                     ),
                     ("category".to_string(), serde_json::json!("fact")),
                     ("scope".to_string(), serde_json::json!(scope)),
@@ -1430,7 +1430,7 @@ fn stdio_proxy_allows_explicit_cross_project_read() {
                 ),
                 (
                     "path".to_string(),
-                    serde_json::json!("/tests/stdio-proxy-cross-read-e2e"),
+                    serde_json::json!("/notes/stdio-proxy-cross-read-e2e"),
                 ),
                 ("category".to_string(), serde_json::json!("fact")),
                 ("scope".to_string(), serde_json::json!("project")),
@@ -1535,7 +1535,7 @@ fn stdio_proxy_tachi_memory_search_rows_stay_objects_under_parallel_forwarding()
                     ("summary".to_string(), serde_json::json!(summary)),
                     (
                         "path".to_string(),
-                        serde_json::json!("/tests/stdio-proxy-row-shape-e2e"),
+                        serde_json::json!("/notes/stdio-proxy-row-shape-e2e"),
                     ),
                     ("category".to_string(), serde_json::json!("fact")),
                     ("scope".to_string(), serde_json::json!(scope)),
@@ -2611,7 +2611,7 @@ fn http_direct_connect_header_identity_binds_profile_and_project() {
                     ("summary".to_string(), serde_json::json!(summary)),
                     (
                         "path".to_string(),
-                        serde_json::json!("/tests/http-direct-e2e"),
+                        serde_json::json!("/notes/http-direct-e2e"),
                     ),
                     ("category".to_string(), serde_json::json!("fact")),
                     ("scope".to_string(), serde_json::json!(scope)),

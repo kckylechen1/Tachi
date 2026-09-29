@@ -689,7 +689,9 @@ pub(super) fn recall_cache_key(
 ) -> Result<String, String> {
     validate_cache_request_floats(params)?;
     let request = RecallCacheRequest {
-        version: 3,
+        // v4 excludes synthetic test namespaces and carries memory revisions.
+        // Old persistent rows must not bypass the new retrieval boundary.
+        version: 4,
         query: &params.query,
         query_vec: &params.query_vec,
         top_k_requested: params.top_k,

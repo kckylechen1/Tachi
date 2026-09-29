@@ -1,6 +1,59 @@
 use super::*;
 
 #[test]
+fn test_namespace_noise_cannot_take_the_first_recall_slot() {
+    let mut conn = setup();
+    let mut real = memory_entry(
+        "real-decision",
+        "RecallBoundaryNeedle durable decision",
+        &["RecallBoundaryNeedle"],
+    );
+    real.path = "/notes/decision".to_string();
+    upsert(&mut conn, &real, false).unwrap();
+    for index in 0..8 {
+        let mut noise = memory_entry(
+            &format!("noise-{index}"),
+            "RecallBoundaryNeedle RecallBoundaryNeedle highly relevant synthetic observation",
+            &["RecallBoundaryNeedle"],
+        );
+        noise.path = format!("/test/probe-{index}");
+        noise.importance = 1.0;
+        upsert(&mut conn, &noise, false).unwrap();
+    }
+    let opts = SearchOptions {
+        top_k: 1,
+        record_access: true,
+        ..Default::default()
+    };
+    let results = hybrid_search(&conn, "RecallBoundaryNeedle", &opts).unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].entry.id, "real-decision");
+    let accesses: i64 = conn
+        .query_row(
+            "SELECT SUM(access_count + scored_count) FROM memories WHERE path LIKE '/test/%'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        accesses, 0,
+        "hidden synthetic evidence must not accumulate recall feedback"
+    );
+    let scoped = hybrid_search(
+        &conn,
+        "RecallBoundaryNeedle",
+        &SearchOptions {
+            path_prefix: Some("/test/".to_string()),
+            record_access: false,
+            ..opts
+        },
+    )
+    .unwrap();
+    assert_eq!(scoped.len(), 1);
+    assert!(scoped[0].entry.id.starts_with("noise-"));
+}
+
+#[test]
 fn hybrid_hides_operation_logs() {
     let mut conn = setup();
     insert(

@@ -1817,7 +1817,11 @@ mod tests {
     fn seed_entry(id: &str, text: &str, keywords: Vec<String>) -> MemoryEntry {
         MemoryEntry {
             id: id.into(),
-            path: "/test/keyword-enrich".into(),
+            // Ordinary-content provenance: `/notes` is not a reserved
+            // `/test`/`/tests` namespace, so the namespace search-noise
+            // classifier does not withhold these ordinary recall fixtures from
+            // the warm-cache search this file's flush tests exercise.
+            path: "/notes/keyword-enrich".into(),
             summary: "pre-seeded summary".into(),
             text: text.into(),
             importance: 0.8,
