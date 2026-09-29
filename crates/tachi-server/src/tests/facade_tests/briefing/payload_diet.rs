@@ -368,6 +368,64 @@ async fn compact_briefing_preserves_bounded_historical_provenance() {
     assert!(wiki["store"].is_object(), "wiki store identity: {wiki}");
 }
 
+#[tokio::test]
+async fn briefing_memory_budget_applies_after_retrieval_overfetch() {
+    let project_root = crate::utils::find_project_git_root().expect("test project root");
+    let project_name =
+        crate::path_utils::plan_c_dir_name_from_root(&project_root).expect("test project identity");
+    let (server, _fixture_db) = crate::tests::make_server_with_project_fixture(&project_name);
+    server
+        .with_named_project_store(&project_name, |store| {
+            for index in 0..18 {
+                let mut memory = make_entry(&format!("briefing-budget-{index}"));
+                memory.path = format!("/scratch/briefing-budget/{index}");
+                memory.summary = format!("BriefingBudgetNeedle observation {index}");
+                memory.text = memory.summary.clone();
+                memory.keywords = vec!["BriefingBudgetNeedle".to_string()];
+                store.upsert(&memory).map_err(|error| error.to_string())?;
+            }
+            Ok::<(), String>(())
+        })
+        .expect("seed more eligible memories than the response budget");
+
+    for (compact, requested, expected) in [(true, 6, 6), (true, 2, 2), (false, 12, 12)] {
+        let mut params = compact_json_params("BriefingBudgetNeedle");
+        params.project = Some(project_name.clone());
+        params.scope = Some("memory".to_string());
+        params.compact = compact;
+        params.top_k = requested;
+        let body = crate::facade_memory_ops::handle_tachi_memory(&server, params)
+            .await
+            .expect("briefing response");
+        let response: Value = serde_json::from_str(&body).expect("briefing JSON");
+        let rows = response["memories"].as_array().expect("nonempty memories");
+        assert_eq!(rows.len(), expected, "compact={compact}, top_k={requested}");
+        assert!(rows.iter().all(|row| row["id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("briefing-budget-"))));
+    }
+
+    // Markdown consumes the SAME truncated projection: the response budget
+    // must bound the rendered memory section too, not only the JSON array.
+    for (compact, requested, expected) in [(true, 6, 6), (true, 2, 2), (false, 12, 12)] {
+        let mut params = tachi_memory_params("briefing");
+        params.query = Some("BriefingBudgetNeedle".to_string());
+        params.project = Some(project_name.clone());
+        params.scope = Some("memory".to_string());
+        params.compact = compact;
+        params.top_k = requested;
+        params.format = Some("markdown".to_string());
+        let markdown = crate::facade_memory_ops::handle_tachi_memory(&server, params)
+            .await
+            .expect("markdown briefing response");
+        let rendered_ids = markdown.matches("briefing-budget-").count();
+        assert_eq!(
+            rendered_ids, expected,
+            "markdown must render the same post-filter budget: compact={compact}, top_k={requested}"
+        );
+    }
+}
+
 /// The compact briefing health block must be a typed projection of the SAME
 /// snapshot + warning assembly the agent status surface reports: identical
 /// score, and the status warning list opening the briefing health warnings
